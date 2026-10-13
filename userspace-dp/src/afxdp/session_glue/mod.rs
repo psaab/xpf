@@ -264,7 +264,7 @@ pub(super) fn lookup_forwarding_resolution_for_session(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     flow: &SessionFlow,
     decision: SessionDecision,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_for_session_with_cache(
         forwarding,
         dynamic_neighbors,
@@ -280,7 +280,7 @@ pub(super) fn lookup_forwarding_resolution_for_session_without_cache(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     flow: &SessionFlow,
     decision: SessionDecision,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_for_session_with_cache(
         forwarding,
         dynamic_neighbors,
@@ -290,7 +290,6 @@ pub(super) fn lookup_forwarding_resolution_for_session_without_cache(
         false,
     )
 }
-
 /// #9752: the `prefer_local` / validation table argument for a session: the
 /// validated installing table, or `None` for default (correct) and for
 /// unresolvable (unreached — the input there is always `LocalDelivery` or
@@ -330,7 +329,7 @@ fn lookup_forwarding_resolution_for_session_with_cache(
     decision: SessionDecision,
     allow_cached_fast_path: bool,
     allow_cached_fallback: bool,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     // #9752: validate a stamped installing table BEFORE any stored-resolution
     // shortcut (Codex-r2-F2/F5: cached reuse, the lookup fallback, and the
     // tunnel/local arms must not serve a session whose table is gone).
@@ -351,16 +350,26 @@ fn lookup_forwarding_resolution_for_session_with_cache(
         // No cached reuse, no FIB lookup, no fallback.
         InstallTable::Unresolvable => {
             let target = resolution_target_for_session(flow, decision);
-            if let Some(local) = local_resolution_without_install_table(forwarding, target) {
-                return local;
-            }
-            return super::table_unavailable_resolution();
+            let resolution = if let Some(local) =
+                local_resolution_without_install_table(forwarding, target)
+            {
+                local
+            } else {
+                super::table_unavailable_resolution()
+            };
+            return ForwardingLookupResult {
+                resolution,
+                selected_route: None,
+            };
         }
     };
     if allow_cached_fast_path
         && decision.resolution.disposition == ForwardingDisposition::LocalDelivery
     {
-        return decision.resolution;
+        return ForwardingLookupResult {
+            resolution: decision.resolution,
+            selected_route: None,
+        };
     }
     if decision.resolution.tunnel_endpoint_id != 0 {
         // #1873 (Codex code r2): the session's stored tunnel resolution
@@ -389,9 +398,12 @@ fn lookup_forwarding_resolution_for_session_with_cache(
                     let mut gated = super::no_route_resolution(None);
                     gated.tunnel_endpoint_id = decision.resolution.tunnel_endpoint_id;
                     gated.egress_ifindex = decision.resolution.egress_ifindex;
-                    return gated;
-                }
+                    return ForwardingLookupResult {
+                        resolution: gated,
+                        selected_route: None,
+                    };
             }
+        }
         }
         let mut resolved = super::resolve_tunnel_forwarding_resolution(
             forwarding,
@@ -400,23 +412,36 @@ fn lookup_forwarding_resolution_for_session_with_cache(
             0,
         );
         resolved.route_mtu = decision.resolution.route_mtu;
-        return match resolved.disposition {
+        let resolution = match resolved.disposition {
             ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
                 if allow_cached_fallback =>
             {
-                cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution).unwrap_or(resolved)
+                cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution)
+                    .unwrap_or(resolved)
             }
             _ => resolved,
         };
+        return ForwardingLookupResult {
+            resolution,
+            selected_route: None,
+        };
     }
     if allow_cached_fast_path {
-        if let Some(cached) = cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution) {
-            return cached;
+        if let Some(cached) =
+            cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution)
+        {
+            return ForwardingLookupResult {
+                resolution: cached,
+                selected_route: None,
+            };
         }
     }
     let target = resolution_target_for_session(flow, decision);
     if let Some(local) = super::interface_nat_local_resolution(forwarding, target, table) {
-        return local;
+        return ForwardingLookupResult {
+            resolution: local,
+            selected_route: None,
+        };
     }
     // #2734: spread ECMP equal-cost members by the per-FLOW 5-tuple hash
     // (the session forward key) so distinct flows to the same destination
@@ -440,11 +465,21 @@ fn lookup_forwarding_resolution_for_session_with_cache(
             &flow.forward_key,
         ),
     };
-    match resolved.disposition {
+    match resolved.resolution.disposition {
         ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
             if allow_cached_fallback =>
         {
-            cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution).unwrap_or(resolved)
+            match cached_session_resolution(
+                forwarding,
+                dynamic_neighbors,
+                decision.resolution,
+            ) {
+                Some(resolution) => ForwardingLookupResult {
+                    resolution,
+                    selected_route: None,
+                },
+                None => resolved,
+            }
         }
         _ => resolved,
     }
@@ -455,7 +490,7 @@ fn lookup_forwarding_resolution_for_synced_session(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     flow: &SessionFlow,
     decision: SessionDecision,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_for_session_with_cache(
         forwarding,
         dynamic_neighbors,
@@ -3099,6 +3134,12 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
     // Only the unique unstamped-fabric reverse-NAT exception supplies this.
     prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,
 ) -> Option<ResolvedFlowSessionDecision> {
+    if !crate::session::PMechSessionDirectory::global()
+        .probe_packet_key(&flow.forward_key)
+        .is_fallthrough()
+    {
+        return None;
+    }
     // Bundle the four shared-session refs once per call. `SharedSessionRefs`
     // is `#[derive(Copy)]`, so the three downstream uses below
     // (purge_translated_synced_hit + 2× maybe_promote_synced_session) each
@@ -3222,7 +3263,8 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 dynamic_neighbors,
                 flow,
                 decision,
-            );
+            )
+            .resolution;
             let current_incarnation =
                 leak_incarnation_for_session(forwarding, decision, resolution_target);
             if current_incarnation.is_some_and(|current| current != stamped_incarnation) {
@@ -3237,6 +3279,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 flow,
                 decision,
             )
+            .resolution
         } else if hit_origin.is_peer_synced() {
             lookup_forwarding_resolution_for_synced_session(
                 forwarding,
@@ -3244,8 +3287,10 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 flow,
                 decision,
             )
+            .resolution
         } else {
             lookup_forwarding_resolution_for_session(forwarding, dynamic_neighbors, flow, decision)
+                .resolution
         };
         let looked_up_resolution = super::prefer_local_forward_candidate_for_fabric_ingress(
             forwarding,
@@ -3455,7 +3500,8 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
     let mut decision = resolved.decision;
     let resolution_target = resolution_target_for_session(flow, decision);
     let looked_up_resolution =
-        lookup_forwarding_resolution_for_session(forwarding, dynamic_neighbors, flow, decision);
+        lookup_forwarding_resolution_for_session(forwarding, dynamic_neighbors, flow, decision)
+            .resolution;
     let looked_up_resolution = super::prefer_local_forward_candidate_for_fabric_ingress(
         forwarding,
         ha_state,

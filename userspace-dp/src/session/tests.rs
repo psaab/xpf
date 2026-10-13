@@ -98,6 +98,134 @@ pub(in crate::session) fn metadata() -> SessionMetadata {
 }
 
 #[test]
+fn pmech_install_reserves_reply_alias_and_local_capacity() {
+    let mut forward_key = key_v4();
+    forward_key.src_ip = IpAddr::V4(Ipv4Addr::new(10, 95, 6, 1));
+    forward_key.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 95));
+    forward_key.src_port = 40950;
+    forward_key.dst_port = 443;
+    forward_key.discriminator = TunnelDiscriminator::Ipsec(95_006);
+    let plan = PMechInstallPlan {
+        forward_key: forward_key.clone(),
+        decision: decision(),
+        metadata: metadata(),
+        owner_worker: 7,
+        owner_generation: 95_006,
+        plan_expiry_ns: 10_000,
+    };
+
+    let mut reservations = SessionTable::new();
+    reservations.set_max_sessions_for_test(2);
+    let token = reservations
+        .reserve_ipsec_install(plan)
+        .expect("valid IPsec plan reserves claims");
+    assert!(reservations.pre_write_check_pmech(token, 7, 95_006, 1));
+    assert!(!reservations.pre_write_check_pmech(token, 8, 95_006, 1));
+    assert!(!reservations.pre_write_check_pmech(token, 7, 95_006, 10_000));
+    assert!(!reservations.can_admit(1));
+    assert_eq!(
+        reservations.session_limit_src_count(TEST_LAN_ZONE_ID, forward_key.src_ip),
+        1
+    );
+
+    let mut colliding_forward = forward_key.clone();
+    colliding_forward.discriminator = TunnelDiscriminator::None;
+    colliding_forward.routing_domain = 0;
+    let mut ordinary_sessions = SessionTable::new();
+    assert!(!ordinary_sessions.install_with_protocol(
+        colliding_forward,
+        decision(),
+        metadata(),
+        1,
+        PROTO_TCP,
+        0,
+    ));
+    assert_eq!(ordinary_sessions.len(), 0);
+
+    assert!(reservations.cancel_ipsec_install(token, 7, 95_006));
+    assert!(!reservations.pre_write_check_pmech(token, 7, 95_006, 1));
+    assert!(reservations.can_admit(2));
+    assert_eq!(
+        reservations.session_limit_src_count(TEST_LAN_ZONE_ID, forward_key.src_ip),
+        0
+    );
+}
+
+fn pmech_synced_install(key: SessionKey) -> SessionInstall {
+    SessionInstall {
+        key,
+        decision: decision(),
+        metadata: metadata(),
+        origin: SessionOrigin::SyncImport,
+        now_ns: 1,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        source_nat_static: None,
+    }
+}
+
+/// A pending IPsec claim fences the two non-local entry points as well: a
+/// peer-synced import of the colliding untagged tuple, and the untagged
+/// reply-alias probe. Both fall through again once the claim is cancelled.
+#[test]
+fn pmech_claim_fences_synced_install_and_reply_alias_9506() {
+    let mut forward_key = key_v4();
+    forward_key.src_ip = IpAddr::V4(Ipv4Addr::new(10, 95, 7, 1));
+    forward_key.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 97));
+    forward_key.src_port = 40951;
+    forward_key.dst_port = 443;
+    forward_key.discriminator = TunnelDiscriminator::Ipsec(95_007);
+    let mut colliding_forward = forward_key.clone();
+    colliding_forward.discriminator = TunnelDiscriminator::None;
+    colliding_forward.routing_domain = 0;
+    let mut untagged_reply = reverse_wire_key(&forward_key, NatDecision::default());
+    untagged_reply.discriminator = TunnelDiscriminator::None;
+    untagged_reply.routing_domain = 0;
+
+    let mut reservations = SessionTable::new();
+    let token = reservations
+        .reserve_ipsec_install(PMechInstallPlan {
+            forward_key: forward_key.clone(),
+            decision: decision(),
+            metadata: metadata(),
+            owner_worker: 7,
+            owner_generation: 95_007,
+            plan_expiry_ns: 10_000,
+        })
+        .expect("valid IPsec plan reserves claims");
+
+    let mut replica = SessionTable::new();
+    assert!(
+        !replica.upsert_synced_with_origin(pmech_synced_install(colliding_forward.clone()), false),
+        "a peer-synced import must not land under a pending IPsec claim"
+    );
+    assert_eq!(replica.len(), 0);
+    match replica.lookup_ipsec_reply_alias_at(&untagged_reply, 1, |_| 0) {
+        IpsecReplyAliasLookup::PMechBlocked(probe) => assert!(
+            probe.is_hold() || probe.is_drop(),
+            "the blocked probe must hold or drop, got {probe:?}"
+        ),
+        other => panic!("untagged reply fell through a pending IPsec claim: {other:?}"),
+    }
+
+    assert!(reservations.cancel_ipsec_install(token, 7, 95_007));
+    assert!(
+        !matches!(
+            replica.lookup_ipsec_reply_alias_at(&untagged_reply, 1, |_| 0),
+            IpsecReplyAliasLookup::PMechBlocked(_)
+        ),
+        "a cancelled claim must stop fencing the reply alias"
+    );
+    assert!(
+        replica.upsert_synced_with_origin(pmech_synced_install(colliding_forward), false),
+        "positive control: the same import lands once the claim is cancelled"
+    );
+}
+
+#[test]
 fn open_delta_keeps_policy_generation_paired_with_admission_id_11698() {
     let mut table = SessionTable::new();
     table.set_forwarding_revalidation_gen(41, 7);

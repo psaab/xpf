@@ -356,7 +356,9 @@ fn non_host_l2_group_unicast_missing_neighbor_drops_before_replay_10966() {
     let mut forwarding = build_forwarding_state(&snapshot);
     let dst = Ipv4Addr::new(10, 0, 61, 50);
     assert_eq!(
-        lookup_forwarding_for_ip(&forwarding, IpAddr::V4(dst)),
+        lookup_forwarding_for_ip(&forwarding, IpAddr::V4(dst))
+            .resolution
+            .disposition,
         ForwardingDisposition::MissingNeighbor,
         "fixture must route through an unresolved neighbor"
     );

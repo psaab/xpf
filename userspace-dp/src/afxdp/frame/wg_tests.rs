@@ -248,7 +248,8 @@ fn outer_egress_returns_physical_for_dynamic_learned_underlay_neighbor() {
         1,
         false,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         real.disposition,
         ForwardingDisposition::MissingNeighbor,

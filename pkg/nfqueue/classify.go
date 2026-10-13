@@ -36,6 +36,7 @@ func (c CaptureClassification) FragmentKey(tunnel, vrf uint32, generation uint64
 	}
 	return FragmentKey{
 		Version:    c.Version,
+		Protocol:   c.Proto,
 		Tunnel:     tunnel,
 		VRF:        vrf,
 		Generation: generation,

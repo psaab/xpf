@@ -5,6 +5,143 @@
 
 use super::*;
 
+fn pmech_inventory_for(
+    rows: &[crate::protocol::IpsecTunnelRowSnapshot],
+    generation: u64,
+    fib_generation: u32,
+) -> crate::protocol::IpsecPMechInventorySnapshot {
+    use crate::protocol::{
+        IpsecMainRouteNextHopSnapshot, IpsecMainRouteSnapshot, IpsecPMechTunnelRowSnapshot,
+        IpsecTrafficSelectorSnapshot,
+    };
+
+    let mut main_routes = Vec::with_capacity(rows.len());
+    let mut tunnel_rows = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let prefix = format!("10.0.0.{}/32", index + 1);
+        main_routes.push(IpsecMainRouteSnapshot {
+            domain: 0,
+            table: 254,
+            disposition: 1, // RTN_UNICAST
+            family: "inet".into(),
+            destination: prefix.clone(),
+            next_hops: vec![IpsecMainRouteNextHopSnapshot {
+                ifindex: row.logical_ifindex as u32,
+                weight: 1,
+            }],
+            ..Default::default()
+        });
+        tunnel_rows.push(IpsecPMechTunnelRowSnapshot {
+            stn: row.stn.clone(),
+            if_id: row.if_id,
+            logical_ifindex: row.logical_ifindex,
+            explicit_selectors: vec![IpsecTrafficSelectorSnapshot {
+                name: "selector".into(),
+                local_ts: "192.0.2.0/24".into(),
+                remote_ts: prefix.clone(),
+                source: "named".into(),
+            }],
+            effective_prefixes: vec![prefix.clone()],
+            ingress_prefixes: vec![prefix],
+            inventory_generation: generation,
+            fib_generation,
+            source_kind: "xfrmi".into(),
+            selector_provenance: "named".into(),
+            inventory_complete: true,
+            inventory_valid: true,
+            inventory_reason: String::new(),
+        });
+    }
+    crate::protocol::IpsecPMechInventorySnapshot {
+        policy_identity: "01".repeat(32),
+        generation,
+        fib_generation,
+        complete: true,
+        main_routes,
+        tunnel_rows,
+    }
+}
+
+fn main_route_table_identities() -> Vec<crate::protocol::RouteTableIdentitySnapshot> {
+    ["inet.0", "inet6.0"]
+        .into_iter()
+        .map(|name| crate::protocol::RouteTableIdentitySnapshot {
+            name: name.into(),
+            domain: 0,
+            table: 254,
+        })
+        .collect()
+}
+
+fn install_main_route_table_authority(forwarding: &mut crate::afxdp::types::ForwardingState) {
+    let identity = crate::afxdp::types::RouteIdentity {
+        domain: 0,
+        table: 254,
+    };
+    forwarding.route_table_identities.insert("inet.0".into(), identity);
+    forwarding.route_table_identities.insert("inet6.0".into(), identity);
+    forwarding.route_table_identity_map_complete = true;
+    forwarding
+        .routes_v4
+        .insert("inet.0".into(), vec![test_main_route()]);
+    forwarding.neighbors.insert(
+        (
+            20,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 2)),
+        ),
+        crate::afxdp::types::NeighborEntry { mac: [2, 0, 0, 0, 0, 20] },
+    );
+}
+
+fn test_ipv4_packet_from(source: [u8; 4], destination: [u8; 4]) -> [u8; 20] {
+    let mut packet = test_ipv4_packet(destination);
+    packet[12..16].copy_from_slice(&source);
+    packet
+}
+
+fn test_main_route() -> crate::afxdp::types::RouteEntryV4 {
+    crate::afxdp::types::RouteEntryV4::single(
+        crate::prefix::PrefixV4::from_net("10.0.0.0/24".parse().expect("test prefix")),
+        20,
+        0,
+        Some("192.0.2.2".parse().expect("test next hop")),
+        false,
+        String::new(),
+        1,
+    )
+}
+
+fn pmech_advisory(
+    view: &RuntimeView,
+    zone_id: u16,
+    if_id: u32,
+) -> crate::afxdp::ipsec_inner::IpsecInnerAdvisory {
+    let inventory = view.pmech_inventory();
+    crate::afxdp::ipsec_inner::IpsecInnerAdvisory {
+        snapshot_generation: view.ipsec_snapshot_generation(),
+        config_generation: view.validation().config_generation,
+        fib_generation: view.validation().fib_generation,
+        zone_id,
+        if_id,
+        pmech_inventory_generation: inventory.generation(),
+        pmech_inventory_fib_generation: inventory.fib_generation(),
+        pmech_policy_identity: inventory.policy_identity(),
+        expected_routing_domain: 0,
+        expected_fib_table: 254,
+    }
+}
+
+fn test_ipv4_packet(destination: [u8; 4]) -> [u8; 20] {
+    let mut packet = [0; 20];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 6;
+    packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+    packet[16..20].copy_from_slice(&destination);
+    packet
+}
+
 impl Coordinator {
     /// #7209 test seam: assign `forwarding` AND publish it, which is what every
     /// production assignment does.
@@ -167,27 +304,29 @@ use crate::{
 
 #[test]
 fn snapshot_published_tunnel_rows_join_d11_10485() {
-    use crate::afxdp::ipsec_inner::{
-        adjudicate_ipsec_inner, IpsecInnerAdvisory, IpsecInnerInput,
-    };
+    use crate::afxdp::ipsec_inner::{adjudicate_ipsec_inner, IpsecInnerInput};
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
     let mut coordinator = Coordinator::new();
+    install_main_route_table_authority(&mut coordinator.forwarding);
     coordinator.validation = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
     };
     coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+    let rows = vec![IpsecTunnelRowSnapshot {
+        stn: "st0".to_string(),
+        if_id: 9,
+        logical_ifindex: 10,
+    }];
     let snapshot = ConfigSnapshot {
         generation: 7,
         fib_generation: 3,
         ipsec_tunnel_snapshot_generation: 42,
-        ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
-            stn: "st0".to_string(),
-            if_id: 9,
-            logical_ifindex: 10,
-        }],
+        ipsec_tunnel_rows: rows.clone(),
+        route_table_identities: main_route_table_identities(),
+        pmech_inventory: Some(pmech_inventory_for(&rows, 7, 3)),
         ..Default::default()
     };
 
@@ -202,7 +341,7 @@ fn snapshot_published_tunnel_rows_join_d11_10485() {
         Some((9, 10))
     );
 
-    let packet = [0x45; 20];
+    let packet = test_ipv4_packet_from([10, 0, 0, 1], [10, 0, 0, 1]);
     let decision = adjudicate_ipsec_inner(
         &view,
         IpsecInnerInput {
@@ -216,13 +355,7 @@ fn snapshot_published_tunnel_rows_join_d11_10485() {
             payload_offset: 20,
             logical_ifindex: 10,
             rx_queue_index: 0,
-            advisory: IpsecInnerAdvisory {
-                snapshot_generation: 42,
-                config_generation: 7,
-                fib_generation: 3,
-                zone_id: 1,
-                if_id: 9,
-            },
+            advisory: pmech_advisory(&view, 1, 9),
             descriptor: None,
         },
     );
@@ -303,27 +436,29 @@ fn snapshot_published_duplicate_if_id_rows_deny_claimants_10485() {
         fib_generation: 3,
     };
     // st0/st1 share if_id 7 (ambiguous claimants); st2 is an unrelated row.
+    let rows = vec![
+        IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 7,
+            logical_ifindex: 10,
+        },
+        IpsecTunnelRowSnapshot {
+            stn: "st1".to_string(),
+            if_id: 7,
+            logical_ifindex: 11,
+        },
+        IpsecTunnelRowSnapshot {
+            stn: "st2".to_string(),
+            if_id: 8,
+            logical_ifindex: 12,
+        },
+    ];
     let snapshot = ConfigSnapshot {
         generation: 7,
         fib_generation: 3,
         ipsec_tunnel_snapshot_generation: 42,
-        ipsec_tunnel_rows: vec![
-            IpsecTunnelRowSnapshot {
-                stn: "st0".to_string(),
-                if_id: 7,
-                logical_ifindex: 10,
-            },
-            IpsecTunnelRowSnapshot {
-                stn: "st1".to_string(),
-                if_id: 7,
-                logical_ifindex: 11,
-            },
-            IpsecTunnelRowSnapshot {
-                stn: "st2".to_string(),
-                if_id: 8,
-                logical_ifindex: 12,
-            },
-        ],
+        ipsec_tunnel_rows: rows.clone(),
+        pmech_inventory: Some(pmech_inventory_for(&rows, 7, 3)),
         ..Default::default()
     };
     assert!(!snapshot.ipsec_tunnel_rows.is_empty());
@@ -347,28 +482,30 @@ fn snapshot_published_duplicate_if_id_rows_deny_claimants_10485() {
 
 #[test]
 fn snapshot_published_rows_deny_stale_advisory_generation_10485() {
-    use crate::afxdp::ipsec_inner::{
-        adjudicate_ipsec_inner, IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput,
-    };
+    use crate::afxdp::ipsec_inner::{adjudicate_ipsec_inner, IpsecInnerDecision, IpsecInnerInput};
     use crate::afxdp::ipsec_inner_queue::reason;
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
     let mut coordinator = Coordinator::new();
+    install_main_route_table_authority(&mut coordinator.forwarding);
     coordinator.validation = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
         fib_generation: 3,
     };
     coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+    let rows = vec![IpsecTunnelRowSnapshot {
+        stn: "st0".to_string(),
+        if_id: 9,
+        logical_ifindex: 10,
+    }];
     let snapshot = ConfigSnapshot {
         generation: 7,
         fib_generation: 3,
         ipsec_tunnel_snapshot_generation: 42,
-        ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
-            stn: "st0".to_string(),
-            if_id: 9,
-            logical_ifindex: 10,
-        }],
+        ipsec_tunnel_rows: rows.clone(),
+        route_table_identities: main_route_table_identities(),
+        pmech_inventory: Some(pmech_inventory_for(&rows, 7, 3)),
         ..Default::default()
     };
     assert!(!snapshot.ipsec_tunnel_rows.is_empty());
@@ -388,6 +525,8 @@ fn snapshot_published_rows_deny_stale_advisory_generation_10485() {
     assert_ne!(advisory_generation, view.ipsec_snapshot_generation());
 
     let packet = [0x45; 20];
+    let mut advisory = pmech_advisory(&view, 1, 9);
+    advisory.snapshot_generation = advisory_generation;
     let decision = adjudicate_ipsec_inner(
         &view,
         IpsecInnerInput {
@@ -401,13 +540,7 @@ fn snapshot_published_rows_deny_stale_advisory_generation_10485() {
             payload_offset: 20,
             logical_ifindex: 10,
             rx_queue_index: 0,
-            advisory: IpsecInnerAdvisory {
-                snapshot_generation: advisory_generation,
-                config_generation: 7,
-                fib_generation: 3,
-                zone_id: 1,
-                if_id: 9,
-            },
+            advisory,
             descriptor: None,
         },
     );
@@ -451,15 +584,17 @@ fn snapshot_empty_rows_withdraw_published_generation_deny_through_load_10540() {
     coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
 
     // Populate first: gen 42 / st0 is published and joinable.
+    let rows = vec![IpsecTunnelRowSnapshot {
+        stn: "st0".to_string(),
+        if_id: 9,
+        logical_ifindex: 10,
+    }];
     let populated = ConfigSnapshot {
         generation: 7,
         fib_generation: 3,
         ipsec_tunnel_snapshot_generation: 42,
-        ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
-            stn: "st0".to_string(),
-            if_id: 9,
-            logical_ifindex: 10,
-        }],
+        ipsec_tunnel_rows: rows.clone(),
+        pmech_inventory: Some(pmech_inventory_for(&rows, 7, 3)),
         ..Default::default()
     };
     coordinator.set_ipsec_tunnel_rows_from_snapshot(&populated);
@@ -511,6 +646,7 @@ fn snapshot_empty_rows_withdraw_published_generation_deny_through_load_10540() {
                 fib_generation: 3,
                 zone_id: 1,
                 if_id: 9,
+                ..Default::default()
             },
             descriptor: None,
         },
@@ -537,12 +673,13 @@ fn snapshot_empty_rows_withdraw_published_generation_deny_through_load_10540() {
 #[test]
 fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
     use crate::afxdp::ipsec_inner::{
-        IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
+        IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
     };
     use crate::afxdp::ipsec_inner_queue::reason;
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
     let mut coordinator = Coordinator::new();
+    install_main_route_table_authority(&mut coordinator.forwarding);
     coordinator.validation = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
@@ -552,27 +689,30 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
     coordinator.forwarding.ifindex_to_zone_id.insert(11, 1);
     coordinator.forwarding.ifindex_to_zone_id.insert(12, 1);
     // st0/st1 share if_id 7 (ambiguous claimants); st2 is an unrelated row.
+    let rows = vec![
+        IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 7,
+            logical_ifindex: 10,
+        },
+        IpsecTunnelRowSnapshot {
+            stn: "st1".to_string(),
+            if_id: 7,
+            logical_ifindex: 11,
+        },
+        IpsecTunnelRowSnapshot {
+            stn: "st2".to_string(),
+            if_id: 8,
+            logical_ifindex: 12,
+        },
+    ];
     let snapshot = ConfigSnapshot {
         generation: 7,
         fib_generation: 3,
         ipsec_tunnel_snapshot_generation: 42,
-        ipsec_tunnel_rows: vec![
-            IpsecTunnelRowSnapshot {
-                stn: "st0".to_string(),
-                if_id: 7,
-                logical_ifindex: 10,
-            },
-            IpsecTunnelRowSnapshot {
-                stn: "st1".to_string(),
-                if_id: 7,
-                logical_ifindex: 11,
-            },
-            IpsecTunnelRowSnapshot {
-                stn: "st2".to_string(),
-                if_id: 8,
-                logical_ifindex: 12,
-            },
-        ],
+        ipsec_tunnel_rows: rows.clone(),
+        route_table_identities: main_route_table_identities(),
+        pmech_inventory: Some(pmech_inventory_for(&rows, 7, 3)),
         ..Default::default()
     };
     assert!(!snapshot.ipsec_tunnel_rows.is_empty());
@@ -594,7 +734,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
         Some((8, 12))
     );
 
-    let packet = [0x45; 20];
+    let packet = test_ipv4_packet_from([10, 0, 0, 3], [10, 0, 0, 3]);
     for (stn, ifindex, if_id) in [("st0", 10i32, 7u32), ("st1", 11i32, 7u32)] {
         let decision = adjudicate_ipsec_inner(
             &view,
@@ -609,13 +749,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
                 payload_offset: 20,
                 logical_ifindex: ifindex,
                 rx_queue_index: 0,
-                advisory: IpsecInnerAdvisory {
-                    snapshot_generation: 42,
-                    config_generation: 7,
-                    fib_generation: 3,
-                    zone_id: 1,
-                    if_id,
-                },
+                advisory: pmech_advisory(&view, 1, if_id),
                 descriptor: None,
             },
         );
@@ -646,13 +780,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
             payload_offset: 20,
             logical_ifindex: 12,
             rx_queue_index: 0,
-            advisory: IpsecInnerAdvisory {
-                snapshot_generation: 42,
-                config_generation: 7,
-                fib_generation: 3,
-                zone_id: 1,
-                if_id: 8,
-            },
+            advisory: pmech_advisory(&view, 1, 8),
             descriptor: None,
         },
     );
@@ -673,9 +801,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
 /// agrees on single-generation fixtures but WouldPermits here → RED.
 #[test]
 fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
-    use crate::afxdp::ipsec_inner::{
-        IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
-    };
+    use crate::afxdp::ipsec_inner::{IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner};
     use crate::afxdp::ipsec_inner_queue::reason;
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
@@ -685,6 +811,7 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
         ("fib-only", 42u64, 7u64, 4u32),
     ] {
         let mut coordinator = Coordinator::new();
+        install_main_route_table_authority(&mut coordinator.forwarding);
         coordinator.validation = ValidationState {
             snapshot_installed: true,
             config_generation: 7,
@@ -693,15 +820,18 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
         coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
 
         // view1: the authority the in-flight packet was stamped under.
+        let first_rows = vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }];
         let first = ConfigSnapshot {
             generation: 7,
             fib_generation: 3,
             ipsec_tunnel_snapshot_generation: 42,
-            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
-                stn: "st0".to_string(),
-                if_id: 9,
-                logical_ifindex: 10,
-            }],
+            ipsec_tunnel_rows: first_rows.clone(),
+            route_table_identities: main_route_table_identities(),
+            pmech_inventory: Some(pmech_inventory_for(&first_rows, 7, 3)),
             ..Default::default()
         };
         coordinator.set_ipsec_tunnel_rows_from_snapshot(&first);
@@ -710,24 +840,21 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
         assert_eq!(view1.ipsec_snapshot_generation(), 42);
         // Production shape: the advisory is stamped FROM the published view,
         // not hand-supplied constants.
-        let advisory = IpsecInnerAdvisory {
-            snapshot_generation: view1.ipsec_snapshot_generation(),
-            config_generation: view1.validation().config_generation,
-            fib_generation: view1.validation().fib_generation,
-            zone_id: 1,
-            if_id: 9,
-        };
+        let advisory = pmech_advisory(&view1, 1, 9);
 
         // view2: rotate exactly one generation, keep the same rows.
+        let second_rows = vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }];
         let second = ConfigSnapshot {
             generation: config_gen,
             fib_generation: fib_gen,
             ipsec_tunnel_snapshot_generation: tunnel_gen,
-            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
-                stn: "st0".to_string(),
-                if_id: 9,
-                logical_ifindex: 10,
-            }],
+            ipsec_tunnel_rows: second_rows.clone(),
+            route_table_identities: main_route_table_identities(),
+            pmech_inventory: Some(pmech_inventory_for(&second_rows, config_gen, fib_gen)),
             ..Default::default()
         };
         coordinator.validation = ValidationState {
@@ -799,9 +926,7 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
 /// proof + reason pin for the teardown shape.
 #[test]
 fn snapshot_stop_inner_teardown_denies_previously_valid_advisory_10540() {
-    use crate::afxdp::ipsec_inner::{
-        IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
-    };
+    use crate::afxdp::ipsec_inner::{IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner};
     use crate::afxdp::ipsec_inner_queue::reason;
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
@@ -813,28 +938,24 @@ fn snapshot_stop_inner_teardown_denies_previously_valid_advisory_10540() {
             fib_generation: 3,
         };
         coordinator.forwarding.ifindex_to_zone_id.insert(10, 1);
+        let rows = vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }];
         let snapshot = ConfigSnapshot {
             generation: 7,
             fib_generation: 3,
             ipsec_tunnel_snapshot_generation: 42,
-            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
-                stn: "st0".to_string(),
-                if_id: 9,
-                logical_ifindex: 10,
-            }],
+            ipsec_tunnel_rows: rows.clone(),
+            pmech_inventory: Some(pmech_inventory_for(&rows, 7, 3)),
             ..Default::default()
         };
         coordinator.set_ipsec_tunnel_rows_from_snapshot(&snapshot);
         coordinator.publish_runtime_view();
         let before = coordinator.ha.runtime.load_full();
         assert_eq!(before.ipsec_snapshot_generation(), 42);
-        let advisory = IpsecInnerAdvisory {
-            snapshot_generation: before.ipsec_snapshot_generation(),
-            config_generation: before.validation().config_generation,
-            fib_generation: before.validation().fib_generation,
-            zone_id: 1,
-            if_id: 9,
-        };
+        let advisory = pmech_advisory(&before, 1, 9);
 
         coordinator.stop_inner(clear_synced_state);
         let view = coordinator.ha.runtime.load_full();
@@ -896,9 +1017,7 @@ fn snapshot_stop_inner_teardown_denies_previously_valid_advisory_10540() {
 /// WouldPermit → RED).
 #[test]
 fn snapshot_empty_rows_refresh_path_withdraws_generation_deny_10540() {
-    use crate::afxdp::ipsec_inner::{
-        IpsecInnerAdvisory, IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner,
-    };
+    use crate::afxdp::ipsec_inner::{IpsecInnerDecision, IpsecInnerInput, adjudicate_ipsec_inner};
     use crate::afxdp::ipsec_inner_queue::reason;
     use crate::protocol::snapshot::{
         ConfigSnapshot, InterfaceSnapshot, IpsecTunnelRowSnapshot, ZoneSnapshot,
@@ -907,24 +1026,28 @@ fn snapshot_empty_rows_refresh_path_withdraws_generation_deny_10540() {
     const GEN: u64 = 7;
     const FIB_GEN: u32 = 3;
 
-    let make_snapshot = |rows: Vec<IpsecTunnelRowSnapshot>| ConfigSnapshot {
-        generation: GEN,
-        fib_generation: FIB_GEN,
-        zones: vec![ZoneSnapshot {
-            name: "zone1".to_string(),
-            id: 1,
+    let make_snapshot = |rows: Vec<IpsecTunnelRowSnapshot>| {
+        let pmech_inventory = pmech_inventory_for(&rows, GEN, FIB_GEN);
+        ConfigSnapshot {
+            generation: GEN,
+            fib_generation: FIB_GEN,
+            zones: vec![ZoneSnapshot {
+                name: "zone1".to_string(),
+                id: 1,
+                ..Default::default()
+            }],
+            interfaces: vec![InterfaceSnapshot {
+                name: "st0.0".to_string(),
+                linux_name: "st0".to_string(),
+                ifindex: 10,
+                zone: "zone1".to_string(),
+                ..Default::default()
+            }],
+            ipsec_tunnel_snapshot_generation: 42,
+            ipsec_tunnel_rows: rows,
+            pmech_inventory: Some(pmech_inventory),
             ..Default::default()
-        }],
-        interfaces: vec![InterfaceSnapshot {
-            name: "st0.0".to_string(),
-            linux_name: "st0".to_string(),
-            ifindex: 10,
-            zone: "zone1".to_string(),
-            ..Default::default()
-        }],
-        ipsec_tunnel_snapshot_generation: 42,
-        ipsec_tunnel_rows: rows,
-        ..Default::default()
+        }
     };
 
     let mut coordinator = Coordinator::new();
@@ -944,13 +1067,7 @@ fn snapshot_empty_rows_refresh_path_withdraws_generation_deny_10540() {
             .map(|row| (row.if_id, row.logical_ifindex)),
         Some((9, 10))
     );
-    let advisory = IpsecInnerAdvisory {
-        snapshot_generation: before.ipsec_snapshot_generation(),
-        config_generation: before.validation().config_generation,
-        fib_generation: before.validation().fib_generation,
-        zone_id: 1,
-        if_id: 9,
-    };
+    let advisory = pmech_advisory(&before, 1, 9);
 
     coordinator
         .refresh_runtime_snapshot(&make_snapshot(Vec::new()))
@@ -1916,6 +2033,11 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
         "the worker-visible validation starts at the default (old) generation",
     );
 
+    let rows = vec![crate::protocol::snapshot::IpsecTunnelRowSnapshot {
+        stn: "st0".to_string(),
+        if_id: 9,
+        logical_ifindex: 10,
+    }];
     let snapshot = ConfigSnapshot {
         generation: NEW_GEN,
         fib_generation: NEW_FIB_GEN,
@@ -1931,12 +2053,26 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             zone: "zone1".to_string(),
             ..Default::default()
         }],
-        ipsec_tunnel_snapshot_generation: 42,
-        ipsec_tunnel_rows: vec![crate::protocol::snapshot::IpsecTunnelRowSnapshot {
-            stn: "st0".to_string(),
-            if_id: 9,
-            logical_ifindex: 10,
+        neighbors: vec![crate::protocol::snapshot::NeighborSnapshot {
+            interface: "st0.0".into(),
+            ifindex: 10,
+            family: "inet".into(),
+            ip: "192.0.2.2".into(),
+            mac: "02:00:00:00:00:20".into(),
+            state: "reachable".into(),
+            ..Default::default()
         }],
+        routes: vec![crate::protocol::RouteSnapshot {
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: "10.0.0.0/24".into(),
+            next_hops: vec!["192.0.2.2@st0.0".into()],
+            ..Default::default()
+        }],
+        ipsec_tunnel_snapshot_generation: 42,
+        ipsec_tunnel_rows: rows.clone(),
+        route_table_identities: main_route_table_identities(),
+        pmech_inventory: Some(pmech_inventory_for(&rows, NEW_GEN, NEW_FIB_GEN)),
         ..Default::default()
     };
 
@@ -1957,7 +2093,7 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             .map(|row| (row.if_id, row.logical_ifindex)),
         Some((9, 10))
     );
-    let packet = [0x45; 20];
+    let packet = test_ipv4_packet_from([10, 0, 0, 1], [10, 0, 0, 1]);
     let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
         &published,
         crate::afxdp::ipsec_inner::IpsecInnerInput {
@@ -1971,13 +2107,7 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             payload_offset: 20,
             logical_ifindex: 10,
             rx_queue_index: 0,
-            advisory: crate::afxdp::ipsec_inner::IpsecInnerAdvisory {
-                snapshot_generation: 42,
-                config_generation: NEW_GEN,
-                fib_generation: NEW_FIB_GEN,
-                zone_id: 1,
-                if_id: 9,
-            },
+            advisory: pmech_advisory(&published, 1, 9),
             descriptor: None,
         },
     );

@@ -203,24 +203,30 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
     // Depth/flags mirror `resolve_tunnel_outer` (per-tunnel-endpoint, no
     // 5-tuple ECMP hash — per-destination spread across outer ECMP).
     let outer = match peer_endpoint.ip() {
-        IpAddr::V4(ip) => crate::afxdp::forwarding::lookup_forwarding_resolution_v4(
-            forwarding,
-            Some(dynamic_neighbors),
-            ip,
-            &endpoint.transport_table,
-            1,
-            false,
-            None,
-        ),
-        IpAddr::V6(ip) => crate::afxdp::forwarding::lookup_forwarding_resolution_v6(
-            forwarding,
-            Some(dynamic_neighbors),
-            ip,
-            &endpoint.transport_table,
-            1,
-            false,
-            None,
-        ),
+        IpAddr::V4(ip) => {
+            crate::afxdp::forwarding::lookup_forwarding_resolution_v4(
+                forwarding,
+                Some(dynamic_neighbors),
+                ip,
+                &endpoint.transport_table,
+                1,
+                false,
+                None,
+            )
+            .resolution
+        }
+        IpAddr::V6(ip) => {
+            crate::afxdp::forwarding::lookup_forwarding_resolution_v6(
+                forwarding,
+                Some(dynamic_neighbors),
+                ip,
+                &endpoint.transport_table,
+                1,
+                false,
+                None,
+            )
+            .resolution
+        }
     };
     // Recursion guard, mirroring `resolve_tunnel_outer`: an outer that resolves
     // to local delivery or back into a tunnel is not a usable transport hop.
@@ -575,7 +581,8 @@ mod tests {
             1,
             false,
             None,
-        );
+        )
+        .resolution;
         let got = fwd.decision.resolution;
         assert_eq!(got.disposition, expected.disposition);
         assert_eq!(got.local_ifindex, expected.local_ifindex);

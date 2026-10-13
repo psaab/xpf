@@ -116,8 +116,18 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	next.Fabrics = buildFabricSnapshotsFrom(cfg, liveXfrm)
 	next.TunnelEndpoints = buildTunnelEndpointSnapshots(cfg, next.Interfaces)
 	next.MirrorConfigs, next.MirrorExclusions = buildMirrorConfigSnapshots(cfg, next.Interfaces)
-	m.refreshCaptureAuthorityLocked(&next)
+	generation := m.generation
+	if generation < current.Generation {
+		generation = current.Generation
+	}
+	if generation < math.MaxUint64 {
+		next.Generation = generation + 1
+	} else {
+		next.Generation = generation
+	}
+	next.FIBGeneration = m.readFIBGeneration()
 	resampled := m.resampleUnresolvedSectionsLocked(&next)
+	m.refreshCaptureAuthorityLocked(&next)
 
 	if h, ok := snapshotContentHash(&next); ok && h == m.lastSnapshotHash &&
 		!m.applySnapshotOutcomeUnknown && m.partialOutcomeUnknown == 0 && resampled == 0 {
@@ -130,15 +140,9 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 		}
 		return false, fmt.Errorf("refusing interface-link refresh to incompatible helper: %w", err)
 	}
-	generation := m.generation
-	if generation < current.Generation {
-		generation = current.Generation
-	}
 	if generation == math.MaxUint64 {
 		return false, fmt.Errorf("userspace: snapshot generation exhausted during interface-link refresh")
 	}
-	next.Generation = generation + 1
-	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	if err := m.disarmBeforeUnsupportedPublishLocked(&next); err != nil {
 		return false, err

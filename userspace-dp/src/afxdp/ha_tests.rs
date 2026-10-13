@@ -8066,7 +8066,7 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
             &Arc::new(ShardedNeighborMap::new()),
             &flow,
             test_decision(),
-        );
+        ).resolution;
     assert_eq!(
         live_resolution.disposition,
         ForwardingDisposition::ForwardCandidate,

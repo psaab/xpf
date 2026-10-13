@@ -25,7 +25,7 @@ func overlayTestConfig() *config.Config {
 		{Destination: "10.20.0.0/16", NextHops: []config.NextHopEntry{{Address: "172.16.50.1"}}},
 	}
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
-		{Name: "ISP-B", StaticRoutes: []*config.StaticRoute{
+		{Name: "ISP-B", TableID: config.StableRoutingInstanceTableID("ISP-B"), StaticRoutes: []*config.StaticRoute{
 			{Destination: "0.0.0.0/0", NextHops: []config.NextHopEntry{{Address: "10.9.0.1"}}},
 		}},
 	}

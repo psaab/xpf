@@ -505,7 +505,8 @@ mod flowless_local_delivery_tests {
             &dynamic_neighbors,
             dst,
             Some("vrf-x"),
-        );
+        )
+        .resolution;
         assert_ne!(
             override_only.disposition,
             ForwardingDisposition::LocalDelivery,

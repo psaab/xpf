@@ -87,6 +87,7 @@ pub(crate) struct WorkerScratch {
     /// its own flow-cache slot). Drained and returned to the binding each pass,
     /// keeping that capacity.
     pub(crate) scratch_filter_revoked_keys: Vec<SessionKey>,
+    pub(crate) pmech_injected_replay_addrs: Vec<u64>,
 }
 
 impl WorkerScratch {
@@ -103,7 +104,9 @@ impl WorkerScratch {
 
     pub(crate) fn pre_sized(ring_entries: u32) -> Self {
         Self {
-            scratch_recycle: Vec::with_capacity(RX_BATCH_SIZE as usize),
+            scratch_recycle: Vec::with_capacity(
+                RX_BATCH_SIZE as usize + crate::session::PMECH_MAX_HELD_WAITERS_TOTAL,
+            ),
             scratch_forwards: Vec::with_capacity(RX_BATCH_SIZE as usize),
             scratch_fill: Vec::with_capacity(FILL_BATCH_SIZE),
             scratch_prepared_tx: Vec::with_capacity(TX_BATCH_SIZE),
@@ -121,6 +124,7 @@ impl WorkerScratch {
             scratch_filter_revoked_keys: Vec::with_capacity(
                 RX_BATCH_SIZE as usize * Self::REVOKED_KEYS_PER_DESCRIPTOR,
             ),
+            pmech_injected_replay_addrs: Vec::new(),
         }
     }
 }

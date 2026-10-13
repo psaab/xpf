@@ -5483,7 +5483,8 @@ fn static_bare_link_local_gateway_refuses_ambiguous_interfaces_11322() {
             0,
             true,
             None,
-        );
+        )
+        .resolution;
         assert_eq!(
             unresolved.disposition,
             ForwardingDisposition::NoRoute,
@@ -5504,7 +5505,8 @@ fn static_bare_link_local_gateway_refuses_ambiguous_interfaces_11322() {
             0,
             true,
             None,
-        );
+        )
+        .resolution;
         assert_eq!(
             resolved.disposition,
             ForwardingDisposition::ForwardCandidate,
@@ -5573,7 +5575,8 @@ fn static_bare_link_local_gateway_resolves_unique_interface_11322() {
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -5668,7 +5671,8 @@ fn forwarding_instance_link_local_gateway_uses_authorized_default_interface_1142
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -5845,7 +5849,8 @@ fn forwarding_instance_global_gateway_uses_authorized_default_interface_11684() 
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved_v4.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -5869,7 +5874,8 @@ fn forwarding_instance_global_gateway_uses_authorized_default_interface_11684() 
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved_v6.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -5951,7 +5957,7 @@ fn forwarding_instance_interface_only_member_uses_authorized_default_interface_1
         0,
         true,
         None,
-    );
+    ).resolution;
     assert_eq!(
         resolved_v4.disposition,
         ForwardingDisposition::MissingNeighbor
@@ -5968,7 +5974,7 @@ fn forwarding_instance_interface_only_member_uses_authorized_default_interface_1
         0,
         true,
         None,
-    );
+    ).resolution;
     assert_eq!(
         resolved_v6.disposition,
         ForwardingDisposition::MissingNeighbor
@@ -6218,7 +6224,8 @@ fn recursive_ecmp_preserves_direct_member_11317() {
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -6366,6 +6373,7 @@ fn connected_directed_broadcast_snapshot_neighbor_is_not_installed_or_used_11033
         crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
             &state, &dynamic, broadcast
         )
+        .resolution
         .disposition,
         crate::afxdp::ForwardingDisposition::MissingNeighbor,
         "directed broadcast must stay unresolved even when dynamic neighbor state contains it"
@@ -6374,6 +6382,7 @@ fn connected_directed_broadcast_snapshot_neighbor_is_not_installed_or_used_11033
         crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
             &state, &dynamic, unicast
         )
+        .resolution
         .disposition,
         crate::afxdp::ForwardingDisposition::ForwardCandidate,
         "ordinary connected unicast neighbor remains forwardable"
@@ -8682,7 +8691,8 @@ fn stale_session_never_adopts_reowned_tunnel_id() {
         &std::sync::Arc::new(ShardedNeighborMap::new()),
         &flow,
         stale_decision,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved.disposition,
         crate::afxdp::ForwardingDisposition::NoRoute,
@@ -8708,7 +8718,8 @@ fn stale_session_never_adopts_reowned_tunnel_id() {
         &std::sync::Arc::new(ShardedNeighborMap::new()),
         &flow,
         fresh_decision,
-    );
+    )
+    .resolution;
     assert_ne!(
         (resolved.disposition, resolved.egress_ifindex),
         (crate::afxdp::ForwardingDisposition::NoRoute, 0),
@@ -10397,7 +10408,7 @@ fn secure_tunnel_unit_ifindex_decides_route_disposition() {
             .any(|c| c.prefix.contains(Ipv4Addr::new(10, 5, 5, 2))),
         "premise broken: an ifindex-0 tunnel row must contribute no connected prefix"
     );
-    let r0 = lookup_forwarding_resolution_v4(&unresolved, None, dst, "inet.0", 0, true, None);
+    let r0 = lookup_forwarding_resolution_v4(&unresolved, None, dst, "inet.0", 0, true, None).resolution;
     assert_eq!(
         r0.disposition,
         ForwardingDisposition::NoRoute,
@@ -10415,7 +10426,7 @@ fn secure_tunnel_unit_ifindex_decides_route_disposition() {
             .any(|c| c.prefix.contains(Ipv4Addr::new(10, 5, 5, 2)) && c.ifindex == 42),
         "premise broken: a resolved tunnel row must contribute its connected prefix"
     );
-    let r42 = lookup_forwarding_resolution_v4(&resolved, None, dst, "inet.0", 0, true, None);
+    let r42 = lookup_forwarding_resolution_v4(&resolved, None, dst, "inet.0", 0, true, None).resolution;
     assert_eq!(
         r42.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -10459,7 +10470,7 @@ fn lo0_address_local_delivery_requires_a_resolved_ifindex_11464() {
         "a lo0 row without a Linux ifindex must not enter helper local_v4"
     );
     let not_local =
-        lookup_forwarding_resolution_v4(&unresolved, None, dst, "inet.0", 0, true, None);
+        lookup_forwarding_resolution_v4(&unresolved, None, dst, "inet.0", 0, true, None).resolution;
     assert_eq!(
         not_local.disposition,
         ForwardingDisposition::NoRoute,
@@ -10482,7 +10493,7 @@ fn lo0_address_local_delivery_requires_a_resolved_ifindex_11464() {
             .any(|entry| entry.host == dst && entry.ifindex == 83),
         "a resolved lo0 address must retain its Linux interface owner"
     );
-    let local = lookup_forwarding_resolution_v4(&resolved, None, dst, "inet.0", 0, true, None);
+    let local = lookup_forwarding_resolution_v4(&resolved, None, dst, "inet.0", 0, true, None).resolution;
     assert_eq!(local.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(local.local_ifindex, 83);
 }
@@ -10553,7 +10564,7 @@ fn next_table_target_uses_table_lpm_without_rule_restart_9955() {
     );
 
     let dst = Ipv4Addr::new(172, 16, 5, 5);
-    let selected = lookup_forwarding_resolution_v4(&state, None, dst, "inet.0", 0, true, None);
+    let selected = lookup_forwarding_resolution_v4(&state, None, dst, "inet.0", 0, true, None).resolution;
     assert_eq!(
         selected.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -10572,7 +10583,8 @@ fn next_table_target_uses_table_lpm_without_rule_restart_9955() {
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         unrouted.disposition,
         ForwardingDisposition::NoRoute,
@@ -10673,7 +10685,7 @@ fn xfrmi_egress_resolves_a_negative_cache_key_6710() {
 
     let state = build_forwarding_state(&snapshot(true));
     let dst = Ipv4Addr::new(192, 168, 99, 5);
-    let r = lookup_forwarding_resolution_v4(&state, None, dst, "inet.0", 0, true, None);
+    let r = lookup_forwarding_resolution_v4(&state, None, dst, "inet.0", 0, true, None).resolution;
 
     assert_eq!(
         r.disposition,
@@ -12316,7 +12328,8 @@ fn mixed_static_recursive_backup_resolves_via_second_static_12183() {
             0,
             true,
             None,
-        );
+        )
+        .resolution;
         assert_eq!(
             resolution.disposition,
             ForwardingDisposition::ForwardCandidate,
@@ -12421,7 +12434,8 @@ fn mixed_static_recursive_backup_resolves_via_second_static_v6_12183() {
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -12455,7 +12469,8 @@ fn mixed_static_recursive_backup_resolves_via_second_static_v6_12183() {
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         reordered_resolution.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -12647,7 +12662,8 @@ fn bare_v6_link_local_never_recurses_to_default_gateway_12398() {
             0,
             true,
             Some(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5555),
-        );
+        )
+        .resolution;
         if resolution.disposition == ForwardingDisposition::ForwardCandidate
             && resolution.egress_ifindex == 202
             && resolution.next_hop == Some(IpAddr::V6(wan_gateway))
@@ -12757,7 +12773,8 @@ fn bare_v6_link_local_nested_never_recurses_to_wan_12398() {
             0,
             true,
             Some(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5555),
-        );
+        )
+        .resolution;
         if resolution.disposition == ForwardingDisposition::ForwardCandidate
             && resolution.egress_ifindex == 202
             && resolution.next_hop == Some(IpAddr::V6(wan_gateway))
@@ -13241,7 +13258,8 @@ fn recursive_static_lpm_covering_route_beats_default_v4_12398() {
             0,
             true,
             Some(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5555),
-        );
+        )
+        .resolution;
         if resolution.disposition == ForwardingDisposition::ForwardCandidate {
             match resolution.egress_ifindex {
                 201 => trust_flows += 1,
@@ -13355,7 +13373,8 @@ fn recursive_static_lpm_covering_route_beats_default_v6_12398() {
             0,
             true,
             Some(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5555),
-        );
+        )
+        .resolution;
         if resolution.disposition == ForwardingDisposition::ForwardCandidate {
             match resolution.egress_ifindex {
                 201 => trust_flows += 1,

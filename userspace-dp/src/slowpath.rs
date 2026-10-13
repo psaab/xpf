@@ -784,17 +784,21 @@ fn ipsec_inner_descriptor(
         advisory_zone_id: frame.zone_id,
         advisory_if_id: frame.if_id,
         expected_routing_domain: 0,
-        expected_fib_table: 0,
+        expected_fib_table: 254,
         permit_epoch: frame.lease.permit_epoch,
         queue_number: frame.lease.queue_number,
         queue_epoch: frame.lease.queue_epoch,
         snapshot_generation: frame.snapshot_generation,
         config_generation: frame.config_generation,
         fib_generation: frame.fib_generation,
+        pmech_inventory_generation: frame.pmech_inventory_generation,
+        pmech_inventory_fib_generation: frame.pmech_inventory_fib_generation,
+        pmech_policy_identity: frame.pmech_policy_identity,
         phase_epoch: 0,
         worker_set_generation,
         request_id: frame.lease.request_id,
         flags: frame.flags,
+        deadline_mono_ns: frame.deadline_mono_ns,
         enqueue_ns: 0,
     }
 }
@@ -1284,6 +1288,16 @@ impl SlowPathReinjector {
     /// the worker channel/TUN.
     pub(crate) fn validate_dry_run_frame(&self, frame: SubmitFrame) -> AdmitDecision {
         let mut decision = self.reinject_core.validate_dry_run(&frame);
+        if decision.admitted
+            && !crate::slowpath_reinject_9506::pmech_deadline_admissible_at(
+                frame.deadline_mono_ns,
+                frame.deadline_clock_id,
+                crate::afxdp::monotonic_nanos(),
+            )
+        {
+            decision.admitted = false;
+            decision.reason = ADMIT_BAD_LEASE;
+        }
         if decision.admitted {
             let packet_len = frame.bytes.len() as u64;
             let live_mtu = self.status_delegated.live_mtu.load(Ordering::Relaxed);
@@ -1312,7 +1326,7 @@ impl SlowPathReinjector {
     fn submit_ipsec_inner_v1(&self, frame: SubmitFrame) -> AdmitDecision {
         let mut decision = self
             .reinject_core
-            .admit_with_class(&frame, Some(AdmissionClass::Adjudicated));
+            .admit_p2_with_class(&frame, AdmissionClass::Adjudicated);
         if !decision.admitted {
             return decision;
         }
@@ -1326,6 +1340,7 @@ impl SlowPathReinjector {
             decision.admitted = false;
             decision.reason = reason;
         };
+
 
         let pool = self.ipsec_inner_transport.pool();
         let Some(slab_id) = pool.acquire() else {

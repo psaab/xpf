@@ -192,15 +192,19 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
             match install_table {
                 // #9752: same table rule as `prefer_local` (non-flow lookup:
                 // existing per-destination hash semantics preserved).
-                Some(table) => super::lookup_forwarding_resolution_in_table_with_dynamic(
-                    forwarding,
-                    dynamic_neighbors,
-                    target_ip,
-                    Some(table),
-                ),
-                None => lookup_forwarding_resolution_with_dynamic(
-                    forwarding, dynamic_neighbors, target_ip,
-                ),
+                Some(table) => {
+                    super::lookup_forwarding_resolution_in_table_with_dynamic(
+                        forwarding,
+                        dynamic_neighbors,
+                        target_ip,
+                        Some(table),
+                    )
+                    .resolution
+                }
+                None => {
+                    lookup_forwarding_resolution_with_dynamic(forwarding, dynamic_neighbors, target_ip)
+                        .resolution
+                }
             },
         );
         let local_owner_rg = owner_rg_for_resolution(forwarding, local_resolution);

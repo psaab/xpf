@@ -87,7 +87,8 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             dynamic_neighbors,
             &flow,
             entry.decision,
-        );
+        )
+        .resolution;
         // On active node, enforce HA snapshot to filter out sessions
         // for inactive RGs. On standby, skip HA enforcement — store
         // the resolved ForwardCandidate so the session is ready when

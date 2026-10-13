@@ -386,7 +386,12 @@ const (
 	// v44 -> v45 (#11812): PolicerSnapshot adds optional single-rate marking and
 	// logical-interface-policer fields; the Go and Rust snapshot versions move
 	// with the shape even though the current Rust runtime does not consume them.
-	ProtocolVersion = 45
+	// v45 -> v46 (#9506 P2): the snapshot carries the tunnel-relevant main-table
+	// route inventory, terminal route-table identities for E19/E22, explicit
+	// selector intersections, and a dedicated zone/policy identity for the
+	// P-MECH worker/view commit guard. Older helpers cannot validate this
+	// authority.
+	ProtocolVersion = 46
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -403,6 +408,11 @@ const (
 	// first per-feature floor in the tree; #6648 tracks giving the local gates
 	// the same treatment. Never renumber it: it names a historical wire fact.
 	MinProtocolMultiZoneScopedPolicy = 4
+
+	// MinProtocolPMech is the FIRST snapshot version whose table-254 route
+	// inventory and per-tunnel explicit selector membership can support D22+
+	// P-MECH worker adjudication. This historical feature floor is immutable.
+	MinProtocolPMech = 46
 
 	// The remaining per-feature floors (#6648). Each names the FIRST snapshot
 	// protocol version whose wire representation carries that feature, and each
@@ -672,6 +682,14 @@ type FibRouteWire struct {
 	MTU          uint32           `json:"mtu"`
 }
 
+// RouteTableIdentitySnapshot binds one canonical routing-table name to the
+// routing domain and kernel table number selected by configuration.
+type RouteTableIdentitySnapshot struct {
+	Name   string `json:"name"`
+	Domain uint32 `json:"domain"`
+	Table  uint32 `json:"table"`
+}
+
 // Rename operation. It is additive wire state; absent ancestry means the
 // helper retains the historical teardown behavior.
 type PolicyRenameAncestry struct {
@@ -730,13 +748,11 @@ type IpsecTunnelRowSnapshot struct {
 	LogicalIfindex int32  `json:"logical_ifindex"`
 }
 
-// IpsecBindlessSelectorSnapshot is one complete pair of IPsec traffic-selector
-// sides for a policy-based VPN with no bind-interface. Empty sides are not
-// published: they resolve to dynamic endpoints rather than a shape the helper
-// can classify precisely.
-type IpsecBindlessSelectorSnapshot struct {
-	LocalTS  string `json:"local_ts"`
-	RemoteTS string `json:"remote_ts"`
+type IpsecTrafficSelectorSnapshot struct {
+	Name     string `json:"name,omitempty"`
+	LocalTS  string `json:"local_ts,omitempty"`
+	RemoteTS string `json:"remote_ts,omitempty"`
+	Source   string `json:"source"`
 }
 
 type ConfigSnapshot struct {
@@ -764,21 +780,23 @@ type ConfigSnapshot struct {
 	// the latter advances for ordinary config/FIB publishes, while the former
 	// advances only when admitted NFQUEUE handles rotate. Rust D14 compares its
 	// packet snapshot-generation advisory against this exact capture authority.
-	IpsecTunnelSnapshotGeneration uint64                `json:"ipsec_tunnel_snapshot_generation,omitempty"`
-	Summary                       SnapshotSummary       `json:"summary"`
-	Capabilities                  UserspaceCapabilities `json:"capabilities"`
-	MapPins                       UserspaceMapPins      `json:"map_pins"`
-	Zones                         []ZoneSnapshot        `json:"zones,omitempty"`
+	IpsecTunnelSnapshotGeneration uint64                       `json:"ipsec_tunnel_snapshot_generation,omitempty"`
+	PMechInventory                *IpsecPMechInventorySnapshot `json:"pmech_inventory,omitempty"`
+	Summary                       SnapshotSummary              `json:"summary"`
+	Capabilities                  UserspaceCapabilities        `json:"capabilities"`
+	MapPins                       UserspaceMapPins             `json:"map_pins"`
+	Zones                         []ZoneSnapshot               `json:"zones,omitempty"`
 	// ZoneSetValidated is true only when the producer supplied a populated
 	// zone set and completed duplicate/collision validation without
 	// quarantining a zone. Rust uses it to derive removed-zone ids; absent or
 	// false is a fail-closed no-op for old/ambiguous producers.
-	ZoneSetValidated bool                     `json:"zone_set_validated,omitempty"`
-	Interfaces       []InterfaceSnapshot      `json:"interfaces,omitempty"`
-	Fabrics          []FabricSnapshot         `json:"fabrics,omitempty"`
-	TunnelEndpoints  []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
-	Neighbors        []NeighborSnapshot       `json:"neighbors,omitempty"`
-	Routes           []RouteSnapshot          `json:"routes,omitempty"`
+	ZoneSetValidated     bool                         `json:"zone_set_validated,omitempty"`
+	Interfaces           []InterfaceSnapshot          `json:"interfaces,omitempty"`
+	Fabrics              []FabricSnapshot             `json:"fabrics,omitempty"`
+	TunnelEndpoints      []TunnelEndpointSnapshot     `json:"tunnel_endpoints,omitempty"`
+	Neighbors            []NeighborSnapshot           `json:"neighbors,omitempty"`
+	Routes               []RouteSnapshot              `json:"routes,omitempty"`
+	RouteTableIdentities []RouteTableIdentitySnapshot `json:"route_table_identities,omitempty"`
 	// ForwardingTables identifies the family-qualified tables backed by
 	// `instance-type forwarding`. The Rust FIB uses this explicit marker to
 	// allow qualified IPv4/IPv6 gateways and interface-only members in those

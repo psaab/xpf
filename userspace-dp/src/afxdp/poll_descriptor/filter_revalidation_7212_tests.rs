@@ -2262,7 +2262,8 @@ fn a_steady_state_tunneled_pbr_steer_stays_pinned_10630() {
         &neighbors,
         flow.dst_ip,
         Some("blue.inet.0"),
-    );
+    )
+    .resolution;
     assert_eq!(
         fresh.tunnel_endpoint_id, 824,
         "fixture liveness: blue.inet.0 must resolve the flow via tunnel 824"
@@ -2316,7 +2317,8 @@ fn a_tunneled_pbr_steer_whose_table_lost_its_route_revokes_10630() {
         &neighbors,
         flow.dst_ip,
         Some("blue.inet.0"),
-    );
+    )
+    .resolution;
     assert_eq!(
         fresh.disposition,
         ForwardingDisposition::NoRoute,
@@ -2370,7 +2372,8 @@ fn a_tunneled_pbr_steer_retargeted_to_native_revokes_10630() {
         &neighbors,
         flow.dst_ip,
         Some("green.inet.0"),
-    );
+    )
+    .resolution;
     assert_eq!(
         fresh.tunnel_endpoint_id, 0,
         "fixture liveness: green.inet.0 must resolve the flow natively"
@@ -2431,7 +2434,8 @@ fn a_tunneled_pbr_steer_retargeted_to_a_different_tunnel_revokes_10630() {
         &neighbors,
         flow.dst_ip,
         Some("green.inet.0"),
-    );
+    )
+    .resolution;
     assert_eq!(
         fresh.tunnel_endpoint_id, 825,
         "fixture liveness: green.inet.0 must resolve the flow via tunnel 825"
@@ -2508,7 +2512,8 @@ fn a_tunneled_pbr_steer_whose_pbr_term_was_removed_revokes_10630() {
         &neighbors,
         flow.dst_ip,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         fresh.tunnel_endpoint_id, 0,
         "fixture liveness: MAIN must resolve the flow natively, not via a tunnel"
@@ -3226,7 +3231,7 @@ fn unchanged_non_ingress_fib_local_session_is_not_revoked_12056() {
             &neighbors,
             flow.dst_ip,
             None,
-        );
+        ).resolution;
     assert_eq!(
         resolution.disposition,
         crate::afxdp::ForwardingDisposition::LocalDelivery,

@@ -72,6 +72,11 @@ func (m *Manager) bumpGeneration() uint64 {
 // on success, so the next bump re-diffs and re-sends).
 func (m *Manager) BumpFIBGeneration() (uint32, error) {
 	newGen, shimErr := m.bpfShim.BumpFIBGeneration()
+	// The P-MECH route dump is the only part of a bump that scales with the
+	// main table. Take it before m.mu so status polls, neighbor updates, and
+	// publishes never wait behind it; the stamp below uses it only if the
+	// config and tunnel rows it was filtered for are still current.
+	prefetch := m.prefetchPMechRoutes()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -90,9 +95,15 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 	prevFIB := m.lastSnapshot.FIBGeneration
 	prevSnapGen := m.lastSnapshot.Generation
 	prevAlloc := m.generation
+	prevPermitEpoch := m.lastSnapshot.PermitEpoch
+	prevQueueEpochs := append([]QueueEpochSnapshot(nil), m.lastSnapshot.QueueEpochs...)
+	prevTunnelSnapshotGeneration := m.lastSnapshot.IpsecTunnelSnapshotGeneration
+	prevTunnelRows := append([]IpsecTunnelRowSnapshot(nil), m.lastSnapshot.IpsecTunnelRows...)
+	prevPMechInventory := m.lastSnapshot.PMechInventory
 	m.lastSnapshot.FIBGeneration = newGen
 	m.incGenerationSaturatingLocked()
 	m.lastSnapshot.Generation = m.generation
+	stampCaptureAuthorityWithRoutes(m.lastSnapshot, m.captureEpochProvider, prefetch)
 
 	// #1197 v4 (Codex code-review v3 #1): refresh the monitored
 	// ifindex cache UNCONDITIONALLY — link recreation can happen
@@ -148,7 +159,9 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 		}
 	}
 
-	// Send lightweight FIB generation bump — no full snapshot rebuild.
+	// Send the lightweight FIB bump with the refreshed, exact authority
+	// inventory. The Rust handler publishes this inventory with the FIB
+	// validation change in one RuntimeView store.
 	var status ProcessStatus
 	if err := m.requestLocked(ControlRequest{
 		Type: "bump_fib_generation",
@@ -157,8 +170,11 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 			// exactly like apply_snapshot. Stamp the protocol version so a
 			// legitimate route-only bump is accepted; an unversioned (0)
 			// message is rejected as a mixed-version / corrupt client.
-			Version:       ProtocolVersion,
-			FIBGeneration: newGen,
+			Version:                       ProtocolVersion,
+			FIBGeneration:                 newGen,
+			IpsecTunnelSnapshotGeneration: m.lastSnapshot.IpsecTunnelSnapshotGeneration,
+			IpsecTunnelRows:               append([]IpsecTunnelRowSnapshot(nil), m.lastSnapshot.IpsecTunnelRows...),
+			PMechInventory:                m.lastSnapshot.PMechInventory,
 		},
 	}, &status); err != nil {
 		// #10724: restore only when the helper's in-band refusal proves that
@@ -170,14 +186,35 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 			m.lastSnapshot.FIBGeneration = prevFIB
 			m.lastSnapshot.Generation = prevSnapGen
 			m.generation = prevAlloc
+			m.lastSnapshot.PermitEpoch = prevPermitEpoch
+			m.lastSnapshot.QueueEpochs = prevQueueEpochs
+			m.lastSnapshot.IpsecTunnelSnapshotGeneration = prevTunnelSnapshotGeneration
+			m.lastSnapshot.IpsecTunnelRows = prevTunnelRows
+			m.lastSnapshot.PMechInventory = prevPMechInventory
 		}
 		return newGen, fmt.Errorf("bump fib generation: %w", err)
 	}
 	if committer := m.captureAuthorityCommitter; committer != nil && m.appliedSnapshot.Generation != 0 {
-		committer(m.appliedSnapshot.Generation, newGen,
-			m.appliedSnapshot.CaptureGeneration)
+		committer(m.appliedSnapshot.Generation, m.lastSnapshot)
 	}
 	return newGen, shimErr
+}
+
+// prefetchPMechRoutes streams the main table for the next FIB bump without
+// holding m.mu. It reads the retained config and tunnel rows under a brief
+// lock; a bump with no tunnel rows (or no capture provider) dumps nothing.
+func (m *Manager) prefetchPMechRoutes() *pmechRoutePrefetch {
+	m.mu.Lock()
+	if m.lastSnapshot == nil || m.lastSnapshot.Config == nil || m.proc == nil ||
+		m.proc.Process == nil || m.captureEpochProvider == nil ||
+		len(m.lastSnapshot.IpsecTunnelRows) == 0 {
+		m.mu.Unlock()
+		return nil
+	}
+	cfg := m.lastSnapshot.Config
+	rows := append([]IpsecTunnelRowSnapshot(nil), m.lastSnapshot.IpsecTunnelRows...)
+	m.mu.Unlock()
+	return dumpPMechMainRoutes(cfg, rows)
 }
 
 // advanceGenerationAfterPartialUpdateLocked performs the post-publish

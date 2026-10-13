@@ -27,6 +27,7 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
         return reverse.lookup.decision.resolution;
     }
     lookup_forwarding_resolution_with_dynamic(ctx.forwarding, ctx.dynamic_neighbors, original_src)
+        .resolution
 }
 
 /// #10672: resolve the forwarding for an ICMP error quoting a REPLY packet —
@@ -65,4 +66,5 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_quoted_reply_resolution(
         }
     }
     lookup_forwarding_resolution_with_dynamic(ctx.forwarding, ctx.dynamic_neighbors, quoted_src)
+        .resolution
 }

@@ -932,7 +932,7 @@ fn flow_miss_interface_nat_uses_native_route_table_12086() {
             IpAddr::V4(target),
             Some("red.inet.0"),
         )
-        .disposition,
+        .resolution.disposition,
         ForwardingDisposition::NoRoute,
         "red's FIB must not inherit inet.0's connected WAN route",
     );

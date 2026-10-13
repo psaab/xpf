@@ -297,13 +297,16 @@ func TestEnsureRequiredSnapshotProtocolRejectsOldHelperForPersistentSourceNAT(t 
 // ensureRequiredSnapshotProtocolLocked. Before #2138 the persistent
 // source NAT gate disarmed the helper but was missing from the daemon's
 // abort set, so a mismatch promoted the commit against a disarmed
-// dataplane. The predicate must match BOTH required gates (bare and
+// dataplane. The predicate must match every required gate (bare and
 // wrapped) and must NOT match unrelated errors.
 func TestIsRequiredProtocolGateError(t *testing.T) {
 	for _, sentinel := range []error{
 		ErrPolicySchedulerProtocolIncompatible,
 		ErrPersistentSourceNATProtocolIncompatible,
 		ErrScopedGlobalZoneSetProtocolIncompatible,
+		ErrEgressZoneProtocolIncompatible,
+		ErrSecureTunnelProtocolIncompatible,
+		ErrPMechProtocolIncompatible,
 	} {
 		if !IsRequiredProtocolGateError(sentinel) {
 			t.Errorf("IsRequiredProtocolGateError(%v) = false, want true (bare sentinel)", sentinel)

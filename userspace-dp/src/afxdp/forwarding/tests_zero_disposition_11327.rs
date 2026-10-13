@@ -55,7 +55,8 @@ fn zero_disposition_route_falls_through_under_both_default_policies_11327() {
             &Arc::new(ShardedNeighborMap::new()),
             IpAddr::V4(Ipv4Addr::new(10, 1, 0, 20)),
             Some("inet.0"),
-        );
+        )
+        .resolution;
         assert_eq!(
             resolution.disposition,
             ForwardingDisposition::ForwardCandidate,

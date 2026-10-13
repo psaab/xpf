@@ -191,9 +191,9 @@ pub(in crate::afxdp) fn resolve_forwarding(
     meta: UserspaceDpMeta,
     state: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     let Some(dst) = parse_packet_destination(area, desc, meta) else {
-        return ForwardingResolution {
+        return no_route_lookup_result(ForwardingResolution {
             disposition: ForwardingDisposition::NoRoute,
             local_ifindex: 0,
             egress_ifindex: 0,
@@ -205,7 +205,7 @@ pub(in crate::afxdp) fn resolve_forwarding(
             tx_vlan_id: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
-        };
+        });
     };
     lookup_forwarding_resolution_with_dynamic(state, dynamic_neighbors, dst)
 }
@@ -214,14 +214,14 @@ pub(in crate::afxdp) fn resolve_forwarding(
 pub(in crate::afxdp) fn lookup_forwarding_for_ip(
     state: &ForwardingState,
     dst: IpAddr,
-) -> ForwardingDisposition {
-    lookup_forwarding_resolution(state, dst).disposition
+) -> ForwardingLookupResult {
+    lookup_forwarding_resolution(state, dst)
 }
 
 pub(in crate::afxdp) fn lookup_forwarding_resolution(
     state: &ForwardingState,
     dst: IpAddr,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_inner(state, None, dst, None)
 }
 
@@ -229,7 +229,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic(
     state: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     dst: IpAddr,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_inner(state, Some(dynamic_neighbors), dst, None)
 }
 
@@ -242,7 +242,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     dst: IpAddr,
     flow_key: &crate::session::SessionKey,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_inner_ecmp(
         state,
         Some(dynamic_neighbors),
@@ -262,7 +262,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow_in_ta
     dst: IpAddr,
     flow_key: &crate::session::SessionKey,
     table: &str,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_inner_ecmp(
         state,
         Some(dynamic_neighbors),
@@ -351,7 +351,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_in_table_with_dynamic(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     dst: IpAddr,
     table: Option<&str>,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_inner(state, Some(dynamic_neighbors), dst, table)
 }
 
@@ -360,7 +360,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_inner(
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
     dst: IpAddr,
     table: Option<&str>,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_inner_ecmp(state, dynamic_neighbors, dst, table, None)
 }
 
@@ -374,7 +374,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_inner_ecmp(
     dst: IpAddr,
     table: Option<&str>,
     ecmp_flow_hash: Option<u64>,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     match dst {
         IpAddr::V4(ip) => {
             let table = table
@@ -415,7 +415,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v4(
     depth: usize,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     // #9955: this wrapper enters the two-stage resolver with the rule stage
     // enabled. Leak-selected targets call the same table resolver with that
     // stage disabled, matching kernel ip-rule semantics.
@@ -571,7 +571,7 @@ fn lookup_forwarding_resolution_v4_inner(
     evaluate_leaks: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     // Per-table local entries retain their existing priority. Interface-NAT
     // ownership is admitted only for leak-target walks (`!evaluate_leaks`);
     // the ordinary source-table lookup leaves it to the session-miss gate.
@@ -579,10 +579,10 @@ fn lookup_forwarding_resolution_v4_inner(
     if let Some(resolution) =
         local_delivery_resolution_v4(state, ip, table, !evaluate_leaks)
     {
-        return resolution;
+        return selected_route_lookup_result(state, table, resolution);
     }
     if depth >= MAX_NEXT_TABLE_DEPTH {
-        return ForwardingResolution {
+        return no_route_lookup_result(ForwardingResolution {
             disposition: ForwardingDisposition::NextTableUnsupported,
             local_ifindex: 0,
             egress_ifindex: 0,
@@ -594,7 +594,7 @@ fn lookup_forwarding_resolution_v4_inner(
             tx_vlan_id: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
-        };
+        });
     }
     if evaluate_leaks {
         // #9955: stage one is the kernel's priority-ordered ip-rule walk. A
@@ -630,17 +630,19 @@ fn lookup_forwarding_resolution_v4_inner(
             tunnel_endpoint_id,
         }) => {
             if tunnel_endpoint_id != 0 {
-                return if allow_tunnels {
+                if !allow_tunnels {
+                    return no_route_lookup_result(no_route_resolution(Some(IpAddr::V4(ip))));
+                }
+                return selected_route_lookup_result(
+                    state,
+                    table,
                     resolve_tunnel_forwarding_resolution(
                         state,
                         dynamic_neighbors,
                         tunnel_endpoint_id,
                         depth,
-
-                    )
-                } else {
-                    no_route_resolution(Some(IpAddr::V4(ip)))
-                };
+                    ),
+                );
             }
             let neighbor = lookup_neighbor_entry(state, dynamic_neighbors, ifindex, IpAddr::V4(ip));
             let mut resolution = ForwardingResolution {
@@ -661,23 +663,27 @@ fn lookup_forwarding_resolution_v4_inner(
                 transport_route_mtu: 0,
             };
             populate_egress_resolution(state, ifindex, &mut resolution);
-            resolution
+            selected_route_lookup_result(state, table, resolution)
         }
         Some(ResolvedRouteV4::Static { route, selected }) => {
             if route.discard {
-                return ForwardingResolution {
-                    disposition: ForwardingDisposition::DiscardRoute,
-                    local_ifindex: 0,
-                    egress_ifindex: 0,
-                    tx_ifindex: 0,
-                    tunnel_endpoint_id: 0,
-                    next_hop: None,
-                    neighbor_mac: None,
-                    src_mac: None,
-                    tx_vlan_id: 0,
-                    route_mtu: 0,
-                    transport_route_mtu: 0,
-                };
+                return selected_route_lookup_result(
+                    state,
+                    table,
+                    ForwardingResolution {
+                        disposition: ForwardingDisposition::DiscardRoute,
+                        local_ifindex: 0,
+                        egress_ifindex: 0,
+                        tx_ifindex: 0,
+                        tunnel_endpoint_id: 0,
+                        next_hop: None,
+                        neighbor_mac: None,
+                        src_mac: None,
+                        tx_vlan_id: 0,
+                        route_mtu: 0,
+                        transport_route_mtu: 0,
+                    },
+                );
             }
             // `select_v4_route` has already selected a member within the
             // preferred live tier, or the preferred drivable member if every
@@ -687,21 +693,22 @@ fn lookup_forwarding_resolution_v4_inner(
                 None => (None, 0, 0),
             };
             if tunnel_endpoint_id != 0 {
-                return if allow_tunnels {
-                    let mut resolution = resolve_tunnel_forwarding_resolution(
-                        state,
-                        dynamic_neighbors,
-                        tunnel_endpoint_id,
-                        depth,
-                    );
-                    resolution.route_mtu = route.mtu;
-                    resolution
-                } else {
-                    no_route_resolution(next_hop.map(IpAddr::V4).or(Some(IpAddr::V4(ip))))
-                };
+                if !allow_tunnels {
+                    return no_route_lookup_result(no_route_resolution(
+                        next_hop.map(IpAddr::V4).or(Some(IpAddr::V4(ip))),
+                    ));
+                }
+                let mut resolution = resolve_tunnel_forwarding_resolution(
+                    state,
+                    dynamic_neighbors,
+                    tunnel_endpoint_id,
+                    depth,
+                );
+                resolution.route_mtu = route.mtu;
+                return selected_route_lookup_result(state, table, resolution);
             }
             if ifindex <= 0 {
-                return no_route_resolution(next_hop.map(IpAddr::V4));
+                return no_route_lookup_result(no_route_resolution(next_hop.map(IpAddr::V4)));
             }
             let target = next_hop.unwrap_or(ip);
             let neighbor =
@@ -724,9 +731,9 @@ fn lookup_forwarding_resolution_v4_inner(
                 transport_route_mtu: 0,
             };
             populate_egress_resolution(state, ifindex, &mut resolution);
-            resolution
+            selected_route_lookup_result(state, table, resolution)
         }
-        None => no_route_resolution(None),
+        None => no_route_lookup_result(no_route_resolution(None)),
     }
 }
 
@@ -738,7 +745,7 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v6(
     depth: usize,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     lookup_forwarding_resolution_v6_inner(
         state,
         dynamic_neighbors,
@@ -783,14 +790,14 @@ fn lookup_forwarding_resolution_v6_inner(
     evaluate_leaks: bool,
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     if let Some(resolution) =
         local_delivery_resolution_v6(state, ip, table, !evaluate_leaks)
     {
-        return resolution;
+        return selected_route_lookup_result(state, table, resolution);
     }
     if depth >= MAX_NEXT_TABLE_DEPTH {
-        return ForwardingResolution {
+        return no_route_lookup_result(ForwardingResolution {
             disposition: ForwardingDisposition::NextTableUnsupported,
             local_ifindex: 0,
             egress_ifindex: 0,
@@ -802,7 +809,7 @@ fn lookup_forwarding_resolution_v6_inner(
             tx_vlan_id: 0,
             route_mtu: 0,
             transport_route_mtu: 0,
-        };
+        });
     }
     if evaluate_leaks {
         // #9955: perform the rule stage once. The target lookup disables
@@ -835,16 +842,19 @@ fn lookup_forwarding_resolution_v6_inner(
             tunnel_endpoint_id,
         }) => {
             if tunnel_endpoint_id != 0 {
-                return if allow_tunnels {
+                if !allow_tunnels {
+                    return no_route_lookup_result(no_route_resolution(Some(IpAddr::V6(ip))));
+                }
+                return selected_route_lookup_result(
+                    state,
+                    table,
                     resolve_tunnel_forwarding_resolution(
                         state,
                         dynamic_neighbors,
                         tunnel_endpoint_id,
                         depth,
-                    )
-                } else {
-                    no_route_resolution(Some(IpAddr::V6(ip)))
-                };
+                    ),
+                );
             }
             let neighbor = lookup_neighbor_entry(state, dynamic_neighbors, ifindex, IpAddr::V6(ip));
             let mut resolution = ForwardingResolution {
@@ -865,23 +875,27 @@ fn lookup_forwarding_resolution_v6_inner(
                 transport_route_mtu: 0,
             };
             populate_egress_resolution(state, ifindex, &mut resolution);
-            resolution
+            selected_route_lookup_result(state, table, resolution)
         }
         Some(ResolvedRouteV6::Static { route, selected }) => {
             if route.discard {
-                return ForwardingResolution {
-                    disposition: ForwardingDisposition::DiscardRoute,
-                    local_ifindex: 0,
-                    egress_ifindex: 0,
-                    tx_ifindex: 0,
-                    tunnel_endpoint_id: 0,
-                    next_hop: None,
-                    neighbor_mac: None,
-                    src_mac: None,
-                    tx_vlan_id: 0,
-                    route_mtu: 0,
-                    transport_route_mtu: 0,
-                };
+                return selected_route_lookup_result(
+                    state,
+                    table,
+                    ForwardingResolution {
+                        disposition: ForwardingDisposition::DiscardRoute,
+                        local_ifindex: 0,
+                        egress_ifindex: 0,
+                        tx_ifindex: 0,
+                        tunnel_endpoint_id: 0,
+                        next_hop: None,
+                        neighbor_mac: None,
+                        src_mac: None,
+                        tx_vlan_id: 0,
+                        route_mtu: 0,
+                        transport_route_mtu: 0,
+                    },
+                );
             }
             // See the v4 twin: preserve the preferred tier's cold-path
             // fallback only when no same-prefix tier has a live member.
@@ -890,21 +904,22 @@ fn lookup_forwarding_resolution_v6_inner(
                 None => (None, 0, 0),
             };
             if tunnel_endpoint_id != 0 {
-                return if allow_tunnels {
-                    let mut resolution = resolve_tunnel_forwarding_resolution(
-                        state,
-                        dynamic_neighbors,
-                        tunnel_endpoint_id,
-                        depth,
-                    );
-                    resolution.route_mtu = route.mtu;
-                    resolution
-                } else {
-                    no_route_resolution(next_hop.map(IpAddr::V6).or(Some(IpAddr::V6(ip))))
-                };
+                if !allow_tunnels {
+                    return no_route_lookup_result(no_route_resolution(
+                        next_hop.map(IpAddr::V6).or(Some(IpAddr::V6(ip))),
+                    ));
+                }
+                let mut resolution = resolve_tunnel_forwarding_resolution(
+                    state,
+                    dynamic_neighbors,
+                    tunnel_endpoint_id,
+                    depth,
+                );
+                resolution.route_mtu = route.mtu;
+                return selected_route_lookup_result(state, table, resolution);
             }
             if ifindex <= 0 {
-                return no_route_resolution(next_hop.map(IpAddr::V6));
+                return no_route_lookup_result(no_route_resolution(next_hop.map(IpAddr::V6)));
             }
             let target = next_hop.unwrap_or(ip);
             let neighbor =
@@ -927,9 +942,9 @@ fn lookup_forwarding_resolution_v6_inner(
                 transport_route_mtu: 0,
             };
             populate_egress_resolution(state, ifindex, &mut resolution);
-            resolution
+            selected_route_lookup_result(state, table, resolution)
         }
-        None => no_route_resolution(None),
+        None => no_route_lookup_result(no_route_resolution(None)),
     }
 }
 
@@ -946,6 +961,25 @@ pub(in crate::afxdp) fn no_route_resolution(next_hop: Option<IpAddr>) -> Forward
         tx_vlan_id: 0,
         route_mtu: 0,
         transport_route_mtu: 0,
+    }
+}
+#[inline]
+fn selected_route_lookup_result(
+    state: &ForwardingState,
+    table: &str,
+    resolution: ForwardingResolution,
+) -> ForwardingLookupResult {
+    ForwardingLookupResult {
+        resolution,
+        selected_route: state.route_table_identities.get(table).copied(),
+    }
+}
+
+#[inline]
+fn no_route_lookup_result(resolution: ForwardingResolution) -> ForwardingLookupResult {
+    ForwardingLookupResult {
+        resolution,
+        selected_route: None,
     }
 }
 
@@ -1381,7 +1415,7 @@ fn tunnel_next_hop_live(
     }
     matches!(
         resolve_tunnel_outer(state, dynamic_neighbors, tunnel_endpoint_id, depth)
-            .map(|outer| outer.disposition),
+            .map(|outer| outer.resolution.disposition),
         Some(ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor)
     )
 }

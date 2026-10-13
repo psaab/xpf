@@ -27,9 +27,13 @@ pub(crate) const SUBMIT_MAX_FRAMES: usize = 64;
 pub(crate) const SUBMIT_MAX_DATA_LEN: usize = 65_535;
 /// Maximum complete binary message, including its type byte.
 pub(crate) const REINJECT_MAX_MSG: usize = 1_048_576;
-/// P-MECH submit tail size: snapshot u64 + config u64 + FIB u32 + zone u16
-/// + if_id u32. Keep this shared with strict codec tests (26 bytes).
-pub(crate) const SUBMIT_PMECH_TAIL_LEN: usize = 26;
+/// P-MECH submit tail: snapshot u64 + config u64 + FIB u32 + zone u16 +
+/// if_id u32 + inventory generation u64 + inventory FIB u32 + policy SHA-256
+/// (32 bytes) + absolute CLOCK_MONOTONIC deadline u64 + clock id u8 (79 bytes).
+pub(crate) const SUBMIT_PMECH_TAIL_LEN: usize = 79;
+pub(crate) const PMECH_DEADLINE_MAX_FUTURE_SKEW_NS: u64 = 1_000_000_000;
+pub(crate) const PMECH_DEADLINE_MIN_REMAINING_NS: u64 = 0;
+pub(crate) const PMECH_DEADLINE_CLOCK_MONOTONIC: u8 = 1;
 
 /// Dedicated data-plane message types. Control-socket JSON is intentionally not
 /// used for packet admission or completion handoff.
@@ -181,7 +185,29 @@ pub(crate) struct SubmitFrame {
     pub fib_generation: u32,
     pub zone_id: u16,
     pub if_id: u32,
+    pub pmech_inventory_generation: u64,
+    pub pmech_inventory_fib_generation: u32,
+    pub pmech_policy_identity: [u8; 32],
+    pub deadline_mono_ns: u64,
+    pub deadline_clock_id: u8,
 }
+pub(crate) fn pmech_deadline_admissible_at(
+    deadline_mono_ns: u64,
+    deadline_clock_id: u8,
+    now_ns: u64,
+) -> bool {
+    if deadline_clock_id != PMECH_DEADLINE_CLOCK_MONOTONIC
+        || now_ns == 0
+        || deadline_mono_ns <= now_ns
+    {
+        return false;
+    }
+    let remaining = deadline_mono_ns - now_ns;
+    remaining > PMECH_DEADLINE_MIN_REMAINING_NS
+        && remaining <= PMECH_DEADLINE_MAX_FUTURE_SKEW_NS
+}
+
+
 
 fn d11_frame_digest(frame: &SubmitFrame, run_id: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -900,7 +926,7 @@ impl ReinjectCore {
         inner.authority.close_permit(permit_epoch);
     }
     pub(crate) fn admit(&self, frame: &SubmitFrame) -> AdmitDecision {
-        self.admit_with_class_owner(frame, None, 0)
+        self.admit_with_class_owner(frame, None, 0, false)
     }
 
     pub(crate) fn admit_for_connection(
@@ -908,7 +934,7 @@ impl ReinjectCore {
         frame: &SubmitFrame,
         connection_id: u64,
     ) -> AdmitDecision {
-        self.admit_with_class_owner(frame, None, connection_id)
+        self.admit_with_class_owner(frame, None, connection_id, false)
     }
 
     pub(crate) fn admit_with_class(
@@ -916,7 +942,15 @@ impl ReinjectCore {
         frame: &SubmitFrame,
         class: Option<AdmissionClass>,
     ) -> AdmitDecision {
-        self.admit_with_class_owner(frame, class, 0)
+        self.admit_with_class_owner(frame, class, 0, false)
+    }
+
+    pub(crate) fn admit_p2_with_class(
+        &self,
+        frame: &SubmitFrame,
+        class: AdmissionClass,
+    ) -> AdmitDecision {
+        self.admit_with_class_owner(frame, Some(class), 0, true)
     }
 
     pub(crate) fn admit_with_class_owner(
@@ -924,6 +958,7 @@ impl ReinjectCore {
         frame: &SubmitFrame,
         class: Option<AdmissionClass>,
         connection_id: u64,
+        enforce_p2_deadline: bool,
     ) -> AdmitDecision {
         let id = frame.lease.request_id;
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -980,6 +1015,18 @@ impl ReinjectCore {
         }
         let now = Instant::now();
         let frame_digest = d11_frame_digest(frame, &inner.authority.run_id);
+        if enforce_p2_deadline
+            && !pmech_deadline_admissible_at(
+                frame.deadline_mono_ns,
+                frame.deadline_clock_id,
+                crate::afxdp::monotonic_nanos(),
+            )
+        {
+            if let Some(class) = class {
+                Self::record_refusal(&mut inner.stats, class);
+            }
+            return Self::decision(frame, false, ADMIT_BAD_LEASE);
+        }
         inner.entries.insert(
             id,
             Entry {
@@ -1585,7 +1632,7 @@ fn push_u16(out: &mut Vec<u8>, value: u16) {
 }
 pub(crate) fn encode_submit_batch(frames: &[SubmitFrame]) -> Vec<u8> {
     assert!(frames.len() <= SUBMIT_MAX_FRAMES);
-    let mut out = Vec::with_capacity(2 + frames.len() * 142);
+    let mut out = Vec::with_capacity(2 + frames.len() * (72 + SUBMIT_PMECH_TAIL_LEN));
     push_u16(&mut out, frames.len() as u16);
     for frame in frames {
         assert!(frame.bytes.len() <= SUBMIT_MAX_DATA_LEN);
@@ -1613,6 +1660,11 @@ pub(crate) fn encode_submit_batch(frames: &[SubmitFrame]) -> Vec<u8> {
         push_u32(&mut out, frame.fib_generation);
         push_u16(&mut out, frame.zone_id);
         push_u32(&mut out, frame.if_id);
+        push_u64(&mut out, frame.pmech_inventory_generation);
+        push_u32(&mut out, frame.pmech_inventory_fib_generation);
+        out.extend_from_slice(&frame.pmech_policy_identity);
+        push_u64(&mut out, frame.deadline_mono_ns);
+        out.push(frame.deadline_clock_id);
     }
     out
 }
@@ -1700,6 +1752,12 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
         let fib_generation = c.u32()?;
         let zone_id = c.u16()?;
         let if_id = c.u32()?;
+        let pmech_inventory_generation = c.u64()?;
+        let pmech_inventory_fib_generation = c.u32()?;
+        let mut pmech_policy_identity = [0u8; 32];
+        pmech_policy_identity.copy_from_slice(c.take(32)?);
+        let deadline_mono_ns = c.u64()?;
+        let deadline_clock_id = c.u8()?;
         out.push(SubmitFrame {
             lease: ReinjectLease {
                 permit_epoch,
@@ -1723,6 +1781,11 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
             fib_generation,
             zone_id,
             if_id,
+            pmech_inventory_generation,
+            pmech_inventory_fib_generation,
+            pmech_policy_identity,
+            deadline_mono_ns,
+            deadline_clock_id,
         });
     }
     if !c.done() {
@@ -1745,6 +1808,11 @@ pub(crate) struct PooledSubmitFrame {
     pub fib_generation: u32,
     pub zone_id: u16,
     pub if_id: u32,
+    pub pmech_inventory_generation: u64,
+    pub pmech_inventory_fib_generation: u32,
+    pub pmech_policy_identity: [u8; 32],
+    pub deadline_mono_ns: u64,
+    pub deadline_clock_id: u8,
 }
 
 /// Decode a P-MECH batch directly into preallocated D11 slabs. This is the
@@ -1788,6 +1856,12 @@ pub(crate) fn decode_submit_batch_into_pool(
             let fib_generation = c.u32()?;
             let zone_id = c.u16()?;
             let if_id = c.u32()?;
+            let pmech_inventory_generation = c.u64()?;
+            let pmech_inventory_fib_generation = c.u32()?;
+            let mut pmech_policy_identity = [0u8; 32];
+            pmech_policy_identity.copy_from_slice(c.take(32)?);
+            let deadline_mono_ns = c.u64()?;
+            let deadline_clock_id = c.u8()?;
             let owner_valid_utf8 = std::str::from_utf8(owner_bytes).is_ok();
             let stn_valid_utf8 = std::str::from_utf8(stn_bytes).is_ok();
             let valid = owned_ifindex != 0
@@ -1832,6 +1906,11 @@ pub(crate) fn decode_submit_batch_into_pool(
                 fib_generation,
                 zone_id,
                 if_id,
+                pmech_inventory_generation,
+                pmech_inventory_fib_generation,
+                pmech_policy_identity,
+                deadline_mono_ns,
+                deadline_clock_id,
             });
         }
         if !c.done() {

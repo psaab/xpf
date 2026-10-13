@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "210fa7c739585810f12c31042e5f59b35922419aa376c2369905a3efe5d2c8d2"
+	snapshotShapeGolden8892 = "c2ea3156c32eae9885059ffa5f964805ef061cd1fa2e66e0504d5c187fe155fe"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -497,7 +497,12 @@ const (
 	// marking-action and logical-interface-policer JSON fields. The keys are
 	// omitted by default and the current Rust runtime ignores them; warnings
 	// identify the retention-only behavior, while this version pins the shape.
-	snapshotShapeVersion8892 = 45
+	// v45 -> v46 BUMPED (#9506): ConfigSnapshot.PMechInventory carries the
+	// main-table route inventory and per-tunnel P-MECH rows, and
+	// ConfigSnapshot.RouteTableIdentities transmits the route-table name to
+	// (domain, table) authority used by D14. Both are helper-consumed wire
+	// fields; the golden is the digest measured on the v46 tree.
+	snapshotShapeVersion8892 = 46
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

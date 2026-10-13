@@ -851,7 +851,8 @@ impl super::Coordinator {
             self.dynamic_neighbors_ref(),
             peer_ip,
             table,
-        );
+        )
+        .resolution;
         self.forwarding
             .egress
             .get(&resolution.egress_ifindex)

@@ -11,7 +11,7 @@ use crate::slowpath_reinject_9506::{
     CancelScope, CaptureOrigin, ReinjectCompletion, ReinjectCore, ReinjectLease,
     ReinjectOutcome, SubmitFrame, ADMIT_BAD_LEASE, ADMIT_NON_DRY_RUN, ADMIT_OK,
     ADMIT_SHUTDOWN, ADMIT_STALE, MSG_ADMIT, MSG_ANNOUNCE, MSG_CANCEL, MSG_COMPLETE, MSG_SUBMIT_BATCH,
-    ORIGIN_FORWARD, ORIGIN_INET, SUBMIT_FLAG_DRY_RUN,
+    ORIGIN_FORWARD, ORIGIN_INET, PMECH_DEADLINE_CLOCK_MONOTONIC, SUBMIT_FLAG_DRY_RUN,
 };
 use arc_swap::ArcSwapOption;
 use std::os::unix::net::UnixStream;
@@ -45,6 +45,11 @@ fn frame(id: u64, flow_tag: u64) -> SubmitFrame {
         fib_generation: 1,
         zone_id: 1,
         if_id: 1,
+        pmech_inventory_generation: 0,
+        pmech_inventory_fib_generation: 0,
+        pmech_policy_identity: [0; 32],
+        deadline_mono_ns: crate::afxdp::monotonic_nanos() + 500_000_000,
+        deadline_clock_id: PMECH_DEADLINE_CLOCK_MONOTONIC,
     }
 }
 
@@ -136,6 +141,53 @@ fn submit_conn_admits_enqueues_and_cancels_serially() {
     // cancel has no terminal completion to drain.
     assert_eq!(core.live_count(), 0);
     assert!(core.drain_ready(16).is_empty());
+
+    drop(client);
+    handle.join().unwrap();
+}
+
+#[test]
+fn dry_run_expired_or_wrong_clock_deadlines_refuse_without_side_effects() {
+    let core = open_core();
+    let target = live_target(&core);
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let worker_core = core.clone();
+    let worker_target = target.clone();
+    let handle = std::thread::spawn(move || {
+        serve_submit_conn(server, &worker_core, &worker_target);
+    });
+
+    let mut expired = frame(11, 1);
+    expired.deadline_mono_ns = crate::afxdp::monotonic_nanos().saturating_sub(1);
+    let mut wrong_clock = frame(12, 2);
+    wrong_clock.deadline_clock_id = 2;
+    client
+        .write_all(&encode_message(
+            MSG_SUBMIT_BATCH,
+            &encode_submit_batch(&[expired, wrong_clock]),
+        ))
+        .unwrap();
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_ADMIT);
+    let decisions = crate::slowpath_reinject_9506::decode_admit(&payload).unwrap();
+    assert_eq!(decisions.len(), 2);
+    for decision in decisions {
+        assert!(!decision.admitted);
+        assert_eq!(decision.reason, ADMIT_BAD_LEASE);
+    }
+    let stats = core.stats_snapshot();
+    assert_eq!(stats.dry_run_refused, 2);
+    assert_eq!(stats.dry_run_admitted, 0);
+    assert_eq!(core.live_count(), 0);
+    assert_eq!(
+        target
+            .load_full()
+            .unwrap()
+            .delegated_status()
+            .queued_packets,
+        0,
+        "refused dry-run frames must not touch the worker queue"
+    );
 
     drop(client);
     handle.join().unwrap();

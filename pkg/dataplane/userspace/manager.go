@@ -201,7 +201,7 @@ type Manager struct {
 	cfg                                config.UserspaceConfig
 	clusterHA                          bool
 	captureEpochProvider               CaptureEpochProvider
-	captureAuthorityCommitter          func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64)
+	captureAuthorityCommitter          func(configGeneration uint64, snapshot *ConfigSnapshot)
 	policySnapshotCommitter            func(configGeneration uint64)
 	policySnapshotPrePublisher         func(generation uint64) error
 	// policySnapshotPrepublishGeneration records the deferred full snapshot

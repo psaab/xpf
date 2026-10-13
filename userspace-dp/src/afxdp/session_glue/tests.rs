@@ -4287,6 +4287,7 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
             &flow,
             test_decision(),
         )
+        .resolution
         .disposition,
         ForwardingDisposition::ForwardCandidate,
         "precondition: the failback lookup has a live route and neighbor"
@@ -5975,6 +5976,7 @@ fn apply_worker_commands_demote_owner_rg_rewrites_resolution_to_fabric_redirect(
             &flow,
             test_decision(),
         )
+        .resolution
         .disposition,
         ForwardingDisposition::ForwardCandidate,
         "precondition: demotion resolves a live route and neighbor"
@@ -11156,7 +11158,7 @@ fn refresh_owner_rgs_standby_local_delivery_forces_live_redirect_4805() {
     let now_secs = now_ns / 1_000_000_000;
     let forwarding = test_forwarding_state_with_local_destination(local_ip);
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip)).disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip)).resolution.disposition,
         ForwardingDisposition::LocalDelivery,
         "precondition: 192.0.2.10 is modeled as an inet.0 local address"
     );
@@ -11224,7 +11226,7 @@ fn refresh_owner_rgs_active_owner_local_delivery_publishes_kernel_local_4805() {
     let now_secs = now_ns / 1_000_000_000;
     let forwarding = test_forwarding_state_with_local_destination(local_ip);
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip)).disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip)).resolution.disposition,
         ForwardingDisposition::LocalDelivery,
         "precondition: 192.0.2.10 is modeled as an inet.0 local address"
     );
@@ -11859,6 +11861,7 @@ fn refresh_owner_rgs_skips_hainactive_hold_clock_5152() {
             &flow,
             test_decision(),
         )
+        .resolution
         .disposition,
         ForwardingDisposition::ForwardCandidate,
         "precondition: Case B has a live route and neighbor for the session key"
@@ -17272,6 +17275,11 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
     // Sanity: with A live, the cached fast path still serves A.
     let served_a =
         lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    let mut expected_cached = stored.resolution;
+    expected_cached.src_mac = Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    assert_eq!(served_a.resolution, expected_cached);
+    assert_eq!(served_a.selected_route, None);
+    let served_a = served_a.resolution;
     assert_eq!(
         served_a.neighbor_mac,
         Some(mac_a),
@@ -17284,7 +17292,7 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
         .epoch_for(&(ifindex, next_hop));
     assert!(dynamic_neighbors.remove_if_present(&(ifindex, next_hop)));
     let absent =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored).resolution;
     assert_eq!(
         absent.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -17309,7 +17317,7 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
     );
     // The same stored decision (stale A) must now re-resolve to live B.
     let served_b =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored).resolution;
     assert_eq!(
         served_b.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -17393,6 +17401,11 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
     };
     let served_a =
         lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    let mut expected_cached = stored.resolution;
+    expected_cached.src_mac = Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    assert_eq!(served_a.resolution, expected_cached);
+    assert_eq!(served_a.selected_route, None);
+    let served_a = served_a.resolution;
     assert_eq!(
         served_a.neighbor_mac,
         Some(mac_a),
@@ -17403,7 +17416,7 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
         .epoch_for(&(ifindex, next_hop));
     assert!(dynamic_neighbors.remove_if_present(&(ifindex, next_hop)));
     let absent =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored).resolution;
     assert_eq!(
         absent.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -17427,7 +17440,7 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
         "the first learn after removal does not bump the shard epoch (v6)"
     );
     let served_b =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored).resolution;
     assert_eq!(
         served_b.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -17493,7 +17506,8 @@ fn session_hit_reresolves_after_manager_replace_removes_snapshot_neighbor_12255(
         &dynamic,
         next_hop,
         &flow.forward_key,
-    );
+    )
+    .resolution;
     assert_eq!(live.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(live.neighbor_mac, Some(snapshot_mac));
     let mut sessions = SessionTable::new();
@@ -17588,7 +17602,7 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
         forward_key: key.clone(),
     };
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip);
+    let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip).resolution;
     assert_eq!(initial.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(initial.next_hop, Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))));
     let decision = SessionDecision {
@@ -17735,7 +17749,7 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
         forward_key: key.clone(),
     };
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip);
+    let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip).resolution;
     assert_eq!(initial.disposition, ForwardingDisposition::ForwardCandidate);
     let decision = SessionDecision {
         resolution: initial,
@@ -17831,7 +17845,7 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
         dst_ip: key.dst_ip,
         forward_key: key.clone(),
     };
-    let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip);
+    let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip).resolution;
     assert_eq!(initial.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(
         initial.next_hop,
@@ -17908,7 +17922,7 @@ fn refresh_owner_rgs_resolves_live_route_before_restamp_11373() {
         dst_ip: key.dst_ip,
         forward_key: key.clone(),
     };
-    let initial_resolution = lookup_forwarding_resolution(&forwarding_before, flow.dst_ip);
+    let initial_resolution = lookup_forwarding_resolution(&forwarding_before, flow.dst_ip).resolution;
     assert_eq!(
         initial_resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -17983,7 +17997,7 @@ fn demote_owner_rgs_resolves_live_route_before_restamp_11373() {
     let forwarding_before = build_forwarding_state(&snapshot);
     let mut key = test_key();
     key.dst_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
-    let initial = lookup_forwarding_resolution(&forwarding_before, key.dst_ip);
+    let initial = lookup_forwarding_resolution(&forwarding_before, key.dst_ip).resolution;
     assert_eq!(
         initial.disposition,
         ForwardingDisposition::ForwardCandidate,

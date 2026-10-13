@@ -153,7 +153,8 @@ pub(in crate::afxdp::session_glue) fn collect_refresh_owner_rgs_items(
             dynamic_neighbors,
             &flow,
             decision,
-        );
+        )
+        .resolution;
         let looked_up_resolution = super::super::prefer_local_forward_candidate_for_fabric_ingress(
             forwarding,
             ha_state,
