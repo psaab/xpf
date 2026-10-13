@@ -526,14 +526,20 @@ func resolveStaticNATThenPrefixName(ab *AddressBook, name string) (string, bool)
 	if ab == nil || name == "" {
 		return "", false
 	}
+	if _, collision := ab.CollidingNames[name]; collision {
+		return "", false
+	}
 	if a, ok := ab.Addresses[name]; ok && a != nil {
 		if value := a.UsableValue(); value != "" {
 			return value, true
 		}
 	}
 	if _, ok := ab.AddressSets[name]; ok {
+		if addressBookNameCollidesForStaticNAT(ab, name, make(map[string]bool)) {
+			return "", false
+		}
 		members, err := expandAddressSetLeaves(name, ab)
-		if err != nil || len(members) != 1 {
+		if err != nil || len(members) != 1 || addressBookNameCollidesForStaticNAT(ab, members[0], make(map[string]bool)) {
 			return "", false
 		}
 		if a, ok := ab.Addresses[members[0]]; ok && a != nil {
@@ -543,6 +549,40 @@ func resolveStaticNATThenPrefixName(ab *AddressBook, name string) (string, bool)
 		}
 	}
 	return "", false
+}
+
+// addressBookNameCollidesForStaticNAT checks the requested name and every set
+// name traversed while expanding it. It follows the same cross-kind rule as
+// expandAddressSetLeaves: an address wins over a same-named set when used as a
+// member, but that member itself is still checked against CollidingNames.
+func addressBookNameCollidesForStaticNAT(ab *AddressBook, name string, visited map[string]bool) bool {
+	if _, collision := ab.CollidingNames[name]; collision {
+		return true
+	}
+	if visited[name] {
+		return false
+	}
+	set := ab.AddressSets[name]
+	if set == nil {
+		return false
+	}
+	visited[name] = true
+	defer delete(visited, name)
+	for _, member := range set.Addresses {
+		if _, collision := ab.CollidingNames[member]; collision {
+			return true
+		}
+		if _, isAddress := ab.Addresses[member]; !isAddress && ab.AddressSets[member] != nil &&
+			addressBookNameCollidesForStaticNAT(ab, member, visited) {
+			return true
+		}
+	}
+	for _, nested := range set.AddressSets {
+		if addressBookNameCollidesForStaticNAT(ab, nested, visited) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveStaticNATThenPrefixNames resolves every `then static-nat prefix-name`

@@ -197,10 +197,11 @@ func TestCrossKindAddressSetBounds12502(t *testing.T) {
 	}
 }
 
-// TestCrossKindAddressFirstOnNameCollision12502 pins the precedence for a
-// cross-kind member that names both an address and an address-set. Strict
-// commit rejects the collision. The lenient load path records it and keeps
-// resolving the member as the address, as before cross-kind leaf expansion.
+// TestCrossKindAddressFirstOnNameCollision12502 pins that a cross-kind member
+// collision is refused during static-NAT prefix-name resolution. Strict
+// commit rejects the collision; tolerant compilation records it and leaves the
+// NAT target empty so the #4290 warning fires rather than selecting either
+// definition.
 func TestCrossKindAddressFirstOnNameCollision12502(t *testing.T) {
 	lines := []string{
 		"set security address-book global address X 10.1.1.1/32",
@@ -218,8 +219,11 @@ func TestCrossKindAddressFirstOnNameCollision12502(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lenient compile: %v", err)
 	}
-	if rule := cfg.Security.NAT.Static[0].Rules[0]; rule.Then != "10.1.1.1/32" {
-		t.Fatalf("lenient static-NAT target = %q; want address X 10.1.1.1/32, not set X's 10.9.0.1/32",
-			rule.Then)
+	rule := cfg.Security.NAT.Static[0].Rules[0]
+	if rule.Then != "" {
+		t.Fatalf("lenient static-NAT target = %q; want empty so the collision is not selected", rule.Then)
+	}
+	if !natWarnContains(cfg, "static NAT translation target") {
+		t.Fatalf("lenient static-NAT collision must warn via the empty-target gate; warnings=%v", cfg.Warnings)
 	}
 }
