@@ -3174,7 +3174,13 @@ never lock an operator out of a remote box it manages.
   would match that delete against the replacement. Those routes are excluded
   from FRR's default-table statics; implicit gateways are matched against live
   table-999 connected routes as well as configured prefixes, covering
-  DHCP-only management addresses.
+  DHCP-only management addresses. The backup-router's gateway resolves to its
+  management output link the same way, so the kernel's listed route (which
+  carries the output link the kernel chose) matches the desired route and an
+  unchanged reconcile replaces nothing. A gateway on no management link keeps
+  no output link and is replaced on every reconcile, so the kernel re-checks
+  it; an unreachable gateway fails the apply and its stale route is deleted
+  (#12583).
   DHCP-learned management-VRF routes are reconciled alongside them before
   networkd; their error is latched into a separate management-route leg of the
   same routing debt, including errors from management-only DHCP callbacks.
