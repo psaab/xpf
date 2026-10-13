@@ -100,8 +100,9 @@ func TestElidedRoutingInstanceDoesNotStealTheOSPFInterface9055(t *testing.T) {
 // does not depend on duplicates or on #11310 staying strict: both spellings
 // of the no-member pair must reach the SAME verdict, and if both commit their
 // instances must be DeepEqual (the 9620 agree-harness shape). Under theft the
-// elided spelling commits a stolen member while the braced spelling is
-// refused — RED either way. Under a drop regression the instances differ.
+// refused — RED either way. Under a drop regression the verdict arm
+// fires first today; the instances-differ arm trips only if #11310
+// ever stops rejecting the braced no-member spelling.
 func TestElidedRoutingInstanceNoMemberParity9055(t *testing.T) {
 	const proto = "protocols { ospf { area 0.0.0.0 { interface ge-0/0/1.0; } } }"
 	iface := "interfaces { ge-0/0/1 { unit 0 { family inet { address 10.0.1.1/24; } } } }\n"
@@ -110,8 +111,8 @@ func TestElidedRoutingInstanceNoMemberParity9055(t *testing.T) {
 	if (eerr == nil) != (berr == nil) {
 		t.Errorf("no-member pair reaches different verdicts: elided err=%v, braced err=%v", eerr, berr)
 	} else if eerr == nil && !reflect.DeepEqual(ec.RoutingInstances, bc.RoutingInstances) {
-		t.Errorf("no-member pair commits different instances:\n elided %+v\n braced %+v",
-			ec.RoutingInstances, bc.RoutingInstances)
+		t.Errorf("no-member pair commits different instances:\n elided %s\n braced %s",
+			json9620(ec.RoutingInstances), json9620(bc.RoutingInstances))
 	}
 }
 
