@@ -28,10 +28,9 @@ import (
 //     runs.
 //   - A braced group is compiled for every member by
 //     bracketedGroupInstances8794 (#8794).
-//   - A repeat of the name, as in `security-zone [ zga zga ];`, loses nothing.
-//   - An `apply-macro` tail. No compiler consumes a macro, and
-//     `security-zone trust apply-macro M;` compiles exactly like its braced
-//     spelling (measured at ed313e4c9, #9656 review round 5).
+//   - An exact `apply-macro` tail (`security-zone trust apply-macro M`).
+//     No compiler consumes a macro, so it compiles exactly like its braced
+//     spelling. Extra keys after M are still subject to the dropped-tail check.
 //
 // Why a refusal: an earlier cut expanded groups in the normalizer, and three
 // review rounds found the per-member statements it materialised colliding with
@@ -55,8 +54,9 @@ func validateZoneStatementTails9656(nodes []*Node, lenient bool) ([]string, erro
 			for _, ch := range zs.Children {
 				if ch == nil || len(ch.Keys) < 3 || ch.Keys[0] != "security-zone" || len(ch.Children) > 0 {
 					continue
-				}
-				if ch.Keys[2] == "apply-macro" || !zoneTailDropsKeys9656(ch) {
+				// A complete apply-macro tail is inert, but any token beyond its
+				// single macro name remains dropped content and must be refused.
+				if (len(ch.Keys) == 4 && ch.Keys[2] == "apply-macro") || !zoneTailDropsKeys9656(ch) {
 					continue
 				}
 				msg := zoneTailMessage9656(ch)

@@ -388,17 +388,15 @@ func dedupHostInboundTokens(vals []string) []string {
 //
 // A group has surplus keys AND a braced body; a packed tail has surplus keys
 // and NO children. The two cannot overlap, so this is disjoint from the #8690
-// normalizer's `len(Children) == 0` construction by the same property that
-// separates them there.
+// normalizer's `len(Children) == 0` construction. A braced apply-macro header
+// is also a multi-key node with children, but `apply-macro` owns its name and
+// body rather than adding zone names; stop fanout and hide that body from zone readers.
 //
-// THERE IS NO BRACKET PROVENANCE TO PRESERVE, which dissolves the HA concern
-// about ConfigTree.Format emitting bare keys: the bracketed and bare spellings
-// parse to byte-identical trees (measured above), so a primary and a standby
-// running this code fan out identically whichever spelling crosses the
-// Format -> SyncApply boundary. A rolling upgrade still differs -- an OLD peer
-// compiles one zone where a NEW one compiles two -- but that is the pre-fix
-// behaviour on the old node, and it errs toward FEWER zones, which is the
-// direction that fails closed.
+// The parser records KeysBracketed, so an apply-macro token is cut off only
+// when it is not itself a bracketed zone member. That matters for a literal
+// zone named `apply-macro`. Older or synthesized trees may lack this metadata;
+// in those trees the token is treated as an apply statement, matching the
+// conservative default for keys whose provenance is unknown.
 //
 // Scoped to zones deliberately. namedInstances is shared by many containers and
 // fanning it out globally would change every one of them; that is a separate
@@ -413,11 +411,35 @@ func bracketedGroupInstances8794(nodes []*Node) []struct {
 	}
 	for _, child := range nodes {
 		if len(child.Keys) >= 3 && len(child.Children) > 0 {
-			for _, nm := range child.Keys[1:] {
+			instanceNode := child
+			discardMacroBody := false
+			// apply-macro in a security-zone header consumes its name and
+			// optional body instead of naming zones. Keep its token in the
+			// group only when bracket provenance says it was authored as an
+			// actual bracketed member (for example, a zone named apply-macro).
+			for i, nm := range child.Keys[1:] {
+				if child.Name() == "security-zone" && nm == "apply-macro" && !child.KeyBracketed(i+1) {
+					discardMacroBody = true
+					break
+				}
+			}
+			if discardMacroBody {
+				// The parser attaches the macro's braced payload as this node's
+				// children. Give zone readers a bodyless view so macro content
+				// is not compiled as zone properties.
+				copy := *child
+				copy.Children = nil
+				copy.IsLeaf = true
+				instanceNode = &copy
+			}
+			for i, nm := range child.Keys[1:] {
+				if child.Name() == "security-zone" && nm == "apply-macro" && !child.KeyBracketed(i+1) {
+					break
+				}
 				out = append(out, struct {
 					name string
 					node *Node
-				}{nm, child})
+				}{nm, instanceNode})
 			}
 			continue
 		}
