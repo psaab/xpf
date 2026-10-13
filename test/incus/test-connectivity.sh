@@ -332,13 +332,21 @@ test_cluster() {
 	service_check "$FW0" "cluster: xpfd service active on fw0"
 	service_check "$FW1" "cluster: xpfd service active on fw1"
 
+	# Heartbeat/fabric peer addresses come from the cluster conf
+	# (CLUSTER_CONF): node0's peer-address is fw1's heartbeat IP, and
+	# vice versa. Hardcoding them breaks whenever a cluster renumbers
+	# (loss userspace uses 10.99.12/13, legacy used 10.99.0/1).
+	HB_FW1=$(awk '$1=="peer-address"{print $2; exit}' "$CLUSTER_CONF" | tr -d ';')
+	HB_FW0=$(awk '$1=="peer-address"{n++; if(n==2) print $2}' "$CLUSTER_CONF" | tr -d ';')
+	FAB_FW1=$(awk '$1=="fabric-peer-address"{print $2; exit}' "$CLUSTER_CONF" | tr -d ';')
+	FAB_FW0=$(awk '$1=="fabric-peer-address"{n++; if(n==2) print $2}' "$CLUSTER_CONF" | tr -d ';')
 	# Heartbeat connectivity (auto VRF — em0/fab0 may be in vrf-mgmt)
-	ping_test "$FW0" "10.99.0.2" "cluster: fw0 → fw1 heartbeat (10.99.0.2)"
-	ping_test "$FW1" "10.99.0.1" "cluster: fw1 → fw0 heartbeat (10.99.0.1)"
+	ping_test "$FW0" "$HB_FW1" "cluster: fw0 → fw1 heartbeat (${HB_FW1})"
+	ping_test "$FW1" "$HB_FW0" "cluster: fw1 → fw0 heartbeat (${HB_FW0})"
 
 	# Fabric connectivity
-	ping_test "$FW0" "10.99.1.2" "cluster: fw0 → fw1 fabric (10.99.1.2)"
-	ping_test "$FW1" "10.99.1.1" "cluster: fw1 → fw0 fabric (10.99.1.1)"
+	ping_test "$FW0" "$FAB_FW1" "cluster: fw0 → fw1 fabric (${FAB_FW1})"
+	ping_test "$FW1" "$FAB_FW0" "cluster: fw1 → fw0 fabric (${FAB_FW0})"
 
 	# WAN gateway
 	ping_test "$FW0" "$WAN_GW4" "cluster: fw0 → WAN gateway (${WAN_GW4})"
