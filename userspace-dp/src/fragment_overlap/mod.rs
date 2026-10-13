@@ -92,7 +92,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use crate::hot_hash_seed::hot_path_hash_seed;
+use crate::hot_hash_seed::{frag_overlap_shard_seed, keyed_shard_index};
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6};
 use crate::nat::NatDecision;
 
@@ -201,12 +201,12 @@ fn ip_octets(ip: IpAddr, out: &mut [u8; 16]) -> usize {
     }
 }
 
-/// Seeded FNV-1a plus the assoc-compatible multiply-shift finalizer over the coarse
+/// Seeded FNV-1a plus a keyed splitmix64 finalizer over the coarse
 /// `(family, src, dst, ident)` digest. Protocol and routing domain are deliberately
 /// excluded so same-datagram candidates (hostile proto-varying v4, cross-domain floods)
 /// co-locate in one shard; membership is by full-key equality.
 pub(crate) fn overlap_shard_index_seeded(key: &OverlapKey, seed: u64) -> usize {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ seed;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |b: u8| {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -224,13 +224,13 @@ pub(crate) fn overlap_shard_index_seeded(key: &OverlapKey, seed: u64) -> usize {
     for b in key.ident.to_be_bytes() {
         mix(b);
     }
-    (h.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        >> (u64::BITS - OVERLAP_SHARDS.trailing_zeros())) as usize
+    keyed_shard_index(h, seed, 0x6f76_6572_6c61_7001, OVERLAP_SHARDS)
 }
+
 
 #[cfg(test)]
 pub(crate) fn overlap_shard_index(key: &OverlapKey) -> usize {
-    overlap_shard_index_seeded(key, hot_path_hash_seed())
+    overlap_shard_index_seeded(key, frag_overlap_shard_seed())
 }
 /// Fairness identity (#10658): the admitted sender. `dst`/`ident`/`protocol` are
 /// excluded — keying them would let one sender mint fresh quota by varying the
@@ -453,7 +453,7 @@ impl Drop for OverlapCheckResult {
 
 impl OverlapTracker {
     pub(crate) fn new() -> Self {
-        Self::with_seed(hot_path_hash_seed())
+        Self::with_seed(frag_overlap_shard_seed())
     }
 
     fn with_seed(seed: u64) -> Self {
@@ -2119,19 +2119,18 @@ mod tests {
     #[test]
     fn seeded_index_defeats_targeted_single_shard_fill_12189() {
         // DSM-027: four permitted sources can each hold eight incomplete
-        // datagram anchors. These fixed vectors were precomputed against the
-        // unseeded index and also collide when the assoc-compatible finalizer
-        // has a zero seed, exhausting one domain shard and fail-closing a
-        // legitimate key there.
+        // datagram anchors. This set is regenerated for the post-fold keyed
+        // finalizer: seed zero places every key in TARGET_SHARD, while seed
+        // one disperses the set across shards.
         const ATTACK_SOURCES: [u8; 4] = [101, 102, 103, 104];
         const DOMAIN: u32 = 7;
         const TARGET_SHARD: usize = 5;
         let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
         let attack_idents: [[u32; 8]; 4] = [
-            [128, 224, 275, 538, 762, 1343, 1542, 1638],
-            [163, 195, 605, 765, 842, 1689, 1785, 1814],
-            [194, 341, 600, 760, 1262, 1732, 2349, 2509],
-            [498, 808, 968, 1089, 1486, 1908, 2004, 2109],
+            [29, 68, 83, 91, 95, 115, 168, 177],
+            [4, 37, 42, 44, 45, 53, 57, 68],
+            [65, 80, 121, 128, 139, 145, 178, 192],
+            [13, 48, 77, 101, 107, 108, 125, 134],
         ];
         let t = OverlapTracker::with_seed(1);
         let now_ns = 1_000u64;
@@ -2212,11 +2211,9 @@ mod tests {
 
     #[test]
     fn seeded_finalizer_scatters_high_nibble_keys_12189() {
-        // Opus R1 F1: FNV-1a low bits depend only on the low bits of the seed
-        // and of each input byte, so without the multiply-shift finalizer keys
-        // differing only in high nibbles land in one shard for every seed even
-        // with the seed kept. Fixed seeds and a fixed high-nibble-only set keep
-        // this deterministic; it also catches a low-bits-of-product variant.
+        // The finalizer avalanches the full digest and post-fold seed, so
+        // high-nibble-only inputs spread even though FNV low bits preserve
+        // input-byte locality. Fixed seed/input vectors make this deterministic.
         const SRCS: [u8; 4] = [0x65, 0x75, 0x45, 0x55];
         const IDENTS: [u32; 8] = [0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70];
         const SEEDS: [u64; 3] = [1, 7, 42];
@@ -2245,4 +2242,124 @@ mod tests {
         }
     }
 
+    #[test]
+    fn high_seed_bytes_scatter_precomputed_shard_collisions_12602() {
+        // These vectors collide under the previous seeded multiply-shift
+        // index at seed 0x5c, not merely at seed zero. The fixed low byte
+        // reproduces the attacker's partial-seed knowledge; each higher seed
+        // byte is then varied independently.
+        const ATTACK_SOURCES: [u8; 4] = [101, 102, 103, 104];
+        const IDENTS: [[u32; 8]; 4] = [
+            [9, 23, 61, 70, 99, 108, 122, 142],
+            [3, 18, 25, 40, 62, 65, 72, 87],
+            [15, 35, 40, 57, 82, 102, 111, 124],
+            [0, 22, 45, 58, 71, 84, 96, 107],
+        ];
+        let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+        let legacy_index = |key: &OverlapKey, seed: u64| {
+            let mut h = 0xcbf2_9ce4_8422_2325 ^ seed;
+            let mut mix = |b: u8| {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            };
+            mix(key.addr_family);
+            let mut buf = [0u8; 16];
+            let n = ip_octets(key.src, &mut buf);
+            for &b in &buf[..n] {
+                mix(b);
+            }
+            let n = ip_octets(key.dst, &mut buf);
+            for &b in &buf[..n] {
+                mix(b);
+            }
+            for b in key.ident.to_be_bytes() {
+                mix(b);
+            }
+            (h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 60) as usize
+        };
+        for (src, idents) in ATTACK_SOURCES.iter().zip(IDENTS.iter()) {
+            for ident in idents {
+                let key = OverlapKey {
+                    addr_family: libc::AF_INET as u8,
+                    src: IpAddr::V4(Ipv4Addr::new(10, 0, 61, *src)),
+                    dst,
+                    ident: *ident,
+                    protocol: 6,
+                    routing_domain: 7,
+                };
+                assert_eq!(
+                    legacy_index(&key, 0x5c),
+                    5,
+                    "fixture key must collide under the old index at the known low byte"
+                );
+            }
+        }
+        for seed_byte in 1..8u32 {
+            let mut reached = [false; OVERLAP_SHARDS];
+            for high in 0..256u64 {
+                let seed = 0x5cu64 | (high << (seed_byte * 8));
+                let mut occupancy = [0usize; OVERLAP_SHARDS];
+                let mut old_occupancy = [0usize; OVERLAP_SHARDS];
+                for (src, idents) in ATTACK_SOURCES.iter().zip(IDENTS.iter()) {
+                    for ident in idents {
+                        let key = OverlapKey {
+                            addr_family: libc::AF_INET as u8,
+                            src: IpAddr::V4(Ipv4Addr::new(10, 0, 61, *src)),
+                            dst,
+                            ident: *ident,
+                            protocol: 6,
+                            routing_domain: 7,
+                        };
+                        let old_shard = legacy_index(&key, seed);
+                        old_occupancy[old_shard] += 1;
+                        let shard = overlap_shard_index_seeded(&key, seed);
+                        assert!(shard < OVERLAP_SHARDS);
+                        occupancy[shard] += 1;
+                    }
+                }
+                let spread = occupancy.iter().filter(|&&n| n != 0).count();
+                let max = *occupancy.iter().max().unwrap();
+                let old_spread = old_occupancy.iter().filter(|&&n| n != 0).count();
+                assert!(
+                    old_spread <= 2,
+                    "seed byte {seed_byte}, seed {seed:#x}: old index spread={old_spread}"
+                );
+                assert!(
+                    spread >= 4 && max <= 14,
+                    "seed byte {seed_byte}, seed {seed:#x}: spread={spread}, max={max}"
+                );
+                for (i, &n) in occupancy.iter().enumerate() {
+                    reached[i] |= n > 0;
+                }
+            }
+            assert!(
+                reached.into_iter().all(|seen| seen),
+                "seed byte {seed_byte} did not reach every shard"
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_index_is_deterministic_in_range_and_distributed_12602() {
+        for seed in [0, 1, 0x5c, 0xdead_beef_c0de_f00d] {
+            let mut counts = [0usize; OVERLAP_SHARDS];
+            for i in 0..8192u32 {
+                let mut key = v4_key();
+                key.ident = i.wrapping_mul(0x9e37_79b1);
+                key.src = IpAddr::V4(Ipv4Addr::new(
+                    10, (i >> 16) as u8, (i >> 8) as u8, i as u8,
+                ));
+                let shard = overlap_shard_index_seeded(&key, seed);
+                assert!(shard < OVERLAP_SHARDS);
+                assert_eq!(shard, overlap_shard_index_seeded(&key, seed));
+                counts[shard] += 1;
+            }
+            for (shard, count) in counts.into_iter().enumerate() {
+                assert!(
+                    (256..=1024).contains(&count),
+                    "seed {seed:#x}: shard {shard} got {count}/8192 keys"
+                );
+            }
+        }
+    }
 }

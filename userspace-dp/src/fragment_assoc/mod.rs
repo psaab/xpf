@@ -107,7 +107,7 @@
 //! config reloads inside `Nat64State::from_snapshots_with_previous` so in-flight
 //! datagrams keep translating. Deliberately left for a separate change.
 
-use crate::hot_hash_seed::hot_path_hash_seed;
+use crate::hot_hash_seed::{frag_assoc_shard_seed, keyed_shard_index};
 use crate::nat64::{Nat64ReverseInfo, ipv6_fragment_header};
 use crate::session::{SessionDecision, SessionKey};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -431,9 +431,10 @@ fn ip_octets(ip: IpAddr, out: &mut [u8; 16]) -> usize {
 
 /// Seeded FNV-1a over the source address -> shard index. Stable within a process
 /// so every association for one source maps to one bucket on every worker, but
-/// randomized at boot to prevent offline collision precomputation.
+/// randomized at boot to prevent offline collision precomputation. The secret is
+/// applied after the key fold and uses an assoc-specific domain.
 pub(crate) fn frag_shard_index_seeded(key: &FragKey, seed: u64) -> usize {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ seed;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |b: u8| {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -443,11 +444,11 @@ pub(crate) fn frag_shard_index_seeded(key: &FragKey, seed: u64) -> usize {
     for &b in &buf[..n] {
         mix(b);
     }
-    (h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (u64::BITS - FRAG_SHARDS.trailing_zeros())) as usize
+    keyed_shard_index(h, seed, 0x6672_6167_6173_7301, FRAG_SHARDS)
 }
 
 pub(crate) fn frag_shard_index(key: &FragKey) -> usize {
-    frag_shard_index_seeded(key, hot_path_hash_seed())
+    frag_shard_index_seeded(key, frag_assoc_shard_seed())
 }
 
 /// #9901 (F-010): absolute-lifetime-aware liveness — the ONE predicate both

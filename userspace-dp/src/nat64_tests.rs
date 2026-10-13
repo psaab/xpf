@@ -5336,7 +5336,7 @@ fn frag_assoc_shard_hash_seed_defeats_offline_collisions_11058() {
     };
     // Offline search against the former fixed FNV low-bit index found this
     // victim and both attack sources in one shard. The .1/.17 pair also keeps
-    // the same low nibble, which collided for every seed before full-width mix.
+    // the same low nibble, which collided before keyed avalanche.
     let unseeded_shard = legacy_index(victim.src);
     assert_eq!(legacy_index(attacker_a.src), unseeded_shard);
     assert_eq!(legacy_index(attacker_b.src), unseeded_shard);
@@ -5345,6 +5345,29 @@ fn frag_assoc_shard_hash_seed_defeats_offline_collisions_11058() {
     // The same fixed inputs separate after high-bit avalanche; a fixed seed
     // keeps this deterministic while production supplies its per-process seed.
     let seeded = 0x0123_4567_89ab_cdef;
+    // All eight seed bytes must affect shared-key relationships. Fix the
+    // low byte and vary one other byte at a time, matching the reported
+    // low-byte-only attacker model.
+    for seed_byte in 1..8u32 {
+        let mut same_shard = [0usize; 4];
+        for high in 0..256u64 {
+            let seed = 0x5cu64 | (high << (seed_byte * 8));
+            let victim_shard = frag_shard_index_seeded(&victim, seed);
+            for (i, key) in [&same_low_nibble, &attacker_a, &attacker_b]
+                .iter()
+                .enumerate()
+            {
+                same_shard[i] +=
+                    usize::from(frag_shard_index_seeded(key, seed) == victim_shard);
+            }
+        }
+        for (key, hits) in same_shard.iter().enumerate() {
+            assert!(
+                *hits < 128,
+                "seed byte {seed_byte}: key {key} shares victim shard {hits}/256 times"
+            );
+        }
+    }
     let victim_shard = frag_shard_index_seeded(&victim, seeded);
     assert_ne!(
         frag_shard_index_seeded(&same_low_nibble, seeded),
@@ -5354,6 +5377,58 @@ fn frag_assoc_shard_hash_seed_defeats_offline_collisions_11058() {
     assert_ne!(frag_shard_index_seeded(&attacker_b, seeded), victim_shard);
     let process_shard = frag_shard_index(&victim);
     assert_eq!(frag_shard_index(&victim), process_shard);
+}
+
+#[test]
+fn frag_assoc_high_seed_bytes_break_legacy_collisions_12602() {
+    let dst = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+    let make_key = |last| FragKey {
+        addr_family: libc::AF_INET as u8,
+        src: IpAddr::V4(Ipv4Addr::new(10, 0, 0, last)),
+        dst,
+        ident: 1,
+        protocol: PROTO_UDP,
+        authority: frag_test_authority(),
+    };
+    let victim = make_key(1);
+    let attackers = [make_key(6), make_key(87), make_key(154)];
+    let legacy_index = |src: IpAddr, seed: u64| {
+        let mut h = 0xcbf2_9ce4_8422_2325 ^ seed;
+        let mut mix = |byte: u8| {
+            h ^= u64::from(byte);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        match src {
+            IpAddr::V4(ip) => ip.octets().into_iter().for_each(&mut mix),
+            IpAddr::V6(ip) => ip.octets().into_iter().for_each(&mut mix),
+        }
+        (h.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 60) as usize
+    };
+    let old_shard = legacy_index(victim.src, 0x5c);
+    for key in &attackers {
+        assert_eq!(
+            legacy_index(key.src, 0x5c),
+            old_shard,
+            "fixed-low-byte fixture must collide under the former seeded index"
+        );
+    }
+    for seed_byte in 1..8u32 {
+        let mut same_shard = [0usize; 3];
+        for high in 0..256u64 {
+            let seed = 0x5cu64 | (high << (seed_byte * 8));
+            let victim_shard = frag_shard_index_seeded(&victim, seed);
+            for (i, key) in attackers.iter().enumerate() {
+                same_shard[i] +=
+                    usize::from(frag_shard_index_seeded(key, seed) == victim_shard);
+            }
+        }
+        for (key, hits) in same_shard.iter().enumerate() {
+            assert!(
+                *hits < 64,
+                "seed byte {seed_byte}: legacy-colliding key {key} shares shard {hits}/256 times"
+            );
+        }
+    }
 }
 
 #[test]
