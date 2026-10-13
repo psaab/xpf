@@ -204,4 +204,76 @@ func TestBootstrapLifelineUnreadableIdentityNeutralizes12550(t *testing.T) {
 	if !strings.Contains(got, "unreadable") && !strings.Contains(got, "could not read") && !strings.Contains(got, "cannot verify") {
 		t.Fatalf("bootstrap unreadable must be logged distinctly, got:\n%s", logs.String())
 	}
+	if strings.Contains(got, "mismatch") {
+		t.Fatalf("bootstrap unreadable must be distinct from mismatch, got:\n%s", logs.String())
+	}
+}
+
+// blockLinkRemoval12550 makes the removal of 10-xpf-<name>.link fail even
+// when the test runs as root: that path is a non-empty directory, so
+// os.Remove returns ENOTEMPTY. The stale MAC-form claim lives in a sibling
+// managed file; retainedMACAddress matches it by Name=, not by file name.
+func blockLinkRemoval12550(t *testing.T, dir, name, mac string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, linkPrefix+name+".link", "keep"), 0o755); err != nil {
+		t.Fatalf("create removal blocker: %v", err)
+	}
+	content := "# Managed by xpfd — do not edit\n[Match]\nMACAddress=" + mac + "\n\n[Link]\nName=" + name + "\n"
+	if err := os.WriteFile(filepath.Join(dir, linkPrefix+name+"-stale.link"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write stale MAC-form claim: %v", err)
+	}
+}
+
+// A failed removal must not be reported as done: the log and the errs
+// channel name the failed removal and carry the remove error, and neither
+// claims the file or the persistence was removed.
+func TestRenamePositionalRemovalFailureNotReportedRemoved12550(t *testing.T) {
+	logs := captureLogs12156(t)
+	dir := withTempLinkDir(t)
+	blockLinkRemoval12550(t, dir, "fxp0", "52:54:00:aa:bb:cc")
+	stubIdentity12550(t, "52:54:00:12:34:56", nil)
+
+	changed, errs := renamePositional([]pciNIC{{sortKey: 1, busAddr: "0000:05:00.0", name: "fxp0"}}, 0, false,
+		func(string, string) error { return nil })
+	if changed {
+		t.Fatal("a failed removal must not report a .link change")
+	}
+	joined := errors.Join(errs...)
+	if joined == nil || !strings.Contains(joined.Error(), "removal failed") {
+		t.Fatalf("failed removal must surface on errs, got %v", joined)
+	}
+	if strings.Contains(joined.Error(), "persistence removed") {
+		t.Fatalf("failed removal must not claim persistence was removed, got %v", joined)
+	}
+	var pathErr *os.PathError
+	if !errors.As(joined, &pathErr) {
+		t.Fatalf("errs must wrap the remove error, got %v", joined)
+	}
+	got := logs.String()
+	if strings.Contains(got, "removed the file") || !strings.Contains(got, "could not remove the file") {
+		t.Fatalf("failed removal must be logged as a failure, got:\n%s", got)
+	}
+}
+
+func TestBootstrapLifelineRemovalFailureNotReportedRemoved12550(t *testing.T) {
+	logs := captureLogs12156(t)
+	st := staticLifelineSeams(t)
+	blockLinkRemoval12550(t, st.linkDir, "fxp0", "52:54:00:aa:bb:cc")
+	stubIdentity12550(t, "52:54:00:12:34:56", nil)
+	lifelineLinkByName = func(string) (netlink.Link, error) { return okLink(), nil }
+	lifelineAddrList = func(netlink.Link, int) ([]netlink.Addr, error) {
+		return []netlink.Addr{staticAddr("192.0.2.10/24")}, nil
+	}
+	lifelineRouteList = func(_ netlink.Link, family int) ([]netlink.Route, error) {
+		if family == netlink.FAMILY_V4 {
+			return []netlink.Route{{Gw: net.ParseIP("192.0.2.1")}}, nil
+		}
+		return nil, nil
+	}
+	d := &Daemon{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+	d.setupBootstrapLifeline()
+	got := logs.String()
+	if strings.Contains(got, "removed the file") || !strings.Contains(got, "could not remove the file") {
+		t.Fatalf("bootstrap failed removal must be logged as a failure, got:\n%s", got)
+	}
 }
