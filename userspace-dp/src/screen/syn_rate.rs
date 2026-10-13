@@ -198,15 +198,13 @@ const _: () = assert!(DST_COLS.is_power_of_two() && SRC_COLS.is_power_of_two());
 /// independently — same-seed rows would collapse the sketch to a single row and
 /// inflate the false-positive rate (it never affects the fail-closed bias).
 ///
-/// These fixed per-row constants provide row INDEPENDENCE, not secrecy: they are
-/// public, so on their own they do NOT stop an off-box attacker from precomputing
-/// which source IPs land in a chosen victim's `ROWS` cells and driving those cells
-/// over `source-threshold` to throttle a victim's legit SYNs (a targeted
-/// false-positive, #4382). Secrecy comes from the PER-BOOT `SynRateSketch::seed`
-/// (drawn once from `hot_hash_seed::hot_path_hash_seed`, #2364) that
-/// `cell_index`/`cell_index_ip_port` fold in ALONGSIDE `ROW_SEEDS[row]`: the
-/// source→cell mapping is unknowable offline and reshuffles on every restart, so
-/// the attacker cannot construct a colliding IP set offline.
+/// These fixed per-row constants provide row INDEPENDENCE, not secrecy. FxHash
+/// updates its state additively, so the hash difference for a chosen key pair
+/// is independent of the per-boot seed; address-word deltas can therefore form
+/// predictable colliding families across restarts (#12789). The per-boot
+/// `SynRateSketch::seed` (drawn once from `hot_hash_seed::hot_path_hash_seed`,
+/// #2364) is used by keyed SipHash in `cell_index` and `cell_index_ip_port`,
+/// preventing offline construction of those key-pair collisions.
 const ROW_SEEDS: [u64; ROWS] = [
     0x9E37_79B9_7F4A_7C15,
     0xC2B2_AE3D_27D4_EB4F,
