@@ -194,6 +194,11 @@ pub(crate) struct BindingWorker {
     /// happen still allocates nothing steady-state (the old sweep built a fresh
     /// Vec of every key on EVERY sweep — ~98 KiB per sweep at the cap).
     pub(crate) pending_neigh_scan: Vec<(i32, std::net::IpAddr)>,
+    /// Pending reverse packets stay on the arrival worker until their PMech
+    /// token becomes Live; descriptors never cross UMEM ownership boundaries.
+    pub(crate) pending_pmech_reverse: VecDeque<PendingPMechReversePacket>,
+    pub(crate) next_pmech_defer_id: u64,
+    pub(crate) pending_pmech_replay: VecDeque<PendingPMechReversePacket>,
     /// #1651 B3: dead-host negative neighbor cache. Key
     /// `(egress_ifindex, next_hop)`; value = insertion `now_ns`. A dst is
     /// recorded when it times out in `pending_neigh` without resolving;
@@ -591,6 +596,9 @@ impl BindingWorker {
             pending_neigh_schedule: Default::default(),
             last_neigh_generation: (0, 0),
             pending_neigh_scan: Vec::new(),
+            pending_pmech_reverse: VecDeque::new(),
+            next_pmech_defer_id: 0,
+            pending_pmech_replay: VecDeque::new(),
             // #1651 B3: lazy-grow (empty until first dead-host drop).
             neg_neigh_cache: super::neg_neigh::NegNeighCache::default(),
             resolver_enqueue_throttle: super::types::FastMap::default(),
@@ -731,6 +739,9 @@ impl BindingWorker {
             pending_neigh_schedule: Default::default(),
             last_neigh_generation: (0, 0),
             pending_neigh_scan: Vec::new(),
+            pending_pmech_reverse: VecDeque::new(),
+            next_pmech_defer_id: 0,
+            pending_pmech_replay: VecDeque::new(),
             // #1651 B3: lazy-grow (empty until first dead-host drop).
             neg_neigh_cache: super::neg_neigh::NegNeighCache::default(),
             resolver_enqueue_throttle: super::types::FastMap::default(),
@@ -850,6 +861,9 @@ impl BindingWorker {
             pending_neigh_schedule: Default::default(),
             last_neigh_generation: (0, 0),
             pending_neigh_scan: Vec::new(),
+            pending_pmech_reverse: VecDeque::new(),
+            next_pmech_defer_id: 0,
+            pending_pmech_replay: VecDeque::new(),
             // #1651 B3: lazy-grow (empty until first dead-host drop).
             neg_neigh_cache: super::neg_neigh::NegNeighCache::default(),
             resolver_enqueue_throttle: super::types::FastMap::default(),

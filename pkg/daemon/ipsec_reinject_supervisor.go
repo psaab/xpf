@@ -194,10 +194,16 @@ type ipsecSupervisor struct {
 	// teardown so no pre-close ACCEPT remains in flight.
 	commitLease sync.RWMutex
 
-	// Supervisor-visible terminal accounting. Uncertain operations are terminal
-	// and never retried; only packets that remained held may be reconciled.
-	terminalMu sync.Mutex
-	terminal   map[ipsecTerminalKey]ipsecTerminalState
+	// Supervisor-visible terminal accounting. A key is reserved while its
+	// verdict is in flight and retained only when the sink result is
+	// uncertain: uncertain operations are terminal and never retried. A
+	// successful verdict releases its key because the kernel has consumed
+	// that packet ID. Retained uncertain keys are bounded by
+	// ipsecTerminalUncertainCap and reclaimed when their queue is released.
+	terminalMu        sync.Mutex
+	terminal          map[ipsecTerminalKey]ipsecTerminalState
+	terminalUncertain []ipsecTerminalKey
+	uncertainNext     int
 
 	allocator *ipsecQueueAllocator
 }
@@ -591,9 +597,30 @@ type ipsecTerminalState uint8
 
 const (
 	ipsecTerminalAttempted ipsecTerminalState = iota + 1
-	ipsecTerminalSuccessful
 	ipsecTerminalUncertain
 )
+
+// ipsecTerminalUncertainCap bounds retained uncertain reservations. Each one
+// records a failed verdict syscall; past the cap the oldest is forgotten, so a
+// verdict for that kernel packet ID can proceed again. By then the ID has
+// either been consumed or reused by a new packet that needs its own verdict.
+const ipsecTerminalUncertainCap = 4096
+
+// recordUncertainLocked retains key as uncertain within the FIFO bound.
+// Caller holds terminalMu.
+func (s *ipsecSupervisor) recordUncertainLocked(key ipsecTerminalKey) {
+	s.terminal[key] = ipsecTerminalUncertain
+	if len(s.terminalUncertain) < ipsecTerminalUncertainCap {
+		s.terminalUncertain = append(s.terminalUncertain, key)
+		return
+	}
+	oldest := s.terminalUncertain[s.uncertainNext]
+	if s.terminal[oldest] == ipsecTerminalUncertain && oldest != key {
+		delete(s.terminal, oldest)
+	}
+	s.terminalUncertain[s.uncertainNext] = key
+	s.uncertainNext = (s.uncertainNext + 1) % ipsecTerminalUncertainCap
+}
 
 type ipsecVerdictSink interface {
 	Verdict(ipsecVerdict, uint32) error
@@ -646,12 +673,15 @@ func (s *ipsecSupervisor) commitValidatedVerdict(token ipsecLeaseToken, gateID u
 	}
 	if err := sink.Verdict(verdict, packet.PacketID); err != nil {
 		s.terminalMu.Lock()
-		s.terminal[key] = ipsecTerminalUncertain
+		s.recordUncertainLocked(key)
 		s.terminalMu.Unlock()
 		return verdict, refused, err
 	}
+	// The kernel consumed this packet ID with the verdict. Releasing the
+	// reservation keeps the map bounded by in-flight and uncertain verdicts
+	// and lets a later packet that reuses the ID receive its own verdict.
 	s.terminalMu.Lock()
-	s.terminal[key] = ipsecTerminalSuccessful
+	delete(s.terminal, key)
 	s.terminalMu.Unlock()
 	return verdict, refused, nil
 }
@@ -677,15 +707,55 @@ func (s *ipsecSupervisor) validateReinjectLease(lease ipsecReinjectLease, queueE
 	return nil
 }
 
+func ipsecQueueGateKind(key ipsecQueueKey) (uint8, bool) {
+	switch key.Family {
+	case ipsecFamilyInet:
+		switch key.Hook {
+		case ipsecHookForward:
+			return ipsecGateForward, true
+		case ipsecHookInput:
+			return ipsecGateInput, true
+		}
+	case ipsecFamilyBridge:
+		switch key.Hook {
+		case ipsecHookForward:
+			return ipsecGateBridgeForward, true
+		case ipsecHookInput:
+			return ipsecGateBridgeInput, true
+		}
+	}
+	return 0, false
+}
+
 func (s *ipsecSupervisor) allocateQueue(key ipsecQueueKey) (ipsecQueueHandle, error) {
 	if s == nil || s.allocator == nil {
 		return ipsecQueueHandle{}, errIpsecQueueExhausted
 	}
-	return s.allocator.allocate(key)
+	kind, ok := ipsecQueueGateKind(key)
+	if !ok {
+		return ipsecQueueHandle{}, errIpsecQueueStale
+	}
+	handle, err := s.allocator.allocate(key)
+	if err != nil {
+		return ipsecQueueHandle{}, err
+	}
+	if s.registerEmissionGateEpoch(handle.Number, kind, handle.Epoch) == nil {
+		_ = s.allocator.retire(handle, true, true)
+		return ipsecQueueHandle{}, errIpsecQueueStale
+	}
+	return handle, nil
 }
 
 func (s *ipsecSupervisor) retireQueue(handle ipsecQueueHandle, listenerExited, destroyConfirmed bool) error {
 	if s == nil || s.allocator == nil {
+		return errIpsecQueueStale
+	}
+	gate := s.gate(handle.Number)
+	if gate == nil || gate.epoch.Load() != handle.Epoch {
+		return errIpsecQueueStale
+	}
+	_ = s.closeEmissionGate(handle.Number)
+	if listenerExited && destroyConfirmed && !s.retireEmissionGate(handle.Number) {
 		return errIpsecQueueStale
 	}
 	return s.allocator.retire(handle, listenerExited, destroyConfirmed)

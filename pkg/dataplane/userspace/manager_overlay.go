@@ -220,7 +220,6 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	for i := range next.TunnelEndpoints {
 		next.TunnelEndpoints[i].LinkUp = snapshotLinkUp(next.TunnelEndpoints[i].LinuxName)
 	}
-	m.refreshCaptureAuthorityLocked(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 	// #3772 (M9): a transient ip-rule enumeration failure aborts the
 	// overlay publish (fail-closed). The deferred commit above leaves
@@ -268,6 +267,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	// duplicate skip so the manager stamp converges even without wire I/O.
 	m.recordPolicyContentRejectionLocked(next.Capabilities.PolicyContentRejected)
 
+	m.refreshCaptureAuthorityLocked(&next)
 	// Duplicate-publish skip: identical content (e.g. the actuator ran
 	// twice for the same overlay) does not need a control-socket
 	// round-trip. The content hash excludes Generation/FIBGeneration. Not while an

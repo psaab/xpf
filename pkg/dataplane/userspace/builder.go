@@ -48,7 +48,7 @@ func (m *Manager) SetCaptureEpochProvider(provider CaptureEpochProvider) {
 // full and FIB-only applies. It is separate from CaptureEpochProvider because
 // preparing a snapshot must not mutate the currently active packet authority
 // before the helper acknowledges that snapshot.
-func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, uint32, uint64)) {
+func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, *ConfigSnapshot)) {
 	if m == nil {
 		return
 	}
@@ -95,11 +95,19 @@ func (m *Manager) SetPolicySnapshotPrePublisher(callback func(uint64) error) {
 	m.mu.Unlock()
 }
 
-// stampCaptureAuthority applies one provider result to a snapshot. Keeping
-// this copy operation shared prevents full Compile, retained-snapshot refresh,
-// and test-only builder paths from drifting on the four coupled authority
-// fields.
+// stampCaptureAuthority applies one provider result to a snapshot, then
+// freezes the matching P-MECH route inventory and policy identity. Keeping
+// this operation shared prevents full Compile and retained-snapshot refresh
+// from drifting on coupled authority fields.
 func stampCaptureAuthority(snap *ConfigSnapshot, provider CaptureEpochProvider) {
+	stampCaptureAuthorityWithRoutes(snap, provider, nil)
+}
+
+// stampCaptureAuthorityWithRoutes is stampCaptureAuthority with a main-table
+// dump taken earlier without the manager lock; a prefetch filtered for a
+// different config or tunnel row set is ignored and the table is dumped here.
+func stampCaptureAuthorityWithRoutes(snap *ConfigSnapshot, provider CaptureEpochProvider,
+	prefetch *pmechRoutePrefetch) {
 	if snap == nil || provider == nil {
 		return
 	}
@@ -109,6 +117,7 @@ func stampCaptureAuthority(snap *ConfigSnapshot, provider CaptureEpochProvider) 
 	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
 	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
 	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
+	stampPMechInventoryWithPrefetch(snap, prefetch)
 }
 
 // refreshCaptureAuthorityLocked refreshes retained snapshots immediately
@@ -215,6 +224,10 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	synCookieKey, synCookieKeyRing := buildSYNCookieKeys(cfg, synCookieNow())
 	bindlessSelectorRows := buildBindlessSelectorRows(cfg)
 	_, forwardingTables := forwardingInstanceRouteTables(cfg)
+	routeTableIdentities, err := routeTableIdentitySnapshots(cfg)
+	if err != nil {
+		return nil, err
+	}
 	snap := &ConfigSnapshot{
 		Version:                      ProtocolVersion,
 		Generation:                   generation,
@@ -231,14 +244,15 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 		// worker's session-id namespace on the helper. Read from the compiled
 		// config's cluster stanza; absent/standalone leaves it 0, which is the
 		// pre-#6311 layout bit for bit.
-		NodeID:           clusterNodeID(cfg),
-		Zones:            buildZoneSnapshots(cfg),
-		Interfaces:       interfaces,
-		Fabrics:          buildFabricSnapshotsFrom(cfg, liveXfrm),
-		TunnelEndpoints:  buildTunnelEndpointSnapshots(cfg, interfaces),
-		Neighbors:        buildNeighborSnapshots(cfg),
-		ForwardingTables: forwardingTables,
-		Routes:           routes,
+		NodeID:               clusterNodeID(cfg),
+		Zones:                buildZoneSnapshots(cfg),
+		Interfaces:           interfaces,
+		Fabrics:              buildFabricSnapshotsFrom(cfg, liveXfrm),
+		TunnelEndpoints:      buildTunnelEndpointSnapshots(cfg, interfaces),
+		Neighbors:            buildNeighborSnapshots(cfg),
+		ForwardingTables:     forwardingTables,
+		RouteTableIdentities: routeTableIdentities,
+		Routes:               routes,
 		// #9054: the helper needs to know the FIB it just received is
 		// DELIBERATELY incomplete. See ConfigSnapshot.LearnedRouteImportCapped.
 		LearnedRouteImportCapped: learnedRoutesCapped,
@@ -369,9 +383,9 @@ func buildBindlessSelectorRows(cfg *config.Config) []IpsecBindlessSelectorSnapsh
 }
 
 // snapshotContentHash computes a SHA-256 hash over the stable content of a
-// snapshot, excluding volatile fields (Generation, FIBGeneration, GeneratedAt)
-// that change on every build even when the forwarding-relevant content is
-// identical. Used to skip redundant control-socket publishes, and since #9520
+// snapshot, excluding volatile snapshot and P-MECH inventory generation fields
+// (Generation, FIBGeneration, GeneratedAt) that change on every build even when
+// the forwarding-relevant content is identical. Used to skip redundant control-socket publishes, and since #9520
 // as ConfigSnapshot.ContentDigest, the content identity the helper compares
 // when an apply_snapshot reuses its installed generation. Config is excluded
 // because the helper never reads it; a helper change that starts reading it
@@ -401,6 +415,21 @@ func snapshotContentHash(snap *ConfigSnapshot) ([32]byte, bool) {
 	// Filtered-out rows (state="none", malformed MAC) never reach
 	// the dataplane, so churn in them must not shift the hash.
 	tmp.Neighbors = filterPublishableNeighbors(snap.Neighbors)
+	// P-MECH inventory generations identify the snapshot that carries the
+	// inventory, not its forwarding content. Leaving them in the digest defeats
+	// dedup on every FIB/config generation change, even when the inventory rows
+	// are identical. Preserve all semantic inventory fields in the digest.
+	if inventory := snap.PMechInventory; inventory != nil {
+		normalized := *inventory
+		normalized.Generation = 0
+		normalized.FIBGeneration = 0
+		normalized.TunnelRows = append([]IpsecPMechTunnelRowSnapshot(nil), inventory.TunnelRows...)
+		for i := range normalized.TunnelRows {
+			normalized.TunnelRows[i].InventoryGeneration = 0
+			normalized.TunnelRows[i].FIBGeneration = 0
+		}
+		tmp.PMechInventory = &normalized
+	}
 	data, err := json.Marshal(&tmp)
 	if err != nil {
 		slog.Warn("snapshotContentHash: marshal failed, skipping dedup", "err", err)

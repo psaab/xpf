@@ -922,13 +922,13 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                 install_table_check: desired_identity.1,
             });
         }
-        let fresh =
-            crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-                forwarding,
-                dynamic_neighbors,
-                target,
-                table.as_deref(),
-            );
+        let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+            forwarding,
+            dynamic_neighbors,
+            target,
+            table.as_deref(),
+        )
+        .resolution;
         if tunneled_hit_stays_pinned(decision.resolution, fresh) {
             return None;
         }
@@ -1001,6 +1001,7 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                 target,
                 table.as_deref(),
             )
+            .resolution
         });
     // #12056 follow-up: this resolution re-runs ONLY the interface-NAT and
     // FIB arms, never the ordered ingress-local arm (that arm, with its

@@ -8,12 +8,14 @@ import (
 	"time"
 )
 
-// FragmentKey identifies one inner datagram. Tunnel, VRF and generation are
-// intentionally part of the key: fragment state must never cross a tunnel,
-// routing instance or queue generation boundary.
+// FragmentKey identifies one fragment datagram for pool accounting. Tunnel,
+// VRF and generation are intentionally part of the key: state cannot cross a
+// tunnel, routing instance or queue generation boundary.
 type FragmentKey struct {
 	Version    uint8
+	Protocol   uint8
 	Tunnel     uint32
+	IfID       uint32
 	VRF        uint32
 	Generation uint64
 	ID         uint32

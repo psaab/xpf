@@ -151,12 +151,84 @@ func NewIpsecCapturePipeline(cfg IpsecCapturePipelineConfig) (*IpsecCapturePipel
 		}
 	}
 	cfg.Pipeline.LeaseMinter = actor
+	// The actor is always the pipeline's terminal sink, with or without
+	// receive queues: no configuration may route a captured packet's verdict
+	// around the S4 supervisor committer.
+	cfg.Pipeline.Sink = actor
 	pipeline, err := nfqueue.NewCapturePipeline(cfg.Pipeline)
 	if err != nil {
 		return nil, err
 	}
 	actor.pipeline = pipeline
 	return actor, nil
+}
+
+// ipsecCapturePacketVerdict issues the capture sink's one terminal syscall.
+// It is a variable only so hermetic tests can observe the verdict without a
+// kernel queue.
+var ipsecCapturePacketVerdict = (*nfqueue.Packet).Verdict
+
+// Verdict keeps the packet-only sink contract for isolated callers. Active
+// capture uses VerdictFrame so all immutable queue/snapshot identities reach
+// the supervisor committer.
+func (a *IpsecCapturePipeline) Verdict(packet *nfqueue.Packet, verdict nfqueue.Verdict) error {
+	if packet == nil {
+		return errors.New("ipsec capture: nil terminal packet")
+	}
+	queue := packet.QueueID()
+	return a.VerdictFrame(nfqueue.CaptureFrame{
+		Packet: packet, QueueNumber: queue, QueueEpoch: a.queueEpochs[queue],
+	}, verdict)
+}
+
+// VerdictFrame is the capture terminal. It ignores the requested verdict:
+// until P-MECH forwarding lands, every captured packet is dropped through the
+// S4 supervisor committer, including a shadow-phase ACCEPT.
+func (a *IpsecCapturePipeline) VerdictFrame(frame nfqueue.CaptureFrame, _ nfqueue.Verdict) error {
+	if a == nil || a.supervisor == nil || frame.Packet == nil {
+		return errors.New("ipsec capture: terminal supervisor unavailable")
+	}
+	queue := frame.QueueNumber
+	if queue == 0 {
+		queue = frame.Packet.QueueID()
+	}
+	queueEpoch := frame.QueueEpoch
+	if queueEpoch == 0 {
+		queueEpoch = a.queueEpochs[queue]
+	}
+	record := a.supervisor.loadPermit()
+	permitEpoch := uint64(0)
+	if record != nil {
+		permitEpoch = record.permitEpoch
+	}
+	packet := ipsecPacketRef{
+		GateID: queue, QueueNumber: frame.Packet.QueueID(),
+		QueueEpoch: queueEpoch, SnapshotGeneration: frame.SnapshotGeneration,
+		PacketID: frame.Packet.PacketID(),
+	}
+	token := ipsecLeaseToken{permitEpoch: permitEpoch, queueEpoch: queueEpoch}
+	_, _, err := a.supervisor.commitValidatedVerdict(
+		token, queue, ipsecVerdictDrop, record, packet,
+		ipsecCaptureVerdictWriter{packet: frame.Packet},
+	)
+	if errors.Is(err, errIpsecAlreadyTerminal) {
+		// An earlier packet with this kernel ID still holds the key (its
+		// verdict was uncertain or is in flight). DROP cannot forward, so the
+		// held packet still receives its one terminal verdict.
+		return ipsecCapturePacketVerdict(frame.Packet, nfqueue.VerdictDrop)
+	}
+	return err
+}
+
+type ipsecCaptureVerdictWriter struct {
+	packet *nfqueue.Packet
+}
+
+func (w ipsecCaptureVerdictWriter) Verdict(verdict ipsecVerdict, packetID uint32) error {
+	if w.packet == nil || packetID != w.packet.PacketID() || verdict != ipsecVerdictDrop {
+		return errors.New("ipsec capture: invalid terminal DROP request")
+	}
+	return ipsecCapturePacketVerdict(w.packet, nfqueue.VerdictDrop)
 }
 
 // publishSnapshotAuthority updates only the shared config/FIB half of packet
@@ -248,27 +320,27 @@ func (a *IpsecCapturePipeline) receiveQueue(ctx context.Context, captureQueue Ip
 			a.captureFailure(err)
 			return
 		}
-		classification, err := nfqueue.ClassifyCapturePayload(packet.Payload())
-		if err != nil {
-			_ = packet.Verdict(nfqueue.VerdictDrop)
-			continue
-		}
 		configGeneration := a.configGeneration.Load()
 		fibGeneration := a.fibGeneration.Load()
 		frame := nfqueue.CaptureFrame{
-			Packet: packet, FlowKey: classification.FlowKey,
-			Generation:         captureQueue.Generation,
+			Packet: packet, Generation: captureQueue.Generation,
 			SnapshotGeneration: captureQueue.SnapshotGeneration,
 			ConfigGeneration:   configGeneration,
 			FIBGeneration:      fibGeneration,
 			QueueNumber:        captureQueue.QueueNumber,
 			QueueEpoch:         captureQueue.QueueEpoch,
 		}
+		classification, err := nfqueue.ClassifyCapturePayload(packet.Payload())
+		if err != nil {
+			_ = a.pipeline.RejectPreFrame(frame, nfqueue.CaptureClassificationError)
+			continue
+		}
+		frame.FlowKey = classification.FlowKey
 		if classification.IsFragment {
 			key, keyOK := classification.FragmentKey(captureQueue.Tunnel, captureQueue.VRF, captureQueue.Generation)
 			piece, pieceOK := classification.FragmentPiece(packet.Payload())
-			if !keyOK || !pieceOK {
-				_ = packet.Verdict(nfqueue.VerdictDrop)
+			if !keyOK || !pieceOK || len(piece.Data) == 0 {
+				_ = a.pipeline.RejectPreFrame(frame, nfqueue.CaptureFragmentMetadataError)
 				continue
 			}
 			frame.FragmentKey = &key

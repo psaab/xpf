@@ -569,7 +569,8 @@ fn missing_neighbor_seed_install_and_reseed_stay_in_table() {
         &dynamic_neighbors,
         dst,
         Some("blue.inet.0"),
-    );
+    )
+    .resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::MissingNeighbor);
     // Real stamp fn: a neighbor-miss resolved in X still stamps X.
     let (domain, check) = super::super::forwarding::install_table_stamp_for_miss(
@@ -809,7 +810,8 @@ fn unresolvable_stamp_serves_terminal_not_default() {
         &dynamic_neighbors,
         &pbr_flow(),
         unknown,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::TableUnavailable,
@@ -832,7 +834,8 @@ fn unresolvable_stamp_serves_terminal_not_default() {
         &dynamic_neighbors,
         &pbr_flow(),
         mismatched,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::TableUnavailable,
@@ -858,7 +861,8 @@ fn unresolvable_stamp_serves_terminal_not_default() {
         &dynamic_neighbors,
         &v6_flow,
         stamped_decision(unusable_resolution()),
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::TableUnavailable,
@@ -1029,7 +1033,8 @@ fn install_table_precedence_pins() {
         &dynamic_neighbors,
         &pbr_flow(),
         unstamped_decision(local_delivery),
-    );
+    )
+    .resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     // A blue-stamped session against an empty registry is terminal (proves
     // validation precedes the cached/lookup fallback for STAMPED sessions).
@@ -1038,7 +1043,8 @@ fn install_table_precedence_pins() {
         &dynamic_neighbors,
         &pbr_flow(),
         stamped_decision(unusable_resolution()),
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::TableUnavailable,
@@ -1050,7 +1056,8 @@ fn install_table_precedence_pins() {
         &dynamic_neighbors,
         &pbr_flow(),
         stamped_decision(unusable_resolution()),
-    );
+    )
+    .resolution;
     assert_eq!(resolved.egress_ifindex, BLUE_IFINDEX);
 }
 
@@ -1182,7 +1189,8 @@ fn ecmp_spread_preserved_within_installing_table() {
             &dynamic_neighbors,
             &flow,
             stamped_decision(unusable_resolution()),
-        );
+        )
+        .resolution;
         assert_eq!(
             resolved.disposition,
             ForwardingDisposition::ForwardCandidate,
@@ -1235,7 +1243,7 @@ fn nat64_reresolve_uses_post_nat_family_table() {
         install_table_check: check,
     };
     let resolved =
-        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, decision);
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, decision).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -1266,7 +1274,8 @@ fn unresolvable_stamp_serves_any_table_local() {
         &dynamic_neighbors,
         &pbr_flow(),
         unknown,
-    );
+    )
+    .resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 0);
     assert_eq!(
@@ -1300,7 +1309,8 @@ fn unresolvable_stamp_does_not_serve_interface_nat_local_12086() {
         &dynamic_neighbors,
         &pbr_flow(),
         unknown,
-    );
+    )
+    .resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::TableUnavailable);
 }
 
@@ -1346,7 +1356,8 @@ fn stamped_reresolve_scopes_interface_nat_to_install_table_12086() {
         &dynamic_neighbors,
         &flow,
         stamped_decision(unusable_resolution()),
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::NoRoute,
@@ -1380,13 +1391,15 @@ fn tunnel_resolution_bypasses_install_table() {
         &dynamic_neighbors,
         &pbr_flow(),
         stamped_decision(tunneled),
-    );
+    )
+    .resolution;
     let unstamped = lookup_forwarding_resolution_for_session(
         &forwarding,
         &dynamic_neighbors,
         &pbr_flow(),
         unstamped_decision(tunneled),
-    );
+    )
+    .resolution;
     assert_eq!(stamped.disposition, unstamped.disposition);
     assert_eq!(stamped.egress_ifindex, unstamped.egress_ifindex);
     assert_ne!(

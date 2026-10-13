@@ -201,7 +201,7 @@ impl super::Coordinator {
                     let resolution = enforce_ha_resolution(
                         &self.forwarding,
                         &self.ha.rg_runtime,
-                        lookup_forwarding_resolution(&self.forwarding, dst),
+                        lookup_forwarding_resolution(&self.forwarding, dst).resolution,
                     );
                     record_forwarding_disposition(
                         &ident,

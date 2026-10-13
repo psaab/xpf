@@ -192,7 +192,7 @@ func TestPMechSnapshotAdvancesAcceptedAuthorityWithoutCaptureRotation10485(t *te
 		zoneSnapshot: snapshot,
 		handles:      wiringHandles9506(),
 	}
-	runtime.publishSnapshotAuthority(9, 7)
+	runtime.publishSnapshotAuthority(9, 7, nil)
 	if capture, fib := snapshot.Generations(); capture != 4 || fib != 4 {
 		t.Fatalf("capture authority changed=(%d,%d), want immutable (4,4)", capture, fib)
 	}

@@ -545,7 +545,7 @@ pub(super) fn bump_fib(
     // monotonicity invariant and leaves its validation state untouched on
     // refusal; fail closed here too — do NOT advance the reported status /
     // stored snapshot and do NOT persist.
-    if !guard.afxdp.bump_fib_generation(snapshot.fib_generation) {
+    if !guard.afxdp.bump_fib_generation_with_snapshot(snapshot) {
         response.ok = false;
         response.error = format!(
             "fib generation rollback rejected: {} < current {}",
@@ -555,8 +555,11 @@ pub(super) fn bump_fib(
         return;
     }
     guard.status.last_fib_generation = snapshot.fib_generation;
-    if let Some(ref mut snap) = guard.snapshot {
+    if let Some(snap) = &mut guard.snapshot {
         snap.fib_generation = snapshot.fib_generation;
+        snap.ipsec_tunnel_snapshot_generation = snapshot.ipsec_tunnel_snapshot_generation;
+        snap.ipsec_tunnel_rows = snapshot.ipsec_tunnel_rows.clone();
+        snap.pmech_inventory = snapshot.pmech_inventory.clone();
     }
     refresh_status(guard);
     // #3767 M2: persist the accepted bump. Previously bump_fib mutated

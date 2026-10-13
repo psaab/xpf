@@ -72,17 +72,42 @@ pub(in crate::afxdp) struct LogicalIngressParams<'a> {
     pub(in crate::afxdp) fib_generation: u32,
 }
 
-/// Build the Ethernet-framed inner packet and its logical-ingress meta.
+/// Build the bare-L3 inner packet and its logical-ingress meta.
 ///
-/// Returns `None` when the inner packet cannot be parsed or the RFC 6040
-/// combine rejects the packet (the relevant counter is bumped first).
+/// D11/IPsec owns an L3 datagram, not an Ethernet frame. Returns `None` when
+/// the inner packet cannot be parsed or the RFC 6040 combine rejects it.
 pub(in crate::afxdp) fn build_logical_ingress_packet(
     forwarding: &ForwardingState,
     params: &LogicalIngressParams<'_>,
 ) -> Option<(Vec<u8>, UserspaceDpMeta)> {
-    let mut synthetic = vec![0u8; 14 + params.inner_packet.len()];
-    synthetic[12..14].copy_from_slice(&params.inner_eth_proto.to_be_bytes());
-    synthetic[14..].copy_from_slice(params.inner_packet);
+    build_logical_ingress_packet_with_ethernet(forwarding, params, false)
+}
+
+/// Build the Ethernet-framed inner packet used by established GRE/WG ingress
+/// paths. D11/IPsec uses [`build_logical_ingress_packet`] and never fabricates
+/// this header.
+pub(in crate::afxdp) fn build_logical_ingress_ethernet_packet(
+    forwarding: &ForwardingState,
+    params: &LogicalIngressParams<'_>,
+) -> Option<(Vec<u8>, UserspaceDpMeta)> {
+    build_logical_ingress_packet_with_ethernet(forwarding, params, true)
+}
+
+fn build_logical_ingress_packet_with_ethernet(
+    forwarding: &ForwardingState,
+    params: &LogicalIngressParams<'_>,
+    ethernet_framed: bool,
+) -> Option<(Vec<u8>, UserspaceDpMeta)> {
+    let l3_offset = if ethernet_framed { 14 } else { 0 };
+    let mut packet = if ethernet_framed {
+        let mut frame = Vec::with_capacity(14 + params.inner_packet.len());
+        frame.resize(12, 0);
+        frame.extend_from_slice(&params.inner_eth_proto.to_be_bytes());
+        frame.extend_from_slice(params.inner_packet);
+        frame
+    } else {
+        params.inner_packet.to_vec()
+    };
 
     // #2315: RFC 6040 §4.2 decap-side ECN combine. The outer ECN arrives as
     // `params.outer_ecn` -- this body has no outer header and must NOT try to
@@ -93,28 +118,31 @@ pub(in crate::afxdp) fn build_logical_ingress_packet(
     //
     // An outer CE upgrades an ECN-capable inner to CE, so a congestion mark
     // applied on the OUTER path reaches the inner endpoints; the illegal
-    // outer-CE / inner-Not-ECT combination is dropped. Mutates the synthetic
-    // inner in place (octet `14 + 1` for the inner TOS) and recomputes the
-    // inner IPv4 header checksum when CE is set. `None` skips the combine --
-    // for GRE that means a truncated outer header.
+    // outer-CE / inner-Not-ECT combination is dropped. Mutate the inner L3
+    // bytes in place and recompute the IPv4 header checksum when CE is set.
+    // `None` skips the combine -- for GRE that means a truncated outer header.
     if let Some(outer_ecn) = params.outer_ecn
         && !apply_decap_ecn_combine(
-            &mut synthetic[14..],
+            &mut packet[l3_offset..],
             params.inner_family,
             outer_ecn,
             params.ecn_illegal_drops,
         )
     {
-        // Illegal RFC 6040 §4.2 combination — drop (counter bumped in
-        // apply_decap_ecn_combine).
         return None;
     }
 
+    let pkt_len = u16::try_from(packet.len()).ok()?;
     let flow = parse_session_flow_from_frame(
-        &synthetic,
+        &packet,
         UserspaceDpMeta {
             addr_family: params.inner_family,
             protocol: params.protocol,
+            l3_offset: l3_offset as u16,
+            l4_offset: u16::try_from(l3_offset + usize::from(params.rel_l4_offset)).ok()?,
+            payload_offset: u16::try_from(l3_offset + usize::from(params.payload_offset)).ok()?,
+            pkt_len,
+            meta_flags: params.meta_flags,
             ..UserspaceDpMeta::default()
         },
     );
@@ -137,23 +165,11 @@ pub(in crate::afxdp) fn build_logical_ingress_packet(
 
     // Derive the ingress zone from the tunnel's LOGICAL ifindex, never the
     // underlay's (#7167 invariant 2).
-    //
-    // #921: a direct ID lookup rather than a two-hop name round-trip, because
-    // GRE's caller runs pre-flow-cache on the per-packet path for GRE-tunnel
-    // workloads. Other callers may be colder, but none of them want the
-    // round-trip either.
     let ingress_zone = forwarding
         .ifindex_to_zone_id
         .get(&params.logical_ifindex)
         .copied()
         .unwrap_or_default();
-    // #8581: the length of the buffer this meta describes — the synthetic
-    // 14-byte Ethernet header PLUS the inner packet — matching every other
-    // construction site, so `pkt_len - l3_offset` is the L3 length everywhere.
-    // This carried the INNER length alone, so the same L3 packet counted 14
-    // bytes fewer in every filter, policy, policer, session and zone byte
-    // counter when it arrived decapsulated than when it arrived native.
-    let pkt_len = u16::try_from(14 + params.inner_packet.len()).ok()?;
     let inner_meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -162,18 +178,15 @@ pub(in crate::afxdp) fn build_logical_ingress_packet(
         rx_queue_index: params.rx_queue_index,
         ingress_vlan_id: 0,
         ingress_zone,
-        l3_offset: 14,
-        l4_offset: 14 + params.rel_l4_offset,
-        payload_offset: 14 + params.payload_offset,
+        l3_offset: l3_offset as u16,
+        l4_offset: u16::try_from(l3_offset + usize::from(params.rel_l4_offset)).ok()?,
+        payload_offset: u16::try_from(l3_offset + usize::from(params.payload_offset)).ok()?,
         pkt_len,
         addr_family: params.inner_family,
         protocol: params.protocol,
         // CoS selects from the inner codepoint, never the outer tunnel DSCP (#11809).
-        dscp: inner_tos_byte(&synthetic[14..], params.inner_family) >> 2,
+        dscp: inner_tos_byte(&packet[l3_offset..], params.inner_family) >> 2,
         tcp_flags: packet_tcp_flags(params.inner_packet, params.inner_family, params.protocol, params.rel_l4_offset),
-        // Caller-supplied: GRE passes GRE_DECAP_INGRESS_FLAG (#2486) so the
-        // forward builder selects the `tcp-mss gre-in` clamp. Every protocol
-        // owes its own answer here -- see the struct docs.
         meta_flags: params.meta_flags,
         flow_src_port: src_port,
         flow_dst_port: dst_port,
@@ -184,7 +197,7 @@ pub(in crate::afxdp) fn build_logical_ingress_packet(
         ..UserspaceDpMeta::default()
     };
 
-    Some((synthetic, inner_meta))
+    Some((packet, inner_meta))
 }
 
 #[cfg(test)]
@@ -256,7 +269,7 @@ mod pkt_len_invariant_8581_tests {
         // RELATIONSHIP between two lengths, not either length's value.
         for inner_len in [40usize, 60, 128, 1500] {
             let inner = inner_v4(inner_len);
-            let (frame, meta) = build_logical_ingress_packet(&fw, &params(&inner))
+            let (frame, meta) = build_logical_ingress_ethernet_packet(&fw, &params(&inner))
                 .expect("a well-formed inner packet must build");
 
             // PREMISE: the buffer really does carry a synthetic L2 header, or
@@ -298,12 +311,29 @@ mod pkt_len_invariant_8581_tests {
         let fw = ForwardingState::default();
         let small = inner_v4(40);
         let large = inner_v4(1400);
-        let (fs, ms) = build_logical_ingress_packet(&fw, &params(&small)).expect("small builds");
-        let (fl, ml) = build_logical_ingress_packet(&fw, &params(&large)).expect("large builds");
+        let (fs, ms) =
+            build_logical_ingress_ethernet_packet(&fw, &params(&small)).expect("small builds");
+        let (fl, ml) =
+            build_logical_ingress_ethernet_packet(&fw, &params(&large)).expect("large builds");
         assert_eq!(
             ml.pkt_len as i64 - ms.pkt_len as i64,
             fl.len() as i64 - fs.len() as i64,
             "#8581: pkt_len must move with the BUFFER length, not by a constant",
         );
+    }
+
+    #[test]
+    fn logical_ingress_keeps_d11_packet_bare_l3() {
+        let fw = ForwardingState::default();
+        for inner_len in [40usize, 60, 128] {
+            let inner = inner_v4(inner_len);
+            let (packet, meta) =
+                build_logical_ingress_packet(&fw, &params(&inner)).expect("inner builds");
+            assert_eq!(packet, inner, "D11 must keep the original bare L3 bytes");
+            assert_eq!(meta.l3_offset, 0, "bare L3 begins at offset zero");
+            assert_eq!(meta.l4_offset, 20, "L4 offset stays L3-relative");
+            assert_eq!(meta.payload_offset, 40);
+            assert_eq!(meta.pkt_len as usize, inner_len);
+        }
     }
 }

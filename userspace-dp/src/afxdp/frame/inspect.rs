@@ -691,6 +691,26 @@ pub(in crate::afxdp) fn nibble_checked_l3(
     l3_offset: u16,
     addr_family: u8,
 ) -> Option<CheckedL3> {
+    // D11/P-Mech owns a bare L3 datagram and explicitly stamps l3_offset=0.
+    // Accept that stamp when its IP version agrees with the family; ordinary
+    // Ethernet frames with no L3 stamp still fall back to the wire resolver.
+    if l3_offset == 0 {
+        let expected_version = match addr_family as i32 {
+            libc::AF_INET => Some(4u8),
+            libc::AF_INET6 => Some(6u8),
+            _ => None,
+        };
+        if frame
+            .first()
+            .zip(expected_version)
+            .is_some_and(|(byte, version)| (byte >> 4) == version)
+        {
+            return Some(CheckedL3 {
+                l3: 0,
+                stamp_trusted: true,
+            });
+        }
+    }
     if let Some(l3) = nibble_trusted_stamp(frame, l3_offset, addr_family) {
         return Some(CheckedL3 {
             l3,
@@ -1870,6 +1890,12 @@ pub(in crate::afxdp) fn frame_is_non_first_fragment(frame: &[u8], meta: Userspac
         _ => return false,
     };
     let l3 = match meta.l3_offset {
+        0 if frame
+            .first()
+            .is_some_and(|byte| (byte >> 4) == expected_version) =>
+        {
+            0
+        }
         14 | 18
             if frame
                 .get(meta.l3_offset as usize)
@@ -2640,6 +2666,39 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
         ZoneEncodedFabricStamp::Valid(id)
     } else {
         ZoneEncodedFabricStamp::Invalid
+    }
+}
+
+/// Parse the original IPv4/IPv6 source address from a frame using the
+/// verified L3 offset or its trusted metadata stamp.
+pub(in crate::afxdp) fn parse_packet_source_from_frame(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> Option<IpAddr> {
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
+    match meta.addr_family as i32 {
+        libc::AF_INET => {
+            let end = l3.checked_add(20)?;
+            if end > frame.len() {
+                return None;
+            }
+            Some(IpAddr::V4(Ipv4Addr::new(
+                frame[l3 + 12],
+                frame[l3 + 13],
+                frame[l3 + 14],
+                frame[l3 + 15],
+            )))
+        }
+        libc::AF_INET6 => {
+            let end = l3.checked_add(40)?;
+            if end > frame.len() {
+                return None;
+            }
+            Some(IpAddr::V6(Ipv6Addr::from(
+                <[u8; 16]>::try_from(&frame[l3 + 8..l3 + 24]).ok()?,
+            )))
+        }
+        _ => None,
     }
 }
 

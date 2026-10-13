@@ -7617,6 +7617,7 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
             &forwarding_nr,
             IpAddr::V4(DMZ_DST_10507)
         )
+        .resolution
         .disposition,
         ForwardingDisposition::NoRoute,
         "fixture: forward live must be NoRoute (unresolvable companion)"
@@ -7723,6 +7724,7 @@ fn recorded_nonlocal_noroute_retained_10507() {
             &forwarding_nr,
             IpAddr::V4(DMZ_DST_10507)
         )
+        .resolution
         .disposition,
         ForwardingDisposition::NoRoute,
         "fixture: live must be NoRoute (non-local retention)"
@@ -9763,7 +9765,7 @@ fn fib_only_cross_zone_route_move_rejudges_existing_session_12074() {
             &forwarding_initial,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .egress_ifindex,
+        .resolution.egress_ifindex,
         WAN_IFINDEX,
     );
     assert_eq!(
@@ -9771,7 +9773,7 @@ fn fib_only_cross_zone_route_move_rejudges_existing_session_12074() {
             &forwarding_moved,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .egress_ifindex,
+        .resolution.egress_ifindex,
         DMZ_IFINDEX,
     );
     assert_eq!(forwarding_initial.egress_zone_id(DMZ_IFINDEX), TEST_DMZ_ZONE_ID);
@@ -10034,7 +10036,7 @@ fn fib_only_same_zone_route_move_keeps_forwarding_and_nat_12074() {
             &forwarding_moved,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .egress_ifindex,
+        .resolution.egress_ifindex,
         DMZ_IFINDEX,
     );
     assert_eq!(forwarding_initial.egress_zone_id(DMZ_IFINDEX), TEST_WAN_ZONE_ID);
@@ -10194,14 +10196,14 @@ fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
         crate::afxdp::forwarding::lookup_forwarding_resolution(
             &forwarding_initial,
             IpAddr::V4(FIB_MOVE_DST_12074),
-        ).egress_ifindex,
+        ).resolution.egress_ifindex,
         WAN_IFINDEX,
     );
     assert_eq!(
         crate::afxdp::forwarding::lookup_forwarding_resolution(
             &forwarding_moved,
             IpAddr::V4(FIB_MOVE_DST_12074),
-        ).egress_ifindex,
+        ).resolution.egress_ifindex,
         DMZ_IFINDEX,
     );
     assert_eq!(
@@ -10423,7 +10425,7 @@ fn fib_only_reply_nonforwarding_route_12074(
             &forwarding_moved,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .disposition,
+        .resolution.disposition,
         if discard {
             crate::afxdp::ForwardingDisposition::DiscardRoute
         } else {
@@ -10664,7 +10666,7 @@ fn reverse_sessionless_no_route_fib_stale_12074(
             &forwarding,
             IpAddr::V4(FIB_MOVE_DST_12074),
         )
-        .disposition,
+        .resolution.disposition,
         crate::afxdp::ForwardingDisposition::NoRoute,
     );
 
@@ -10849,7 +10851,7 @@ fn no_local_entry_current_route_12074(
     let current_resolution = crate::afxdp::forwarding::lookup_forwarding_resolution(
         &forwarding,
         IpAddr::V4(FIB_MOVE_DST_12074),
-    );
+    ).resolution;
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     sessions.set_forwarding_revalidation_gen(7, 9);

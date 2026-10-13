@@ -95,7 +95,8 @@ fn daemon_unique_bare_link_local_ignores_kernel_link_scope_11650() {
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(resolution.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(resolution.egress_ifindex, 101);
 }
@@ -196,7 +197,8 @@ fn genuinely_ambiguous_universe_link_local_stays_no_route_11650() {
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(unresolved.disposition, ForwardingDisposition::NoRoute);
     assert_eq!(unresolved.egress_ifindex, 0);
 
@@ -329,7 +331,8 @@ fn mixed_link_local_ecmp_keeps_resolvable_member_11650() {
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(resolution.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(resolution.egress_ifindex, 101);
     assert_eq!(resolution.next_hop, Some(IpAddr::V6(direct_gateway)));

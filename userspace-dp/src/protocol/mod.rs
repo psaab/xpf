@@ -17,6 +17,7 @@
 //!     SourceNatPoolStatus
 //!   - `security`: screen/firewall-filter/policer/policy snapshots and
 //!     counter statuses
+//!   - pmech: route-based IPsec P-MECH authority snapshot DTOs
 //!   - `control`: control socket request/response, ProcessStatus,
 //!     session-sync wire shapes, protocol-version consts
 //!   - `binding`: BindingStatus + BindingCountersSnapshot, HAGroupStatus,
@@ -32,6 +33,7 @@ mod binding;
 mod control;
 mod cos;
 mod nat;
+mod pmech;
 mod resolution;
 mod security;
 pub(crate) mod session_delta_schema;

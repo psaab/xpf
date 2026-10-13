@@ -370,7 +370,8 @@ fn native_table_lookup_egresses_member_not_wan_10312() {
         &Arc::new(ShardedNeighborMap::new()),
         flow.dst_ip,
         table.as_deref(),
-    );
+    )
+    .resolution;
     assert_eq!(
         resolved.egress_ifindex, TENANT_IFINDEX,
         "a tenant-connected destination must egress the member interface, not the WAN"
@@ -478,7 +479,8 @@ fn ambiguous_fabric_zone_does_not_fall_back_to_main_11061() {
         &Arc::new(ShardedNeighborMap::new()),
         flow.dst_ip,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         main.egress_ifindex, WAN_IFINDEX,
         "FIXTURE: an accidental MAIN lookup must select the configured WAN default"

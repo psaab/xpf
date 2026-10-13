@@ -16,6 +16,10 @@ use super::security::{
     PolicerSnapshot, PolicyRenameAncestry, PolicyRuleSnapshot, PolicySessionRebind,
     ScreenMissingProfileRef, ScreenProfileSnapshot, ThreeColorPolicerSnapshot,
 };
+pub(crate) use super::pmech::{
+    IpsecBindlessSelectorSnapshot, IpsecMainRouteNextHopSnapshot, IpsecMainRouteSnapshot,
+    IpsecPMechInventorySnapshot, IpsecPMechTunnelRowSnapshot, IpsecTrafficSelectorSnapshot,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SnapshotSummary {
@@ -314,6 +318,16 @@ pub(crate) struct RouteSnapshot {
     pub mtu: i32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct RouteTableIdentitySnapshot {
+    #[serde(rename = "name", default)]
+    pub name: String,
+    #[serde(rename = "domain", default)]
+    pub domain: u32,
+    #[serde(rename = "table", default)]
+    pub table: u32,
+}
+
 fn is_zero_i32(value: &i32) -> bool {
     *value == 0
 }
@@ -540,13 +554,7 @@ pub(crate) struct IpsecTunnelRowSnapshot {
     #[serde(rename = "logical_ifindex", default)]
     pub logical_ifindex: i32,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub(crate) struct IpsecBindlessSelectorSnapshot {
-    #[serde(rename = "local_ts", default)]
-    pub local_ts: String,
-    #[serde(rename = "remote_ts", default)]
-    pub remote_ts: String,
-}
+
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ConfigSnapshot {
@@ -573,6 +581,12 @@ pub(crate) struct ConfigSnapshot {
     pub ipsec_tunnel_snapshot_generation: u64,
     #[serde(rename = "ipsec_tunnel_rows", default, skip_serializing_if = "Vec::is_empty")]
     pub ipsec_tunnel_rows: Vec<IpsecTunnelRowSnapshot>,
+    #[serde(
+        rename = "pmech_inventory",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pmech_inventory: Option<IpsecPMechInventorySnapshot>,
     /// #10683: exact IP-shape pairs from bind-less policy-based IPsec VPNs.
     /// The marker and rows are one contract: a v31 helper cannot enforce
     /// them, so protocol v32 refuses a mixed-version producer/consumer.
@@ -615,6 +629,12 @@ pub(crate) struct ConfigSnapshot {
     pub neighbors: Vec<NeighborSnapshot>,
     #[serde(default)]
     pub routes: Vec<RouteSnapshot>,
+    #[serde(
+        rename = "route_table_identities",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub route_table_identities: Vec<RouteTableIdentitySnapshot>,
     /// Canonical route tables backed by `instance-type forwarding`. In these
     /// tables, qualified gateways and interface-only members may use an
     /// explicit default-instance interface in routing domain zero; ordinary
@@ -1402,5 +1422,33 @@ mod route_mtu_wire_tests {
             value.get("mtu").is_none(),
             "an unknown route MTU must keep the wire field absent"
         );
+    }
+}
+#[cfg(test)]
+mod ipsec_main_route_identity_tests {
+    use super::*;
+
+    #[test]
+    fn main_route_domain_and_table_are_required_during_deserialization() {
+        assert!(
+            serde_json::from_str::<IpsecMainRouteSnapshot>(r#"{"table":254}"#).is_err(),
+            "missing domain must fail closed"
+        );
+        assert!(
+            serde_json::from_str::<IpsecMainRouteSnapshot>(r#"{"domain":0}"#).is_err(),
+            "missing table must fail closed"
+        );
+    }
+
+    #[test]
+    fn main_route_serialization_emits_zero_domain_and_explicit_table() {
+        let route = IpsecMainRouteSnapshot {
+            domain: 0,
+            table: 254,
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(route).expect("serialize main route");
+        assert_eq!(wire["domain"], 0);
+        assert_eq!(wire["table"], 254);
     }
 }

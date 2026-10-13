@@ -1288,7 +1288,8 @@ fn resolve_current_forward_companion(
         dynamic_neighbors,
         &flow,
         fwd_decision,
-    );
+    )
+    .resolution;
     let looked_up = prefer_local_forward_candidate_for_fabric_ingress(
         forwarding,
         ha_state,

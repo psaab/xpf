@@ -1092,21 +1092,110 @@ mod slow_path_mtu_tests {
         assert_eq!(preserved.mtu(), 1500, "preserved reinjector starts at 1500");
 
         // A snapshot whose largest interface MTU is 9000 -> slow_path_mtu() == 9000.
+        // #9506 F4: the D11/D14 join below needs the same complete canonical
+        // main-table route authority the cc022836f coordinator::tests fixtures
+        // install: explicit inet.0/inet6.0 domain-0/table-254 identities, a
+        // usable FIB route + neighbor for 10.0.0.1, and a source tuple inside
+        // the tunnel's ingress proof (10.0.0.1/32). Without the identities the
+        // published forwarding reports an incomplete identity map and
+        // RuntimeView::new_with_ipsec_authority marks the inventory
+        // unavailable, so the join denies with d22_inventory_unavailable /
+        // reason 52 before any join or MTU assertion runs.
+        let tunnel_rows = vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }];
         let snapshot = ConfigSnapshot {
             generation: 7,
             fib_generation: 3,
             ipsec_tunnel_snapshot_generation: 42,
-            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
-                stn: "st0".to_string(),
-                if_id: 9,
-                logical_ifindex: 10,
+            ipsec_tunnel_rows: tunnel_rows,
+            zones: vec![crate::protocol::snapshot::ZoneSnapshot {
+                name: "zone1".to_string(),
+                id: 1,
+                ..Default::default()
             }],
+            route_table_identities: ["inet.0", "inet6.0"]
+                .into_iter()
+                .map(|name| crate::protocol::snapshot::RouteTableIdentitySnapshot {
+                    name: name.into(),
+                    domain: 0,
+                    table: 254,
+                })
+                .collect(),
+            neighbors: vec![crate::protocol::snapshot::NeighborSnapshot {
+                interface: "st0.0".into(),
+                ifindex: 10,
+                family: "inet".into(),
+                ip: "192.0.2.2".into(),
+                mac: "02:00:00:00:00:20".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            }],
+            routes: vec![crate::protocol::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.0.0.0/24".into(),
+                next_hops: vec!["192.0.2.2@st0.0".into()],
+                ..Default::default()
+            }],
+            pmech_inventory: Some(crate::protocol::snapshot::IpsecPMechInventorySnapshot {
+                policy_identity: "01".repeat(32),
+                generation: 7,
+                fib_generation: 3,
+                complete: true,
+                main_routes: vec![crate::protocol::snapshot::IpsecMainRouteSnapshot {
+                    domain: 0,
+                    table: 254,
+                    disposition: 1, // RTN_UNICAST
+                    family: "inet".into(),
+                    destination: "10.0.0.1/32".into(),
+                    next_hops: vec![crate::protocol::snapshot::IpsecMainRouteNextHopSnapshot {
+                        ifindex: 10,
+                        weight: 1,
+                    }],
+                    ..Default::default()
+                }],
+                tunnel_rows: vec![crate::protocol::snapshot::IpsecPMechTunnelRowSnapshot {
+                    stn: "st0".into(),
+                    if_id: 9,
+                    logical_ifindex: 10,
+                    explicit_selectors: vec![crate::protocol::snapshot::IpsecTrafficSelectorSnapshot {
+                        name: "selector".into(),
+                        local_ts: "192.0.2.0/24".into(),
+                        remote_ts: "10.0.0.1/32".into(),
+                        source: "named".into(),
+                    }],
+                    effective_prefixes: vec!["10.0.0.1/32".into()],
+                    ingress_prefixes: vec!["10.0.0.1/32".into()],
+                    inventory_generation: 7,
+                    fib_generation: 3,
+                    source_kind: "xfrmi".into(),
+                    selector_provenance: "named".into(),
+                    inventory_complete: true,
+                    inventory_valid: true,
+                    inventory_reason: String::new(),
+                }],
+            }),
             interfaces: vec![InterfaceSnapshot {
+                name: "st0.0".to_string(),
+                linux_name: "st0".to_string(),
+                ifindex: 10,
+                zone: "zone1".to_string(),
                 mtu: 9000,
                 ..Default::default()
             }],
             ..Default::default()
         };
+        assert_eq!(snapshot.route_table_identities.len(), 2);
+        assert!(
+            snapshot
+                .route_table_identities
+                .iter()
+                .all(|identity| identity.domain == 0 && identity.table == 254),
+            "F4 fixture publishes canonical inet.0/inet6.0 domain-0/table-254 identities"
+        );
         assert_eq!(
             snapshot.slow_path_mtu(),
             9000,
@@ -1118,6 +1207,36 @@ mod slow_path_mtu_tests {
         // EBADF no-op.
         let mut forwarding = ForwardingState::default();
         forwarding.ifindex_to_zone_id.insert(10, 1);
+        let identity = crate::afxdp::types::RouteIdentity {
+            domain: 0,
+            table: 254,
+        };
+        forwarding.route_table_identities.insert("inet.0".into(), identity);
+        forwarding.route_table_identities.insert("inet6.0".into(), identity);
+        forwarding.route_table_identity_map_complete = true;
+        forwarding.routes_v4.insert(
+            "inet.0".into(),
+            vec![crate::afxdp::types::RouteEntryV4::single(
+                crate::prefix::PrefixV4::from_net(
+                    "10.0.0.0/24".parse().expect("canonical route prefix"),
+                ),
+                20,
+                0,
+                Some("192.0.2.2".parse().expect("canonical route next hop")),
+                false,
+                String::new(),
+                1,
+            )],
+        );
+        forwarding.neighbors.insert(
+            (
+                20,
+                "192.0.2.2".parse().expect("canonical route neighbor"),
+            ),
+            crate::afxdp::types::NeighborEntry {
+                mac: [2, 0, 0, 0, 0, 20],
+            },
+        );
         let fds = ReconcileSnapshotFds {
             map_fd: OwnedFd { fd: -1 },
             heartbeat_map_fd: OwnedFd { fd: -1 },
@@ -1144,6 +1263,38 @@ mod slow_path_mtu_tests {
         assert!(out.is_some(), "apply_snapshot returns the secured fds");
 
         let view = coord.ha.runtime.load_full();
+        let main_identity = crate::afxdp::types::RouteIdentity {
+            domain: 0,
+            table: 254,
+        };
+        assert!(view.forwarding().route_table_identity_map_complete);
+        assert_eq!(
+            view.forwarding().route_table_identities.get("inet.0"),
+            Some(&main_identity)
+        );
+        assert_eq!(
+            view.forwarding().route_table_identities.get("inet6.0"),
+            Some(&main_identity)
+        );
+        let main_route = crate::afxdp::forwarding::lookup_forwarding_resolution(
+            view.forwarding().as_ref(),
+            "10.0.0.1".parse().expect("IPv4 main-table destination"),
+        );
+        assert_eq!(main_route.selected_route, Some(main_identity));
+        assert_eq!(
+            main_route.resolution.disposition,
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            "F4 fixture route resolves through a usable next hop and neighbor"
+        );
+        assert!(view.pmech_inventory().complete());
+        assert!(view.pmech_inventory().has_main_table_routes());
+        assert!(
+            view.pmech_inventory()
+                .exact_tunnel("st0", 9, 10)
+                .expect("published P-MECH row")
+                .allows_source(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))),
+            "packet source tuple is inside the published ingress proof"
+        );
         assert_eq!(view.ipsec_snapshot_generation(), 42);
         assert_eq!(
             view.ipsec_tunnel_rows()
@@ -1151,7 +1302,16 @@ mod slow_path_mtu_tests {
                 .map(|row| (row.if_id, row.logical_ifindex)),
             Some((9, 10))
         );
-        let packet = [0x45; 20];
+        let packet = {
+            let mut packet = [0; 20];
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = 6;
+            packet[12..16].copy_from_slice(&[10, 0, 0, 1]);
+            packet[16..20].copy_from_slice(&[10, 0, 0, 1]);
+            packet
+        };
         let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
             &view,
             crate::afxdp::ipsec_inner::IpsecInnerInput {
@@ -1171,6 +1331,11 @@ mod slow_path_mtu_tests {
                     fib_generation: 3,
                     zone_id: 1,
                     if_id: 9,
+                    pmech_inventory_generation: 7,
+                    pmech_inventory_fib_generation: 3,
+                    pmech_policy_identity: [1; 32],
+                    expected_routing_domain: 0,
+                    expected_fib_table: 254,
                 },
                 descriptor: None,
             },
@@ -1179,6 +1344,7 @@ mod slow_path_mtu_tests {
             decision.is_would_permit(),
             "apply_snapshot publication must complete the D11/D14 join: {decision:?}"
         );
+        assert_eq!(decision.reason(), None, "D11/D14 join must not fail with reason 52");
 
         let sp = coord
             .slow_path

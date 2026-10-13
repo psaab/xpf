@@ -77,7 +77,8 @@ fn connected_marker_with_live_interface_remains_usable_12063() {
         0,
         true,
         None,
-    );
+    )
+    .resolution;
     assert_eq!(
         resolution.egress_ifindex, 77,
         "the connected marker backed by a live interface must still win over the default route"

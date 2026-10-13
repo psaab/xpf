@@ -78,7 +78,8 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 dynamic_neighbors,
                 &flow,
                 decision,
-            );
+            )
+            .resolution;
             let looked_up_resolution = super::super::prefer_local_forward_candidate_for_fabric_ingress(
                 forwarding,
                 ha_state,

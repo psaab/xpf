@@ -82,6 +82,7 @@ func TestBuildSnapshotSummary(t *testing.T) {
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
 		{
 			Name:              "vrf1",
+			TableID:           config.StableRoutingInstanceTableID("vrf1"),
 			Inet6StaticRoutes: []*config.StaticRoute{{Destination: "::/0", NextHops: []config.NextHopEntry{{Address: "fe80::1", Interface: "ge-0/0/0.0"}}}},
 		},
 	}
