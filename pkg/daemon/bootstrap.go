@@ -1649,16 +1649,20 @@ func (d *Daemon) setupBootstrapLifeline() {
 			// name-only link plus any stale fxp0.link would each resurrect
 			// a wrong identity next boot — neutralize both (fail-closed).
 			// No error channel here: the log IS the signal (ERROR, not Info).
+			neutralized := true
 			for _, name := range []string{linkPrefix + lifeline + ".link", linkPrefix + defaultMgmtInterface + ".link"} {
 				if err := neutralizeResurrectableLink(name); err != nil {
+					neutralized = false
 					slog.Error("bootstrap: failed to neutralize resurrectable .link",
 						"file", name, "err", err)
 				}
 			}
-			slog.Error("bootstrap: unknown-original lifeline renamed to fxp0 without a "+
-				"verifiable kernel name; neutralized retained .link claims so the next "+
-				"boot falls back to kernel names",
-				"from", lifeline)
+			if neutralized {
+				slog.Error("bootstrap: unknown-original lifeline renamed to fxp0 without a "+
+					"verifiable kernel name; neutralized retained .link claims so the next "+
+					"boot falls back to kernel names",
+					"from", lifeline)
+			}
 		}
 	} else if _, err := writeLinkFile(defaultMgmtInterface, original); err != nil {
 		// #5842: the bootstrap lifeline .link is the file that keeps the

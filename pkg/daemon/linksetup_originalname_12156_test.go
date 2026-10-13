@@ -527,6 +527,97 @@ func TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156(t *testing.
 	}
 }
 
+// #12704: when neutralize fails on a target-change path, the success
+// wording must not be logged. Removal is forced to fail by making one
+// of the .link paths a non-empty directory (ENOTEMPTY, even as root).
+func TestRenamePositionalNeutralizeFailureNotReportedNeutralized12704(t *testing.T) {
+	logs := captureLogs12156(t)
+	dir := withTempLinkDir(t)
+	ownLink := `# Managed by xpfd — do not edit
+[Match]
+MACAddress=52:54:00:00:00:01
+
+[Link]
+Name=ge-0-0-0
+`
+	if err := os.WriteFile(filepath.Join(dir, linkPrefix+"ge-0-0-0.link"), []byte(ownLink), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, linkPrefix+"fxp0.link", "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nics := []pciNIC{{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"}}
+	var renamed [][2]string
+	_, errs := renamePositional(nics, 0, false, func(from, to string) error {
+		renamed = append(renamed, [2]string{from, to})
+		return nil
+	})
+	if len(errs) == 0 {
+		t.Fatal("failed neutralize must surface on errs")
+	}
+	if len(renamed) != 1 || renamed[0] != [2]string{"ge-0-0-0", "fxp0"} {
+		t.Fatalf("required rename must still run after failed neutralize, got %v", renamed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, linkPrefix+"ge-0-0-0.link")); !os.IsNotExist(err) {
+		t.Fatalf("removable own claim must be neutralized, stat err=%v", err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link", "keep")); err != nil || !info.IsDir() {
+		t.Fatalf("failed target removal must leave its blocker in place, info=%v err=%v", info, err)
+	}
+	got := logs.String()
+	if strings.Contains(got, "neutralized retained .link claims") {
+		t.Fatalf("failed neutralize must not be reported as neutralized, got:\n%s", got)
+	}
+	if !strings.Contains(got, "could not neutralize") && !strings.Contains(got, "failed to neutralize") {
+		t.Fatalf("failed neutralize must be logged as a failure, got:\n%s", got)
+	}
+}
+
+func TestBootstrapLifelineNeutralizeFailureNotReportedNeutralized12704(t *testing.T) {
+	logs := captureLogs12156(t)
+	st := staticLifelineSeams(t)
+	detectLifelineInterfaceFn = func() (string, bool, error) { return "ge-0-0-0", true, nil }
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{{sortKey: 0, busAddr: "0000:05:00.0", name: "ge-0-0-0"}}, nil
+	}
+	ownLink := filepath.Join(st.linkDir, linkPrefix+"ge-0-0-0.link")
+	ownContent := strings.Replace(macFormFxp0Link12156, "Name=fxp0", "Name=ge-0-0-0", 1)
+	if err := os.WriteFile(ownLink, []byte(ownContent), 0644); err != nil {
+		t.Fatalf("write own MAC-form fixture: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(st.linkDir, linkPrefix+"fxp0.link", "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lifelineLinkByName = func(string) (netlink.Link, error) { return okLink(), nil }
+	lifelineAddrList = func(netlink.Link, int) ([]netlink.Addr, error) {
+		return []netlink.Addr{staticAddr("192.0.2.10/24")}, nil
+	}
+	lifelineRouteList = func(_ netlink.Link, family int) ([]netlink.Route, error) {
+		if family == netlink.FAMILY_V4 {
+			return []netlink.Route{{Gw: net.ParseIP("192.0.2.1")}}, nil
+		}
+		return nil, nil
+	}
+	d := &Daemon{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+	d.setupBootstrapLifeline()
+	if _, err := os.Stat(ownLink); !os.IsNotExist(err) {
+		t.Fatalf("removable own claim must be neutralized, stat err=%v", err)
+	}
+	if info, err := os.Stat(filepath.Join(st.linkDir, linkPrefix+"fxp0.link", "keep")); err != nil || !info.IsDir() {
+		t.Fatalf("failed target removal must leave its blocker in place, info=%v err=%v", info, err)
+	}
+	if !*st.renamed {
+		t.Error("the lifeline must still attempt the rename to fxp0 after failed neutralize")
+	}
+	got := logs.String()
+	if strings.Contains(got, "neutralized retained .link claims") {
+		t.Fatalf("failed neutralize must not be reported as neutralized, got:\n%s", got)
+	}
+	if !strings.Contains(got, "failed to neutralize") {
+		t.Fatalf("failed neutralize must be logged as a failure, got:\n%s", got)
+	}
+}
+
 // TestRenamePositionalUnfreedKeepsOwnerChain12156 pins the unknowns-first
 // ordering: an unknown NIC that failed ITS OWN temp rename still wears
 // another NIC's final name. NIC B (unknown, MAC-form ge-0-0-0 claim) wants

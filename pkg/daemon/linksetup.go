@@ -568,17 +568,23 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			if pre, ok := preTemp[current]; ok {
 				removeName = pre
 			}
+			neutralized := true
 			for _, name := range []string{linkPrefix + removeName + ".link", linkPrefix + final + ".link"} {
 				if err := neutralizeResurrectableLink(name); err != nil {
+					neutralized = false
+					slog.Error("linksetup: failed to neutralize resurrectable .link",
+						"file", name, "err", err)
 					errs = append(errs, err)
 				} else {
 					changed = true
 				}
 			}
-			slog.Error("linksetup: unknown-original NIC changed target without a "+
-				"verifiable kernel name; neutralized retained .link claims so the next "+
-				"boot falls back to kernel names",
-				"from", current, "to", final)
+			if neutralized {
+				slog.Error("linksetup: unknown-original NIC changed target without a "+
+					"verifiable kernel name; neutralized retained .link claims so the next "+
+					"boot falls back to kernel names",
+					"from", current, "to", final)
+			}
 		} else {
 			wrote, err := writeLinkFile(final, original)
 			if err != nil {
