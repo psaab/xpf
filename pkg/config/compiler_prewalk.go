@@ -53,6 +53,18 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		}
 	}
 
+	// #12777: a one-key firewall `filter` container can keep its term subtree
+	// in the AST while the section compiler misses it, silently dropping an
+	// authored discard action. The compiled Config cannot expose such terms to
+	// the existing #10294 typed gate. Run the #12526 AST validator before
+	// lowering on strict paths; tolerant load/peer-sync retains the existing
+	// #10294 warning behavior.
+	if !opts.lenientFirewallRefs {
+		if err := ValidateFirewallNamelessTermsAST12526(tree); err != nil {
+			return nil, err
+		}
+	}
+
 	// #1814 VRRP track-interface AST pre-walk. Runs on the group-expanded
 	// tree (so apply-groups-inherited statements are covered) and BEFORE
 	// section compilation so the lenient path's first-wins pruning is
