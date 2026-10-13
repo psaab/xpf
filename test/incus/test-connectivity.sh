@@ -332,14 +332,23 @@ test_cluster() {
 	service_check "$FW0" "cluster: xpfd service active on fw0"
 	service_check "$FW1" "cluster: xpfd service active on fw1"
 
-	# Heartbeat/fabric peer addresses come from the cluster conf
-	# (CLUSTER_CONF): node0's peer-address is fw1's heartbeat IP, and
-	# vice versa. Hardcoding them breaks whenever a cluster renumbers
-	# (loss userspace uses 10.99.12/13, legacy used 10.99.0/1).
-	HB_FW1=$(awk '$1=="peer-address"{print $2; exit}' "$CLUSTER_CONF" | tr -d ';')
-	HB_FW0=$(awk '$1=="peer-address"{n++; if(n==2) print $2}' "$CLUSTER_CONF" | tr -d ';')
-	FAB_FW1=$(awk '$1=="fabric-peer-address"{print $2; exit}' "$CLUSTER_CONF" | tr -d ';')
-	FAB_FW0=$(awk '$1=="fabric-peer-address"{n++; if(n==2) print $2}' "$CLUSTER_CONF" | tr -d ';')
+	# Heartbeat/fabric peer addresses come from the cluster conf:
+	# each `groups { nodeN { ... } }` block's peer-address is the
+	# OTHER node's heartbeat IP. Selecting by group name (not by
+	# occurrence order) keeps this right if blocks are reordered.
+	# Hardcoding them breaks whenever a cluster renumbers (loss
+	# userspace uses 10.99.12/13, legacy used 10.99.0/1).
+	CLUSTER_CONF="${CLUSTER_CONF:-${PROJECT_ROOT}/docs/ha-cluster.conf}"
+	peer_of() { # $1=group $2=key
+		awk -v g="$1" -v k="$2" '
+			$1=="groups" {ing=1; next}
+			ing && $1==g {$2=="{" && (ins=1); next}
+			ing && ins && $1==k {print $2; exit}' "$CLUSTER_CONF" | tr -d ';'
+	}
+	HB_FW1=$(peer_of node0 peer-address)
+	HB_FW0=$(peer_of node1 peer-address)
+	FAB_FW1=$(peer_of node0 fabric-peer-address)
+	FAB_FW0=$(peer_of node1 fabric-peer-address)
 	# Heartbeat connectivity (auto VRF — em0/fab0 may be in vrf-mgmt)
 	ping_test "$FW0" "$HB_FW1" "cluster: fw0 → fw1 heartbeat (${HB_FW1})"
 	ping_test "$FW1" "$HB_FW0" "cluster: fw1 → fw0 heartbeat (${HB_FW0})"
