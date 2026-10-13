@@ -1094,22 +1094,34 @@ mod tests {
 
     #[test]
     fn keyed_siphash_spreads_v6_s3_directory_keys_12778() {
-        let directory = PMechSessionDirectory::with_seed(42);
         let key = ipsec_key();
-        let shards: std::collections::HashSet<_> = (0..256u16)
-            .map(|i| {
-                let candidate = SessionKey {
-                    addr_family: libc::AF_INET6 as u8,
-                    src_ip: IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1)),
-                    ..key.clone()
-                };
-                directory.shard_index(&candidate)
-            })
-            .collect();
-        assert!(
-            shards.len() > 16,
-            "v6 s3 keys collapsed to {} shards",
-            shards.len()
+        let placement = |seed| {
+            let directory = PMechSessionDirectory::with_seed(seed);
+            (0..256u16)
+                .map(|i| {
+                    let candidate = SessionKey {
+                        addr_family: libc::AF_INET6 as u8,
+                        src_ip: IpAddr::V6(std::net::Ipv6Addr::new(
+                            0x2001, 0xdb8, 0, i, 0, 0, 0, 1,
+                        )),
+                        ..key.clone()
+                    };
+                    directory.shard_index(&candidate)
+                })
+                .collect::<Vec<_>>()
+        };
+        for seed in [1, 42, 0x0123_4567_89ab_cdef, u64::MAX] {
+            let shards: std::collections::HashSet<_> = placement(seed).into_iter().collect();
+            assert!(
+                shards.len() > 16,
+                "seed {seed:#x} spread to only {} shards",
+                shards.len()
+            );
+        }
+        assert_ne!(
+            placement(42),
+            placement(43),
+            "seed must change shard layout"
         );
     }
 }

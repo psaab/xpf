@@ -612,6 +612,10 @@ mod tests {
                 distinct.len()
             );
         }
-        assert_ne!(placement(42), placement(43), "seed must change bucket layout");
+        assert_ne!(
+            placement(42),
+            placement(43),
+            "seed must change bucket layout"
+        );
     }
 }

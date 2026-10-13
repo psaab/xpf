@@ -176,7 +176,13 @@ pub(super) struct SharedSessionBareTupleIndex {
 
 impl Default for SharedSessionBareTupleIndex {
     fn default() -> Self {
-        let state = HotPathSeededState::new(crate::hot_hash_seed::hot_path_hash_seed());
+        Self::with_seed(crate::hot_hash_seed::hot_path_hash_seed())
+    }
+}
+
+impl SharedSessionBareTupleIndex {
+    fn with_seed(seed: u64) -> Self {
+        let state = HotPathSeededState::new(seed);
         Self {
             scopes: HashMap::with_hasher(state),
             state,
@@ -905,26 +911,36 @@ mod bare_tuple_keyed_hash_tests_12778 {
 
     #[test]
     fn shared_bare_tuple_index_uses_keyed_siphash_12778() {
-        let index = SharedSessionBareTupleIndex::default();
-        let buckets: std::collections::HashSet<_> = (0..256u16)
-            .map(|i| {
-                let key = SessionKey {
-                    addr_family: libc::AF_INET6 as u8,
-                    protocol: crate::afxdp::PROTO_UDP,
-                    src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1)),
-                    dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 2)),
-                    src_port: 40_000,
-                    dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
-                };
-                index.scopes.hasher().hash_one(&key.bare_tuple()) & 0x3f
-            })
-            .collect();
-        assert!(
-            buckets.len() > 32,
-            "bare tuple placement spread to only {} buckets",
-            buckets.len()
+        let placement = |seed| {
+            let index = SharedSessionBareTupleIndex::with_seed(seed);
+            (0..256u16)
+                .map(|i| {
+                    let key = SessionKey {
+                        addr_family: libc::AF_INET6 as u8,
+                        protocol: crate::afxdp::PROTO_UDP,
+                        src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1)),
+                        dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 2)),
+                        src_port: 40_000,
+                        dst_port: 443,
+                        discriminator: Default::default(),
+                        routing_domain: 0,
+                    };
+                    index.scopes.hasher().hash_one(&key.bare_tuple()) & 0x3f
+                })
+                .collect::<Vec<_>>()
+        };
+        for seed in [1, 42, 0x0123_4567_89ab_cdef, u64::MAX] {
+            let buckets: std::collections::HashSet<_> = placement(seed).into_iter().collect();
+            assert!(
+                buckets.len() > 32,
+                "seed {seed:#x} spread to only {} buckets",
+                buckets.len()
+            );
+        }
+        assert_ne!(
+            placement(42),
+            placement(43),
+            "seed must change bare tuple layout"
         );
     }
 
