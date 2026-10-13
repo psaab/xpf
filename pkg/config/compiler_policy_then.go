@@ -128,7 +128,7 @@ func validatePolicyThenPermitStrict(nodes []*Node, lenient bool) ([]string, erro
 		return nil
 	}
 
-	checkPolicy := func(scope, policyName string, polNode *Node) error {
+	checkPolicy := func(scope, policyName string, polNode *Node, isGlobal bool) error {
 		for _, tok := range policyUnsupportedThenPermitModifiers(polNode) {
 			if err := emit(scope, policyName, tok); err != nil {
 				return err
@@ -154,7 +154,7 @@ func validatePolicyThenPermitStrict(nodes []*Node, lenient bool) ([]string, erro
 				switch child.Name() {
 				case "global":
 					for _, polInst := range namedInstances(child.FindChildren("policy")) {
-						if err := checkPolicy("global", polInst.name, polInst.node); err != nil {
+						if err := checkPolicy("global", polInst.name, polInst.node, true); err != nil {
 							return err
 						}
 					}
@@ -185,7 +185,7 @@ func validatePolicyThenPermitStrict(nodes []*Node, lenient bool) ([]string, erro
 					for _, zp := range pairs {
 						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
 						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
-							if err := checkPolicy(scope, polInst.name, polInst.node); err != nil {
+							if err := checkPolicy(scope, polInst.name, polInst.node, false); err != nil {
 								return err
 							}
 						}
@@ -263,7 +263,7 @@ func validatePolicyThenRejectStrict(nodes []*Node, lenient bool) ([]string, erro
 		return nil
 	}
 
-	checkPolicy := func(scope, policyName string, polNode *Node) error {
+	checkPolicy := func(scope, policyName string, polNode *Node, isGlobal bool) error {
 		// A bare `then reject` (a `reject` node with no modifier tokens) is
 		// fully supported. Only `then reject <modifier>` (a reject profile or
 		// a packet-type reject like tcp-reset) carries an unsupported
@@ -306,7 +306,7 @@ func validatePolicyThenRejectStrict(nodes []*Node, lenient bool) ([]string, erro
 				switch child.Name() {
 				case "global":
 					for _, polInst := range namedInstances(child.FindChildren("policy")) {
-						if err := checkPolicy("global", polInst.name, polInst.node); err != nil {
+						if err := checkPolicy("global", polInst.name, polInst.node, true); err != nil {
 							return err
 						}
 					}
@@ -335,7 +335,7 @@ func validatePolicyThenRejectStrict(nodes []*Node, lenient bool) ([]string, erro
 					for _, zp := range pairs {
 						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
 						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
-							if err := checkPolicy(scope, polInst.name, polInst.node); err != nil {
+							if err := checkPolicy(scope, polInst.name, polInst.node, false); err != nil {
 								return err
 							}
 						}
@@ -412,7 +412,7 @@ func validatePolicyThenCountAlarmStrict(nodes []*Node, lenient bool) ([]string, 
 		return nil
 	}
 
-	checkPolicy := func(scope, policyName string, polNode *Node) error {
+	checkPolicy := func(scope, policyName string, polNode *Node, isGlobal bool) error {
 		for _, countNode := range policyThenActionNodes(polNode, "count") {
 			for _, token := range collapsedThenActionTokens(countNode) {
 				if token == "alarm" {
@@ -432,7 +432,7 @@ func validatePolicyThenCountAlarmStrict(nodes []*Node, lenient bool) ([]string, 
 				switch child.Name() {
 				case "global":
 					for _, polInst := range namedInstances(child.FindChildren("policy")) {
-						if err := checkPolicy("global", polInst.name, polInst.node); err != nil {
+						if err := checkPolicy("global", polInst.name, polInst.node, true); err != nil {
 							return err
 						}
 					}
@@ -460,7 +460,7 @@ func validatePolicyThenCountAlarmStrict(nodes []*Node, lenient bool) ([]string, 
 					for _, zp := range pairs {
 						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
 						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
-							if err := checkPolicy(scope, polInst.name, polInst.node); err != nil {
+							if err := checkPolicy(scope, polInst.name, polInst.node, false); err != nil {
 								return err
 							}
 						}
@@ -547,7 +547,7 @@ func validatePolicyThenDenyStrict(nodes []*Node, lenient bool) ([]string, error)
 		return nil
 	}
 
-	checkPolicy := func(scope, policyName string, polNode *Node) error {
+	checkPolicy := func(scope, policyName string, polNode *Node, isGlobal bool) error {
 		// #3842: union `then deny` nodes across ALL `then {}` blocks
 		// (policyThenActionNodes), not just the first via FindChild — a
 		// duplicate inner then block (load merge/override) carries deny
@@ -637,7 +637,7 @@ func validatePolicyThenDenyStrict(nodes []*Node, lenient bool) ([]string, error)
 				switch child.Name() {
 				case "global":
 					for _, polInst := range namedInstances(child.FindChildren("policy")) {
-						if err := checkPolicy("global", polInst.name, polInst.node); err != nil {
+						if err := checkPolicy("global", polInst.name, polInst.node, true); err != nil {
 							return err
 						}
 					}
@@ -666,7 +666,7 @@ func validatePolicyThenDenyStrict(nodes []*Node, lenient bool) ([]string, error)
 					for _, zp := range pairs {
 						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
 						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
-							if err := checkPolicy(scope, polInst.name, polInst.node); err != nil {
+							if err := checkPolicy(scope, polInst.name, polInst.node, false); err != nil {
 								return err
 							}
 						}
@@ -690,7 +690,7 @@ func validatePolicyThenDenyStrict(nodes []*Node, lenient bool) ([]string, error)
 // policies.
 func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
-	checkPolicy := func(scope, policyName string, polNode *Node) error {
+	checkPolicy := func(scope, policyName string, polNode *Node, isGlobal bool) error {
 		for _, sibling := range policyUnsupportedThenSiblings(polNode) {
 			msg := fmt.Sprintf(
 				"security policies %s policy %q has unsupported then sibling %q "+
@@ -724,7 +724,7 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 				switch child.Name() {
 				case "global":
 					for _, polInst := range namedInstances(child.FindChildren("policy")) {
-						if err := checkPolicy("global", polInst.name, polInst.node); err != nil {
+						if err := checkPolicy("global", polInst.name, polInst.node, true); err != nil {
 							return err
 						}
 					}
@@ -752,7 +752,7 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 					for _, zp := range pairs {
 						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
 						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
-							if err := checkPolicy(scope, polInst.name, polInst.node); err != nil {
+							if err := checkPolicy(scope, polInst.name, polInst.node, false); err != nil {
 								return err
 							}
 						}
@@ -769,17 +769,28 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 }
 
 // validatePolicyEnforcementSubtrees rejects direct policy `term` and
-// `session-options` children, plus every other unknown direct child except
-// scalar one-edit `description` typos with at most one value token and no
-// children, and Junos apply statements skipped by this gate.
+// `session-options` children, unknown direct children except scalar one-edit
+// `description` typos with at most one value token and no children or Junos
+// apply statements, plus unresolved tails on known scalar policy leaves
+// (#12634).
 func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
-	checkPolicy := func(scope, policyName string, polNode *Node) error {
+	checkPolicy := func(scope, policyName string, polNode *Node, isGlobal bool) error {
 		for _, subtree := range policyDroppedEnforcementSubtrees(polNode) {
 			msg := fmt.Sprintf(
 				"security policies %s policy %q contains dropped enforcement subtree %q "+
 					"(nested enforcement is not compiled and could weaken the direct policy action) (#11014)",
 				scope, policyName, subtree,
+			)
+			if !lenient {
+				return fmt.Errorf("%s", msg)
+			}
+			warnings = append(warnings, msg)
+		}
+		for _, leaf := range policyUnresolvedScalarLeafTails(expandResolvingRun9792(polNode, policySchema9792(isGlobal))) {
+			msg := fmt.Sprintf(
+				"security policies %s policy %q contains unresolved trailing content on scalar leaf %q; the incomplete policy is poisoned on tolerant load (#12634)",
+				scope, policyName, leaf,
 			)
 			if !lenient {
 				return fmt.Errorf("%s", msg)
@@ -806,7 +817,7 @@ func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, e
 				switch child.Name() {
 				case "global":
 					for _, polInst := range namedInstances(child.FindChildren("policy")) {
-						if err := checkPolicy("global", polInst.name, polInst.node); err != nil {
+						if err := checkPolicy("global", polInst.name, polInst.node, true); err != nil {
 							return err
 						}
 					}
@@ -834,7 +845,7 @@ func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, e
 					for _, zp := range pairs {
 						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
 						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
-							if err := checkPolicy(scope, polInst.name, polInst.node); err != nil {
+							if err := checkPolicy(scope, polInst.name, polInst.node, false); err != nil {
 								return err
 							}
 						}

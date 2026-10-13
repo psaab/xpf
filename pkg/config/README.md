@@ -1260,18 +1260,20 @@ can leave an earlier direct permit active; an unknown `then log` mode (#11023)
 silently drops configured session logging; and an unknown policy-level `term`
 or `session-options` subtree can carry enforcement constraints discarded by the
 compiler (#11014). Every unknown direct policy child also poisons the tolerant
-policy snapshot (#12234), except a scalar one-edit typo of `description` with
+policy snapshot (#12234), except scalar one-edit typos of `description` with
 no children and at most one value token, and Junos apply statements: group
 expansion honors `apply-groups-except`, while `apply-macro` is not compiled.
-A packed description typo carrying another token can drop an
-authored match, action, or schedule binding. `compilePolicy` sets
-`Policy.LenientContentDropped` for these cases: shared AST predicates cover the
-existing match/permit gates, `policyUnsupportedThenSiblings` checks child and
-compact `then` tails, `policyUnsupportedThenLogTokens` checks log-leaf values
-and compact `then` tails; `policyUnknownEnforcementChildren` quarantines every
-unknown nested child and every unknown direct child except the description/apply
-cases. `runEarlyStrictAndFolds` also sets the flag for undefined-scheduler
-DENY/REJECT policies (#12244), which would otherwise load inactive.
+Known scalar `description` and `scheduler-name` leaves with unresolved trailing
+tokens or children also poison the snapshot (#12634), because the packed-run
+expander leaves those tails uncompiled and can silently discard the scheduler
+binding. `compilePolicy` sets `Policy.LenientContentDropped` for these cases:
+shared AST predicates cover the existing match/permit gates,
+`policyUnsupportedThenSiblings` checks child and compact `then` tails,
+`policyUnsupportedThenLogTokens` checks log-leaf values and compact `then`
+tails; `policyUnknownEnforcementChildren` quarantines unknown children, and
+`policyUnresolvedScalarLeafTails` handles unresolved content on known scalar
+`runEarlyStrictAndFolds` also sets the flag for undefined-scheduler DENY/REJECT
+policies (#12244), which would otherwise load inactive.
 The userspace snapshot builder (`buildOneRuleSnapshot`) poisons such a rule with
 the `__unsupported__` application sentinel, so the Rust integrity preflight
 rejects the WHOLE snapshot (previous-good retained; fresh-boot default-deny) —

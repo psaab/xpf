@@ -394,3 +394,176 @@ func TestUnknownGlobalSecurityPolicyChildPoisonsLenientCompile12234(t *testing.T
 		t.Fatal("packed description typo in global policy did not poison it")
 	}
 }
+
+// #12634: a KNOWN scalar policy leaf (`description` or `scheduler-name`)
+// carrying tokens beyond its single value, or children, that the packed/nested
+// leaf-run expander does not fully resolve is skipped by the #12234
+// unknown-child predicate (the keyword itself is recognized), so the typo'd
+// scheduler binding silently dropped with zero diagnostics. Poison + warn +
+// strict-reject, and keep legitimately resolved runs clean.
+func policyUnknownEnforcementFlatTree12634(t *testing.T, tail string) *ConfigTree {
+	t.Helper()
+	tree := &ConfigTree{}
+	commands := []string{
+		"set schedulers scheduler permit-window daily start-time 08:30",
+		"set schedulers scheduler permit-window daily stop-time 09:00",
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security policies from-zone trust to-zone untrust policy p match source-address any",
+		"set security policies from-zone trust to-zone untrust policy p match destination-address any",
+		"set security policies from-zone trust to-zone untrust policy p match application any",
+		"set security policies from-zone trust to-zone untrust policy p then permit",
+		"set security policies from-zone trust to-zone untrust policy p " + tail,
+	}
+	for _, command := range commands {
+		path, err := ParseSetCommand(command)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", command, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", command, err)
+		}
+	}
+	return tree
+}
+
+func TestKnownScalarLeafUnresolvedTailPoisons12634(t *testing.T) {
+	cases := []struct {
+		name            string
+		child           string
+		leaf            string
+		flat            bool
+		wantDescription string
+	}{
+		{name: "braced description typo tail", child: `description "x" schedulr-name permit-window;`, leaf: "description", wantDescription: "x"},
+		{name: "braced scheduler-name typo tail", child: `scheduler-name permit-window descripton "x";`, leaf: "scheduler-name"},
+		{name: "braced description unknown tail", child: `description "x" bogus-token permit-window;`, leaf: "description", wantDescription: "x"},
+		{name: "braced scheduler extra value token", child: `scheduler-name permit-window extra-window;`, leaf: "scheduler-name"},
+		{name: "flat description typo tail", child: `description x schedulr-name permit-window`, leaf: "description", flat: true, wantDescription: "x"},
+		{name: "flat scheduler-name nested typo tail", child: `scheduler-name permit-window descripton x`, leaf: "scheduler-name", flat: true},
+		{name: "flat description nested child tail", child: `description x bogus-token permit-window`, leaf: "description", flat: true, wantDescription: "x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tree *ConfigTree
+			if tc.flat {
+				tree = policyUnknownEnforcementFlatTree12634(t, tc.child)
+			} else {
+				tree = policyUnknownEnforcementTree12234(t, tc.child)
+			}
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile rejected policy: %v", err)
+			}
+			pol := policyPoisonPolicy11013(t, cfg)
+			if pol.Action != PolicyPermit {
+				t.Fatalf("control permit action = %v, want permit", pol.Action)
+			}
+			if !pol.LenientContentDropped {
+				t.Fatalf("known scalar leaf %q with unresolvable tail %q did not poison the policy", tc.leaf, tc.child)
+			}
+			if pol.Description != tc.wantDescription {
+				t.Errorf("policy description = %q, want %q", pol.Description, tc.wantDescription)
+			}
+			if tc.wantDescription != "" && pol.SchedulerName != "" {
+				t.Errorf("unresolved scheduler binding = %q, want empty", pol.SchedulerName)
+			}
+			warnings := strings.Join(cfg.Warnings, "\n")
+			for _, want := range []string{tc.leaf, "#12634"} {
+				if !strings.Contains(warnings, want) {
+					t.Errorf("lenient warning %q does not name %q", warnings, want)
+				}
+			}
+			if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "#12634") {
+				t.Fatalf("strict compiler must reject known scalar leaf tail %q, got %v", tc.child, err)
+			}
+			if tc.leaf == "description" {
+				if err := SchemaValidate(tree, nil); err == nil {
+					t.Fatalf("strict schema must reject known scalar leaf tail %q", tc.child)
+				}
+			}
+		})
+	}
+}
+
+func TestKnownScalarLeafUnresolvedTailPoisonsGlobalPolicy12634(t *testing.T) {
+	tree, errs := NewParser(`security {
+    policies {
+        global {
+            policy p {
+                match {
+                    source-address any;
+                    destination-address any;
+                    application any;
+                }
+                then { permit; }
+                description "x" scheduler-name permit-window extra-token;
+            }
+        }
+    }
+}`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse global policy fixture: %v", errs[0])
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile rejected global policy: %v", err)
+	}
+	if len(cfg.Security.GlobalPolicies) != 1 {
+		t.Fatalf("global policies = %d, want 1", len(cfg.Security.GlobalPolicies))
+	}
+	pol := cfg.Security.GlobalPolicies[0]
+	if pol.Description != "x" || pol.SchedulerName != "permit-window" {
+		t.Fatalf("global policy fields = description %q, scheduler %q; want %q and permit-window", pol.Description, pol.SchedulerName, "x")
+	}
+	if !pol.LenientContentDropped || !strings.Contains(strings.Join(cfg.Warnings, "\n"), "#12634") {
+		t.Fatalf("unresolved global scheduler tail must poison and warn #12634: dropped=%v warnings=%v", pol.LenientContentDropped, cfg.Warnings)
+	}
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "#12634") {
+		t.Fatalf("strict compiler must reject unresolved global scheduler tail, got %v", err)
+	}
+}
+
+// #12634: resolved scalar runs and single-value leaves remain non-poisoned.
+func TestKnownScalarLeafResolvedRunsStayClean12634(t *testing.T) {
+	cases := []struct {
+		name      string
+		child     string
+		scheduler string
+		flat      bool
+	}{
+		{name: "single description", child: `description "x";`},
+		{name: "single scheduler", child: `scheduler-name permit-window;`, scheduler: "permit-window"},
+		{name: "packed resolved run", child: `description "x" scheduler-name permit-window;`, scheduler: "permit-window"},
+		{name: "packed resolved run scheduler first", child: `scheduler-name permit-window description "x";`, scheduler: "permit-window"},
+		{name: "flat resolved scheduler", child: `scheduler-name permit-window`, scheduler: "permit-window", flat: true},
+		{name: "flat resolved packed run", child: `description x scheduler-name permit-window`, scheduler: "permit-window", flat: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var tree *ConfigTree
+			if tc.flat {
+				tree = policyUnknownEnforcementFlatTree12634(t, tc.child)
+			} else {
+				tree = policyUnknownEnforcementTree12234(t, tc.child)
+			}
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile rejected policy: %v", err)
+			}
+			pol := policyPoisonPolicy11013(t, cfg)
+			if pol.LenientContentDropped {
+				t.Fatalf("resolved scalar leaf %q must not poison", tc.child)
+			}
+			if pol.SchedulerName != tc.scheduler {
+				t.Fatalf("scheduler = %q, want %q", pol.SchedulerName, tc.scheduler)
+			}
+			if strings.Contains(strings.Join(cfg.Warnings, "\n"), "#12634") {
+				t.Fatalf("resolved scalar leaf %q must not warn #12634: %v", tc.child, cfg.Warnings)
+			}
+			if _, err := CompileConfig(tree); err != nil {
+				t.Fatalf("strict compiler must accept resolved scalar leaf %q: %v", tc.child, err)
+			}
+		})
+	}
+}
