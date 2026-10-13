@@ -327,8 +327,18 @@ CLI_LOG=""
 CLI_IDX_FILE=""
 CLI_REQUEST_RC=0
 declare -a CLI_STATUS_RESPONSES=()
+# #12658: optional function that ANSWERS a status read from what has been
+# issued so far (it reads $CLI_LOG), for cells where ownership must move only
+# in response to a command -- e.g. a transfer that lands only when re-sent. A
+# fixed response queue cannot express that: it advances per read, not per
+# command, so a reassert that never re-sent would converge all the same.
+CLI_STATUS_FN=""
 
 _fake_cli_status() {
+	if [[ -n "$CLI_STATUS_FN" ]]; then
+		"$CLI_STATUS_FN"
+		return $?
+	fi
 	local n=${#CLI_STATUS_RESPONSES[@]}
 	(( n == 0 )) && return 1
 	local i
@@ -352,6 +362,7 @@ reset_cli_mock() {
 	printf '0' >"$CLI_IDX_FILE"
 	CLI_REQUEST_RC=0
 	CLI_STATUS_RESPONSES=()
+	CLI_STATUS_FN=""
 	# No sleeping in the self-test; the retry COUNTS are what is under test.
 	DEPLOY_REASSERT_READ_DELAY=0
 	DEPLOY_REASSERT_VERIFY_DELAY=0
@@ -1245,6 +1256,127 @@ test_reassert_transfer_rc_is_not_the_verdict() {
 	fi
 }
 
+# ── #12658: a refused transfer is re-sent while the commit wait runs ──────
+# Live shape: once RG1 lands on a freshly cut node0 that has not yet proven XSK
+# liveness, node0 reads RG2 `userspace XSK liveness not proven` for ~2s and
+# RequestPeerFailover REFUSES the RG2 transfer. The reassert sent it once and
+# swallowed the refusal, so under preempt=no RG2 stayed on node1: 3 of 4
+# rolling deploys on 2026-10-13 ended split-RG, with every LAN->WAN flow across
+# the generic-XDP fabric at ~6 Gbps.
+STATUS_THREE_RG_NODE0_PRIMARY="Redundancy group: 0 , Failover count: 0
+node0   200       primary        no       no       None
+node1   100       secondary      no       no       None
+
+Redundancy group: 1 , Failover count: 0
+node0   200       primary        no       no       None
+node1   100       secondary      no       no       None
+
+Redundancy group: 2 , Failover count: 0
+node0   200       primary        no       no       None
+node1   100       secondary      no       no       None
+"
+
+# The state those three deploys were left in.
+STATUS_RG2_ON_NODE1="Redundancy group: 0 , Failover count: 0
+node0   200       primary        no       no       None
+node1   100       secondary      no       no       None
+
+Redundancy group: 1 , Failover count: 0
+node0   200       primary        no       no       None
+node1   100       secondary      no       no       None
+
+Redundancy group: 2 , Failover count: 0
+node0   200       secondary      no       no       None
+node1   100       primary        no       no       None
+"
+
+# Ownership of RG2 moves only once its transfer has been SENT TWICE.
+_status_rg2_lands_on_second_send_12658() {
+	local sends
+	sends=$(grep -cx 'request chassis cluster failover redundancy-group 2 node 0' "$CLI_LOG" || true)
+	if (( sends >= 2 )); then
+		printf '%s\n' "$STATUS_THREE_RG_NODE0_PRIMARY"
+	else
+		printf '%s\n' "$STATUS_RG2_ON_NODE1"
+	fi
+}
+
+_status_rg2_never_lands_12658() {
+	printf '%s\n' "$STATUS_RG2_ON_NODE1"
+}
+
+# #7771 for a re-sent transfer: the LAST transfer for <rg> must be followed by
+# a status read before the first pin-clearing reset after it. Echoes the
+# offending position on failure.
+_last_transfer_read_before_clear_12658() {
+	local rg="$1" xfer_ln clear_ln between
+	xfer_ln=$(grep -nx "request chassis cluster failover redundancy-group $rg node 0" "$CLI_LOG" | tail -1 | cut -d: -f1)
+	if [[ -z "$xfer_ln" ]]; then
+		echo "no transfer issued for rg$rg"
+		return 1
+	fi
+	clear_ln=$(awk -v n="$xfer_ln" -v want="request chassis cluster failover reset redundancy-group $rg" \
+		'NR > n && $0 == want { print NR; exit }' "$CLI_LOG")
+	if [[ -z "$clear_ln" ]]; then
+		echo "no pin-clearing reset after the last transfer (line $xfer_ln)"
+		return 1
+	fi
+	between=$(sed -n "$((xfer_ln + 1)),$((clear_ln - 1))p" "$CLI_LOG" | grep -cx 'show chassis cluster status' || true)
+	if (( between < 1 )); then
+		echo "last transfer (line $xfer_ln) is followed by its pin reset (line $clear_ln) with no status read between"
+		return 1
+	fi
+}
+
+test_rgs_not_role_lists_only_unowned_groups_12658() {
+	local split all partial
+	split=$(printf '%s' "$STATUS_RG2_ON_NODE1" | deploy_node_rgs_not_role node0 primary | tr '\n' ' ')
+	all=$(printf '%s' "$STATUS_THREE_RG_NODE0_PRIMARY" | deploy_node_rgs_not_role node0 primary | tr '\n' ' ')
+	partial=$(printf '%s' "$STATUS_RG0_OK_RG1_INVERTED" | deploy_node_rgs_not_role node0 primary | tr '\n' ' ')
+	if [[ "$split" == "2 " && -z "$all" && "$partial" == "1 " ]]; then
+		ok "reassert: rgs-not-role lists exactly the groups node0 does not own (split='2', all-primary='', partial='1')"
+	else
+		bad "reassert: rgs-not-role -> split='$split' (want '2 '), all-primary='$all' (want ''), partial='$partial' (want '1 ')"
+	fi
+}
+
+test_reassert_resends_a_refused_transfer_12658() {
+	reset_cli_mock
+	CLI_STATUS_FN=_status_rg2_lands_on_second_send_12658
+	local rc=0 sends why
+	( DEPLOY_REASSERT_TRANSFER_DELAY=0 \
+		deploy_reassert_primary_node0 "fake:vm0" "fake:vm1" ) >/dev/null 2>&1 || rc=$?
+	sends=$(grep -cx 'request chassis cluster failover redundancy-group 2 node 0' "$CLI_LOG" || true)
+	if (( rc != 0 || sends < 2 )); then
+		bad "reassert: node0 refused the first RG2 transfer and it was sent $sends time(s) (rc=$rc). A refused transfer that is never re-sent leaves RG2 on node1 under preempt=no: split-RG, LAN->WAN across the fabric (#12658)."
+		return
+	fi
+	if ! why=$(_last_transfer_read_before_clear_12658 2); then
+		bad "reassert: the RG2 re-send broke the #7771 ordering: $why"
+		return
+	fi
+	ok "reassert: a refused RG2 transfer is re-sent until it lands (sends=$sends); its pin is cleared only after a status read (#12658 + #7771)"
+}
+
+test_reassert_resend_is_bounded_and_ordered_12658() {
+	reset_cli_mock
+	CLI_STATUS_FN=_status_rg2_never_lands_12658
+	local rc=0 sends why
+	( DEPLOY_REASSERT_TRANSFER_TRIES=4 DEPLOY_REASSERT_TRANSFER_DELAY=0 \
+		deploy_reassert_primary_node0 "fake:vm0" ) >/dev/null 2>&1 || rc=$?
+	sends=$(grep -cx 'request chassis cluster failover redundancy-group 2 node 0' "$CLI_LOG" || true)
+	# One initial send, then one re-send per pass EXCEPT the last: 1 + (4 - 1).
+	if (( rc == 0 || sends != 4 )); then
+		bad "reassert: RG2 never lands -> want rc!=0 and exactly 4 sends (1 + 3 re-sends over 4 passes), got rc=$rc sends=$sends"
+		return
+	fi
+	if ! why=$(_last_transfer_read_before_clear_12658 2); then
+		bad "reassert: a re-send on the final pass reintroduces #7771: $why"
+		return
+	fi
+	ok "reassert: an RG that never lands is re-sent a bounded number of times (sends=$sends), the reassert still dies, and the pin is cleared only after a status read"
+}
+
 # The WIRING. Every test above drives deploy_reassert_primary_node0 directly,
 # so all of them stay green if cluster-setup.sh stops calling it — which is the
 # mutation that actually matters, because the function only ever runs from
@@ -1912,6 +2044,9 @@ test_reassert_issues_reset_transfer_reset_per_rg
 test_reassert_failure_names_the_missing_precondition_7962
 test_reassert_failure_names_a_real_signal_when_primed_7962
 test_reassert_transfer_rc_is_not_the_verdict
+test_rgs_not_role_lists_only_unowned_groups_12658
+test_reassert_resends_a_refused_transfer_12658
+test_reassert_resend_is_bounded_and_ordered_12658
 test_reassert_is_wired_into_both_deploy_paths
 test_reassert_clears_the_peer_manual_pin
 test_reassert_call_site_passes_the_peer

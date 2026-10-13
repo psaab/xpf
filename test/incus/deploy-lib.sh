@@ -630,6 +630,23 @@ deploy_node_role_every_rg_ok() {
 	'
 }
 
+# deploy_node_rgs_not_role reads `show chassis cluster status` on stdin and
+# prints, one per line in ascending order, every redundancy group in which
+# <node> does NOT read exactly <role>. A group with no <node> row counts as
+# "not". It is the per-RG complement of deploy_node_role_every_rg_ok, scoped
+# the same way (the `Redundancy group: N` header, never a substring grep), and
+# the post-deploy reassert uses it to re-send only the transfers that have not
+# landed (#12658).
+deploy_node_rgs_not_role() {
+	local node="${1:?deploy_node_rgs_not_role: node required}"
+	local role="${2:?deploy_node_rgs_not_role: role required}"
+	awk -v node="$node" -v role="$role" '
+		/^Redundancy group:[[:space:]]/ { rg = $3; seen[rg] = 1; next }
+		$1 == node { if (rg != "" && $3 == role) { ok[rg] = 1 } }
+		END { for (g in seen) { if (!(g in ok)) { print g } } }
+	' | sort -n
+}
+
 # deploy_node_rg_role reads `show chassis cluster status` on stdin and prints
 # the exact role ($3) of <node> for redundancy group <rg>. It succeeds ONLY IF
 # exactly one <node> row exists inside the `Redundancy group: <rg>` block.
@@ -769,7 +786,10 @@ deploy_reassert_prime_liveness() {
 #   - the leading reset clears a stale manual-failover flag that would
 #     otherwise refuse the transfer;
 #   - the transfer is what actually MOVES ownership (`failover reset` alone
-#     never did — that was the original #6591 report);
+#     never did — that was the original #6591 report). While the commit wait
+#     runs it is re-sent for every RG node0 does not own yet, because node0
+#     refuses a transfer for an RG that is transiently not takeover-ready
+#     (#12658);
 #   - the trailing reset clears the flag the transfer itself sets, which
 #     otherwise blocks the peer from electing during a later reboot leg.
 #
@@ -782,7 +802,7 @@ deploy_reassert_primary_node0() {
 	# there is no `manual` field in the proto and none in the heartbeat sync --
 	# so a pin left on the peer cannot be observed or cleared from node0.
 	local pinst="${2:-}"
-	local status rgs rg try
+	local status rgs rg try pending
 
 	status=""
 	rgs=""
@@ -841,6 +861,26 @@ deploy_reassert_primary_node0() {
 		status=$(incus exec "$rinst" -- cli -c "show chassis cluster status" 2>/dev/null || true)
 		if printf '%s\n' "$status" | deploy_reassert_node0_primary_ok; then
 			break
+		fi
+		# #12658: re-send the transfer for every RG node0 does not own yet.
+		# RequestPeerFailover REFUSES a transfer while the local RG is not
+		# takeover-ready, and that window opens routinely in the middle of this
+		# loop: the moment RG1 lands on a freshly cut node0 that has not yet
+		# proven XSK liveness, node0 stops being an idle standby and RG2 reads
+		# `userspace XSK liveness not proven` until WAN RX proves it ~2s later.
+		# A transfer that was sent once and refused was never re-sent, so 3 of 4
+		# rolling deploys on 2026-10-13 left RG2 on node1 -- split-RG, every
+		# LAN->WAN flow across the generic-XDP fabric, capped at ~6 Gbps.
+		#
+		# Never on the LAST pass: every re-send must be followed by a status
+		# read before the pins below are cleared, or this reintroduces #7771.
+		if (( try + 1 < DEPLOY_REASSERT_TRANSFER_TRIES )); then
+			pending=$(printf '%s\n' "$status" | deploy_node_rgs_not_role node0 primary)
+			while read -r rg; do
+				[[ -n "$rg" ]] || continue
+				info "post-deploy reassert: node0 does not own redundancy group $rg yet; re-sending its transfer"
+				incus exec -n "$rinst" -- cli -c "request chassis cluster failover redundancy-group $rg node 0" >/dev/null 2>&1 || true
+			done <<<"$pending"
 		fi
 		(( DEPLOY_REASSERT_TRANSFER_DELAY > 0 )) && sleep "$DEPLOY_REASSERT_TRANSFER_DELAY"
 	done
