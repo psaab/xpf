@@ -46,9 +46,13 @@ func TestStaticRouteInterfaceQualifiedNextHopTail12790(t *testing.T) {
 	}
 
 	t.Run("well-formed qualified-next-hop remains accepted", func(t *testing.T) {
-		cfg, err := CompileConfig(hierTree(t, `routing-options { static { route 10.20.0.0/16 next-hop 10.0.0.1 interface ge-0/0/1.0 qualified-next-hop 10.0.0.2 preference 250; } }`))
+		src := `routing-options { static { route 10.20.0.0/16 next-hop 10.0.0.1 interface ge-0/0/1.0 qualified-next-hop 10.0.0.2 preference 250; } }`
+		cfg, err := CompileConfig(hierTree(t, src))
 		if err != nil {
 			t.Fatalf("strict compile: %v", err)
+		}
+		if err := SchemaValidate(hierTree(t, src), nil); err != nil {
+			t.Fatalf("strict schema validation rejected complete qualified-next-hop: %v", err)
 		}
 		for _, warning := range cfg.Warnings {
 			if strings.Contains(warning, "#12790") {
