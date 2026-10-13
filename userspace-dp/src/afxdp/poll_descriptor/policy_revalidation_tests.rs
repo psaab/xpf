@@ -1879,6 +1879,44 @@ fn new_pair_same_app_id_skips_restamp_write_and_later_restock_works_12191() {
     forwarding.app_catalog = AppCatalog::from_snapshot(&[app_entry(22)]);
     sessions.set_app_id_catalog_epoch(forwarding.app_catalog.epoch());
     sessions.set_policy_revalidation_gen(6);
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    assert!(app_id_revalidation_hit(
+        &forwarding,
+        &mut sessions,
+        &reverse_key,
+        &reverse_metadata,
+        decision,
+        &flow,
+        SessionOrigin::ReverseFlow,
+    ));
+    assert_eq!(
+        sessions.policy_revalidation_target(&reverse_key),
+        PolicyRevalidationTarget::Fresh,
+        "zone policy becomes fresh even when the AppID conntrack read fails"
+    );
+    assert!(sessions.app_id_catalog_stale(&fwd_key));
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_app_id_restamp_lookups_for_test(),
+        1,
+        "the first changed-catalog permit attempts a conntrack lookup"
+    );
+
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &fwd_key,
+            decision,
+            &metadata,
+            &FastMap::default(),
+            0,
+            11,
+            session_id,
+            timeout_secs,
+            SessionOrigin::ForwardFlow,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+    );
     assert!(app_id_revalidation_hit(
         &forwarding,
         &mut sessions,
@@ -1893,12 +1931,75 @@ fn new_pair_same_app_id_skips_restamp_write_and_later_restock_works_12191() {
             .expect("forward conntrack row")
             .app_id,
         22,
-        "a stale hit after catalog change must restock the live AppID"
+        "a later permitted hit must retry and restamp after the map recovers"
+    );
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_app_id_restamp_lookups_for_test(),
+        2,
+        "the recovered map must be read after the first failed attempt"
     );
     assert_eq!(
         crate::afxdp::bpf_map::conntrack_app_id_restamp_writes_for_test(),
         1,
-        "a changed AppID must perform exactly one map update"
+        "a changed AppID must perform exactly one successful map update"
+    );
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    assert!(app_id_revalidation_hit(
+        &forwarding,
+        &mut sessions,
+        &second_key,
+        &metadata,
+        decision,
+        &second_flow,
+        SessionOrigin::ForwardFlow,
+    ));
+    assert_eq!(
+        sessions.policy_revalidation_target(&second_key),
+        PolicyRevalidationTarget::Fresh
+    );
+    assert!(sessions.app_id_catalog_stale(&second_key));
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_app_id_restamp_lookups_for_test(),
+        1
+    );
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &second_key,
+            decision,
+            &metadata,
+            &FastMap::default(),
+            0,
+            11,
+            sessions.session_id_for(&second_key),
+            sessions.timeout_secs_for(&second_key),
+            SessionOrigin::ForwardFlow,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+    );
+    assert!(app_id_revalidation_hit(
+        &forwarding,
+        &mut sessions,
+        &second_key,
+        &metadata,
+        decision,
+        &second_flow,
+        SessionOrigin::ForwardFlow,
+    ));
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_row_for_test(&second_key)
+            .expect("recovered second conntrack row")
+            .app_id,
+        22
+    );
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_app_id_restamp_lookups_for_test(),
+        2
+    );
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_app_id_restamp_writes_for_test(),
+        1
     );
 }
 
