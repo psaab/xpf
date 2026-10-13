@@ -117,8 +117,17 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 		if _, ok := z.AddressBook.Addresses[name]; ok {
 			return true
 		}
-		_, ok := z.AddressBook.AddressSets[name]
-		return ok
+		if _, ok := z.AddressBook.AddressSets[name]; ok {
+			return true
+		}
+		for _, entry := range z.AddressBook.UnknownBookEntries {
+			for _, candidate := range entry.Names {
+				if candidate == name {
+					return true
+				}
+			}
+		}
+		return false
 	}
 
 	// Inject each zone-local entry into the global book under its qualified
@@ -188,6 +197,11 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 				}
 			}
 			gb.AddressSets[q] = ns
+		}
+		for _, entry := range z.AddressBook.UnknownBookEntries {
+			for _, name := range entry.Names {
+				markFoldCollision(zoneLocalQualify(zoneName, name))
+			}
 		}
 	}
 
@@ -490,6 +504,31 @@ func parseAddressBookEntries(node *Node, ab *AddressBook) {
 							as.UnknownMembers = append(as.UnknownMembers, kw)
 						}
 					}
+				}
+			}
+		default:
+			if isApplyStatementKeyword(child.Name()) || child.Name() == "" {
+				continue
+			}
+			entry := AddressBookUnknownEntry{Keyword: child.Name()}
+			if len(child.Keys) > 1 {
+				entry.Names = append(entry.Names, child.Keys[1:]...)
+			}
+			// Hierarchical typo entries have no name on the parent node:
+			// capture each immediate block name so zone-local references to
+			// the dropped entry cannot fall back to a global twin.
+			for _, nested := range child.Children {
+				if !nested.IsLeaf {
+					entry.Names = append(entry.Names, nested.Keys...)
+				}
+			}
+			ab.UnknownBookEntries = append(ab.UnknownBookEntries, entry)
+			if len(entry.Names) > 0 {
+				if ab.CollidingNames == nil {
+					ab.CollidingNames = make(map[string]struct{})
+				}
+				for _, name := range entry.Names {
+					ab.CollidingNames[name] = struct{}{}
 				}
 			}
 		}
