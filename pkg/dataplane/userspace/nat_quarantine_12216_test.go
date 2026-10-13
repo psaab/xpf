@@ -29,8 +29,8 @@ func TestNATAddressNameCollisionQuarantined12216(t *testing.T) {
 	}, "blocked"); len(got) != 0 {
 		t.Fatalf("feed overlay must not bypass collision quarantine, got %v", got)
 	}
-	if got := appendNATSourceAddressName(cfg, nil, nil, "blocked"); len(got) != 1 || got[0] != "blocked" {
-		t.Fatalf("colliding NAT source must use the unmatchable raw-name fallback, got %v", got)
+	if got := appendNATSourceAddressName(cfg, nil, nil, "blocked"); len(got) != 1 || got[0] != natUnresolvedAddressNamePrefix+"blocked" {
+		t.Fatalf("colliding NAT source must use the unparseable prefixed fallback, got %v", got)
 	}
 	if nameRepresentable(ab, nil, nil, "blocked", map[string]bool{}) {
 		t.Fatal("policy-path control accepted the same colliding reference")

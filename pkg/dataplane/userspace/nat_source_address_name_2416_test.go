@@ -142,9 +142,9 @@ func TestBuildDestinationNATSnapshotsUnknownSourceAddressNameFailsClosed(t *test
 			got = s.SourceAddresses
 		}
 	}
-	if len(got) != 1 || got[0] != "does-not-exist" {
-		t.Fatalf("unknown source-address-name SourceAddresses = %+v, want [does-not-exist] "+
-			"(non-empty unparseable token => fail-closed match-nothing, NOT match-any)", got)
+	if len(got) != 1 || got[0] != natUnresolvedAddressNamePrefix+"does-not-exist" {
+		t.Fatalf("unknown source-address-name SourceAddresses = %+v, want prefixed unparseable fallback "+
+			"(non-empty token => fail-closed match-nothing, NOT match-any)", got)
 	}
 }
 

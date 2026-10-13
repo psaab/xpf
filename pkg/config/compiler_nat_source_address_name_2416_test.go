@@ -94,8 +94,9 @@ func TestNATSNATUnknownSourceAddressNameRejected(t *testing.T) {
 	msg := err.Error()
 	if !strings.Contains(msg, "source") ||
 		!strings.Contains(msg, "r1") ||
-		!strings.Contains(msg, "does-not-exist") {
-		t.Fatalf("error must name the rule + the undefined book entry, got: %v", err)
+		!strings.Contains(msg, "does-not-exist") ||
+		!strings.Contains(msg, "unparseable fallback") {
+		t.Fatalf("error must name the rule + undefined book entry and describe its unparseable fallback, got: %v", err)
 	}
 }
 
@@ -109,7 +110,9 @@ func TestNATUnknownSourceAddressNameLenientWarns(t *testing.T) {
 	}
 	found := false
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "source-address-name") && strings.Contains(w, "does-not-exist") {
+		if strings.Contains(w, "source-address-name") &&
+			strings.Contains(w, "does-not-exist") &&
+			strings.Contains(w, "unparseable fallback") {
 			found = true
 		}
 	}

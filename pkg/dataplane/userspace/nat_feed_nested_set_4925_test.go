@@ -289,8 +289,8 @@ func Test_nat_address_name_set_unresolvable_nonfeed_member_fails_closed_4925(t *
 			t.Fatal("source list collapsed to empty (match-any) — fail-OPEN; an " +
 				"unresolvable non-feed set member must stay non-empty + unmatchable (#4925)")
 		}
-		if !contains(got, "dead-set") {
-			t.Fatalf("source list must carry the raw unmatchable set token to fail "+
+		if !contains(got, natUnresolvedAddressNamePrefix+"dead-set") {
+			t.Fatalf("source list must carry the prefixed unmatchable set token to fail "+
 				"closed, got %v", got)
 		}
 		// Must NOT have leaked any other feed's prefixes into this set.

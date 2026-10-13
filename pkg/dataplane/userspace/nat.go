@@ -24,6 +24,8 @@ func natCounterID(ids map[string]uint32, natType, ruleSet, rule string) uint32 {
 	return ids[dataplane.NATCounterKey(natType, ruleSet, rule)]
 }
 
+const natUnresolvedAddressNamePrefix = "unresolved-address-name:"
+
 // resolveNATAddressNamePrefixes resolves a NAT `match {source,destination}-
 // address-name` reference into concrete prefixes using the SAME feed-aware
 // recursive address-book expander the security-policy path uses
@@ -60,10 +62,9 @@ func natCounterID(ids map[string]uint32, natType, ruleSet, rule string) uint32 {
 // set, a dangling reference without a ready feed, an unusable static address
 // without a ready feed value, or an unready feed binding) poisons the name
 // and yields NO prefixes here.
-// The append helpers retain a non-empty raw-name token, but it is not
-// guaranteed unmatchable: an
-// address-book name may itself parse as an IP/CIDR and then match that literal
-// prefix. Making the fallback unparseable by construction is tracked by #12626.
+// The append helpers retain a non-empty fallback token with a fixed
+// non-address prefix, so even an address-book name that is itself an IP/CIDR
+// cannot become a matching literal prefix (#12626).
 //
 // The output is sorted + deduped to match the static resolver's shape (so the
 // already-green #2416 exact-slice pins stay byte-identical); the NAT consumer
@@ -93,12 +94,11 @@ func resolveNATAddressNamePrefixes(cfg *config.Config, feedOverlay map[string][]
 // NAT rule carries the entry's prefixes (static AND feed-backed) into the #2394
 // source constraint instead of publishing an empty (match-any) source list.
 //
-// On an unknown or unresolvable name, the raw token is appended so the source
-// list stays NON-EMPTY (source_constrained stays true on the Rust side). If the
-// name is not a parseable IP/CIDR, it contributes no prefix and matches nothing;
-// a CIDR-shaped book name can parse as a literal prefix instead. #12626 tracks
-// making this fallback unparseable by construction. Commit validation rejects
-// the reference on the strict path.
+// On an unknown or unresolvable name, the prefixed token is appended so the
+// source list stays NON-EMPTY (source_constrained stays true on the Rust side).
+// The fixed non-address prefix ensures even a CIDR-shaped set name cannot match
+// a literal prefix (#12626). Commit validation rejects the reference on the
+// strict path.
 func appendNATSourceAddressName(cfg *config.Config, feedOverlay map[string][]string, sourceAddrs []string, name string) []string {
 	if name == "" {
 		return sourceAddrs
@@ -106,9 +106,8 @@ func appendNATSourceAddressName(cfg *config.Config, feedOverlay map[string][]str
 	if values := resolveNATAddressNamePrefixes(cfg, feedOverlay, name); len(values) > 0 {
 		return append(sourceAddrs, values...)
 	}
-	// Keep the source constraint non-empty with the raw-name fallback. A name
-	// that parses as an IP/CIDR can match that literal prefix; see #12626.
-	return append(sourceAddrs, name)
+	// Keep the source constraint non-empty with a prefixed, unparseable fallback.
+	return append(sourceAddrs, natUnresolvedAddressNamePrefix+name)
 }
 
 // appendNATDestinationAddressName resolves a NAT rule's `match
@@ -122,12 +121,11 @@ func appendNATSourceAddressName(cfg *config.Config, feedOverlay map[string][]str
 // so a name-scoped destination matches the same prefixes a literal `match
 // destination-address` would, including feed-backed members nested in a set.
 //
-// On an unknown or unresolvable name, the raw token is appended so the
+// On an unknown or unresolvable name, the prefixed token is appended so the
 // destination list stays NON-EMPTY (the rule does not collapse to no
-// destination = skip). A non-IP/CIDR token contributes no installed table
-// entry, but a CIDR-shaped book name may parse into a translation prefix; #12626
-// tracks making the fallback unparseable by construction. Commit validation
-// rejects the reference on the strict path.
+// destination = skip). The fixed non-address prefix ensures even a CIDR-shaped
+// name cannot become a translation prefix (#12626). Commit validation rejects
+// the reference on the strict path.
 func appendNATDestinationAddressName(cfg *config.Config, feedOverlay map[string][]string, destAddrs []string, name string) []string {
 	if name == "" {
 		return destAddrs
@@ -135,9 +133,8 @@ func appendNATDestinationAddressName(cfg *config.Config, feedOverlay map[string]
 	if values := resolveNATAddressNamePrefixes(cfg, feedOverlay, name); len(values) > 0 {
 		return append(destAddrs, values...)
 	}
-	// Keep the destination list non-empty with the raw-name fallback. A name
-	// that parses as an IP/CIDR can contribute a translation prefix; see #12626.
-	return append(destAddrs, name)
+	// Keep the destination list non-empty with a prefixed, unparseable fallback.
+	return append(destAddrs, natUnresolvedAddressNamePrefix+name)
 }
 
 // natNeverMatchPortRange is an impossible inclusive range (Low > High): no L4

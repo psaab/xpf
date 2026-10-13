@@ -50,9 +50,10 @@ import (
 // SCOPE: literal values only. `match source-address-name` / `match
 // destination-address-name` are address-BOOK references and are validated by
 // validateNATSourceAddressNameReferencesStrict; the snapshot builders append an
-// unresolvable name's RAW token to the same wire list on purpose, as a
-// fail-closed backstop (appendNATSourceAddressName), so this gate must never
-// walk the post-resolution list — only the config leaf the operator authored.
+// unresolvable name's prefixed, unparseable token to the same wire list on
+// purpose, as a fail-closed backstop (appendNATSourceAddressName), so this gate
+// must never walk the post-resolution list — only the config leaf the operator
+// authored.
 //
 // Strict on commit / commit-check (hard reject naming the NAT kind, rule-set,
 // rule, match leaf, and the offending value); lenient on load / peer-sync
