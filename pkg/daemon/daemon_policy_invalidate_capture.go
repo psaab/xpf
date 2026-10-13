@@ -548,12 +548,13 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		landedTarget := applied != nil && debt.newCfg == applied && plan.newCfg != applied
 		switch {
 		case landedTarget && debt.predecessorCfg != nil && debt.predecessorCfg == plan.newCfg:
-			// An exact rollback restores the landed target's predecessor, so
-			// its candidates are no longer owed. Restore only any earlier
-			// landed debt; preserve scanFailure below to remain fail-closed
-			// until a complete capture or authoritative full clear. This
-			// one-level path keeps its pre-#12532 behavior: the target's own
-			// candidates leave the obligation here, before the undo publishes.
+			// An exact rollback restores the landed target's predecessor. Carry
+			// only an earlier landed obligation here; the target's own capture
+			// is split by retainPolicyInvalidationCaptureLocked below: candidates
+			// the predecessor denies remain deletion debt, and permitted ones
+			// stay pending until the restored target publishes. Preserve
+			// scanFailure below to remain fail-closed until a complete capture or
+			// authoritative full clear.
 			landed = debt.landed
 			if landed != nil {
 				previousCapture = landed.capture

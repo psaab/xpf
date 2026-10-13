@@ -14,28 +14,7 @@ import (
 // with the same forbidding C1 policy. The candidate must remain owed even
 // though the new target has no diff to rediscover it.
 func TestPolicyInvalidationExactUndoRejectedPublishReowesCandidate12780(t *testing.T) {
-	r, _ := newConvergenceRun12072(t, []string{"p-first", "a", "b", "web"})
-	// Session 1 is retained with its original rule provenance even though C0
-	// denies it; exact undo must preserve that failed-delete obligation.
-	c0, err := r.h.d.store.SyncApply(rulesConfigText12532("exact12780-c0", "",
-		[]rule12532{
-			{name: "p-first", app: "any"},
-			{name: "a", app: "any", deny: true},
-			{name: "b", app: "any"},
-			{name: "web", app: "any"},
-		}), nil)
-	if err != nil {
-		t.Fatalf("promote C0: %v", err)
-	}
-	r.dp.applied, r.dp.helperCfg = c0, c0
-	ids := dpuserspace.PolicyIDsByStableKey(c0)
-	for i := range r.dp.rows {
-		row := &r.dp.rows[i]
-		row.PolicyID = ids[r.dp.ruleBySession[row.ExpectedRTFlowSessionID]]
-		row.IngressZoneID = config.StableZoneID("trust")
-		row.EgressZoneID = config.StableZoneID("untrust")
-	}
-	r.h.d.store.MarkActiveApplied()
+	r, c0 := newDeniedExactUndoRun12780(t)
 
 	r.dp.deleteErrOnce = true
 	c1, gen, err := publishConfirmedRollbackText12072(t, r, c0,
@@ -106,4 +85,51 @@ func TestPolicyInvalidationExactUndoLandedRollbackDischarges12780(t *testing.T) 
 	if r.h.d.policyInvalidationDebt != nil {
 		t.Fatalf("accepted rollback left debt: %+v", r.h.d.policyInvalidationDebt)
 	}
+}
+
+func TestPolicyInvalidationExactUndoDeniedCandidateLandsDeletes12780(t *testing.T) {
+	r, c0 := newDeniedExactUndoRun12780(t)
+	r.dp.deleteErrOnce = true
+	_, gen, err := publishConfirmedRollbackText12072(t, r, c0,
+		rulesConfigText12532("exactland12780-c1", "", []rule12532{
+			{name: "p-first", app: "any"}, {name: "b", app: "any"}, {name: "web", app: "any"},
+		}))
+	if err == nil {
+		t.Fatal("C0->C1 failed candidate delete was not surfaced")
+	}
+	r.h.d.executeConfirmedRollback(gen)
+	if r.h.d.store.ActiveConfig() != c0 || r.dp.applied != c0 {
+		t.Fatalf("rollback did not land C0: store=%p helper=%p", r.h.d.store.ActiveConfig(), r.dp.applied)
+	}
+	if !r.hasDeletedSession(1) || r.hasLiveSession(1) {
+		t.Fatal("accepted exact undo did not delete the retained candidate denied by C0")
+	}
+	if r.h.d.policyInvalidationDebt != nil {
+		t.Fatalf("accepted exact undo left debt: %+v", r.h.d.policyInvalidationDebt)
+	}
+}
+
+func newDeniedExactUndoRun12780(t *testing.T) (*convergenceRun12072, *config.Config) {
+	t.Helper()
+	r, _ := newConvergenceRun12072(t, []string{"p-first", "a", "b", "web"})
+	c0, err := r.h.d.store.SyncApply(rulesConfigText12532("exact12780-c0", "",
+		[]rule12532{
+			{name: "p-first", app: "any"},
+			{name: "a", app: "any", deny: true},
+			{name: "b", app: "any"},
+			{name: "web", app: "any"},
+		}), nil)
+	if err != nil {
+		t.Fatalf("promote C0: %v", err)
+	}
+	r.dp.applied, r.dp.helperCfg = c0, c0
+	ids := dpuserspace.PolicyIDsByStableKey(c0)
+	for i := range r.dp.rows {
+		row := &r.dp.rows[i]
+		row.PolicyID = ids[r.dp.ruleBySession[row.ExpectedRTFlowSessionID]]
+		row.IngressZoneID = config.StableZoneID("trust")
+		row.EgressZoneID = config.StableZoneID("untrust")
+	}
+	r.h.d.store.MarkActiveApplied()
+	return r, c0
 }
