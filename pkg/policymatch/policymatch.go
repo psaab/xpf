@@ -1897,12 +1897,17 @@ func ZonePairPolicyFilterTier(fromZone, toZone string) int {
 // given match-scope zones is selected by a `from-zone X to-zone Y` display
 // filter (#3357). It governs which scoped/unscoped globals a FILTERED policy
 // view shows. An empty filter axis selects every global on that axis. A global
-// whose match-scope zone is empty or "any" spans every zone, so it always
-// applies (it IS enforced for the filtered pair). A scoped global is selected
-// only when its scope equals the filter on each constrained axis. The semantics
-// mirror globalScopeSetMatches (an "any"/empty scope is all-zones) so the filtered
-// view shows exactly the globals the runtime enforces for that zone pair.
+// whose match-scope zone is empty or "any" spans every transit zone, so it
+// applies to transit pairs. The junos-host gate is separate: it consults only
+// globals explicitly scoped to `to-zone junos-host`, so transit-wide globals
+// must not appear in a host-bound filtered view (#12523).
 func GlobalPolicyAppliesToZonePair(matchFrom, matchTo []string, filterFrom, filterTo string) bool {
+	// #12523: Junos-host traffic uses a distinct policy gate. Unlike transit,
+	// it does not evaluate unscoped or `to-zone any` globals; only a global
+	// explicitly scoped to `to-zone junos-host` can apply.
+	if filterTo == JunosHostZone && !config.IsHostToZoneScope(matchTo) {
+		return false
+	}
 	axisApplies := func(scope []string, filter string) bool {
 		if filter == "" || config.IsWildcardZoneSet(scope) {
 			return true

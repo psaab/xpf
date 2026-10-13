@@ -131,3 +131,48 @@ func TestShowPoliciesFilteredPreservesExactQuarantinedZonePair12094(t *testing.T
 		t.Fatalf("quarantined host filter omitted the runtime from-any exception:\n%s", hostOut)
 	}
 }
+
+// #12523: a junos-host filter lists only globals scoped exactly to-zone
+// junos-host whose from-zone covers the filtered ingress (every ingress for a
+// to-zone-only filter); the unscoped transit global stays out of both views.
+func TestShowPoliciesFilteredJunosHostExcludesUnscopedGlobal12523(t *testing.T) {
+	for _, tc := range []struct {
+		name, fromZone string
+		want, notWant  []string
+	}{
+		{"from-zone trust", "trust",
+			[]string{"host-scoped-global"}, []string{"unscoped-transit-global", "off-pair-host-global"}},
+		{"to-zone only", "",
+			[]string{"host-scoped-global", "off-pair-host-global"}, []string{"unscoped-transit-global"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &ctl{client: &fakeBpfrxClient{
+				getPoliciesResp: &pb.GetPoliciesResponse{Policies: []*pb.PolicyInfo{
+					{FromZone: "*", ToZone: "*", Rules: []*pb.PolicyRule{
+						{Name: "unscoped-transit-global", Action: "deny"},
+						{Name: "host-scoped-global", Action: "deny", MatchToZone: "junos-host"},
+						{Name: "off-pair-host-global", Action: "deny", MatchFromZone: "dmz", MatchToZone: "junos-host"},
+					}},
+				}},
+				getZonesResp: &pb.GetZonesResponse{Zones: []*pb.ZoneInfo{
+					{Name: "trust"}, {Name: "dmz"},
+				}},
+			}}
+			out := captureStdout(t, func() {
+				if err := c.showPoliciesFiltered(tc.fromZone, "junos-host", false); err != nil {
+					t.Fatalf("showPoliciesFiltered(%q, junos-host): %v", tc.fromZone, err)
+				}
+			})
+			for _, rule := range tc.want {
+				if !strings.Contains(out, "Rule: "+rule+"\n") {
+					t.Errorf("filtered junos-host view dropped host-scoped global %q:\n%s", rule, out)
+				}
+			}
+			for _, rule := range tc.notWant {
+				if strings.Contains(out, "Rule: "+rule+"\n") {
+					t.Errorf("filtered junos-host view listed global %q the host gate never evaluates for this filter:\n%s", rule, out)
+				}
+			}
+		})
+	}
+}

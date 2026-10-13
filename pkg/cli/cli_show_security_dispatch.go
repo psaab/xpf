@@ -369,7 +369,8 @@ func (c *CLI) handleShowSecurity(args []string) error {
 			policySetID := uint32(len(cfg.Security.Policies))
 			// Global policies in brief view. #3357: a from/to-zone filter no
 			// longer suppresses the globals — show the unscoped globals (every
-			// pair) plus any scoped global (#3148) targeting the filtered pair.
+			// transit pair; never junos-host, #12523) plus any scoped global
+			// (#3148) targeting the filtered pair.
 			if len(cfg.Security.GlobalPolicies) > 0 {
 				for i, pol := range cfg.Security.GlobalPolicies {
 					// #3476: skip a nil global rule like the runtime walker.
@@ -505,9 +506,10 @@ func (c *CLI) handleShowSecurity(args []string) error {
 		}
 		// Global policies. #3357: a from/to-zone filter no longer suppresses the
 		// global block (only `global`-only and the unfiltered view did before) —
-		// the filtered standard view must show an unscoped global (every pair)
-		// and a scoped global (#3148) targeting the filtered pair. When globalOnly
-		// the filter is empty so every global is selected (no regression).
+		// the filtered standard view must show an unscoped global (every transit
+		// pair; never junos-host, #12523) and a scoped global (#3148) targeting
+		// the filtered pair. When globalOnly the filter is empty so every global
+		// is selected (no regression).
 		if len(cfg.Security.GlobalPolicies) > 0 {
 			// #3357: print the "Global policies:" header lazily so a filter that
 			// selects no global does not leave a dangling empty header.

@@ -873,6 +873,13 @@ From zone: guest, To zone: lan
   also shown (#3357) after the zone-pair tiers: an unscoped/`any` global and a
   scoped global (#3148) whose `match from-zone`/`to-zone` includes the filter;
   a scoped global bound to a different pair is omitted.
+- A host-bound filter (`to-zone junos-host`, with or without `from-zone`)
+  follows the separate Junos-host gate instead of the transit tiers. It never
+  lists a `to-zone any` stanza (#12094), and its global tier lists only globals
+  scoped exactly `match to-zone junos-host` whose `match from-zone` is unset,
+  `any`, or includes the filtered from-zone (any from-zone scope when the
+  filter names none). Globals whose `match to-zone` is unset or `any` are
+  omitted because the host gate never evaluates them (#12523).
 
 ---
 
@@ -1067,9 +1074,10 @@ Global policies:
   gRPC `policies-hit-count`/`policies-detail` text views) plus the remote CLI
   still suppressed scoped globals. A `from-zone X to-zone Y` filter now includes
   every global that GOVERNS that pair — an unscoped/`any` global (enforced for
-  every pair) and a scoped global whose `match from-zone`/`to-zone` equals the
-  filter — and excludes a scoped global bound to a different pair, mirroring the
-  runtime `globalScopeMatches` selection. The remote `show security policies`
+  every transit pair; #12523 omits it from `to-zone junos-host` views) and a
+  scoped global whose `match from-zone`/`to-zone` equals the filter — and
+  excludes a scoped global bound to a different pair, mirroring the runtime
+  `globalScopeMatches` selection. The remote `show security policies`
   (filtered) renders each global rule under its effective scope, and the remote
   `... brief` prints the per-rule `match_from_zone`/`match_to_zone` (falling back
   to `*`/`*` only for an unscoped global) instead of the group `*`. The shared
@@ -1088,10 +1096,19 @@ Global policies:
   stanzas shown. Undefined filters do not select transit tiers, and quarantined
   filters retain only their exact authored pair. The host-specific
   `any -> junos-host` rule remains applicable to unknown ingress. Global-group
-  selection remains separate; the pre-existing unscoped-global host-view
-  mismatch is tracked as a #12094 follow-up. One shared
-  `policymatch.ZonePairPolicyAppliesToFilterPair` predicate governs the gRPC
-  text, local CLI, and remote CLI views.
+  selection remains separate (host-bound global selection: #12523 below). One
+  shared `policymatch.ZonePairPolicyAppliesToFilterPair` predicate governs the
+  gRPC text, local CLI, and remote CLI views.
+- **#12523 — host-bound views omit transit-wide globals.** A `to-zone
+  junos-host` filter, with or without `from-zone`, lists only the globals the
+  Junos-host gate evaluates: those scoped exactly `match to-zone junos-host`
+  whose `match from-zone` is unset, `any`, or includes the filtered from-zone
+  (any from-zone scope when the filter names none). A global whose `match
+  to-zone` is unset or `any` is omitted whatever its `match from-zone`: the
+  host gate never evaluates it, so listing it implied it governed host-bound
+  traffic. The gRPC hit-count `Total` for such a view no longer counts it;
+  transit filters still list it. The local CLI, gRPC text, and remote CLI
+  views share `policymatch.GlobalPolicyAppliesToZonePair`.
 - **#3683 (M02) — remote FILTERED policy view normalizes the global scope to
   `any`.** The remote `show security policies` (filtered) `showPoliciesFiltered`
   (`cmd/cli/show.go`) hand-rolled an all-zones global scope as `*`, so an
