@@ -186,6 +186,7 @@ test-memlock-guards:
 		echo "  so the guards stop skipping and start failing at map creation."; \
 		exit 1; \
 	fi
+# This leg scans plain-text RUN records; pin text output against GOFLAGS=-json.
 	@pkgs=$$(sed -n 's/.*File: "\([^"]*\)".*/\1/p' pkg/memlockcensus/registry.go \
 		| xargs -n1 dirname | sort -u | sed 's#^#./#'); \
 	if [ -z "$$pkgs" ]; then \
@@ -195,7 +196,7 @@ test-memlock-guards:
 		exit 1; \
 	fi; \
 	echo "test-memlock-guards: packages $$pkgs"; \
-	out=$$(TMPDIR=/tmp XPF_REQUIRE_MEMLOCK_GUARDS=1 $(GO) test -count=1 -v $$pkgs ./pkg/memlockcensus/ 2>&1); \
+	out=$$(TMPDIR=/tmp XPF_REQUIRE_MEMLOCK_GUARDS=1 $(GO) test -json=false -count=1 -v $$pkgs ./pkg/memlockcensus/ 2>&1); \
 	status=$$?; \
 	echo "$$out"; \
 	missing=''; \
@@ -241,7 +242,8 @@ test-shim-run:
 # against the retained object; census every test in the shared admission file.
 # #12055: tagged-only VID-0 local destinations must be dropped by the shim
 # before its kernel-local delivery arms; census the whole focused test file.
-	@out=$$(go test ./pkg/dataplane/userspace/ -run 'TestV6|TestFragment|TestNonFirstFragment|TestUserspaceXDPQinQ|TestUserspaceXDPSTag|TestUserspaceXDPTaggedOnly|TestUserspaceXDPDispatch|TestBuildUserspaceWGZoneAdmission|TestSyncUserspaceWGZoneMaps|TestUserspaceXDPWireGuard' -v -count=1 2>&1); \
+# #12599: the by-name census parses text RUN records, so pin output against GOFLAGS=-json.
+	@out=$$(go test -json=false ./pkg/dataplane/userspace/ -run 'TestV6|TestFragment|TestNonFirstFragment|TestUserspaceXDPQinQ|TestUserspaceXDPSTag|TestUserspaceXDPTaggedOnly|TestUserspaceXDPDispatch|TestBuildUserspaceWGZoneAdmission|TestSyncUserspaceWGZoneMaps|TestUserspaceXDPWireGuard' -v -count=1 2>&1); \
 	status=$$?; \
 	echo "$$out"; \
 	missing=''; \

@@ -346,6 +346,10 @@ run_shell test/xsk-repro/selftest-multitoken-cc_6355.sh
 # the exact failure the reproducer exists to detect, reported as PASS. SKIPs
 # without cargo or offline-buildable deps.
 run_shell test/xsk-repro/selftest-probe-filter_6898.sh
+# #12599: by-name privileged Go gates scan plain-text RUN records, so the
+# actual go argv must pin -json=false against inherited GOFLAGS=-json.
+# Hermetic argv probes exercise both real Makefile targets without BPF.
+run_shell test/incus/make-guard-probes-selftest.sh
 # The committed fixture negatives for the by-name asserts above (#9922
 # SPARK-MINOR-7): stub-cargo cells proving a deleted/renamed guarded cell
 # FAILs. Same file, so no discovery churn (already in the odd-set math as
