@@ -1,8 +1,9 @@
 # Bare-metal interface device-map (#1956)
 
 xpf's default interface handling is **positional**: at startup it enumerates
-every PCI NIC, sorts virtio-first then by PCI bus address, and assigns vSRX
-names by enumeration index (`fxp0`, `em0`, `ge-{fpc}-0-{n}`). Unconfigured
+every PCI NIC, sorts virtio-first then by PCI bus address and (for multiple
+netdevs on one function) by hardware port identity, and assigns vSRX names
+by enumeration index (`fxp0`, `em0`, `ge-{fpc}-0-{n}`). Unconfigured
 NICs that are not matched by a non-xpf systemd-networkd `.network` file are
 brought down. That is correct for the appliance image and controlled-topology
 VMs, but it is hazardous on real bare metal:

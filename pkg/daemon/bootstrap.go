@@ -1556,7 +1556,7 @@ func (d *Daemon) setupBootstrapLifeline() {
 	if len(nics) > 0 {
 		// The warning identifies the currently first PCI device so an operator
 		// can distinguish it from the management path without reconstructing
-		// the virtio-first, then PCI-address enumeration order.
+		// the virtio-first, then PCI-address and hardware-port enumeration order.
 		index0Name, index0PCI = nics[0].name, nics[0].busAddr
 	}
 	if len(nics) == 0 {

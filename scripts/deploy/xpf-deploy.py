@@ -75,7 +75,8 @@ VALID_BACKINGS = {"net", "bridge", "macvlan", "sriov", "physical", "pci"}
 # Guest PCI enumeration classes. The guest names interfaces positionally
 # (assignName), but ONLY after enumeratePCINICs() sorts NICs with a
 # virtio-first tiebreaker: sk=0 for driver "virtio_net", sk=1 for
-# everything else, then by PCI bus address (pkg/daemon/linksetup.go). A
+# everything else, then by PCI bus address; if several netdevs share a
+# function, by `dev_port` and `phys_port_name` before the current name.
 # virtio-backed device (net/bridge/macvlan attach as `virtio_net`) always
 # sorts ahead of a passthrough device (sriov/physical/pci attach as the
 # real hardware driver), regardless of the order the tool attaches them.

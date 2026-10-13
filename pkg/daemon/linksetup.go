@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/fsatomic"
@@ -128,12 +129,17 @@ func retainedMACAddress(currentName string) string {
 	return ""
 }
 
-// pciNIC holds enumeration data for one physical NIC.
 type pciNIC struct {
-	sortKey int    // 0 = virtio, 1 = hardware
-	busAddr string // PCI bus address (e.g. "0000:05:00.0")
-	name    string // current kernel name (e.g. "enp5s0")
+	sortKey      int    // 0 = virtio, 1 = hardware
+	busAddr      string // PCI bus address (e.g. "0000:05:00.0")
+	name         string // current kernel name (e.g. "enp5s0")
+	devPort      int    // kernel dev_port; -1 when unavailable
+	physPortName string // kernel phys_port_name; empty when unavailable
 }
+
+// sysClassNetRoot is package-global to let enumeration tests exercise the
+// real sysfs walk against a synthetic tree. Production leaves it unchanged.
+var sysClassNetRoot = "/sys/class/net"
 
 // enumerateAndRenameInterfaces assigns vSRX-style names to all PCI NICs.
 //
@@ -257,9 +263,9 @@ func reapplyRSSIndirectionWith(rssEnabled bool, userspaceWorkers int, allowedInt
 }
 
 // enumeratePCINICs discovers all PCI network interfaces via sysfs, sorted
-// by driver type (virtio first) then PCI bus address.
+// by driver type (virtio first), PCI bus address, then hardware port identity.
 func enumeratePCINICs() ([]pciNIC, error) {
-	entries, err := os.ReadDir("/sys/class/net")
+	entries, err := os.ReadDir(sysClassNetRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +277,8 @@ func enumeratePCINICs() ([]pciNIC, error) {
 			continue
 		}
 
-		devicePath := filepath.Join("/sys/class/net", name, "device")
+		netPath := filepath.Join(sysClassNetRoot, name)
+		devicePath := filepath.Join(netPath, "device")
 		if _, err := os.Stat(devicePath); err != nil {
 			continue // not a PCI device
 		}
@@ -297,19 +304,88 @@ func enumeratePCINICs() ([]pciNIC, error) {
 		if driver == "virtio_net" {
 			sk = 0
 		}
-		nics = append(nics, pciNIC{sortKey: sk, busAddr: busAddr, name: name})
+		devPort := -1
+		if data, err := os.ReadFile(filepath.Join(netPath, "dev_port")); err == nil {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && parsed >= 0 {
+				devPort = parsed
+			}
+		}
+		physPortName := ""
+		if data, err := os.ReadFile(filepath.Join(netPath, "phys_port_name")); err == nil {
+			physPortName = strings.TrimSpace(string(data))
+		}
+		nics = append(nics, pciNIC{
+			sortKey: sk, busAddr: busAddr, name: name,
+			devPort: devPort, physPortName: physPortName,
+		})
 	}
 
-	// Sort: virtio first, then by PCI bus address (lexicographic on
-	// bus address is equivalent to numeric for same-width addresses).
 	sort.Slice(nics, func(i, j int) bool {
-		if nics[i].sortKey != nics[j].sortKey {
-			return nics[i].sortKey < nics[j].sortKey
+		a, b := nics[i], nics[j]
+		if a.sortKey != b.sortKey {
+			return a.sortKey < b.sortKey
 		}
-		return nics[i].busAddr < nics[j].busAddr
+		if a.busAddr != b.busAddr {
+			return a.busAddr < b.busAddr
+		}
+		// A known port number is a stronger hardware identity than a
+		// representor label; unknown values sort after known ones.
+		if (a.devPort >= 0) != (b.devPort >= 0) {
+			return a.devPort >= 0
+		}
+		if a.devPort >= 0 && a.devPort != b.devPort {
+			return a.devPort < b.devPort
+		}
+		if a.physPortName != b.physPortName {
+			if a.physPortName == "" {
+				return false
+			}
+			if b.physPortName == "" {
+				return true
+			}
+			if lessPhysPortName(a.physPortName, b.physPortName) {
+				return true
+			}
+			if lessPhysPortName(b.physPortName, a.physPortName) {
+				return false
+			}
+		}
+		return a.name < b.name
 	})
 
 	return nics, nil
+}
+
+// lessPhysPortName compares the digit runs numerically (for example,
+// pf0vf2 before pf0vf10) and otherwise compares bytes. Empty/unparseable
+// names still have deterministic ordering through the original text.
+func lessPhysPortName(a, b string) bool {
+	for len(a) > 0 && len(b) > 0 {
+		if a[0] >= '0' && a[0] <= '9' && b[0] >= '0' && b[0] <= '9' {
+			endA, endB := 0, 0
+			for endA < len(a) && a[endA] >= '0' && a[endA] <= '9' {
+				endA++
+			}
+			for endB < len(b) && b[endB] >= '0' && b[endB] <= '9' {
+				endB++
+			}
+			numA, errA := strconv.ParseUint(a[:endA], 10, 64)
+			numB, errB := strconv.ParseUint(b[:endB], 10, 64)
+			if errA == nil && errB == nil && numA != numB {
+				return numA < numB
+			}
+			if len(a[:endA]) != len(b[:endB]) {
+				return len(a[:endA]) < len(b[:endB])
+			}
+			a, b = a[endA:], b[endB:]
+			continue
+		}
+		if a[0] != b[0] {
+			return a[0] < b[0]
+		}
+		a, b = a[1:], b[1:]
+	}
+	return len(a) < len(b)
 }
 
 // extractPCIAddr extracts the last PCI address (DDDD:BB:DD.F) from a sysfs path.
@@ -734,12 +810,12 @@ func unfreedNameErr(logPrefix, current, final string) error {
 // live-name readback is the available substitute: it cannot tell you the right
 // NIC got the name, but it can tell you the name is worn at all.
 //
-// Re-enumeration is sound here because enumeratePCINICs sorts by (sortKey,
-// busAddr) -- both PCI-derived and independent of the interface NAME -- so
-// index i addresses the same NIC before and after a rename pass. If that sort
-// ever became name-dependent this check would silently compare a NIC against
-// another NIC's intended name, which is why the ordering is stated here rather
-// than assumed.
+// Re-enumeration is sound here because enumeratePCINICs sorts by
+// (sortKey, busAddr, dev_port, phys_port_name, name). The port identity
+// fields keep shared-function multiport NICs at the same index across
+// interface renames; name is only a final fallback when sysfs has no
+// distinguishing port metadata. Reordering sysfs metadata can otherwise
+// compare a NIC against another NIC's intended name.
 func verifyPositionalNames(fpc int, clusterMode bool) []error {
 	nics, err := enumeratePCINICsFn()
 	if err != nil {
