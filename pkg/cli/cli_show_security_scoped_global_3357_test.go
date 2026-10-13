@@ -14,8 +14,8 @@ import (
 // (#3148) `match from-zone X to-zone Y` that is actively enforced for that
 // exact pair was therefore omitted from the very command an operator uses to
 // prove which rules govern the pair. The filtered views now include an
-// unscoped global (every pair) and a scoped global targeting the filter, and
-// exclude a scoped global bound to a different pair.
+// unscoped global (every transit pair) and a scoped global targeting the
+// filter, and exclude a scoped global bound to a different pair.
 
 // scopedGlobalCLIConfig3357 has a scoped global for trust->untrust, a scoped
 // global for the off-pair trust->dmz, and an unscoped (all-zones) global.

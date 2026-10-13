@@ -275,10 +275,11 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 	// the same for the REST inventory).
 	//
 	// #3357: a from/to-zone filter no longer suppresses the whole global
-	// block. An unscoped global is enforced for every zone pair and a scoped
-	// global (#3148) may target exactly the filtered pair, so the filtered
-	// hit-count surface must show the globals that govern it.
-	// GlobalPolicyAppliesToZonePair selects per-rule scope against the filter.
+	// block. An unscoped global is enforced for every transit zone pair (never
+	// junos-host, #12523) and a scoped global (#3148) may target exactly the
+	// filtered pair, so the filtered hit-count surface must show the globals
+	// that govern it. GlobalPolicyAppliesToZonePair selects per-rule scope
+	// against the filter.
 	if len(cfg.Security.GlobalPolicies) > 0 {
 		for i, pol := range cfg.Security.GlobalPolicies {
 			if pol == nil {
@@ -593,9 +594,10 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 	policySetID := uint32(len(cfg.Security.Policies))
 	// Global policies. #3357: a from/to-zone filter no longer suppresses the
 	// global block — the filtered detail surface must still show an unscoped
-	// global (enforced for every pair) and a scoped global (#3148) targeting
-	// the filtered pair. The "Global policies:" header prints lazily so a
-	// filter that selects no global leaves no dangling empty header.
+	// global (enforced for every transit pair, never junos-host: #12523) and a
+	// scoped global (#3148) targeting the filtered pair. The "Global policies:"
+	// header prints lazily so a filter that selects no global leaves no
+	// dangling empty header.
 	if len(cfg.Security.GlobalPolicies) > 0 {
 		globalHeaderPrinted := false
 		for i, pol := range cfg.Security.GlobalPolicies {

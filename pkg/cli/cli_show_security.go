@@ -190,11 +190,12 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 	}
 	policySetID := uint32(len(cfg.Security.Policies))
 	// Global policies. #3357: a from/to-zone filter no longer suppresses the
-	// global block — an unscoped global is enforced for every zone pair and a
-	// scoped global (#3148) may target exactly the filtered pair, so the
-	// filtered hit-count table must show the globals that govern it. Per-rule
-	// scope is matched against the filter via GlobalPolicyAppliesToZonePair;
-	// the ruleID is the loop index so skipped rows keep counter alignment.
+	// global block — an unscoped global is enforced for every transit zone
+	// pair (never junos-host, #12523) and a scoped global (#3148) may target
+	// exactly the filtered pair, so the filtered hit-count table must show the
+	// globals that govern it. Per-rule scope is matched against the filter via
+	// GlobalPolicyAppliesToZonePair; the ruleID is the loop index so skipped
+	// rows keep counter alignment.
 	if len(cfg.Security.GlobalPolicies) > 0 {
 		for i, pol := range cfg.Security.GlobalPolicies {
 			// #3476: skip a nil global rule like the runtime walker does.
@@ -461,8 +462,9 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 
 	// Global policies. #3357: a from/to-zone filter no longer suppresses the
 	// global block — the filtered detail view must still show an unscoped
-	// global (enforced for every pair) and a scoped global (#3148) targeting
-	// the filtered pair. GlobalPolicyAppliesToZonePair selects per-rule scope.
+	// global (enforced for every transit pair, never junos-host: #12523) and a
+	// scoped global (#3148) targeting the filtered pair.
+	// GlobalPolicyAppliesToZonePair selects per-rule scope.
 	if len(cfg.Security.GlobalPolicies) > 0 {
 		for i, pol := range cfg.Security.GlobalPolicies {
 			// #3476: skip a nil global rule like the runtime walker does.
