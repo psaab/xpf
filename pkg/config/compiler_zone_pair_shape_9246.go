@@ -46,12 +46,32 @@ func malformedZonePairShape9246(n *Node) string {
 	if n.Keys[0] == "from-zone" && n.Keys[2] != "to-zone" &&
 		!isSyntheticFromZoneCensusPlaceholder9246(n) {
 		for i := 3; i < len(n.Keys); i++ {
-			if n.Keys[i] == "to-zone" {
-				return "from-zone [ " + strings.Join(n.Keys[1:i], " ") + " ] to-zone" +
-					": a bracketed [ ... ] zone list is not valid on from-zone — a policy context is ONE " +
-					"zone pair. The malformed context is skipped on tolerant loads and the userspace " +
-					"policy snapshot is refused; write one `from-zone <zone> to-zone <zone>` context per pair"
+			if n.Keys[i] != "to-zone" {
+				continue
 			}
+			destinations := make([]string, 0, len(n.Children))
+			seen := make(map[string]bool, len(n.Children))
+			for _, child := range n.Children {
+				if len(child.Keys) == 0 {
+					continue
+				}
+				destination := child.Keys[0]
+				if child.KeyBracketed(0) {
+					destination = "[ " + strings.Join(child.Keys, " ") + " ]"
+				}
+				if !seen[destination] {
+					destinations = append(destinations, destination)
+					seen[destination] = true
+				}
+			}
+			toZone := ""
+			if len(destinations) > 0 {
+				toZone = " " + strings.Join(destinations, ", ")
+			}
+			return "from-zone [ " + strings.Join(n.Keys[1:i], " ") + " ] to-zone" + toZone +
+				": a bracketed [ ... ] zone list is not valid on from-zone — a policy context is ONE " +
+				"zone pair. The malformed context is skipped on tolerant loads and the userspace " +
+				"policy snapshot is refused; write one `from-zone <zone> to-zone <zone>` context per pair"
 		}
 	}
 	if n.Keys[2] != "to-zone" {
