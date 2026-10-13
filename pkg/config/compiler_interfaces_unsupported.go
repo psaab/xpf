@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // compiler_interfaces_unsupported.go carries reject-at-commit gates for
 // interface spellings that xpf parses but cannot honour. These unsupported
@@ -262,6 +265,88 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 							"binding; remove it) (#10293)",
 						ifName, unitID, famName, knob); err != nil {
 						return nil, err
+					}
+				}
+			}
+			// #12656: compileInterfaces only consumes address families inet
+			// and inet6. Policer bindings under mpls/any, and bindings packed
+			// under an unrecognized family token, otherwise disappear.
+			for _, family := range unit.Children {
+				if family.Name() != "family" {
+					continue
+				}
+				afs := []*Node{family}
+				if len(family.Keys) < 2 {
+					afs = family.Children
+				}
+				for _, af := range afs {
+					if af == nil {
+						continue
+					}
+					afName := af.Name()
+					start := 1
+					if af.Name() == "family" && len(af.Keys) > 1 {
+						afName = af.Keys[1]
+						start = 2
+					}
+					var bindings []string
+					for i := start; i+1 < len(af.Keys); i++ {
+						if af.Keys[i] == "policer" &&
+							(af.Keys[i+1] == "input" || af.Keys[i+1] == "output") {
+							bindings = append(bindings, "policer "+af.Keys[i+1])
+						}
+						if af.Keys[i] == "filter" && isFilterDirection12090(af.Keys[i+1]) {
+							bindings = append(bindings, "filter "+af.Keys[i+1])
+						}
+					}
+					for _, child := range af.Children {
+						switch child.Name() {
+						case "policer":
+							for i := 1; i < len(child.Keys); i++ {
+								if child.Keys[i] == "input" || child.Keys[i] == "output" {
+									bindings = append(bindings, "policer "+child.Keys[i])
+								}
+							}
+							for _, leaf := range child.Children {
+								if leaf.Name() == "input" || leaf.Name() == "output" {
+									bindings = append(bindings, "policer "+leaf.Name())
+								}
+							}
+						case "filter":
+							for i := 1; i < len(child.Keys); i++ {
+								if isFilterDirection12090(child.Keys[i]) {
+									bindings = append(bindings, "filter "+child.Keys[i])
+								}
+							}
+							for _, leaf := range child.Children {
+								if leaf.Name() == "input" || leaf.Name() == "output" {
+									bindings = append(bindings, "filter "+leaf.Name())
+								}
+							}
+						}
+					}
+					if !isInterfaceFamilyAF12090(afName) {
+						for _, binding := range bindings {
+							if err := emit(
+								"interfaces %s unit %s family %s: `%s` is not supported "+
+									"(unknown interface family; remove it) (#12656)",
+								ifName, unitID, afName, binding); err != nil {
+								return nil, err
+							}
+						}
+						continue
+					}
+					if afName == "mpls" || afName == "any" {
+						for _, binding := range bindings {
+							if strings.HasPrefix(binding, "policer ") {
+								if err := emit(
+									"interfaces %s unit %s family %s: `%s` is not supported "+
+										"(xpf has no consumer for this interface binding; remove it) (#12656)",
+									ifName, unitID, afName, binding); err != nil {
+									return nil, err
+								}
+							}
+						}
 					}
 				}
 			}
