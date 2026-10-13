@@ -206,8 +206,7 @@ const _: () = assert!(DST_COLS.is_power_of_two() && SRC_COLS.is_power_of_two());
 /// (drawn once from `hot_hash_seed::hot_path_hash_seed`, #2364) that
 /// `cell_index`/`cell_index_ip_port` fold in ALONGSIDE `ROW_SEEDS[row]`: the
 /// source→cell mapping is unknowable offline and reshuffles on every restart, so
-/// the attacker cannot construct a colliding IP set — exactly as the flow
-/// cache / session map / ECMP / CoS hashes already do.
+/// the attacker cannot construct a colliding IP set offline.
 const ROW_SEEDS: [u64; ROWS] = [
     0x9E37_79B9_7F4A_7C15,
     0xC2B2_AE3D_27D4_EB4F,
