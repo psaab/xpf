@@ -70,6 +70,7 @@ PIN_TEMP=''
 KEYRING_WRITTEN=0
 KEYRING_BACKUP=''
 KEYRING_TEMP=''
+KEYRING_IDENT=''
 # /usr/share/keyrings (NOT /etc/apt/keyrings): the xpf package ships the same
 # keyring here as a package-owned (non-conffile) file, so this bootstrap write
 # and the later `apt install` agree without a dpkg conffile prompt, and key
@@ -79,9 +80,14 @@ SRC=/etc/apt/sources.list.d/xpf.sources
 PIN=/etc/apt/preferences.d/xpf-channel.pref
 PIN_MARKER="# xpf appliance channel pin; Managed by install.sh (#11133)"
 
-# cleanup_on_fail removes the apt source written by this run, restores the
-# prior managed channel pin, and restores the keyring only while its live bytes
-# still match this installer's write. An unmarked preference is never changed.
+# cleanup_on_fail removes the apt source written by this run and restores the
+# prior managed channel pin. It rolls the keyring back (restores the previous
+# file, or removes the bootstrap write on first install) only while the live
+# path is still this installer's object: the device:inode recorded before the
+# rename AND the bytes it wrote (#12543). Equal bytes on a new inode (a dpkg
+# unpack renames over the path) and new bytes on the same inode (an in-place
+# rewrite) are both left intact, and the backup is discarded. An unmarked
+# preference is never changed.
 cleanup_on_fail() {
     _rc=$?
     if [ "$INSTALL_OK" != "1" ] && [ "$DRY" != "1" ]; then
@@ -112,7 +118,14 @@ cleanup_on_fail() {
             rm -f "$KEYRING_TEMP" || _rc=1
         fi
         if [ "$KEYRING_WRITTEN" = "1" ]; then
-            if [ -f "$KEYRING" ] && [ ! -L "$KEYRING" ] \
+            # Identity + bytes (#12543): only the bootstrap object itself may
+            # be rolled back. A dpkg unpack replaces the inode (rename over),
+            # so a byte-identical package payload must be preserved.
+            _keyring_ident_now=$(stat -c '%d:%i' "$KEYRING" 2>/dev/null) \
+                || _keyring_ident_now=''
+            if [ -n "$KEYRING_IDENT" ] \
+                && [ "$_keyring_ident_now" = "$KEYRING_IDENT" ] \
+                && [ -f "$KEYRING" ] && [ ! -L "$KEYRING" ] \
                 && printf '%s\n' "$ARCHIVE_KEY" | cmp -s - "$KEYRING"; then
                 if [ -n "$KEYRING_BACKUP" ]; then
                     info "install failed (rc=$_rc) — restoring previous $KEYRING"
@@ -366,6 +379,14 @@ install_keyring() {
             cp -p "$KEYRING" "$KEYRING_BACKUP"
         fi
         sync "$KEYRING_TEMP" || die "cannot sync temporary archive keyring."
+        # Record the bootstrap object's identity (device:inode) BEFORE the
+        # rename (#12543): the rename is same-directory, so the temp's
+        # identity becomes the live path's identity. Rollback requires this
+        # identity AND matching bytes, so a dpkg unpack that replaces the
+        # inode with byte-identical payload is left intact.
+        KEYRING_IDENT=$(stat -c '%d:%i' "$KEYRING_TEMP" 2>/dev/null) \
+            || die "cannot record bootstrap keyring identity."
+        [ -n "$KEYRING_IDENT" ] || die "cannot record bootstrap keyring identity."
         # Arm rollback before the rename so an unsuccessful move is reversible.
         KEYRING_WRITTEN=1
         mv -f "$KEYRING_TEMP" "$KEYRING"
