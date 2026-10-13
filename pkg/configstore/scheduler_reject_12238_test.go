@@ -30,8 +30,9 @@ func assertSchedulerUnion12238(t *testing.T, label string, compiled *config.Conf
 func assertSchedulerReject12238(t *testing.T, label string, err error) {
 	t.Helper()
 	if err == nil || !strings.Contains(err.Error(), `scheduler "S"`) ||
-		!strings.Contains(err.Error(), "monday") || !strings.Contains(err.Error(), "#12238") {
-		t.Fatalf("%s strict verdict = %v, want a #12238 rejection naming scheduler S and monday", label, err)
+		!strings.Contains(err.Error(), "monday") ||
+		(!strings.Contains(err.Error(), "#12238") && !strings.Contains(err.Error(), "#12643")) {
+		t.Fatalf("%s strict verdict = %v, want a weekday scheduler contradiction rejection", label, err)
 	}
 }
 
@@ -39,11 +40,11 @@ func assertSchedulerWarning12238(t *testing.T, label string, warnings []string) 
 	t.Helper()
 	for _, warning := range warnings {
 		if strings.Contains(warning, `scheduler "S"`) && strings.Contains(warning, "monday") &&
-			strings.Contains(warning, "#12238") {
+			(strings.Contains(warning, "#12238") || strings.Contains(warning, "#12643")) {
 			return
 		}
 	}
-	t.Fatalf("%s warnings = %v, want a #12238 warning naming scheduler S and monday", label, warnings)
+	t.Fatalf("%s warnings = %v, want a weekday scheduler contradiction warning naming scheduler S and monday", label, warnings)
 }
 
 func TestSchedulerContradictionLoadPathsRejectOrPreserveSameWindow12238(t *testing.T) {
@@ -63,9 +64,8 @@ func TestSchedulerContradictionLoadPathsRejectOrPreserveSameWindow12238(t *testi
 	assertSchedulerWarning12238(t, "LoadOverrideAs tolerant", overrideLenient.Warnings)
 	want := assertSchedulerUnion12238(t, "LoadOverrideAs tolerant compile", overrideLenient)
 
-	// Load merge into an empty candidate and the display-set replay below both
-	// compose Monday into ONE weekday statement, which is not diagnosed
-	// (#12643); they must still compile to the same union window.
+	// Load merge and display-set replay can coalesce Monday into one node.
+	// #12643 makes strict acceptance independent of that storage shape.
 	merge := newTestStore(t)
 	if err := merge.EnterConfigure(); err != nil {
 		t.Fatal(err)
@@ -73,11 +73,14 @@ func TestSchedulerContradictionLoadPathsRejectOrPreserveSameWindow12238(t *testi
 	if err := merge.LoadMergeAs("", schedulerContradictionText12238); err != nil {
 		t.Fatalf("LoadMergeAs: %v", err)
 	}
-	mergeCompiled, err := merge.CommitCheck()
+	_, err = merge.CommitCheck()
+	assertSchedulerReject12238(t, "LoadMergeAs", err)
+	mergeLenient, err := config.CompileConfigLenient(merge.candidate)
 	if err != nil {
-		t.Fatalf("LoadMergeAs strict verdict: %v", err)
+		t.Fatalf("compile merge candidate tolerantly: %v", err)
 	}
-	if got := assertSchedulerUnion12238(t, "LoadMergeAs", mergeCompiled); got != want {
+	assertSchedulerWarning12238(t, "LoadMergeAs tolerant", mergeLenient.Warnings)
+	if got := assertSchedulerUnion12238(t, "LoadMergeAs tolerant", mergeLenient); got != want {
 		t.Fatalf("LoadMergeAs window %+v differs from LoadOverrideAs tolerant window %+v", got, want)
 	}
 
@@ -92,11 +95,14 @@ func TestSchedulerContradictionLoadPathsRejectOrPreserveSameWindow12238(t *testi
 	if _, err := set.LoadSetAs("", setText); err != nil {
 		t.Fatalf("LoadSetAs(LoadOverrideAs display set): %v", err)
 	}
-	setCompiled, err := set.CommitCheck()
+	_, err = set.CommitCheck()
+	assertSchedulerReject12238(t, "LoadSetAs", err)
+	setLenient, err := config.CompileConfigLenient(set.candidate)
 	if err != nil {
-		t.Fatalf("LoadSetAs strict verdict: %v", err)
+		t.Fatalf("compile display-set candidate tolerantly: %v", err)
 	}
-	if got := assertSchedulerUnion12238(t, "LoadSetAs", setCompiled); got != want {
+	assertSchedulerWarning12238(t, "LoadSetAs tolerant", setLenient.Warnings)
+	if got := assertSchedulerUnion12238(t, "LoadSetAs tolerant", setLenient); got != want {
 		t.Fatalf("LoadSetAs window %+v differs from LoadOverrideAs tolerant window %+v", got, want)
 	}
 }
@@ -207,4 +213,69 @@ system { host-name before; }
 	}
 	_, err = booted.Commit()
 	assertSchedulerReject12238(t, "unrelated commit over the stored contradiction", err)
+}
+
+// #12643: strict commit validation rejects weekday all-day plus a complete
+// window even when flat set or group inheritance composes both into one node.
+func TestSchedulerSingleStatementAllDayWindowCommitCheckRejects12643(t *testing.T) {
+	tests := []struct {
+		name  string
+		apply func(*testing.T, *Store)
+	}{
+		{
+			name: "W3 flat set",
+			apply: func(t *testing.T, s *Store) {
+				for _, command := range []string{
+					"schedulers scheduler S monday all-day",
+					"schedulers scheduler S monday start-time 09:00:00",
+					"schedulers scheduler S monday stop-time 17:00:00",
+				} {
+					if err := s.SetFromInput(command); err != nil {
+						t.Fatalf("SetFromInput(%q): %v", command, err)
+					}
+				}
+			},
+		},
+		{
+			name: "W5 group-inherited",
+			apply: func(t *testing.T, s *Store) {
+				text := `groups { g1 { schedulers { scheduler S { monday all-day; } } } }
+apply-groups g1;
+schedulers { scheduler S { monday { start-time 09:00:00; stop-time 17:00:00; } } }
+`
+				if err := s.LoadOverrideAs("", text); err != nil {
+					t.Fatalf("LoadOverrideAs: %v", err)
+				}
+			},
+		},
+		{
+			name: "GR6 node0-only group",
+			apply: func(t *testing.T, s *Store) {
+				text := `groups {
+    node0 { schedulers { scheduler S { monday all-day; } } }
+    node1 { system { host-name node1; } }
+}
+apply-groups "${node}";
+schedulers { scheduler S { monday { start-time 09:00:00; stop-time 17:00:00; } } }
+`
+				if err := s.LoadOverrideAs("", text); err != nil {
+					t.Fatalf("LoadOverrideAs: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.EnterConfigure(); err != nil {
+				t.Fatal(err)
+			}
+			tc.apply(t, s)
+			_, err := s.CommitCheck()
+			if err == nil || !strings.Contains(err.Error(), `scheduler "S"`) ||
+				!strings.Contains(err.Error(), "monday") || !strings.Contains(err.Error(), "#12643") {
+				t.Fatalf("CommitCheck = %v, want a #12643 rejection naming scheduler S and monday", err)
+			}
+		})
+	}
 }

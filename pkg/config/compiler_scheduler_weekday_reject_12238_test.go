@@ -5,16 +5,15 @@ package config_test
 // compilation rejects those contradictions whether the statements sit in one
 // scheduler block or in repeated blocks; tolerant compilation warns and
 // preserves the existing union semantics. Partial boundary fragments and
-// values authored within one weekday statement keep their existing behavior.
-// Fragments that flat `set`, `load merge`, or group inheritance compose into
-// one statement are not diagnosed; those shapes are tracked by #12643.
+// values authored within one weekday statement keep their existing behavior,
+// except that a complete all-day/time-window combination is now diagnosed by
+// #12643 regardless of whether those meanings compose into one statement.
 //
 // Runtime evaluates flags before time bounds (Exclude, then AllDay), so the
 // union fallback must produce the same compiled scheduler window across paths.
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 
@@ -86,7 +85,7 @@ func rejectAndWarnUnion12238(t *testing.T, text string, kinds ...string) *config
 	}
 	var warning string
 	for _, candidate := range compiled.Warnings {
-		if strings.Contains(candidate, "#12238") {
+		if strings.Contains(candidate, "#12238") || strings.Contains(candidate, "#12643") {
 			warning = candidate
 			break
 		}
@@ -98,12 +97,16 @@ func rejectAndWarnUnion12238(t *testing.T, text string, kinds ...string) *config
 func assertDiagnostic12238(t *testing.T, label, message string, kinds []string) {
 	t.Helper()
 	if !strings.Contains(message, `scheduler "S"`) || !strings.Contains(message, "monday") ||
-		!strings.Contains(message, "#12238") {
-		t.Fatalf("%s = %q, want a #12238 diagnostic naming scheduler S and monday", label, message)
+		(!strings.Contains(message, "#12238") && !strings.Contains(message, "#12643")) {
+		t.Fatalf("%s = %q, want a scheduler S weekday contradiction diagnostic", label, message)
 	}
-	for _, kind := range []string{flagWindow12238, allDayExclude12238} {
-		if got, want := strings.Contains(message, kind), slices.Contains(kinds, kind); got != want {
-			t.Fatalf("%s = %q: mentions %q = %v, want %v", label, message, kind, got, want)
+	for _, kind := range kinds {
+		got := strings.Contains(message, kind)
+		if kind == flagWindow12238 {
+			got = got || strings.Contains(message, "complete start-time/stop-time window")
+		}
+		if !got {
+			t.Fatalf("%s = %q: missing expected diagnostic component %q", label, message, kind)
 		}
 	}
 }
@@ -236,7 +239,7 @@ apply-groups "${node}";
 	}
 	var warning string
 	for _, candidate := range compiled.Warnings {
-		if strings.Contains(candidate, "#12238") {
+		if strings.Contains(candidate, "#12238") || strings.Contains(candidate, "#12643") {
 			warning = candidate
 			break
 		}
@@ -312,15 +315,15 @@ func TestSchedulerWeekdayPartialAndSingleStatementControls_12238(t *testing.T) {
 	}
 
 	single := parseWeekdayConfig12238(t, `schedulers {
-    scheduler S { monday { all-day; exclude; start-time 09:00:00; stop-time 17:00:00; } }
+    scheduler S { monday { exclude; start-time 09:00:00; stop-time 17:00:00; } }
 }`)
 	compiled, err = config.CompileConfig(single)
 	if err != nil {
-		t.Fatalf("contradictory declarations within one weekday statement retain existing behavior: %v", err)
+		t.Fatalf("single-statement exclude/window remains valid because exclude already makes the day closed: %v", err)
 	}
 	w = weekdayWindow12238(t, compiled, "monday")
-	if !w.AllDay || !w.Exclude || w.StartTime != "09:00:00" || w.StopTime != "17:00:00" {
-		t.Fatalf("single-statement window changed: %+v", w)
+	if !w.Exclude || w.AllDay || w.StartTime != "09:00:00" || w.StopTime != "17:00:00" {
+		t.Fatalf("single-statement exclude/window changed: %+v", w)
 	}
 }
 
@@ -360,15 +363,28 @@ func TestSchedulerWeekdayDistinctDayAndFlatSetParity_12238(t *testing.T) {
 	}
 
 	// Flat `set` and FormatSet replay compose Monday into ONE weekday
-	// statement, which is not diagnosed (#12643); they must still compile to
-	// the same union window.
-	setCfg := compileFlat12238(t,
+	// statement, which #12643 now rejects because it combines all-day with
+	// a complete window; the union remains unchanged on tolerant paths.
+	setTree := &config.ConfigTree{}
+	for _, command := range []string{
 		"set schedulers scheduler S monday all-day",
 		"set schedulers scheduler S monday start-time 09:00:00",
 		"set schedulers scheduler S monday stop-time 17:00:00",
 		"set schedulers scheduler S tuesday start-time 09:00:00",
 		"set schedulers scheduler S tuesday stop-time 17:00:00",
-	)
+	} {
+		path, err := config.ParseSetCommand(command)
+		if err != nil {
+			t.Fatalf("parse flat command %q: %v", command, err)
+		}
+		if err := setTree.SetPath(path); err != nil {
+			t.Fatalf("apply flat command %q: %v", command, err)
+		}
+	}
+	setCfg, err := config.CompileConfigLenient(setTree)
+	if err != nil {
+		t.Fatalf("compile flat commands tolerantly: %v", err)
+	}
 	setMonday := weekdayWindow12238(t, setCfg, "monday")
 	if *setMonday != *monday {
 		t.Fatalf("hierarchical tolerant window %+v diverges from flat-set window %+v", *monday, *setMonday)
@@ -388,9 +404,9 @@ func TestSchedulerWeekdayDistinctDayAndFlatSetParity_12238(t *testing.T) {
 			t.Fatalf("replay FormatSet line %q: %v", line, err)
 		}
 	}
-	flatCfg, err := config.CompileConfig(flat)
+	flatCfg, err := config.CompileConfigLenient(flat)
 	if err != nil {
-		t.Fatalf("FormatSet replay must compile with the same union: %v", err)
+		t.Fatalf("FormatSet replay tolerantly compiled: %v", err)
 	}
 	flatMonday := weekdayWindow12238(t, flatCfg, "monday")
 	if *flatMonday != *monday {
@@ -480,12 +496,13 @@ schedulers { scheduler S { monday { start-time 09:00:00; stop-time 17:00:00; } }
 		warn   bool
 	}{
 		{name: "P1 hierarchical blocks", tree: baseTree, reject: true, warn: true},
-		// P2, P3, and P3c compose Monday into one statement (#12643).
-		{name: "P2 flat set", tree: p2Flat},
-		{name: "P3 FormatSet replay", tree: replaySet(baseTree.FormatSet())},
+		// P2, P3, and P3c compose Monday into one statement (#12643), so each
+		// now rejects strictly and warns tolerantly.
+		{name: "P2 flat set", tree: p2Flat, reject: true, warn: true},
+		{name: "P3 FormatSet replay", tree: replaySet(baseTree.FormatSet()), reject: true, warn: true},
 		{name: "P3b Format replay", tree: p3bFormat, reject: true, warn: true},
-		{name: "P3c load-merge FormatSet replay", tree: replaySet(baseTree.FormatSetForLoadMerge())},
-		{name: "P4 one statement", tree: p4Single},
+		{name: "P3c load-merge FormatSet replay", tree: replaySet(baseTree.FormatSetForLoadMerge()), reject: true, warn: true},
+		{name: "P4 one statement", tree: p4Single, reject: true, warn: true},
 		{name: "P5 split start/stop blocks", tree: p5Split, reject: true, warn: true},
 		{name: "P6 separate roots", tree: p6Roots, reject: true, warn: true},
 		{name: "P8 one block, separate statements", tree: p8InBlock, reject: true, warn: true},
@@ -496,10 +513,11 @@ schedulers { scheduler S { monday { start-time 09:00:00; stop-time 17:00:00; } }
 		t.Run(row.name, func(t *testing.T) {
 			_, strictErr := config.CompileConfig(row.tree)
 			if row.reject {
-				if strictErr == nil || !strings.Contains(strictErr.Error(), "#12238") ||
+				if strictErr == nil ||
+					(!strings.Contains(strictErr.Error(), "#12238") && !strings.Contains(strictErr.Error(), "#12643")) ||
 					!strings.Contains(strictErr.Error(), `scheduler "S"`) ||
 					!strings.Contains(strictErr.Error(), "monday") {
-					t.Fatalf("strict error = %v, want #12238 naming scheduler S and monday", strictErr)
+					t.Fatalf("strict error = %v, want a scheduler weekday contradiction diagnostic", strictErr)
 				}
 			} else if strictErr != nil {
 				t.Fatalf("strict compile: %v", strictErr)
@@ -511,7 +529,7 @@ schedulers { scheduler S { monday { start-time 09:00:00; stop-time 17:00:00; } }
 			}
 			foundWarning := false
 			for _, warning := range compiled.Warnings {
-				if strings.Contains(warning, "#12238") {
+				if strings.Contains(warning, "#12238") || strings.Contains(warning, "#12643") {
 					foundWarning = true
 					break
 				}

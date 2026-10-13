@@ -8977,20 +8977,24 @@ that a peer-only group supplies are rejected on either node.
   pre-existing union window, so an already-stored config still boots. The
   strict gate then refuses the next commit, including a commit after a
   rollback to such a revision, until the statements are combined or removed.
-- A flag next to only a partial start/stop pair, distinct weekdays, and
-  repeated `daily` statements (a last-wins scalar window) remain valid.
-- One weekday statement keeps the #10006 behavior: `monday { all-day;
-  start-time …; stop-time …; }` is accepted.
-- The outcome depends on the stored shape. Flat `set` lines that build one
-  `monday` node, `load merge` into an existing `monday { … }` container, and
-  group inheritance that merges into an inline `monday { … }` each produce ONE
-  statement, which is not diagnosed even when it mixes `all-day` with a time
-  window. `set … monday start-time …` on top of a stored `monday all-day;` leaf
-  produces a second statement and is rejected. The single-statement and
-  group-merged shapes are tracked by #12643.
+- A complete weekday time window cannot be combined with `all-day`, even
+  within one weekday statement. The runtime evaluates `all-day` before time
+  bounds, so the result enforces the day all day; strict compile rejects and
+  tolerant load / peer-sync warns while preserving the existing union
+  (#12643). A flag next to only a partial start/stop pair remains valid, as
+  does `exclude` with a time window because `exclude` already forces the day
+  closed. Daily windows retain their existing scalar/precedence behavior.
+- The check examines each effective node view before node-local compilation,
+  so a peer-only inherited all-day flag cannot evade validation when it merges
+  into an inline weekday window.
+- The outcome for a repeated or merged configuration is no longer determined
+  by whether flat `set`, `load merge`, or group inheritance composed the
+  conflicting values into one statement. All-day plus a complete time window
+  is rejected in every shape.
 
 Regression coverage is in
-`pkg/config/compiler_scheduler_weekday_reject_12238_test.go` and
+`pkg/config/compiler_scheduler_weekday_reject_12238_test.go`,
+`pkg/config/compiler_scheduler_weekday_single_12643_test.go`, and
 `pkg/configstore/scheduler_reject_12238_test.go`.
 
 ### Quoted-value escape round-trip contract (#3854)
