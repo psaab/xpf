@@ -1472,10 +1472,13 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 			// second top-level `policy-options {}` root reuses the persisted `ps`
 			// (from po.PolicyStatements) but gets a FRESH, empty termsByName — a
 			// same-name term in that root would append as a DUPLICATE (a malformed
-			// double route-map sequence in FRR) instead of composing. Seed the fresh
-			// index from ps.Terms so a same-name term composes onto the existing
-			// PolicyTerm across roots, exactly as it already does within a root.
+			// double route-map sequence in FRR) instead of composing. Seed
+			// named terms only: malformed one-key placeholders must not absorb
+			// or overwrite an authored term with the same leading body token.
 			for _, t := range ps.Terms {
+				if t == nil || t.nameless {
+					continue
+				}
 				termsByName[t.Name] = t
 			}
 		}
@@ -1483,38 +1486,79 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 		for _, prop := range inst.node.Children {
 			switch prop.Name() {
 			case "term":
-				if len(prop.Keys) < 2 {
-					continue
+				type policyTermInstance struct {
+					name            string
+					node            *Node
+					nameless        bool
+					nestedContainer bool
 				}
-				termName := prop.Keys[1]
-
-				// Find or create term (flat set syntax may create multiple
-				// nodes for the same term name)
-				term, exists := termsByName[termName]
-				if !exists {
-					term = &PolicyTerm{Name: termName}
-					termsByName[termName] = term
-					ps.Terms = append(ps.Terms, term)
-				}
-
-				// Handle both hierarchical children and flat inline keys.
-				// Flat: Keys=["term","t1","from","protocol","direct"] with no children
-				// Hierarchical: Keys=["term","t1"] with from/then children
-				// Handle hierarchical children and flat inline keys independently:
-				// Junos permits packed `term T from ... { then ...; }` nodes whose
-				// body and key tail both carry semantics.
-				if len(prop.Children) > 0 {
-					parsePolicyTermChildren(term, prop.Children)
-				}
-				if len(prop.Keys) > 2 {
-					var bracketed, quoted []bool
-					if len(prop.KeysBracketed) == len(prop.Keys) {
-						bracketed = prop.KeysBracketed[2:]
+				var termInstances []policyTermInstance
+				if len(prop.Keys) >= 2 {
+					termInstances = append(termInstances, policyTermInstance{
+						name: prop.Keys[1], node: prop,
+					})
+				} else {
+					// A one-key `term` container has no term-name token.
+					// Its malformed body remains unparsed; only a single-key,
+					// non-leaf child other than `from` or `then` can identify
+					// an explicitly named nested term.
+					_, name, nameless := policyNamelessTermBody12521(prop)
+					if !nameless {
+						for _, child := range prop.Children {
+							if namedPolicyTermChild12521(child) {
+								termInstances = append(termInstances, policyTermInstance{
+									name: child.Name(), node: child, nestedContainer: true,
+								})
+							}
+						}
 					}
-					if len(prop.KeysQuoted) == len(prop.Keys) {
-						quoted = prop.KeysQuoted[2:]
+					if nameless {
+						termInstances = append(termInstances, policyTermInstance{
+							name: name, node: prop, nameless: true,
+						})
 					}
-					parsePolicyTermInlineKeys(term, prop.Keys[2:], bracketed, quoted, prop.BracketedClosed)
+				}
+				for _, termInst := range termInstances {
+					termName := termInst.name
+					termNode := termInst.node
+					if termInst.nameless {
+						// Do not use the authored-looking first body key as an
+						// identity: it can collide with a real named term.
+						term := &PolicyTerm{Name: termName, nameless: true}
+						ps.Terms = append(ps.Terms, term)
+						continue
+					}
+					if termNode == nil {
+						continue
+					}
+
+					// Find or create term (flat set syntax may create multiple
+					// nodes for the same term name)
+					term, exists := termsByName[termName]
+					if !exists {
+						term = &PolicyTerm{Name: termName}
+						termsByName[termName] = term
+						ps.Terms = append(ps.Terms, term)
+					}
+					if termInst.nestedContainer {
+						term.nestedContainer12521 = true
+					}
+
+					if len(termNode.Children) > 0 {
+						parsePolicyTermChildren(term, termNode.Children)
+					}
+					tail := instanceValueTail(termNode, termName)
+					if len(tail) > 0 {
+						offset := len(termNode.Keys) - len(tail)
+						var bracketed, quoted []bool
+						if len(termNode.KeysBracketed) == len(termNode.Keys) {
+							bracketed = termNode.KeysBracketed[offset:]
+						}
+						if len(termNode.KeysQuoted) == len(termNode.Keys) {
+							quoted = termNode.KeysQuoted[offset:]
+						}
+						parsePolicyTermInlineKeys(term, tail, bracketed, quoted, termNode.BracketedClosed)
+					}
 				}
 			case "from":
 				ps.UnknownFrom = append(ps.UnknownFrom, policyStatementUnknownFrom11779(prop)...)

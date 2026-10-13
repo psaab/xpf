@@ -695,6 +695,12 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 		if len(errs) > 0 {
 			return fmt.Errorf("parse error: %v", errs[0])
 		}
+		// Inspect the literal input before hierarchical-to-set lowering erases
+		// whether a one-key policy term had a name. Group bodies are included,
+		// but references are not expanded using only this fragment.
+		if err := config.ValidatePolicyNamelessTermsAST12521(tree); err != nil {
+			return fmt.Errorf("merge: %w", err)
+		}
 		// Convert hierarchical to flat commands and apply each one. FormatSet
 		// emits a `deactivate <path>` line after every inactive node's `set`
 		// line(s), so the hierarchical -> flat -> tree round trip must honor

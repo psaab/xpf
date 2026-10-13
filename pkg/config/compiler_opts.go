@@ -2686,6 +2686,9 @@ type compileOpts struct {
 	// independently omits invalid next-hop, prepend, local-preference, metric,
 	// metric-type, and origin clauses so an existing config still boots.
 	lenientPolicyThenOperands bool
+	// lenientPolicyNamelessTerm12521 downgrades the routing-policy nameless
+	// term gate to a warning on tolerant load / peer-sync.
+	lenientPolicyNamelessTerm12521 bool
 	// lenientPolicyReservedRedistName (#5116/#12065) downgrades the reserved
 	// route-map-suffix gate (validatePolicyReservedRedistNameStrict) from a
 	// hard compile error to a cfg.Warnings entry. Generated source-protocol
@@ -3352,6 +3355,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyASPathRegex:               true,
 		lenientPolicyCommunityRegex:            true,
 		lenientPolicyThenOperands:              true,
+		lenientPolicyNamelessTerm12521:         true,
 		lenientPolicyReservedRedistName:        true,
 		lenientPolicyReservedChainName:         true,
 		lenientVRRPVirtualAddress:              true,

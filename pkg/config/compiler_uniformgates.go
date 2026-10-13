@@ -11,10 +11,11 @@ import "fmt"
 // sub-struct of the compiled *Config and either (a) returns its first error on
 // the strict commit / commit-check path, or (b) downgrades to a warning
 // appended to cfg.Warnings on its per-gate tolerant flag (load / peer-sync,
-// #1960 no-brick). The phase performs NO cfg mutation — it only reads the
-// compiled config, threads warnings, and dispatches the first strict error.
-// (validateEventOptionsWithinAST is an AST pre-walk, so this phase also reads
-// the group-expanded, inactive-pruned *ConfigTree; it is read-only there.)
+// #1960 no-brick). Tolerant gates may append warnings and replace malformed
+// typed values with safe placeholders; strict gates dispatch the first error.
+// This phase does not mutate the source AST. (validateEventOptionsWithinAST
+// is an AST pre-walk, so the phase also reads the group-expanded,
+// inactive-pruned *ConfigTree; it is read-only there.)
 //
 // Behavior-preserving invariants (do NOT reorder relative to master): the
 // source order of every gate is observable — on the strict path the FIRST

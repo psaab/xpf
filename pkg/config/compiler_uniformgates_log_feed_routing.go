@@ -472,5 +472,26 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #12521: a one-key routing-policy `term` container has no authored name
+	// unless its whole body consists of explicitly named nested terms. Strict
+	// commit / commit-check rejects every nameless body. Tolerant load /
+	// peer-sync warns and replaces each malformed container with a neutral term,
+	// without executing a nested child from a mixed malformed container.
+	if opts.lenientPolicyNamelessTerm12521 {
+		errs := policyNamelessTermErrors12521(cfg)
+		for _, err := range errs {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("routing policy nameless term (downgraded to warning on tolerant path): %v", err))
+		}
+		if len(errs) > 0 {
+			neutralizePolicyNamelessTerms12521(cfg)
+		}
+		for _, warning := range policyNestedTermWarnings12521(cfg) {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("routing policy nested term (tolerant behavior change): %s", warning))
+		}
+	} else if err := validatePolicyNamelessTermsStrict12521(cfg); err != nil {
+		return err
+	}
 	return nil
 }
