@@ -432,6 +432,48 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 	if grouped != nil && len(grouped) != len(path) {
 		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
 	}
+	// Junos accepts a compact policy term as `term T then accept from ...`.
+	// In the flat set schema the first clause is a container and the remainder
+	// is therefore nested below then/accept. The policy compiler consumes `from`
+	// as a sibling of `then`, not as a child of the action. Normalize this
+	// supported spelling before the schema walk so direct SetPath, LoadSet, and
+	// LoadMerge replay all build the same term tree. Do not reinterpret quoted
+	// or bracketed tokens, nor action operands.
+	fromIndex := -1
+	switch {
+	case len(path) > 0 && path[0] == "policy-options":
+		fromIndex = 7
+	case len(path) > 2 && path[0] == "groups" && path[2] == "policy-options":
+		fromIndex = 9
+	}
+	if fromIndex >= 0 && len(path) > fromIndex && path[fromIndex-6] == "policy-statement" &&
+		path[fromIndex-4] == "term" && path[fromIndex-2] == "then" &&
+		path[fromIndex] == "from" && (path[fromIndex-1] == "accept" || path[fromIndex-1] == "reject") &&
+		(quoted == nil || !quoted[fromIndex]) && (grouped == nil || !grouped[fromIndex]) {
+		termEnd := fromIndex - 2
+		fromPath := make([]string, 0, len(path)-2)
+		fromPath = append(fromPath, path[:termEnd]...)
+		fromPath = append(fromPath, path[fromIndex:]...)
+		actionPath := path[:fromIndex]
+		var fromQuoted, actionQuoted []bool
+		if quoted != nil {
+			fromQuoted = make([]bool, 0, len(quoted)-2)
+			fromQuoted = append(fromQuoted, quoted[:termEnd]...)
+			fromQuoted = append(fromQuoted, quoted[fromIndex:]...)
+			actionQuoted = quoted[:fromIndex]
+		}
+		var fromGrouped, actionGrouped []bool
+		if grouped != nil {
+			fromGrouped = make([]bool, 0, len(grouped)-2)
+			fromGrouped = append(fromGrouped, grouped[:termEnd]...)
+			fromGrouped = append(fromGrouped, grouped[fromIndex:]...)
+			actionGrouped = grouped[:fromIndex]
+		}
+		if err := t.SetPathQuotedGrouped(fromPath, fromQuoted, fromGrouped, closed...); err != nil {
+			return err
+		}
+		return t.SetPathQuotedGrouped(actionPath, actionQuoted, actionGrouped, closed...)
+	}
 	// quotedRange returns the provenance for path[from:to] — every node built
 	// below takes its keys from exactly one CONTIGUOUS range of path (the
 	// schema slice, plus any compound-key or trailing-value tokens, which are
