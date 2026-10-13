@@ -3663,6 +3663,21 @@ fn pool_snat_sticky_index_changes_with_secret_seed_and_stays_in_bounds_12789() {
 }
 
 #[test]
+fn pool_snat_keyed_index_vector_12789() {
+    let sources = [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 100)),
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        IpAddr::V6("2001:db8::1".parse().unwrap()),
+        IpAddr::V6("2001:db8:1:2:3:4:5:6".parse().unwrap()),
+    ];
+    let indices = sources
+        .iter()
+        .map(|src| super::allocator::sticky_pool_index_seeded(*src, 64, 42))
+        .collect::<Vec<_>>();
+    assert_eq!(indices, [22, 21, 38, 33]);
+}
+
+#[test]
 fn pool_snat_sticky_index_v6_s3_clique_disperses_for_each_seed_12789() {
     for seed in [1, 42, 0x0123_4567_89AB_CDEF, u64::MAX] {
         let distinct: std::collections::BTreeSet<usize> = (0..256u16)
