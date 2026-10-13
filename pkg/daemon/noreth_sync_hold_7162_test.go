@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,8 @@ func TestNoRethSyncHoldReleasesOnTimeoutWithNoPeer7162(t *testing.T) {
 	}
 
 	d.armNoRethSyncHold(40 * time.Millisecond)
+	// #12579: poll continuously rather than sleeping past the narrow interval
+	// between publishing the reason and clearing the active flag.
 
 	deadline := time.Now().Add(3 * time.Second)
 	for d.inNoRethSyncHold() {
@@ -146,7 +149,9 @@ func TestNoRethSyncHoldReleasesOnTimeoutWithNoPeer7162(t *testing.T) {
 				"#110's defect exactly: a bound that depends on the condition it is " +
 				"bounding cannot fire in the case it exists for (#7162)")
 		}
-		time.Sleep(5 * time.Millisecond)
+		// Keep polling concurrent with the two-state release publication;
+		// sleeping here can skip over the narrow flag/reason interleaving.
+		runtime.Gosched()
 	}
 	if got := d.noRethSyncHoldEndReason(); got != "timeout-degraded" {
 		t.Errorf("hold end reason = %q, want %q so the degraded release is "+

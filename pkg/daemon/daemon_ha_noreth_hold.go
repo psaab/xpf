@@ -82,8 +82,10 @@ func (d *Daemon) releaseNoRethSyncHold(reason string) {
 		d.noRethSyncHoldMu.Unlock()
 		return
 	}
-	d.noRethSyncHold.Store(false)
+	// Publish the reason before clearing the flag: lock-free readers use the
+	// cleared flag as the release edge, then read the paired reason.
 	d.noRethSyncHoldReason.Store(reason)
+	d.noRethSyncHold.Store(false)
 	if d.noRethSyncHoldTimer != nil {
 		d.noRethSyncHoldTimer.Stop()
 		d.noRethSyncHoldTimer = nil
