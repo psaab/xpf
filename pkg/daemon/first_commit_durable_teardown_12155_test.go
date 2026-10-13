@@ -30,6 +30,7 @@ func (d *firstCommitTeardownRuntime12155) Teardown() error {
 // config remains suppressed, then the same bootstrap teardown used by a live
 // timer removes the abandoned networkd/FRR state before its debt is cleared.
 func TestExpiredFirstCommitBootTearsDownTakeover12155(t *testing.T) {
+	_ = firstCommit12155FilesAndCommands(t)
 	root := t.TempDir()
 	storePath := filepath.Join(root, "xpf.conf")
 	store, err := configstore.New(storePath)

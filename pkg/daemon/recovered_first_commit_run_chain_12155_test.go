@@ -30,6 +30,7 @@ import (
 // only an ephemeral loopback gRPC listener, and keeps host effects redirected
 // into temp dirs.
 func TestRecoveredFirstCommitBootCleanupRunsThroughDaemonRun12155(t *testing.T) {
+	isolateFirstCommitRollbackHostAuth12169(t)
 	previousLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
@@ -119,6 +120,32 @@ func TestRecoveredFirstCommitBootCleanupRunsThroughDaemonRun12155(t *testing.T) 
 			GRPCAddr:    "127.0.0.1:0",
 		},
 	}
+	// Seed the host-auth state from the abandoned config; Run must retire it
+	// even though Store.Load rolled back before the #12169 live callback.
+	if err := os.WriteFile(shadowPath, []byte("root:!:19000:0:99999:7:::\nalice:$6$salt$activehash:19000:0:99999:7:::\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwdPath, []byte("root:x:0:0::/root:/bin/bash\nalice:x:1001:1001::/home/alice:/bin/bash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProvisioned("alice", 1001); err != nil {
+		t.Fatal(err)
+	}
+	if err := markPasswordProvisioned("alice", 1001); err != nil {
+		t.Fatal(err)
+	}
+	chpasswdBin := filepath.Join(root, "hostauth-bin")
+	if err := os.MkdirAll(chpasswdBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chpasswdInput := filepath.Join(root, "chpasswd.stdin")
+	chpasswd := "#!/bin/sh\ncat > " + chpasswdInput + "\n" +
+		"while IFS=: read -r u h _; do [ -n \"$u\" ] && [ -n \"$h\" ] && " +
+		"sed -i \"s/^$u:[^:]*/$u:$h/\" " + shadowPath + "; done < " + chpasswdInput + "\n"
+	if err := os.WriteFile(filepath.Join(chpasswdBin, "chpasswd"), []byte(chpasswd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", chpasswdBin+":"+os.Getenv("PATH"))
 
 	// Queue a real Run exit condition before startup. Run only consumes it
 	// after every startup phase succeeds, so the call below proves the phases
@@ -137,6 +164,23 @@ func TestRecoveredFirstCommitBootCleanupRunsThroughDaemonRun12155(t *testing.T) 
 	}
 	if got := readConf(t, confPath); strings.Contains(got, sentinel) {
 		t.Fatalf("Daemon.Run left FRR managed sentinel %q", sentinel)
+	}
+	shadow, err := os.ReadFile(shadowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(shadow), "\n") {
+		if strings.HasPrefix(line, "alice:") && !strings.HasPrefix(line, "alice:!") {
+			t.Fatalf("Daemon.Run left abandoned FIRST password usable: %q", line)
+		}
+	}
+	for _, marker := range []string{
+		filepath.Join(provisionedUsersDir, "alice"),
+		filepath.Join(provisionedPasswordsDir(), "alice"),
+	} {
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Errorf("Daemon.Run left abandoned host-auth marker %s (stat err=%v)", marker, err)
+		}
 	}
 
 	// Post-dataplane stage: observe durable debt and its on-disk marker cleared

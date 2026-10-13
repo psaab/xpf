@@ -23,6 +23,7 @@ import (
 func firstCommit12155FilesAndCommands(t *testing.T) string {
 	t.Helper()
 	seamTransitClose9686(t)
+	isolateFirstCommitRollbackHostAuth12169(t)
 	dir := t.TempDir()
 	oldDir, oldRun := linkDir, runCommandTimeout
 	linkDir = dir
