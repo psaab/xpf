@@ -676,11 +676,10 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 			}
 		}
 	}
-	// A dropped child whose spelling could name an enforcement control or
-	// zone-local address-book behavior makes the zone's effective intent
-	// ambiguous. Tolerant Load/SyncApply keeps the node bootable but removes
-	// every interface binding and screen claim, so neither the kernel dataplane
-	// nor userspace can present a healthy zone.
+	// Any unknown child makes the zone's effective intent ambiguous. Tolerant
+	// Load/SyncApply keeps the node bootable but removes every interface binding
+	// and screen claim, so neither the kernel dataplane nor userspace can present
+	// a partially compiled zone.
 	// Apply after all repeated security-zone blocks so later siblings cannot
 	// restore bindings after the poison was recorded.
 	for _, zone := range sec.Zones {

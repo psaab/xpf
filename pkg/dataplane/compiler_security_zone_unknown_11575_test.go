@@ -63,7 +63,7 @@ security {
 	}
 	foundUnarmed := false
 	for _, surface := range result.unarmedSurfaces {
-		if surface.Name == "zone:trust" && strings.Contains(surface.Reason, "enforcement-bearing") {
+		if surface.Name == "zone:trust" && strings.Contains(surface.Reason, "unknown security-zone child") {
 			foundUnarmed = true
 			break
 		}

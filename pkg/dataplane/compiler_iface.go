@@ -747,7 +747,7 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 		if zone.DroppedEnforcementChild {
 			result.recordUnarmedSurface(UnarmedSurface{
 				Name:   "zone:" + name,
-				Reason: "unknown enforcement-bearing security-zone child was dropped; zone excluded from dataplane maps",
+				Reason: "unknown security-zone child was dropped; zone excluded from dataplane maps",
 			})
 			continue
 		}
