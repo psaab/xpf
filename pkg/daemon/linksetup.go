@@ -401,11 +401,12 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	// MINOR-3: unknown NICs run BEFORE any known NIC writes (order within
 	// each class is still map order). Every neutralize lands before the
 	// known owner's writeLinkFile, so no map order can interleave a
-	// neutralize between the owner's write and the end of the pass. For an
-	// unknown whose own temp rename FAILED (unfreed current), a failed
-	// owner write leaves NO claim behind (fail-closed: nothing was
-	// spared). Temp-OK shape excepted: if the temp rename SUCCEEDED the
-	// phase-2 key is xpf-tmp-N and the O.link removal misses (#12557).
+	// neutralize between the owner's write and the end of the pass. A
+	// failed owner write leaves NO claim behind (fail-closed: nothing was
+	// spared) whether the unknown's own temp rename FAILED (unfreed
+	// current, so its O.link is named by current) or SUCCEEDED (the
+	// phase-2 key is xpf-tmp-N, so the O.link is removed under the
+	// pre-temp name that breakNameCollisions returns in preTemp, #12557).
 	// The ordering key must match the loop's unknown predicate, including
 	// the collided-temp "" re-derivation below — hence the helper.
 	var errs []error
@@ -612,6 +613,14 @@ func logUnknownOriginalLinkSkip(logPrefix, current, final string) {
 // returned in stranded (tempName → its pre-temp current name) so the caller can
 // restore it to a host-predictable name; the positional caller has no unmapped
 // NICs, so it receives an empty map.
+//
+// A temp-renamed desired source is returned in preTemp (tempName → its
+// pre-temp current name), so the caller can still find the .link filed under
+// the name the NIC wore before phase 1: the positional caller neutralizes an
+// unknown-original NIC's O.link under that name (#12557). The device-map
+// caller ignores it: deviceMapOriginalNameFor reports an unknown original only
+// for a NIC that already wears its final logical name, and phase 1 never
+// temp-renames such a NIC.
 //
 // currentNames MUST list every present NIC name — it is used both to decide
 // occupancy and to pick an xpf-tmp-N that is not already in use (a leftover
