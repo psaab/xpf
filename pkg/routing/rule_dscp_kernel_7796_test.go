@@ -265,8 +265,8 @@ func TestRuleAddDSCPRejectsOutOfRange7796(t *testing.T) {
 		t.Fatal("dscp 64 must be rejected: the field is 6 bits, so 64 truncates to 0 " +
 			"and would install a best-effort rule under a name that is not one")
 	}
-	if !strings.Contains(err.Error(), "out of range") {
-		t.Errorf("error %q should say the value is out of range", err)
+	if got, want := err.Error(), "dscp rule: dscp 64 out of range (0-63)"; got != want {
+		t.Errorf("error = %q, want encoder range-check error %q", got, want)
 	}
 }
 
