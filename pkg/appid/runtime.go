@@ -394,7 +394,9 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 		// lazily caches the full-universe assignment. If all tied candidates are
 		// already in the AppID-off catalog, keep that catalog's own assigned-ID
 		// order: sessions stamped by the off dataplane and unstamped sessions
-		// must retain the same fallback label (#12225 F3).
+		// must retain the same fallback label (#12225 F3). Candidates outside
+		// the OFF catalog are ranked too (#12630); that stamped/unstamped
+		// split is tracked in #12731.
 		best := ""
 		bestPortBased := false
 		var bestID uint16
