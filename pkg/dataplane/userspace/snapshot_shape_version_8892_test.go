@@ -461,7 +461,9 @@ const (
 	// at 45. This is the same v45 STANDS arm used for #12288.
 	// v45 STANDS (#12217): SecurityConfig.UnknownPoliciesChildren is a
 	// compile-time diagnostic (`json:"-"`, the #9246 MalformedZonePairs
-	// precedent) naming unknown direct children of `security policies`,
+	// precedent) naming unknown direct children of `security policies` (and, since
+	// #12629, qualified misnested contexts such as from-zone "A" to-zone
+	// "B" polcy),
 	// and Policy.UnknownSecurityPoliciesChildren (`json:"-"`, the F1
 	// carrier cause) carries those names on the synthetic poison carrier.
 	// ConfigSnapshot embeds Config, so this reflection walk sees the
