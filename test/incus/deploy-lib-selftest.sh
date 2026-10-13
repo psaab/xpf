@@ -1816,6 +1816,21 @@ test_manifest_write_wired_after_cluster_deploy() {
 	fi
 }
 
+test_cluster_deploy_gate_runs_in_one_ordered_wave() {
+	local code deploy gate wrapper
+	code=$(awk '/^cluster-deploy-and-gate:/,/^$/' "$SCRIPT_DIR/../../Makefile")
+	wrapper=$(grep -nF './test/incus/with-cluster.sh' <<<"$code" | cut -d: -f1)
+	deploy=$(grep -nF '$(MAKE) cluster-deploy' <<<"$code" | cut -d: -f1)
+	gate=$(grep -nF '$(MAKE) "$$1"' <<<"$code" | cut -d: -f1)
+	# deploy and gate share one recipe line; line order is enough there.
+	if [[ -z "$wrapper" || -z "$deploy" || -z "$gate" ]] ||
+		((wrapper >= deploy || deploy > gate)); then
+		bad "deploy/gate wave: deploy and smoke must run in one lock cell, in order"
+	else
+		ok "deploy/gate wave: deploy and smoke run in one ordered lock cell"
+	fi
+}
+
 
 # #12203: committed regression cells for the scoped dual-active role reader.
 DUAL_ACTIVE_CHAINED_CRASH="${DUAL_ACTIVE_CHAINED_CRASH:-$SCRIPT_DIR/test-chained-crash.sh}"
@@ -2018,6 +2033,7 @@ test_manifest_node_index_maps_configured_instances
 test_manifest_raw_records_verified_binary_hashes
 test_manifest_deb_hashes_package_payload
 test_manifest_write_wired_after_cluster_deploy
+test_cluster_deploy_gate_runs_in_one_ordered_wave
 test_reconcile_stale_pin_removes_managed
 test_reconcile_stale_pin_no_pin_noop
 test_reconcile_stale_pin_foreign_override_hardfails
