@@ -74,12 +74,11 @@ func (b *groupExpandBudget) hasPromotedSibling9855(dst []*Node, keyword string) 
 // false whenever the existing override/adopt behavior must stand: zone
 // statements (owned by #9801/#9831), scalar/unmodelled/no-tail leaves (the
 // #7648 expansion declines them all), and a schema the ancestor path cannot
-// resolve.
+// resolve. A routing-policy term the expansion declines is rebuilt by
+// policyTermBody12537 instead, so its group content is merged and validated
+// rather than dropped (#12537).
 func packedLeafMergeParts9855(ancestorPath [][]string, s *Node) (leafSchema *schemaNode, body []*Node, ok bool) {
-	if s == nil || groupZoneLeaf9831(ancestorPath, s) {
-		return nil, nil, false
-	}
-	if body = groupPackedLeafBody(ancestorPath, s); body == nil {
+	if s == nil || len(s.Keys) == 0 || groupZoneLeaf9831(ancestorPath, s) {
 		return nil, nil, false
 	}
 	parent := schemaAtAncestorPath(ancestorPath)
@@ -87,6 +86,12 @@ func packedLeafMergeParts9855(ancestorPath [][]string, s *Node) (leafSchema *sch
 		return nil, nil, false
 	}
 	if leafSchema = resolveSchemaChild(parent, s.Keys[0]); leafSchema == nil || leafSchema.children == nil {
+		return nil, nil, false
+	}
+	if body = groupPackedLeafBody(ancestorPath, s); body == nil {
+		body = policyTermBody12537(leafSchema, s, false)
+	}
+	if body == nil {
 		return nil, nil, false
 	}
 	return leafSchema, body, true
@@ -148,7 +153,10 @@ func markSynthTerminals9855(nodes []*Node) {
 // override — unless every gate holds: a clean leaf peer, a packed body or
 // unmodelled tail, the same raw instance, and a peer tail (if any) that
 // expands under the schema. An unexpandable peer tail bails so truncation
-// cannot drop tail tokens that downstream gates scanning Keys must see.
+// cannot drop tail tokens that downstream gates scanning Keys must see; a
+// routing-policy term's tail is instead rebuilt by policyTermBody12537, which
+// carries every match and action token, so the group's term is not dropped
+// beside it (#12537).
 func promoteLeafPeerForPackedGroup9855(ancestorPath [][]string, peer, s *Node) ([]*Node, bool) {
 	if peer == nil || !peer.IsLeaf || s == nil {
 		return nil, false
@@ -188,7 +196,9 @@ func promoteLeafPeerForPackedGroup9855(ancestorPath [][]string, peer, s *Node) (
 	if tail := peer.Keys[span:]; len(tail) > 0 {
 		peerBody = packedBodyChildren(peer, leafSchema)
 		if sameNodes9855(peerBody, peer.Children) {
-			return nil, false
+			if peerBody = policyTermBody12537(leafSchema, peer, true); peerBody == nil {
+				return nil, false
+			}
 		}
 	}
 	oldKeys := peer.Keys
