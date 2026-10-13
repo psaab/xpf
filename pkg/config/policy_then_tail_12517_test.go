@@ -23,9 +23,9 @@ func policyThenTailCases12517() []policyThenTailCase12517 {
 		{name: "metric-type", action: "metric-type 1", tail: "foo"},
 		{name: "origin", action: "origin igp", tail: "egp"},
 		{name: "community-none", action: "community none", tail: "foo"},
-		{name: "community-add", action: "community add 65001:100", tail: "foo"},
-		{name: "community-set", action: "community set 65001:100", tail: "foo"},
-		{name: "community-value", action: "community 65001:100", tail: "foo"},
+		{name: "community-add", action: "community add [ 65001:100 ]", tail: "foo"},
+		{name: "community-set", action: "community set [ 65001:100 ]", tail: "foo"},
+		{name: "community-value", action: "community [ 65001:100 ]", tail: "foo"},
 		{name: "load-balance", action: "load-balance per-packet", tail: "foo"},
 		{name: "accept", action: "accept", tail: "foo"},
 		{name: "reject", action: "reject", tail: "foo"},
@@ -69,16 +69,20 @@ func policyThenTailSpellings12517(tc policyThenTailCase12517) []struct {
 	}
 }
 
+// policyTree12517 parses hierarchical text, or one or more `set` lines through
+// the store's grouped set parser, which keeps `[ ... ]` provenance.
 func policyTree12517(t *testing.T, text string) *config.ConfigTree {
 	t.Helper()
 	if strings.HasPrefix(text, "set ") {
-		path, err := config.ParseSetCommand(text)
-		if err != nil {
-			t.Fatalf("ParseSetCommand(%q): %v", text, err)
-		}
 		tree := &config.ConfigTree{}
-		if err := tree.SetPath(path); err != nil {
-			t.Fatalf("SetPath(%q): %v", text, err)
+		for _, line := range strings.Split(text, "\n") {
+			_, path, quoted, grouped, closed, err := config.ParseSetVerbGroupedClosed(line)
+			if err != nil {
+				t.Fatalf("ParseSetVerbGroupedClosed(%q): %v", line, err)
+			}
+			if err := tree.SetPathQuotedGrouped(path, quoted, grouped, closed); err != nil {
+				t.Fatalf("SetPathQuotedGrouped(%q): %v", line, err)
+			}
 		}
 		return tree
 	}
@@ -399,6 +403,214 @@ func TestBareRouteFilterAfterThenKeepsFromDiagnostic12517(t *testing.T) {
 			_, err := config.CompileConfig(policyTree12517(t, text))
 			if err == nil || !strings.Contains(err.Error(), "supported `from` clauses") {
 				t.Fatalf("strict compile error = %v, want the #11779 supported-from diagnostic", err)
+			}
+		})
+	}
+}
+
+type policyThenLoad12517 struct {
+	name string
+	fn   func(*configstore.Store, string) error
+}
+
+// policyThenLoads12517 are the candidate-loading store channels. A set-path
+// text also goes through SetFromInput, the operator CLI/gRPC/REST `set` path.
+func policyThenLoads12517(text string) []policyThenLoad12517 {
+	loads := []policyThenLoad12517{
+		{name: "LoadOverride", fn: (*configstore.Store).LoadOverride},
+		{name: "LoadMerge", fn: (*configstore.Store).LoadMerge},
+	}
+	if strings.HasPrefix(text, "set ") {
+		loads = append(loads, policyThenLoad12517{name: "SetFromInput", fn: func(s *configstore.Store, text string) error {
+			for _, line := range strings.Split(text, "\n") {
+				if err := s.SetFromInput(strings.TrimPrefix(line, "set ")); err != nil {
+					return err
+				}
+			}
+			return nil
+		}})
+	}
+	return loads
+}
+
+// policyThenCommitCheck12517 loads text into a fresh candidate and returns
+// the CommitCheck result; a load error fails the test before commit checks.
+func policyThenCommitCheck12517(t *testing.T, load policyThenLoad12517, text string) (*config.Config, error) {
+	t.Helper()
+	store := policyThenTailStore12517(t)
+	if err := load.fn(store, text); err != nil {
+		t.Fatalf("%s rejected input before commit validation: %v", load.name, err)
+	}
+	return store.CommitCheck()
+}
+
+// FAIL-ON-REVERT (#12517 B1): a `[ ... ]` community list after a chained
+// action is one value. expandFlatRun dropped bracket provenance from the
+// statements it cut out of a run, so d042225ed's child reader counted the
+// second member as an unknown modifier and strict commit rejected configs
+// that master commits. RED with the list extent ignored (one value token
+// regardless of brackets): every row fails with `unknown modifier "65001:2"`.
+func TestChainedBracketedCommunityListCommits12517(t *testing.T) {
+	for _, list := range []struct{ name, clause, op string }{
+		{name: "add", clause: "community add [ 65001:1 65001:2 ]", op: "add"},
+		{name: "set", clause: "community set [ 65001:1 65001:2 ]", op: "set"},
+		{name: "bare", clause: "community [ 65001:1 65001:2 ]", op: ""},
+	} {
+		chain := "local-preference 200 metric 10 " + list.clause + " accept"
+		for _, spelling := range []struct {
+			name, text string
+			chained    bool
+		}{
+			{name: "compact chain", text: "policy-options { policy-statement P { term t { then " + chain + "; } } }", chained: true},
+			{name: "term-line chain", text: "policy-options { policy-statement P { term t then " + chain + "; } }", chained: true},
+			{name: "braced chain", text: "policy-options { policy-statement P { term t { then { " + chain + "; } } } }", chained: true},
+			{name: "braced accept first", text: "policy-options { policy-statement P { term t { then { accept " + list.clause + "; } } } }"},
+			{name: "set-path chain", text: "set policy-options policy-statement P term t then " + chain, chained: true},
+		} {
+			check := func(t *testing.T, cfg *config.Config) {
+				t.Helper()
+				term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+				value := term.Community
+				if list.op == "add" {
+					value = term.CommunityAdd
+				}
+				if term.Action != "accept" || term.CommunityOp != list.op || value != "65001:1 65001:2" {
+					t.Fatalf("Action=%q CommunityOp=%q value=%q, want accept/%q/%q",
+						term.Action, term.CommunityOp, value, list.op, "65001:1 65001:2")
+				}
+				if spelling.chained && (term.LocalPreference != 200 || term.Metric != 10) {
+					t.Fatalf("chain lost its actions: LocalPreference=%d Metric=%d", term.LocalPreference, term.Metric)
+				}
+			}
+			t.Run(list.name+"/"+spelling.name, func(t *testing.T) {
+				t.Run("CompileConfig", func(t *testing.T) {
+					cfg, err := config.CompileConfig(policyTree12517(t, spelling.text))
+					if err != nil {
+						t.Fatalf("strict compile rejected a valid bracketed list: %v", err)
+					}
+					check(t, cfg)
+				})
+				t.Run("CheckText", func(t *testing.T) {
+					cfg, err := configstore.CheckText(spelling.text, 0)
+					if err != nil {
+						t.Fatalf("CheckText rejected a valid bracketed list: %v", err)
+					}
+					check(t, cfg)
+				})
+				for _, load := range policyThenLoads12517(spelling.text) {
+					t.Run(load.name, func(t *testing.T) {
+						cfg, err := policyThenCommitCheck12517(t, load, spelling.text)
+						if err != nil {
+							t.Fatalf("%s + CommitCheck rejected a valid bracketed list: %v", load.name, err)
+						}
+						check(t, cfg)
+					})
+				}
+			})
+		}
+	}
+}
+
+// FAIL-ON-REVERT (#12517 B3): a token after the closing bracket of a
+// `then community` list is a tail in every spelling, chained or not.
+// RED with bracketed lists exempted from the tail check (d042225ed counted
+// every token once any key was bracketed): every child-path row accepts the
+// trailing value. RED with bracket provenance left off expandFlatRun's
+// segments: the chained child-path rows accept it.
+func TestTokenAfterBracketedCommunityListRejected12517(t *testing.T) {
+	const defs = "community L1 members 65001:1; community L2 members 65001:2; community L3 members 65001:3; "
+	const setDefs = "set policy-options community L1 members 65001:1\n" +
+		"set policy-options community L2 members 65001:2\n" +
+		"set policy-options community L3 members 65001:3\n"
+	for _, list := range []struct{ name, clause, extra string }{
+		{name: "add", clause: "community add [ 65001:1 65001:2 ] 65001:3", extra: "65001:3"},
+		{name: "set", clause: "community set [ 65001:1 65001:2 ] 65001:3", extra: "65001:3"},
+		{name: "bare", clause: "community [ 65001:1 65001:2 ] 65001:3", extra: "65001:3"},
+		{name: "delete", clause: "community delete [ L1 L2 ] L3", extra: "L3"},
+	} {
+		want := `policy-options policy-statement "P" term "t" then community: unknown modifier "` + list.extra + `"`
+		// The list ends the chain: with a sibling after the stray value, a
+		// set-path replay folds both onto the community leaf and the older
+		// #8437 fused-statement walk rejects it first, with its own message.
+		chain := "local-preference 200 " + list.clause
+		for _, spelling := range []struct{ name, text string }{
+			{name: "compact", text: "policy-options { " + defs + "policy-statement P { term t { then " + list.clause + "; } } }"},
+			{name: "term-line", text: "policy-options { " + defs + "policy-statement P { term t then " + list.clause + "; } }"},
+			{name: "braced", text: "policy-options { " + defs + "policy-statement P { term t { then { " + list.clause + "; } } } }"},
+			{name: "set-path", text: setDefs + "set policy-options policy-statement P term t then " + list.clause},
+			{name: "compact chain", text: "policy-options { " + defs + "policy-statement P { term t { then " + chain + "; } } }"},
+			{name: "term-line chain", text: "policy-options { " + defs + "policy-statement P { term t then " + chain + "; } }"},
+			{name: "braced chain", text: "policy-options { " + defs + "policy-statement P { term t { then { " + chain + "; } } } }"},
+			{name: "set-path chain", text: setDefs + "set policy-options policy-statement P term t then " + chain},
+		} {
+			t.Run(list.name+"/"+spelling.name, func(t *testing.T) {
+				tree := policyTree12517(t, spelling.text)
+				t.Run("CompileConfig", func(t *testing.T) {
+					if _, err := config.CompileConfig(tree); err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("strict compile error = %v, want %q", err, want)
+					}
+				})
+				t.Run("CompileConfigLenient", func(t *testing.T) {
+					cfg, err := config.CompileConfigLenient(tree)
+					if err != nil {
+						t.Fatalf("tolerant compile rejected a persisted config: %v", err)
+					}
+					if !hasPolicyThenTailWarning12517(cfg.Warnings, want) {
+						t.Fatalf("tolerant compile omitted %q: %v", want, cfg.Warnings)
+					}
+				})
+				t.Run("CheckText", func(t *testing.T) {
+					if _, err := configstore.CheckText(spelling.text, 0); err == nil || !strings.Contains(err.Error(), want) {
+						t.Fatalf("CheckText error = %v, want %q", err, want)
+					}
+				})
+				for _, load := range policyThenLoads12517(spelling.text) {
+					t.Run(load.name, func(t *testing.T) {
+						if _, err := policyThenCommitCheck12517(t, load, spelling.text); err == nil || !strings.Contains(err.Error(), want) {
+							t.Fatalf("%s + CommitCheck error = %v, want %q", load.name, err, want)
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
+// hasPolicyThenTailWarning12517 reports the tolerant downgrade of want.
+func hasPolicyThenTailWarning12517(warnings []string, want string) bool {
+	for _, warning := range warnings {
+		if strings.HasPrefix(warning, "policy then operand (downgraded to warning on tolerant path): ") &&
+			strings.Contains(warning, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// FAIL-ON-REVERT (#12517): `show configuration | display set` (FormatSet)
+// prints a leaf's `[ ... ]` list without brackets, so the replayed community
+// statement carries no bracket provenance. Such a value run stays one value
+// and the replay commits, as on master. RED with an unbracketed child-path
+// value limited to one token (d042225ed's counter): every add, set, and bare
+// row fails with `unknown modifier "65001:2"`.
+func TestDisplaySetCommunityListReplays12517(t *testing.T) {
+	for _, text := range []string{
+		"policy-options { policy-statement P { term t { then { community add [ 65001:1 65001:2 ]; accept; } } } }",
+		"policy-options { policy-statement P { term t { then community set [ 65001:1 65001:2 ]; } } }",
+		"policy-options { policy-statement P { term t then community [ 65001:1 65001:2 ] accept; } }",
+		"policy-options { community L1 members 65001:1; community L2 members 65001:2; policy-statement P { term t { then { community delete [ L1 L2 ]; accept; } } } }",
+	} {
+		t.Run(text, func(t *testing.T) {
+			display := strings.TrimSpace(policyTree12517(t, text).FormatSet())
+			if strings.Contains(display, "[") {
+				t.Fatalf("display set kept the brackets; this cell needs the bracket-free replay:\n%s", display)
+			}
+			if _, err := configstore.CheckText(display, 0); err != nil {
+				t.Fatalf("CheckText rejected display-set output: %v\n%s", err, display)
+			}
+			load := policyThenLoads12517(display)
+			if _, err := policyThenCommitCheck12517(t, load[len(load)-1], display); err != nil {
+				t.Fatalf("%s replay of display-set output failed CommitCheck: %v\n%s", load[len(load)-1].name, err, display)
 			}
 		})
 	}

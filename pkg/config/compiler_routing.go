@@ -2070,21 +2070,18 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					}
 					extraCount = 1
 				case "community":
-					values := firewallMatchValues(ac)
-					applyCommunityAction(term, values)
-					if len(values) > 0 && values[0] != "delete" {
-						extraCount = 1
-						if values[0] == "add" || values[0] == "set" {
-							extraCount = 2
-						}
-						for _, bracketed := range ac.KeysBracketed {
-							if bracketed {
-								extraCount = len(values)
-								break
-							}
-						}
+					// `then community` is a multi-value leaf that packs an
+					// optional operation keyword (add|delete|set|none) plus the
+					// community value onto Keys / Children. Read every token via
+					// the SSOT and interpret the operation (#2848).
+					applyCommunityAction(term, firewallMatchValues(ac))
+					if extra := policyThenCommunityTail12517(ac); extra != "" {
+						recordPolicyThenTail12517(term, action, extra)
 					}
 				case "as-path-prepend":
+					// `then as-path-prepend` is multi-value. Read every entry
+					// through the firewallMatchValues SSOT, then split quoted
+					// multi-ASN values before storing the operands (#2892/#12070).
 					term.hasASPathPrependOperand12070 = true
 					term.ASPathPrepend = appendPolicyASPathPrependOperands(term.ASPathPrepend, firewallMatchValues(ac))
 				case "origin":
@@ -2259,6 +2256,9 @@ func isQuotedThenNextHopReject12517(keys []string, quoted, bracketed []bool, i i
 		((i < len(quoted) && quoted[i]) || (i < len(bracketed) && bracketed[i]))
 }
 
+// policyThenNodeExtra12517 returns the first non-empty token a child-path
+// `then` statement carries beyond its keyword and `expected` operands,
+// counting its own Keys and then its nested children in order, or "".
 func policyThenNodeExtra12517(node *Node, expected int) string {
 	seen := 0
 	var visit func(*Node, bool) string
@@ -2287,6 +2287,74 @@ func policyThenNodeExtra12517(node *Node, expected int) string {
 		return ""
 	}
 	return visit(node, true)
+}
+
+// policyThenCommunityTail12517 returns the first token a child-path
+// `then community` statement carries beyond its operation and value, or "".
+// It reads the same values as firewallMatchValues. `none` takes no value.
+// The value of add, delete, set, or the bare replace form is one token or,
+// when the operator authored a `[ ... ]` list at the value slot, the whole
+// contiguous list; a token after the closing bracket is a tail.
+//
+// Bracket provenance is the only signal for the list's extent, and some
+// trees carry none: display-set output (FormatSet) prints a leaf's list
+// without brackets, and trees persisted before #6668 never recorded them.
+// With no bracketed token at all, a multi-token value is ambiguous, so the
+// whole run stays the value as on master: every token is applied, nothing
+// is dropped, and the community reference gate still rejects a token that
+// is neither a community literal nor a defined community.
+func policyThenCommunityTail12517(node *Node) string {
+	if node == nil || len(node.Keys) == 0 {
+		return ""
+	}
+	var values []string
+	var bracketed []bool
+	provenance := false
+	appendValue := func(owner *Node, i int) {
+		if owner.Keys[i] == "" {
+			return
+		}
+		values = append(values, owner.Keys[i])
+		bracketed = append(bracketed, owner.KeyBracketed(i))
+		provenance = provenance || owner.KeyBracketed(i)
+	}
+	for i := 1; i < len(node.Keys); i++ {
+		if node.Keys[i] == node.Keys[0] && !node.KeyQuoted(i) {
+			continue // firewallMatchValues drops bare self-repeats too
+		}
+		appendValue(node, i)
+	}
+	for _, child := range node.Children {
+		for i := range child.Keys {
+			appendValue(child, i)
+		}
+	}
+	if len(values) == 0 {
+		return ""
+	}
+	start := 0
+	switch values[0] {
+	case "none":
+		if len(values) > 1 {
+			return values[1]
+		}
+		return ""
+	case "add", "delete", "set":
+		start = 1
+	}
+	if start >= len(values) || !provenance {
+		return ""
+	}
+	end := start + 1
+	if bracketed[start] {
+		for end < len(values) && bracketed[end] {
+			end++
+		}
+	}
+	if end < len(values) {
+		return values[end]
+	}
+	return ""
 }
 
 var policyTermFromUnsupportedThenKeywords11779 = map[string]bool{
