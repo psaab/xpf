@@ -106,8 +106,8 @@
 //! commit-time memory advisory.
 
 use super::rate::{RateCounter, TokenBucket};
-use rustc_hash::FxHasher;
-use std::hash::Hasher;
+use crate::hot_hash_seed::HotPathSeededState;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::net::IpAddr;
 
 /// One count-min sketch cell: charge an event and report whether the key is
@@ -198,16 +198,13 @@ const _: () = assert!(DST_COLS.is_power_of_two() && SRC_COLS.is_power_of_two());
 /// independently — same-seed rows would collapse the sketch to a single row and
 /// inflate the false-positive rate (it never affects the fail-closed bias).
 ///
-/// These fixed per-row constants provide row INDEPENDENCE, not secrecy: they are
-/// public, so on their own they do NOT stop an off-box attacker from precomputing
-/// which source IPs land in a chosen victim's `ROWS` cells and driving those cells
-/// over `source-threshold` to throttle a victim's legit SYNs (a targeted
-/// false-positive, #4382). Secrecy comes from the PER-BOOT `SynRateSketch::seed`
-/// (drawn once from `hot_hash_seed::hot_path_hash_seed`, #2364) that
-/// `cell_index`/`cell_index_ip_port` fold in ALONGSIDE `ROW_SEEDS[row]`: the
-/// source→cell mapping is unknowable offline and reshuffles on every restart, so
-/// the attacker cannot construct a colliding IP set — exactly as the flow
-/// cache / session map / ECMP / CoS hashes already do.
+/// These fixed per-row constants provide row INDEPENDENCE, not secrecy. FxHash
+/// updates its state additively, so the hash difference for a chosen key pair
+/// is independent of the per-boot seed; address-word deltas can therefore form
+/// predictable colliding families across restarts (#12789). The per-boot
+/// `SynRateSketch::seed` (drawn once from `hot_hash_seed::hot_path_hash_seed`,
+/// #2364) is used by keyed SipHash in `cell_index` and `cell_index_ip_port`,
+/// preventing offline construction of those key-pair collisions.
 const ROW_SEEDS: [u64; ROWS] = [
     0x9E37_79B9_7F4A_7C15,
     0xC2B2_AE3D_27D4_EB4F,
@@ -266,13 +263,8 @@ impl<C: SketchCell> SynRateSketch<C> {
     /// column count).
     #[inline]
     fn cell_index(&self, row: usize, ip: &IpAddr) -> usize {
-        let mut h = FxHasher::default();
-        h.write_u64(ROW_SEEDS[row]);
-        h.write_u64(self.seed);
-        match ip {
-            IpAddr::V4(a) => h.write(&a.octets()),
-            IpAddr::V6(a) => h.write(&a.octets()),
-        }
+        let mut h = HotPathSeededState::new(self.seed).build_hasher();
+        (ROW_SEEDS[row], ip).hash(&mut h);
         (h.finish() as usize) & self.mask
     }
 
@@ -321,14 +313,8 @@ impl<C: SketchCell> SynRateSketch<C> {
     /// threshold`, which caps the rate to a destination IP AND port (#4112).
     #[inline]
     fn cell_index_ip_port(&self, row: usize, ip: &IpAddr, port: u16) -> usize {
-        let mut h = FxHasher::default();
-        h.write_u64(ROW_SEEDS[row]);
-        h.write_u64(self.seed);
-        match ip {
-            IpAddr::V4(a) => h.write(&a.octets()),
-            IpAddr::V6(a) => h.write(&a.octets()),
-        }
-        h.write_u16(port);
+        let mut h = HotPathSeededState::new(self.seed).build_hasher();
+        (ROW_SEEDS[row], ip, port).hash(&mut h);
         (h.finish() as usize) & self.mask
     }
 

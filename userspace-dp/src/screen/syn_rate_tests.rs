@@ -171,13 +171,9 @@ fn cell_mapping_stable_within_one_seed() {
     }
 }
 
-/// #4382 (hardening / RED-on-revert): the source→cell mapping must NOT be an
-/// externally probeable pure function of the source IP. Two different
-/// per-boot seeds must produce a DIFFERENT cell distribution for the SAME
-/// attacker IP set, so an off-box attacker cannot precompute a colliding
-/// source-IP set to drive a victim's cells over `source-threshold`. With the
-/// per-boot `seed` dropped from `cell_index` (the reverted state) the
-/// distribution is seed-independent and NO seed diverges → this FAILS.
+/// The keyed source→cell mapping is stable within one per-boot seed and changes
+/// when that seed changes. This guards against accidentally dropping the seed
+/// from the placement path; exact keyed-hash outputs are pinned separately.
 #[test]
 fn cell_mapping_depends_on_per_boot_seed() {
     let ips = sample_ips(128);
@@ -201,6 +197,91 @@ fn cell_mapping_depends_on_per_boot_seed() {
         diverged,
         "sketch cell distribution did not change across seeds — cell_index \
              is per-boot-seed-independent (#4382 regression)"
+    );
+}
+
+/// Sample IPv6 source family varying only the third segment (`s3`).
+fn v6_s3_ips(n: u16) -> Vec<IpAddr> {
+    (0..n)
+        .map(|i| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1)))
+        .collect()
+}
+
+#[test]
+fn cell_v6_s3_sample_spreads_for_every_pinned_seed_12789() {
+    let ips = v6_s3_ips(256);
+    for seed in [
+        0x0123_4567_89AB_CDEFu64,
+        0xA5A5_0000_C3C3_FFFF,
+        0xDEAD_BEEF_CAFE_BABE,
+        1,
+        42,
+        u64::MAX,
+    ] {
+        let s = SynRateSketch::with_cols_seeded(SRC_COLS, seed);
+        for row in 0..ROWS {
+            let distinct: std::collections::BTreeSet<usize> = ips
+                .iter()
+                .map(|ip| s.cell_indices(ip)[row])
+                .collect();
+            assert!(
+                distinct.len() > 64,
+                "v6 s3 sample covered only {} cells in row {row} under seed {seed:#x}",
+                distinct.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn cell_ip_port_v6_s3_sample_spreads_for_every_pinned_seed_12789() {
+    let ips = v6_s3_ips(256);
+    for seed in [
+        0x0123_4567_89AB_CDEFu64,
+        0xA5A5_0000_C3C3_FFFF,
+        0xDEAD_BEEF_CAFE_BABE,
+        1,
+        42,
+        u64::MAX,
+    ] {
+        let s = SynRateSketch::with_cols_seeded(DST_COLS, seed);
+        for row in 0..ROWS {
+            let distinct: std::collections::BTreeSet<usize> = ips
+                .iter()
+                .map(|ip| s.cell_indices_ip_port(ip, 53)[row])
+                .collect();
+            assert!(
+                distinct.len() > 64,
+                "v6 s3 (ip,port) sample covered only {} cells in row {row} under seed {seed:#x}",
+                distinct.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn cell_ip_port_mapping_is_stable_and_depends_on_per_boot_seed_12789() {
+    let ips = v6_s3_ips(128);
+    let distribution = |seed| {
+        let s = SynRateSketch::<RateCounter>::with_cols_seeded(DST_COLS, seed);
+        ips.iter()
+            .map(|ip| s.cell_indices_ip_port(ip, 443))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(distribution(42), distribution(42));
+    assert_ne!(distribution(42), distribution(43));
+}
+
+
+#[test]
+fn keyed_siphash_bucket_vectors_12789() {
+    let ip = v6_s3_ips(1)[0];
+    let src = SynRateSketch::with_cols_seeded(SRC_COLS, 42);
+    let dst = SynRateSketch::<RateCounter>::with_cols_seeded(DST_COLS, 42);
+    assert_eq!(src.cell_indices(&ip), [1492, 1468, 405, 1951]);
+    assert_eq!(
+        dst.cell_indices_ip_port(&ip, 53),
+        [547, 144, 896, 514]
     );
 }
 

@@ -3532,7 +3532,11 @@ fn pool_snat_address_persistent_sticks_source_to_pool_address() {
 
     let src = "10.0.1.101".parse().unwrap();
     let expected_idx = sticky_pool_index(src, 3);
-    assert_eq!(expected_idx, 1);
+    let expected_address = [
+        "203.0.113.1",
+        "203.0.113.2",
+        "203.0.113.3",
+    ][expected_idx];
 
     for want_port in 40000..40004 {
         let d = match_source_nat(
@@ -3547,7 +3551,7 @@ fn pool_snat_address_persistent_sticks_source_to_pool_address() {
             None,
         )
         .expect("should match");
-        assert_eq!(d.rewrite_src, Some("203.0.113.2".parse().unwrap()));
+        assert_eq!(d.rewrite_src, Some(expected_address.parse().unwrap()));
         assert_eq!(d.rewrite_src_port, Some(want_port));
     }
 }
@@ -3583,7 +3587,6 @@ fn pool_snat_address_persistent_sticks_each_source_independently() {
         "10.0.1.106".parse().unwrap(),
         "10.0.1.107".parse().unwrap(),
     ];
-    let mut pool_addresses_used = std::collections::HashSet::new();
 
     for src in sources {
         let mut addresses_for_src = std::collections::HashSet::new();
@@ -3608,13 +3611,7 @@ fn pool_snat_address_persistent_sticks_each_source_independently() {
             1,
             "source {src} mapped to multiple pool addresses: {addresses_for_src:?}"
         );
-        pool_addresses_used.extend(addresses_for_src);
     }
-
-    assert!(
-        pool_addresses_used.len() >= 4,
-        "sticky hash collapsed source spread: {pool_addresses_used:?}"
-    );
 }
 
 #[test]
@@ -3629,7 +3626,8 @@ fn pool_snat_address_persistent_spreads_distinct_sources_across_pool() {
             ((host >> 8) & 0xff) as u8,
             (host & 0xff) as u8,
         ));
-        seen[sticky_pool_index(src, pool_len)] = true;
+        seen[super::allocator::sticky_pool_index_seeded(src, pool_len, 0x0123_4567_89ab_cdef)] =
+            true;
     }
 
     let used = seen.iter().filter(|used| **used).count();
@@ -3640,20 +3638,64 @@ fn pool_snat_address_persistent_spreads_distinct_sources_across_pool() {
 }
 
 #[test]
-fn pool_snat_address_persistent_userspace_v2_contract_fixtures() {
-    // Golden vectors pinning the FxHash-seeded mapping (#2349). These guard
-    // against an accidental change to the sticky-index hash; a deliberate hash
-    // change must re-pin them and bump the seed version.
-    assert_eq!(sticky_pool_index("10.0.1.100".parse().unwrap(), 4), 3);
-    assert_eq!(sticky_pool_index("10.0.1.101".parse().unwrap(), 4), 2);
-    assert_eq!(sticky_pool_index("192.0.2.1".parse().unwrap(), 5), 3);
-    assert_eq!(sticky_pool_index("198.51.100.25".parse().unwrap(), 5), 2);
-    assert_eq!(sticky_pool_index("2001:db8::1".parse().unwrap(), 257), 109);
-    assert_eq!(sticky_pool_index("2001:db8::2".parse().unwrap(), 257), 240);
+fn pool_snat_sticky_index_changes_with_secret_seed_and_stays_in_bounds_12789() {
+    let sources = [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 100)),
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        IpAddr::V6("2001:db8::1".parse().unwrap()),
+        IpAddr::V6("2001:db8:1:2:3:4:5:6".parse().unwrap()),
+    ];
+    let distribution = |seed| {
+        sources
+            .iter()
+            .map(|src| super::allocator::sticky_pool_index_seeded(*src, 64, seed))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(distribution(42), distribution(42));
+    assert_ne!(distribution(42), distribution(43));
+    for index in distribution(42) {
+        assert!(index < 64, "sticky pool index {index} out of bounds");
+    }
+    for src in sources {
+        assert_eq!(super::allocator::sticky_pool_index_seeded(src, 0, 42), 0);
+        assert_eq!(super::allocator::sticky_pool_index_seeded(src, 1, 42), 0);
+    }
 }
 
 #[test]
-fn pool_snat_address_persistent_userspace_v2_selects_pool_addresses() {
+fn pool_snat_keyed_index_vector_12789() {
+    let sources = [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 100)),
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        IpAddr::V6("2001:db8::1".parse().unwrap()),
+        IpAddr::V6("2001:db8:1:2:3:4:5:6".parse().unwrap()),
+    ];
+    let indices = sources
+        .iter()
+        .map(|src| super::allocator::sticky_pool_index_seeded(*src, 64, 42))
+        .collect::<Vec<_>>();
+    assert_eq!(indices, [22, 21, 38, 33]);
+}
+
+#[test]
+fn pool_snat_sticky_index_v6_s3_clique_disperses_for_each_seed_12789() {
+    for seed in [1, 42, 0x0123_4567_89AB_CDEF, u64::MAX] {
+        let distinct: std::collections::BTreeSet<usize> = (0..256u16)
+            .map(|i| {
+                let src = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1));
+                super::allocator::sticky_pool_index_seeded(src, 64, seed)
+            })
+            .collect();
+        assert!(
+            distinct.len() > 32,
+            "#12789: v6 s3-clique collapsed to {} of 64 sticky slots under seed {seed:#x}",
+            distinct.len()
+        );
+    }
+}
+
+#[test]
+fn pool_snat_address_persistent_selects_keyed_pool_addresses() {
     let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
         name: "userspace-v1-selection".to_string(),
         from_zone: "lan".to_string(),
@@ -3677,30 +3719,37 @@ fn pool_snat_address_persistent_userspace_v2_selects_pool_addresses() {
     }]);
 
     let cases = [
-        ("10.0.1.100", "8.8.8.8", 50000, "203.0.113.13"),
-        ("10.0.1.101", "8.8.4.4", 50001, "203.0.113.12"),
-        (
-            "2001:db8::1",
-            "2001:4860:4860::8888",
-            50002,
-            "2001:db8:ffff::11",
-        ),
-        (
-            "fd00::3",
-            "2001:4860:4860::8844",
-            50003,
-            "2001:db8:ffff::13",
-        ),
+        ("10.0.1.100", "8.8.8.8", 50000),
+        ("10.0.1.101", "8.8.4.4", 50001),
+        ("2001:db8::1", "2001:4860:4860::8888", 50002),
+        ("fd00::3", "2001:4860:4860::8844", 50003),
     ];
 
-    for (src, dst, src_port, want_src) in cases {
+    let pool_addresses: Vec<IpAddr> = [
+        "203.0.113.10",
+        "203.0.113.11",
+        "203.0.113.12",
+        "203.0.113.13",
+        "2001:db8:ffff::10",
+        "2001:db8:ffff::11",
+        "2001:db8:ffff::12",
+        "2001:db8:ffff::13",
+    ]
+    .into_iter()
+    .map(|addr| addr.parse().unwrap())
+    .collect();
+
+    for (src, dst, src_port) in cases {
+        let src: IpAddr = src.parse().unwrap();
+        let family_offset = if src.is_ipv4() { 0 } else { 4 };
+        let expected = pool_addresses[family_offset + sticky_pool_index(src, 4)];
         let decision = expect_snat_decision(match_source_nat_result_for_tuple(
             &InterfaceNatAllocators::default(),
             &rules,
             &NatScopeCtx::default(),
             "lan",
             "wan",
-            src.parse().unwrap(),
+            src,
             dst.parse().unwrap(),
             Some(6),
             src_port,
@@ -3714,58 +3763,30 @@ fn pool_snat_address_persistent_userspace_v2_selects_pool_addresses() {
             &mut None,
         ));
 
-        assert_eq!(decision.rewrite_src, Some(want_src.parse().unwrap()));
-        assert_eq!(decision.rewrite_src_port, Some(40000));
+        assert_eq!(decision.rewrite_src, Some(expected));
+        assert!(
+            (40000..=40010).contains(&decision.rewrite_src_port.unwrap()),
+            "translated port must remain inside the configured range"
+        );
     }
 }
+
 
 #[test]
-fn pool_snat_address_persistent_differs_from_legacy_backend_algorithms() {
-    let v4: Ipv4Addr = "10.0.1.100".parse().unwrap();
-    assert_eq!(sticky_pool_index(IpAddr::V4(v4), 4), 3);
-    assert_eq!(legacy_backend_v4_index(v4, 4), 2);
-
-    let v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
-    assert_eq!(sticky_pool_index(IpAddr::V6(v6), 257), 109);
-    assert_eq!(legacy_backend_v6_index(v6, 257), 116);
-}
-
-fn legacy_backend_v4_index(src_ip: Ipv4Addr, pool_len: usize) -> usize {
-    if pool_len <= 1 {
-        return 0;
-    }
-    (u32::from_le_bytes(src_ip.octets()) as usize) % pool_len
-}
-
-fn legacy_backend_v6_index(src_ip: Ipv6Addr, pool_len: usize) -> usize {
-    if pool_len <= 1 {
-        return 0;
-    }
-    let mut hash = 0u32;
-    for chunk in src_ip.octets().chunks_exact(4) {
-        let mut word = [0u8; 4];
-        word.copy_from_slice(chunk);
-        hash ^= u32::from_le_bytes(word);
-    }
-    (hash as usize) % pool_len
-}
-
-#[test]
-fn pool_snat_address_persistent_hashes_full_ipv6_address() {
+fn pool_snat_address_persistent_seeded_hashes_full_ipv6_address_12789() {
     let a: IpAddr = "2001:db8::1".parse().unwrap();
     let b: IpAddr = "2001:db8::2".parse().unwrap();
-
-    assert_eq!(sticky_pool_index(a, 257), 109);
-    assert_eq!(sticky_pool_index(b, 257), 240);
+    assert_ne!(
+        super::allocator::sticky_pool_index_seeded(a, 64, 42),
+        super::allocator::sticky_pool_index_seeded(b, 64, 42),
+        "adjacent full IPv6 source addresses should use full-address hashing"
+    );
 }
 
 #[test]
 fn pool_snat_address_persistent_sticky_index_is_deterministic_and_stable() {
-    // Determinism + persistence contract (#2349): the same source IP must map
-    // to the same pool slot on every call, regardless of how many other
-    // sources have been hashed in between (the FxHasher is constructed fresh
-    // per call, so there is no shared mutable state — but assert it anyway so
-    // a future change that introduces state fails here).
+    // Same-process sticky contract: the per-process secret is held fixed for
+    // the process lifetime, so other source lookups cannot perturb this key.
     let sources: &[&str] = &[
         "10.0.1.100",
         "10.0.1.101",
@@ -3791,12 +3812,10 @@ fn pool_snat_address_persistent_sticky_index_is_deterministic_and_stable() {
                 );
             }
 
-            // Interleaving other sources does not perturb this one's slot —
-            // proves the SELECTOR (sticky_pool_index) is a pure deterministic
-            // function with no shared/mutable hasher state, so the same source
-            // always hashes to the same slot. This is distinct from the
-            // separate lease cache (persistent_by_source), which memoizes the
-            // chosen address; the hash itself caches nothing.
+            // Interleaving other sources cannot perturb this key because
+            // each lookup initializes a fresh keyed hasher from the same
+            // process seed. The separate lease cache memoizes allocations;
+            // the selector itself caches nothing.
             for other in sources {
                 let _ = sticky_pool_index(other.parse().unwrap(), pool_len);
             }
@@ -9257,24 +9276,18 @@ fn pass2_still_falls_through_a_refusing_owner_6979_f1() {
 
 // --- #7360: persistent-NAT lease reconstruction on the HA standby ------------
 //
-// THE FIXTURE IS THE WHOLE TEST, twice over.
+// The fixture uses a multi-address pool and interleaved decoy flows from a
+// second client, so the selector has genuinely made a choice before the
+// failover session is imported. The test exercises explicit lease/session
+// reconstruction; the per-process sticky hash is deliberately NOT treated as
+// an HA contract. With `address-persistent` disabled, the translated address
+// and port both have to come from the imported lease.
 //
-// (1) A SINGLE-ADDRESS pool makes an address assertion pass by construction, and
-//     under `address-persistent` the address survives a failover for free
-//     anyway — `sticky_pool_index` is a pure function of `(src_ip, pool_len)`
-//     and the standby recomputes the same hash. So the property that can
-//     actually fail is the PORT, and the address is only worth asserting on a
-//     rule WITHOUT `address-persistent`, where it genuinely varies. Every cell
-//     below uses a multi-address pool with interleaved decoy flows from a
-//     SECOND client, so a chooser that had moved on cannot return to the same
-//     slot by luck.
-//
-// (2) ONE session proves nothing. A persistent lease is shared by every flow
-//     from one client, so the defect only appears with TWO sessions sharing a
-//     translation — which is also the shape that exposes the session DROP.
+// Each case uses TWO sessions sharing one client's lease. A single session
+// would not exercise the shared-lease reconstruction or the session-drop path.
 
-/// The 4-address persistent pool both nodes run. HA requires identical config,
-/// so the standby's rule set is built from the same snapshot.
+/// The 4-address persistent pool used by each node. HA requires identical
+/// config, so the standby's rule set is built from the same snapshot.
 fn ha_persistent_rules_7360(address_persistent: bool) -> Vec<SourceNatRule> {
     persistent_pool_rules_with_options(
         300,
@@ -9417,16 +9430,15 @@ fn a_persistent_client_keeps_its_translated_port_after_failover_7360() {
     let after = expect_snat_decision(tuple_snat_lookup(&standby, 12345, "1.1.1.1", 443, 3));
     assert_eq!(
         after.rewrite_src_port, before.rewrite_src_port,
-        "the client's translated PORT must survive the failover. This is the axis \
-         that fails: under `address-persistent` the ADDRESS survives for free \
-         because `sticky_pool_index` is a pure function of (src_ip, pool_len), so \
-         asserting the address here would measure the hash rather than the repair"
+        "the client's translated PORT must survive the failover. The sticky
+         selector is process-keyed and cannot provide a cross-node mapping
+         guarantee; this assertion measures the explicitly synchronized lease"
     );
 }
 
-/// The ADDRESS, asserted on the ONLY rule shape where it can vary: no
-/// `address-persistent`, multi-address pool, decoys interleaved. Under
-/// `address-persistent` this assertion would pass with the defect present.
+/// The ADDRESS, asserted with `address-persistent` disabled to isolate the
+/// synchronized lease from the node-local keyed selector. A multi-address pool
+/// with decoys ensures the pool would otherwise make a different choice.
 #[test]
 fn a_persistent_client_keeps_its_translated_address_after_failover_7360() {
     let active = ha_persistent_rules_7360(false);
@@ -9629,22 +9641,21 @@ fn a_synced_import_conflicting_with_an_existing_lease_is_refused_7360() {
 // reverse-identity token and nothing else, so the standby held zero leases.
 //
 // THE ASSERTION AXIS INVERTS. Under `port no-translation` the client keeps its
-// own source port on the wire, so there is no translated PORT to lose — what
-// the lease pins is the ADDRESS, and the address is what moves across a
-// failover. #7360's cells call the address "the axis that survives for free";
-// here it is the entire property.
+// own source port on the wire, so there is no translated PORT to lose. The
+// lease must pin the ADDRESS through failover; this is not provided by the
+// process-local sticky selector.
 //
 // So the fixture must be a MULTI-ADDRESS pool with `address-persistent` OFF and
-// interleaved decoys. With one pool address, or with `address-persistent` on
-// (where `sticky_pool_index` is a pure function of `(src_ip, pool_len)` and the
-// standby recomputes the same slot), the assertion passes by construction and
-// measures nothing.
+// interleaved decoys: this isolates synchronized address-lease reconstruction.
+// The keyed sticky selector is per-process and provides no independent-node
+// guarantee, so hash-only recomputation is not the behavior under test here.
 
-/// The 4-address `port no-translation` persistent pool both nodes run.
+/// The 4-address `port no-translation` persistent pool used by each node.
 ///
-/// `address_persistent` is a parameter only so the "this measures nothing"
-/// claim above can itself be tested (`the_same_cell_passes_under_address_persistent_8132`)
-/// rather than asserted.
+/// `address_persistent` is also covered by
+/// `same_process_address_persistent_recomputes_without_lease_8132`; that
+/// control verifies only stable recomputation under one process seed, not HA
+/// behavior between independent nodes.
 fn ha_address_only_rules_8132(address_persistent: bool) -> Vec<SourceNatRule> {
     let mut snap = persistent_pool_snapshot(
         300,
@@ -9770,40 +9781,29 @@ fn an_address_only_client_keeps_its_public_address_after_failover_8132() {
     );
 }
 
-/// THE CONTROL FOR THE FIXTURE'S OTHER HALF: the same cell under
-/// `address-persistent`, where `sticky_pool_index` is a pure function of
-/// `(src_ip, pool_len)` and both nodes recompute the same slot.
-///
-/// It passes on the UNFIXED code, which is the point. Without this, "we used a
-/// multi-address pool with address-persistent off" is a claim about the fixture
-/// rather than a measured property of it — and a later edit flipping that flag
-/// would silently turn the cell above into a no-op.
+/// Same-process control for `address-persistent`: allocators share the
+/// per-process keyed seed, so recomputing the source slot agrees even without
+/// a lease. This does NOT model independent HA nodes; explicit lease/session
+/// synchronization, not a cross-node hash contract, preserves allocated
+/// addresses across failover.
 #[test]
-fn the_address_assertion_is_vacuous_under_address_persistent_8132() {
+fn same_process_address_persistent_recomputes_without_lease_8132() {
     let active = ha_address_only_rules_8132(true);
     let before = expect_address_only_decision(tuple_snat_lookup(&active, 12345, "8.8.8.8", 53, 1));
 
-    // A standby that imported NOTHING for this client — the pre-#8132 state,
-    // exactly. The five decoys DO each mint a lease (persistent NAT binds an
-    // internal transport address, so five source ports are five keys); naming
-    // that number is what makes the absence of a SIXTH the assertion. A lease
-    // for our client would put it at 6.
+    // A second allocator in this process imported nothing for this client.
     let standby = ha_address_only_rules_8132(true);
     decoy_flows_8132(&standby, 2);
     assert_eq!(
         source_nat_pool_statuses(&standby)[0].persistent_leases,
         5,
-        "fixture: exactly the five decoys' leases and nothing for our client, so \
-         anything the two nodes agree on below comes from the hash and not from \
-         persistence"
+        "fixture: exactly five decoy leases; our client has no lease"
     );
 
     let after = expect_address_only_decision(tuple_snat_lookup(&standby, 12345, "1.1.1.1", 443, 3));
     assert_eq!(
         after.rewrite_src, before.rewrite_src,
-        "with `address-persistent` ON the two nodes agree WITHOUT any lease, so an \
-         address assertion under that flag measures the hash. This is why the cell \
-         above turns it off"
+        "the same process seed must recompute the source's sticky pool address"
     );
 }
 

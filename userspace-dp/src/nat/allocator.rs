@@ -5667,7 +5667,8 @@ impl PortAllocator {
         // The refusal itself is correct and is KEPT for the two PINNED cases;
         // only the missing retry was the defect:
         //   * `address_persistent` — the address is `sticky_pool_index(src_ip)`,
-        //     a pure function of the source. Probing on would break the
+        //     a pure function of the source within this process (#12789).
+        //     Probing on would break the
         //     `address-persistent` contract, so the sibling
         //     `reserve_address_only_roundrobin` likewise sets
         //     `address_attempts = 1` here.
@@ -6316,43 +6317,26 @@ pub(crate) fn allocator_capacity(num_addresses: usize, port_low: u16, port_high:
 }
 
 /// Map a source IP to a sticky pool-address slot for `address-persistent`
-/// SNAT.
-///
-/// This is a load-distribution hash, not a security primitive: it only needs
-/// to be deterministic (same source IP → same slot for a given pool size),
-/// well-distributed across the pool, and cheap. It runs on the SNAT
-/// *allocation* path (first flow for an address-persistent source), so under
-/// connection churn a crypto hash is wasted work. We use a seeded FxHash
-/// (`rustc_hash`, already a dependency for the allocator's hash maps) instead
-/// of SHA-256 (#2349).
-///
-/// Stability scope: the mapping is computed live and is never persisted to
-/// disk or synced across HA — `persistent_by_source` is an in-memory map — so
-/// the only contract is same-source→same-slot within a process lifetime, and
-/// identical results across nodes running the same binary. The `-v2` seed is a
-/// hash-quality salt, not a cross-restart stability guarantee. Swapping the
-/// hash (SHA-256 → FxHash) changes which pool address a given source lands on;
-/// that is safe because existing sessions keep their already-allocated address
-/// and only new flows pick up the new mapping.
+/// SNAT. Placement uses the per-process keyed SipHash state so a remote source
+/// cannot predict colliding source families offline. Existing allocations are
+/// unchanged; the mapping is stable for a process lifetime but can differ
+/// across process starts or HA nodes.
 pub(super) fn sticky_pool_index(src_ip: IpAddr, pool_len: usize) -> usize {
+    sticky_pool_index_seeded(
+        src_ip,
+        pool_len,
+        crate::hot_hash_seed::hot_path_hash_seed(),
+    )
+}
+
+/// Seed-pinned core for deterministic placement tests.
+pub(super) fn sticky_pool_index_seeded(src_ip: IpAddr, pool_len: usize, seed: u64) -> usize {
     if pool_len <= 1 {
         return 0;
     }
 
-    let mut hasher = rustc_hash::FxHasher::default();
-    // Seed with a fixed salt so the distribution does not key purely on the
-    // raw IP bytes (FxHash of a small contiguous run can correlate adjacent
-    // addresses).
-    hasher.write(b"xpf-userspace-snat-address-persistent-v2");
-    match src_ip {
-        IpAddr::V4(addr) => {
-            hasher.write_u8(4);
-            hasher.write(&addr.octets());
-        }
-        IpAddr::V6(addr) => {
-            hasher.write_u8(6);
-            hasher.write(&addr.octets());
-        }
-    }
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let mut hasher = crate::hot_hash_seed::HotPathSeededState::new(seed).build_hasher();
+    src_ip.hash(&mut hasher);
     (hasher.finish() % pool_len as u64) as usize
 }
