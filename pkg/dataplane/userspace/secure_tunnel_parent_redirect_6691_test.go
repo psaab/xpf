@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -922,16 +921,16 @@ func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 		// convergence while the device is still there, which is what
 		// makes it the most dangerous of the three.
 		wantApplyErr bool
-		// wantErrSubstr pins WHICH delete path retained the device, and
-		// ONLY that path: the tracked retry ("delete xfrmi") or the orphan
-		// sweep ("delete orphan xfrmi"). The check is an exact match on
-		// the joined error — presence alone would let a sweep that also
-		// double-deletes tracked names through (P4). Without it the two
-		// LinkDel-failure rows would prove the same thing.
-		wantErrSubstr string
+		// wantErr is the WHOLE expected error, compared verbatim. It pins
+		// WHICH delete path retained the device, and ONLY that path: the
+		// tracked retry ("delete xfrmi") or the orphan sweep ("delete
+		// orphan xfrmi"). Presence or a substring would let a sweep that
+		// also double-deletes tracked names through (P4). Without it the
+		// two LinkDel-failure rows would prove the same thing.
+		wantErr string
 	}{
-		{name: "LinkDel fails", failLinkDel: true, wantApplyErr: true, wantErrSubstr: "delete xfrmi st10"},
-		{name: "untracked after daemon restart, orphan reap LinkDel fails", restart: true, failLinkDel: true, wantApplyErr: true, wantErrSubstr: "delete orphan xfrmi st10"},
+		{name: "LinkDel fails", failLinkDel: true, wantApplyErr: true, wantErr: "delete xfrmi st10: device busy"},
+		{name: "untracked after daemon restart, orphan reap LinkDel fails", restart: true, failLinkDel: true, wantApplyErr: true, wantErr: "delete orphan xfrmi st10: device busy"},
 		{name: "untracked after daemon restart, orphan reap LinkList fails", restart: true, failLinkList: true, wantApplyErr: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -970,11 +969,10 @@ func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 				t.Fatalf("ApplyXfrmi(nil) error = %v, want error present = %v",
 					err, tc.wantApplyErr)
 			}
-			if tc.wantErrSubstr != "" {
-				want := tc.wantErrSubstr + ": device busy"
-				if err == nil || strings.TrimSpace(err.Error()) != want {
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
 					t.Fatalf("ApplyXfrmi(nil) error = %v, want exactly %q",
-						err, want)
+						err, tc.wantErr)
 				}
 			}
 
