@@ -31,6 +31,11 @@ func TestSyncApplyQuarantinesMisnestedSecurityPolicyDeny12629(t *testing.T) {
 			text: `security { policies { default-policy permit-all; from-zone A to-zone B { to-zon C { policy d { match { source-address any; destination-address any; application any; } then { deny; } } } } } }`,
 			want: `to-zon`,
 		},
+		{
+			name: "fully nested policy keyword",
+			text: `security { policies { default-policy permit-all; from-zone { A { to-zone { B { polcy d { match { source-address any; destination-address any; application any; } then { deny; } } } } } } } }`,
+			want: `polcy`,
+		},
 	}
 
 	for _, tc := range cases {

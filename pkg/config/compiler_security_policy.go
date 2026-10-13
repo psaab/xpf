@@ -177,6 +177,8 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 					ToZone:   zp.to,
 				}
 
+				recordMisnestedPolicyChildren12629(sec, zp.policyNode, "policy",
+					fmt.Sprintf("from-zone %q to-zone %q", zp.from, zp.to))
 				for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
 					zpp.Policies = append(zpp.Policies, compilePolicy(polInst, false))
 				}
