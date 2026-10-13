@@ -132,9 +132,12 @@ func userspaceBindTargetNetdev(iface InterfaceSnapshot) string {
 // physical interface, we emit the parent Linux name — that is the netdev the
 // AF_XDP socket actually binds to.
 //
-// Returns nil on nil config, snapshot-build error, or failed xfrm dump. This
-// best-effort derivation grants reshape permission only when its evidence is
-// complete.
+// Returns nil on nil config, on a snapshot-build error (#2514), and when the
+// snapshot's xfrm-device dump HARD-failed (#12580): with no kernel evidence a
+// stale live xfrmi cannot be told from an ordinary NIC, so nothing is granted.
+// An INTERRUPTED dump is not a failure here — xfrmDumpNames keeps its partial
+// device list as the sample, so an xfrmi missing from that list still reads
+// as an ordinary NIC (#12710). Never returns an error.
 func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
@@ -155,7 +158,23 @@ func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 	// the real apply path (ApplyConfig) surfaces the same error to the
 	// operator and rejects the commit.
 	snap, err := buildSnapshot(cfg, ucfg, 0, 0)
-	if err != nil || snap == nil || snap.xfrmDumpFailed {
+	if err != nil || snap == nil {
+		return nil
+	}
+	// #12580: a hard xfrm dump failure degrades the same way, but unlike the
+	// build error above it does NOT fail the apply — the apply snapshot keeps
+	// its configuration-ownership fallback (sampleLiveXfrmNetdevs) — so the
+	// commit SUCCEEDS while every consumer of this list does nothing: RSS
+	// reshape and the kill-switch restore, coalescence, and the released-NIC
+	// hand-back. Nothing retries them before the next apply. The sampler's
+	// ERROR names only the ingress fallback, so this WARN is the operator's
+	// only record that NIC tuning was skipped.
+	if snap.xfrmDumpFailed {
+		slog.Warn("userspace: xfrm netdev dump failed; NIC tuning allowlist withheld "+
+			"for this apply: RSS indirection (reshape and kill-switch restore), "+
+			"interrupt coalescence and released-NIC hand-back are skipped until the "+
+			"next config apply",
+			"issue", "#12580")
 		return nil
 	}
 	seen := make(map[string]struct{})
@@ -183,9 +202,12 @@ func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 	// Safe here means: an entry in this list is permission to RESHAPE a NIC's
 	// RSS table and pin its coalescing, so the conservative answer to any doubt
 	// is to name FEWER netdevs, never more. That is what the degrade-to-nil
-	// above does for a build error, and it is why liveXfrmNetdevs no longer
-	// discards a partial dump: the interrupted-dump case was the measured way
-	// this sample came back EMPTY and re-admitted a device.
+	// above does for a build error and a hard dump failure, and it is why
+	// liveXfrmNetdevs no longer discards a partial dump: the interrupted-dump
+	// case was the measured way this sample came back EMPTY and re-admitted a
+	// device. Keeping the partial list does not make it complete — an xfrmi
+	// the interrupted dump did not return is still read as an ordinary NIC
+	// (#12710).
 	refused := buildUserspaceRefusedNetdevs(snap)
 	for _, iface := range snap.Interfaces {
 		if iface.Zone == "" || userspaceSkipsIngressInterface(iface) {

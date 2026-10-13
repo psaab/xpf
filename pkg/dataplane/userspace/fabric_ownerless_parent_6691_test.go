@@ -500,21 +500,32 @@ func stubXfrmNetdevsErr(t *testing.T, err error) func() {
 	return func() { liveXfrmNetdevs = prev }
 }
 
-// TestAllowlistDegradesToNilOnXfrmDumpFailure is the #12580 regression guard.
+// TestAllowlistDegradesToNilOnXfrmDumpFailure12580 is the #12580 regression
+// guard.
 //
-// UserspaceBoundLinuxInterfaces documents that on an xfrm dump failure it
-// "degrades to touching no NIC at all" (liveXfrmNetdevs' doc: this consumer
-// resolves the error in "its own conservative direction"). The ingress side
-// of the same failed sample deliberately falls back to configuration
-// ownership only (sampleLiveXfrmNetdevs) — but the allowlist is PERMISSION
-// to reshape a NIC's RSS table and pin its coalescing, and on a failed dump
-// nothing can tell a stale live xfrmi (a zoned `st10` row the config no
-// longer binds, still in the kernel) from an ordinary NIC.
+// liveXfrmNetdevs documents that when its dump REPORTS an error,
+// UserspaceBoundLinuxInterfaces "degrades to touching no NIC at all" — each
+// consumer resolves the error in "its own conservative direction". The
+// ingress side of the same failed sample deliberately falls back to
+// configuration ownership only (sampleLiveXfrmNetdevs) — but the allowlist is
+// PERMISSION to reshape a NIC's RSS table and pin its coalescing, and on a
+// failed dump nothing can tell a stale live xfrmi (a zoned `st10` row the
+// config no longer binds, still in the kernel) from an ordinary NIC.
+//
+// SCOPE: a HARD dump error only. An interrupted dump (ErrDumpInterrupted) is
+// not reported as an error at all — xfrmDumpNames keeps its partial device
+// list as the sample — so an xfrmi missing from that list is still granted.
+// #12710 owns that decision; this test makes no claim about it.
 //
 // The fixture is the issue's measured composition: a stale zoned `st10`
 // row (no VPN names it) beside an ordinary LAN NIC, with the dump stubbed
 // to a hard error. At pre-fix head the allowlist came back
 // [ge-0-0-0 st10] — the stale xfrmi granted reshape permission.
+//
+// The degrade lands on a commit that otherwise SUCCEEDS (the apply snapshot
+// keeps its configuration-ownership fallback), so every NIC-tuning consumer
+// of the list does nothing until the next apply. The WARN is the operator's
+// only record of that, so it is part of the contract.
 //
 // FAIL-ON-REVERT / MUTANT KILLS:
 //   - drop the degrade-to-nil (snapshot flag never stamped or never read):
@@ -523,6 +534,9 @@ func stubXfrmNetdevsErr(t *testing.T, err error) func() {
 //     control reds — the LAN must survive a healthy dump.
 //   - fail buildSnapshot itself on dump error: the snapshot-build control
 //     reds because a hard dump error must not fail the apply snapshot.
+//   - drop the WARN, demote it below WARN, or stop naming a skipped
+//     consumer or the retry point: the failed-dump row reds on the record.
+//   - log the WARN on every build: the success-dump control reds.
 func TestAllowlistDegradesToNilOnXfrmDumpFailure12580(t *testing.T) {
 	defer stubLinkSnapshot5619(t, map[string]int{"ge-0-0-0": 10, "st10": 11})()
 
@@ -536,10 +550,25 @@ func TestAllowlistDegradesToNilOnXfrmDumpFailure12580(t *testing.T) {
 	t.Run("failed dump grants reshape permission to nothing", func(t *testing.T) {
 		defer stubXfrmNetdevsErr(t, errors.New("RTM_GETLINK: no buffer space available"))()
 		cfg := compileForTest5619(t, lines...)
+		logs := captureSlog12580(t)
 		if got := UserspaceBoundLinuxInterfaces(cfg); got != nil {
 			t.Errorf("allowlist on a failed xfrm dump = %v, want nil (degrade to "+
 				"touching no NIC at all): the stale xfrmi st10 is indistinguishable "+
 				"from an ordinary NIC without the kernel half of the evidence", got)
+		}
+		warns := allowlistDegradeWarns12580(logs.String())
+		if len(warns) != 1 {
+			t.Fatalf("WARN records reporting the withheld allowlist = %d, want exactly 1: "+
+				"the commit succeeds, so this record is the operator's only signal that "+
+				"NIC tuning was skipped.\nlogs:\n%s", len(warns), logs.String())
+		}
+		for _, want := range []string{
+			"RSS indirection", "kill-switch", "coalescence", "hand-back", "next config apply",
+		} {
+			if !strings.Contains(warns[0], want) {
+				t.Errorf("the degrade WARN does not name %q: an operator cannot tell "+
+					"which NIC tuning was skipped, or until when.\ngot: %s", want, warns[0])
+			}
 		}
 		// The failure belongs to this one snapshot; it must not turn into
 		// a snapshot-build error or get lost before the allowlist reads it.
@@ -555,6 +584,7 @@ func TestAllowlistDegradesToNilOnXfrmDumpFailure12580(t *testing.T) {
 	t.Run("successful dump keeps the LAN and still refuses the stale xfrmi", func(t *testing.T) {
 		defer stubXfrmNetdevs(t, "st10")()
 		cfg := compileForTest5619(t, lines...)
+		logs := captureSlog12580(t)
 		got := UserspaceBoundLinuxInterfaces(cfg)
 		if !slices.Contains(got, "ge-0-0-0") {
 			t.Errorf("allowlist on a healthy dump = %v, want the LAN ge-0-0-0: "+
@@ -563,5 +593,31 @@ func TestAllowlistDegradesToNilOnXfrmDumpFailure12580(t *testing.T) {
 		if slices.Contains(got, "st10") {
 			t.Errorf("allowlist on a healthy dump = %v contains the live xfrmi st10", got)
 		}
+		if warns := allowlistDegradeWarns12580(logs.String()); len(warns) != 0 {
+			t.Errorf("a healthy dump logged the allowlist-degrade WARN: %q", warns)
+		}
 	})
+}
+
+// captureSlog12580 routes the default logger into a buffer for the rest of
+// the calling (sub)test.
+func captureSlog12580(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return &buf
+}
+
+// allowlistDegradeWarns12580 returns the WARN records that report the reshape
+// allowlist being withheld.
+func allowlistDegradeWarns12580(logs string) []string {
+	var out []string
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "allowlist") {
+			out = append(out, line)
+		}
+	}
+	return out
 }
