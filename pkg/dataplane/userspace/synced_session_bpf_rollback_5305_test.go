@@ -14,11 +14,9 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
-// newMirrorFailManager5305 builds a Manager whose helper session mirror FAILS:
-// m.proc is set (so syncSession*Locked does not early-return nil) but no
-// listener exists on the derived session socket, so the mirror connect fails.
-// Real in-memory BPF session maps are injected so the pinned mirror can be read
-// back to assert the transactional rollback (#5305).
+// newMirrorFailManager5305 builds a Manager whose helper session mirror fails
+// because no listener exists on the derived session socket. Real in-memory BPF
+// maps are injected to verify Go does not pre-write imported rows (#5305).
 func newMirrorFailManager5305(t *testing.T) *Manager {
 	t.Helper()
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -26,15 +24,16 @@ func newMirrorFailManager5305(t *testing.T) *Manager {
 	}
 	dir := t.TempDir()
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
 	// No listener at <dir>/userspace-dp-sessions.sock -> mirror connect fails.
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
 	injectSessionMaps(t, m)
 	return m
 }
 
-// newMirrorOKManager5305 builds a Manager with a live session helper socket
-// that acknowledges every mirror request, so the mirror SUCCEEDS.
+// newMirrorOKManager5305 builds a helper that applies imported rows to the
+// shared BPF maps before acknowledging them. Go only sends the RPC; this fake
+// performs the helper-owned map effect.
 func newMirrorOKManager5305(t *testing.T) *Manager {
 	t.Helper()
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -47,6 +46,10 @@ func newMirrorOKManager5305(t *testing.T) *Manager {
 		t.Fatalf("listen session socket: %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
+	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
+	injectSessionMaps(t, m)
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -56,15 +59,19 @@ func newMirrorOKManager5305(t *testing.T) *Manager {
 			go func() {
 				defer conn.Close()
 				var req ControlRequest
-				_ = json.NewDecoder(conn).Decode(&req)
+				if err := json.NewDecoder(conn).Decode(&req); err == nil && req.SessionSync != nil {
+					if req.SessionSync.AddrFamily == dataplane.AFInet {
+						_ = m.bpfShim.SetSessionV4(rollbackKeyV4(),
+							dataplane.SessionValue{IngressZone: 1, EgressZone: 2, PolicyID: 42})
+					} else if req.SessionSync.AddrFamily == dataplane.AFInet6 {
+						_ = m.bpfShim.SetSessionV6(rollbackKeyV6(),
+							dataplane.SessionValueV6{IngressZone: 1, EgressZone: 2, PolicyID: 42})
+					}
+				}
 				_ = json.NewEncoder(conn).Encode(ControlResponse{OK: true})
 			}()
 		}
 	}()
-	m := New()
-	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
-	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
-	injectSessionMaps(t, m)
 	return m
 }
 
@@ -91,18 +98,10 @@ func rollbackKeyV6() dataplane.SessionKeyV6 {
 	}
 }
 
-// TestSetClusterSyncedSessionV4RollsBackOrphanOnMirrorFailure pins the #5305
-// transactional-install contract: when the helper mirror upsert fails, the
-// forward cluster-synced install must leave the pinned BPF session map EXACTLY
-// as it was — a previously-absent key stays absent (no orphan), a key with a
-// prior value is restored to that prior value (not the failed install value).
-//
-// RED-on-revert: neutralize the compensation by deleting the
-// `compErr := m.restoreBPFSessionV4Locked(...)` call in SetClusterSyncedSessionV4
-// (return just the mirror error). The absent-key sub-case then finds the orphan
-// installVal still present, and the prior-value sub-case finds it overwritten by
-// installVal, so both assertions fail.
-func TestSetClusterSyncedSessionV4RollsBackOrphanOnMirrorFailure(t *testing.T) {
+// TestSetClusterSyncedSessionV4HelperFailureLeavesMapUnchanged proves that a
+// failed helper call leaves the Go-visible map untouched: absent rows remain
+// absent and prior rows remain unchanged. The helper owns imported map writes.
+func TestSetClusterSyncedSessionV4HelperFailureLeavesMapUnchanged5305(t *testing.T) {
 	key := rollbackKeyV4()
 
 	t.Run("absent-key-deleted", func(t *testing.T) {
@@ -113,9 +112,9 @@ func TestSetClusterSyncedSessionV4RollsBackOrphanOnMirrorFailure(t *testing.T) {
 		if err == nil {
 			t.Fatal("SetClusterSyncedSessionV4() = nil, want mirror failure")
 		}
-		// The orphan must not survive: the key was absent, so it must be gone.
+		// A failed helper call must not create a local orphan row.
 		if _, getErr := m.bpfShim.GetSessionV4(key); !errors.Is(getErr, ebpf.ErrKeyNotExist) {
-			t.Fatalf("BPF entry survived a failed install: GetSessionV4 err = %v, want ErrKeyNotExist", getErr)
+			t.Fatalf("BPF entry appeared after a failed helper call: GetSessionV4 err = %v, want ErrKeyNotExist", getErr)
 		}
 		// Health behavior preserved: takeover stays disarmed.
 		if !m.sessionMirrorFailed {
@@ -126,7 +125,7 @@ func TestSetClusterSyncedSessionV4RollsBackOrphanOnMirrorFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("prior-value-restored", func(t *testing.T) {
+	t.Run("prior-value-unchanged", func(t *testing.T) {
 		m := newMirrorFailManager5305(t)
 		// Seed a distinguishable prior value directly on the BPF mirror.
 		prior := dataplane.SessionValue{IsReverse: 0, IngressZone: 7, EgressZone: 9, PolicyID: 111}
@@ -138,7 +137,7 @@ func TestSetClusterSyncedSessionV4RollsBackOrphanOnMirrorFailure(t *testing.T) {
 			t.Fatalf("read seeded prior: %v", err)
 		}
 
-		// A failing install with a DIFFERENT value must not survive.
+		// A failed helper call must not replace the prior value.
 		val := dataplane.SessionValue{IsReverse: 0, IngressZone: 1, EgressZone: 2, PolicyID: 222}
 		if err := m.SetClusterSyncedSessionV4(key, val); err == nil {
 			t.Fatal("SetClusterSyncedSessionV4() = nil, want mirror failure")
@@ -146,20 +145,20 @@ func TestSetClusterSyncedSessionV4RollsBackOrphanOnMirrorFailure(t *testing.T) {
 
 		got, err := m.bpfShim.GetSessionV4(key)
 		if err != nil {
-			t.Fatalf("prior BPF entry vanished after failed install: %v", err)
+			t.Fatalf("prior BPF entry vanished after failed helper call: %v", err)
 		}
 		if got != want {
-			t.Fatalf("BPF entry not restored to prior value: got %+v, want %+v", got, want)
+			t.Fatalf("failed helper call changed prior BPF entry: got %+v, want %+v", got, want)
 		}
 	})
 }
 
-// TestSetClusterSyncedSessionV6RollsBackOrphanOnMirrorFailure is the IPv6
-// analogue (#5305). Same RED-on-revert: drop restoreBPFSessionV6Locked.
-func TestSetClusterSyncedSessionV6RollsBackOrphanOnMirrorFailure(t *testing.T) {
+// TestSetClusterSyncedSessionV6HelperFailureLeavesMapUnchanged is the IPv6
+// analogue.
+func TestSetClusterSyncedSessionV6HelperFailureLeavesMapUnchanged5305(t *testing.T) {
 	key := rollbackKeyV6()
 
-	t.Run("absent-key-deleted", func(t *testing.T) {
+	t.Run("absent-key-stays-absent", func(t *testing.T) {
 		m := newMirrorFailManager5305(t)
 		val := dataplane.SessionValueV6{IsReverse: 0, IngressZone: 1, EgressZone: 2}
 
@@ -168,7 +167,7 @@ func TestSetClusterSyncedSessionV6RollsBackOrphanOnMirrorFailure(t *testing.T) {
 			t.Fatal("SetClusterSyncedSessionV6() = nil, want mirror failure")
 		}
 		if _, getErr := m.bpfShim.GetSessionV6(key); !errors.Is(getErr, ebpf.ErrKeyNotExist) {
-			t.Fatalf("BPF entry survived a failed install: GetSessionV6 err = %v, want ErrKeyNotExist", getErr)
+			t.Fatalf("BPF entry appeared after a failed helper call: GetSessionV6 err = %v, want ErrKeyNotExist", getErr)
 		}
 		if !m.sessionMirrorFailed {
 			t.Fatal("sessionMirrorFailed = false, want true")
@@ -178,7 +177,7 @@ func TestSetClusterSyncedSessionV6RollsBackOrphanOnMirrorFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("prior-value-restored", func(t *testing.T) {
+	t.Run("prior-value-unchanged", func(t *testing.T) {
 		m := newMirrorFailManager5305(t)
 		prior := dataplane.SessionValueV6{IsReverse: 0, IngressZone: 7, EgressZone: 9, PolicyID: 111}
 		if err := m.bpfShim.SetSessionV6(key, prior); err != nil {
@@ -196,19 +195,18 @@ func TestSetClusterSyncedSessionV6RollsBackOrphanOnMirrorFailure(t *testing.T) {
 
 		got, err := m.bpfShim.GetSessionV6(key)
 		if err != nil {
-			t.Fatalf("prior BPF entry vanished after failed install: %v", err)
+			t.Fatalf("prior BPF entry vanished after failed helper call: %v", err)
 		}
 		if got != want {
-			t.Fatalf("BPF entry not restored to prior value: got %+v, want %+v", got, want)
+			t.Fatalf("failed helper call changed prior BPF entry: got %+v, want %+v", got, want)
 		}
 	})
 }
 
-// TestSetClusterSyncedSessionRollbackSuccessPathUnregressed proves the fix does
-// NOT regress the success path: a mirror that succeeds still installs the
-// forward entry into the BPF map and clears the sticky mirror-failure flag
-// (#5247). Both address families.
-func TestSetClusterSyncedSessionRollbackSuccessPathUnregressed(t *testing.T) {
+// TestSetClusterSyncedSessionHelperWriteVisibleAndHealthy proves that a
+// successful helper-owned map write is visible and clears the sticky
+// mirror-failure flag (#5247), for both address families.
+func TestSetClusterSyncedSessionHelperWriteVisibleAndHealthy5305(t *testing.T) {
 	t.Run("v4", func(t *testing.T) {
 		m := newMirrorOKManager5305(t)
 		// A prior transient failure latched the sticky flag.

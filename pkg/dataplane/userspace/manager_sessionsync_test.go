@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -685,7 +684,7 @@ func TestSessionSyncRequestGenerationJSONWireType(t *testing.T) {
 	}
 }
 
-func TestSetClusterSyncedSessionV4SkipsReverseHelperMirror(t *testing.T) {
+func TestSetClusterSyncedSessionV4PublishesReverseSessionToHelper(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("RemoveMemlock: %v", err)
 	}
@@ -698,25 +697,18 @@ func TestSetClusterSyncedSessionV4SkipsReverseHelperMirror(t *testing.T) {
 	}
 	defer ln.Close()
 
-	unexpectedConn := make(chan string, 4)
+	requests := make(chan SessionSyncRequest, 4)
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			select {
-			case unexpectedConn <- "unexpected helper session socket connection for reverse cluster session":
-			default:
-			}
 			go func() {
 				defer conn.Close()
 				var req ControlRequest
-				if err := json.NewDecoder(conn).Decode(&req); err == nil {
-					select {
-					case unexpectedConn <- fmt.Sprintf("unexpected helper mirror request for reverse cluster session: %+v", req):
-					default:
-					}
+				if err := json.NewDecoder(conn).Decode(&req); err == nil && req.SessionSync != nil {
+					requests <- *req.SessionSync
 				}
 				_ = json.NewEncoder(conn).Encode(ControlResponse{OK: true})
 			}()
@@ -724,7 +716,7 @@ func TestSetClusterSyncedSessionV4SkipsReverseHelperMirror(t *testing.T) {
 	}()
 
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
 	m.cfg.ControlSocket = controlSock
 	sessionsMap, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:    ebpf.Hash,
@@ -776,9 +768,12 @@ func TestSetClusterSyncedSessionV4SkipsReverseHelperMirror(t *testing.T) {
 	}
 
 	select {
-	case msg := <-unexpectedConn:
-		t.Fatal(msg)
-	case <-time.After(200 * time.Millisecond):
+	case req := <-requests:
+		if req.Operation != "mirror_publish_only" || req.AddrFamily != dataplane.AFInet || !req.IsReverse {
+			t.Fatalf("reverse IPv4 helper request = %+v, want mirror_publish_only IPv4 reverse session", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reverse IPv4 session was not published to helper")
 	}
 
 	var srcIPv6, dstIPv6, natSrcIPv6 [16]byte
@@ -808,9 +803,12 @@ func TestSetClusterSyncedSessionV4SkipsReverseHelperMirror(t *testing.T) {
 	}
 
 	select {
-	case msg := <-unexpectedConn:
-		t.Fatal(msg)
-	case <-time.After(200 * time.Millisecond):
+	case req := <-requests:
+		if req.Operation != "mirror_publish_only" || req.AddrFamily != dataplane.AFInet6 || !req.IsReverse {
+			t.Fatalf("reverse IPv6 helper request = %+v, want mirror_publish_only IPv6 reverse session", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reverse IPv6 session was not published to helper")
 	}
 }
 
@@ -820,7 +818,7 @@ func TestSetClusterSyncedSessionV4MirrorFailureMarksHelperUnhealthy(t *testing.T
 	}
 	dir := t.TempDir()
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
 	injectSessionMaps(t, m)
 
@@ -853,7 +851,7 @@ func TestSetClusterSyncedSessionV6MirrorFailureMarksHelperUnhealthy(t *testing.T
 	}
 	dir := t.TempDir()
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
 	injectSessionMaps(t, m)
 

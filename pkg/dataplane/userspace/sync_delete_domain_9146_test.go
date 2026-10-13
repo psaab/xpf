@@ -47,9 +47,10 @@ import (
 // TestDeleteNamesTheInstalledRoutingDomain9146 goes RED.
 
 type syncRec9146 struct {
-	ln   net.Listener
-	mu   sync.Mutex
-	reqs []SessionSyncRequest
+	ln    net.Listener
+	mu    sync.Mutex
+	reqs  []SessionSyncRequest
+	apply func(SessionSyncRequest)
 	// refusal, when set, is the in-band error ONE request is answered with
 	// (#9714); every other request is answered OK. refuseAt names WHICH request,
 	// 1-based.
@@ -81,6 +82,11 @@ func (r *syncRec9146) all() []SessionSyncRequest {
 	defer r.mu.Unlock()
 	return append([]SessionSyncRequest(nil), r.reqs...)
 }
+func (r *syncRec9146) setApply(fn func(SessionSyncRequest)) {
+	r.mu.Lock()
+	r.apply = fn
+	r.mu.Unlock()
+}
 
 func startSyncRec9146(t *testing.T, sock string) *syncRec9146 {
 	t.Helper()
@@ -109,7 +115,11 @@ func startSyncRec9146(t *testing.T, sock string) *syncRec9146 {
 					if len(r.reqs) == r.refuseAt && r.refusal != "" {
 						resp = ControlResponse{OK: false, Error: r.refusal}
 					}
+					apply := r.apply
 					r.mu.Unlock()
+					if resp.OK && apply != nil {
+						apply(*req.SessionSync)
+					}
 				}
 				_ = json.NewEncoder(conn).Encode(resp)
 			}()
@@ -367,7 +377,7 @@ func TestDeleteSessionItselfNamesTheDomainOnTheWire9146(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
 	injectSessionMaps(t, m) // skips without BPF privileges
 	rec := startSyncRec9146(t, filepath.Join(dir, "userspace-dp-sessions.sock"))
@@ -384,6 +394,10 @@ func TestDeleteSessionItselfNamesTheDomainOnTheWire9146(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
+	rec.setApply(func(SessionSyncRequest) {
+		_ = m.bpfShim.DeleteSession(k)
+		_ = m.bpfShim.DeleteSession(rev)
+	})
 
 	if err := m.DeleteSession(k); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
@@ -394,7 +408,7 @@ func TestDeleteSessionItselfNamesTheDomainOnTheWire9146(t *testing.T) {
 		t.Fatal("DeleteSession emitted no helper sync at all — the delete never reaches the standby")
 	}
 	for i, r := range got {
-		if r.Operation != "mirror_delete_batch" {
+		if r.Operation != "mirror_delete" {
 			continue
 		}
 		if r.RoutingDomain != tenant {
@@ -417,7 +431,7 @@ func TestDeleteSessionHelperFailureKeepsMirrorRetryable9146(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
 	injectSessionMaps(t, m) // skips without BPF privileges
 	rec := startSyncRec9146(t, filepath.Join(dir, "userspace-dp-sessions.sock"))
@@ -426,6 +440,7 @@ func TestDeleteSessionHelperFailureKeepsMirrorRetryable9146(t *testing.T) {
 	if err := m.bpfShim.SetSessionV4(k, dataplane.SessionValue{RoutingDomain: 100007}); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
+	rec.setApply(func(SessionSyncRequest) { _ = m.bpfShim.DeleteSession(k) })
 	rec.refuseFirst("injected helper delete failure")
 	if err := m.DeleteSession(k); err == nil {
 		t.Fatal("DeleteSession succeeded when the helper refused the delete")
@@ -446,10 +461,10 @@ func TestDeleteSessionHelperFailureKeepsMirrorRetryable9146(t *testing.T) {
 	}
 }
 
-// The reverse companion is the second helper request. Refusing it must still
-// return an error and leave the authoritative BPF row available for a complete
-// retry; a forward-only refusal cell cannot catch a swallowed reverse error.
-func TestDeleteSessionReverseHelperFailureKeepsMirrorRetryable9146(t *testing.T) {
+// Since #8015 the helper deletes the stored forward row and its reverse
+// companion atomically from one request; a refusal of that request must leave
+// the BPF row available for retry.
+func TestDeleteSessionHelperFailureKeepsMirrorRetryableSingleRequest9146(t *testing.T) {
 	dir, err := os.MkdirTemp("", "x9146reverse-retry")
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
@@ -457,7 +472,7 @@ func TestDeleteSessionReverseHelperFailureKeepsMirrorRetryable9146(t *testing.T)
 	t.Cleanup(func() { os.RemoveAll(dir) })
 
 	m := New()
-	m.proc = &exec.Cmd{}
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
 	m.cfg.ControlSocket = filepath.Join(dir, "control.sock")
 	injectSessionMaps(t, m) // skips without BPF privileges
 	rec := startSyncRec9146(t, filepath.Join(dir, "userspace-dp-sessions.sock"))
@@ -473,28 +488,18 @@ func TestDeleteSessionReverseHelperFailureKeepsMirrorRetryable9146(t *testing.T)
 	}); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
-	rec.refuseNth(2, "injected reverse helper delete failure")
+	rec.setApply(func(SessionSyncRequest) {
+		_ = m.bpfShim.DeleteSession(k)
+		_ = m.bpfShim.DeleteSession(rev)
+	})
+	rec.refuseNth(1, "injected helper delete failure")
 	if err := m.DeleteSession(k); err == nil {
-		t.Fatal("DeleteSession succeeded when the reverse helper refused the delete")
+		t.Fatal("DeleteSession succeeded when the helper refused the delete")
 	}
-	if got := rec.all(); len(got) != 2 {
-		t.Fatalf("reverse refusal emitted %d helper requests, want forward + reverse", len(got))
+	if got := rec.all(); len(got) != 1 || got[0].Operation != "mirror_delete" {
+		t.Fatalf("delete emitted requests %+v, want one atomic mirror_delete", got)
 	}
 	if _, err := m.bpfShim.GetSessionV4(k); err != nil {
-		t.Fatalf("reverse helper failure deleted the mirror row (%v); retry became impossible", err)
-	}
-
-	rec.mu.Lock()
-	rec.refuseAt = 0
-	rec.refusal = ""
-	rec.mu.Unlock()
-	if err := m.DeleteSession(k); err != nil {
-		t.Fatalf("retry DeleteSession after reverse refusal: %v", err)
-	}
-	if _, err := m.bpfShim.GetSessionV4(k); err == nil {
-		t.Fatal("successful retry left the BPF mirror row behind")
-	}
-	if got := rec.all(); len(got) != 4 {
-		t.Fatalf("retry emitted %d total helper requests, want two complete delete pairs", len(got))
+		t.Fatalf("helper failure deleted the mirror row (%v); retry became impossible", err)
 	}
 }
