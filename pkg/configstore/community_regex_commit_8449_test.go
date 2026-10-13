@@ -53,9 +53,15 @@ func TestCommunityValidMembersStillCommit_8449(t *testing.T) {
 // a change that made Load strict would leave every pkg/config test green while
 // a booting node lost its routing config.
 func TestCommunityRegexNoBrickOnTolerantPath_8449(t *testing.T) {
+	// The bad member goes into the TREE before the tolerant compile, the way
+	// a stored/peer-synced config would carry it. (Compiling a valid tree and
+	// overwriting Members afterwards never exercises the tolerant gate: the
+	// downgrade branch can be forced strict and such a cell stays green.)
+	// QUOTED, as in TestCommunityRegexRejectedAtCommit_8449: an unquoted `[`
+	// is consumed by the bracketed-list lexer.
 	tree := &config.ConfigTree{}
 	for _, s := range []string{
-		"set policy-options community c1 members 65000:100",
+		`set policy-options community c1 members "65000:["`,
 	} {
 		p, err := config.ParseSetCommand(s)
 		if err != nil {
@@ -65,19 +71,40 @@ func TestCommunityRegexNoBrickOnTolerantPath_8449(t *testing.T) {
 			t.Fatalf("setpath %q: %v", s, err)
 		}
 	}
-	// Inject the unrenderable member the way a stored/peer-synced config would
-	// carry it, bypassing the strict gate.
-	cfg, err := config.CompileConfigLenient(tree)
-	if err != nil {
-		t.Fatalf("tolerant compile of a valid config failed: %v", err)
-	}
-	cfg.PolicyOptions.Communities["c1"].Members = []string{"65000:["}
 	// The predicate must still call it unrenderable...
 	if config.ValidCommunityMember("65000:[") == nil {
 		t.Fatal("the predicate no longer rejects the member; the belt guards nothing")
 	}
-	// ...and the tolerant path must not have refused to produce a config.
+	// ...the strict compile of the same tree must refuse it (the gate fires)...
+	if _, err := config.CompileConfig(tree); err == nil {
+		t.Fatal("strict compile accepted the unrenderable member; the gate does not fire on this tree")
+	}
+	// ...and the tolerant path must downgrade it to a warning, not refuse to
+	// produce a config.
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile bricked on a persisted unrenderable member: %v", err)
+	}
 	if cfg.PolicyOptions.Communities["c1"] == nil {
 		t.Fatal("tolerant compile dropped the community definition entirely")
+	}
+	foundMember := false
+	for _, m := range cfg.PolicyOptions.Communities["c1"].Members {
+		if m == "65000:[" {
+			foundMember = true
+		}
+	}
+	if !foundMember {
+		t.Fatalf("tolerant compile dropped the unrenderable member; members=%v",
+			cfg.PolicyOptions.Communities["c1"].Members)
+	}
+	foundWarning := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "policy community member") && strings.Contains(w, "65000:[") {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("tolerant compile produced no downgraded community-member warning; warnings=%v", cfg.Warnings)
 	}
 }
