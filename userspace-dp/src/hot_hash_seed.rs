@@ -5,28 +5,23 @@
 // a key-pair delta is seed-independent, and selected v6 address words let
 // remote senders construct same-set families for every seed. This module
 // supplies a per-process key to the keyed SipHash builder used for cache
-// sets and session maps, preventing offline collision construction.
-//
-// This module provides a SINGLE per-process secret seed, drawn once at
-// first use and stable for the life of the process, that the node-local
-// hot-path hashes fold in. The seed is:
+// sets and session maps (#12603), plus independent per-process
+// fragment-shard secrets (#12602). Each seed is drawn once and remains
+// stable for the life of the process.
 //
 //   * Per-boot random  — defeats offline collision construction (the
 //     attacker cannot know which keys collide without observing the
 //     daemon, and the mapping reshuffles on every restart).
-//   * Stable within a boot — the flow-cache set index, session-map
-//     bucket, and fabric-queue selection for a given flow MUST be
-//     consistent across that flow's lifetime, or the caches/maps break.
-//     A `OnceLock` gives "draw once, then constant" semantics.
-//   * Node-local only — every site that uses this seed is private to
-//     one worker/process and is NOT part of any wire protocol or
-//     HA-synced structure. HA session sync transmits the explicit
-//     `SessionKey`, never a hash value, so peers re-derive their own
-//     buckets under their own seed. The fabric queue hash selects
-//     among THIS node's local fabric egress bindings (`all_by_if`,
-//     modulo the local count) — the peer does not need to agree, so a
-//     per-node seed is correct there too. NOTHING that requires
-//     cross-node or cross-restart hash determinism uses this seed.
+//   * Stable within a boot — cache indexes, session-map buckets, fabric-queue
+//     selection, and fragment-map placement stay consistent for the lifetime
+//     of their owning structures. LazyLock/OnceLock provide draw-once semantics.
+//   * Node-local only — every site has private placement, not a value in a wire
+//     protocol or HA-synced structure. Common hot-path sites use the shared seed;
+//     fragment maps draw independent keys. HA session sync transmits the explicit
+//     `SessionKey`, never a hash value, so peers re-derive their own buckets.
+//     The fabric queue hash selects among THIS node's local egress bindings
+//     (`all_by_if`, modulo the local count). NOTHING that requires cross-node or
+//     cross-restart hash determinism uses these per-process secrets.
 //
 // ECMP flow-to-member selection deliberately does not use this seed: its
 // mapping must survive restart/HA re-resolution when the live member set is
@@ -39,7 +34,7 @@
 // and a never-zero invariant) via `os_random_seed_u64`, so there is one
 // audited entropy path rather than two.
 
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 /// XorShift-style mix step shared by the OS-entropy fallback. File-private.
 #[inline(always)]
@@ -122,7 +117,6 @@ pub(crate) fn os_random_seed_u64() -> u64 {
     nonzero(fallback)
 }
 
-/// Process-global per-boot seed. Drawn once at first use, then constant.
 static HOT_PATH_SEED: OnceLock<u64> = OnceLock::new();
 
 /// Per-process seeded SipHash builder for attacker-keyed table placement.
@@ -156,9 +150,46 @@ impl std::hash::BuildHasher for HotPathSeededState {
 /// The process-global hot-path seed. Stable for the life of the process.
 /// Tests pin seeds through `HotPathSeededState::new` or each `*_seeded`
 /// helper rather than mutating this global.
+
+/// The common per-process secret for node-local hot-path hashes. Stable for the
+/// process lifetime and never zero. Fragment maps use separate keys below.
+///
+/// Reproducibility for tests is provided not by mutating this global (which
+/// would race across the parallel test runner) but by parameterized seeded
+/// cores at each hash site. Production reads this common seed only where sites
+/// intentionally share the key.
+
 #[inline]
 pub(crate) fn hot_path_hash_seed() -> u64 {
     *HOT_PATH_SEED.get_or_init(os_random_seed_u64)
+}
+/// Independent per-process keys for fragment shard maps. Separate draws ensure
+/// disclosure of another hot-path site's shared seed does not expose these
+/// placements. Both remain stable for the process lifetime.
+static FRAG_ASSOC_SHARD_SEED: LazyLock<u64> = LazyLock::new(os_random_seed_u64);
+static FRAG_OVERLAP_SHARD_SEED: LazyLock<u64> = LazyLock::new(os_random_seed_u64);
+
+#[inline]
+pub(crate) fn frag_assoc_shard_seed() -> u64 {
+    *FRAG_ASSOC_SHARD_SEED
+}
+
+#[inline]
+pub(crate) fn frag_overlap_shard_seed() -> u64 {
+    *FRAG_OVERLAP_SHARD_SEED
+}
+
+/// Keyed, domain-separated high-bit shard selection. The seed is applied
+/// after the caller's key fold so changes to any seed byte avalanche through
+/// the selected bits rather than merely rotating a seeded FNV state.
+#[inline]
+pub(crate) fn keyed_shard_index(hash: u64, seed: u64, domain: u64, shards: usize) -> usize {
+    debug_assert!(shards >= 2 && shards.is_power_of_two());
+    let mut h = hash ^ seed ^ domain;
+    h = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h = (h ^ (h >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^= h >> 31;
+    (h >> (u64::BITS - shards.trailing_zeros())) as usize
 }
 
 #[cfg(test)]
