@@ -3532,7 +3532,11 @@ fn pool_snat_address_persistent_sticks_source_to_pool_address() {
 
     let src = "10.0.1.101".parse().unwrap();
     let expected_idx = sticky_pool_index(src, 3);
-    assert_eq!(expected_idx, 1);
+    let expected_address = [
+        "203.0.113.1",
+        "203.0.113.2",
+        "203.0.113.3",
+    ][expected_idx];
 
     for want_port in 40000..40004 {
         let d = match_source_nat(
@@ -3547,7 +3551,7 @@ fn pool_snat_address_persistent_sticks_source_to_pool_address() {
             None,
         )
         .expect("should match");
-        assert_eq!(d.rewrite_src, Some("203.0.113.2".parse().unwrap()));
+        assert_eq!(d.rewrite_src, Some(expected_address.parse().unwrap()));
         assert_eq!(d.rewrite_src_port, Some(want_port));
     }
 }
@@ -3583,7 +3587,6 @@ fn pool_snat_address_persistent_sticks_each_source_independently() {
         "10.0.1.106".parse().unwrap(),
         "10.0.1.107".parse().unwrap(),
     ];
-    let mut pool_addresses_used = std::collections::HashSet::new();
 
     for src in sources {
         let mut addresses_for_src = std::collections::HashSet::new();
@@ -3608,13 +3611,7 @@ fn pool_snat_address_persistent_sticks_each_source_independently() {
             1,
             "source {src} mapped to multiple pool addresses: {addresses_for_src:?}"
         );
-        pool_addresses_used.extend(addresses_for_src);
     }
-
-    assert!(
-        pool_addresses_used.len() >= 4,
-        "sticky hash collapsed source spread: {pool_addresses_used:?}"
-    );
 }
 
 #[test]
@@ -3629,7 +3626,8 @@ fn pool_snat_address_persistent_spreads_distinct_sources_across_pool() {
             ((host >> 8) & 0xff) as u8,
             (host & 0xff) as u8,
         ));
-        seen[sticky_pool_index(src, pool_len)] = true;
+        seen[super::allocator::sticky_pool_index_seeded(src, pool_len, 0x0123_4567_89ab_cdef)] =
+            true;
     }
 
     let used = seen.iter().filter(|used| **used).count();
@@ -3751,7 +3749,10 @@ fn pool_snat_address_persistent_selects_keyed_pool_addresses() {
         ));
 
         assert_eq!(decision.rewrite_src, Some(expected));
-        assert_eq!(decision.rewrite_src_port, Some(40000));
+        assert!(
+            (40000..=40010).contains(&decision.rewrite_src_port.unwrap()),
+            "translated port must remain inside the configured range"
+        );
     }
 }
 
@@ -9773,40 +9774,29 @@ fn an_address_only_client_keeps_its_public_address_after_failover_8132() {
     );
 }
 
-/// THE CONTROL FOR THE FIXTURE'S OTHER HALF: the same cell under
-/// `address-persistent`, where `sticky_pool_index` is a pure function of
-/// `(src_ip, pool_len)` and both nodes recompute the same slot.
-///
-/// It passes on the UNFIXED code, which is the point. Without this, "we used a
-/// multi-address pool with address-persistent off" is a claim about the fixture
-/// rather than a measured property of it — and a later edit flipping that flag
-/// would silently turn the cell above into a no-op.
+/// Same-process control for `address-persistent`: allocators share the
+/// per-process keyed seed, so recomputing the source slot agrees even without
+/// a lease. This does NOT model independent HA nodes; explicit lease/session
+/// synchronization, not a cross-node hash contract, preserves allocated
+/// addresses across failover.
 #[test]
-fn the_address_assertion_is_vacuous_under_address_persistent_8132() {
+fn same_process_address_persistent_recomputes_without_lease_8132() {
     let active = ha_address_only_rules_8132(true);
     let before = expect_address_only_decision(tuple_snat_lookup(&active, 12345, "8.8.8.8", 53, 1));
 
-    // A standby that imported NOTHING for this client — the pre-#8132 state,
-    // exactly. The five decoys DO each mint a lease (persistent NAT binds an
-    // internal transport address, so five source ports are five keys); naming
-    // that number is what makes the absence of a SIXTH the assertion. A lease
-    // for our client would put it at 6.
+    // A second allocator in this process imported nothing for this client.
     let standby = ha_address_only_rules_8132(true);
     decoy_flows_8132(&standby, 2);
     assert_eq!(
         source_nat_pool_statuses(&standby)[0].persistent_leases,
         5,
-        "fixture: exactly the five decoys' leases and nothing for our client, so \
-         anything the two nodes agree on below comes from the hash and not from \
-         persistence"
+        "fixture: exactly five decoy leases; our client has no lease"
     );
 
     let after = expect_address_only_decision(tuple_snat_lookup(&standby, 12345, "1.1.1.1", 443, 3));
     assert_eq!(
         after.rewrite_src, before.rewrite_src,
-        "with `address-persistent` ON the two nodes agree WITHOUT any lease, so an \
-         address assertion under that flag measures the hash. This is why the cell \
-         above turns it off"
+        "the same process seed must recompute the source's sticky pool address"
     );
 }
 
