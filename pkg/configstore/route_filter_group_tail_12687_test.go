@@ -42,7 +42,7 @@ func TestTolerantSyncGroupInheritedInvalidRouteFilterRejects12687(t *testing.T) 
 	}{
 		{"malformed upto", "upto /bogus"},
 		{"malformed prefix-length-range", "prefix-length-range /24-/abc"},
-		{"unsupported through operand", "through bogus"},
+		{"malformed through operand", "through bogus"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,5 +71,22 @@ func TestTolerantSyncGroupInheritedInvalidRouteFilterRejects12687(t *testing.T) 
 				t.Fatalf("SyncApply emitted no route-filter warning: %v", cfg.Warnings)
 			}
 		})
+	}
+}
+
+func TestTolerantSyncDirectInvalidRouteFilterKeepsLegacyPosture12687(t *testing.T) {
+	// Boundary control (review fold): only INHERITED malformed trailers
+	// are quarantined by #12687. The direct braced spelling keeps its
+	// pre-existing tolerant posture (warn + accept) — the direct term-line
+	// spelling is separately covered by #11779 UnknownFrom.
+	text := "policy-options { policy-statement P { term T { from { route-filter 10.0.0.0/8 upto /bogus; } then { accept; } } } }"
+	store := newTestStore(t)
+	cfg, err := store.SyncApply(text, nil)
+	if err != nil {
+		t.Fatalf("SyncApply rejected tolerant input: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if term.Action != "accept" {
+		t.Fatalf("direct braced tolerant term action = %q, want accept (legacy posture, not #12687 scope)", term.Action)
 	}
 }
