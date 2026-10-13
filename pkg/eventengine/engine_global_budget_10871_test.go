@@ -1,6 +1,7 @@
 package eventengine
 
 import (
+	"strings"
 	"context"
 	"errors"
 	"fmt"
@@ -23,8 +24,17 @@ func TestFlappingTargetGlobalBudgetAndOperatorLatency10871(t *testing.T) {
 	store := newStore(t)
 	var clockMu sync.Mutex
 	now := time.Unix(1_800_000_000, 0)
+	var commitMu sync.Mutex
+	var committedPolicies []string
 	e := New(store, func(_ context.Context, description string) (*config.Config, error) {
 		compiled, err := store.CommitWithDescriptionAs("system:event-engine", description)
+		if err == nil {
+			commitMu.Lock()
+			if i := strings.LastIndex(description, "flap-"); i >= 0 {
+				committedPolicies = append(committedPolicies, description[i:i+7])
+			}
+			commitMu.Unlock()
+		}
 		if err == nil {
 			// Model a representative serialized root apply while the event
 			// worker owns the config lock.
@@ -185,5 +195,22 @@ func TestFlappingTargetGlobalBudgetAndOperatorLatency10871(t *testing.T) {
 	if got := store.ActiveConfig().System.DomainName; got != wantDomain {
 		t.Fatalf("second budget refill committed through %q, want next policies ending at %s from cursor %d",
 			got, wantDomain, refillCursor)
+	}
+	// Fairness must hold across windows in committed-policy identity, not
+	// just cursor continuity: window 2's commits are disjoint from
+	// window 1's (kills cursor-never-advances and off-by-one mutants,
+	// which re-commit the same policies every window).
+	commitMu.Lock()
+	defer commitMu.Unlock()
+	flaps := committedPolicies[len(committedPolicies)-2*globalActionBudget:]
+	seen := map[string]bool{}
+	for _, p := range flaps {
+		if seen[p] {
+			t.Fatalf("policy %q committed in both budget windows (commit order %v)", p, flaps)
+		}
+		seen[p] = true
+	}
+	if len(seen) != 2*globalActionBudget {
+		t.Fatalf("committed policies across two windows = %v, want %d distinct", flaps, 2*globalActionBudget)
 	}
 }
