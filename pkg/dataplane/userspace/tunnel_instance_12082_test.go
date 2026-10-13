@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -240,7 +241,20 @@ func TestTunnelStanzaActiveInstanceGuard11060G3(t *testing.T) {
 				lines = append(lines,
 					"set routing-instances "+tc.instance+" instance-type "+tc.instanceType)
 			}
-			cfg := tunnelMembershipConfig12082(t, lines)
+			cfg, err := config.CompileConfigLenient(treeFromSet6722(t, lines))
+			if err != nil {
+				t.Fatalf("tolerant compile for legacy unsupported target: %v", err)
+			}
+			foundWarning := false
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "#12520") && strings.Contains(warning, tc.instance) {
+					foundWarning = true
+					break
+				}
+			}
+			if !foundWarning {
+				t.Fatalf("tolerant compile omitted #12520 warning for %q: %v", tc.instance, cfg.Warnings)
+			}
 			if got := buildInterfaceRoutingInstances(cfg); len(got) != 0 {
 				t.Fatalf("tunnel stanza rows for %q = %v, want no active owner", tc.instance, got)
 			}

@@ -2970,6 +2970,12 @@ type compileOpts struct {
 	// tolerant load/peer-sync so existing configs still boot. Strict commit
 	// rejects these members because fxp*/fab*/em* are owned by vrf-mgmt.
 	lenientRIMgmtMember11392 bool
+	// lenientTunnelRITarget12520 (#12520) warns instead of rejecting an
+	// undefined, forwarding or reserved-management explicit tunnel
+	// routing-instance target on load/sync, and clears that target so the
+	// tunnel runs in the default routing domain. A cleared GRE tunnel whose
+	// outer identity another tunnel already owns is skipped instead.
+	lenientTunnelRITarget12520 bool
 	// lenientRoutingInstanceType9814 (#9814) downgrades the routing-instance
 	// instance-type value-domain gate (validateRoutingInstanceTypeStrict9814)
 	// from a hard compile error to a cfg.Warnings entry. A mistyped or
@@ -3254,6 +3260,7 @@ func lenientCompileOpts() compileOpts {
 		protocolScopeOpts:                      protocolScopeOpts{lenientProtocolInterfaceMembership11310: true, lenientOSPFAreaInterface11400: true},
 		lenientDHCPRelayDHCPv6:                 true,
 		lenientWireguardRoutingInstance:        true,
+		lenientTunnelRITarget12520:             true,
 		lenientDHCPRelayChildTokens:            true,
 		lenientDHCPRelayV4Config:               true,
 		lenientRoutingRuleWindows:              true,

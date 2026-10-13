@@ -23,7 +23,7 @@ import "testing"
 func TestTunnelRoutingInstanceSpellingsAgree8936(t *testing.T) {
 	read := func(t *testing.T, txt string) string {
 		t.Helper()
-		tree, perrs := NewParser(txt).Parse()
+		tree, perrs := NewParser("routing-instances { vrf8936 { instance-type virtual-router; } } " + txt).Parse()
 		if len(perrs) > 0 {
 			t.Fatalf("fixture must parse: %v", perrs[0])
 		}

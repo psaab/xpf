@@ -15,6 +15,7 @@ import (
 func tunnelSet9156(t *testing.T, lines ...string) *TunnelConfig {
 	t.Helper()
 	tree := &ConfigTree{}
+	lines = append(lines, "set routing-instances VR1 instance-type virtual-router")
 	for _, l := range lines {
 		p, err := ParseSetCommand(l)
 		if err != nil {

@@ -46,6 +46,8 @@ func TestEmitTunnelEndpointNamesPreservesPerUnitGREOverrides(t *testing.T) {
 		"set interfaces gr-0/0/0 unit 7 tunnel ttl 77",
 		"set interfaces gr-0/0/0 unit 7 tunnel routing-instance destination UNIT-VR",
 		"set interfaces gr-0/0/0 unit 7 family inet address 10.7.0.1/30",
+		"set routing-instances IFACE-VR instance-type virtual-router",
+		"set routing-instances UNIT-VR instance-type virtual-router",
 	}
 	cfg, err := CompileConfig(buildTree(t, cmds))
 	if err != nil {

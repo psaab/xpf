@@ -1,5 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Reject undefined, forwarding-only, and reserved management routing
+    instances as explicit tunnel targets at commit. Tolerant loads warn and
+    clear such a target, so the tunnel runs in the default routing domain; a
+    cleared GRE tunnel whose outer source, destination and key another tunnel
+    already uses there is skipped instead, and the other tunnel keeps them.
+    A tunnel device an earlier release already enslaved to vrf-mgmt keeps
+    that binding across an in-place daemon restart until the device is
+    recreated, for example by a reboot (#12520).
+
   * Reject packed `family any filter|simple-filter` bindings under
     interfaces and forwarding-options at commit (flat-set
     `set ... family any filter input F`, `family { any filter ...; }`, and

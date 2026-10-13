@@ -74,7 +74,7 @@ const (
 // spelling verdicts for this leaf under ANY value pair — the same condition
 // TestSchemaSpellingDifferentialGate uses to count a leaf as compared.
 func gateLeafCompared(g gateLeaf) bool {
-	for _, vp := range gateValuePairs {
+	for _, vp := range gateValuePairsForLeaf(g) {
 		state := spellingVerdicts(g, vp.v1, vp.v2)
 		cmpSet := gateSpellingsScalar
 		if g.multi {
@@ -116,18 +116,19 @@ func classifyGateBlindLeaf(g gateLeaf) gateBlindClass {
 	// a leaf the prerequisite rescued would still be reported as unreachable.
 	pre, _ := gateLeafPrereq(g)
 	epath := gateEffectivePath(g)
+	root, _ := gateRootPrereq(g)
 	withPre := func(stmt string) (string, error) {
 		if pre != "" {
 			stmt = pre + " " + stmt
 		}
-		return gateCompileBrace(gateBraceConfig(epath, stmt))
+		return gateCompileBrace(root + gateBraceConfig(epath, stmt))
 	}
 	noLeaf, errNo := withPre("")
 	bare, errBare := withPre(g.leaf + ";")
 	if errNo != nil || errBare != nil {
 		return gateBlindErr
 	}
-	for _, vp := range gateValuePairs {
+	for _, vp := range gateValuePairsForLeaf(g) {
 		withVal, err := withPre(g.leaf + " " + vp.v1 + ";")
 		if err != nil {
 			continue
@@ -164,13 +165,14 @@ func classifyGateBlindLeaf(g gateLeaf) gateBlindClass {
 // flag on it: the differential must keep nulling warnings, and a shared helper
 // that sometimes does and sometimes does not is how this mismatch happened.
 func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
+	root, _ := gateRootPrereq(g)
 	compile := func(stmt string) (string, bool) {
 		if pre != "" && stmt != "" {
 			stmt = pre + " " + stmt
 		} else if pre != "" {
 			stmt = pre
 		}
-		tree, errs := NewParser(gateBraceConfig(epath, stmt)).Parse()
+		tree, errs := NewParser(root + gateBraceConfig(epath, stmt)).Parse()
 		if len(errs) > 0 {
 			return "", false
 		}
@@ -191,7 +193,7 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 	if w, ok := compile(g.leaf + ";"); ok && w != base {
 		return true
 	}
-	for _, vp := range gateValuePairs {
+	for _, vp := range gateValuePairsForLeaf(g) {
 		if w, ok := compile(g.leaf + " " + vp.v1 + ";"); ok && w != base {
 			return true
 		}
@@ -399,7 +401,12 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // #10826 adds seven api-auth class/expiry/named-key leaves. The UTC date pair
 // and a valid sibling credential for per-user/per-key fields make all seven
 // comparable; tighten the measured floor 780 -> 787.
-const gateCoverageFloor = 787
+// #12520 clears an undefined tunnel routing-instance target on the tolerant
+// path, which made both tunnel-RI target leaves inert (788 -> 786 compared);
+// gateTunnelRITargetPairs probes them with defined VRFs, restoring 788. The
+// base already measured 788 against 787, so tighten 787 -> 788: one floor
+// unit of slack would let either restored leaf go blind again unnoticed.
+const gateCoverageFloor = 788
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent

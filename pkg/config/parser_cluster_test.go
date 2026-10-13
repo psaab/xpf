@@ -1208,7 +1208,8 @@ func TestFabricLegacyModeNoLocalMember(t *testing.T) {
 }
 
 func TestPerUnitTunnelConfig(t *testing.T) {
-	cmds := []string{"set interfaces gr-0/0/0 unit 0 point-to-point", "set interfaces gr-0/0/0 unit 0 tunnel source 209.237.133.186", "set interfaces gr-0/0/0 unit 0 tunnel destination 107.161.208.15", "set interfaces gr-0/0/0 unit 0 tunnel routing-instance destination Atherton-Fiber", "set interfaces gr-0/0/0 unit 0 family inet mtu 1456", "set interfaces gr-0/0/0 unit 0 family inet address 10.255.192.22/30", "set interfaces gr-0/0/0 unit 1 point-to-point", "set interfaces gr-0/0/0 unit 1 tunnel source 2602:fd41:20:5::351", "set interfaces gr-0/0/0 unit 1 tunnel destination 2602:ffd3:0:2::7", "set interfaces gr-0/0/0 unit 1 tunnel routing-instance destination Atherton-Fiber", "set interfaces gr-0/0/0 unit 1 family inet mtu 1456", "set interfaces gr-0/0/0 unit 1 family inet address 10.255.192.34/30", "set interfaces gr-0/0/0 unit 1 family inet6 mtu 1436", "set interfaces gr-0/0/0 unit 1 family inet6 address fe80::8/64", "set interfaces gr-0/0/0 unit 1 family inet6 address fc00::e/126"}
+	cmds := []string{"set interfaces gr-0/0/0 unit 0 point-to-point", "set interfaces gr-0/0/0 unit 0 tunnel source 209.237.133.186", "set interfaces gr-0/0/0 unit 0 tunnel destination 107.161.208.15", "set interfaces gr-0/0/0 unit 0 tunnel routing-instance destination atherton", "set interfaces gr-0/0/0 unit 0 family inet mtu 1456", "set interfaces gr-0/0/0 unit 0 family inet address 10.255.192.22/30", "set interfaces gr-0/0/0 unit 1 point-to-point", "set interfaces gr-0/0/0 unit 1 tunnel source 2602:fd41:20:5::351", "set interfaces gr-0/0/0 unit 1 tunnel destination 2602:ffd3:0:2::7", "set interfaces gr-0/0/0 unit 1 tunnel routing-instance destination atherton", "set interfaces gr-0/0/0 unit 1 family inet mtu 1456", "set interfaces gr-0/0/0 unit 1 family inet address 10.255.192.34/30", "set interfaces gr-0/0/0 unit 1 family inet6 mtu 1436", "set interfaces gr-0/0/0 unit 1 family inet6 address fe80::8/64", "set interfaces gr-0/0/0 unit 1 family inet6 address fc00::e/126"}
+	cmds = append(cmds, "set routing-instances atherton instance-type virtual-router")
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)
@@ -1249,8 +1250,8 @@ func TestPerUnitTunnelConfig(t *testing.T) {
 	if unit0.Tunnel.Destination != "107.161.208.15" {
 		t.Errorf("unit 0 Tunnel.Destination = %q, want 107.161.208.15", unit0.Tunnel.Destination)
 	}
-	if unit0.Tunnel.RoutingInstance != "Atherton-Fiber" {
-		t.Errorf("unit 0 Tunnel.RoutingInstance = %q, want Atherton-Fiber", unit0.Tunnel.RoutingInstance)
+	if unit0.Tunnel.RoutingInstance != "atherton" {
+		t.Errorf("unit 0 Tunnel.RoutingInstance = %q, want atherton", unit0.Tunnel.RoutingInstance)
 	}
 	if len(unit0.Tunnel.Addresses) != 1 || unit0.Tunnel.Addresses[0] != "10.255.192.22/30" {
 		t.Errorf("unit 0 Tunnel.Addresses = %v, want [10.255.192.22/30]", unit0.Tunnel.Addresses)
@@ -1271,8 +1272,8 @@ func TestPerUnitTunnelConfig(t *testing.T) {
 	if unit1.Tunnel.Destination != "2602:ffd3:0:2::7" {
 		t.Errorf("unit 1 Tunnel.Destination = %q, want 2602:ffd3:0:2::7", unit1.Tunnel.Destination)
 	}
-	if unit1.Tunnel.RoutingInstance != "Atherton-Fiber" {
-		t.Errorf("unit 1 RoutingInstance = %q, want Atherton-Fiber", unit1.Tunnel.RoutingInstance)
+	if unit1.Tunnel.RoutingInstance != "atherton" {
+		t.Errorf("unit 1 RoutingInstance = %q, want atherton", unit1.Tunnel.RoutingInstance)
 	}
 	if len(unit1.Tunnel.Addresses) != 3 {
 		t.Errorf("unit 1 Tunnel.Addresses = %v, want 3 entries", unit1.Tunnel.Addresses)

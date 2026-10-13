@@ -2258,6 +2258,12 @@ func TestInterfacePointToPointAndMTU(t *testing.T) {
         }
     }
 }`
+	input += `
+routing-instances {
+    my-vrf {
+        instance-type virtual-router;
+    }
+}`
 	parser := NewParser(input)
 	tree, errs := parser.Parse()
 	if len(errs) > 0 {
