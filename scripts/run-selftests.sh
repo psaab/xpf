@@ -370,8 +370,8 @@ run_shell test/routing/selftest-rule-dscp-probes_7796.sh
 # failed namespace is a failure. SKIPs without go/unshare/ip or where
 # unprivileged user namespaces are unavailable.
 run_shell test/routing/selftest-routing-kernel_9812.sh
-# The leg's own probes, hermetically: missing go/unshare/ip/bash/netns must
-# SKIP (77), never false-FAIL under the forcing env. Six cells, fixtures only.
+# The probes pin missing-tool behavior and the -json=false argv contract.
+# Seven hermetic fixture cells: no Go build or netns.
 run_shell test/routing/selftest-routing-probes_9812.sh
 # #10771: prove the BPF leg's privilege contract with fake tools: without
 # passwordless sudo it SKIPs; when available, the compiled probe is invoked as

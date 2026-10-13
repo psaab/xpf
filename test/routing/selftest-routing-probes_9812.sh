@@ -5,9 +5,10 @@
 # inside the test is a Fatalf, not a skip. So every tool the test can consume
 # (go, unshare, ip, bash) must be preflighted by the leg: a deleted probe (or
 # a newly consumed tool without one) turns a minimal host from SKIP into a
-# false FAIL. Each cell below runs the REAL leg against a fixture PATH and
-# asserts the contract. The last two cells drive the leg's by-name guard with
-# canned `go test -v` output: nothing here builds Go or creates a netns.
+# false FAIL. This probe runs the REAL 9812 forcing leg against fixture PATHs
+# and asserts its contracts. The final three cells pin its output flag and
+# exercise the by-name guard with canned output: nothing here builds Go or
+# creates a netns.
 #
 # Hermetic and fast: fixture dirs under mktemp, absolute-path symlinks (a
 # `command -v` hit on a shell function is a bare name, and a symlink to a bare
@@ -44,6 +45,9 @@ for t in sh go unshare ip bash grep sed true cat; do
 	p=$(abspath "$t") || { echo "FAIL: cannot resolve fixture tool $t"; exit 1; }
 	ln -s "$p" "$FIX/$t"
 done
+
+# Fixture PATHs must select the fake go, not an inherited absolute GO.
+unset GO
 
 # mkfix <name> [missing...]: a fresh fixture dir holding the full set minus
 # the named tools. Prints the dir.
@@ -115,7 +119,42 @@ else
 	bad "denied netns: rc=$rc out=$out"
 fi
 
-# ── 5. positive control: probes pass and the guard parses a good run ──
+# ── 5. -json=false stays pinned against inherited GOFLAGS=-json ──
+d=$(mkfix jsonflag); rm -f "$d/unshare" "$d/go"
+write_fake_unshare "$d/unshare"
+cat > "$d/canned.txt" <<'EOF'
+=== RUN   TestNextTableIngressScopeOnRealKernel_9420
+--- PASS: TestNextTableIngressScopeOnRealKernel_9420 (0.06s)
+=== RUN   TestVRFMissTerminatorOnRealKernel9819
+--- PASS: TestVRFMissTerminatorOnRealKernel9819 (0.45s)
+=== RUN   TestPBRPrecedesLeakBandsOnRealKernel11319
+--- PASS: TestPBRPrecedesLeakBandsOnRealKernel11319 (0.13s)
+=== RUN   TestTunnelKeepaliveVRFHeldSourcePeerAlive12083
+--- PASS: TestTunnelKeepaliveVRFHeldSourcePeerAlive12083 (0.18s)
+PASS
+ok  	github.com/psaab/xpf/pkg/routing	0.646s
+EOF
+cat > "$d/go" <<'EOF'
+#!/bin/sh
+found=0
+for arg do
+	[ "$arg" = "-json=false" ] && found=1
+done
+if [ "$found" -ne 1 ]; then
+	echo "FAIL: -json=false missing from go argv"
+	exit 23
+fi
+exec cat "$CANNED_GO_OUTPUT"
+EOF
+chmod +x "$d/go"
+out=$(CANNED_GO_OUTPUT="$d/canned.txt" GOFLAGS=-json PATH="$d" sh "$LEG" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all four routing kernel cells ran and passed"; then
+	ok "-json=false is passed explicitly under GOFLAGS=-json"
+else
+	bad "-json=false argv guard expected pass, got $rc: $out"
+fi
+
+# ── 6. positive control: probes pass and the guard parses a good run ──
 d=$(mkfix ok); rm -f "$d/unshare" "$d/go"
 write_fake_unshare "$d/unshare"
 cat > "$d/canned.txt" <<'EOF'
@@ -138,7 +177,7 @@ else
 	bad "positive control: rc=$rc out=$out"
 fi
 
-# ── 6. guard control: a run where the kernel cells never ran must FAIL ──
+# ── 7. guard control: a run where the kernel cells never ran must FAIL ──
 d=$(mkfix norun); rm -f "$d/unshare" "$d/go"
 write_fake_unshare "$d/unshare"
 cat > "$d/canned.txt" <<'EOF'

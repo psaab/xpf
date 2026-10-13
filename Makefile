@@ -896,8 +896,8 @@ test-rule-dscp-lib:
 # rotted -run predicate cannot report a clean pass over nothing.
 # Single-sourced with the `make selftest` legs: each script here is the SAME
 # script the aggregate runs, so the target and the aggregate cannot drift into
-# testing different things. The probes script pins the leg's missing-tool
-# contract hermetically (six cells, fixtures only).
+# testing different things. The probes pin the leg's missing-tool and
+# output-flag contracts hermetically (seven fixture cells).
 test-routing-kernel-lib:
 	sh ./test/routing/selftest-routing-kernel_9812.sh
 	sh ./test/routing/selftest-routing-probes_9812.sh
