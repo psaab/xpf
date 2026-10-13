@@ -876,15 +876,18 @@ type compileOpts struct {
 	// lenientRouteFilterMatchTypes (#2525) downgrades the route-filter
 	// match-type gate (validateRouteFilterMatchTypesStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
-	// path hard-rejects an FRR-unsupported `through` match-type and a
-	// malformed / inverted / out-of-range / below-base `prefix-length-range`.
-	// These match-types committed unnoticed before this gate (the schema
-	// admitted them and the renderer silently degraded them to an open-ended
-	// `le maxLen`), so an already-persisted or peer-synced config may carry
-	// one; an upgrading / receiving node must still BOOT through it (warn)
-	// rather than fail closed (#1960). The renderer skips the offending entry
-	// on the tolerant path (match-nothing, fail-closed). Same doctrine as
-	// lenientRoutingExportRef.
+	// path hard-rejects an FRR-unsupported `through` match-type, a
+	// malformed / inverted / out-of-range / below-base `prefix-length-range`,
+	// an `upto` without a parsed length (#12067), and an unknown match-type
+	// such as `orlongerr` (#12538; compact and term-line spellings used to
+	// commit it). Before their gates these committed unnoticed: the renderer
+	// widened `through` and bad ranges to an open-ended `le maxLen`
+	// (pre-#2525) and silently skipped an unknown match-type (pre-#12538).
+	// An already-persisted or peer-synced config may therefore carry one; an
+	// upgrading / receiving node must still BOOT through it (warn) rather
+	// than fail closed (#1960). Rendering is unchanged on the tolerant path:
+	// the renderer skips a `through`, bad-range, or unknown match-type entry
+	// (match-nothing, fail-closed). Same doctrine as lenientRoutingExportRef.
 	lenientRouteFilterMatchTypes bool
 	// lenientApplicationSpecs (#2142) downgrades the application-definition
 	// port/protocol gate (validateApplicationSpecsStrict) from a hard compile

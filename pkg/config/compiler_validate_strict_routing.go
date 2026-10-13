@@ -1443,7 +1443,7 @@ func validateStaticNextHopFamilyStrict(cfg *Config) error {
 
 // validateRouteFilterMatchTypesStrict gates route-filter match-types and
 // operands that the FRR prefix-list backend cannot render losslessly (#2525,
-// #12067):
+// #12067, #12538):
 //
 //   - "through <prefix2>" has NO FRR equivalent. Junos "through" matches the
 //     base prefix, prefix2, and only the prefixes on the direct radix-tree
@@ -1460,6 +1460,16 @@ func validateStaticNextHopFamilyStrict(cfg *Config) error {
 //     UptoLen at zero, which the renderer treats as the open-ended "le maxLen"
 //     fallback; reject it at strict commit rather than widening the authored
 //     prefix constraint.
+//
+//   - Any other match-type is unknown: a misspelling such as "orlongerr", an
+//     uppercase "EXACT", an empty quoted "", or an unsupported Junos keyword
+//     such as "address-mask". The renderer skips such an entry, so the term
+//     silently matches nothing for that prefix (#12538). The schema walk
+//     rejects it in flat, hierarchical, and compact spellings
+//     (ValidateRouteFilterArgPositional,
+//     validatePackedPolicyRouteFilterTailStrict12067), but a term-line tail
+//     never reaches the schema walk, so this compiled check is the gate
+//     there. "exact", "longer", and "orlonger" render directly.
 //
 // Strict on commit / commit-check. The compiler downgrades this to a warning on
 // the tolerant load / peer-sync path (#1960), whose existing rendering behavior
@@ -1526,6 +1536,12 @@ func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 							"policy-statement %q term %q route-filter %q `upto` requires a prefix length such as /24",
 							name, term.Name, rf.Prefix)
 					}
+				case "exact", "longer", "orlonger":
+					// Handled directly by FRR prefix-list rendering.
+				default:
+					return fmt.Errorf(
+						"policy-statement %q term %q route-filter %q: not a valid route-filter match-type %q (expected one of: exact, longer, orlonger, upto, prefix-length-range, through)",
+						name, term.Name, rf.Prefix, rf.MatchType)
 				}
 			}
 		}

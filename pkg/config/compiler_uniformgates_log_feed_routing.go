@@ -438,12 +438,16 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 	// and `prefix-length-range` must carry a well-formed /low-/high within the
 	// family / base-prefix bounds. Both committed unnoticed before this gate
 	// and the FRR renderer silently degraded them to an open-ended `le maxLen`,
-	// leaking / dropping the configured constraint. Strict on commit /
-	// commit-check (hard reject so the unsupported / malformed match-type is
-	// operator-visible); lenient on load / peer-sync (warn so an already-
-	// persisted or peer-synced config still boots — #1960; the renderer then
-	// skips the offending entry, match-nothing). Runs on the fully-compiled
-	// *Config. Mirrors validateRoutingExportReferencesStrict.
+	// leaking / dropping the configured constraint. The gate also rejects an
+	// `upto` without a parsed length (#12067) and any unknown match-type such
+	// as `orlongerr` (#12538). The renderer skips an unknown entry, so it used
+	// to commit and silently match nothing for its prefix; this compiled check
+	// also covers term-line tails, which the schema walk never sees. Strict on
+	// commit / commit-check (hard reject so the unsupported / malformed /
+	// unknown match-type is operator-visible); lenient on load / peer-sync
+	// (warn so an already-persisted or peer-synced config still boots — #1960;
+	// rendering is unchanged). Runs on the fully-compiled *Config. Mirrors
+	// validateRoutingExportReferencesStrict.
 	if err := validateRouteFilterMatchTypesStrict(cfg); err != nil {
 		if opts.lenientRouteFilterMatchTypes {
 			cfg.Warnings = append(cfg.Warnings,

@@ -8676,7 +8676,7 @@ and loopback addresses, IPv4 0/8, multicast, and IPv6 link-local, plus
 `discard`, `reject`, and `next-table` have no supported FRR route-map lowering.
 The shared predicate is used by the schema gate and render-side omission belt.
 
-### Route-filter tails are checked at strict commit (#12067)
+### Route-filter tails and match-types are checked at strict commit (#12067, #12538)
 
 `from route-filter <prefix> <match-type>` may carry one match-type-specific
 operand (`upto /N`, `prefix-length-range /low-/high`, or `through <prefix>`).
@@ -8705,6 +8705,26 @@ fallback. Coverage is in
 `pkg/config/route_filter_tail_12067_test.go`,
 `pkg/configstore/fused_statement_8437_test.go`, and
 `pkg/configstore/route_filter_r2_12067_test.go`.
+
+The match-type itself is checked at strict commit too (#12538). Only `exact`,
+`longer`, `orlonger`, `upto`, `prefix-length-range`, and `through` are
+recognized, case-sensitively; `through` is then rejected as unsupported. Flat
+`set` and hierarchical spellings already rejected any other token. Compact
+(`term T { from route-filter <prefix> <type>; }`) and term-line
+(`term T from route-filter <prefix> <type>;`) spellings did not: a misspelling
+such as `orlongerr`, an uppercase `EXACT`, an empty quoted `""`, or the
+unsupported Junos `address-mask` committed cleanly, and the renderer skipped
+the entry, so the term silently matched nothing for that prefix. The schema
+gate now rejects it in the packed compact `from` run, and
+`validateRouteFilterMatchTypesStrict` rejects any other compiled match-type,
+which also covers term-line tails that the schema walk never visits. Commit,
+commit-check, and a commit after `rollback` to such a config fail with
+`not a valid route-filter match-type`. Tolerant load and peer-sync only warn
+and rendering is unchanged, so an existing config still boots, but its next
+commit fails until the entry is fixed. Coverage is in
+`pkg/config/route_filter_unknown_matchtype_12538_test.go`,
+`pkg/configstore/route_filter_unknown_matchtype_12538_test.go`, and
+`pkg/frr/policy_route_filter_unknown_matchtype_12538_test.go`.
 
 ### The as-path REGEX is the whole token tail, and it is validated (#6686)
 
