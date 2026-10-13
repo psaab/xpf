@@ -698,11 +698,8 @@ func logUnknownOriginalLinkSkip(logPrefix, current, final string) {
 //
 // A temp-renamed desired source is returned in preTemp (tempName → its
 // pre-temp current name), so the caller can still find the .link filed under
-// the name the NIC wore before phase 1: the positional caller neutralizes an
-// unknown-original NIC's O.link under that name (#12557). The device-map
-// caller ignores it: deviceMapOriginalNameFor reports an unknown original only
-// for a NIC that already wears its final logical name, and phase 1 never
-// temp-renames such a NIC.
+// the name the NIC wore before phase 1: both callers neutralize an
+// unknown-original NIC's O.link under that name (#12557, #12718).
 //
 // currentNames MUST list every present NIC name — it is used both to decide
 // occupancy and to pick an xpf-tmp-N that is not already in use (a leftover
