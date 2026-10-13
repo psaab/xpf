@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -345,6 +346,59 @@ func TestThenCommunityNamedLikeFromWordStillCompiles12517(t *testing.T) {
 			}
 			if tc.op == "delete" && strings.Join(term.CommunityDelete, " ") != strings.Join(tc.deleteNames, " ") {
 				t.Fatalf("community delete names = %v, want %v", term.CommunityDelete, tc.deleteNames)
+			}
+		})
+	}
+}
+
+// FAIL-ON-REVERT (#12517 B2): an unknown statement in a braced or set-path
+// `then` block is the #10707 open-world case, not a #12517 tail. Strict
+// compile stays compatible and reports it through the #10707 warning only.
+// RED when the child reader records unknown statement keywords as tails:
+// every row fails strict compile with the #12517 diagnostic.
+func TestOpenWorldThenStatementStaysWarnOnly12517(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, word string
+	}{
+		{name: "braced misspelled accept", text: "policy-options { policy-statement P { term t { from { protocol bgp; } then { accept; acccept; } } } }", word: "acccept"},
+		{name: "braced unknown first statement", text: "policy-options { policy-statement P { term t { then { foo; accept; } } } }", word: "foo"},
+		{name: "set-path unknown statement", text: "set policy-options policy-statement P term t then foo", word: "foo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := config.CompileConfig(policyTree12517(t, tc.text))
+			if err != nil {
+				t.Fatalf("open-world then statement %q rejected at strict compile: %v", tc.word, err)
+			}
+			openWorld := false
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "policy then operand") {
+					t.Fatalf("open-world then statement produced a #12517 warning: %q", warning)
+				}
+				if strings.Contains(warning, "#10707") && strings.Contains(warning, strconv.Quote(tc.word)) {
+					openWorld = true
+				}
+			}
+			if !openWorld {
+				t.Fatalf("strict compile omitted the #10707 warning for %q: %v", tc.word, cfg.Warnings)
+			}
+		})
+	}
+}
+
+// FAIL-ON-REVERT (#12517 B2): a bare `route-filter` marker after `then accept`
+// is evidence for both the #11779 from-match gate and the #12517 tail gate.
+// The tail gate runs later so the specific #11779 diagnostic reaches the
+// operator. RED when the tail check runs before #11779 (for example inside
+// validatePolicyThenOperandsStrict): strict compile reports the tail instead.
+func TestBareRouteFilterAfterThenKeepsFromDiagnostic12517(t *testing.T) {
+	for _, text := range []string{
+		"policy-options { policy-statement P { term T then accept route-filter; } }",
+		"policy-options { policy-statement P { term T from protocol static then accept route-filter; } }",
+	} {
+		t.Run(text, func(t *testing.T) {
+			_, err := config.CompileConfig(policyTree12517(t, text))
+			if err == nil || !strings.Contains(err.Error(), "supported `from` clauses") {
+				t.Fatalf("strict compile error = %v, want the #11779 supported-from diagnostic", err)
 			}
 		})
 	}

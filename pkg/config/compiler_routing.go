@@ -2090,9 +2090,12 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 				case "origin":
 					term.Origin = nodeVal(ac)
 					extraCount = 1
-				default:
-					recordPolicyThenTail12517(term, "then", action)
 				}
+				// An unknown statement keyword here is a separate authored
+				// statement under an open-world container: the #10707
+				// prewalk names it, `show configuration` keeps it, and strict
+				// commit stays compatible. Only tails of the recognized
+				// actions above are #12517 evidence.
 				if extraCount >= 0 {
 					if extra := policyThenNodeExtra12517(ac, extraCount); extra != "" {
 						recordPolicyThenTail12517(term, action, extra)

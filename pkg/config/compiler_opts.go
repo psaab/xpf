@@ -2681,9 +2681,10 @@ type compileOpts struct {
 	// authoring order. Same doctrine as lenientPolicyCommunityRef.
 	lenientPolicyASPathRegex    bool
 	lenientPolicyCommunityRegex bool // #8449: sibling of the as-path gate; see lenientPolicyASPathRegex
-	// lenientPolicyThenOperands downgrades the compiled #12070/#12513/#12517
-	// operand/tail gate to a warning for tolerant loads. The FRR renderer
-	// omits invalid operands; quoted-then reject parsing retains Action=reject.
+	// lenientPolicyThenOperands downgrades the compiled #12070/#12513 operand
+	// gate and the #12517 then-tail gate to warnings for tolerant loads. The
+	// FRR renderer omits invalid operands; quoted-then reject parsing retains
+	// Action=reject.
 	lenientPolicyThenOperands bool
 	// lenientPolicyNamelessTerm12521 downgrades the routing-policy nameless
 	// term gate to a warning on tolerant load / peer-sync.
