@@ -1005,6 +1005,13 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 					"max", config.RAPREF64MaxLifetimeSeconds)
 			}
 			if !prunePREF64 {
+				// RFC 8781 encodes PREF64 lifetime in 8-second units.
+				// ndp rounds to nearest, which advertises a positive
+				// configured lifetime below 4s as zero (withdrawal), and
+				// can expire other values up to 4s early. Round seconds up
+				// here so every positive lifetime remains positive and is
+				// never shortened on the wire.
+				pref64Life = (pref64Life + 7) / 8 * 8
 				ra.Options = append(ra.Options, &ndp.PREF64{
 					Lifetime: time.Duration(pref64Life) * time.Second,
 					Prefix:   prefix,

@@ -506,6 +506,16 @@ never retried and the stale IPv6 default-router identity lingered on hosts
     65532–524283, so dropping keeps the over-range outcome uniform. Inherited
     PREF64 still saturates (previous bullet): it derives from a valid Router
     Lifetime, not an out-of-range operator value.
+  - **PREF64 lifetime rounds up to the 8-second wire quantum (#12653):** RFC
+    8781 stores the lifetime in units of 8 seconds. `ndp` rounds to nearest,
+    which encoded explicit values 1–3 seconds as zero; zero means remove the
+    PREF64, not "keep it briefly." `buildRA` rounds every positive effective
+    lifetime up before converting to `time.Duration`, so positive lifetimes
+    never become zero or expire before their configured value. Thus 1–8 seconds
+    encode as 8, 9–16 as 16, and values already divisible by 8 remain unchanged.
+    Configured 0 still means inherit the router lifetime (or the documented
+    1800-second fallback when router lifetime is 0); over-maximum explicit
+    values continue to be dropped by #12536.
   - **PIO lifetimes saturate at the send sink (`buildRA`, `sender.go`,
     #12193):** valid and preferred lifetimes saturate to `0xffffffff`
     AFTER the `<=0` default substitution and BEFORE the
