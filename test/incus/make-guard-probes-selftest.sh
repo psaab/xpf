@@ -56,8 +56,8 @@ CANNED="$FIX/canned.txt"
 } | sort -u | while IFS= read -r n; do
 	printf '=== RUN   %s\n--- PASS: %s (0.00s)\n' "$n" "$n"
 done > "$CANNED"
-printf 'PASS\nok  \tfake\t0.001s\n' >> "$CANNED"
 [ -s "$CANNED" ] || { echo "FAIL: derived NO canned test names — fixture would prove nothing"; exit 1; }
+printf 'PASS\nok  \tfake\t0.001s\n' >> "$CANNED"
 
 # Fake id: only `-u` is answered (0, root); anything else delegates.
 cat > "$FIX/id" <<'EOF'
