@@ -523,11 +523,14 @@ func inspectPackedHead12090(n *Node, nodeSchema *schemaNode, ancestors []*Node) 
 		isInterfaceFamilyAF12090(n.Name())
 }
 
+// isInterfaceFamilyAF12090 names the AF tokens that a bare `family` parent
+// can carry as a packed child. `any` is the all-families filter AF that
+// flat-set `family any filter ...` lands as (#12522).
 func isInterfaceFamilyAF12090(name string) bool {
 	switch name {
 	case "inet", "inet6", "inet-vpn", "inet6-vpn",
 		"iso", "mpls", "ccc", "tcc", "bridge", "vpls",
-		"ethernet-switching", "evpn":
+		"ethernet-switching", "evpn", "any":
 		return true
 	default:
 		return false

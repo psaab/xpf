@@ -1,5 +1,14 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Reject packed `family any filter|simple-filter` bindings under
+    interfaces and forwarding-options at commit (flat-set
+    `set ... family any filter input F`, `family { any filter ...; }`, and
+    their interface-range and apply-groups expansions), as the braced
+    spelling already was: xpf has no consumer for them (interface filters
+    are enforced only under family inet/inet6). Tolerant loads warn;
+    remove the binding, or rebind an interface filter under family inet
+    and inet6, before the next commit (#12522).
+
   * Reapply host-inbound `except` exclusions across the union of a
     physical-interface override and a unit-level override. An exclusion in
     either scope now also removes the other scope's overlapping aliases and
