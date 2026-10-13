@@ -1133,6 +1133,8 @@ func (r *Runner) requireStaleStoppedPreviousReadsDB(j *Journal, unitState string
 // successful reload still does not replace a previously running process.
 // The base unit's sbin path follows the managed current symlink and returns
 // an empty loaded version; an inactive unit returns an empty running version.
+// MainPID's executable comes from /proc/<pid>/exe, which the kernel resolves
+// through the sbin and current symlinks, so it has no unattributable sbin form.
 func (r *Runner) stoppedResumeExecutionVersions(j *Journal) (string, string, error) {
 	value, err := r.cfg.Sys.UnitExecStart(r.cfg.Unit)
 	if err != nil {
@@ -1170,9 +1172,6 @@ func (r *Runner) stoppedResumeExecutionVersions(j *Journal) (string, string, err
 		runningVersion = j.PreviousVersion
 	case j.TargetVersion != "" && runningExe == filepath.Join(r.versionDir(j.TargetVersion), "xpfd"):
 		runningVersion = j.TargetVersion
-	case runningExe == filepath.Join(r.cfg.SbinDir, "xpfd"):
-		// The managed sbin path follows versions/current, but cannot be
-		// attributed to a concrete version from the executable path.
 	default:
 		return "", "", fmt.Errorf("resume STOPPED: running unit executable %q matches neither recorded previous version %q nor target version %q; inspect the unit and restore a known-good runtime before retrying",
 			runningExe, j.PreviousVersion, j.TargetVersion)
