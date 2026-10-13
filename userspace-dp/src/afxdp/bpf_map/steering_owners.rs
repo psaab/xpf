@@ -66,10 +66,9 @@ use crate::session::SessionKey;
 pub(crate) type SteeringRow = [u8; 40];
 
 const NUM_SHARDS: usize = 64;
-const SHARD_BITS: u32 = NUM_SHARDS.trailing_zeros();
 const _: () = assert!(
     NUM_SHARDS.is_power_of_two(),
-    "shard selection takes the top bits of the hash"
+    "shard selection masks keyed hash bits"
 );
 const _: () = assert!(
     crate::nat::MAX_NAT_HOLDER_WORKERS == u128::BITS,
