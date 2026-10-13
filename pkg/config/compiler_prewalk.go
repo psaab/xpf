@@ -616,23 +616,19 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// is #8430's unshipped remainder. Runs pre-walk for the same reason they do:
 	// after compileFirewall a valueless leaf and an omitted one are
 	// indistinguishable.
-	// #12528: the firewall matcher reads is-fragment as a presence-only
-	// flag and flexible-match-range only from its range children. A fused
-	// `then` action is otherwise dropped, leaving Action empty and turning
-	// an intended discard/reject into fall-through. Strict commit rejects;
-	// tolerant load retains historical behavior but emits a warning.
-	var firewallFusedThenWarnings []string
-	if err := validateFirewallFusedThen12528(tree.Children); err != nil {
-		if opts.lenientFirewallFusedThen12528 {
-			firewallFusedThenWarnings = append(firewallFusedThenWarnings,
-				fmt.Sprintf("%v", err))
-		} else {
-			return nil, err
-		}
-	}
-
 	firewallValuelessFromWarnings, err := validateFirewallFilterValuelessFromStrict(
 		tree.Children, opts.lenientFirewallValuelessFrom)
+	if err != nil {
+		return nil, err
+	}
+	// #12528: is-fragment is a bare flag and flexible-match-range is read only
+	// through its named ranges, so a `then` action fused under either compiles
+	// to an EMPTY Action -- a fall-through that accepts what the operator wrote
+	// to discard or reject. Runs pre-walk beside #8480 because the compiled
+	// term cannot tell a dropped action from an omitted one. Strict refuses
+	// the first offending term; lenient warns about every one (#1960).
+	firewallFusedThenWarnings, err := validateFirewallFusedThenStrict12528(
+		tree.Children, opts.lenientFirewallFusedThen12528)
 	if err != nil {
 		return nil, err
 	}

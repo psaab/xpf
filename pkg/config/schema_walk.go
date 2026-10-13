@@ -149,12 +149,6 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree, cfg *Config) er
 		return err
 	}
 	vc := &walkContext{cfg: cfg, refs: refs}
-	// #12528: the generic sibling-tail check does not catch `then` here:
-	// it is a term-level sibling, not a child of `from`. Validate the two
-	// compiler-owned leaves on the normalized tree before the schema walk.
-	if err := validateFirewallFusedThen12528(tree.Children); err != nil {
-		return err
-	}
 	// closed=false: the top-level walk is open-world. The per-subtree
 	// closed-world flag (#4313) is inherited from schemaNode.closedWorld as
 	// the walker descends. No count here — see the keyword-resolution gate

@@ -645,21 +645,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 				// explicit nested term name. Multi-key children under a one-key
 				// `term` container are instead nameless statements whose leading
 				// value tokens could be consumed as a term name by lowering.
-				var namelessTermNodes map[*Node]struct{}
-				for _, termNode := range termNodes {
-					if len(termNode.Keys) != 1 {
-						continue
-					}
-					for _, child := range termNode.Children {
-						if !child.IsLeaf && len(child.Keys) == 1 {
-							continue
-						}
-						if namelessTermNodes == nil {
-							namelessTermNodes = make(map[*Node]struct{})
-						}
-						namelessTermNodes[child] = struct{}{}
-					}
-				}
+				namelessTermNodes := firewallNamelessTermNodes(termNodes)
 				for _, termInst := range namedInstances(termNodes) {
 					term := &FirewallFilterTerm{
 						Name: termInst.name,
@@ -1590,16 +1576,47 @@ func packedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
 	return out
 }
 
+// firewallNamelessTermNodes returns the instance nodes namedInstances would
+// misread as terms: children of a one-key `term` container that are leaves or
+// carry more than one key. A one-key child block (`term { T { ... } }`) is an
+// explicitly named nested term. compileFirewall marks these instances for the
+// #10294 gate; the #12528 gate leaves them to it.
+func firewallNamelessTermNodes(termNodes []*Node) map[*Node]struct{} {
+	var nameless map[*Node]struct{}
+	for _, termNode := range termNodes {
+		if len(termNode.Keys) != 1 {
+			continue
+		}
+		for _, child := range termNode.Children {
+			if !child.IsLeaf && len(child.Keys) == 1 {
+				continue
+			}
+			if nameless == nil {
+				nameless = make(map[*Node]struct{})
+			}
+			nameless[child] = struct{}{}
+		}
+	}
+	return nameless
+}
+
 // firewallPackedTermFromNodes extracts every packed `from` statement from a
 // firewall term when the generic expander bails out on a schema-unknown leaf.
 // `then` is a term-level sibling, so it bounds each from tail. The returned
 // nodes are fresh and carry quote and bracket provenance for every operand.
 func firewallPackedTermFromNodes(termNode *Node, termSchema *schemaNode) []*Node {
+	froms, _ := firewallPackedTermFromStatements(termNode, termSchema, false)
+	return froms
+}
+
+// firewallPackedTermFromStatements is firewallPackedTermFromNodes that, when
+// wantNext is set, also returns the unquoted token ending each statement:
+// "then", "from", or "" at the end of the term keys (#12528).
+func firewallPackedTermFromStatements(termNode *Node, termSchema *schemaNode, wantNext bool) (froms []*Node, next []string) {
 	if termNode == nil || termSchema == nil || len(termNode.Keys) == 0 {
-		return nil
+		return nil, nil
 	}
 	consumed, _ := consumeNodeKeys(termNode.Keys, termSchema)
-	var out []*Node
 	for i := consumed; i < len(termNode.Keys); i++ {
 		if termNode.KeyQuoted(i) || termNode.KeyBracketed(i) || termNode.Keys[i] != "from" {
 			continue
@@ -1622,9 +1639,16 @@ func firewallPackedTermFromNodes(termNode *Node, termSchema *schemaNode) []*Node
 		}
 		from.setKeysQuoted(quoted)
 		from.setKeysBracketed(bracketed)
-		out = append(out, from)
+		froms = append(froms, from)
+		if wantNext {
+			terminator := ""
+			if end < len(termNode.Keys) {
+				terminator = termNode.Keys[end]
+			}
+			next = append(next, terminator)
+		}
 	}
-	return out
+	return froms, next
 }
 
 // firewallTermFromNodes lowers every `from` statement carried by a term. A
