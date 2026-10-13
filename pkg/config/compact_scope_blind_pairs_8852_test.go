@@ -162,6 +162,13 @@ var knownBlindScopePairs8852 = map[string]string{
 	"services flow-monitoring":          "plain-container",
 	"services ip-monitoring":            "plain-container",
 	// #8879 batch 8, shapes derived by the sentinel method.
+	// #12810 admits these schema pairs; the census has no compact site for
+	// a zero-argument container head, so per-pair equivalence is measured by
+	// the sampling-instance and family-only fixtures instead.
+	"instance family": "plain-container",
+	"instance input":  "plain-container",
+	"inet output":     "plain-container",
+	"inet6 output":    "plain-container",
 	"forwarding-options family": "plain-container",
 	"protocols ospf3":           "plain-container",
 	"security dynamic-address":  "plain-container",

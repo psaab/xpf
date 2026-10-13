@@ -1068,7 +1068,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"unit scheduler-map",
 		"unit shaping-rate":
 		return true
-	// forwarding-options: 16 pairs.
+	// forwarding-options: 21 pairs.
 	case "dhcp-relay group",
 		"dhcp-relay server-group",
 		"flow-server port",
@@ -1078,8 +1078,13 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"group active-server-group",
 		"group interface",
 		"inet6 mode",
+		"inet output",
+		"inet6 output",
 		"input rate",
+		"instance input",
+		"instance family",
 		"output flow-server",
+		"output inline-jflow",
 		"output source-address",
 		"overrides maximum-hop-count",
 		"overrides maximum-packet-rate",

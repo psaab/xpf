@@ -67,13 +67,13 @@ gateway nat-traversal	security/ike/gateway,security/ipsec/gateway
 gateway no-nat-traversal	security/ike/gateway,security/ipsec/gateway
 gateway remote-identity	security/ike/gateway,security/ipsec/gateway
 gateway version	security/ike/gateway,security/ipsec/gateway
+group active-server-group	forwarding-options/dhcp-relay/dhcpv6/group,forwarding-options/dhcp-relay/group
 group authentication-key	protocols/bgp/group,routing-instances/*/protocols/bgp/group
 group description	protocols/bgp/group,routing-instances/*/protocols/bgp/group
 group export	protocols/bgp/group,protocols/rip/group,routing-instances/*/protocols/bgp/group,routing-instances/*/protocols/rip/group
 group hold-time	protocols/bgp/group,routing-instances/*/protocols/bgp/group
 group import	protocols/bgp/group,routing-instances/*/protocols/bgp/group
-group active-server-group	forwarding-options/dhcp-relay/group,forwarding-options/dhcp-relay/dhcpv6/group
-group interface	forwarding-options/dhcp-relay/group,forwarding-options/dhcp-relay/dhcpv6/group,system/services/dhcp-local-server/group,system/services/dhcpv6-local-server/group
+group interface	forwarding-options/dhcp-relay/dhcpv6/group,forwarding-options/dhcp-relay/group,system/services/dhcp-local-server/group,system/services/dhcpv6-local-server/group
 group local-address	protocols/bgp/group,routing-instances/*/protocols/bgp/group
 group local-as	protocols/bgp/group,routing-instances/*/protocols/bgp/group
 group loops	protocols/bgp/group,routing-instances/*/protocols/bgp/group
@@ -88,6 +88,7 @@ ike gateway	security/ike,security/ipsec/vpn/ike
 inet filter	firewall/family/inet,interfaces/*/unit/family/inet
 inet-precedence forwarding-class	class-of-service/classifiers/inet-precedence,class-of-service/rewrite-rules/inet-precedence
 inet6 filter	firewall/family/inet6,interfaces/*/unit/family/inet6
+instance input	forwarding-options/port-mirroring/instance,forwarding-options/sampling/instance
 interface authentication-key	protocols/isis/interface,routing-instances/*/protocols/isis/interface
 interface authentication-type	protocols/isis/interface,protocols/ospf/area/interface,routing-instances/*/protocols/isis/interface,routing-instances/*/protocols/ospf/area/interface
 interface cost	protocols/ospf/area/interface,protocols/ospf3/area/interface,routing-instances/*/protocols/ospf/area/interface,routing-instances/*/protocols/ospf3/area/interface
@@ -136,6 +137,7 @@ ospf3 area	protocols/ospf3,routing-instances/*/protocols/ospf3
 ospf3 export	protocols/ospf3,routing-instances/*/protocols/ospf3
 ospf3 router-id	protocols/ospf3,routing-instances/*/protocols/ospf3
 output flow-server	forwarding-options/sampling/instance/family/inet/output,forwarding-options/sampling/instance/family/inet6/output
+output inline-jflow	forwarding-options/sampling/instance/family/inet/output,forwarding-options/sampling/instance/family/inet6/output
 output source-address	forwarding-options/sampling/instance/family/inet/output,forwarding-options/sampling/instance/family/inet6/output
 oversubscription-policy guarantee-rate	class-of-service/interfaces/oversubscription-policy,class-of-service/interfaces/unit/oversubscription-policy
 peer allowed-ips	interfaces/*/tunnel/wireguard/peer,interfaces/*/unit/tunnel/wireguard/peer
@@ -147,8 +149,8 @@ policy proposal-set	security/ike/policy,security/ipsec/policy
 policy proposals	security/ike/policy,security/ipsec/policy
 policy then	event-options/policy,security/policies/from-zone/policy,security/policies/global/policy,services/ip-monitoring/policy
 pool address	security/nat/destination/pool,security/nat/source/pool
-pool routing-instance	security/nat/destination/pool,security/nat/source/pool
 pool dns-server	system/services/dhcp-local-server/group/pool,system/services/dhcpv6-local-server/group/pool
+pool routing-instance	security/nat/destination/pool,security/nat/source/pool
 pool static-binding	system/services/dhcp-local-server/group/pool,system/services/dhcpv6-local-server/group/pool
 prefix-limit maximum	protocols/bgp/group/family/inet/unicast/prefix-limit,protocols/bgp/group/family/inet6/unicast/prefix-limit,protocols/bgp/group/neighbor/family/inet/unicast/prefix-limit,protocols/bgp/group/neighbor/family/inet6/unicast/prefix-limit,routing-instances/*/protocols/bgp/group/family/inet/unicast/prefix-limit,routing-instances/*/protocols/bgp/group/family/inet6/unicast/prefix-limit,routing-instances/*/protocols/bgp/group/neighbor/family/inet/unicast/prefix-limit,routing-instances/*/protocols/bgp/group/neighbor/family/inet6/unicast/prefix-limit
 proposal authentication-algorithm	security/ike/proposal,security/ipsec/proposal
@@ -169,8 +171,6 @@ rewrite-rules ieee-802.1	class-of-service/interfaces/rewrite-rules,class-of-serv
 rib static	routing-instances/*/routing-options/rib,routing-options/rib
 rib-group inet	routing-instances/*/interface-routes/rib-group,routing-instances/*/routing-options/interface-routes/rib-group,routing-options/interface-routes/rib-group
 rib-group inet6	routing-instances/*/interface-routes/rib-group,routing-instances/*/routing-options/interface-routes/rib-group,routing-options/interface-routes/rib-group
-sampling input	interfaces/*/unit/family/inet/sampling,interfaces/*/unit/family/inet6/sampling
-sampling output	interfaces/*/unit/family/inet/sampling,interfaces/*/unit/family/inet6/sampling
 rip authentication-key	protocols/rip,routing-instances/*/protocols/rip
 rip authentication-type	protocols/rip,routing-instances/*/protocols/rip
 rip group	protocols/rip,routing-instances/*/protocols/rip
@@ -185,6 +185,8 @@ routing-options interface-routes	routing-instances/*/routing-options,routing-opt
 routing-options rib	routing-instances/*/routing-options,routing-options
 routing-options static	routing-instances/*/routing-options,routing-options
 rule-set rule	security/nat/destination/rule-set,security/nat/source/rule-set,security/nat/static/rule-set
+sampling input	interfaces/*/unit/family/inet/sampling,interfaces/*/unit/family/inet6/sampling
+sampling output	interfaces/*/unit/family/inet/sampling,interfaces/*/unit/family/inet6/sampling
 shaping-rate burst-size	class-of-service/interfaces/shaping-rate,class-of-service/interfaces/unit/shaping-rate
 static route	routing-instances/*/routing-options/rib/static,routing-instances/*/routing-options/static,routing-options/rib/static,routing-options/static
 static-binding fixed-address	system/services/dhcp-local-server/group/pool/static-binding,system/services/dhcpv6-local-server/group/pool/static-binding
