@@ -646,6 +646,9 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 					zone.AddressBook = ab
 				}
 				parseAddressBookEntries(prop, ab)
+				if len(ab.UnknownBookEntries) > 0 {
+					zone.DroppedEnforcementChild = true
+				}
 			default:
 				recordUnknownSecurityZoneChild11575(zone, prop.Keys)
 			}

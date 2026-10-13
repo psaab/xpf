@@ -35,10 +35,33 @@ import (
 // `address-set` member to that expansion pass, which reports it as a policy
 // wildcard rather than an address-set.
 func validateAddressSetMembersDefinedStrict(cfg *Config) error {
-	if cfg == nil || cfg.Security.AddressBook == nil {
+	if cfg == nil {
 		return nil
 	}
 	ab := cfg.Security.AddressBook
+	if ab == nil {
+		return nil
+	}
+	unknownErr := func(scope string, book *AddressBook) error {
+		if book == nil || len(book.UnknownBookEntries) == 0 {
+			return nil
+		}
+		entry := book.UnknownBookEntries[0]
+		return fmt.Errorf("%saddress-book: unknown entry keyword %q (names %v) was dropped; a policy deny may fall through to a global twin",
+			scope, entry.Keyword, entry.Names)
+	}
+	if err := unknownErr("global ", ab); err != nil {
+		return err
+	}
+	for _, zoneName := range sortedZoneNames(cfg) {
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		if err := unknownErr(fmt.Sprintf("zone %q ", zoneName), zone.AddressBook); err != nil {
+			return err
+		}
+	}
 	defined := func(name string) bool {
 		if _, ok := ab.Addresses[name]; ok {
 			return true

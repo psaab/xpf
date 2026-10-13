@@ -794,6 +794,14 @@ Junos treats an undefined reference. NAT rule address-name references
 (`source-address-name` etc.) remain global-only; zone-local resolution is
 scoped to security-policy match addresses.
 
+Unknown direct entries in either address-book scope are now retained as
+compiler metadata instead of disappearing. Strict compilation rejects them;
+tolerant loads warn. An unknown zone-local entry makes the zone unbound and
+qualifies any policy reference to its authored name into a colliding
+zone-local token, so it cannot fall through to a same-named global entry
+(#12622). Global unknown-entry names are likewise quarantined from resolution.
+`address-book` apply-meta statements remain ignored as before.
+
 **An interface belongs to exactly one security zone (#3072):**
 `InterfaceZoneMap` and the userspace ingress/egress maps share the logical
 interface-key expansion used by the strict validator. A config assigning one

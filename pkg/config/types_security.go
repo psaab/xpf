@@ -1598,10 +1598,18 @@ type SynFloodConfig struct {
 type AddressBook struct {
 	Addresses   map[string]*Address
 	AddressSets map[string]*AddressSet
+	// UnknownBookEntries records unsupported direct children so compilation can
+	// reject commits and tolerant loads can warn and quarantine references.
+	UnknownBookEntries []AddressBookUnknownEntry `json:"-"`
 	// CollidingNames records entries the tolerant compiler must not resolve
 	// because more than one definition claimed the same operator-visible name.
 	// It is compiler metadata, not persisted configuration or wire state.
 	CollidingNames map[string]struct{} `json:"-"`
+}
+
+type AddressBookUnknownEntry struct {
+	Keyword string
+	Names   []string
 }
 
 // Address is a named address entry (IP prefix).
