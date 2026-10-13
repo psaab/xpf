@@ -592,6 +592,14 @@ func (m *Manager) reclaimTombstoneWhenStopped(name string, s *sender, startEpoch
 	}
 	m.mu.Unlock()
 
+	// Snapshot claimWaitTimeout BEFORE launching the detached goroutine:
+	// the goroutine outlives finishDrainDecision's unlock and may run after
+	// the caller (or a test restoring the package-var seam) has moved on,
+	// so reading the package var inside the goroutine would race that
+	// restore with no happens-before edge (#12585). Capturing it here is
+	// ordered by goroutine creation, and it is also semantically the
+	// budget in effect when this reclaimer was armed.
+	waitBudget := claimWaitTimeout
 	go func() {
 		<-s.stopped
 		// The wedged owner has finally exited; its conn is now PROVEN closed.
@@ -614,7 +622,7 @@ func (m *Manager) reclaimTombstoneWhenStopped(name string, s *sender, startEpoch
 		// timeout, so there was an unavoidable RA gap); the wait only bounds how
 		// long the detached reclaimer lingers before logging completion.
 		if repl != nil {
-			repl.waitConnReady(claimWaitTimeout)
+			repl.waitConnReady(waitBudget)
 		}
 		slog.Info("ra: reclaimed tombstone after wedged owner finally exited",
 			"interface", name)
