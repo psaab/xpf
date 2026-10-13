@@ -78,6 +78,7 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 		}
 		// "global { policy ... }" - global policies applied to all zone pairs
 		if child.Name() == "global" {
+			recordMisnestedPolicyChildren12629(sec, child, "policy", "global policies")
 			for _, polInst := range namedInstances(child.FindChildren("policy")) {
 				pol := compilePolicy(polInst, true)
 				sec.GlobalPolicies = append(sec.GlobalPolicies, pol)
@@ -132,6 +133,8 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 					sec.MalformedZonePairs = append(sec.MalformedZonePairs, bad)
 					continue
 				}
+				recordMisnestedPolicyChildren12629(sec, child, "policy",
+					fmt.Sprintf("from-zone %q to-zone %q", child.Keys[1], child.Keys[3]))
 				pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
 			} else {
 				// Flat set: from-zone → <name> → to-zone → <name> → policy ...
@@ -153,6 +156,12 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 						} else if bodyHasToZoneLessPolicy12231(fzSub) {
 							sec.MalformedZonePairs = append(sec.MalformedZonePairs, containerToZoneLess12231(fzSub.Name()))
 						}
+						recordMisnestedPolicyChildren12629(sec, fzSub, "to-zone",
+							fmt.Sprintf("from-zone %q", fzSub.Name()))
+					}
+					if len(child.Keys) == 2 || len(child.Keys) == 3 {
+						recordMisnestedPolicyChildren12629(sec, child, "to-zone",
+							fmt.Sprintf("from-zone %q", child.Keys[1]))
 					}
 					for _, tzNode := range fzSub.FindChildren("to-zone") {
 						for _, tzSub := range tzNode.Children {
