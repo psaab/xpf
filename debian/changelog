@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Keep the configured unit host-inbound override authoritative when a base
+    interface and unit 0 share an AF_XDP ifindex, independent of snapshot row
+    order. Preserve the Go base-before-unit emission contract (#12646).
   * Write a zero-padded static-route destination or IPsec traffic-selector
     mask that the userspace dataplane parses (IPv4 up to two digits, IPv6 up
     to three: `10.0.0.0/08`, `2001:db8::/032`) in canonical form at compile.

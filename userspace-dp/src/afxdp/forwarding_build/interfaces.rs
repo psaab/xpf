@@ -468,6 +468,17 @@ pub(super) fn populate_interfaces(
     let mut contested_host_inbound_sentinels: std::collections::BTreeSet<i32> =
         std::collections::BTreeSet::new();
 
+    // #12646: Go merges physical + unit overrides into an effective per-unit
+    // set, keyed by the logical unit name. A unit-0 row shares its ifindex with
+    // the base row, so preserve the more-specific unit's set even if snapshot
+    // row order changes.
+    let unit_host_inbound_ifindexes: std::collections::BTreeSet<i32> = snapshot
+        .interfaces
+        .iter()
+        .filter(|iface| iface.ifindex > 0 && iface.host_inbound_configured)
+        .filter(|iface| is_logical_unit_row(&iface.name, iface.is_unit))
+        .map(|iface| iface.ifindex)
+        .collect();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
@@ -799,15 +810,17 @@ pub(super) fn populate_interfaces(
                 }
             }
         }
-        // #3362: per-interface host-inbound OVERRIDE. When the control plane
-        // marked this interface host-inbound-configured, classify its EFFECTIVE
-        // token set — resolved in Go, where the interface stanza REPLACES the
-        // zone one (#6515) — and key it by ifindex so the
-        // local-delivery admit path prefers it over the from-zone's set. A
-        // present-but-empty override classifies to an empty ZoneHostInbound =
-        // fail-closed deny-all (matching the zone-level semantics and the nft
-        // primary path's per-interface drop).
-        if iface.host_inbound_configured {
+        // #3362 per-interface host-inbound OVERRIDE. The control plane carries
+        // the effective token set resolved for this interface.
+        if iface.host_inbound_configured
+            && (is_logical_unit_row(&iface.name, iface.is_unit)
+                || !unit_host_inbound_ifindexes.contains(&iface.ifindex))
+        {
+            // #12646: unit 0 shares its netdev ifindex with the base. The
+            // unit override is more specific than the base row's set and must
+            // win regardless of snapshot row order. Skip the base's write when
+            // a configured unit row exists; retain the unit's existing
+            // last-write behavior for any additional unit aliases.
             empty_zone_host_inbound_sentinels.remove(&iface.ifindex);
             state.ifindex_host_inbound.insert(
                 iface.ifindex,
