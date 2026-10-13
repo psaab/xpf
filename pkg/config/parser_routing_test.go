@@ -2731,6 +2731,7 @@ func TestIPIPTunnelExplicitMode(t *testing.T) {
 
 func TestGRETunnelRoutingInstanceDestination(t *testing.T) {
 	cmds := []string{"set interfaces gr-0/0/0 tunnel source 10.0.0.1", "set interfaces gr-0/0/0 tunnel destination 10.0.0.2", "set interfaces gr-0/0/0 tunnel routing-instance destination dmz-vr", "set interfaces gr-0/0/0 unit 0 family inet address 10.10.10.1/30"}
+	cmds = append(cmds, "set routing-instances dmz-vr instance-type virtual-router")
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)
@@ -3387,7 +3388,8 @@ func TestBGPBFDMultiplierSetSyntax(t *testing.T) {
 }
 
 func TestIPIPTunnelWithRoutingInstance(t *testing.T) {
-	cmds := []string{"set interfaces ip-0/0/0 unit 0 tunnel source 209.237.133.186", "set interfaces ip-0/0/0 unit 0 tunnel destination 107.161.208.15", "set interfaces ip-0/0/0 unit 0 tunnel routing-instance destination Atherton-Fiber", "set interfaces ip-0/0/0 unit 0 family inet mtu 1456", "set interfaces ip-0/0/0 unit 0 family inet address 10.255.192.26/30"}
+	cmds := []string{"set interfaces ip-0/0/0 unit 0 tunnel source 209.237.133.186", "set interfaces ip-0/0/0 unit 0 tunnel destination 107.161.208.15", "set interfaces ip-0/0/0 unit 0 tunnel routing-instance destination atherton", "set interfaces ip-0/0/0 unit 0 family inet mtu 1456", "set interfaces ip-0/0/0 unit 0 family inet address 10.255.192.26/30"}
+	cmds = append(cmds, "set routing-instances atherton instance-type virtual-router")
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)
@@ -3425,8 +3427,8 @@ func TestIPIPTunnelWithRoutingInstance(t *testing.T) {
 	if unit0.Tunnel.Name != "ip-0-0-0" {
 		t.Errorf("Name = %q, want %q", unit0.Tunnel.Name, "ip-0-0-0")
 	}
-	if unit0.Tunnel.RoutingInstance != "Atherton-Fiber" {
-		t.Errorf("RoutingInstance = %q, want Atherton-Fiber", unit0.Tunnel.RoutingInstance)
+	if unit0.Tunnel.RoutingInstance != "atherton" {
+		t.Errorf("RoutingInstance = %q, want atherton", unit0.Tunnel.RoutingInstance)
 	}
 	if unit0.Tunnel.Source != "209.237.133.186" {
 		t.Errorf("Source = %q, want 209.237.133.186", unit0.Tunnel.Source)

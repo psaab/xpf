@@ -861,6 +861,22 @@ devices retains only those unaffected keys. The daemon's list binder and
 cannot steal `fxp0` from `vrf-mgmt` or fight the fabric-overlay rebind for
 `fab0`/`fab1`.
 
+**Explicit tunnel routing-instance targets must name a VRF (#12520):** an
+interface- or unit-level `tunnel routing-instance destination` must name a
+defined, non-forwarding routing instance other than the reserved `mgmt`. For
+any other target the kernel tunnel manager still derives `vrf-<target>` (for
+`mgmt`, the management VRF) while userspace keeps the tunnel in the default
+routing domain. Strict commit rejects the stanza after the established tunnel
+tail gates (#9909, #5162, #10654, #4785), so their diagnostics keep the
+first-error slot. Tolerant boot/peer-sync warns once per claim and clears the
+target, so both planes run the tunnel in the default routing domain. Clearing
+can move a GRE tunnel's #10654 decap identity onto one another tunnel already
+owns there; that quarantined tunnel is then skipped (an interface-level tunnel
+is removed, a unit-level one takes its unit with it), so the owner keeps the
+identity in both planes. A device an earlier release already enslaved to
+`vrf-mgmt` stays bound until it is recreated, because a restart adopts existing
+devices as-is (`pkg/routing/README.md`).
+
 **Configured host-inbound lifelines stay out of tenant routing instances
 (#11364):** strict commit rejects a role-derived cluster control/fabric
 lifeline listed as a tenant-VRF member. Tolerant load/peer-sync warns and

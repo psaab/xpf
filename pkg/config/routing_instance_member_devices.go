@@ -347,6 +347,7 @@ type routingInstanceTunnelDeviceClaim struct {
 	LinuxName string
 	Instance  string
 	Member    string
+	Tunnel    *TunnelConfig
 }
 
 // routingInstanceTunnelDeviceClaims collects interface-level and unit-level
@@ -374,6 +375,7 @@ func routingInstanceTunnelDeviceClaims(cfg *Config) []routingInstanceTunnelDevic
 			out = append(out, routingInstanceTunnelDeviceClaim{
 				LinuxName: tc.Name, Instance: tc.RoutingInstance,
 				Member: fmt.Sprintf("%s tunnel routing-instance", ifName),
+				Tunnel: tc,
 			})
 		}
 		unitNums := make([]int, 0, len(ifc.Units))
@@ -389,6 +391,7 @@ func routingInstanceTunnelDeviceClaims(cfg *Config) []routingInstanceTunnelDevic
 			out = append(out, routingInstanceTunnelDeviceClaim{
 				LinuxName: unit.Tunnel.Name, Instance: unit.Tunnel.RoutingInstance,
 				Member: fmt.Sprintf("%s.%d tunnel routing-instance", ifName, unitNum),
+				Tunnel: unit.Tunnel,
 			})
 		}
 	}

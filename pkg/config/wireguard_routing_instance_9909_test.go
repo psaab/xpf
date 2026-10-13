@@ -275,6 +275,11 @@ func TestWireguardRoutingInstanceLenientSkips9909(t *testing.T) {
 	if len(warns) != 1 {
 		t.Fatalf("want exactly one #9909 warning, got %d: %v", len(warns), cfg.Warnings)
 	}
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "#12520") {
+			t.Fatalf("WireGuard quarantine produced a duplicate #12520 warning: %v", cfg.Warnings)
+		}
+	}
 	if !strings.Contains(warns[0], "wg0") || !strings.Contains(warns[0], "blue") {
 		t.Fatalf("warning %q names neither tunnel wg0 nor instance blue; want both", warns[0])
 	}

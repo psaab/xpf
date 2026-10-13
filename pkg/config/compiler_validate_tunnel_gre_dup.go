@@ -18,6 +18,33 @@ type greOuterKey struct {
 	transportRI string
 }
 
+// greOuterKeyForTunnel returns the decap identity of a GRE-kind tunnel
+// (`gre`, `ip6gre`, mirroring Rust `tunnel_mode_kind`) with net.ParseIP +
+// String normalization; ok is false for other modes and for an unparseable
+// endpoint, which never reaches the decap index.
+func greOuterKeyForTunnel(tc *TunnelConfig) (greOuterKey, bool) {
+	if tc == nil || (tc.Mode != "gre" && tc.Mode != "ip6gre") {
+		return greOuterKey{}, false
+	}
+	src := net.ParseIP(tc.Source)
+	dst := net.ParseIP(tc.Destination)
+	if src == nil || dst == nil {
+		return greOuterKey{}, false
+	}
+	return greOuterKey{
+		source: src.String(), destination: dst.String(),
+		key: tc.Key, transportRI: tc.RoutingInstance,
+	}, true
+}
+
+// outerDescription renders the outer triple for diagnostics.
+func (k greOuterKey) outerDescription() string {
+	if k.key == 0 {
+		return fmt.Sprintf("source %s, destination %s, key 0 (unkeyed)", k.source, k.destination)
+	}
+	return fmt.Sprintf("source %s, destination %s, key %d", k.source, k.destination, k.key)
+}
+
 // validateGreDuplicateOuterStrict rejects two GRE tunnels that share an
 // identical outer (source, destination, key, transport instance) (#10654).
 //
@@ -94,30 +121,21 @@ func validateGreDuplicateOuterStrict(cfg *Config, lenient bool) ([]string, error
 	byObject := make(map[*TunnelConfig]struct{})
 	for _, ep := range EmitTunnelEndpointNames(cfg) {
 		tc := ep.Tunnel
-		if tc.Mode != "gre" && tc.Mode != "ip6gre" {
-			continue
-		}
 		if _, done := byObject[tc]; done {
 			continue
 		}
 		byObject[tc] = struct{}{}
-		src := net.ParseIP(tc.Source)
-		dst := net.ParseIP(tc.Destination)
-		if src == nil || dst == nil {
+		k, ok := greOuterKeyForTunnel(tc)
+		if !ok {
 			continue
 		}
-		k := greOuterKey{source: src.String(), destination: dst.String(), key: tc.Key, transportRI: tc.RoutingInstance}
 		owner, dup := seen[k]
 		if !dup {
 			seen[k] = ep.Name
 			continue
 		}
-		keyDesc := fmt.Sprintf("key %d", tc.Key)
-		if tc.Key == 0 {
-			keyDesc = "key 0 (unkeyed)"
-		}
-		msg := fmt.Sprintf("duplicate GRE outer (source %s, destination %s, %s) already claimed by tunnel %q — inbound decap would attribute every frame of that tunnel to whichever endpoint sorts first (#10654)",
-			k.source, k.destination, keyDesc, owner)
+		msg := fmt.Sprintf("duplicate GRE outer (%s) already claimed by tunnel %q — inbound decap would attribute every frame of that tunnel to whichever endpoint sorts first (#10654)",
+			k.outerDescription(), owner)
 		if lenient {
 			warnings = append(warnings, fmt.Sprintf("tunnel %q: %s", ep.Name, msg))
 			continue

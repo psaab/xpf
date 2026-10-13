@@ -417,5 +417,11 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	// walk would have to re-derive the pairing the compiler already did.
 	cfg.Warnings = append(cfg.Warnings, filterLogSyslogRoutingWarnings(cfg)...)
 
+	// #12520 runs after all established tail gates so their diagnostics retain
+	// first-error priority, including #9909, #5162, #4785, and #10654.
+	if err := runTailGatesTunnelRITarget12520(cfg, opts); err != nil {
+		return err
+	}
+
 	return nil
 }

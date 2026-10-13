@@ -592,7 +592,11 @@ var notAValueList = map[string]string{
 
 // Value pairs must span the DOMAINS setSchema's typed leaves accept, not merely
 // be distinctive strings — see trap (2) above.
-var gateValuePairs = []struct{ name, v1, v2 string }{
+type gateValuePair struct {
+	name, v1, v2 string
+}
+
+var gateValuePairs = []gateValuePair{
 	{"word", "zzqaaa1", "zzqbbb2"},
 	// #10826 expiries parse UTC calendar dates; word-only probes are inert.
 	{"date", "2099-01-01", "2099-12-31"},
@@ -636,6 +640,44 @@ var gateValuePairs = []struct{ name, v1, v2 string }{
 	// were added for, and the same remedy: give the gate a valid pair
 	// rather than reclassify leaves that are genuinely comparable.
 	{"dhgroup", "14", "19"},
+}
+
+// #12520: a tunnel routing-instance target must name a defined VRF, and the
+// tolerant compile clears any other target, so under every generic pair these
+// two leaves compile exactly like the bare leaf and drop out of coverage. They
+// probe a pair of VRF names instead, defined at the root by gateRootPrereq.
+var gateTunnelRITargetSites = map[string]bool{
+	"interfaces <*> tunnel routing-instance destination":          true,
+	"interfaces <*> unit <*> tunnel routing-instance destination": true,
+}
+
+var gateTunnelRITargetPairs = []gateValuePair{{"defined-vrf", "gate-a", "gate-b"}}
+
+// gateValuePairsForLeaf returns the value pairs the gate probes g with.
+func gateValuePairsForLeaf(g gateLeaf) []gateValuePair {
+	if gateTunnelRITargetSites[g.siteKey()] {
+		return gateTunnelRITargetPairs
+	}
+	return gateValuePairs
+}
+
+// gateRootPrereq returns root-level statements every compile of g carries, as
+// one brace body and as set commands. Like a gateParentPrereq row, it is the
+// same in the zero-, one- and two-value configs, so it cancels out of every
+// comparison and only decides whether there is one.
+func gateRootPrereq(g gateLeaf) (string, []string) {
+	if !gateTunnelRITargetSites[g.siteKey()] {
+		return "", nil
+	}
+	brace := "routing-instances { "
+	var sets []string
+	for _, vp := range gateTunnelRITargetPairs {
+		for _, name := range []string{vp.v1, vp.v2} {
+			brace += name + " { instance-type virtual-router; } "
+			sets = append(sets, "set routing-instances "+name+" instance-type virtual-router")
+		}
+	}
+	return brace + "} ", sets
 }
 
 type gateLeaf struct {
@@ -943,12 +985,13 @@ func equalPaths(a, b []string) bool {
 // tried across every value pair so a type mismatch on one pair is not mistaken
 // for the leaf being unreadable.
 func wordInert(g gateLeaf, path []string) bool {
-	base, err := gateCompileBrace(gateBraceConfig(path, ""))
+	root, _ := gateRootPrereq(g)
+	base, err := gateCompileBrace(root + gateBraceConfig(path, ""))
 	if err != nil {
 		return true
 	}
-	for _, vp := range gateValuePairs {
-		one, err := gateCompileBrace(gateBraceConfig(path, g.leaf+" "+vp.v1+";"))
+	for _, vp := range gateValuePairsForLeaf(g) {
+		one, err := gateCompileBrace(root + gateBraceConfig(path, g.leaf+" "+vp.v1+";"))
 		if err == nil && one != base {
 			return false
 		}
@@ -1067,14 +1110,16 @@ func spellingVerdicts(g gateLeaf, v1, v2 string) map[string]string {
 	// #7492: prepend the parent prerequisite, identically in every form, so it
 	// cancels out of the comparison and only decides whether a comparison exists.
 	preBody, preSets := gateLeafPrereq(g)
+	rootBody, rootSets := gateRootPrereq(g)
 	brace := func(stmt string) (string, error) {
 		if preBody != "" {
 			stmt = preBody + " " + stmt
 		}
-		return gateCompileBrace(gateBraceConfig(epath, stmt))
+		return gateCompileBrace(rootBody + gateBraceConfig(epath, stmt))
 	}
 	sets := func(cmds ...string) (string, error) {
-		return gateCompileSet(append(append([]string{}, preSets...), cmds...))
+		all := append(append([]string{}, rootSets...), preSets...)
+		return gateCompileSet(append(all, cmds...))
 	}
 	forms := map[string][3]func() (string, error){
 		"A-hier-bracket": {
@@ -1187,7 +1232,7 @@ func TestSchemaSpellingDifferentialGate(t *testing.T) {
 	compared := 0
 	for _, g := range leaves {
 		leafCompared := false
-		for _, vp := range gateValuePairs {
+		for _, vp := range gateValuePairsForLeaf(g) {
 			state := spellingVerdicts(g, vp.v1, vp.v2)
 			cmpSet := gateSpellingsScalar
 			if g.multi {
