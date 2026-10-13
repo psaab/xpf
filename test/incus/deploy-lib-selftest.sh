@@ -1847,6 +1847,9 @@ test_deploy_gate_wave_fences_checkout_sha() {
 	cat >"$fake_make" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$1" == cluster-deploy && "${FAIL_DEPLOY:-0}" == 1 ]]; then
+	exit 1
+fi
 if [[ "$1" == cluster-deploy && "${ADVANCE_CHECKOUT:-0}" == 1 ]]; then
 	printf 'advanced\n' >>"$XPF_REPO_ROOT/source"
 	git -C "$XPF_REPO_ROOT" add source
@@ -1875,6 +1878,15 @@ SH
 		bad "deploy/gate wave: advanced checkout reached the gate"
 	else
 		ok "deploy/gate wave: checkout advance after deploy aborts before gate"
+	fi
+	rm -f "$log"
+	if XPF_REPO_ROOT="$root" GATE_MARKER="$log" FAIL_DEPLOY=1 \
+		deploy_gate_wave "$root" test-gate "$fake_make" "$fake_make" cluster-deploy >/dev/null 2>&1; then
+		bad "deploy/gate wave: gate ran after a failed deploy"
+	elif [[ -e "$log" ]]; then
+		bad "deploy/gate wave: failed deploy still reached the gate"
+	else
+		ok "deploy/gate wave: failed deploy aborts before gate"
 	fi
 	rm -rf "$fixture"
 }
