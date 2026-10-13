@@ -2889,6 +2889,54 @@ fn flow_cache_not_populated_by_control_segment_via_insertion_site() {
         );
     }
 
+// ---- #12603: v6 s3-clique must not be an all-seed single-set clique ------
+
+/// #12603 adversarial family: v6 keys identical except the top 16 bits
+/// (segment 3, `s3`) of the source address. These collide in one set under
+/// seed-additive FxHasher for every seed; keyed nonlinear hashing disperses.
+fn v6_s3_clique(n: u16) -> Vec<crate::session::SessionKey> {
+    use std::net::Ipv6Addr;
+    (0..n)
+        .map(|i| crate::session::SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V6(Ipv6Addr::new(
+                0x2001, 0x0db8, 0, i, 0, 0, 0, 1,
+            )),
+            dst_ip: IpAddr::V6(Ipv6Addr::new(
+                0x2001, 0x0db8, 0, 2, 0, 0, 0, 2,
+            )),
+            src_port: 40000,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        })
+        .collect()
+}
+
+#[test]
+fn set_index_v6_s3_clique_disperses_for_every_pinned_seed_12603() {
+    let keys = v6_s3_clique(256);
+    for seed in [
+        0x0123_4567_89AB_CDEFu64,
+        0xA5A5_0000_C3C3_FFFF,
+        0xDEAD_BEEF_CAFE_BABE,
+        1,
+        42,
+        u64::MAX,
+    ] {
+        let distinct: std::collections::BTreeSet<usize> = keys
+            .iter()
+            .map(|k| FlowCache::set_index_seeded(seed, k, 7))
+            .collect();
+        assert!(
+            distinct.len() > 64,
+            "#12603: v6 s3-clique collapsed to {} distinct sets under seed {seed:#x}",
+            distinct.len()
+        );
+    }
+}
+
 // ── #3048/#5147: cached dst_mac eviction on the flow's OWN neighbor ────
 // End-to-end at the flow-cache layer: a descriptor is stamped with the
 // per-shard MAC-change epoch of its OWN next-hop neighbor at insert. The

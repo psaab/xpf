@@ -1,13 +1,11 @@
 // Per-boot secret seed for node-local hot-path hashes (#2364).
 //
 // Several forwarding-path structures hash attacker-controllable keys
-// (5-tuples, ingress ifindex) with an UNKEYED, deterministic mixer
-// (`rustc_hash::FxHasher::default()`). An off-box attacker who controls
-// the 5-tuple can precompute keys whose masked low bits collide, forcing
-// flow-cache set thrash, fabric-queue skew, or session-map collision
-// chains (algorithmic-complexity DoS). This is the same class of hazard
-// the CoS SFQ flow hash already defends against with a per-queue random
-// seed (`afxdp::cos::flow_hash::cos_flow_hash_seed_from_os`).
+// (5-tuples, ingress ifindex) for placement. FxHasher's seed is additive:
+// a key-pair delta is seed-independent, and selected v6 address words let
+// remote senders construct same-set families for every seed. This module
+// supplies a per-process key to the keyed SipHash builder used for cache
+// sets and session maps, preventing offline collision construction.
 //
 // This module provides a SINGLE per-process secret seed, drawn once at
 // first use and stable for the life of the process, that the node-local
@@ -127,16 +125,37 @@ pub(crate) fn os_random_seed_u64() -> u64 {
 /// Process-global per-boot seed. Drawn once at first use, then constant.
 static HOT_PATH_SEED: OnceLock<u64> = OnceLock::new();
 
-/// The per-process secret seed for node-local hot-path hashes. Stable for
-/// the life of the process. Never zero.
-///
-/// Reproducibility for tests is provided not by mutating this global (which
-/// would race across the parallel test runner) but by the seed-parameterized
-/// `*_seeded` cores at each call site (`FlowCache::set_index_seeded`,
-/// `worker::fabric_queue_hash_seeded`, and the `FxSeededState` the session
-/// indices are built from). Those let a test pin a seed locally and assert
-/// both intra-seed stability and cross-seed reshuffling — the same pattern
-/// the CoS SFQ hash uses. Production always reads this process-global value.
+/// Per-process seeded SipHash builder for attacker-keyed table placement.
+/// FxHasher's seed is additive and therefore cannot prevent key-pair
+/// cancellations in its polynomial hash.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HotPathSeededState {
+    seed: u64,
+}
+
+impl HotPathSeededState {
+    #[inline]
+    pub(crate) const fn new(seed: u64) -> Self {
+        Self { seed }
+    }
+}
+
+#[allow(deprecated)]
+impl std::hash::BuildHasher for HotPathSeededState {
+    type Hasher = std::hash::SipHasher;
+
+    #[inline]
+    fn build_hasher(&self) -> Self::Hasher {
+        std::hash::SipHasher::new_with_keys(
+            self.seed,
+            self.seed.rotate_left(29) ^ 0x9e37_79b9_7f4a_7c15,
+        )
+    }
+}
+
+/// The process-global hot-path seed. Stable for the life of the process.
+/// Tests pin seeds through `HotPathSeededState::new` or each `*_seeded`
+/// helper rather than mutating this global.
 #[inline]
 pub(crate) fn hot_path_hash_seed() -> u64 {
     *HOT_PATH_SEED.get_or_init(os_random_seed_u64)
