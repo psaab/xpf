@@ -995,6 +995,11 @@ type ConfigSnapshot struct {
 	// hashes the JSON encoding) therefore excludes it as well.
 	schedulerActiveState    map[string]bool
 	schedulerActiveStateSet bool
+	// xfrmDumpFailed records that this snapshot's single xfrm-device dump
+	// failed. It is local derivation metadata: the apply path retains the
+	// documented configuration-ownership fallback, while the RSS allowlist
+	// consumes it to grant no reshape permission without kernel evidence.
+	xfrmDumpFailed bool
 	// policySnapshotIdentity is the cached policy/rename authorization identity.
 	// It is manager-local, excluded from the wire and snapshot content hash, and
 	// survives partial snapshot copies that change only non-policy sections.

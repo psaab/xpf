@@ -19,7 +19,8 @@ import (
 // wrong: its rows are written back into m.lastSnapshot beside the existing
 // interface rows on both planes, so its sample has to agree with theirs.
 func buildFabricSnapshots(cfg *config.Config) []FabricSnapshot {
-	return buildFabricSnapshotsFrom(cfg, sampleLiveXfrmNetdevs())
+	liveXfrm, _ := sampleLiveXfrmNetdevs()
+	return buildFabricSnapshotsFrom(cfg, liveXfrm)
 }
 
 // alignFabricVerdicts returns fresh fabric rows carrying the device-level

@@ -249,10 +249,11 @@ func TestUserspaceDataplaneDisabled_WithdrawsFullPriorSet_6801(t *testing.T) {
 // TestEmptyAllowlistWhileUserspaceEnabled_RetainsOwnership_6801 is the
 // middle row that separates a real withdrawal from a derivation
 // failure. UserspaceBoundLinuxInterfaces degrades to nil when its
-// snapshot build fails, and the tunable step still runs on a commit
-// whose dataplane apply failed — so "no names" must NOT mean "release
-// everything". Ripping the tuning off a NIC the dataplane is still
-// forwarding on costs a mid-traffic RX re-steer.
+// snapshot build fails (#2514) and when its xfrm-device dump hard-fails
+// (#12580, on a commit that otherwise succeeds), and the tunable step
+// still runs on a commit whose dataplane apply failed — so "no names"
+// must NOT mean "release everything". Ripping the tuning off a NIC the
+// dataplane is still forwarding on costs a mid-traffic RX re-steer.
 //
 // Deleting the empty-allowlist guard reds this cell while every other
 // cell in this file stays green.

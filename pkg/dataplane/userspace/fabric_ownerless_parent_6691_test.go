@@ -331,8 +331,8 @@ func TestXfrmDumpFailureIsLoggedNotSwallowed(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prevLogger) })
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
-	if got := sampleLiveXfrmNetdevs(); len(got) != 0 {
-		t.Fatalf("sample = %v, want empty on a failed dump", got)
+	if got, failed := sampleLiveXfrmNetdevs(); len(got) != 0 || !failed {
+		t.Fatalf("sample = %v, failed = %v; want empty sample with failure status", got, failed)
 	}
 	line := buf.String()
 	if !bytes.Contains([]byte(line), []byte("level=ERROR")) {
@@ -348,8 +348,8 @@ func TestXfrmDumpFailureIsLoggedNotSwallowed(t *testing.T) {
 	// assertion above would pass on every build and say nothing.
 	buf.Reset()
 	liveXfrmNetdevs = func() (map[string]bool, error) { return map[string]bool{"st0": true}, nil }
-	if got := sampleLiveXfrmNetdevs(); !got["st0"] {
-		t.Fatalf("sample = %v, want the dumped xfrm device", got)
+	if got, failed := sampleLiveXfrmNetdevs(); !got["st0"] || failed {
+		t.Fatalf("sample = %v, failed = %v; want st0 and no failure", got, failed)
 	}
 	if bytes.Contains(buf.Bytes(), []byte("level=ERROR")) {
 		t.Errorf("a successful dump logged an error: %q", buf.String())
@@ -489,4 +489,135 @@ func TestFabricAndBaseRowNeverDisagree(t *testing.T) {
 			}
 		})
 	}
+}
+
+// stubXfrmNetdevsErr presents a kernel whose xfrm dump HARD-FAILS (#12580):
+// no evidence at all, as opposed to stubXfrmNetdevs' successful empty dump.
+func stubXfrmNetdevsErr(t *testing.T, err error) func() {
+	t.Helper()
+	prev := liveXfrmNetdevs
+	liveXfrmNetdevs = func() (map[string]bool, error) { return nil, err }
+	return func() { liveXfrmNetdevs = prev }
+}
+
+// TestAllowlistDegradesToNilOnXfrmDumpFailure12580 is the #12580 regression
+// guard.
+//
+// liveXfrmNetdevs documents that when its dump REPORTS an error,
+// UserspaceBoundLinuxInterfaces "degrades to touching no NIC at all" — each
+// consumer resolves the error in "its own conservative direction". The
+// ingress side of the same failed sample deliberately falls back to
+// configuration ownership only (sampleLiveXfrmNetdevs) — but the allowlist is
+// PERMISSION to reshape a NIC's RSS table and pin its coalescing, and on a
+// failed dump nothing can tell a stale live xfrmi (a zoned `st10` row the
+// config no longer binds, still in the kernel) from an ordinary NIC.
+//
+// SCOPE: a HARD dump error only. An interrupted dump (ErrDumpInterrupted) is
+// not reported as an error at all — xfrmDumpNames keeps its partial device
+// list as the sample — so an xfrmi missing from that list is still granted.
+// #12710 owns that decision; this test makes no claim about it.
+//
+// The fixture is the issue's measured composition: a stale zoned `st10`
+// row (no VPN names it) beside an ordinary LAN NIC, with the dump stubbed
+// to a hard error. At pre-fix head the allowlist came back
+// [ge-0-0-0 st10] — the stale xfrmi granted reshape permission.
+//
+// The degrade lands on a commit that otherwise SUCCEEDS (the apply snapshot
+// keeps its configuration-ownership fallback), so every NIC-tuning consumer
+// of the list does nothing until the next apply. The WARN is the operator's
+// only record of that, so it is part of the contract.
+//
+// FAIL-ON-REVERT / MUTANT KILLS:
+//   - drop the degrade-to-nil (snapshot flag never stamped or never read):
+//     the failed-dump row reds on both the nil assertion and st10.
+//   - degrade on EVERY build (ignore the flag's value): the success-dump
+//     control reds — the LAN must survive a healthy dump.
+//   - fail buildSnapshot itself on dump error: the snapshot-build control
+//     reds because a hard dump error must not fail the apply snapshot.
+//   - drop the WARN, demote it below WARN, or stop naming a skipped
+//     consumer or the retry point: the failed-dump row reds on the record.
+//   - log the WARN on every build: the success-dump control reds.
+func TestAllowlistDegradesToNilOnXfrmDumpFailure12580(t *testing.T) {
+	defer stubLinkSnapshot5619(t, map[string]int{"ge-0-0-0": 10, "st10": 11})()
+
+	lines := []string{
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces st10 unit 0 family inet address 192.0.2.1/24",
+		"set security zones security-zone trust interfaces ge-0/0/0.0",
+		"set security zones security-zone trust interfaces st10.0",
+	}
+
+	t.Run("failed dump grants reshape permission to nothing", func(t *testing.T) {
+		defer stubXfrmNetdevsErr(t, errors.New("RTM_GETLINK: no buffer space available"))()
+		cfg := compileForTest5619(t, lines...)
+		logs := captureSlog12580(t)
+		if got := UserspaceBoundLinuxInterfaces(cfg); got != nil {
+			t.Errorf("allowlist on a failed xfrm dump = %v, want nil (degrade to "+
+				"touching no NIC at all): the stale xfrmi st10 is indistinguishable "+
+				"from an ordinary NIC without the kernel half of the evidence", got)
+		}
+		warns := allowlistDegradeWarns12580(logs.String())
+		if len(warns) != 1 {
+			t.Fatalf("WARN records reporting the withheld allowlist = %d, want exactly 1: "+
+				"the commit succeeds, so this record is the operator's only signal that "+
+				"NIC tuning was skipped.\nlogs:\n%s", len(warns), logs.String())
+		}
+		for _, want := range []string{
+			"RSS indirection", "kill-switch", "coalescence", "hand-back", "next config apply",
+		} {
+			if !strings.Contains(warns[0], want) {
+				t.Errorf("the degrade WARN does not name %q: an operator cannot tell "+
+					"which NIC tuning was skipped, or until when.\ngot: %s", want, warns[0])
+			}
+		}
+		// The failure belongs to this one snapshot; it must not turn into
+		// a snapshot-build error or get lost before the allowlist reads it.
+		snap, err := buildSnapshot(cfg, deriveUserspaceConfig(cfg), 0, 0)
+		if err != nil {
+			t.Fatalf("buildSnapshot on a failed xfrm dump: %v", err)
+		}
+		if !snap.xfrmDumpFailed {
+			t.Fatal("snapshot lost the xfrm dump failure status")
+		}
+	})
+
+	t.Run("successful dump keeps the LAN and still refuses the stale xfrmi", func(t *testing.T) {
+		defer stubXfrmNetdevs(t, "st10")()
+		cfg := compileForTest5619(t, lines...)
+		logs := captureSlog12580(t)
+		got := UserspaceBoundLinuxInterfaces(cfg)
+		if !slices.Contains(got, "ge-0-0-0") {
+			t.Errorf("allowlist on a healthy dump = %v, want the LAN ge-0-0-0: "+
+				"the degrade must fire on dump failure only", got)
+		}
+		if slices.Contains(got, "st10") {
+			t.Errorf("allowlist on a healthy dump = %v contains the live xfrmi st10", got)
+		}
+		if warns := allowlistDegradeWarns12580(logs.String()); len(warns) != 0 {
+			t.Errorf("a healthy dump logged the allowlist-degrade WARN: %q", warns)
+		}
+	})
+}
+
+// captureSlog12580 routes the default logger into a buffer for the rest of
+// the calling (sub)test.
+func captureSlog12580(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return &buf
+}
+
+// allowlistDegradeWarns12580 returns the WARN records that report the reshape
+// allowlist being withheld.
+func allowlistDegradeWarns12580(logs string) []string {
+	var out []string
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "allowlist") {
+			out = append(out, line)
+		}
+	}
+	return out
 }

@@ -764,13 +764,30 @@ subset.
 
 The operator-visible contract is now symmetric: **a netdev that leaves the
 userspace-dp allowlist gets its default RSS indirection table and its pre-xpf
-coalescence back on the same commit.** Withdrawal is keyed on the CONFIG signal
-(the userspace dataplane being disabled), never on an empty derived list —
+coalescence back on the same commit** — provided that commit could derive the
+allowlist (below). Withdrawal is keyed on the CONFIG signal (the userspace
+dataplane being disabled), never on an empty derived list —
 `UserspaceBoundLinuxInterfaces` degrades to nil on a snapshot-build error
-(#2514), and treating "no names" as "release everything" would rip the tuning
-off NICs the dataplane is still forwarding on. Mechanism, ownership records and
-retry-debt semantics: `pkg/daemon/README.md`, "NIC tuning ownership +
-released-interface teardown (#6801)".
+(#2514) and on a hard xfrm-device dump failure (#12580), and treating "no
+names" as "release everything" would rip the tuning off NICs the dataplane is
+still forwarding on.
+
+The two degrades differ in what the operator sees. A snapshot-build error also
+fails the apply, so the commit is rejected. A hard xfrm dump failure does NOT:
+the apply snapshot excludes secure tunnels by configuration ownership alone and
+the commit SUCCEEDS, while RSS reshaping (and the kill-switch restore),
+coalescence and this hand-back are all skipped until the next apply re-derives
+the allowlist — the next commit, or the boot-time apply after a restart;
+nothing retries sooner. xpfd logs a WARN naming the skipped work. Meanwhile a
+NIC still on its default RSS table (first boot, newly bound, or re-enabled
+after the kill switch) keeps feeding every hardware queue, and on a NIC with
+more than 16 RX queues (`BindingQueuesPerIface`) the transit hashed onto queues
+the planner never binds takes `drop_degraded_transit`. An INTERRUPTED dump is
+not a failure: its partial device list is used as the sample, so an xfrmi
+missing from it is still granted (#12710).
+
+Mechanism, ownership records and retry-debt semantics: `pkg/daemon/README.md`,
+"NIC tuning ownership + released-interface teardown (#6801)".
 
 #### Session Table (`session.rs`)
 
