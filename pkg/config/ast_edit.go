@@ -1708,7 +1708,7 @@ func deleteInterfaceFilterSampling12508(
 		}
 		if keysEqual(n.Keys, nodeKeys) {
 			if containerSchema == schemaForwardingOptions.children["sampling"] {
-				if deleteBelowRepeatedSibling12714(n, childKeys) {
+				if deleteBelowRepeatedSibling12714(n, childKeys, containerSchema) {
 					matched = true
 				}
 			} else if removeAllMatchingNodes12508(&n.Children, childKeys) {
@@ -1756,7 +1756,7 @@ func setInterfaceFilterSamplingInactive12508(
 		}
 		if keysEqual(n.Keys, nodeKeys) {
 			if containerSchema == schemaForwardingOptions.children["sampling"] {
-				if markBelowRepeatedSiblingInactive12714(n, childKeys, inactive) {
+				if markBelowRepeatedSiblingInactive12714(n, childKeys, inactive, containerSchema) {
 					matched = true
 				}
 			} else if markAllMatchingNodesInactive12508(&n.Children, childKeys, inactive) > 0 {
@@ -1799,9 +1799,18 @@ func markAllMatchingNodesInactive12508(nodes *[]*Node, targetKeys []string, inac
 
 // deleteBelowRepeatedSibling12714 descends through keyed child containers,
 // removing every matching descendant across the repeated parent siblings.
-func deleteBelowRepeatedSibling12714(parent *Node, keys []string) bool {
+func deleteBelowRepeatedSibling12714(parent *Node, keys []string, schema *schemaNode) bool {
 	if len(keys) == 0 {
 		return false
+	}
+	matched := false
+	for i := len(parent.Children) - 1; i >= 0; i-- {
+		child := parent.Children[i]
+		if child != nil && child.IsLeaf && keysMatch(child.Keys, keys) &&
+			elidedNodeIsExactlyOneStatement(child, schema) {
+			parent.Children = append(parent.Children[:i], parent.Children[i+1:]...)
+			matched = true
+		}
 	}
 	keyCount := 1
 	for _, child := range parent.Children {
@@ -1811,18 +1820,19 @@ func deleteBelowRepeatedSibling12714(parent *Node, keys []string) bool {
 		}
 	}
 	if len(keys) == keyCount {
-		return removeAllMatchingNodes12508(&parent.Children, keys)
+		containersMatched := removeAllMatchingNodes12508(&parent.Children, keys)
+		return containersMatched || matched
 	}
 	if len(keys) < keyCount {
-		return false
+		return matched
 	}
 	rest := keys[keyCount:]
-	matched := false
+	childSchema := schemaChildFor(schema, keys[0])
 	for _, child := range parent.Children {
 		if child == nil || child.IsLeaf || !keysEqual(child.Keys, keys[:keyCount]) {
 			continue
 		}
-		if deleteBelowRepeatedSibling12714(child, rest) {
+		if deleteBelowRepeatedSibling12714(child, rest, childSchema) {
 			matched = true
 		}
 	}
@@ -1831,9 +1841,17 @@ func deleteBelowRepeatedSibling12714(parent *Node, keys []string) bool {
 
 // markBelowRepeatedSiblingInactive12714 is the deactivate/activate twin of
 // deleteBelowRepeatedSibling12714: same descent, marking instead of removing.
-func markBelowRepeatedSiblingInactive12714(parent *Node, keys []string, inactive bool) bool {
+func markBelowRepeatedSiblingInactive12714(parent *Node, keys []string, inactive bool, schema *schemaNode) bool {
 	if len(keys) == 0 {
 		return false
+	}
+	matched := false
+	for _, child := range parent.Children {
+		if child != nil && child.IsLeaf && keysMatch(child.Keys, keys) &&
+			elidedNodeIsExactlyOneStatement(child, schema) {
+			child.Inactive = inactive
+			matched = true
+		}
 	}
 	keyCount := 1
 	for _, child := range parent.Children {
@@ -1843,18 +1861,19 @@ func markBelowRepeatedSiblingInactive12714(parent *Node, keys []string, inactive
 		}
 	}
 	if len(keys) == keyCount {
-		return markAllMatchingNodesInactive12508(&parent.Children, keys, inactive) > 0
+		containersMatched := markAllMatchingNodesInactive12508(&parent.Children, keys, inactive) > 0
+		return containersMatched || matched
 	}
 	if len(keys) < keyCount {
-		return false
+		return matched
 	}
 	rest := keys[keyCount:]
-	matched := false
+	childSchema := schemaChildFor(schema, keys[0])
 	for _, child := range parent.Children {
 		if child == nil || child.IsLeaf || !keysEqual(child.Keys, keys[:keyCount]) {
 			continue
 		}
-		if markBelowRepeatedSiblingInactive12714(child, rest, inactive) {
+		if markBelowRepeatedSiblingInactive12714(child, rest, inactive, childSchema) {
 			matched = true
 		}
 	}

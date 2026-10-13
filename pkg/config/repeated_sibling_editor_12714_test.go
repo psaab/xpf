@@ -254,6 +254,65 @@ func TestEditorParitySampling12714(t *testing.T) {
 
 }
 
+func TestEditorDeepSamplingElidedChildren12714(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		wantRate int
+	}{
+		{
+			name:  "elided instance and input",
+			input: `forwarding-options { sampling { instance i2 input rate 100; } }`,
+		},
+		{
+			name:  "braced instance with elided input",
+			input: `forwarding-options { sampling { instance i2 { input rate 100; } } }`,
+		},
+		{
+			name:  "fully compact sampling",
+			input: `forwarding-options { sampling instance i2 input rate 100; }`,
+		},
+		{
+			name: "mixed elided and braced input leaves",
+			input: `forwarding-options {
+				sampling { instance i2 { input rate 100; input { rate 200; } } }
+			}`,
+			wantRate: 100,
+		},
+	}
+	path := []string{"forwarding-options", "sampling", "instance", "i2", "input", "rate"}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, operation := range []string{"delete", "deactivate"} {
+				t.Run(operation, func(t *testing.T) {
+					tree := tree12714(t, tc.input)
+					before := tree.Format()
+					if tc.wantRate != 0 {
+						if got := samplingInstance12714(compileTree12714(t, tree.Clone()), "i2"); got == nil || got.InputRate != tc.wantRate {
+							t.Fatalf("precondition i2 = %+v, want input rate %d", got, tc.wantRate)
+						}
+					}
+					var err error
+					if operation == "delete" {
+						err = tree.DeletePath(path)
+					} else {
+						err = tree.DeactivatePath(path)
+					}
+					if err != nil {
+						t.Fatalf("%s: %v", operation, err)
+					}
+					if tree.Format() == before {
+						t.Errorf("%s reported success without changing the elided statement", operation)
+					}
+					if got := samplingInstance12714(compileTree12714(t, tree.Clone()), "i2"); got != nil && got.InputRate != 0 {
+						t.Errorf("after %s i2 rate = %d, want 0", operation, got.InputRate)
+					}
+				})
+			}
+		})
+	}
+}
+
 // --- group-body parity (first-wins inside groups, mirroring #12508) ---
 
 func TestEditorParityGroupsDHCP12714(t *testing.T) {
