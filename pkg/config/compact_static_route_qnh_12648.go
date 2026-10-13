@@ -14,20 +14,34 @@ func normalizePackedStaticRouteQualifiedNextHop(tree *ConfigTree) int {
 		return 0
 	}
 	changed := 0
-	var walk func([]*Node)
-	walk = func(nodes []*Node) {
+	var walk func(nodes []*Node, parent, grandparent, greatGrandparent *Node)
+	walk = func(nodes []*Node, parent, grandparent, greatGrandparent *Node) {
 		for _, node := range nodes {
 			if node == nil {
 				continue
 			}
-			if node.Name() == "route" {
+			if node.Name() == "route" && isStaticRouteNode12648(parent, grandparent, greatGrandparent) {
 				changed += splitPackedRouteQualifiedNextHop(node)
 			}
-			walk(node.Children)
+			walk(node.Children, node, parent, grandparent)
 		}
 	}
-	walk(tree.Children)
+	walk(tree.Children, nil, nil, nil)
 	return changed
+}
+
+func isStaticRouteNode12648(parent, grandparent, greatGrandparent *Node) bool {
+	if parent == nil || parent.Name() != "static" || grandparent == nil {
+		return false
+	}
+	switch grandparent.Name() {
+	case "routing-options":
+		return true
+	case "rib":
+		return greatGrandparent != nil && greatGrandparent.Name() == "routing-options"
+	default:
+		return false
+	}
 }
 
 func splitPackedRouteQualifiedNextHop(route *Node) int {
@@ -47,6 +61,11 @@ func splitPackedRouteQualifiedNextHop(route *Node) int {
 			}
 		}
 		if qnh <= 1 || qnh+1 >= len(nextHop.Keys) {
+			continue
+		}
+		gateway := qnh + 1
+		if isRouteInlineKeyword(nextHop.Keys[gateway]) &&
+			!nextHop.KeyQuoted(gateway) && !nextHop.KeyBracketed(gateway) {
 			continue
 		}
 
