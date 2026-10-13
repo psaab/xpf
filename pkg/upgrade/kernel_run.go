@@ -504,7 +504,18 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) (bool, error) {
 		return false, disarmAfterArmFailure(sys, fmt.Errorf("kernel-upgrade arm: %w", err))
 	}
 	if err := r.ktransition(j, KernelStateArmed); err != nil {
-		return false, disarmAfterArmFailure(sys, err)
+		if !isPostRenameJournalError(err) {
+			return false, disarmAfterArmFailure(sys, err)
+		}
+		// The ARMED rename landed: BootNext was positively read back and the
+		// visible journal now agrees with that queued trial. Do not unwind by
+		// clearing BootNext/disarming the watchdog, which would leave a
+		// false-ARMED journal (Arm refuses >= ARMED). As with #12162's landed
+		// backstep/restore writes, classify the typed error by errors.As and
+		// continue with the verified trial; durability across power loss is
+		// unknown, but a plain error here would contradict the visible state.
+		r.logf("kernel-upgrade arm: ARMED journal rename landed but directory sync failed "+
+			"(durability across power loss is unknown): %v; proceeding to reboot", err)
 	}
 
 	return watchdogArmed, nil
