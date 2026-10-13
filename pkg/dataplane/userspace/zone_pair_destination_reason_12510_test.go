@@ -7,11 +7,13 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// groupedFromListTree12510 writes one `from-zone [ A C ] to-zone <toZone>`
-// policy p1 context per destination as grouped set commands, the CLI
-// producer: the context node ends at `to-zone` and each statement's
-// destination is folded into its body.
+// groupedFromListTree12510 writes one grouped-set from-zone-list policy per
+// destination.
 func groupedFromListTree12510(t *testing.T, toZones ...string) *config.ConfigTree {
+	return groupedFromZoneTree12510(t, "[ A C ]", toZones...)
+}
+
+func groupedFromZoneTree12510(t *testing.T, fromZone string, toZones ...string) *config.ConfigTree {
 	t.Helper()
 	commands := []string{
 		"set security zones security-zone A",
@@ -22,7 +24,7 @@ func groupedFromListTree12510(t *testing.T, toZones ...string) *config.ConfigTre
 		"set security policies default-policy permit-all",
 	}
 	for _, toZone := range toZones {
-		prefix := "set security policies from-zone [ A C ] to-zone " + toZone + " policy p1 "
+		prefix := "set security policies from-zone " + fromZone + " to-zone " + toZone + " policy p1 "
 		commands = append(commands,
 			prefix+"match source-address any",
 			prefix+"match destination-address any",
@@ -42,10 +44,12 @@ func groupedFromListTree12510(t *testing.T, toZones ...string) *config.ConfigTre
 	return tree
 }
 
-// hierarchicalFromListTree12510 writes the same context as hierarchical text
-// through config.NewParser, the producer behind Store.Load, load and HA sync:
-// every token between `to-zone` and `{` stays on the context node.
+// hierarchicalFromListTree12510 writes the same context as hierarchical text.
 func hierarchicalFromListTree12510(t *testing.T, toZone string) *config.ConfigTree {
+	return hierarchicalFromZoneTree12510(t, "[ A C ]", toZone)
+}
+
+func hierarchicalFromZoneTree12510(t *testing.T, fromZone, toZone string) *config.ConfigTree {
 	t.Helper()
 	text := `security {
     zones {
@@ -56,7 +60,7 @@ func hierarchicalFromListTree12510(t *testing.T, toZone string) *config.ConfigTr
         security-zone E;
     }
     policies {
-        from-zone [ A C ] to-zone ` + toZone + ` {
+        from-zone ` + fromZone + ` to-zone ` + toZone + ` {
             policy p1 {
                 match {
                     source-address any;
@@ -99,6 +103,37 @@ func fromListMirrorReason12510(t *testing.T, tree *config.ConfigTree) string {
 		t.Fatalf("mirror reason is not deterministic: first=%q repeat=%q", reasons, repeat)
 	}
 	return reasons[0]
+}
+
+// Three-member from-lists must retain every member in the userspace mirror
+// reason for both parser-produced AST shapes.
+func TestThreeMemberFromZoneMirrorNamesMembers12680(t *testing.T) {
+	producers := []struct {
+		name string
+		tree func(*testing.T, string) *config.ConfigTree
+	}{
+		{"grouped set", func(t *testing.T, members string) *config.ConfigTree {
+			return groupedFromZoneTree12510(t, members, "B")
+		}},
+		{"hierarchical text", func(t *testing.T, members string) *config.ConfigTree {
+			return hierarchicalFromZoneTree12510(t, members, "B")
+		}},
+	}
+	for _, producer := range producers {
+		t.Run(producer.name, func(t *testing.T) {
+			seen := make(map[string]string)
+			for _, members := range []string{"[ A C D ]", "[ A C E ]"} {
+				reason := fromListMirrorReason12510(t, producer.tree(t, members))
+				if want := "from-zone " + members + " to-zone B: "; !strings.Contains(reason, want) {
+					t.Errorf("mirror reason does not name source list %q (want %q): %s", members, want, reason)
+				}
+				if previous, ok := seen[reason]; ok {
+					t.Errorf("source lists %q and %q produced identical mirror reason %s", previous, members, reason)
+				}
+				seen[reason] = members
+			}
+		})
+	}
 }
 
 // Prefix-identical grouped contexts share one AST node and one diagnostic, so
