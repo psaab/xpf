@@ -668,6 +668,10 @@ mod tests_filter_revocation_7212;
 #[cfg(test)]
 #[path = "tests_policy_revocation_8356.rs"]
 mod tests_policy_revocation_8356;
+// #12644: synced shared-session writes wait for the poll-site Owner verdict.
+#[cfg(test)]
+#[path = "tests_probe_12644_kill.rs"]
+mod tests_probe_12644_kill;
 // #9519: session-hit ingress AUTHORITY through the real poll path.
 #[cfg(test)]
 #[path = "tests_session_hit_authority_9519.rs"]

@@ -705,6 +705,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
         false,
         0,
         0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
     )
     .expect("translated shared alias resolves on the inactive peer");
 
@@ -819,6 +820,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
         false,
         0,
         0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
     )
     .expect("translated alias resolves despite a shared wire-key collision");
     assert!(
@@ -940,6 +942,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
             false,
             0,
             3,
+            crate::afxdp::session_glue::SessionHitVerdict::Owner,
         )
         .expect("translated worker lookup resolves to the canonical import");
         assert_eq!(hit.key, key);
@@ -1095,6 +1098,7 @@ fn ha_imported_transient_dynamic_snat_local_alias_keeps_shared_canonical_12187()
         false,
         0,
         3,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
     )
     .expect("translated local alias resolves against the shared canonical import");
     assert_eq!(hit.key, translated_key);

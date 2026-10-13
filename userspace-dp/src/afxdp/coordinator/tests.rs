@@ -10291,6 +10291,7 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
         2_000_000,
         imported.protocol,
         0x10,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
     );
     assert_eq!(
         promoted_metadata, imported.metadata,

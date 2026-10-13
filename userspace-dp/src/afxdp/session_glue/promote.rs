@@ -58,6 +58,13 @@ pub(in crate::afxdp::session_glue) fn should_keep_synced_hit_transient(
         && is_translated_forward_session_key(key, decision, metadata)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::afxdp) enum SessionHitVerdict {
+    Owner,
+    Foreign,
+    Unresolved,
+}
+
 /// Promote a synced session hit into a locally-owned session when
 /// the local node is now the active owner. No-op if the session is
 /// not promotable or not currently in a `ForwardCandidate` state.
@@ -68,7 +75,7 @@ pub(in crate::afxdp::session_glue) fn should_keep_synced_hit_transient(
 ///
 /// The compatibility wrapper keeps the pre-#1346 13-argument shape for tests;
 /// the production variant adds the two conntrack fds to invalidate only origin.
-pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
+fn promote_synced_session_with_conntrack(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
@@ -191,8 +198,12 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
     now_ns: u64,
     protocol: u8,
     tcp_flags: u8,
+    verdict: SessionHitVerdict,
 ) -> SessionMetadata {
-    maybe_promote_synced_session_with_conntrack(
+    if verdict != SessionHitVerdict::Owner {
+        return metadata;
+    }
+    promote_synced_session_with_conntrack(
         sessions,
         session_map,
         -1,
@@ -212,12 +223,77 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
     )
 }
 
+/// Evaluate the session-hit verdict before applying any deferred synced
+/// materialization, purge, or promotion. Foreign and unresolved packets leave
+/// the decision, metadata, shared maps, and local session state untouched.
+pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    shared: SharedSessionRefs<'_>,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &WorkerCommandQueues,
+    forwarding: &ForwardingState,
+    now_ns: u64,
+    tcp_flags: u8,
+    worker_id: u32,
+    verdict: SessionHitVerdict,
+    resolved: &mut ResolvedFlowSessionDecision,
+) {
+    if verdict != SessionHitVerdict::Owner {
+        return;
+    }
+
+    apply_deferred_synced_purge(
+        sessions,
+        session_map,
+        shared,
+        forwarding,
+        now_ns,
+        worker_id,
+        verdict,
+        resolved,
+    );
+    super::apply_deferred_shared_materialization(
+        sessions,
+        forwarding,
+        now_ns,
+        tcp_flags,
+        verdict,
+        resolved,
+    );
+
+    let Some(promotion) = resolved.deferred_synced_promotion.take() else {
+        return;
+    };
+    resolved.metadata = promote_synced_session_with_conntrack(
+        sessions,
+        session_map,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        shared,
+        peer_worker_commands,
+        worker_commands_by_id,
+        forwarding,
+        &promotion.key,
+        promotion.decision,
+        promotion.metadata,
+        promotion.origin,
+        promotion.fabric_ingress,
+        promotion.now_ns,
+        promotion.protocol,
+        promotion.tcp_flags,
+    );
+}
+
+
 /// Purge a translated peer-synced hit: drop the entry from the shared
-/// maps, delete the kernel session-map entry, remove the local
-/// session-table entry, AND return the source-NAT / NAT64 pool
-/// reservation this forward session reserved at install. Used when the
-/// local node is not the active owner of a translated forward session —
-/// leaving the hit live would route traffic to the wrong node.
+/// maps, delete the kernel session-map entry, remove the local session-table
+/// entry, AND return the source-NAT / NAT64 pool reservation this forward
+/// session reserved at install. Used when the local node is not the active
+/// owner of a translated forward session — leaving the hit live would route
+/// traffic to the wrong node.
 ///
 /// #5295: the purged entry is a peer-synced FORWARD translated session
 /// (the guard below rejects reverse/non-translated keys), so at install
@@ -281,6 +357,35 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
         key,
         decision.nat,
         metadata.is_reverse,
+        now_ns,
+        worker_id,
+    );
+}
+fn apply_deferred_synced_purge(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    shared: SharedSessionRefs<'_>,
+    forwarding: &ForwardingState,
+    now_ns: u64,
+    worker_id: u32,
+    verdict: SessionHitVerdict,
+    resolved: &mut ResolvedFlowSessionDecision,
+) {
+    if verdict != SessionHitVerdict::Owner {
+        return;
+    }
+    let Some(purge) = resolved.deferred_synced_purge.take() else {
+        return;
+    };
+    purge_translated_synced_hit(
+        sessions,
+        session_map,
+        shared,
+        &purge.key,
+        purge.decision,
+        &purge.metadata,
+        purge.origin,
+        forwarding,
         now_ns,
         worker_id,
     );
