@@ -318,18 +318,17 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 									bindings = append(bindings, "filter "+child.Keys[i])
 								}
 							}
-							for _, leaf := range child.Children {
-								if leaf.Name() == "input" || leaf.Name() == "output" {
-									bindings = append(bindings, "filter "+leaf.Name())
-								}
-							}
+							// Braced filter leaves are diagnosed by the
+							// #12090 keyword walk; avoid a duplicate warning.
+							// Packed directions above remain in this check.
+
 						}
 					}
 					if !isInterfaceFamilyAF12090(afName) {
 						for _, binding := range bindings {
 							if err := emit(
 								"interfaces %s unit %s family %s: `%s` is not supported "+
-									"(unknown interface family; remove it) (#12656)",
+									"(xpf has no consumer for this interface binding; remove it) (#12656)",
 								ifName, unitID, afName, binding); err != nil {
 								return nil, err
 							}

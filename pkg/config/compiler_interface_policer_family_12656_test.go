@@ -12,7 +12,7 @@ func TestInterfaceUnsupportedFamilyPolicersRejected12656(t *testing.T) {
 	for _, family := range []string{"mpls", "any"} {
 		for _, direction := range []string{"input", "output"} {
 			for _, shape := range []struct {
-				name string
+				name  string
 				build func(*testing.T, string, string) *ConfigTree
 			}{
 				{"flat", func(t *testing.T, family, direction string) *ConfigTree {
@@ -40,6 +40,20 @@ func TestInterfaceUnknownFamilyBindingsRejected12656(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assertRejectInterfaceFamily12656(t, flatTreeFromSets(t, tc.setPath), "foo", tc.label)
 		})
+	}
+}
+
+func TestInterfaceUnknownFamilyBracedFilterEmitsSingleDiagnostic12656(t *testing.T) {
+	tree := hierTree(t, "interfaces { ge-0/0/0 { unit 0 { family foo { filter { input f; } } } } }")
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	if len(cfg.Warnings) != 1 {
+		t.Fatalf("lenient warnings = %q, want exactly one #12090 diagnostic", cfg.Warnings)
+	}
+	if !strings.Contains(cfg.Warnings[0], "#12090") {
+		t.Fatalf("lenient warning %q lacks #12090", cfg.Warnings[0])
 	}
 }
 
