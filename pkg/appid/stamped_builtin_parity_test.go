@@ -28,13 +28,13 @@ func stampedWinner(t *testing.T, cat Catalog, proto uint8, srcPort, dstPort uint
 
 func TestStampedUnstampedBuiltinParity_12731(t *testing.T) {
 	cases := []struct {
-		name   string
-		app    *config.Application
-		refs   []string
-		proto  uint8
-		src    uint16
-		dst    uint16
-		want   string
+		name  string
+		app   *config.Application
+		refs  []string
+		proto uint8
+		src   uint16
+		dst   uint16
+		want  string
 	}{
 		{"unreferenced builtin http", nil, []string{"junos-ssh"}, 6, 40000, 80, Unknown},
 		{"unreferenced builtin https", nil, []string{"junos-ssh"}, 6, 40000, 443, Unknown},

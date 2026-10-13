@@ -61,8 +61,9 @@ func TestBuiltinPoolOnOffParity_12630(t *testing.T) {
 			}
 			disabledCfg := &config.Config{Applications: config.ApplicationsConfig{Applications: userApps}}
 			disabledCfg.Services.ApplicationIdentification = false
-			// Compare modes only when the OFF catalog references the builtin,
-			// since unreferenced builtins are intentionally not fallback labels.
+			// Reference the builtin so the OFF catalog stamps it; parity
+			// compares only catalogued labels (unreferenced builtins are
+			// intentionally not fallback labels).
 			refs = append(refs, "junos-ike-nat")
 			disabledCfg.Security.GlobalPolicies = []*config.Policy{{Name: "ref", Match: config.PolicyMatch{Applications: refs}}}
 			offCat, err := BuildCatalog(disabledCfg)
