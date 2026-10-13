@@ -625,36 +625,41 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						// but it is ten pairs owing rows in four registers to reach
 						// what one packedBody call reaches here. Same shape as
 						// #9620 H9.
-						if dhcpNode := packedBody(afNode.FindChild("dhcp"),
-							schemaForPath("interfaces", "x", "unit", "family", "inet", "dhcp")); dhcpNode != nil {
-							unit.DHCP = true
-							if len(dhcpNode.Children) > 0 {
-								opts := &DHCPInetOptions{}
-								for _, prop := range dhcpNode.Children {
-									switch prop.Name() {
-									case "lease-time":
-										if v := nodeVal(prop); v != "" {
-											if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcp lease-time", v); ok {
-												opts.LeaseTime = n
-											}
-										}
-									case "retransmission-attempt":
-										if v := nodeVal(prop); v != "" {
-											if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcp retransmission-attempt", v); ok {
-												opts.RetransmissionAttempt = n
-											}
-										}
-									case "retransmission-interval":
-										if v := nodeVal(prop); v != "" {
-											if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcp retransmission-interval", v); ok {
-												opts.RetransmissionInterval = n
-											}
-										}
-									case "force-discover":
-										opts.ForceDiscover = true
+						for _, rawDHCPNode := range afNode.FindChildren("dhcp") {
+							if dhcpNode := packedBody(rawDHCPNode,
+								schemaForPath("interfaces", "x", "unit", "family", "inet", "dhcp")); dhcpNode != nil {
+								unit.DHCP = true
+								if len(dhcpNode.Children) > 0 {
+									opts := unit.DHCPOptions
+									if opts == nil {
+										opts = &DHCPInetOptions{}
 									}
+									for _, prop := range dhcpNode.Children {
+										switch prop.Name() {
+										case "lease-time":
+											if v := nodeVal(prop); v != "" {
+												if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcp lease-time", v); ok {
+													opts.LeaseTime = n
+												}
+											}
+										case "retransmission-attempt":
+											if v := nodeVal(prop); v != "" {
+												if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcp retransmission-attempt", v); ok {
+													opts.RetransmissionAttempt = n
+												}
+											}
+										case "retransmission-interval":
+											if v := nodeVal(prop); v != "" {
+												if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcp retransmission-interval", v); ok {
+													opts.RetransmissionInterval = n
+												}
+											}
+										case "force-discover":
+											opts.ForceDiscover = true
+										}
+									}
+									unit.DHCPOptions = opts
 								}
-								unit.DHCPOptions = opts
 							}
 						}
 						if mtuNode := afNode.FindChild("mtu"); mtuNode != nil {
@@ -766,51 +771,56 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 						// #9977, the inet6 twin: `family inet6 dhcpv6-client
 						// client-type stateful;` leaves the options on the
 						// dhcpv6-client node's Keys.
-						if dcNode := packedBody(afNode.FindChild("dhcpv6-client"),
-							schemaForPath("interfaces", "x", "unit", "family", "inet6", "dhcpv6-client")); dcNode != nil {
-							unit.DHCPv6 = true
-							dc := &DHCPv6ClientConfig{}
-							for _, prop := range dcNode.Children {
-								switch prop.Name() {
-								case "client-identifier":
-									if dtNode := prop.FindChild("duid-type"); dtNode != nil {
-										dc.DUIDType = nodeVal(dtNode)
-									} else if nodeVal(prop) == "duid-type" && len(prop.Keys) >= 3 {
-										// Inline: client-identifier duid-type duid-ll;
-										dc.DUIDType = prop.Keys[2]
-									}
-								case "client-type":
-									dc.ClientType = nodeVal(prop)
-								case "client-ia-type":
-									if v := nodeVal(prop); v != "" {
-										dc.ClientIATypes = append(dc.ClientIATypes, v)
-									}
-								case "prefix-delegating":
-									if plNode := prop.FindChild("preferred-prefix-length"); plNode != nil {
-										if v := nodeVal(plNode); v != "" {
-											if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcpv6-client prefix-delegating preferred-prefix-length", v); ok {
-												dc.PrefixDelegatingPrefixLen = n
+						for _, rawDCNode := range afNode.FindChildren("dhcpv6-client") {
+							if dcNode := packedBody(rawDCNode,
+								schemaForPath("interfaces", "x", "unit", "family", "inet6", "dhcpv6-client")); dcNode != nil {
+								unit.DHCPv6 = true
+								dc := unit.DHCPv6Client
+								if dc == nil {
+									dc = &DHCPv6ClientConfig{}
+								}
+								for _, prop := range dcNode.Children {
+									switch prop.Name() {
+									case "client-identifier":
+										if dtNode := prop.FindChild("duid-type"); dtNode != nil {
+											dc.DUIDType = nodeVal(dtNode)
+										} else if nodeVal(prop) == "duid-type" && len(prop.Keys) >= 3 {
+											// Inline: client-identifier duid-type duid-ll;
+											dc.DUIDType = prop.Keys[2]
+										}
+									case "client-type":
+										dc.ClientType = nodeVal(prop)
+									case "client-ia-type":
+										if v := nodeVal(prop); v != "" {
+											dc.ClientIATypes = append(dc.ClientIATypes, v)
+										}
+									case "prefix-delegating":
+										if plNode := prop.FindChild("preferred-prefix-length"); plNode != nil {
+											if v := nodeVal(plNode); v != "" {
+												if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcpv6-client prefix-delegating preferred-prefix-length", v); ok {
+													dc.PrefixDelegatingPrefixLen = n
+												}
 											}
 										}
-									}
-									if slNode := prop.FindChild("sub-prefix-length"); slNode != nil {
-										if v := nodeVal(slNode); v != "" {
-											if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcpv6-client prefix-delegating sub-prefix-length", v); ok {
-												dc.PrefixDelegatingSubPrefLen = n
+										if slNode := prop.FindChild("sub-prefix-length"); slNode != nil {
+											if v := nodeVal(slNode); v != "" {
+												if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcpv6-client prefix-delegating sub-prefix-length", v); ok {
+													dc.PrefixDelegatingSubPrefLen = n
+												}
 											}
 										}
-									}
-								case "req-option":
-									if v := nodeVal(prop); v != "" {
-										dc.ReqOptions = append(dc.ReqOptions, v)
-									}
-								case "update-router-advertisement":
-									if ifNode := prop.FindChild("interface"); ifNode != nil {
-										dc.UpdateRAInterface = nodeVal(ifNode)
+									case "req-option":
+										if v := nodeVal(prop); v != "" {
+											dc.ReqOptions = append(dc.ReqOptions, v)
+										}
+									case "update-router-advertisement":
+										if ifNode := prop.FindChild("interface"); ifNode != nil {
+											dc.UpdateRAInterface = nodeVal(ifNode)
+										}
 									}
 								}
+								unit.DHCPv6Client = dc
 							}
-							unit.DHCPv6Client = dc
 						}
 					}
 				}
