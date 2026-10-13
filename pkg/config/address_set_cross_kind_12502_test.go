@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -121,5 +123,103 @@ func TestCrossKindStaticNATPrefixNameCompiles12502(t *testing.T) {
 					rule.ThenPrefixName, rule.Then)
 			}
 		})
+	}
+}
+
+// crossKindChain12502 builds s0 -> s1 -> ... -> s<edges> -> a0, where every
+// set reaches the next one through a cross-kind `address` member.
+func crossKindChain12502(edges int) *AddressBook {
+	ab := &AddressBook{
+		Addresses:   map[string]*Address{"a0": {Name: "a0", Value: "10.9.0.1/32"}},
+		AddressSets: make(map[string]*AddressSet, edges+1),
+	}
+	for i := 0; i <= edges; i++ {
+		name, member := fmt.Sprintf("s%d", i), fmt.Sprintf("s%d", i+1)
+		if i == edges {
+			member = "a0"
+		}
+		ab.AddressSets[name] = &AddressSet{Name: name, Addresses: []string{member}}
+	}
+	return ab
+}
+
+// TestCrossKindAddressSetBounds12502 pins that a cross-kind `address` edge is
+// bounded like a nested `address-set` edge: it counts toward the five-edge
+// depth limit and shares the path-local cycle set, so a cycle is reported as
+// a cycle rather than as a depth overrun. Both literal-prefix consumers fail
+// closed on either error.
+func TestCrossKindAddressSetBounds12502(t *testing.T) {
+	cycle := &AddressBook{
+		Addresses: map[string]*Address{},
+		AddressSets: map[string]*AddressSet{
+			"A": {Name: "A", Addresses: []string{"B"}},
+			"B": {Name: "B", Addresses: []string{"A"}},
+		},
+	}
+	for _, tc := range []struct {
+		name    string
+		ab      *AddressBook
+		root    string
+		wantErr string
+	}{
+		{name: "five-edge-chain-resolves", ab: crossKindChain12502(5), root: "s0"},
+		{name: "nine-edge-chain-too-deep", ab: crossKindChain12502(9), root: "s0",
+			wantErr: "address-set nesting too deep (max 5): s6"},
+		{name: "mutual-cycle", ab: cycle, root: "A",
+			wantErr: `cycle detected in address-set "A"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := expandAddressSetLeaves(tc.root, tc.ab)
+			cfg := &Config{}
+			cfg.Security.AddressBook = tc.ab
+			v4, _, _, _, hostOK := junosHostResolveAddrSet(cfg, []string{tc.root}, nil)
+			prefix, natOK := resolveStaticNATThenPrefixName(tc.ab, tc.root)
+			if tc.wantErr == "" {
+				if err != nil || !reflect.DeepEqual(got, []string{"a0"}) {
+					t.Fatalf("expandAddressSetLeaves(%q) = %v, %v; want [a0]", tc.root, got, err)
+				}
+				if !hostOK || !reflect.DeepEqual(v4, []string{"10.9.0.1/32"}) ||
+					!natOK || prefix != "10.9.0.1/32" {
+					t.Fatalf("junos-host = %v, %v; static-NAT = %q, %v; want 10.9.0.1/32",
+						v4, hostOK, prefix, natOK)
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.wantErr {
+				t.Fatalf("expandAddressSetLeaves(%q) = %v, %v; want error %q",
+					tc.root, got, err, tc.wantErr)
+			}
+			if hostOK || natOK {
+				t.Fatalf("consumer resolved past the error: junos-host = %v, %v; static-NAT = %q, %v",
+					v4, hostOK, prefix, natOK)
+			}
+		})
+	}
+}
+
+// TestCrossKindAddressFirstOnNameCollision12502 pins the precedence for a
+// cross-kind member that names both an address and an address-set. Strict
+// commit rejects the collision. The lenient load path records it and keeps
+// resolving the member as the address, as before cross-kind leaf expansion.
+func TestCrossKindAddressFirstOnNameCollision12502(t *testing.T) {
+	lines := []string{
+		"set security address-book global address X 10.1.1.1/32",
+		"set security address-book global address xm 10.9.0.1/32",
+		"set security address-book global address-set X address xm",
+		"set security address-book global address-set A address X",
+		"set security nat static rule-set S rule R1 match destination-address 203.0.113.5/32",
+		"set security nat static rule-set S rule R1 then static-nat prefix-name A",
+	}
+	if _, err := CompileConfig(buildTree(t, lines)); err == nil ||
+		!strings.Contains(err.Error(), `defines "X" as BOTH`) {
+		t.Fatalf("strict commit error = %v; want the X address/address-set collision", err)
+	}
+	cfg, err := CompileConfigLenient(buildTree(t, lines))
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	if rule := cfg.Security.NAT.Static[0].Rules[0]; rule.Then != "10.1.1.1/32" {
+		t.Fatalf("lenient static-NAT target = %q; want address X 10.1.1.1/32, not set X's 10.9.0.1/32",
+			rule.Then)
 	}
 }
