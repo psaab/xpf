@@ -165,6 +165,7 @@ pub(crate) static NAT64_FRAG_PROTOCOL_ALIAS_MISSES: AtomicU64 = AtomicU64::new(0
 pub(crate) static FRAG_MAX_LIFETIME_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const FRAG_SHARDS: usize = 16;
+const _: () = assert!(FRAG_SHARDS >= 2 && FRAG_SHARDS.is_power_of_two());
 /// Fixed per-shard entry cap. Total ceiling is
 /// `FRAG_SHARDS * FRAG_CAP_PER_SHARD` = 1024 entries; each entry is
 /// a `Copy` `SessionDecision` + an optional `Nat64ReverseInfo` + a deadline —

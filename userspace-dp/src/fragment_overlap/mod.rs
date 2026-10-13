@@ -227,7 +227,6 @@ pub(crate) fn overlap_shard_index_seeded(key: &OverlapKey, seed: u64) -> usize {
     keyed_shard_index(h, seed, 0x6f76_6572_6c61_7001, OVERLAP_SHARDS)
 }
 
-
 #[cfg(test)]
 pub(crate) fn overlap_shard_index(key: &OverlapKey) -> usize {
     overlap_shard_index_seeded(key, frag_overlap_shard_seed())
@@ -1030,6 +1029,17 @@ mod tests {
             addr_family: libc::AF_INET as u8,
             src: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
             dst: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            ident: 0xBEEF,
+            protocol: 6,
+            routing_domain: 0,
+        }
+    }
+
+    fn v6_key() -> OverlapKey {
+        OverlapKey {
+            addr_family: libc::AF_INET6 as u8,
+            src: IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 100)),
+            dst: IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 1, 0, 0, 0, 200)),
             ident: 0xBEEF,
             protocol: 6,
             routing_domain: 0,
@@ -2353,6 +2363,24 @@ mod tests {
                 assert!(shard < OVERLAP_SHARDS);
                 assert_eq!(shard, overlap_shard_index_seeded(&key, seed));
                 counts[shard] += 1;
+            }
+            // v6 keys (family + 16-byte addresses) scatter the same way.
+            let mut v6counts = [0usize; OVERLAP_SHARDS];
+            for i in 0..8192u32 {
+                let mut key = v6_key();
+                key.ident = i.wrapping_mul(0x9e37_79b1);
+                key.src = IpAddr::V6(std::net::Ipv6Addr::new(
+                    0x2001, 0x0db8, 0, 0, 0, 0, (i >> 8) as u16, i as u16,
+                ));
+                let shard = overlap_shard_index_seeded(&key, seed);
+                assert!(shard < OVERLAP_SHARDS);
+                v6counts[shard] += 1;
+            }
+            for (shard, count) in v6counts.into_iter().enumerate() {
+                assert!(
+                    (256..=1024).contains(&count),
+                    "seed {seed:#x}: v6 shard {shard} got {count}/8192 keys"
+                );
             }
             for (shard, count) in counts.into_iter().enumerate() {
                 assert!(
