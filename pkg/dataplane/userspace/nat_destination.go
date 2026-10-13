@@ -276,19 +276,27 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 				}
 				srcPorts := appPortRangesFromSpec(a.SourcePort)
 				if a.SourcePort != "" && len(srcPorts) == 0 {
-					// #3437: a configured source-port that coalesces to nothing
-					// (every value out of 1..65535) fails CLOSED — match no source
-					// port rather than widening to any.
-					srcPorts = []NatPortRangeWire{natNeverMatchPortRange}
+					// #3437/#12631: a broken source-port constraint narrows
+					// translate rules, but widens an off exemption.
+					if !isOff {
+						srcPorts = []NatPortRangeWire{natNeverMatchPortRange}
+					}
+				}
+				dstRanges := appPortRangesFromSpec(a.DestinationPort)
+				dstPortConfigured := a.DestinationPort != ""
+				if isOff && dstPortConfigured && len(dstRanges) == 0 {
+					// #12631: an unrepresentable app port cannot narrow an
+					// exemption; retain the other valid app axes.
+					dstPortConfigured = false
 				}
 				return appTerm{
 					proto:             a.Protocol,
-					dstRanges:         appPortRangesFromSpec(a.DestinationPort),
-					dstPortsPresent:   a.DestinationPort != "",
+					dstRanges:         dstRanges,
+					dstPortsPresent:   len(dstRanges) > 0,
 					srcPorts:          srcPorts,
 					icmpType:          a.ICMPType,
 					icmpCode:          a.ICMPCode,
-					dstPortConfigured: a.DestinationPort != "",
+					dstPortConfigured: dstPortConfigured,
 				}, true
 			}
 
@@ -334,11 +342,15 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 					// range so it cannot widen this DNAT rule; this also refuses a
 					// nested application-set reference as a whole.
 					if drops := config.ApplicationReferenceMatchDrops(appName, &cfg.Applications); len(drops) > 0 {
-						slog.Warn("userspace snapshot: destination NAT application has dropped match constraints; emitting a never-match term (fail-closed, #11587)",
-							"application", appName, "drops", drops)
-						appTerms = append(appTerms, appTerm{
-							srcPorts: []NatPortRangeWire{natNeverMatchPortRange},
-						})
+						slog.Warn("userspace snapshot: destination NAT application has dropped match constraints",
+							"application", appName, "drops", drops, "off_exemption", isOff)
+						if isOff {
+							appTerms = append(appTerms, appTerm{})
+						} else {
+							appTerms = append(appTerms, appTerm{
+								srcPorts: []NatPortRangeWire{natNeverMatchPortRange},
+							})
+						}
 						continue
 					}
 					app, found := config.ResolveApplication(appName, userApps)
@@ -370,6 +382,12 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 								appTerms = append(appTerms, term)
 							}
 						}
+					} else if isOff {
+						slog.Warn("userspace snapshot: destination NAT off exemption has an unresolved application reference; widening that application axis to match all (#12631)",
+							"ruleset", rs.Name, "rule", rule.Name, "application", appName)
+						// #12631: a tolerated dangling app reference is an
+						// over-exemption term, including beside valid members.
+						appTerms = append(appTerms, appTerm{})
 					}
 				}
 			}
@@ -408,7 +426,11 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			//     application-present path.
 			if len(appTerms) == 0 {
 				if appConfigured {
-					appTerms = []appTerm{{srcPorts: []NatPortRangeWire{natNeverMatchPortRange}}}
+					if isOff {
+						appTerms = []appTerm{{}}
+					} else {
+						appTerms = []appTerm{{srcPorts: []NatPortRangeWire{natNeverMatchPortRange}}}
+					}
 				} else {
 					// #3431: one explicit-match term per protocol of a bracket
 					// list / repeated `match protocol [ tcp udp ]` (match ANY).
@@ -453,6 +475,12 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 				ruleDstPorts = []int{rule.Match.DestinationPort}
 			}
 			ruleDstPortConfigured := len(ruleDstPorts) > 0 || len(rule.Match.InvalidDestinationPorts) > 0
+			if isOff && ruleDstPortConfigured && len(coalescePortRanges(ruleDstPorts)) == 0 {
+				// #12631: a broken explicit port constraint must not narrow an
+				// off exemption to nothing.
+				ruleDstPortConfigured = false
+				ruleDstPorts = nil
+			}
 
 			for _, term := range appTerms {
 				// #3446: a `match destination-port` that was configured but
@@ -489,6 +517,12 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 					termRanges = coalescePortRanges(ruleDstPorts)
 					termPortsPresent = len(ruleDstPorts) > 0
 					termDstPortConfigured = true
+				}
+				if isOff && len(termRanges) == 0 && (termPortsPresent || termDstPortConfigured) {
+					// #12631: a configured port with no representable values
+					// widens this exemption instead of making it never-match.
+					termPortsPresent = false
+					termDstPortConfigured = false
 				}
 				portRanges := termRanges
 				// Did this term CONFIGURE a destination-port at all? A configured
