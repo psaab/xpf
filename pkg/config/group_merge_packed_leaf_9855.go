@@ -145,8 +145,8 @@ func markSynthTerminals9855(nodes []*Node) {
 // same-instance inline LEAF peer by promoting the peer to the container its
 // braced spelling is, and returns the group body for the caller to merge
 // into the promoted children. It reports false — keeping the existing
-// override — unless every gate holds: a clean leaf peer, an expandable
-// packed group body, the same raw instance, and a peer tail (if any) that
+// override — unless every gate holds: a clean leaf peer, a packed body or
+// unmodelled tail, the same raw instance, and a peer tail (if any) that
 // expands under the schema. An unexpandable peer tail bails so truncation
 // cannot drop tail tokens that downstream gates scanning Keys must see.
 func promoteLeafPeerForPackedGroup9855(ancestorPath [][]string, peer, s *Node) ([]*Node, bool) {
@@ -158,7 +158,27 @@ func promoteLeafPeerForPackedGroup9855(ancestorPath [][]string, peer, s *Node) (
 	}
 	leafSchema, body, ok := packedLeafMergeParts9855(ancestorPath, s)
 	if !ok {
-		return nil, false
+		// #12719 is the bare-unit peer gap: preserve packed unsupported
+		// filter/MAC tails so the existing commit gates can reject them.
+		if groupZoneLeaf9831(ancestorPath, s) || len(s.Keys) < 2 || s.Keys[0] != "unit" {
+			return nil, false
+		}
+		parent := schemaAtAncestorPath(ancestorPath)
+		if parent == nil {
+			return nil, false
+		}
+		leafSchema = resolveSchemaChild(parent, s.Keys[0])
+		if leafSchema == nil || leafSchema.children == nil {
+			return nil, false
+		}
+		identity, _ := consumeNodeKeys(s.Keys, leafSchema)
+		if identity >= len(s.Keys) || (s.Keys[identity] != "filter" && s.Keys[identity] != "mac") {
+			return nil, false
+		}
+		body = groupPackedLeafUnmodelledTail(ancestorPath, s)
+		if body == nil {
+			return nil, false
+		}
 	}
 	span, ok := identitySpan9855(leafSchema, s.Keys, peer.Keys)
 	if !ok {
