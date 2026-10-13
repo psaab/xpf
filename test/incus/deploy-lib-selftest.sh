@@ -1817,18 +1817,66 @@ test_manifest_write_wired_after_cluster_deploy() {
 }
 
 test_cluster_deploy_gate_runs_in_one_ordered_wave() {
-	local code deploy gate wrapper
+	local code wrapper runner
 	code=$(awk '/^cluster-deploy-and-gate:/,/^$/' "$SCRIPT_DIR/../../Makefile")
 	wrapper=$(grep -nF './test/incus/with-cluster.sh' <<<"$code" | cut -d: -f1)
-	deploy=$(grep -nF '$(MAKE) cluster-deploy' <<<"$code" | cut -d: -f1)
-	gate=$(grep -nF '$(MAKE) "$$1"' <<<"$code" | cut -d: -f1)
-	# deploy and gate share one recipe line; line order is enough there.
-	if [[ -z "$wrapper" || -z "$deploy" || -z "$gate" ]] ||
-		((wrapper >= deploy || deploy > gate)); then
-		bad "deploy/gate wave: deploy and smoke must run in one lock cell, in order"
+	runner=$(grep -nF 'deploy_gate_wave "$$PWD" "$$1"' <<<"$code" | cut -d: -f1)
+	if [[ -z "$wrapper" || -z "$runner" ]]; then
+		bad "deploy/gate wave: deploy and smoke must use the fenced runner in one lock cell"
 	else
-		ok "deploy/gate wave: deploy and smoke run in one ordered lock cell"
+		ok "deploy/gate wave: deploy and smoke use the SHA-fenced runner in one lock cell"
 	fi
+}
+
+test_deploy_gate_wave_fences_checkout_sha() {
+	local fixture root fake_make log
+	fixture=$(mktemp -d)
+	root="$fixture/root"
+	mkdir -p "$root"
+	git -C "$root" init -q
+	git -C "$root" config user.email test@example.invalid
+	git -C "$root" config user.name test
+	printf 'deployed\n' >"$root/source"
+	git -C "$root" add source && git -C "$root" commit -qm deployed || {
+		bad "deploy/gate wave: failed to create temporary checkout"
+		rm -rf "$fixture"
+		return
+	}
+	fake_make="$fixture/fake-make"
+	log="$fixture/gate-called"
+	cat >"$fake_make" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == cluster-deploy && "${ADVANCE_CHECKOUT:-0}" == 1 ]]; then
+	printf 'advanced\n' >>"$XPF_REPO_ROOT/source"
+	git -C "$XPF_REPO_ROOT" add source
+	git -C "$XPF_REPO_ROOT" commit -qm advanced
+elif [[ "$1" != cluster-deploy ]]; then
+	: >"$GATE_MARKER"
+fi
+SH
+	chmod +x "$fake_make"
+	if ! declare -F deploy_gate_wave >/dev/null; then
+		bad "deploy/gate wave: SHA-fenced runner is unavailable"
+		rm -rf "$fixture"
+		return
+	fi
+	if XPF_REPO_ROOT="$root" GATE_MARKER="$log" \
+		deploy_gate_wave "$root" test-gate "$fake_make" "$fake_make" cluster-deploy && [[ -e "$log" ]]; then
+		ok "deploy/gate wave: unchanged checkout runs deploy then gate"
+	else
+		bad "deploy/gate wave: unchanged checkout did not run its gate"
+	fi
+	rm -f "$log"
+	if XPF_REPO_ROOT="$root" GATE_MARKER="$log" ADVANCE_CHECKOUT=1 \
+		deploy_gate_wave "$root" test-gate "$fake_make" "$fake_make" cluster-deploy >/dev/null 2>&1; then
+		bad "deploy/gate wave: gate ran after checkout advanced past deployed SHA"
+	elif [[ -e "$log" ]]; then
+		bad "deploy/gate wave: advanced checkout reached the gate"
+	else
+		ok "deploy/gate wave: checkout advance after deploy aborts before gate"
+	fi
+	rm -rf "$fixture"
 }
 
 
@@ -2034,6 +2082,7 @@ test_manifest_raw_records_verified_binary_hashes
 test_manifest_deb_hashes_package_payload
 test_manifest_write_wired_after_cluster_deploy
 test_cluster_deploy_gate_runs_in_one_ordered_wave
+test_deploy_gate_wave_fences_checkout_sha
 test_reconcile_stale_pin_removes_managed
 test_reconcile_stale_pin_no_pin_noop
 test_reconcile_stale_pin_foreign_override_hardfails

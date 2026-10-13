@@ -1491,9 +1491,9 @@ endif
 # must not be papered over as a valid attestation.
 .PHONY: cluster-deploy-and-gate
 CLUSTER_GATE ?= test-connectivity
-cluster-deploy-and-gate:
+cluster-deploy-and-gate: $(CLUSTER_DEPLOY_PREREQS)
 	./test/incus/with-cluster.sh "cluster deploy + $(CLUSTER_GATE)" -- \
-		bash -c '$(MAKE) cluster-deploy && $(MAKE) "$$1"' -- "$(CLUSTER_GATE)"
+		bash -c 'source ./test/incus/deploy-lib.sh; deploy_gate_wave "$$PWD" "$$1" "$(MAKE)" env BPFRX_CLUSTER_ENV="$(CLUSTER_ENV)" $(if $(filter 1,$(XPF_DEPLOY_FAST)),,XPF_CLUSTER_SKIP_BUILD=1) ./test/incus/cluster-setup.sh deploy "$(NODE)"' -- "$(CLUSTER_GATE)"
 
 cluster-deploy: $(CLUSTER_DEPLOY_PREREQS)
 # The prereq already built, so the deb branch skips cmd_deploy's internal
