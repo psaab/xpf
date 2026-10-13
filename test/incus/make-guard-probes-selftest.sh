@@ -22,6 +22,7 @@ set -u
 
 # shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck disable=SC1007  # same CDPATH-clearing idiom
 ROOT=$(CDPATH= cd -- "$HERE/../.." && pwd)
 MAKEFILE="$ROOT/Makefile"
 PASS=0; FAIL=0
@@ -92,6 +93,7 @@ chmod +x "$FIX/id"
 # run_leg <target>: run one Makefile leg against the fixture PATH under
 # an inherited GOFLAGS=-json. Prints output; rc is the leg's.
 run_leg() {
+	# shellcheck disable=SC1007  # MAKEFLAGS= clears inherited make flags
 	(cd "$ROOT" && CANNED_GO_OUTPUT="$CANNED" GOFLAGS=-json MAKEFLAGS= \
 		PATH="$FIX:$PATH" make "$1" 2>&1)
 }
