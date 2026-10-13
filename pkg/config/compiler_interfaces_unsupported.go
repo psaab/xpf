@@ -212,17 +212,20 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 			}
 			unitID := unitIdentity(unit)
 
-			// H10: a static MAC override at the logical-unit scope.
-			for _, c := range unit.Children {
-				if c.Name() == "mac" {
-					if err := emit(
-						"interfaces %s unit %s: static `mac` override is not "+
-							"supported (the interface MAC is read-only; for cluster "+
-							"RETH it is computed deterministically per node) — "+
-							"remove it (#2008 H10)",
-						ifName, unitID); err != nil {
-						return nil, err
-					}
+			// H10: a static MAC override at logical-unit scope has no
+			// consumer anywhere under `unit`. It surfaces as a packed
+			// tail on the unit node (no inline peer), a mid-tail leaf
+			// nested under the preceding stanza (flat packed split),
+			// or an ordinary braced child — one descendant rule covers
+			// every spelling.
+			if packedUnitTailHasMac(unit.Keys) || unitHasMACDescendant(unit) {
+				if err := emit(
+					"interfaces %s unit %s: static `mac` override is not "+
+						"supported (the interface MAC is read-only; for cluster "+
+						"RETH it is computed deterministically per node) — "+
+						"remove it (#2008 H10)",
+					ifName, unitID); err != nil {
+					return nil, err
 				}
 			}
 
@@ -785,6 +788,47 @@ func hasARPPolicer(fam *Node) bool {
 			if pc.Name() == "arp" {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// packedUnitTailHasMac walks a packed unit tail (`unit <n> [stanza
+// <args> ...]`) with the unit schema and reports a `mac` keyword at a
+// stanza position. Argument values are skipped by arity, so a value
+// that merely spells "mac" (e.g. `description mac`) is not a hit;
+// unknown keywords advance one token (their arity is unknowable, the
+// same posture as filterKeywordPositions12090).
+func packedUnitTailHasMac(keys []string) bool {
+	if len(keys) < 4 {
+		return false
+	}
+	unitSchema := schemaInterfaces.wildcard.children["unit"]
+	for i := 2; i < len(keys); {
+		keyword := keys[i]
+		if isApplyStatementKeyword(keyword) {
+			return false
+		}
+		if keyword == "mac" {
+			return true
+		}
+		child := unitSchema.children[keyword]
+		if child == nil {
+			i++
+			continue
+		}
+		i += 1 + child.args
+	}
+	return false
+}
+
+// unitHasMACDescendant reports whether any node under a unit is named
+// `mac`. No legitimate unit subtree contains one: family/address leaves
+// carry no mac stanza, and a value spelling "mac" is never a node name.
+func unitHasMACDescendant(unit *Node) bool {
+	for _, c := range unit.Children {
+		if c.Name() == "mac" || unitHasMACDescendant(c) {
+			return true
 		}
 	}
 	return false

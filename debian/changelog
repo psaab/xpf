@@ -7,6 +7,9 @@ xpf (0.0.0) unstable; urgency=medium
     unknown-family interface filter/policer bindings at commit: xpf has no
     interface-family consumer for them, so they would otherwise commit as
     silent no-ops. Tolerant loads warn instead (#12656).
+  * Reject a packed `unit <n> mac <address>` override on the unit node,
+    even when no inline unit container exists. Tolerant loads warn, matching
+    the existing H10 handling for braced unit MAC overrides (#12683).
   * Write a zero-padded static-route destination or IPsec traffic-selector
     mask that the userspace dataplane parses (IPv4 up to two digits, IPv6 up
     to three: `10.0.0.0/08`, `2001:db8::/032`) in canonical form at compile.
