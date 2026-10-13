@@ -93,6 +93,14 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 			}
 			var pairs []zonePair
 
+			if len(child.Keys) >= 4 && child.Keys[2] == "policy" {
+				// #12633 SET1: `from-zone A policy p1 ...` occupies the
+				// destination slot with the policy keyword/name and otherwise
+				// compiles as a phantom A->p1 pair with no policy.
+				sec.MalformedZonePairs = append(sec.MalformedZonePairs,
+					policyAsDestinationZone12633(child.Keys[1], child.Keys[3]))
+				continue
+			}
 			if len(child.Keys) >= 4 {
 				// Hierarchical: Keys=["from-zone", "trust", "to-zone", "untrust"]
 				//
@@ -137,7 +145,16 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 					fmt.Sprintf("from-zone %q to-zone %q", child.Keys[1], child.Keys[3]))
 				pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
 			} else {
-				// Flat set: from-zone → <name> → to-zone → <name> → policy ...
+				// #12633: these nested/list forms drop their authored rules
+				// or compile a phantom destination. The existing strict tree
+				// gate owns the specific rejection; recording here makes the
+				// tolerant path attach the established snapshot poison.
+				if len(child.Keys) == 2 {
+					if tz := child.FindChild("to-zone"); tz != nil && len(tz.FindChildren("policy")) > 0 {
+						sec.MalformedZonePairs = append(sec.MalformedZonePairs,
+							nestedZonePolicyError12633(child.Keys[1], tz))
+					}
+				}
 				if len(child.Keys) >= 2 && bodyHasToZoneLessPolicy12231(child) {
 					// Keyed context: the children are the body, so the source
 					// zone is Keys[1], not a child name.
@@ -145,9 +162,6 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 				}
 				for _, fzSub := range child.Children {
 					if len(child.Keys) == 1 {
-						// #11346 mixed node: only its direct policies lack a
-						// destination. Fall through so policies under a nested
-						// `to-zone` child still compile into their pair below.
 						if to, mixed := keysCarryToZone12231(fzSub); mixed {
 							if len(fzSub.FindChildren("policy")) > 0 {
 								sec.MalformedZonePairs = append(sec.MalformedZonePairs,
@@ -155,6 +169,25 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 							}
 						} else if bodyHasToZoneLessPolicy12231(fzSub) {
 							sec.MalformedZonePairs = append(sec.MalformedZonePairs, containerToZoneLess12231(fzSub.Name()))
+						}
+						// #12633: a keyed to-zone under a source container
+						// is another mixed shape; the old pair builder reads
+						// "policy" as its destination when the policy stanza
+						// itself is nested under that keyed node.
+						for _, tzNode := range fzSub.FindChildren("to-zone") {
+							if len(tzNode.Keys) >= 2 && len(tzNode.FindChildren("policy")) > 0 {
+								sec.MalformedZonePairs = append(sec.MalformedZonePairs,
+									mixedKeyedZonePairError11346(fzSub.Name(), tzNode.Keys[1]).Error())
+								break
+							}
+							// In the fully-container spelling, `policy`
+							// in the to-zone body is consumed as a zone
+							// name by pair construction, making A->policy.
+							if len(tzNode.Keys) == 1 && len(tzNode.FindChildren("policy")) > 0 {
+								sec.MalformedZonePairs = append(sec.MalformedZonePairs,
+									policyAsDestinationZone12633(fzSub.Name(), "policy"))
+								break
+							}
 						}
 						recordMisnestedPolicyChildren12629(sec, fzSub, "to-zone",
 							fmt.Sprintf("from-zone %q", fzSub.Name()))
@@ -840,6 +873,28 @@ func LenientDroppedPolicyLocator(cfg *Config) string {
 
 func toZoneLess12231(from string) string {
 	return fmt.Sprintf("from-zone %q has no to-zone context; the policy context is skipped and not enforced (#12231)", from)
+}
+
+func nestedZonePolicyError12633(from string, toZone *Node) string {
+	to := ""
+	if toZone != nil && len(toZone.Keys) >= 2 {
+		to = toZone.Keys[1]
+	}
+	if to == "" {
+		return policyAsDestinationZone12633(from, "policy")
+	}
+	return fmt.Sprintf(
+		"security policies from-zone %q contains a NESTED `to-zone %s { ... }` block. "+
+			"Junos models one COMBINED hierarchy, so this spelling is not implemented: it "+
+			"compiles to zero zone-pairs and zero policies, and the pair falls through to "+
+			"the default policy with nothing said. Write it as "+
+			"`set security policies from-zone %s to-zone %s policy <name> ...` "+
+			"(or the block form `from-zone %s to-zone %s { ... }`) (#7523)",
+		from, to, from, to, from, to)
+}
+
+func policyAsDestinationZone12633(from, phantom string) string {
+	return fmt.Sprintf("from-zone %q has `policy %s` where the to-zone destination belongs; the context is skipped and not enforced (#12633)", from, phantom)
 }
 
 // containerToZoneLess12231 describes a to-zone-less child of the from-zone
