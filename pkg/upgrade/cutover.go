@@ -414,7 +414,11 @@ func (r *Runner) Run(opts Options) (err error) {
 			// If this stale cut is superseded, that target has not passed health
 			// and must not become the fresh cut's rollback base. Restore the
 			// journaled known-good version without restoring the old DB snapshot:
-			// a restarted old daemon may have committed changes since STOP.
+			// a restarted old daemon may have committed changes since STOP. The
+			// target may also have run since 6a (Restart=, boot, or the postinst
+			// safety net) and migrated the DB beyond PreviousVersion's reader, so
+			// every path below that restarts PreviousVersion first proves it can
+			// read the live DB, and fails closed otherwise.
 			if j.State == StateStopped {
 				current, currentErr := r.readCurrentVersion()
 				if currentErr != nil {
@@ -422,59 +426,30 @@ func (r *Runner) Run(opts Options) (err error) {
 				}
 				switch current {
 				case j.TargetVersion:
-					if j.PreviousVersion == "" {
-						return fmt.Errorf("stale STOPPED recovery: current names unverified target %s but journal has no known-good previous version; refusing to start a fresh cut",
-							j.TargetVersion)
-					}
-					if err := r.validateRestorableVersion(j.PreviousVersion); err != nil {
-						return fmt.Errorf("stale STOPPED recovery: known-good previous version %s is not restorable: %w",
-							j.PreviousVersion, err)
-					}
-					if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
-						return fmt.Errorf("stale STOPPED recovery: stop unit before restoring known-good version %s: %w",
-							j.PreviousVersion, err)
-					}
-					if err := r.flip(j.PreviousVersion); err != nil {
-						return fmt.Errorf("stale STOPPED recovery: restore known-good version %s: %w",
-							j.PreviousVersion, err)
-					}
-					loadedVersion, runningVersion, err := r.stoppedResumeExecutionVersions(j)
-					if err != nil {
-						return fmt.Errorf("stale STOPPED recovery: verify known-good unit execution: %w", err)
-					}
-					if loadedVersion != j.PreviousVersion || runningVersion == j.TargetVersion {
-						return fmt.Errorf("stale STOPPED recovery: unit execution remains unverified after restoring %s (loaded=%q running=%q); preserving journal",
-							j.PreviousVersion, loadedVersion, runningVersion)
+					if err := r.restoreStaleStoppedPrevious(j); err != nil {
+						return err
 					}
 				case j.PreviousVersion:
 					// A prior recovery may have repointed current to PreviousVersion
-					// but crashed before daemon-reload. Do not restart with the stale
-					// target ExecStart; prove systemd's loaded command and any running
-					// process are no longer the unverified target first.
+					// but failed before daemon-reload, and the postinst safety net
+					// may since have started the still-loaded target. Do not restart
+					// with the stale target ExecStart; prove systemd's loaded command
+					// and any running process are no longer the unverified target
+					// first.
 					loadedVersion, runningVersion, err := r.stoppedResumeExecutionVersions(j)
 					if err != nil {
 						return fmt.Errorf("stale STOPPED recovery: inspect unit execution after restoring current: %w", err)
 					}
 					if loadedVersion == j.TargetVersion || runningVersion == j.TargetVersion {
-						if err := r.validateRestorableVersion(j.PreviousVersion); err != nil {
-							return fmt.Errorf("stale STOPPED recovery: known-good previous version %s is not restorable: %w",
-								j.PreviousVersion, err)
+						if err := r.restoreStaleStoppedPrevious(j); err != nil {
+							return err
 						}
-						if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
-							return fmt.Errorf("stale STOPPED recovery: stop unit before reloading known-good version %s: %w",
-								j.PreviousVersion, err)
-						}
-						if err := r.flip(j.PreviousVersion); err != nil {
-							return fmt.Errorf("stale STOPPED recovery: reload known-good version %s: %w",
-								j.PreviousVersion, err)
-						}
-						loadedVersion, runningVersion, err = r.stoppedResumeExecutionVersions(j)
-						if err != nil {
-							return fmt.Errorf("stale STOPPED recovery: verify known-good unit execution: %w", err)
-						}
-						if loadedVersion != j.PreviousVersion || runningVersion == j.TargetVersion {
-							return fmt.Errorf("stale STOPPED recovery: unit execution remains unverified after restoring %s (loaded=%q running=%q); preserving journal",
-								j.PreviousVersion, loadedVersion, runningVersion)
+					} else if j.PreviousVersion != "" {
+						// systemd does not name the target (it never did, or e.g.
+						// a reboot loaded a restored drop-in), but a target that
+						// ran after an earlier flip may still have migrated the DB.
+						if err := r.requireStaleStoppedPreviousReadsDB(j, "the unit was not restarted"); err != nil {
+							return err
 						}
 					}
 				default:
@@ -483,15 +458,17 @@ func (r *Runner) Run(opts Options) (err error) {
 				}
 			}
 			// STAGED/PREFLIGHT/COPIED/VERIFIED (pure, live untouched) or
-			// STOPPED with current still at the known-good previous version.
-			// Restart the unit if it was stopped, sweep partials, begin anew.
+			// STOPPED with current at the known-good previous version (never
+			// flipped, or restored above). Restart the unit if it was stopped,
+			// sweep partials, begin anew.
 			r.logf("upgrade: staged version %s differs from journaled target %s; "+
 				"recovering and starting fresh", stagedVer, j.TargetVersion)
 			if j.State == StateStopped {
 				if startErr := r.cfg.Sys.StartUnit(r.cfg.Unit); startErr != nil {
-					// #5846: the still-current KNOWN-GOOD daemon (the stopped cut
-					// never flipped `current`) FAILED to restart. Do NOT swallow
-					// this and fall through to a fresh cut: proceeding would
+					// #5846: the KNOWN-GOOD daemon (current names PreviousVersion:
+					// the stopped cut never flipped it, or the recovery above
+					// restored it) FAILED to restart. Do NOT swallow this and fall
+					// through to a fresh cut: proceeding would
 					// removeAllPartials + reset the journal (destroying the
 					// stale-recovery evidence) and start a NEW cut whose rollback
 					// target (PreviousVersion, read from `current` below) is the very
@@ -1090,6 +1067,64 @@ func (r *Runner) Run(opts Options) (err error) {
 	}
 	r.recordCommittedCut(j.TargetVersion)
 	return nil
+}
+
+// restoreStaleStoppedPrevious returns a superseded STOPPED cut whose unit may
+// execute its unverified target (current, loaded ExecStart, or MainPID names
+// it) to the journaled known-good PreviousVersion before recovery restarts the
+// unit. The stale cut-boundary snapshot is deliberately not restored: a
+// restarted old daemon may have committed since STOP. The live DB must instead
+// remain readable by PreviousVersion. That is proven before the stop, so a
+// refusal leaves the unit untouched, and again after it, because a running
+// target can commit a newer envelope until it is stopped.
+func (r *Runner) restoreStaleStoppedPrevious(j *Journal) error {
+	if j.PreviousVersion == "" {
+		return fmt.Errorf("stale STOPPED recovery: unit state names unverified target %s but journal has no known-good previous version; refusing to start a fresh cut",
+			j.TargetVersion)
+	}
+	if err := r.validateRestorableVersion(j.PreviousVersion); err != nil {
+		return fmt.Errorf("stale STOPPED recovery: known-good previous version %s is not restorable: %w",
+			j.PreviousVersion, err)
+	}
+	if err := r.requireStaleStoppedPreviousReadsDB(j, "the unit was not stopped"); err != nil {
+		return err
+	}
+	if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
+		return fmt.Errorf("stale STOPPED recovery: stop unit before restoring known-good version %s: %w",
+			j.PreviousVersion, err)
+	}
+	if err := r.requireStaleStoppedPreviousReadsDB(j, "the unit was stopped and is left down"); err != nil {
+		return err
+	}
+	if err := r.flip(j.PreviousVersion); err != nil {
+		return fmt.Errorf("stale STOPPED recovery: restore known-good version %s: %w",
+			j.PreviousVersion, err)
+	}
+	loadedVersion, runningVersion, err := r.stoppedResumeExecutionVersions(j)
+	if err != nil {
+		return fmt.Errorf("stale STOPPED recovery: verify known-good unit execution: %w", err)
+	}
+	if loadedVersion != j.PreviousVersion || runningVersion == j.TargetVersion {
+		return fmt.Errorf("stale STOPPED recovery: unit execution remains unverified after restoring %s (loaded=%q running=%q); preserving journal",
+			j.PreviousVersion, loadedVersion, runningVersion)
+	}
+	return nil
+}
+
+// requireStaleStoppedPreviousReadsDB fails closed unless the journaled
+// known-good version can read the live config DB. Once FLIP 6a named the
+// unverified target, systemd may have run it and it may have migrated the DB
+// envelope beyond PreviousVersion's reader. Restarting PreviousVersion there
+// fails closed at boot, yet the fresh cut would record it as its rollback
+// target and a later rollback would report success on a DB it cannot read.
+func (r *Runner) requireStaleStoppedPreviousReadsDB(j *Journal, unitState string) error {
+	err := r.validateForwardEnvelopeCompatibility(j.PreviousVersion,
+		filepath.Join(r.versionDir(j.PreviousVersion), "xpfd"))
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("stale STOPPED recovery: known-good previous version %s cannot be proven to read the live config DB, which unverified target %s may have migrated (%w); refusing to restart %s (%s) and preserving current, the stale journal and partials for operator recovery",
+		j.PreviousVersion, j.TargetVersion, err, j.PreviousVersion, unitState)
 }
 
 // stoppedResumeExecutionVersions resolves both the version systemd currently
