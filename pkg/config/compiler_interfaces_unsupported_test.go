@@ -391,3 +391,16 @@ func famNode(t *testing.T, tree *ConfigTree) *Node {
 	t.Fatal("no family node")
 	return nil
 }
+
+func TestH10PackedUnitMACMidTailRejected(t *testing.T) {
+	// `mac` after another packed stanza is the same H10 violation as
+	// first-position mac; the tail walk is schema-guided so a value
+	// spelling "mac" (description) is not a hit.
+	assertCommitRejects(t, flatTreeFromSets(t,
+		"set interfaces ge-0/0/0 unit 0 vlan-id 5 mac 00:11:22:33:44:66",
+	), "#2008 H10")
+	assertCommitAccepts(t, flatTreeFromSets(t,
+		"set interfaces ge-0/0/0 unit 0 description mac",
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+	))
+}
