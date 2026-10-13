@@ -41,7 +41,7 @@ var Registry = []Site{
 	{File: "pkg/dataplane/userspace/manager_ha_test.go", Test: "TestUpdateRGActiveActivationKeepsCtrlEnabledAfterAckedStatus"},
 	{File: "pkg/dataplane/userspace/manager_sessionsync_test.go", Test: "TestSetClusterSyncedSessionV4MirrorFailureMarksHelperUnhealthy"},
 	{File: "pkg/dataplane/userspace/manager_sessionsync_test.go", Test: "TestSetClusterSyncedSessionV4MirrorSuccessClearsStickyFailure"},
-	{File: "pkg/dataplane/userspace/manager_sessionsync_test.go", Test: "TestSetClusterSyncedSessionV4SkipsReverseHelperMirror"},
+	{File: "pkg/dataplane/userspace/manager_sessionsync_test.go", Test: "TestSetClusterSyncedSessionV4PublishesReverseSessionToHelper"},
 	{File: "pkg/dataplane/userspace/manager_sessionsync_test.go", Test: "TestSetClusterSyncedSessionV6MirrorFailureMarksHelperUnhealthy"},
 	{File: "pkg/dataplane/userspace/maps_sync_addrlist_prune_3924_test.go", Test: "TestSyncLocalAddressMapsPrunesStaleOnCompleteEnum"},
 	{File: "pkg/dataplane/userspace/maps_sync_addrlist_prune_3924_test.go", Test: "TestSyncLocalAddressMapsSkipsPruneOnAddrListError"},
