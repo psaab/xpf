@@ -68,18 +68,47 @@ the running daemon and config untouched).
 finished).** When the journaled target differs from the newly-staged
 version, the live system is recovered to a consistent state BEFORE a fresh
 cut starts, so the new cut's rollback target (`PreviousVersion`, read from
-`current`) is always a verified-live version. For a stale **STOPPED**
-journal the old cut already stopped the daemon but never flipped `current`,
-so recovery restarts the still-current KNOWN-GOOD daemon. That restart is
-**fail-closed** (#5846): if `StartUnit` FAILS, recovery ABORTS and returns
-the error — it does NOT sweep partials, reset the journal, or begin a fresh
-cut, because doing so would start a new cut whose rollback target is the
-version that JUST FAILED TO RESTART while the control plane is DOWN
-(possible unrecoverable state). The stale journal + partials are PRESERVED
-so an operator or the next-boot re-run retries recovery; a fresh cut
-proceeds only once the known-good daemon is confirmed restarted. This
-mirrors the fail-closed-on-lifecycle-error posture of the rolling/kernel
-drain paths (#5845).
+`current`) is always a verified-live version.
+
+For a stale **STOPPED** journal, recovery must distinguish whether FLIP 6a
+already repointed `current` before the interruption. If `current` still names
+the journaled `PreviousVersion`, recovery restarts the known-good daemon. If
+`current` names the stale target, that target has NOT been health-confirmed:
+recovery first stops the unit, restores the journaled known-good version, and
+then restarts it. If that restore flip fails or is interrupted after changing
+`current` but before `daemon-reload`, the journal remains STOPPED while
+systemd still has the target's `ExecStart` loaded, and the postinst safety
+net may start that target before the retry. So the next run checks the
+loaded `ExecStart` and running executable, and stops and reloads the
+known-good version before restarting it.
+
+The old DB snapshot is not restored, preserving commits made by a restarted
+old daemon since STOP. But once the target could have run, it may have
+migrated the live DB to an envelope `PreviousVersion` cannot read. Every
+recovery path that restarts `PreviousVersion` therefore first proves, with
+its `--capability-check` envelope reader, that it can read the live DB:
+before stopping the unit, again after the stop (a running target can commit
+while it is being stopped), and before a plain restart. If that proof fails,
+recovery neither flips nor restarts (a refusal after the stop leaves the unit
+down). It preserves `current`, the stale journal and partials, and leaves the
+choice to the operator: keep the target's DB and finish on a version that
+reads it, or install a DB `PreviousVersion` can read (such as the stale
+cut-boundary snapshot, which discards later commits). A refusal does not undo
+an earlier attempt's partial restore: if `current` and the unit drop-in
+already name `PreviousVersion`, a reboot would start it on the migrated DB, so
+resolve the refusal before rebooting. An unexpected `current` value, an
+unrestorable previous version, or a lifecycle error likewise aborts recovery
+fail-closed.
+
+On every STOPPED path the restart itself is **fail-closed** (#5846):
+if `StartUnit` FAILS, recovery ABORTS and returns the error — it does NOT
+sweep partials, reset the journal, or begin a fresh cut, because that would
+start a new cut whose rollback target is the version that JUST FAILED TO
+RESTART while the control plane is DOWN (possible unrecoverable state). The
+stale journal + partials are PRESERVED so an operator or the next-boot re-run
+retries recovery; a fresh cut proceeds only once the known-good daemon is
+confirmed restarted. This mirrors the fail-closed-on-lifecycle-error posture
+of the rolling/kernel drain paths (#5845).
 
 - **PREFLIGHT** — check `/var` free ≥ staged size + config-DB snapshot
   size + margin; GC eligible versions if short; take the pre-upgrade

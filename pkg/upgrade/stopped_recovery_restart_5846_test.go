@@ -47,6 +47,11 @@ func seedStaleStoppedSupersede(t *testing.T, fs *fakeSystem) (*Runner, Config, s
 	if err := r.saveJournal(jStale); err != nil {
 		t.Fatal(err)
 	}
+	// The cut stopped the unit before the interruption. (A restarted old daemon
+	// would report its kernel-resolved versions/1.0.0/xpfd executable, never
+	// the sbin symlink testEnv seeds as the running path.)
+	fs.unitRunning = false
+	fs.runningUnitExe = ""
 
 	// Partial-dir evidence that removeAllPartials would sweep.
 	partial := filepath.Join(cfg.VersionsDir, partialPrefix+"stale-cut"+partialSuffix)
