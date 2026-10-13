@@ -11,6 +11,23 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+func TestPolicySchedulerConfigHashIncludesDailyExclude12822(t *testing.T) {
+	ordinary := &config.Config{Schedulers: map[string]*config.SchedulerConfig{
+		"daily": {Name: "daily", StartTime: "09:00:00", StopTime: "17:00:00"},
+	}}
+	excluded := &config.Config{Schedulers: map[string]*config.SchedulerConfig{
+		"daily": {Name: "daily", StartTime: "09:00:00", StopTime: "17:00:00", DailyExclude: true},
+	}}
+	ordinaryHash, ordinarySet := policySchedulerConfigHash(ordinary)
+	excludedHash, excludedSet := policySchedulerConfigHash(excluded)
+	if !ordinarySet || !excludedSet {
+		t.Fatal("both scheduler configs must be represented in the hash")
+	}
+	if ordinaryHash == excludedHash {
+		t.Fatal("adding daily exclude must change the scheduler config hash")
+	}
+}
+
 func TestStartPolicySchedulerLoopLockedWaitsForDaemonContext(t *testing.T) {
 	sched, _ := scheduler.NewPrimed(map[string]*config.SchedulerConfig{
 		"always": {Name: "always"},

@@ -106,8 +106,8 @@ a config that leaned on that bug would lose enforcement with no signal.
 `schedulerHasEffectiveWindow`) therefore emits a commit-time WARNING naming
 each such scheduler: *"scheduler X defines no time window; policies bound
 to it will be INACTIVE (use `daily all-day` for always-on)."* A scheduler
-carrying any window — a daily/weekday time-of-day arm, `all-day`, or a
-start/stop calendar range — does NOT warn. The predicate mirrors the
+carrying any window — a daily/weekday time-of-day arm, `all-day`, `exclude`,
+or a start/stop calendar range — does NOT warn. The predicate mirrors the
 runtime `schedulerHasTimeWindow || schedulerHasDateRange` split, so the
 warning fires exactly when `isWithinWindow` would fail closed for every
 instant. It is a warning, not a hard reject, because a degenerate scheduler

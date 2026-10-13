@@ -29,13 +29,14 @@ import (
 // always-permit — a policy `scheduler-name` scoped to a window that failed to
 // compile must deny, not permit around the clock.
 type SchedulerConfig struct {
-	Name      string
-	StartTime string // daily-window start "HH:MM" or "HH:MM:SS"
-	StopTime  string // daily-window stop "HH:MM" or "HH:MM:SS", exclusive
-	StartDate string // "YYYY-MM-DD" or "YYYY-MM-DD.HH:MM" (optional)
-	StopDate  string // date-only inclusive or date-time exclusive (optional)
-	Daily     bool   // `daily` recurrence keyword present
-	AllDay    bool   // `daily all-day` — active the entire day
+	Name         string
+	StartTime    string // daily-window start "HH:MM" or "HH:MM:SS"
+	StopTime     string // daily-window stop "HH:MM" or "HH:MM:SS", exclusive
+	StartDate    string // "YYYY-MM-DD" or "YYYY-MM-DD.HH:MM" (optional)
+	StopDate     string // date-only inclusive or date-time exclusive (optional)
+	Daily        bool   // `daily` recurrence keyword present
+	AllDay       bool   // `daily all-day` — active the entire day
+	DailyExclude bool   // `daily exclude` — never active in the daily window
 
 	// Days holds per-weekday overrides keyed by lowercase weekday name
 	// ("monday".."sunday"). A present entry overrides the daily window for
