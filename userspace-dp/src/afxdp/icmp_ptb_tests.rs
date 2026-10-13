@@ -794,6 +794,131 @@ fn ptb_still_generated_for_l2_unicast_dst() {
     );
 }
 
+/// #12647: forwarding state where PTB_IFINDEX (24) is a fabric parent whose
+/// egress entry exists (so the PTB builders CAN build — the stamped cells
+/// below are held by the gate, not an unbuildable reply).
+fn stamped_fabric_ptb_forwarding(mtu: usize) -> ForwardingState {
+    let mut fwd = forwarding_with_egress(mtu);
+    fwd.fabrics.push(FabricLink {
+        parent_ifindex: PTB_IFINDEX,
+        overlay_ifindex: 0,
+        peer_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer_mac: FW_MAC,
+        local_mac: EGRESS_SRC_MAC,
+        up: true,
+    });
+    fwd
+}
+
+/// #12647 RED: an oversized DF IPv4 packet arriving on stamped fabric
+/// ingress (V1 zone stamp as source MAC) must NOT emit a Frag-Needed: the
+/// builder reflects the synthetic stamp as the reply's L2 destination, so
+/// the PTB is undeliverable backscatter (same class as the #12319
+/// reject/cookie gates). The stamp MUST land in the source-MAC bytes
+/// [6..12] — reusing SENDER_MAC via `set_l2_dst` (bytes [0..6]) would
+/// not exercise this gate. Fails on base: no stamp arm exists in
+/// `ptb_reply_suppressed`.
+#[test]
+fn ptb_suppressed_for_v1_stamped_fabric_source_12647() {
+    let (mut frame, meta) = inbound_v4_udp(1500, true);
+    let l3 = meta.l3_offset as usize;
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    let fwd = stamped_fabric_ptb_forwarding(1400);
+    assert!(
+        ptb_reply_suppressed(&frame, meta, l3, &fwd),
+        "#12647: V1-stamped fabric source must suppress the PTB"
+    );
+}
+
+/// #12647 RED: same for the V2 NAT-scope stamp (prefix 02:bf:73). Kills a
+/// gate that matches only the V1 `FABRIC_ZONE_MAC_MAGIC` shape.
+#[test]
+fn ptb_suppressed_for_v2_stamped_fabric_source_12647() {
+    let (mut frame, meta) = inbound_v4_udp(1500, true);
+    let l3 = meta.l3_offset as usize;
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x73, 0x00, 0x00, 0x2a]);
+    let fwd = stamped_fabric_ptb_forwarding(1400);
+    assert!(
+        ptb_reply_suppressed(&frame, meta, l3, &fwd),
+        "#12647: V2-stamped fabric source must suppress the PTB"
+    );
+}
+
+/// #12647 RED: the stamped gate is address-family agnostic — an oversized
+/// IPv6 packet on stamped fabric ingress must NOT emit Packet-Too-Big.
+/// Kills an IPv4-only gate.
+#[test]
+fn ptb_suppressed_for_stamped_fabric_source_v6_12647() {
+    let (mut frame, meta) = inbound_v6_udp(1500);
+    let l3 = meta.l3_offset as usize;
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    let fwd = stamped_fabric_ptb_forwarding(1400);
+    assert!(
+        ptb_reply_suppressed(&frame, meta, l3, &fwd),
+        "#12647: V1-stamped fabric source must suppress the IPv6 PTB"
+    );
+}
+
+/// #12647 control: an UNSTAMPED source on the SAME fabric ingress is an
+/// ordinary peer arrival — its oversized DF packet still earns a
+/// Frag-Needed with the correct next-hop MTU. Kills a gate that keys on
+/// fabric ingress alone (which would black-hole PMTUD for real peers).
+#[test]
+fn ptb_still_generated_for_unstamped_fabric_source_12647() {
+    let (frame, meta) = inbound_v4_udp(1500, true); // src MAC = SENDER_MAC
+    let l3 = meta.l3_offset as usize;
+    let fwd = stamped_fabric_ptb_forwarding(1400);
+    assert!(
+        !ptb_reply_suppressed(&frame, meta, l3, &fwd),
+        "#12647: unstamped fabric source must NOT suppress the PTB"
+    );
+    let out = build_frag_needed_v4(&frame, meta, PTB_IFINDEX, &fwd, 1400)
+        .expect("#12647: unstamped fabric PTB must build");
+    // ICMP type 3 code 4, next-hop MTU in bytes 6..8 of the ICMP message
+    // (L2 14 + IPv4 20 + 6).
+    assert_eq!(&out[40..42], &1400u16.to_be_bytes(), "next-hop MTU");
+}
+
+/// #12647 control: a stamp-shaped source MAC on NATIVE (non-fabric)
+/// ingress is not a synthetic fabric arrival — the PTB still builds.
+/// Kills a gate that keys on the source MAC alone.
+#[test]
+fn ptb_still_generated_for_stamp_shaped_native_source_12647() {
+    let (mut frame, meta) = inbound_v4_udp(1500, true);
+    let l3 = meta.l3_offset as usize;
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    // No FabricLink for PTB_IFINDEX: native ingress.
+    let fwd = forwarding_with_egress(1400);
+    assert!(
+        !ptb_reply_suppressed(&frame, meta, l3, &fwd),
+        "#12647: stamp-shaped source on native ingress must NOT suppress the PTB"
+    );
+    assert!(
+        build_frag_needed_v4(&frame, meta, PTB_IFINDEX, &fwd, 1400).is_some(),
+        "#12647: stamp-shaped native PTB must build"
+    );
+}
+
+/// #12647 boundary control: stamped fabric traffic at (and below) the
+/// egress MTU does not enter the PTB decision at all. Equality is a forward,
+/// not an oversize/PTB; one byte below also remains an ordinary forward.
+#[test]
+fn stamped_fabric_ptb_boundary_equality_and_under_mtu_forward_12647() {
+    for (payload_len, mtu) in [(1372usize, 1400usize), (1371, 1400)] {
+        let (mut frame, mut meta) = inbound_v4_udp(payload_len, true);
+        let l3 = meta.l3_offset as usize;
+        frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+        meta.ingress_ifindex = PTB_IFINDEX as u32;
+        let decision = forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, mtu);
+        assert_eq!(
+            decision,
+            EgressMtuDecision::Forward,
+            "stamped frame with L3 size {} at/below MTU {mtu} must remain a forward",
+            frame.len() - l3
+        );
+    }
+}
+
 /// #2325: direct unit test of the shared `l2_dst_is_group_or_broadcast`
 /// helper — the IEEE group (I/G) bit is the low bit of the first octet;
 /// broadcast (all-FF) is a group address. Unicast MACs (even bit clear)

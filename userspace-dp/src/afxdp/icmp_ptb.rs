@@ -468,6 +468,18 @@ pub(in crate::afxdp) fn ptb_reply_suppressed(
     {
         return true;
     }
+    // #12647: PTB builders reflect the Ethernet source into the reply's
+    // destination. On fabric ingress, a V1/V2 synthetic source stamp is not
+    // the originating client's MAC, so that reply is unreachable backscatter.
+    // Share the existing stamped-fabric gate with reject and cookie replies;
+    // unstamped peer traffic and stamp-shaped native traffic remain eligible.
+    if crate::afxdp::forwarding::ingress_has_synthetic_fabric_source(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        frame,
+    ) {
+        return true;
+    }
     let Some(packet) = frame.get(l3_offset..) else {
         return true;
     };
