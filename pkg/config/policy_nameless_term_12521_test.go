@@ -16,6 +16,41 @@ func namelessPolicyTermTree12521(t *testing.T, body string) *ConfigTree {
 }`)
 }
 
+func TestPolicyStatementMissingNameNestedShapeRejected12601(t *testing.T) {
+	for _, body := range []string{
+		"then local-preference 200 accept;",
+		"then accept;",
+		"then reject;",
+		"from { protocol bgp; } then accept;",
+		"",
+	} {
+		t.Run(body, func(t *testing.T) {
+			tree := hierTree(t, `policy-options {
+    policy-statement {
+        P term {
+            `+body+`
+        }
+    }
+}`)
+			_, err := CompileConfig(tree)
+			if err == nil || !strings.Contains(err.Error(), "#12521") {
+				t.Fatalf("strict compile error = %v, want #12521 rejection for nameless nested term", err)
+			}
+		})
+	}
+
+	named := hierTree(t, `policy-options {
+    policy-statement {
+        P term then {
+            then accept;
+        }
+    }
+}`)
+	if _, err := CompileConfig(named); err != nil {
+		t.Fatalf("named term control rejected: %v", err)
+	}
+}
+
 func TestPolicyNamelessTermRejected12521(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

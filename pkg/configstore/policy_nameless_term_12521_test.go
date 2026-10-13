@@ -53,6 +53,27 @@ func TestCommitCheckRejectsNamelessPolicyTerm12521(t *testing.T) {
 	}
 }
 
+func TestCommitCheckRejectsPackedNamelessPolicyTerm12601(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	defer s.ExitConfigure()
+	input := `policy-options {
+    policy-statement {
+        P term {
+            then local-preference 200 accept;
+        }
+    }
+}`
+	if err := s.LoadOverride(input); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	if _, err := s.CommitCheck(); err == nil || !strings.Contains(err.Error(), "#12521") {
+		t.Fatalf("CommitCheck error = %v, want #12521 rejection", err)
+	}
+}
+
 func TestLoadMergeRejectsNamelessPolicyTermsBeforeFlatten12521(t *testing.T) {
 	cases := []struct {
 		name  string

@@ -41,6 +41,18 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// #12601: a packed `policy-statement { P term { ... } }` can leave the
+	// nameless term's action in the raw tree while compilePolicyOptions sees
+	// only `P` as a statement child and silently skips the term. The compiled
+	// Config therefore cannot expose it to the existing #12521 typed gate.
+	// Validate the expanded AST before lowering it; tolerant compilation keeps
+	// the established #12521 placeholder-and-warning behavior.
+	if !opts.lenientPolicyNamelessTerm12521 {
+		if err := ValidatePolicyNamelessTermsAST12521(tree); err != nil {
+			return nil, err
+		}
+	}
+
 	// #1814 VRRP track-interface AST pre-walk. Runs on the group-expanded
 	// tree (so apply-groups-inherited statements are covered) and BEFORE
 	// section compilation so the lenient path's first-wins pruning is

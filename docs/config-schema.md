@@ -16623,14 +16623,17 @@ change the policy's existing fallback. If a malformed container also holds a
 named nested term, that nested child is not compiled.
 
 Strict compilation and operator `CommitCheck` reject nameless term bodies with
-a diagnostic naming the policy-statement and first body token. `LoadMerge`
-checks the literal hierarchical input before converting it to set paths. It
-unpacks packed keys before a policy term on a clone while preserving each
-term-name key run and its body shape. It then scans root `policy-options` and
-every `policy-options` subtree under `groups`. It does not expand the fragment;
-group references can resolve against the existing candidate, and inactive or
-`${node}` references remain deferred to the normal load/commit path. The scan
-includes inactive nodes as a fail-safe.
+a diagnostic naming the policy-statement and first body token. The strict AST
+gate also checks packed policy-statement key runs (for example,
+`policy-statement { P term { then accept; } }`) before compilation, because
+the compiler can otherwise mistake `P` for a property and silently skip the
+term's action. `LoadMerge` checks the literal hierarchical input before
+converting it to set paths. It unpacks packed keys before a policy term on a
+clone while preserving each term-name key run and its body shape. It then scans
+root `policy-options` and every `policy-options` subtree under `groups`. It does
+not expand the fragment; group references can resolve against the existing
+candidate, and inactive or `${node}` references remain deferred to the normal
+load/commit path. The scan includes inactive nodes as a fail-safe.
 
 An explicitly named nested term such as
 `policy-statement P { term { T { then accept; } } }` now compiles as term `T`;
