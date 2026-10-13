@@ -98,6 +98,9 @@ type policyInvalidationDebt struct {
 	// appliedDigest is captured only after this target's full local apply
 	// succeeds and is stamped after the debt's candidates clear.
 	appliedDigest string
+	// tailFailed prevents status-loop catch-up from treating publication as
+	// proof that a deferred apply's failed local tail converged.
+	tailFailed bool
 	// landed is the predecessor obligation whose target had already landed
 	// when this unlanded target's capture merged it forward. A superseded
 	// target's retire restores it instead of dropping the whole debt.
@@ -537,7 +540,9 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	var previousScanFailure *policyInvalidationScanFailure
 	var landed *policyInvalidationDebt
 	var reauthorized *policyInvalidationCapture
+	var tailFailed bool
 	if debt := d.policyInvalidationDebt; debt != nil {
+		tailFailed = debt.tailFailed && debt.newCfg == plan.newCfg
 		landedTarget := applied != nil && debt.newCfg == applied && plan.newCfg != applied
 		switch {
 		case landedTarget && debt.predecessorCfg != nil && debt.predecessorCfg == plan.newCfg:
@@ -594,6 +599,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		oldCfg: plan.oldCfg, newCfg: plan.newCfg, predecessorCfg: predecessorCfg,
 		renameApply: plan.renameApply, scanFailure: previousScanFailure,
 		publishGeneration: previousGeneration, landed: landed, reauthorized: reauthorized,
+		tailFailed: tailFailed,
 	}
 
 	// The three target sets are computed HERE, once, and the clears consume the
@@ -1381,7 +1387,7 @@ func (d *Daemon) dischargePolicyInvalidationAfterPublish(generation uint64) {
 			if active != nil && active != debt.newCfg {
 				return
 			}
-			if active == debt.newCfg && debt.appliedDigest == "" {
+			if active == debt.newCfg && debt.appliedDigest == "" && !debt.tailFailed {
 				// The catch-up callback is a successful apply boundary even
 				// when the original caller lost its response.
 				debt.appliedDigest = d.store.ActiveDigest()

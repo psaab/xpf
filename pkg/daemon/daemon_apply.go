@@ -336,6 +336,12 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// silently missing tomorrow.
 	defer func() {
 		if retErr != nil {
+			if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == cfg &&
+				d.deferredSnapshotCompletionForConfig(cfg) != nil {
+				// A deferred snapshot can land after this apply's tail has
+				// failed. Its later publication does not repair that tail.
+				debt.tailFailed = true
+			}
 			if d.store != nil {
 				d.store.InvalidateAppliedDigest()
 			}
@@ -359,6 +365,9 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		if retErr == nil && d.store != nil {
 			if debt := d.policyInvalidationDebt; debt != nil {
 				debt.appliedDigest = d.store.ActiveDigest()
+				// A complete local apply attempt replaces the earlier failed
+				// tail result, even if its snapshot is awaiting publication.
+				debt.tailFailed = false
 			}
 		}
 	}()
