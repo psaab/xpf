@@ -43,7 +43,8 @@ func normalizeCompactStanzas(tree *ConfigTree) int {
 	if tree == nil {
 		return 0
 	}
-	return normalizeCompactStanzasWithScope(tree, compactNormalizeInScope)
+	changed := normalizeCompactStanzasWithScope(tree, compactNormalizeInScope)
+	return changed + normalizePackedStaticRouteQualifiedNextHop(tree)
 }
 
 // normalizeCompactStanzasWithScope is normalizeCompactStanzas with the scope
