@@ -20,6 +20,10 @@ func TestRouteFilterPrefixSlotRejected12654(t *testing.T) {
 		{"term-line garbage prefix", `policy-options { policy-statement P { term T from route-filter garbage exact; term T then accept; } }`},
 		{"term-line bare address", `policy-options { policy-statement P { term T from route-filter 10.0.0.0 exact; term T then accept; } }`},
 		{"term-line out-of-range prefix", `policy-options { policy-statement P { term T from route-filter 2001:db8::/129 exact; term T then accept; } }`},
+		{"compact quoted leading-space prefix", `policy-options { policy-statement P { term T { from route-filter " 10.0.0.0/24" exact; then accept; } } }`},
+		{"compact quoted trailing-space prefix", `policy-options { policy-statement P { term T { from route-filter "2001:db8::/32 " exact; then accept; } } }`},
+		{"term-line quoted leading-space prefix", `policy-options { policy-statement P { term T from route-filter " 10.0.0.0/24" exact; term T then accept; } }`},
+		{"term-line quoted trailing-space prefix", `policy-options { policy-statement P { term T from route-filter "2001:db8::/32 " exact; term T then accept; } }`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

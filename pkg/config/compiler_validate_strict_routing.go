@@ -1497,6 +1497,11 @@ func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 				if rf == nil {
 					continue
 				}
+				if rf.Prefix != strings.TrimSpace(rf.Prefix) {
+					return fmt.Errorf(
+						"policy-statement %q term %q route-filter prefix %q: not a valid CIDR: whitespace-padded prefix",
+						name, term.Name, rf.Prefix)
+				}
 				if err := ValidateRouteFilterArgPositional(0, rf.Prefix, nil); err != nil {
 					return fmt.Errorf(
 						"policy-statement %q term %q route-filter prefix %q: not a valid CIDR: %v",

@@ -8828,7 +8828,8 @@ an error and the renderer omitted the malformed entry. Strict compilation now
 rejects such a prefix; tolerant load and peer-sync warn and retain the existing
 renderer omission behavior. Valid IPv4/IPv6 CIDRs, including `/0`, `/32`, and
 `/128`, remain accepted. Coverage is in
-`pkg/config/route_filter_prefix_slot_12654_test.go`.
+`pkg/config/route_filter_prefix_slot_12654_test.go` and
+`pkg/configstore/route_filter_prefix_slot_12654_test.go`.
 
 ### The as-path REGEX is the whole token tail, and it is validated (#6686)
 
