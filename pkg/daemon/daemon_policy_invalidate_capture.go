@@ -12,6 +12,7 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/policymatch"
 )
 
 // #6948 — commit-time session invalidation reads the session table BEFORE the
@@ -67,6 +68,7 @@ type policyInvalidationPlan struct {
 	oldCfg      *config.Config
 	newCfg      *config.Config
 	renameApply *pendingRenameApply
+	rollback    bool
 }
 
 // policyInvalidationScanFailure remembers the old authority under which a scan
@@ -316,7 +318,11 @@ type policyInvalidationCapture struct {
 	// must never enter any delete bucket.
 	renamed        []dpuserspace.PolicySessionRebind
 	renameAncestry []dpuserspace.PolicyRenameAncestry
-
+	// candidateRuleIDs binds helper candidate identity to the stable rule key
+	// that admitted it. Runtime policy IDs are positional and change across
+	// config generations, so rollback re-authorization must not infer the
+	// candidate's rule from the rollback target's policy ID.
+	candidateRuleIDs map[policyInvalidationMatchIdentity]string
 	// readErr is the userspace helper READ failure (P9); v4Err/v6Err belong
 	// to the store path only.
 	readErr error
@@ -390,6 +396,13 @@ func (d *Daemon) armPolicyInvalidationPlanWithRename(
 		oldCfg:      oldCfg,
 		newCfg:      newCfg,
 		renameApply: renameApply,
+	}
+}
+
+func (d *Daemon) armPolicyInvalidationRollbackPlan(oldCfg, newCfg *config.Config) {
+	d.armPolicyInvalidationPlan(oldCfg, newCfg)
+	if d.policyInvalidationPlan != nil {
+		d.policyInvalidationPlan.rollback = true
 	}
 }
 
@@ -517,38 +530,31 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	var previousScanFailure *policyInvalidationScanFailure
 	var landed *policyInvalidationDebt
 	if debt := d.policyInvalidationDebt; debt != nil {
-		undoesLandedTarget := applied != nil && debt.newCfg == applied &&
-			plan.newCfg != applied && debt.predecessorCfg != nil &&
-			debt.predecessorCfg == plan.newCfg
-		if applied != nil && debt.newCfg == applied && plan.newCfg != applied {
-			// An exact rollback restores the landed target's predecessor, so
-			// its candidates are no longer owed. Restore only any earlier
-			// landed debt; preserve scanFailure below to remain fail-closed
-			// until a complete capture or authoritative full clear.
-			if undoesLandedTarget {
-				landed = debt.landed
-			} else {
-				// A landed debt's own predecessor was already merged into it
-				// and can never be restored again; cut the chain so it stays
-				// bounded.
-				debt.landed = nil
-				landed = debt
-			}
-		} else {
-			// Carry landed obligations across superseding targets and same-target
-			// adopts. Reusing the existing record keeps the chain depth at one.
+		rollbackToEarlierConfig := plan.rollback && applied != nil &&
+			debt.newCfg == applied && plan.newCfg != applied
+		switch {
+		case rollbackToEarlierConfig && debt.predecessorCfg == plan.newCfg:
+			// Preserve the established one-level undo behavior: the target's
+			// capture includes its predecessor obligation, which must be restored.
 			landed = debt.landed
-		}
-		previousCapture = debt.capture
-		previousScanFailure = debt.scanFailure
-		if undoesLandedTarget {
-			// The current capture may contain both this target's candidates
-			// and its predecessor's. Only the latter remain owed after undo.
-			previousCapture = nil
 			if landed != nil {
 				previousCapture = landed.capture
 			}
+		case rollbackToEarlierConfig:
+			// The bounded landed link cannot describe which nested transition
+			// introduced each candidate. Re-authorize all candidates against
+			// the actual rollback target using stable rule provenance.
+			landed = nil
+			previousCapture = reauthorizePolicyCandidates(d, debt.capture, plan.newCfg)
+		case applied != nil && debt.newCfg == applied && plan.newCfg != applied:
+			debt.landed = nil
+			landed = debt
+			previousCapture = debt.capture
+		default:
+			landed = debt.landed
+			previousCapture = debt.capture
 		}
+		previousScanFailure = debt.scanFailure
 		if debt.newCfg == plan.newCfg {
 			previousGeneration = debt.publishGeneration
 		}
@@ -704,6 +710,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 						capture.readErr = errors.Join(capture.readErr, err)
 						continue
 					}
+					recordPolicyCandidateRule(capture, plan.oldCfg, match)
 					capture.deleted.policy = append(capture.deleted.policy, match)
 					if entry4 != nil {
 						capture.deleted.v4 = append(capture.deleted.v4, *entry4)
@@ -723,6 +730,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 				capture.readErr = errors.Join(capture.readErr, err)
 				continue
 			}
+			recordPolicyCandidateRule(capture, plan.oldCfg, match)
 			target := &capture.deleted
 			if idInSet(modified, match.PolicyID) {
 				target = &capture.modified
@@ -967,7 +975,16 @@ func mergePolicyInvalidationCaptures(previous, current *policyInvalidationCaptur
 	mark(current.deleted)
 	mark(current.modified)
 	mark(current.deflt)
-
+	if current.candidateRuleIDs == nil && len(previous.candidateRuleIDs) != 0 {
+		current.candidateRuleIDs = make(map[policyInvalidationMatchIdentity]string)
+	}
+	for id, ruleID := range previous.candidateRuleIDs {
+		if ruleID != "" {
+			current.candidateRuleIDs[id] = ruleID
+		}
+	}
+	// New candidates are already represented in seenPolicy; do not let them
+	// replace retained stable-rule provenance for an identical row.
 	merge := func(previous, current capturedSessions) capturedSessions {
 		for _, entry := range previous.v4 {
 			if _, ok := seenV4[entry.Key]; !ok {
@@ -994,6 +1011,159 @@ func mergePolicyInvalidationCaptures(previous, current *policyInvalidationCaptur
 	current.modified = merge(previous.modified, current.modified)
 	current.deflt = merge(previous.deflt, current.deflt)
 	return current
+}
+func policyStableKeyForRuntimeID(cfg *config.Config, policyID uint32) string {
+	if policyID == dataplane.DefaultPolicySentinelID {
+		return dataplane.DefaultPolicyName
+	}
+	for key, id := range dpuserspace.PolicyIDsByStableKey(cfg) {
+		if id == policyID {
+			return key
+		}
+	}
+	return ""
+}
+
+func recordPolicyCandidateRule(
+	capture *policyInvalidationCapture, cfg *config.Config, match dpuserspace.SessionPolicyMatch,
+) {
+	if capture.candidateRuleIDs == nil {
+		capture.candidateRuleIDs = make(map[policyInvalidationMatchIdentity]string)
+	}
+	capture.candidateRuleIDs[policyInvalidationMatchID(match)] =
+		policyStableKeyForRuntimeID(cfg, match.PolicyID)
+}
+
+// reauthorizePolicyCandidates removes retained helper rows that the restored
+// config permits. Their original rule identity is retained separately because
+// positional policy IDs may differ at every nesting level. Unknown identities
+// or malformed tuples remain debt and therefore fail closed.
+func reauthorizePolicyCandidates(
+	d *Daemon, capture *policyInvalidationCapture, restored *config.Config,
+) *policyInvalidationCapture {
+	if capture == nil || restored == nil || d == nil {
+		return capture
+	}
+	zoneName := func(id uint16) string {
+		for name := range restored.Security.Zones {
+			if config.StableZoneID(name) == id {
+				return name
+			}
+		}
+		return ""
+	}
+	policies := dpuserspace.PoliciesByStableKey(restored)
+	feedOverlay := d.feedSnapshotsForConfig(restored)
+	policyInactive := dpuserspace.PolicyInactiveFn(
+		d.policySchedulerActiveStateForApplyLocked(restored, time.Now()))
+	permitted := func(match dpuserspace.SessionPolicyMatch) bool {
+		key := capture.candidateRuleIDs[policyInvalidationMatchID(match)]
+		parts := strings.SplitN(key, "/", 2)
+		from, to := zoneName(match.IngressZoneID), zoneName(match.EgressZoneID)
+		if from == "" || to == "" {
+			return false
+		}
+		if key != dataplane.DefaultPolicyName {
+			zones := strings.SplitN(parts[0], "->", 2)
+			global := strings.HasPrefix(key, "junos-global->junos-global/")
+			if len(parts) != 2 || len(zones) != 2 ||
+				(!global && (zones[0] != from || zones[1] != to)) {
+				return false
+			}
+			policy, exists := policies[key]
+			if !exists || policy.Action != config.PolicyPermit {
+				return false
+			}
+		}
+		family := match.AddrFamily
+		if family == 0 {
+			family = match.Tuple.AddrFamily
+		}
+		src, dst := net.ParseIP(match.Tuple.SrcIP), net.ParseIP(match.Tuple.DstIP)
+		if family == 4 {
+			src, dst = src.To4(), dst.To4()
+		} else if family == 6 {
+			src, dst = src.To16(), dst.To16()
+			if src == nil || dst == nil || net.ParseIP(match.Tuple.SrcIP).To4() != nil ||
+				net.ParseIP(match.Tuple.DstIP).To4() != nil {
+				return false
+			}
+		} else {
+			return false
+		}
+		if src == nil || dst == nil {
+			return false
+		}
+		query := policymatch.Query{
+			FromZone: from, ToZone: to, SrcIP: src, DstIP: dst,
+			Protocol: policyQueryProtocol(match.Tuple.Protocol),
+			SrcPort:  int(match.Tuple.SrcPort), DstPort: int(match.Tuple.DstPort),
+			SrcFamily: fmt.Sprintf("v%d", family), DstFamily: fmt.Sprintf("v%d", family),
+		}
+		if match.DNAT && match.NATDstIP != "" {
+			translated := net.ParseIP(match.NATDstIP)
+			if family == 4 {
+				translated = translated.To4()
+			} else {
+				translated = translated.To16()
+				if translated == nil || translated.To4() != nil {
+					return false
+				}
+			}
+			if translated == nil {
+				return false
+			}
+			query.DstIP = translated
+		}
+		if match.DNAT && match.NATDstPort != 0 {
+			query.DstPort = int(match.NATDstPort)
+		}
+		query.FeedOverlay = feedOverlay
+		query.PolicyInactiveFn = policyInactive
+		result := policymatch.Match(restored, query)
+		return result.Action == config.PolicyPermit
+	}
+	var keep func(capturedSessions) capturedSessions
+	keep = func(bucket capturedSessions) capturedSessions {
+		filtered := bucket.policy[:0]
+		permittedV4 := make(map[dataplane.SessionKey]struct{})
+		permittedV6 := make(map[dataplane.SessionKeyV6]struct{})
+		for _, match := range bucket.policy {
+			if !permitted(match) {
+				filtered = append(filtered, match)
+				continue
+			}
+			key4, _, err4 := policyTupleV4(match.Tuple)
+			if err4 == nil && (match.AddrFamily == 4 || match.Tuple.AddrFamily == 4) {
+				permittedV4[key4] = struct{}{}
+			}
+			key6, _, err6 := policyTupleV6(match.Tuple)
+			if err6 == nil && (match.AddrFamily == 6 || match.Tuple.AddrFamily == 6) {
+				permittedV6[key6] = struct{}{}
+			}
+			delete(capture.candidateRuleIDs, policyInvalidationMatchID(match))
+		}
+		bucket.policy = filtered
+		v4 := bucket.v4[:0]
+		for _, entry := range bucket.v4 {
+			if _, ok := permittedV4[entry.Key]; !ok {
+				v4 = append(v4, entry)
+			}
+		}
+		bucket.v4 = v4
+		v6 := bucket.v6[:0]
+		for _, entry := range bucket.v6 {
+			if _, ok := permittedV6[entry.Key]; !ok {
+				v6 = append(v6, entry)
+			}
+		}
+		bucket.v6 = v6
+		return bucket
+	}
+	capture.deleted = keep(capture.deleted)
+	capture.modified = keep(capture.modified)
+	capture.deflt = keep(capture.deflt)
+	return capture
 }
 
 // capturePolicyInvalidationBeforeDeferredPublish runs outside Manager.mu from

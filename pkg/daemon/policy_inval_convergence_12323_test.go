@@ -878,6 +878,8 @@ func newLandedRollbackRun12072(t *testing.T) (*convergenceRun12072, *config.Conf
 	for i := range r.dp.rows {
 		row := &r.dp.rows[i]
 		row.PolicyID = ids[r.dp.ruleBySession[row.ExpectedRTFlowSessionID]]
+		row.IngressZoneID = config.StableZoneID("trust")
+		row.EgressZoneID = config.StableZoneID("untrust")
 	}
 	r.h.d.store.MarkActiveApplied()
 	return r, c0
