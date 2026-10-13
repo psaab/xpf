@@ -657,6 +657,20 @@ the manual-failover flag and never MOVES ownership — only
 trailing reset clears the flag the transfer itself sets, which would otherwise
 block the peer from electing during a later reboot leg.
 
+**A refused transfer is re-sent (#12658).** node0 refuses a transfer for an RG
+that is not takeover-ready (`RequestPeerFailover`), and one such window opens
+in the middle of every reassert. Once RG1 lands on a freshly cut node0 that has
+not yet proven XSK liveness, node0 is no longer an idle standby, so RG2 reads
+`userspace XSK liveness not proven` until WAN RX proves it about 2s later. The
+reassert used to send each transfer once and swallow the refusal. 3 of 4
+rolling deploys on 2026-10-13 left RG2 on node1 that way, and with
+`preempt=no` nothing moved it back. Every LAN→WAN flow then crossed the
+generic-XDP fabric and stopped scaling at about 6 Gbps (#12655). The commit
+wait now re-sends the transfer for every RG node0 does not own yet, on every
+pass except the last. That keeps the #7771 rule: each transfer is followed by
+a status read before its pin is cleared. The verify that follows is still the
+verdict.
+
 **It is fail-closed and dies rather than warning.** It retries the status read
 across the post-deploy settle window (the daemon is still coming up; a reassert
 issued ~20s after a deploy was measured not to take while the identical command
@@ -673,8 +687,8 @@ produced: read `show chassis cluster status` on both nodes before re-running,
 and do NOT read the next smoke's failure as an HA regression.
 
 The logic lives in `deploy-lib.sh` (`deploy_reassert_primary_node0`,
-`deploy_reassert_node0_primary_ok`) so `make test-deploy-lib` covers it against
-a mocked incus — no cluster required.
+`deploy_reassert_node0_primary_ok`, `deploy_node_rgs_not_role`) so
+`make test-deploy-lib` covers it against a mocked incus — no cluster required.
 
 **The failover smoke names WHICH failure it hit (#7368).**
 `test-failover.sh` used one exit code (2) for three different outcomes, so
