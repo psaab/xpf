@@ -188,6 +188,15 @@ r() {
 	echo "${INCUS_REMOTE:+${INCUS_REMOTE}:}$1"
 }
 
+# The deploy liveness primer consumes CLUSTER_LAN_HOST. Cluster env files
+# declare the equivalent LAN_HOST; resolve it here with the same Incus remote
+# qualification used for VM references.
+if [[ -n "${CLUSTER_LAN_HOST:-${LAN_HOST:-}}" ]]; then
+	CLUSTER_LAN_HOST="$(deploy_lan_host_ref)"
+else
+	CLUSTER_LAN_HOST=""
+fi
+
 # Resolve VM name from node index (0 or 1)
 vm_name() {
 	case "$1" in

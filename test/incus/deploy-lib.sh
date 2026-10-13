@@ -35,6 +35,18 @@
 # sync with pkg/upgrade manifest.Names() (xpfd, cli, xpf-userspace-dp).
 deploy_managed_bins=(xpfd cli xpf-userspace-dp)
 
+# Resolve the LAN target for liveness priming using the same remote-qualified
+# ref rules as cluster-env.sh. An explicit CLUSTER_LAN_HOST override wins;
+# otherwise the cluster env's LAN_HOST supplies the name.
+deploy_lan_host_ref() {
+	local host="${CLUSTER_LAN_HOST:-${LAN_HOST:-}}"
+	[[ -n "$host" ]] || return 1
+	if [[ -n "${INCUS_REMOTE:-}" && "$host" != *:* ]]; then
+		host="${INCUS_REMOTE}:${host}"
+	fi
+	printf '%s\n' "$host"
+}
+
 # The #1917 in-place-upgrade ExecStart pin drop-in (pkg/upgrade/flip.go
 # unitDropinName). Removing it reverts the unit to the package/base-unit
 # ExecStart=/usr/local/sbin/xpfd.
