@@ -1693,6 +1693,15 @@ func deleteInterfaceFilterSampling12508(
 
 	targetKeys := path[i:]
 	childKeys := path[i+keyCount:]
+	if deepRepeatedSiblingSchema12761(containerSchema) {
+		for _, n := range *nodes {
+			if n != nil && !n.IsLeaf && keysEqual(n.Keys, nodeKeys) &&
+				repeatedSiblingHasUnsafeElidedMatch12761(n, childKeys, containerSchema) {
+				return true, fmt.Errorf("%w: cannot safely delete %q because a matching elided node also carries another statement",
+					ErrPathNotFound, strings.Join(targetKeys, " "))
+			}
+		}
+	}
 	matched := false
 	for k := len(*nodes) - 1; k >= 0; k-- {
 		n := (*nodes)[k]
@@ -1841,6 +1850,36 @@ func deleteBelowRepeatedSibling12714(parent *Node, keys []string, schema *schema
 		}
 	}
 	return matched
+}
+
+// repeatedSiblingHasUnsafeElidedMatch12761 preflights a deep delete so an
+// uneditable packed match cannot be skipped after another sibling is removed.
+func repeatedSiblingHasUnsafeElidedMatch12761(parent *Node, keys []string, schema *schemaNode) bool {
+	if len(keys) == 0 {
+		return false
+	}
+	for _, child := range parent.Children {
+		if child != nil && child.IsLeaf && keysMatch(child.Keys, keys) &&
+			!elidedNodeIsExactlyOneStatement(child, schema) {
+			return true
+		}
+	}
+	childSchema := schemaChildFor(schema, keys[0])
+	if childSchema == nil {
+		return false
+	}
+	keyCount, childSchema := consumeNodeKeys(keys, childSchema)
+	if keyCount >= len(keys) {
+		return false
+	}
+	rest := keys[keyCount:]
+	for _, child := range parent.Children {
+		if child != nil && !child.IsLeaf && keysEqual(child.Keys, keys[:keyCount]) &&
+			repeatedSiblingHasUnsafeElidedMatch12761(child, rest, childSchema) {
+			return true
+		}
+	}
+	return false
 }
 
 // markBelowRepeatedSiblingInactive12714 is the deactivate/activate twin of

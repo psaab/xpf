@@ -525,4 +525,91 @@ func TestEditorDeepSamplingPackedRunRefused12761(t *testing.T) {
 	if got := flowServerAddrs12714(t, tree, false); len(got) != 1 || got[0] != "1.1.1.1" {
 		t.Errorf("after refusal flow-servers = %v, want [1.1.1.1]", got)
 	}
+
+	t.Run("winning packed later sibling refuses atomically", func(t *testing.T) {
+		tree := tree12714(t, `forwarding-options {
+			sampling { instance i2 { family inet { output { flow-server 1.1.1.1 { version 9; } } } } }
+			sampling { instance i2 { family inet { output { flow-server 1.1.1.1 inline-jflow; } } } }
+		}`)
+		if got := flowServerAddrs12714(t, tree, false); len(got) != 1 || got[0] != "1.1.1.1" {
+			t.Fatalf("precondition flow-servers = %v, want [1.1.1.1]", got)
+		}
+		before := tree.Format()
+		err := tree.DeletePath([]string{"forwarding-options", "sampling", "instance", "i2", "family", "inet", "output", "flow-server", "1.1.1.1"})
+		if err == nil {
+			t.Fatal("delete succeeded although the winning packed sibling could not be edited safely")
+		}
+		if tree.Format() != before {
+			t.Errorf("refused delete changed the earlier sibling before discovering the packed winner")
+		}
+		if got := flowServerAddrs12714(t, tree, false); len(got) != 1 || got[0] != "1.1.1.1" {
+			t.Errorf("after refusal flow-servers = %v, want unchanged [1.1.1.1]", got)
+		}
+	})
+}
+
+func TestEditorDeepSamplingRemainingVerdictProbes12761(t *testing.T) {
+	t.Run("source-address under braced output", func(t *testing.T) {
+		tree := tree12714(t, `forwarding-options { sampling { instance i2 { family inet { output { source-address 10.0.0.1; } } } } }`)
+		if got := samplingInstance12714(compileTree12714(t, tree), "i2"); got == nil || got.FamilyInet == nil || got.FamilyInet.SourceAddress != "10.0.0.1" {
+			t.Fatalf("precondition sampling instance = %+v, want source-address 10.0.0.1", got)
+		}
+		before := tree.Format()
+		err := tree.DeletePath([]string{"forwarding-options", "sampling", "instance", "i2", "family", "inet", "output", "source-address"})
+		if err != nil {
+			t.Fatalf("delete source-address: %v", err)
+		}
+		if tree.Format() == before {
+			t.Fatal("delete source-address reported success without changing the tree")
+		}
+		if got := samplingInstance12714(compileTree12714(t, tree), "i2"); got == nil || got.FamilyInet == nil || got.FamilyInet.SourceAddress != "" {
+			t.Errorf("after delete source-address sampling instance = %+v, want empty source-address", got)
+		}
+	})
+
+	t.Run("whole elided family statement", func(t *testing.T) {
+		tree := tree12714(t, `forwarding-options { sampling { instance i2 family inet output flow-server 4.4.4.4; } }`)
+		before := tree.Format()
+		err := tree.DeletePath([]string{"forwarding-options", "sampling", "instance", "i2", "family", "inet", "output", "flow-server", "4.4.4.4"})
+		if err != nil {
+			t.Fatalf("delete elided family flow-server: %v", err)
+		}
+		if tree.Format() == before {
+			t.Fatal("delete elided family flow-server reported success without changing the tree")
+		}
+		if got := flowServerAddrs12714(t, tree, false); len(got) != 0 {
+			t.Errorf("after delete flow-servers = %v, want none", got)
+		}
+	})
+
+	t.Run("elided instance bare delete", func(t *testing.T) {
+		tree := tree12714(t, `forwarding-options {
+			sampling { instance i2 { input { rate 100; } } }
+			sampling { instance i3 input rate 200; }
+		}`)
+		before := tree.Format()
+		err := tree.DeletePath([]string{"forwarding-options", "sampling", "instance", "i3"})
+		if err != nil {
+			t.Fatalf("delete elided instance: %v", err)
+		}
+		if tree.Format() == before {
+			t.Fatal("delete elided instance reported success without changing the tree")
+		}
+	})
+}
+
+func TestEditorParityGroupsSampling12761(t *testing.T) {
+	input := `groups { G { forwarding-options { sampling {
+		instance i2 { input { rate 100; } }
+	} } } }
+	apply-groups G;`
+	path := []string{"groups", "G", "forwarding-options", "sampling", "instance", "i2", "input", "rate", "150"}
+	tree := tree12714(t, input)
+	if got := samplingInstance12714(compileTree12714(t, tree), "i2"); got == nil || got.InputRate != 100 {
+		t.Fatalf("precondition group-expanded rate = %+v, want first-wins 100", got)
+	}
+	must12714(t, tree.SetPath(path))
+	if got := samplingInstance12714(compileTree12714(t, tree), "i2"); got == nil || got.InputRate != 150 {
+		t.Errorf("after group set rate = %+v, want 150 (group first-wins target)", got)
+	}
 }
