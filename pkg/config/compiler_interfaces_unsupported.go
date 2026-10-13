@@ -212,7 +212,20 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 			}
 			unitID := unitIdentity(unit)
 
-			// H10: a static MAC override at the logical-unit scope.
+			// H10: a static MAC override at logical-unit scope can be
+			// represented as a packed tail on the unit node itself when no
+			// inline unit peer exists to receive it.
+			if len(unit.Keys) > 2 && unit.Keys[2] == "mac" {
+				if err := emit(
+					"interfaces %s unit %s: static `mac` override is not "+
+						"supported (the interface MAC is read-only; for cluster "+
+						"RETH it is computed deterministically per node) — "+
+						"remove it (#2008 H10)",
+					ifName, unitID); err != nil {
+					return nil, err
+				}
+			}
+			// A braced unit container carries mac as an ordinary child.
 			for _, c := range unit.Children {
 				if c.Name() == "mac" {
 					if err := emit(
