@@ -634,13 +634,6 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					// one group produce one outcome; the override decision
 					// happens one level down, so an inline value still wins.
 					budget.notePromoted9855(peer)
-					if haveExcept {
-						contrib := s.fromGroups
-						if len(contrib) == 0 {
-							contrib = []string{group}
-						}
-						addNodeContrib9862(body, contrib)
-					}
 					appendDuplicateBlockMergeMarkersToLeaves9023(body, markers)
 					if err := budget.charge(countNodes(body)); err != nil {
 						return err
