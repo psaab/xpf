@@ -7364,6 +7364,11 @@ load/sync the legacy config, preserving the #1960 no-brick contract. Leaf
 payloads and opaque bodies are not treated as child keywords. The spelling
 differential gate also requires an actually-compared value leaf under each of
 the three roots, so a green global count cannot hide an uncovered subtree.
+A policy term's braced or set-path `then` block is covered by this rule too:
+an unknown statement such as `then { accept; acccept; }` warns and commits.
+The #12517 then-tail gate does not treat it as a tail; it rejects only tokens
+beyond a recognized action's operands and unknown words in the packed compact
+and term-line spellings, which have no statement boundary of their own.
 
 PR-A landed the mechanism DORMANT (no production subtree set `closedWorld`,
 zero false-reject risk). It is white-box tested with a SYNTHETIC subtree
@@ -8690,6 +8695,21 @@ warns, that word keeps its action or match, and the renderer omits
 local-preference and metric values outside 0..4294967295. Fail-on-revert
 coverage is in `pkg/config/policy_termline_values_12513_test.go` and
 `pkg/frr/policy_termline_values_12513_test.go`.
+
+Tokens a recognized `then` action cannot hold fail strict commit in every
+spelling (#12517): `then local-preference 200 foo`, `then origin igp egp`,
+`then accept foo`, `then next policy foo`, a token after a `then community`
+value or its `[ ... ]` list, and a from-match word (`protocol`, `prefix-list`,
+`route-filter`, `as-path`, `family`, `neighbor`, `interface`, `instance`,
+`rib`) after an action. The packed compact and term-line spellings also reject
+an unknown action word (`then foo accept`). A community value run with no
+bracket provenance (for example a `display set` replay, which prints the list
+without brackets) stays one value. The gate runs after the #11780 and #11779
+policy gates; tolerant load and peer-sync warn with the `policy then operand`
+prefix and keep master's rendering, except that a quoted or bracketed `then`
+inside an AS-path-prepend run keeps the authored `next-hop reject` as deny.
+Fail-on-revert coverage is in `pkg/config/policy_then_tail_12517_test.go` and
+`pkg/frr/policy_then_tail_12517_test.go`.
 
 ### Route-filter tails and match-types are checked at strict commit (#12067, #12538)
 

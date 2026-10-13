@@ -2029,18 +2029,24 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 			// survives -- and installed WITHOUT the attributes the operator
 			// attached to it: default local-preference, no ECMP.
 			for _, ac := range expandFlatRun(tc.Children, policyTermThenSchema8939()) {
-				switch ac.Name() {
+				action := ac.Name()
+				extraCount := -1
+				switch action {
 				case "accept":
 					term.Action = "accept"
+					extraCount = 0
 				case "reject":
 					term.Action = "reject"
+					extraCount = 0
 				case "next":
 					recordPolicyNextAction11780(term, nodeVal(ac))
+					extraCount = 1
 				case "next-hop":
 					term.hasNextHopOperand12070 = true
 					term.NextHop = nodeVal(ac)
 				case "load-balance":
 					term.LoadBalance = nodeVal(ac)
+					extraCount = 1
 				case "local-preference":
 					if v := nodeVal(ac); v != "" {
 						if n, err := strconv.Atoi(v); err == nil {
@@ -2048,6 +2054,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 							term.HasLocalPreference = true
 						}
 					}
+					extraCount = 1
 				case "metric":
 					if v := nodeVal(ac); v != "" {
 						if n, err := strconv.Atoi(v); err == nil {
@@ -2055,18 +2062,23 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 							term.HasMetric = true
 						}
 					}
+					extraCount = 1
 				case "metric-type":
 					if v := nodeVal(ac); v != "" {
 						if n, err := strconv.Atoi(v); err == nil {
 							term.MetricType = n
 						}
 					}
+					extraCount = 1
 				case "community":
 					// `then community` is a multi-value leaf that packs an
 					// optional operation keyword (add|delete|set|none) plus the
 					// community value onto Keys / Children. Read every token via
 					// the SSOT and interpret the operation (#2848).
 					applyCommunityAction(term, firewallMatchValues(ac))
+					if extra := policyThenCommunityTail12517(ac); extra != "" {
+						recordPolicyThenTail12517(term, action, extra)
+					}
 				case "as-path-prepend":
 					// `then as-path-prepend` is multi-value. Read every entry
 					// through the firewallMatchValues SSOT, then split quoted
@@ -2075,12 +2087,26 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					term.ASPathPrepend = appendPolicyASPathPrependOperands(term.ASPathPrepend, firewallMatchValues(ac))
 				case "origin":
 					term.Origin = nodeVal(ac)
+					extraCount = 1
+				}
+				// An unknown statement keyword here is a separate authored
+				// statement under an open-world container: the #10707
+				// prewalk names it, `show configuration` keeps it, and strict
+				// commit stays compatible. Only tails of the recognized
+				// actions above are #12517 evidence.
+				if extraCount >= 0 {
+					if extra := policyThenNodeExtra12517(ac, extraCount); extra != "" {
+						recordPolicyThenTail12517(term, action, extra)
+					}
 				}
 			}
 			if len(tc.Keys) >= 2 {
 				parsePolicyTermInlineKeys(term, tc.Keys, tc.KeysBracketed, tc.KeysQuoted, tc.BracketedClosed)
 			}
 		}
+	}
+	if term.quotedThenNextHopReject12517 {
+		term.Action = "reject"
 	}
 }
 func policyFromOpaqueChildNames11779(node *Node) []string {
@@ -2192,6 +2218,146 @@ var policyTermFromMatchInlineKeywords12070 = map[string]bool{
 	"protocol": true, "prefix-list": true, "route-filter": true, "as-path": true,
 }
 
+// policyTermDroppedFromWords12517 are the remaining Junos from-match words the
+// inline main switch has no case for: after a then action it silently drops
+// them (#12517 RES-7). They are deliberately NOT added to the #12070 map above,
+// which #12513 also uses to decide that a term-line operand slot holds a
+// keyword: a community defined with one of these names stays a valid
+// `then community` value, and an AS-path-prepend run keeps absorbing them as
+// invalid operands so tolerant rendering still omits the whole prepend.
+var policyTermDroppedFromWords12517 = map[string]bool{
+	"family": true, "neighbor": true, "interface": true, "instance": true, "rib": true,
+}
+
+// isPolicyThenFromWord12517 reports a from-match word that the inline reader
+// reinterprets as a match (#12070 map) or drops (#12517 map) when it appears
+// in a then-action position.
+func isPolicyThenFromWord12517(tok string) bool {
+	return policyTermFromMatchInlineKeywords12070[tok] || policyTermDroppedFromWords12517[tok]
+}
+
+func recordPolicyThenTail12517(term *PolicyTerm, action, value string) {
+	if term == nil || term.invalidPolicyThenTail12517 {
+		return
+	}
+	term.invalidPolicyThenTail12517 = true
+	term.invalidPolicyThenTailAction12517 = action
+	term.invalidPolicyThenTailValue12517 = value
+}
+
+func recordPolicyThenInlineTail12517(term *PolicyTerm, keys []string, i int, action string, active bool) {
+	if active && i+1 < len(keys) && !policyTermThenInlineKeywords[keys[i+1]] {
+		recordPolicyThenTail12517(term, action, keys[i+1])
+	}
+}
+
+func isQuotedThenNextHopReject12517(keys []string, quoted, bracketed []bool, i int) bool {
+	return i+2 < len(keys) && keys[i] == "then" &&
+		keys[i+1] == "next-hop" && keys[i+2] == "reject" &&
+		((i < len(quoted) && quoted[i]) || (i < len(bracketed) && bracketed[i]))
+}
+
+// policyThenNodeExtra12517 returns the first non-empty token a child-path
+// `then` statement carries beyond its keyword and `expected` operands,
+// counting its own Keys and then its nested children in order, or "".
+func policyThenNodeExtra12517(node *Node, expected int) string {
+	seen := 0
+	var visit func(*Node, bool) string
+	visit = func(current *Node, skipHead bool) string {
+		if current == nil {
+			return ""
+		}
+		start := 0
+		if skipHead {
+			start = 1
+		}
+		for i := start; i < len(current.Keys); i++ {
+			if current.Keys[i] == "" {
+				continue
+			}
+			if seen == expected {
+				return current.Keys[i]
+			}
+			seen++
+		}
+		for _, child := range current.Children {
+			if extra := visit(child, false); extra != "" {
+				return extra
+			}
+		}
+		return ""
+	}
+	return visit(node, true)
+}
+
+// policyThenCommunityTail12517 returns the first token a child-path
+// `then community` statement carries beyond its operation and value, or "".
+// It reads the same values as firewallMatchValues. `none` takes no value.
+// The value of add, delete, set, or the bare replace form is one token or,
+// when the operator authored a `[ ... ]` list at the value slot, the whole
+// contiguous list; a token after the closing bracket is a tail.
+//
+// Bracket provenance is the only signal for the list's extent, and some
+// trees carry none: display-set output (FormatSet) prints a leaf's list
+// without brackets, and trees persisted before #6668 never recorded them.
+// With no bracketed token at all, a multi-token value is ambiguous, so the
+// whole run stays the value as on master: every token is applied, nothing
+// is dropped, and the community reference gate still rejects a token that
+// is neither a community literal nor a defined community.
+func policyThenCommunityTail12517(node *Node) string {
+	if node == nil || len(node.Keys) == 0 {
+		return ""
+	}
+	var values []string
+	var bracketed []bool
+	provenance := false
+	appendValue := func(owner *Node, i int) {
+		if owner.Keys[i] == "" {
+			return
+		}
+		values = append(values, owner.Keys[i])
+		bracketed = append(bracketed, owner.KeyBracketed(i))
+		provenance = provenance || owner.KeyBracketed(i)
+	}
+	for i := 1; i < len(node.Keys); i++ {
+		if node.Keys[i] == node.Keys[0] && !node.KeyQuoted(i) {
+			continue // firewallMatchValues drops bare self-repeats too
+		}
+		appendValue(node, i)
+	}
+	for _, child := range node.Children {
+		for i := range child.Keys {
+			appendValue(child, i)
+		}
+	}
+	if len(values) == 0 {
+		return ""
+	}
+	start := 0
+	switch values[0] {
+	case "none":
+		if len(values) > 1 {
+			return values[1]
+		}
+		return ""
+	case "add", "delete", "set":
+		start = 1
+	}
+	if start >= len(values) || !provenance {
+		return ""
+	}
+	end := start + 1
+	if bracketed[start] {
+		for end < len(values) && bracketed[end] {
+			end++
+		}
+	}
+	if end < len(values) {
+		return values[end]
+	}
+	return ""
+}
+
 var policyTermFromUnsupportedThenKeywords11779 = map[string]bool{
 	"accept": true, "as-path-prepend": true, "load-balance": true,
 	"local-preference": true, "metric": true, "metric-type": true,
@@ -2260,17 +2426,22 @@ func isPolicyTermCommunityActionOperand(keys []string, i int) bool {
 // "as-path-prepend", "65001"
 func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quoted []bool, bracketedClosed bool) {
 	inFrom := false
+	seenThen := false
 	for i := 0; i < len(keys); i++ {
 		if inFrom && policyTermFromUnsupportedThenKeywords11779[keys[i]] {
 			term.UnknownFrom = append(term.UnknownFrom, keys[i])
 			i = skipUnknownPolicyTermFromTail11779(keys, i)
 			continue
 		}
+		if seenThen && !inFrom && isPolicyThenFromWord12517(keys[i]) {
+			recordPolicyThenTail12517(term, "then", keys[i])
+		}
 		switch keys[i] {
 		case "from":
 			inFrom = true
 			continue
 		case "then":
+			seenThen = true
 			inFrom = false
 			if i+1 < len(keys) {
 				if keys[i+1] == "next" {
@@ -2281,6 +2452,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 						value = keys[i]
 					}
 					recordPolicyNextAction11780(term, value)
+					recordPolicyThenInlineTail12517(term, keys, i, "next", true)
 					continue
 				}
 				if keys[i+1] == "next-hop" || keys[i+1] == "as-path-prepend" {
@@ -2305,6 +2477,17 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				}
 				i++
 				term.Action = keys[i]
+				if term.Action == "accept" || term.Action == "reject" {
+					recordPolicyThenInlineTail12517(term, keys, i, term.Action, true)
+				} else {
+					// #12517: neither a dispatched value action nor a
+					// terminal one. Unlike a braced statement, the packed
+					// word has no boundary of its own: it lands in Action
+					// and its operands fall through to the main switch.
+					// Action keeps it so #11780 still reports a `then foo
+					// next policy` conflict; the tail gate rejects it.
+					recordPolicyThenTail12517(term, "then", term.Action)
+				}
 			}
 		case "next":
 			if !inFrom {
@@ -2314,6 +2497,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 					value = keys[i]
 				}
 				recordPolicyNextAction11780(term, value)
+				recordPolicyThenInlineTail12517(term, keys, i, "next", seenThen)
 			}
 		case "protocol":
 			// "from protocol [ bgp ospf static ]" — the lexer strips the
@@ -2422,6 +2606,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
 				term.LoadBalance = v
 			}
+			recordPolicyThenInlineTail12517(term, keys, i, "load-balance", seenThen)
 		case "local-preference":
 			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
 				if n, err := strconv.Atoi(v); err == nil {
@@ -2431,6 +2616,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 					recordInvalidPolicyThenOperand12513(term, "local-preference", v)
 				}
 			}
+			recordPolicyThenInlineTail12517(term, keys, i, "local-preference", seenThen)
 		case "metric":
 			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
 				if n, err := strconv.Atoi(v); err == nil {
@@ -2440,6 +2626,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 					recordInvalidPolicyThenOperand12513(term, "metric", v)
 				}
 			}
+			recordPolicyThenInlineTail12517(term, keys, i, "metric", seenThen)
 		case "metric-type":
 			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
 				// MetricType 0 means "not set", so an authored 0 stays
@@ -2450,6 +2637,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 					recordInvalidPolicyThenOperand12513(term, "metric-type", v)
 				}
 			}
+			recordPolicyThenInlineTail12517(term, keys, i, "metric-type", seenThen)
 		case "community":
 			if inFrom {
 				var badClause string
@@ -2473,6 +2661,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 			case "none":
 				applyCommunityAction(term, []string{op})
 				i++
+				recordPolicyThenInlineTail12517(term, keys, i, "community", seenThen)
 			case "add", "delete", "set":
 				i++
 				if i+1 >= len(keys) {
@@ -2482,10 +2671,12 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				var vals []string
 				vals, i = readPolicyThenCommunityValues12513(term, append(make([]string, 0, 2), op), keys, bracketed, i+1)
 				applyCommunityAction(term, vals)
+				recordPolicyThenInlineTail12517(term, keys, i, "community", seenThen)
 			default:
 				var vals []string
 				vals, i = readPolicyThenCommunityValues12513(term, nil, keys, bracketed, i+1)
 				applyCommunityAction(term, vals)
+				recordPolicyThenInlineTail12517(term, keys, i, "community", seenThen)
 			}
 		case "as-path":
 			var badClause string
@@ -2514,6 +2705,9 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				quotedValue := next < len(quoted) && quoted[next]
 				bracketedValue := next < len(bracketed) && bracketed[next]
 				if (quotedValue || bracketedValue) && policyTermThenInlineKeywords[keys[next]] {
+					if isQuotedThenNextHopReject12517(keys, quoted, bracketed, next) {
+						term.quotedThenNextHopReject12517 = true
+					}
 					term.invalidASPathPrependExtra12070 = true
 					term.invalidASPathPrependExtraValue12070 = keys[next]
 					break
@@ -2528,13 +2722,20 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
 				term.Origin = v
 			}
+			recordPolicyThenInlineTail12517(term, keys, i, "origin", seenThen)
 		case "accept":
 			if !inFrom {
 				term.Action = "accept"
+				if seenThen {
+					recordPolicyThenInlineTail12517(term, keys, i, "accept", true)
+				}
 			}
 		case "reject":
 			if !inFrom {
 				term.Action = "reject"
+				if seenThen {
+					recordPolicyThenInlineTail12517(term, keys, i, "reject", true)
+				}
 			}
 		default:
 			if inFrom {
@@ -2542,6 +2743,9 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				i = skipUnknownPolicyTermFromTail11779(keys, i)
 			}
 		}
+	}
+	if term.quotedThenNextHopReject12517 {
+		term.Action = "reject"
 	}
 }
 

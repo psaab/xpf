@@ -149,6 +149,13 @@ func expandFlatRun(children []*Node, container *schemaNode) []*Node {
 			if n.KeysQuoted != nil && end <= len(n.KeysQuoted) {
 				seg.KeysQuoted = append([]bool(nil), n.KeysQuoted[start:end]...)
 			}
+			// #12517: bracket provenance is a per-key mask too (#8921), so it
+			// moves with its keys. Without it a `[ ... ]` list cut out of a
+			// chained run (`accept community add [ a b ]`) reads exactly like
+			// unbracketed values, and the list's extent is lost.
+			if len(n.KeysBracketed) == len(n.Keys) {
+				seg.setKeysBracketed(n.KeysBracketed[start:end], n.BracketedClosed)
+			}
 			out = append(out, seg)
 		}
 		// A nested node is the next link of the chain only if it NAMES another

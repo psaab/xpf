@@ -183,6 +183,20 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #12517: a token past a recognized `then` action's operands, or a then-side
+	// from-match word, was dropped or reinterpreted as a match by the policy
+	// readers. Deliberately after #11780 and #11779 so their diagnostics win
+	// on shared inputs. Strict on commit / commit-check; tolerant loads warn
+	// with the #12070/#12513 operand-gate prefix and keep master's rendering.
+	if err := validatePolicyThenTailsStrict12517(cfg); err != nil {
+		if opts.lenientPolicyThenOperands {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("policy then operand (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #5701: route-map sequence-number overflow gate. A policy-statement whose
 	// per-term Cartesian expansion (families x from-prefix-list x from-community
 	// x from-as-path x from-protocol) produces more sequences than the FRR route-map

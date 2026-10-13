@@ -497,6 +497,9 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 	var b strings.Builder
 	seq := startSeq
 	for _, term := range ps.Terms {
+		// The compiler normalizes the quoted-then `next-hop reject` diversion
+		// to Action=reject (#12517); the ordinary action mapping below keeps
+		// tolerant FRR rendering denied rather than flipping it to permit.
 		action := "permit"
 		validNextPolicy := term.NextPolicy && term.Action == ""
 		if term.Action == "reject" && !term.NextPolicy || term.NextPolicy && term.Action != "" {
