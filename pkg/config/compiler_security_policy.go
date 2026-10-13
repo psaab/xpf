@@ -905,11 +905,19 @@ func nestedZonePolicyError12633(from string, toZone *Node) string {
 	to := ""
 	if toZone != nil && len(toZone.Keys) >= 2 {
 		to = toZone.Keys[1]
-	} else if toZone != nil && len(toZone.Children) > 0 &&
-		toZone.Children[0].Name() != "policy" {
+	} else if toZone != nil {
 		// `to-zone { B { policy ... } }` carries its destination as a
-		// child name rather than a key.
-		to = toZone.Children[0].Name()
+		// child name rather than a key; name the POLICY-BEARING child,
+		// not merely the first (`to-zone { X; B { policy } }` denies under B).
+		for _, child := range toZone.Children {
+			if child.Name() != "policy" && hasPolicyIntent12629(child) {
+				to = child.Name()
+				break
+			}
+		}
+		if to == "" && len(toZone.Children) > 0 && toZone.Children[0].Name() != "policy" {
+			to = toZone.Children[0].Name()
+		}
 	}
 	if to == "" {
 		return policyAsDestinationZone12633(from, "policy")

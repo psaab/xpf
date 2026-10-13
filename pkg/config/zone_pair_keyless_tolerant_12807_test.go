@@ -6,8 +6,8 @@ import (
 )
 
 // #12807 (follow-up #12633): keyless/nested to-zone variants stay warn-only
-// on the tolerant path — they record through the #12629 misnested channel
-// (a warning only) instead of MalformedZonePairs, so the snapshot poison
+// on the tolerant path — only the #7523 lenient downgrade warning surfaces;
+// nothing is recorded into MalformedZonePairs, so the snapshot poison
 // carrier never engages and the dropped deny fails open under permit-all.
 // compilePolicies also inspected only the first to-zone child, so a policy-
 // bearing SECOND to-zone records nothing at all.
@@ -48,5 +48,32 @@ func TestTolerantKeylessNestedZonePairShapesPoison12807(t *testing.T) {
 				t.Fatal("tolerant compile did not add the snapshot poison carrier")
 			}
 		})
+	}
+}
+
+func TestTolerantKeylessToZoneNamesPolicyBearingChild12807(t *testing.T) {
+	// `to-zone { X; B { policy deny } }`: the diagnostic must name B
+	// (the policy-bearing destination), not the first child X.
+	cfg, _ := CompileConfigLenient(hierTree(t, `security {
+    policies {
+        from-zone A {
+            to-zone {
+                X;
+                B { policy p1 { then { deny; } } }
+            }
+        }
+    }
+}`))
+	found := false
+	for _, mp := range cfg.Security.MalformedZonePairs {
+		if strings.Contains(mp, "to-zone B ") {
+			found = true
+		}
+		if strings.Contains(mp, "to-zone X ") {
+			t.Fatalf("diagnostic named first child instead of policy-bearing B: %q", mp)
+		}
+	}
+	if !found {
+		t.Fatalf("MalformedZonePairs = %v, want one naming B", cfg.Security.MalformedZonePairs)
 	}
 }
