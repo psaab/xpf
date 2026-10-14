@@ -509,6 +509,9 @@ func validatePolicyMatchAddressSetMembersStrict(cfg *Config) error {
 	return nil
 }
 
+// displayPolicyAddressBookName renders a possibly zone-qualified book key
+// for operator messages: zone-local entries display as the authored local
+// name plus their zone, never the internal `zone-local/<zone>/` key (#12836).
 func displayPolicyAddressBookName(name string) string {
 	if zone, local, ok := ZoneLocalUnqualify(name); ok {
 		return fmt.Sprintf("%s (security-zone %s)", local, zone)
@@ -646,12 +649,12 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 		}
 		if slices.Contains(pol.Match.FromZones, JunosGlobalZoneName) {
 			return fmt.Errorf(
-				"security policies global policy %q match from-zone %q names the reserved global-policy context, not a security zone; remove this from-zone match context",
+				"security policies global policy %q match from-zone %q names the reserved global-policy context, not a security zone; remove this from-zone match context (#12836)",
 				pol.Name, JunosGlobalZoneName)
 		}
 		if slices.Contains(pol.Match.ToZones, JunosGlobalZoneName) {
 			return fmt.Errorf(
-				"security policies global policy %q match to-zone %q names the reserved global-policy context, not a security zone; remove this to-zone match context",
+				"security policies global policy %q match to-zone %q names the reserved global-policy context, not a security zone; remove this to-zone match context (#12836)",
 				pol.Name, JunosGlobalZoneName)
 		}
 		// #4626 M03: a scoped-global from-zone/to-zone match context is a zone
