@@ -5,13 +5,19 @@ Per-rep validity is read from probe.json["validity"]["ok"].
 
 For each cell, the median valid rep for the configured gate percentile
 is selected as the representative; its p50/p95/p99/p99.9 +
-IQR-of-p99-across-reps + achieved-RPS summary populate summary.json.
+IQR-of-the-representative-percentile-across-reps + achieved-RPS summary
+populate summary.json.
 Cells require 10 valid reps to report status OK; if the runner reaches
 its 15-rep ceiling with fewer valid reps, the gate is
 INSUFFICIENT-DATA.
 Gate cells must use the same mouse-probe connection mode and pacing
 interval; otherwise the reducer returns INSUFFICIENT-DATA instead of
-comparing unlike latency artifacts.
+comparing unlike latency artifacts. Valid reps must also agree on where
+their flows terminated: reps declaring different (mouse_target,
+elephant_target) pairs mark the cell INCONSISTENT-TARGETS (#13066)
+instead of summarising it with the targets silently dropped — that drop
+let a shared-target cell bypass the #8259 VOID-NOT-ATTRIBUTABLE guard
+and emit a citable PASS.
 
 Default decision threshold (#905, plan §7.2):
 - p99(N=128, M=10, best-effort) ≤ 2 × p99(N=0, M=10, best-effort)
@@ -103,17 +109,20 @@ def _target_pair_from_rep(rep: dict) -> Optional[Tuple[str, str]]:
     return (str(mouse), str(elephant))
 
 
-def shared_target_pair(reps: List[dict]) -> Optional[Tuple[str, str]]:
-    """The one target pair every valid rep agrees on, if they do.
+def _unique_target_pairs(reps: List[dict]) -> List[Tuple[str, str]]:
+    """The distinct (mouse_target, elephant_target) pairs the reps declare.
 
-    Returns `None` when no rep declares a pair. Mixed pairs are reported by the
-    caller as their own defect: a cell whose reps terminated on different hosts
-    cannot be summarised at all.
+    `None` declarations — reps whose artifacts predate the #8259 target
+    split — contribute nothing, so a legacy-only cell returns an empty
+    list and stays summarisable. More than one distinct pair is the
+    caller's defect to report (#13066): a cell whose valid reps
+    terminated on different hosts cannot be summarised at all, and
+    quietly dropping the pair would hand `decide()` a `(None, None)`
+    that skips the void guard.
     """
-    pairs = {p for p in (_target_pair_from_rep(r) for r in reps) if p is not None}
-    if len(pairs) == 1:
-        return next(iter(pairs))
-    return None
+    return sorted(
+        {p for p in (_target_pair_from_rep(r) for r in reps) if p is not None}
+    )
 
 
 def _probe_config_key(config: dict) -> Tuple[object, object]:
@@ -212,6 +221,19 @@ def median_rep_by_p99(valid_reps: List[dict]) -> Optional[dict]:
     return median_rep_by_percentile(valid_reps, "p99")
 
 
+def _iqr_across_reps(values: List[float]) -> float:
+    """Interquartile range across the reps' samples of one percentile.
+
+    #13066 (D10-02): the old `values[n // 4]` / `values[(3 * n) // 4]`
+    index slicing snapped the quartiles to order statistics, and the
+    spread was only ever computed for p99 even when the gate selected
+    and compared the representative rep by p999. Inclusive quartiles
+    interpolate, so a 10-rep cell uses all of its samples.
+    """
+    q1, _, q3 = statistics.quantiles(values, n=4, method="inclusive")
+    return q3 - q1
+
+
 def summarize_cell(reps: List[dict], representative_percentile: str = "p99") -> dict:
     """Produce the per-cell summary record."""
     valid = select_valid_reps(reps)
@@ -222,10 +244,22 @@ def summarize_cell(reps: List[dict], representative_percentile: str = "p99") -> 
         "iqr_p99_across_reps": None,
         "representative_percentile": representative_percentile,
     }
-    pair = shared_target_pair(valid)
-    if pair is not None:
+    if representative_percentile != "p99":
+        summary[f"iqr_{representative_percentile}_across_reps"] = None
+    target_pairs = _unique_target_pairs(valid)
+    if len(target_pairs) == 1:
         # #8259: the gate needs to know where the two flows terminated.
-        summary["mouse_target"], summary["elephant_target"] = pair
+        summary["mouse_target"], summary["elephant_target"] = target_pairs[0]
+    elif len(target_pairs) > 1:
+        # #13066 (D10-02): mixed pairs must not degrade to "no targets".
+        # The old code dropped the pair here, decide() read (None, None),
+        # and a cell whose reps mostly terminated on one shared host
+        # sailed past the VOID-NOT-ATTRIBUTABLE guard to a citable PASS.
+        # Attribution is the prior question, so this precedes both the
+        # probe-config and the valid-rep count checks.
+        summary["target_pairs"] = target_pairs
+        summary["status"] = "INCONSISTENT-TARGETS"
+        return summary
     probe_configs = _unique_probe_configs(valid)
     if len(probe_configs) == 1:
         summary["probe_config"] = probe_configs[0]
@@ -240,11 +274,17 @@ def summarize_cell(reps: List[dict], representative_percentile: str = "p99") -> 
     p99s = sorted(
         r.get("rtt_us", {}).get("p99") or 0 for r in valid
     )
-    n = len(p99s)
-    if n >= 4:
-        q1 = p99s[n // 4]
-        q3 = p99s[(3 * n) // 4]
-        summary["iqr_p99_across_reps"] = q3 - q1
+    if len(p99s) >= 4:
+        summary["iqr_p99_across_reps"] = _iqr_across_reps(p99s)
+    if representative_percentile != "p99":
+        representative_values = sorted(
+            r.get("rtt_us", {}).get(representative_percentile) or 0
+            for r in valid
+        )
+        if len(representative_values) >= 4:
+            summary[f"iqr_{representative_percentile}_across_reps"] = (
+                _iqr_across_reps(representative_values)
+            )
     if median is not None:
         rtt = median.get("rtt_us", {})
         totals = median.get("totals", {})

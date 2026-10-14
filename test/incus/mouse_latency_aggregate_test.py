@@ -484,3 +484,119 @@ class VoidNotAttributableTests(unittest.TestCase):
         empty = {"status": "INSUFFICIENT-VALID-REPS", "median_rep": None}
         v = self._decide(empty, {"status": "OK", "median_rep": {"p999_us": 6765}})
         self.assertEqual(v["verdict"], "INSUFFICIENT-DATA")
+
+
+def _with_targets(rep: dict, mouse_target: str, elephant_target: str) -> dict:
+    """Stamp the rep manifest declaring where its two flows terminated."""
+    rep["manifest"] = {
+        "mouse_target": mouse_target,
+        "elephant_target": elephant_target,
+    }
+    return rep
+
+
+class MixedTargetPairTests(unittest.TestCase):
+    """#13066 (D10-02) — mixed target pairs across reps must reject the cell.
+
+    `shared_target_pair` returned `None` both when no rep declared a pair
+    and when the valid reps split across pairs, and `summarize_cell` only
+    acted on the not-`None` case. A partially re-run cell therefore
+    summarised as a clean OK carrying no targets at all; `decide()` then
+    read `(None, None)` for the pair, skipped the #8259
+    VOID-NOT-ATTRIBUTABLE guard, and a cell whose reps terminated on a
+    shared host could still emit a citable PASS.
+    """
+
+    def test_consistent_shared_pair_voids_end_to_end(self):
+        """Positive control: the agreed-on pair must reach `decide()`.
+
+        When every valid rep declares the same (shared) pair, the summary
+        carries it and the #8259 guard fires. This is the behaviour the
+        silent mixed-pair drop was bypassing.
+        """
+        idle = summarize_cell(
+            [_with_targets(_make_rep(p99=100), "10.0.2.2", "10.0.2.2")
+             for _ in range(10)]
+        )
+        loaded = summarize_cell(
+            [_with_targets(_make_rep(p99=150), "10.0.2.2", "10.0.2.2")
+             for _ in range(10)]
+        )
+        self.assertEqual(loaded["status"], "OK")
+        self.assertEqual(loaded["mouse_target"], "10.0.2.2")
+        self.assertEqual(loaded["elephant_target"], "10.0.2.2")
+        v = decide({(0, 10): idle, (128, 10): loaded})
+        self.assertEqual(v["verdict"], "VOID-NOT-ATTRIBUTABLE")
+
+    def test_mixed_target_pairs_reject_the_cell(self):
+        # 9 of 10 reps captured against the shared host, one rep re-run
+        # after a target split: the cell cannot be summarised at all.
+        reps = [
+            _with_targets(_make_rep(p99=100 + 10 * i), "10.0.2.2", "10.0.2.2")
+            for i in range(9)
+        ]
+        reps.append(_with_targets(_make_rep(p99=145), "10.0.2.3", "10.0.2.2"))
+        s = summarize_cell(reps)
+        self.assertEqual(s["status"], "INCONSISTENT-TARGETS")
+        self.assertEqual(
+            s["target_pairs"],
+            [("10.0.2.2", "10.0.2.2"), ("10.0.2.3", "10.0.2.2")],
+        )
+        self.assertIsNone(s["median_rep"])
+        self.assertNotIn("mouse_target", s)
+        self.assertNotIn("elephant_target", s)
+
+    def test_mixed_target_pairs_cannot_return_pass(self):
+        """The exact false-PASS shape from the finding.
+
+        The idle cell is attributable (split targets) and the ratio is a
+        comfortable 1.5 <= 2.0, but 9 of 10 loaded reps — including the
+        median rep — terminated on the shared host. The gate must refuse
+        the verdict, not emit a citable PASS with the targets dropped.
+        """
+        idle = summarize_cell(
+            [_with_targets(_make_rep(p99=300), "10.0.2.3", "10.0.2.2")
+             for _ in range(10)]
+        )
+        loaded_reps = [
+            _with_targets(_make_rep(p99=450), "10.0.2.2", "10.0.2.2")
+            for _ in range(9)
+        ]
+        loaded_reps.append(
+            _with_targets(_make_rep(p99=450), "10.0.2.3", "10.0.2.2")
+        )
+        loaded = summarize_cell(loaded_reps)
+        v = decide({(0, 10): idle, (128, 10): loaded})
+        self.assertNotEqual(v["verdict"], "PASS")
+        self.assertEqual(v["verdict"], "INSUFFICIENT-DATA")
+        self.assertIn("INCONSISTENT-TARGETS", v["reason"])
+
+    def test_mixed_pairs_take_precedence_over_insufficient_reps(self):
+        """Attribution is the prior question (#8259 ordering).
+
+        INSUFFICIENT-VALID-REPS says "collect more reps", and more reps
+        cannot make a cell that straddles two termination topologies
+        summarisable — mirroring how decide() orders the void check.
+        """
+        reps = [
+            _with_targets(_make_rep(p99=100), "10.0.2.2", "10.0.2.2")
+            for _ in range(5)
+        ]
+        reps += [
+            _with_targets(_make_rep(p99=100), "10.0.2.3", "10.0.2.2")
+            for _ in range(4)
+        ]
+        s = summarize_cell(reps)
+        self.assertEqual(s["status"], "INCONSISTENT-TARGETS")
+
+    def test_iqr_follows_the_representative_percentile(self):
+        """D10-02 tail: 100E100M gates on p999, so the across-rep spread
+        must be computed for the gated percentile, not stay hardcoded to
+        p99 while the representative is selected by p999.
+        """
+        reps = [_make_rep(p99=100 + 10 * i) for i in range(10)]
+        s = summarize_cell(reps, representative_percentile="p999")
+        self.assertIn("iqr_p999_across_reps", s)
+        # _make_rep sets p999 = p99 + 10 for every rep, so the p999 sample
+        # is the p99 sample shifted by +10 us: same spread.
+        self.assertEqual(s["iqr_p999_across_reps"], s["iqr_p99_across_reps"])
