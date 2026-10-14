@@ -531,8 +531,73 @@ pub(super) fn actual_embedded_icmp_ingress_zone(
             .ifindex_to_zone_id
             .get(&logical_ifindex)
             .copied()
-            .unwrap_or(meta.ingress_zone)
+            .unwrap_or(0)
     })
+}
+
+#[cfg(test)]
+mod tests_12866 {
+    use super::*;
+
+    fn meta(parent: i32, vlan: u16, shim_zone: u16) -> UserspaceDpMeta {
+        let mut m = UserspaceDpMeta::default();
+        m.ingress_ifindex = parent as u32;
+        m.ingress_vlan_id = vlan;
+        m.ingress_zone = shim_zone;
+        m
+    }
+
+    #[test]
+    fn unzoned_logical_unit_resolves_zero_not_shim_zone_12866() {
+        let mut fwd = ForwardingState::default();
+        // Known VLAN unit 20 on parent 10, deliberately unzoned.
+        fwd.ingress_logical_ifindex.insert((10, 100), 20);
+        // The physical parent has zone 7, but the known logical child is unzoned.
+        fwd.ifindex_to_zone_id.insert(10, 7);
+        assert_eq!(
+            actual_embedded_icmp_ingress_zone(&fwd, meta(10, 100, 7), None),
+            0
+        );
+    }
+
+    #[test]
+    fn zoned_logical_unit_resolves_own_zone_12866() {
+        let mut fwd = ForwardingState::default();
+        fwd.ingress_logical_ifindex.insert((10, 100), 20);
+        fwd.ifindex_to_zone_id.insert(20, 9);
+        assert_eq!(
+            actual_embedded_icmp_ingress_zone(&fwd, meta(10, 100, 7), None),
+            9
+        );
+    }
+
+    #[test]
+    fn override_takes_precedence_12866() {
+        let fwd = ForwardingState::default();
+        assert_eq!(
+            actual_embedded_icmp_ingress_zone(&fwd, meta(10, 100, 7), Some(3)),
+            3
+        );
+    }
+
+    #[test]
+    fn resolver_miss_unzoned_physical_resolves_zero_12866() {
+        let fwd = ForwardingState::default();
+        assert_eq!(
+            actual_embedded_icmp_ingress_zone(&fwd, meta(10, 0, 7), None),
+            0
+        );
+    }
+
+    #[test]
+    fn zoned_physical_fallback_resolves_own_zone_12866() {
+        let mut fwd = ForwardingState::default();
+        fwd.ifindex_to_zone_id.insert(10, 7);
+        assert_eq!(
+            actual_embedded_icmp_ingress_zone(&fwd, meta(10, 0, 5), None),
+            7
+        );
+    }
 }
 
 /// Recover the outer L3 identity from the actual prebuilt wire frame. The
