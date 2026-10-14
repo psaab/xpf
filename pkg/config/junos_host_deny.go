@@ -1559,9 +1559,13 @@ func junosHostLinuxNameWith(cfg *Config, ifName string, unit *InterfaceUnit, tun
 	return LinuxIfName(ifName)
 }
 
-// junosHostZoneByInterface maps every interface ref (physical, base, and each
-// unit) to its security zone, mirroring userspace.buildInterfaceZoneMap so the
-// netdev resolution above assigns the same zone the dataplane snapshot does.
+// junosHostZoneByInterface maps each explicitly zoned interface ref and each
+// unit produced by a bare ref to its security zone. Unlike InterfaceZoneMap, it
+// does not fan an ordinary physical/VLAN unit ref up to the physical base —
+// that base row is a distinct dataplane ingress owned only by an explicit
+// bare/base reference or unit-0's own netdev row (#12839). It does bind a
+// tunnel unit's family base: the snapshot has no separate unit candidate for
+// that row, and the base row is its only snapshot-side ingress candidate.
 func junosHostZoneByInterface(cfg *Config) map[string]string {
 	out := make(map[string]string, len(cfg.Security.Zones))
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
@@ -1571,6 +1575,8 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 	sort.Strings(zoneNames)
 	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
+	tunNames := tunnelNameMapFn(cfg)
+	vrfMasterByNetdev := junosHostVRFMasterNetdevs(cfg, tunNames)
 	for _, zoneName := range zoneNames {
 		if _, excluded := excludedZones[zoneName]; excluded {
 			continue
@@ -1596,9 +1602,17 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 				}
 			}
 			if s.HasUnit {
-				// Unit (or trailing-dot) reference: also bind the physical
-				// base, mirroring InterfaceZoneMap's zone-specific fan-up.
-				if s.Base != "" {
+				// Ordinary units do not own their physical base. Preserve the
+				// base candidate only where the snapshot has no equivalent unit
+				// ingress candidate: secure-tunnel family rows and VRF-master
+				// scoping of a parent device.
+				_, tunnelUnit := cfg.SecureTunnelUnitNetdev(s.Literal)
+				if !tunnelUnit {
+					tunnelUnit = tunNames[s.Literal] != ""
+				}
+				baseLinux := junosHostLinuxNameWith(cfg, s.Base, nil, tunNames)
+				_, vrfParent := vrfMasterByNetdev[baseLinux]
+				if s.Base != "" && (tunnelUnit || vrfParent) {
 					if _, conflicted := conflictedInterfaces[s.Literal]; conflicted {
 						continue
 					}

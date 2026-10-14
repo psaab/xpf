@@ -46,19 +46,21 @@ func zoneKeys9821(t *testing.T, m map[string]string) []string {
 }
 
 // TestZoneMirrorsAgreeDeclaredDotted9821: InterfaceZoneMap and
-// junosHostZoneByInterface agree key-for-key on declared-dotted members
-// (bare fan-down, unit + base bind, padded normalization).
+// junosHostZoneByInterface agree on explicitly claimed unit keys, while the
+// #4146 map excludes ordinary unit refs' physical-base fan-up; exceptions for
+// tunnel units and VRF-parent scoping are covered in their dedicated tests.
 func TestZoneMirrorsAgreeDeclaredDotted9821(t *testing.T) {
 	cases := []struct {
-		name   string
-		member string
-		want   []string
+		name      string
+		member    string
+		want      []string
+		wantJunos []string
 	}{
-		{"bareFansDown", "ge-0/0/5.0", []string{"ge-0/0/5.0", "ge-0/0/5.0.0", "ge-0/0/5.0.1"}},
-		{"unitBindsBase", "ge-0/0/5.0.1", []string{"ge-0/0/5.0", "ge-0/0/5.0.1"}},
-		{"paddedNormalizes", "ge-0/0/5.0.01", []string{"ge-0/0/5.0", "ge-0/0/5.0.1"}},
-		{"undottedBare", "ge-0/0/6", []string{"ge-0/0/6", "ge-0/0/6.0"}},
-		{"undottedUnit", "ge-0/0/6.0", []string{"ge-0/0/6", "ge-0/0/6.0"}},
+		{"bareFansDown", "ge-0/0/5.0", []string{"ge-0/0/5.0", "ge-0/0/5.0.0", "ge-0/0/5.0.1"}, []string{"ge-0/0/5.0", "ge-0/0/5.0.0", "ge-0/0/5.0.1"}},
+		{"unitBindsBase", "ge-0/0/5.0.1", []string{"ge-0/0/5.0", "ge-0/0/5.0.1"}, []string{"ge-0/0/5.0.1"}},
+		{"paddedNormalizes", "ge-0/0/5.0.01", []string{"ge-0/0/5.0", "ge-0/0/5.0.1"}, []string{"ge-0/0/5.0.1"}},
+		{"undottedBare", "ge-0/0/6", []string{"ge-0/0/6", "ge-0/0/6.0"}, []string{"ge-0/0/6", "ge-0/0/6.0"}},
+		{"undottedUnit", "ge-0/0/6.0", []string{"ge-0/0/6", "ge-0/0/6.0"}, []string{"ge-0/0/6.0"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,8 +70,8 @@ func TestZoneMirrorsAgreeDeclaredDotted9821(t *testing.T) {
 				t.Errorf("InterfaceZoneMap keys = %q, want %q", zm, tc.want)
 			}
 			jn := zoneKeys9821(t, junosHostZoneByInterface(cfg))
-			if !reflect.DeepEqual(jn, tc.want) {
-				t.Errorf("junosHostZoneByInterface keys = %q, want %q", jn, tc.want)
+			if !reflect.DeepEqual(jn, tc.wantJunos) {
+				t.Errorf("junosHostZoneByInterface keys = %q, want %q", jn, tc.wantJunos)
 			}
 		})
 	}
