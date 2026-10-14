@@ -8037,6 +8037,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 &flow_cache_policy_counter,
                                 filter_match_extra,
                                 ingress_zone_override,
+                                now_secs,
                                 admission_to_zone,
                                 apply_nat_on_fabric,
                                 &neighbor_epoch_snapshot,

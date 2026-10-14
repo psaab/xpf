@@ -49,6 +49,7 @@ pub(super) fn stage_flow_cache_seed(
     flow_cache_policy_counter: &Option<std::sync::Arc<crate::policy::PolicyRuleCounter>>,
     filter_match_extra: TermMatchExtra<'static>,
     ingress_zone_override: Option<u16>,
+    now_secs: u64,
     // #12865: the admission-resolved egress zone captured by the caller
     // before any fabric redirect replaced the resolution.
     admission_egress_zone: u16,
@@ -215,10 +216,20 @@ pub(super) fn stage_flow_cache_seed(
                 meta.ingress_vlan_id,
             )
             .unwrap_or(meta.ingress_ifindex as i32);
+            // #12865: use the owner-RG-gated override, exactly as the
+            // admission sites do — the raw claimed zone must not be
+            // stamped when the gate declines it.
+            let gated_override = crate::afxdp::forwarding::gate_fabric_zone_override_on_owner_rg(
+                worker_ctx.forwarding,
+                worker_ctx.ha_state,
+                now_secs,
+                ingress_zone_override,
+                entry.decision.resolution,
+            );
             let (from_zone, _) = zone_pair_ids_for_flow_with_override(
                 worker_ctx.forwarding,
                 logical,
-                ingress_zone_override,
+                gated_override,
                 entry.decision.resolution.egress_ifindex,
             );
             if from_zone != 0 {
