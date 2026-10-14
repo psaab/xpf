@@ -126,8 +126,15 @@ func (c *CLI) parseSessionFilterMode(args []string, clearMode bool) sessionFilte
 		case "zone":
 			if v, ok := takeValue(&i, "zone"); ok {
 				f.zoneName = v
-				if cr != nil {
-					f.zoneID = cr.ZoneIDs[v]
+				// #12891: on the CLEAR path, a quarantined (ID-collision
+				// loser) name would resolve to the survivor's ID and
+				// clear its sessions; leave zoneID 0 so validate()
+				// rejects it as not found. Show paths keep resolving
+				// (display qualifies the name, #10530).
+				if !clearMode || f.cfg == nil || config.ZoneQuarantineExcludedReason(v, f.cfg) == "" {
+					if cr != nil {
+						f.zoneID = cr.ZoneIDs[v]
+					}
 				}
 			}
 		case "protocol":

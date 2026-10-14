@@ -1434,6 +1434,13 @@ func (s *Server) ClearSessions(ctx context.Context, req *pb.ClearSessionsRequest
 	if req.Zone != "" {
 		// An unresolvable zone must fail the RPC: leaving the zone ID
 		// at 0 would silently widen the clear to every zone.
+		// #12891: a quarantined (ID-collision loser) name resolves in
+		// cr.ZoneIDs to the SURVIVOR's ID; clearing by it would delete
+		// the survivor's sessions. Reject it like an unknown zone.
+		if cfg := s.store.ActiveConfig(); cfg != nil &&
+			config.ZoneQuarantineExcludedReason(req.Zone, cfg) != "" {
+			return nil, status.Errorf(codes.InvalidArgument, "zone %q not found", req.Zone)
+		}
 		var zoneID uint16
 		if cr := s.applyResult(); cr != nil {
 			zoneID = cr.ZoneIDs[req.Zone]
