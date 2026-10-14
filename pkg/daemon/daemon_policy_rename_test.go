@@ -1246,3 +1246,52 @@ func TestRenameAncestryPrunedOnNextBind(t *testing.T) {
 		t.Fatalf("peer snapshot after the plain bind carries stale lineage: %#v", ancestry)
 	}
 }
+
+func TestExpandZoneRenameScopedGlobal12857(t *testing.T) {
+	build := func(renamed bool, scopeZone string) *config.Config {
+		cfg := policyRenameEvaluatorConfig("p", config.PolicyPermit)
+		if renamed {
+			cfg.Security.Zones = map[string]*config.ZoneConfig{
+				"lan2": {Name: "lan2"}, "other": {Name: "other"}, "wan": {Name: "wan"},
+			}
+			for _, pair := range cfg.Security.Policies {
+				if pair.FromZone == "lan" {
+					pair.FromZone = "lan2"
+				}
+			}
+		}
+		cfg.Security.GlobalPolicies = []*config.Policy{{
+			Name:   "g-web",
+			Action: config.PolicyPermit,
+			Match:  config.PolicyMatch{FromZones: []string{scopeZone}, Applications: []string{"junos-http"}},
+		}}
+		return cfg
+	}
+	oldCfg := build(false, "lan")
+	newCfg := build(true, "lan2")
+	_, wire, ok := expandPolicyRenameAncestry(oldCfg, newCfg,
+		[]configstore.RenameDescriptor{policyZoneDescriptor("lan", "lan2")})
+	if !ok {
+		t.Fatal("scoped-global zone rename was rejected")
+	}
+	found := false
+	for _, w := range wire {
+		if w.SourceRuleID == "junos-global->junos-global/g-web" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no ancestry wire row for scoped global policy: %+v", wire)
+	}
+	changed := build(true, "wan")
+	_, changedWire, ok := expandPolicyRenameAncestry(oldCfg, changed,
+		[]configstore.RenameDescriptor{policyZoneDescriptor("lan", "lan2")})
+	if !ok {
+		t.Fatal("zone rename itself must still validate")
+	}
+	for _, w := range changedWire {
+		if w.SourceRuleID == "junos-global->junos-global/g-web" {
+			t.Fatal("scope change to an undescribed zone produced global continuity")
+		}
+	}
+}

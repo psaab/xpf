@@ -106,6 +106,14 @@ func PolicyResolvedIdentityStrippedFingerprints(cfg *config.Config, feedOverlay 
 		rule.Name = ""
 		rule.FromZone = ""
 		rule.ToZone = ""
+		// #12857: scoped-global policies carry their zone scope in the
+		// Match* fields, not FromZone/ToZone. Strip those too, or a pure
+		// zone rename changes the fingerprint and rename continuity is
+		// refused for content-identical rules.
+		rule.MatchFromZone = ""
+		rule.MatchToZone = ""
+		rule.MatchFromZones = nil
+		rule.MatchToZones = nil
 		blob, err := json.Marshal(rule)
 		if err != nil {
 			return nil
