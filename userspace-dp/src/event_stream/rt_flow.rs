@@ -165,6 +165,10 @@ impl EventStreamWorkerHandle {
     /// 5-tuple (caller runs the same `app_catalog.lookup` the close path uses,
     /// mirroring #2520) and `ingress_ifindex` is the admitting binding's
     /// interface index. 0 in either keeps the prior UNKNOWN / N/A rendering.
+    /// #12889: the frame's `timestamp_ns` carries the session's ADMISSION
+    /// instant (wall-clock conversion of the Open delta's monotonic
+    /// `created_ns`), so the Go record reflects admission time — not the
+    /// socket-drain `time.Now()` a 0 wire stamp falls back to.
     pub(crate) fn emit_session_create_rt_flow(
         &self,
         delta: &SessionDelta,
@@ -181,7 +185,20 @@ impl EventStreamWorkerHandle {
         // still rides the shared dataplane-event channel so it MUST honor the
         // same limiter / budget / counters under
         // DataplaneEventKind::SessionCreate rather than a bare `try_send`.
-        let (now_mono_ns, _) = read_mono_and_wall_clocks();
+        // #12889: stop discarding the wall-clock half of the anchored reading.
+        // Convert the Open delta's monotonic admission instant
+        // (`created_ns`, stamped at install) to an absolute wall-clock value
+        // for the wire `timestamp_ns` slot — the same #2465 conversion the
+        // close path runs for its close instant. The Go decoder
+        // (pkg/logging/ringbuf.go `eventTimeFromWire`) prefers a nonzero wire
+        // stamp on BOTH the live logEvent path and DecodeRawEventRecord, so a
+        // queued/backlogged delivery can no longer skew the create record's
+        // time to drain time — or misorder it after the session's
+        // SESSION_CLOSE record. A 0 `created_ns` (bulk owner-RG export Open
+        // delta, no entry in hand) maps to 0 and keeps the legacy Go-side
+        // time.Now() fallback, mirroring the close path's 0/unknown doctrine.
+        let (now_mono_ns, now_unix_ns) = read_mono_and_wall_clocks();
+        let create_unix_ns = monotonic_ns_to_unix_ns(delta.created_ns, now_mono_ns, now_unix_ns);
         self.try_emit_dataplane_frame(
             DataplaneEventKind::SessionCreate,
             delta.metadata.ingress_zone,
@@ -216,6 +233,8 @@ impl EventStreamWorkerHandle {
                     // in the additive [152:160] slot so this SESSION_CREATE
                     // record shares an id with its eventual SESSION_CLOSE.
                     delta.session_id,
+                    // #12889: admission instant (wall-clock), rides [0:8].
+                    create_unix_ns,
                 )
             },
         );
