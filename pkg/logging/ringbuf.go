@@ -634,19 +634,15 @@ func (er *EventReader) logEvent(data []byte) {
 		dstIP := net.IP(evt.DstIP[:])
 		srcStr = fmt.Sprintf("[%s]:%d", srcIP, evt.SrcPort)
 		dstStr = fmt.Sprintf("[%s]:%d", dstIP, evt.DstPort)
-		natSrcIP := net.IP(evt.NATSrcIP[:])
-		natDstIP := net.IP(evt.NATDstIP[:])
-		natSrcStr = fmt.Sprintf("[%s]:%d", natSrcIP, evt.NATSrcPort)
-		natDstStr = fmt.Sprintf("[%s]:%d", natDstIP, evt.NATDstPort)
+		natSrcStr = formatNATAddr12890(evt.NATSrcIP, true, evt.NATSrcPort)
+		natDstStr = formatNATAddr12890(evt.NATDstIP, true, evt.NATDstPort)
 	} else {
 		srcIP := net.IP(evt.SrcIP[:4])
 		dstIP := net.IP(evt.DstIP[:4])
 		srcStr = fmt.Sprintf("%s:%d", srcIP, evt.SrcPort)
 		dstStr = fmt.Sprintf("%s:%d", dstIP, evt.DstPort)
-		natSrcIP := net.IP(evt.NATSrcIP[:4])
-		natDstIP := net.IP(evt.NATDstIP[:4])
-		natSrcStr = fmt.Sprintf("%s:%d", natSrcIP, evt.NATSrcPort)
-		natDstStr = fmt.Sprintf("%s:%d", natDstIP, evt.NATDstPort)
+		natSrcStr = formatNATAddr12890(evt.NATSrcIP, false, evt.NATSrcPort)
+		natDstStr = formatNATAddr12890(evt.NATDstIP, false, evt.NATDstPort)
 	}
 
 	eventName := eventTypeName(evt.EventType)
@@ -999,6 +995,34 @@ func (er *EventReader) logEvent(data []byte) {
 // used by the eBPF ring buffer and by the userspace event-stream adapter.
 // It is decode-only; transports that need EventBuffer, callback, local-log,
 // and syslog fanout must call EventReader.ProcessRawEvent instead.
+
+// formatNATAddr12890 renders one 16-byte NAT slot. The wire writes an
+// IPv4 rewrite left-aligned into the slot regardless of the flow's
+// family (#12890), so a NAT64 record (v6 flow, v4 NAT) must not be
+// rendered as a 16-byte IPv6 address; symmetrically a v6 NAT address
+// under a v4 flow renders as IPv6. The tail-zero / tail-nonzero shape
+// is the only discriminator the payload carries.
+func formatNATAddr12890(slot [16]byte, flowV6 bool, port uint16) string {
+	zeroTail := true
+	for _, b := range slot[4:] {
+		if b != 0 {
+			zeroTail = false
+			break
+		}
+	}
+	zeroHead := slot[0] == 0 && slot[1] == 0 && slot[2] == 0 && slot[3] == 0
+	switch {
+	case flowV6 && zeroTail && !zeroHead:
+		return fmt.Sprintf("%s:%d", net.IP(slot[:4]), port)
+	case !flowV6 && !zeroTail:
+		return fmt.Sprintf("[%s]:%d", net.IP(slot[:]), port)
+	case flowV6:
+		return fmt.Sprintf("[%s]:%d", net.IP(slot[:]), port)
+	default:
+		return fmt.Sprintf("%s:%d", net.IP(slot[:4]), port)
+	}
+}
+
 func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 	if len(data) < rawEventWireSize {
 		return EventRecord{}, false
@@ -1038,19 +1062,15 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 		dstIP := net.IP(evt.DstIP[:])
 		srcStr = fmt.Sprintf("[%s]:%d", srcIP, evt.SrcPort)
 		dstStr = fmt.Sprintf("[%s]:%d", dstIP, evt.DstPort)
-		natSrcIP := net.IP(evt.NATSrcIP[:])
-		natDstIP := net.IP(evt.NATDstIP[:])
-		natSrcStr = fmt.Sprintf("[%s]:%d", natSrcIP, evt.NATSrcPort)
-		natDstStr = fmt.Sprintf("[%s]:%d", natDstIP, evt.NATDstPort)
+		natSrcStr = formatNATAddr12890(evt.NATSrcIP, true, evt.NATSrcPort)
+		natDstStr = formatNATAddr12890(evt.NATDstIP, true, evt.NATDstPort)
 	case addrFamilyInet:
 		srcIP := net.IP(evt.SrcIP[:4])
 		dstIP := net.IP(evt.DstIP[:4])
 		srcStr = fmt.Sprintf("%s:%d", srcIP, evt.SrcPort)
 		dstStr = fmt.Sprintf("%s:%d", dstIP, evt.DstPort)
-		natSrcIP := net.IP(evt.NATSrcIP[:4])
-		natDstIP := net.IP(evt.NATDstIP[:4])
-		natSrcStr = fmt.Sprintf("%s:%d", natSrcIP, evt.NATSrcPort)
-		natDstStr = fmt.Sprintf("%s:%d", natDstIP, evt.NATDstPort)
+		natSrcStr = formatNATAddr12890(evt.NATSrcIP, false, evt.NATSrcPort)
+		natDstStr = formatNATAddr12890(evt.NATDstIP, false, evt.NATDstPort)
 	default:
 		return EventRecord{}, false
 	}
