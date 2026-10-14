@@ -206,6 +206,18 @@ func (s *Scheduler) ActiveStateWithFailClosed() (map[string]bool, bool) {
 	return out, failClosed
 }
 
+// InRecoveryHold reports whether the wall-clock recovery hold is in
+// effect at now (#12885: apply seeding must not prime scheduled permits
+// active past an inherited hold).
+func (s *Scheduler) InRecoveryHold(now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !s.unsafeUntil.IsZero() && now.Before(s.unsafeUntil)
+}
+
 // Update replaces the scheduler configurations and re-evaluates immediately.
 func (s *Scheduler) Update(schedulers map[string]*config.SchedulerConfig) {
 	s.mu.Lock()

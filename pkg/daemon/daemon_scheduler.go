@@ -96,6 +96,11 @@ func (d *Daemon) policySchedulerActiveStateAndFailClosedForApplyLocked(cfg *conf
 	if previous != nil {
 		var previousState map[string]bool
 		previousState, failClosed = previous.ActiveStateWithFailClosed()
+		if previous.InRecoveryHold(now) {
+			// #12885: a wall-clock recovery hold survives a scheduler
+			// config change for apply seeding — prime nothing active.
+			failClosed = true
+		}
 		if hash == d.policySchedulerConfigHash {
 			return previousState, failClosed
 		}
