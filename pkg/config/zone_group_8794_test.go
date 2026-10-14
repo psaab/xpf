@@ -108,6 +108,56 @@ func TestBracketedZoneGroupCreatesEveryZone8794(t *testing.T) {
 	})
 }
 
+// TestBracketedZoneGroupDoesNotFanOutApplyMacro12828 guards the shared-body
+// shape: keys belonging to an apply-macro header are not zone names.
+func TestBracketedZoneGroupDoesNotFanOutApplyMacro12828(t *testing.T) {
+	text := screenDef8794 + `zones { security-zone [ trust untrust ] apply-macro M { screen edge; } } }`
+	tr, perrs := NewParser(text).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("fixture must parse: %v", perrs)
+	}
+	cfg, err := compileConfigWithOpts(tr, compileOpts{})
+	if err != nil {
+		t.Fatalf("strict compile: %v", err)
+	}
+	want := map[string]bool{"trust": true, "untrust": true}
+	if len(cfg.Security.Zones) != len(want) {
+		t.Fatalf("compiled %d zones, want only %v; apply-macro metadata became phantom zones", len(cfg.Security.Zones), want)
+	}
+	for name := range cfg.Security.Zones {
+		if !want[name] {
+			t.Errorf("phantom zone %q created from apply-macro header", name)
+		}
+	}
+	for name := range want {
+		zone := cfg.Security.Zones[name]
+		if zone == nil {
+			t.Errorf("group zone %q was not compiled", name)
+			continue
+		}
+		if zone.ScreenProfile != "" {
+			t.Errorf("zone %q compiled apply-macro body as screen profile %q", name, zone.ScreenProfile)
+		}
+	}
+
+	t.Run("bracketed member named apply-macro remains a zone", func(t *testing.T) {
+		tr, perrs := NewParser(screenDef8794 +
+			`zones { security-zone [ trust apply-macro ] { screen edge; } } }`).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("fixture must parse: %v", perrs)
+		}
+		cfg, err := compileConfigWithOpts(tr, compileOpts{})
+		if err != nil {
+			t.Fatalf("strict compile: %v", err)
+		}
+		if len(cfg.Security.Zones) != 2 || cfg.Security.Zones["trust"] == nil ||
+			cfg.Security.Zones["apply-macro"] == nil {
+			t.Errorf("bracketed members compiled as zones %v, want trust and apply-macro",
+				cfg.Security.Zones)
+		}
+	})
+}
+
 // TestEveryZoneEnumerationSeesTheGroup8794 pins the property my first #8794 fix
 // broke: every path that enumerates zones must see the SAME zones.
 //
