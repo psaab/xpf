@@ -26,6 +26,10 @@ func feedPolicyCfg(srcName, dstName string) *config.Config {
 		Security: config.SecurityConfig{
 			// AddressBook intentionally nil: the feed-backed name exists only
 			// via the binding, exercising the "build from overlay alone" path.
+			Zones: map[string]*config.ZoneConfig{
+				"trust":   {Name: "trust"},
+				"untrust": {Name: "untrust"},
+			},
 			Policies: []*config.ZonePairPolicies{
 				{
 					FromZone: "untrust",
