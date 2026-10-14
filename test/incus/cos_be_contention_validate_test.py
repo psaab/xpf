@@ -67,6 +67,16 @@ def _status(*, q0: int = 0, q2: int = 0, q10: int = 0, q11: int = 0) -> dict:
     }
 
 
+def _status_with_q2_park(*, q0: int = 0, q2: int = 0, q2_park_root: int) -> dict:
+    """Status fixture where queue 2's park_root tokens vary per snapshot."""
+    status = _status(q0=q0, q2=q2)
+    for iface in status["status"]["cos_interfaces"]:
+        for queue in iface["queues"]:
+            if queue["queue_id"] == 2:
+                queue["drain_park_root_tokens"] = q2_park_root
+    return status
+
+
 def _write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value) + "\n", encoding="utf-8")
 
@@ -530,6 +540,129 @@ class CoSBEContentionValidateTests(unittest.TestCase):
             self.assertEqual(summary["verdict"], "FAIL")
             self.assertTrue(
                 any("during-snapshot" in reason for reason in summary["failure_reasons"])
+            )
+
+    def test_fails_dataplane_counter_reset_between_during_and_after(self) -> None:
+        """#13067 (D10-07): after resetting below during must FAIL, not PASS."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q2=0),
+                during=_status(q2=100),
+                after=_status(q2=200),
+                exact_bps=1_000_000_000,
+            )
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=0),
+                during=_status(q0=100, q2=500_000_000),
+                after=_status(q0=200, q2=1),  # dataplane restarted after during
+                exact_bps=920_000_000,
+                contender_bps=24_000_000_000,
+            )
+
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(
+                any(
+                    "negative during->after DrainShape delta" in reason
+                    for reason in summary["failure_reasons"]
+                )
+            )
+
+    def test_fails_complete_stall_between_during_and_after(self) -> None:
+        """#13067 (D10-07): traffic wedging after during must FAIL, not PASS."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q2=0),
+                during=_status(q2=100),
+                after=_status(q2=200),
+                exact_bps=1_000_000_000,
+            )
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=0),
+                during=_status(q0=100, q2=500_000_000),
+                after=_status(q0=200, q2=500_000_000),  # queue wedged at t=2s
+                exact_bps=920_000_000,
+                contender_bps=24_000_000_000,
+            )
+
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(
+                any(
+                    "during->after" in reason for reason in summary["failure_reasons"]
+                )
+            )
+
+    def test_fails_park_token_regression_between_during_and_after(self) -> None:
+        """#13067 (D10-07): park tokens dropping after during must FAIL."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q2=0),
+                during=_status(q2=100),
+                after=_status(q2=200),
+                exact_bps=1_000_000_000,
+            )
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status_with_q2_park(q0=0, q2=200, q2_park_root=3),
+                during=_status_with_q2_park(q0=100, q2=400, q2_park_root=5),
+                after=_status_with_q2_park(q0=200, q2=600, q2_park_root=3),
+                exact_bps=920_000_000,
+                contender_bps=24_000_000_000,
+            )
+
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(
+                any(
+                    "negative during->after DrainShape delta" in reason
+                    for reason in summary["failure_reasons"]
+                )
+            )
+
+    def test_fails_unexpected_queue_counter_dip_between_before_and_during(self) -> None:
+        """#13067 (D10-07): a net-zero dip on any queue must FAIL, not PASS."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_manifest(root)
+            _write_phase(
+                root / "cell" / "baseline",
+                before=_status(q2=0),
+                during=_status(q2=100),
+                after=_status(q2=200),
+                exact_bps=1_000_000_000,
+            )
+            _write_phase(
+                root / "cell" / "contended",
+                before=_status(q0=0, q2=200, q11=100),
+                during=_status(q0=100, q2=400, q11=50),  # non-expected dip
+                after=_status(q0=200, q2=600, q11=100),  # recovered: net 0
+                exact_bps=920_000_000,
+                contender_bps=24_000_000_000,
+            )
+
+            summary = _validate(root)
+
+            self.assertEqual(summary["verdict"], "FAIL")
+            self.assertTrue(
+                any(
+                    "negative before->during DrainShape delta" in reason
+                    for reason in summary["failure_reasons"]
+                )
             )
 
 

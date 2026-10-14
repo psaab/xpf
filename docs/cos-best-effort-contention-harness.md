@@ -69,8 +69,12 @@ The validator fails closed when:
 
 - any iperf run exits non-zero
 - status snapshots are missing or their capture commands exit non-zero
-- an expected queue has no `drain_sent_bytes` delta
-- any queue has a negative DrainShape counter delta
+- an expected queue has no `drain_sent_bytes` delta from before to during or
+  from during to after — traffic must keep flowing across the whole phase, so a
+  queue that wedged right after the during snapshot or a dataplane that
+  restarted between snapshots cannot certify the cell (#13067)
+- any queue has a negative DrainShape counter delta in either the
+  before→after or the during→after window
 - an expected queue's `forwarding_class` does not match the manifest
 - any unexpected queue drains more than `WRONG_QUEUE_SENT_BYTES_TOLERANCE`
 - the contender iperf throughput is below `MIN_CONTENDER_BPS`, because a
@@ -94,6 +98,11 @@ MIN_CONTENDED_ROOT_PRESSURE_RATIO=0.90
 ROOT_SHAPE_BPS=25000000000
 COS_INTERFACE_NAME=reth0.80
 ```
+
+`MIN_EXPECTED_SENT_BYTES` is enforced independently on each snapshot window
+(before→during, during→after, and before→after); with the default of `1` that
+already proves strict three-snapshot monotonicity, and raising it turns the
+gate into a per-window byte-volume floor for stricter qualification runs.
 
 Set `COS_IFINDEX` to pin validation to a specific CoS interface if interface
 names are ambiguous.

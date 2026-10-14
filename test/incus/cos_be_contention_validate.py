@@ -257,6 +257,25 @@ def queue_deltas(before: dict[int, QueueShape], after: dict[int, QueueShape]) ->
         )
     return deltas
 
+def _negative_drain_delta_failure(
+    phase_name: str,
+    window: str,
+    deltas: dict[int, QueueDelta],
+) -> str | None:
+    negative = [
+        delta
+        for delta in deltas.values()
+        if delta.sent_bytes < 0 or delta.park_root < 0 or delta.park_queue < 0
+    ]
+    if not negative:
+        return None
+    formatted = ", ".join(
+        f"q{d.queue_id}=sent:{d.sent_bytes}/root:{d.park_root}/queue:{d.park_queue}"
+        for d in negative
+    )
+    suffix = f" {window}" if window else ""
+    return f"{phase_name}: negative{suffix} DrainShape delta: {formatted}"
+
 
 def _phase_status_paths(phase_dir: Path) -> tuple[Path, Path, Path]:
     return (
@@ -318,6 +337,11 @@ def analyze_phase(
     after_shapes = queue_shapes(after_json, interface_name=interface_name, ifindex=ifindex)
     deltas = queue_deltas(before_shapes, after_shapes)
     during_deltas = queue_deltas(before_shapes, during_shapes)
+    # #13067 (D10-07): every snapshot window must be monotone, not just the
+    # before -> after endpoints, or a mid-phase dataplane restart or a queue
+    # that wedged right after the during snapshot would still certify the
+    # phase (before <= during < after across all queue counters).
+    post_during_deltas = queue_deltas(during_shapes, after_shapes)
 
     for queue_id in sorted(expected_queues):
         dur_delta = during_deltas.get(queue_id, QueueDelta(queue_id, "-", 0, 0, 0))
@@ -328,17 +352,14 @@ def analyze_phase(
                 "traffic may not have been flowing when during snapshot was taken"
             )
 
-    negative = [
-        delta
-        for delta in deltas.values()
-        if delta.sent_bytes < 0 or delta.park_root < 0 or delta.park_queue < 0
-    ]
-    if negative:
-        formatted = ", ".join(
-            f"q{d.queue_id}=sent:{d.sent_bytes}/root:{d.park_root}/queue:{d.park_queue}"
-            for d in negative
-        )
-        failures.append(f"{phase_dir.name}: negative DrainShape delta: {formatted}")
+    for window, window_deltas in (
+        ("", deltas),
+        ("before->during", during_deltas),
+        ("during->after", post_during_deltas),
+    ):
+        failure = _negative_drain_delta_failure(phase_dir.name, window, window_deltas)
+        if failure is not None:
+            failures.append(failure)
 
     for queue_id in sorted(expected_queues):
         delta = deltas.get(queue_id, QueueDelta(queue_id, "-", 0, 0, 0))
@@ -346,6 +367,16 @@ def analyze_phase(
             failures.append(
                 f"{phase_dir.name}: expected queue {queue_id} sent_bytes delta "
                 f"{delta.sent_bytes} below {min_expected_sent_bytes}"
+            )
+        post_during_delta = post_during_deltas.get(
+            queue_id, QueueDelta(queue_id, "-", 0, 0, 0)
+        )
+        if post_during_delta.sent_bytes < min_expected_sent_bytes:
+            failures.append(
+                f"{phase_dir.name}: expected queue {queue_id} during->after "
+                f"sent_bytes delta {post_during_delta.sent_bytes} below "
+                f"{min_expected_sent_bytes}; traffic stalled or counters reset "
+                "between during and after snapshots"
             )
         expected_class = expected_queues[queue_id]
         if expected_class and delta.forwarding_class != expected_class:
