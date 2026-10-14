@@ -10524,3 +10524,79 @@ fn poll_descriptor_transit_dnat_ike_forwards_and_installs_session_11439() {
     assert_eq!(request.target_ifindex, 24);
     assert_eq!(request.decision.nat.rewrite_dst, Some(IpAddr::V4(gateway)));
 }
+
+/// #12873 fail-on-revert: an audit-mode (`alarm-without-drop`) SYN-ACK
+/// session-miss that trips the SYN-flood gate must tally a per-zone flood
+/// ALARM, not silently leave the zone's syn_flood counters at zero.
+///
+/// Drives the REAL `poll_binding_process_descriptor` session-miss arm (not
+/// `record_zone_flood_alarm` directly): the defect is the missing tally at
+/// that call site. Reverting the fix leaves the alarm triple empty while the
+/// global alarm event still fires, so the first assertion goes RED.
+#[test]
+fn session_miss_syn_ack_flood_alarm_without_drop_tallies_zone_alarm_12873() {
+    use crate::afxdp::flood_counters::flush_recorded_flood_counters;
+    use crate::tcp_flags::{TCP_ACK, TCP_SYN};
+
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "lan".to_string(),
+        crate::screen::ScreenProfile {
+            syn_flood_threshold: 2,
+            alarm_without_drop: true,
+            ..crate::screen::ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(profiles);
+
+    // Distinct source ports so every packet is a genuine session MISS (an
+    // alarmed first flow would otherwise turn later packets into hits).
+    // Threshold 2 admits the first two and trips the third.
+    for i in 0..3u16 {
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 1, 1),
+            Ipv4Addr::new(198, 51, 100, 20),
+            40000 + i,
+            443,
+            TCP_SYN | TCP_ACK,
+            TEST_LAN_MAC,
+        );
+        let meta = txn_meta_v4(24, TCP_SYN | TCP_ACK, frame.len() as u16);
+        let _ = txn_run_descriptor_with_screen_state(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            &mut screen,
+        );
+    }
+
+    assert_eq!(
+        screen.alarm_without_drop_events(),
+        1,
+        "fixture must trip exactly one suppressed SYN-flood alarm"
+    );
+    flush_recorded_flood_counters(
+        &forwarding.flood_counter_store,
+        &forwarding.flood_counter_slot_map,
+    );
+    assert_eq!(
+        forwarding.flood_counter_store.alarm_zones_for_test(),
+        vec![(TEST_LAN_ZONE_ID, (1, 0, 0))],
+        "audit-mode session-miss SYN-flood must tally exactly one per-zone \
+         syn_flood ALARM for the ingress zone (#12873)"
+    );
+    assert!(
+        forwarding.flood_counter_store.snapshot().is_empty(),
+        "an alarmed (permitted) packet must not be counted as a flood DROP"
+    );
+}
