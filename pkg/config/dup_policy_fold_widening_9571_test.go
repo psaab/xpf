@@ -301,8 +301,17 @@ func TestNestedAndPeeledPolicyInstancesAreFoldedAndChecked12820(t *testing.T) {
 							t.Fatalf("%s: %v", entry.label, err)
 						}
 						pols := policies9571(cfg)
-						if len(pols) != 1 || !pols[0].LenientContentDropped {
-							t.Errorf("%s: wanted exactly one fail-closed policy, got %+v", entry.label, pols)
+						if len(pols) != 1 {
+							t.Fatalf("%s: want exactly one folded policy, got %d", entry.label, len(pols))
+						}
+						if pols[0].Action != PolicyPermit {
+							t.Errorf("%s: the fixture's merged policy must remain a permit, got %v", entry.label, pols[0].Action)
+						}
+						if !pols[0].LenientContentDropped {
+							t.Errorf("%s: wanted the permit policy fail-closed, got %+v", entry.label, pols[0])
+						}
+						if LenientDroppedPolicyLocator(cfg) == "" {
+							t.Errorf("%s: poisoned policy is missing the fail-closed locator", entry.label)
 						}
 					}
 				})
@@ -344,5 +353,26 @@ func TestNestedAndPeeledSafePolicyFoldRemainsUnpoisoned12820(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+func TestSiblingPeeledPolicyContainersFoldTogether12820(t *testing.T) {
+	text := `security { ` + zones9571 + ` policies { from-zone trust to-zone untrust {
+		policy { p1 { ` + anyMatch9571 + ` then { deny; } } }
+		policy { p1 { ` + anyMatch9571 + ` then { permit; } } }
+	} } }`
+	tree := parse9571(t, text)
+	for _, entry := range lenientEntries9571 {
+		cfg, err := entry.compile(tree.Clone())
+		if err != nil {
+			t.Fatalf("%s: %v", entry.label, err)
+		}
+		pols := policies9571(cfg)
+		if len(pols) != 1 {
+			t.Fatalf("%s: sibling peeled containers should fold into one policy, got %d", entry.label, len(pols))
+		}
+		if pols[0].Action != PolicyPermit || !pols[0].LenientContentDropped ||
+			LenientDroppedPolicyLocator(cfg) == "" {
+			t.Errorf("%s: sibling peeled deny-to-permit fold was not fail-closed: %+v", entry.label, pols[0])
+		}
 	}
 }

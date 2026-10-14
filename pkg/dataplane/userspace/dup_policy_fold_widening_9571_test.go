@@ -37,12 +37,24 @@ func TestFoldWidenedDuplicatePoisonsTheWire9571(t *testing.T) {
 		text(`policy p1 { `+anyM+` then { deny; } }`)
 	safeGroupFold := `groups { G { system { host-name grouped; } } } apply-groups G; ` +
 		text(`policy p1 { `+anyM+` then { permit; } } policy p1 { then { deny; } }`)
+	denyPermit := `policy p1 { ` + anyM + ` then { deny; } } policy p1 { ` + anyM + ` then { permit; } }`
+	nestedContainer := `security { zones { security-zone trust; security-zone untrust; } policies {
+		from-zone { trust { to-zone { untrust { ` + denyPermit + ` } } } }
+	} }`
+	peeledContainer := `security { zones { security-zone trust; security-zone untrust; } policies {
+		from-zone trust to-zone untrust {
+			policy { p1 { ` + anyM + ` then { deny; } } }
+			policy { p1 { ` + anyM + ` then { permit; } } }
+		}
+	} }`
 	for _, tc := range []struct {
 		name     string
 		text     string
 		poisoned bool
 	}{
-		{"deny then permit", text(`policy p1 { ` + anyM + ` then { deny; } } policy p1 { ` + anyM + ` then { permit; } }`), true},
+		{"deny then permit", text(denyPermit), true},
+		{"nested zone-container snapshot refusal", nestedContainer, true},
+		{"peeled policy-container snapshot refusal", peeledContainer, true},
 		{"group-inherited conflict", groupConflict, true},
 		{"#8752 control: permit then a deny fragment", text(`policy p1 { ` + anyM + ` then { permit; } } policy p1 { then { deny; } }`), false},
 		{"safe mixed-action fold with apply-groups", safeGroupFold, false},
