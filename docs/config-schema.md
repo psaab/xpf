@@ -8950,7 +8950,7 @@ The loop now REUSES the existing map entry, so distinct weekday windows UNION
 across blocks/roots (the `Days` map lives on the reused struct — no separate index
 is needed, unlike the policy-statement term index, because per-day dedup is the
 map key). The daily/date scalars (`start-time`/`stop-time`/`start-date`/
-`stop-date`, the `daily` window, `all-day`) follow flat-set / Junos load-merge
+`stop-date`, the `daily` window) follow flat-set / Junos load-merge
 LAST-WINS: a repeated leaf replaces, exactly as a second `set` of the same leaf
 does, so no order-dependent divergence from flat is introduced (a "conflict" is
 not representable in flat-set — the last `set` simply wins). Fail-on-revert
@@ -9018,8 +9018,9 @@ that a peer-only group supplies are rejected on either node.
 - Daily `all-day` plus a complete start/stop window is also rejected: runtime
   enforces daily all-day before time bounds, so the window silently becomes
   ineffective (#12745). Strict compile rejects and tolerant load / peer-sync
-  warns while preserving the union. Daily scalar last-wins behavior for
-  separate statements remains unchanged.
+  warns while preserving the union. Since #12826 `all-day` is sticky across
+  duplicate daily statements (any statement asserting it keeps it, matching
+  flat-set composition); other daily scalars keep last-wins behavior.
 - The check examines each effective node view before node-local compilation,
   so a peer-only inherited all-day flag cannot evade validation when it merges
   into an inline weekday window.
