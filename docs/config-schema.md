@@ -13163,6 +13163,25 @@ same/conflicting group choices (including `apply-groups-except` presence),
 conflicting groups with and without an inline override, and preservation of
 strict/tolerant same-tier ambiguity behavior.
 
+### #12923 — Two apply-groups with different `default-policy` actions
+
+Only the block spelling of a group's `default-policy` carried merge
+provenance (#12823). A group's flat `default-policy permit-all;` leaf met the
+generic inline-wins override and the cross-shape no-duplicate guard even when
+the winning destination stanza came from another apply-group, so two groups
+with different actions resolved silently by application order — permit-first
+failed open with no stanza pair for #11821/#12821 to see. Group-adopted
+default-policy stanzas of both spellings now carry provenance: a later
+group's stanza materializes beside an earlier group's stanza, and the
+existing #11821/#11367/#12821 gates reject distinct actions (strict) or warn
+and force deny-all (tolerant). Identical actions across groups remain
+accepted, and an authored inline stanza still overrides every group silently.
+
+Regression coverage: `pkg/config/compiler_default_policy_two_groups_12923_test.go`
+checks flat/block shape mixes in both application orders, top-level and
+in-scope `apply-groups`, nested groups, missing `security` stanzas, stanza
+materialization, identical-action acceptance, and inline-override precedence.
+
 ### #3534 — `default-policy-log session-init|session-close` (implicit default RT_FLOW logging)
 
 Split from #3363 Part 2. Operators want the implicit default-policy verdict to
