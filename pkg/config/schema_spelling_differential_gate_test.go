@@ -206,6 +206,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -948,12 +949,15 @@ func gateNumericArgs(path []string) []string {
 	return out
 }
 
+var gateEffectivePathMu sync.Mutex
 var gateEffectivePathCache = map[string][]string{}
 
 // gateEffectivePath picks the path this leaf is compiled with: the authored word
 // form, or the numeric-arg form when the word form makes the leaf unreadable.
 func gateEffectivePath(g gateLeaf) []string {
 	key := g.siteKey()
+	gateEffectivePathMu.Lock()
+	defer gateEffectivePathMu.Unlock()
 	if p, ok := gateEffectivePathCache[key]; ok {
 		return p
 	}
@@ -1186,32 +1190,49 @@ func spellingVerdicts(g gateLeaf, v1, v2 string) map[string]string {
 			},
 		},
 	}
+	type verdict struct {
+		name           string
+		zero, one, two string
+		err            bool
+		unstable       bool
+	}
+	results := make([]verdict, len(gateSpellingsMulti))
+	var wg sync.WaitGroup
+	for i, name := range gateSpellingsMulti {
+		i, name := i, name
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f := forms[name]
+			zero, e0 := f[0]()
+			one, e1 := f[1]()
+			two, e2 := f[2]()
+			result := verdict{name: name, zero: zero, one: one, two: two, err: e0 != nil || e1 != nil || e2 != nil}
+			if !result.err {
+				// Determinism self-check: a compiler that builds a slice by ranging a
+				// Go map can emit a different order for identical input, which would
+				// make one == two compare unequal at random. Recompile and require
+				// self-equality rather than trusting it.
+				again, err := f[1]()
+				result.unstable = err != nil || again != one
+			}
+			results[i] = result
+		}()
+	}
+	wg.Wait()
 	state := map[string]string{}
-	for _, name := range gateSpellingsMulti {
-		f := forms[name]
-		zero, e0 := f[0]()
-		one, e1 := f[1]()
-		two, e2 := f[2]()
-		if e0 != nil || e1 != nil || e2 != nil {
-			state[name] = "err"
-			continue
-		}
-		// Determinism self-check: a compiler that builds a slice by ranging a
-		// Go map can emit a different order for identical input, which would
-		// make one == two compare unequal at random. Recompile and require
-		// self-equality rather than trusting it.
-		if again, err := f[1](); err != nil || again != one {
-			state[name] = "unstable"
-			continue
-		}
-		if zero == one {
-			state[name] = "inert" // trap (3): the leaf never reached the compiler
-			continue
-		}
-		if one == two {
-			state[name] = "drop"
-		} else {
-			state[name] = "keep"
+	for _, result := range results {
+		switch {
+		case result.err:
+			state[result.name] = "err"
+		case result.unstable:
+			state[result.name] = "unstable"
+		case result.zero == result.one:
+			state[result.name] = "inert" // trap (3): the leaf never reached the compiler
+		case result.one == result.two:
+			state[result.name] = "drop"
+		default:
+			state[result.name] = "keep"
 		}
 	}
 	return state
