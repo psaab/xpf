@@ -116,9 +116,10 @@ func validateAddressSetMembersDefinedStrict(cfg *Config) error {
 	}
 
 	// #12214: compileAddressBook expands every set during the shared prepass,
-	// including sets unused by policies. Reject the same depth/cycle failures at
-	// commit instead of allowing a green commit to abort every apply. The graph
-	// validator also follows cross-kind address members that resolve to sets.
+	// including sets unused by policies. Bound every consumer graph at commit
+	// instead of allowing a green commit to abort every apply; the validator
+	// follows cross-kind address members that resolve to sets (#12832), a
+	// superset of the apply-time ID-graph prepass.
 	for _, name := range names {
 		if err := validateAddressSetGraphDepthAndCycles12832(name, ab); err != nil {
 			detail := err.Error()
