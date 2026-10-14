@@ -113,8 +113,8 @@ func AnalyzePolicyShadowing(cfg *config.Config) []string {
 // wildcard is not an unreachability proof for them (see the note above).
 //
 // #12894: the pair universe is the runtime's SURVIVING zone scope, not the
-// authored text. DefinedZoneNames (#12895) is that SSOT — cfg.Security.Zones
-// minus the StableZoneID quarantine losers and reserved names the snapshot
+// authored text: cfg.Security.Zones minus the StableZoneID quarantine
+// losers and reserved names the snapshot
 // builder refuses to install (config.ZoneQuarantineExclusionsForConfig, the
 // same set quarantineCollidingZones uses to prune scoped-global members and
 // drop rules whose whole match side collided, #5577). Counting a dead or
@@ -126,7 +126,15 @@ func AnalyzePolicyShadowing(cfg *config.Config) []string {
 // bound to a quarantined zone is dropped by the runtime, and its pair is no
 // longer in the universe, so it can no longer be credited as a coverer.
 func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePairPolicies, findings []string) []string {
-	defined := DefinedZoneNames(cfg)
+	// Effective (surviving) zone set: authored inventory minus the
+	// quarantine exclusions the snapshot builder prunes with.
+	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
+	defined := make(map[string]bool, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		if _, excluded := quarantined[name]; !excluded {
+			defined[name] = true
+		}
+	}
 	var zones []string
 	for name := range defined {
 		zones = append(zones, name)
