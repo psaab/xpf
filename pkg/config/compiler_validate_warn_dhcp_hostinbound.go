@@ -168,6 +168,11 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 			for _, ifn := range g.Interfaces {
 				// Group refs and zone keys use the same canonical logical-unit
 				// identity (#9821); padded unit spellings must resolve alike.
+				// #12957: the EFFECTIVE-POLICY probes below resolve through
+				// both spellings too — the compiled stamp answers for every
+				// spelling of an interface, but a stamp-free config (hand-built,
+				// pre-resolveDerivedConfig) keys its overrides by spelling, and a
+				// padded ref must not silently skip a canonically-keyed override.
 				ifKey := cfg.SplitInterfaceUnitRef(ifn).Literal
 				zname, ok := ifZone[ifKey]
 				if !ok {
@@ -186,14 +191,43 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 				// A declared interface override remains significant: it replaces
 				// the zone set (#6515), so if it omits dhcp the operator must
 				// restore the token on that interface.
-				_, _, overridden := z.InterfaceHostInboundOverride(ifn)
+				// Authored spelling first — an override keyed by that exact
+				// spelling still applies on a stamp-free config (#12843) —
+				// then the canonical Literal the zone lookup resolved through.
+				probes := []string{ifn}
+				if ifKey != ifn {
+					probes = append(probes, ifKey)
+				}
+				var overridden bool
+				for _, p := range probes {
+					if _, _, d := z.InterfaceHostInboundOverride(p); d {
+						overridden = true
+						break
+					}
+				}
 				zoneAdmits := z.HostInboundTraffic != nil &&
 					hostInboundAdmitsSystemService(z.HostInboundTraffic.SystemServices, fam.token)
 				if !overridden && zoneAdmits &&
 					!hostInboundAdmitsSystemService(z.ZoneLevelSystemServicesFor(z.HostInboundTraffic.SystemServices, ifn), fam.token) {
 					continue
 				}
-				effSvc, _, _ := z.InterfaceHostInboundEffective(ifn)
+				// An override declared under either spelling REPLACES the zone
+				// set (#6515), and same-identity declarations union exactly as
+				// the compiled stamp unions them; with no declaring spelling
+				// the zone-level set (as #7490 applies it here) answers.
+				var effSvc []string
+				var overrideDeclared bool
+				for _, p := range probes {
+					svc, _, o := z.InterfaceHostInboundEffective(p)
+					if !o {
+						continue
+					}
+					overrideDeclared = true
+					effSvc = UnionHostInboundTokens(effSvc, svc)
+				}
+				if !overrideDeclared {
+					effSvc, _, _ = z.InterfaceHostInboundEffective(probes[0])
+				}
 				if hostInboundAdmitsSystemService(effSvc, fam.token) {
 					continue
 				}
