@@ -143,8 +143,13 @@ func validateRPMSourceAddressStrict(cfg *Config) error {
 // sees the gap at commit instead of a silently-dead probe feeding
 // ip-monitoring failover.
 //
-// Only IP-literal targets are checked: net.ParseIP rejects a zoned
-// literal so the zone is split off by hand first (no DNS at commit). A
+// Only IP-literal targets are checked, and the literal is found in EVERY
+// form the runtime accepts (#12908): a bare literal (fe80::1%ge-0/0/3), a
+// schemeless bracketed host ([fe80::1%25ge-0/0/3]:8443), and a full http-get
+// URL (http://[fe80::1%25ge-0/0/3]/hb) — FindTargetIPLiteral below. The gate
+// used to split the raw target at '%' and hand the rest to net.ParseIP, so a
+// URL-form target failed IP parsing and an unscoped http://[fe80::1]/ slipped
+// past the rejection the bare form got (no DNS at commit either way). A
 // hostname resolving to a link-local cannot be caught here (resolution is
 // runtime); a hostname that resolves to a bare link-local would fail at
 // runtime with ErrProbeSetup (the same missing-zone error in probeICMP).
@@ -168,26 +173,89 @@ func validateRPMLinkLocalZoneStrict(cfg *Config) error {
 			if test == nil || test.Target == "" {
 				continue
 			}
-			host := test.Target
-			zone := ""
-			if i := strings.IndexByte(host, '%'); i >= 0 {
-				zone = host[i+1:]
-				host = host[:i]
-			}
-			ip := net.ParseIP(host)
+			// #12908: FindTargetIPLiteral understands the bare, bracketed and
+			// URL forms, so a URL-form link-local literal is gated exactly like
+			// the bare one instead of failing net.ParseIP and skipping the gate.
+			ip, zone, _, _ := FindTargetIPLiteral(test.Target)
 			if ip == nil || ip.To4() != nil || !ip.IsLinkLocalUnicast() {
 				continue // not an IPv6 link-local literal
 			}
 			if zone == "" && test.DestinationInterface == "" {
 				return fmt.Errorf(
 					"services rpm probe %q test %q: target %q is an IPv6 link-local address "+
-						"with no scope — add an explicit %%zone (fe80::1%%ge-0/0/3) or a "+
-						"destination-interface so the probe can pick the egress link",
+					"with no scope — add an explicit %%zone (fe80::1%%ge-0/0/3, or in a "+
+						"URL target http://[fe80::1%%25ge-0/0/3]/) or a destination-interface "+
+						"so the probe can pick the egress link",
 					probe.Name, test.Name, test.Target)
 			}
 		}
 	}
 	return nil
+}
+
+// FindTargetIPLiteral returns the IP-literal host of an RPM probe target
+// together with its %zone, for every target form the runtime accepts:
+//
+//	bare literal          fe80::1   fe80::1%ge-0/0/3
+//	schemeless bracketed  [fe80::1]:80   [fe80::1%25ge-0/0/3]:8443
+//	full URL (http-get)   http://[fe80::1]/hb   https://[fe80::1%25ge-0/0/3]:8443/hb
+//
+// start/end delimit the literal's bytes in the target — brackets included,
+// port, userinfo and path excluded — so a caller can rewrite the scope in
+// place (the runtime zone attachment in pkg/rpm does exactly that). A target
+// whose host is not an IP literal (a hostname, host:port, a malformed URL)
+// returns a nil IP: the same population net.ParseIP already rejected, plus
+// the URL form that used to hide a link-local literal from the zone gate
+// (#12908). No DNS, no url.Parse — pure string inspection, so it is usable
+// at commit time and stays in lockstep with what the dial path will see.
+func FindTargetIPLiteral(target string) (ip net.IP, zone string, start, end int) {
+	host := target
+	start = 0
+	if i := strings.Index(target, "://"); i >= 0 {
+		host = target[i+3:]
+		start = i + 3
+	}
+	hostEnd := len(host)
+	if j := strings.IndexAny(host, "/?#"); j >= 0 {
+		hostEnd = j
+	}
+	token := host[:hostEnd]
+	// Userinfo (http://user@host/) is not part of the literal.
+	if at := strings.LastIndexByte(token, '@'); at >= 0 {
+		token = token[at+1:]
+		start += at + 1
+	}
+	if strings.HasPrefix(token, "[") {
+		closeIdx := strings.IndexByte(token, ']')
+		if closeIdx < 0 {
+			return nil, "", 0, 0
+		}
+		// RFC 6874: inside a URL host the zone separator is %25-escaped;
+		// the schemeless bracketed form may carry either spelling.
+		inner := strings.ReplaceAll(token[1:closeIdx], "%25", "%")
+		ip, zone = splitLiteralZone(inner)
+		if ip == nil {
+			return nil, "", 0, 0
+		}
+		return ip, zone, start, start+closeIdx+1
+	}
+	// Unbracketed: only a bare literal qualifies — an unbracketed IPv6
+	// cannot carry a port, and host:port / hostnames do not parse as an IP.
+	ip, zone = splitLiteralZone(token)
+	if ip == nil {
+		return nil, "", 0, 0
+	}
+	return ip, zone, start, start + hostEnd
+}
+
+// splitLiteralZone splits a bare IP literal off its trailing %zone.
+// net.ParseIP rejects a zoned literal, so the zone is taken by hand.
+func splitLiteralZone(literal string) (net.IP, string) {
+	host, zone := literal, ""
+	if i := strings.IndexByte(literal, '%'); i >= 0 {
+		host, zone = literal[:i], literal[i+1:]
+	}
+	return net.ParseIP(host), zone
 }
 
 // validateRPMHTTPGetSchemeStrict rejects an http-get RPM test whose
