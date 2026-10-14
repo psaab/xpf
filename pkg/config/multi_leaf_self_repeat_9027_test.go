@@ -94,6 +94,65 @@ func TestMultiLeafSelfRepeatIsRefused9027(t *testing.T) {
 // #12553 update: the parser now normalizes the packed run into two
 // singleton leaves (#10825), so the literal is never minted on ANY path —
 // the residual this test used to log is closed; assert it stays closed.
+func TestLegitimatelyNamedObjectIsAccepted9029(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		text       string
+		wantRefuse bool
+	}{
+		// The definition of an object NAMED after its own keyword. Refusing
+		// this was the first version of the gate over-reaching.
+		{"an address DEFINED as `address`",
+			`security { address-book { global { address address 10.0.0.0/8; } } }`, false},
+
+		// Referencing it, said unambiguously by QUOTING.
+		{"a member quoted as \"address\"",
+			`security { address-book { global { address address 10.0.0.0/8;
+				address-set AS1 { address "address"; } } } }`, false},
+
+		// The api-key site: a key legitimately named `api-key`, quoted.
+		{"a quoted api-key name",
+			`system { services { web-management { api-auth { expires 2099-01-01;
+				api-key AAA; api-key "api-key"; } } } }`, false},
+
+		// THE ROW THAT BINDS THE QUOTING BRANCH, and it is the only one that
+		// does. The two spellings below produce the IDENTICAL Keys
+		// (`[address ADDR-A address]`) and differ only in KeysQuoted, so the
+		// verdict comes from that bit and nothing else.
+		//
+		// Without this pair the quoting branch is INERT: arity scoping already
+		// covers every other case in this file, and a mutation disabling
+		// KeyQuoted killed zero cells until this row existed. A branch nothing
+		// can fail is a claim, not a guard.
+		{"a member run whose second member is QUOTED as the keyword",
+			`security { address-book { global { address ADDR-A 10.0.0.0/8; address address 10.1.0.0/16;
+				address-set AS1 { address ADDR-A "address"; } } } }`, false},
+		{"the same run UNQUOTED is refused",
+			`security { address-book { global { address ADDR-A 10.0.0.0/8; address address 10.1.0.0/16;
+				address-set AS1 { address ADDR-A address; } } } }`, true},
+
+		// STILL REFUSED. The bare repeat is the missing-semicolon shape and the
+		// security case; the quoting escape must not open it.
+		// #12553: the bare api-key run row is gone — the parser normalizes
+		// it into two singleton leaves (#10825); TestApiKeyLiteral pins
+		// that the literal is never minted as a credential.
+		{"bare address member run is still refused",
+			`security { address-book { global { address ADDR-A 10.0.0.0/8; address ADDR-B 10.1.0.0/16;
+				address-set AS1 { address ADDR-A address ADDR-B; } } } }`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := selfRepeatTree9027(t, tc.text)
+			_, err := CompileConfig(tr)
+			if (err != nil) != tc.wantRefuse {
+				t.Fatalf("refused=%v, want %v (err=%v)", err != nil, tc.wantRefuse, err)
+			}
+			if tc.wantRefuse && !strings.Contains(err.Error(), "QUOTE it") {
+				t.Errorf("the refusal does not offer quoting as the remedy: %v", err)
+			}
+		})
+	}
+}
+
 func TestApiKeyLiteralIsNotMintedAsACredential9027(t *testing.T) {
 	tr := selfRepeatTree9027(t,
 		`system { services { web-management { api-auth { expires 2099-01-01; api-key AAA api-key BBB; } } } }`)
