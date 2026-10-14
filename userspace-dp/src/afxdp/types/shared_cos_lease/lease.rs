@@ -1256,15 +1256,47 @@ impl SharedCoSQueueLease {
         if target == 0 {
             return None;
         }
-        let active_flows = v8
+        // #13071 (deep-review D2-06): size the cap from the
+        // epoch-consistent flow count, not the live bucket. A peer
+        // flow that drains mid-epoch decrements the live count after
+        // the epoch's fair budget was already computed for — and
+        // partially consumed by — the original count; multiplying the
+        // live count here retroactively shrank the worker cap below
+        // bytes already spent, starving the remaining flows for the
+        // rest of the epoch (and counting false suppression telemetry
+        // on the drained-to-zero transition).
+        let live_flows = v8
             .worker_active_flow_buckets
             .get(worker_id)
-            .map(|a| a.0.load(Ordering::Relaxed) as u64)
+            .map(|a| a.0.load(Ordering::Relaxed))
             .unwrap_or(0);
-        if active_flows == 0 {
-            return Some(0);
+        // #1745 sticky-max acquire-time sample for THIS epoch tag —
+        // the same denominator the rotation publisher used. The
+        // rotation winner installs the fresh (new_tag, 0) slot before
+        // the seqlock publish, so under the matching epoch_tag check
+        // above the slot carries the current epoch's sample. Tag
+        // EQUALITY (not ordering) per the wrap-safe discipline of
+        // record_equal_flow_active_sample; a mismatched slot reads as
+        // 0 and falls back to the live count.
+        let sampled_flows = v8
+            .worker_equal_flow_active_samples
+            .get(worker_id)
+            .map(|s| {
+                let (slot_tag, count) = PackedEpochGrant::unpack(s.0.load(Ordering::Acquire));
+                if slot_tag == epoch_tag { count } else { 0 }
+            })
+            .unwrap_or(0);
+        let effective_flows = live_flows.max(sampled_flows);
+        if effective_flows == 0 {
+            // No live flows and no sample for this epoch: the old
+            // synthetic Some(0) denied every remaining byte and
+            // counted cap-hit/suppressed telemetry for a cap that was
+            // zero only because the flow count was. Follow the
+            // target == 0 / stale-tag read-only doctrine instead: no
+            // cap, and rotation owns fail-open publication.
+            return None;
         }
-        target.checked_mul(active_flows)
+        target.checked_mul(effective_flows as u64)
     }
 }
 
