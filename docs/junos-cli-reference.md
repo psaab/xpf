@@ -386,8 +386,26 @@ From zone: guest, To zone: lan
     clock. When the dataplane cannot report scheduler state (offline CLI),
     every policy renders `enabled`.
 - **Policy fields:** 4-space indent, `<Key>: <value>`.
+- **Address inversion (#3336 / #12901):** when a rule carries
+  `source-address-excluded` / `destination-address-excluded`, the flat
+  address line is suffixed ` (except)` — `Source addresses: bad-net
+  (except)` — so an "all EXCEPT these" match cannot read as its opposite.
+  Un-inverted rules render bit-identically. (The detail view annotates the
+  header instead: `Source addresses (except):`.)
 - **Action line:** `Action: permit` or `Action: reject, log` or `Action: deny, log`.
+  The `, log` token requires a real session-log trigger (#12901): a policy
+  with `then log session-init` and/or `session-close`. An EMPTY log block
+  (a leniently-loaded bare `then log`, #3060 — rejected at strict commit)
+  emits no session records and renders a plain `Action: permit`.
 - Multiple addresses shown as named address entries.
+- **`brief` quarantine rows (#12901):** a rule whose zone is quarantined
+  (StableZoneID collision loser, #10530) never has its counter published —
+  the quarantine scrub drops it from the applied snapshot — so its Hits
+  cell reads `UNAVAILABLE (quarantined zone — live counters unavailable)`
+  and the losing zone carries the scrub qualifier in the From/To columns,
+  exactly like the hit-count table. Such rows are NOT counted by the
+  trailing "not yet published by the dataplane" note, which describes
+  live rules awaiting the first helper poll only.
 - **`junos-host` self-traffic policy (#3019):** a `from-zone <z> to-zone
   junos-host` policy is the Junos self-traffic (host-bound) security policy.
   As of #3019 these policies are ENFORCED on the dataplane LocalDelivery path
