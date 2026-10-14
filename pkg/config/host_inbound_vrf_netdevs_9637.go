@@ -12,14 +12,22 @@ func HostInboundVRFEnslavedNetdevs(cfg *Config) map[string]bool {
 		return nil
 	}
 	if len(cfg.RoutingInstances) == 0 {
-		hasManagementInterface := false
+		hasManagementBinding := false
 		for ifName := range cfg.Interfaces.Interfaces {
 			if IsManagementIfName(ifName) {
-				hasManagementInterface = true
+				hasManagementBinding = true
 				break
 			}
 		}
-		if !hasManagementInterface {
+		if !hasManagementBinding {
+			for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
+				if claim.Instance == ManagementVRFInstanceName {
+					hasManagementBinding = true
+					break
+				}
+			}
+		}
+		if !hasManagementBinding {
 			return nil
 		}
 	}

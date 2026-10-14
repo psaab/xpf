@@ -1211,31 +1211,55 @@ func junosHostVRFEnslavedNetdevs(cfg *Config, netdevByRef map[string]string, tun
 			IsReservedRoutingInstanceName(ri.Name) {
 			continue
 		}
-		for _, member := range ri.Interfaces {
-			if member == "" {
+		// Use the daemon binder's per-instance keys: they are alias-aware
+		// (ResolveRoutingInstanceMemberBase) and include tolerant #11060
+		// retained primary claims. Map resolved interface keys through the
+		// configured netdev table to avoid including synthetic names for
+		// undeclared tolerant members.
+		for _, key := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
+			// The resolver may retain a synthetic key for an undeclared
+			// member. Only include netdevs the configured interface-name map
+			// actually knows; this still resolves aliases because the key
+			// uses the declared interface identity.
+			if netdev := netdevByRef[key.InterfaceKey]; netdev != "" {
+				add(netdev)
 				continue
 			}
-			for _, key := range InterfaceUnitRefKeys(cfg, member) {
-				add(netdevByRef[key])
+			// A quarantined primary claim is independently daemon-bound;
+			// preserve its recorded Linux name if the ref map lacks it.
+			for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
+				if claim.Instance == ri.Name && claim.InterfaceKey == key.InterfaceKey &&
+					claim.LinuxName == key.LinuxName {
+					add(claim.LinuxName)
+					break
+				}
 			}
 		}
 	}
 	// Tunnel manager binds its explicit stanza devices outside the RI member
-	// list traversal. Only include claims whose target is an active VRF.
+	// list traversal. Include claims whose target is an active VRF, plus
+	// claims to the reserved management instance: junosHostVRFMasterNetdevs
+	// attributes those to vrf-mgmt, so the enslaved set must agree (the
+	// target need not be a defined routing-instance).
 	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
-		if active[claim.Instance] {
+		if active[claim.Instance] || claim.Instance == ManagementVRFInstanceName {
 			add(claim.LinuxName)
 		}
 	}
 	// The daemon binds management-class devices to vrf-mgmt independently of
 	// routing-instance configuration; include their physical and unit netdevs.
+	// Management binding is unconditional, so — like
+	// HostInboundDHCPVRFEnslavedNetdevs — it is not dropped when the device is
+	// also RI-contested: the mgmt binding happens regardless of that contest.
 	for ifName := range cfg.Interfaces.Interfaces {
 		if !IsManagementIfName(ifName) {
 			continue
 		}
 		for ref, netdev := range netdevByRef {
 			if ref == ifName || strings.HasPrefix(ref, ifName+".") {
-				add(netdev)
+				if netdev != "" {
+					out[netdev] = true
+				}
 			}
 		}
 	}

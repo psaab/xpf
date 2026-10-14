@@ -104,3 +104,58 @@ func TestHostInboundVRFEnslavedConflictedMemberExcluded12844(t *testing.T) {
 	// The contested unit must not be guessed as enslaved by either owner.
 	requireEnslaved12844(t, cfg, "ge-0-0-1", "ge-0-0-1.50")
 }
+
+func TestHostInboundVRFEnslavedRetainedPrimaryClaim12952(t *testing.T) {
+	cfg := multiUnitTrunkCfg12844("ge-0/0/1")
+	cfg.RoutingInstances[0].Interfaces = []string{"ge-0/0/1.50"}
+	cfg.QuarantinedRIMemberDeviceConflicts = []RoutingInstanceMemberDeviceConflict{
+		{LinuxName: "ge-0-0-1.80", Claims: []RoutingInstanceMemberClaim{{Instance: "tenant"}}},
+	}
+	cfg.QuarantinedRIMemberPrimaryClaims = []RoutingInstanceMemberPrimaryClaim{
+		{Instance: "tenant", InterfaceKey: "ge-0/0/1", LinuxName: "ge-0-0-1"},
+	}
+	requireEnslaved12844(t, cfg, "ge-0-0-1", "ge-0-0-1.50")
+}
+
+func TestHostInboundVRFEnslavedAliasSpelledMember12952(t *testing.T) {
+	cfg := multiUnitTrunkCfg12844("ge-0-0-1")
+	requireEnslaved12844(t, cfg, "ge-0-0-1", "ge-0-0-1.50", "ge-0-0-1.80")
+}
+
+func TestHostInboundVRFEnslavedUndeclaredMemberNotNetdev12952(t *testing.T) {
+	cfg := multiUnitTrunkCfg12844("ge-0/0/99")
+	requireEnslaved12844(t, cfg)
+}
+
+func TestHostInboundVRFEnslavedManagementTunnelClaim12952(t *testing.T) {
+	cfg := &Config{}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"gr-0/0/0": {
+			Name: "gr-0/0/0",
+			Tunnel: &TunnelConfig{
+				Name: "gr-0-0-0", Mode: "gre", Source: "192.0.2.1",
+				Destination: "192.0.2.2", RoutingInstance: ManagementVRFInstanceName,
+			},
+			Units: map[int]*InterfaceUnit{0: {Number: 0}},
+		},
+	}
+	requireEnslaved12844(t, cfg, "gr-0-0-0")
+	if got := junosHostVRFMasterNetdevs(cfg, cfg.TunnelNameMap())["gr-0-0-0"]; got != ManagementVRFDeviceName {
+		t.Fatalf("management tunnel master = %q, want %q", got, ManagementVRFDeviceName)
+	}
+}
+
+func TestHostInboundVRFEnslavedManagementClassContested12952(t *testing.T) {
+	cfg := &Config{}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"fxp0": {Name: "fxp0"},
+	}
+	cfg.RoutingInstances = []*RoutingInstanceConfig{
+		{Name: "tenant", InstanceType: "virtual-router", Interfaces: []string{"fxp0"}},
+		{Name: "other", InstanceType: "virtual-router", Interfaces: []string{"fxp0"}},
+	}
+	requireEnslaved12844(t, cfg, "fxp0")
+	if !HostInboundDHCPVRFEnslavedNetdevs(cfg)["fxp0"] {
+		t.Fatal("HostInboundDHCPVRFEnslavedNetdevs omitted management-class fxp0")
+	}
+}
