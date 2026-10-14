@@ -780,19 +780,32 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	// #11082: the interceptor verified the method-only token (connection
 	// gate). Re-verify against THESE arguments: a token captured from one
 	// stream must not authorize a different interface_name/summary_mode.
-	if tok, present := fabricAuthArgsTokenFromMetadata(stream.Context()); present {
-		if !verifyFabricStreamArgsToken(s.fabricAcceptedKeys(), tok, pb.BpfrxService_MonitorInterface_FullMethodName, req) {
-			if emit, suppressed := denyaudit.Note(denyaudit.SurfaceFabricAuth, "stream args-bound token mismatch"); emit {
-				slog.Warn("fabric MonitorInterface rejected call: arguments do not match the stream token",
-					"suppressed_since_last", suppressed)
+	//
+	// #13050: FABRIC streams only. This handler is shared by the loopback
+	// management listener, whose local CLI callers send no token at all, so
+	// counting them here held xpf_fabric_stream_args_unbound_total (the
+	// #11524 Phase-2 zero-across-a-cycle predicate) permanently above zero
+	// on local traffic alone. The marker is stamped server-side by the
+	// fabric stream interceptor — never read from client metadata — so a
+	// local stream skips both the verification and the fallback counter and
+	// keeps working; loopback callers authenticate by peer credentials
+	// (#5278), not the fabric PSK. The method-only fallback itself stays
+	// until #11524 Phase 2 (cycle attestation).
+	if fabricAuthStreamContext(stream.Context()) {
+		if tok, present := fabricAuthArgsTokenFromMetadata(stream.Context()); present {
+			if !verifyFabricStreamArgsToken(s.fabricAcceptedKeys(), tok, pb.BpfrxService_MonitorInterface_FullMethodName, req) {
+				if emit, suppressed := denyaudit.Note(denyaudit.SurfaceFabricAuth, "stream args-bound token mismatch"); emit {
+					slog.Warn("fabric MonitorInterface rejected call: arguments do not match the stream token",
+						"suppressed_since_last", suppressed)
+				}
+				return status.Error(codes.Unauthenticated, "fabric RPC authentication failed: stream arguments do not match the token")
 			}
-			return status.Error(codes.Unauthenticated, "fabric RPC authentication failed: stream arguments do not match the token")
+		} else {
+			// Legacy peer (predates args-bound stream tokens): the method
+			// token already passed the interceptor. Count the fallback so
+			// the migration is observable; Phase 2 removes it.
+			fabricStreamArgsUnboundTotal.Add(1)
 		}
-	} else {
-		// Legacy peer (predates args-bound stream tokens): the method
-		// token already passed the interceptor. Count the fallback so
-		// the migration is observable; Phase 2 removes it.
-		fabricStreamArgsUnboundTotal.Add(1)
 	}
 
 	hostname, _ := os.Hostname()

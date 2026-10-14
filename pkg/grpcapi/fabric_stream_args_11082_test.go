@@ -55,7 +55,10 @@ func TestMonitorInterfaceArgsBinding11082(t *testing.T) {
 		if tok != "" {
 			md.Set(fabricAuthArgsBoundKey, tok)
 		}
-		ctx, cancel := context.WithCancel(metadata.NewIncomingContext(context.Background(), md))
+		// #13050: the args-bound check is fabric-context-only now, so this
+		// test must arrive as a fabric stream (the marker the production
+		// fabric stream interceptor stamps), not a bare loopback context.
+		ctx, cancel := context.WithCancel(withFabricAuthStreamContext(metadata.NewIncomingContext(context.Background(), md)))
 		defer cancel()
 		errc := make(chan error, 1)
 		go func() {

@@ -79,8 +79,9 @@ func (c *xpfCollector) initGlobalDescriptors() {
 	)
 	c.fabricStreamArgsUnboundTotal = prometheus.NewDesc(
 		"xpf_fabric_stream_args_unbound_total",
-		"Total MonitorInterface streams accepted on the legacy method-only "+
-			"token because the peer sent no args-bound token (#11082). "+
+		"Total FABRIC MonitorInterface streams accepted on the legacy "+
+			"method-only token because the peer sent no args-bound token "+
+			"(#11082). Local loopback monitor streams never count (#13050). "+
 			"Migration signal: stays zero once all peers bind arguments, "+
 			"then the fallback is removed (Phase 2).",
 		nil, nil,
