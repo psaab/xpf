@@ -119,7 +119,7 @@
 
 use super::policy_revalidation::{PolicyRevocation, PolicyRevocationReason};
 use super::*;
-use crate::policy::{PolicyEvaluationResult, evaluate_policy_result_without_counting};
+use crate::policy::{PolicyEvaluationResult, evaluate_policy_result_without_counting_at};
 use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
 
 /// Attribution for an established-hit denial. Evaluation intentionally skips
@@ -259,6 +259,7 @@ pub(super) fn owner_hit_icmp_verdict(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     packet_frame: &[u8],
+    now_ns: u64,
 ) -> Option<OwnerHitIcmpVerdict> {
     // Host-bound packets have a different authority plane (`junos-host`).
     // Transit owners can be judged from the session's recorded zone pair and
@@ -288,7 +289,7 @@ pub(super) fn owner_hit_icmp_verdict(
         }) {
             return None;
         }
-        let result = evaluate_policy_result_without_counting(
+        let result = evaluate_policy_result_without_counting_at(
             &forwarding.policy,
             metadata.ingress_zone,
             metadata.egress_zone,
@@ -298,6 +299,7 @@ pub(super) fn owner_hit_icmp_verdict(
             flow.forward_key.src_port,
             flow.forward_key.dst_port,
             packet_icmp,
+            now_ns,
         );
         return Some(
             if matches!(result.action, crate::policy::PolicyAction::Permit) {
@@ -315,7 +317,7 @@ pub(super) fn owner_hit_icmp_verdict(
         .nat
         .rewrite_dst_port
         .unwrap_or(flow.forward_key.dst_port);
-    let result = evaluate_policy_result_without_counting(
+    let result = evaluate_policy_result_without_counting_at(
         &forwarding.policy,
         metadata.ingress_zone,
         metadata.egress_zone,
@@ -325,6 +327,7 @@ pub(super) fn owner_hit_icmp_verdict(
         flow.forward_key.src_port,
         dst_port,
         packet_icmp,
+        now_ns,
     );
     Some(
         if matches!(result.action, crate::policy::PolicyAction::Permit) {
@@ -352,6 +355,7 @@ pub(super) fn foreign_hit_verdict(
     packet_frame: &[u8],
     arrival_zone: u16,
     on_admitting_interface: bool,
+    now_ns: u64,
 ) -> ForeignHitVerdict {
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery {
         return ForeignHitVerdict::Forward;
@@ -367,7 +371,7 @@ pub(super) fn foreign_hit_verdict(
                 .unwrap_or(flow.forward_key.dst_port),
         )
     };
-    let result = evaluate_policy_result_without_counting(
+    let result = evaluate_policy_result_without_counting_at(
         &forwarding.policy,
         arrival_zone,
         metadata.egress_zone,
@@ -377,6 +381,7 @@ pub(super) fn foreign_hit_verdict(
         flow.forward_key.src_port,
         dst_port,
         policy_packet_icmp(packet_frame, meta),
+        now_ns,
     );
     if matches!(result.action, crate::policy::PolicyAction::Permit) {
         return ForeignHitVerdict::Forward;

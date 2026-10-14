@@ -2494,6 +2494,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow,
                                 meta,
                                 packet_frame,
+                                now_ns,
                             )
                         } else {
                             None
@@ -2563,6 +2564,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     packet_frame,
                                     arrival_zone,
                                     may_revoke,
+                                    now_ns,
                                 ) {
                                     ForeignHitVerdict::Forward => None,
                                     ForeignHitVerdict::Drop(deny) => {
