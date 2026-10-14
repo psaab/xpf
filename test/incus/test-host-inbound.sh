@@ -70,7 +70,8 @@ xpf_enter_destructive_cluster_cell "test-host-inbound $*" "$0" "$@"
 #     ADDRESS, SAME FAMILY, SAME RUN, SAME PROBER — an ICMP echo to that exact
 #     address. A DENY cell whose control did not answer is scored FAIL
 #     (blind), never PASS. host-inbound-lib.sh makes that verdict total and
-#     host-inbound-selftest.sh drives the middle row.
+#     host-inbound-selftest.sh drives the middle row — and, since #12912, the
+#     per-port listener gate above.
 #   * the prober distinguishes an RST from a timeout. xpfd binds its own
 #     listeners on 127.0.0.1 only, so an admitted probe of a non-listening
 #     port comes back as an RST — a packet-carrying POSITIVE signal that
@@ -169,44 +170,51 @@ pscore() {
 # complete a telnet handshake and flip those DENY cells RED — without it the
 # telnet cells pass vacuously (xpf_dp_rst silences the RST either way).
 # Started after the posture gate, killed by the EXIT trap (composed with the
-# failover trap below); the marker makes stale-listener cleanup precise
-# (never a broad pkill).
+# failover trap below); the shared marker prefix makes stale-listener cleanup
+# precise (never a broad pkill) while the per-port suffixes below keep the
+# two listeners individually accountable.
 HI_SSH_LISTENER_MARK="xpf-hi-smoke-ssh-listener-9637"
+# hi_ssh_listener_mark <port> — the pgrep marker for ONE port's probe
+# listener. Per-port on purpose (#12912): while both ports shared one
+# marker, pgrep answered for whichever listener was still alive, so a live
+# TCP/22 process vouched for a dead TCP/23 one and the gate below could not
+# tell the two ports apart.
+hi_ssh_listener_mark() { echo "${HI_SSH_LISTENER_MARK}-$1"; }
 start_ssh_probe_listener() {
-	local inst py22 py23
-	py22='import socket; MARK="xpf-hi-smoke-ssh-listener-9637"; s=socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("::", 22)); s.listen(16); [s.accept()[0].close() for _ in iter(int, 1)]'
-	py23='import socket; MARK="xpf-hi-smoke-ssh-listener-9637"; s=socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("::", 23)); s.listen(16); [s.accept()[0].close() for _ in iter(int, 1)]'
+	local inst port mark py owned verdict
 	for inst in "$FW0" "$FW1"; do
 		incus exec "$inst" -- pkill -f "$HI_SSH_LISTENER_MARK" >/dev/null 2>&1 || true
-		incus exec "$inst" -- bash -c "nohup python3 -c '$py22' >/tmp/xpf-hi-ssh-listener-22.log 2>&1 &" >/dev/null 2>&1 || die "cannot start ssh probe listener on $inst"
-		incus exec "$inst" -- bash -c "nohup python3 -c '$py23' >/tmp/xpf-hi-ssh-listener-23.log 2>&1 &" >/dev/null 2>&1 || die "cannot start telnet probe listener on $inst"
-	done
-	# Fail-closed: every ssh/telnet cell below needs OUR listener on the
-	# exact socket the prober reaches. A bare `ss :port` check can be
-	# satisfied by a sibling lane's, stale, or loopback-only listener while
-	# OUR process is dead — scoring cells against someone else's socket.
-	# So for each node and each port: list owned PIDs (pgrep on the marker),
-	# list the socket's PIDs (`ss -tlnp` names users per socket), and require
-	# every socket PID to be an owned PID (and at least one to exist).
-	# Loopback-only listeners do not satisfy external probers and fail here.
-	for inst in "$FW0" "$FW1"; do
-		sleep 1
-		owned="$(incus exec "$inst" -- pgrep -f "$HI_SSH_LISTENER_MARK" 2>/dev/null || true)"
-		[[ -n "$owned" ]] || die "ssh probe listener process missing on $inst — refusing to score cells against an unverified port"
 		for port in 22 23; do
-		# One awk over `ss -tlnp` (hi_wildcard_socket_pids): consider only
-		# rows whose LOCAL address is wildcard (0.0.0.0/[::], i.e.
-		# externally reachable — never 127.0.0.1/[::1]) with an EXACT port
-		# match (":22" must not catch ":220"), and emit the socket PIDs.
-		# Every emitted PID must be an owned marker PID; empty output
-		# fails closed.
-		sockpids="$(incus exec "$inst" -- ss -tlnp 2>/dev/null | hi_wildcard_socket_pids "$port")"
-			for spid in $sockpids; do
-				grep -qxF "$spid" <<<"$owned" || die "$inst:$port held by pid $spid, not our marker process (owned: $(tr '\n' ' ' <<<"$owned")) — refusing to score cells against a foreign socket"
-			done
+			mark="$(hi_ssh_listener_mark "$port")"
+			py="import socket; MARK=\"$mark\"; s=socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind((\"::\", $port)); s.listen(16); [s.accept()[0].close() for _ in iter(int, 1)]"
+			incus exec "$inst" -- bash -c "nohup python3 -c '$py' >/tmp/xpf-hi-ssh-listener-$port.log 2>&1 &" >/dev/null 2>&1 \
+				|| die "cannot start port-$port probe listener on $inst"
 		done
 	done
-	info "ssh probe listener on TCP/22+23 ($FW0, $FW1, ownership-verified)"
+	# Fail-closed, PER PORT (#12912): every ssh/telnet cell below needs OUR
+	# listener on the exact socket the prober reaches. A bare `ss :port`
+	# check can be satisfied by a sibling lane's, stale, or loopback-only
+	# listener while OUR process is dead — scoring cells against someone
+	# else's socket. So for each node and each port: list the pids owned by
+	# THIS port's marker (a shared marker let the live TCP/22 process answer
+	# for the dead TCP/23 one), then hand the node's `ss -tlnp` to
+	# hi_socket_ownership_verdict, which demands a NON-EMPTY wildcard-bound
+	# socket list for the exact port (a missing listener must not pass
+	# vacuously through an empty ownership loop — the #12912 defect) whose
+	# every pid is an owned one. Loopback-only listeners do not satisfy
+	# external probers and fail there too.
+	for inst in "$FW0" "$FW1"; do
+		sleep 1
+		for port in 22 23; do
+			owned="$(incus exec "$inst" -- pgrep -f "$(hi_ssh_listener_mark "$port")" 2>/dev/null || true)"
+			verdict="$(incus exec "$inst" -- ss -tlnp 2>/dev/null | hi_socket_ownership_verdict "$port" "$owned")"
+			case "$verdict" in
+				PASS\ *) ;;
+				*) die "$inst port-$port probe listener gate: ${verdict:-hi_socket_ownership_verdict printed nothing}" ;;
+			esac
+		done
+	done
+	info "ssh probe listener on TCP/22+23 ($FW0, $FW1, per-port ownership verified)"
 }
 cleanup_ssh_probe_listener() {
 	local inst

@@ -10,6 +10,10 @@
 # the two collapse — which is precisely the defect #7798 had to remove from the
 # FBF smoke, and which the #6936 comment asks to be avoided here on the first
 # pass rather than after someone notices.
+# Since #12912 it also pins the listener-presence gate: unit rows for
+# hi_socket_ownership_verdict and a sed-lifted run of the live smoke's
+# start_ssh_probe_listener against fake ss/pgrep fixtures, so a missing or
+# foreign TCP/23 listener can no longer pass telnet DENY cells vacuously.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -111,6 +115,63 @@ checkpids SS_MULTI_PID_ROW $'1234\n5678' 23 "$SS_OUT"
 # what rejects it (grep -qxF against the marker PIDs).
 checkpids SS_FOREIGN_PID_EMITTED "9999" 220 "$SS_OUT"
 checkpids SS_EMPTY_SS_EMPTY "" 22 ""
+
+# --- listener presence gate: per-port verdict (#12912) ------------------------
+# hi_socket_ownership_verdict is the per-port gate start_ssh_probe_listener
+# runs before ANY host-inbound cell is scored. THE FIRST ROW is the #12912
+# defect itself: an owned marker process alone must not satisfy a port with
+# no wildcard-bound socket — the empty socket list used to walk through an
+# empty ownership loop and pass every telnet DENY cell vacuously while the
+# live TCP/22 listener kept the shared marker non-empty.
+checkg() {
+	local name="$1" want="$2" port="$3" owned="$4" ss="$5" got verdict
+	got="$(hi_socket_ownership_verdict "$port" "$owned" <<<"$ss")"
+	verdict="${got%% *}"
+	if [[ "$verdict" == "$want" ]]; then
+		pass=$((pass + 1)); printf 'ok   %-34s -> %s\n' "$name" "$verdict"
+	else
+		fail=$((fail + 1)); printf 'FAIL %-34s -> want %s got %s (%s)\n' "$name" "$want" "$verdict" "$got"
+	fi
+	# TOTALITY: exactly one line, and it is one of the two known words.
+	[[ "$(grep -c . <<<"$got")" -eq 1 ]] || {
+		fail=$((fail + 1)); printf 'FAIL %-34s -> verdict was not exactly one line: %q\n' "$name" "$got"; }
+	[[ "$verdict" == PASS || "$verdict" == FAIL ]] || {
+		fail=$((fail + 1)); printf 'FAIL %-34s -> verdict word %q is neither PASS nor FAIL\n' "$name" "$verdict"; }
+}
+
+GATE_SS_22='State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 16 [::]:22 [::]:* users:(("python3",pid=1022,fd=3))'
+# THE #12912 ROW: this port's marker process is alive (owned non-empty) but
+# no wildcard socket exists for it — FAIL, never a vacuous pass.
+checkg GATE_NO_SOCKET_FAILS FAIL 23 "1023" "$GATE_SS_22"
+# The same reading with nothing owned at all, and with no ss output at all.
+checkg GATE_EMPTY_OWNED_FAILS FAIL 22 "" "$GATE_SS_22"
+checkg GATE_EMPTY_SS_FAILS     FAIL 22 "1022" ""
+# Foreign holder: the socket exists but belongs to another process.
+GATE_SS_FOREIGN='State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 16 [::]:22 [::]:* users:(("python3",pid=1022,fd=3))
+LISTEN 0 16 [::]:23 [::]:* users:(("inetd",pid=9876,fd=5))'
+checkg GATE_FOREIGN_HOLDER_FAILS FAIL 23 "1023" "$GATE_SS_FOREIGN"
+# Loopback-only is not externally reachable: no wildcard row for the port.
+GATE_SS_LO='State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 16 [::]:22 [::]:* users:(("python3",pid=1022,fd=3))
+LISTEN 0 16 127.0.0.1:23 0.0.0.0:* users:(("python3",pid=1023,fd=3))'
+checkg GATE_LOOPBACK_ONLY_FAILS FAIL 23 "1023" "$GATE_SS_LO"
+# Near-miss port: :230 is not :23.
+GATE_SS_NEAR='State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 16 [::]:230 [::]:* users:(("python3",pid=1023,fd=3))'
+checkg GATE_PORT_NEAR_MISS_FAILS FAIL 23 "1023" "$GATE_SS_NEAR"
+# Multi-pid socket: one foreign co-holder spoils the whole port...
+GATE_SS_MULTI='State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 16 [::]:23 [::]:* users:(("python3",pid=1023,fd=3),("python3",pid=9876,fd=3))'
+checkg GATE_MULTI_ONE_FOREIGN_FAILS FAIL 23 "1023" "$GATE_SS_MULTI"
+# ...while a fully-owned multi-pid socket passes, as does each plain port.
+checkg GATE_MULTI_ALL_OWNED_PASSES PASS 23 $'1023\n9876' "$GATE_SS_MULTI"
+GATE_SS_BOTH='State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+LISTEN 0 16 [::]:22 [::]:* users:(("python3",pid=1022,fd=3))
+LISTEN 0 16 [::]:23 [::]:* users:(("python3",pid=1023,fd=3))'
+checkg GATE_OWNED_22_PASSES PASS 22 "1022" "$GATE_SS_BOTH"
+checkg GATE_OWNED_23_PASSES PASS 23 "1023" "$GATE_SS_BOTH"
 
 # --- THE CORE TABLE: every (expectation x observation x control) combination -
 checkv() {
@@ -276,6 +337,166 @@ lan-v4-telnet SILENT'
 checkm MATRIX_AFTER_EMPTY   FAIL "$BASE" ''
 checkm MATRIX_BEFORE_EMPTY  FAIL ''      "$BASE"
 checkm MATRIX_BOTH_EMPTY    FAIL ''      ''
+
+# --- THE DECISIVE CHECK (#12912): the live gate under hermetic ss/pgrep -----
+# The unit rows above pin hi_socket_ownership_verdict; these rows pin the
+# WIRING in test-host-inbound.sh. The live start_ssh_probe_listener (and,
+# post-fix, hi_ssh_listener_mark) is lifted out of the real script by
+# sed-range eval — the same pattern cluster-cell-selftest.sh uses to lift
+# xpf_assert_cluster_lock_idle out of test-connectivity.sh — and run against
+# a fake `incus` whose `pgrep -f` answers come from the listener processes
+# the function itself just started and whose `ss -tlnp` rows come from the
+# same world. THE FIRST ROW is the issue's scenario: only the TCP/22
+# listener alive. On master the shared marker kept `owned` non-empty and the
+# port-23 socket list came back empty, so the ownership loop iterated zero
+# times and the gate sailed through to its info line — the vacuous pass
+# behind every telnet DENY cell. Only the both-owned scenario may pass.
+GATE_TMP="$(mktemp -d)"
+trap 'rm -rf "$GATE_TMP"' EXIT
+mkdir -p "$GATE_TMP/bin"
+cat >"$GATE_TMP/bin/incus" <<'FAKE_INCUS'
+#!/usr/bin/env bash
+# Fake incus for the #12912 listener-gate drive: hermetic ss/pgrep fixtures.
+# It models exactly the four verbs start_ssh_probe_listener uses:
+#   exec <inst> -- pkill -f <pat>    no-op success (stale cleanup)
+#   exec <inst> -- bash -c <cmd>     record the listener: parse MARK= and the
+#                                    s.bind port out of the python payload,
+#                                    pid := 9000+port
+#   exec <inst> -- pgrep -f <pat>    pids of LIVE listeners whose recorded
+#                                    MARK contains the pattern (pgrep -f on
+#                                    a plain-string mark is a substring test)
+#   exec <inst> -- ss -tlnp          one [::]:<port> row per LIVE listener,
+#                                    plus one foreign row when
+#                                    HI_FAKE_FOREIGN_PORT/HI_FAKE_FOREIGN_PID
+#                                    name a foreign holder
+# "LIVE" is decided by HI_FAKE_WORLD, a file listing the ports whose listener
+# actually survived: a port missing from it never started or died at bind —
+# no process, no socket.
+set -u
+[[ "${1:-}" == exec ]] || exit 0
+shift 2
+[[ "${1:-}" == -- ]] && shift
+world="${HI_FAKE_WORLD:?HI_FAKE_WORLD must name the live-ports file}"
+case "${1:-}" in
+pkill)
+	exit 0
+	;;
+bash)
+	cmd="$3"
+	mark="${cmd#*MARK=\"}"
+	mark="${mark%%\"*}"
+	port="${cmd#*s.bind((\"::\", }"
+	port="${port%%)*}"
+	if [[ -z "$mark" || -z "$port" || ! "$port" =~ ^[0-9]+$ ]]; then
+		echo "fake-incus: cannot parse MARK/bind port from: $cmd" >&2
+		exit 1
+	fi
+	printf '%s %s %s\n' "$port" "$((9000 + port))" "$mark" >>"${world}.procs"
+	exit 0
+	;;
+pgrep)
+	pat="$3"
+	found=0
+	while read -r p pid m; do
+		[[ -n "$p" ]] || continue
+		grep -qx "$p" "$world" || continue
+		if [[ "MARK=$m" == *"$pat"* ]]; then
+			echo "$pid"
+			found=1
+		fi
+	done <"${world}.procs"
+	exit $((1 - found))
+	;;
+ss)
+	echo 'State Recv-Q Send-Q Local Address:Port Peer Address:Port Process'
+	while read -r p pid m; do
+		[[ -n "$p" ]] || continue
+		grep -qx "$p" "$world" || continue
+		printf 'LISTEN 0 16 [::]:%s [::]:* users:(("python3",pid=%s,fd=3))\n' "$p" "$pid"
+	done <"${world}.procs"
+	if [[ -n "${HI_FAKE_FOREIGN_PORT:-}" ]]; then
+		printf 'LISTEN 0 16 [::]:%s [::]:* users:(("inetd",pid=%s,fd=5))\n' \
+			"$HI_FAKE_FOREIGN_PORT" "${HI_FAKE_FOREIGN_PID:?}"
+	fi
+	exit 0
+	;;
+*)
+	echo "fake-incus: unexpected verb: $*" >&2
+	exit 1
+	;;
+esac
+FAKE_INCUS
+chmod +x "$GATE_TMP/bin/incus"
+cat >"$GATE_TMP/bin/sleep" <<'FAKE_SLEEP'
+#!/usr/bin/env sh
+# The real gate sleeps 1s per node to let listeners bind; the fake ones bind
+# instantly.
+exit 0
+FAKE_SLEEP
+chmod +x "$GATE_TMP/bin/sleep"
+
+# Lift the LIVE gate out of test-host-inbound.sh. hi_ssh_listener_mark is a
+# one-line function, so it is matched whole-line (a `{...},/^}/` range would
+# run past its end-of-line brace and double-print the function below). A
+# missing start function must be a loud FAIL, not three silently-green
+# scenarios over a stub.
+HI_GATE_SRC="$(sed -n '/^HI_SSH_LISTENER_MARK=/p
+	/^hi_ssh_listener_mark()/p
+	/^start_ssh_probe_listener() {/,/^}/p' "${SCRIPT_DIR}/test-host-inbound.sh")"
+if [[ -n "$(sed -n '/^start_ssh_probe_listener() {/,/^}/p' "${SCRIPT_DIR}/test-host-inbound.sh")" ]]; then
+	pass=$((pass + 1)); printf 'ok   %-34s -> start_ssh_probe_listener lifted from the live smoke\n' "GATE_EXTRACT"
+else
+	fail=$((fail + 1)); printf 'FAIL %-34s -> could not extract start_ssh_probe_listener from test-host-inbound.sh\n' "GATE_EXTRACT"
+fi
+
+# gate_case <name> <dies|passes> <live-ports...>
+#   Run the live gate against a world where exactly <live-ports> survived.
+#   dies:   the gate must fail closed (die, exit 2) naming the guilty port.
+#   passes: the gate must reach its per-port ownership info line (exit 0).
+gate_case() {
+	local name="$1" want="$2"; shift 2
+	local out rc=0 world ok=0 why
+	world="${GATE_TMP}/${name}.world"
+	printf '%s\n' "$@" >"$world"
+	rm -f "${world}.procs"
+	out="$(
+		(
+			export HI_FAKE_WORLD="$world" PATH="${GATE_TMP}/bin:$PATH"
+			eval "$HI_GATE_SRC"
+			# FW0/FW1 ride the command environment (the eval'd gate reads
+			# them); die/info stand in for the smoke's own helpers.
+			die() { printf 'DIE: %s\n' "$*"; exit 2; }
+			info() { printf 'INFO: %s\n' "$*"; }
+			FW0=node0 FW1=node1 start_ssh_probe_listener
+		) 2>&1
+	)" || rc=$?
+	case "$want" in
+	dies)
+		[[ "$rc" -eq 2 ]] && grep -q '^DIE: .*23' <<<"$out" && ok=1
+		why="want fail-closed die naming port 23, got rc=$rc: $(head -1 <<<"$out")"
+		;;
+	passes)
+		[[ "$rc" -eq 0 ]] && grep -q '^INFO: ' <<<"$out" && ok=1
+		why="want the per-port ownership info line, got rc=$rc: $(head -1 <<<"$out")"
+		;;
+	*)
+		why="bad want: $want"
+		;;
+	esac
+	if [[ "$ok" -eq 1 ]]; then
+		pass=$((pass + 1)); printf 'ok   %-34s -> %s\n' "$name" "$want"
+	else
+		fail=$((fail + 1)); printf 'FAIL %-34s -> %s\n' "$name" "$why"
+	fi
+}
+
+# Owned TCP/22 only (no /23): the #12912 scenario — must DIE.
+gate_case GATE_LIVE_OWNED_22_ONLY_DIES dies 22
+# Foreign TCP/23 (our 23 dead, someone else's socket): must DIE.
+HI_FAKE_FOREIGN_PORT=23 HI_FAKE_FOREIGN_PID=9876 \
+	gate_case GATE_LIVE_FOREIGN_23_DIES dies 22
+# Both owned: the only world that may reach the info line.
+gate_case GATE_LIVE_BOTH_OWNED_PASSES passes 22 23
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

@@ -275,3 +275,41 @@ hi_wildcard_socket_pids() {
 			}
 		}' | sort -u
 }
+
+# hi_socket_ownership_verdict <port> <owned-pids>
+#
+#   Read `ss -tlnp` output on stdin; print exactly one line: "PASS <why>"
+#   or "FAIL <why>". TOTAL.
+#
+#   The per-port listener-presence gate the host-inbound smoke runs before
+#   ANY cell is scored (#9637 listeners, made port-specific by #12912).
+#   <owned-pids> is THIS port's marker process list — `pgrep -f` on the
+#   port-specific marker, never a marker shared with the other port: with
+#   one shared marker a live TCP/22 listener vouched for a dead TCP/23 one.
+#
+#   FAIL, never a silent pass, when:
+#     * hi_wildcard_socket_pids finds no pid for the exact port — nothing
+#       externally reachable is listening there. An empty pid list must not
+#       walk through an empty ownership loop (#12912: that is exactly how a
+#       missing TCP/23 listener let every telnet DENY cell pass vacuously
+#       while the live TCP/22 listener kept the shared marker non-empty);
+#     * any socket pid is absent from <owned-pids> — the port is held by a
+#       foreign or stale process, and cells would be scored against
+#       someone else's socket.
+hi_socket_ownership_verdict() {
+	local port="$1" owned="$2"
+	local ssout sockpids spid
+	ssout="$(cat)"
+	sockpids="$(hi_wildcard_socket_pids "$port" <<<"$ssout")"
+	if [[ -z "$sockpids" ]]; then
+		echo "FAIL port $port has no wildcard-bound listener (this port's marker pids: $(tr '\n' ' ' <<<"$owned")) — nothing would answer the prober, so cells would pass vacuously"
+		return
+	fi
+	for spid in $sockpids; do
+		grep -qxF "$spid" <<<"$owned" || {
+			echo "FAIL port $port held by pid $spid, not this port's marker process (owned: $(tr '\n' ' ' <<<"$owned")) — refusing to score cells against a foreign socket"
+			return
+		}
+	done
+	echo "PASS port $port wildcard listener held by this port's marker pid(s): $(tr '\n' ' ' <<<"$sockpids")"
+}
