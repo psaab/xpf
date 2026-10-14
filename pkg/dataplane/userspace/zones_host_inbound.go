@@ -1374,8 +1374,8 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 
 // HostInboundLifelineIngressNetdevs returns the sorted linux netdev names
 // of true lifelines whose ingress must keep management reachability to
-// lifeline-shared values (#10751 M1/Opus9): fxp0 plus the linux names of every
-// configured control/fabric unit recognized by HostInboundLifelineInterface.
+// lifeline-shared values (#10751 M1/Opus9): fxp0 plus configured control/fabric
+// interfaces and units recognized by HostInboundLifelineInterface.
 // Bare em0/fab<N> names are not exempt unless the config assigns them a
 // lifeline role (#11068). This MIRRORS the withhold-side interface definition:
 // an interface whose addresses get withheld must have its ingress excepted in
@@ -1393,6 +1393,15 @@ func HostInboundLifelineIngressNetdevs(cfg *config.Config) []string {
 		for ifName, iface := range cfg.Interfaces.Interfaces {
 			if iface == nil {
 				continue
+			}
+			// Unit-less physical lifelines have a base-row address but no
+			// logical-unit row to add their netdev below. Do not add a bare
+			// parent for an interface with units: a non-unit-mapped parent
+			// would broaden the gap exception beyond the lifeline member.
+			if len(iface.Units) == 0 && hostInboundLifelineInterface(ifName, lifelines) {
+				if ln := snapshotLinuxName(cfg, ifName, iface, nil); ln != "" {
+					set[ln] = true
+				}
 			}
 			for un, unit := range iface.Units {
 				if unit == nil {
