@@ -200,11 +200,13 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	zoneIngressV4, zoneIngressV6 := hostInboundZoneIngressDestinations(spec.Views)
 	for _, v := range spec.Views {
 		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) ||
-			hostInboundWGGuardEmits(v.V4Addrs, spec.WGListenPorts) {
+			hostInboundWGGuardEmits(v.V4Addrs, spec.WGListenPorts) ||
+			hostInboundWGGuardEmits(v.IngressDenyV4, spec.WGListenPorts) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip"))
 		}
 		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) ||
-			hostInboundWGGuardEmits(v.V6Addrs, spec.WGListenPorts) {
+			hostInboundWGGuardEmits(v.V6Addrs, spec.WGListenPorts) ||
+			hostInboundWGGuardEmits(v.IngressDenyV6, spec.WGListenPorts) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}

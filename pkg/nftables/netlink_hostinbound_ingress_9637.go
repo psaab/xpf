@@ -58,50 +58,55 @@ func hostInboundWGGuardEmits(addrs []string, listenPorts []uint16) bool {
 	return len(addrs) > 0 && len(listenPorts) > 0
 }
 
-func hostInboundWGAddressesForFamily(v HostInboundZoneView, f nlFamily) []string {
+func hostInboundWGAddressesForFamily(v HostInboundZoneView, f nlFamily) (addresses, ingressDeny []string) {
 	if f == famV6 {
-		return v.V6Addrs
+		return v.V6Addrs, v.IngressDenyV6
 	}
-	return v.V4Addrs
+	return v.V4Addrs, v.IngressDenyV4
 }
-
 func hostInboundWGZoneAddresses(views []HostInboundZoneView, f nlFamily) (zones []string, addresses map[string][]string, ambiguous []string) {
 	owners := make(map[string]string)
 	ambiguousSet := make(map[string]bool)
 	for _, view := range views {
-		for _, addr := range hostInboundWGAddressesForFamily(view, f) {
-			if owner, ok := owners[addr]; ok && owner != view.Zone {
-				ambiguousSet[addr] = true
-				continue
+		addrs, denied := hostInboundWGAddressesForFamily(view, f)
+		for _, list := range [2][]string{addrs, denied} {
+			for _, addr := range list {
+				if owner, ok := owners[addr]; ok && owner != view.Zone {
+					ambiguousSet[addr] = true
+					continue
+				}
+				owners[addr] = view.Zone
 			}
-			owners[addr] = view.Zone
 		}
 	}
 	addresses = make(map[string][]string)
 	seenZones, seenAmbiguous := map[string]bool{}, map[string]bool{}
 	seenAddrs := make(map[string]map[string]bool)
 	for _, view := range views {
-		for _, addr := range hostInboundWGAddressesForFamily(view, f) {
-			if ambiguousSet[addr] {
-				if !seenAmbiguous[addr] {
-					ambiguous = append(ambiguous, addr)
-					seenAmbiguous[addr] = true
+		addrs, denied := hostInboundWGAddressesForFamily(view, f)
+		for _, list := range [2][]string{addrs, denied} {
+			for _, addr := range list {
+				if ambiguousSet[addr] {
+					if !seenAmbiguous[addr] {
+						ambiguous = append(ambiguous, addr)
+						seenAmbiguous[addr] = true
+					}
+					continue
 				}
-				continue
-			}
-			if owners[addr] != view.Zone {
-				continue
-			}
-			if !seenZones[view.Zone] {
-				zones = append(zones, view.Zone)
-				seenZones[view.Zone] = true
-			}
-			if seenAddrs[view.Zone] == nil {
-				seenAddrs[view.Zone] = make(map[string]bool)
-			}
-			if !seenAddrs[view.Zone][addr] {
-				addresses[view.Zone] = append(addresses[view.Zone], addr)
-				seenAddrs[view.Zone][addr] = true
+				if owners[addr] != view.Zone {
+					continue
+				}
+				if !seenZones[view.Zone] {
+					zones = append(zones, view.Zone)
+					seenZones[view.Zone] = true
+				}
+				if seenAddrs[view.Zone] == nil {
+					seenAddrs[view.Zone] = make(map[string]bool)
+				}
+				if !seenAddrs[view.Zone][addr] {
+					addresses[view.Zone] = append(addresses[view.Zone], addr)
+					seenAddrs[view.Zone][addr] = true
+				}
 			}
 		}
 	}

@@ -34,6 +34,8 @@ func hostInboundWireGuardZonePorts(cfg *config.Config, views []dpuserspace.ZoneH
 	for _, view := range views {
 		addrs(view.Zone, view.V4Addrs)
 		addrs(view.Zone, view.V6Addrs)
+		addrs(view.Zone, view.IngressDenyV4)
+		addrs(view.Zone, view.IngressDenyV6)
 	}
 
 	byZone := make(map[string]map[uint16]bool)
@@ -92,51 +94,53 @@ func hostInboundWireGuardZoneAddresses(views []dpuserspace.ZoneHostInboundView, 
 	owners := make(map[string]string)
 	ambiguousSet := make(map[string]bool)
 	for _, view := range views {
-		addrs := view.V4Addrs
-		if family == "ip6" {
-			addrs = view.V6Addrs
-		}
-		for _, addr := range addrs {
-			if owner, ok := owners[addr]; ok && owner != view.Zone {
-				ambiguousSet[addr] = true
-				continue
+		for _, addrs := range hostInboundWireGuardAddressLists(view, family) {
+			for _, addr := range addrs {
+				if owner, ok := owners[addr]; ok && owner != view.Zone {
+					ambiguousSet[addr] = true
+					continue
+				}
+				owners[addr] = view.Zone
 			}
-			owners[addr] = view.Zone
 		}
 	}
 	addresses = make(map[string][]string)
 	seenZones := make(map[string]bool)
 	seenAddrs := make(map[string]map[string]bool)
 	for _, view := range views {
-		addrs := view.V4Addrs
-		if family == "ip6" {
-			addrs = view.V6Addrs
-		}
-		for _, addr := range addrs {
-			if ambiguousSet[addr] {
-				if !seenZones["\x00"+addr] {
-					ambiguous = append(ambiguous, addr)
-					seenZones["\x00"+addr] = true
+		for _, addrs := range hostInboundWireGuardAddressLists(view, family) {
+			for _, addr := range addrs {
+				if ambiguousSet[addr] {
+					if !seenZones["\x00"+addr] {
+						ambiguous = append(ambiguous, addr)
+						seenZones["\x00"+addr] = true
+					}
+					continue
 				}
-				continue
-			}
-			if owners[addr] != view.Zone {
-				continue
-			}
-			if !seenZones[view.Zone] {
-				zones = append(zones, view.Zone)
-				seenZones[view.Zone] = true
-			}
-			if seenAddrs[view.Zone] == nil {
-				seenAddrs[view.Zone] = make(map[string]bool)
-			}
-			if !seenAddrs[view.Zone][addr] {
-				addresses[view.Zone] = append(addresses[view.Zone], addr)
-				seenAddrs[view.Zone][addr] = true
+				if owners[addr] != view.Zone {
+					continue
+				}
+				if !seenZones[view.Zone] {
+					zones = append(zones, view.Zone)
+					seenZones[view.Zone] = true
+				}
+				if seenAddrs[view.Zone] == nil {
+					seenAddrs[view.Zone] = make(map[string]bool)
+				}
+				if !seenAddrs[view.Zone][addr] {
+					addresses[view.Zone] = append(addresses[view.Zone], addr)
+					seenAddrs[view.Zone][addr] = true
+				}
 			}
 		}
 	}
 	return zones, addresses, ambiguous
+}
+func hostInboundWireGuardAddressLists(view dpuserspace.ZoneHostInboundView, family string) [2][]string {
+	if family == "ip6" {
+		return [2][]string{view.V6Addrs, view.IngressDenyV6}
+	}
+	return [2][]string{view.V4Addrs, view.IngressDenyV4}
 }
 
 func hostInboundWireGuardZoneIngress(views []dpuserspace.ZoneHostInboundView) map[string]xnft.HostInboundWGIngress {
