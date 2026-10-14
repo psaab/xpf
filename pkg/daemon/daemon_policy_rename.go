@@ -477,13 +477,22 @@ func rematchRenamedV6(oldCfg, newCfg *config.Config, binding policyRenameBinding
 	}
 	src := net.IP(append([]byte(nil), key.SrcIP[:]...))
 	dst := net.IP(append([]byte(nil), key.DstIP[:]...))
+	dstFamily := "v6"
 	if value.Flags&dataplane.SessFlagDNAT != 0 && value.NATDstIP != ([16]byte{}) {
-		dst = net.IP(append([]byte(nil), value.NATDstIP[:]...))
+		if value.Flags&dataplane.SessFlagNAT64 != 0 {
+			// NAT64's translated IPv4 destination is left-aligned in the
+			// legacy v6 ABI; the NAT64 flag disambiguates it from a genuine
+			// IPv6 destination whose trailing twelve bytes are zero.
+			dst = net.IP(append([]byte(nil), value.NATDstIP[:4]...))
+			dstFamily = "v4"
+		} else {
+			dst = net.IP(append([]byte(nil), value.NATDstIP[:]...))
+		}
 	}
 	q := policymatch.Query{
 		FromZone: from, ToZone: to,
 		SrcIP: src, DstIP: dst, Protocol: policyQueryProtocol(key.Protocol),
-		SrcPort: networkPort(key.SrcPort), DstPort: networkPort(key.DstPort), SrcFamily: "v6", DstFamily: "v6",
+		SrcPort: networkPort(key.SrcPort), DstPort: networkPort(key.DstPort), SrcFamily: "v6", DstFamily: dstFamily,
 	}
 	if value.Flags&dataplane.SessFlagDNAT != 0 && value.NATDstPort != 0 {
 		q.DstPort = networkPort(value.NATDstPort)
@@ -543,13 +552,15 @@ func rematchRenamedMatch(oldCfg, newCfg *config.Config, binding policyRenameBind
 	}
 	if match.DNAT && match.NATDstIP != "" {
 		translated := net.ParseIP(match.NATDstIP)
-		if family == 4 {
+		if config.NATAddrFamily(match.NATDstIP) == "v4" {
 			translated = translated.To4()
+			dstFam = "v4"
 		} else {
 			translated = translated.To16()
 			if translated == nil || translated.To4() != nil {
 				translated = nil
 			}
+			dstFam = "v6"
 		}
 		if translated == nil {
 			return dpuserspace.PolicySessionRebind{}, false
