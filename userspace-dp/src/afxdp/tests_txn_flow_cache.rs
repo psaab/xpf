@@ -3556,6 +3556,71 @@ fn run_flowless_nat_frame(
     )
 }
 
+/// #12905 cold-path harness: like `run_flowless_nat_frame`, but observes the
+/// MISSING-NEIGHBOR park (the buffered decision's NAT, which the retry TX
+/// applies) and the captured slow-path reinject bytes (which
+/// `extract_l3_packet_with_nat` already rewrote), instead of the immediate
+/// forward the warm fixture produces.
+#[allow(clippy::type_complexity)]
+fn run_flowless_nat_frame_cold(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> (
+    BatchCounters,
+    DebugPollCounters,
+    usize,
+    Option<crate::nat::NatDecision>,
+    Vec<(bool, Vec<u8>)>,
+) {
+    let forwarding = build_forwarding_state(snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, meta.ingress_ifindex as i32, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(64);
+    assert!(
+        crate::afxdp::forwarding::ingress_destination_mac_accepted(
+            &forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            frame,
+        ),
+        "fixture destination MAC must be accepted on ingress {}",
+        meta.ingress_ifindex,
+    );
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(
+        1500,
+    ));
+    reinjector.enable_test_packet_capture();
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+    );
+    let parked_nat = binding
+        .pending_neigh
+        .values()
+        .next()
+        .map(|parked| parked.decision.nat);
+    (
+        batch,
+        dbg,
+        sessions.len(),
+        parked_nat,
+        reinjector.test_enqueued_packets(),
+    )
+}
+
 fn flowless_nat_descriptor(
     snapshot: &ConfigSnapshot,
     dst: Ipv4Addr,
@@ -3836,54 +3901,290 @@ fn flowless_ambiguous_port_dnat_preserves_local_delivery_gates_11435() {
     assert_eq!(pending, 0);
 }
 
+/// #12905 (D10-03): cold-start LIVENESS for a translated flowless packet.
+/// Before #12905, `flowless_base_resolution` returned `None` whenever a
+/// destination rewrite was selected and the post-translation lookup landed on
+/// NoRoute / MissingNeighbor, so the caller dropped the packet as
+/// `nat_flowless_untranslated_dropped` BEFORE zone policy evaluation and
+/// neighbor resolution — every flowless static-NAT / DNAT / inbound-NPTv6
+/// flow was blackholed at cold start while the untranslated population kept
+/// its probe/defer/retry liveness. The rewrite is now carried by the cold
+/// dispositions: MissingNeighbor parks the frame in pending_neigh with the
+/// translated decision (the retry TX applies it via
+/// rewrite_forwarded_frame_in_place) and NoRoute reinjects through
+/// extract_l3_packet_with_nat (translation applied before the kernel FIB).
+/// Both cells are RED on pre-#12905 master: the park/reinject never happen
+/// and the fence counter is 1.
 #[test]
-fn flowless_cold_translated_no_route_and_missing_neighbor_drop_11435() {
+fn flowless_static_dnat_cold_missing_neighbor_parks_translated_12905() {
     let vip = Ipv4Addr::new(198, 51, 100, 10);
-    for missing_neighbor in [false, true] {
-        for non_first in [false, true] {
-            let mut snapshot = flowless_dnat_snapshot("any");
-            snapshot.default_policy = "permit".to_string();
-            snapshot.policies.clear();
-            if missing_neighbor {
-                snapshot.neighbors.clear();
-            } else {
-                snapshot.destination_nat_rules[0].pool_address = "203.0.113.77".to_string();
-            }
-            let (frame, meta) = if non_first {
-                flowless_non_first_fragment_ipv4_frame(vip)
-            } else {
-                flowless_gre_ipv4_frame(vip)
-            };
-            assert_eq!(
-                crate::afxdp::frame::frame_is_non_first_fragment(&frame, meta),
-                non_first
-            );
+    let internal = Ipv4Addr::new(172, 16, 80, 100);
+    let mut snapshot = flowless_dnat_snapshot("any");
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.destination_nat_rules.clear();
+    snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
+        source_addresses: Vec::new(),
+        counter_id: 0,
+        name: "flowless-static-dnat-cold".to_string(),
+        from_zone: "lan".to_string(),
+        from_interface: String::new(),
+        from_routing_instance: String::new(),
+        external_ip: vip.to_string(),
+        internal_ip: internal.to_string(),
+        match_destination_port: 0,
+        mapped_port: 0,
+        ..Default::default()
+    }];
+    // Cold-start injection: the /32 route to the translated host is valid but
+    // its next-hop neighbor is UNRESOLVED.
+    snapshot.neighbors.clear();
 
-            let (batch, dbg, sessions, flow_backed, forwarded, reinjected, pending) =
-                run_flowless_nat_frame(&snapshot, &frame, meta);
-            assert!(!flow_backed);
-            assert_eq!(dbg.tx, 0, "cold translated traffic must not transmit");
-            assert_eq!(
-                batch.nat_frag_untranslated_dropped,
-                u64::from(non_first),
-                "fragment counter attribution for missing_neighbor={missing_neighbor}"
-            );
-            assert_eq!(
-                batch.nat_flowless_untranslated_dropped,
-                u64::from(!non_first),
-                "whole-packet counter attribution for missing_neighbor={missing_neighbor}"
-            );
-            assert_eq!(sessions, 0);
-            assert!(forwarded.is_none());
-            assert_eq!(
-                reinjected, 0,
-                "the cold translated frame must not be retried"
-            );
-            assert_eq!(
-                pending, 0,
-                "the cold translated frame must not be neighbor-buffered"
-            );
-        }
+    let (frame, meta) = flowless_gre_ipv4_frame(vip);
+    let (batch, dbg, sessions, parked, reinjected) =
+        run_flowless_nat_frame_cold(&snapshot, &frame, meta);
+    assert_eq!(
+        dbg.missing_neigh, 1,
+        "premise: valid route + unresolved next-hop resolves MissingNeighbor"
+    );
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(
+        batch.nat_flowless_untranslated_dropped, 0,
+        "RED on revert: the translated packet must not be fenced"
+    );
+    assert_eq!(batch.nat_frag_untranslated_dropped, 0);
+    assert_eq!(dbg.tx, 0, "nothing transmits before the neighbor resolves");
+    assert_eq!(sessions, 0, "flowless parks without seeding a session");
+    assert_eq!(
+        reinjected.len(),
+        0,
+        "the parked representative owns the frame; no untranslated kernel copy"
+    );
+    let parked = parked.expect("the translated GRE must park for neighbor retry");
+    assert_eq!(parked.rewrite_dst, Some(IpAddr::V4(internal)));
+    assert!(!parked.nat64);
+}
+
+/// #12905: the fragment population of the same defect — a translated
+/// non-first fragment parks (attribution stays off the fragment counter) with
+/// the rewrite recorded for the retry TX. The retry-time reconstruction in
+/// neighbor_dispatch only fires for a DEFAULT decision, so the parked
+/// translation is applied exactly once.
+#[test]
+fn flowless_dnat_fragment_cold_missing_neighbor_parks_translated_12905() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let internal = Ipv4Addr::new(172, 16, 80, 100);
+    let mut snapshot = flowless_dnat_snapshot("any");
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors.clear();
+
+    let (frame, meta) = flowless_non_first_fragment_ipv4_frame(vip);
+    assert!(
+        crate::afxdp::frame::frame_is_non_first_fragment(&frame, meta),
+        "fixture must exercise a real non-first fragment"
+    );
+    let (batch, dbg, sessions, parked, reinjected) =
+        run_flowless_nat_frame_cold(&snapshot, &frame, meta);
+    assert_eq!(dbg.missing_neigh, 1);
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(batch.nat_frag_untranslated_dropped, 0);
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions, 0);
+    assert_eq!(reinjected.len(), 0);
+    let parked = parked.expect("the translated fragment must park for retry");
+    assert_eq!(parked.rewrite_dst, Some(IpAddr::V4(internal)));
+}
+
+/// #12905: the inbound-NPTv6 population — a checksum-neutral translated v6
+/// GRE parks with the recorded rewrite when the outer next-hop is unresolved.
+#[test]
+fn flowless_nptv6_cold_missing_neighbor_parks_translated_12905() {
+    let src = "2001:db8:200::102".parse::<Ipv6Addr>().unwrap();
+    let external = "2001:db8:100:1::99".parse::<Ipv6Addr>().unwrap();
+    let mut snapshot = flowless_dnat_snapshot("any");
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.destination_nat_rules.clear();
+    snapshot.nptv6_rules = vec![crate::protocol::Nptv6RuleSnapshot {
+        name: "flowless-nptv6-cold".to_string(),
+        from_zone: "lan".to_string(),
+        internal_prefix: "fd00:100::/48".to_string(),
+        external_prefix: "2001:db8:100::/48".to_string(),
+        ..Default::default()
+    }];
+    snapshot.neighbors.clear();
+
+    let (frame, meta) = flowless_gre_ipv6_frame(src, external);
+    let (batch, dbg, sessions, parked, reinjected) =
+        run_flowless_nat_frame_cold(&snapshot, &frame, meta);
+    assert_eq!(dbg.missing_neigh, 1);
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions, 0);
+    assert_eq!(reinjected.len(), 0);
+    let parked = parked.expect("the translated NPTv6 GRE must park for retry");
+    assert!(parked.nptv6);
+    let translated = match parked.rewrite_dst {
+        Some(IpAddr::V6(dst_v6)) => dst_v6,
+        other => panic!("NPTv6 park must record a v6 rewrite, got {other:?}"),
+    };
+    assert_eq!(
+        &translated.octets()[..6],
+        &"fd00:100::".parse::<Ipv6Addr>().unwrap().octets()[..6],
+        "the parked rewrite must leave the external prefix"
+    );
+    assert_ne!(translated, external);
+}
+
+/// #12905: the NoRoute population — a permitted translated flowless packet
+/// whose translated destination has no route ADJUDICATES (zone policy on the
+/// computable pair) and then delegates to the kernel FIB with the translation
+/// already applied (#7480 doctrine), instead of being fenced.
+#[test]
+fn flowless_static_dnat_cold_no_route_reinjects_translated_12905() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let unrouted = Ipv4Addr::new(203, 0, 113, 77);
+    let mut snapshot = flowless_dnat_snapshot("any");
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.destination_nat_rules.clear();
+    snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
+        source_addresses: Vec::new(),
+        counter_id: 0,
+        name: "flowless-static-dnat-unrouted".to_string(),
+        from_zone: "lan".to_string(),
+        from_interface: String::new(),
+        from_routing_instance: String::new(),
+        external_ip: vip.to_string(),
+        internal_ip: unrouted.to_string(),
+        match_destination_port: 0,
+        mapped_port: 0,
+        ..Default::default()
+    }];
+
+    let (frame, meta) = flowless_gre_ipv4_frame(vip);
+    let (batch, dbg, sessions, parked, reinjected) =
+        run_flowless_nat_frame_cold(&snapshot, &frame, meta);
+    assert_eq!(
+        dbg.no_route, 1,
+        "premise: the translated destination has no route"
+    );
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions, 0);
+    assert!(parked.is_none(), "a route miss has no next-hop to park on");
+    assert_eq!(
+        reinjected.len(),
+        1,
+        "RED on revert: the adjudicated permit must keep the kernel delegation"
+    );
+    let (_, packet) = &reinjected[0];
+    assert_eq!(
+        &packet[16..20],
+        &unrouted.octets(),
+        "the reinjected L3 packet must carry the TRANSLATED destination"
+    );
+    assert_ne!(&packet[16..20], &vip.octets());
+}
+
+/// #12905: a DENIED translated NoRoute packet downgrades to PolicyDenied and
+/// never reaches the kernel FIB — the #7480 delegation survives only for a
+/// policy permit, and the drop is attributed to policy, not the NAT fence.
+#[test]
+fn flowless_static_dnat_cold_no_route_policy_deny_never_reinjects_12905() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let unrouted = Ipv4Addr::new(203, 0, 113, 77);
+    let mut snapshot = flowless_dnat_snapshot("any");
+    snapshot.policies.clear();
+    snapshot.destination_nat_rules.clear();
+    snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
+        source_addresses: Vec::new(),
+        counter_id: 0,
+        name: "flowless-static-dnat-unrouted-deny".to_string(),
+        from_zone: "lan".to_string(),
+        from_interface: String::new(),
+        from_routing_instance: String::new(),
+        external_ip: vip.to_string(),
+        internal_ip: unrouted.to_string(),
+        match_destination_port: 0,
+        mapped_port: 0,
+        ..Default::default()
+    }];
+
+    let (frame, meta) = flowless_gre_ipv4_frame(vip);
+    let (batch, dbg, sessions, parked, reinjected) =
+        run_flowless_nat_frame_cold(&snapshot, &frame, meta);
+    assert_eq!(dbg.no_route, 1);
+    assert_eq!(dbg.policy_deny, 1, "default-deny must adjudicate the miss");
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(sessions, 0);
+    assert!(parked.is_none());
+    assert!(
+        reinjected.is_empty(),
+        "a denied translated NoRoute packet must not reach the kernel"
+    );
+}
+
+/// #12905: the fail-closed halves stay fail-closed. Zone policy still runs
+/// FIRST on the cold arms, on the POST-translation tuple the warm arm matches
+/// (#2345 doctrine): a default-deny, or a policy naming only the PRE-NAT VIP,
+/// denies the translated flow BEFORE any probe, seed, park, or reinject —
+/// counted as a policy deny, never as a NAT fence drop.
+#[test]
+fn flowless_cold_translated_policy_runs_first_and_stays_fail_closed_12905() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let internal = Ipv4Addr::new(172, 16, 80, 100);
+    for (policy_destination, expect_parked) in [
+        ("172.16.80.100/32", true),
+        ("198.51.100.10/32", false),
+        ("", false),
+    ] {
+        let mut snapshot = if policy_destination.is_empty() {
+            let mut snapshot = flowless_dnat_snapshot("any");
+            snapshot.policies.clear();
+            snapshot
+        } else {
+            flowless_dnat_snapshot(policy_destination)
+        };
+        snapshot.destination_nat_rules.clear();
+        snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
+            source_addresses: Vec::new(),
+            counter_id: 0,
+            name: "flowless-static-dnat-cold-deny".to_string(),
+            from_zone: "lan".to_string(),
+            from_interface: String::new(),
+            from_routing_instance: String::new(),
+            external_ip: vip.to_string(),
+            internal_ip: internal.to_string(),
+            match_destination_port: 0,
+            mapped_port: 0,
+            ..Default::default()
+        }];
+        snapshot.neighbors.clear();
+
+        let (frame, meta) = flowless_gre_ipv4_frame(vip);
+        let (batch, dbg, sessions, parked, reinjected) =
+            run_flowless_nat_frame_cold(&snapshot, &frame, meta);
+        assert_eq!(dbg.missing_neigh, 1, "destination={policy_destination:?}");
+        assert_eq!(
+            dbg.policy_deny,
+            u64::from(!expect_parked),
+            "destination={policy_destination:?}: the cold arm must adjudicate \
+             the post-translation tuple"
+        );
+        assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+        assert_eq!(batch.nat_frag_untranslated_dropped, 0);
+        assert_eq!(sessions, 0);
+        assert_eq!(reinjected.len(), 0);
+        assert_eq!(
+            parked.is_some(),
+            expect_parked,
+            "destination={policy_destination:?}: only a post-NAT permit parks"
+        );
     }
 }
 

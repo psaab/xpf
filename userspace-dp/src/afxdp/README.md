@@ -645,12 +645,19 @@ sync.
     junos-host gates still run; transit is dropped and counted once. The static
     pre-route ambiguity probe is DNAT-only, so unrelated static SNAT cannot
     preempt a destination rewrite. A selected translated NoRoute or
-    MissingNeighbor is dropped before cold policy, neighbor probing/buffering,
-    or kernel reinjection because those paths cannot carry the rewrite. Plain
-    no-NAT cold traffic retains its existing retry/reinjection behavior.
-    Regression cells cover local ambiguity, both cold dispositions, checksum
-    protocol boundaries, non-first fragments, port maps, NPTv6, and SNAT
-    preservation.
+    MissingNeighbor now flows into its disposition arm instead of being
+    dropped (#12905): the cold paths DO carry the rewrite — MissingNeighbor
+    parks the frame in `pending_neigh` with the translated decision (the
+    retry TX applies it) and NoRoute reinjects through
+    `extract_l3_packet_with_nat`, which applies the recorded rewrite before
+    the kernel FIB sees the packet. The cold arms adjudicate the
+    post-translation tuple (#2345 doctrine) and their NAT fences probe only
+    the un-applied source side for a translated decision, so a deny stays a
+    policy deny and the untranslated population keeps its fail-closed fence.
+    Plain no-NAT cold traffic retains its existing retry/reinjection behavior.
+    Regression cells cover local ambiguity, cold park/reinject liveness and
+    its fail-closed deny halves, checksum protocol boundaries, non-first
+    fragments, port maps, NPTv6, and SNAT preservation.
   - **#5467 — egress `filter output` on the flowless TX path:** the #3291 gate
     above enforces the INGRESS input filter / PBR / zone policy on a flowless
     packet, but the EGRESS interface `filter output` was evaluated only on the
