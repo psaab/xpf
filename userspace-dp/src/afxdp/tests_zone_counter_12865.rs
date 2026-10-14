@@ -4,7 +4,6 @@
 //   P1: does the SLOW-path (first-packet) FabricRedirect punt credit the
 //       INTENDED egress zone (wan) rather than the redirect transport?
 //   P2 (control): does the same punt credit the logical ingress zone?
-#![allow(unused_imports)]
 use crate::NeighborSnapshot;
 
 use super::test_fixtures::*;
@@ -121,10 +120,9 @@ fn zone_counter_12865_slow_path_fabric_redirect_credits_intended_egress_zone() {
     );
 }
 
-/// Probe P3 (residual evidence): with a POPULATED raw shim ingress zone (as
-/// the production XDP shim stamps), how many ingress credits does ONE
-/// slow-path forwarded packet produce? Prints the rows; asserts nothing
-/// beyond arrival so the printed numbers are the evidence.
+/// Probe P3: with a POPULATED raw shim ingress zone (as the production
+/// XDP shim stamps), ONE slow-path forwarded packet must produce exactly
+/// one ingress credit (no double count).
 #[test]
 fn zone_counter_12865_slow_path_double_count_with_populated_shim_zone() {
     let forwarding = build_forwarding_state(&fabric_snapshot_with_lan_neighbor_probe());
@@ -223,4 +221,53 @@ fn zone_counter_12865_fast_path_second_packet_credits_intended_egress() {
         wan.egress_packets, 2,
         "P4: BOTH packets (slow punt + session hit) must credit the intended wan egress"
     );
+}
+
+/// P5: a cacheable UDP flow's SECOND packet is a true flow-cache hit.
+/// Both packets must credit the admitted pair (lan ingress, wan egress) —
+/// the cache entry's stamped metadata is what the hit path reads.
+#[test]
+fn zone_counter_12865_fast_path_udp_hit_credits_admission_pair() {
+    let forwarding = build_forwarding_state(&fabric_snapshot_with_lan_neighbor_probe());
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(2, active_rg_probe(now_secs))]);
+    let mut sessions = SessionTable::new();
+    let mut lan_binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    lan_binding.interface = Arc::<str>::from("ge-0-0-1");
+    let frame = build_udp_frame_v4_full(
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        64,
+    );
+    let mut meta = txn_meta_v4(24, 0, frame.len() as u16);
+    meta.protocol = PROTO_UDP;
+    meta.payload_offset = 42;
+    for _ in 0..2 {
+        let (_b, d) = txn_run_descriptor_checked(
+            &mut lan_binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
+        );
+        assert_eq!(d.policy_deny, 0, "P5: UDP packet denied?");
+    }
+    crate::afxdp::zone_counters::flush_recorded_zone_counters(
+        &forwarding.zone_counter_store,
+        &forwarding.zone_counter_slot_map,
+    );
+    let rows = forwarding.zone_counter_store.snapshot();
+    let lan = rows
+        .iter()
+        .find(|r| r.zone_id == TEST_LAN_ZONE_ID)
+        .expect("P5: lan row must exist");
+    let wan = rows
+        .iter()
+        .find(|r| r.zone_id == TEST_WAN_ZONE_ID)
+        .expect("P5: wan row must exist");
+    assert_eq!(lan.ingress_packets, 2, "P5: both UDP packets credit lan ingress");
+    assert_eq!(wan.egress_packets, 2, "P5: both UDP packets credit wan egress");
 }

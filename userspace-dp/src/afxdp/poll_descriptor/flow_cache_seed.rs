@@ -49,6 +49,9 @@ pub(super) fn stage_flow_cache_seed(
     flow_cache_policy_counter: &Option<std::sync::Arc<crate::policy::PolicyRuleCounter>>,
     filter_match_extra: TermMatchExtra<'static>,
     ingress_zone_override: Option<u16>,
+    // #12865: the admission-resolved egress zone captured by the caller
+    // before any fabric redirect replaced the resolution.
+    admission_egress_zone: u16,
     apply_nat_on_fabric: bool,
     neighbor_epoch_snapshot: &ShardEpochSnapshot,
     worker_ctx: &WorkerContext,
@@ -193,6 +196,40 @@ pub(super) fn stage_flow_cache_seed(
         // flow-cache hit path counts against the admitting
         // rule even after a live policy reorder.
         entry.metadata.policy_counter = flow_cache_policy_counter.clone();
+        // #12865: stamp the admission zone pair. from_forward_decision
+        // leaves egress_zone 0 (and ingress 0 for miss-seeded entries),
+        // which would make flow-cache hits credit nothing (or the fabric
+        // transport) instead of the zones the packet was adjudicated under.
+        if entry.metadata.egress_zone == 0 && admission_egress_zone != 0 {
+            entry.metadata.egress_zone = admission_egress_zone;
+            entry.metadata.egress_zone_check =
+                crate::session::zone_vintage_check_for_id(
+                    &worker_ctx.forwarding.zone_id_to_name,
+                    admission_egress_zone,
+                );
+        }
+        if entry.metadata.ingress_zone == 0 {
+            let logical = resolve_ingress_logical_ifindex(
+                worker_ctx.forwarding,
+                meta.ingress_ifindex as i32,
+                meta.ingress_vlan_id,
+            )
+            .unwrap_or(meta.ingress_ifindex as i32);
+            let (from_zone, _) = zone_pair_ids_for_flow_with_override(
+                worker_ctx.forwarding,
+                logical,
+                ingress_zone_override,
+                entry.decision.resolution.egress_ifindex,
+            );
+            if from_zone != 0 {
+                entry.metadata.ingress_zone = from_zone;
+                entry.metadata.ingress_zone_check =
+                    crate::session::zone_vintage_check_for_id(
+                        &worker_ctx.forwarding.zone_id_to_name,
+                        from_zone,
+                    );
+            }
+        }
         flow_cache.insert(entry);
     }
     }
