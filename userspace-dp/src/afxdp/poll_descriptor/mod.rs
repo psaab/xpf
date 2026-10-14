@@ -2576,6 +2576,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         meta.ingress_ifindex as i32,
                                         ha_startup_grace_until_secs,
                                         resolved.origin,
+                                        // #12867: the identity-checked original
+                                        // tuple for a translated forward-wire
+                                        // alias, so the sessionless verdict
+                                        // judges the pre-SNAT source.
+                                        resolved.source_nat_validation_key.as_ref(),
                                     )
                                 }
                                 Some(arrival_zone) => match foreign_hit_verdict(

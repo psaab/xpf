@@ -321,14 +321,35 @@ struct PolicyJudgmentInput {
     /// The JUDGED protocol — the forward key's, never the triggering packet's
     /// (under NAT64 the reply's family differs from the judgment's).
     protocol: u8,
-    /// Forward wire tuple (source stays pre-translation, Junos order).
+    /// Original forward source selectors plus forward-wire destination tuple.
+    /// Policy runs after destination NAT and BEFORE source NAT (Junos order,
+    /// #9382), so the source is the pre-SNAT original — #12867: never the
+    /// translated tuple a forward-wire alias packet carries on the wire.
     src_ip: IpAddr,
     dst_ip: IpAddr,
-    /// Forward wire ports.
+    /// Original forward source port; forward-wire destination port.
     src_port: u16,
     dst_port: u16,
     from_source: FromZoneSource,
     now_ns: u64,
+}
+
+/// #12867: does this forward arrival carry the decision's own TRANSLATED
+/// source tuple? A source-NAT forward-wire alias (the HA/fabric retransmission
+/// of a translated flow) arrives with the public translated source on the
+/// wire, and zone policy must judge the pre-SNAT original instead. The test
+/// mirrors the resolver's own translation check
+/// (`shared_ops::shared_source_nat_original_key`): the translated address with
+/// either the translated port or no port rewrite. A port-only translation
+/// (translated address == original address, translated port != wire port)
+/// therefore reads as NOT translated for an original-direction packet, whose
+/// wire tuple already IS the original.
+#[inline]
+fn arrival_carries_translated_source(nat: NatDecision, flow: &SessionFlow) -> bool {
+    nat.rewrite_src == Some(flow.forward_key.src_ip)
+        && nat
+            .rewrite_src_port
+            .is_none_or(|port| port == flow.forward_key.src_port)
 }
 
 /// Check whether a stored forward source translation remains expressible by
@@ -641,6 +662,12 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     // revocation (which has no entry to reload one from). The Stale path still
     // reloads the judged entry's own origin below.
     origin: SessionOrigin,
+    // #12867: the resolver's identity-checked ORIGINAL tuple for a translated
+    // forward-wire alias (`source_nat_validation_key`, #12187). Populated only
+    // for a keep-transient hit, whose purge makes the gate NoLocalEntry — so
+    // the sessionless arm is its consumer; a Stale entry supplies its own
+    // canonical key below.
+    policy_source_key: Option<&SessionKey>,
 ) -> Option<PolicyRevocation> {
     let flow = flow?;
     // #10507 packet-time provenance fence, single probe. Evaluated before
@@ -775,6 +802,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                 from_source,
                 origin,
                 now_ns,
+                policy_source_key,
             );
         }
         PolicyRevalidationTarget::Stale(k) => k.clone(),
@@ -789,19 +817,38 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     {
         return None;
     }
-    // The forward pair, judged as itself: the packet's tuple and protocol use
-    // the from-zone derived from its arrival identity (#9384). An Owner fabric
+    // The forward pair, judged as itself: the tuple and protocol use the
+    // from-zone derived from its arrival identity (#9384). An Owner fabric
     // arrival keeps the entry's recorded zone because the fabric link's zone
     // is structurally not the flow's, and hit authority has already checked
     // the validated stamp against that zone. A foreign stamp does not reach
     // this revalidation path.
+    //
+    // #12867: the SOURCE selectors are the canonical key's, never the arriving
+    // wire tuple's. A source-NAT forward-wire alias (HA/fabric retransmission
+    // of a translated flow) carries the public translated source; the gate has
+    // already computed the entry's canonical ORIGINAL key, and policy judges
+    // the pre-translation source (Junos order, #9382). For every ordinary hit
+    // the canonical key IS the packet's tuple, so this is byte-identical
+    // unless the arrival actually carried the translation.
+    if arrival_carries_translated_source(decision.nat, flow) && canonical_key == flow.forward_key {
+        // The entry itself is keyed on the translated tuple (a fabric wire
+        // seed or a materialized alias replica): this node holds no
+        // authenticated original to judge, and the public tuple is not a
+        // policy identity. Decline — judge nothing, stamp nothing — and let
+        // the next packet resolve through the canonical row (the placeholder
+        // bypass in the lookup), where the original selectors are derivable.
+        // Declining, not revoking: a revoke would assert a deny no walk
+        // derived and churn the seed against its shared canonical row.
+        return None;
+    }
     let input = PolicyJudgmentInput {
         decision,
         metadata: (*metadata).clone(),
         protocol: meta.protocol,
-        src_ip: flow.src_ip,
+        src_ip: canonical_key.src_ip,
         dst_ip: flow.dst_ip,
-        src_port: flow.forward_key.src_port,
+        src_port: canonical_key.src_port,
         dst_port: flow.forward_key.dst_port,
         from_source: if packet_fabric_ingress {
             FromZoneSource::RecordedZone(metadata.ingress_zone)
@@ -909,6 +956,7 @@ pub(crate) fn revalidate_zone_policy_declines_for_test(
         0,
         0,
         SessionOrigin::ForwardFlow,
+        None,
     )
     .is_none()
 }
@@ -948,6 +996,7 @@ pub(crate) fn revalidate_zone_policy_revokes_for_test(
         0,
         0,
         SessionOrigin::ForwardFlow,
+        None,
     )
     .is_some_and(|revocation| revocation.canonical_key.is_some())
 }
@@ -987,6 +1036,7 @@ pub(crate) fn revalidate_zone_policy_revocation_for_test(
         0,
         0,
         SessionOrigin::ForwardFlow,
+        None,
     )
     .and_then(|rev| rev.canonical_key.map(|key| (key, rev.decision)))
 }
@@ -1023,6 +1073,7 @@ pub(crate) fn revalidate_zone_policy_sessionless_denies_for_test(
         0,
         0,
         SessionOrigin::ForwardFlow,
+        None,
     )
     .is_some_and(|revocation| revocation.canonical_key.is_none())
 }
@@ -1061,6 +1112,7 @@ pub(crate) fn revalidate_zone_policy_canonical_key_for_test(
         0,
         0,
         SessionOrigin::ForwardFlow,
+        None,
     )
     .and_then(|revocation| revocation.canonical_key)
 }
@@ -1179,6 +1231,10 @@ fn sessionless_zone_policy_verdict(
     from_source: FromZoneSource,
     origin: SessionOrigin,
     now_ns: u64,
+    // #12867: the resolver's identity-checked ORIGINAL tuple for a translated
+    // forward-wire alias (`source_nat_validation_key`, #12187). Without it a
+    // translated arrival has no policy identity — see below.
+    policy_source_key: Option<&SessionKey>,
 ) -> Option<PolicyRevocation> {
     // The caller supplies authoritative FORWARD data. A reverse hit never
     // reaches this helper with its swapped row; the reverse arm resolves its
@@ -1191,13 +1247,31 @@ fn sessionless_zone_policy_verdict(
     {
         return None;
     }
+    // #12867: zone policy judges the ORIGINAL pre-SNAT source (Junos order,
+    // #9382). A sessionless translated alias carries the public translated
+    // source on the wire; only the resolver's identity-checked original key —
+    // matched through HA session identity and SNAT provenance — may stand in
+    // for it. A translated arrival with no authenticated original fails
+    // CLOSED: drop the packet rather than judge, permit, or deny against the
+    // public tuple, which is not a policy identity.
+    let Some(source_key) = policy_source_key.or_else(|| {
+        (!arrival_carries_translated_source(decision.nat, flow)).then_some(&flow.forward_key)
+    }) else {
+        return Some(PolicyRevocation {
+            canonical_key: None,
+            decision,
+            metadata: metadata.clone(),
+            origin,
+            reason: PolicyRevocationReason::ZonePolicy,
+        });
+    };
     let input = PolicyJudgmentInput {
         decision,
         metadata: metadata.clone(),
         protocol: meta.protocol,
-        src_ip: flow.src_ip,
+        src_ip: source_key.src_ip,
         dst_ip: flow.dst_ip,
-        src_port: flow.forward_key.src_port,
+        src_port: source_key.src_port,
         dst_port: flow.forward_key.dst_port,
         from_source,
         now_ns,
@@ -1447,6 +1521,12 @@ fn reverse_hit_zone_policy(
                     from_source,
                     fwd_origin,
                     now_ns,
+                    // #12867: no identity-checked original is needed here —
+                    // `fwd_flow` is built from the companion's own key, so
+                    // the translated-arrival predicate below only fires when
+                    // the companion row itself is keyed on its translated
+                    // tuple, which must fail closed rather than be judged.
+                    None,
                 )?;
                 // The local forward companion is authoritative, so this uses
                 // the ordinary pair-revocation shape rather than drop-only.

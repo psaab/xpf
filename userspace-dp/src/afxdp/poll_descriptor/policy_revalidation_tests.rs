@@ -1365,6 +1365,7 @@ fn permitted_stale_hit_restamps_conntrack_app_id_12191() {
         24,
         0,
         SessionOrigin::ForwardFlow,
+        None,
     );
     assert!(
         revocation.is_none(),
@@ -1415,6 +1416,7 @@ fn permitted_stale_hit_restamps_conntrack_app_id_12191() {
         24,
         0,
         SessionOrigin::ForwardFlow,
+        None,
     );
     assert!(
         forced_fresh_revocation.is_none(),
@@ -1594,6 +1596,7 @@ fn reverse_stale_hit_restamps_forward_ipv6_conntrack_row_12191() {
         24,
         0,
         SessionOrigin::ReverseFlow,
+        None,
     );
     assert!(
         revocation.is_none(),
@@ -1675,6 +1678,7 @@ fn app_id_revalidation_hit(
         24,
         0,
         origin,
+        None,
     )
     .is_none()
 }
@@ -2334,5 +2338,328 @@ fn source_nat_revalidation_other_vlan_zone_still_revoked_12861() {
     assert!(
         !valid,
         "SNAT session arriving on a dmz VLAN must not match the lan->wan rule"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #12867: zone-policy revalidation must judge the ORIGINAL pre-SNAT source of
+// a translated forward-wire alias, never the public tuple on the wire.
+// ---------------------------------------------------------------------------
+
+/// #12867 scenario kit: a canonical SNAT session installed under its ORIGINAL
+/// tuple — the production shape, since the local forward-wire index maps the
+/// translated tuple onto exactly that row — plus the translated retransmission
+/// that arrives carrying the public source.
+struct SnatWireAliasCase12867 {
+    original: SessionKey,
+    wire: SessionKey,
+    decision: SessionDecision,
+    metadata: SessionMetadata,
+}
+
+fn snat_wire_alias_case_12867(nat: NatDecision) -> SnatWireAliasCase12867 {
+    let original = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: libc::IPPROTO_TCP as u8,
+        src_ip: "10.0.0.1".parse().expect("private source"),
+        dst_ip: "198.51.100.9".parse().expect("public destination"),
+        src_port: 45_000,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let decision = app_id_revalidation_decision(nat);
+    let wire = crate::session::forward_wire_key(&original, decision.nat);
+    SnatWireAliasCase12867 {
+        original,
+        wire,
+        decision,
+        metadata: app_id_revalidation_metadata(false),
+    }
+}
+
+/// A `lan -> wan` permit whose source-address and source-port selectors are
+/// separately controllable, so either field being read off the post-SNAT wire
+/// alias is independently observable. Everything else is `any`.
+fn snat_alias_policy_12867(source_addresses: &[&str], source_port: &str) -> ForwardingState {
+    let mut snapshot = crate::afxdp::test_fixtures::policy_deny_snapshot();
+    let rule = &mut snapshot.policies[0];
+    rule.from_zone = "lan".to_string();
+    rule.source_addresses = source_addresses.iter().map(|s| (*s).to_string()).collect();
+    rule.applications = vec!["source-port-probe".to_string()];
+    rule.application_terms = vec![crate::protocol::PolicyApplicationSnapshot {
+        name: "source-port-probe".to_string(),
+        protocol: "tcp".to_string(),
+        source_port: source_port.to_string(),
+        destination_port: String::new(),
+        ..Default::default()
+    }];
+    crate::afxdp::forwarding_build::build_forwarding_state(&snapshot)
+}
+
+fn install_stale_alias_session_12867(
+    case: &SnatWireAliasCase12867,
+    install_key: &SessionKey,
+) -> SessionTable {
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        install_key.clone(),
+        case.decision,
+        case.metadata.clone(),
+        SessionOrigin::ForwardFlow,
+        1_000_000_000,
+        libc::IPPROTO_TCP as u8,
+        0x10,
+    ));
+    sessions.set_policy_revalidation_gen(2);
+    sessions
+}
+
+fn revalidate_alias_hit_12867(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    case: &SnatWireAliasCase12867,
+    session_key: &SessionKey,
+    flow: &SessionFlow,
+) -> Option<PolicyRevocation> {
+    revalidate_zone_policy_on_session_hit(
+        forwarding,
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        sessions,
+        session_key,
+        &case.metadata,
+        case.decision,
+        Some(flow),
+        crate::afxdp::tests_support::txn_meta_v4(24, 0x10, 54),
+        false,
+        false,
+        &BTreeMap::new(),
+        &Arc::new(ShardedNeighborMap::new()),
+        1_100_000_000,
+        1,
+        24,
+        0,
+        SessionOrigin::ForwardFlow,
+        // A stale local hit has no resolver-supplied original: the canonical
+        // key of the entry it judged is the original-tuple supply.
+        None,
+    )
+}
+
+/// #12867 RED: a stale forward revalidation of a translated wire alias must
+/// judge the canonical ORIGINAL source. Master judged the arriving public
+/// tuple, so a permit naming only the original private source revoked the
+/// live session (fail-closed against the wrong question), while a permit
+/// naming only the translated public source kept it flowing — the fail-open
+/// the issue reports. Both directions are pinned.
+#[test]
+fn zone_policy_snat_wire_alias_stale_judges_canonical_source_12867() {
+    let case = snat_wire_alias_case_12867(NatDecision {
+        rewrite_src: Some("203.0.113.10".parse().expect("public pool source")),
+        rewrite_src_port: Some(50_000),
+        ..NatDecision::default()
+    });
+    assert_ne!(case.original.src_ip, case.wire.src_ip);
+    assert_ne!(case.original.src_port, case.wire.src_port);
+    let flow = SessionFlow {
+        src_ip: case.wire.src_ip,
+        dst_ip: case.wire.dst_ip,
+        forward_key: case.wire.clone(),
+    };
+
+    // Permit names ONLY the original private source.
+    let forwarding = snat_alias_policy_12867(&["10.0.0.1/32"], "");
+    let mut sessions = install_stale_alias_session_12867(&case, &case.original);
+    let revocation =
+        revalidate_alias_hit_12867(&forwarding, &mut sessions, &case, &case.original, &flow);
+    assert!(
+        revocation.is_none(),
+        "the stale alias must match its original-source permit"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&case.original),
+        PolicyRevalidationTarget::Fresh,
+        "the original-source permit must stamp the canonical row current"
+    );
+
+    // Permit names ONLY the translated public source: the alias must not
+    // borrow it.
+    let forwarding = snat_alias_policy_12867(&["203.0.113.10/32"], "");
+    let mut sessions = install_stale_alias_session_12867(&case, &case.original);
+    let revocation =
+        revalidate_alias_hit_12867(&forwarding, &mut sessions, &case, &case.original, &flow);
+    assert!(
+        revocation
+            .as_ref()
+            .is_some_and(|revocation| revocation.canonical_key == Some(case.original.clone())),
+        "a public-source permit must not keep the alias alive"
+    );
+}
+
+/// #12867: the sessionless (#10582 keep-transient) verdict judges the
+/// resolver-authenticated ORIGINAL tuple, and a translated sessionless
+/// arrival without one fails closed instead of borrowing a public-source
+/// permit.
+#[test]
+fn zone_policy_sessionless_snat_alias_uses_original_or_fails_closed_12867() {
+    let case = snat_wire_alias_case_12867(NatDecision {
+        rewrite_src: Some("203.0.113.10".parse().expect("public pool source")),
+        rewrite_src_port: Some(50_000),
+        ..NatDecision::default()
+    });
+    let flow = SessionFlow {
+        src_ip: case.wire.src_ip,
+        dst_ip: case.wire.dst_ip,
+        forward_key: case.wire.clone(),
+    };
+    let meta = crate::afxdp::tests_support::txn_meta_v4(24, 0x10, 54);
+    let from_source = FromZoneSource::LiveIfindex {
+        ifindex: 24,
+        vlan: 0,
+    };
+
+    // The authenticated original matches an original-source permit: the
+    // sessionless packet forwards.
+    let forwarding = snat_alias_policy_12867(&["10.0.0.1/32"], "");
+    assert!(
+        sessionless_zone_policy_verdict(
+            &forwarding,
+            case.decision,
+            &case.metadata,
+            &flow,
+            meta,
+            from_source,
+            SessionOrigin::SyncImport,
+            1_100_000_000,
+            Some(&case.original),
+        )
+        .is_none(),
+        "the sessionless alias must match its original-source permit"
+    );
+
+    // Without the authenticated original, even an any-source permit must not
+    // judge the public tuple: fail closed with a KEYLESS drop.
+    let any_forwarding = snat_alias_policy_12867(&["any"], "");
+    assert!(
+        sessionless_zone_policy_verdict(
+            &any_forwarding,
+            case.decision,
+            &case.metadata,
+            &flow,
+            meta,
+            from_source,
+            SessionOrigin::SyncImport,
+            1_100_000_000,
+            None,
+        )
+        .is_some_and(|revocation| revocation.canonical_key.is_none()),
+        "an unauthenticated translated arrival must fail closed, not borrow a public-source permit"
+    );
+}
+
+/// #12867 discriminator pins: a port-only translation (address preserved)
+/// still judges the ORIGINAL port, and an original-direction packet of that
+/// session is judged normally — the preserved address must not be misread as
+/// a translated arrival.
+#[test]
+fn zone_policy_port_only_snat_judges_original_port_12867() {
+    let case = snat_wire_alias_case_12867(NatDecision {
+        rewrite_src: Some("10.0.0.1".parse().expect("address-preserving pool")),
+        rewrite_src_port: Some(50_000),
+        ..NatDecision::default()
+    });
+    // The alias differs from the original in the PORT only.
+    assert_eq!(case.original.src_ip, case.wire.src_ip);
+    assert_ne!(case.original.src_port, case.wire.src_port);
+
+    // Permit names the ORIGINAL source port: the translated alias arrival
+    // must match it through the canonical key (master judged the translated
+    // port and revoked).
+    let forwarding = snat_alias_policy_12867(&["any"], "45000");
+    let alias_flow = SessionFlow {
+        src_ip: case.wire.src_ip,
+        dst_ip: case.wire.dst_ip,
+        forward_key: case.wire.clone(),
+    };
+    let mut sessions = install_stale_alias_session_12867(&case, &case.original);
+    let revocation = revalidate_alias_hit_12867(
+        &forwarding,
+        &mut sessions,
+        &case,
+        &case.original,
+        &alias_flow,
+    );
+    assert!(
+        revocation.is_none(),
+        "the port-only alias must match its original source port"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&case.original),
+        PolicyRevalidationTarget::Fresh,
+        "the original-port permit must stamp the canonical row current"
+    );
+
+    // An ORIGINAL-direction packet of the same session is judged normally —
+    // the preserved address must not trip the translated-arrival decline.
+    let original_flow = SessionFlow {
+        src_ip: case.original.src_ip,
+        dst_ip: case.original.dst_ip,
+        forward_key: case.original.clone(),
+    };
+    let mut sessions = install_stale_alias_session_12867(&case, &case.original);
+    let revocation = revalidate_alias_hit_12867(
+        &forwarding,
+        &mut sessions,
+        &case,
+        &case.original,
+        &original_flow,
+    );
+    assert!(
+        revocation.is_none(),
+        "an original-direction port-only SNAT packet must be judged, not declined"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&case.original),
+        PolicyRevalidationTarget::Fresh,
+        "the original-direction packet must stamp the canonical row current"
+    );
+}
+
+/// #12867: a row keyed on its own TRANSLATED tuple (a fabric wire seed or a
+/// materialized alias replica) has no authenticated original on this node.
+/// The stale arm must decline — neither judging nor stamping the public
+/// tuple — rather than revoke on a verdict no walk derived. The next packet
+/// resolves through the canonical row instead (the placeholder bypass in the
+/// lookup), where the original selectors are derivable.
+#[test]
+fn zone_policy_translated_keyed_row_declines_without_stamping_12867() {
+    let case = snat_wire_alias_case_12867(NatDecision {
+        rewrite_src: Some("203.0.113.10".parse().expect("public pool source")),
+        rewrite_src_port: Some(50_000),
+        ..NatDecision::default()
+    });
+    let flow = SessionFlow {
+        src_ip: case.wire.src_ip,
+        dst_ip: case.wire.dst_ip,
+        forward_key: case.wire.clone(),
+    };
+    // No lan -> wan rule exists in the plain snapshot: only the default deny.
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+        &crate::afxdp::test_fixtures::policy_deny_snapshot(),
+    );
+    let mut sessions = install_stale_alias_session_12867(&case, &case.wire);
+    let revocation =
+        revalidate_alias_hit_12867(&forwarding, &mut sessions, &case, &case.wire, &flow);
+    assert!(
+        revocation.is_none(),
+        "a translated-keyed row must be declined, not revoked on an underivable verdict"
+    );
+    assert!(
+        matches!(
+            sessions.policy_revalidation_target(&case.wire),
+            PolicyRevalidationTarget::Stale(_)
+        ),
+        "the decline must not stamp the public tuple fresh"
     );
 }
