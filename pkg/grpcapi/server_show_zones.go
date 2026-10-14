@@ -284,6 +284,11 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 			if pr.Applications == nil {
 				pr.Applications = []string{}
 			}
+			if (statsEnabled || rule.Count) && readPolicy == nil {
+				// #12900: dataplane unloaded — hits are NO-DATA, not a
+				// published zero.
+				pr.HitCountersUnavailable = true
+			}
 			if (statsEnabled || rule.Count) && readPolicy != nil {
 				policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 				ctrs, err := readPolicy(policyID)
@@ -374,6 +379,11 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 			}
 			if pr.Applications == nil {
 				pr.Applications = []string{}
+			}
+			if (statsEnabled || rule.Count) && readPolicy == nil {
+				// #12900: dataplane unloaded — hits are NO-DATA, not a
+				// published zero.
+				pr.HitCountersUnavailable = true
 			}
 			if (statsEnabled || rule.Count) && readPolicy != nil {
 				policyID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
