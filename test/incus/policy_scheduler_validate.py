@@ -44,10 +44,8 @@ def _status_from_doc(path: Path) -> dict[str, Any]:
 
 
 def _as_int(value: Any, default: int = 0) -> int:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return default
-    if isinstance(value, bool):
-        return int(value)
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -84,6 +82,15 @@ def _require_userspace_runtime(label: str, status: dict[str, Any]) -> None:
         )
 
 
+def _counter_int(label: str, rule_id: str, field: str, value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise ValidationFailure(
+            f"{label}: policy_rule_counters entry {rule_id!r} field {field!r} "
+            f"must be a non-negative integer, got {value!r}"
+        )
+    return value
+
+
 def _policy_counter(label: str, status: dict[str, Any], rule_id: str) -> PolicyCounter:
     counters = status.get("policy_rule_counters", [])
     if not isinstance(counters, list):
@@ -91,8 +98,8 @@ def _policy_counter(label: str, status: dict[str, Any], rule_id: str) -> PolicyC
     for counter in counters:
         if isinstance(counter, dict) and counter.get("rule_id") == rule_id:
             return PolicyCounter(
-                packets=_as_int(counter.get("packets")),
-                bytes=_as_int(counter.get("bytes")),
+                packets=_counter_int(label, rule_id, "packets", counter.get("packets")),
+                bytes=_counter_int(label, rule_id, "bytes", counter.get("bytes")),
             )
     raise ValidationFailure(f"{label}: missing policy_rule_counters entry {rule_id!r}")
 
@@ -104,6 +111,47 @@ def _read_text(path: Path) -> str:
         raise ValidationFailure(f"missing artifact: {path}") from exc
 
 
+_PING_STATS_RE = re.compile(
+    r"^\s*(\d+) packets transmitted, (\d+) (?:packets )?received, "
+    r"(\d+(?:\.\d+)?)% packet loss",
+    re.MULTILINE,
+)
+
+
+def _inactive_traffic_witness(path: Path, min_packets: int) -> dict[str, Any]:
+    text = _read_text(path)
+    matches = _PING_STATS_RE.findall(text)
+    if len(matches) != 1:
+        raise ValidationFailure(
+            f"inactive: expected exactly one ping statistics block in "
+            f"{path.name}, found {len(matches)}"
+        )
+    transmitted_str, received_str, loss_str = matches[0]
+    transmitted = int(transmitted_str)
+    received = int(received_str)
+    loss_pct = float(loss_str)
+    if transmitted < min_packets:
+        raise ValidationFailure(
+            f"inactive: traffic witness offered {transmitted} packets during "
+            f"the inactive scheduler window, want >= {min_packets}"
+        )
+    allowed = received == transmitted and loss_pct == 0.0
+    denied = received == 0 and loss_pct == 100.0
+    if not (allowed or denied):
+        raise ValidationFailure(
+            "inactive: traffic witness is not decisive "
+            f"(transmitted={transmitted}, received={received}, "
+            f"loss={loss_str}%); want full success or full deny while the "
+            "scheduled rule is inactive"
+        )
+    return {
+        "transmitted": transmitted,
+        "received": received,
+        "loss_pct": loss_pct,
+        "outcome": "allowed" if allowed else "denied",
+    }
+
+
 def validate_artifacts(
     root: Path,
     *,
@@ -111,9 +159,11 @@ def validate_artifacts(
     active_status: str = "active-status.json",
     rebuild_status: str = "rebuild-status.json",
     inactive_status: str = "inactive-status.json",
+    inactive_traffic: str = "inactive-traffic.stdout",
     failover_status: str | None = "failover-status.json",
     missing_scheduler_output: str = "missing-scheduler-commit.txt",
     min_active_packets: int = 1,
+    min_inactive_packets: int = 1,
     min_failover_packet_delta: int = 1,
 ) -> dict[str, Any]:
     active = _status_from_doc(root / active_status)
@@ -156,6 +206,10 @@ def validate_artifacts(
             f"(inactive={inactive_counter}, rebuild={rebuild_counter})"
         )
 
+    inactive_witness = _inactive_traffic_witness(
+        root / inactive_traffic, min_inactive_packets
+    )
+
     failover_counter: PolicyCounter | None = None
     if failover is not None:
         failover_counter = _policy_counter("failover", failover, rule_id)
@@ -164,6 +218,11 @@ def validate_artifacts(
             raise ValidationFailure(
                 "failover: policy counter did not advance on the new userspace owner "
                 f"({failover_counter.packets} < {required})"
+            )
+        if failover_counter.bytes < rebuild_counter.bytes:
+            raise ValidationFailure(
+                "failover: policy bytes went backward "
+                f"({failover_counter.bytes} < {rebuild_counter.bytes})"
             )
 
     missing_text = _read_text(root / missing_scheduler_output)
@@ -182,6 +241,7 @@ def validate_artifacts(
         "active": active_counter.__dict__,
         "rebuild": rebuild_counter.__dict__,
         "inactive": inactive_counter.__dict__,
+        "inactive_traffic": inactive_witness,
     }
     if failover_counter is not None:
         summary["failover"] = failover_counter.__dict__
@@ -201,6 +261,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--active-status", default="active-status.json")
     parser.add_argument("--rebuild-status", default="rebuild-status.json")
     parser.add_argument("--inactive-status", default="inactive-status.json")
+    parser.add_argument("--inactive-traffic", default="inactive-traffic.stdout")
     parser.add_argument("--failover-status", default="failover-status.json")
     parser.add_argument(
         "--no-failover",
@@ -212,6 +273,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default="missing-scheduler-commit.txt",
     )
     parser.add_argument("--min-active-packets", type=int, default=1)
+    parser.add_argument("--min-inactive-packets", type=int, default=1)
     parser.add_argument("--min-failover-packet-delta", type=int, default=1)
     return parser.parse_args(argv)
 
@@ -225,9 +287,11 @@ def main(argv: list[str] | None = None) -> int:
             active_status=args.active_status,
             rebuild_status=args.rebuild_status,
             inactive_status=args.inactive_status,
+            inactive_traffic=args.inactive_traffic,
             failover_status=None if args.no_failover else args.failover_status,
             missing_scheduler_output=args.missing_scheduler_output,
             min_active_packets=args.min_active_packets,
+            min_inactive_packets=args.min_inactive_packets,
             min_failover_packet_delta=args.min_failover_packet_delta,
         )
     except ValidationFailure as exc:
