@@ -139,7 +139,12 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	var warnings []string
 	for _, rp := range all {
 		for _, ifn := range rp.ifaces {
-			zname, ok := ifZone[ifn]
+			// The zone map and InterfaceHostInboundEffective both use the
+			// canonical logical unit identity. Routing refs are retained as
+			// authored, so normalize aliases (for example .00 -> .0) before
+			// lookup rather than silently skipping an in-zone managed protocol.
+			ifRef := cfg.SplitInterfaceUnitRef(ifn).Literal
+			zname, ok := ifZone[ifRef]
 			if !ok {
 				continue
 			}
@@ -153,8 +158,18 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 			// unit. Reuse InterfaceHostInboundEffective so the strict gate matches
 			// the dataplane's admission resolution (a parent `reth0` override
 			// admitting ospf also covers unit `reth0.10`).
-			_, effProto, _ := z.InterfaceHostInboundEffective(ifn)
-			if hostInboundAdmitsRoutingProtocol(effProto, rp.token) {
+			effSvc, effProto, _ := z.InterfaceHostInboundEffective(ifRef)
+			// any-service is a packet-wide host-inbound full-admit, including
+			// managed routing multicast protocols. Unlike system-services all,
+			// it is not a bounded named-service union (#3226).
+			admitted := false
+			for _, svc := range effSvc {
+				if HostInboundFullAdmitService(svc) {
+					admitted = true
+					break
+				}
+			}
+			if admitted || hostInboundAdmitsRoutingProtocol(effProto, rp.token) {
 				continue
 			}
 			warnings = append(warnings, fmt.Sprintf(
