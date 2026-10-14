@@ -1993,11 +1993,13 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 	zoneIngressV4, zoneIngressV6 := hostInboundZoneIngressDestinations(views)
 	for _, v := range views {
 		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) ||
-			hostInboundEmitsWireGuardGuard(v.V4Addrs, wgListenPorts) {
+			hostInboundEmitsWireGuardGuard(v.V4Addrs, wgListenPorts) ||
+			hostInboundEmitsWireGuardGuard(v.IngressDenyV4, wgListenPorts) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip"))
 		}
 		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) ||
-			hostInboundEmitsWireGuardGuard(v.V6Addrs, wgListenPorts) {
+			hostInboundEmitsWireGuardGuard(v.V6Addrs, wgListenPorts) ||
+			hostInboundEmitsWireGuardGuard(v.IngressDenyV6, wgListenPorts) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}

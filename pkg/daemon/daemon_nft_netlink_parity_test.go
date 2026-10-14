@@ -78,7 +78,13 @@ func TestNftNetlinkParity(t *testing.T) {
 func runNftNetlinkParityInner(t *testing.T) {
 	inst := xnft.NewNetlinkInstaller()
 	views, unzonedV4, unzonedV6, programs, wg, wgZones := parityHostInboundInputs()
-
+	// #12846: the owner zone's WG accept must include an address present only
+	// in IngressDeny*, and the exact row remains covered by this netlink/text
+	// per-rule parity harness below.
+	if oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wgZones, true); !strings.Contains(oracle,
+		`iifname "lifeline-vrf" meta sdifname "ge-lifeline-vrf" ip daddr 192.0.2.88 udp dport 51823 accept`) {
+		t.Fatalf("text oracle lacks WG ingress admission for IngressDeny address:\n%s", oracle)
+	}
 	t.Run("host_inbound", func(t *testing.T) {
 		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wgZones, true)
 		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, wgZones, true)
@@ -926,9 +932,9 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 	}
 	unzonedV4 = []string{"10.0.99.1"}
 	unzonedV6 = []string{"2001:db8:99::1"}
-	wg = []uint16{51820, 51821, 51822}
+	wg = []uint16{51820, 51821, 51822, 51823}
 	// #11076/#12034: trust and shared-trust admit only owner-zone listener scopes.
-	wgZones = map[string][]uint16{"trust": {51820}, "mgmt": {51821}, "shared-trust": {51822}}
+	wgZones = map[string][]uint16{"trust": {51820}, "mgmt": {51821}, "shared-trust": {51822}, "lifeline-vrf-deny": {51823}}
 	programs = []dpuserspace.JunosHostProgram{
 		{
 			Zone:           "untrust",
