@@ -7,7 +7,7 @@ package config
 //	ids-option s1 { icmp { ping-death; } }   nested   -> [ids-option s1]>[icmp]>[ping-death]
 //	ids-option s1 icmp ping-death;           packed   -> [ids-option s1 icmp ping-death]
 //
-// It normalises the tail at ONE depth — `packedBody(inst.node, idsSchema)` —
+// It normalises the tail at ONE depth — `screenPackedBody(inst.node, idsSchema)` —
 // and the depth one level in was never swept. A FAMILY node (`icmp`, `ip`,
 // `tcp`, `udp`, `limit-session`) that carries its own body packed onto its
 // Keys arrives with ZERO children:
@@ -61,6 +61,27 @@ package config
 // flag at all. #9056 owns that general class (83 sites across the tree, of
 // which the screen families are a handful) and stays open; this fixes the
 // screen family depth at the reader.
+
+// screenPackedBody uses the shared schema-directed expansion when it can
+// resolve the full packed tail. If that walk bails on an unmodelled token,
+// expand the remainder as single-token nodes instead: compileScreen records
+// those nodes as UnknownLeaves, allowing the strict screen gate to reject
+// malformed configuration rather than silently dropping the entire body.
+func screenPackedBody(node *Node, schema *schemaNode) *Node {
+	expanded := packedBody(node, schema)
+	if expanded != node || node == nil || schema == nil {
+		return expanded
+	}
+	consumed, _ := consumeNodeKeys(node.Keys, schema)
+	if consumed >= len(node.Keys) || node.KeyBracketed(consumed) {
+		// Bracketed keys can be a list of ids-option instance names rather
+		// than a compact screen body (for example, ids-option [s1 s2]).
+		// Keep that schema-declined shape untouched; only unbracketed tails
+		// are interpreted as packed statements here.
+		return expanded
+	}
+	return screenFamilyBody(node, schema)
+}
 
 // screenNormalizeFamilies returns body with every FAMILY child's packed tail
 // expanded. The returned node is the ORIGINAL when nothing needed expanding

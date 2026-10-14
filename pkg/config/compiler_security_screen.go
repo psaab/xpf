@@ -250,7 +250,7 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 		// bound to a zone normally, so the operator got no protection from a
 		// check they configured and nothing said so.
 		idsSchema := schemaForPath("security", "screen", "ids-option")
-		body := packedBody(inst.node, idsSchema)
+		body := screenPackedBody(inst.node, idsSchema)
 
 		// #9421: #6683 normalised the ids-option node's packed tail and
 		// stopped there. A FAMILY node one level in (`icmp ping-death;`,
@@ -274,7 +274,7 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 			if famSchema == nil || n == nil || len(n.Keys) == 0 {
 				return n
 			}
-			return packedBody(n, resolveSchemaChild(famSchema, n.Keys[0]))
+			return screenPackedBody(n, resolveSchemaChild(famSchema, n.Keys[0]))
 		}
 		famSchema := func(fam string) *schemaNode {
 			if idsSchema == nil {
