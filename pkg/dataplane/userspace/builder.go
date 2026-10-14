@@ -196,12 +196,17 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	if err != nil {
 		return nil, err
 	}
+	zones := buildZoneSnapshots(cfg)
 	// #3261 / #10688 / #12047: stamp refusal reasons from the built policy rules
 	// and address-book rows. The cfg-only capability derivation cannot see feeds.
 	// #12507: then the static routes and bind-less selector fence rows this
 	// build publishes below whose CIDR mask the helper cannot parse.
 	caps := deriveUserspaceCapabilities(cfg)
 	caps.PolicyContentRejected = collectPolicyContentRejections(policies)
+	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
+		collectPolicyZoneRejections(policies, zones)...)
+	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
+		collectPolicyIdentityRejections(policies)...)
 	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
 		collectAddressBookFamilyRejections(addressBooks)...)
 	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
@@ -251,7 +256,7 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 		// config's cluster stanza; absent/standalone leaves it 0, which is the
 		// pre-#6311 layout bit for bit.
 		NodeID:               clusterNodeID(cfg),
-		Zones:                buildZoneSnapshots(cfg),
+		Zones:                zones,
 		Interfaces:           interfaces,
 		Fabrics:              buildFabricSnapshotsFrom(cfg, liveXfrm),
 		TunnelEndpoints:      buildTunnelEndpointSnapshots(cfg, interfaces),
