@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "c31d169a651700fc1f407bb0f3d48099fc2d810ec3bf78ef2650befd356cf06d"
+	snapshotShapeGolden8892 = "b53de1a2b0fd362425227096f5a8fd7a7aee002f1608d4c51c19d819a4101830"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -524,6 +524,27 @@ const (
 	// so no helper of any vintage can observe it, and bumping for it
 	// would spend the one signal that says the wire really changed.
 	// ProtocolVersion stays at 46.
+	// v46 STANDS (#12938): `SecurityConfig.EnforcementPoliciesChildren` and
+	// `SecurityConfig.EnforcementPoliciesContent` were added by #12819
+	// (56051932c) to the typed config, and ConfigSnapshot embeds the whole
+	// Config, so they moved this digest. Same arm as #9246/#12217: both are
+	// tagged `json:"-"`, they are COMPILE-TIME DIAGNOSTICS retaining the
+	// policy-context children whose opaque subtree matched no known
+	// non-enforcement grammar and the corresponding rejected content shape,
+	// so strict compilation can reject them and tolerant loads can warn and
+	// quarantine -- all decided Go-side before any snapshot is built.
+	// Measured, not argued: dumping the sorted reflection walk at
+	// 56051932c^ and at 56051932c differs by exactly two lines (the two
+	// fields themselves, both tagged "-", with no reachable element fields),
+	// the parent walk hashes to the previous golden c31d169a, and the HEAD
+	// walk hashes to the new golden below.
+	// Rust models `config` as one opaque serde_json::Value
+	// (userspace-dp/src/protocol/snapshot.rs:798), names no field inside
+	// it, and `grep -rn EnforcementPolicies userspace-dp/src/` returns
+	// zero hits; every consumer is in pkg/config. Nothing transmits the
+	// fields, so no helper of any vintage can observe them, and bumping
+	// for them would spend the one signal that says the wire really
+	// changed. ProtocolVersion stays at 46.
 	snapshotShapeVersion8892 = 46
 )
 
