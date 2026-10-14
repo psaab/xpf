@@ -1762,7 +1762,8 @@ pub(crate) struct PolicyState {
     /// re-derivation can only manufacture a false DENY when a constrained
     /// PERMIT is skipped, so this remains the permit-only revocation gate.
     icmp_type_constrained_permit: [bool; 2],
-    /// #11064: does any active rule (PERMIT or DENY) carry an ICMP/ICMPv6
+    /// #11064/#12860: does any rule that can be eligible under a fresh or
+    /// expired scheduler lease (PERMIT, DENY, or REJECT) carry an ICMP/ICMPv6
     /// type/code-constrained term? Session hits use the packet's actual
     /// type/code and re-evaluate whenever either action can change the verdict.
     icmp_type_constrained_term: [bool; 2],
@@ -2725,14 +2726,26 @@ pub(crate) fn parse_policy_state_with_counters(
         // a type-constrained term have ADMITTED a flow a type-blind eval
         // denies" — is answered by icmp_type_constrained_permit below; the
         // wider _term arm is correct for both consumers.)
-        if !state.rules[idx].inactive {
+        // #12860: the packet-scoped session-hit gate must cover every rule
+        // that can be eligible under either a fresh or expired scheduler
+        // lease. An inactive scheduled DENY/REJECT is skipped while fresh,
+        // but becomes eligible when the lease expires; inactive PERMITs do
+        // not (expired scheduled permits are skipped fail-closed).
+        let scheduler_may_enable_deny = !state.rules[idx].scheduler_name.is_empty()
+            && matches!(
+                state.rules[idx].action,
+                PolicyAction::Deny | PolicyAction::Reject
+            );
+        if !state.rules[idx].inactive || scheduler_may_enable_deny {
             for (slot, proto) in [PROTO_ICMP, PROTO_ICMPV6].into_iter().enumerate() {
                 if state.rules[idx]
                     .compiled_apps
                     .has_icmp_type_constrained_term(proto)
                 {
                     state.icmp_type_constrained_term[slot] = true;
-                    if matches!(state.rules[idx].action, PolicyAction::Permit) {
+                    if !state.rules[idx].inactive
+                        && matches!(state.rules[idx].action, PolicyAction::Permit)
+                    {
                         state.icmp_type_constrained_permit[slot] = true;
                     }
                 }
