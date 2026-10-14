@@ -295,6 +295,14 @@ func (s *Server) showSchedulers(cfg *config.Config, buf *strings.Builder) {
 		return
 	}
 	for name, sched := range cfg.Schedulers {
+		if sched == nil {
+			// #12903: a present-but-nil scheduler map value is admitted by the
+			// tolerant-load / peer-sync path (#1960) — the same nil-tolerant
+			// class the application-set guard below (#5221) and the CLI's
+			// address-book guards (#7197) already skip. Skip it rather than
+			// dereferencing sched.StartTime and panicking the display handler.
+			continue
+		}
 		fmt.Fprintf(buf, "Scheduler: %s\n", name)
 		if sched.StartTime != "" {
 			fmt.Fprintf(buf, "  Start time: %s\n", sched.StartTime)
@@ -331,12 +339,31 @@ func (s *Server) showApplications(cfg *config.Config, buf *strings.Builder) {
 		sort.Strings(names)
 		for _, name := range names {
 			app := cfg.Applications.Applications[name]
+			if app == nil {
+				// #12903: present-but-nil application map values reach this render
+				// via the tolerant-load / peer-sync path (#1960); the resolver
+				// (#5179) and the application-set loop below (#5221) already
+				// tolerate them. Skip rather than dereferencing app.Protocol and
+				// panicking the display handler.
+				continue
+			}
 			fmt.Fprintf(buf, "  %-24s proto=%-6s", name, app.Protocol)
 			if app.DestinationPort != "" {
 				fmt.Fprintf(buf, " dst-port=%s", app.DestinationPort)
 			}
 			if app.SourcePort != "" {
 				fmt.Fprintf(buf, " src-port=%s", app.SourcePort)
+			}
+			if app.ICMPType != nil {
+				// #12903: an ICMP/ICMPv6 application may be constrained to one
+				// message type/code (junos-icmp-ping = type 8, #11340). Omitting
+				// the constraint here widened the rendered application to every
+				// type/code — the operator could not see the narrowing the
+				// dataplane actually enforces.
+				fmt.Fprintf(buf, " icmp-type=%d", *app.ICMPType)
+			}
+			if app.ICMPCode != nil {
+				fmt.Fprintf(buf, " icmp-code=%d", *app.ICMPCode)
 			}
 			if app.InactivityTimeout > 0 {
 				fmt.Fprintf(buf, " timeout=%ds", app.InactivityTimeout)
@@ -975,14 +1002,27 @@ func (s *Server) showAlg(cfg *config.Config, buf *strings.Builder) {
 }
 
 func (s *Server) showDynamicAddress(cfg *config.Config, buf *strings.Builder) {
-	if cfg == nil || len(cfg.Security.DynamicAddress.FeedServers) == 0 {
+	if cfg == nil {
+		buf.WriteString("No dynamic address feeds configured\n")
+		return
+	}
+	// The per-binding Enforced verdict below needs the same runtime snapshot
+	// view the feed rows use, so it is fetched once for both.
+	var runtimeFeeds map[string]feeds.FeedInfo
+	if s.feedsFn != nil {
+		runtimeFeeds = s.feedsFn()
+	}
+	if len(cfg.Security.DynamicAddress.FeedServers) == 0 {
 		buf.WriteString("No dynamic address feeds configured\n")
 	} else {
-		var runtimeFeeds map[string]feeds.FeedInfo
-		if s.feedsFn != nil {
-			runtimeFeeds = s.feedsFn()
-		}
 		for name, feed := range cfg.Security.DynamicAddress.FeedServers {
+			if feed == nil {
+				// #12903: a present-but-nil feed-server map value is admitted by
+				// the tolerant-load / peer-sync path (#1960); skip it rather
+				// than dereferencing feed.URL and panicking the display
+				// handler (same class as #5221 / #7197).
+				continue
+			}
 			fmt.Fprintf(buf, "Feed server: %s\n", name)
 			// Redact any embedded basic-auth userinfo / query-string token —
 			// dynamic-address feeds routinely carry per-tenant bearer tokens in
@@ -1044,6 +1084,39 @@ func (s *Server) showDynamicAddress(cfg *config.Config, buf *strings.Builder) {
 			}
 			buf.WriteString("\n")
 		}
+	}
+
+	// #12903: the local CLI has carried the per-binding `Enforced` verdict
+	// since #9689; this render omitted the whole section, so a remote operator
+	// could not see which dynamic addresses the dataplane is actually
+	// enforcing (current/stale prefixes, fail-mode drop, or unresolved with
+	// the previous-good policy set retained). Verdicts come from the same
+	// shared feeds.BindingEnforcement the CLI uses, so the two surfaces cannot
+	// drift from each other or from SnapshotForBindings.
+	bindings := cfg.Security.DynamicAddress.AddressBindings
+	if len(bindings) == 0 {
+		return
+	}
+	names := make([]string, 0, len(bindings))
+	for name := range bindings {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	buf.WriteString("Dynamic Address Bindings:\n")
+	for _, name := range names {
+		b := bindings[name]
+		if b == nil {
+			// #12903: skip a present-but-nil binding admitted by the
+			// tolerant-load / peer-sync path (#1960) rather than
+			// dereferencing b.FeedNames (same class as #5221 / #7197).
+			continue
+		}
+		mode := b.FailMode
+		if mode == "" {
+			mode = "retain"
+		}
+		fmt.Fprintf(buf, "  %s: feeds %s, fail-mode %s\n", name, strings.Join(b.FeedNames, ", "), mode)
+		fmt.Fprintf(buf, "    Enforced: %s\n", feeds.BindingEnforcement(b, runtimeFeeds))
 	}
 }
 
@@ -1137,13 +1210,37 @@ func (s *Server) showAddressBook(cfg *config.Config, buf *strings.Builder) {
 		if len(ab.Addresses) > 0 {
 			buf.WriteString("Addresses:\n")
 			for name, addr := range ab.Addresses {
+				if addr == nil {
+					// #12903: a present-but-nil *Address map value is admitted
+					// by the tolerant-load / peer-sync path (#1960) — the SAME
+					// nil-tolerant class the local CLI already skips (#7197).
+					// Skip it rather than dereferencing addr.Value and
+					// panicking the display handler.
+					continue
+				}
 				fmt.Fprintf(buf, "  %-20s %s\n", name, addr.Value)
 			}
 		}
 		if len(ab.AddressSets) > 0 {
 			buf.WriteString("Address sets:\n")
 			for name, as := range ab.AddressSets {
-				fmt.Fprintf(buf, "  %-20s members: %s\n", name, strings.Join(as.Addresses, ", "))
+				if as == nil {
+					// #12903: same nil-tolerant contract as the address rows
+					// above (#7197); skip rather than dereferencing
+					// as.Addresses.
+					continue
+				}
+				// #12903: render nested address-set members with the same
+				// `set:` prefix the local CLI uses, so a set that groups other
+				// sets no longer presents as holding only its direct address
+				// members — an operator auditing a deny set would otherwise
+				// under-count what it matches.
+				parts := make([]string, 0, len(as.Addresses)+len(as.AddressSets))
+				parts = append(parts, as.Addresses...)
+				for _, nested := range as.AddressSets {
+					parts = append(parts, "set:"+nested)
+				}
+				fmt.Fprintf(buf, "  %-20s members: %s\n", name, strings.Join(parts, ", "))
 			}
 		}
 	}
@@ -1160,6 +1257,13 @@ func (s *Server) showIKE(cfg *config.Config, buf *strings.Builder) {
 		sort.Strings(names)
 		for _, name := range names {
 			gw := cfg.Security.IPsec.Gateways[name]
+			if gw == nil {
+				// #12903: a present-but-nil gateway map value is admitted by
+				// the tolerant-load / peer-sync path (#1960); skip it rather
+				// than dereferencing gw.Address and panicking the display
+				// handler (same class as #5221 / #7197).
+				continue
+			}
 			fmt.Fprintf(buf, "IKE gateway: %s\n", name)
 			if gw.Address != "" {
 				fmt.Fprintf(buf, "  Remote address:     %s\n", gw.Address)
@@ -1178,7 +1282,7 @@ func (s *Server) showIKE(cfg *config.Config, buf *strings.Builder) {
 			}
 			if gw.IKEPolicy != "" {
 				fmt.Fprintf(buf, "  IKE policy:         %s\n", gw.IKEPolicy)
-				if pol, ok := cfg.Security.IPsec.IKEPolicies[gw.IKEPolicy]; ok {
+				if pol, ok := cfg.Security.IPsec.IKEPolicies[gw.IKEPolicy]; ok && pol != nil {
 					fmt.Fprintf(buf, "    Mode:     %s\n", pol.Mode)
 					fmt.Fprintf(buf, "    Proposal: %s\n", strings.Join(pol.Proposals, " "))
 				}
@@ -1226,6 +1330,12 @@ func (s *Server) showIKE(cfg *config.Config, buf *strings.Builder) {
 			buf.WriteString("IKE proposals:\n")
 			for _, name := range pNames {
 				p := cfg.Security.IPsec.IKEProposals[name]
+				if p == nil {
+					// #12903: nil-tolerant contract for a present-but-nil
+					// proposal slot (#1960); skip rather than dereferencing
+					// p.AuthMethod.
+					continue
+				}
 				fmt.Fprintf(buf, "  %s: auth=%s enc=%s dh=group%d", name, p.AuthMethod, p.EncryptionAlg, p.DHGroup)
 				if p.LifetimeSeconds > 0 {
 					fmt.Fprintf(buf, " lifetime=%ds", p.LifetimeSeconds)
