@@ -3,6 +3,8 @@ package daemon
 import (
 	"encoding/binary"
 	"net"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -134,6 +136,10 @@ func expandPolicyRenameAncestryWithFeeds(
 	type ancestryPair struct {
 		sf, st, sn string
 		df, dt, dn string
+		// globalScope marks pairs generated because a global policy's
+		// zone SCOPE touches the renamed zone (#12857): the rule's stable
+		// ID (junos-global->junos-global/<name>) does not change.
+		globalScope bool
 	}
 	var pairs []ancestryPair
 	for _, descriptor := range descriptors {
@@ -143,7 +149,7 @@ func expandPolicyRenameAncestryWithFeeds(
 			if !sok || !dok {
 				return nil, nil, false
 			}
-			pairs = append(pairs, ancestryPair{sf, st, sn, df, dt, dn})
+			pairs = append(pairs, ancestryPair{sf: sf, st: st, sn: sn, df: df, dt: dt, dn: dn})
 			continue
 		}
 		sourceZone, sourceOK := zoneRenamePath(descriptor.SourcePath)
@@ -164,8 +170,49 @@ func expandPolicyRenameAncestryWithFeeds(
 			}
 			pairs = append(pairs, ancestryPair{
 				sf: identity.from, st: identity.to, sn: identity.name,
-				df: df, dt: dt, dn: identity.name,
+				df: df, dt: dt, dn: identity.name, globalScope: false,
 			})
+		}
+		// #12857: a scoped global policy's rule ID does not change when a
+		// zone in its Match scope is renamed, but its sessions still need
+		// continuity validation against the renamed scope.
+		for _, policy := range oldCfg.Security.GlobalPolicies {
+			if policy == nil {
+				continue
+			}
+			// The new generation's same-named global must carry exactly
+			// the renamed scope; a scope that moved elsewhere is a content
+			// change, not rename continuity.
+			scopeOK := false
+			for _, np := range newCfg.Security.GlobalPolicies {
+				if np == nil || np.Name != policy.Name {
+					continue
+				}
+				want := append(append([]string{}, policy.Match.FromZones...), policy.Match.ToZones...)
+				for i, zone := range want {
+					if zone == sourceZone {
+						want[i] = destinationZone
+					}
+				}
+				got := append(append([]string{}, np.Match.FromZones...), np.Match.ToZones...)
+				sort.Strings(want)
+				sort.Strings(got)
+				scopeOK = slices.Equal(want, got)
+			}
+			if !scopeOK {
+				continue
+			}
+			scope := append(append([]string{}, policy.Match.FromZones...), policy.Match.ToZones...)
+			for _, zone := range scope {
+				if zone == sourceZone {
+					pairs = append(pairs, ancestryPair{
+						sf: config.JunosGlobalZoneName, st: config.JunosGlobalZoneName, sn: policy.Name,
+						df: config.JunosGlobalZoneName, dt: config.JunosGlobalZoneName, dn: policy.Name,
+						globalScope: true,
+					})
+					break
+				}
+			}
 		}
 	}
 	if len(pairs) == 0 {
@@ -191,7 +238,7 @@ func expandPolicyRenameAncestryWithFeeds(
 		destinationID := dpuserspace.StablePolicyRuleID(df, dt, dn)
 		oldID, oldOK := oldIDs[sourceID]
 		_, newOK := newIDs[destinationID]
-		if !oldOK || !newOK || sourceID == destinationID {
+		if !oldOK || !newOK || (sourceID == destinationID && !pair.globalScope) {
 			return nil, nil, false
 		}
 		if oldFingerprints[sourceID] == "" || oldFingerprints[sourceID] != newFingerprints[destinationID] {
@@ -233,8 +280,13 @@ func expandPolicyRenameAncestryWithFeeds(
 	}
 	// A chain means the source/destination relation is not one-to-one in this
 	// apply and cannot safely prove continuity from one old row to one new row.
-	for source := range seenSource {
-		if _, chained := seenDestination[source]; chained {
+	// Global-scope pairs (#12857) are same-ID by construction and exempt.
+	for _, pair := range pairs {
+		if pair.globalScope {
+			continue
+		}
+		sourceID := dpuserspace.StablePolicyRuleID(pair.sf, pair.st, pair.sn)
+		if _, chained := seenDestination[sourceID]; chained {
 			return nil, nil, false
 		}
 	}
