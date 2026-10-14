@@ -83,7 +83,7 @@ command -v python3 >/dev/null 2>&1 || die_void "python3 is required locally to p
 if ! incus info "$FW0" >/dev/null 2>&1; then
 	die_void "cluster instance ${FW0} is not reachable — this is the #12495 LAB leg and needs the loss cluster; the hermetic halves are the pkg/vrrp unit pins and make test-v6-na-recovery-lib"
 fi
-incus exec "$CLUSTER_LAN_HOST" -- command -v tcpdump >/dev/null 2>&1 ||
+incus exec "$CLUSTER_LAN_HOST" -- sh -c "command -v tcpdump" >/dev/null 2>&1 ||
 	die_void "tcpdump is not installed on ${CLUSTER_LAN_HOST}; install it before the run (the capture is the instrument)"
 
 # rg_primary <from-node> — prints "node0" or "node1" for V6_NA_RG's primary,
@@ -92,12 +92,12 @@ incus exec "$CLUSTER_LAN_HOST" -- command -v tcpdump >/dev/null 2>&1 ||
 rg_primary() {
 	local out
 	out="$(incus exec "$1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)"
-	printf '%s\n' "$out" | grep -A1 "Redundancy group: ${V6_NA_RG}" | head -1 |
-		sed -n 's/.*\(node[01]\).*primary.*/\1/p'
+	printf '%s\n' "$out" | grep -A2 "Redundancy group: ${V6_NA_RG} " |
+		sed -n 's/.*\(node[01]\).*primary.*/\1/p' | head -1
 }
 
 wait_primary() { # <want-node0-or-node1> <deadline-s>
-	local want="$1" deadline="$2" label="$3" start now
+	local want="$1" deadline="$2" label="${3:-}" start now
 	start="$(date +%s)"
 	while :; do
 		[[ "$(rg_primary "$FW0")" == "$want" ]] && return 0
