@@ -622,17 +622,18 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	now := time.Now()
 	oldSched := d.policySchedulerActiveStateForApplyLocked(plan.oldCfg, now)
 	newSched := d.policySchedulerActiveStateForApplyLocked(plan.newCfg, now)
-	deleted := deletedPolicyRuntimeIDs(plan.oldCfg, plan.newCfg)
-	modified := changedPolicyRuntimeIDs(plan.oldCfg, plan.newCfg, oldSched, newSched)
+	oldFeedOverlay := d.feedSnapshotsForConfig(plan.oldCfg)
 	feedOverlay := d.feedSnapshotsForConfig(plan.newCfg)
+	deleted := deletedPolicyRuntimeIDs(plan.oldCfg, plan.newCfg)
+	modified := changedPolicyRuntimeIDs(plan.oldCfg, plan.newCfg, oldSched, newSched, oldFeedOverlay, feedOverlay)
 	deflt := defaultPolicyChangeRuntimeIDs(plan.oldCfg, plan.newCfg)
 
 	capture := &policyInvalidationCapture{}
 	var renameBindings map[uint32]policyRenameBinding
 	if plan.renameApply != nil && plan.newCfg != nil && plan.newCfg.Security.PolicyRematchExtensive {
 		var valid bool
-		renameBindings, capture.renameAncestry, valid = expandPolicyRenameAncestry(
-			plan.oldCfg, plan.newCfg, plan.renameApply.descriptors)
+		renameBindings, capture.renameAncestry, valid = expandPolicyRenameAncestryWithFeeds(
+			plan.oldCfg, plan.newCfg, plan.renameApply.descriptors, oldFeedOverlay, feedOverlay)
 		if !valid {
 			renameBindings = nil
 			capture.renameAncestry = nil

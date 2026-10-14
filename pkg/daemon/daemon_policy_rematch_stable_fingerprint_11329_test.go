@@ -115,8 +115,8 @@ func TestPolicyRematchExtensiveIgnoresPositionalPolicyIDs11329(t *testing.T) {
 				t.Fatalf("precondition: target ID did not shift: old=%d new=%d", oldID, newID)
 			}
 
-			oldFP := dpuserspace.PolicyResolvedFingerprints(tc.old)[tc.key]
-			newFP := dpuserspace.PolicyResolvedFingerprints(tc.new)[tc.key]
+			oldFP := dpuserspace.PolicyResolvedFingerprints(tc.old, nil)[tc.key]
+			newFP := dpuserspace.PolicyResolvedFingerprints(tc.new, nil)[tc.key]
 			if oldFP == "" || newFP == "" {
 				t.Fatalf("precondition: target fingerprint missing: old=%q new=%q", oldFP, newFP)
 			}

@@ -515,7 +515,7 @@ func TestPolicyResolvedFingerprintTracksAddressBookDefinition11007(t *testing.T)
 			Action: config.PolicyPermit,
 		}},
 	}}
-	before := PolicyResolvedFingerprints(cfg)
+	before := PolicyResolvedFingerprints(cfg, nil)
 	if len(before) != 1 {
 		t.Fatalf("fingerprints = %v, want one stable policy fingerprint", before)
 	}
@@ -523,7 +523,7 @@ func TestPolicyResolvedFingerprintTracksAddressBookDefinition11007(t *testing.T)
 	for key = range before {
 	}
 	cfg.Security.AddressBook.Addresses["host"].Value = "10.0.0.2/32"
-	after := PolicyResolvedFingerprints(cfg)
+	after := PolicyResolvedFingerprints(cfg, nil)
 	if after[key] == "" || after[key] == before[key] {
 		t.Fatalf("changing a referenced address-set definition did not change fingerprint: before=%v after=%v",
 			before, after)

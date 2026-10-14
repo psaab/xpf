@@ -124,3 +124,28 @@ func TestPolicyRematchExtensive_ReferencedObjectChanged8993(t *testing.T) {
 		}
 	})
 }
+
+func TestPolicyRematchExtensiveTracksStaticSiblingBesideLiveFeed12851(t *testing.T) {
+	build := func(hostCIDR string) *config.Config {
+		cfg := extensiveAddrConfig([]string{"h1", "feedref"}, hostCIDR, true, config.PolicyPermit)
+		cfg.Security.AddressBook.Addresses["feedref"] = &config.Address{Name: "feedref", Value: "192.0.2.1/32"}
+		cfg.Security.DynamicAddress.AddressBindings = map[string]*config.AddressBinding{
+			"feedref": {Name: "feedref", FeedNames: []string{"test-feed"}},
+		}
+		return cfg
+	}
+	oldCfg := build("10.0.0.1/32")
+	newCfg := build("10.0.9.9/32")
+	webID := dpuserspace.PolicyIDsByStableKey(oldCfg)["trust->untrust/p-web"]
+	if webID == 0 {
+		t.Fatal("precondition: p-web id must be non-zero")
+	}
+	overlay := map[string][]string{"feedref": {"198.51.100.1/32"}}
+	got := changedPolicyRuntimeIDs(oldCfg, newCfg, nil, nil, overlay, overlay)
+	if _, swept := got[webID]; !swept {
+		t.Fatalf("#12851: static sibling tightening beside a healthy live feed did not mark p-web for extensive rematch: %v", got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("#12851: unrelated policies were marked changed: %v", got)
+	}
+}

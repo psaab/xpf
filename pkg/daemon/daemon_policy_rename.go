@@ -104,6 +104,14 @@ func expandPolicyRenameAncestry(
 	oldCfg, newCfg *config.Config,
 	descriptors []configstore.RenameDescriptor,
 ) (map[uint32]policyRenameBinding, []dpuserspace.PolicyRenameAncestry, bool) {
+	return expandPolicyRenameAncestryWithFeeds(oldCfg, newCfg, descriptors, nil, nil)
+}
+
+func expandPolicyRenameAncestryWithFeeds(
+	oldCfg, newCfg *config.Config,
+	descriptors []configstore.RenameDescriptor,
+	oldFeedOverlay, newFeedOverlay map[string][]string,
+) (map[uint32]policyRenameBinding, []dpuserspace.PolicyRenameAncestry, bool) {
 	if len(descriptors) == 0 || oldCfg == nil || newCfg == nil {
 		return nil, nil, false
 	}
@@ -111,8 +119,8 @@ func expandPolicyRenameAncestry(
 	if len(oldIDs) == 0 || len(newIDs) == 0 {
 		return nil, nil, false
 	}
-	oldFingerprints := dpuserspace.PolicyResolvedIdentityStrippedFingerprints(oldCfg)
-	newFingerprints := dpuserspace.PolicyResolvedIdentityStrippedFingerprints(newCfg)
+	oldFingerprints := dpuserspace.PolicyResolvedIdentityStrippedFingerprints(oldCfg, oldFeedOverlay)
+	newFingerprints := dpuserspace.PolicyResolvedIdentityStrippedFingerprints(newCfg, newFeedOverlay)
 	if len(oldFingerprints) == 0 || len(newFingerprints) == 0 {
 		return nil, nil, false
 	}
