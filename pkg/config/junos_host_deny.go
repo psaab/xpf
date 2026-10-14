@@ -992,8 +992,17 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 		// Keep the physical row for VLAN/tunnel unit 0, whose netdev is distinct.
 		unit0 := iface.Units[0]
 		unit0Name := fmt.Sprintf("%s.0", ifName)
-		if unit0 == nil || zoneByIface[unit0Name] != zoneName ||
-			junosHostLinuxNameWith(cfg, ifName, unit0, tunNames) != physicalNetdev {
+		unit0Distinct := unit0 != nil &&
+			junosHostLinuxNameWith(cfg, ifName, unit0, tunNames) != physicalNetdev
+		if unit0Distinct && zoneByIface[unit0Name] == zoneName {
+			// A distinct unit-0 netdev leaves the physical snapshot row
+			// as the physical ingress carrier. The zone owns that path
+			// through its unit-0 ref even though #12839 correctly stopped
+			// assigning the bare physical ref to the unit's zone.
+			note(physicalNetdev, ifName)
+		} else if unit0 == nil || zoneByIface[unit0Name] != zoneName {
+			// On a same-netdev collapse unit 0 is authoritative; otherwise
+			// retain an explicitly owned bare row when it belongs elsewhere.
 			addRow(ifName, physicalNetdev, "", 0)
 		}
 		unitNums := make([]int, 0, len(iface.Units))
