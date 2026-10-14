@@ -76,7 +76,9 @@ func TestGlobalPolicyAppliesToZonePairInZones12684(t *testing.T) {
 		{"from junos-host transit to, unscoped excluded", nil, nil, "junos-host", "untrust", false},
 		{"host pair, host-scoped included", []string{"any"}, []string{"junos-host"}, "junos-host", "junos-host", true},
 		{"host pair, unscoped excluded", nil, nil, "junos-host", "junos-host", false},
-		{"to junos-host, undefined from excluded", nil, []string{"junos-host"}, "ghost", "junos-host", false},
+		{"to junos-host, undefined from, unscoped-from host global included (#12895)", nil, []string{"junos-host"}, "ghost", "junos-host", true},
+		{"to junos-host, undefined from, from-any host global included (#12895)", []string{"any"}, []string{"junos-host"}, "ghost", "junos-host", true},
+		{"to junos-host, undefined from, scoped-from host global excluded (#12895)", []string{"trust"}, []string{"junos-host"}, "ghost", "junos-host", false},
 		{"to junos-host, defined from included", []string{"trust"}, []string{"junos-host"}, "trust", "junos-host", true},
 	}
 	for _, tc := range cases {
