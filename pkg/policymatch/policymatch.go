@@ -2516,6 +2516,10 @@ func isBookName(cfg *config.Config, overlay map[string][]string, tok string) boo
 // matching expandBookNameRecursive so the simulator and the dataplane agree
 // (closing the feed-portion under-deny in the simulator too). overlay may be
 // nil; ab may be nil while overlay carries the name (a pure feed binding).
+//
+// #12965: a present-EMPTY overlay entry for a declared fail-mode drop binding
+// is match-none — the same-named static closure must not resurrect, matching
+// the #12961 policy address-book row the dataplane enforces.
 func expandBookName(cfg *config.Config, overlay map[string][]string, name string, visited map[string]bool) []string {
 	return expandBookNameWithMemo(cfg, overlay, name, visited, nil)
 }
@@ -2535,8 +2539,18 @@ func expandBookNameWithMemo(
 
 	noteFeedPublicationDebt(cfg, name, memo)
 	var out []string
-	if feeds := overlay[name]; len(feeds) > 0 {
+	feeds, feedBound := overlay[name]
+	if len(feeds) > 0 {
 		out = append(out, feeds...)
+	}
+	// #12965: dropped-feed precedence. The hold-dropped binding publishes an
+	// explicit empty set (#10014); a same-named static address/set is an alias
+	// the feed shadows, not a fallback — returning here (not falling through
+	// to the book) keeps the simulator's verdicts on the dataplane's row.
+	if feedBound && len(feeds) == 0 &&
+		cfg.Security.DynamicAddress.AddressBindings[name] != nil &&
+		cfg.Security.DynamicAddress.AddressBindings[name].FailMode == "drop" {
+		return out
 	}
 	ab := cfg.Security.AddressBook
 	if ab == nil {

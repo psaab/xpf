@@ -38,7 +38,10 @@ const natUnresolvedAddressNamePrefix = "unresolved-address-name:"
 // static address/set closure, matching policy book rows. If that static closure
 // is poisoned, the ready direct feed stands alone instead of exposing a
 // partial static subset. Nested feed members also contribute ready prefixes
-// alongside static members (#4925).
+// alongside static members (#4925). A present-EMPTY overlay for a declared
+// fail-mode drop binding is the exception: it is the binding's match-none
+// intent and takes precedence over the same-named static closure (#12965),
+// keeping NAT in book-row parity with the #12961 policy resolver.
 //
 // Before #4925 this helper called the STATIC resolveUserspaceAddressBookEntry
 // expander, which never consulted feedOverlay for nested members and POISONED
