@@ -762,10 +762,10 @@ func zoneInterfaceMembers(iface *Node) []string {
 	if zoneInterfaceApplyMetaKeyword(iface.Name()) {
 		return nil
 	}
-	names, hasBody := zoneInterfaceKeysBeforeBody(iface)
-	if hasBody {
-		// A body keyword landed on this node's OWN Keys, which means the
-		// statement was written in the packed spelling
+	names, stopped := zoneInterfaceKeysBeforeBody(iface)
+	if stopped {
+		// A body keyword or apply-meta statement landed on this node's OWN
+		// Keys. A body indicates the packed spelling
 		// `<if> host-inbound-traffic system-services ssh` — everything from
 		// that token on is the member's BODY, including this node's CHILDREN
 		// (they are the body's contents, e.g. `system-services ssh`). Recursing
@@ -805,10 +805,10 @@ func zoneInterfaceMembers(iface *Node) []string {
 //
 // Deliberately NOT zoneInterfaceNonMemberToken, which is a superset: that one
 // also covers the host-inbound body keywords, and the member walk already
-// handles those through zoneInterfaceBodyKeywords with different semantics (a
-// body keyword on the node's OWN Keys terminates the walk; a meta keyword is
-// simply skipped). Widening the walk to the superset would conflate the two and
-// change what a packed body does.
+// handles those through zoneInterfaceBodyKeywords with different semantics. A
+// body keyword on the node's OWN Keys terminates the walk as a packed body; a
+// meta keyword there terminates it as metadata, while a meta child is skipped.
+// Widening the walk to the superset would conflate the two boundaries.
 func zoneInterfaceApplyMetaKeyword(tok string) bool {
 	switch tok {
 	case "apply-groups", "apply-groups-except", "apply-macro":
@@ -830,8 +830,8 @@ var zoneInterfaceBodyKeywords = map[string]bool{
 }
 
 // zoneInterfaceKeysBeforeBody splits a member node's Keys at the first body
-// keyword: it returns the interface names that precede it, and whether one was
-// found. Empty keys are skipped.
+// keyword or apply-meta statement: it returns the interface names that precede
+// it and whether a stopping statement was found. Empty keys are skipped.
 //
 // Before #6525 the caller read every key unconditionally. That is correct for
 // every shape `set` can author (SetPath always makes `host-inbound-traffic` a
@@ -848,12 +848,14 @@ var zoneInterfaceBodyKeywords = map[string]bool{
 // and filed on its own; the direction is fail-CLOSED (the override is absent, so
 // the interface admits only what the zone-level stanza admits) rather than the
 // fail-open a phantom membership would produce.
-func zoneInterfaceKeysBeforeBody(iface *Node) (names []string, hasBody bool) {
+func zoneInterfaceKeysBeforeBody(iface *Node) (names []string, stopped bool) {
 	for _, k := range iface.Keys {
 		if k == "" {
 			continue
 		}
-		if zoneInterfaceBodyKeywords[k] {
+		if zoneInterfaceBodyKeywords[k] || zoneInterfaceApplyMetaKeyword(k) {
+			// Meta statements on a packed member's Keys are not interface names;
+			// neither are their arguments or an apply-macro body.
 			return names, true
 		}
 		names = append(names, k)
@@ -1002,6 +1004,14 @@ func zoneInterfaceMemberPackedTail(iface *Node) (keyword string, tail []string, 
 		if k == "" {
 			continue
 		}
+		if zoneInterfaceApplyMetaKeyword(k) {
+			// Meta BEFORE any body keyword owns the remaining tokens
+			// (apply-macro body) — not member evidence. Meta AFTER a body
+			// keyword is an ordinary tail token: it must not void the
+			// packed-tail signal for stray members preceding it (#12835
+			// review B1).
+			return "", nil, false
+		}
 		if !zoneInterfaceBodyKeywords[k] {
 			continue
 		}
@@ -1036,6 +1046,9 @@ func zoneInterfaceMemberPackedTail(iface *Node) (keyword string, tail []string, 
 		return k, nil, false
 	}
 	for _, child := range iface.Children {
+		if zoneInterfaceApplyMetaKeyword(child.Name()) {
+			continue
+		}
 		if zoneInterfaceBodyKeywords[child.Name()] {
 			// The keyword arrived as a CHILD NODE rather than on this node's
 			// Keys. Its own subtree is the member's BODY — except for tokens

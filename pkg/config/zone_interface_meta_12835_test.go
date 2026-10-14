@@ -1,0 +1,77 @@
+package config
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestZoneInterfacePackedMemberKeysSkipApplyMeta12835(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		keys []string
+	}{
+		{"apply-macro", []string{"ge-0/0/0.0", "apply-macro", "M"}},
+		{"apply-groups", []string{"ge-0/0/0.0", "apply-groups", "G"}},
+		{"apply-groups-except", []string{"ge-0/0/0.0", "apply-groups-except", "G"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := zoneInterfaceMembers(&Node{Keys: tc.keys})
+			if !reflect.DeepEqual(got, []string{"ge-0/0/0.0"}) {
+				t.Fatalf("zoneInterfaceMembers = %v, want [ge-0/0/0.0]", got)
+			}
+		})
+	}
+	if got := zoneInterfaceMembers(&Node{Keys: []string{"ge-0/0/0.0", "host-inbound-traffic", "system-services"}}); !reflect.DeepEqual(got, []string{"ge-0/0/0.0"}) {
+		t.Fatalf("ordinary body boundary changed membership: got %v", got)
+	}
+}
+
+func TestZoneInterfacePackedApplyMacroOwnKeysCompiles12835(t *testing.T) {
+	src := `interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }
+security { zones { security-zone Z { interfaces { ge-0/0/0.0 apply-macro M { host-inbound-traffic ge-0/0/9.0; } } } } }`
+	tree, errs := NewParser(src).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	if err := SchemaValidate(tree, nil); err != nil {
+		t.Fatalf("SchemaValidate rejected in-key apply-macro: %v", err)
+	}
+	for _, compile := range []struct {
+		name string
+		fn   func(*ConfigTree) (*Config, error)
+	}{
+		{"strict", CompileConfig},
+		{"lenient", CompileConfigLenient},
+	} {
+		t.Run(compile.name, func(t *testing.T) {
+			cfg, err := compile.fn(tree)
+			if err != nil {
+				t.Fatalf("compile rejected in-key apply-macro: %v", err)
+			}
+			if got := cfg.Security.Zones["Z"].Interfaces; !reflect.DeepEqual(got, []string{"ge-0/0/0.0"}) {
+				t.Fatalf("zone membership = %v, want only the authored interface", got)
+			}
+		})
+	}
+}
+
+func TestZoneInterfaceMetaAfterBodyTailStillRejects12835(t *testing.T) {
+	// Meta AFTER a body keyword must not void the packed-tail signal:
+	// the stray member ge-0/0/9.0 is dropped content (#6735).
+	text := `interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } ge-0/0/9 { unit 0 { family inet { address 10.0.9.1/24; } } } }
+security { zones { security-zone Z { interfaces { ge-0/0/0.0 host-inbound-traffic ge-0/0/9.0 apply-macro M; } } } }`
+	tree, errs := NewParser(text).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatal("strict must reject meta-after-tail packed shape")
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	if len(cfg.Warnings) == 0 {
+		t.Fatal("lenient must warn about the dropped member")
+	}
+}
