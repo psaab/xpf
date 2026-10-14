@@ -777,6 +777,7 @@ clean:
 # env var flows through to setup.sh (INSTANCE_NAME=${XPF_INSTANCE:-xpf-fw}).
 .PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
 
+.PHONY: test-v6-na-recovery-lib
 test-env-init:
 	./test/incus/setup.sh init
 
@@ -1244,6 +1245,20 @@ test-iperf-throughput-lib:
 # no incus, cluster, network or crafted frames.
 test-screen-probe-lib:
 	bash ./test/incus/screen-probe-selftest.sh
+
+# Self-test the #12495 IPv6 NA-burst ATTRIBUTION layer: the functions that
+# turn a wire-capture event timeline (NA/RA/ARP lines normalized from a pcap
+# by v6-na-parse-12495.py) plus a neighbor-table timeline into PASS / FAIL /
+# VOID. The acceptance of #12495 is an attribution -- neighbor recovery "via
+# the becomeMaster NA burst (vs RA SLLA)" -- and a transit probe alone goes
+# green under EITHER mechanism, so the discriminator (a global-VIP entry can
+# only be rewritten by an override NA) and the witness (the v4 GARP burst
+# from the same transition proves the capture was live when the NA is
+# absent) are decided here, hermetically, before anyone spends a lab run.
+# The pcap parser is exercised against byte-built frames; unparseable input
+# is PARSEERR -> VOID, never a silent zero.
+test-v6-na-recovery-lib:
+	bash ./test/incus/v6-na-recovery-12495-selftest.sh
 
 # #8259: provision the SECOND VLAN-80 target, so a mouse-latency verdict can be
 # ATTRIBUTED.
