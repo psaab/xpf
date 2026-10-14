@@ -67,6 +67,10 @@ fn ensure_cos_interface_runtime_cold(
     }
     let mut runtime = build_cos_interface_runtime(config, now_ns);
     if let Some(iface_fast) = binding.cos.cos_fast_interfaces.get(&egress_ifindex) {
+        // #13073: snapshot the root lease onto the runtime so shared_exact
+        // admission never needs the fast map again (refreshed on swap by
+        // `refresh_cos_runtime_shared_root_leases`).
+        runtime.shared_root_lease = iface_fast.shared_root_lease.clone();
         apply_cos_queue_flow_fair_promotion(
             &mut runtime,
             &iface_fast.queue_fast_path,
@@ -136,6 +140,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
         default_queue: config.default_queue,
         nonempty_queues: 0,
         runnable_queues: 0,
+        shared_root_lease: None,
         oversubscription_policy: config.oversubscription_policy,
         oversubscription_guarantee_fraction: config.oversubscription_guarantee_fraction,
         priority_low_min_share_bytes: config.priority_low_min_share_bytes,
@@ -260,6 +265,22 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
             level1: std::array::from_fn(|_| Vec::new()),
             scratch: Default::default(),
         },
+    }
+}
+
+/// #13073: re-snapshot every materialized interface runtime's root lease
+/// from a freshly assigned `cos_fast_interfaces` map. Lease-set changes
+/// (worker join/leave) arrive as a whole-map swap on the worker loop; a
+/// runtime that kept its materialization-time lease would keep admitting
+/// shared_exact traffic at a stale shard count. Must be called after every
+/// `binding.cos.cos_fast_interfaces = ...` assignment. Cold path.
+pub(in crate::afxdp) fn refresh_cos_runtime_shared_root_leases(binding: &mut BindingWorker) {
+    for (root_ifindex, root) in binding.cos.cos_interfaces.iter_mut() {
+        root.shared_root_lease = binding
+            .cos
+            .cos_fast_interfaces
+            .get(root_ifindex)
+            .and_then(|iface_fast| iface_fast.shared_root_lease.clone());
     }
 }
 

@@ -1848,13 +1848,15 @@ fn enqueue_cos_item(
         // then restore the prospective-flow expansion (#707) over that share.
         // Owner-local queues keep the unchanged flow-aware buffer limit.
         let buffer_limit = if queue.shared_exact() {
-            // Only shared_exact admission needs the worker count; owner-local
-            // queues avoid an extra fast-interface lookup on this hot path.
-            let active_shards = binding
-                .cos
-                .cos_fast_interfaces
-                .get(&egress_ifindex)
-                .and_then(|iface| iface.shared_root_lease.as_ref())
+            // #13073: read the shard count from the runtime's own lease
+            // snapshot (attached at materialization, refreshed on fast-map
+            // swap) instead of re-probing `cos_fast_interfaces` — the root
+            // is already in scope here, so this drops a per-packet FastMap
+            // hash lookup + `Arc` pointer chase from every shared_exact
+            // admission. A missing lease keeps owner-local semantics.
+            let active_shards = root
+                .shared_root_lease
+                .as_ref()
                 .map(|lease| lease.active_shards())
                 .unwrap_or(1)
                 .max(1);
