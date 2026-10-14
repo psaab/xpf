@@ -244,12 +244,12 @@ func TestSchedulerDailySingleStatementControls12745(t *testing.T) {
 			t.Fatalf("legacy direct window changed: %+v", s)
 		}
 	})
-	t.Run("later daily window replaces prior all-day", func(t *testing.T) {
-		cfg := accept(t, parseWeekdayConfig12238(t, `schedulers {
+	t.Run("later daily window retains prior all-day and rejects", func(t *testing.T) {
+		sched := rejectAndWarnUnion12745(t, parseWeekdayConfig12238(t, `schedulers {
     scheduler S { daily all-day; daily { start-time 09:00:00; stop-time 17:00:00; } }
 }`))
-		if s := cfg.Schedulers["S"]; s == nil || s.AllDay || s.StartTime != "09:00:00" || s.StopTime != "17:00:00" {
-			t.Fatalf("daily scalar last-wins behavior changed: %+v", s)
+		if !sched.AllDay || sched.StartTime != "09:00:00" || sched.StopTime != "17:00:00" {
+			t.Fatalf("tolerant compile must keep the union window, got %+v", sched)
 		}
 	})
 }

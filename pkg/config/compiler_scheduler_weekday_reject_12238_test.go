@@ -260,30 +260,16 @@ func TestSchedulerWeekdayFlagHalfWindowCompletedElsewhereRejects_12238(t *testin
 	}
 }
 
-// `daily` is a last-wins scalar window (compileSchedulers overwrites its
-// all-day flag rather than ORing it), so repeated daily statements are outside
-// the #12238 weekday merge and stay accepted without a diagnostic.
-func TestSchedulerDailyRepeatsStayLastWins_12238(t *testing.T) {
+// Daily all-day plus a complete window is a #12745 contradiction, even when
+// duplicate daily statements compose the two meanings.
+func TestSchedulerDailyRepeatsReject12745_12238(t *testing.T) {
 	for _, text := range []string{
 		`schedulers { scheduler S { daily all-day; } scheduler S { daily { start-time 09:00:00; stop-time 17:00:00; } } }`,
 		`schedulers { scheduler S { daily all-day; daily { start-time 09:00:00; stop-time 17:00:00; } } }`,
 	} {
-		compiled, err := config.CompileConfig(parseWeekdayConfig12238(t, text))
-		if err != nil {
-			t.Fatalf("repeated daily statements must compile: %v\n%s", err, text)
-		}
-		sched := compiled.Schedulers["S"]
-		if sched == nil || sched.AllDay || sched.StartTime != "09:00:00" || sched.StopTime != "17:00:00" {
-			t.Fatalf("daily window must be the last-wins 09:00:00..17:00:00, got %+v", sched)
-		}
-		lenient, err := config.CompileConfigLenient(parseWeekdayConfig12238(t, text))
-		if err != nil {
-			t.Fatalf("tolerant compile: %v", err)
-		}
-		for _, warning := range lenient.Warnings {
-			if strings.Contains(warning, "#12238") {
-				t.Fatalf("daily repeats must not raise a #12238 warning: %q", warning)
-			}
+		sched := rejectAndWarnUnion12745(t, parseWeekdayConfig12238(t, text))
+		if !sched.AllDay || sched.StartTime != "09:00:00" || sched.StopTime != "17:00:00" {
+			t.Fatalf("tolerant compile must keep the daily union window, got %+v", sched)
 		}
 	}
 }
