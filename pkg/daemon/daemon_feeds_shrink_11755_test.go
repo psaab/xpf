@@ -72,9 +72,9 @@ func TestFeedShrinkHighWaterSurvivesColdDaemonRestart11755(t *testing.T) {
 	body = feedShrinkBody11755(500)
 	bodyMu.Unlock()
 
-	var logs bytes.Buffer
+	logs := &synchronizedLogBuffer11755{}
 	previousLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 	second := newDaemon()
 	second.reconcileFeeds(cfg)
@@ -83,9 +83,38 @@ func TestFeedShrinkHighWaterSurvivesColdDaemonRestart11755(t *testing.T) {
 	if secondInfo.ShrinkGuardHighWaterCount != 50_000 || secondInfo.ShrinkGuardHighWaterHash != firstInfo.ShrinkGuardHighWaterHash {
 		t.Fatalf("cold daemon restart lost the epoch high-water: first=%+v second=%+v", firstInfo, secondInfo)
 	}
-	if !strings.Contains(logs.String(), "bootstrap below or changed from remembered high-water") {
+	waitForAuditWarning := func() string {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			captured := logs.String()
+			if strings.Contains(captured, "bootstrap below or changed from remembered high-water") {
+				return captured
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return logs.String()
+	}
+	if !strings.Contains(waitForAuditWarning(), "bootstrap below or changed from remembered high-water") {
 		t.Fatalf("cold-boot shrink comparison emitted no audit warning:\n%s", logs.String())
 	}
+}
+
+type synchronizedLogBuffer11755 struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *synchronizedLogBuffer11755) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *synchronizedLogBuffer11755) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 func feedShrinkBody11755(count int) string {
