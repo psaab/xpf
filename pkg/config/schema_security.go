@@ -1532,7 +1532,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 		"system-wide": {desc: "System-wide policy statistics (enable|enabled|disable|disabled)", args: 1, placeholder: "<enable|enabled|disable|disabled>",
 			valueType: ValueEnumOf, valueDesc: "system-wide policy statistics mode",
 			valueExamples: []string{"enable", "enabled", "disable", "disabled"},
-			validator: ValidateEnum([]string{"enable", "enabled", "disable", "disabled"}), children: nil},
+			validator:     ValidateEnum([]string{"enable", "enabled", "disable", "disabled"}), children: nil},
 	}},
 	"pre-id-default-policy": {desc: "Default policy before application identification", children: map[string]*schemaNode{
 		"then": {desc: "Action", children: map[string]*schemaNode{

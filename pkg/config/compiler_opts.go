@@ -3366,7 +3366,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyThenCountAlarm:            true,
 		lenientDefaultPolicyBlock11367:         true,
 		lenientDefaultPolicyConflict11821:      true,
-		lenientPolicyStatsSystemWide12825:       true,
+		lenientPolicyStatsSystemWide12825:      true,
 		lenientPolicyThenSiblings:              true,
 		lenientPolicyEnforcementSubtrees:       true,
 		lenientPolicyMissingMatch:              true,

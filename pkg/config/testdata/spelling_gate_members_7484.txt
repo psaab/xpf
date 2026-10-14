@@ -680,7 +680,7 @@ COMPARED	routing-options static route <*> qualified-next-hop <*> preference
 flag (read, but value-less)	routing-options static route <*> reject
 advisory (read, value ignored, warning says so)	routing-options static route <*> rib-group
 flag (read, but value-less)	schedulers scheduler <*> daily all-day
-unreachable (leaf changed nothing)	schedulers scheduler <*> daily exclude
+flag (read, but value-less)	schedulers scheduler <*> daily exclude
 COMPARED	schedulers scheduler <*> daily start-time
 COMPARED	schedulers scheduler <*> daily stop-time
 unreachable (leaf changed nothing)	schedulers scheduler <*> description
@@ -933,7 +933,7 @@ flag (read, but value-less)	security policies global policy <*> then log
 flag (read, but value-less)	security policies global policy <*> then permit
 flag (read, but value-less)	security policies global policy <*> then reject
 flag (read, but value-less)	security policies policy-rematch extensive
-unreachable (leaf changed nothing)	security policy-stats system-wide
+advisory (read, value ignored, warning says so)	security policy-stats system-wide
 unreachable (leaf changed nothing)	security pre-id-default-policy then log
 COMPARED	security screen ids-option <*> icmp flood threshold
 COMPARED	security screen ids-option <*> ip ip-sweep threshold
