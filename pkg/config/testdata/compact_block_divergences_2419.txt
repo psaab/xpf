@@ -229,12 +229,12 @@
 # compiler intentionally does not consume; keep this measured divergence in
 # the inventory rather than widening the unrelated compact-policy reader.
 #
-# checked: 1179
+# checked: 1198
 #
-# skipped (leaf value not observable in the typed config): 234
-# skipped (a spelling did not parse or compile): 31
-# skipped (no two distinct synthesizable values): 11
-# skipped (under groups (schema re-host, duplicate coverage)): 1150
+# skipped (leaf value not observable in the typed config): 240
+# skipped (a spelling did not parse or compile): 20
+# skipped (no two distinct synthesizable values): 12
+# skipped (under groups (schema re-host, duplicate coverage)): 1162
 #
 bridge-domains xpfname domain-type	partial
 bridge-domains xpfname routing-interface	partial
@@ -266,9 +266,9 @@ interfaces xpfname unit	partial
 interfaces xpfname unit xpfarg family inet address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group	empty
-interfaces xpfname unit xpfarg family inet mtu	empty
-interfaces xpfname unit xpfarg family inet targeted-broadcast	empty
-interfaces xpfname unit xpfarg family inet unnumbered-address	empty
+interfaces xpfname unit xpfarg family inet mtu	partial
+interfaces xpfname unit xpfarg family inet targeted-broadcast	partial
+interfaces xpfname unit xpfarg family inet unnumbered-address	partial
 interfaces xpfname unit xpfarg family inet6 address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group	empty

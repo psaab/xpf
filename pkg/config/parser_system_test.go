@@ -535,14 +535,12 @@ func TestSystemConfigWebManagementEnhanced(t *testing.T) {
 system {
     services {
         web-management {
-            http {
-                interface fxp0.0;
-            }
             https {
                 system-generated-certificate;
                 interface fxp0.0;
             }
             api-auth {
+                expires 2099-01-01;
                 user admin {
                     password s3cret;
                 }
@@ -564,14 +562,14 @@ system {
 	if wm == nil {
 		t.Fatal("web-management is nil")
 	}
-	if !wm.HTTP {
-		t.Error("HTTP should be true")
+	if wm.HTTP {
+		t.Error("HTTP should be false (#10826: cleartext cannot serve api-auth)")
 	}
 	if !wm.HTTPS {
 		t.Error("HTTPS should be true")
 	}
-	if wm.HTTPInterface != "fxp0.0" {
-		t.Errorf("HTTP interface = %q, want fxp0.0", wm.HTTPInterface)
+	if wm.HTTPInterface != "" {
+		t.Errorf("HTTP interface = %q, want empty (no http stanza)", wm.HTTPInterface)
 	}
 	if wm.HTTPSInterface != "fxp0.0" {
 		t.Errorf("HTTPS interface = %q, want fxp0.0", wm.HTTPSInterface)
@@ -725,7 +723,7 @@ system {
 }
 
 func TestSystemConfigSetSyntax(t *testing.T) {
-	cmds := []string{"set system root-authentication encrypted-password \"$6$abcsalt$hashhash\"", "set system root-authentication ssh-ed25519 \"ssh-ed25519 AAAA\"", "set system master-password pseudorandom-function juniper-prf1", "set system license autoupdate url https://example.com/keys", "set system processes utmd disable", "set system services web-management https system-generated-certificate", "set system services web-management https interface fxp0.0", "set system services web-management api-auth api-key tok-abc-123", "set system syslog user * any emergency", "set system syslog host 10.0.0.1 any any", "set system syslog host 10.0.0.1 daemon info"}
+	cmds := []string{"set system root-authentication encrypted-password \"$6$abcsalt$hashhash\"", "set system root-authentication ssh-ed25519 \"ssh-ed25519 AAAA\"", "set system master-password pseudorandom-function juniper-prf1", "set system license autoupdate url https://example.com/keys", "set system processes utmd disable", "set system services web-management https system-generated-certificate", "set system services web-management https interface fxp0.0", "set system services web-management api-auth expires 2099-01-01", "set system services web-management api-auth api-key tok-abc-123", "set system syslog user * any emergency", "set system syslog host 10.0.0.1 any any", "set system syslog host 10.0.0.1 daemon info"}
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := ParseSetCommand(cmd)

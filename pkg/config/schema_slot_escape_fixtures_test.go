@@ -277,6 +277,22 @@ func slotEscapeHistoricalRows() []slotEscapeRow {
 
 func slotEscapeRows() []slotEscapeRow {
 	return []slotEscapeRow{
+		// #12553: sites the synthetic sweep cannot commit (prerequisite
+		// containers the sweep does not build).
+		{"api-auth api-key", "system services web-management api-auth api-key",
+			[]string{
+				"set system services web-management https system-generated-certificate",
+				"set system services web-management https interface fxp0.0",
+				"set system services web-management api-auth expires 2099-01-01",
+			},
+			"set system services web-management api-auth api-key", "machine-generated-key-alpha", "tiny"},
+		{"rewrite-rules exp code-points", "class-of-service rewrite-rules exp <*> forwarding-class <*> loss-priority <*> code-points",
+			nil,
+			"set class-of-service rewrite-rules exp r1 forwarding-class be loss-priority low code-points", "000", "999"},
+		{"rewrite-rules inet-precedence code-points", "class-of-service rewrite-rules inet-precedence <*> forwarding-class <*> loss-priority <*> code-points",
+			nil,
+			"set class-of-service rewrite-rules inet-precedence r1 forwarding-class be loss-priority low code-points", "0", "9"},
+
 		// #12243: unreferenced address-set members reject policy wildcards
 		// (direct `address` members in the definedness pass, nested
 		// `address-set` members in #12214's expansion pass). Use concrete

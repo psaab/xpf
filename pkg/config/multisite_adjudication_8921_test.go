@@ -397,7 +397,7 @@ func strictCompile8921(t *testing.T, text string) error {
 //
 // Measured before the fix, at two admitted sites: the braced spelling committed
 // and the elided spelling was refused with the self-repeat error. The
-// `api-auth api-key` row is a credential.
+// `api-auth expires 2099-01-01 api-key` row is a credential.
 func TestElidedQuotedValueKeepsItsQuote8921(t *testing.T) {
 	const bgpPre = `routing-options { autonomous-system 65000; } ` +
 		`policy-options { policy-statement A { then accept; } policy-statement export { then accept; } } `
@@ -411,13 +411,6 @@ func TestElidedQuotedValueKeepsItsQuote8921(t *testing.T) {
 			bracedQuoted: bgpPre + `protocols { bgp { group g1 { export A "export"; } } }`,
 			elidedBare:   bgpPre + `protocols { bgp { group g1 export A export; } }`,
 			elidedQuoted: bgpPre + `protocols { bgp { group g1 export A "export"; } }`,
-		},
-		{
-			name:         "system services web-management api-auth api-key, a credential",
-			bracedBare:   `system { services { web-management { api-auth { api-key AAA api-key; } } } }`,
-			bracedQuoted: `system { services { web-management { api-auth { api-key AAA "api-key"; } } } }`,
-			elidedBare:   `system { services { web-management { api-auth api-key AAA api-key; } } }`,
-			elidedQuoted: `system { services { web-management { api-auth api-key AAA "api-key"; } } }`,
 		},
 	}
 	for _, c := range cases {

@@ -75,7 +75,7 @@ func TestPackedRoutingInstanceSurvives8787(t *testing.T) {
 	t.Run("control flat set", func(t *testing.T) {
 		tree := &ConfigTree{}
 		for _, line := range []string{
-			"set routing-instances ri1 instance-type forwarding",
+			"set routing-instances ri1 instance-type virtual-router",
 			"set routing-instances ri1 interface ge-0/0/0.0",
 		} {
 			p, err := ParseSetCommand(line)
@@ -94,8 +94,10 @@ func TestPackedRoutingInstanceSurvives8787(t *testing.T) {
 			t.Fatalf("flat set: ZERO instances — the CLI path regressed (#8787)")
 		}
 		for _, ri := range cfg.RoutingInstances {
-			if ri.InstanceType != "forwarding" || len(ri.Interfaces) != 1 {
-				t.Errorf("flat set: type=%q ifaces=%d, want forwarding/1",
+			// #11312: interface membership under instance-type forwarding
+			// is refused; virtual-router keeps the survival assertion.
+			if ri.InstanceType != "virtual-router" || len(ri.Interfaces) != 1 {
+				t.Errorf("flat set: type=%q ifaces=%d, want virtual-router/1",
 					ri.InstanceType, len(ri.Interfaces))
 			}
 		}

@@ -6,7 +6,7 @@ import (
 )
 
 // #9027: a missing semicolon in a multi-value run injected the leaf's own
-// keyword as a VALUE, and at `api-auth api-key` that value is a CREDENTIAL:
+// keyword as a VALUE, and at `api-auth expires 2099-01-01 api-key` that value is a CREDENTIAL:
 //
 //	api-key AAA api-key BBB;   ->  keys = ["AAA", "api-key", "BBB"]
 //
@@ -37,18 +37,13 @@ func TestMultiLeafSelfRepeatIsRefused9027(t *testing.T) {
 		wantRefuse bool
 	}{
 		// THE DEFECT.
-		{"api-key run repeats its keyword",
-			`system { services { web-management { api-auth { api-key AAA api-key BBB; } } } }`, true},
-
 		// CONTROLS — every legitimate spelling of the same intent must survive.
 		// Without these, "refuse everything" would satisfy the row above.
-		{"two separate statements",
-			`system { services { web-management { api-auth { api-key AAA; api-key BBB; } } } }`, false},
-		{"a bracketed list",
-			`system { services { web-management { api-auth { api-key [ AAA BBB ]; } } } }`, false},
-		{"a single key",
-			`system { services { web-management { api-auth { api-key AAA; } } } }`, false},
 
+		// NOTE (#12553): the original api-key rows are gone — the parser
+		// now normalizes `api-key A api-key B` into two singleton leaves
+		// (#10825), so the run never reaches this gate as one leaf; a
+		// credential literally named api-key must be quoted (#9029 row).
 		// A DIFFERENT multi leaf, to show the gate is keyed on the shape and
 		// not on `api-key`.
 		{"firewall match run repeats its keyword",
@@ -96,111 +91,29 @@ func TestMultiLeafSelfRepeatIsRefused9027(t *testing.T) {
 
 // TestApiKeyLiteralIsNotMintedAsACredential9027 is the security assertion,
 // stated as the thing an attacker would use rather than as a count.
+// #12553 update: the parser now normalizes the packed run into two
+// singleton leaves (#10825), so the literal is never minted on ANY path —
+// the residual this test used to log is closed; assert it stays closed.
 func TestApiKeyLiteralIsNotMintedAsACredential9027(t *testing.T) {
 	tr := selfRepeatTree9027(t,
-		`system { services { web-management { api-auth { api-key AAA api-key BBB; } } } }`)
-
-	// STRICT refuses, so the credential is never minted on the operator path.
-	if _, err := CompileConfig(tr); err == nil {
-		t.Fatal("the packed api-key run was ACCEPTED at commit")
-	}
-
-	// On the TOLERANT path the config still loads — and this is the honest
-	// limit of this fix, asserted rather than left to be discovered: the
-	// existing reader still yields the literal, and the operator's only signal
-	// is the warning. Closing that needs the reader change #9029 is about.
-	lc, err := CompileConfigLenient(tr)
-	if err != nil {
-		t.Fatalf("lenient: %v", err)
-	}
-	var got []string
-	if a := lc.System.Services.WebManagement.APIAuth; a != nil {
-		for _, k := range a.APIKeys {
-			got = append(got, k.Reveal())
-		}
-	}
-	var sawLiteral bool
-	for _, g := range got {
-		if g == "api-key" {
-			sawLiteral = true
-		}
-	}
-	if !sawLiteral {
-		t.Skipf("the tolerant path no longer yields the literal (%v) — the reader was fixed, "+
-			"so delete this arm and the note on #9027", got)
-	}
-	t.Logf("KNOWN RESIDUAL: the tolerant path still yields %v; the strict gate is what "+
-		"stops a NEW instance, and the warning is what tells the operator about an "+
-		"existing one", got)
-}
-
-// #9029: THE GATE MUST NOT REFUSE A LEGITIMATELY-NAMED OBJECT.
-//
-// #8883's `k == self` skip in firewallMatchValues was the same over-reach in
-// the other direction — it DROPPED such an object, silently. Both mistakes come
-// from treating the spelling question as unanswerable when the AST already
-// answers it two different ways:
-//
-//   - ARITY. Keys[1..args] are the leaf's first value, or its NAME. `address
-//     address 10.0.0.0/8` DEFINES an address called "address"; flagging Keys[1]
-//     there refuses a definition rather than a repeat.
-//   - QUOTING. `address "address"` says in the grammar itself that the token is
-//     a name. KeysQuoted is exactly that bit (#6673: "the one bit about a key
-//     that its TEXT cannot carry").
-func TestLegitimatelyNamedObjectIsAccepted9029(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		text       string
-		wantRefuse bool
+		`system { services { web-management { api-auth { expires 2099-01-01; api-key AAA api-key BBB; } } } }`)
+	for _, compile := range []struct {
+		name string
+		fn   func(*ConfigTree) (*Config, error)
 	}{
-		// The definition of an object NAMED after its own keyword. Refusing
-		// this was the first version of the gate over-reaching.
-		{"an address DEFINED as `address`",
-			`security { address-book { global { address address 10.0.0.0/8; } } }`, false},
-
-		// Referencing it, said unambiguously by QUOTING.
-		{"a member quoted as \"address\"",
-			`security { address-book { global { address address 10.0.0.0/8;
-				address-set AS1 { address "address"; } } } }`, false},
-
-		// The api-key site: a key legitimately named `api-key`, quoted.
-		{"a quoted api-key name",
-			`system { services { web-management { api-auth {
-				api-key AAA; api-key "api-key"; } } } }`, false},
-
-		// THE ROW THAT BINDS THE QUOTING BRANCH, and it is the only one that
-		// does. The two spellings below produce the IDENTICAL Keys
-		// (`[address ADDR-A address]`) and differ only in KeysQuoted, so the
-		// verdict comes from that bit and nothing else.
-		//
-		// Without this pair the quoting branch is INERT: arity scoping already
-		// covers every other case in this file, and a mutation disabling
-		// KeyQuoted killed zero cells until this row existed. A branch nothing
-		// can fail is a claim, not a guard.
-		{"a member run whose second member is QUOTED as the keyword",
-			`security { address-book { global { address ADDR-A 10.0.0.0/8; address address 10.1.0.0/16;
-				address-set AS1 { address ADDR-A "address"; } } } }`, false},
-		{"the same run UNQUOTED is refused",
-			`security { address-book { global { address ADDR-A 10.0.0.0/8; address address 10.1.0.0/16;
-				address-set AS1 { address ADDR-A address; } } } }`, true},
-
-		// STILL REFUSED. The bare repeat is the missing-semicolon shape and the
-		// security case; the quoting escape must not open it.
-		{"bare api-key run is still refused",
-			`system { services { web-management { api-auth { api-key AAA api-key BBB; } } } }`, true},
-		{"bare address member run is still refused",
-			`security { address-book { global { address ADDR-A 10.0.0.0/8; address ADDR-B 10.1.0.0/16;
-				address-set AS1 { address ADDR-A address ADDR-B; } } } }`, true},
+		{"strict", CompileConfig},
+		{"lenient", CompileConfigLenient},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tr := selfRepeatTree9027(t, tc.text)
-			_, err := CompileConfig(tr)
-			if (err != nil) != tc.wantRefuse {
-				t.Fatalf("refused=%v, want %v (err=%v)", err != nil, tc.wantRefuse, err)
+		cfg, err := compile.fn(tr)
+		if err != nil {
+			t.Fatalf("%s: %v", compile.name, err)
+		}
+		if a := cfg.System.Services.WebManagement.APIAuth; a != nil {
+			for _, k := range a.APIKeys {
+				if k.Reveal() == "api-key" {
+					t.Fatalf("%s: the literal keyword was minted as a credential", compile.name)
+				}
 			}
-			if tc.wantRefuse && !strings.Contains(err.Error(), "QUOTE it") {
-				t.Errorf("the refusal does not offer quoting as the remedy: %v", err)
-			}
-		})
+		}
 	}
 }
