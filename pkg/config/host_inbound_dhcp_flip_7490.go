@@ -64,14 +64,30 @@ import (
 // dhcp-local-server` / `dhcpv6-local-server` and `forwarding-options
 // dhcp-relay` — all four are inputs to the role classifier.
 //
-// It stamps BOTH spellings of a member ref: the ref as the zone's Interfaces
-// list authored it, and every configured unit beneath a bare physical ref. The
-// zone member is routinely a bare physical (`reth1`) while the enforcement path
-// resolves per unit (`reth1.0`), and a map that answered for only one spelling
-// would withhold on one plane and not the other.
+// It stamps the authored ref and its declared-aware canonical Literal, plus
+// every configured unit beneath a bare physical ref. The zone member is
+// routinely a bare physical (`reth1`) while the enforcement path resolves per
+// unit (`reth1.0`), and a map that answered for only one spelling would withhold
+// on one plane and not the other.
 func stampZoneDHCPScopeWithheld(cfg *Config) {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return
+	}
+	// The ZoneConfig query method has no *Config, so retain the declared
+	// interface set required by the #9821 splitter alongside the derived
+	// withholding keys. stampResolvedInterfaceOverrides stamps the same set
+	// later in this phase; keeping it here also makes this stamp self-contained.
+	declared := make(map[string]bool, len(cfg.Interfaces.Interfaces))
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc != nil {
+			declared[name] = true
+		}
+	}
+	isDeclared := func(name string) bool { return declared[name] }
+	for _, zone := range cfg.Security.Zones {
+		if zone != nil {
+			zone.ResolvedInterfaceDeclared = declared
+		}
 	}
 	scope := NewHostInboundZoneScope(cfg)
 	for _, zone := range cfg.Security.Zones {
@@ -86,17 +102,12 @@ func stampZoneDHCPScopeWithheld(cfg *Config) {
 			if withheld == nil {
 				withheld = map[string]bool{}
 			}
-			// #9821: stamp the canonical Literal alongside the authored
-			// spelling so padded multi-dot refs (`p.0.01`) withhold the
-			// canonical unit (`p.0.1`) the enforcement path resolves.
-			// Single-dot behavior is byte-identical (Literal == legacy canon).
+			// Stamp both authored and declared-aware canonical spellings.
 			withheld[ref] = true
-			withheld[cfg.SplitInterfaceUnitRef(ref).Literal] = true
+			withheld[splitInterfaceRefWithDeclared(isDeclared, ref).Literal] = true
 		}
 		for _, ref := range zone.Interfaces {
 			mark(ref)
-			// #9821: bare-vs-unit decided by the split (declared-first):
-			// a dotted-physical member fans down onto its units.
 			s := cfg.SplitInterfaceUnitRef(ref)
 			if s.HasUnit {
 				continue
@@ -114,14 +125,13 @@ func stampZoneDHCPScopeWithheld(cfg *Config) {
 // WithholdsZoneLevelDHCPFor reports whether this zone's ZONE-LEVEL dhcp/bootp
 // authorization is withheld from ref, reading the derived stamp.
 //
-// EXACT lookup (modulo unit-ref canonicalization) and NOT a walk up to the
-// physical parent. The stamp already records every spelling that should be
-// withheld — the authored ref, its canonical form, and each configured unit
-// beneath a bare physical — so a parent fallback would add nothing for the refs
-// it is right about and would be WRONG for the rest: a physical whose unit 0
-// runs a DHCP server is itself withheld, and falling back would then withhold
-// from `ge-0/0/7.50` as well, a sibling unit with no DHCP role, denying DHCP on
-// an unrelated VLAN unit.
+// EXACT lookup of the authored and declared-aware canonical spellings, and NOT
+// a walk up to the physical parent. The stamp records every spelling that
+// should be withheld and each configured unit beneath a bare physical — a
+// parent fallback would add nothing for the refs it is right about and would
+// be WRONG for the rest: a physical whose unit 0 runs a DHCP server is itself
+// withheld, and falling back would then withhold from `ge-0/0/7.50` as well, a
+// sibling unit with no DHCP role, denying DHCP on an unrelated VLAN unit.
 //
 // That is the same leak hostInboundSameInterface refuses one level down
 // ("basing both sides on the physical would collapse those two, over-matching a
@@ -133,7 +143,9 @@ func (z *ZoneConfig) WithholdsZoneLevelDHCPFor(ref string) bool {
 	if z == nil || len(z.DHCPScopeWithheld) == 0 || ref == "" {
 		return false
 	}
-	return z.DHCPScopeWithheld[ref] || z.DHCPScopeWithheld[CanonicalInterfaceUnitRef(ref)]
+	isDeclared := func(name string) bool { return z.ResolvedInterfaceDeclared[name] }
+	return z.DHCPScopeWithheld[ref] ||
+		z.DHCPScopeWithheld[splitInterfaceRefWithDeclared(isDeclared, ref).Literal]
 }
 
 // ZoneLevelSystemServicesFor returns the zone-level `system-services` list AS
