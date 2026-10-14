@@ -140,29 +140,50 @@ func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePai
 			same bool // coverer shares the global's action
 		}
 		covered := make(map[[2]string]cover)
-		for _, zpp := range pairs {
-			if zpp == nil {
-				continue
+		// #12893: first-cover wins must follow RUNTIME tier precedence
+		// (exact pair, then single-wildcard, then both-any), not the
+		// lexicographical pair sort — "any" < "trust" would let a
+		// wildcard stanza claim coverage the runtime gives to an exact
+		// stanza first, inverting SHADOWED vs REDUNDANT.
+		tierOf := func(zpp *config.ZonePairPolicies, f, t string) int {
+			exact := zpp.FromZone == f && zpp.ToZone == t
+			if exact {
+				return 0
 			}
-			for _, pol := range zpp.Policies {
-				if pol == nil {
-					continue
-				}
-				if !policyMatchIsSuperset(pol, global) {
-					continue
-				}
-				for _, f := range fromSet {
-					if zpp.FromZone != "any" && zpp.FromZone != f {
-						continue
-					}
-					for _, t := range toSet {
+			if (zpp.FromZone == "any") != (zpp.ToZone == "any") {
+				return 1
+			}
+			return 2
+		}
+		for _, f := range fromSet {
+			for _, t := range toSet {
+				k := [2]string{f, t}
+				for tier := 0; tier <= 2; tier++ {
+					recorded := false
+					for _, zpp := range pairs {
+						if zpp == nil || tierOf(zpp, f, t) != tier {
+							continue
+						}
+						if zpp.FromZone != "any" && zpp.FromZone != f {
+							continue
+						}
 						if zpp.ToZone != "any" && zpp.ToZone != t {
 							continue
 						}
-						k := [2]string{f, t}
-						if _, ok := covered[k]; !ok {
+						for _, pol := range zpp.Policies {
+							if pol == nil || !policyMatchIsSuperset(pol, global) {
+								continue
+							}
 							covered[k] = cover{rule: pol.Name, same: pol.Action == global.Action}
+							recorded = true
+							break
 						}
+						if recorded {
+							break
+						}
+					}
+					if recorded {
+						break
 					}
 				}
 			}
