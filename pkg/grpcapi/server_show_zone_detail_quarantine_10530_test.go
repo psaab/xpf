@@ -29,9 +29,41 @@ func TestGRPCZoneDetailCallerPrefixContract10530(t *testing.T) {
 	if !summaryAdjacent {
 		t.Fatalf("gRPC zones-detail omitted shared policy summary:\n%s", out.String())
 	}
+	// #12896 narrowed the ordinary control: a healthy zone never gains the
+	// BLOCK qualifier, but a row whose peer zone is quarantined is per-row
+	// qualified by the SSOT (what apply would scrub), so "no qualifier
+	// anywhere" is no longer the contract.
 	var ordinary strings.Builder
 	s.showZonesDetail(cfg, "trust", &ordinary)
-	if strings.Contains(ordinary.String(), config.ZoneQuarantinePoliciesQualifier) {
-		t.Fatalf("ordinary gRPC zones-detail gained quarantine qualifier:\n%s", ordinary.String())
+	ordinaryLines := strings.Split(ordinary.String(), "\n")
+	for i, line := range ordinaryLines {
+		if strings.Contains(line, "Policy summary") {
+			// The #10530 contract is about the dedicated block-qualifier LINE;
+			// the references line above may legitimately carry per-reference
+			// #12896 marks.
+			if i == 0 || ordinaryLines[i-1] == "  "+config.ZoneQuarantinePoliciesQualifier {
+				t.Fatalf("ordinary gRPC zones-detail gained the block qualifier:\n%s", ordinary.String())
+			}
+			break
+		}
+	}
+	ordinaryRow := ""
+	deadRow := ""
+	for _, line := range ordinaryLines {
+		if strings.Contains(line, "ordinary-rule") {
+			ordinaryRow = line
+		}
+		if strings.Contains(line, "loser-rule") {
+			deadRow = line
+		}
+	}
+	if ordinaryRow == "" || deadRow == "" {
+		t.Fatalf("ordinary gRPC zones-detail lost its policy rows:\n%s", ordinary.String())
+	}
+	if strings.Contains(ordinaryRow, config.ZoneQuarantinePoliciesQualifier) {
+		t.Fatalf("live trust->trust row gained quarantine qualifier:\n%s", ordinaryRow)
+	}
+	if !strings.Contains(deadRow, config.ZoneQuarantinePoliciesQualifier) {
+		t.Fatalf("peer-quarantined trust->z214 row lacks the #12896 scrub qualifier:\n%s", deadRow)
 	}
 }

@@ -31,12 +31,44 @@ func TestZoneDetailCallerPrefixContract10530(t *testing.T) {
 	if !summaryAdjacent {
 		t.Fatalf("zones-detail omitted shared policy summary:\n%s", out)
 	}
+	// #12896 narrowed the ordinary control: a healthy zone never gains the
+	// BLOCK qualifier, but a row whose peer zone is quarantined is per-row
+	// qualified by the SSOT (what apply would scrub), so "no qualifier
+	// anywhere" is no longer the contract.
 	ordinary := captureStdout(t, func() {
 		if err := c.showZonesDisplay(c.store.ActiveConfig(), true, "trust"); err != nil {
 			t.Fatalf("showZonesDisplay ordinary: %v", err)
 		}
 	})
-	if strings.Contains(ordinary, config.ZoneQuarantinePoliciesQualifier) {
-		t.Fatalf("ordinary zones-detail gained quarantine qualifier:\n%s", ordinary)
+	ordinaryLines := strings.Split(ordinary, "\n")
+	for i, line := range ordinaryLines {
+		if strings.Contains(line, "Policy summary") {
+			// The #10530 contract is about the dedicated block-qualifier LINE;
+			// the references line above may legitimately carry per-reference
+			// #12896 marks.
+			if i == 0 || ordinaryLines[i-1] == "  "+config.ZoneQuarantinePoliciesQualifier {
+				t.Fatalf("ordinary zones-detail gained the block qualifier:\n%s", ordinary)
+			}
+			break
+		}
+	}
+	ordinaryRow := ""
+	deadRow := ""
+	for _, line := range ordinaryLines {
+		if strings.Contains(line, "ordinary-rule") {
+			ordinaryRow = line
+		}
+		if strings.Contains(line, "loser-rule") {
+			deadRow = line
+		}
+	}
+	if ordinaryRow == "" || deadRow == "" {
+		t.Fatalf("ordinary zones-detail lost its policy rows:\n%s", ordinary)
+	}
+	if strings.Contains(ordinaryRow, config.ZoneQuarantinePoliciesQualifier) {
+		t.Fatalf("live trust->trust row gained quarantine qualifier:\n%s", ordinaryRow)
+	}
+	if !strings.Contains(deadRow, config.ZoneQuarantinePoliciesQualifier) {
+		t.Fatalf("peer-quarantined trust->z214 row lacks the #12896 scrub qualifier:\n%s", deadRow)
 	}
 }
