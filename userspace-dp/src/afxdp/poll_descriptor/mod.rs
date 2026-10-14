@@ -4670,6 +4670,32 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
+                                // #12904: the #10683 selector fence must drop
+                                // matching transit BEFORE any state or pool
+                                // resource is consumed. Checking here — after
+                                // policy admit, before NAT64/NPTv6/SNAT
+                                // allocation and the forward/reverse session
+                                // install below — keeps a fenced flow from
+                                // publishing session entries, replicating to
+                                // peers, or holding a translated pool
+                                // identity. The pre-routing DNAT/NPTv6 tuple
+                                // is already composed into `decision.nat`;
+                                // the post-translation-only shapes are
+                                // re-checked after allocation below.
+                                if ForwardPacketMeta::from(meta)
+                                    .l3_addrs_unfiltered()
+                                    .is_some_and(|(source, destination)| {
+                                        worker_ctx
+                                            .forwarding
+                                            .bindless_ipsec_selector_fence
+                                            .matches_with_nat(source, destination, decision.nat)
+                                    })
+                                {
+                                    telemetry.dbg.policy_deny += 1;
+                                    telemetry.counters.touched = true;
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                                 // NAT64: cross-family translation takes
                                 // priority over same-family SNAT.
                                 let mut source_nat_release_key = None;
@@ -4912,6 +4938,56 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                     None
                                 };
+                                // #12904: allocation composed the final NAT
+                                // tuple (SNAT/NPTv6/NAT64 translated source),
+                                // which can match a selector pair the
+                                // original tuple did not. Re-check before
+                                // the session install, BPF publication, or
+                                // peer replication below, and undo the
+                                // just-reserved translation so pool
+                                // accounting is unchanged — the same
+                                // rollback pair the hop-limit ICMP-TE bounce
+                                // below uses. Skipped when nothing was
+                                // allocated (the pre-check above already
+                                // covered that unchanged decision).
+                                if (source_nat_release_key.is_some() || nat64_info.is_some())
+                                    && ForwardPacketMeta::from(meta)
+                                        .l3_addrs_unfiltered()
+                                        .is_some_and(|(source, destination)| {
+                                            worker_ctx
+                                                .forwarding
+                                                .bindless_ipsec_selector_fence
+                                                .matches_with_nat(source, destination, decision.nat)
+                                        })
+                                {
+                                    if let Some(release_key) = source_nat_release_key.as_ref() {
+                                        rollback_source_nat_allocation_for_worker(
+                                            &worker_ctx.forwarding.iface_nat_allocators,
+                                            &worker_ctx.forwarding.source_nat_rules,
+                                            release_key,
+                                            decision.nat,
+                                            false,
+                                            now_ns,
+                                            worker_id,
+                                        );
+                                    }
+                                    // #4381 parity: a NAT64 forward flow
+                                    // allocated a translated pool port above;
+                                    // roll it back too (self-gated on
+                                    // `nat.nat64`).
+                                    crate::nat64::rollback_nat64_allocation_for_worker(
+                                        &worker_ctx.forwarding.nat64,
+                                        &flow.forward_key,
+                                        decision.nat,
+                                        false,
+                                        now_ns,
+                                        worker_id,
+                                    );
+                                    telemetry.dbg.policy_deny += 1;
+                                    telemetry.counters.touched = true;
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                                 // #5140: read the INNER packet via `packet_frame`
                                 // (decapped frame post native-GRE, else
                                 // `raw_frame`). The TTL/hop-limit test + the
@@ -7574,6 +7650,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // #10683: apply the immutable selector fence only to transit
                 // candidates, before overlap/session/egress accounting. It is
                 // intentionally independent of the kernel SA monitor.
+                // #12904: for the flow-backed ForwardCandidate miss this is
+                // now a BACKSTOP — the pre-publication gates above (before
+                // NAT allocation and again after it) already refused fenced
+                // traffic. This tail site remains the gate for FabricRedirect,
+                // flowless, and fragment-consult paths that never pass
+                // through the install-time gates.
                 let bindless_selector_match = matches!(
                     decision.resolution.disposition,
                     ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
@@ -8498,6 +8580,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx,
                                         );
                                     }
+                                }
+                                // #12904: a bind-less selector match must not
+                                // reach the kernel FIB through the NoRoute
+                                // slow-path delegation either — the reinjected
+                                // copy is forwarded by the kernel with no
+                                // zone policy, session, NAT or screen and,
+                                // for a bind-less policy-based VPN, no XFRM
+                                // template to encrypt it. Downgrade to
+                                // PolicyDenied so the trailing #1913
+                                // chokepoint refuses the frame fail-closed
+                                // (#7480 downgrade shape). Only a still-NoRoute
+                                // (policy-permitted) disposition needs this;
+                                // a policy deny above already refused it.
+                                if decision.resolution.disposition == ForwardingDisposition::NoRoute
+                                    && worker_ctx
+                                        .forwarding
+                                        .bindless_ipsec_selector_fence
+                                        .matches_with_nat(
+                                            adj_flow.src_ip,
+                                            adj_flow.dst_ip,
+                                            decision.nat,
+                                        )
+                                {
+                                    telemetry.dbg.policy_deny += 1;
+                                    telemetry.counters.touched = true;
+                                    decision.resolution.disposition =
+                                        ForwardingDisposition::PolicyDenied;
                                 }
                                 // #10679/#11066: permitted NoRoute packets may
                                 // reach the kernel FIB only when no missing
