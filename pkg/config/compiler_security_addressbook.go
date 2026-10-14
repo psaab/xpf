@@ -476,35 +476,49 @@ func parseAddressBookEntries(node *Node, ab *AddressBook) {
 					ab.AddressSets[name] = as
 				}
 				idx := indexFor(name, as)
-				for _, member := range child.Children {
-					switch member.Name() {
-					case "address":
-						for _, v := range addressSetMemberValues(member) {
+				appendMembers := func(kind string, values []string) {
+					if kind == "address" {
+						for _, v := range values {
 							if _, seen := idx.addr[v]; !seen {
 								idx.addr[v] = struct{}{}
 								as.Addresses = append(as.Addresses, v)
 							}
 						}
-					case "address-set":
-						for _, v := range addressSetMemberValues(member) {
-							if _, seen := idx.set[v]; !seen {
-								idx.set[v] = struct{}{}
-								as.AddressSets = append(as.AddressSets, v)
-							}
+						return
+					}
+					for _, v := range values {
+						if _, seen := idx.set[v]; !seen {
+							idx.set[v] = struct{}{}
+							as.AddressSets = append(as.AddressSets, v)
 						}
+					}
+				}
+				for _, member := range child.Children {
+					switch member.Name() {
+					case "address", "address-set":
+						appendMembers(member.Name(), addressSetMemberValues(member))
 					case "description":
-						// Metadata is not a member and remains accepted, matching
-						// the schema's documented address-set description leaf.
+						// Ignore the metadata value, not a packed member run
+						// after it (`description "d" address a1`).
+						if len(member.Keys) > 2 {
+							appendPackedAddressSetMembers12831(member.Keys[2:], bracketMask12831(member, 2), appendMembers,
+								func(kw string) { as.UnknownMembers = append(as.UnknownMembers, kw) })
+						}
+						for _, packed := range member.Children {
+							appendPackedAddressSetMembers12831(packed.Keys, bracketMask12831(packed, 0), appendMembers,
+								func(kw string) { as.UnknownMembers = append(as.UnknownMembers, kw) })
+						}
 					default:
-						// #11822: address-set's closed-world body is opaque to
-						// tolerant schema diagnostics. Retain an unknown keyword
-						// so the deferred gate can warn, and resolvers can poison
-						// this under-populated set instead of passing its subset.
+						// #11822: retain unknown member keywords so deferred
+						// validation and resolution can poison this set.
 						if kw := member.Name(); kw != "" {
 							as.UnknownMembers = append(as.UnknownMembers, kw)
 						}
 					}
 				}
+				// A brace-elided body may be packed on the address-set node.
+				appendPackedAddressSetMembers12831(child.Keys[2:], bracketMask12831(child, 2), appendMembers,
+					func(kw string) { as.UnknownMembers = append(as.UnknownMembers, kw) })
 			}
 		default:
 			if isApplyStatementKeyword(child.Name()) || child.Name() == "" {
@@ -535,6 +549,53 @@ func parseAddressBookEntries(node *Node, ab *AddressBook) {
 	}
 }
 
+// appendPackedAddressSetMembers12831 reads recognized address-set member
+// statements from packed keys. It preserves multi-valued members until the next
+// recognized statement head, and records every unrecognized token so a typo
+// cannot silently yield a valid subset.
+func appendPackedAddressSetMembers12831(keys []string, bracketed []bool, appendMember func(string, []string), unknown func(string)) {
+	for i := 0; i < len(keys); {
+		if keys[i] == "description" && !keyBracketed12831(bracketed, i) {
+			i += 2 // the schema admits one metadata value
+			continue
+		}
+		kind := keys[i]
+		if kind != "address" && kind != "address-set" {
+			unknown(kind)
+			i++
+			continue
+		}
+		start := i + 1
+		i = start
+		for i < len(keys) {
+			if keyBracketed12831(bracketed, i) {
+				i++
+				continue
+			}
+			if keys[i] == "address" || keys[i] == "address-set" || keys[i] == "description" {
+				break
+			}
+			i++
+		}
+		if start == i {
+			unknown(kind)
+			continue
+		}
+		appendMember(kind, keys[start:i])
+	}
+}
+
+func keyBracketed12831(bracketed []bool, i int) bool {
+	return i >= 0 && i < len(bracketed) && bracketed[i]
+}
+
+func bracketMask12831(node *Node, start int) []bool {
+	if node == nil || len(node.KeysBracketed) != len(node.Keys) || start < 0 || start > len(node.Keys) {
+		return nil
+	}
+	return node.KeysBracketed[start:]
+}
+
 // mergeAddressNode folds one `address <name> ...` AST node into addr,
 // handling both AST shapes and arbitrary sub-stanza ordering (#2222):
 //
@@ -555,12 +616,15 @@ func mergeAddressNode(addr *Address, node *Node) {
 		if d := descriptionText(node); d != "" {
 			addr.Description = d
 		}
-		// #3332: the description text is a single token at Keys[3] (a quoted
-		// multi-word description is one token); any token past it is operator
-		// garbage the compiler silently dropped. Record it for the strict
-		// trailing-token gate.
+		// In a packed description leaf, the address value can follow the
+		// description value: `address a1 description "d" 10.0.0.1/32`.
 		if len(node.Keys) > 4 {
-			addr.TrailingTokens = append(addr.TrailingTokens, node.Keys[4:]...)
+			if looksLikeIPOrCIDR(node.Keys[4]) {
+				addr.Value = node.Keys[4]
+				addr.TrailingTokens = append(addr.TrailingTokens, node.Keys[5:]...)
+			} else {
+				addr.TrailingTokens = append(addr.TrailingTokens, node.Keys[4:]...)
+			}
 		}
 		return
 	}
@@ -594,6 +658,16 @@ func mergeAddressNode(addr *Address, node *Node) {
 		case "description":
 			if d := nodeVal(sub); d != "" {
 				addr.Description = d
+			}
+			// A braced body may contain the packed equivalent of the
+			// description leaf, with the prefix after its text.
+			if len(sub.Keys) > 2 {
+				if looksLikeIPOrCIDR(sub.Keys[2]) {
+					addr.Value = sub.Keys[2]
+					addr.TrailingTokens = append(addr.TrailingTokens, sub.Keys[3:]...)
+				} else {
+					addr.TrailingTokens = append(addr.TrailingTokens, sub.Keys[2:]...)
+				}
 			}
 		default:
 			// A bare value leaf (the hierarchical block prefix) is usable only

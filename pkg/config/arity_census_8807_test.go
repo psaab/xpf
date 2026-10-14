@@ -374,6 +374,12 @@ var arityAdjudicated8807 = map[string]arityVerdict8807{
 	"pool": {"false-pairing", "compiler_services.go reads Keys[4] on the DHCP-server pool; the matched leaves are " +
 		"NAT pools args:1. The NAT pools' real defect was existence, not arity (#8800)."},
 
+	"description": {"false-pairing", "compiler_security_addressbook.go (packed address-book statements, #12831) reads " +
+		"Keys[2:], Keys[4], Keys[5:], Keys[3:] inside `description` case clauses: those indices address the PACKED " +
+		"member tail (address/address-set statements following the description value), never the description leaf's own " +
+		"args:1 value. Unknown tail tokens are recorded as unknown members and fail closed (strict undefined-member, " +
+		"lenient poison), so no description argument is dropped or widened by the higher reads."},
+
 	"reject": {"measured-benign", "same path, real arity mismatch -- compiler_firewall.go:1337 reads an OPTIONAL " +
 		"Keys[1] message-type on `then reject <type>` while the leaf is args:0. MEASURED by lane-8015 with an absent " +
 		"baseline: every spelling delivers, and a bogus message-type is a LOUD commit rejection via the " +
