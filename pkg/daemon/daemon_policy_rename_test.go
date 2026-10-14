@@ -258,6 +258,83 @@ func TestPermittedRenameResultRejectsDefaultPermit10592(t *testing.T) {
 		}
 	})
 }
+func TestRemappedQueryZonesSimultaneousPolicyAndZoneRename12881(t *testing.T) {
+	oldCfg, newCfg := zoneRenameEvaluatorConfigs()
+	// A global policy has a non-zero runtime ID when a zone-pair policy set
+	// precedes it, matching the production binding path under test.
+	oldCfg.Security.GlobalPolicies = []*config.Policy{{Name: "g-old", Action: config.PolicyPermit}}
+	newCfg.Security.GlobalPolicies = []*config.Policy{{Name: "g-new", Action: config.PolicyPermit}}
+	globalDescriptor := configstore.RenameDescriptor{
+		SourcePath:      []string{"global", "policy", "g-old"},
+		DestinationPath: []string{"global", "policy", "g-new"},
+	}
+	bindings, _, ok := expandPolicyRenameAncestry(
+		oldCfg, newCfg,
+		[]configstore.RenameDescriptor{policyZoneDescriptor("lan", "lan2"), globalDescriptor},
+	)
+	if !ok {
+		t.Fatal("simultaneous global-policy and zone rename was rejected")
+	}
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["junos-global->junos-global/g-old"]
+	binding, ok := bindings[oldID]
+	if !ok {
+		t.Fatalf("missing non-zero global-policy binding for ID %d", oldID)
+	}
+	from, to, ingress, egress, ok := remappedQueryZones(
+		oldCfg, newCfg, binding, config.StableZoneID("lan"), config.StableZoneID("wan"),
+	)
+	if !ok || from != "lan2" || to != "wan" ||
+		ingress != config.StableZoneID("lan2") || egress != config.StableZoneID("wan") {
+		t.Fatalf("global policy scope prevented concrete zone remap: %q/%q IDs=%d/%d ok=%v", from, to, ingress, egress, ok)
+	}
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 10}, DstIP: [4]byte{10, 0, 0, 20}, Protocol: 6,
+		SrcPort: 1234, DstPort: 443,
+	}
+	value := dataplane.SessionValue{
+		PolicyID: oldID, IngressZone: config.StableZoneID("lan"), EgressZone: config.StableZoneID("wan"),
+	}
+	record, permitted := rematchRenamedV4(oldCfg, newCfg, binding, key, value)
+	if !permitted || record.IngressZone != config.StableZoneID("lan2") ||
+		record.EgressZone != config.StableZoneID("wan") {
+		t.Fatalf("session was not rebound into renamed concrete zones: %+v permitted=%v", record, permitted)
+	}
+}
+
+func TestRemappedQueryZonesWildcardPolicyAndZoneRename12881(t *testing.T) {
+	oldCfg, newCfg := zoneRenameEvaluatorConfigs()
+	oldCfg.Security.Policies = append(oldCfg.Security.Policies, &config.ZonePairPolicies{
+		FromZone: "any", ToZone: "wan",
+		Policies: []*config.Policy{{Name: "w-old", Action: config.PolicyPermit}},
+	})
+	newCfg.Security.Policies = append(newCfg.Security.Policies, &config.ZonePairPolicies{
+		FromZone: "any", ToZone: "wan",
+		Policies: []*config.Policy{{Name: "w-new", Action: config.PolicyPermit}},
+	})
+	wildcardDescriptor := configstore.RenameDescriptor{
+		SourcePath:      []string{"security", "policies", "from-zone", "any", "to-zone", "wan", "policy", "w-old"},
+		DestinationPath: []string{"security", "policies", "from-zone", "any", "to-zone", "wan", "policy", "w-new"},
+	}
+	bindings, _, ok := expandPolicyRenameAncestry(
+		oldCfg, newCfg,
+		[]configstore.RenameDescriptor{policyZoneDescriptor("lan", "lan2"), wildcardDescriptor},
+	)
+	if !ok {
+		t.Fatal("simultaneous wildcard-policy and zone rename was rejected")
+	}
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["any->wan/w-old"]
+	binding, ok := bindings[oldID]
+	if !ok {
+		t.Fatalf("missing wildcard-policy binding for ID %d", oldID)
+	}
+	from, to, ingress, egress, ok := remappedQueryZones(
+		oldCfg, newCfg, binding, config.StableZoneID("lan"), config.StableZoneID("wan"),
+	)
+	if !ok || from != "lan2" || to != "wan" ||
+		ingress != config.StableZoneID("lan2") || egress != config.StableZoneID("wan") {
+		t.Fatalf("wildcard policy scope prevented concrete zone remap: %q/%q IDs=%d/%d ok=%v", from, to, ingress, egress, ok)
+	}
+}
 
 // N3d: port byte-order through the rematch path. networkPort converts
 // between wire (network) and host order; the rematch query AND the recorded

@@ -23,6 +23,7 @@ type policyRenameBinding struct {
 	sourceToZone        string
 	destinationFromZone string
 	destinationToZone   string
+	zoneRenames         map[string]string
 	oldPolicyID         uint32
 	policyInactiveFn    func(string) bool
 	feedOverlay         map[string][]string
@@ -133,6 +134,8 @@ func expandPolicyRenameAncestryWithFeeds(
 	}
 	bindings := make(map[uint32]policyRenameBinding, len(descriptors))
 	wire := make([]dpuserspace.PolicyRenameAncestry, 0, len(descriptors))
+	zoneRenames := make(map[string]string)
+	renamedTo := make(map[string]string)
 	type ancestryPair struct {
 		sf, st, sn string
 		df, dt, dn string
@@ -147,6 +150,23 @@ func expandPolicyRenameAncestryWithFeeds(
 	}
 	var pairs []ancestryPair
 	for _, descriptor := range descriptors {
+		sourceZone, sourceOK := zoneRenamePath(descriptor.SourcePath)
+		destinationZone, destinationOK := zoneRenamePath(descriptor.DestinationPath)
+		if sourceOK || destinationOK {
+			if !sourceOK || !destinationOK || sourceZone == destinationZone {
+				return nil, nil, false
+			}
+			if prior, exists := zoneRenames[sourceZone]; exists && prior != destinationZone {
+				return nil, nil, false
+			}
+			if prior, exists := renamedTo[destinationZone]; exists && prior != sourceZone {
+				return nil, nil, false
+			}
+			zoneRenames[sourceZone] = destinationZone
+			renamedTo[destinationZone] = sourceZone
+		}
+	}
+	for _, descriptor := range descriptors {
 		sf, st, sn, sok := policyRulePathKey(descriptor.SourcePath)
 		df, dt, dn, dok := policyRulePathKey(descriptor.DestinationPath)
 		if sok || dok {
@@ -158,7 +178,7 @@ func expandPolicyRenameAncestryWithFeeds(
 		}
 		sourceZone, sourceOK := zoneRenamePath(descriptor.SourcePath)
 		destinationZone, destinationOK := zoneRenamePath(descriptor.DestinationPath)
-		if !sourceOK || !destinationOK || sourceZone == destinationZone {
+		if !sourceOK || !destinationOK {
 			return nil, nil, false
 		}
 		for _, identity := range policyIdentities(oldCfg) {
@@ -289,6 +309,7 @@ func expandPolicyRenameAncestryWithFeeds(
 				sourceRuleID: sourceID, destinationRuleID: destinationID,
 				sourceFromZone: sf, sourceToZone: st,
 				destinationFromZone: df, destinationToZone: dt,
+				zoneRenames: zoneRenames,
 				oldPolicyID: oldID,
 			}
 		}
@@ -404,6 +425,12 @@ func remappedQueryZones(
 	to, toOK := oldNames[egressID]
 	if !fromOK || !toOK {
 		return "", "", 0, 0, false
+	}
+	if renamed, ok := binding.zoneRenames[from]; ok {
+		from = renamed
+	}
+	if renamed, ok := binding.zoneRenames[to]; ok {
+		to = renamed
 	}
 	if from == binding.sourceFromZone {
 		from = binding.destinationFromZone
