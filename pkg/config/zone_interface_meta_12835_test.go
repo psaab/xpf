@@ -54,3 +54,24 @@ security { zones { security-zone Z { interfaces { ge-0/0/0.0 apply-macro M { hos
 		})
 	}
 }
+
+func TestZoneInterfaceMetaAfterBodyTailStillRejects12835(t *testing.T) {
+	// Meta AFTER a body keyword must not void the packed-tail signal:
+	// the stray member ge-0/0/9.0 is dropped content (#6735).
+	text := `interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } ge-0/0/9 { unit 0 { family inet { address 10.0.9.1/24; } } } }
+security { zones { security-zone Z { interfaces { ge-0/0/0.0 host-inbound-traffic ge-0/0/9.0 apply-macro M; } } } }`
+	tree, errs := NewParser(text).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatal("strict must reject meta-after-tail packed shape")
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	if len(cfg.Warnings) == 0 {
+		t.Fatal("lenient must warn about the dropped member")
+	}
+}

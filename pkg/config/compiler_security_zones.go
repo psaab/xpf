@@ -1211,4 +1211,3 @@ func zoneHasInterface(zone *ZoneConfig, member string) bool {
 	}
 	return false
 }
-
