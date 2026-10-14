@@ -3950,6 +3950,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     reason,
                                     event_now_ns_from_secs(now_secs),
                                 );
+                                // #12873: keep session-miss audit alarms in the
+                                // same per-zone flood tally as ordinary screen
+                                // stage alarms. The recorder ignores reasons
+                                // outside the three flood families.
+                                crate::afxdp::flood_counters::record_zone_flood_alarm(
+                                    &worker_ctx.forwarding.flood_counter_slot_map,
+                                    from_zone_id,
+                                    reason,
+                                );
                                 screen.record_alarm_without_drop();
                             } else {
                                 emit_screen_drop_event(
