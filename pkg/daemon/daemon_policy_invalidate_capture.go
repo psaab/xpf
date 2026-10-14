@@ -1131,14 +1131,19 @@ func clonePolicyInvalidationCapture(capture *policyInvalidationCapture) *policyI
 }
 
 // reauthorizePolicyCandidates splits retained helper candidates into those the
-// restored config still forbids (kept) and those it permits. Positional policy
-// IDs may differ at every nesting level, so each candidate is judged by the
-// stable rule key recorded when it was captured. capture itself is never
-// modified: authority refusal later in the same capture restores the original
-// debt, which must still own every candidate. All-kept results are detached
-// from capture because downstream pruning compacts slices in place. Unknown
-// provenance, colliding zone IDs, and malformed tuples are kept and fail closed.
-// permitted is nil when the restored config permits no candidate.
+// restored config still forbids (kept) and those it re-authorizes under their
+// captured identity. Positional policy IDs may differ at every nesting level,
+// so each candidate is judged by the stable rule key recorded when it was
+// captured; only a restored verdict ISSUED BY THAT KEY (or, for a
+// sentinel-attributed orphan, by the restored default-policy itself)
+// discharges the debt — a permit by any other rule leaves the candidate kept,
+// mirroring permittedRenameResult (#12879). capture itself is never modified:
+// authority refusal later in the same capture restores the original debt,
+// which must still own every candidate. All-kept results are detached from
+// capture because downstream pruning compacts slices in place. Unknown
+// provenance, colliding zone IDs, and malformed tuples are kept and fail
+// closed. permitted is nil when the restored config re-authorizes no
+// candidate.
 func (d *Daemon) reauthorizePolicyCandidates(
 	capture *policyInvalidationCapture, restored *config.Config, preserveDefaultRematch bool,
 ) (kept, permitted *policyInvalidationCapture) {
@@ -1229,7 +1234,18 @@ func (d *Daemon) reauthorizePolicyCandidates(
 		query.FeedOverlay = feedOverlay
 		query.PolicyInactiveFn = policyInactive
 		result := policymatch.Match(restored, query)
-		return result.Action == config.PolicyPermit
+		if key == dataplane.DefaultPolicyName {
+			// The captured identity is the implicit default-policy, so only
+			// the restored config's own default verdict can re-authorize it.
+			return result.DefaultUsed && result.Action == config.PolicyPermit
+		}
+		// A named key is discharged only by the restored rule carrying that
+		// identity: Matched + RuleID == key. Requiring Matched also keeps an
+		// unmatched `to-zone junos-host` query closed — its Action is the
+		// meaningless zero value (PolicyPermit), and a sibling rule's or the
+		// default-policy's permit is not the captured rule's authorization
+		// (#12879).
+		return result.Matched && result.RuleID == key && result.Action == config.PolicyPermit
 	}
 	keptCapture := *capture
 	kept = &keptCapture
