@@ -220,6 +220,12 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner(
         }
         Err(mut local_req) => {
             req.overlap_admissions = local_req.overlap_admissions.take();
+            // #13072: the refused enqueue hands the request back, so the
+            // pooled buffer checked out above must return to THIS worker's
+            // pool — dropping it would free it to the OS heap and drain the
+            // pool one buffer per refused redirect, pushing the warmed
+            // cross-worker copy back onto per-packet allocation.
+            crate::afxdp::cos::redirect_pool::recycle(local_req.bytes);
             Err(req)
         }
     }
@@ -268,6 +274,11 @@ pub(in crate::afxdp) fn redirect_prepared_cos_request_to_owner_binding(
         }
         Err(mut local_req) => {
             req.overlap_admissions = local_req.overlap_admissions.take();
+            // #13072: mirror the owner arm above — a refused enqueue must
+            // return the checked-out pooled buffer to this worker's pool
+            // instead of freeing it to the OS heap (pool drain → per-packet
+            // allocation on the warmed redirect path).
+            crate::afxdp::cos::redirect_pool::recycle(local_req.bytes);
             Err(req)
         }
     }
