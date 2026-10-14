@@ -125,7 +125,8 @@ func classifyPolicyAddresses(cfg *config.Config, nameToID map[string]uint32, add
 // table for inclusion on the wire ConfigSnapshot. Returns the
 // table + a map from each declared address-book name (Addresses
 // and AddressSets) to its assigned u32 ID. Names that reference
-// the same canonical CIDR content share an ID.
+// the same canonical CIDR content share an ID, except that
+// helper-refused spellings are bucketed separately (#12852).
 //
 // HA determinism: names are iterated in lexicographic sorted order
 // before any hashing/ID assignment. Content hashing buckets by

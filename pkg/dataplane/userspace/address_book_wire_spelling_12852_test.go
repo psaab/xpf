@@ -4,8 +4,9 @@
 // mask, #12507) and "10.0.0.0/8" therefore shared one bucket: an
 // unreferenced padded entry poisoned a clean referenced one (whole snapshot
 // refused), and a clean first entry masked a referenced padded one (no
-// refusal). The bucket key now carries the exact wire spelling, so distinct
-// spellings never share a row.
+// refusal). The bucket key now carries helper-refused wire spellings, so a
+// refused spelling never shares a row with its canonical spelling
+// (helper-accepted padding still shares by design, #12178).
 package userspace
 
 import (
