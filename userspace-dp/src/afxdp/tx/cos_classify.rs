@@ -1848,13 +1848,15 @@ fn enqueue_cos_item(
         // then restore the prospective-flow expansion (#707) over that share.
         // Owner-local queues keep the unchanged flow-aware buffer limit.
         let buffer_limit = if queue.shared_exact() {
-            // Only shared_exact admission needs the worker count; owner-local
-            // queues avoid an extra fast-interface lookup on this hot path.
-            let active_shards = binding
-                .cos
-                .cos_fast_interfaces
-                .get(&egress_ifindex)
-                .and_then(|iface| iface.shared_root_lease.as_ref())
+            // #13073: read the shard count from the runtime's own lease
+            // snapshot (attached at materialization, refreshed on fast-map
+            // swap) instead of re-probing `cos_fast_interfaces` — the root
+            // is already in scope here, so this drops a per-packet FastMap
+            // hash lookup + `Arc` pointer chase from every shared_exact
+            // admission. A missing lease keeps owner-local semantics.
+            let active_shards = root
+                .shared_root_lease
+                .as_ref()
                 .map(|lease| lease.active_shards())
                 .unwrap_or(1)
                 .max(1);
@@ -1862,13 +1864,24 @@ fn enqueue_cos_item(
         } else {
             cos_flow_aware_buffer_limit(queue, flow_bucket)
         };
+        // #13064 (research D1-12): derive the per-flow share cap ONCE
+        // per packet. The flow-share admission gate below and the ECN
+        // policy both key off this single value;
+        // `apply_cos_admission_ecn_policy` takes it as a parameter
+        // instead of recomputing it — the recompute cost a 64-bit
+        // `div_ceil` (two on shared_exact queues, where the BDP floor
+        // adds a division) on every enqueued packet, including packets
+        // the ECN policy then refused to mark and shared_exact packets
+        // whose per-flow arm is discarded outright. Non-flow-fair
+        // queues early-return `buffer_limit` inside the (inlined)
+        // helper, so the unconditional call is free there.
+        let flow_share_limit = cos_queue_flow_share_limit(queue, buffer_limit, flow_bucket);
         let flow_share_exceeded = if queue.flow_fair() {
             let ff = queue
                 .flow_fair_state
                 .as_ref()
                 .expect("flow_fair queue missing FlowFairState");
-            ff.flow_bucket_bytes[flow_bucket].saturating_add(item_len)
-                > cos_queue_flow_share_limit(queue, buffer_limit, flow_bucket)
+            ff.flow_bucket_bytes[flow_bucket].saturating_add(item_len) > flow_share_limit
         } else {
             false
         };
@@ -1886,6 +1899,7 @@ fn enqueue_cos_item(
             queue,
             buffer_limit,
             flow_bucket,
+            flow_share_limit,
             flow_share_exceeded,
             buffer_exceeded,
             &mut item,

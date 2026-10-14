@@ -663,6 +663,16 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     pub(in crate::afxdp) default_queue: u8,
     pub(in crate::afxdp) nonempty_queues: usize,
     pub(in crate::afxdp) runnable_queues: usize,
+    /// #13073: this interface's `SharedCoSRootLease` snapshot, cloned from
+    /// `cos_fast_interfaces` at runtime materialization and refreshed on
+    /// every fast-map swap (`refresh_cos_runtime_shared_root_leases`).
+    /// Shared_exact admission reads `active_shards()` from here instead of
+    /// re-probing the fast map per packet — the runtime is already in
+    /// scope at `enqueue_cos_item`, so the probe was a pure per-packet
+    /// FastMap hash lookup + `Arc` pointer chase on the hot path
+    /// (docs/engineering-standards-hpc.md §4/§8). `None` keeps
+    /// owner-local semantics (`active_shards == 1`).
+    pub(in crate::afxdp) shared_root_lease: Option<Arc<SharedCoSRootLease>>,
     /// #1614 A1: copied from `CoSInterfaceConfig.oversubscription_policy`
     /// at `build_cos_interface_runtime` time. Controls whether the
     /// hot-path selector runs the legacy round-robin (`Proportional`)

@@ -326,19 +326,61 @@ pub(super) fn build_cos_batch_from_queue(
         ff.pop_snapshot_stack.clear();
     }
     let head = cos_queue_front(queue)?;
+    // #13062 (D1-04): this builder is not a non-exact-only path. It
+    // also serves (a) lazily-promoted non-exact guaranteed queues
+    // (#1735: `!exact && transmit_rate_bytes > 0`), whose per-packet
+    // `account_flow_bucket_tx` in submit_local / submit_prepared
+    // maintains `flow_bucket_observed_bps` at real CPU cost, and (b)
+    // `shared_exact` queues with `surplus_sharing == true` (#915) in
+    // Phase 3 (`CoSServicePhase::Surplus` via
+    // `select_cos_surplus_batch_filtered`). The pre-fix `u64::MAX`
+    // hardcode made #1229 v7 cap-aware bucket selection dead code on
+    // (a) — elephant buckets were never deferred on this path — and
+    // bypassed BOTH the #1229 v7 cap and the #917 V_min cross-worker
+    // lag brake on (b), while `apply_cos_*_result` still published the
+    // unthrottled `queue_vtime` to `vtime_floor`: a surplus-draining
+    // worker could run arbitrarily far ahead of its peers without ever
+    // tripping the lag brake.
+    //
+    // Fix: sample the per-flow fair-share target ONCE per build (same
+    // stable-eligible-set contract as drain.rs) and thread it into the
+    // cap-aware peek/pop. `compute_drain_target_bps` returns
+    // `u64::MAX` for non-flow-fair or unshaped queues, so best-effort
+    // and unshaped builds keep byte-identical selection.
+    let target_bps = compute_drain_target_bps(queue);
     match head {
         CoSPendingTxItem::Local(_) => {
             local_scratch.clear();
+            // #941 Work item D analog: consume one suspension slot for
+            // this build call, AFTER the empty-queue preflight above
+            // (drain.rs consumes after its free-frame preflight for the
+            // same no-progress reason). `suspended` persists for the
+            // whole loop so every cadence pop sees the same state.
+            let suspended = cos_queue_v_min_consume_suspension(queue);
             let mut remaining_root = root_budget;
             let mut remaining_secondary = secondary_budget;
             let mut batch_bytes = 0u64;
             while local_scratch.len() < TX_BATCH_SIZE {
+                // #917 Phase 4 (#13062 / D1-04): V_min gate before the
+                // peek, mirroring drain_exact_local_items_to_scratch_
+                // flow_fair. `cos_queue_v_min_continue` self-gates to a
+                // no-op unless the queue is shared_exact AND shaped AND
+                // floored, so non-exact / best-effort builds are
+                // unaffected. The candidate counter persists across
+                // builds; the commit is deferred to the confirmed pop
+                // (#2646 — a throttled or budget-missed break must not
+                // burn a cadence position).
+                let candidate_pop_count = queue.v_min.v_min_pop_count.wrapping_add(1);
+                if !suspended && !cos_queue_v_min_continue(queue, candidate_pop_count) {
+                    break;
+                }
                 // #1763 Lever A — fused select+pop. Peek returns the
-                // min-finish bucket id; if we commit to popping, reuse
-                // that exact bucket (no re-scan). No queue mutation
-                // occurs between peek and the matching pop, so the
-                // selected bucket is byte-identical to a re-scan.
-                let Some((bucket, front)) = cos_queue_peek_min_bucket(queue, u64::MAX) else {
+                // cap-aware min-finish bucket id (#1229 v7 via the
+                // once-per-build `target_bps`); if we commit to popping,
+                // reuse that exact bucket (no re-scan). No queue
+                // mutation occurs between peek and the matching pop, so
+                // the selected bucket is byte-identical to a re-scan.
+                let Some((bucket, front)) = cos_queue_peek_min_bucket(queue, target_bps) else {
                     break;
                 };
                 let len = cos_item_len(front);
@@ -350,8 +392,11 @@ pub(super) fn build_cos_batch_from_queue(
                 }
                 remaining_root = remaining_root.saturating_sub(len);
                 remaining_secondary = remaining_secondary.saturating_sub(len);
-                match cos_queue_pop_known_bucket(queue, bucket, u64::MAX) {
+                match cos_queue_pop_known_bucket(queue, bucket, target_bps) {
                     Some(CoSPendingTxItem::Local(req)) => {
+                        // #2646: pop confirmed — advance the cadence
+                        // counter now; the breaks above did not.
+                        queue.v_min.v_min_pop_count = candidate_pop_count;
                         batch_bytes = batch_bytes.saturating_add(len);
                         local_scratch.push_back(req);
                     }
@@ -375,13 +420,25 @@ pub(super) fn build_cos_batch_from_queue(
         }
         CoSPendingTxItem::Prepared(_) => {
             prepared_scratch.clear();
+            // #941 Work item D analog (Prepared arm): same post-
+            // preflight suspension consume as the Local arm above.
+            let suspended = cos_queue_v_min_consume_suspension(queue);
             let mut remaining_root = root_budget;
             let mut remaining_secondary = secondary_budget;
             let mut batch_bytes = 0u64;
             while prepared_scratch.len() < TX_BATCH_SIZE {
-                // #1763 Lever A — fused select+pop (Prepared arm). See
-                // the Local arm above for the no-mutation invariant.
-                let Some((bucket, front)) = cos_queue_peek_min_bucket(queue, u64::MAX) else {
+                // #917 Phase 4 (#13062 / D1-04): V_min gate before the
+                // peek, mirroring drain_exact_prepared_items_to_scratch_
+                // flow_fair (and the Local arm above). Same self-gating
+                // and #2646 deferred-counter contract.
+                let candidate_pop_count = queue.v_min.v_min_pop_count.wrapping_add(1);
+                if !suspended && !cos_queue_v_min_continue(queue, candidate_pop_count) {
+                    break;
+                }
+                // #1763 Lever A — fused select+pop (Prepared arm, now
+                // cap-aware via `target_bps`). See the Local arm above
+                // for the no-mutation invariant.
+                let Some((bucket, front)) = cos_queue_peek_min_bucket(queue, target_bps) else {
                     break;
                 };
                 let len = cos_item_len(front);
@@ -393,8 +450,11 @@ pub(super) fn build_cos_batch_from_queue(
                 }
                 remaining_root = remaining_root.saturating_sub(len);
                 remaining_secondary = remaining_secondary.saturating_sub(len);
-                match cos_queue_pop_known_bucket(queue, bucket, u64::MAX) {
+                match cos_queue_pop_known_bucket(queue, bucket, target_bps) {
                     Some(CoSPendingTxItem::Prepared(req)) => {
+                        // #2646: pop confirmed — advance the cadence
+                        // counter now; the breaks above did not.
+                        queue.v_min.v_min_pop_count = candidate_pop_count;
                         batch_bytes = batch_bytes.saturating_add(len);
                         prepared_scratch.push_back(req);
                     }

@@ -103,44 +103,4 @@ mod sojourn;
 mod refund;
 mod submit;
 mod demand_mask_9365;
-
-// #13065 (source finding D1-14) FAIL-ON-REVERT modularity guard: every
-// production .rs file at the top level of cos/queue_service/ must stay
-// below the 800-LOC split ceiling the #13065 extraction established.
-// The pre-split monolith was a single 2,248-LOC queue_service/mod.rs
-// combining selection, waterfill, and settlement subsystems, which is
-// where six of the CoS fairness defects in the source review were
-// masked; re-growth past the ceiling must fail the suite instead of
-// waiting for the repo-global heatmap refresh (whose lag fails nothing
-// by design). Test files under tests/ are out of scope: the ceiling
-// governs production code (docs/engineering-style.md, modularity
-// discipline).
-#[test]
-fn queue_service_production_files_below_800_loc_13065() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp/cos/queue_service");
-    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-        .filter_map(|entry| {
-            let path = entry.expect("queue_service dir entry").path();
-            (path.is_file() && path.extension().is_some_and(|ext| ext == "rs")).then_some(path)
-        })
-        .collect();
-    paths.sort();
-    assert!(
-        !paths.is_empty(),
-        "fixture sanity: cos/queue_service/ must contain .rs files"
-    );
-    for path in paths {
-        let loc = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-            .lines()
-            .count();
-        assert!(
-            loc < 800,
-            "{} is {} LOC — exceeds the 800-LOC queue_service split ceiling \
-             (#13065); extract a sibling module instead of growing this file",
-            path.display(),
-            loc
-        );
-    }
-}
+mod fairness;

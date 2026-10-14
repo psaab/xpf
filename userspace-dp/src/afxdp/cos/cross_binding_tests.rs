@@ -950,3 +950,190 @@ fn redirect_local_cos_request_to_owner_refused_at_capacity_returns_err_10310() {
         "the refusal must still bump the aggregate drop counter"
     );
 }
+
+/// #13072 FAIL-ON-REVERT merge gate: a cross-worker prepared redirect that
+/// is REFUSED after its `redirect_pool::checkout` copy must return the
+/// checked-out buffer to the thread-local pool. Pre-fix, the `Err` arm
+/// dropped `local_req.bytes` straight to the OS heap, so every refused
+/// redirect permanently drained one pooled buffer; a burst of refused
+/// redirects exhausted the pool and pushed the warmed redirect path back
+/// onto per-packet `alloc`/`free`. RED on base as an assertion failure
+/// (pool length 0 instead of 1), GREEN post-fix.
+#[test]
+fn redirect_prepared_cos_request_to_owner_binding_err_recycles_pool_buffer_13072() {
+    use crate::afxdp::cos::redirect_pool;
+
+    // Isolate the per-thread pool from residue left by earlier tests.
+    redirect_pool::clear_for_test();
+
+    let owner_live = Arc::new(BindingLiveState::new());
+    let fast_path = test_cos_fast_interfaces(
+        80,
+        12,
+        4,
+        vec![(4, test_queue_fast_path(false, 7, None, None))],
+        Some(owner_live.clone()),
+        None,
+    )
+    .remove(&80)
+    .expect("fast path");
+    let root = test_cos_runtime_with_exact(false);
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 2, 80, root, fast_path);
+
+    let payload: Vec<u8> = (0..64u16).map(|i| (i & 0xff) as u8).collect();
+    let len = payload.len() as u32;
+    unsafe { binding.umem.area().slice_mut_unchecked(128, payload.len()) }
+        .expect("source frame")
+        .copy_from_slice(&payload);
+    binding.tx_pipeline.free_tx_frames.reserve(16);
+
+    // Warm the pool the way the owner-worker settle does: one successful
+    // redirect whose committed buffer is recycled back.
+    let warm_req = test_prepared_request(128, len);
+    assert!(
+        redirect_prepared_cos_request_to_owner_binding(&mut binding, warm_req, None).is_ok(),
+        "warm redirect must route to the owner-live queue",
+    );
+    let mut warm_drained = VecDeque::new();
+    unsafe { owner_live.take_pending_tx_into(&mut warm_drained) };
+    let warm_bytes = warm_drained.pop_front().expect("warm request queued").bytes;
+    assert_eq!(
+        warm_bytes, payload,
+        "warm redirect copied the frame verbatim"
+    );
+    redirect_pool::recycle(warm_bytes);
+    assert_eq!(
+        redirect_pool::len_for_test(),
+        1,
+        "committed buffer returned to the per-worker pool",
+    );
+
+    // Refuse the next enqueue: fill the owner redirect inbox to its hard
+    // cap so `try_enqueue_tx_owned` hands the request back.
+    let mut admitted = 0usize;
+    while owner_live
+        .try_enqueue_tx_owned(TxRequest {
+            bytes: Vec::new(),
+            expected_ports: None,
+            expected_addr_family: libc::AF_INET as u8,
+            expected_protocol: PROTO_TCP,
+            flow_key: None,
+            egress_ifindex: 80,
+            cos_queue_id: Some(4),
+            dscp_rewrite: None,
+            mirror_clone: false,
+            overlap_admissions: None,
+            enqueue_ns: 0,
+        })
+        .is_ok()
+    {
+        admitted += 1;
+    }
+    assert!(
+        admitted > 0,
+        "inbox fill must admit at least one request before refusing",
+    );
+
+    // The refused redirect must STILL return its checked-out buffer to
+    // the pool (checkout pops it to 0; recycle must push it back to 1).
+    let refused_req = test_prepared_request(128, len);
+    let refused =
+        redirect_prepared_cos_request_to_owner_binding(&mut binding, refused_req, None);
+    assert!(refused.is_err(), "full inbox must refuse the redirect");
+    assert_eq!(
+        redirect_pool::len_for_test(),
+        1,
+        "#13072: the refused redirect must return its checked-out buffer \
+         to the per-worker pool instead of freeing it to the OS heap",
+    );
+}
+
+/// #13072 FAIL-ON-REVERT merge gate — SIBLING SITE. Same invariant as the
+/// test above, but for `redirect_prepared_cos_request_to_owner` (the
+/// worker-command Step-1 arm): when `push_shaped_local_bounded` refuses at
+/// the command-queue cap, the `Err` arm must recycle the checked-out
+/// buffer. Together the two tests gate BOTH post-checkout `Err` arms
+/// enumerated in #13072.
+#[test]
+fn redirect_prepared_cos_request_to_owner_err_recycles_pool_buffer_13072() {
+    use crate::afxdp::cos::redirect_pool;
+    use crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS;
+
+    redirect_pool::clear_for_test();
+
+    // Queue owner_live is None on the queue fast path, so the redirect
+    // falls through to the worker-command arm (`push_shaped_local_bounded`).
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let worker_commands_by_id = BTreeMap::from([(7, commands.clone())]);
+    let fast_path = test_cos_fast_interfaces(
+        80,
+        12,
+        4,
+        vec![(4, test_queue_fast_path(false, 7, None, None))],
+        None,
+        None,
+    )
+    .remove(&80)
+    .expect("fast path");
+    let root = test_cos_runtime_with_exact(false);
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 2, 80, root, fast_path);
+
+    let payload: Vec<u8> = (0..64u16).map(|i| (i & 0xff) as u8).collect();
+    let len = payload.len() as u32;
+    unsafe { binding.umem.area().slice_mut_unchecked(128, payload.len()) }
+        .expect("source frame")
+        .copy_from_slice(&payload);
+    binding.tx_pipeline.free_tx_frames.reserve(16);
+
+    // Warm pass: a successful redirect whose committed buffer is recycled
+    // back into the pool, mirroring the owner-worker settle replenish.
+    let warm_req = test_prepared_request(128, len);
+    assert!(
+        redirect_prepared_cos_request_to_owner(&mut binding, warm_req, 2, &worker_commands_by_id, None)
+            .is_ok(),
+        "warm redirect must route to the owner worker command queue",
+    );
+    let warm_bytes = match commands
+        .lock()
+        .unwrap()
+        .pop_front()
+        .expect("warm command queued")
+    {
+        WorkerCommand::EnqueueShapedLocal(req) => req.bytes,
+        other => panic!("unexpected command queued: {other:?}"),
+    };
+    assert_eq!(warm_bytes, payload, "warm redirect copied the frame verbatim");
+    redirect_pool::recycle(warm_bytes);
+    assert_eq!(
+        redirect_pool::len_for_test(),
+        1,
+        "committed buffer returned to the per-worker pool",
+    );
+
+    // Refuse the next redirect: fill the owner command queue to its cap so
+    // `push_shaped_local_bounded` hands the request back (#10310 arm).
+    {
+        let mut pending = commands.lock().unwrap();
+        while pending.len() < MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+        }
+    }
+
+    // The refused redirect must STILL return its checked-out buffer to
+    // the pool (checkout pops it to 0; recycle must push it back to 1).
+    let refused_req = test_prepared_request(128, len);
+    let refused = redirect_prepared_cos_request_to_owner(
+        &mut binding,
+        refused_req,
+        2,
+        &worker_commands_by_id,
+        None,
+    );
+    assert!(refused.is_err(), "full command queue must refuse the redirect");
+    assert_eq!(
+        redirect_pool::len_for_test(),
+        1,
+        "#13072: the refused redirect must return its checked-out buffer \
+         to the per-worker pool instead of freeing it to the OS heap",
+    );
+}
