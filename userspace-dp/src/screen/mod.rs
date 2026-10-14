@@ -760,6 +760,28 @@ impl ScreenState {
             || !self.inert_profile_refs.is_empty()
     }
 
+    /// #12875: does THIS zone have anything a screen stage needs to act on?
+    ///
+    /// The per-zone analogue of `has_screen_state`, over the SAME three
+    /// sets: a resolved profile to ENFORCE, or an unresolved / inert
+    /// reference to REPORT and substitute the #7168 conservative default
+    /// for. The screen poll stages used to gate GLOBALLY — once ANY zone
+    /// had state, they ran `extract_screen_info` and fail-closed its
+    /// #2146 parse errors for EVERY resolved zone, dropping malformed
+    /// frames on a zone whose own screen verdict is `missing_profile_verdict`'s
+    /// None arm: a silent Pass. Enabling a profile for one zone must not
+    /// impose another zone's screen-specific parse cost and drops.
+    ///
+    /// The gate excludes exactly and only the legitimate no-screen zone, so
+    /// the tolerant doctrines stay fail-closed: zones in either reference
+    /// map are admitted (their substituted default still drops the
+    /// malformed-packet set).
+    pub fn zone_has_screen_state(&self, zone: &str) -> bool {
+        self.zones.contains_key(zone)
+            || self.missing_profile_refs.contains_key(zone)
+            || self.inert_profile_refs.contains_key(zone)
+    }
+
     /// Run all screen checks for a packet arriving on the given zone.
     /// Returns `ScreenVerdict::Pass` if the packet is clean, or
     /// `ScreenVerdict::Drop(reason)` if it should be dropped.

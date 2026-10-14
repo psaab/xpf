@@ -100,9 +100,9 @@ use session_hit_authority::{
 use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
     SynCookieAckOutcome, ike_host_inbound_gate_context, reinject_ipsec_passthrough,
-    stage_classify_fabric_ingress, stage_ipsec_passthrough_check, stage_link_layer_classify,
-    stage_native_gre_decap, stage_parse_flow_and_learn, stage_screen_check,
-    stage_screen_syn_cookie_ack_on_session_miss, stage_wg_decap,
+    screen_zone_with_state, stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
+    stage_link_layer_classify, stage_native_gre_decap, stage_parse_flow_and_learn,
+    stage_screen_check, stage_screen_syn_cookie_ack_on_session_miss, stage_wg_decap,
 };
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp_at;
@@ -1044,13 +1044,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // sketches or elicit a SYN-cookie response. The verdict-only
                 // walk has no counter/log side effects; the normal filter
                 // enforcement below remains the sole counted/logged evaluation.
-                let input_filter_denied_before_screens = screen.has_screen_state()
-                    && input_filter_would_deny_before_screen(
-                        worker_ctx.forwarding,
-                        packet_frame,
-                        flow.as_ref(),
-                        meta,
-                    );
+                // #12875: the walk is PER-ZONE, like the screen stages it
+                // guards — it only has work where they do. For a zone with no
+                // screen state there is nothing to mutate and no cookie to
+                // elicit, and the packet reaches its ordinary counted filter
+                // enforcement below either way, so a profile resolved for a
+                // different zone must not buy this zone a filter re-walk.
+                let input_filter_denied_before_screens =
+                    screen_zone_with_state(worker_ctx, meta, ingress_zone_override, screen)
+                        .is_some()
+                        && input_filter_would_deny_before_screen(
+                            worker_ctx.forwarding,
+                            packet_frame,
+                            flow.as_ref(),
+                            meta,
+                        );
                 // #946 Phase 1 stage 10: screen / IDS slow-path.
                 // Filter-denied packets continue to their ordinary filter
                 // enforcement site below without mutating screens or producing

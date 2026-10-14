@@ -545,6 +545,24 @@ sync.
     The per-destination flood sketches (#4132) are untouched — the fix skips the
     re-count, it does not disable the screen. vSRX parity: screens fire once, on
     the true cluster-ingress node.
+  - **#12875 — screen stages gate on the INGRESS zone's own state, not the
+    global one:** `stage_screen_check` and
+    `stage_screen_syn_cookie_ack_on_session_miss` used to ask only
+    `has_screen_state()` / `has_profiles()` — is screening configured
+    ANYWHERE — then resolve the zone and run `extract_screen_info`
+    unconditionally, fail-closing its parse errors (#2146/#4167). With a
+    profile resolved for one zone, a malformed frame on a DIFFERENT zone
+    with no screen configuration was dropped as an `ip-malformed` screen
+    drop and never reached policy — a screen-specific denial manufactured
+    by another zone's profile. Both stages (and the #11332 pre-screen
+    input-filter walk in `poll_descriptor/mod.rs`, which exists only to
+    keep filter-denied packets off the screen state) now resolve the zone
+    via `screen_zone_with_state` and return early unless THAT zone has
+    state (`ScreenState::zone_has_screen_state`: a resolved profile, or an
+    unresolved/inert reference). The missing/inert reference zones are
+    still admitted, so the #7168/#7888 substituted conservative default
+    keeps the tolerant doctrines fail-closed, and a screened zone's
+    parse-error fail-close is untouched.
   - **#3291 — zone policy / input filter / PBR on the flowless TRANSIT
     arm:** #3064 restored only the *screen* engine on the flowless path;
     zone security policy, the interface input filter, and firewall-filter
