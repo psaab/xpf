@@ -1618,3 +1618,233 @@ fn extensive_rematch_purges_nonzero_admission_id_after_first_rule_move_12072() {
     drop(shared);
     harness.shutdown();
 }
+
+/// #12858 (D5-02): a permitted host-bound session admitted by the policy-id-0
+/// rule carries the LOCAL interface's zone as its `egress_zone`, never
+/// `ZONE_ID_RESERVED_MIN`. On an extensive first-policy rename with explicit
+/// junos-host ancestry, rematching must use host-specific tier semantics:
+/// this host wildcard permit must beat an earlier transit `to-zone any` deny.
+/// The forward entry must be rebound rather than purged, using the reserved
+/// host zone for policy evaluation while preserving its local egress-zone stamp.
+///
+/// RED pre-fix: `ancestry_source_zone_matches(.., egress_zone=1)` rejects the
+/// junos-host source arm and the re-eval pair `(1, 1)` misses the host rule,
+/// so the forward half is deleted. FAIL-ON-REVERT: reverting the host-pair
+/// re-evaluation (or the stamped-egress translation) makes the forward half
+/// purge again; reverting the transit LocalDelivery exemption keeps the
+/// transit control below green, so the exemption is pinned separately.
+#[test]
+fn extensive_rotation_rebinds_junos_host_local_delivery_first_policy_12858() {
+    let old_rules = [
+        rule_with_zones("p-host", 0, "lan", "junos-host"),
+        rule_with_zones("p-web", 1, "lan", "dmz"),
+    ];
+    let host_counter = policy(&old_rules)
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose p-host's counter");
+    let host_key = key(40201);
+    let mut host_forward = entry(host_key.clone(), false, Some(host_counter));
+    host_forward.decision.resolution.disposition = ForwardingDisposition::LocalDelivery;
+    host_forward.decision.resolution.local_ifindex = 11;
+    host_forward.decision.resolution.egress_ifindex = 11;
+    host_forward.decision.resolution.tx_ifindex = 11;
+    // LocalMiss host sessions contain only this forward entry; they do not
+    // synthesize the transit/NAT reverse companion. The worker's test queue
+    // accepts sync-family origins, so use SyncImport to seed the same
+    // LocalDelivery single-entry shape without a packet-path install.
+    host_forward.metadata.egress_zone = 1;
+    host_forward.origin = SessionOrigin::SyncImport;
+
+    let harness = RotationHarness::start_with_extra_origin_old_rules(
+        &[host_forward],
+        SessionOrigin::SharedPromote,
+        &old_rules,
+        "lan->junos-host/p-host",
+    );
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->junos-host/p-host".to_string(),
+        destination_rule_id: "any->junos-host/p-host-v2".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "junos-host".to_string(),
+        destination_from_zone: "any".to_string(),
+        destination_to_zone: "junos-host".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: crate::policy::ZONE_ID_RESERVED_MIN,
+        destination_from_zone_id: 0,
+        destination_to_zone_id: crate::policy::ZONE_ID_RESERVED_MIN,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: true,
+        destination_to_zone_any: false,
+    };
+    harness.publish(
+        2,
+        &{
+            let mut transit_deny = rule_with_zones("p-transit-deny", 0, "lan", "any");
+            transit_deny.action = "deny".to_string();
+            vec![
+                transit_deny,
+                rule_with_zones("p-host-v2", 1, "any", "junos-host"),
+                rule_with_zones("p-web", 2, "lan", "dmz"),
+            ]
+        },
+        true,
+        &[ancestry],
+        None,
+    );
+    let shared = harness.synced.lock().expect("shared synced map");
+    let forward = shared
+        .get(&host_key)
+        .expect("#12858: permitted junos-host LocalDelivery forward half must be retained and rebound, not purged");
+    let counter = forward
+        .metadata
+        .policy_counter
+        .as_ref()
+        .expect("retained host session must carry the renamed rule's counter");
+    assert_eq!(counter.rule_id(), "any->junos-host/p-host-v2");
+    assert_eq!(forward.metadata.policy_counter_idx, 2);
+    // The host policy re-evaluation uses the reserved junos-host id but
+    // retains LocalDelivery's recorded egress as the actual local zone.
+    assert_eq!(forward.metadata.ingress_zone, 1);
+    assert_eq!(forward.metadata.egress_zone, 1);
+    assert!(
+        !shared.contains_key(&reverse_session_key(&host_key, NatDecision::default())),
+        "a LocalMiss host session must remain single-entry after rebind"
+    );
+    drop(shared);
+    harness.shutdown();
+}
+
+/// #12858 negative control: the SAME junos-host rename where the renamed
+/// destination rule DENIES the flow must still purge — retention requires a
+/// fresh permit under the new policy, never blind survival. This cell is
+/// green pre- and post-fix (denied host traffic must die), which keeps the
+/// retain cell above from passing via an over-broad LocalDelivery exemption.
+#[test]
+fn extensive_rotation_purges_junos_host_local_delivery_when_renamed_rule_denies_12858() {
+    let old_rules = [
+        rule_with_zones("p-host", 0, "lan", "junos-host"),
+        rule_with_zones("p-web", 1, "lan", "dmz"),
+    ];
+    let host_counter = policy(&old_rules)
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose p-host's counter");
+    let host_key = key(40202);
+    let mut host_forward = entry(host_key.clone(), false, Some(host_counter));
+    host_forward.decision.resolution.disposition = ForwardingDisposition::LocalDelivery;
+    host_forward.decision.resolution.local_ifindex = 11;
+    host_forward.decision.resolution.egress_ifindex = 11;
+    host_forward.decision.resolution.tx_ifindex = 11;
+    host_forward.metadata.egress_zone = 1;
+    host_forward.origin = SessionOrigin::SyncImport;
+
+    let harness = RotationHarness::start_with_extra_origin_old_rules(
+        &[host_forward],
+        SessionOrigin::SharedPromote,
+        &old_rules,
+        "lan->junos-host/p-host",
+    );
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->junos-host/p-host".to_string(),
+        destination_rule_id: "lan->junos-host/p-host-v2".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "junos-host".to_string(),
+        destination_from_zone: "lan".to_string(),
+        destination_to_zone: "junos-host".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: crate::policy::ZONE_ID_RESERVED_MIN,
+        destination_from_zone_id: 1,
+        destination_to_zone_id: crate::policy::ZONE_ID_RESERVED_MIN,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    let mut denied = rule_with_zones("p-host-v2", 0, "lan", "junos-host");
+    denied.action = "deny".to_string();
+    harness.publish(
+        2,
+        &[denied, rule_with_zones("p-web", 1, "lan", "dmz")],
+        true,
+        &[ancestry],
+        None,
+    );
+    let shared = harness.synced.lock().expect("shared synced map");
+    assert!(
+        !shared.contains_key(&host_key),
+        "a junos-host session whose renamed rule denies must purge (fail-closed)"
+    );
+    drop(shared);
+    harness.shutdown();
+}
+
+/// #12858 transit control: a ForwardCandidate session admitted by the
+/// transit first rule (stamped egress = wan) under a junos-host rename
+/// ancestry must NOT be retained — the host-pair re-evaluation applies only
+/// to LocalDelivery rows. FAIL-ON-REVERT (inverted): an exemption scoped to
+/// "any row whose ancestry says junos-host" would rebind this transit row
+/// and fail this cell.
+#[test]
+fn extensive_rotation_does_not_retain_transit_row_under_junos_host_ancestry_12858() {
+    let old_rules = [
+        rule_with_zones("p-host", 0, "lan", "junos-host"),
+        rule_with_zones("p-web", 1, "lan", "dmz"),
+    ];
+    let host_counter = policy(&old_rules)
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose p-host's counter");
+    // Default entry(): ForwardCandidate, ingress lan, egress wan.
+    let transit_key = key(40203);
+    let transit_forward = entry(transit_key.clone(), false, Some(host_counter));
+    let transit_entries = [
+        transit_forward,
+        entry(
+            reverse_session_key(&transit_key, NatDecision::default()),
+            true,
+            None,
+        ),
+    ];
+
+    let harness = RotationHarness::start_with_extra_origin_old_rules(
+        &transit_entries,
+        SessionOrigin::SharedPromote,
+        &old_rules,
+        "lan->junos-host/p-host",
+    );
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->junos-host/p-host".to_string(),
+        destination_rule_id: "lan->junos-host/p-host-v2".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "junos-host".to_string(),
+        destination_from_zone: "lan".to_string(),
+        destination_to_zone: "junos-host".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: crate::policy::ZONE_ID_RESERVED_MIN,
+        destination_from_zone_id: 1,
+        destination_to_zone_id: crate::policy::ZONE_ID_RESERVED_MIN,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    harness.publish(
+        2,
+        &[
+            rule_with_zones("p-host-v2", 0, "lan", "junos-host"),
+            rule_with_zones("p-web", 1, "lan", "dmz"),
+        ],
+        true,
+        &[ancestry],
+        None,
+    );
+    let shared = harness.synced.lock().expect("shared synced map");
+    assert!(
+        !shared.contains_key(&transit_key),
+        "a transit row must not be retained by junos-host ancestry (LocalDelivery-only)"
+    );
+    drop(shared);
+    harness.shutdown();
+}

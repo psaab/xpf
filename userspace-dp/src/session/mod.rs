@@ -3687,9 +3687,11 @@ impl SessionTable {
     }
 
     /// Rebind both halves of a retained policy session to the new rule
-    /// identity selected by commit-time rematching. Policy and zone fields are
-    /// not secondary-index inputs; changing the forward ingress zone also
-    /// transfers its counted zone/IP pair.
+    /// identity selected by commit-time rematching. A LocalDelivery session
+    /// can be a single LocalMiss entry; in that case it has no reverse
+    /// companion to update. Policy and zone fields are not secondary-index
+    /// inputs; changing the forward ingress zone also transfers its counted
+    /// zone/IP pair.
     pub(crate) fn rebind_policy_pair(
         &mut self,
         key: &SessionKey,
@@ -3707,13 +3709,15 @@ impl SessionTable {
         }
         let old_ingress_zone = forward.metadata.ingress_zone;
         let forward_counted = install::session_limit_origin_counted(forward.origin);
+        let single_local_delivery = forward.decision.resolution.disposition
+            == crate::afxdp::ForwardingDisposition::LocalDelivery;
         let companion_key = reverse_session_key(key, forward.decision.nat);
         if companion_key != *key {
-            let Some(companion) = self.entry_by_key(&companion_key) else {
-                return false;
-            };
-            if !companion.metadata.is_reverse {
-                return false;
+            match self.entry_by_key(&companion_key) {
+                Some(companion) if companion.metadata.is_reverse => {}
+                Some(_) => return false,
+                None if !single_local_delivery => return false,
+                None => {}
             }
         }
 
@@ -3748,8 +3752,9 @@ impl SessionTable {
         rebound
     }
 
-    /// Return the live forward/reverse halves after a policy rebind so mirror
-    /// layers can be restamped with the same policy identity.
+    /// Return the live rebind entries after a policy rebind so mirror layers
+    /// can be restamped with the same policy identity. LocalDelivery rows may
+    /// legitimately have no reverse companion.
     pub(crate) fn policy_rebind_pair_entries(
         &self,
         key: &SessionKey,
@@ -3758,11 +3763,15 @@ impl SessionTable {
         if forward.metadata.is_reverse {
             return None;
         }
+        let single_local_delivery = forward.decision.resolution.disposition
+            == crate::afxdp::ForwardingDisposition::LocalDelivery;
         let companion_key = reverse_session_key(key, forward.decision.nat);
         if companion_key != *key {
-            let companion = self.entry_by_key(&companion_key)?;
-            if !companion.metadata.is_reverse {
-                return None;
+            match self.entry_by_key(&companion_key) {
+                Some(companion) if companion.metadata.is_reverse => {}
+                Some(_) => return None,
+                None if !single_local_delivery => return None,
+                None => {}
             }
         }
 

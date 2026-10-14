@@ -3950,6 +3950,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
     )
 }
 
+/// Evaluate host-bound policy at a captured time and count the packet once.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
     state: &PolicyState,
@@ -3963,6 +3964,94 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
     packet_len: u64,
     l4_present: bool,
     now_ns: u64,
+) -> Option<PolicyEvaluationResult> {
+    evaluate_junos_host_policy_l3_aware_at_with_hit_count(
+        state,
+        from_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        now_ns,
+        PolicyHitCount::Count,
+    )
+}
+
+/// Re-derive host-bound policy without changing packet or rule counters.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting(
+    state: &PolicyState,
+    from_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    l4_present: bool,
+) -> Option<PolicyEvaluationResult> {
+    evaluate_junos_host_policy_l3_aware_without_counting_at(
+        state,
+        from_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        l4_present,
+        policy_scheduler_now_ns(state),
+    )
+}
+
+/// Re-derive host-bound policy without changing packet or rule counters.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting_at(
+    state: &PolicyState,
+    from_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    l4_present: bool,
+    now_ns: u64,
+) -> Option<PolicyEvaluationResult> {
+    evaluate_junos_host_policy_l3_aware_at_with_hit_count(
+        state,
+        from_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        0,
+        l4_present,
+        now_ns,
+        PolicyHitCount::Never,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
+    state: &PolicyState,
+    from_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    l4_present: bool,
+    now_ns: u64,
+    hit_count: PolicyHitCount,
 ) -> Option<PolicyEvaluationResult> {
     let scheduler_expired = state.scheduler_rules_expired_at(now_ns);
     // #10644: NO `from_id == 0` early return here. The old entry guard
@@ -4011,7 +4100,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
                         skipped_frag_deny,
                         &state.rules[idx],
                         packet_len,
-                        PolicyHitCount::Count,
+                        hit_count,
                     ));
                 }
                 RuleMatchOutcome::Miss(reason) => {
@@ -4052,7 +4141,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
                         skipped_frag_deny,
                         &state.rules[idx],
                         packet_len,
-                        PolicyHitCount::Count,
+                        hit_count,
                     ));
                 }
                 RuleMatchOutcome::Miss(reason) => {
@@ -4100,7 +4189,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
                     skipped_frag_deny,
                     rule,
                     packet_len,
-                    PolicyHitCount::Count,
+                    hit_count,
                 ));
             }
             RuleMatchOutcome::Miss(reason) => {
