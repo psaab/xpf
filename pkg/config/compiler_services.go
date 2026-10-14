@@ -183,7 +183,7 @@ func validateRPMLinkLocalZoneStrict(cfg *Config) error {
 			if zone == "" && test.DestinationInterface == "" {
 				return fmt.Errorf(
 					"services rpm probe %q test %q: target %q is an IPv6 link-local address "+
-					"with no scope — add an explicit %%zone (fe80::1%%ge-0/0/3, or in a "+
+						"with no scope — add an explicit %%zone (fe80::1%%ge-0/0/3, or in a "+
 						"URL target http://[fe80::1%%25ge-0/0/3]/) or a destination-interface "+
 						"so the probe can pick the egress link",
 					probe.Name, test.Name, test.Target)
@@ -215,9 +215,15 @@ func FindTargetIPLiteral(target string) (ip net.IP, zone string, start, end int)
 		host = target[i+3:]
 		start = i + 3
 	}
+	// The authority ends at the first path/query/fragment separator — but
+	// ONLY in the schemed form, and never inside brackets: a bare or
+	// schemeless target is entirely literal, and a Junos zone (ge-0/0/3)
+	// legally carries '/', so cutting at '/' there would truncate the zone.
 	hostEnd := len(host)
-	if j := strings.IndexAny(host, "/?#"); j >= 0 {
-		hostEnd = j
+	if schemed := start > 0; schemed && !strings.HasPrefix(host, "[") {
+		if j := strings.IndexAny(host, "/?#"); j >= 0 {
+			hostEnd = j
+		}
 	}
 	token := host[:hostEnd]
 	// Userinfo (http://user@host/) is not part of the literal.
@@ -237,7 +243,7 @@ func FindTargetIPLiteral(target string) (ip net.IP, zone string, start, end int)
 		if ip == nil {
 			return nil, "", 0, 0
 		}
-		return ip, zone, start, start+closeIdx+1
+		return ip, zone, start, start + closeIdx + 1
 	}
 	// Unbracketed: only a bare literal qualifies — an unbracketed IPv6
 	// cannot carry a port, and host:port / hostnames do not parse as an IP.
@@ -245,7 +251,7 @@ func FindTargetIPLiteral(target string) (ip net.IP, zone string, start, end int)
 	if ip == nil {
 		return nil, "", 0, 0
 	}
-	return ip, zone, start, start + hostEnd
+	return ip, zone, start, start + len(token)
 }
 
 // splitLiteralZone splits a bare IP literal off its trailing %zone.
