@@ -58,10 +58,17 @@ def aggregate_verdict(near_observed: int) -> tuple[int, str]:
     )
 
 
+# Sound #11416 populated/removed legs: this regression exercises the
+# near-miss/tail windows, so the positive suffix stays at passing values and
+# cannot mask the regression under test.
+SOUND_POSITIVE_SUFFIX = (1500, 1500, 1500, 1500, 1000, 0, 1500, 1500)
+
+
 def window_verdict(near_observed: int, tail_observed: int) -> tuple[int, str]:
     return verdict(
         "wire_routing_separation_window_verdict",
         tail_observed, 1000, 0, 1500, 1500, 0, 1500, near_observed,
+        *SOUND_POSITIVE_SUFFIX,
     )
 
 

@@ -14,6 +14,13 @@ before the routing-instance term. That intentionally bypasses steering to the
 proven main route. It demonstrates capture/verdict liveness, but does not test
 fallthrough from an empty selected-VRF table to main.
 
+#11416 populated-instance legs: after the empty-RI miss burst, the gate
+populates the RI (test-owned GRE member + static route) and interleaves a
+fresh-tuple probe (tag R) with its near-miss control (tag B); after removing
+only the RI route it interleaves another fresh probe (tag D) with control
+(tag E). Each leg uses a fresh source port so no established 5-tuple is
+reused. All tags share the `<tag>10136:<seq>:` payload shape.
+
 A successful sendto counts as OFFERED, not proof that the dataplane received
 the frame; only peer-side capture counts as observed. Payload tags distinguish
 the bursts in the shared capture window.
@@ -36,7 +43,7 @@ def main() -> int:
     ap.add_argument("--dst", required=True)
     ap.add_argument("--port", required=True, type=int)
     ap.add_argument("--count", required=True, type=int)
-    ap.add_argument("--tag", required=True, choices=("C", "N", "P"))
+    ap.add_argument("--tag", required=True, choices=("B", "C", "D", "E", "N", "P", "R"))
     ap.add_argument("--rate", type=float, default=500.0)
     ap.add_argument("--interleave", action="store_true",
                     help="interleave control before each probe, then send a control tail after")
@@ -46,7 +53,7 @@ def main() -> int:
         type=int,
         help=f"must exceed --count by at least {INTERLEAVE_TAIL_FLOOR} for a post-probe tail",
     )
-    ap.add_argument("--interleave-control-tag", choices=("C", "N", "P"))
+    ap.add_argument("--interleave-control-tag", choices=("B", "C", "D", "E", "N", "P", "R"))
     args = ap.parse_args()
     control_args = (
         args.interleave_control_port,

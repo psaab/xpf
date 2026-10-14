@@ -132,28 +132,100 @@ wire_routing_separation_verdict() {
 # wire_routing_separation_window_verdict <late_near_miss_observed>
 #   <probe_offered> <probe_leaked> <precommit_control_offered>
 #   <precommit_control_observed> <cksum_bad> <near_miss_offered>
-#   <near_miss_observed>
+#   <near_miss_observed> <populated_offered> <populated_observed>
+#   <populated_control_offered> <populated_control_observed>
+#   <removed_offered> <removed_observed> <removed_control_offered>
+#   <removed_control_observed>
 #
 # The sender reserves the first 100 near-miss packets after the complete
 # probe burst. Their peer-side observations establish liveness immediately
 # after the final probe while tolerating loss of an individual tail packet.
 # Keep public gate metrics unchanged; an empty tail makes an otherwise-PASS
 # result capture-blind.
+#
+# #11416 populated-RI positive legs (IPv4/UDP shape only; the v6 twin, TCP,
+# and return-path legs remain blocked on the #11416 maintainer ruling):
+#
+#   populated_*  the FBF-steered exact tuple re-offered with a fresh source
+#                port while the RI holds a test-owned GRE member and an exact
+#                /32 static route. It MUST reach the peer encapsulated in the
+#                RI member's GRE (the populated capture filter admits the
+#                probe only in proto-47 form, so a main-table fallback cannot
+#                score). populated_control_* is the same-window near-miss.
+#   removed_*    the same steered tuple re-offered with another fresh source
+#                port after deleting only the RI static route. It MUST NOT
+#                reach the peer in any form (GRE or plain); removed_control_*
+#                is that window's near-miss.
+#
+# Precedence (issue acceptance: an authenticated violation must never be
+# erased by a weak sample, and a weak control must never manufacture a PASS):
+#   1. malformed input (any of the sixteen) — VOID harness-void;
+#   2. an authenticated FAIL from the miss phases (leak/corruption/precommit/
+#      tail) stays FAIL — the positive legs are measured but cannot rescue it;
+#   3. populated violation — route-present control observed at the drop floor
+#      while the steered tuple emerged below it — FAIL;
+#   4. removed violation — route-removed control observed at the drop floor
+#      while the steered tuple still emerged — FAIL;
+#   5. a would-be PASS is demoted: any positive leg under-offered
+#      (populated probe < WIRE_LIVENESS_OFFERED, its control / the removed
+#      legs < WIRE_DROP_FLOOR) is VOID under-sampled; a blind positive-window
+#      control is VOID capture-blind;
+#   6. a VOID from the miss phases keeps its slug (the miss proof is a
+#      prerequisite; sound positive legs cannot upgrade it).
 wire_routing_separation_window_verdict() {
 	local tail="${1:-}" po="${2:-}" pl="${3:-}" pco="${4:-}" pcb="${5:-}"
-	local ck="${6:-}" nmo="${7:-}" nmb="${8:-}" out rc
-	if ! wire_num "$tail"; then
-		printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=%s probe_leaked=%s control_offered=%s control_observed=%s cksum_bad=%s precommit_control_offered=%s precommit_control_observed=%s\n' \
-			"$po" "$pl" "$nmo" "$nmb" "$ck" "$pco" "$pcb"
+	local ck="${6:-}" nmo="${7:-}" nmb="${8:-}"
+	local ro="${9:-}" rb="${10:-}" rco="${11:-}" rcb="${12:-}"
+	local dof="${13:-}" db="${14:-}" eco="${15:-}" ecb="${16:-}"
+	local positive_metrics="populated_offered=$ro populated_observed=$rb populated_control_offered=$rco populated_control_observed=$rcb removed_offered=$dof removed_observed=$db removed_control_offered=$eco removed_control_observed=$ecb"
+	local zero_metrics="probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0 $positive_metrics"
+	local out rc a
+	if (($# != 16)); then
+		printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void %s\n' "$zero_metrics"
 		return 2
 	fi
+	for a in "$tail" "$po" "$pl" "$pco" "$pcb" "$ck" "$nmo" "$nmb" \
+		"$ro" "$rb" "$rco" "$rcb" "$dof" "$db" "$eco" "$ecb"; do
+		if ! wire_num "$a"; then
+			printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void %s\n' "$zero_metrics"
+			return 2
+		fi
+	done
 	out="$(wire_routing_separation_verdict "$po" "$pl" "$pco" "$pcb" "$ck" "$nmo" "$nmb")"
 	rc=$?
 	if ((rc == 0)) && ((10#$tail == 0)); then
 		out="${out/WIRE_GATE wire_routing_separation PASS reason=--/WIRE_GATE wire_routing_separation VOID reason=capture-blind}"
 		rc=2
 	fi
-	printf '%s\n' "$out"
+	# Authenticated positive-leg violations. Each requires its own control to
+	# have proven the window live, so a blind control cannot fabricate a FAIL;
+	# conversely a proven window with a missing/below-floor steered tuple is a
+	# real violation, not a weak sample.
+	local populated_violation=0 removed_violation=0
+	if ((10#$ro >= WIRE_LIVENESS_OFFERED)) && ((10#$rcb >= WIRE_DROP_FLOOR)) &&
+		((10#$rb < WIRE_DROP_FLOOR)); then
+		populated_violation=1
+	fi
+	if ((10#$dof >= WIRE_DROP_FLOOR)) && ((10#$ecb >= WIRE_DROP_FLOOR)) &&
+		((10#$db > 0)); then
+		removed_violation=1
+	fi
+	if ((rc == 1)) || ((populated_violation)) || ((removed_violation)); then
+		out="WIRE_GATE wire_routing_separation FAIL reason=-- ${out#*reason=* } $positive_metrics"
+		printf '%s\n' "$out"
+		return 1
+	fi
+	if ((rc == 0)); then
+		if ((10#$ro < WIRE_LIVENESS_OFFERED)) || ((10#$rco < WIRE_DROP_FLOOR)) ||
+			((10#$dof < WIRE_DROP_FLOOR)) || ((10#$eco < WIRE_DROP_FLOOR)); then
+			out="${out/WIRE_GATE wire_routing_separation PASS reason=--/WIRE_GATE wire_routing_separation VOID reason=under-sampled}"
+			rc=2
+		elif ((10#$rcb < WIRE_DROP_FLOOR)) || ((10#$ecb < WIRE_DROP_FLOOR)); then
+			out="${out/WIRE_GATE wire_routing_separation PASS reason=--/WIRE_GATE wire_routing_separation VOID reason=capture-blind}"
+			rc=2
+		fi
+	fi
+	printf '%s %s\n' "$out" "$positive_metrics"
 	return "$rc"
 }
 
@@ -718,6 +790,15 @@ wire_conntrack_verdict() {
 # remains installed as EXIT while INT/TERM are ignored, so a cancellation
 # cannot interrupt a multi-commit restore or print a verdict before restoration
 # has been verified.
+#
+# #11416: a gate may opt into FAIL stickiness by exporting WIRE_GATE_FAIL_STICKY=1
+# before its EXIT trap fires (only wire-routing-separation does today). For that
+# gate an authenticated FAIL (WIRE_GATE_FINAL_RC=1 with a pending verdict line)
+# survives a failed restore: the FAIL line is printed with restore_failed=1
+# appended so the restoration failure is recorded separately instead of
+# erasing the violation (issue acceptance: an observed violation must not be
+# voided by a weak later sample or cleanup conflict). PASS and VOID still
+# demote to the gate's RESTORE_VOID — restoration failure prevents PASS.
 wire_gate_finalize() {
 	local rc=$? restore_ok=0
 	trap '' EXIT INT TERM
@@ -730,6 +811,11 @@ wire_gate_finalize() {
 	fi
 	trap - INT TERM
 	if ((restore_ok == 0)); then
+		if [[ "${WIRE_GATE_FAIL_STICKY:-0}" == 1 &&
+			"${WIRE_GATE_FINAL_RC:-}" == 1 && -n "${WIRE_GATE_FINAL_OUT:-}" ]]; then
+			printf '%s restore_failed=1\n' "$WIRE_GATE_FINAL_OUT"
+			exit 1
+		fi
 		printf '%s\n' "${WIRE_GATE_RESTORE_VOID:-WIRE_GATE harness VOID reason=harness-void}"
 		exit 2
 	fi
@@ -742,13 +828,15 @@ wire_gate_finalize() {
 
 # Hermetic proof for the finalizer contract: cleanup runs with TERM ignored,
 # a successful restore prints the pending verdict/rc, and a failed restore
-# demotes it to the gate-specific harness VOID/rc=2.
+# demotes it to the gate-specific harness VOID/rc=2 — unless the gate opted
+# into #11416 FAIL stickiness and the pending verdict is an authenticated
+# FAIL, which then carries restore_failed=1 through at rc=1.
 wire_gate_finalizer_selftest() {
 	local tmp mode out rc expected_rc expected_out
 	tmp="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-finalizer.XXXXXX")" || return 1
 	export WIRE_GATE_FINALIZER_TEST_FILE="$tmp"
 	export -f wire_gate_finalize
-	for mode in green restore-fail; do
+	for mode in green restore-fail sticky-fail; do
 		out="$(
 			WIRE_GATE_FINALIZER_TEST_MODE="$mode" bash -c '
 				cleanup() {
@@ -756,12 +844,16 @@ wire_gate_finalizer_selftest() {
 					printf cleanup >>"$WIRE_GATE_FINALIZER_TEST_FILE"
 				}
 				RESTORE_OK=1
-				[[ "$WIRE_GATE_FINALIZER_TEST_MODE" == restore-fail ]] && RESTORE_OK=0
+				[[ "$WIRE_GATE_FINALIZER_TEST_MODE" != green ]] && RESTORE_OK=0
 				WIRE_GATE_CLEANUP_FN=cleanup
 				WIRE_GATE_RESTORE_OK_REF=RESTORE_OK
 				WIRE_GATE_RESTORE_VOID="finalizer-restore-void"
 				WIRE_GATE_FINAL_OUT="finalizer-pass"
 				WIRE_GATE_FINAL_RC=1
+				if [[ "$WIRE_GATE_FINALIZER_TEST_MODE" == sticky-fail ]]; then
+					WIRE_GATE_FAIL_STICKY=1
+					WIRE_GATE_FINAL_OUT="finalizer-fail"
+				fi
 				false
 				wire_gate_finalize
 			' 2>/dev/null
@@ -769,6 +861,8 @@ wire_gate_finalizer_selftest() {
 		rc=$?
 		if [[ "$mode" == green ]]; then
 			expected_rc=1; expected_out=finalizer-pass
+		elif [[ "$mode" == sticky-fail ]]; then
+			expected_rc=1; expected_out="finalizer-fail restore_failed=1"
 		else
 			expected_rc=2; expected_out=finalizer-restore-void
 		fi
@@ -778,7 +872,7 @@ wire_gate_finalizer_selftest() {
 			return 1
 		fi
 	done
-	if [[ "$(<"$tmp")" != cleanupcleanup ]]; then
+	if [[ "$(<"$tmp")" != cleanupcleanupcleanup ]]; then
 		rm -f "$tmp"
 		unset WIRE_GATE_FINALIZER_TEST_FILE
 		return 1
