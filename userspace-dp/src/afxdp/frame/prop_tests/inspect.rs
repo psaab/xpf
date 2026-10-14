@@ -138,8 +138,15 @@ proptest! {
 
         // Meta-consistent parse. #10729 X2-F6: an AH-bearing chain is
         // flowless by design (AH identity, not the inner tuple) — the
-        // authoritative walk is the oracle for what counts as AH-bearing.
-        let has_ah = walk_ipv6_ext_chain(&pkt.frame, pkt.l3).ah_present;
+        // oracle for "AH-bearing" is the parser's own family-gated
+        // `ipv6_ah_sighted`, NOT the raw walk. #12998: the walk is
+        // IPv6-only by contract; run on a v4 frame it reads the
+        // flags byte at l3+6 (0x00 → HopByHop) and then walks payload
+        // bytes as extension headers, so a payload 0x33 at a walk
+        // position spuriously flagged ordinary v4 packets and demanded
+        // `None` for tuples the parser correctly parses. See the
+        // `pin_p_i4_ah_oracle_is_family_gated_v4` pin below.
+        let has_ah = ipv6_ah_sighted(&pkt.frame, pkt.addr_family, pkt.l3);
         let flow = parse_session_flow_from_bytes(&pkt.frame, pkt.meta);
         if has_ah {
             prop_assert_eq!(flow, None);
@@ -663,4 +670,64 @@ fn pin_ipv6_first_fragment_offset_zero_still_parses() {
     let flow = parse_session_flow_from_bytes(&frag, frame_led_meta(pkt.meta))
         .expect("v6 first fragment still parses");
     assert_eq!(flow, pkt.session_flow());
+}
+
+/// #12998 pin: P-I4's "AH-bearing" oracle must be the parser's
+/// family-gated `ipv6_ah_sighted`, never the raw `walk_ipv6_ext_chain`.
+/// The walk is IPv6-only by contract (inspect.rs — "IPv4 is untouched:
+/// 0/43/44/51/60 ... are ordinary IPv4 protocol numbers there, with no
+/// extension-header meaning"), but it walks ANY buffer handed to it:
+/// on a v4 frame it reads the zero flags/frag byte at l3+6 as
+/// HopByHop and then walks L4/payload bytes as extension headers, so
+/// a payload 0x33 (51) at a walk-visited next-header position makes
+/// the raw walk report `ah_present` — and the pre-#12998 property
+/// then demanded `None` for a packet the parser correctly parses.
+///
+/// The tuple is all-zero because that is exactly where proptest
+/// shrinking drove the flake (arbitrary u32/u16 tuple parts shrink to
+/// zero); the parse layer deliberately returns whatever tuple the
+/// frame encodes — the P-I4 round-trip contract — with policy and
+/// martian handling downstream. Fail-on-revert: against the raw-walk
+/// oracle the first assertion pair below is the flake itself (walk
+/// says AH, parser says `Some`); the replayed corpus seed
+/// `20137a2b...` in proptest-regressions pins the generated shape.
+#[test]
+fn pin_p_i4_ah_oracle_is_family_gated_v4() {
+    // Baseline TCP/IPv4 spec driven to the shrunk all-zero tuple.
+    let mut spec = ipv4_tcp_spec();
+    spec.src4 = 0;
+    spec.dst4 = 0;
+    spec.src_port = 0;
+    spec.dst_port = 0;
+    let pkt = build_valid_frame(&spec);
+    let l3 = pkt.l3;
+    let mut frame = pkt.frame.clone();
+    // Walk-misread bytes (payload starts at l3+40 for IHL 20, TCP
+    // options 0): HopByHop next = 51 at l3+40 with HdrExtLen 0
+    // (advance 8), then a readable "AH" pair at l3+48 whose next byte
+    // 6 (TCP) terminates the walk — `ah_present` stays latched.
+    frame[l3 + 40] = 51;
+    frame[l3 + 41] = 0;
+    frame[l3 + 48] = 6;
+    frame[l3 + 49] = 0;
+
+    // Mechanism: the RAW v6 walk misreads this v4 frame as AH-bearing.
+    assert!(
+        walk_ipv6_ext_chain(&frame, l3).ah_present,
+        "raw walk must misread the engineered v4 frame — else this pin lost its trigger"
+    );
+    // The production gate is family-gated: IPv4 has no ext-chain
+    // meaning, so no AH sighting.
+    assert!(!ipv6_ah_sighted(&frame, pkt.addr_family, l3));
+    // The parser therefore returns the frame's (all-zero) tuple on
+    // both arbitration paths — the exact Some-where-None-expected
+    // flake the pre-#12998 property exhibited.
+    assert_eq!(
+        parse_session_flow_from_bytes(&frame, pkt.meta).as_ref(),
+        Some(&pkt.session_flow())
+    );
+    assert_eq!(
+        parse_session_flow_from_bytes(&frame, frame_led_meta(pkt.meta)).as_ref(),
+        Some(&pkt.session_flow())
+    );
 }
