@@ -125,6 +125,142 @@ check "a leftover on node0 is FAIL" FAIL "$(screen_probe_disarm_verdict 1 0)"
 check "a leftover on node1 ALONE is FAIL" FAIL "$(screen_probe_disarm_verdict 0 1)"
 check "an unreadable disarm count is FAIL, not PASS" FAIL "$(screen_probe_disarm_verdict 0 "")"
 
+# --- #12910: the extractor must read labeled series ------------------------
+#
+# The exporter declares the per-reason witness family ONLY with a `reason`
+# label, so every sample line's first field is the metric name WITH its
+# label block attached. The live script fed that name to an exact `$1 == m`
+# awk test, which can never match: every witness sample came back empty and
+# every live verdict was VOID while the counter sat there counting. The
+# extractor is label-aware and lives in the lib precisely so this cell can
+# exist without a cluster.
+
+PROM_BEFORE='# HELP xpf_screen_drops_total Total packets dropped by screen/IDS checks.
+# TYPE xpf_screen_drops_total counter
+xpf_screen_drops_total 7
+# HELP xpf_screen_drops_by_reason_total Total packets dropped, by reason.
+# TYPE xpf_screen_drops_by_reason_total counter
+xpf_screen_drops_by_reason_total{reason="tear-drop"} 2
+xpf_screen_drops_by_reason_total{reason="syn-flood"} 5
+# A LONGER name sharing the prefix must not be summed into either family.
+xpf_screen_drops_by_reason_total_bytes 99
+'
+
+check_eq "a labeled family is summed across its label sets" 7 \
+	"$(printf '%s' "$PROM_BEFORE" | screen_probe_extract_metric xpf_screen_drops_by_reason_total)"
+check_eq "an unlabeled family passes through unchanged" 7 \
+	"$(printf '%s' "$PROM_BEFORE" | screen_probe_extract_metric xpf_screen_drops_total)"
+check_eq "the longer prefix-sharing name is its own family, not part of ours" 99 \
+	"$(printf '%s' "$PROM_BEFORE" | screen_probe_extract_metric xpf_screen_drops_by_reason_total_bytes)"
+check_eq "an absent family is empty, not 0" "" \
+	"$(printf 'xpf_other_total 1\n' | screen_probe_extract_metric xpf_screen_drops_by_reason_total)"
+check_eq "a non-integer sample is empty, not a guess" "" \
+	"$(printf 'xpf_screen_drops_total 4.2e+01\n' | screen_probe_extract_metric xpf_screen_drops_total)"
+check_eq "an empty exposition is empty" "" \
+	"$(printf '' | screen_probe_extract_metric xpf_screen_drops_total)"
+
+# The decisive check from the issue: a labeled per-reason witness increment,
+# fed through the extractor into the verdict layer, must render the intended
+# DROP/PASS polarity. On master the same fixture produced an EMPTY witness
+# sample and therefore VOID, whatever the counters actually did.
+
+PROM_DROPPED='xpf_screen_drops_total 8
+xpf_screen_drops_by_reason_total{reason="tear-drop"} 3
+xpf_screen_drops_by_reason_total{reason="syn-flood"} 5
+'
+PROM_PASSED='xpf_screen_drops_total 7
+xpf_screen_drops_by_reason_total{reason="tear-drop"} 3
+xpf_screen_drops_by_reason_total{reason="syn-flood"} 5
+'
+
+_wb="$(printf '%s' "$PROM_BEFORE" | screen_probe_extract_metric xpf_screen_drops_by_reason_total)"
+_wa_d="$(printf '%s' "$PROM_DROPPED" | screen_probe_extract_metric xpf_screen_drops_by_reason_total)"
+_wa_p="$(printf '%s' "$PROM_PASSED" | screen_probe_extract_metric xpf_screen_drops_by_reason_total)"
+_sb="$(printf '%s' "$PROM_BEFORE" | screen_probe_extract_metric xpf_screen_drops_total)"
+_sa_d="$(printf '%s' "$PROM_DROPPED" | screen_probe_extract_metric xpf_screen_drops_total)"
+_sa_p="$(printf '%s' "$PROM_PASSED" | screen_probe_extract_metric xpf_screen_drops_total)"
+
+check "a labeled witness increment with a moved aggregate is DROPPED" DROPPED \
+	"$(screen_probe_verdict armed "$_wb" "$_wa_d" "$_sb" "$_sa_d")"
+check "a labeled witness increment with a flat aggregate is PASSED" PASSED \
+	"$(screen_probe_verdict armed "$_wb" "$_wa_p" "$_sb" "$_sa_p")"
+check "a labeled witness family that vanishes mid-probe is VOID" VOID \
+	"$(screen_probe_verdict armed "$_wb" "" "$_sb" "$_sa_d")"
+
+# --- #12911: the process exit contract --------------------------------------
+#
+# rc0 belongs to DROPPED-with-clean-cleanup alone. A witnessed PASSED — the
+# subject reached the screen and was NOT dropped — is the failed finding for
+# an instrument whose subject should be screened, and it used to fall
+# through to rc0, where an exit-code-only caller reads it as a green DROP
+# gate. A leftover profile on the shared cluster is the worst outcome this
+# file knows, so cleanup FAIL outranks every verdict, including VOID (whose
+# rc2 used to mask it). Anything unrecognised fails closed.
+
+probe_exit_status() {
+	screen_probe_exit_status "$@"
+	local rc=$?
+	printf '%s' "$rc"
+}
+
+check_eq "DROPPED with a clean cleanup is rc0" 0 \
+	"$(probe_exit_status "DROPPED moved +1" "PASS removed on both nodes")"
+check_eq "a witnessed PASSED is rc1, never a green rc0" 1 \
+	"$(probe_exit_status "PASSED not dropped" "PASS removed on both nodes")"
+check_eq "VOID is rc2" 2 \
+	"$(probe_exit_status "VOID witness unreadable" "PASS removed on both nodes")"
+check_eq "a leftover profile is rc3" 3 \
+	"$(probe_exit_status "DROPPED moved +1" "FAIL still present")"
+check_eq "cleanup FAIL outranks VOID instead of being masked by rc2" 3 \
+	"$(probe_exit_status "VOID witness unreadable" "FAIL still present")"
+check_eq "cleanup FAIL outranks PASSED" 3 \
+	"$(probe_exit_status "PASSED not dropped" "FAIL still present")"
+check_eq "an unrecognised verdict fails closed at rc4" 4 \
+	"$(probe_exit_status "garbage" "PASS clean")"
+check_eq "an unrecognised cleanup fails closed at rc4" 4 \
+	"$(probe_exit_status "DROPPED moved +1" "garbage")"
+check_eq "an empty verdict fails closed at rc4" 4 "$(probe_exit_status "" "PASS clean")"
+
+# --- #12911: the live script's own wiring, pinned by inspection -------------
+#
+# The live probe needs a cluster, so its two process-level promises are
+# pinned statically, in the same file-level-predicate style as the #6936
+# marker scan: the probe takes the shared-cluster lock its header claims,
+# before any incus work; and its exit status is decided by the tested
+# contract above rather than by hand-rolled code that can regress to a
+# PASSED rc0 fall-through. Presence, not absence-of-an-idiom: a correct
+# script may legitimately use other shapes elsewhere.
+
+LIVE=./screen-probe.sh
+live_body="$(cat "$LIVE")"
+if grep -Eq '^[[:space:]]*(source|\.)[[:space:]][^#]*cluster-cell\.sh' <<<"$live_body"; then
+	printf 'ok   the live probe sources cluster-cell.sh in its preamble\n'
+else
+	printf 'FAIL the live probe does not source cluster-cell.sh in its preamble — its header promises the shared-cluster lock (#12911)\n'
+	fails=$((fails + 1))
+fi
+lock_line="$(grep -n 'xpf_enter_destructive_cluster_cell' "$LIVE" | head -1 | cut -d: -f1)"
+first_incus="$(awk '!/^[[:space:]]*#/ && /incus exec/ { print NR; exit }' "$LIVE")"
+if [[ -n "$lock_line" && -n "$first_incus" ]] && (( lock_line < first_incus )); then
+	printf 'ok   the live probe takes the lock (line %s) before its first incus work (line %s)\n' "$lock_line" "$first_incus"
+else
+	printf 'FAIL the live probe must call xpf_enter_destructive_cluster_cell before any incus work (lock line=%s first incus line=%s) (#12911)\n' \
+		"${lock_line:-none}" "${first_incus:-none}"
+	fails=$((fails + 1))
+fi
+if grep -q 'screen_probe_exit_status' "$LIVE"; then
+	printf 'ok   the live probe maps its exit status through screen_probe_exit_status\n'
+else
+	printf 'FAIL the live probe does not use screen_probe_exit_status — its rc contract is untested hand-rolled code (#12911)\n'
+	fails=$((fails + 1))
+fi
+if grep -q 'screen_probe_extract_metric' "$LIVE"; then
+	printf 'ok   the live probe extracts metrics through screen_probe_extract_metric\n'
+else
+	printf 'FAIL the live probe does not use screen_probe_extract_metric — a label-blind extractor made every witness sample empty (#12910)\n'
+	fails=$((fails + 1))
+fi
+
 # --- totality --------------------------------------------------------------
 #
 # Every verdict call must produce exactly one line beginning with one of the

@@ -68,6 +68,42 @@ screen_probe_delta() {
 	printf '%s\n' "$(( after - before ))"
 }
 
+# screen_probe_extract_metric <metric>  (Prometheus text exposition on stdin)
+#   Print the family's value as one integer, summed across every label set,
+#   or NOTHING when the family is absent from the exposition or any of its
+#   samples is not an integer.
+#
+#   #12910: the per-reason witness family is exported ONLY as labeled series
+#   — xpf_screen_drops_by_reason_total{reason="tear-drop"} 3 — so a sample
+#   line's first field is the metric name WITH its label block attached, and
+#   the exact `$1 == metric` test the live script used can never match it.
+#   Every witness sample came back empty, so every live verdict was VOID
+#   while the counter counted: a permanently unreadable instrument, wearing
+#   the clothes of a fail-closed one.
+#
+#   Why SUM the label sets instead of selecting one label: the witness only
+#   needs "some per-reason screen counter moved" to prove the path is live,
+#   and forcing the caller to name the label would rebuild trap 2 one level
+#   down — the wrong label reads exactly like a dead path. The boundary
+#   match (exact name, or name immediately followed by `{`) keeps the
+#   aggregate xpf_screen_drops_total, the per-reason family and any longer
+#   name from standing in for one another.
+#
+#   Fail-closed on shape, in the same direction as screen_probe_delta: an
+#   absent family and an unparseable one both print nothing. Neither is 0.
+screen_probe_extract_metric() {
+	local metric="${1-}"
+	awk -v m="$metric" '
+		$1 ~ /^#/ { next }
+		index($1, m) == 1 && (length($1) == length(m) || substr($1, length(m) + 1, 1) == "{") {
+			if ($2 !~ /^[0-9]+$/) { bad = 1; next }
+			sum += $2
+			found = 1
+		}
+		END { if (!bad && found) print sum }
+	'
+}
+
 # screen_probe_verdict <armed> <witness_before> <witness_after> <subject_before> <subject_after>
 #   Print exactly one verdict line:
 #     "VOID <message>"    the measurement did not happen; nothing was learned
@@ -138,4 +174,39 @@ screen_probe_disarm_verdict() {
 		return 0
 	fi
 	printf 'FAIL %s\n' "screen profile still present (node0=${n0} node1=${n1}) — the shared cluster was left armed; remove it before another lane deploys"
+}
+
+# screen_probe_exit_status <verdict> <cleanup>
+#   Map the run's two result lines to the process exit status — #12911.
+#
+#     0  DROPPED with a clean cleanup. The ONLY green: rc0 means "the
+#        witness was live AND the subject was dropped", which is the sole
+#        outcome an exit-code-only caller may read as a passed DROP gate.
+#     1  PASSED: the subject frame REACHED the screen stage and was NOT
+#        dropped. For an instrument whose subject is a frame that should
+#        be screened, that is the failed finding — it used to fall through
+#        to rc0, where a status-only caller mistakes it for a green gate.
+#     2  VOID: nothing was learned; the measurement did not happen.
+#     3  cleanup FAIL: the shared cluster was left armed. Decided FIRST,
+#        because a leaked profile changes what every other lane measures —
+#        worse than any measurement outcome — and the old ordering let
+#        VOID's rc2 mask it.
+#     4  an unrecognised verdict or cleanup: the decision layer itself is
+#        broken. Fail closed rather than guess at a reading.
+#
+#   Same discipline as screen_probe_verdict: defaulted, not required, so a
+#   short argument list cannot abort the function into emitting a guess.
+screen_probe_exit_status() {
+	local verdict="${1-}" cleanup="${2-}"
+	case "$cleanup" in
+		PASS\ *) ;;
+		FAIL\ *) return 3 ;;
+		*) return 4 ;;
+	esac
+	case "$verdict" in
+		DROPPED\ *) return 0 ;;
+		PASSED\ *) return 1 ;;
+		VOID\ *) return 2 ;;
+		*) return 4 ;;
+	esac
 }
