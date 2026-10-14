@@ -252,3 +252,151 @@ func TestGroupConflictScanKeepsSafeMixedActionFoldUnpoisoned11063(t *testing.T) 
 		}
 	}
 }
+func TestNestedAndPeeledPolicyInstancesAreFoldedAndChecked12820(t *testing.T) {
+	const any = `match { source-address any; destination-address any; application any; }`
+	cases := []struct {
+		name, zones string
+	}{
+		{
+			name:  "three-level zone containers",
+			zones: `from-zone { trust { to-zone { untrust { `,
+		},
+		{
+			name:  "combined zone with peeled policy container",
+			zones: `from-zone trust to-zone untrust { policy { `,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prefix := `security { ` + zones9571 + ` policies { ` + tc.zones
+			suffix := ` } } } }`
+			if tc.name == "three-level zone containers" {
+				suffix = ` } } } } } }`
+			}
+			for _, body := range []struct {
+				name, text string
+			}{
+				{
+					name: "duplicate restrictive then permit",
+					text: `policy p1 { ` + any + ` then { deny; } } policy p1 { ` + any + ` then { permit; } }`,
+				},
+				{
+					name: "conflicting terminal actions in one policy",
+					text: `policy p1 { ` + any + ` then { deny; permit; } }`,
+				},
+			} {
+				bodyText := body.text
+				if tc.name == "combined zone with peeled policy container" {
+					bodyText = strings.ReplaceAll(bodyText, "policy p1", "p1")
+				}
+				text := prefix + bodyText + suffix
+				if body.name == "conflicting terminal actions in one policy" &&
+					len(collectDirectTerminalActionConflictsFromExpandedTree(parse9571(t, text))) == 0 {
+					t.Fatal("direct conflict walker missed the nested or peeled policy instance")
+				}
+				t.Run(body.name, func(t *testing.T) {
+					for _, entry := range lenientEntries9571 {
+						cfg, err := entry.compile(parse9571(t, text))
+						if err != nil {
+							t.Fatalf("%s: %v", entry.label, err)
+						}
+						pols := policies9571(cfg)
+						if len(pols) != 1 {
+							t.Fatalf("%s: want exactly one folded policy, got %d", entry.label, len(pols))
+						}
+						if pols[0].Action != PolicyPermit {
+							t.Errorf("%s: the fixture's merged policy must remain a permit, got %v", entry.label, pols[0].Action)
+						}
+						if !pols[0].LenientContentDropped {
+							t.Errorf("%s: wanted the permit policy fail-closed, got %+v", entry.label, pols[0])
+						}
+						if LenientDroppedPolicyLocator(cfg) == "" {
+							t.Errorf("%s: poisoned policy is missing the fail-closed locator", entry.label)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestNestedAndPeeledSafePolicyFoldRemainsUnpoisoned12820(t *testing.T) {
+	const any = `match { source-address any; destination-address any; application any; }`
+	for _, tc := range []struct{ name, text string }{
+		{
+			"three-level nested",
+			`security { ` + zones9571 + ` policies { from-zone { trust { to-zone { untrust {
+				policy p1 { ` + any + ` then { permit; } }
+				policy p1 { then { deny; } }
+			} } } } } }`,
+		},
+		{
+			"peeled policy container control",
+			`security { ` + zones9571 + ` policies { from-zone trust to-zone untrust { policy {
+				p1 { ` + any + ` then { permit; } }
+			} } } }`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if conflicts := collectDirectTerminalActionConflictsFromExpandedTree(
+				parse9571(t, tc.text)); len(conflicts) != 0 {
+				t.Fatalf("safe policy containers reported direct conflicts: %+v", conflicts)
+			}
+			for _, entry := range lenientEntries9571 {
+				cfg, err := entry.compile(parse9571(t, tc.text))
+				if err != nil {
+					t.Fatalf("%s: %v", entry.label, err)
+				}
+				pols := policies9571(cfg)
+				if len(pols) != 1 || pols[0].LenientContentDropped {
+					t.Errorf("%s: safe fold should yield one unpoisoned policy, got %+v", entry.label, pols)
+				}
+			}
+		})
+	}
+}
+func TestSiblingPeeledPolicyContainersFoldTogether12820(t *testing.T) {
+	text := `security { ` + zones9571 + ` policies { from-zone trust to-zone untrust {
+		policy { p1 { ` + anyMatch9571 + ` then { deny; } } }
+		policy { p1 { ` + anyMatch9571 + ` then { permit; } } }
+	} } }`
+	tree := parse9571(t, text)
+	for _, entry := range lenientEntries9571 {
+		cfg, err := entry.compile(tree.Clone())
+		if err != nil {
+			t.Fatalf("%s: %v", entry.label, err)
+		}
+		pols := policies9571(cfg)
+		if len(pols) != 1 {
+			t.Fatalf("%s: sibling peeled containers should fold into one policy, got %d", entry.label, len(pols))
+		}
+		if pols[0].Action != PolicyPermit || !pols[0].LenientContentDropped ||
+			LenientDroppedPolicyLocator(cfg) == "" {
+			t.Errorf("%s: sibling peeled deny-to-permit fold was not fail-closed: %+v", entry.label, pols[0])
+		}
+	}
+}
+
+func TestGlobalPeeledWrappersFoldAcross12820(t *testing.T) {
+	// Two bare `policy` wrappers under `global`, same name, deny vs
+	// permit: they must fold into ONE poisoned policy (review fold —
+	// the global arm previously folded each wrapper independently).
+	const any = `match { source-address any; destination-address any; application any; }`
+	text := globalText9571(`policy { p1 { ` + any + ` then { deny; } } } policy { p1 { ` + any + ` then { permit; } } }`)
+	cfg, err := CompileConfigLenient(parse9571(t, text))
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	var p1s []*Policy
+	for _, p := range cfg.Security.GlobalPolicies {
+		if p.Name == "p1" {
+			p1s = append(p1s, p)
+		}
+	}
+	if len(p1s) != 1 {
+		t.Fatalf("global p1 policies = %d, want 1 folded policy", len(p1s))
+	}
+	if !p1s[0].LenientContentDropped {
+		t.Fatalf("cross-wrapper deny/permit fold must poison the merged policy: %+v", p1s[0])
+	}
+}
