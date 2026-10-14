@@ -173,12 +173,39 @@ fn flow_share_div_ceil(buffer_limit: u64, prospective_active: u64) -> u64 {
     buffer_limit.div_ceil(prospective_active.max(1))
 }
 
+// #13064 test probe: number of `cos_queue_flow_share_limit` calls
+// made on the CURRENT thread since the last reset. Thread-local so
+// parallel tests in this binary cannot pollute each other's counts;
+// compiled out of production builds entirely. The enqueue-path
+// regression (`enqueue_computes_flow_share_limit_once_per_packet_13064`
+// in tx/cos_classify_tests.rs) uses it to pin that the per-flow share
+// cap is derived exactly once per enqueued packet: the ECN policy
+// consumes the caller-threaded limit instead of recomputing it (a
+// 64-bit `div_ceil` on owner-local flow-fair queues; a fair-share
+// `div_ceil` plus a BDP-floor division on shared_exact queues).
+#[cfg(test)]
+thread_local! {
+    static FLOW_SHARE_LIMIT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn reset_flow_share_limit_call_probe() {
+    FLOW_SHARE_LIMIT_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn flow_share_limit_call_probe_count() -> u64 {
+    FLOW_SHARE_LIMIT_CALLS.with(|calls| calls.get())
+}
+
 #[inline]
 pub(in crate::afxdp) fn cos_queue_flow_share_limit(
     queue: &CoSQueueRuntime,
     buffer_limit: u64,
     flow_bucket: usize,
 ) -> u64 {
+    #[cfg(test)]
+    FLOW_SHARE_LIMIT_CALLS.with(|calls| calls.set(calls.get() + 1));
     if !queue.flow_fair() {
         return buffer_limit;
     }
@@ -366,8 +393,11 @@ pub(in crate::afxdp) fn cos_shared_exact_buffer_limit(
 ///     queue is past the mark fraction of its operator-configured
 ///     buffer, independent of per-flow accounting.
 ///   * **Per-flow**: `ff.flow_bucket_bytes[flow_bucket] >
-///     share_cap × NUM/DEN`, where `share_cap` is the current
-///     per-flow cap from `cos_queue_flow_share_limit`. This is the
+///     flow_share_limit × NUM/DEN`, where `flow_share_limit` is the
+///     per-flow cap the caller (`enqueue_cos_item`) derived ONCE via
+///     `cos_queue_flow_share_limit` for the flow-share admission gate
+///     — #13064: this policy consumes the caller's value and must
+///     not recompute it. This is the
 ///     #722 arm. On the 16-flow / 1 Gbps exact-queue live workload
 ///     the aggregate queue sat at ~31% utilisation — the #718 50%
 ///     threshold never tripped — while per-flow buckets routinely
@@ -381,16 +411,22 @@ pub(in crate::afxdp) fn cos_shared_exact_buffer_limit(
 /// see the `admission_ecn_per_flow_threshold_matches_share_cap_denominator`
 /// test for the regression pin.
 ///
-/// Non-flow-fair queues degenerate safely:
-/// `cos_queue_flow_share_limit` returns `buffer_limit` unchanged when
-/// `queue.flow_fair` is false, so the per-flow threshold collapses
-/// onto the aggregate one. No behaviour change on best-effort or
-/// pure-rate-limited queues.
+/// Non-flow-fair queues degenerate safely: they select the aggregate
+/// arm below, and the caller passes `buffer_limit` as the degenerate
+/// share limit (`cos_queue_flow_share_limit` returns it unchanged
+/// when `queue.flow_fair()` is false). No behaviour change on
+/// best-effort or pure-rate-limited queues.
+///
+/// Ordering contract (#13064, research D1-12): the drop flags
+/// (`flow_share_exceeded`, `buffer_exceeded`) are checked BEFORE any
+/// threshold arithmetic — a packet the caller has already doomed is
+/// returned unmarked without computing either arm.
 #[inline]
 pub(in crate::afxdp) fn apply_cos_admission_ecn_policy(
     queue: &mut CoSQueueRuntime,
     buffer_limit: u64,
     flow_bucket: usize,
+    flow_share_limit: u64,
     flow_share_exceeded: bool,
     buffer_exceeded: bool,
     item: &mut CoSPendingTxItem,
@@ -423,29 +459,27 @@ pub(in crate::afxdp) fn apply_cos_admission_ecn_policy(
     // flows at 145 Mbps with 0 retrans and 9 flows at 50-75 Mbps
     // with thousands of retrans) WILL come back.
     //
-    // #722: per-flow threshold derived from the same share cap
-    // the admission gate uses. `cos_queue_flow_share_limit` is
-    // pure and inlined: ~5 ns on the legacy owner-local path
-    // (saturating_add + max + div_ceil + clamp); ~8 ns on the
-    // post-#914 shared_exact path (adds one division + multiply
-    // for `bdp_floor_bytes`).
-    let aggregate_ecn_threshold =
-        buffer_limit.saturating_mul(COS_ECN_MARK_THRESHOLD_NUM) / COS_ECN_MARK_THRESHOLD_DEN.max(1);
-    let share_cap = cos_queue_flow_share_limit(queue, buffer_limit, flow_bucket);
-    let flow_ecn_threshold =
-        share_cap.saturating_mul(COS_ECN_MARK_THRESHOLD_NUM) / COS_ECN_MARK_THRESHOLD_DEN.max(1);
-
-    let flow_above = if queue.flow_fair() {
-        queue
-            .flow_fair_state
-            .as_ref()
-            .expect("flow_fair queue missing FlowFairState")
-            .flow_bucket_bytes[flow_bucket]
-            > flow_ecn_threshold
-    } else {
-        false
-    };
-    let aggregate_above = queue.hot.queued_bytes > aggregate_ecn_threshold;
+    // #722: per-flow threshold derived from the same share cap the
+    // admission gate uses — the caller (`enqueue_cos_item`) derives
+    // it once and threads it in as `flow_share_limit`.
+    // `cos_queue_flow_share_limit` is pure and inlined: ~5 ns on the
+    // legacy owner-local path (saturating_add + max + div_ceil +
+    // clamp); ~8 ns on the post-#914 shared_exact path (adds one
+    // division + multiply for `bdp_floor_bytes`). #13064 (research
+    // D1-12) forbids recomputing it here: pre-#13064 this body called
+    // it on EVERY enqueued packet — including packets the drop flags
+    // below then refused to mark, and shared_exact packets whose
+    // per-flow arm is discarded outright — burning a 64-bit `div_ceil`
+    // (two on shared_exact, where the BDP floor adds a second
+    // division) for a result the caller already held. Two ordering
+    // invariants follow:
+    //   1. The drop flags gate FIRST: a packet the caller has
+    //      already doomed (`flow_share_exceeded || buffer_exceeded`)
+    //      is never marked, so no threshold arithmetic runs for it.
+    //   2. Each queue class computes only the arm it selects.
+    if flow_share_exceeded || buffer_exceeded {
+        return false;
+    }
     // Three classes:
     //   * flow_fair && !shared_exact — owner-local-exact (#784).
     //     Per-flow arm only; #784's fairness fix on 1 Gbps iperf-a
@@ -461,12 +495,23 @@ pub(in crate::afxdp) fn apply_cos_admission_ecn_policy(
     //     Aggregate arm; there is no per-flow accounting on that
     //     path.
     let should_mark = if queue.flow_fair() && !queue.shared_exact() {
-        flow_above
+        let flow_ecn_threshold = flow_share_limit
+            .saturating_mul(COS_ECN_MARK_THRESHOLD_NUM)
+            / COS_ECN_MARK_THRESHOLD_DEN.max(1);
+        queue
+            .flow_fair_state
+            .as_ref()
+            .expect("flow_fair queue missing FlowFairState")
+            .flow_bucket_bytes[flow_bucket]
+            > flow_ecn_threshold
     } else {
-        aggregate_above
+        let aggregate_ecn_threshold = buffer_limit
+            .saturating_mul(COS_ECN_MARK_THRESHOLD_NUM)
+            / COS_ECN_MARK_THRESHOLD_DEN.max(1);
+        queue.hot.queued_bytes > aggregate_ecn_threshold
     };
 
-    if !should_mark || flow_share_exceeded || buffer_exceeded {
+    if !should_mark {
         return false;
     }
     // Both variants share a single `admission_ecn_marked` counter: the
