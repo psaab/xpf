@@ -2128,3 +2128,211 @@ fn reverse_stale_dnat_hit_restamps_post_nat_forward_row_12191() {
         "the post-NAT :8443 app must win over the wire :443 app"
     );
 }
+
+/// #12861 fixture: a VLAN trunk. Physical parent 11 inherits the FIRST
+/// sub-interface's zone (dmz, 3) in `ifindex_to_zone_id`; the SNAT session
+/// arrived on VLAN 50, whose logical unit 13 is in lan (1). Egress 12 is wan
+/// (2). The SNAT rule is `lan -> wan`, so the session is valid ONLY when the
+/// revalidation resolves `(11, VLAN 50) -> 13` before the zone-pair lookup.
+fn snat_vlan_trunk_forwarding_12861() -> ForwardingState {
+    let mut forwarding = imported_snat_forwarding(false);
+    forwarding.zone_id_to_name.insert(3, "dmz".to_string());
+    forwarding.ingress_logical_ifindex.insert((11, 50), 13);
+    forwarding.ifindex_to_zone_id.insert(11, 3);
+    forwarding.ifindex_to_zone_id.insert(13, 1);
+    forwarding.ifindex_unambiguous_zone_id.insert(12, 2);
+    forwarding
+}
+
+fn snat_vlan_trunk_case_12861(
+    forwarding: ForwardingState,
+    ingress_ifindex: u32,
+    ingress_vlan_id: u16,
+    fabric_ingress: bool,
+) -> (
+    ForwardingState,
+    SessionDecision,
+    SessionMetadata,
+    SessionKey,
+) {
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+        src_port: 45000,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+            rewrite_src_port: Some(45000),
+            ..Default::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = SessionMetadata {
+        ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex,
+        ingress_vlan_id,
+        owner_rg_id: 1,
+        fabric_ingress,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+    (forwarding, decision, metadata, key)
+}
+
+/// #12861 RED: a dynamic SNAT session admitted on VLAN 50 (lan) of a trunk
+/// whose physical parent resolves to dmz must survive an unrelated SNAT
+/// generation advance — the rule is `lan -> wan` and the mapping is unchanged.
+/// Pre-fix the raw physical ifindex yields `dmz -> wan`, no rule matches, and
+/// the live session is revoked.
+#[test]
+fn source_nat_revalidation_resolves_vlan_logical_ingress_12861() {
+    let (forwarding, decision, metadata, key) =
+        snat_vlan_trunk_case_12861(snat_vlan_trunk_forwarding_12861(), 11, 50, false);
+    let (valid, static_nat) =
+        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    assert!(
+        valid,
+        "SNAT session on VLAN 50 (lan) must remain valid; raw physical parent resolves to dmz"
+    );
+    assert_eq!(static_nat, Some(false));
+}
+
+/// #12861 integration edge: advancing the forwarding/SNAT generations on an
+/// installed dynamic mapping must not return a live-session revocation.
+#[test]
+fn source_nat_vlan_logical_ingress_survives_generation_advance_12861() {
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    let mut synced = crate::server::helpers::build_synced_session_entry(
+        &imported_snat_request(1, false),
+        &zones,
+        0,
+    )
+    .expect("dynamic SNAT session imports");
+    synced.metadata.ingress_ifindex = 11;
+    synced.metadata.ingress_vlan_id = 50;
+    synced.metadata.fabric_ingress = false;
+    let key = synced.key.clone();
+    let decision = synced.decision;
+    let metadata = synced.metadata.clone();
+    let origin = synced.origin;
+    let static_nat = synced.source_nat_static;
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.upsert_synced_with_origin(synced.into_session_install(1), false));
+
+    // Commit an unrelated source-NAT generation advance without changing the
+    // dynamic pool rule or the established translation.
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &snat_vlan_trunk_forwarding_12861(),
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            &flow,
+            origin,
+            static_nat,
+            None,
+        )
+        .is_none(),
+        "the unchanged SNAT mapping on VLAN 50 must survive revalidation"
+    );
+}
+
+/// #12861: untagged ingress (VLAN 0) on the same trunk resolves through
+/// `(11, 0)`. Pin 11's untagged unit to lan so the session stays valid —
+/// the fix must not break the untagged path.
+#[test]
+fn source_nat_revalidation_untagged_trunk_stays_valid_12861() {
+    let mut forwarding = snat_vlan_trunk_forwarding_12861();
+    forwarding.ingress_logical_ifindex.insert((11, 0), 13);
+    let (forwarding, decision, metadata, key) =
+        snat_vlan_trunk_case_12861(forwarding, 11, 0, false);
+    let (valid, _) =
+        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    assert!(valid, "untagged SNAT session on lan unit must remain valid");
+}
+
+/// #12861: when the physical ifindex itself is the lan unit (no VLAN
+/// subdivision), resolution falls back to the physical index and the session
+/// stays valid.
+#[test]
+fn source_nat_revalidation_physical_lan_stays_valid_12861() {
+    let mut forwarding = snat_vlan_trunk_forwarding_12861();
+    forwarding.ifindex_to_zone_id.insert(11, 1);
+    let (forwarding, decision, metadata, key) =
+        snat_vlan_trunk_case_12861(forwarding, 11, 0, false);
+    let (valid, _) =
+        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    assert!(
+        valid,
+        "SNAT session on a physical lan port must remain valid"
+    );
+}
+
+/// #12861: fabric-ingress identity keeps the recorded-zone shortcut — the
+/// stored zones are authoritative and no live ifindex resolution applies.
+#[test]
+fn source_nat_revalidation_fabric_keeps_recorded_zones_12861() {
+    let (forwarding, decision, metadata, key) =
+        snat_vlan_trunk_case_12861(snat_vlan_trunk_forwarding_12861(), 0, 0, true);
+    let (valid, _) =
+        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    assert!(
+        valid,
+        "fabric SNAT session must keep recorded lan->wan zones"
+    );
+}
+
+/// #12861 anti-mutant: VLAN 60 legitimately lands in dmz, where no
+/// `dmz -> wan` SNAT rule exists. The fix must still revoke — resolving the
+/// logical unit must not launder a mapping the live rule set does not express.
+#[test]
+fn source_nat_revalidation_other_vlan_zone_still_revoked_12861() {
+    let mut forwarding = snat_vlan_trunk_forwarding_12861();
+    forwarding.ingress_logical_ifindex.insert((11, 60), 14);
+    forwarding.ifindex_to_zone_id.insert(14, 3);
+    let (forwarding, decision, metadata, key) =
+        snat_vlan_trunk_case_12861(forwarding, 11, 60, false);
+    let (valid, _) =
+        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    assert!(
+        !valid,
+        "SNAT session arriving on a dmz VLAN must not match the lan->wan rule"
+    );
+}
