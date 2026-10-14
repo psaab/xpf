@@ -1269,7 +1269,7 @@ func TestExpandZoneRenameScopedGlobal12857(t *testing.T) {
 	}
 	oldCfg := build(false, "lan")
 	newCfg := build(true, "lan2")
-	_, wire, ok := expandPolicyRenameAncestry(oldCfg, newCfg,
+	bindings, wire, ok := expandPolicyRenameAncestry(oldCfg, newCfg,
 		[]configstore.RenameDescriptor{policyZoneDescriptor("lan", "lan2")})
 	if !ok {
 		t.Fatal("scoped-global zone rename was rejected")
@@ -1283,6 +1283,21 @@ func TestExpandZoneRenameScopedGlobal12857(t *testing.T) {
 	if !found {
 		t.Fatalf("no ancestry wire row for scoped global policy: %+v", wire)
 	}
+	// Session level: the binding must rewrite a real session's renamed
+	// zone (not the junos-global sentinel), or retention tears down.
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["junos-global->junos-global/g-web"]
+	binding, ok := bindings[oldID]
+	if !ok {
+		t.Fatalf("missing binding for scoped global policy id %d", oldID)
+	}
+	if binding.sourceFromZone != "lan" || binding.destinationFromZone != "lan2" {
+		t.Fatalf("binding zones = %q->%q, want lan->lan2", binding.sourceFromZone, binding.destinationFromZone)
+	}
+	_, _, newIngress, _, rok := remappedQueryZones(oldCfg, newCfg, binding,
+		config.StableZoneID("lan"), config.StableZoneID("wan"))
+	if !rok || newIngress != config.StableZoneID("lan2") {
+		t.Fatalf("remappedQueryZones = ingress %d ok=%v, want lan2 id", newIngress, rok)
+	}
 	changed := build(true, "wan")
 	_, changedWire, ok := expandPolicyRenameAncestry(oldCfg, changed,
 		[]configstore.RenameDescriptor{policyZoneDescriptor("lan", "lan2")})
@@ -1292,6 +1307,22 @@ func TestExpandZoneRenameScopedGlobal12857(t *testing.T) {
 	for _, w := range changedWire {
 		if w.SourceRuleID == "junos-global->junos-global/g-web" {
 			t.Fatal("scope change to an undescribed zone produced global continuity")
+		}
+	}
+	// Directional scope: moving the renamed zone from FromZones to
+	// ToZones keeps the merged from+to union equal but is a content
+	// change — no global continuity row may be produced.
+	swapped := build(true, "lan2")
+	swapped.Security.GlobalPolicies[0].Match.FromZones = nil
+	swapped.Security.GlobalPolicies[0].Match.ToZones = []string{"lan2"}
+	_, swappedWire, ok := expandPolicyRenameAncestry(oldCfg, swapped,
+		[]configstore.RenameDescriptor{policyZoneDescriptor("lan", "lan2")})
+	if !ok {
+		t.Fatal("zone rename itself must still validate")
+	}
+	for _, w := range swappedWire {
+		if w.SourceRuleID == "junos-global->junos-global/g-web" {
+			t.Fatal("from/to scope swap produced global continuity")
 		}
 	}
 }
