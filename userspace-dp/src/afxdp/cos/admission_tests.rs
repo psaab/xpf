@@ -288,11 +288,13 @@ fn admission_ecn_marked_counter_increments_when_marking_above_threshold() {
 
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
-    // Non-flow-fair queue: share_cap == buffer_limit, so both
-    // thresholds collapse onto the aggregate one. `flow_bucket=0`
-    // is unused beyond the (constant-returning) share-limit call.
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, false, false, &mut item, &umem);
+    // Non-flow-fair queue: the caller-threaded share limit degenerates
+    // to `buffer_limit` (`cos_queue_flow_share_limit` early-returns
+    // it), and the policy selects the aggregate arm, so `flow_bucket`
+    // is unused.
+    let marked = apply_cos_admission_ecn_policy(
+        queue, buffer_limit, 0, buffer_limit, false, false, &mut item, &umem,
+    );
 
     assert!(marked);
     let after = snapshot_counters(queue);
@@ -329,8 +331,9 @@ fn admission_does_not_mark_below_threshold() {
 
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, false, false, &mut item, &umem);
+    let marked = apply_cos_admission_ecn_policy(
+        queue, buffer_limit, 0, buffer_limit, false, false, &mut item, &umem,
+    );
 
     assert!(!marked, "at-threshold must not mark");
     let after = snapshot_counters(queue);
@@ -355,8 +358,9 @@ fn admission_does_not_mark_non_ect_packets() {
 
     let mut item = test_local_ipv4_item(ECN_NOT_ECT);
     let umem = test_admission_umem();
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, false, false, &mut item, &umem);
+    let marked = apply_cos_admission_ecn_policy(
+        queue, buffer_limit, 0, buffer_limit, false, false, &mut item, &umem,
+    );
 
     assert!(!marked);
     let after = snapshot_counters(queue);
@@ -381,8 +385,11 @@ fn admission_does_not_mark_when_drop_is_imminent() {
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
     // Signal that the caller already decided this packet will drop.
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, true, false, &mut item, &umem);
+    // The share-limit value is irrelevant on both calls: the drop
+    // flags must short-circuit before any arm is computed (#13064).
+    let marked = apply_cos_admission_ecn_policy(
+        queue, buffer_limit, 0, buffer_limit, true, false, &mut item, &umem,
+    );
     assert!(!marked, "flow_share_exceeded path must skip marking");
     let after_share = snapshot_counters(queue);
     assert_eq!(
@@ -390,8 +397,9 @@ fn admission_does_not_mark_when_drop_is_imminent() {
         before.admission_ecn_marked
     );
 
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, false, true, &mut item, &umem);
+    let marked = apply_cos_admission_ecn_policy(
+        queue, buffer_limit, 0, buffer_limit, false, true, &mut item, &umem,
+    );
     assert!(!marked, "buffer_exceeded path must skip marking");
     let after_buf = snapshot_counters(queue);
     assert_eq!(after_buf.admission_ecn_marked, before.admission_ecn_marked);
@@ -459,8 +467,8 @@ fn admission_ecn_marks_when_per_flow_above_threshold_aggregate_below() {
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, target, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, target);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, target, share_limit, false, false, &mut item, &umem);
 
     assert!(marked, "per-flow arm must fire when aggregate is below");
     let after = snapshot_counters(queue);
@@ -517,8 +525,8 @@ fn admission_ecn_does_not_mark_when_only_aggregate_above_threshold() {
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, target, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, target);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, target, share_limit, false, false, &mut item, &umem);
 
     assert!(
         !marked,
@@ -552,8 +560,8 @@ fn admission_ecn_does_not_mark_when_both_thresholds_below() {
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, target, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, target);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, target, share_limit, false, false, &mut item, &umem);
 
     assert!(!marked, "no threshold tripped — no mark");
     let after = snapshot_counters(queue);
@@ -615,8 +623,8 @@ fn admission_ecn_shared_exact_marks_on_aggregate_arm() {
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, target, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, target);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, target, share_limit, false, false, &mut item, &umem);
 
     assert!(
         marked,
@@ -656,8 +664,8 @@ fn admission_ecn_does_not_mark_when_flow_share_already_exceeded() {
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, target, true, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, target);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, target, share_limit, true, false, &mut item, &umem);
 
     assert!(!marked, "flow_share_exceeded must suppress the mark");
     let after = snapshot_counters(queue);
@@ -724,8 +732,8 @@ fn admission_ecn_per_flow_threshold_matches_share_cap_denominator() {
     let before = snapshot_counters(queue);
     let mut item = test_local_ipv4_item(ECN_ECT_0);
     let umem = test_admission_umem();
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, target, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, target);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, target, share_limit, false, false, &mut item, &umem);
     assert!(marked);
     let after = snapshot_counters(queue);
     assert_eq!(after.admission_ecn_marked, before.admission_ecn_marked + 1);
@@ -759,8 +767,8 @@ fn admission_ecn_marks_prepared_ipv4_ect0_packet_above_threshold() {
         .to_vec();
     assert_eq!(pre_bytes[15] & ECN_MASK, ECN_ECT_0);
 
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, 0);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, 0, share_limit, false, false, &mut item, &umem);
 
     assert!(marked, "Prepared variant must be marked");
     // Pin (3): counter bumped by exactly 1.
@@ -828,8 +836,8 @@ fn admission_ecn_marks_prepared_ipv6_ect0_packet_above_threshold() {
         tclass,
     );
 
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, 0);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, 0, share_limit, false, false, &mut item, &umem);
 
     assert!(marked, "Prepared IPv6 must be marked");
     let after = snapshot_counters(queue);
@@ -874,8 +882,8 @@ fn admission_ecn_leaves_prepared_not_ect_packet_untouched() {
         .expect("slice readback")
         .to_vec();
 
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, 0);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, 0, share_limit, false, false, &mut item, &umem);
 
     assert!(!marked, "NOT-ECT packet must not be marked");
     let after = snapshot_counters(queue);
@@ -927,8 +935,8 @@ fn admission_ecn_skips_prepared_when_umem_slice_out_of_range() {
         enqueue_ns: 0,
     });
 
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, 0);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, 0, share_limit, false, false, &mut item, &umem);
 
     assert!(!marked, "out-of-range slice must not be marked");
     let after = snapshot_counters(queue);
@@ -957,29 +965,15 @@ fn admission_ecn_counter_increments_for_both_local_and_prepared_in_same_queue() 
 
     // Local variant first.
     let mut local_item = test_local_ipv4_item(ECN_ECT_0);
-    let marked_local = apply_cos_admission_ecn_policy(
-        queue,
-        buffer_limit,
-        0,
-        false,
-        false,
-        &mut local_item,
-        &umem,
-    );
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, 0);
+    let marked_local = apply_cos_admission_ecn_policy(queue, buffer_limit, 0, share_limit, false, false, &mut local_item, &umem);
     assert!(marked_local, "Local variant must mark");
 
     // Prepared variant next.
     let packet = build_ipv4_test_packet(ECN_ECT_0);
     let mut prepared_item = test_prepared_item_in_umem(&mut umem, 0, &packet, libc::AF_INET as u8);
-    let marked_prepared = apply_cos_admission_ecn_policy(
-        queue,
-        buffer_limit,
-        0,
-        false,
-        false,
-        &mut prepared_item,
-        &umem,
-    );
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, 0);
+    let marked_prepared = apply_cos_admission_ecn_policy(queue, buffer_limit, 0, share_limit, false, false, &mut prepared_item, &umem);
     assert!(marked_prepared, "Prepared variant must mark");
 
     let after = snapshot_counters(queue);
@@ -1026,8 +1020,8 @@ fn admission_ecn_marks_prepared_single_vlan_tagged_ipv4_packet() {
         test_prepared_item_in_umem(&mut umem, frame_offset, &tagged, libc::AF_INET as u8);
 
     let before = snapshot_counters(queue);
-    let marked =
-        apply_cos_admission_ecn_policy(queue, buffer_limit, 0, false, false, &mut item, &umem);
+    let share_limit = cos_queue_flow_share_limit(queue, buffer_limit, 0);
+    let marked = apply_cos_admission_ecn_policy(queue, buffer_limit, 0, share_limit, false, false, &mut item, &umem);
     assert!(
         marked,
         "VLAN-tagged ECT(0) Prepared frame must be marked at the VLAN-shifted offset",

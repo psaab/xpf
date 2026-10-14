@@ -6,7 +6,10 @@
 use super::*;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{SharedCoSExactBacklog, SharedCoSRootLease};
-use crate::afxdp::cos::admission::COS_FLOW_FAIR_MIN_SHARE_BYTES;
+use crate::afxdp::cos::admission::{
+    COS_FLOW_FAIR_MIN_SHARE_BYTES, flow_share_limit_call_probe_count,
+    reset_flow_share_limit_call_probe,
+};
 use crate::afxdp::cos::builders::refresh_cos_runtime_shared_root_leases;
 use crate::filter::TermMatchExtra;
 use crate::{

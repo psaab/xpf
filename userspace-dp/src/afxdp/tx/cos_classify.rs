@@ -1864,13 +1864,24 @@ fn enqueue_cos_item(
         } else {
             cos_flow_aware_buffer_limit(queue, flow_bucket)
         };
+        // #13064 (research D1-12): derive the per-flow share cap ONCE
+        // per packet. The flow-share admission gate below and the ECN
+        // policy both key off this single value;
+        // `apply_cos_admission_ecn_policy` takes it as a parameter
+        // instead of recomputing it — the recompute cost a 64-bit
+        // `div_ceil` (two on shared_exact queues, where the BDP floor
+        // adds a division) on every enqueued packet, including packets
+        // the ECN policy then refused to mark and shared_exact packets
+        // whose per-flow arm is discarded outright. Non-flow-fair
+        // queues early-return `buffer_limit` inside the (inlined)
+        // helper, so the unconditional call is free there.
+        let flow_share_limit = cos_queue_flow_share_limit(queue, buffer_limit, flow_bucket);
         let flow_share_exceeded = if queue.flow_fair() {
             let ff = queue
                 .flow_fair_state
                 .as_ref()
                 .expect("flow_fair queue missing FlowFairState");
-            ff.flow_bucket_bytes[flow_bucket].saturating_add(item_len)
-                > cos_queue_flow_share_limit(queue, buffer_limit, flow_bucket)
+            ff.flow_bucket_bytes[flow_bucket].saturating_add(item_len) > flow_share_limit
         } else {
             false
         };
@@ -1888,6 +1899,7 @@ fn enqueue_cos_item(
             queue,
             buffer_limit,
             flow_bucket,
+            flow_share_limit,
             flow_share_exceeded,
             buffer_exceeded,
             &mut item,
