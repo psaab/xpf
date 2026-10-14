@@ -24,6 +24,11 @@ OUT_DIR="$4"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=test/incus/mouse-elephant-lib.sh
 . "${SCRIPT_DIR}/mouse-elephant-lib.sh"
+# #13070 (D10-15): incus_run / incus_exec / detect_active_primary moved to
+# the shared CoS schedule + CLI wrapper library (same implementations,
+# same tolerant fallback doctrine); they are defined there now.
+# shellcheck source=cos-apply-lib.sh
+. "${SCRIPT_DIR}/cos-apply-lib.sh"
 
 # Constants from plan §3.1.
 INCUS_REMOTE="loss"
@@ -150,52 +155,13 @@ rm -f "${OUT_DIR}"/probe.json \
       "${OUT_DIR}"/jc-stderr-*.txt \
       "${OUT_DIR}"/INVALID-*
 
-# `incus_run` wraps incus calls so they work both inside and outside
-# the incus-admin group. Only the user's own group needs to differ —
-# if the user isn't already in incus-admin, `sg` runs the command
-# under that group via a single shell invocation.
-#
-# R1 MED 1: `sg ... -c "incus $*"` collapses argv across word
-# boundaries. We use `printf '%q '` to safely re-quote each arg.
-incus_run() {
-    if id -nG "$USER" 2>/dev/null | grep -qw incus-admin; then
-        incus "$@"
-        return
-    fi
-    if command -v sg >/dev/null && getent group incus-admin >/dev/null 2>&1; then
-        local quoted
-        quoted=$(printf '%q ' "$@")
-        sg incus-admin -c "incus ${quoted}"
-        return
-    fi
-    incus "$@"
-}
-
-incus_exec() {
-    local target="$1"; shift
-    incus_run exec "${INCUS_REMOTE}:${target}" -- "$@"
-}
-
-# Discover which node is currently primary (R1 MED 2: post-rep SYN
-# snapshot must follow primary if a transition happened in-rep).
-current_primary() {
-    local out
-    out=$(incus_exec "$PRIMARY" cli -c "show chassis cluster status" 2>/dev/null) || out=""
-    local node
-    node=$(printf '%s' "$out" | python3 -c '
-import sys
-sys.path.insert(0, "'"${SCRIPT_DIR}"'")
-from cluster_status_parse import parse_cluster_status
-for rg, n, st in parse_cluster_status(sys.stdin.read()):
-    if rg == 0 and st == "primary":
-        print(f"xpf-userspace-fw{n}")
-        break
-') || node=""
-    if [[ -z "$node" ]]; then
-        node="$PRIMARY"
-    fi
-    echo "$node"
-}
+# incus_run / incus_exec / current_primary used to be defined here; they
+# moved to cos-apply-lib.sh (#13070 / D10-15) as incus_run / incus_exec /
+# detect_active_primary so every CoS harness shares ONE wrapper set.
+# Behavior notes for this script: incus_exec still qualifies bare targets
+# with ${INCUS_REMOTE} (the lib does it), and current_primary's tolerant
+# fallback is now `detect_active_primary "$PRIMARY" "$SECONDARY"` — same
+# query, same parser, same fall-back-to-fw0 answer.
 
 write_invalid_manifest() {
     local reason="$1"
@@ -340,7 +306,7 @@ fi
 # it must run against the current RG0 primary. If the cluster has
 # already failed over before the rep starts, hard-coding fw0 would
 # attempt to apply on the secondary.
-PRE_PRIMARY=$(current_primary)
+PRE_PRIMARY=$(detect_active_primary "$PRIMARY" "$SECONDARY")
 APPLY_COS_FLAGS=()
 if [[ "$MOUSE_COS_SURPLUS_SHARING" -eq 1 ]]; then
     APPLY_COS_FLAGS+=(--surplus-sharing)
@@ -402,7 +368,7 @@ done
 # comparison will follow (current primary at the time of the snapshot).
 # Mismatch between pre (always fw0) and post (current_primary) made the
 # screen_engaged delta meaningless when fw0 wasn't primary.
-SCREEN_PRE_FW=$(current_primary)
+SCREEN_PRE_FW=$(detect_active_primary "$PRIMARY" "$SECONDARY")
 echo "$SCREEN_PRE_FW" > "${OUT_DIR}/screen-pre-fw.txt"
 incus_exec "$SCREEN_PRE_FW" cli -c "show security screen statistics zone wan" \
     > "${OUT_DIR}/screen-pre.txt" 2>/dev/null || true
@@ -454,7 +420,7 @@ if [[ "$N" -gt 0 ]]; then
         --out "${OUT_DIR}/cwnd-settle.json"
     settle_diag_rc=$?
     set -e
-    SETTLE_PRIMARY=$(current_primary)
+    SETTLE_PRIMARY=$(detect_active_primary "$PRIMARY" "$SECONDARY")
     incus_exec "$SETTLE_PRIMARY" cli -c "show class-of-service interface" \
         > "${OUT_DIR}/cos-interface-settle.txt" 2>/dev/null || true
     if [[ $settle_diag_rc -ne 0 ]]; then
@@ -602,7 +568,7 @@ done
 # node is currently primary — if a transition happened in-window we
 # already invalidated above, but for the no-transition case we want
 # the screen counters from the same node we sampled in step 4a.
-post_primary=$(current_primary)
+post_primary=$(detect_active_primary "$PRIMARY" "$SECONDARY")
 incus_exec "$post_primary" cli -c "show security screen statistics zone wan" \
     > "${OUT_DIR}/screen-post.txt" 2>/dev/null || true
 incus_exec "$post_primary" cli -c "show class-of-service interface" \

@@ -26,33 +26,28 @@ DEFAULT_MIN_EXACT_BASELINE_CAP_RATIO = 0.70
 DEFAULT_MIN_CONTENDED_ROOT_PRESSURE_RATIO = 0.90
 DEFAULT_ROOT_SHAPE_BPS = 25_000_000_000.0
 
-FORWARDING_CLASS_BY_PORT = {
-    5200: "best-effort",
-    5201: "iperf-100m",
-    5202: "iperf-1g",
-    5203: "iperf-3g",
-    5204: "iperf-6g",
-    5205: "iperf-9g",
-    5206: "iperf-12g",
-    5207: "iperf-15g",
-    5208: "iperf-18g",
-    5209: "iperf-21g",
-    5210: "iperf-24g",
-    5211: "iperf-uncapped",
-}
+# The canonical port -> class / cap grid, DERIVED from
+# cos-iperf-config.set by the single Python source of truth (#13070 /
+# D10-15) instead of restated here as literals. The names keep their
+# validator-local spellings because the manifest checks below key on
+# them; only the values' provenance changed.
+#
+# The sys.path insert is required for the spec_from_file_location loaders
+# the _test.py files use (they do not put test/incus on sys.path); it is
+# the same self-location the cos-simul-load-smoke heredoc does (#4239
+# V-10).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-PORT_CAP_BPS_BY_PORT = {
-    5201: 100_000_000.0,
-    5202: 1_000_000_000.0,
-    5203: 3_000_000_000.0,
-    5204: 6_000_000_000.0,
-    5205: 9_000_000_000.0,
-    5206: 12_000_000_000.0,
-    5207: 15_000_000_000.0,
-    5208: 18_000_000_000.0,
-    5209: 21_000_000_000.0,
-    5210: 24_000_000_000.0,
-}
+import cos_fixture_spec  # noqa: E402  (needs the sys.path insert above)
+
+# Deliberate surface, unchanged from the pre-#13070 literals: the class
+# map covers the 520x family only, and the caps cover the exact classes
+# only (62xx and the non-exact root classes stay absent so the same
+# lookups keep missing — see cos_fixture_spec.py).
+FORWARDING_CLASS_BY_PORT = cos_fixture_spec.FORWARDING_CLASS_BY_PORT
+PORT_CAP_BPS_BY_PORT = cos_fixture_spec.PORT_CAP_BPS_BY_PORT
 
 
 class ValidationError(ValueError):

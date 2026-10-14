@@ -23,6 +23,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# #13070 (D10-15): the port/class/shape grid comes from the shared CoS
+# schedule library instead of script-local copies of cos-iperf-config.set.
+# shellcheck source=cos-apply-lib.sh
+source "${SCRIPT_DIR}/cos-apply-lib.sh"
 
 DIRECTION="${1:-push}"
 DURATION="${DURATION:-30}"
@@ -31,38 +35,11 @@ TARGET_V4="${TARGET_V4:-172.16.80.200}"
 HOST="${HOST:-loss:cluster-userspace-host}"
 ART="${ART:-/tmp/cos-simul-load-$(date +%s)}"
 
-# Port → class-name map (matches test/incus/cos-iperf-config.set).
-# CLASS_NAME / SHAPE_GBPS document the port mapping for a bash reader; the
-# Python reducer carries its own copies, so they are unused in the shell.
-declare -a PORTS=(5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5211)
-# shellcheck disable=SC2034  # documentation map; Python heredoc has its own
-declare -A CLASS_NAME=(
-  [5201]=iperf-100m
-  [5202]=iperf-1g
-  [5203]=iperf-3g
-  [5204]=iperf-6g
-  [5205]=iperf-9g
-  [5206]=iperf-12g
-  [5207]=iperf-15g
-  [5208]=iperf-18g
-  [5209]=iperf-21g
-  [5210]=iperf-24g
-  [5211]=iperf-uncapped
-)
-# shellcheck disable=SC2034  # documentation map; Python heredoc has its own
-declare -A SHAPE_GBPS=(
-  [5201]=0.1
-  [5202]=1.0
-  [5203]=3.0
-  [5204]=6.0
-  [5205]=9.0
-  [5206]=12.0
-  [5207]=15.0
-  [5208]=18.0
-  [5209]=21.0
-  [5210]=24.0
-  [5211]=0     # uncapped → priority-low; gate 2 is ≥ 5% of ceiling
-)
+# All 11 shaped/priority classes: the canonical grid minus best-effort
+# (#13070 / D10-15 — this list used to be a hand-maintained copy of
+# cos-iperf-config.set; class names and shapes live only in the shared
+# spec now, so there is nothing here to drift).
+declare -a PORTS=("${COS_SCHEDULE_PORTS[@]:1}")
 
 mkdir -p "$ART"
 echo "#1614 simul-load smoke: direction=$DIRECTION duration=${DURATION}s streams=$STREAMS host=$HOST art=$ART"
@@ -74,7 +51,7 @@ fi
 
 # Launch generator-side mpstat in parallel for the R8 check; we always
 # capture it because generator CPU evidence is cheap and useful.
-sg incus-admin -c "incus exec $HOST -- mpstat -P ALL 1 $DURATION" > "$ART/mpstat.txt" 2>&1 &
+incus_exec "$HOST" mpstat -P ALL 1 "$DURATION" > "$ART/mpstat.txt" 2>&1 &
 MPSTAT_PID=$!
 
 # Launch the 11 iperf3 senders in parallel. Capture each generator's exit
@@ -85,7 +62,7 @@ declare -a IPERF_PIDS=()
 for port in "${PORTS[@]}"; do
   (
     rc=0
-    sg incus-admin -c "incus exec $HOST -- iperf3 -c $TARGET_V4 -P $STREAMS -t $DURATION -p $port $REV_FLAG --json" \
+    incus_exec "$HOST" iperf3 -c "$TARGET_V4" -P "$STREAMS" -t "$DURATION" -p "$port" $REV_FLAG --json \
       > "$ART/sim_${port}.json" 2>"$ART/sim_${port}.err" || rc=$?
     echo "$rc" > "$ART/sim_${port}.rc"
   ) &
@@ -110,17 +87,17 @@ direction = sys.argv[2]
 # directory to the import path explicitly (#4239 V-10).
 sys.path.insert(0, sys.argv[3])
 from fairness_cov import population_cov
-ports = [5201, 5202, 5203, 5204, 5205, 5206, 5207, 5208, 5209, 5210, 5211]
-class_names = {
-    5201: "iperf-100m", 5202: "iperf-1g", 5203: "iperf-3g",
-    5204: "iperf-6g", 5205: "iperf-9g", 5206: "iperf-12g",
-    5207: "iperf-15g", 5208: "iperf-18g", 5209: "iperf-21g",
-    5210: "iperf-24g", 5211: "iperf-uncapped",
-}
+from cos_fixture_spec import canonical_cos_schedule
+# #13070 (D10-15): the port -> class / shape grid is DERIVED from the
+# fixture via cos_fixture_spec (this heredoc used to carry its own copy).
+# Uncapped is non-exact: it rides the priority-low root scheduler, so its
+# exact shape is 0 and gate 2 reads it as ">= 5% of ceiling" instead.
+schedule = canonical_cos_schedule()
+ports = sorted(p for p in schedule if 5201 <= p <= 5211)
+class_names = {p: schedule[p]["forwarding_class"] for p in ports}
 shape_gbps = {
-    5201: 0.1, 5202: 1.0, 5203: 3.0, 5204: 6.0, 5205: 9.0,
-    5206: 12.0, 5207: 15.0, 5208: 18.0, 5209: 21.0, 5210: 24.0,
-    5211: 0.0,
+    p: (schedule[p]["cap_bps"] / 1e9) if schedule[p]["exact"] else 0.0
+    for p in ports
 }
 
 rows = []

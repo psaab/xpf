@@ -78,13 +78,22 @@ class CoSPortGridTests(unittest.TestCase):
                     SYMMETRIC,
                 )
 
-    def test_harness_and_sweep_share_the_canonical_queue_and_rate_map(self):
-        for queue, forwarding_class, _, iperf_port, echo_port, rate_bps, _ in PORT_GRID:
-            with self.subTest(queue=queue):
-                self.assertIn(f"{iperf_port}|{echo_port}) printf '{queue}\\n' ;;", HARNESS)
-                self.assertIn(f"{iperf_port}|{echo_port}) printf '{rate_bps}\\n' ;;", HARNESS)
-                self.assertIn(f"q{queue}-{forwarding_class}", SWEEP)
-                self.assertIn(f" {iperf_port} {queue} {rate_bps}", SWEEP)
+    def test_harness_and_sweep_use_the_shared_schedule_library(self):
+        # #13070 (D10-15): the harness and the sweep used to carry their
+        # own copies of this queue/rate map, and this test pinned BOTH
+        # spellings — which is exactly what let one copy drift unseen.
+        # They now source cos-apply-lib.sh, and the VALUES are pinned
+        # against the fixture by test_cos_apply_lib.py instead. What
+        # remains pinned here is the wiring (#8244 pattern): a script
+        # that substitutes the helpers without sourcing the library
+        # expands them to EMPTY, which is worse than a wrong number and
+        # passes every value assertion.
+        for script, marker in (
+            (HARNESS, "cos_port_to_rate_bps"),
+            (SWEEP, "COS_SCHEDULE_PORTS"),
+        ):
+            self.assertIn("cos-apply-lib.sh", script)
+            self.assertIn(marker, script)
 
     def test_mouse_latency_defaults_use_620x_echo_ports(self):
         # #8244: the defaults were declared independently in the rep script and

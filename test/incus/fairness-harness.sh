@@ -64,6 +64,11 @@
 # and 9 Gbps exact classes.
 
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# #13070 (D10-15): the canonical port -> queue/rate grid comes from the
+# shared CoS schedule library instead of a harness-local copy.
+# shellcheck source=cos-apply-lib.sh
+source "${SCRIPT_DIR}/cos-apply-lib.sh"
 
 MIXED_COS=${MIXED_COS:-0}
 ISOLATED_GENERATORS=${ISOLATED_GENERATORS:-0}
@@ -165,41 +170,11 @@ if [ ! -x "$FAIRNESS_EVAL" ]; then
     exit 2
 fi
 
-canonical_cos_queue_for_port() {
-    case "$1" in
-        5200|6200) printf '0\n' ;;
-        5201|6201) printf '1\n' ;;
-        5202|6202) printf '2\n' ;;
-        5203|6203) printf '3\n' ;;
-        5204|6204) printf '4\n' ;;
-        5205|6205) printf '5\n' ;;
-        5206|6206) printf '6\n' ;;
-        5207|6207) printf '7\n' ;;
-        5208|6208) printf '8\n' ;;
-        5209|6209) printf '9\n' ;;
-        5210|6210) printf '10\n' ;;
-        5211|6211) printf '11\n' ;;
-        *) return 1 ;;
-    esac
-}
-
-canonical_shaper_rate_for_port() {
-    case "$1" in
-        5200|6200) printf '25000000000\n' ;;
-        5201|6201) printf '100000000\n' ;;
-        5202|6202) printf '1000000000\n' ;;
-        5203|6203) printf '3000000000\n' ;;
-        5204|6204) printf '6000000000\n' ;;
-        5205|6205) printf '9000000000\n' ;;
-        5206|6206) printf '12000000000\n' ;;
-        5207|6207) printf '15000000000\n' ;;
-        5208|6208) printf '18000000000\n' ;;
-        5209|6209) printf '21000000000\n' ;;
-        5210|6210) printf '24000000000\n' ;;
-        5211|6211) printf '25000000000\n' ;;
-        *) return 1 ;;
-    esac
-}
+# #13070 (D10-15): canonical_cos_queue_for_port / canonical_shaper_rate_for_port
+# lived here as a private copy of the 12-port grid; the shared
+# cos_port_to_queue / cos_port_to_rate_bps in cos-apply-lib.sh replace them
+# (same values, same fail-closed rc on an unmapped port, asserted against
+# cos-iperf-config.set by test_cos_apply_lib.py).
 
 if [[ "$MIXED_COS" -eq 1 ]]; then
     if [[ -z "$COS_IFINDEX" ]]; then
@@ -207,25 +182,25 @@ if [[ "$MIXED_COS" -eq 1 ]]; then
         exit 2
     fi
     if [[ -z "$COS_QUEUE_ID" ]]; then
-        if ! COS_QUEUE_ID=$(canonical_cos_queue_for_port "$PORT"); then
+        if ! COS_QUEUE_ID=$(cos_port_to_queue "$PORT"); then
             echo "fairness-harness: cannot infer COS_QUEUE_ID for PORT=$PORT; set COS_QUEUE_ID explicitly" >&2
             exit 2
         fi
     fi
     if [[ -z "$MIXED_COS_QUEUE_ID" ]]; then
-        if ! MIXED_COS_QUEUE_ID=$(canonical_cos_queue_for_port "$MIXED_PORT"); then
+        if ! MIXED_COS_QUEUE_ID=$(cos_port_to_queue "$MIXED_PORT"); then
             echo "fairness-harness: cannot infer MIXED_COS_QUEUE_ID for MIXED_PORT=$MIXED_PORT; set MIXED_COS_QUEUE_ID explicitly" >&2
             exit 2
         fi
     fi
     if [[ -z "$SHAPER_RATE_BPS" ]]; then
-        if ! SHAPER_RATE_BPS=$(canonical_shaper_rate_for_port "$PORT"); then
+        if ! SHAPER_RATE_BPS=$(cos_port_to_rate_bps "$PORT"); then
             echo "fairness-harness: cannot infer SHAPER_RATE_BPS for PORT=$PORT; set SHAPER_RATE_BPS explicitly" >&2
             exit 2
         fi
     fi
     if [[ -z "$MIXED_SHAPER_RATE_BPS" ]]; then
-        if ! MIXED_SHAPER_RATE_BPS=$(canonical_shaper_rate_for_port "$MIXED_PORT"); then
+        if ! MIXED_SHAPER_RATE_BPS=$(cos_port_to_rate_bps "$MIXED_PORT"); then
             echo "fairness-harness: cannot infer MIXED_SHAPER_RATE_BPS for MIXED_PORT=$MIXED_PORT; set MIXED_SHAPER_RATE_BPS explicitly" >&2
             exit 2
         fi
@@ -236,7 +211,7 @@ else
         # is a misconfiguration, NOT a 25G-capped class. Silently defaulting
         # to 25G masked a bad PORT as a pass against the largest cap; fail
         # hard instead and require an explicit rate (#4241 V-11).
-        if ! SHAPER_RATE_BPS=$(canonical_shaper_rate_for_port "$PORT"); then
+        if ! SHAPER_RATE_BPS=$(cos_port_to_rate_bps "$PORT"); then
             echo "fairness-harness: cannot infer SHAPER_RATE_BPS for PORT=$PORT; set SHAPER_RATE_BPS explicitly" >&2
             exit 2
         fi

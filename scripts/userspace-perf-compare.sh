@@ -41,6 +41,11 @@ fi
 
 # shellcheck disable=SC1090
 source "${ENV_FILE}"
+# #13070 (D10-15): the incus CLI wrapper comes from the shared CoS
+# schedule + wrapper library (test/incus/cos-apply-lib.sh) instead of a
+# script-local copy.
+# shellcheck source=test/incus/cos-apply-lib.sh
+source "${PROJECT_ROOT}/test/incus/cos-apply-lib.sh"
 
 FW0="${INCUS_REMOTE}:${VM0}"
 FW1="${INCUS_REMOTE}:${VM1}"
@@ -50,12 +55,12 @@ V6_TARGET="2001:559:8585:80::200"
 
 mkdir -p "${OUTPUT_DIR}"
 
+# #13070 (D10-15): delegates to the shared wrapper; INCUS_FORCE_SG keeps
+# this script's always-through-sg operator contract exactly as before.
 run_incus() {
 	local vm="$1"
 	local cmd="$2"
-	local incus_cmd
-	printf -v incus_cmd 'incus exec %q -- bash -lc %q' "${vm}" "${cmd}"
-	sg incus-admin -c "${incus_cmd}"
+	INCUS_FORCE_SG=1 incus_exec_shell "$vm" "$cmd"
 }
 
 wait_cli() {
@@ -76,6 +81,11 @@ stats_file() {
 	run_incus "${vm}" "cli -c 'show chassis cluster data-plane statistics'" >"${out}"
 }
 
+# Deliberately NOT the lib's detect_active_primary (#13070 / D10-15): that
+# one answers "who holds RG0" with a tolerant fallback. THIS detector
+# answers "whose data plane is forwarding" and always picks a node (fw1 as
+# the last resort) so the comparison always runs — a hard fail here would
+# abort a diagnostic, not gate a qualification.
 detect_active_fw() {
 	local fw0_stats fw1_stats
 	fw0_stats="${OUTPUT_DIR}/fw0.stats.txt"
@@ -121,7 +131,7 @@ run_case() {
 	local perf_log="${OUTPUT_DIR}/${family}.perf.log"
 
 	run_incus "${fw}" "rm -f ${perf_data}"
-	sg incus-admin -c "incus exec ${fw} -- sh -lc 'timeout ${PERF_SECONDS} perf record -F 997 -a -g -o ${perf_data} -- sleep ${PERF_SECONDS}'" \
+	INCUS_FORCE_SG=1 incus_exec "${fw}" sh -lc "timeout ${PERF_SECONDS} perf record -F 997 -a -g -o ${perf_data} -- sleep ${PERF_SECONDS}" \
 		>"${perf_log}" 2>&1 &
 	local perf_pid=$!
 	sleep 1

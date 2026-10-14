@@ -65,6 +65,11 @@ if [[ "$COS" != "with-cos" && "$COS" != "no-cos" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# #13070 (D10-15): the shared incus wrapper replaces bare `incus exec`
+# (same command shape, plus the sg fallback for operators outside
+# incus-admin).
+# shellcheck source=cos-apply-lib.sh
+source "${SCRIPT_DIR}/cos-apply-lib.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 FW="loss:xpf-userspace-fw0"
@@ -89,7 +94,7 @@ cleanup_on_signal() {
 	# The host-side `incus exec` we backgrounded does NOT terminate the
 	# remote `perf record` when we kill it; stop it explicitly inside
 	# the guest.  pkill is a no-op if perf is already gone.
-	incus exec "$FW" -- pkill -TERM perf 2>/dev/null || true
+	incus_exec "$FW" pkill -TERM perf 2>/dev/null || true
 	exit 130
 }
 trap cleanup_on_signal INT TERM
@@ -101,7 +106,7 @@ g8_preflight() {
 
 	log "G8.1 check kernel.perf_event_paranoid on $FW"
 	local paranoid
-	paranoid=$(incus exec "$FW" -- sysctl -n kernel.perf_event_paranoid 2>/dev/null || echo 999)
+	paranoid=$(incus_exec "$FW" sysctl -n kernel.perf_event_paranoid 2>/dev/null || echo 999)
 	if [[ "$paranoid" =~ ^-?[0-9]+$ ]] && [[ "$paranoid" -le 1 ]]; then
 		log "  perf_event_paranoid=$paranoid (OK, <= 1)"
 	else
@@ -116,7 +121,7 @@ g8_preflight() {
 		# whitespace around the colon (some perf list outputs format
 		# "sched : sched_switch" at column widths).  LOW-6 fix.
 		local tp_re="${tp//:/\\s*:\\s*}"
-		if incus exec "$FW" -- bash -c "perf list '$tp' 2>/dev/null | grep -qE '$tp_re'"; then
+		if incus_exec "$FW" bash -c "perf list '$tp' 2>/dev/null | grep -qE '$tp_re'"; then
 			log "  tracepoint $tp present"
 		else
 			echo "G8.2 FAIL: $tp not found — bpftrace fallback NOT in #821 scope; HARD STOP" >&2
@@ -129,7 +134,7 @@ g8_preflight() {
 	# perf stderr" is actually satisfied.  We pipe the subshell's combined
 	# stdout+stderr through sed for indentation.  `perf record` itself is
 	# run WITHOUT the blanket `>/dev/null 2>&1` redirection.
-	if incus exec "$FW" -- bash -c '
+	if incus_exec "$FW" bash -c '
 		set -e
 		TID=$(ps -eLo tid,comm | awk "\$2==\"xpf-userspace-w\"{print \$1;exit}")
 		if [ -z "$TID" ]; then
@@ -144,16 +149,16 @@ g8_preflight() {
 		log "  perf record smoke OK"
 	else
 		echo "G8.3 FAIL: perf record smoke — dumping ps -eLo:" >&2
-		incus exec "$FW" -- ps -eLo tid,pid,comm 2>&1 | grep -E 'xpf-userspace' | sed 's|^|  |' >&2 || true
+		incus_exec "$FW" ps -eLo tid,pid,comm 2>&1 | grep -E 'xpf-userspace' | sed 's|^|  |' >&2 || true
 		rc=1
 	fi
 
 	log "G8.4 perf script parseability"
-	if incus exec "$FW" -- bash -c 'perf script -i /tmp/smoke.data 2>/dev/null | head -5 | grep -q sched_switch'; then
+	if incus_exec "$FW" bash -c 'perf script -i /tmp/smoke.data 2>/dev/null | head -5 | grep -q sched_switch'; then
 		log "  perf script parses sched_switch OK"
 	else
 		echo "G8.4 FAIL: perf script output did not contain sched_switch" >&2
-		incus exec "$FW" -- perf script -i /tmp/smoke.data 2>&1 | head -20 | sed 's|^|  |' >&2 || true
+		incus_exec "$FW" perf script -i /tmp/smoke.data 2>&1 | head -20 | sed 's|^|  |' >&2 || true
 		rc=1
 	fi
 
@@ -224,7 +229,7 @@ sleep 0.5
 # #823: read timestamps from the GUEST, not the host. Host and guest
 # clocks in the incus VM can drift tens of seconds apart (unsynced
 # NTP). step1's sampler uses the guest's `date +%s`; we must match.
-PERF_START_NS="$(incus exec "$FW" -- date +%s%N)"
+PERF_START_NS="$(incus_exec "$FW" date +%s%N)"
 log "PERF_START_NS=$PERF_START_NS (guest clock)"
 
 # -- step 5: perf record -----------------------------------------------------
@@ -237,10 +242,10 @@ log "spawning perf record on $FW (60 s)"
 # rigorous one-shot clock conversion (same math NTP uses), NOT
 # inferred from first-event latency. Reducer receives the offset
 # via --mono-wall-offset-ns and applies it: t_wall = t_mono + offset.
-MONO_WALL_OFFSET_NS="$(incus exec "$FW" -- python3 -c \
+MONO_WALL_OFFSET_NS="$(incus_exec "$FW" python3 -c \
 	'import time; print(time.time_ns() - time.clock_gettime_ns(time.CLOCK_MONOTONIC))')"
 log "MONO_WALL_OFFSET_NS=$MONO_WALL_OFFSET_NS"
-incus exec "$FW" -- bash -c "
+incus_exec "$FW" bash -c "
 	set -e
 	rm -f /tmp/sched-switch.perf.data
 	perf record \\
@@ -290,7 +295,7 @@ incus file pull "$FW/tmp/sched-switch.perf.data" "$STEP2_OUTDIR/perf.data"
 # full precision (default `perf script` format keeps microseconds).
 # Combined with `-k CLOCK_REALTIME` from perf-record, timestamps are
 # absolute unix wall-clock ns.
-incus exec "$FW" -- perf script --ns -i /tmp/sched-switch.perf.data > "$STEP2_OUTDIR/perf-script.txt"
+incus_exec "$FW" perf script --ns -i /tmp/sched-switch.perf.data > "$STEP2_OUTDIR/perf-script.txt"
 
 # -- step 8: step1 histogram classifier in single-cell scope ----------------
 
