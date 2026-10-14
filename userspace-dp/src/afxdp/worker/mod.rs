@@ -118,7 +118,8 @@ pub(crate) use launch::{
 // no longer originate from tx.rs after the moves.
 use super::cos::{
     clear_all_cos_exact_backlogs_for_binding, cos_queue_len, cos_queue_pop_front_no_snapshot,
-    publish_cos_exact_backlog, release_all_cos_queue_leases, release_all_cos_root_leases,
+    publish_cos_exact_backlog, refresh_cos_runtime_shared_root_leases,
+    release_all_cos_queue_leases, release_all_cos_root_leases,
 };
 
 pub(crate) struct BindingWorker {
@@ -669,7 +670,7 @@ impl BindingWorker {
         slot: u32,
         worker_id: u32,
         root_ifindex: i32,
-        root: CoSInterfaceRuntime,
+        mut root: CoSInterfaceRuntime,
         fast_path: WorkerCoSInterfaceFastPath,
     ) -> Self {
         let ring_entries = 64;
@@ -686,6 +687,9 @@ impl BindingWorker {
 
         let mut cos_interfaces = FastMap::default();
         let cos_nonempty_interfaces = usize::from(root.nonempty_queues > 0);
+        // #13073: mirror production materialization — the runtime snapshots
+        // the root lease held by the fast path it is built against.
+        root.shared_root_lease = fast_path.shared_root_lease.clone();
         cos_interfaces.insert(root_ifindex, root);
         let mut cos_fast_interfaces = FastMap::default();
         cos_fast_interfaces.insert(root_ifindex, fast_path);

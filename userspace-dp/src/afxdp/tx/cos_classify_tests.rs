@@ -7,6 +7,7 @@ use super::*;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{SharedCoSExactBacklog, SharedCoSRootLease};
 use crate::afxdp::cos::admission::COS_FLOW_FAIR_MIN_SHARE_BYTES;
+use crate::afxdp::cos::builders::refresh_cos_runtime_shared_root_leases;
 use crate::filter::TermMatchExtra;
 use crate::{
     ClassOfServiceSnapshot, CoSDSCPClassifierEntrySnapshot, CoSDSCPClassifierSnapshot,
@@ -239,6 +240,227 @@ fn shared_exact_enqueue_partitions_configured_buffer_across_workers() {
         queued_bytes <= BUFFER_BYTES,
         "shared_exact queued {queued_bytes} bytes across workers for a \
          {BUFFER_BYTES}-byte configured buffer",
+    );
+}
+
+/// #13073: shared_exact admission must take `active_shards` from the
+/// interface runtime's own root-lease snapshot, not from a live per-packet
+/// re-probe of `cos_fast_interfaces`.
+///
+/// FAIL-ON-REVERT: the pre-#13073 code probed the fast map on every
+/// shared_exact admission, so a fast-map entry that lost its lease (the
+/// divergence a mid-swap window produces before runtimes are refreshed)
+/// silently widened this worker's share from BUFFER/4 to the full BUFFER —
+/// the exact over-admission the #11768 partition exists to prevent. RED on
+/// master (admits the full 96 KB), GREEN post-fix (admits the 24 KB share).
+#[test]
+fn shared_exact_enqueue_reads_shard_count_from_runtime_lease_snapshot() {
+    const SHARDS: usize = 4;
+    const BUFFER_BYTES: u64 = 96_000;
+    const PACKET_BYTES: u64 = 1_500;
+    const IFINDEX: i32 = 45;
+    const QUEUE_ID: u8 = 4;
+
+    let shared_root_lease = Arc::new(SharedCoSRootLease::new(
+        1_250_000_000,
+        BUFFER_BYTES,
+        SHARDS,
+    ));
+    let fast_interfaces = test_cos_fast_interfaces(
+        IFINDEX,
+        IFINDEX,
+        QUEUE_ID,
+        vec![(QUEUE_ID, test_queue_fast_path(true, 0, None, None))],
+        None,
+        Some(shared_root_lease),
+    );
+    let fast_path = fast_interfaces
+        .get(&IFINDEX)
+        .expect("interface fast path")
+        .clone();
+    let mut root = test_cos_runtime_with_queues(
+        1_250_000_000,
+        vec![CoSQueueConfig {
+            queue_id: QUEUE_ID,
+            forwarding_class: "shared-exact-snapshot".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_250_000_000,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: BUFFER_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    enable_test_flow_fair(&mut root.queues[0]);
+    root.queues[0].config.shared_exact = true;
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFINDEX, root, fast_path);
+    // Diverge the two lease sources exactly as a mid-swap window does: the
+    // runtime keeps its materialization-time lease while the fast-map entry
+    // has already lost it.
+    binding
+        .cos
+        .cos_fast_interfaces
+        .get_mut(&IFINDEX)
+        .expect("interface fast path")
+        .shared_root_lease = None;
+
+    let mut accepted = 0u64;
+    for _ in 0..=(BUFFER_BYTES / PACKET_BYTES) {
+        let queued_before = binding
+            .cos
+            .cos_interfaces
+            .get(&IFINDEX)
+            .expect("CoS runtime")
+            .queues[0]
+            .hot
+            .queued_bytes;
+        assert!(
+            enqueue_cos_item(
+                &mut binding,
+                IFINDEX,
+                Some(QUEUE_ID),
+                PACKET_BYTES,
+                test_flow_cos_item(5303, PACKET_BYTES as usize),
+                0,
+                None,
+            )
+            .is_ok(),
+            "interface and queue must remain available",
+        );
+        let queued_after = binding
+            .cos
+            .cos_interfaces
+            .get(&IFINDEX)
+            .expect("CoS runtime")
+            .queues[0]
+            .hot
+            .queued_bytes;
+        if queued_after == queued_before {
+            break;
+        }
+        accepted += queued_after - queued_before;
+    }
+    assert_eq!(
+        accepted,
+        BUFFER_BYTES / SHARDS as u64,
+        "admission must partition by the runtime's 4-shard lease snapshot, not by \
+         a fast-map probe that reports a missing lease as 1 shard",
+    );
+}
+
+/// #13073 companion: a lease-set change arrives as a fresh
+/// `cos_fast_interfaces` map. The runtime snapshots must be refreshed from
+/// it, so a shard-count change (worker join/leave) re-partitions admission
+/// immediately — a runtime frozen at its materialization-time snapshot
+/// would keep admitting at the old shard count forever.
+#[test]
+fn fast_map_lease_swap_refreshes_runtime_shard_snapshot() {
+    const BUFFER_BYTES: u64 = 96_000;
+    const PACKET_BYTES: u64 = 1_500;
+    const IFINDEX: i32 = 46;
+    const QUEUE_ID: u8 = 4;
+
+    let lease_4_shards = Arc::new(SharedCoSRootLease::new(
+        1_250_000_000,
+        BUFFER_BYTES,
+        4,
+    ));
+    let fast_interfaces = test_cos_fast_interfaces(
+        IFINDEX,
+        IFINDEX,
+        QUEUE_ID,
+        vec![(QUEUE_ID, test_queue_fast_path(true, 0, None, None))],
+        None,
+        Some(lease_4_shards),
+    );
+    let fast_path = fast_interfaces
+        .get(&IFINDEX)
+        .expect("interface fast path")
+        .clone();
+    let mut root = test_cos_runtime_with_queues(
+        1_250_000_000,
+        vec![CoSQueueConfig {
+            queue_id: QUEUE_ID,
+            forwarding_class: "shared-exact-lease-swap".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_250_000_000,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: BUFFER_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    enable_test_flow_fair(&mut root.queues[0]);
+    root.queues[0].config.shared_exact = true;
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFINDEX, root, fast_path);
+
+    // The worker set shrinks 4 -> 2: the coordinator publishes a fresh
+    // lease map, the worker loop swaps it in and refreshes the runtimes.
+    let lease_2_shards = Arc::new(SharedCoSRootLease::new(
+        1_250_000_000,
+        BUFFER_BYTES,
+        2,
+    ));
+    binding.cos.cos_fast_interfaces = test_cos_fast_interfaces(
+        IFINDEX,
+        IFINDEX,
+        QUEUE_ID,
+        vec![(QUEUE_ID, test_queue_fast_path(true, 0, None, None))],
+        None,
+        Some(lease_2_shards),
+    );
+    refresh_cos_runtime_shared_root_leases(&mut binding);
+
+    let mut accepted = 0u64;
+    for _ in 0..=(BUFFER_BYTES / PACKET_BYTES) {
+        let queued_before = binding
+            .cos
+            .cos_interfaces
+            .get(&IFINDEX)
+            .expect("CoS runtime")
+            .queues[0]
+            .hot
+            .queued_bytes;
+        assert!(
+            enqueue_cos_item(
+                &mut binding,
+                IFINDEX,
+                Some(QUEUE_ID),
+                PACKET_BYTES,
+                test_flow_cos_item(5304, PACKET_BYTES as usize),
+                0,
+                None,
+            )
+            .is_ok(),
+            "interface and queue must remain available",
+        );
+        let queued_after = binding
+            .cos
+            .cos_interfaces
+            .get(&IFINDEX)
+            .expect("CoS runtime")
+            .queues[0]
+            .hot
+            .queued_bytes;
+        if queued_after == queued_before {
+            break;
+        }
+        accepted += queued_after - queued_before;
+    }
+    assert_eq!(
+        accepted,
+        BUFFER_BYTES / 2,
+        "the runtime must re-partition by the swapped-in 2-shard lease",
     );
 }
 

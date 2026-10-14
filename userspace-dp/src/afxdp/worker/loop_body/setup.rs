@@ -252,6 +252,10 @@ pub(super) fn worker_loop_setup(
     );
     for binding in bindings.iter_mut() {
         binding.cos.cos_fast_interfaces = cos_fast_interfaces.clone();
+        // #13073: pair every fast-map assignment with the runtime root-lease
+        // re-snapshot (no-op while cos_interfaces is still empty; keeps the
+        // swap-site invariant total).
+        refresh_cos_runtime_shared_root_leases(binding);
     }
     let interrupt_poll_fds = if poll_mode == crate::PollMode::Interrupt {
         bindings

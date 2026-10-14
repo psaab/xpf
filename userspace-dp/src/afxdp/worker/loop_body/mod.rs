@@ -1794,6 +1794,11 @@ pub(crate) fn worker_loop(
             );
             for binding in bindings.iter_mut() {
                 binding.cos.cos_fast_interfaces = cos_fast_interfaces.clone();
+                // #13073: the swap can carry new root leases (worker
+                // join/leave); fold them into the materialized runtimes so
+                // shared_exact admission keeps partitioning by the live
+                // shard count, not a materialization-time snapshot.
+                refresh_cos_runtime_shared_root_leases(binding);
             }
             // The new SharedCoSExactBacklog slots in the freshly built
             // cos_fast_interfaces start at zero. Republish the current

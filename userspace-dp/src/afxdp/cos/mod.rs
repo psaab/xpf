@@ -15,7 +15,7 @@ pub(super) use admission::{
     apply_cos_admission_ecn_policy, cos_flow_aware_buffer_limit, cos_queue_flow_share_limit,
     cos_shared_exact_buffer_limit,
 };
-pub(super) use builders::ensure_cos_interface_runtime;
+pub(super) use builders::{ensure_cos_interface_runtime, refresh_cos_runtime_shared_root_leases};
 pub(super) use cross_binding::{
     LocalRoutingDecision, Step1Action, redirect_prepared_cos_request_to_owner,
     redirect_prepared_cos_request_to_owner_binding, resolve_local_routing_decision,
