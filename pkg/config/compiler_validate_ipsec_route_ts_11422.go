@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 )
 
 // validateIPsecRouteTrafficSelectorsStrict rejects installed static routes via
@@ -59,8 +60,15 @@ func validateIPsecStaticRouteTrafficSelectors11422(
 					continue
 				}
 
-				var owner string
-				covered := false
+				// #12909: several VPNs may legitimately share one
+				// bind-interface with provably disjoint selectors (#11380).
+				// Each contributes its remote ranges to the XFRM policies on
+				// that device, so a routed destination is coverable by their
+				// UNION. Requiring one single VPN to cover the whole
+				// destination falsely rejected aggregates split across
+				// complementary VPNs on the same st0.X.
+				var owners []string
+				var union []ModeledIPsecSelectorPair11380
 				for _, name := range vpnNames {
 					vpn := cfg.Security.IPsec.VPNs[name]
 					if vpn == nil || vpn.BindInterface == "" {
@@ -70,19 +78,17 @@ func validateIPsecStaticRouteTrafficSelectors11422(
 					if bindIfID != routeIfID || !bindInterfaceOwnsRef(vpn.BindInterface, nextHop.Interface) {
 						continue
 					}
-					if owner == "" {
-						owner = name
-					}
-					if ipsecTSAddressSetsCoverPrefix11422(
-						ModeledIPsecSelectorPairs11380(vpn), destination) {
-						covered = true
-						break
-					}
+					owners = append(owners, name)
+					union = append(union, ModeledIPsecSelectorPairs11380(vpn)...)
 				}
-				if owner != "" && !covered {
+				if len(owners) > 0 && !ipsecTSAddressSetsCoverPrefix11422(union, destination) {
+					quoted := make([]string, len(owners))
+					for i, name := range owners {
+						quoted[i] = fmt.Sprintf("%q", name)
+					}
 					return fmt.Errorf(
-						"static route %s via bind-interface %q is outside VPN %q's rendered remote traffic-selector union; XFRM will blackhole the routed traffic (#11422)",
-						route.Destination, nextHop.Interface, owner)
+						"static route %s via bind-interface %q is outside VPN %s's rendered remote traffic-selector union; XFRM will blackhole the routed traffic (#11422)",
+						route.Destination, nextHop.Interface, strings.Join(quoted, ", "))
 				}
 			}
 		}

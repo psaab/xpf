@@ -65,3 +65,48 @@ func TestRouteViaBindInterfaceWarnsOnLenientLoad11422(t *testing.T) {
 	}
 	t.Fatalf("lenient compile did not warn about the uncovered tunnel route: %v", cfg.Warnings)
 }
+
+// sharedBindRouteTree11422 builds two VPNs sharing one bind-interface with
+// provably disjoint selectors (#11380), plus a static route over that bind.
+func sharedBindRouteTree11422(t *testing.T, route, aRemote, bRemote string) *ConfigTree {
+	t.Helper()
+	commands := []string{
+		"set security ike gateway gw-a address 198.51.100.1",
+		"set security ike gateway gw-b address 198.51.100.2",
+		"set security ipsec vpn site-a ike gateway gw-a",
+		"set security ipsec vpn site-a bind-interface st0.0",
+		"set security ipsec vpn site-b ike gateway gw-b",
+		"set security ipsec vpn site-b bind-interface st0.0",
+		"set routing-options static route " + route,
+	}
+	commands = append(commands, selectorCommands11380("site-a", "to-a", "10.0.0.0/24", aRemote)...)
+	commands = append(commands, selectorCommands11380("site-b", "to-b", "10.0.0.0/24", bRemote)...)
+	return buildBindIfaceTree(t, commands...)
+}
+
+// #12909: VPNs sharing a bind-interface each contribute their remote ranges
+// to the XFRM policies on that device, so a routed destination is coverable
+// by their UNION. Requiring one single VPN to cover the whole destination
+// falsely rejected aggregates split across complementary VPNs (#11380).
+func TestSharedBindSelectorUnionCoversAggregateRoute12909(t *testing.T) {
+	t.Run("complementary VPN halves cover the aggregate route", func(t *testing.T) {
+		_, err := CompileConfig(sharedBindRouteTree11422(t,
+			"10.2.0.0/24 next-hop 192.0.2.1 interface st0.0", "10.2.0.0/25", "10.2.0.128/25"))
+		if err != nil {
+			t.Fatalf("strict commit rejected a route covered by the union of two shared-bind VPNs: %v", err)
+		}
+	})
+
+	t.Run("aggregate outside the union still rejected naming both VPNs", func(t *testing.T) {
+		_, err := CompileConfig(sharedBindRouteTree11422(t,
+			"10.2.0.0/23 next-hop 192.0.2.1 interface st0.0", "10.2.0.0/25", "10.2.0.128/25"))
+		if err == nil {
+			t.Fatal("strict commit accepted a route outside the shared-bind remote selector union")
+		}
+		for _, want := range []string{"#11422", "10.2.0.0/23", "st0.0", "site-a", "site-b"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("shared-bind rejection %q does not identify %q", err, want)
+			}
+		}
+	})
+}
