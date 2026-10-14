@@ -371,6 +371,54 @@ func TestWithholdsZoneLevelDHCPForDeclaredNames12841(t *testing.T) {
 	}
 }
 
+// TestWithholdsZoneLevelDHCPForDeclaredNamesCompile12841 pins the same
+// opposite-direction cases through CompileConfig so the real derived-stamp
+// phase and the shared effective resolver are exercised end to end.
+func TestWithholdsZoneLevelDHCPForDeclaredNamesCompile12841(t *testing.T) {
+	t.Run("padded declared bare name is distinct", func(t *testing.T) {
+		cfg, err := CompileConfigLenient(buildTree(t, []string{
+			"set interfaces p.01 unit 0 family inet address 10.0.1.1/24",
+			"set interfaces p.1 unit 0 family inet address 10.0.2.1/24",
+			"set interfaces p.01 description padded-name",
+			"set interfaces p.1 description canonical-name",
+			"set security zones security-zone z interfaces p.1",
+			"set security zones security-zone z host-inbound-traffic system-services dhcp",
+			"set system services dhcp-local-server group g interface p.1",
+		}))
+		if err != nil {
+			t.Fatalf("CompileConfigLenient: %v", err)
+		}
+		z := cfg.Security.Zones["z"]
+		if !z.DHCPScopeWithheld["p.1"] || z.DHCPScopeWithheld["p.01"] {
+			t.Fatalf("compiled withholding keys = %v, want p.1 only (p.01 is a distinct declared interface)", z.DHCPScopeWithheld)
+		}
+		if svc := zoneSvcFor(t, cfg, "z", "p.01"); !hasTok(svc, "dhcp") {
+			t.Errorf("compiled p.01 effective services = %v, want zone-level dhcp retained", svc)
+		}
+		if svc := zoneSvcFor(t, cfg, "z", "p.1"); hasTok(svc, "dhcp") {
+			t.Errorf("compiled server p.1 effective services = %v, want zone-level dhcp withheld", svc)
+		}
+	})
+
+	t.Run("padded unit under declared dotted name resolves", func(t *testing.T) {
+		cfg := flip7490Cfg(t,
+			"set interfaces p description base",
+			"set interfaces p.0 unit 0 family inet address 10.0.0.1/24",
+			"set interfaces p.0 unit 1 family inet address 10.0.1.1/24",
+			"set security zones security-zone z interfaces p.0",
+			"set security zones security-zone z host-inbound-traffic system-services dhcp",
+			"set system services dhcp-local-server group g interface p.0",
+		)
+		z := cfg.Security.Zones["z"]
+		if !z.DHCPScopeWithheld["p.0.1"] {
+			t.Fatalf("compiled withholding keys = %v, want canonical child p.0.1", z.DHCPScopeWithheld)
+		}
+		if svc := zoneSvcFor(t, cfg, "z", "p.0.01"); hasTok(svc, "dhcp") {
+			t.Errorf("compiled padded p.0.01 effective services = %v, want zone-level dhcp withheld", svc)
+		}
+	})
+}
+
 // TestDupHostOverrideMapDeclaredDotted9821: the gate mirror agrees with the
 // runtime map on canonical keys (multi-dot Literals added; undotted-padded
 // raw-only preserved exactly).
