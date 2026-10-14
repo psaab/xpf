@@ -277,6 +277,44 @@ func TestScreenFamilyPackedTailBothShapes9421(t *testing.T) {
 	}
 }
 
+// TestScreenPackedMalformedTailRejected12871 covers tokens after a valid
+// screen path where packedBody abandons normalization on the first unknown
+// token. Neither the configured flag nor its trailing garbage may disappear
+// before the strict unknown-leaf gate sees it.
+func TestScreenPackedMalformedTailRejected12871(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "recognized flag followed by unknown token",
+			body: "tcp land bogus-tail;",
+			want: "tcp land bogus-tail",
+		},
+		{
+			name: "missing intermediate threshold keyword",
+			body: "ip ip-sweep 7777;",
+			want: "ip ip-sweep 7777",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "security { screen { ids-option P " + tc.body + " } }"
+			tree, errs := NewParser(src).Parse()
+			if len(errs) > 0 {
+				t.Fatalf("parse %q: %v", src, errs)
+			}
+			strictErr, _, summary := screenChannels9421(t, tree)
+			if strictErr == nil {
+				t.Fatalf("strict CompileConfig accepted malformed packed body %q; compiled profile: %s", tc.body, summary)
+			}
+			if !strings.Contains(summary, tc.want) {
+				t.Fatalf("lenient compile lost malformed packed tokens %q:\n%s", tc.want, summary)
+			}
+		})
+	}
+}
+
 // TestScreenFamilyPackedTailRefusalMessage9421 pins the refusal TEXT, not just
 // the refusal. A mutation caught by the wrong branch reads as a working gate:
 // the bracketed spelling must be rejected by the #3318 unknown-leaf gate naming
