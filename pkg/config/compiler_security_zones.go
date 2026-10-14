@@ -805,10 +805,10 @@ func zoneInterfaceMembers(iface *Node) []string {
 //
 // Deliberately NOT zoneInterfaceNonMemberToken, which is a superset: that one
 // also covers the host-inbound body keywords, and the member walk already
-// handles those through zoneInterfaceBodyKeywords with different semantics (a
-// body keyword on the node's OWN Keys terminates the walk; a meta keyword is
-// simply skipped). Widening the walk to the superset would conflate the two and
-// change what a packed body does.
+// handles those through zoneInterfaceBodyKeywords with different semantics. A
+// body keyword on the node's OWN Keys terminates the walk as a packed body; a
+// meta keyword there terminates it as metadata, while a meta child is skipped.
+// Widening the walk to the superset would conflate the two boundaries.
 func zoneInterfaceApplyMetaKeyword(tok string) bool {
 	switch tok {
 	case "apply-groups", "apply-groups-except", "apply-macro":
@@ -1038,6 +1038,9 @@ func zoneInterfaceMemberPackedTail(iface *Node) (keyword string, tail []string, 
 		return k, nil, false
 	}
 	for _, child := range iface.Children {
+		if zoneInterfaceApplyMetaKeyword(child.Name()) {
+			continue
+		}
 		if zoneInterfaceBodyKeywords[child.Name()] {
 			// The keyword arrived as a CHILD NODE rather than on this node's
 			// Keys. Its own subtree is the member's BODY — except for tokens
@@ -1200,3 +1203,4 @@ func zoneHasInterface(zone *ZoneConfig, member string) bool {
 	}
 	return false
 }
+

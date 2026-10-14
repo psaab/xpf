@@ -1152,8 +1152,7 @@ func validateZoneInterfacesNonEmptyStrict(tree *ConfigTree) error {
 				continue
 			}
 			for _, inst := range bracketedGroupInstances8794(zonesNode.FindChildren("security-zone")) {
-				props := expandResolvingRuns9792(inst.node.Children, securityZoneSchema9792())
-				for _, prop := range props {
+				for _, prop := range inst.node.Children {
 					if prop.Name() != "interfaces" {
 						continue
 					}
@@ -1263,8 +1262,7 @@ func validateZoneInterfacePackedTailStrict(tree *ConfigTree) error {
 				continue
 			}
 			for _, inst := range bracketedGroupInstances8794(zonesNode.FindChildren("security-zone")) {
-				props := expandResolvingRuns9792(inst.node.Children, securityZoneSchema9792())
-				for _, prop := range props {
+				for _, prop := range inst.node.Children {
 					if prop.Name() != "interfaces" {
 						continue
 					}
