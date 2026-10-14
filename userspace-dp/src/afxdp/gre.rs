@@ -1223,7 +1223,7 @@ pub(super) fn try_native_gre_decap_from_frame_with_input_filter(
                 ecn_illegal_drops: &GRE_DECAP_ECN_ILLEGAL_DROPS,
                 // #2486: mark the inner packet GRE-decapped so the forward builder
                 // selects the `tcp-mss gre-in` clamp value.
-                meta_flags: GRE_DECAP_INGRESS_FLAG,
+                meta_flags: GRE_DECAP_INGRESS_FLAG | crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG,
                 rx_queue_index: meta.rx_queue_index,
                 // GRE runs inside a worker on a received packet, so the attachment
                 // generations are inherited from the triggering RX meta (#7167

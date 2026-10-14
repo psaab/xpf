@@ -265,11 +265,17 @@ fn enqueue_reject_reply(
     // backscatter counted as sent with a REJECT event, against the #3615
     // "never logs a reject that did not happen" contract. The gate is
     // therefore protocol-agnostic: any stamped fabric arrival is unreplyable.
-    if crate::afxdp::forwarding::ingress_has_synthetic_fabric_source(
-        forwarding,
-        ingress_ifindex,
-        packet_frame,
-    ) {
+    // #12864: GRE/WireGuard decap uses a zero-MAC synthetic Ethernet header
+    // for inner L3. The packet is dropped even when policy chooses `reject`;
+    // reflecting its fake L2 would leak an unencapsulated response on the
+    // physical binding. No generated-reply budget/token may be consumed.
+    if meta.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG != 0
+        || crate::afxdp::forwarding::ingress_has_synthetic_fabric_source(
+            forwarding,
+            ingress_ifindex,
+            packet_frame,
+        )
+    {
         return false;
     }
 

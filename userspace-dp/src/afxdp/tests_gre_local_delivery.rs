@@ -1899,6 +1899,11 @@ fn gre_decap_marks_inner_meta_with_gre_in_flag() {
         0,
         "decap must mark the inner meta as GRE-decapped (gre-in clamp marker)"
     );
+    assert_ne!(
+        decap.meta.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG,
+        0,
+        "decap must mark its fabricated Ethernet L2 unusable for reject replies"
+    );
 }
 
 

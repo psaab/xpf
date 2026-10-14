@@ -348,7 +348,7 @@ pub(in crate::afxdp) fn build_injected_packet(
             logical_ifindex: endpoint.logical_ifindex,
             outer_ecn: descriptor.outer_ecn,
             ecn_illegal_drops: &crate::afxdp::gre::WG_DECAP_ECN_ILLEGAL_DROPS,
-            meta_flags: 0,
+            meta_flags: crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG,
             rx_queue_index,
             config_generation: descriptor.config_generation,
             fib_generation: descriptor.fib_generation,
@@ -798,6 +798,11 @@ mod tests {
             0,
         )
         .expect("attached WG plaintext must build a worker frame");
+        assert_ne!(
+            injected.1.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG,
+            0,
+            "worker-injected WG plaintext has fabricated Ethernet L2, so reject replies must be suppressed"
+        );
         let (deliveries, rx) = wg_deliveries(400);
         let (batch, dbg) = crate::afxdp::tests_support::txn_run_descriptor_with_injected(
             &mut binding,
