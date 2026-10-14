@@ -199,7 +199,11 @@ func validateDuplicateNamedBlockAST(tree *ConfigTree, lenient bool) ([]string, e
 	// 3b. Duplicate ids-option FAMILY block within ONE profile. This is not a
 	// named container — the duplicate is the family keyword itself — so it
 	// keeps its own walk. compileScreen reads each family with FindChild, so a
-	// repeat is first-sibling-only, not last-writer-wins.
+	// repeat is first-sibling-only, not last-writer-wins. Inspect the packed
+	// body expansion too: `ids-option s1 icmp ... icmp ...;` has no authored
+	// family children, but packedBody synthesizes the same siblings
+	// compileScreen will consume.
+	idsSchema := schemaForPath("security", "screen", "ids-option")
 	for _, child := range tree.Children {
 		if child.Name() != "security" {
 			continue
@@ -211,7 +215,8 @@ func validateDuplicateNamedBlockAST(tree *ConfigTree, lenient bool) ([]string, e
 				}
 				famSeen := map[string]bool{}
 				famReported := map[string]bool{}
-				for _, fam := range inst.node.Children {
+				body := packedBody(inst.node, idsSchema)
+				for _, fam := range body.Children {
 					fn := fam.Name()
 					if !screenIDSFamily[fn] {
 						continue
