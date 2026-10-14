@@ -201,6 +201,10 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 		// rejects the config, and the helper retains its previous state.
 		return []string{fmt.Sprintf("policy snapshot cannot be built (fail-closed): %v", err)}
 	}
+	// Mirror the exact post-quarantine policy/zone view published to the helper.
+	// This prevents removed rules leaving phantom reasons and catches global
+	// scopes whose authored zone was omitted from the published zone set.
+	policies, zones := policySnapshotAfterZoneQuarantine(cfg, policies)
 	reasons := collectPolicyContentRejections(policies)
 	// #9410: the ZONE-RESOLUTION arm. The helper rejects the WHOLE snapshot on an
 	// unresolvable policy zone reference (SnapshotIntegrityError::Unresolvable-
@@ -212,7 +216,7 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 	// It reads the ZONE SNAPSHOT rather than cfg.Security.Zones on purpose; see
 	// policies_reject_zone_9410.go for why a config-side predicate answers the
 	// wrong question.
-	reasons = append(reasons, collectPolicyZoneRejections(policies, buildZoneSnapshots(cfg))...)
+	reasons = append(reasons, collectPolicyZoneRejections(policies, zones)...)
 	// #9584: the RULE-IDENTITY arm. The helper also rejects the whole snapshot
 	// when two rules resolve to one stable identity (DuplicateRuleId) or share a
 	// non-zero policy_id (DuplicatePolicyId). A duplicate policy name written in
@@ -363,3 +367,4 @@ func collectPolicyCIDRMaskRejections(policies []PolicyRuleSnapshot) []string {
 	}
 	return reasons
 }
+

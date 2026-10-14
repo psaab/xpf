@@ -196,27 +196,9 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	if err != nil {
 		return nil, err
 	}
+	// Build the zone rows once; quarantine and policy refusal checks share this view.
 	zones := buildZoneSnapshots(cfg)
-	// #3261 / #10688 / #12047: stamp refusal reasons from the built policy rules
-	// and address-book rows. The cfg-only capability derivation cannot see feeds.
-	// #12507: then the static routes and bind-less selector fence rows this
-	// build publishes below whose CIDR mask the helper cannot parse.
 	caps := deriveUserspaceCapabilities(cfg)
-	caps.PolicyContentRejected = collectPolicyContentRejections(policies)
-	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
-		collectPolicyZoneRejections(policies, zones)...)
-	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
-		collectPolicyIdentityRejections(policies)...)
-	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
-		collectAddressBookFamilyRejections(addressBooks)...)
-	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
-		collectAddressBookCIDRMaskRejections(addressBooks)...)
-	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
-		collectPolicyCIDRMaskRejections(policies)...)
-	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
-		collectStaticRouteCIDRMaskRejections(cfg)...)
-	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
-		collectBindlessSelectorCIDRMaskRejections(cfg)...)
 	// #3438: a BuildCatalog fault (overflow / malformed application-set) fails
 	// the snapshot closed rather than shipping an empty catalog that would
 	// silently degrade all session naming to UNKNOWN.
@@ -337,6 +319,25 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	// published set reduced, so Rust must not mistake that reduction for a
 	// committed zone removal.
 	snap.ZoneSetValidated = len(snap.Zones) > 0 && len(snap.zoneIDCollisions) == 0
+	// Compute policy refusal reasons from the exact post-quarantine policy/zone
+	// sets published to the helper, not intermediates that may contain removed
+	// rules or resolvable zones that were omitted.
+	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
+		collectPolicyContentRejections(snap.Policies)...)
+	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
+		collectPolicyZoneRejections(snap.Policies, snap.Zones)...)
+	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
+		collectPolicyIdentityRejections(snap.Policies)...)
+	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
+		collectAddressBookFamilyRejections(addressBooks)...)
+	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
+		collectAddressBookCIDRMaskRejections(addressBooks)...)
+	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
+		collectPolicyCIDRMaskRejections(snap.Policies)...)
+	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
+		collectStaticRouteCIDRMaskRejections(cfg)...)
+	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
+		collectBindlessSelectorCIDRMaskRejections(cfg)...)
 	if len(snap.zoneIDCollisions) > 0 {
 		// Keep the operator-facing counts equal to what is actually published.
 		snap.Summary.ZoneCount = len(snap.Zones)

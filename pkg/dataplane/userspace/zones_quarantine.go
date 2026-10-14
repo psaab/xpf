@@ -258,3 +258,16 @@ func scrubPoliciesForQuarantinedZones(policies []PolicyRuleSnapshot, quarantined
 func quarantinedZoneNamesForConfig(cfg *config.Config) map[string]struct{} {
 	return config.QuarantinedZoneNames(config.ZoneQuarantineNamesForConfig(cfg))
 }
+
+// policySnapshotAfterZoneQuarantine returns the policy and zone views the
+// userspace helper receives after StableZoneID quarantine. The policy slice is
+// freshly built/owned by the caller, so quarantine may compact it in place.
+func policySnapshotAfterZoneQuarantine(cfg *config.Config, policies []PolicyRuleSnapshot) ([]PolicyRuleSnapshot, []ZoneSnapshot) {
+	snap := &ConfigSnapshot{
+		Config:   cfg,
+		Zones:    buildZoneSnapshots(cfg),
+		Policies: policies,
+	}
+	quarantineCollidingZones(snap)
+	return snap.Policies, snap.Zones
+}
