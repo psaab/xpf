@@ -13131,6 +13131,28 @@ checks bracketed, mixed key/body, and nested block spellings in both action
 orders, strict rejection, tolerant warnings and fail-closed compilation, and
 single-action controls.
 
+### #12823 — Inline `default-policy` overrides group choices
+
+`default-policy` is represented as a valued leaf for flat-set support, while
+Junos's canonical block spelling is a choice container. Group expansion used
+the generic container merge, appending a group action child to a different
+inline action child. The expanded two-child block was then rejected by
+#11367, although the inline action is the valid higher-precedence override.
+The merge now lets an authored inline block replace inherited group choices;
+group-vs-group choices and authored same-tier ambiguity remain rejected.
+This distinction also applies through nested group expansion and is independent
+of whether `apply-groups-except` appears. An empty inline block still takes
+precedence and contributes no action, so it suppresses a group action; avoid
+an empty override when an inherited default is intended. Separate repeated
+top-level `security` stanzas are compiled as separate roots: group inheritance
+and inline overrides in one stanza do not resolve or combine choices in another.
+
+Regression coverage: `pkg/config/compiler_default_policy_group_override_12823_test.go`
+checks flat and block overrides, equal values, inherited-only groups, nested
+same/conflicting group choices (including `apply-groups-except` presence),
+conflicting groups with and without an inline override, and preservation of
+strict/tolerant same-tier ambiguity behavior.
+
 ### #3534 — `default-policy-log session-init|session-close` (implicit default RT_FLOW logging)
 
 Split from #3363 Part 2. Operators want the implicit default-policy verdict to

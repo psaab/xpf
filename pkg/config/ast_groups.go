@@ -38,6 +38,10 @@ type groupExpandBudget struct {
 	// rides here rather than as a tenth mergeNodes parameter; checks are
 	// siblings-only, so entries from other levels never interfere.
 	promoted9855 map[*Node]bool
+	// groupDefaultPolicyBlocks12823 tracks choice blocks adopted from a group
+	// during this expansion. It distinguishes them from authored inline
+	// destinations without overloading #9862 exclusion provenance.
+	groupDefaultPolicyBlocks12823 map[*Node]bool
 }
 
 // charge accounts n units of expansion work and reports when the budget is
@@ -353,6 +357,7 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 					return err
 				}
 				body := cloneNodes(cached)
+				markDefaultPolicyGroupBlocks12823(budget, ancestorPath, body)
 				appendDuplicateBlockMergeMarkersToLeaves9023(body, ref.markers)
 				if err := mergeNodes(nodes, body, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards); err != nil {
 					return err
@@ -385,14 +390,14 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 				tagNodesInherited(cloned, name)
 			}
 			// #9862: leaf provenance for `apply-groups-except` through nested
-			// groups. Tags the outer group's own body BEFORE the nested
-			// expansion below merges nested content in, so nested nodes keep
-			// the nested name. Gated: untagged clones filter identically to
-			// #9422 when the tree carries no exclusion.
+			// groups. Tags the outer group's own body BEFORE nested expansion,
+			// so nested nodes keep their own contributor names.
+			// Default-policy group/inline provenance is independent of
+			// apply-groups-except and must be set on every clone.
+			markDefaultPolicyGroupBlocks12823(budget, ancestorPath, cloned)
 			if haveExcept {
 				addNodeContrib9862(cloned, []string{name})
 			}
-			// Transitive apply-groups (#4474): a group body may itself say
 			// `apply-groups G2` (a nested-group template, a standard Junos
 			// idiom). Expand the group's OWN references to a fixed point BEFORE
 			// merging its body, so G2's content is inherited rather than
@@ -419,6 +424,7 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 				body = cloneNodes(expanded)
 				appendDuplicateBlockMergeMarkersToLeaves9023(body, ref.markers)
 			}
+			markDefaultPolicyGroupBlocks12823(budget, ancestorPath, body)
 			if err := mergeNodes(nodes, body, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards); err != nil {
 				return err
 			}
@@ -797,6 +803,14 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		if legacyScalarContainerOverride9859(ancestorPath, *dst, s) {
 			continue
 		}
+		// #12823: an authored inline block-value leaf is a higher-precedence
+		// choice than the corresponding group block. Do not append the
+		// group's choice child, which would create a false #11367 ambiguity.
+		// Choices inherited from another group remain mergeable so genuine
+		// group-group ambiguity is still rejected.
+		if defaultPolicyGroupBlockOverride12823(budget, ancestorPath, *dst, s) {
+			continue
+		}
 
 		// Container node: find matching containers in dst.
 		//
@@ -880,6 +894,12 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// hence -1.)
 			if err := budget.charge(countNodes([]*Node{s}) - 1); err != nil {
 				return err
+			}
+			if isDefaultPolicyGroupBlock12823(ancestorPath, s) {
+				if budget.groupDefaultPolicyBlocks12823 == nil {
+					budget.groupDefaultPolicyBlocks12823 = make(map[*Node]bool)
+				}
+				budget.groupDefaultPolicyBlocks12823[s] = true
 			}
 			*dst = append(*dst, s)
 		}
