@@ -82,20 +82,51 @@ func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPoli
 		for _, pol := range root.FindChildren("policies") {
 			// from-zone <a> to-zone <b> { policy … }
 			for _, fz := range pol.FindChildren("from-zone") {
-				m, w, c := mergeInstancesUnder(fz, "policy", askZonePair9571)
-				merged = append(merged, m...)
-				widened = append(widened, zonePairWidened9571(fz.Keys, nil, w)...)
-				conflicting = append(conflicting, zonePairDirectConflicts11063(fz.Keys, nil, c)...)
+				if len(fz.Keys) >= 4 && fz.Keys[2] == "to-zone" {
+					merged, widened, conflicting = foldPolicyInstances12820(
+						fz, fz.Keys, nil, askZonePair9571, merged, widened, conflicting)
+					continue
+				}
+				merged, widened, conflicting = foldPolicyInstances12820(
+					fz, fz.Keys, nil, askZonePair9571, merged, widened, conflicting)
+				for _, child := range fz.Children {
+					if child.Name() != "to-zone" && len(fz.Keys) == 1 {
+						// Supported container form:
+						// from-zone { A { to-zone { B { policy ... } } } }
+						for _, tz := range child.FindChildren("to-zone") {
+							if len(tz.Keys) >= 2 {
+								merged, widened, conflicting = foldPolicyInstances12820(
+									tz, []string{"from-zone", child.Name()}, tz.Keys,
+									askZonePair9571, merged, widened, conflicting)
+								continue
+							}
+							for _, destination := range tz.Children {
+								merged, widened, conflicting = foldPolicyInstances12820(
+									destination, []string{"from-zone", child.Name()},
+									[]string{"to-zone", destination.Name()},
+									askZonePair9571, merged, widened, conflicting)
+							}
+						}
+					}
+				}
 				for _, tz := range fz.Children {
-					m, w, c := mergeInstancesUnder(tz, "policy", askZonePair9571)
-					merged = append(merged, m...)
-					widened = append(widened, zonePairWidened9571(fz.Keys, tz.Keys, w)...)
-					conflicting = append(conflicting, zonePairDirectConflicts11063(fz.Keys, tz.Keys, c)...)
+					merged, widened, conflicting = foldPolicyInstances12820(
+						tz, fz.Keys, tz.Keys, askZonePair9571,
+						merged, widened, conflicting)
 				}
 			}
 			// global { policy … }
 			for _, g := range pol.FindChildren("global") {
 				m, w, c := mergeInstancesUnder(g, "policy", askGlobal9571)
+				for _, policyContainer := range g.FindChildren("policy") {
+					if len(policyContainer.Keys) != 1 {
+						continue
+					}
+					pm, pw, pc := mergeInstancesUnder(policyContainer, "policy", askGlobal9571)
+					m = append(pm, m...)
+					w = append(pw, w...)
+					c = append(pc, c...)
+				}
 				merged = append(merged, m...)
 				for _, name := range w {
 					widened = append(widened, foldWidenedPolicy9571{global: true, name: name})
@@ -103,6 +134,49 @@ func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPoli
 				for _, name := range c {
 					conflicting = append(conflicting, directTerminalActionConflict11063{global: true, name: name})
 				}
+			}
+		}
+	}
+	return merged, widened, conflicting
+}
+
+func foldPolicyInstances12820(parent *Node, fromKeys, toKeys []string,
+	ask policyActionAsk9571, merged []string, widened []foldWidenedPolicy9571,
+	conflicting []directTerminalActionConflict11063) ([]string, []foldWidenedPolicy9571, []directTerminalActionConflict11063) {
+	fold := func(container *Node) {
+		m, w, c := mergeInstancesUnder(container, "policy", ask)
+		merged = append(merged, m...)
+		widened = append(widened, zonePairWidened9571(fromKeys, toKeys, w)...)
+		conflicting = append(conflicting, zonePairDirectConflicts11063(fromKeys, toKeys, c)...)
+	}
+	fold(parent)
+	if parent != nil {
+		var wrappers []*Node
+		var peeled []*Node
+		for _, child := range parent.FindChildren("policy") {
+			if len(child.Keys) == 1 {
+				wrappers = append(wrappers, child)
+				peeled = append(peeled, child.Children...)
+			}
+		}
+		if len(peeled) > 0 {
+			scratch := &Node{Keys: []string{"policy"}, Children: peeled}
+			m, w, c := mergeInstancesUnder(scratch, "policy", ask)
+			merged = append(merged, m...)
+			widened = append(widened, zonePairWidened9571(fromKeys, toKeys, w)...)
+			conflicting = append(conflicting, zonePairDirectConflicts11063(fromKeys, toKeys, c)...)
+			kept := make(map[*Node]struct{}, len(scratch.Children))
+			for _, child := range scratch.Children {
+				kept[child] = struct{}{}
+			}
+			for _, wrapper := range wrappers {
+				children := wrapper.Children[:0]
+				for _, child := range wrapper.Children {
+					if _, ok := kept[child]; ok {
+						children = append(children, child)
+					}
+				}
+				wrapper.Children = children
 			}
 		}
 	}
@@ -151,10 +225,29 @@ func collectDirectTerminalActionConflictsFromExpandedTree(tree *ConfigTree) []di
 				conflicting = append(conflicting,
 					zonePairDirectConflicts11063(fromZone.Keys, nil,
 						directPolicyConflictNames11063(fromZone, false))...)
-				for _, toZone := range fromZone.Children {
+				if len(fromZone.Keys) >= 4 && fromZone.Keys[2] == "to-zone" {
+					continue
+				}
+				for _, child := range fromZone.Children {
 					conflicting = append(conflicting,
-						zonePairDirectConflicts11063(fromZone.Keys, toZone.Keys,
-							directPolicyConflictNames11063(toZone, false))...)
+						zonePairDirectConflicts11063(fromZone.Keys, child.Keys,
+							directPolicyConflictNames11063(child, false))...)
+					for _, toZone := range child.FindChildren("to-zone") {
+						if len(toZone.Keys) >= 2 {
+							conflicting = append(conflicting,
+								zonePairDirectConflicts11063(
+									[]string{"from-zone", child.Name()}, toZone.Keys,
+									directPolicyConflictNames11063(toZone, false))...)
+							continue
+						}
+						for _, destination := range toZone.Children {
+							conflicting = append(conflicting,
+								zonePairDirectConflicts11063(
+									[]string{"from-zone", child.Name()},
+									[]string{"to-zone", destination.Name()},
+									directPolicyConflictNames11063(destination, false))...)
+						}
+					}
 				}
 			}
 			for _, global := range policies.FindChildren("global") {
@@ -174,16 +267,14 @@ func directPolicyConflictNames11063(parent *Node, isGlobal bool) []string {
 	}
 	var conflicting []string
 	for _, child := range parent.Children {
-		if len(child.Keys) < 2 || child.Keys[0] != "policy" {
+		if len(child.Keys) == 0 || child.Keys[0] != "policy" {
 			continue
 		}
-		name := child.Keys[1]
-		policy := compilePolicy(struct {
-			name string
-			node *Node
-		}{name, child}, isGlobal)
-		if conflictingPolicyTerminalActions(policy.terminalActions) {
-			conflicting = append(conflicting, name)
+		for _, instance := range namedInstances([]*Node{child}) {
+			policy := compilePolicy(instance, isGlobal)
+			if conflictingPolicyTerminalActions(policy.terminalActions) {
+				conflicting = append(conflicting, instance.name)
+			}
 		}
 	}
 	return conflicting
@@ -235,11 +326,16 @@ func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) 
 	var foldedNames []string
 	var kept []*Node
 	for _, child := range parent.Children {
-		if len(child.Keys) < 2 || child.Keys[0] != keyword {
+		peeledPolicy := keyword == "policy" && parent.Name() == "policy" &&
+			len(child.Keys) == 1 && child.Keys[0] != "policy"
+		if (len(child.Keys) < 2 || child.Keys[0] != keyword) && !peeledPolicy {
 			kept = append(kept, child)
 			continue
 		}
-		name := child.Keys[1]
+		name := child.Keys[0]
+		if !peeledPolicy {
+			name = child.Keys[1]
+		}
 		// Asked of each statement BEFORE anything is folded into it: the first
 		// occurrence is still as authored when it is first seen, and a later one
 		// is its own node until it is appended below.
@@ -263,11 +359,13 @@ func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) 
 			continue
 		}
 		// Fold into the FIRST occurrence, which keeps its position in `kept`.
-		if tail := child.Keys[2:]; len(tail) > 0 {
-			prev.Children = append(prev.Children, &Node{
-				Keys:   append([]string(nil), tail...),
-				IsLeaf: true,
-			})
+		if !peeledPolicy {
+			if tail := child.Keys[2:]; len(tail) > 0 {
+				prev.Children = append(prev.Children, &Node{
+					Keys:   append([]string(nil), tail...),
+					IsLeaf: true,
+				})
+			}
 		}
 		prev.Children = append(prev.Children, child.Children...)
 		prev.IsLeaf = false
