@@ -1,5 +1,34 @@
 package config
 
+import "fmt"
+
+// validateALGPackedTokens rejects tokens that the ALG compiler does not consume.
+// Known ALG classes accept only the optional `disable` token; unknown classes
+// remain opaque because their vendor-specific bodies are intentionally tolerated.
+func validateALGPackedTokens(node *Node, _ *schemaNode) error {
+	if node == nil || len(node.Keys) == 0 {
+		return nil
+	}
+	proto := node.Keys[0]
+	tokens := node.Keys[1:]
+	if proto == "alg" {
+		if len(tokens) == 0 {
+			return nil
+		}
+		proto = tokens[0]
+		tokens = tokens[1:]
+	}
+	switch proto {
+	case "dns", "ftp", "sip", "tftp":
+		for _, token := range tokens {
+			if token != "disable" {
+				return fmt.Errorf("unknown configuration keyword %q under ALG %q (valid: disable)", token, proto)
+			}
+		}
+	}
+	return nil
+}
+
 // algDisabled reports whether `security alg <proto>` carries a `disable`
 // statement, in EITHER AST shape (#6564).
 //
@@ -14,16 +43,14 @@ package config
 // This is the same accumulate-both-sides discipline as firewallMatchValues /
 // addressSetMemberValues.
 func algDisabled(algNode *Node, proto string) bool {
-	protoNode := algNode.FindChild(proto)
-	if protoNode == nil {
-		return false
-	}
-	if protoNode.FindChild("disable") != nil {
-		return true
-	}
-	for _, k := range protoNode.Keys[1:] {
-		if k == "disable" {
+	for _, protoNode := range algNode.FindChildren(proto) {
+		if protoNode.FindChild("disable") != nil {
 			return true
+		}
+		for _, k := range protoNode.Keys[1:] {
+			if k == "disable" {
+				return true
+			}
 		}
 	}
 	return false

@@ -1075,11 +1075,11 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 	// is intentionally outside xpf's modeled grammar. The wildcard is not a
 	// blanket security escape — only this compiler-owned ALG value/body slot
 	// ends inherited closed-world enforcement.
-	"alg": {desc: "ALG (application layer gateway) control", children: map[string]*schemaNode{
-		"dns":  {desc: "DNS ALG", children: map[string]*schemaNode{"disable": {desc: "Disable DNS ALG", children: nil}}},
-		"ftp":  {desc: "FTP ALG", children: map[string]*schemaNode{"disable": {desc: "Disable FTP ALG", children: nil}}},
-		"sip":  {desc: "SIP ALG", children: map[string]*schemaNode{"disable": {desc: "Disable SIP ALG", children: nil}}},
-		"tftp": {desc: "TFTP ALG", children: map[string]*schemaNode{"disable": {desc: "Disable TFTP ALG", children: nil}}},
+	"alg": {desc: "ALG (application layer gateway) control", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{
+		"dns":  {desc: "DNS ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable DNS ALG", children: nil}}},
+		"ftp":  {desc: "FTP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable FTP ALG", children: nil}}},
+		"sip":  {desc: "SIP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable SIP ALG", children: nil}}},
+		"tftp": {desc: "TFTP ALG", packedTail: true, nodeValidator: validateALGPackedTokens, children: map[string]*schemaNode{"disable": {desc: "Disable TFTP ALG", children: nil}}},
 	}, wildcard: &schemaNode{desc: "Unsupported ALG class (accepted-only; compiler warning)", closedWorldOpaque: true, children: map[string]*schemaNode{
 		"disable": {desc: "Disable this ALG class", children: nil},
 	}}},
