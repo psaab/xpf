@@ -539,7 +539,10 @@ func sortParsedAddressBookCIDRs(parsed []parsedAddressBookCIDR) {
 		}
 		ma, _ := a.network.Mask.Size()
 		mb, _ := b.network.Mask.Size()
-		return ma < mb
+		if ma != mb {
+			return ma < mb
+		}
+		return a.value < b.value
 	})
 }
 
@@ -585,6 +588,26 @@ func canonicalizeParsedAddressBookContent(v4, v6 []parsedAddressBookCIDR) []byte
 		ones, _ := prefix.network.Mask.Size()
 		buf.WriteByte(byte(ones))
 		buf.Write(prefix.network.IP.To16())
+	}
+	// Preserve existing IDs for ordinary canonical books. A helper-refused
+	// padded mask has the same parsed network as its canonical spelling but
+	// cannot be parsed by Rust, so keep those exact wire spellings distinct.
+	var refused []string
+	for _, prefixes := range [][]parsedAddressBookCIDR{v4, v6} {
+		for _, prefix := range prefixes {
+			if prefix.valid && config.CIDRMaskHelperRefusesPadding(prefix.value) {
+				refused = append(refused, prefix.value)
+			}
+		}
+	}
+	if len(refused) > 0 {
+		sort.Strings(refused)
+		buf.WriteString("REFUSED")
+		binary.Write(&buf, binary.BigEndian, uint32(len(refused)))
+		for _, value := range refused {
+			binary.Write(&buf, binary.BigEndian, uint32(len(value)))
+			buf.WriteString(value)
+		}
 	}
 	return buf.Bytes()
 }
