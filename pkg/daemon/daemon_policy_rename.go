@@ -138,8 +138,12 @@ func expandPolicyRenameAncestryWithFeeds(
 		df, dt, dn string
 		// globalScope marks pairs generated because a global policy's
 		// zone SCOPE touches the renamed zone (#12857): the rule's stable
-		// ID (junos-global->junos-global/<name>) does not change.
+		// ID (junos-global->junos-global/<name>) does not change, so rule
+		// identity travels in srcRuleID/dstRuleID while sf/st/df/dt carry
+		// the per-side zone rewrite for session remapping.
 		globalScope bool
+		srcRuleID   string
+		dstRuleID   string
 	}
 	var pairs []ancestryPair
 	for _, descriptor := range descriptors {
@@ -183,36 +187,50 @@ func expandPolicyRenameAncestryWithFeeds(
 			// The new generation's same-named global must carry exactly
 			// the renamed scope; a scope that moved elsewhere is a content
 			// change, not rename continuity.
+			renamedScope := func(zones []string) []string {
+				out := append([]string{}, zones...)
+				for i, zone := range out {
+					if zone == sourceZone {
+						out[i] = destinationZone
+					}
+				}
+				sort.Strings(out)
+				return out
+			}
 			scopeOK := false
 			for _, np := range newCfg.Security.GlobalPolicies {
 				if np == nil || np.Name != policy.Name {
 					continue
 				}
-				want := append(append([]string{}, policy.Match.FromZones...), policy.Match.ToZones...)
-				for i, zone := range want {
-					if zone == sourceZone {
-						want[i] = destinationZone
-					}
-				}
-				got := append(append([]string{}, np.Match.FromZones...), np.Match.ToZones...)
-				sort.Strings(want)
-				sort.Strings(got)
-				scopeOK = slices.Equal(want, got)
+				gotFrom := append([]string{}, np.Match.FromZones...)
+				sort.Strings(gotFrom)
+				gotTo := append([]string{}, np.Match.ToZones...)
+				sort.Strings(gotTo)
+				scopeOK = slices.Equal(renamedScope(policy.Match.FromZones), gotFrom) &&
+					slices.Equal(renamedScope(policy.Match.ToZones), gotTo)
 			}
 			if !scopeOK {
 				continue
 			}
-			scope := append(append([]string{}, policy.Match.FromZones...), policy.Match.ToZones...)
-			for _, zone := range scope {
-				if zone == sourceZone {
-					pairs = append(pairs, ancestryPair{
-						sf: config.JunosGlobalZoneName, st: config.JunosGlobalZoneName, sn: policy.Name,
-						df: config.JunosGlobalZoneName, dt: config.JunosGlobalZoneName, dn: policy.Name,
-						globalScope: true,
-					})
-					break
-				}
+			inScope := func(zones []string) bool { return slices.Contains(zones, sourceZone) }
+			if !inScope(policy.Match.FromZones) && !inScope(policy.Match.ToZones) {
+				continue
 			}
+			sf, df := config.JunosGlobalZoneName, config.JunosGlobalZoneName
+			if inScope(policy.Match.FromZones) {
+				sf, df = sourceZone, destinationZone
+			}
+			st, dt := config.JunosGlobalZoneName, config.JunosGlobalZoneName
+			if inScope(policy.Match.ToZones) {
+				st, dt = sourceZone, destinationZone
+			}
+			globalID := dpuserspace.StablePolicyRuleID(
+				config.JunosGlobalZoneName, config.JunosGlobalZoneName, policy.Name)
+			pairs = append(pairs, ancestryPair{
+				sf: sf, st: st, sn: policy.Name,
+				df: df, dt: dt, dn: policy.Name,
+				globalScope: true, srcRuleID: globalID, dstRuleID: globalID,
+			})
 		}
 	}
 	if len(pairs) == 0 {
@@ -234,8 +252,14 @@ func expandPolicyRenameAncestryWithFeeds(
 		if !sourceFromOK || !sourceToOK || !destinationFromOK || !destinationToOK {
 			return nil, nil, false
 		}
-		sourceID := dpuserspace.StablePolicyRuleID(sf, st, sn)
-		destinationID := dpuserspace.StablePolicyRuleID(df, dt, dn)
+		sourceID := pair.srcRuleID
+		if sourceID == "" {
+			sourceID = dpuserspace.StablePolicyRuleID(sf, st, sn)
+		}
+		destinationID := pair.dstRuleID
+		if destinationID == "" {
+			destinationID = dpuserspace.StablePolicyRuleID(df, dt, dn)
+		}
 		oldID, oldOK := oldIDs[sourceID]
 		_, newOK := newIDs[destinationID]
 		if !oldOK || !newOK || (sourceID == destinationID && !pair.globalScope) {
