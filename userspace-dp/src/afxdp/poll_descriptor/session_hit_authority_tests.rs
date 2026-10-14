@@ -7,6 +7,7 @@ use crate::InterfaceSnapshot;
 use crate::afxdp::forwarding_build::build_forwarding_state;
 use crate::afxdp::test_fixtures::policy_deny_snapshot;
 use crate::test_zone_ids::*;
+use crate::ip_proto::PROTO_ICMP;
 
 /// `reth1.0`, zone `lan`, in `policy_deny_snapshot`.
 const LAN_A: i32 = 24;
@@ -365,4 +366,210 @@ fn an_arrival_that_resolves_to_no_zone_is_foreign_9519() {
         "an arrival the box puts in no zone cannot be the lan session's owner; it \
          is judged as a zone-0 arrival, which policy refuses to match (#3110)"
     );
+}
+
+// #12868: hit verdicts must evaluate scheduled rules at the descriptor's
+// captured `now_ns`, not at a fresh `monotonic_nanos()` read. The fixtures
+// below place the scheduler heartbeat receipt at t=1_000 with version 7, so
+// the lease is fresh at t=1_000 and expired at
+// t=1_000 + SCHEDULER_HEARTBEAT_LEASE_NS + 1. At the expired instant a
+// scheduled PERMIT must no longer match (fail-closed to the default deny);
+// at the fresh instant it must match. On the pre-fix code the verdict
+// helpers read the real clock (boot-relative, far past any 300s-old receipt
+// only if the box has been up that long — and, crucially, never equal to the
+// supplied descriptor time), so the fresh-instant assertions fail: the
+// helpers ignore the caller's timestamp entirely.
+
+use crate::PolicyRuleSnapshot;
+use crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS;
+use std::net::{IpAddr, Ipv4Addr};
+
+const SCHED_RECEIPT_NS: u64 = 1_000;
+const SCHED_EXPIRED_NS: u64 = SCHED_RECEIPT_NS + SCHEDULER_HEARTBEAT_LEASE_NS + 1;
+
+fn scheduled_icmp_forwarding() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    // Scheduled PERMIT lan -> wan, plus an unrelated typed ICMP rule to arm
+    // the packet-scoped owner check.
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "sched-lan-permit".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        scheduler_name: "workhours".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        action: "permit".into(),
+        ..Default::default()
+    });
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "icmp-type-guard".into(),
+        from_zone: "dmz".into(),
+        to_zone: "lan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["junos-icmp-ping".into()],
+        application_terms: vec![crate::PolicyApplicationSnapshot {
+            name: "junos-icmp-ping".into(),
+            protocol: "icmp".into(),
+            source_port: String::new(),
+            destination_port: String::new(),
+            icmp_type: Some(8),
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: "permit".into(),
+        ..Default::default()
+    });
+    // Scheduled PERMIT dmz -> wan (any application) replaces the fixture's
+    // unscheduled dmz permit so the foreign path is also schedule-gated.
+    for rule in snapshot.policies.iter_mut() {
+        if rule.name == "allow-other" {
+            rule.scheduler_name = "workhours".into();
+        }
+    }
+    let fw = build_forwarding_state(&snapshot);
+    assert!(
+        fw.policy
+            .icmp_packet_verdict_may_depend_on_type(PROTO_ICMP),
+        "fixture must arm the type-dependent owner check"
+    );
+    assert!(
+        fw.policy.scheduler_lease.apply(7, SCHED_RECEIPT_NS),
+        "fixture heartbeat must be accepted"
+    );
+    fw
+}
+
+fn icmp_echo_frame() -> Vec<u8> {
+    crate::afxdp::tests_support::build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 0, 1),
+        Ipv4Addr::new(172, 16, 0, 1),
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    )
+}
+
+fn icmp_flow() -> SessionFlow {
+    let src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1));
+    SessionFlow {
+        src_ip,
+        dst_ip,
+        forward_key: crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_ICMP,
+            src_ip,
+            dst_ip,
+            src_port: 0x1234,
+            dst_port: 0,
+            discriminator: crate::session::TunnelDiscriminator::None,
+            routing_domain: 0,
+        },
+    }
+}
+
+fn icmp_meta() -> UserspaceDpMeta {
+    let mut meta = UserspaceDpMeta {
+        ingress_ifindex: LAN_A as u32,
+        ..UserspaceDpMeta::default()
+    };
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    meta
+}
+
+fn forward_decision() -> SessionDecision {
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: WAN,
+            tx_ifindex: WAN,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))),
+            neighbor_mac: Some([0; 6]),
+            src_mac: Some([0; 6]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: crate::nat::NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
+}
+
+#[test]
+fn owner_forward_icmp_verdict_uses_descriptor_time_12868() {
+    let fw = scheduled_icmp_forwarding();
+    let metadata = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);
+    let flow = icmp_flow();
+    let frame = icmp_echo_frame();
+    let decision = forward_decision();
+    assert_eq!(
+        owner_hit_icmp_verdict(
+            &fw, &metadata, decision, &flow, icmp_meta(), &frame, SCHED_RECEIPT_NS,
+        ),
+        Some(OwnerHitIcmpVerdict::Forward),
+        "at the fresh descriptor time the scheduled permit is live"
+    );
+    assert!(matches!(
+        owner_hit_icmp_verdict(
+            &fw, &metadata, decision, &flow, icmp_meta(), &frame, SCHED_EXPIRED_NS,
+        ),
+        Some(OwnerHitIcmpVerdict::Drop(_))
+    ));
+}
+
+#[test]
+fn owner_reverse_icmp_verdict_uses_descriptor_time_12868() {
+    let fw = scheduled_icmp_forwarding();
+    let mut metadata = session(TEST_LAN_ZONE_ID, LAN_A, 0, true);
+    metadata.egress_zone = TEST_WAN_ZONE_ID;
+    let flow = icmp_flow();
+    let frame = icmp_echo_frame();
+    let decision = forward_decision();
+    assert_eq!(
+        owner_hit_icmp_verdict(
+            &fw, &metadata, decision, &flow, icmp_meta(), &frame, SCHED_RECEIPT_NS,
+        ),
+        Some(OwnerHitIcmpVerdict::Forward),
+        "reverse non-answer at fresh descriptor time uses the scheduled permit"
+    );
+    assert!(matches!(
+        owner_hit_icmp_verdict(
+            &fw, &metadata, decision, &flow, icmp_meta(), &frame, SCHED_EXPIRED_NS,
+        ),
+        Some(OwnerHitIcmpVerdict::Drop(_))
+    ));
+}
+
+#[test]
+fn foreign_hit_verdict_uses_descriptor_time_12868() {
+    let fw = scheduled_icmp_forwarding();
+    let metadata = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);
+    let flow = icmp_flow();
+    let frame = icmp_echo_frame();
+    let decision = forward_decision();
+    let sessions = SessionTable::new();
+    let key = flow.forward_key.clone();
+    // Foreign arrival from dmz: judged dmz -> wan, covered by the scheduled
+    // `allow-other` permit.
+    assert!(matches!(
+        foreign_hit_verdict(
+            &fw, &sessions, &key, &metadata, decision, &flow, icmp_meta(), &frame,
+            TEST_DMZ_ZONE_ID, false, SCHED_RECEIPT_NS,
+        ),
+        ForeignHitVerdict::Forward
+    ));
+    assert!(matches!(
+        foreign_hit_verdict(
+            &fw, &sessions, &key, &metadata, decision, &flow, icmp_meta(), &frame,
+            TEST_DMZ_ZONE_ID, false, SCHED_EXPIRED_NS,
+        ),
+        ForeignHitVerdict::Drop(_)
+    ));
 }
