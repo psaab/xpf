@@ -468,7 +468,9 @@ func (r *addressBookExpansionResolver) appendCIDR(out *addressBookParsedExpansio
 // #12216: this mirrors policy-path quarantine for colliding names, declared but
 // unready feeds, unusable address values, and dangling members. A ready feed
 // still contributes its live prefixes; a present-empty fail-mode-drop overlay
-// remains an intentional match-none value (#10014).
+// remains an intentional match-none value (#10014) that takes precedence over
+// a same-named static closure, exactly as the #12961 policy resolver gate
+// does for book rows (#12965 keeps NAT lowering in that parity).
 func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]string, bindings map[string]*config.AddressBinding, name string, visited map[string]bool, _depth int) ([]string, bool) {
 	if ab != nil {
 		if _, collision := ab.CollidingNames[name]; collision {
@@ -491,6 +493,13 @@ func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]st
 			return out, false
 		}
 		return nil, true
+	}
+	// #12965: a present-empty overlay for a declared fail-mode drop binding
+	// is the binding's match-none intent — the same-named static closure must
+	// not resurrect after the feed drops (parity with the #12961 policy
+	// resolver gate in addressBookExpansionResolver.expand).
+	if feedBound && len(feeds) == 0 && bindings[name] != nil && bindings[name].FailMode == "drop" {
+		return out, false
 	}
 	if addr, ok := ab.Addresses[name]; ok {
 		if value := addr.UsableValue(); value != "" {
