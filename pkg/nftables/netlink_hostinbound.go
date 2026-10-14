@@ -840,6 +840,11 @@ func emitHostInboundScreenFloodNetlink(p *nlPlan, rules []HostInboundScreenFlood
 				a.needNfproto(screenFloodFamily(screen))
 			}))
 		}
+		if (len(screen.IngressNetdevs) > 0 || len(screen.IngressVRFScopes) > 0) && len(screen.Addresses) > 0 {
+			emit(makeBase(func(a *ruleAsm) {
+				a.daddr(screenFloodFamily(screen), screen.Addresses, false)
+			}))
+		}
 	}
 }
 

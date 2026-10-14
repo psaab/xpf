@@ -2403,6 +2403,12 @@ func emitHostInboundScreenFloodText(rules *[]string, screens []xnft.HostInboundS
 				emit(hostInboundScreenFloodMatchesText(screen, &scope))
 			}
 		}
+		if (len(screen.IngressNetdevs) > 0 || len(screen.IngressVRFScopes) > 0) && len(screen.Addresses) > 0 {
+			fallback := screen
+			fallback.IngressNetdevs = nil
+			fallback.IngressVRFScopes = nil
+			emit(hostInboundScreenFloodMatchesText(fallback, nil))
+		}
 	}
 }
 

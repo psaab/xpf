@@ -30,30 +30,29 @@ type HostInboundScreenFloodRule struct {
 	SourceThreshold    uint32
 	IngressNetdevs     []string
 	IngressVRFScopes   []config.HostInboundVRFIngressScope
-	Addresses          []string
+	Addresses          []string // residual destination fallback for views lacking ingress scope
 	AlarmWithoutDrop   bool
 }
 
 // HostInboundScreenFloodRules coalesces per-interface host-inbound views into
-// one screen budget per zone and address family. Ingress device scopes take
-// precedence over destination addresses, matching the worker's ingress-zone
-// screen selection; address matching is the fallback for views without an
-// unambiguous ingress device.
+// one screen budget per zone and address family. Ingress device scopes cover
+// unambiguous views; Addresses retains the destination fallback for views
+// without an unambiguous ingress device.
 func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScreenFloodRule {
 	type zoneFlood struct {
-		v4, v6, ingress              map[string]struct{}
-		vrfIngress                   map[string]map[string]struct{}
-		icmp, udp, syn, synSource    uint32
-		profileSet, alarmWithoutDrop bool
+		v4, v6, ingress, fallbackV4, fallbackV6 map[string]struct{}
+		vrfIngress                              map[string]map[string]struct{}
+		icmp, udp, syn, synSource               uint32
+		profileSet, alarmWithoutDrop            bool
 	}
 	zones := make(map[string]*zoneFlood)
 	for _, view := range views {
 		z := zones[view.Zone]
 		if z == nil {
 			z = &zoneFlood{
-				v4:         make(map[string]struct{}),
-				v6:         make(map[string]struct{}),
-				ingress:    make(map[string]struct{}),
+				v4: make(map[string]struct{}), v6: make(map[string]struct{}),
+				ingress: make(map[string]struct{}),
+				fallbackV4: make(map[string]struct{}), fallbackV6: make(map[string]struct{}),
 				vrfIngress: make(map[string]map[string]struct{}),
 			}
 			zones[view.Zone] = z
@@ -64,7 +63,8 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 		for _, addr := range view.V6Addrs {
 			z.v6[addr] = struct{}{}
 		}
-		for _, name := range hostInboundDirectIngressNetdevs(view) {
+		direct := hostInboundDirectIngressNetdevs(view)
+		for _, name := range direct {
 			z.ingress[name] = struct{}{}
 		}
 		for _, scope := range view.IngressVRFScopes {
@@ -76,6 +76,14 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 			}
 			for _, slave := range scope.Slaves {
 				z.vrfIngress[scope.Master][slave] = struct{}{}
+			}
+		}
+		if len(direct) == 0 && len(view.IngressVRFScopes) == 0 {
+			for _, addr := range view.V4Addrs {
+				z.fallbackV4[addr] = struct{}{}
+			}
+			for _, addr := range view.V6Addrs {
+				z.fallbackV6[addr] = struct{}{}
 			}
 		}
 
@@ -106,9 +114,15 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 		z := zones[zoneName]
 		ingress := sortedKeys(z.ingress)
 		for _, family := range []string{"ip", "ip6"} {
-			addresses := sortedKeys(z.v4)
+			addresses := sortedKeys(z.fallbackV4)
 			if family == "ip6" {
-				addresses = sortedKeys(z.v6)
+				addresses = sortedKeys(z.fallbackV6)
+			}
+			if len(ingress) == 0 && len(z.vrfIngress) == 0 {
+				addresses = sortedKeys(z.v4)
+				if family == "ip6" {
+					addresses = sortedKeys(z.v6)
+				}
 			}
 			if len(ingress) == 0 && len(z.vrfIngress) == 0 && len(addresses) == 0 {
 				continue
@@ -118,15 +132,10 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 					return
 				}
 				out = append(out, HostInboundScreenFloodRule{
-					Zone:               zoneName,
-					Family:             family,
-					Protocol:           protocol,
-					AggregateThreshold: aggregateThreshold,
-					SourceThreshold:    sourceThreshold,
-					IngressNetdevs:     ingress,
-					IngressVRFScopes:   sortedScreenVRFScopes(z.vrfIngress),
-					Addresses:          addresses,
-					AlarmWithoutDrop:   z.alarmWithoutDrop,
+					Zone: zoneName, Family: family, Protocol: protocol,
+					AggregateThreshold: aggregateThreshold, SourceThreshold: sourceThreshold,
+					IngressNetdevs: ingress, IngressVRFScopes: sortedScreenVRFScopes(z.vrfIngress),
+					Addresses: addresses, AlarmWithoutDrop: z.alarmWithoutDrop,
 				})
 			}
 			appendRule("udp", screenFloodSaturatingMultiply(z.udp, hostInboundScreenFloodSecondaryCeilingMultiplier), z.udp)
