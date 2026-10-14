@@ -223,11 +223,9 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					"address":     {desc: "Address to include in this set", args: 1, multi: true, placeholder: "<address-name>", children: nil},
 					"address-set": {desc: "Nested address set to include", args: 1, multi: true, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", children: nil},
 					// NOT tagged scalar:true (#3332): AddressSet has no Description
-					// field (types_security.go) and parseAddressBookEntries does
-					// not read an address-set `description` child, so the value is
-					// currently unsupported and discarded at compile. An arity gate
-					// here would assert validation on a feature that has no effect;
-					// tag it scalar only if/when AddressSet.Description is wired.
+					// field (types_security.go), so its metadata value is accepted
+					// but not stored. parseAddressBookEntries still extracts any
+					// address/address-set members packed after the description.
 					"description": {desc: "Address set description", args: 1, placeholder: "<text>", children: nil},
 				}},
 			}},
@@ -802,11 +800,9 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"address":     {desc: "Address to include in this set", args: 1, multi: true, placeholder: "<address-name>", children: nil},
 				"address-set": {desc: "Nested address set to include", args: 1, multi: true, valueHint: ValueHintAddressName, placeholder: "<address-set-name>", children: nil},
 				// NOT tagged scalar:true (#3332): AddressSet has no Description
-				// field (types_security.go) and parseAddressBookEntries does
-				// not read an address-set `description` child, so the value is
-				// currently unsupported and discarded at compile. An arity gate
-				// here would assert validation on a feature that has no effect;
-				// tag it scalar only if/when AddressSet.Description is wired.
+				// field (types_security.go), so its metadata value is accepted
+				// but not stored. parseAddressBookEntries still extracts any
+				// address/address-set members packed after the description.
 				"description": {desc: "Address set description", args: 1, placeholder: "<text>", children: nil},
 			}},
 		}},
