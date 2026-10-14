@@ -210,7 +210,7 @@ func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[st
 		if gp == nil {
 			continue
 		}
-		if !globalAppliesToZoneAfterQuarantine(gp.Match, zone, viewedExcluded) {
+		if !GlobalPolicyAppliesToZoneAfterQuarantine(gp.Match, zone, viewedExcluded) {
 			continue
 		}
 		// #12896: render the scope the apply-time scrub would leave. A
@@ -255,7 +255,7 @@ func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[st
 	return lines
 }
 
-// globalAppliesToZoneAfterQuarantine is the #12896 live-zone-aware tier-2
+// GlobalPolicyAppliesToZoneAfterQuarantine is the #12896 live-zone-aware tier-2
 // selection predicate. For an INSTALLED viewed zone it is exactly
 // config.GlobalPolicyAppliesToZone (wildcard-or-membership on either side).
 // For a quarantined viewed zone only a scope that LITERALLY names the zone
@@ -264,7 +264,11 @@ func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[st
 // this one, so listing it there represented a live rule as governing a zone
 // that cannot carry traffic. The literal spellings stay for diagnosis, each
 // scrub-marked by scrubbedScopeLabel.
-func globalAppliesToZoneAfterQuarantine(m config.PolicyMatch, zone string, viewedExcluded bool) bool {
+//
+// Exported for #12899 so the remote-CLI zone summary — which selects its
+// global tier from the gRPC policy inventory instead of config — applies this
+// same SSOT predicate rather than re-deriving a drift-prone copy.
+func GlobalPolicyAppliesToZoneAfterQuarantine(m config.PolicyMatch, zone string, viewedExcluded bool) bool {
 	if !viewedExcluded {
 		return config.GlobalPolicyAppliesToZone(m, zone)
 	}
