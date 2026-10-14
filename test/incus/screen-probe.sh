@@ -40,6 +40,11 @@
 # They are supplied by the caller because the crafted frame IS the experiment;
 # this script owns the arming, sampling, witnessing and cleanup around it.
 #
+# EXIT STATUS: 0 only when the witness was live and the subject was DROPPED
+# with both nodes left clean — rc0 is a green DROP gate and nothing else.
+# 1 PASSED (subject not dropped; read the printed verdict), 2 VOID,
+# 3 the shared cluster was left armed, 4 a broken decision layer (#12911).
+#
 # This script takes the shared-cluster lock via cluster-cell.sh, like every
 # other destructive or config-mutating target. NEVER run it outside the lock:
 # it commits config to both nodes.
@@ -48,6 +53,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=screen-probe-lib.sh
 source ./screen-probe-lib.sh
+# #12911: the header has always promised the shared-cluster lock, but the
+# body never took it — a live probe commits screen config to BOTH nodes, so
+# it can collide with another lane's deploy or smoke. Enter the #1875 cell
+# like every other config-mutating target: a standalone run re-execs through
+# with-cluster.sh and QUEUES behind a held lock; a run already inside a cell
+# proceeds lock-free (cells nest).
+# shellcheck source=cluster-cell.sh
+source ./cluster-cell.sh
+xpf_enter_destructive_cluster_cell "screen-probe $*" "$0" "$@"
 # shellcheck source=cluster-env.sh
 source ./cluster-env.sh
 # shellcheck source=cos-apply-lib.sh
@@ -58,10 +72,15 @@ WITNESS_CMD="${2:?usage: screen-probe.sh <subject-send-cmd> <witness-send-cmd>}"
 PROFILE="${SCREEN_PROBE_PROFILE:-probe8336}"
 
 metrics() {
-	# The aggregate, per trap 2. Prints the raw sample or nothing.
+	# The extractor lives in the lib and is label-aware (#12910): the
+	# per-reason family is exported ONLY as labeled series, which an exact
+	# `$1 == m` awk match can never see — that shape made every witness
+	# sample empty and every live verdict VOID. Prints the family value
+	# (summed across label sets) or nothing. The subject stays the
+	# aggregate, per trap 2.
 	incus exec "$FW0" -- curl -sf --max-time 5 \
 		http://127.0.0.1:8080/metrics 2>/dev/null \
-		| awk -v m="$1" '$1 == m { print $2 }' | head -1
+		| screen_probe_extract_metric "$1"
 }
 
 # arm commits the screen profile and VERIFIES the commit from the CLI
@@ -158,12 +177,20 @@ cleanup="$(screen_probe_disarm_verdict \
 	"$(count_profile_on "$FW0")" "$(count_profile_on "$FW1")")"
 printf 'SCREEN PROBE CLEANUP: %s\n' "$cleanup"
 
-# A VOID measurement is not a pass. Exit non-zero so a caller that only checks
-# the status does not read "we did not measure" as "nothing was wrong" -- which
-# is the reading this whole file exists to make impossible.
-case "$verdict" in
-	VOID\ *) exit 2 ;;
-esac
-case "$cleanup" in
-	FAIL\ *) exit 3 ;;
-esac
+# The process contract (#12911), decided by the lib so it is testable
+# without a cluster — `screen_probe_exit_status`:
+#   0   DROPPED and both nodes clean: the only green. rc0 means the witness
+#       was live AND the subject was dropped, the sole reading an
+#       exit-code-only caller may take as a passed DROP gate.
+#   1   PASSED: the subject REACHED the screen and was NOT dropped — for an
+#       instrument whose subject is a frame that should be screened, that is
+#       the failed finding. Read the printed verdict for the diagnostic.
+#   2   VOID: the measurement did not happen; nothing was learned.
+#   3   cleanup FAIL: the shared cluster was left armed, which is worse than
+#       any measurement outcome — so it outranks the verdict, and VOID's
+#       exit no longer masks it.
+#   4   an unrecognised verdict or cleanup: the decision layer is broken;
+#       fail closed.
+rc=0
+screen_probe_exit_status "$verdict" "$cleanup" || rc=$?
+exit "$rc"
