@@ -375,6 +375,40 @@ func ZoneQuarantineSurvivorName(name string, names []string) string {
 	return StableZoneIDOwner(names, StableZoneID(name))
 }
 
+// ScopedGlobalQuarantineDropped reports whether the zone-quarantine scrub
+// mirrors the runtime DROP decision for a scoped-global policy
+// (userspace scrubPoliciesForQuarantinedZones, #5577): true exactly when a
+// CONFIGURED match side (len > 0) has EVERY member in the quarantined set —
+// leaving that side installed would silently broaden the rule to all zones,
+// so the whole rule is dropped and cannot match, count, or be enforced.
+//
+// A MIXED scope — some members quarantined, at least one survivor on every
+// configured side — keeps the rule installed and enforced for the survivors,
+// so the observability surfaces must keep reading its live counters instead
+// of marking the whole rule quarantined (#12897). An unscoped side (len == 0,
+// all-zones) can never be emptied, matching the runtime prune which leaves it
+// untouched.
+//
+// quarantined is the caller's display-facing exclusion set
+// (ZoneQuarantineExclusionsForConfig); zone-pair rules do not route through
+// this helper — their singular endpoints quarantine the whole rule by
+// definition and each surface keeps its existing isQuarantined(from) ||
+// isQuarantined(to) spelling.
+func ScopedGlobalQuarantineDropped(from, to []string, quarantined map[string]struct{}) bool {
+	sideDropped := func(scope []string) bool {
+		if len(scope) == 0 {
+			return false
+		}
+		for _, name := range scope {
+			if _, drop := quarantined[name]; !drop {
+				return false
+			}
+		}
+		return true
+	}
+	return sideDropped(from) || sideDropped(to)
+}
+
 // StableZoneIDOwner returns the sorted-first installed zone name that owns a
 // numeric zone id among names. Reserved context names are excluded because
 // snapshot builders quarantine them rather than installing them. It returns

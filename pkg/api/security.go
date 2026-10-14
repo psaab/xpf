@@ -387,7 +387,13 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 			}
 			displayFromZones, fromScopeQuarantined := pruneQuarantinedScope(rule.Match.FromZones)
 			displayToZones, toScopeQuarantined := pruneQuarantinedScope(rule.Match.ToZones)
-			scopeQuarantined := fromScopeQuarantined || toScopeQuarantined
+			// #12897: mirror the runtime scrub (#5577) — only a configured
+			// side EMPTIED by the prune drops the whole global rule; a mixed
+			// scope survives enforced for its live members, so its counters
+			// stay live. The description qualifier below still marks any
+			// pruned member.
+			scopeQuarantined := config.ScopedGlobalQuarantineDropped(rule.Match.FromZones, rule.Match.ToZones, quarantinedZones)
+			scopePruned := fromScopeQuarantined || toScopeQuarantined
 			pr := PolicyRule{
 				Name:        rule.Name,
 				Description: rule.Description,
@@ -436,11 +442,11 @@ func (s *Server) policiesHandler(w http.ResponseWriter, _ *http.Request) {
 			if pr.Applications == nil {
 				pr.Applications = []string{}
 			}
-			if scopeQuarantined {
+			if scopePruned {
 				pr.Description = appendPolicyQualifier(pr.Description)
-				if statsEnabled || rule.Count {
-					pr.HitCountersUnavailable = true
-				}
+			}
+			if scopeQuarantined && (statsEnabled || rule.Count) {
+				pr.HitCountersUnavailable = true
 			}
 
 			if !scopeQuarantined && (statsEnabled || rule.Count) {

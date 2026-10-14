@@ -3272,6 +3272,10 @@ type PolicyRule struct {
 	// #11072: true when either of the rule's zones is StableZoneID-collision
 	// quarantined. The text twin marks such scope (ZoneQuarantinePoliciesQualifier);
 	// without this bit a remote show presents scrubbed permits as live.
+	// #12897: for a scoped GLOBAL this is the whole-rule verdict the runtime
+	// scrub (#5577) makes — true only when a configured match side is EMPTIED
+	// by quarantine (the rule is dropped); a mixed scope keeps the rule
+	// enforced for its surviving zones, reads false, and carries live counters.
 	// Additive; false (omitted) for unquarantined scope.
 	Quarantined   bool `protobuf:"varint,24,opt,name=quarantined,proto3" json:"quarantined,omitempty"`
 	unknownFields protoimpl.UnknownFields

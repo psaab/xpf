@@ -204,26 +204,18 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 	// fail-closed match-policies simulator (#3414).
 	schedActive, haveSched := s.policySchedulerActiveState()
 	// #11072: mirror the text twin's quarantine marking (server_show_policies_text.go):
-	// a rule whose scope touches a StableZoneID-collision quarantine carries
-	// Quarantined=true so remote show does not present scrubbed permits as live.
+	// a rule the zone-quarantine scrub would DROP carries Quarantined=true so
+	// remote show does not present scrubbed permits as live. #12897: for a
+	// scoped global that is the whole-rule verdict — only a configured match
+	// side EMPTIED by quarantine drops it; a mixed scope stays enforced for
+	// its survivors, so it is NOT wholly quarantined and its counters stay
+	// live below.
 	quarantinedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
 	isQuarantined := func(name string) bool {
 		_, ok := quarantinedZones[name]
 		return ok
 	}
-	scopeQuarantined := func(from, to []string) bool {
-		for _, name := range from {
-			if isQuarantined(name) {
-				return true
-			}
-		}
-		for _, name := range to {
-			if isQuarantined(name) {
-				return true
-			}
-		}
-		return false
-	}
+
 	var policySetID uint32
 	for _, zpp := range cfg.Security.Policies {
 		// #3476: skip a nil zone-pair set (tolerant / HA-sync path) while
@@ -337,7 +329,7 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 				Name:        rule.Name,
 				Description: rule.Description,
 				Action:      policyActionStr(rule.Action),
-				Quarantined: scopeQuarantined(rule.Match.FromZones, rule.Match.ToZones),
+				Quarantined: config.ScopedGlobalQuarantineDropped(rule.Match.FromZones, rule.Match.ToZones, quarantinedZones),
 				// #3358: unqualify synthetic zone-local keys (#3061) so the
 				// inventory exposes the authored book name, not the internal
 				// compiler token. DisplayAddressNames returns a new slice.
