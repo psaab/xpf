@@ -1166,7 +1166,11 @@ func validatePortSpec(spec string) error {
 // tagging is inferred from standard service tuples only (FTP TCP/21, DNS UDP/53,
 // SIP TCP/UDP/5060), so a known pin such as `alg ftp destination-port 2121`
 // has no dataplane effect. TFTP has no conntrack tag at any port. #11673 warns
-// on such inert pins; wiring a per-application ALG through to enforcement needs
+// on such inert pins; #12837 aligns the tag-eligibility check with the tagger:
+// protocol aliases (junos-tcp-any / junos-udp-any) and canonical numerics
+// resolve like appid.ProtocolNumber, and `security alg <proto> disable` leaves
+// every tuple of that ALG untagged, so a disabled well-known pin warns naming
+// the knob. Wiring a per-application ALG through to enforcement needs
 // a new snapshot field plus Rust session-metadata handling, a genuine dataplane
 // fork deliberately deferred to the per-application slice of broader #2008.
 var supportedApplicationALGs = map[string]bool{
