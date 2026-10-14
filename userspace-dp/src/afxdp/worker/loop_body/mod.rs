@@ -37,6 +37,7 @@ use crate::afxdp::ipsec_inner::{
 use crate::afxdp::ipsec_inner_queue::{
     reason as ipsec_reason, IPSEC_INNER_DRAIN_BUDGET, IpsecInnerDoubleBatch, IpsecInnerVerdict,
 };
+use crate::slowpath_reinject_9506::{ReinjectLease, SUBMIT_FLAG_FORWARD};
 // #1776: the one-shot setup phase (thread pin, TSC calibration,
 // initial ArcSwap load_fulls, binding construction, BPF-map-FD
 // cache, initial cos_status publish) lives in loop_body/setup.rs.
@@ -1369,6 +1370,50 @@ pub(crate) fn worker_loop(
                         let Some(decision) = decision else {
                             continue;
                         };
+                        // #9506 S9.5 FORWARD permit join: a successful
+                        // adjudication of a SUBMIT_FLAG_FORWARD frame arms the
+                        // leased adjudicated-TUN write while this worker still
+                        // owns the slab. Arming (or its refusal rollback)
+                        // happens BEFORE the verdict is posted, so the verdict
+                        // drain can never terminalize an armed entry; the
+                        // writer thread's pre-write check linearizes
+                        // authorization and resolve_write emits the terminal.
+                        // Frames without the flag (the D11 witness path) keep
+                        // the deny-only WouldPermit terminal.
+                        if decision.is_would_permit()
+                            && descriptor.flags & SUBMIT_FLAG_FORWARD != 0
+                        {
+                            if let Some(slow_path) = slow_path.as_ref() {
+                                let lease = ReinjectLease {
+                                    request_id: descriptor.request_id,
+                                    permit_epoch: descriptor.permit_epoch,
+                                    queue_number: descriptor.queue_number,
+                                    queue_epoch: descriptor.queue_epoch,
+                                };
+                                let forwarded = match transport
+                                    .pool()
+                                    .buffer(descriptor.slab_id)
+                                {
+                                    Some(buffer) => match buffer
+                                        .get(..descriptor.len as usize)
+                                    {
+                                        Some(bytes) => slow_path
+                                            .forward_ipsec_inner_permit(
+                                                bytes.to_vec(),
+                                                lease,
+                                                descriptor.flow_tag,
+                                            ),
+                                        None => false,
+                                    },
+                                    None => false,
+                                };
+                                if !forwarded {
+                                    // The completion entry is already a
+                                    // definitive Refused terminal (or was
+                                    // never armed); fail-closed, no write.
+                                }
+                            }
+                        }
                         let verdict = verdict_from_decision(&decision);
                         if let Err(failed) = transport.post_worker_verdict(worker_id, verdict) {
                             let _ = transport.requeue_worker_verdict(worker_id, failed);

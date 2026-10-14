@@ -455,6 +455,7 @@ pub(crate) fn run() -> Result<(), String> {
             ipsec_inner_worker_retired_total: 0,
             ipsec_inner_worker_orphan_reaped_total: 0,
             ipsec_inner_orphan_provisional_total: 0,
+            ipsec_inner_permit_forward_armed_total: 0,
             session_delete_replica_dropped: 0,
             session_delete_replica_drop_repaired: 0,
             ha_transition_demote_dropped: 0,

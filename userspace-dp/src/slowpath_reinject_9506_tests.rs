@@ -1836,3 +1836,50 @@ fn authority_restart_clears_old_run_provenance() {
     assert_eq!(status.run_id, "run-b");
     assert!(status.provenance.is_empty());
 }
+
+#[test]
+fn armed_would_permit_waits_for_the_write_terminal_9506() {
+    // #9506 S9.5 permit join: an ARMED (forwarded) Would-Permit verdict must
+    // NOT terminalize the completion entry. The writer thread's pre-write
+    // check linearizes authorization and resolve_write emits the terminal;
+    // before that, nothing is streamable to Go. RED on the deny-only bridge:
+    // the verdict terminalized WouldPermit and the pre-write check then saw
+    // a Terminal entry instead of Queued.
+    let core = open_core();
+    assert!(core.admit(&frame(950, 17, 64)).admitted);
+    assert!(core.arm_write(&lease(950)));
+    assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::WouldPermit {
+        request_id: 950
+    }));
+    assert!(
+        core.peek_ready(8).is_empty(),
+        "an armed entry must wait for its write terminal"
+    );
+    assert!(matches!(
+        core.pre_write_check(&lease(950)),
+        super::PreWrite::Proceed
+    ));
+    assert!(core.resolve_write(&lease(950), written(64)));
+    let ready = core.peek_ready(8);
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].request_id, 950);
+    assert_eq!(ready[0].outcome, ReinjectOutcome::Written);
+    assert_eq!(ready[0].bytes_written, 64);
+}
+
+#[test]
+fn unarmed_would_permit_keeps_deny_only_terminal_9506() {
+    // The D11 witness path posts Would-Permit WITHOUT arming a write; that
+    // verdict stays a deny-only terminal so the witness semantics are
+    // unchanged by the permit join.
+    let core = open_core();
+    assert!(core.admit(&frame(951, 18, 64)).admitted);
+    assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::WouldPermit {
+        request_id: 951
+    }));
+    let ready = core.peek_ready(8);
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].request_id, 951);
+    assert_eq!(ready[0].outcome, ReinjectOutcome::WouldPermit);
+    assert_eq!(ready[0].bytes_written, 0);
+}

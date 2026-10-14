@@ -614,8 +614,8 @@ affected tunnels and each one's zone: `warnSecureTunnelPlaintextUnadjudicatedAST
 aggregation shape and zone-membership reader
 (`pkg/config/compiler_tunnel_plaintext_advisory.go`) but, since #9251, not their
 headings or unzoned caveat. The IPsec advisory escalates a zoned tunnel
-("ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as
-zone-adjudicated and is not").
+("ASSIGNED A ZONE, BUT DECRYPTED TRAFFIC IS NOT FULLY UNDER THAT POLICY —
+stateless FORWARD adjudication, dropped INPUT").
 The WireGuard advisory says the zone is enforced on the dataplane path and NOT
 on the kernel path, names host-inbound delivery plus transit refusal on both
 uncovered and covered ingress, says other listen ports are dropped there, and
@@ -632,12 +632,19 @@ both HA node views — and NEITHER can reject: they have no error return and no
 `lenient` flag, so a box already running a tunnel can still commit an unrelated
 change (#1960 no-brick).
 
-The advisories make the remaining boundary VISIBLE; they do not make the
-kernel path zone-adjudicated. For IPsec, #9506 now owns the kernel-to-userspace
-capture bridge: an admitted generation diverts INPUT+FORWARD captures before
-policy and fail-closes them with terminal DROP. The Rust D11 adjudicated-PERMIT
-join remains unbuilt; #9506 owns the capture bridge and D11 owns the still-
-unwired permit path. For WireGuard, the degraded covered-ingress half refuses
+The advisories make the remaining boundary VISIBLE. For IPsec, #9506 owns the
+kernel-to-userspace capture bridge AND, since the S9.5 FORWARD permit join,
+the adjudicated permit: an admitted generation diverts INPUT+FORWARD captures
+before policy, the enforcing pipeline plus the Rust D13/D14 gate adjudicate
+every frame (zone, tunnel row, main-table route domain, and selector
+containment of source AND destination), a permitted FORWARD frame re-enters
+through the leased adjudicated-TUN write (kernel main table, D_usp1) with its
+original terminally dropped, and every other frame — INPUT, fragments, and
+every refusal — is terminally dropped. The permit is STATELESS: no session,
+NAT, screen, or HA publication runs on the permitted path, INPUT permits
+(D12a Option A) remain denied, and the live SA-level denied+permitted
+witness, HA behaviour and the per-packet pricing gate (V2) are still owed.
+For WireGuard, the degraded covered-ingress half refuses
 transit since #9594, and Half A (#10527) extends that refusal to the previously
 uncovered ingress while preserving host-inbound delivery. Half B remains a
 separate follow-up for a full WG local-delivery seam; it is not part of #10527.

@@ -594,6 +594,10 @@ pub(crate) struct ProcessStatus {
     pub ipsec_inner_worker_orphan_reaped_total: u64,
     #[serde(rename = "ipsec_inner_orphan_provisional_total", default)]
     pub ipsec_inner_orphan_provisional_total: u64,
+    /// #9506 S9.5: leased adjudicated-TUN writes armed for worker-adjudicated
+    /// WouldPermit frames. Additive / defaulted for backward compatibility.
+    #[serde(rename = "ipsec_inner_permit_forward_armed_total", default)]
+    pub ipsec_inner_permit_forward_armed_total: u64,
     /// #9720: the per-command split of `worker_command_queue_drops` for the
     /// three RG-transition commands (`DemoteOwnerRGS`, `RefreshOwnerRGS`,
     /// `VacateAllSharedExactSlots`), in PUSHES. Each refusal is recorded as

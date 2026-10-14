@@ -1182,12 +1182,68 @@ impl SlowPathReinjector {
         )
     }
 
+    /// #9506 S9.5 permit join: hand one worker-adjudicated WouldPermit
+    /// frame to the adjudicated-TUN writer under its lease. Arming happens
+    /// before the enqueue so the WouldPermit verdict cannot terminalize the
+    /// completion entry; the writer's `pre_write_check` is the authorization
+    /// linearization point and `resolve_write` emits the terminal outcome.
+    /// Admission-class accounting already ran at submit admission, so this
+    /// path does not record the class again. Any enqueue refusal rolls the
+    /// entry back to a definitive Refused terminal (fail-closed: no write,
+    /// no NF_ACCEPT, Go drops the original).
+    pub(crate) fn forward_ipsec_inner_permit(
+        &self,
+        bytes: Vec<u8>,
+        lease: ReinjectLease,
+        flow_tag: u64,
+    ) -> bool {
+        if !self.reinject_core.arm_write(&lease) {
+            return false;
+        }
+        match self.enqueue_request(
+            &self.tx_delegated,
+            &self.status_delegated,
+            bytes,
+            PacketQueue::Adjudicated,
+            Some(lease),
+            flow_tag,
+            false,
+        ) {
+            Ok(EnqueueOutcome::Accepted) => {
+                crate::afxdp::ipsec_inner::ipsec_inner_permit_forward_armed_total
+                    .fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            outcome => {
+                let _ = outcome;
+                self.reinject_core
+                    .refuse_queued(&lease, "permit forward enqueue refused".to_string());
+                false
+            }
+        }
+    }
+
+
     fn enqueue_on(
         &self,
         tx: &SyncSender<PacketRequest>,
         status: &Arc<SharedStatus>,
         bytes: Vec<u8>,
         queue: PacketQueue,
+    ) -> Result<EnqueueOutcome, String> {
+        self.enqueue_request(tx, status, bytes, queue, None, 0, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_request(
+        &self,
+        tx: &SyncSender<PacketRequest>,
+        status: &Arc<SharedStatus>,
+        bytes: Vec<u8>,
+        queue: PacketQueue,
+        lease: Option<ReinjectLease>,
+        flow_tag: u64,
+        record_class: bool,
     ) -> Result<EnqueueOutcome, String> {
         let packet_len = bytes.len() as u64;
         // Refuse frames larger than the live TUN MTU before they reach a
@@ -1199,8 +1255,10 @@ impl SlowPathReinjector {
             status
                 .dropped_bytes
                 .fetch_add(packet_len, Ordering::Relaxed);
-            if let Some(class) = admission_class(queue) {
-                self.reinject_core.record_class_refused(class);
+            if record_class {
+                if let Some(class) = admission_class(queue) {
+                    self.reinject_core.record_class_refused(class);
+                }
             }
             return Ok(EnqueueOutcome::MtuExceeded);
         }
@@ -1217,8 +1275,10 @@ impl SlowPathReinjector {
             status
                 .rate_limited_packets
                 .fetch_add(1, Ordering::Relaxed);
-            if let Some(class) = admission_class(queue) {
-                self.reinject_core.record_class_refused(class);
+            if record_class {
+                if let Some(class) = admission_class(queue) {
+                    self.reinject_core.record_class_refused(class);
+                }
             }
             return Ok(EnqueueOutcome::RateLimited);
         }
@@ -1231,8 +1291,8 @@ impl SlowPathReinjector {
         match tx.try_send(PacketRequest {
             bytes,
             queue,
-            lease: None,
-            flow_tag: 0,
+            lease,
+            flow_tag,
         }) {
             Ok(()) => {
                 #[cfg(test)]
@@ -1247,8 +1307,10 @@ impl SlowPathReinjector {
                         .expect("test packet observation")
                         .push((matches!(queue, PacketQueue::Delegated), bytes));
                 }
-                if let Some(class) = admission_class(queue) {
-                    self.reinject_core.record_class_admitted(class);
+                if record_class {
+                    if let Some(class) = admission_class(queue) {
+                        self.reinject_core.record_class_admitted(class);
+                    }
                 }
                 Ok(EnqueueOutcome::Accepted)
             }
@@ -1261,8 +1323,10 @@ impl SlowPathReinjector {
                 status
                     .queue_full_packets
                     .fetch_add(1, Ordering::Relaxed);
-                if let Some(class) = admission_class(queue) {
-                    self.reinject_core.record_class_refused(class);
+                if record_class {
+                    if let Some(class) = admission_class(queue) {
+                        self.reinject_core.record_class_refused(class);
+                    }
                 }
                 Ok(EnqueueOutcome::QueueFull)
             }
@@ -1272,8 +1336,10 @@ impl SlowPathReinjector {
                 status
                     .dropped_bytes
                     .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
-                if let Some(class) = admission_class(queue) {
-                    self.reinject_core.record_class_refused(class);
+                if record_class {
+                    if let Some(class) = admission_class(queue) {
+                        self.reinject_core.record_class_refused(class);
+                    }
                 }
                 let err = "slow-path worker is not running".to_string();
                 status.set_last_error(err.clone());

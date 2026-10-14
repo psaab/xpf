@@ -355,4 +355,9 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 		"IPsec-inner provisional journal entries reaped as orphans (#9506).",
 		nil, nil,
 	)
+	c.userspaceIpsecInnerPermitForwardArmed = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_permit_forward_armed_total",
+		"Leased adjudicated-TUN writes armed for worker-adjudicated IPsec-inner permits (#9506).",
+		nil, nil,
+	)
 }

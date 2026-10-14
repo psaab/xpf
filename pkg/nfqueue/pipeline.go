@@ -175,6 +175,10 @@ type AdjudicatedFrame struct {
 	IfID            uint32
 	DeadlineMonoNS  uint64
 	DeadlineClockID uint8
+	// Flags mirrors the Rust SUBMIT_FLAG_* wire bits. The enforcing permit
+	// arm sets ReinjectSubmitFlagForward; the D11 attestation arm leaves it
+	// zero so its witness semantics stay deny-only.
+	Flags byte
 }
 
 // CapturePipelineConfig controls all bounded resources and the P-MECH
@@ -826,6 +830,8 @@ func (p *CapturePipeline) submitEligible(frames []CaptureFrame) {
 	}
 	parts := PartitionOwnerBatches(frames)
 	owners := DispatchWorkers(parts)
+	var admitted []AdjudicatedFrame
+	var pending []*pendingReinject
 	for _, owner := range owners {
 		batch := parts[owner]
 		if len(batch) > p.batchCap {
@@ -894,14 +900,114 @@ func (p *CapturePipeline) submitEligible(frames []CaptureFrame) {
 				p.finishFrame(frame, VerdictDrop)
 				continue
 			}
-			// V1 stays pre-submit deny-only until the Rust D11 worker/verdict
-			// join is wired into the reinject server. Sending flags=0 here
-			// would reach the legacy delegated writer without S9 adjudication.
+			// #9506 S9.5 FORWARD permit join: a zone-passed FORWARD frame is
+			// submitted to the Rust D13/D14 worker adjudication under a leased
+			// epoch. The worker re-checks zone, tunnel-row, route-domain and
+			// source/destination selector containment, and a successful
+			// adjudication re-enters the frame through the adjudicated TUN
+			// (kernel main table); the Written completion then terminally
+			// drops this original so the flow is forwarded exactly once.
+			// INPUT-hook frames and pipelines without a submitter or lease
+			// minter keep the fail-closed pre-submit suppression (D12a input
+			// permits remain a separate slice).
+			if frame.origin.Hook != CaptureHookForward || p.submitter == nil || p.leaseMinter == nil {
+				p.mu.Lock()
+				p.stats.V1PermitSuppressed++
+				p.mu.Unlock()
+				p.finishFrame(frame, VerdictDrop)
+				continue
+			}
+			lease, leaseErr := p.lease(frame)
+			if leaseErr != nil {
+				p.emitDeny(frame, ReasonEvaluatorUnavailable)
+				p.finishFrame(frame, VerdictDrop)
+				continue
+			}
 			p.mu.Lock()
-			p.stats.V1PermitSuppressed++
+			flow := p.flows[frame.FlowKey]
+			if flow == nil || flow.pending != nil || len(flow.frames) == 0 || flow.frames[0].Packet != frame.Packet {
+				p.mu.Unlock()
+				p.emitDeny(frame, ReasonProvenance)
+				p.finishFrame(frame, VerdictDrop)
+				continue
+			}
+			item := &pendingReinject{frame: frame, lease: lease, admissionPending: true}
+			flow.pending = item
+			p.pending[lease.RequestID] = item
+			p.stats.Adjudicated++
 			p.mu.Unlock()
-			p.finishFrame(frame, VerdictDrop)
+			admitted = append(admitted, AdjudicatedFrame{
+				Frame: frame, Origin: frame.origin, Lease: lease,
+				ZoneID: uint16(evaluation.ZoneID), IfID: evaluation.IfID,
+				Flags: ReinjectSubmitFlagForward,
+			})
+			pending = append(pending, item)
 		}
+	}
+	if len(admitted) == 0 {
+		return
+	}
+	p.submitGate.RLock()
+	p.submitAdmitted(admitted, pending, "adjudicated admission failure")
+}
+
+// submitAdmitted drives the post-admission submit tail shared by the D11
+// attestation arm and the ordinary enforcing permit arm: deadline stamping,
+// one SubmitAdjudicated round trip, per-frame admission application, and the
+// uncertain-lease cancellation rollback. The caller MUST hold submitGate for
+// reading; this function releases it and drains the deadline cancel queue
+// before invoking any uncertain callback, exactly as the attestation arm
+// always did.
+func (p *CapturePipeline) submitAdmitted(admitted []AdjudicatedFrame, pending []*pendingReinject, failureReason string) {
+	deadlineMonoNS, deadlineErr := stampReinjectDeadline(p.ackDeadline)
+	if deadlineErr != nil {
+		unexpectedCompletion := false
+		for _, item := range pending {
+			unexpectedCompletion = p.deadlineFailedState(item) || unexpectedCompletion
+		}
+		p.submitGate.RUnlock()
+		p.drainDeadlineCancelQueue()
+		if unexpectedCompletion {
+			p.uncertain("completion before deadline failure")
+		}
+		return
+	}
+	p.mu.Lock()
+	for i := range admitted {
+		admitted[i].DeadlineMonoNS = deadlineMonoNS
+		admitted[i].DeadlineClockID = reinjectDeadlineClockMonotonic
+		pending[i].deadlineMonoNS = deadlineMonoNS
+		pending[i].deadlineArmed = true
+	}
+	p.mu.Unlock()
+	responses, submitErr := p.submitter.SubmitAdjudicated(admitted)
+	var cancelItems []*pendingReinject
+	if submitErr != nil {
+		for _, item := range pending {
+			if p.admissionFailedState(item, "TRANSPORT", submitErr) {
+				cancelItems = append(cancelItems, item)
+			}
+		}
+	} else {
+		for i, item := range pending {
+			if i >= len(responses) {
+				if p.admissionFailedState(item, "TRANSPORT", errors.New("missing admission response")) {
+					cancelItems = append(cancelItems, item)
+				}
+				continue
+			}
+			if failed := p.applyAdmission(item, responses[i]); failed != nil {
+				cancelItems = append(cancelItems, failed)
+			}
+		}
+	}
+	p.submitGate.RUnlock()
+	p.drainDeadlineCancelQueue()
+	if len(cancelItems) != 0 {
+		p.uncertain(failureReason)
+	}
+	for _, item := range cancelItems {
+		p.cancelUncertainLease(item.lease)
 	}
 }
 

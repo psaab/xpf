@@ -509,6 +509,11 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.IpsecInnerOrphanProvisionalTotal),
 	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceIpsecInnerPermitForwardArmed,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerPermitForwardArmedTotal),
+	)
 	// #2317: WG-decap RFC 6040 4.2 illegal-combination drops (outer CE,
 	// recvmsg-captured, over a Not-ECT inner). Emitted unconditionally so
 	// a 0 is a real "no illegal combinations seen" signal rather than an

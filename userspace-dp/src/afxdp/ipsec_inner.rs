@@ -90,6 +90,8 @@ pub(crate) static ipsec_inner_syn_cookie_refusals_total: AtomicU64 = AtomicU64::
 pub(crate) static ipsec_inner_fragment_late_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
 pub(crate) static nfq_reentry_unsupported_domain_total: AtomicU64 = AtomicU64::new(0);
+#[allow(non_upper_case_globals)]
+pub(crate) static ipsec_inner_permit_forward_armed_total: AtomicU64 = AtomicU64::new(0);
 
 /// #9506 counter slice: one-call snapshot of the Rust-incremented
 /// IPsec-inner counters. Definition-only §4.3 statics stay local until their
@@ -113,6 +115,7 @@ pub(crate) struct IpsecInnerCounterSnapshot {
     pub ipsec_inner_worker_retired_total: u64,
     pub ipsec_inner_worker_orphan_reaped_total: u64,
     pub ipsec_inner_orphan_provisional_total: u64,
+    pub ipsec_inner_permit_forward_armed_total: u64,
 }
 
 /// Load every counter in [`IpsecInnerCounterSnapshot`] once. `Relaxed` is
@@ -135,6 +138,8 @@ pub(crate) fn ipsec_inner_counters_snapshot() -> IpsecInnerCounterSnapshot {
         ipsec_inner_worker_orphan_reaped_total: IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL
             .load(Ordering::Relaxed),
         ipsec_inner_orphan_provisional_total: IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL
+            .load(Ordering::Relaxed),
+        ipsec_inner_permit_forward_armed_total: ipsec_inner_permit_forward_armed_total
             .load(Ordering::Relaxed),
     }
 }
@@ -373,15 +378,23 @@ fn d14_zone_gate(
     if lookup.resolution.disposition != ForwardingDisposition::ForwardCandidate {
         return Err(deny(input, "d19_route_not_forwardable", reason::NO_ROUTE));
     }
-    // GLM coverage note: this only verifies that the selector projection is
-    // present; it does NOT enforce that `destination` is contained in that
-    // projection. That gap is acceptable only while the terminal below remains
-    // deny-only (`WouldPermit`, with no forwarding/enqueue/accept). Add an
-    // explicit destination-containment check here before introducing any
-    // forwarding terminal.
+    // #9506 S9.5: the selector projection must be present AND must contain
+    // the frame's destination. This containment is the explicit prerequisite
+    // the deny-only phase documented: a forwarded (permitted) frame may only
+    // re-enter the kernel main table when its destination is inside the
+    // tunnel's route-derived selector projection, so a permitted re-entry can
+    // never widen the reachable set beyond what the tunnel's selectors and
+    // main-table routes already cover.
     let (selectors, effective_prefixes) = pmech_row.selector_projection();
     if selectors.is_empty() || effective_prefixes.is_empty() {
         return Err(deny(input, "d22_selector_inventory_invalid", reason::EVALUATOR_UNAVAILABLE));
+    }
+    if !pmech_row.allows_destination(destination) {
+        return Err(deny(
+            input,
+            "d22_destination_outside_selector",
+            reason::DOMAIN_OVERLAP,
+        ));
     }
     Ok((owned, meta, row.if_id))
 }
@@ -419,15 +432,16 @@ pub(crate) fn adjudicate_ipsec_inner(
         Err(decision) => return decision,
     };
 
-    // S9.2-S9.4/S9.6 deny-only subset: later worker stages are represented by
-    // the existing poll_descriptor order, but the final permit join is OUT in
-    // V1. Every would-join site carries this S9.5-removal comment: no session
-    // install, flow-cache publish, NAT mutation, q0 enqueue, or NF_ACCEPT.
-    // The verdict is returned as WOULD_PERMIT so Go can observe the successful
-    // adjudication. It is NOT E28; Go's E28 byte-52 suppression counter is
-    // reserved for evaluator/snapshot/worker-set unavailability. V1's
-    // S9.5-removal comment: no session install, flow-cache publish, NAT
-    // mutation, q0 enqueue, or NF_ACCEPT occurs here.
+    // S9.5 FORWARD permit join: D13/D14 above is the complete stateless
+    // adjudication (zone, tunnel row, route domain, source and destination
+    // containment), and the worker loop converts this WOULD_PERMIT into a
+    // leased adjudicated-TUN write for SUBMIT_FLAG_FORWARD frames. Still no
+    // session install, flow-cache publish, NAT mutation, screen stage, or
+    // NF_ACCEPT: the permit is stateless and re-enters the kernel main table
+    // (D_usp1), with the original NFQUEUE packet terminally dropped by Go to
+    // avoid a duplicate. The verdict is WOULD_PERMIT either way; it is NOT
+    // E28, and Go's byte-52 counter stays reserved for evaluator/snapshot/
+    // worker-set unavailability.
     IpsecInnerDecision::WouldPermit {
         request_id: input
             .descriptor
@@ -868,7 +882,14 @@ mod tests {
     }
 
     #[test]
-    fn d14_source_proof_replaces_destination_prefix_gate_9506() {
+    fn d14_destination_outside_selector_denies_even_with_default_route_9506() {
+        // The deny-only phase let a destination outside the selector
+        // projection Would-Permit when a 0/0 main-table route resolved it
+        // ("source proof replaces destination prefix gate"). #9506 S9.5
+        // connects the terminal to forwarding, so the explicit
+        // destination-containment prerequisite now applies: a permitted
+        // re-entry can never widen the reachable set beyond the tunnel's
+        // selector projection.
         let mut forwarding = test_forwarding_authority();
         forwarding.routes_v4.insert(
             "inet.0".into(),
@@ -895,7 +916,34 @@ mod tests {
             logical_ifindex: 10,
         }]);
         let view = view_with_rows(1, 1, rows, forwarding);
+        // Source is inside the ingress proof (10.0.0.0/24); the destination
+        // 203.0.113.9 is outside the selector projection.
         let packet = test_packet_with_source([10, 0, 0, 1], [203, 0, 113, 9]);
+        let decision =
+            adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
+        assert!(!decision.is_would_permit());
+        assert_eq!(decision.reason(), Some(reason::DOMAIN_OVERLAP));
+        // Deny carries stage "d22_destination_outside_selector"; reason is
+        // the wire-stable identity used by the event codec.
+    }
+
+    #[test]
+    fn d14_destination_inside_selector_would_permits_9506() {
+        let mut forwarding = test_forwarding_with_route("10.0.0.0/24", 10);
+        let next_hop: std::net::IpAddr = "10.0.0.2".parse().expect("IPv4 next hop");
+        forwarding.neighbors.insert(
+            (10, next_hop),
+            crate::afxdp::NeighborEntry {
+                mac: [0x02, 0, 0, 0, 0, 10],
+            },
+        );
+        let rows = IpsecTunnelRows::new([IpsecTunnelRow {
+            stn: "st0".into(),
+            if_id: 1,
+            logical_ifindex: 10,
+        }]);
+        let view = view_with_rows(1, 1, rows, forwarding);
+        let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 9]);
         let decision =
             adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
         assert!(decision.is_would_permit());
@@ -903,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn would_permit_is_a_verdict_and_never_a_rust_permit() {
+    fn would_permit_verdict_is_not_itself_a_terminal_permit() {
         let mut forwarding = test_forwarding_with_route("10.0.0.0/24", 10);
         let next_hop: std::net::IpAddr = "10.0.0.2".parse().expect("IPv4 next hop");
         forwarding.neighbors.insert(

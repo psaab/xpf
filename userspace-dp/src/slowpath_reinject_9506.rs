@@ -80,6 +80,11 @@ pub(crate) const ORIGIN_FORWARD: u8 = 1;
 pub(crate) const ORIGIN_INPUT: u8 = 2;
 pub(crate) const SUBMIT_FLAG_SHADOW: u8 = 0x01;
 pub(crate) const SUBMIT_FLAG_DRY_RUN: u8 = 0x02;
+/// #9506 S9.5: the submitting plane asks the Rust worker to convert a
+/// successful D13/D14 adjudication into a leased adjudicated-TUN write
+/// (permit join). Without the bit a WouldPermit verdict stays a deny-only
+/// terminal, which is how the D11 witness path keeps its semantics.
+pub(crate) const SUBMIT_FLAG_FORWARD: u8 = 0x04;
 pub(crate) const ORIGIN_MAX_OWNER: usize = 64;
 pub(crate) const RUN_ID_MAX: usize = 64;
 pub(crate) const ORIGIN_MAX_STN: usize = 16;
@@ -656,6 +661,11 @@ struct Entry {
     frame_digest: [u8; 32],
     since: Instant,
     state: EntryState,
+    /// #9506 S9.5: a leased adjudicated-TUN write has been armed for this
+    /// Queued entry. The WouldPermit worker verdict must then NOT
+    /// terminalize it: `pre_write_check`/`resolve_write` own the terminal
+    /// (Written/Refused/Fenced) from the writer thread.
+    write_armed: bool,
 }
 #[derive(Debug)]
 struct CoreInner {
@@ -849,7 +859,7 @@ impl ReinjectCore {
     /// touches the worker channel, or reaches any TUN writer.
     pub(crate) fn validate_dry_run(&self, frame: &SubmitFrame) -> AdmitDecision {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let refusal = if frame.flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN) != 0 {
+        let refusal = if frame.flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN | SUBMIT_FLAG_FORWARD) != 0 {
             Some(ADMIT_BAD_LEASE)
         } else if inner.shutdown {
             Some(ADMIT_SHUTDOWN)
@@ -962,7 +972,7 @@ impl ReinjectCore {
     ) -> AdmitDecision {
         let id = frame.lease.request_id;
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if frame.flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN) != 0 {
+        if frame.flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN | SUBMIT_FLAG_FORWARD) != 0 {
             if let Some(class) = class {
                 Self::record_refusal(&mut inner.stats, class);
             }
@@ -1037,6 +1047,7 @@ impl ReinjectCore {
                 frame_digest,
                 since: now,
                 state: EntryState::Queued,
+                write_armed: false,
             },
         );
         inner
@@ -1148,8 +1159,11 @@ impl ReinjectCore {
     }
 
     /// Join a Rust D11 worker verdict to the Go-facing completion table.
-    /// V1 is deny-only: a deny becomes `Denied`, while a successful
-    /// adjudication becomes `WouldPermit` (never a q0 write or NF_ACCEPT).
+    /// A deny becomes `Denied`. A successful adjudication becomes
+    /// `WouldPermit` unless a leased adjudicated-TUN write was armed for
+    /// that request (#9506 S9.5): an armed entry keeps waiting for the
+    /// writer thread's `resolve_write` terminal (Written/Refused/Fenced),
+    /// so the verdict must not terminalize it. That is the permit join.
     pub(crate) fn resolve_ipsec_inner_verdict(&self, verdict: IpsecInnerVerdict) -> bool {
         let (request_id, outcome, reason) = match verdict {
             IpsecInnerVerdict::Deny {
@@ -1171,10 +1185,31 @@ impl ReinjectCore {
         if !matches!(entry.state, EntryState::Queued) {
             return false;
         }
+        if matches!(verdict, IpsecInnerVerdict::WouldPermit { .. }) && entry.write_armed {
+            return true;
+        }
         Self::terminalize_with_reason(&mut inner, request_id, outcome, 0, reason)
     }
 
-    /// Mark a queued descriptor as a definitive no-write refusal.
+    /// Arm the leased adjudicated-TUN write for one worker-adjudicated
+    /// frame. The entry must still be Queued under the exact lease; arming
+    /// happens before the PacketRequest is enqueued so the WouldPermit
+    /// verdict (posted after the forward attempt) can never terminalize an
+    /// armed entry. Returns false when no such Queued entry exists.
+    pub(crate) fn arm_write(&self, lease: &ReinjectLease) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = inner.entries.get_mut(&lease.request_id) else {
+            return false;
+        };
+        if entry.lease != *lease || !matches!(entry.state, EntryState::Queued) {
+            return false;
+        }
+        entry.write_armed = true;
+        true
+    }
+
+    /// Mark a queued descriptor as a definitive no-write refusal. Also the
+    /// rollback for a write that was armed but could not be enqueued.
     pub(crate) fn refuse_queued(&self, lease: &ReinjectLease, _reason: String) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = inner.entries.get(&lease.request_id) else {
@@ -1721,7 +1756,7 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
         let queue_number = c.u16()?;
         let flow_tag = c.u64()?;
         let flags = c.u8()?;
-        if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN) != 0 {
+        if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN | SUBMIT_FLAG_FORWARD) != 0 {
             return Err(CodecError::BadFlags);
         }
         let family = c.u8()?;
@@ -1836,7 +1871,7 @@ pub(crate) fn decode_submit_batch_into_pool(
             let queue_number = c.u16()?;
             let flow_tag = c.u64()?;
             let flags = c.u8()?;
-            if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN) != 0 {
+            if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN | SUBMIT_FLAG_FORWARD) != 0 {
                 return Err(CodecError::BadFlags);
             }
             let family = c.u8()?;
