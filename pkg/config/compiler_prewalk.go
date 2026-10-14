@@ -581,6 +581,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// #12825: validate the recognized system-wide policy-statistics enum
+	// spellings and reject or fail closed on contradictory duplicate values.
+	policyStatsWarnings, err := validatePolicyStatsSystemWide12825(
+		tree.Children, opts.lenientPolicyStatsSystemWide12825)
+	if err != nil {
+		return nil, err
+	}
 
 	// #11013: security policies do not implement the firewall filter's
 	// `then next term` semantics. An unrecognized then sibling is dropped.
@@ -876,6 +883,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, defaultPolicyWarnings...)
 	warnings = append(warnings, defaultPolicyConflictWarnings...)
 	warnings = append(warnings, defaultPolicyValueWarnings...)
+	warnings = append(warnings, policyStatsWarnings...)
 	warnings = append(warnings, policyThenSiblingWarnings...)
 	warnings = append(warnings, policyEnforcementWarnings...)
 	warnings = append(warnings, policyMissingMatchWarnings...)

@@ -16680,3 +16680,17 @@ Write an explicit name on each term body, for example
 `pkg/frr/policy_nameless_term_12521_test.go`. The configstore suite covers 11
 named hierarchical and packed spellings plus set-to-show-to-LoadMerge round
 trips.
+
+## Security policy statistics and pre-identification logging (#12825)
+
+`security policy-stats system-wide` is a typed enum accepting `enable`,
+`enabled`, `disable`, or `disabled`. Invalid values are rejected on strict
+compilation and warned about on tolerant load; tolerant compilation disables
+the statistics knob. Repeated `system-wide` leaves or `policy-stats` blocks
+must agree on their enabled/disabled state. Contradictory values are rejected
+strictly and warned about with statistics disabled on tolerant load.
+
+Repeated `security pre-id-default-policy` blocks merge their session-init and
+session-close logging bits across all security roots instead of replacing the
+earlier block. A block without logging modes does not clear a mode already
+configured elsewhere.

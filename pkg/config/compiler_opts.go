@@ -2531,6 +2531,9 @@ type compileOpts struct {
 	// lenientDefaultPolicyConflict11821 warns on conflicting duplicate
 	// default-policy stanzas; the post-dispatch compiler forces deny-all.
 	lenientDefaultPolicyConflict11821 bool
+	// lenientPolicyStatsSystemWide12825 warns on invalid or contradictory
+	// policy-stats values; the post-dispatch compiler disables the knob.
+	lenientPolicyStatsSystemWide12825 bool
 	// lenientPolicyThenSiblings (#11013/#11023) downgrades unsupported
 	// security-policy `then` siblings and unknown `then log` modes to warnings
 	// on tolerant ingress. The compiler drops both forms, so compilePolicy
@@ -3363,6 +3366,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyThenCountAlarm:            true,
 		lenientDefaultPolicyBlock11367:         true,
 		lenientDefaultPolicyConflict11821:      true,
+		lenientPolicyStatsSystemWide12825:      true,
 		lenientPolicyThenSiblings:              true,
 		lenientPolicyEnforcementSubtrees:       true,
 		lenientPolicyMissingMatch:              true,
