@@ -12,21 +12,20 @@ import "strings"
 // dataplane path keeps using the identical logic (userspace/zones.go now
 // delegates here) — one source of truth for both enforcement and display.
 
-// LifelineBaseName strips the unit suffix (".0") and surrounding whitespace from
-// a logical interface name, returning the bare device name used for lifeline
-// matching ("fxp0.0" -> "fxp0", "fab1.0" -> "fab1"). Returns "" for an empty
-// name.
+// LifelineBaseName strips the final unit suffix and surrounding whitespace from
+// a logical interface name, preserving dotted interface names ("hb.1.0" ->
+// "hb.1", "fxp0.0" -> "fxp0"). Returns "" for an empty name.
 func LifelineBaseName(name string) string {
 	base := strings.TrimSpace(name)
-	if i := strings.IndexByte(base, '.'); i >= 0 {
+	if i := strings.LastIndexByte(base, '.'); i >= 0 {
 		base = base[:i]
 	}
 	return base
 }
 
-// HostInboundLifelineSet resolves the set of management / cluster-control
-// LIFELINE interface base names that must NEVER be subjected to a host-inbound
-// deny:
+// HostInboundLifelineSet resolves the explicitly configured management /
+// cluster-control interface names that must NEVER be subjected to a
+// host-inbound deny:
 //
 //   - fxp0 (out-of-band management) is always a lifeline.
 //   - Chassis-cluster control and fabric interfaces are included only when
@@ -38,20 +37,34 @@ func LifelineBaseName(name string) string {
 // therefore contributes only fxp0.
 func HostInboundLifelineSet(cfg *Config) map[string]bool {
 	set := map[string]bool{"fxp0": true}
-	if cfg != nil && cfg.Chassis.Cluster != nil {
+	if cfg == nil {
+		return set
+	}
+	// Retain every declared interface identity (false for ordinary links).
+	// The matcher uses key presence to prefer a declared dotted base over
+	// interpreting that same spelling as a unit on the shorter parent.
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if _, known := set[name]; !known {
+			set[name] = false
+		}
+	}
+	if cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
 		for _, name := range []string{cc.ControlInterface, cc.FabricInterface, cc.Fabric1Interface} {
-			if base := LifelineBaseName(name); base != "" {
-				set[base] = true
+			if name = strings.TrimSpace(name); name != "" {
+				set[name] = true
 			}
 		}
-		// fabric-options member-interfaces is also explicit role configuration.
-		// Include both local and peer-side fabric interfaces: both are configured
-		// cluster fabric links even though only one is local on a given node.
+		// fabric-options member-interfaces are also explicit role configuration.
+		// Preserve the declared name so dotted siblings stay distinct.
 		for name, ifc := range cfg.Interfaces.Interfaces {
 			if ifc != nil && len(ifc.FabricMembers) > 0 {
-				if base := LifelineBaseName(name); base != "" {
-					set[base] = true
+				if name = strings.TrimSpace(name); name != "" {
+					set[name] = true
 				}
 			}
 		}
@@ -61,12 +74,28 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 
 // HostInboundLifelineInterface reports whether the given logical interface name
 // is an explicitly identified management / cluster-control LIFELINE that must
-// NEVER be subjected to a host-inbound deny. The set is fxp0 plus configured
-// chassis-cluster control/fabric links, including interfaces with explicit
-// fabric-options member-interfaces; interface names alone do not imply a role
-// (#11068). The base name (before the unit suffix) is matched so "fxp0.0" and
-// configured links such as "hb0.0" are caught too.
+// NEVER be subjected to a host-inbound deny. Exact and longest declared names
+// take precedence; only an undeclared final suffix is treated as a unit.
 func HostInboundLifelineInterface(name string, lifelines map[string]bool) bool {
-	base := LifelineBaseName(name)
-	return base != "" && lifelines[base]
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if isLifeline, declared := lifelines[name]; declared {
+		return isLifeline
+	}
+	for prefix := name; ; {
+		dot := strings.LastIndexByte(prefix, '.')
+		if dot < 0 {
+			break
+		}
+		prefix = prefix[:dot]
+		if isLifeline, declared := lifelines[prefix]; declared {
+			if _, _, err := CanonicalLogicalUnit(name[len(prefix)+1:]); err != nil {
+				return false
+			}
+			return isLifeline
+		}
+	}
+	return false
 }
