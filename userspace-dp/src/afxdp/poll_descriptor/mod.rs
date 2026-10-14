@@ -7280,6 +7280,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // HAInactive with unknown ownership (rg=0) means unresolved
                 // — those should NOT be fabric-redirected.
                 let egress_rg = owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
+                // #12865: intended (pre-redirect) egress for zone counters.
+                let intended_egress_ifindex = decision.resolution.egress_ifindex;
                 if decision.resolution.disposition == ForwardingDisposition::HAInactive
                     && egress_rg > 0
                     && !fabric_link_ingress
@@ -7745,13 +7747,38 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     }
                     // #3651: per-zone traffic volume for this slow-path (first-
                     // packet / non-cacheable) forwarded packet, mirroring the
-                    // flow-cache-hit fast path.
+                    // flow-cache-hit fast path. #12865: use the admission
+                    // zone pair, not raw shim meta or the redirect
+                    // transport's egress.
+                    let counter_ingress_logical = resolve_ingress_logical_ifindex(
+                        worker_ctx.forwarding,
+                        meta.ingress_ifindex as i32,
+                        meta.ingress_vlan_id,
+                    )
+                    .unwrap_or(meta.ingress_ifindex as i32);
+                    let (counter_from_zone, counter_to_zone) =
+                        zone_pair_ids_for_flow_with_override(
+                            worker_ctx.forwarding,
+                            counter_ingress_logical,
+                            ingress_zone_override,
+                            decision.resolution.egress_ifindex,
+                        );
                     crate::afxdp::zone_counters::record_zone_traffic(
                         &worker_ctx.forwarding.zone_counter_slot_map,
-                        meta.ingress_zone,
-                        worker_ctx
-                            .forwarding
-                            .egress_zone_id(decision.resolution.egress_ifindex),
+                        counter_from_zone,
+                        if decision.resolution.disposition
+                            == ForwardingDisposition::FabricRedirect
+                        {
+                            worker_ctx
+                                .forwarding
+                                .egress_zone_id(intended_egress_ifindex)
+                        } else if counter_to_zone != 0 {
+                            counter_to_zone
+                        } else {
+                            worker_ctx
+                                .forwarding
+                                .egress_zone_id(decision.resolution.egress_ifindex)
+                        },
                         meta.pkt_len as u64,
                     );
                     if decision.nat.rewrite_src.is_some() {
