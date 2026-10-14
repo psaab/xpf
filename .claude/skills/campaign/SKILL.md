@@ -72,6 +72,28 @@ No args = full autonomous drive-to-zero over every open issue. With a
 cron tick (CronCreate), each firing re-enters this skill and advances the
 campaign; `CronDelete` when the backlog is terminal.
 
+## Continuous smoke watch (standing, never blocking)
+
+Run a permanent smoke-feedback lane OUTSIDE the parallel agent lanes
+(it does not count against lane limits and never gates a merge):
+
+- A background service loops `test-connectivity.sh cluster` against the
+  current master tip every ~15 min, appending one line per run
+  (`[ts tip=<sha>] Results: ... fails: ...`) to
+  `/var/worktrees/.cache/smoke-watch/smoke-watch.log`.
+- The parent reads the latest lines at every landing-queue check. A NEW
+  failure (not the known external Internet-IPv6 one) or a tip regression
+  vs the previous line = a correctness feedback signal: file an issue
+  immediately and forward-fix it in the normal queue — do NOT stop or
+  slow the landing queue for it, and never hold a PR for the watch.
+- Known-good baseline (2026-10-13): 25 passed / 1 failed, the single
+  failure being LAN host -> internet IPv6 via an external address
+  (environment, not a product regression). Deviations from that
+  baseline are the signal; the baseline itself is not.
+- Perf mistakes ride the same loop: when a perf-relevant merge lands,
+  note the tip in the log; a connectivity or throughput datapoint that
+  regresses against the prior tip gets an issue + forward-fix, in band.
+
 ## The cardinal rule
 
 **You (the PARENT) own review and merge.** The companion lane (Codex/AGY)
