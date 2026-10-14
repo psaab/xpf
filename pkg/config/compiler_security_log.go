@@ -345,7 +345,15 @@ func validateSecurityLogStreamTLSProfileAST(nodes []*Node, prefix string, lenien
 			logPath := joinNodePath(secPath, []string{"log"})
 			for _, inst := range namedInstances(logNode.FindChildren("stream")) {
 				streamPath := joinNodePath(logPath, []string{"stream", inst.name})
-				for _, prop := range inst.node.Children {
+				// #12887: same flat-run expansion compileLog reads, so a
+				// packed `stream s transport tls-profile X;` cannot slip
+				// past the gate as an unexpanded chain head. An elided
+				// stream carries its whole body in the node's own Keys.
+				streamBody := inst.node.Children
+				if len(streamBody) == 0 && len(inst.node.Keys) > 2 {
+					streamBody = []*Node{{Keys: inst.node.Keys[2:]}}
+				}
+				for _, prop := range expandFlatRun(streamBody, securityLogStreamSchema9391()) {
 					if prop.Name() != "transport" {
 						continue
 					}
