@@ -775,7 +775,7 @@ clean:
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The
 # env var flows through to setup.sh (INSTANCE_NAME=${XPF_INSTANCE:-xpf-fw}).
-.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-nat-frag-needed test-wire-nat-frag-needed-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
+.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-nat-frag-needed test-wire-nat-frag-needed-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy test-wire-gate-hermetic-lib
 
 .PHONY: test-v6-na-recovery-lib
 test-env-init:
@@ -1064,6 +1064,15 @@ test-wire-policy-deny:
 
 test-wire-policy-deny-lib:
 	./test/incus/wire-policy-deny.sh --selftest
+
+# #11056: the hermetic legs of the three zero-ledger-row wire gates above —
+# capture reduction over real tcpdump transcripts (test/fixtures/wire/), the
+# gates' --fixture modes over measured transcripts, floor binding, and, when
+# run privileged, the full probe->drop->capture->reduction->verdict pipeline
+# in an isolated netns. Proves the harness, never the DUT: the live
+# loss-cluster rows stay owed (test/incus/LEDGER_COVERAGE.unreached).
+test-wire-gate-hermetic-lib:
+	./test/incus/wire-gate-hermetic-selftest.sh
 
 test-wire-appmatch-twins:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \

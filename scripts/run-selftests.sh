@@ -460,6 +460,12 @@ run_bash test/incus/wire-hostinbound-deny.sh --selftest
 run_bash test/incus/wire-conntrack-lifecycle.sh --selftest
 run_bash test/incus/wire-config-snapshot-selftest.sh
 run_bash test/incus/wire-routing-separation.sh --selftest
+# #11056: the hermetic wire-gate legs — capture reduction over real tcpdump
+# transcripts, the gates' --fixture modes over measured transcripts, floor
+# binding, and near-miss rejection. --no-live keeps this aggregate
+# unprivileged: the privileged netns pipeline (real probes, real nft drop,
+# real capture) runs via `make test-wire-gate-hermetic-lib` as root.
+run_bash test/incus/wire-gate-hermetic-selftest.sh --no-live
 # #7159: the mouse-latency elephant generator's remote lifecycle. Hermetic --
 # a fake iperf3 plus an unprivileged PID namespace; no incus, no cluster. The
 # defect it guards produced a CORRUPT MEASUREMENT, not an error: killing the

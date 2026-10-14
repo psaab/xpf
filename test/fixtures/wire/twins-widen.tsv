@@ -1,0 +1,4 @@
+# wire_appmatch_twins --fixture transcript: the #11056 widened negative
+# control (no drop installed). Measured generated 2026-10-14 in an isolated 3-netns veth topology (prober 10.9.0.1 -> nft forward-drop DUT stand-in 10.9.0.254/10.9.1.254 -> sink/capture 10.9.1.2) with the real wire_probe_burst.py / wire_tcp_accept.py and the gate tcpdump flag sets; see docs/log/11056.md.
+# Both deny twins emerged — the appmatch_widen FAIL shape.
+tcp80_offered=1500 tcp80_observed=7503 tcp8080_offered=1000 tcp8080_observed=1000 udp53_offered=1500 udp53_observed=1500 udp5353_offered=1000 udp5353_observed=1000 cksum_bad=0

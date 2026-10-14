@@ -515,16 +515,9 @@ COFFERED=0
 sleep 5 # drain: datagrams in flight when the sender exits
 kill "$CAP_PID" 2>/dev/null || true
 wait "$CAP_PID" 2>/dev/null || true
-PLEAKED=$(grep -cE "\.${PROBE_PORT}:" "$CAPLOG" 2>/dev/null || true)
-COBSERVED=$(grep -cE "\.${CONTROL_PORT}:" "$CAPLOG" 2>/dev/null || true)
-CKSUM=$(grep -ciE "bad (udp|ip) (cksum|checksum)" "$CAPLOG" 2>/dev/null || true)
-# grep -c prints 0 with rc 1 on no match; normalise to bare numbers.
-PLEAKED=$(printf '%s' "$PLEAKED" | tr -d ' \n' || true)
-COBSERVED=$(printf '%s' "$COBSERVED" | tr -d ' \n' || true)
-CKSUM=$(printf '%s' "$CKSUM" | tr -d ' \n' || true)
-[[ "$PLEAKED" =~ ^[0-9]+$ ]] || PLEAKED=0
-[[ "$COBSERVED" =~ ^[0-9]+$ ]] || COBSERVED=0
-[[ "$CKSUM" =~ ^[0-9]+$ ]] || CKSUM=0
+PLEAKED=$(wire_count_dst_frames "$CAPLOG" "$PROBE_PORT")
+COBSERVED=$(wire_count_dst_frames "$CAPLOG" "$CONTROL_PORT")
+CKSUM=$(wire_count_bad_cksum "$CAPLOG" 'udp|ip')
 rm -f "$CAPLOG"
 echo "offered: probe=$POFFERED control=$COFFERED | observed: leaked=$PLEAKED control=$COBSERVED cksum_bad=$CKSUM"
 

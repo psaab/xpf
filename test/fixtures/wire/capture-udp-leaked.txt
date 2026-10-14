@@ -1,0 +1,84 @@
+# wire_policy_deny leak direction: the probe udp/54901 frames emerge too; generated 2026-10-14 in an isolated 3-netns veth topology (prober 10.9.0.1 -> nft forward-drop DUT stand-in 10.9.0.254/10.9.1.254 -> sink/capture 10.9.1.2) with the real wire_probe_burst.py / wire_tcp_accept.py and the gate tcpdump flag sets; see docs/log/11056.md
+# Real tcpdump text, unmodified: an excerpt of the first 20 matching packet blocks per counted port/flag, banner kept, per-run footer dropped (an excerpt is not the full capture).
+# Source capture: udp-leak-probe.cap (2462 packet blocks total). The counts the reduction cells assert live in wire-gate-hermetic-selftest.sh.
+tcpdump: listening on vB0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+13:52:18.261135 IP (tos 0x0, ttl 63, id 43315, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.266321 IP (tos 0x0, ttl 63, id 43316, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:18.272064 IP (tos 0x0, ttl 63, id 43317, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.277245 IP (tos 0x0, ttl 63, id 43318, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:18.282424 IP (tos 0x0, ttl 63, id 43319, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.287599 IP (tos 0x0, ttl 63, id 43320, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:18.292764 IP (tos 0x0, ttl 63, id 43321, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.297930 IP (tos 0x0, ttl 63, id 43322, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:18.304302 IP (tos 0x0, ttl 63, id 43323, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.309633 IP (tos 0x0, ttl 63, id 43324, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:18.316016 IP (tos 0x0, ttl 63, id 43325, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.321184 IP (tos 0x0, ttl 63, id 43326, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:18.328104 IP (tos 0x0, ttl 63, id 43328, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.333287 IP (tos 0x0, ttl 63, id 43329, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:18.338464 IP (tos 0x0, ttl 63, id 43331, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.343632 IP (tos 0x0, ttl 63, id 43332, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:18.349342 IP (tos 0x0, ttl 63, id 43333, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.354548 IP (tos 0x0, ttl 63, id 43334, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:18.360402 IP (tos 0x0, ttl 63, id 43335, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 64
+13:52:18.366107 IP (tos 0x0, ttl 63, id 43336, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.47598 > 10.9.1.2.54901: [udp sum ok] UDP, length 1400
+13:52:24.063006 IP (tos 0x0, ttl 63, id 44590, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.068213 IP (tos 0x0, ttl 63, id 44591, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400
+13:52:24.073372 IP (tos 0x0, ttl 63, id 44592, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.078460 IP (tos 0x0, ttl 63, id 44593, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400
+13:52:24.083628 IP (tos 0x0, ttl 63, id 44594, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.088821 IP (tos 0x0, ttl 63, id 44595, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400
+13:52:24.093990 IP (tos 0x0, ttl 63, id 44596, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.099164 IP (tos 0x0, ttl 63, id 44598, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400
+13:52:24.104331 IP (tos 0x0, ttl 63, id 44599, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.109531 IP (tos 0x0, ttl 63, id 44600, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400
+13:52:24.114730 IP (tos 0x0, ttl 63, id 44601, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.119955 IP (tos 0x0, ttl 63, id 44602, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400
+13:52:24.125154 IP (tos 0x0, ttl 63, id 44603, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.130359 IP (tos 0x0, ttl 63, id 44604, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400
+13:52:24.135534 IP (tos 0x0, ttl 63, id 44606, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.140734 IP (tos 0x0, ttl 63, id 44607, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400
+13:52:24.145932 IP (tos 0x0, ttl 63, id 44608, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.151149 IP (tos 0x0, ttl 63, id 44609, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400
+13:52:24.156350 IP (tos 0x0, ttl 63, id 44610, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 64
+13:52:24.161512 IP (tos 0x0, ttl 63, id 44611, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.38776 > 10.9.1.2.54902: [udp sum ok] UDP, length 1400

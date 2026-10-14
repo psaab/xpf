@@ -1,0 +1,6 @@
+# wire_appmatch_twins --fixture transcript: the #11056 narrowed run.
+# Measured generated 2026-10-14 in an isolated 3-netns veth topology (prober 10.9.0.1 -> nft forward-drop DUT stand-in 10.9.0.254/10.9.1.254 -> sink/capture 10.9.1.2) with the real wire_probe_burst.py / wire_tcp_accept.py and the gate tcpdump flag sets; see docs/log/11056.md.
+# tcp80_observed counts FRAMES to dst port 80 (SYN, ACK, data, FIN — one
+# connect burst yields several), exactly what the live gate's capture count
+# produces; deny twins observed zero.
+tcp80_offered=1500 tcp80_observed=7519 tcp8080_offered=1000 tcp8080_observed=0 udp53_offered=1500 udp53_observed=1500 udp5353_offered=1000 udp5353_observed=0 cksum_bad=0

@@ -62,7 +62,17 @@ forwarding, so the prop-test leg cannot substitute for the wire gates below.
 These loss-cluster gates need `loss:xpf-userspace-fw0/fw1` and the #1875
 lock cell (unless their Makefile wrapper already owns it). Their sibling
 `-lib` targets are hermetic self-tests (no cluster, no lock), proving the
-harness rather than observed wire behavior.
+harness rather than observed wire behavior. For the three gates with zero
+ledger rows (#11056: `wire_policy_deny`, `wire_hostinbound_deny`,
+`wire_appmatch_twins`), `make test-wire-gate-hermetic-lib` additionally
+drives the capture reductions against real tcpdump transcripts
+(`test/fixtures/wire/`), the gates' `--fixture` modes over measured
+transcripts, and — when run privileged — the full probe→drop→capture→
+reduction→verdict pipeline in an isolated netns; the fixture-narrowing leg
+is bound in-process by the `pkg/policymatch` `#11056` tests against the
+committed cluster baseline. None of that substitutes for the live rows: the
+three gates stay declared unreached in
+`test/incus/LEDGER_COVERAGE.unreached` until the operator records them.
 
 `make test-wire-properties` is different: it uses local Incus instances
 `xpf-fw`, `trust-host`, and `untrust-host`, not the shared loss cluster,

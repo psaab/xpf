@@ -211,14 +211,10 @@ extract_leg() {
 }
 OFFER_A="$(extract_leg "$PROBE_PORT_A")"; OFFER_B="$(extract_leg "$PROBE_PORT_B")"; CONTROL_OFFERED="$(extract_leg "$CONTROL_PORT")"
 for v in OFFER_A OFFER_B CONTROL_OFFERED; do [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '0'; done
-count_replies() { grep -cE "\\.${1} > .*Flags \\[$2" "$CAPLOG" 2>/dev/null || true; }
-COMP_A="$(count_replies "$PROBE_PORT_A" 'S\.')"; REF_A="$(count_replies "$PROBE_PORT_A" 'R')"
-COMP_B="$(count_replies "$PROBE_PORT_B" 'S\.')"; REF_B="$(count_replies "$PROBE_PORT_B" 'R')"
-CTRL_COMP="$(count_replies "$CONTROL_PORT" 'S\.')"; CTRL_REF="$(count_replies "$CONTROL_PORT" 'R')"
-for v in COMP_A REF_A COMP_B REF_B CTRL_COMP CTRL_REF; do [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '0'; done
-REPLIES=$((COMP_A + REF_A + COMP_B + REF_B))
-CONTROL_OBS=$((CTRL_COMP + CTRL_REF))
-CK="$(grep -ciE 'bad (tcp|ip) (cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"; [[ "$CK" =~ ^[0-9]+$ ]] || CK=0
+COMP_A="$(wire_count_flag_replies "$CAPLOG" "$PROBE_PORT_A" 'S\.')"; REF_A="$(wire_count_flag_replies "$CAPLOG" "$PROBE_PORT_A" 'R')"
+COMP_B="$(wire_count_flag_replies "$CAPLOG" "$PROBE_PORT_B" 'S\.')"; REF_B="$(wire_count_flag_replies "$CAPLOG" "$PROBE_PORT_B" 'R')"
+CTRL_COMP="$(wire_count_flag_replies "$CAPLOG" "$CONTROL_PORT" 'S\.')"; CTRL_REF="$(wire_count_flag_replies "$CAPLOG" "$CONTROL_PORT" 'R')"
+CK="$(wire_count_bad_cksum "$CAPLOG" 'tcp|ip')"
 WIRE_GATE_FINAL_OUT="$(wire_hostinbound_verdict "$REPLIES" "$CONTROL_OFFERED" "$CONTROL_OBS" "$CK" 2 "$OFFER_A" "$COMP_A" "$REF_A" "$OFFER_B" "$COMP_B" "$REF_B")"
 WIRE_GATE_FINAL_RC=$?
 exit "$WIRE_GATE_FINAL_RC"

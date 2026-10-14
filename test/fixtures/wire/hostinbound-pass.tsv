@@ -1,0 +1,10 @@
+# wire_hostinbound_deny --fixture transcript: the #11056 deny-direction run.
+# Measured generated 2026-10-14 in an isolated 3-netns veth topology (prober 10.9.0.1 -> nft forward-drop DUT stand-in 10.9.0.254/10.9.1.254 -> sink/capture 10.9.1.2) with the real wire_probe_burst.py / wire_tcp_accept.py and the gate tcpdump flag sets; see docs/log/11056.md.
+# 1000 SYNs each to 22 and 443 (no reply of any kind), 1500 to the netconf
+# control port 830 with 1374 SYN-ACK replies observed on the prober capture.
+reply_frames=0
+ctrl_offered=1500
+ctrl_observed=1374
+cksum_bad=0
+cell 1000 0 0
+cell 1000 0 0

@@ -1,0 +1,52 @@
+# wire_appmatch_twins narrowed: permit twins tcp/80 + udp/53 emerge, deny twins tcp/8080 + udp/5353 dropped upstream; generated 2026-10-14 in an isolated 3-netns veth topology (prober 10.9.0.1 -> nft forward-drop DUT stand-in 10.9.0.254/10.9.1.254 -> sink/capture 10.9.1.2) with the real wire_probe_burst.py / wire_tcp_accept.py and the gate tcpdump flag sets; see docs/log/11056.md
+# Real tcpdump text, unmodified: an excerpt of the first 12 matching packet blocks per counted port/flag, banner kept, per-run footer dropped (an excerpt is not the full capture).
+# Source capture: twins-narrowed.cap (9019 packet blocks total). The counts the reduction cells assert live in wire-gate-hermetic-selftest.sh.
+tcpdump: listening on vB0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+13:52:56.985025 IP (tos 0x0, ttl 63, id 29579, offset 0, flags [DF], proto TCP (6), length 60)
+    10.9.0.1.55762 > 10.9.1.2.80: Flags [S], cksum 0x8198 (correct), seq 1877012528, win 64240, options [mss 1460,sackOK,TS val 1170486887 ecr 0,nop,wscale 10], length 0
+13:52:56.985030 IP (tos 0x0, ttl 63, id 9008, offset 0, flags [DF], proto TCP (6), length 60)
+    10.9.0.1.55772 > 10.9.1.2.80: Flags [S], cksum 0x0a34 (correct), seq 2266442857, win 64240, options [mss 1460,sackOK,TS val 3377321672 ecr 0,nop,wscale 10], length 0
+13:52:56.985059 IP (tos 0x0, ttl 63, id 9009, offset 0, flags [DF], proto TCP (6), length 52)
+    10.9.0.1.55772 > 10.9.1.2.80: Flags [.], cksum 0xf830 (correct), seq 2266442858, ack 2036532659, win 63, options [nop,nop,TS val 3377321672 ecr 435200621], length 0
+13:52:56.985059 IP (tos 0x0, ttl 63, id 29580, offset 0, flags [DF], proto TCP (6), length 52)
+    10.9.0.1.55762 > 10.9.1.2.80: Flags [.], cksum 0xd964 (correct), seq 1877012529, ack 3860587970, win 63, options [nop,nop,TS val 1170486887 ecr 829019228], length 0
+13:52:56.985127 IP (tos 0x0, ttl 63, id 29581, offset 0, flags [DF], proto TCP (6), length 53)
+    10.9.0.1.55762 > 10.9.1.2.80: Flags [P.], cksum 0x685b (correct), seq 0:1, ack 1, win 63, options [nop,nop,TS val 1170486887 ecr 829019228], length 1: HTTP
+13:52:56.985134 IP (tos 0x0, ttl 63, id 9010, offset 0, flags [DF], proto TCP (6), length 53)
+    10.9.0.1.55772 > 10.9.1.2.80: Flags [P.], cksum 0x8727 (correct), seq 0:1, ack 1, win 63, options [nop,nop,TS val 3377321672 ecr 435200621], length 1: HTTP
+13:52:56.985246 IP (tos 0x0, ttl 63, id 9011, offset 0, flags [DF], proto TCP (6), length 52)
+    10.9.0.1.55772 > 10.9.1.2.80: Flags [.], cksum 0xf82d (correct), seq 1, ack 3, win 63, options [nop,nop,TS val 3377321672 ecr 435200621], length 0
+13:52:56.985312 IP (tos 0x0, ttl 63, id 29582, offset 0, flags [DF], proto TCP (6), length 52)
+    10.9.0.1.55762 > 10.9.1.2.80: Flags [.], cksum 0xd961 (correct), seq 1, ack 3, win 63, options [nop,nop,TS val 1170486887 ecr 829019228], length 0
+13:52:56.985343 IP (tos 0x0, ttl 63, id 2305, offset 0, flags [DF], proto TCP (6), length 60)
+    10.9.0.1.55778 > 10.9.1.2.80: Flags [S], cksum 0x85fa (correct), seq 292936991, win 64240, options [mss 1460,sackOK,TS val 263772541 ecr 0,nop,wscale 10], length 0
+13:52:56.985369 IP (tos 0x0, ttl 63, id 2306, offset 0, flags [DF], proto TCP (6), length 52)
+    10.9.0.1.55778 > 10.9.1.2.80: Flags [.], cksum 0x7e29 (correct), seq 292936992, ack 4227798027, win 63, options [nop,nop,TS val 263772541 ecr 1767421918], length 0
+13:52:56.985376 IP (tos 0x0, ttl 63, id 21996, offset 0, flags [DF], proto TCP (6), length 60)
+    10.9.0.1.55792 > 10.9.1.2.80: Flags [S], cksum 0x0c52 (correct), seq 1969487582, win 64240, options [mss 1460,sackOK,TS val 2639019990 ecr 0,nop,wscale 10], length 0
+13:52:56.985381 IP (tos 0x0, ttl 63, id 29583, offset 0, flags [DF], proto TCP (6), length 52)
+    10.9.0.1.55762 > 10.9.1.2.80: Flags [F.], cksum 0xd95e (correct), seq 1, ack 4, win 63, options [nop,nop,TS val 1170486888 ecr 829019228], length 0
+13:53:01.207469 IP (tos 0x0, ttl 63, id 47809, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [12346q] [30840n] [30840au] [|domain]
+13:53:01.212630 IP (tos 0x0, ttl 63, id 47810, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [12602q] [30840n] [30840au] [|domain]
+13:53:01.219049 IP (tos 0x0, ttl 63, id 47812, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [12858q] [30840n] [30840au] [|domain]
+13:53:01.224230 IP (tos 0x0, ttl 63, id 47813, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [13114q] [30840n] [30840au] [|domain]
+13:53:01.229419 IP (tos 0x0, ttl 63, id 47814, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [13370q] [30840n] [30840au] [|domain]
+13:53:01.234603 IP (tos 0x0, ttl 63, id 47816, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [13626q] [30840n] [30840au] [|domain]
+13:53:01.239787 IP (tos 0x0, ttl 63, id 47817, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [13882q] [30840n] [30840au] [|domain]
+13:53:01.244959 IP (tos 0x0, ttl 63, id 47818, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [14138q] [30840n] [30840au] [|domain]
+13:53:01.250107 IP (tos 0x0, ttl 63, id 47819, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [14394q] [30840n] [30840au] [|domain]
+13:53:01.255223 IP (tos 0x0, ttl 63, id 47820, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [30840a] [14650q] [30840n] [30840au] [|domain]
+13:53:01.260380 IP (tos 0x0, ttl 63, id 47821, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [14968a] [12592q] [30840n] [30840au] [|domain]
+13:53:01.265506 IP (tos 0x0, ttl 63, id 47822, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.42558 > 10.9.1.2.53: [udp sum ok] 20533 op6+% [b2&3=0x333a] [14968a] [12593q] [30840n] [30840au] [|domain]
