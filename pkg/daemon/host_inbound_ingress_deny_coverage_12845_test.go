@@ -11,7 +11,7 @@ import (
 const (
 	sharedOnlyV4_12845 = "192.0.2.1"
 	sharedOnlyV6_12845 = "2001:db8::1"
-	ordinaryV4_12845  = "198.51.100.1"
+	ordinaryV4_12845   = "198.51.100.1"
 )
 
 // #12845/D3-11 counterevidence: IngressDeny addresses are lifeline-shared.
