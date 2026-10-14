@@ -511,32 +511,6 @@ func addressSetForExpansion(
 	return as, nil
 }
 
-// validateAddressSetDepthAndCycles checks the same path-local depth and cycle
-// bounds as ExpandAddressSet without allocating its flattened member result.
-func validateAddressSetDepthAndCycles(name string, ab *AddressBook) error {
-	return validateAddrSetDepthAndCycles(name, ab, make(map[string]bool), 0)
-}
-
-func validateAddrSetDepthAndCycles(
-	name string,
-	ab *AddressBook,
-	visited map[string]bool,
-	depth int,
-) error {
-	as, err := addressSetForExpansion(name, ab, visited, depth)
-	if err != nil {
-		return err
-	}
-	visited[name] = true
-	defer delete(visited, name)
-	for _, nested := range as.AddressSets {
-		if err := validateAddrSetDepthAndCycles(nested, ab, visited, depth+1); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func expandAddrSet(name string, ab *AddressBook, visited map[string]bool, depth int) ([]string, error) {
 	return expandAddrSetMode(name, ab, visited, depth, false)
 }

@@ -29,11 +29,12 @@ import (
 //
 // #12214's following expansion pass mirrors ExpandAddressSet instead: each
 // `address-set`-leaf member must be an address-set, not merely an address or
-// wildcard. It also refuses cycles and nesting beyond five edges, matching the
-// apply-time expansion failures for cycles and 6+ edges. This definedness pass
-// therefore names a wildcard `address` member itself and leaves a wildcard
-// `address-set` member to that expansion pass, which reports it as a policy
-// wildcard rather than an address-set.
+// wildcard. Cross-kind `address` members that name an address-set also count
+// toward depth and cycle validation, matching literal-leaf expansion used by
+// junos-host deny and static-NAT prefix-name. This definedness pass therefore
+// names a wildcard `address` member itself and leaves a wildcard `address-set`
+// member to that expansion pass, which reports it as a policy wildcard rather
+// than an address-set.
 func validateAddressSetMembersDefinedStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -115,10 +116,12 @@ func validateAddressSetMembersDefinedStrict(cfg *Config) error {
 	}
 
 	// #12214: compileAddressBook expands every set during the shared prepass,
-	// including sets unused by policies. Reject the same depth/cycle failures at
-	// commit instead of allowing a green commit to abort every apply.
+	// including sets unused by policies. Bound every consumer graph at commit
+	// instead of allowing a green commit to abort every apply; the validator
+	// follows cross-kind address members that resolve to sets (#12832), a
+	// superset of the apply-time ID-graph prepass.
 	for _, name := range names {
-		if err := validateAddressSetDepthAndCycles(name, ab); err != nil {
+		if err := validateAddressSetGraphDepthAndCycles12832(name, ab); err != nil {
 			detail := err.Error()
 			var expansionErr *addressSetExpansionError
 			if errors.As(err, &expansionErr) {
