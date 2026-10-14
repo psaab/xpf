@@ -882,6 +882,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     packet_fabric_ingress,
                     invalid_zone_stamp,
                 } = stage_classify_fabric_ingress(packet_frame, &mut meta, now_secs, worker_ctx);
+                // #12865: the admission-resolved destination zone, captured
+                // at each gated zone-pair computation before any fabric
+                // redirect replaces the resolution. Zone counters credit
+                // this, never the redirect transport's zone.
+                let mut admission_to_zone: u16 = 0;
                 // Preserve only identities admitted by stage 9; local arrivals
                 // use their configured logical interface when creating a punt.
                 let fabric_nat_scope_ifindex_for_redirect =
@@ -2198,6 +2203,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             debug.to_zone = Some(resolved.metadata.egress_zone);
                         }
                         session_ingress_zone = Some(resolved.metadata.ingress_zone);
+                        // #12865: session-hit packets credit the session's
+                        // admitted egress zone (a FabricRedirect resolution
+                        // here would otherwise credit the transport).
+                        if admission_to_zone == 0 {
+                            admission_to_zone = resolved.metadata.egress_zone;
+                        }
                         // #5606: carry the matched session's NAT64 reverse info
                         // (original v6 src/dst) so the live forward request built
                         // below translates a v4->v6 reply back to IPv6. Set for
@@ -3792,6 +3803,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_zone_override,
                             resolution.egress_ifindex,
                         );
+                        admission_to_zone = to_zone_id;
                         // Borrow zone names as &str for string-typed downstream
                         // callers (static_nat, match_source_nat_for_flow, debug
                         // log). No clone — the borrow lives only inside this
@@ -6064,6 +6076,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 Some(from_zone_id),
                                 fabric_nat_scope_ifindex_for_redirect,
                             ) {
+                                // #12865: capture the adjudicated egress zone
+                                // before the redirect replaces the egress
+                                // ifindex with the fabric transport parent.
+                                if admission_to_zone == 0 {
+                                    admission_to_zone = worker_ctx
+                                        .forwarding
+                                        .egress_zone_id(decision.resolution.egress_ifindex);
+                                }
                                 decision.resolution = redirect;
                             }
                         } else if should_seed_fabric_punt(
@@ -6928,12 +6948,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 .get(&arrival_logical)
                                 .copied()
                         });
-                        resolve_fabric_redirect_for_ingress_identity(
+                        // #12865: the adjudicated egress zone survives
+                        // only in base_resolution; capture it before the
+                        // redirect swaps in the fabric transport parent.
+                        let flowless_intended_to_zone = worker_ctx
+                            .forwarding
+                            .egress_zone_id(base_resolution.egress_ifindex);
+                        let redirected = resolve_fabric_redirect_for_ingress_identity(
                             worker_ctx.forwarding,
                             ingress_zone_id,
                             fabric_nat_scope_ifindex_for_redirect,
                         )
-                        .unwrap_or(base_resolution)
+                        .unwrap_or(base_resolution);
+                        if redirected.disposition == ForwardingDisposition::FabricRedirect
+                            && flowless_intended_to_zone != 0
+                        {
+                            admission_to_zone = flowless_intended_to_zone;
+                        }
+                        redirected
                     } else {
                         base_resolution
                     };
@@ -7051,6 +7083,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_zone_override,
                             final_resolution.egress_ifindex,
                         );
+                        // #12865: for FabricRedirect, final_resolution's
+                        // egress is the transport parent; the pre-redirect
+                        // capture above is the adjudicated zone.
+                        if !(final_resolution.disposition
+                            == ForwardingDisposition::FabricRedirect
+                            && admission_to_zone != 0)
+                        {
+                            admission_to_zone = to_zone_id;
+                        }
                         // #3020: an icmp-type-constrained application term fails
                         // closed for a non-first fragment (no readable L4 → None).
                         let policy_icmp = policy_packet_icmp(packet_frame, meta);
@@ -7412,6 +7453,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // HAInactive with unknown ownership (rg=0) means unresolved
                 // — those should NOT be fabric-redirected.
                 let egress_rg = owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
+                // #12865: intended (pre-redirect) egress for zone counters.
+                let intended_egress_ifindex = decision.resolution.egress_ifindex;
                 if decision.resolution.disposition == ForwardingDisposition::HAInactive
                     && egress_rg > 0
                     && !fabric_link_ingress
@@ -7457,6 +7500,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         zone_id,
                         fabric_nat_scope_ifindex_for_redirect,
                     ) {
+                        if admission_to_zone == 0 {
+                            admission_to_zone = worker_ctx
+                                .forwarding
+                                .egress_zone_id(intended_egress_ifindex);
+                        }
                         decision.resolution = redirect;
                     }
                 }
@@ -7877,13 +7925,40 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     }
                     // #3651: per-zone traffic volume for this slow-path (first-
                     // packet / non-cacheable) forwarded packet, mirroring the
-                    // flow-cache-hit fast path.
+                    // flow-cache-hit fast path. #12865: use the admission
+                    // zone pair, not raw shim meta or the redirect
+                    // transport's egress.
+                    let counter_ingress_logical = resolve_ingress_logical_ifindex(
+                        worker_ctx.forwarding,
+                        meta.ingress_ifindex as i32,
+                        meta.ingress_vlan_id,
+                    )
+                    .unwrap_or(meta.ingress_ifindex as i32);
+                    let counter_override = gate_fabric_zone_override_on_owner_rg(
+                        worker_ctx.forwarding,
+                        worker_ctx.ha_state,
+                        now_secs,
+                        ingress_zone_override,
+                        decision.resolution,
+                    );
+                    let (counter_from_zone, counter_to_zone) =
+                        zone_pair_ids_for_flow_with_override(
+                            worker_ctx.forwarding,
+                            counter_ingress_logical,
+                            counter_override,
+                            decision.resolution.egress_ifindex,
+                        );
                     crate::afxdp::zone_counters::record_zone_traffic(
                         &worker_ctx.forwarding.zone_counter_slot_map,
-                        meta.ingress_zone,
-                        worker_ctx
-                            .forwarding
-                            .egress_zone_id(decision.resolution.egress_ifindex),
+                        counter_from_zone,
+                        crate::afxdp::zone_counters::counter_egress_zone(
+                            decision.resolution.disposition,
+                            admission_to_zone,
+                            counter_to_zone,
+                            worker_ctx
+                                .forwarding
+                                .egress_zone_id(decision.resolution.egress_ifindex),
+                        ),
                         meta.pkt_len as u64,
                     );
                     if decision.nat.rewrite_src.is_some() {
@@ -8094,6 +8169,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 &flow_cache_policy_counter,
                                 filter_match_extra,
                                 ingress_zone_override,
+                                now_secs,
+                                admission_to_zone,
                                 apply_nat_on_fabric,
                                 &neighbor_epoch_snapshot,
                                 worker_ctx,

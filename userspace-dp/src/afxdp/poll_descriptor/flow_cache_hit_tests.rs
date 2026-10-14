@@ -1264,6 +1264,8 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         &policy_counter,
         crate::filter::TermMatchExtra::default(),
         None,
+        0,
+        0,
         false,
         &neighbor_epoch_snapshot,
         &worker_ctx,
@@ -1299,6 +1301,8 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         &policy_counter,
         crate::filter::TermMatchExtra::default(),
         None,
+        0,
+        0,
         false,
         &neighbor_epoch_snapshot,
         &worker_ctx,
@@ -2314,6 +2318,48 @@ fn live_flow_cache_callsite_accounts_per_zone_traffic_6304() {
         (egress.ingress_packets, egress.ingress_bytes),
         (0, 0),
         "#6304/#3651: ...and nothing on that zone's INGRESS side"
+    );
+}
+/// #12865 (D6-06): the zone counters must credit the zones the packet was
+/// adjudicated under (`cached_metadata`), not the raw shim stamp. A zero shim
+/// zone is reachable on an unzoned fabric parent or contested VLAN parent.
+/// Pre-fix this call passes `meta.ingress_zone` (0, skipped), losing the
+/// ingress contribution despite the cached session's admitted trust zone.
+#[test]
+fn live_flow_cache_callsite_accounts_metadata_ingress_zone_12865() {
+    let discard = crate::afxdp::zone_counters::ZoneCounterStore::default();
+    crate::afxdp::zone_counters::flush_recorded_zone_counters(
+        &discard,
+        &crate::afxdp::zone_counters::ZoneCounterSlotMap::build(
+            &[TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID],
+            &discard,
+        ),
+    );
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    let frame = tcp_v4_ack_frame();
+    let mut meta = test_meta(&frame);
+    meta.ingress_zone = 0;
+    let run = run_stage_with_meta(&fixture, &frame, meta, 0);
+    assert_eq!(run.tx_counters.pending_in_place_tx_packets, 1);
+    crate::afxdp::zone_counters::flush_recorded_zone_counters(
+        &fixture.forwarding.zone_counter_store,
+        &fixture.forwarding.zone_counter_slot_map,
+    );
+    let rows = fixture.forwarding.zone_counter_store.snapshot();
+    let ingress = rows.iter().find(|r| r.zone_id == TEST_TRUST_ZONE_ID).expect(
+        "#12865: ingress must be credited to cached_metadata.ingress_zone (trust), not raw meta.ingress_zone=0",
+    );
+    assert_eq!(
+        (ingress.ingress_packets, ingress.ingress_bytes),
+        (1, frame.len() as u64)
+    );
+    let egress = rows
+        .iter()
+        .find(|r| r.zone_id == TEST_UNTRUST_ZONE_ID)
+        .expect("#12865: normal egress zone remains credited");
+    assert_eq!(
+        (egress.egress_packets, egress.egress_bytes),
+        (1, frame.len() as u64)
     );
 }
 
@@ -3823,6 +3869,8 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
             &policy_counter,
             crate::filter::TermMatchExtra::default(),
             None,
+            0,
+            0,
             false,
             neighbor_epoch_snapshot,
             &worker_ctx,
@@ -3988,6 +4036,8 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
             &policy_counter,
             crate::filter::TermMatchExtra::default(),
             None,
+            0,
+            0,
             false,
             neighbor_epoch_snapshot,
             &worker_ctx,

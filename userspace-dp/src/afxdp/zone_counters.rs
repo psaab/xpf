@@ -487,6 +487,28 @@ thread_local! {
 /// result would be silently lower per-zone totals on exactly the traffic whose
 /// other half could not be resolved — a counter that undercounts is worse than
 /// one that is candid about counting each side on its own knowledge.
+/// #12865: egress zone selection for per-zone counters. A FabricRedirect
+/// resolution's egress ifindex is the fabric transport, not the intended
+/// destination; when admission captured the intended zone, credit that.
+/// Otherwise the pair computed from the current resolution, then the
+/// resolution-derived fallback.
+#[inline]
+pub(in crate::afxdp) fn counter_egress_zone(
+    disposition: crate::afxdp::ForwardingDisposition,
+    admission_to_zone: u16,
+    computed_to_zone: u16,
+    fallback: u16,
+) -> u16 {
+    use crate::afxdp::ForwardingDisposition;
+    if disposition == ForwardingDisposition::FabricRedirect && admission_to_zone != 0 {
+        admission_to_zone
+    } else if computed_to_zone != 0 {
+        computed_to_zone
+    } else {
+        fallback
+    }
+}
+
 #[inline]
 pub(in crate::afxdp) fn record_zone_traffic(
     slot_map: &ZoneCounterSlotMap,
@@ -1020,5 +1042,36 @@ mod tests {
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].ingress_packets, 1);
         assert_eq!(snap[0].egress_packets, 1);
+    }
+}
+
+
+#[cfg(test)]
+mod counter_egress_zone_tests {
+    use super::counter_egress_zone;
+    use crate::afxdp::ForwardingDisposition;
+
+    #[test]
+    fn fabric_redirect_credits_admission_zone() {
+        assert_eq!(
+            counter_egress_zone(ForwardingDisposition::FabricRedirect, 7, 9, 9),
+            7,
+            "redirect must credit the intended zone, not the fabric transport"
+        );
+        assert_eq!(
+            counter_egress_zone(ForwardingDisposition::FabricRedirect, 0, 9, 9),
+            9,
+            "no admission capture: computed zone is the only information"
+        );
+        assert_eq!(
+            counter_egress_zone(ForwardingDisposition::ForwardCandidate, 7, 3, 9),
+            3,
+            "non-redirect uses the computed pair"
+        );
+        assert_eq!(
+            counter_egress_zone(ForwardingDisposition::ForwardCandidate, 7, 0, 9),
+            9,
+            "unresolved computed zone falls back to the resolution zone"
+        );
     }
 }

@@ -598,16 +598,22 @@ pub(super) fn stage_flow_cache_hit(
             // a packet reaching here has a live TTL. No TTL test remains on the
             // forward fast path.
             telemetry.counters.forward_candidate_packets += 1;
-            // #3651: per-zone traffic volume for this forwarded packet — two
-            // flat-LUT reads (ingress zone from the shim meta, egress zone from
-            // the resolved egress ifindex) into the per-worker thread-local
-            // coalescer, folded into the shared store per RX batch.
+            // #12865: use the zone pair stamped by admission. Raw shim metadata
+            // identifies the physical ingress and is ambiguous on VLAN trunks
+            // and unzoned fabric parents; FabricRedirect's egress_ifindex is
+            // the fabric transport, not the policy-resolved destination.
             crate::afxdp::zone_counters::record_zone_traffic(
                 &worker_ctx.forwarding.zone_counter_slot_map,
-                meta.ingress_zone,
-                worker_ctx
-                    .forwarding
-                    .egress_zone_id(cached_decision.resolution.egress_ifindex),
+                cached_metadata.ingress_zone,
+                if cached_decision.resolution.disposition == ForwardingDisposition::FabricRedirect
+                    || cached_metadata.egress_zone != 0
+                {
+                    cached_metadata.egress_zone
+                } else {
+                    worker_ctx
+                        .forwarding
+                        .egress_zone_id(cached_decision.resolution.egress_ifindex)
+                },
                 meta.pkt_len as u64,
             );
             if cached_decision.nat.rewrite_src.is_some() {

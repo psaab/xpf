@@ -867,9 +867,25 @@ pub(super) fn record_forwarding_disposition(
             if counters.is_hot()
                 && let Some(m) = meta
             {
+                // #12865: credit the logical ingress zone (VLAN unit),
+                // not the raw shim zone. No admission pair exists at this
+                // site, so a FabricRedirect egress still resolves through
+                // the transport ifindex — a documented limitation; the
+                // descriptor-path counter credits the adjudicated zone.
+                let logical_ingress = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+                    forwarding,
+                    m.ingress_ifindex as i32,
+                    m.ingress_vlan_id,
+                )
+                .unwrap_or(m.ingress_ifindex as i32);
+                let ingress_zone = forwarding
+                    .ifindex_to_zone_id
+                    .get(&logical_ingress)
+                    .copied()
+                    .unwrap_or(m.ingress_zone);
                 crate::afxdp::zone_counters::record_zone_traffic(
                     &forwarding.zone_counter_slot_map,
-                    m.ingress_zone,
+                    ingress_zone,
                     forwarding.egress_zone_id(resolution.egress_ifindex),
                     m.pkt_len as u64,
                 );

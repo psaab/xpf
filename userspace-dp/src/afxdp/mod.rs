@@ -1850,3 +1850,6 @@ fn find_target_binding_mut<'a>(
     )?;
     binding_by_index_mut(left, current_index, ingress_binding, right, target_index)
 }
+#[cfg(test)]
+#[path = "tests_zone_counter_12865.rs"]
+mod tests_zone_counter_12865;
