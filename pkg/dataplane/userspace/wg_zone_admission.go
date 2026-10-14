@@ -92,7 +92,8 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 	for _, iface := range snapshot.Interfaces {
 		if iface.Ifindex > 0 {
 			if _, managed := ingressIfindexes[uint32(iface.Ifindex)]; managed {
-				if !(iface.ParentIfindex == 0 && iface.NativeVLANID > 0) && iface.Zone != "" {
+				if !(iface.ParentIfindex == 0 && iface.NativeVLANID > 0) &&
+					!snapshot.wgFanUpBaseRows[iface.Name] && iface.Zone != "" {
 					addUserspaceWGIngressZone(plan.ingress, userspaceWGIngressZoneKey{
 						Ifindex: uint32(iface.Ifindex), VLANID: userspaceWGUnTaggedVLANID,
 					}, zoneID(iface.Zone))
@@ -146,7 +147,8 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 	// NAT's local-delivery exclusion. A primary WAN address remains the
 	// listener's owner when interface SNAT routes it out of local_v*.
 	for _, iface := range snapshot.Interfaces {
-		if iface.AdminDisabled || unresolvedLo0LocalAddressOwner(iface) {
+		if iface.AdminDisabled || unresolvedLo0LocalAddressOwner(iface) ||
+			snapshot.wgFanUpBaseRows[iface.Name] {
 			continue
 		}
 		ownerZone := zoneID(iface.Zone)
