@@ -95,8 +95,8 @@ func TestZoneInterfaceLoopbackAcceptedWithoutExplicitDef(t *testing.T) {
 // union (#4515). `bind-interface st0.0` materializes the st0 xfrmi device at
 // apply time even with no explicit `set interfaces st0 unit 0`, so a zone that
 // references st0.0 is a valid, daemon-materialized dynamic interface the
-// promotion must NOT false-reject (the #4191 over-rejection class). Covering the
-// base st0 admits every unit of the bound tunnel.
+// promotion must NOT false-reject (the #4191 over-rejection class). Covering
+// the base st0 admits the bound unit st0.0 (unit existence is gated separately, #12827).
 func TestZoneInterfaceIPsecBindInterfaceAcceptedWithoutExplicitDef(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security ipsec vpn myvpn bind-interface st0.0",

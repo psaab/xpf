@@ -614,8 +614,9 @@ func zoneReferenceableInterfaceBases(cfg *Config) map[string]bool {
 // carries no traffic), just with an operator-visible warning instead of a hard
 // reject. Zones are walked in sorted name order so the first-reported error is
 // deterministic. A bare reference resolves against its base; an explicit
-// logical-unit suffix must exist when the base has a configured interface
-// stanza, except for an interface-level tunnel's implicit unit 0 (#11433).
+// logical-unit suffix must be an authored unit or a daemon-materialized one
+// (lo0.0, the exact bound secure-tunnel unit, or an interface-level tunnel's
+// implicit unit 0) (#11433, #12827).
 func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -659,18 +660,30 @@ func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 				if err != nil {
 					continue // The unit-reference gate reports malformed suffixes.
 				}
-				if ifCfg := cfg.Interfaces.Interfaces[ref.Base]; ifCfg != nil {
-					unit, exists := ifCfg.Units[unitNum]
+				ifCfg := cfg.Interfaces.Interfaces[ref.Base]
+				unitExists := false
+				implicitTunnelUnit := false
+				if ifCfg != nil {
+					unit := ifCfg.Units[unitNum]
+					unitExists = unit != nil
 					// An interface-level tunnel with no authored logical-unit
 					// stanza is itself the implicit unit 0. In particular,
 					// WireGuard's `wgN` TUN remains referenceable as `wgN.0`.
-					implicitTunnelUnit := unitNum == 0 && ifCfg.Tunnel != nil && !ifCfg.AuthoredUnits
-					if (!exists || unit == nil) && !implicitTunnelUnit {
-						return fmt.Errorf(
-							"security zone %q references interface %q with logical unit %q, "+
-								"which is not configured under `interfaces`",
-							zoneName, ifName, ref.UnitTok)
-					}
+					implicitTunnelUnit = unitNum == 0 && ifCfg.Tunnel != nil && !ifCfg.AuthoredUnits
+				}
+				// lo0 is always materialized with unit 0. A secure-tunnel
+				// unit is materialized only when this exact ref resolves to
+				// a non-colliding IPsec bind; the generous base set above is
+				// not sufficient to prove the unit exists.
+				materializedUnit := ref.Base == "lo0" && unitNum == 0
+				if _, bound := cfg.SecureTunnelNetdevForRef(ifName); bound {
+					materializedUnit = true
+				}
+				if !unitExists && !implicitTunnelUnit && !materializedUnit {
+					return fmt.Errorf(
+						"security zone %q references interface %q with logical unit %q, "+
+							"which is not configured under `interfaces`",
+						zoneName, ifName, ref.UnitTok)
 				}
 			}
 		}
