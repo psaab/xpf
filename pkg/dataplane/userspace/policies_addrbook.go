@@ -125,7 +125,8 @@ func classifyPolicyAddresses(cfg *config.Config, nameToID map[string]uint32, add
 // table for inclusion on the wire ConfigSnapshot. Returns the
 // table + a map from each declared address-book name (Addresses
 // and AddressSets) to its assigned u32 ID. Names that reference
-// the same canonical CIDR content share an ID.
+// the same canonical CIDR content share an ID, except that
+// helper-refused spellings are bucketed separately (#12852).
 //
 // HA determinism: names are iterated in lexicographic sorted order
 // before any hashing/ID assignment. Content hashing buckets by
@@ -539,7 +540,10 @@ func sortParsedAddressBookCIDRs(parsed []parsedAddressBookCIDR) {
 		}
 		ma, _ := a.network.Mask.Size()
 		mb, _ := b.network.Mask.Size()
-		return ma < mb
+		if ma != mb {
+			return ma < mb
+		}
+		return a.value < b.value
 	})
 }
 
@@ -585,6 +589,26 @@ func canonicalizeParsedAddressBookContent(v4, v6 []parsedAddressBookCIDR) []byte
 		ones, _ := prefix.network.Mask.Size()
 		buf.WriteByte(byte(ones))
 		buf.Write(prefix.network.IP.To16())
+	}
+	// Preserve existing IDs for ordinary canonical books. A helper-refused
+	// padded mask has the same parsed network as its canonical spelling but
+	// cannot be parsed by Rust, so keep those exact wire spellings distinct.
+	var refused []string
+	for _, prefixes := range [][]parsedAddressBookCIDR{v4, v6} {
+		for _, prefix := range prefixes {
+			if prefix.valid && config.CIDRMaskHelperRefusesPadding(prefix.value) {
+				refused = append(refused, prefix.value)
+			}
+		}
+	}
+	if len(refused) > 0 {
+		sort.Strings(refused)
+		buf.WriteString("REFUSED")
+		binary.Write(&buf, binary.BigEndian, uint32(len(refused)))
+		for _, value := range refused {
+			binary.Write(&buf, binary.BigEndian, uint32(len(value)))
+			buf.WriteString(value)
+		}
 	}
 	return buf.Bytes()
 }
