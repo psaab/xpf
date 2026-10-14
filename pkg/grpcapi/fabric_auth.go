@@ -603,8 +603,51 @@ func (s *Server) fabricAuthStreamInterceptor(srv interface{}, ss grpc.ServerStre
 	if err := s.checkFabricAuth(ss.Context(), info.FullMethod); err != nil {
 		return err
 	}
-	return handler(srv, ss)
+	// #13050: stamp the fabric-listener marker into the context the handler
+	// (and every later interceptor deriving from it, e.g. the #5883
+	// peer-marker promotion) observes, so stream handlers that ALSO serve
+	// the loopback listener can tell a PSK-authenticated peer stream from a
+	// local one.
+	return handler(srv, fabricAuthServerStream{
+		ServerStream: ss,
+		ctx:          withFabricAuthStreamContext(ss.Context()),
+	})
 }
+
+// fabricAuthStreamContextKey marks a stream context as bound to the FABRIC
+// listener (#13050). Only fabricAuthStreamInterceptor sets it — the loopback
+// listener installs no fabric-auth interceptor, and a remote client cannot
+// forge a Go context value — so its presence is a trusted server-side
+// statement about which listener admitted the stream, never a read of an
+// attacker-supplied header (#11524 Phase-2 source constraint).
+type fabricAuthStreamContextKey struct{}
+
+// withFabricAuthStreamContext stamps the #13050 fabric-listener marker.
+func withFabricAuthStreamContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, fabricAuthStreamContextKey{}, true)
+}
+
+// fabricAuthStreamContext reports whether ctx carries the #13050
+// fabric-listener stream marker. Stream handlers shared by both listeners use
+// it to keep fabric-only machinery (the #11082 args-bound verification and
+// its unbound-fallback counter) away from local callers, which authenticate
+// by loopback peer credentials (#5278) rather than the fabric PSK.
+func fabricAuthStreamContext(ctx context.Context) bool {
+	on, _ := ctx.Value(fabricAuthStreamContextKey{}).(bool)
+	return on
+}
+
+// fabricAuthServerStream re-parents a stream's context so the #13050 marker
+// reaches the handler. grpc.ServerStream has no Context setter, so the
+// standard shape is to embed and override — same as peerMarkerServerStream,
+// and the generated server-stream wrapper embeds this in turn, so Send/Recv
+// keep delegating to the transport stream.
+type fabricAuthServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s fabricAuthServerStream) Context() context.Context { return s.ctx }
 
 // fabricAuthMethodContextKey carries the full gRPC method and unary request
 // digest from the client interceptor to the per-RPC credentials callback.
