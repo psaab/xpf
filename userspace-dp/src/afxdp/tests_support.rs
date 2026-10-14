@@ -2543,6 +2543,19 @@ pub(super) fn junos_host_local_delivery_permit_snapshot(
     log_close: bool,
     policy_id: u32,
 ) -> ConfigSnapshot {
+    junos_host_local_delivery_permit_snapshot_with_timeout(log_init, log_close, policy_id, None)
+}
+
+/// #12863: same permit fixture, but its application term (TCP/179, the port
+/// `run_junos_host_permit_local_delivery` drives) carries a per-application
+/// `inactivity_timeout` of `timeout_secs` seconds (`None` keeps the
+/// use-global default, byte-identical to the pre-#12863 fixture).
+pub(super) fn junos_host_local_delivery_permit_snapshot_with_timeout(
+    log_init: bool,
+    log_close: bool,
+    policy_id: u32,
+    timeout_secs: Option<u32>,
+) -> ConfigSnapshot {
     let mut snapshot = gre_to_self_snapshot();
     snapshot.policies.push(PolicyRuleSnapshot {
         name: "host-permit-log".to_string(),
@@ -2550,8 +2563,16 @@ pub(super) fn junos_host_local_delivery_permit_snapshot(
         to_zone: "junos-host".to_string(),
         source_addresses: vec!["any".to_string()],
         destination_addresses: vec!["any".to_string()],
-        applications: vec!["any".to_string()],
-        application_terms: Vec::new(),
+        applications: vec!["host-bgp-179".to_string()],
+        application_terms: vec![crate::PolicyApplicationSnapshot {
+            name: "host-bgp-179".to_string(),
+            protocol: "tcp".to_string(),
+            source_port: String::new(),
+            destination_port: "179".to_string(),
+            icmp_type: None,
+            icmp_code: None,
+            inactivity_timeout: timeout_secs,
+        }],
         action: "permit".to_string(),
         log_session_init: log_init,
         log_session_close: log_close,
@@ -2566,7 +2587,9 @@ pub(super) fn junos_host_local_delivery_permit_snapshot(
 /// TCP/179 SYN under `snapshot` and return the metadata of the single installed
 /// host-local session (log flags, admitting policy id, hit-counter handle),
 /// asserting exactly one session was cached and it was not policy-denied.
-pub(super) fn run_junos_host_permit_local_delivery(snapshot: &ConfigSnapshot) -> (bool, bool, u32, u32) {
+pub(super) fn run_junos_host_permit_local_delivery(
+    snapshot: &ConfigSnapshot,
+) -> (bool, bool, u32, u32, Option<u64>) {
     let forwarding = build_forwarding_state(snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
@@ -2617,6 +2640,7 @@ pub(super) fn run_junos_host_permit_local_delivery(snapshot: &ConfigSnapshot) ->
             md.log_session_close,
             md.policy_id,
             md.policy_counter_idx,
+            md.inactivity_timeout_ns,
         ));
     });
     seen.expect("a host-local session must be installed for a permitted flow")
