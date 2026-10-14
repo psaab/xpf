@@ -115,8 +115,10 @@ type dhcpHostInboundFamily struct {
 }
 
 // validateDHCPServerHostInboundBypassWarnings emits the #6460 advisory. One
-// warning per (group, interface) pair whose zone omits the family's token,
-// sorted for deterministic commit output.
+// warning per (group, interface) pair whose effective services omit the family's
+// token, except where #7490 withheld an already-configured zone-level DHCP token
+// and the #6519 advisory covers the same condition.
+// Warnings are sorted for deterministic commit output.
 func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 	if cfg == nil || cfg.Security.Zones == nil {
 		return nil
@@ -172,27 +174,41 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 				if z == nil {
 					continue
 				}
-				// EFFECTIVE host-inbound system-services for this interface: the
-				// per-interface override where declared REPLACES the zone-level
-				// set (#6515/#3362), with #3720 physical-parent inheritance for a
-				// logical unit. Reuse the InterfaceHostInboundEffective SSOT so
-				// the advisory resolves admission exactly as the dataplane does —
-				// a parent `reth0` override admitting dhcp must cover unit
-				// `reth0.80`, else this warns falsely.
+				// #7490 deliberately removes zone-level dhcp/bootp from effective
+				// services on server/relay interfaces. When the zone authored the
+				// token but this interface has no override, the resulting absence
+				// is not a zone omission: #6519 already reports the withholding
+				// and its interface-level remedy. Do not emit #6460 with a
+				// contradictory instruction to add a token the zone already has.
+				// A declared interface override remains significant: it replaces
+				// the zone set (#6515), so if it omits dhcp the operator must
+				// restore the token on that interface.
+				_, _, overridden := z.InterfaceHostInboundOverride(ifn)
+				zoneAdmits := z.HostInboundTraffic != nil &&
+					hostInboundAdmitsSystemService(z.HostInboundTraffic.SystemServices, fam.token)
+				if !overridden && zoneAdmits &&
+					!hostInboundAdmitsSystemService(z.ZoneLevelSystemServicesFor(z.HostInboundTraffic.SystemServices, ifn), fam.token) {
+					continue
+				}
 				effSvc, _, _ := z.InterfaceHostInboundEffective(ifn)
 				if hostInboundAdmitsSystemService(effSvc, fam.token) {
 					continue
 				}
+				remedy := fmt.Sprintf("add `host-inbound-traffic system-services %s` to zone %q.", fam.token, zname)
+				explanation := fmt.Sprintf("that zone's host-inbound-traffic system-services set omits %q", fam.token)
+				if overridden && zoneAdmits {
+					explanation = fmt.Sprintf("the per-interface host-inbound-traffic system-services override omits %q", fam.token)
+					remedy = fmt.Sprintf("add `host-inbound-traffic system-services %s` to interface %q in zone %q.", fam.token, ifn, zname)
+				}
 				warnings = append(warnings, fmt.Sprintf(
 					"system services %s group %q serves interface %q (security zone %q) but "+
-						"that zone's host-inbound-traffic system-services set omits %q — the "+
+						"%s — the "+
 						"DHCP server answers on that interface REGARDLESS of the zone's "+
 						"host-inbound set, because %s (#6460). The zone stanza does not bound "+
 						"it. To stop serving that segment, remove %q from group %q; to record "+
-						"that the segment IS meant to be served, add "+
-						"`host-inbound-traffic system-services %s` to zone %q.",
-					fam.stanza, gname, ifn, zname, fam.token, fam.whyOpen,
-					ifn, gname, fam.token, zname))
+						"that the segment IS meant to be served, %s",
+					fam.stanza, gname, ifn, zname, explanation, fam.whyOpen,
+					ifn, gname, remedy))
 			}
 		}
 	}
