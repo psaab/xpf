@@ -71,10 +71,10 @@ func TestShowVLANsNilSlots5910(t *testing.T) {
 	}
 }
 
-// zoneIfaceGRPCStore commits a config binding lo.0 to zone trust so the
-// showZonesDetail interface-detail loop runs and looks up the bound name. The
-// gRPC renderer looks up cfg.Interfaces.Interfaces[ifName] DIRECTLY (by the
-// logical name), so the nil slots are injected under the "lo.0" key.
+// zoneIfaceGRPCStore commits a config binding ge-0/0/0.0 to zone trust so the
+// showZonesDetail interface-detail loop runs and resolves the bound name. The
+// renderer resolves the member's BASE name (#12898/#5325) before the lookup,
+// so the nil slots are injected under the "ge-0/0/0" key.
 func zoneIfaceGRPCStore(t *testing.T) *configstore.Store {
 	t.Helper()
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
@@ -112,18 +112,17 @@ func TestShowZonesDetailNilIfaceSlots5910(t *testing.T) {
 		wantAddress bool
 	}{
 		{"nil-interface-config", func(cfg *config.Config) {
-			// The gRPC renderer looks up the LOGICAL name directly, so inject
-			// the present-but-nil slot under exactly that key.
-			cfg.Interfaces.Interfaces["ge-0/0/0.0"] = nil
+			// The renderer looks up the member's BASE ("ge-0/0/0"), so inject
+			// the present-but-nil stanza under exactly that key (#12898);
+			// LookupInterface treats it as absent, no deref.
+			cfg.Interfaces.Interfaces["ge-0/0/0"] = nil
 		}, false},
 		{"nil-interface-unit", func(cfg *config.Config) {
-			cfg.Interfaces.Interfaces["ge-0/0/0.0"] = &config.InterfaceConfig{
-				Name: "ge-0/0/0",
-				Units: map[int]*config.InterfaceUnit{
-					0: {Number: 0, Addresses: []string{"127.0.0.1/8"}},
-					7: nil, // present-but-nil unit alongside a valid one
-				},
-			}
+			// Same key form on the unit side: a valid unit 0 the renderer
+			// must show, alongside a present-but-nil unit 7 it must skip.
+			cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0] =
+				&config.InterfaceUnit{Number: 0, Addresses: []string{"127.0.0.1/8"}}
+			cfg.Interfaces.Interfaces["ge-0/0/0"].Units[7] = nil
 		}, true},
 	}
 	for _, tc := range cases {
