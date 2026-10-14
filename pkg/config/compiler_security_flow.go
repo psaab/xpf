@@ -193,8 +193,19 @@ func validateFlowTraceFlagsAndFiltersAST(nodes []*Node, prefix string, lenient b
 				// packet-filter source/destination prefixes
 				for _, pf := range namedInstances(toNode.FindChildren("packet-filter")) {
 					pfPath := joinNodePath(toPath, []string{"packet-filter", pf.name})
+					// #12888: read the same expanded body compileFlow reads,
+					// so a packed packet-filter's prefixes are validated.
+					// An elided filter carries its body in its own Keys.
+					pfNode := pf.node
+					if len(pfNode.Children) == 0 && len(pfNode.Keys) > 2 {
+						pfNode = &Node{Keys: pfNode.Keys[:2],
+							Children: expandResolvingRuns9792(
+								[]*Node{{Keys: pfNode.Keys[2:]}}, packetFilterSchema9792())}
+					} else {
+						pfNode = expandResolvingRun9792(pf.node, packetFilterSchema9792())
+					}
 					for _, leaf := range []string{"source-prefix", "destination-prefix"} {
-						pn := pf.node.FindChild(leaf)
+						pn := pfNode.FindChild(leaf)
 						if pn == nil {
 							// Absent prefix: a protocol-only filter is legitimate, so
 							// leave it alone. This is AST-distinguishable from the
