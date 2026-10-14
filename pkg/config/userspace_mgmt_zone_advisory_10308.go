@@ -25,6 +25,18 @@ func appendUserspaceMgmtZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 	if cfg == nil || opts.suppressContestedTrunkZoneAdvisory || cfg.Security.Zones == nil {
 		return
 	}
+	// Early-out before the quarantine walks when no mgmt/control zone
+	// with interfaces exists (avoidable computation on every compile).
+	hasCandidate := false
+	for _, zoneName := range []string{"control", "mgmt"} {
+		if z := cfg.Security.Zones[zoneName]; z != nil && len(z.Interfaces) > 0 {
+			hasCandidate = true
+			break
+		}
+	}
+	if !hasCandidate {
+		return
+	}
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
