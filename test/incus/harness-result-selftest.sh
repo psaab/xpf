@@ -1811,6 +1811,15 @@ wire_log 'WIRE_GATE wire_routing_separation VOID reason=env-void probe_offered=0
 wire_field_is "routing separation early VOID transcribes" 0 1 "VOID"
 wire_field_is "routing separation early VOID keeps env-void" 0 2 "env-void"
 wire_field_has "routing separation early VOID keeps zero metrics" 0 5 "control_observed=0"
+wire_log 'WIRE_GATE wire_nat_frag_needed PASS reason=-- probe_offered=3 snat_observed=3 error_generated=3 control_offered=2 control_observed=2 error_delivered=3 translated_quote=3 untranslated_leaks=0 mtu_confirmed=3 cksum_bad=0\n'
+wire_field_is "nat frag-needed PASS transcribes" 0 1 "PASS"
+wire_field_is "nat frag-needed headline is error_delivered" 0 3 "error_delivered"
+wire_field_has "nat frag-needed keeps the quote metric" 0 5 "translated_quote=3"
+wire_log 'WIRE_GATE wire_nat_frag_needed FAIL reason=-- probe_offered=3 snat_observed=3 error_generated=3 control_offered=2 control_observed=2 error_delivered=0 translated_quote=0 untranslated_leaks=0 mtu_confirmed=0 cksum_bad=0\n'
+wire_field_is "nat frag-needed regression FAIL transcribes" 0 1 "FAIL"
+wire_log 'WIRE_GATE wire_nat_frag_needed VOID reason=env-void probe_offered=3 snat_observed=0 error_generated=0 control_offered=2 control_observed=2 error_delivered=0 translated_quote=0 untranslated_leaks=0 mtu_confirmed=0 cksum_bad=0\n'
+wire_field_is "nat frag-needed env-void transcribes" 0 1 "VOID"
+wire_field_has "nat frag-needed env-void keeps the SNAT attribution leg" 0 5 "snat_observed=0"
 wire_log 'WIRE_GATE wire_policy_deny PASS reason=-- probe_offered=1000 probe_leaked=0 control_offered=1000 control_observed=1000\nWIRE_GATE wire_appmatch_twins PASS reason=-- tcp80_offered=1\n'
 wire_field_is "two gate IDs in one log is VOID" 0 1 "VOID"
 wire_field_has "two gate IDs says why" 0 2 "distinct WIRE_GATE gate IDs"

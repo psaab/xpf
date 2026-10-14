@@ -580,6 +580,11 @@ harness_adapt_wire_gate() {
 		headline="probe_leaked"
 		direction="lower-better"
 		;;
+	wire_nat_frag_needed)
+		required="probe_offered snat_observed error_generated control_offered control_observed error_delivered translated_quote untranslated_leaks mtu_confirmed"
+		headline="error_delivered"
+		direction="higher-better"
+		;;
 	test-host-inbound | test-host-inbound-failover)
 		required="cells_passed cells_failed posture_passed posture_failed"
 		headline="cells_failed"
