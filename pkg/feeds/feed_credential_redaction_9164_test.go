@@ -239,3 +239,23 @@ func TestStaleWarnDoesNotLogTheCredential9164(t *testing.T) {
 		}
 	}
 }
+
+// #12883: the transport may quote a DIFFERENT URL than the configured one
+// (same-origin redirect, scheme normalization); its query token must not
+// survive redaction.
+func TestFeedErrorRedactionChangedURL12883(t *testing.T) {
+	rawURL := "https://feeds.example.net/list.txt"
+	errText := `Get "https://feeds.example.net/redirected.txt?token=REDIRECT_TOKEN_9": dial tcp 10.0.0.1:443: connect: connection refused`
+	got := redactFeedURLInError9164(errText, rawURL)
+	if strings.Contains(got, "REDIRECT_TOKEN_9") {
+		t.Fatalf("redirect token survived: %s", got)
+	}
+	if !strings.Contains(got, "connection refused") {
+		t.Fatalf("diagnostic lost: %s", got)
+	}
+	upper := `Get "HTTPS://user:pass@feeds.example.net/list.txt?token=CASE_TOKEN_1": dial tcp: i/o timeout`
+	got = redactFeedURLInError9164(upper, rawURL)
+	if strings.Contains(got, "CASE_TOKEN_1") || strings.Contains(got, "user:pass") {
+		t.Fatalf("normalized-spelling secret survived: %s", got)
+	}
+}

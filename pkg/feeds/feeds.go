@@ -2392,13 +2392,11 @@ func redactFeedURLInError9164(errText, rawURL string) string {
 	if errText == "" || rawURL == "" {
 		return errText
 	}
+	// No early return when the configured URL is clean: the transport may
+	// still quote a changed URL carrying a credential (#12883). The scrub
+	// below is a no-op on credential-free URLs, so the no-credential
+	// control diagnostic stays byte-identical.
 	redacted := config.RedactURL(rawURL)
-	if redacted == rawURL {
-		// Nothing to hide -- no credential in the configured URL. Returning the
-		// text untouched keeps the no-credential diagnostic byte-identical,
-		// which is what the control row asserts.
-		return errText
-	}
 	out := strings.ReplaceAll(errText, rawURL, redacted)
 
 	// The password-masked spelling net/http emits. Built from the same URL so
@@ -2410,5 +2408,33 @@ func redactFeedURLInError9164(errText, rawURL string) string {
 			out = strings.ReplaceAll(out, masked.String(), redacted)
 		}
 	}
-	return out
+	// #12883: the transport may quote a URL that differs from the configured
+	// one — a same-origin redirect target, or a scheme/host-normalized
+	// spelling — whose query token the literal passes above cannot know.
+	// Scrub every remaining URL-shaped token in the text through the same
+	// RedactURL definition.
+	return scrubURLsInText12883(out)
+}
+
+// scrubURLsInText12883 redacts every scheme:// token in text (terminated by
+// whitespace or a quote) via config.RedactURL.
+func scrubURLsInText12883(text string) string {
+	var b strings.Builder
+	rest := text
+	for {
+		i := strings.Index(rest, "://")
+		if i < 0 {
+			b.WriteString(rest)
+			return b.String()
+		}
+		// The scheme starts after the last delimiter before "://".
+		start := strings.LastIndexAny(rest[:i], " 	\"'`(<[{") + 1
+		end := i + 3
+		for end < len(rest) && !strings.ContainsRune(" 	\"'`>", rune(rest[end])) {
+			end++
+		}
+		b.WriteString(rest[:start])
+		b.WriteString(config.RedactURL(rest[start:end]))
+		rest = rest[end:]
+	}
 }
