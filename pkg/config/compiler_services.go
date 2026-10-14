@@ -865,6 +865,17 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 						fs.FeedEntries = append(fs.FeedEntries, FeedEntry{Name: fs.FeedName})
 						fs.FeedName = ""
 					}
+					// Identical re-statements are idempotent (Junos set
+					// semantics): do not accumulate duplicates that the
+					// strict uniqueness gate would then reject.
+					for _, existing := range fs.FeedEntries {
+						if existing == entry {
+							return
+						}
+					}
+					if fs.FeedName == entry.Name && entry.Path == "" {
+						return
+					}
 					fs.FeedEntries = append(fs.FeedEntries, entry)
 				}
 				if len(prop.Children) == 0 {
@@ -883,6 +894,9 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 					// A peeled feed-name container has named feed children;
 					// the enclosing leaf carries the keyword but no value.
 					for _, feed := range prop.Children {
+						if feed.Name() == "path" {
+							continue // a value child, not a named feed
+						}
 						entry := FeedEntry{Name: feed.Name()}
 						for _, path := range feed.Children {
 							if path.Name() == "path" {
