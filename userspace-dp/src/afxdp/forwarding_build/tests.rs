@@ -12493,8 +12493,8 @@ fn admin_disabled_interface_addresses_do_not_enter_fib_state_11463() {
 
 /// #12183: a mixed direct/recursive row whose direct member has no neighbor
 /// pins the single-terminal recursive path through the second static in two
-/// route-record orders. It does not cover multiple recursive backup specs or
-/// exclusion of a route from matching itself; B2 is tracked by follow-up #12613.
+/// route-record orders. Broader multi-member and self-match cases are covered
+/// by the dedicated #12613 regressions below.
 /// Fixture: direct A has no neighbor (the connected prefix remains live), while
 /// bare R `10.10.0.1` resolves only via second static S (`10.10.0.0/24` via
 /// connected G `192.168.0.254`). The R leg must bake terminal gateway `(G,
@@ -12613,9 +12613,9 @@ fn mixed_static_recursive_backup_resolves_via_second_static_12183() {
     }
 }
 
-/// #12183 v6 twin of the single-terminal recursive case above. It pins
-/// route-record order and terminal-hop baking, not B2 multi-spec selection or
-/// self-match exclusion (tracked by follow-up #12613).
+/// #12183 v6 twin of the single-terminal recursive case above. It pins route
+/// record order and terminal-hop baking; broader cases are covered by the
+/// dedicated #12613 regressions below.
 #[test]
 fn mixed_static_recursive_backup_resolves_via_second_static_v6_12183() {
     use std::net::Ipv6Addr;
@@ -12954,7 +12954,7 @@ fn bare_v6_link_local_never_recurses_to_default_gateway_12398() {
 fn bare_v6_link_local_nested_never_recurses_to_wan_12398() {
     let wan_gateway: std::net::Ipv6Addr = "2001:db8:2::fe".parse().unwrap();
     let probe: std::net::Ipv6Addr = "2001:db8:20::5".parse().unwrap();
-    let nested: std::net::Ipv6Addr = "2001:db8:30::1".parse().unwrap();
+    let nested: std::net::Ipv6Addr = "2001:db8:40::1".parse().unwrap();
     let snapshot = ConfigSnapshot {
         interfaces: vec![
             InterfaceSnapshot {
@@ -12999,6 +12999,13 @@ fn bare_v6_link_local_nested_never_recurses_to_wan_12398() {
                 table: "inet6.0".into(),
                 family: "inet6".into(),
                 destination: "2001:db8:30::/64".into(),
+                next_hops: vec!["2001:db8:40::1".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet6.0".into(),
+                family: "inet6".into(),
+                destination: "2001:db8:40::/64".into(),
                 next_hops: vec!["fe80::1".into()],
                 ..Default::default()
             },
@@ -13831,16 +13838,28 @@ fn recursive_static_ecmp_expands_every_member_in_both_orders_12613() {
 #[test]
 fn recursive_static_self_match_walks_up_to_live_default_v4_12613() {
     let snapshot = ConfigSnapshot {
-        interfaces: vec![InterfaceSnapshot {
-            name: "untrust0".into(),
-            ifindex: 202,
-            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
-                family: "inet".into(),
-                address: "203.0.113.2/24".into(),
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "untrust0".into(),
+                ifindex: 202,
+                addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "203.0.113.2/24".into(),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        }],
+            },
+            InterfaceSnapshot {
+                name: "trust0".into(),
+                ifindex: 201,
+                addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "192.168.0.1/24".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
         neighbors: vec![crate::NeighborSnapshot {
             interface: "untrust0".into(),
             ifindex: 202,
@@ -13862,7 +13881,7 @@ fn recursive_static_self_match_walks_up_to_live_default_v4_12613() {
                 table: "inet.0".into(),
                 family: "inet".into(),
                 destination: "10.20.0.0/24".into(),
-                next_hops: vec!["192.168.0.99@missing0".into(), "10.20.0.1".into()],
+                next_hops: vec!["192.168.0.99".into(), "10.20.0.1".into()],
                 ..Default::default()
             },
         ],
@@ -13884,11 +13903,15 @@ fn recursive_static_self_match_walks_up_to_live_default_v4_12613() {
     assert!(route
         .next_hops
         .iter()
-        .any(|nh| nh.next_hop == Some(Ipv4Addr::new(192, 168, 0, 99)) && nh.ifindex == 0));
+        .any(|nh| nh.next_hop == Some(Ipv4Addr::new(192, 168, 0, 99)) && nh.ifindex == 201));
     assert!(route
         .next_hops
         .iter()
         .all(|nh| nh.next_hop != Some(Ipv4Addr::new(10, 20, 0, 1))));
+    assert!(route
+        .next_hops
+        .iter()
+        .any(|nh| nh.next_hop == Some(Ipv4Addr::new(203, 0, 113, 1)) && nh.ifindex == 202));
     let resolution = lookup_forwarding_resolution_v4(
         &state,
         None,
@@ -13903,10 +13926,14 @@ fn recursive_static_self_match_walks_up_to_live_default_v4_12613() {
         resolution.disposition,
         ForwardingDisposition::ForwardCandidate
     );
-    assert_eq!(resolution.egress_ifindex, 202);
-    assert_eq!(
-        resolution.next_hop,
-        Some(IpAddr::V4("203.0.113.1".parse().unwrap()))
+    assert!(
+        matches!(
+            (resolution.egress_ifindex, resolution.next_hop),
+            (201, Some(IpAddr::V4(ip))) if ip == "192.168.0.99".parse::<Ipv4Addr>().unwrap()
+        ) || matches!(
+            (resolution.egress_ifindex, resolution.next_hop),
+            (202, Some(IpAddr::V4(ip))) if ip == "203.0.113.1".parse::<Ipv4Addr>().unwrap()
+        )
     );
 }
 
@@ -14012,16 +14039,28 @@ fn recursive_static_ecmp_expands_every_v6_member_in_both_orders_12613() {
 #[test]
 fn recursive_static_self_match_walks_up_to_live_default_v6_12613() {
     let snapshot = ConfigSnapshot {
-        interfaces: vec![InterfaceSnapshot {
-            name: "untrust0".into(),
-            ifindex: 202,
-            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
-                family: "inet6".into(),
-                address: "2001:db8:2::2/64".into(),
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "untrust0".into(),
+                ifindex: 202,
+                addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: "2001:db8:2::2/64".into(),
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        }],
+            },
+            InterfaceSnapshot {
+                name: "trust0".into(),
+                ifindex: 201,
+                addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: "2001:db8:1::1/64".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
         neighbors: vec![crate::NeighborSnapshot {
             interface: "untrust0".into(),
             ifindex: 202,
@@ -14043,7 +14082,7 @@ fn recursive_static_self_match_walks_up_to_live_default_v6_12613() {
                 table: "inet6.0".into(),
                 family: "inet6".into(),
                 destination: "2001:db8:20::/64".into(),
-                next_hops: vec!["2001:db8:1::99@missing0".into(), "2001:db8:20::1".into()],
+                next_hops: vec!["2001:db8:1::99".into(), "2001:db8:20::1".into()],
                 ..Default::default()
             },
         ],
@@ -14061,7 +14100,11 @@ fn recursive_static_self_match_walks_up_to_live_default_v6_12613() {
     assert!(route
         .next_hops
         .iter()
-        .any(|nh| nh.next_hop == Some("2001:db8:1::99".parse().unwrap()) && nh.ifindex == 0));
+        .any(|nh| nh.next_hop == Some("2001:db8:1::99".parse().unwrap()) && nh.ifindex == 201));
+    assert!(route
+        .next_hops
+        .iter()
+        .any(|nh| { nh.next_hop == Some("2001:db8:2::1".parse().unwrap()) && nh.ifindex == 202 }));
     assert!(route
         .next_hops
         .iter()
@@ -14076,13 +14119,120 @@ fn recursive_static_self_match_walks_up_to_live_default_v6_12613() {
         None,
     )
     .resolution;
-    assert_eq!(
-        resolution.disposition,
-        ForwardingDisposition::ForwardCandidate
+    assert!(resolution.disposition == ForwardingDisposition::ForwardCandidate);
+    assert!(
+        matches!(
+            (resolution.egress_ifindex, resolution.next_hop),
+            (201, Some(IpAddr::V6(ip))) if ip == "2001:db8:1::99".parse::<std::net::Ipv6Addr>().unwrap()
+        ) || matches!(
+            (resolution.egress_ifindex, resolution.next_hop),
+            (202, Some(IpAddr::V6(ip))) if ip == "2001:db8:2::1".parse::<std::net::Ipv6Addr>().unwrap()
+        )
     );
-    assert_eq!(resolution.egress_ifindex, 202);
+}
+/// Recursive lookup must exclude the active covering row at every depth, not
+/// merely the route whose authored next hop began the lookup.
+#[test]
+fn recursive_expansion_does_not_reenter_active_covering_row_12613() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "trust0".into(),
+            ifindex: 201,
+            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "192.0.2.1/24".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.10.0.0/24".into(),
+                next_hops: vec!["10.10.0.2".into(), "192.0.2.254".into()],
+                next_hop_weights: vec![1, 1],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.20.0.0/24".into(),
+                next_hops: vec!["10.10.0.1".into()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let route = state
+        .routes_v4
+        .get("inet.0")
+        .unwrap()
+        .iter()
+        .find(|route| route.prefix.contains(Ipv4Addr::new(10, 20, 0, 5)))
+        .unwrap();
+    assert_eq!(route.next_hops.len(), 1);
     assert_eq!(
-        resolution.next_hop,
-        Some(IpAddr::V6("2001:db8:2::1".parse().unwrap()))
+        (
+            route.next_hops[0].next_hop,
+            route.next_hops[0].ifindex,
+            route.next_hops[0].weight,
+        ),
+        (Some(Ipv4Addr::new(192, 0, 2, 254)), 201, 1)
+    );
+}
+
+/// Equal-prefix/equal-preference rows are ordered QNH tiers, not one ECMP row.
+#[test]
+fn recursive_expansion_keeps_same_preference_rows_as_tiers_12613() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "trust0".into(),
+            ifindex: 201,
+            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "192.0.2.1/24".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.10.0.0/24".into(),
+                next_hops: vec!["192.0.2.254".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.10.0.0/24".into(),
+                next_hops: vec!["192.0.2.253".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.20.0.0/24".into(),
+                next_hops: vec!["10.10.0.1".into()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let route = state
+        .routes_v4
+        .get("inet.0")
+        .unwrap()
+        .iter()
+        .find(|route| route.prefix.contains(Ipv4Addr::new(10, 20, 0, 5)))
+        .unwrap();
+    assert_eq!(route.next_hops.len(), 1);
+    assert_eq!(
+        route.next_hops[0].next_hop,
+        Some(Ipv4Addr::new(192, 0, 2, 254))
     );
 }

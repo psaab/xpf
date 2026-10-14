@@ -264,14 +264,14 @@ fn route_member_weight(route: &RouteSnapshot, index: usize) -> u32 {
 type RecursiveTargetV4 = (Ipv4Addr, i32, u16, u32);
 type RecursiveTargetV6 = (Ipv6Addr, i32, u16, u32);
 
-fn recursive_static_target_v4(
+fn recursive_static_target_v4<'a>(
     state: &ForwardingState,
-    routes: &RecursiveGatewayRoutes<'_>,
+    routes: &RecursiveGatewayRoutes<'a>,
     ip: Ipv4Addr,
     table: &str,
     names: &BTreeMap<String, i32>,
     linux_names: &BTreeMap<String, i32>,
-    excluded_route: &RouteSnapshot,
+    excluded_routes: &mut [Option<&'a RouteSnapshot>; MAX_RECURSIVE_STATIC_DEPTH],
     visited: &mut [Option<Ipv4Addr>; MAX_RECURSIVE_STATIC_DEPTH],
     depth: usize,
     work: &mut usize,
@@ -296,81 +296,95 @@ fn recursive_static_target_v4(
         };
         let mut offset = 0;
         while offset < matching.len() {
-            while offset < matching.len() && std::ptr::eq(matching[offset], excluded_route) {
+            while offset < matching.len()
+                && excluded_routes[..=depth]
+                    .iter()
+                    .flatten()
+                    .any(|excluded| std::ptr::eq(matching[offset], *excluded))
+            {
                 offset += 1;
             }
             if offset == matching.len() {
                 break;
             }
-            let preference = matching[offset].preference;
+            let route = matching[offset];
+            offset += 1;
+            if route.discard {
+                return Vec::new();
+            }
+            if !route.next_table.is_empty() {
+                continue;
+            }
             let mut expanded = Vec::new();
-            while offset < matching.len() && matching[offset].preference == preference {
-                let route = matching[offset];
-                offset += 1;
-                if std::ptr::eq(route, excluded_route) {
-                    continue;
+            for (index, spec) in route.next_hops.iter().enumerate() {
+                if *work == 0 {
+                    break;
                 }
-                if route.discard {
-                    return Vec::new();
-                }
-                if !route.next_table.is_empty() {
-                    continue;
-                }
-                for (index, spec) in route.next_hops.iter().enumerate() {
-                    if *work == 0 {
-                        break;
-                    }
-                    *work -= 1;
-                    let weight = route_member_weight(route, index);
-                    let (gateway, interface) = parse_route_next_hop(spec);
-                    let allow_default_interface = gateway.is_some() || spec.starts_with('@');
-                    if let Some(name) = interface.as_deref() {
-                        if let Some(ifindex) = explicit_ifindex_in_route_table(
-                            name,
-                            allow_default_interface,
-                            names,
-                            linux_names,
-                            state,
-                            table,
-                        ) {
-                            let endpoint = state
-                                .tunnel_endpoint_by_ifindex
-                                .get(&ifindex)
-                                .copied()
-                                .unwrap_or(0);
-                            expanded.push((gateway.unwrap_or(ip), ifindex, endpoint, weight));
-                        }
-                        continue;
-                    }
-                    let Some(gateway) = gateway else {
-                        continue;
-                    };
-                    if let Some((ifindex, endpoint)) =
-                        infer_connected_route_target_v4(state, gateway, table)
-                    {
-                        expanded.push((gateway, ifindex, endpoint, weight));
-                        continue;
-                    }
-                    for (terminal, ifindex, endpoint, child_weight) in recursive_static_target_v4(
-                        state,
-                        routes,
-                        gateway,
-                        table,
+                *work -= 1;
+                let weight = route_member_weight(route, index);
+                let (gateway, interface) = parse_route_next_hop(spec);
+                let allow_default_interface = gateway.is_some() || spec.starts_with('@');
+                if let Some(name) = interface.as_deref() {
+                    if let Some(ifindex) = explicit_ifindex_in_route_table(
+                        name,
+                        allow_default_interface,
                         names,
                         linux_names,
-                        excluded_route,
-                        visited,
-                        depth + 1,
-                        work,
+                        state,
+                        table,
                     ) {
-                        expanded.push((
+                        let endpoint = state
+                            .tunnel_endpoint_by_ifindex
+                            .get(&ifindex)
+                            .copied()
+                            .unwrap_or(0);
+                        expanded.push((gateway.unwrap_or(ip), ifindex, endpoint, weight));
+                    }
+                    continue;
+                }
+                let Some(gateway) = gateway else {
+                    continue;
+                };
+                if let Some((ifindex, endpoint)) =
+                    infer_connected_route_target_v4(state, gateway, table)
+                {
+                    expanded.push((gateway, ifindex, endpoint, weight));
+                    continue;
+                }
+                if depth + 1 < MAX_RECURSIVE_STATIC_DEPTH {
+                    excluded_routes[depth + 1] = Some(route);
+                }
+                let children = recursive_static_target_v4(
+                    state,
+                    routes,
+                    gateway,
+                    table,
+                    names,
+                    linux_names,
+                    excluded_routes,
+                    visited,
+                    depth + 1,
+                    work,
+                );
+                if depth + 1 < MAX_RECURSIVE_STATIC_DEPTH {
+                    excluded_routes[depth + 1] = None;
+                }
+                expanded.extend(children.into_iter().map(
+                    |(terminal, ifindex, endpoint, child_weight)| {
+                        (
                             terminal,
                             ifindex,
                             endpoint,
                             weight.saturating_mul(child_weight),
-                        ));
-                    }
+                        )
+                    },
+                ));
+                if *work == 0 {
+                    return Vec::new();
                 }
+            }
+            if *work == 0 {
+                return Vec::new();
             }
             if !expanded.is_empty() {
                 return merge_recursive_targets_v4(expanded);
@@ -392,14 +406,14 @@ fn merge_recursive_targets_v4(targets: Vec<RecursiveTargetV4>) -> Vec<RecursiveT
         .collect()
 }
 
-fn recursive_static_target_v6(
+fn recursive_static_target_v6<'a>(
     state: &ForwardingState,
-    routes: &RecursiveGatewayRoutes<'_>,
+    routes: &RecursiveGatewayRoutes<'a>,
     ip: Ipv6Addr,
     table: &str,
     names: &BTreeMap<String, i32>,
     linux_names: &BTreeMap<String, i32>,
-    excluded_route: &RouteSnapshot,
+    excluded_routes: &mut [Option<&'a RouteSnapshot>; MAX_RECURSIVE_STATIC_DEPTH],
     visited: &mut [Option<Ipv6Addr>; MAX_RECURSIVE_STATIC_DEPTH],
     depth: usize,
     work: &mut usize,
@@ -429,95 +443,109 @@ fn recursive_static_target_v6(
         };
         let mut offset = 0;
         while offset < matching.len() {
-            while offset < matching.len() && std::ptr::eq(matching[offset], excluded_route) {
+            while offset < matching.len()
+                && excluded_routes[..=depth]
+                    .iter()
+                    .flatten()
+                    .any(|excluded| std::ptr::eq(matching[offset], *excluded))
+            {
                 offset += 1;
             }
             if offset == matching.len() {
                 break;
             }
-            let preference = matching[offset].preference;
+            let route = matching[offset];
+            offset += 1;
+            if route.discard {
+                return Vec::new();
+            }
+            if !route.next_table.is_empty() {
+                continue;
+            }
             let mut expanded = Vec::new();
             let mut blocks_walk_up = false;
-            while offset < matching.len() && matching[offset].preference == preference {
-                let route = matching[offset];
-                offset += 1;
-                if std::ptr::eq(route, excluded_route) {
-                    continue;
+            for (index, spec) in route.next_hops.iter().enumerate() {
+                if *work == 0 {
+                    break;
                 }
-                if route.discard {
-                    return Vec::new();
-                }
-                if !route.next_table.is_empty() {
-                    continue;
-                }
-                for (index, spec) in route.next_hops.iter().enumerate() {
-                    if *work == 0 {
-                        break;
-                    }
-                    *work -= 1;
-                    let weight = route_member_weight(route, index);
-                    let (gateway, interface) = parse_route_next_hop_v6(spec);
-                    let allow_default_interface = gateway.is_some() || spec.starts_with('@');
-                    if let Some(name) = interface.as_deref() {
-                        if let Some(ifindex) = explicit_ifindex_in_route_table(
-                            name,
-                            allow_default_interface,
-                            names,
-                            linux_names,
-                            state,
-                            table,
-                        ) {
-                            let endpoint = state
-                                .tunnel_endpoint_by_ifindex
-                                .get(&ifindex)
-                                .copied()
-                                .unwrap_or(0);
-                            expanded.push((gateway.unwrap_or(ip), ifindex, endpoint, weight));
-                        }
-                        continue;
-                    }
-                    let Some(gateway) = gateway else {
-                        continue;
-                    };
-                    if gateway.is_unicast_link_local() {
-                        // A link-local member in the selected route blocks
-                        // walk-up to a global default route unless a sibling
-                        // member resolves within this preference tier.
-                        blocks_walk_up = true;
-                        continue;
-                    }
-                    if let Some((ifindex, endpoint)) =
-                        infer_connected_route_target_v6(state, gateway, table)
-                    {
-                        expanded.push((gateway, ifindex, endpoint, weight));
-                        continue;
-                    }
-                    for (terminal, ifindex, endpoint, child_weight) in recursive_static_target_v6(
-                        state,
-                        routes,
-                        gateway,
-                        table,
+                *work -= 1;
+                let weight = route_member_weight(route, index);
+                let (gateway, interface) = parse_route_next_hop_v6(spec);
+                let allow_default_interface = gateway.is_some() || spec.starts_with('@');
+                if let Some(name) = interface.as_deref() {
+                    if let Some(ifindex) = explicit_ifindex_in_route_table(
+                        name,
+                        allow_default_interface,
                         names,
                         linux_names,
-                        excluded_route,
-                        visited,
-                        depth + 1,
-                        work,
+                        state,
+                        table,
                     ) {
-                        expanded.push((
+                        let endpoint = state
+                            .tunnel_endpoint_by_ifindex
+                            .get(&ifindex)
+                            .copied()
+                            .unwrap_or(0);
+                        expanded.push((gateway.unwrap_or(ip), ifindex, endpoint, weight));
+                    }
+                    continue;
+                }
+                let Some(gateway) = gateway else {
+                    continue;
+                };
+                if gateway.is_unicast_link_local() {
+                    blocks_walk_up = true;
+                    continue;
+                }
+                if let Some((ifindex, endpoint)) =
+                    infer_connected_route_target_v6(state, gateway, table)
+                {
+                    expanded.push((gateway, ifindex, endpoint, weight));
+                    continue;
+                }
+                if depth + 1 < MAX_RECURSIVE_STATIC_DEPTH {
+                    excluded_routes[depth + 1] = Some(route);
+                }
+                let children = recursive_static_target_v6(
+                    state,
+                    routes,
+                    gateway,
+                    table,
+                    names,
+                    linux_names,
+                    excluded_routes,
+                    visited,
+                    depth + 1,
+                    work,
+                );
+                if depth + 1 < MAX_RECURSIVE_STATIC_DEPTH {
+                    excluded_routes[depth + 1] = None;
+                }
+                expanded.extend(children.into_iter().map(
+                    |(terminal, ifindex, endpoint, child_weight)| {
+                        (
                             terminal,
                             ifindex,
                             endpoint,
                             weight.saturating_mul(child_weight),
-                        ));
-                    }
+                        )
+                    },
+                ));
+                if *work == 0 {
+                    return Vec::new();
                 }
+            }
+            if *work == 0 {
+                return Vec::new();
             }
             if !expanded.is_empty() {
                 return merge_recursive_targets_v6(expanded);
             }
             if blocks_walk_up {
-                return Vec::new();
+                // Preserve the unresolved terminal as an ifindex-zero member.
+                // This marker prevents every parent from walking up to a
+                // global default route after a nested bare link-local gateway.
+                return vec![(ip, 0, 0, 1)];
             }
         }
     }
@@ -536,17 +564,19 @@ fn merge_recursive_targets_v6(targets: Vec<RecursiveTargetV6>) -> Vec<RecursiveT
         .collect()
 }
 
-fn recursive_gateway_target_v4(
+fn recursive_gateway_target_v4<'a>(
     state: &ForwardingState,
-    routes: &RecursiveGatewayRoutes<'_>,
+    routes: &RecursiveGatewayRoutes<'a>,
     ip: Ipv4Addr,
     table: &str,
     names: &BTreeMap<String, i32>,
     linux_names: &BTreeMap<String, i32>,
-    excluded_route: &RouteSnapshot,
+    excluded_route: &'a RouteSnapshot,
 ) -> Vec<RecursiveTargetV4> {
     let mut work = MAX_RECURSIVE_STATIC_WORK;
     let mut visited = [None; MAX_RECURSIVE_STATIC_DEPTH];
+    let mut excluded_routes = [None; MAX_RECURSIVE_STATIC_DEPTH];
+    excluded_routes[0] = Some(excluded_route);
     recursive_static_target_v4(
         state,
         routes,
@@ -554,24 +584,26 @@ fn recursive_gateway_target_v4(
         table,
         names,
         linux_names,
-        excluded_route,
+        &mut excluded_routes,
         &mut visited,
         0,
         &mut work,
     )
 }
 
-fn recursive_gateway_target_v6(
+fn recursive_gateway_target_v6<'a>(
     state: &ForwardingState,
-    routes: &RecursiveGatewayRoutes<'_>,
+    routes: &RecursiveGatewayRoutes<'a>,
     ip: Ipv6Addr,
     table: &str,
     names: &BTreeMap<String, i32>,
     linux_names: &BTreeMap<String, i32>,
-    excluded_route: &RouteSnapshot,
+    excluded_route: &'a RouteSnapshot,
 ) -> Vec<RecursiveTargetV6> {
     let mut work = MAX_RECURSIVE_STATIC_WORK;
     let mut visited = [None; MAX_RECURSIVE_STATIC_DEPTH];
+    let mut excluded_routes = [None; MAX_RECURSIVE_STATIC_DEPTH];
+    excluded_routes[0] = Some(excluded_route);
     recursive_static_target_v6(
         state,
         routes,
@@ -579,7 +611,7 @@ fn recursive_gateway_target_v6(
         table,
         names,
         linux_names,
-        excluded_route,
+        &mut excluded_routes,
         &mut visited,
         0,
         &mut work,
@@ -1358,6 +1390,8 @@ mod recursive_cycle_guard_12398_tests {
         let mut visited = [None; MAX_RECURSIVE_STATIC_DEPTH];
         visited[0] = Some(gateway);
         let mut work = MAX_RECURSIVE_STATIC_WORK;
+        let mut excluded_routes = [None; MAX_RECURSIVE_STATIC_DEPTH];
+        excluded_routes[0] = Some(&snapshot.routes[0]);
 
         let resolved = recursive_static_target_v4(
             &state,
@@ -1366,7 +1400,7 @@ mod recursive_cycle_guard_12398_tests {
             "inet.0",
             &BTreeMap::new(),
             &BTreeMap::new(),
-            &snapshot.routes[0],
+            &mut excluded_routes,
             &mut visited,
             1,
             &mut work,
@@ -1532,6 +1566,8 @@ mod recursive_prefix_index_12617_tests {
             table: "inet.0".into(),
         });
         let mut work = MAX_RECURSIVE_STATIC_WORK;
+        let mut excluded_routes = [None; MAX_RECURSIVE_STATIC_DEPTH];
+        excluded_routes[0] = Some(&snapshot.routes[1]);
         let resolved = recursive_static_target_v4(
             &state,
             &index,
@@ -1539,7 +1575,7 @@ mod recursive_prefix_index_12617_tests {
             "inet.0",
             &BTreeMap::new(),
             &BTreeMap::new(),
-            &snapshot.routes[0],
+            &mut excluded_routes,
             &mut [None; MAX_RECURSIVE_STATIC_DEPTH],
             0,
             &mut work,
