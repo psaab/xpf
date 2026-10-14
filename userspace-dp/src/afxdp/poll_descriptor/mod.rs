@@ -4327,17 +4327,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 host_log_session_close,
                                 host_policy_id,
                                 host_policy_counter_idx,
+                                host_inactivity_timeout,
                             ) = match &junos_host_outcome {
                                 JunosHostLocalPolicy::Permit(result) => (
                                     result.log_session_init,
                                     result.log_session_close,
                                     result.policy_id,
                                     result.policy_counter_idx,
+                                    result.inactivity_timeout,
                                 ),
                                 // No junos-host policy matched: default no-policy
-                                // host-local metadata (byte-identical to
-                                // pre-#3706). Dropped never reaches here.
-                                _ => (false, false, 0, 0),
+                                // host-local metadata. Dropped never reaches here.
+                                _ => (false, false, 0, 0, None),
                             };
                             // #3706/#3322: bind the admitting rule's shared hit
                             // counter here, where `host_policy_counter_idx` still
@@ -4387,8 +4388,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // policy that admitted the host-bound flow (0 only
                                 // for a no-match host-local session).
                                 policy_id: host_policy_id,
-                                // #3227: host-local sessions are not policy-app-matched.
-                                inactivity_timeout_ns: None,
+                                // #12863: preserve the matched junos-host permit's
+                                // application idle timeout; no-match sessions
+                                // retain the use-global sentinel.
+                                inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(
+                                    host_inactivity_timeout,
+                                ),
                                 // #3073/#3706: the admitting junos-host rule's
                                 // hit-counter handle (0 / None for a no-match
                                 // host-local session).

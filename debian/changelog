@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Preserve `to-zone junos-host` application's configured inactivity-timeout
+    on LocalDelivery sessions. Matched host-local permit sessions now age on
+    the app's idle window; zero/unset timeouts continue to use the global
+    per-protocol timeout (#12863).
+
   * Keep the configured unit host-inbound override authoritative when a base
     interface and unit 0 share an AF_XDP ifindex, independent of snapshot row
     order. Preserve the Go base-before-unit emission contract (#12646).

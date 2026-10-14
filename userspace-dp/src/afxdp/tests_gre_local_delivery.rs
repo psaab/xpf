@@ -288,7 +288,7 @@ fn poll_descriptor_no_junos_host_policy_local_delivery_unchanged_session_miss() 
 #[test]
 fn poll_descriptor_junos_host_permit_log_stamps_local_delivery_session_miss() {
     let snapshot = junos_host_local_delivery_permit_snapshot(true, true, 4242);
-    let (log_init, log_close, policy_id, counter_idx) =
+    let (log_init, log_close, policy_id, counter_idx, timeout_ns) =
         run_junos_host_permit_local_delivery(&snapshot);
 
     assert!(
@@ -312,6 +312,10 @@ fn poll_descriptor_junos_host_permit_log_stamps_local_delivery_session_miss() {
         "#3706: the admitting junos-host rule's 1-based hit-counter handle must \
          be stamped (was the 0 no-counter sentinel)"
     );
+    assert_eq!(
+        timeout_ns, None,
+        "an application without an inactivity timeout must retain the use-global sentinel"
+    );
 }
 
 
@@ -323,7 +327,7 @@ fn poll_descriptor_junos_host_permit_log_stamps_local_delivery_session_miss() {
 #[test]
 fn poll_descriptor_junos_host_permit_no_log_local_delivery_no_overlog() {
     let snapshot = junos_host_local_delivery_permit_snapshot(false, false, 77);
-    let (log_init, log_close, policy_id, _counter_idx) =
+    let (log_init, log_close, policy_id, _counter_idx, timeout_ns) =
         run_junos_host_permit_local_delivery(&snapshot);
 
     assert!(
@@ -338,6 +342,34 @@ fn poll_descriptor_junos_host_permit_no_log_local_delivery_no_overlog() {
         policy_id, 77,
         "the admitting junos-host policy id is stamped even without `then log`"
     );
+    assert_eq!(timeout_ns, None, "unset application timeout uses global timeout");
+}
+
+/// #12863 regression: a matched `to-zone junos-host` permit must propagate the
+/// application's idle timeout into the LocalDelivery session metadata, just
+/// like the transit permit path. Explicit and use-global values are covered.
+#[test]
+fn poll_descriptor_junos_host_permit_stamps_application_inactivity_timeout() {
+    const APP_TIMEOUT_SECS: u32 = 45;
+    const APP_TIMEOUT_NS: u64 = 45_000_000_000;
+
+    for (timeout_secs, expected_ns) in [
+        (Some(APP_TIMEOUT_SECS), Some(APP_TIMEOUT_NS)),
+        (Some(0), None),
+        (None, None),
+    ] {
+        let snapshot = junos_host_local_delivery_permit_snapshot_with_timeout(
+            false,
+            false,
+            12863,
+            timeout_secs,
+        );
+        let (_, _, _, _, actual_ns) = run_junos_host_permit_local_delivery(&snapshot);
+        assert_eq!(
+            actual_ns, expected_ns,
+            "LocalDelivery timeout for application value {timeout_secs:?}"
+        );
+    }
 }
 
 
