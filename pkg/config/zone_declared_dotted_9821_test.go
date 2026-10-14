@@ -275,6 +275,102 @@ func TestStampZoneDHCPScopeWithheldDeclaredDotted9821(t *testing.T) {
 	}
 }
 
+// TestWithholdsZoneLevelDHCPForDeclaredNames12841: the withhold QUERY must
+// resolve spellings through the declared-aware splitter, exactly as the
+// stamp did when it wrote DHCPScopeWithheld. Using the cfg-free first-dot
+// CanonicalInterfaceUnitRef for the query (pre-#12841) produced both
+// failure directions:
+//
+//   - FALSE withhold: declared padded bare name `p.01` is a distinct
+//     interface from declared `p.1`. CanonicalInterfaceUnitRef("p.01")
+//     folds to "p.1", so a server on `p.1` alone withheld from `p.01`.
+//   - MISSED withhold: declared `p.0` with unit 1 stamps the canonical
+//     key "p.0.1"; a padded multi-dot query "p.0.01" canonicalizes under
+//     first-dot rules to the useless "p.0.01" (suffix "0.01" invalid),
+//     missing the stamp. Holding the zone overrode nothing.
+//
+// Both cells fail on current master and pass with the fix. The control
+// cells (canonical and unconfigured units beneath declared dotted `p.0`)
+// pin that normal unit behavior is unchanged.
+func TestWithholdsZoneLevelDHCPForDeclaredNames12841(t *testing.T) {
+	// False-withhold shape: both `p.01` and `p.1` declared; the DHCP
+	// server role sits ONLY on `p.1`, and only `p.1` is a zone member.
+	// (If `p.01` were also a member it would receive its own stamp entry
+	// by authored spelling, and the query-side canonicalization could
+	// not be isolated.)
+	falseCfg := &Config{
+		Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+			"p.01": {Name: "p.01", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+			"p.1":  {Name: "p.1", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+		}},
+		Security: SecurityConfig{Zones: map[string]*ZoneConfig{
+			"z": {
+				Interfaces:         []string{"p.1"},
+				HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"dhcp"}},
+			},
+		}},
+		System: SystemConfig{DHCPServer: DHCPServerConfig{
+			DHCPLocalServer: &DHCPLocalServerConfig{
+				Groups: map[string]*DHCPServerGroup{"g": {Interfaces: []string{"p.1"}}},
+			},
+		}},
+	}
+	stampZoneDHCPScopeWithheld(falseCfg)
+	zFalse := falseCfg.Security.Zones["z"]
+	if !zFalse.WithholdsZoneLevelDHCPFor("p.1") {
+		t.Fatal("fixture precondition: server interface p.1 must be withheld, or the " +
+			"false-withhold cell cannot distinguish a correct answer from a blanket no")
+	}
+	if zFalse.WithholdsZoneLevelDHCPFor("p.01") {
+		t.Error("declared padded name p.01 is a distinct interface from p.1 and runs no " +
+			"DHCP role: zone-level dhcp must NOT be withheld from it (first-dot " +
+			"canonicalization folded p.01 onto p.1)")
+	}
+	falseSvc, _, _ := zFalse.InterfaceHostInboundEffective("p.01")
+	trueSvc, _, _ := zFalse.InterfaceHostInboundEffective("p.1")
+	if !hasTok(falseSvc, "dhcp") || hasTok(trueSvc, "dhcp") {
+		t.Errorf("effective zone-level dhcp must be retained for declared p.01 and withheld for server p.1; p.01=%v p.1=%v", falseSvc, trueSvc)
+	}
+
+	// Missed-withhold shape: declared dotted `p.0` (units 0,1), bare zone
+	// member, server on the bare ref — fan-down stamps p.0.0/p.0.1.
+	missedCfg := &Config{
+		Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+			"p.0": {Name: "p.0", Units: map[int]*InterfaceUnit{0: {Number: 0}, 1: {Number: 1}}},
+		}},
+		Security: SecurityConfig{Zones: map[string]*ZoneConfig{
+			"z": {
+				Interfaces:         []string{"p.0"},
+				HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"dhcp"}},
+			},
+		}},
+		System: SystemConfig{DHCPServer: DHCPServerConfig{
+			DHCPLocalServer: &DHCPLocalServerConfig{
+				Groups: map[string]*DHCPServerGroup{"g": {Interfaces: []string{"p.0"}}},
+			},
+		}},
+	}
+	stampZoneDHCPScopeWithheld(missedCfg)
+	zMissed := missedCfg.Security.Zones["z"]
+	if !zMissed.WithholdsZoneLevelDHCPFor("p.0.1") {
+		t.Fatal("fixture precondition: canonical p.0.1 must be withheld, or the " +
+			"missed-withhold cell cannot distinguish a correct answer from a blanket yes")
+	}
+	if !zMissed.WithholdsZoneLevelDHCPFor("p.0.01") {
+		t.Error("padded multi-dot query p.0.01 resolves to declared p.0 unit 1 and must " +
+			"be withheld (first-dot canonicalization left it as p.0.01, missing the p.0.1 stamp)")
+	}
+	paddedSvc, _, _ := zMissed.InterfaceHostInboundEffective("p.0.01")
+	canonicalSvc, _, _ := zMissed.InterfaceHostInboundEffective("p.0.1")
+	if hasTok(paddedSvc, "dhcp") || hasTok(canonicalSvc, "dhcp") {
+		t.Errorf("effective zone-level dhcp must be withheld for both padded and canonical unit refs; p.0.01=%v p.0.1=%v", paddedSvc, canonicalSvc)
+	}
+	// Control: conventional single-dot spelling behaviour is unchanged.
+	if !zMissed.WithholdsZoneLevelDHCPFor("p.0.0") || zMissed.WithholdsZoneLevelDHCPFor("p.0.7") {
+		t.Error("control broken: p.0.0 must withhold and unconfigured p.0.7 must not")
+	}
+}
+
 // TestDupHostOverrideMapDeclaredDotted9821: the gate mirror agrees with the
 // runtime map on canonical keys (multi-dot Literals added; undotted-padded
 // raw-only preserved exactly).
