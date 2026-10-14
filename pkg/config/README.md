@@ -1004,6 +1004,8 @@ providing a replacement. Separate top-level `security` stanzas compile as
 separate roots and do not combine or resolve one another's default-policy
 values. See `docs/config-schema.md` "#12823".
 
+**Two apply-groups with different default-policy actions cannot resolve by order (#12923):** group-adopted `default-policy` stanzas — flat and block spellings — carry merge provenance, so a later group's stanza materializes beside an earlier group's stanza and the #11821/#11367/#12821 gates see the pair. Distinct actions are strict-rejected and tolerant-load fail-closed to `deny-all`; identical actions stay accepted; an authored inline stanza still overrides every group silently. See `docs/config-schema.md` "#12923".
+
 **Implicit default-policy RT_FLOW logging (#3534):** `set security policies
 default-policy-log session-init|session-close` emits RT_FLOW session logs for
 the implicit default verdict, mirroring a named policy's `then log`. It is a

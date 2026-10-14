@@ -38,8 +38,9 @@ type groupExpandBudget struct {
 	// rides here rather than as a tenth mergeNodes parameter; checks are
 	// siblings-only, so entries from other levels never interfere.
 	promoted9855 map[*Node]bool
-	// groupDefaultPolicyBlocks12823 tracks choice blocks adopted from a group
-	// during this expansion. It distinguishes them from authored inline
+	// groupDefaultPolicyBlocks12823 tracks default-policy stanzas — block and
+	// flat-leaf spellings — adopted from a group during this expansion (#12823
+	// blocks, #12923 leaves). It distinguishes them from authored inline
 	// destinations without overloading #9862 exclusion provenance.
 	groupDefaultPolicyBlocks12823 map[*Node]bool
 }
@@ -573,6 +574,20 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					peer = leafListPeer(*dst, key)
 				}
 			}
+			// #12923: the inline-wins override below also fired when the winning
+			// peer was itself adopted from an earlier apply-group: two groups'
+			// default-policy actions then resolved by order alone and
+			// permit-first failed open with no stanza pair for #11821/#12821
+			// to see. Adopt the later group's stanza beside the adopted peer
+			// instead; the duplicate-stanza gates reject distinct actions
+			// (identical repeats stay legal), and an authored inline peer is
+			// unmarked, so inline still wins silently (#12823).
+			if peer != nil && isDefaultPolicyGroupStanza12923(ancestorPath, s) &&
+				budget.groupDefaultPolicyBlocks12823[peer] {
+				markGroupDefaultPolicyStanza12923(budget, ancestorPath, s)
+				*dst = append(*dst, s)
+				continue
+			}
 			if bracketedPeer := bracketedAddressPeer9859(ancestorPath, *dst, s); bracketedPeer != nil &&
 				mergeBracketedAddressInto9859(ancestorPath, *dst, bracketedPeer, s) {
 				appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{bracketedPeer}, markers)
@@ -686,7 +701,10 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			if suppressSuccessiveLeaf9855(budget, ancestorPath, *dst, s) {
 				continue
 			}
-			// No inline value for this key: adopt the group leaf.
+			// No inline value for this key: adopt the group leaf. #12923: a
+			// default-policy leaf carries group provenance so a later group's
+			// stanza can pair with it instead of being order-suppressed.
+			markGroupDefaultPolicyStanza12923(budget, ancestorPath, s)
 			*dst = append(*dst, s)
 			continue
 		}
@@ -857,7 +875,14 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// this now only fires for a single-key container NOT modeled as a
 			// leaf-list — keep the no-duplicate invariant (skip rather than
 			// append a second node for the same key).
-			if len(s.Keys) == 1 && hasMatchingLeaf(*dst, s.Keys) {
+			// #12923: that guard also dropped a group's default-policy block
+			// beside a flat stanza adopted from another group, resolving the
+			// pair by order. Only an authored inline leaf keeps suppressing a
+			// stanza; beside a group-adopted stanza the block materializes so
+			// #11821/#12821 can see both values.
+			if len(s.Keys) == 1 && hasMatchingLeaf(*dst, s.Keys) &&
+				(!isDefaultPolicyGroupStanza12923(ancestorPath, s) ||
+					!groupDefaultPolicyStanzaAdopted12923(budget, *dst)) {
 				continue
 			}
 			hadChildren := len(s.Children) > 0
