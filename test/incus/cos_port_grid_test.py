@@ -138,13 +138,18 @@ class CoSPortGridTests(unittest.TestCase):
                 )
 
     def test_headroom_applies_symmetric_fixture_for_reverse_default(self):
+        # #13069 (D10-14): TARGET_VM defaults to the DETECTED active
+        # primary (fake incus below reports fw1 active, fw0 standby), and
+        # the post-surplus restore re-applies the canonical forward-only
+        # fixture — no --symmetric — so reverse source-port terms do not
+        # leak into later suites.
         lines = self._run_headroom_and_capture_apply_args({})
         self.assertEqual(
             lines,
             [
-                "--symmetric loss:xpf-userspace-fw0",
-                "--symmetric --surplus-sharing loss:xpf-userspace-fw0",
-                "--symmetric loss:xpf-userspace-fw0",
+                "--symmetric loss:xpf-userspace-fw1",
+                "--symmetric --surplus-sharing loss:xpf-userspace-fw1",
+                "loss:xpf-userspace-fw1",
             ],
         )
 
@@ -153,9 +158,9 @@ class CoSPortGridTests(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                "loss:xpf-userspace-fw0",
-                "--surplus-sharing loss:xpf-userspace-fw0",
-                "loss:xpf-userspace-fw0",
+                "loss:xpf-userspace-fw1",
+                "--surplus-sharing loss:xpf-userspace-fw1",
+                "loss:xpf-userspace-fw1",
             ],
         )
 
@@ -165,6 +170,8 @@ class CoSPortGridTests(unittest.TestCase):
             apply_log = tmp_path / "apply-args.txt"
             fake_apply = tmp_path / "apply-cos-config.sh"
             fake_sweep = tmp_path / "fairness-cos-class-sweep.sh"
+            fake_incus = tmp_path / "incus"
+            incus_log = tmp_path / "incus-args.txt"
             artifact_root = tmp_path / "artifacts"
             fake_apply.write_text(
                 "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$APPLY_LOG\"\n",
@@ -184,13 +191,43 @@ class CoSPortGridTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            # #13069 (D10-14): the headroom script resolves TARGET_VM by
+            # probing the cluster candidates through incus; fw1 answers
+            # active so the fakes above must all be aimed at fw1.
+            fake_incus.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    printf '%s\\n' "$*" >> "$INCUS_LOG"
+                    if [[ "$*" == *"show chassis cluster data-plane statistics"* ]]; then
+                        case "$2" in
+                            *fw1)
+                                printf '%s\\n' \\
+                                    'Enabled: true' \\
+                                    'Forwarding supported: true' \\
+                                    'HA groups: rg1 active=true'
+                                ;;
+                            *)
+                                printf '%s\\n' \\
+                                    'Enabled: true' \\
+                                    'Forwarding supported: false' \\
+                                    'HA groups: rg1 active=false'
+                                ;;
+                        esac
+                    fi
+                    """
+                ),
+                encoding="utf-8",
+            )
             fake_apply.chmod(0o755)
             fake_sweep.chmod(0o755)
+            fake_incus.chmod(0o755)
             env = {
-                "PATH": os.environ.get("PATH", ""),
+                "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
                 "APPLY_COS_CONFIG": str(fake_apply),
                 "APPLY_LOG": str(apply_log),
                 "ARTIFACT_ROOT": str(artifact_root),
+                "INCUS_LOG": str(incus_log),
                 "SWEEP": str(fake_sweep),
             }
             env.update(extra_env)
