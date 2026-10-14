@@ -433,7 +433,10 @@ func compileScreen(node *Node, sec *SecurityConfig) error {
 					recordKeyExtras("tcp fin-no-ack", opt, 1)
 					recordChildExtras("tcp fin-no-ack", opt)
 				case "syn-flood":
-					sf := &SynFloodConfig{}
+					sf := profile.TCP.SynFlood
+					if sf == nil {
+						sf = &SynFloodConfig{}
+					}
 					for _, sfOpt := range expandResolvingRuns9792(opt.Children, synFloodSchema9792()) { // #9792: lenient-path packed run
 						val := numVal(sfOpt, 1)
 						switch sfOpt.Name() {
