@@ -68,9 +68,9 @@ func TestPolicyInvalidationExactUndoRejectedPublishReowesCandidate12780(t *testi
 // TestPolicyInvalidationLandedDeleteDebtRollbackToPredecessor12323 covers it;
 // this cell additionally checks the ledger so a re-owe-everywhere mutant fails).
 func TestPolicyInvalidationExactUndoLandedRollbackDischarges12780(t *testing.T) {
-	r, c0 := newLandedRollbackRun12072(t)
+	r, c0 := newLandedVariantRollbackRun12879(t)
 	r.dp.deleteErrOnce = true
-	_, gen, err := publishConfirmedRollbackTarget12072(
+	_, gen, err := publishConfirmedVariantTarget12879(
 		t, r, c0, "exactok12780-c1", []string{"p-first", "b", "web"})
 	if err == nil {
 		t.Fatal("C0->C1 failed candidate delete was not surfaced")

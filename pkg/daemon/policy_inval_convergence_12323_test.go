@@ -979,9 +979,9 @@ func publishConfirmedRollbackText12072(
 }
 
 func TestPolicyInvalidationLandedDeleteDebtRollbackToPredecessor12323(t *testing.T) {
-	r, c0 := newLandedRollbackRun12072(t)
+	r, c0 := newLandedVariantRollbackRun12879(t)
 	r.dp.deleteErrOnce = true
-	c1, gen, applyErr := publishConfirmedRollbackTarget12072(
+	c1, gen, applyErr := publishConfirmedVariantTarget12879(
 		t, r, c0, "rollback-predecessor-c1", []string{"p-first", "b", "web"})
 	if applyErr == nil {
 		t.Fatal("C0->C1 failed candidate delete was not surfaced")
@@ -1362,9 +1362,9 @@ func TestPolicyInvalidationLandedDebtChainStaysBounded12323(t *testing.T) {
 // landed=Cb's debt.
 func landedBaselineThenConfirmed12072(t *testing.T) (*convergenceRun12072, *config.Config, *config.Config, uint64) {
 	t.Helper()
-	r, c0 := newLandedRollbackRun12072(t)
+	r, c0 := newLandedVariantRollbackRun12879(t)
 	r.dp.deleteErrOnce = true
-	cb, err := publishLandedRollbackConfig12072(t, r, c0, "landed-cb", []string{"p-first", "b", "web"})
+	cb, err := publishLandedVariantConfig12879(t, r, c0, "landed-cb", []string{"p-first", "b", "web"})
 	if err == nil {
 		t.Fatal("premise: C0->Cb failed delete not surfaced")
 	}
@@ -1372,7 +1372,7 @@ func landedBaselineThenConfirmed12072(t *testing.T) (*convergenceRun12072, *conf
 		t.Fatalf("premise: Cb delete debt missing: %+v", d)
 	}
 	r.dp.deleteErrOnce = true
-	c2, gen, err := publishConfirmedRollbackTarget12072(t, r, cb, "landed-c2", []string{"p-first", "web"})
+	c2, gen, err := publishConfirmedVariantTarget12879(t, r, cb, "landed-c2", []string{"p-first", "web"})
 	if err == nil {
 		t.Fatal("premise: Cb->C2 failed delete not surfaced")
 	}
@@ -1454,9 +1454,9 @@ func TestPolicyInvalidationLandedBareRetryPublishFailThenUndo12323(t *testing.T)
 }
 
 func TestPolicyInvalidationPredecessorSurvivesLandedReanchor12323(t *testing.T) {
-	r, c0 := newLandedRollbackRun12072(t)
+	r, c0 := newLandedVariantRollbackRun12879(t)
 	r.dp.deleteErrOnce = true
-	c1, gen, err := publishConfirmedRollbackTarget12072(t, r, c0, "reanchor-c1", []string{"p-first", "b", "web"})
+	c1, gen, err := publishConfirmedVariantTarget12879(t, r, c0, "reanchor-c1", []string{"p-first", "b", "web"})
 	if err == nil {
 		t.Fatal("premise: C0->C1 failed delete not surfaced")
 	}

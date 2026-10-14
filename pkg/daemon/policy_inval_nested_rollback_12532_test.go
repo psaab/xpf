@@ -16,16 +16,16 @@ import (
 // original confirmed C0. C1 removes a (s1 debt), C2 removes b (s2 debt).
 // C0 permits both, so neither session may be deleted by the rollback.
 func TestPolicyInvalidationNestedConfirmedRollbackToRootDischargesPermitted12532(t *testing.T) {
-	r, c0 := newLandedRollbackRun12072(t)
+	r, c0 := newLandedVariantRollbackRun12879(t)
 
 	r.dp.deleteErrOnce = true
-	c1, _, applyErr := publishConfirmedRollbackTarget12072(
+	c1, _, applyErr := publishConfirmedVariantTarget12879(
 		t, r, c0, "nested12532-c1", []string{"p-first", "b", "web"})
 	if applyErr == nil {
 		t.Fatal("C0->C1 failed candidate delete was not surfaced")
 	}
 	r.dp.deleteErrOnce = true
-	_, gen, applyErr := publishConfirmedRollbackTarget12072(
+	_, gen, applyErr := publishConfirmedVariantTarget12879(
 		t, r, c1, "nested12532-c2", []string{"p-first", "web"})
 	if applyErr == nil {
 		t.Fatal("C1->C2 failed candidate delete was not surfaced")
@@ -63,7 +63,7 @@ func TestPolicyInvalidationNestedConfirmedRollbackToRootDischargesPermitted12532
 func TestPolicyInvalidationNestedRollbackKeepsRootDeniedCandidate12532(t *testing.T) {
 	policies := []string{"p-first", "a", "b", "x", "web"}
 	r, _ := newConvergenceRun12072(t, policies)
-	c0, err := r.h.d.store.SyncApply(policySetConfigText12072("root-denies-x", policies), nil)
+	c0, err := r.h.d.store.SyncApply(variantSetConfigText12879("root-denies-x", policies), nil)
 	if err != nil {
 		t.Fatalf("promote C0: %v", err)
 	}
@@ -72,14 +72,16 @@ func TestPolicyInvalidationNestedRollbackKeepsRootDeniedCandidate12532(t *testin
 	ids := dpuserspace.PolicyIDsByStableKey(c0)
 	for i := range r.dp.rows {
 		row := &r.dp.rows[i]
-		row.PolicyID = ids[r.dp.ruleBySession[row.ExpectedRTFlowSessionID]]
+		rule := r.dp.ruleBySession[row.ExpectedRTFlowSessionID]
+		row.PolicyID = ids[rule]
 		row.IngressZoneID = config.StableZoneID("trust")
 		row.EgressZoneID = config.StableZoneID("untrust")
+		row.Tuple.DstPort = variantDestinationPort12686(rule)
 	}
 	r.h.d.store.MarkActiveApplied()
 
 	r.dp.deleteErrOnce = true
-	c1, _, err := publishConfirmedRollbackTarget12072(
+	c1, _, err := publishConfirmedVariantTarget12879(
 		t, r, c0, "root-denies-x-c1", []string{"p-first", "b", "x", "web"})
 	if err == nil {
 		t.Fatal("C0->C1 failed candidate delete was not surfaced")
@@ -89,7 +91,7 @@ func TestPolicyInvalidationNestedRollbackKeepsRootDeniedCandidate12532(t *testin
 		AddrFamily: 4,
 		Tuple: dpuserspace.SessionPolicyTuple{
 			AddrFamily: 4, Protocol: 6, SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
-			SrcPort: 1099, DstPort: 80,
+			SrcPort: 1099, DstPort: variantDestinationPort12686("trust->untrust/x"),
 		},
 		PolicyID: xID, ExpectedRTFlowSessionID: 99,
 		IngressZoneID: config.StableZoneID("trust"),
@@ -97,7 +99,7 @@ func TestPolicyInvalidationNestedRollbackKeepsRootDeniedCandidate12532(t *testin
 	})
 	r.dp.ruleBySession[99] = "trust->untrust/x"
 	r.dp.deleteErrOnce = true
-	_, gen, err := publishConfirmedRollbackTarget12072(
+	_, gen, err := publishConfirmedVariantTarget12879(
 		t, r, c1, "root-denies-x-c2", []string{"p-first", "web"})
 	if err == nil {
 		t.Fatal("C1->C2 failed candidate delete was not surfaced")
@@ -123,16 +125,16 @@ func TestPolicyInvalidationNestedRollbackKeepsRootDeniedCandidate12532(t *testin
 // #12532 depth-3: C0->C1->C2->C3 each forbidding one more rule, timer
 // rollback to C0 must discharge every candidate C0 permits.
 func TestPolicyInvalidationTripleNestedRollbackToRoot12532(t *testing.T) {
-	r, c0 := newLandedRollbackRun12072(t)
+	r, c0 := newLandedVariantRollbackRun12879(t)
 
 	r.dp.deleteErrOnce = true
-	c1, _, err1 := publishConfirmedRollbackTarget12072(
+	c1, _, err1 := publishConfirmedVariantTarget12879(
 		t, r, c0, "nested12532c-c1", []string{"p-first", "b", "web"})
 	r.dp.deleteErrOnce = true
-	c2, _, err2 := publishConfirmedRollbackTarget12072(
+	c2, _, err2 := publishConfirmedVariantTarget12879(
 		t, r, c1, "nested12532c-c2", []string{"p-first", "web"})
 	r.dp.deleteErrOnce = true
-	_, gen, err3 := publishConfirmedRollbackTarget12072(
+	_, gen, err3 := publishConfirmedVariantTarget12879(
 		t, r, c2, "nested12532c-c3", []string{"p-first"})
 	if err1 == nil || err2 == nil || err3 == nil {
 		t.Fatalf("premise: failed deletes not surfaced: %v %v %v", err1, err2, err3)
@@ -462,7 +464,7 @@ func TestPolicyInvalidationNestedRollbackKeepsOlderRecordedRule12532(t *testing.
 // zone is ambiguous, so it must keep all of them instead of picking a name by
 // map iteration order.
 func TestPolicyInvalidationReauthorizationRefusesZoneIDCollision12532(t *testing.T) {
-	r, c0 := newLandedRollbackRun12072(t)
+	r, c0 := newLandedVariantRollbackRun12879(t)
 	trustID := config.StableZoneID("trust")
 	capture := &policyInvalidationCapture{candidateRuleIDs: map[policyInvalidationMatchIdentity]string{}}
 	const candidates = 32
@@ -471,7 +473,7 @@ func TestPolicyInvalidationReauthorizationRefusesZoneIDCollision12532(t *testing
 			AddrFamily: 4,
 			Tuple: dpuserspace.SessionPolicyTuple{
 				AddrFamily: 4, Protocol: 6, SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
-				SrcPort: uint16(3000 + i), DstPort: 80,
+				SrcPort: uint16(3000 + i), DstPort: variantDestinationPort12686("trust->untrust/a"),
 			},
 			ExpectedRTFlowSessionID: uint64(3000 + i),
 			IngressZoneID:           trustID,
