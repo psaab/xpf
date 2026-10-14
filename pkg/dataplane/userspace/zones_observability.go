@@ -85,6 +85,8 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 			}
 		}
 	}
+	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+	conflictedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
 	names := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
@@ -92,6 +94,9 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 	sort.Strings(names)
 	var out []AddresslessEnforcingZone
 	for _, name := range names {
+		if _, excluded := excludedZones[name]; excluded {
+			continue
+		}
 		if scoped[name] {
 			continue
 		}
@@ -111,11 +116,28 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 			if ref == "" || seen[ref] || hostInboundLifelineInterface(ref, lifelines) {
 				continue
 			}
+			// Match the zone mapper's canonical logical-key expansion. A
+			// contested interface is absent from that map, so it cannot
+			// keep either claimant's addressless signal pending.
+			owned := false
+			for _, key := range config.InterfaceUnitRefKeys(cfg, ref) {
+				if _, conflicted := conflictedInterfaces[key]; conflicted {
+					continue
+				}
+				if zoneByIface[key] == name {
+					owned = true
+					break
+				}
+			}
+			if !owned {
+				continue
+			}
 			seen[ref] = true
 			ifaces = append(ifaces, ref)
 		}
 		if len(ifaces) == 0 {
-			// Only lifeline (or no) interfaces — no fail-open window to report.
+			// Only lifeline, quarantined, contested (or no) interfaces —
+			// no fail-open window to report.
 			continue
 		}
 		sort.Strings(ifaces)
@@ -205,6 +227,8 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 	}
 	lifelines := hostInboundLifelineSet(cfg)
 	zoneByIface := buildInterfaceZoneMap(cfg)
+	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+	conflictedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
 
 	// Per-unit resolved-family presence, from the SAME sources the views
 	// core scopes the kernel deny with: the interface snapshots (static
@@ -291,6 +315,12 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 			}
 			zoneName := zoneByIface[unitName]
 			if zoneName == "" {
+				continue
+			}
+			if _, excluded := excludedZones[zoneName]; excluded {
+				continue
+			}
+			if _, conflicted := conflictedInterfaces[unitName]; conflicted {
 				continue
 			}
 			if zone := cfg.Security.Zones[zoneName]; zone == nil {
