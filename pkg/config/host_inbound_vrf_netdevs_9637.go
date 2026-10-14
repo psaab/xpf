@@ -8,13 +8,30 @@ import "fmt"
 // them out of a host-inbound view's iifname scope: at LOCAL_IN, iifname names the
 // VRF master, so a rule naming the enslaved device would match nothing.
 func HostInboundVRFEnslavedNetdevs(cfg *Config) map[string]bool {
-	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 || len(cfg.RoutingInstances) == 0 {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil
 	}
+	if len(cfg.RoutingInstances) == 0 {
+		hasManagementInterface := false
+		for ifName := range cfg.Interfaces.Interfaces {
+			if IsManagementIfName(ifName) {
+				hasManagementInterface = true
+				break
+			}
+		}
+		if !hasManagementInterface {
+			return nil
+		}
+	}
 	tunNames := tunnelNameMapFn(cfg)
-	return junosHostVRFEnslavedNetdevs(cfg, junosHostNetdevByRef(cfg, func(ifName string, unit *InterfaceUnit) string {
+	netdevs := junosHostNetdevByRef(cfg, func(ifName string, unit *InterfaceUnit) string {
 		return junosHostLinuxNameWith(cfg, ifName, unit, tunNames)
-	}))
+	})
+	enslaved := junosHostVRFEnslavedNetdevs(cfg, netdevs, tunNames)
+	if len(cfg.RoutingInstances) == 0 && len(enslaved) == 0 {
+		return nil
+	}
+	return enslaved
 }
 
 // HostInboundDHCPVRFEnslavedNetdevs returns configured netdevs that production

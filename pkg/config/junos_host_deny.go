@@ -1173,27 +1173,69 @@ func junosHostVRFMasterNetdevs(cfg *Config, tunnelNames map[string]string) map[s
 	return out
 }
 
-// junosHostVRFEnslavedNetdevs returns direct candidate netdevs with an
-// authored VRF member identity. Snapshot-derived host-inbound views augment
-// generated fan-down keys from their own LOCAL_IN master mapping; this
-// config-only set retains the pre-existing raw-device semantics used by the
-// coarse/unzoned host-inbound paths.
-func junosHostVRFEnslavedNetdevs(cfg *Config, netdevByRef map[string]string) map[string]bool {
+// junosHostVRFEnslavedNetdevs returns configured netdevs enslaved to a
+// non-forwarding VRF, including every effective bare-member key, explicit
+// tunnel-device claims, and management-class devices bound to vrf-mgmt.
+func junosHostVRFEnslavedNetdevs(cfg *Config, netdevByRef map[string]string, tunnelNames map[string]string) map[string]bool {
 	out := map[string]bool{}
+	if cfg == nil {
+		return out
+	}
+	active := map[string]bool{}
 	for _, ri := range cfg.RoutingInstances {
-		if ri == nil || ri.InstanceType == "forwarding" {
+		if ri != nil && ri.Name != "" && ri.InstanceType != "forwarding" &&
+			!IsReservedRoutingInstanceName(ri.Name) {
+			active[ri.Name] = true
+		}
+	}
+	// Combine persisted tolerant-path quarantine evidence with the current
+	// authored claims, so hand-built or pre-sanitized configs also fail closed.
+	excluded := map[string]bool{}
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		if conflict.LinuxName != "" {
+			excluded[conflict.LinuxName] = true
+		}
+	}
+	for _, conflict := range RoutingInstanceMemberDeviceConflicts(cfg, tunnelNames) {
+		if conflict.LinuxName != "" {
+			excluded[conflict.LinuxName] = true
+		}
+	}
+	add := func(netdev string) {
+		if netdev != "" && !excluded[netdev] {
+			out[netdev] = true
+		}
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" ||
+			IsReservedRoutingInstanceName(ri.Name) {
 			continue
 		}
 		for _, member := range ri.Interfaces {
 			if member == "" {
 				continue
 			}
-			probe := CanonicalInterfaceUnitRef(member)
-			if keys := InterfaceUnitRefKeys(cfg, member); len(keys) > 0 {
-				probe = keys[0]
+			for _, key := range InterfaceUnitRefKeys(cfg, member) {
+				add(netdevByRef[key])
 			}
-			if nd := netdevByRef[probe]; nd != "" {
-				out[nd] = true
+		}
+	}
+	// Tunnel manager binds its explicit stanza devices outside the RI member
+	// list traversal. Only include claims whose target is an active VRF.
+	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
+		if active[claim.Instance] {
+			add(claim.LinuxName)
+		}
+	}
+	// The daemon binds management-class devices to vrf-mgmt independently of
+	// routing-instance configuration; include their physical and unit netdevs.
+	for ifName := range cfg.Interfaces.Interfaces {
+		if !IsManagementIfName(ifName) {
+			continue
+		}
+		for ref, netdev := range netdevByRef {
+			if ref == ifName || strings.HasPrefix(ref, ifName+".") {
+				add(netdev)
 			}
 		}
 	}
