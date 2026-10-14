@@ -193,7 +193,10 @@ pub(super) struct FlowlessBaseResolution {
 /// are resolved before local-address checks and the route lookup, matching the
 /// flow-backed pre-routing order. Ambiguous or unsupported translations are
 /// fail-closed for transit, but first retain untranslated LocalDelivery so its
-/// existing host-inbound gates still run.
+/// existing host-inbound gates still run. A TRANSLATED cold-route miss
+/// (NoRoute / MissingNeighbor) is returned, not dropped (#12905): the
+/// disposition arms own the fail-closed handling and both can carry the
+/// recorded rewrite (pending_neigh replay / translated slow-path reinject).
 ///
 /// Ingress-interface local delivery remains ahead of the PBR override, because
 /// it identifies the packet's actual ingress interface. Interface-NAT
@@ -251,14 +254,15 @@ pub(super) fn flowless_base_resolution(
             route_override,).resolution,
         )
     });
-    if nat.rewrite_dst.is_some()
-        && matches!(
-            resolution.disposition,
-            ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
-        )
-    {
-        return None;
-    }
+    // #12905: a translated resolution that lands on NoRoute or MissingNeighbor
+    // is NOT dropped here. The cold dispositions carry the rewrite downstream:
+    // the MissingNeighbor arm parks the frame in pending_neigh with this
+    // decision (the retry TX applies it via rewrite_forwarded_frame_in_place)
+    // and the NoRoute arm reinjects through extract_l3_packet_with_nat, which
+    // applies the recorded rewrite before the kernel FIB sees the packet.
+    // Dropping here blackholed every flowless static-DNAT/DNAT/NPTv6 flow at
+    // cold start (before zone policy and neighbor resolution could run) while
+    // the untranslated population kept its probe/defer/retry liveness.
     Some(FlowlessBaseResolution {
         resolution,
         nat,

@@ -854,8 +854,14 @@ fn flowless_destination_nat_requires_translation(
 /// configured egress, since the kernel may resolve the destination to any of
 /// them after reinjection; using egress index 0 would make source-NAT matching
 /// return `NoMatch` before the rule is examined.
+/// #12905: `nat` is the packet's recorded decision. When it already carries
+/// the safe address-only destination rewrite, the reinject builder applies it
+/// (`extract_l3_packet_with_nat`), so only the SOURCE side is probed — the
+/// same split the ForwardCandidate translated fence applies. A default
+/// decision keeps the full both-sides probe.
 #[cold]
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn flowless_no_route_requires_nat_translation(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
@@ -865,7 +871,12 @@ pub(super) fn flowless_no_route_requires_nat_translation(
     fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
     now_ns: u64,
+    nat: crate::nat::NatDecision,
 ) -> bool {
+    // A flowless pre-routing decision is default or a destination rewrite
+    // only (port maps and unsupported protocols are fenced earlier), so
+    // `rewrite_dst` alone distinguishes the translated population.
+    let destination_applied = nat.rewrite_dst.is_some();
     let mut has_egress_identity = false;
     for &egress_ifindex in forwarding
         .ifindex_to_config_name
@@ -876,37 +887,72 @@ pub(super) fn flowless_no_route_requires_nat_translation(
         .chain(forwarding.egress.keys())
     {
         has_egress_identity = true;
-        if flowless_requires_nat_translation(
-            forwarding,
-            l3_flow,
-            meta,
-            packet_icmp,
-            ingress_zone_override,
-            fabric_ingress_scope_ifindex,
-            from_zone_id,
-            forwarding.egress_zone_id(egress_ifindex),
-            egress_ifindex,
-            now_ns,
-        ) {
+        let to_zone_id = forwarding.egress_zone_id(egress_ifindex);
+        let requires = if destination_applied {
+            flowless_source_nat_requires_translation(
+                forwarding,
+                l3_flow,
+                meta,
+                packet_icmp,
+                fabric_ingress_scope_ifindex,
+                from_zone_id,
+                to_zone_id,
+                egress_ifindex,
+                now_ns,
+            )
+        } else {
+            flowless_requires_nat_translation(
+                forwarding,
+                l3_flow,
+                meta,
+                packet_icmp,
+                ingress_zone_override,
+                fabric_ingress_scope_ifindex,
+                from_zone_id,
+                to_zone_id,
+                egress_ifindex,
+                now_ns,
+            )
+        };
+        if requires {
             return true;
         }
     }
     if !has_egress_identity || forwarding.egress.is_empty() {
         // Without an egress row, the kernel may resolve a reinjected packet to
         // an interface NAT cannot match here. Preserve the fail-closed fallback
-        // even after probing the configured interface-index maps.
-        return flowless_requires_nat_translation(
-            forwarding,
-            l3_flow,
-            meta,
-            packet_icmp,
-            ingress_zone_override,
-            fabric_ingress_scope_ifindex,
-            from_zone_id,
-            0,
-            0,
-            now_ns,
-        ) || !forwarding.source_nat_rules.is_empty()
+        // even after probing the configured interface-index maps. The
+        // static-NAT / NPTv6 halves of the tail are SOURCE-side tables too
+        // (static SNAT, outbound NPTv6), so the translated population keeps
+        // the same fail-closed residual.
+        let fallback = if destination_applied {
+            flowless_source_nat_requires_translation(
+                forwarding,
+                l3_flow,
+                meta,
+                packet_icmp,
+                fabric_ingress_scope_ifindex,
+                from_zone_id,
+                0,
+                0,
+                now_ns,
+            )
+        } else {
+            flowless_requires_nat_translation(
+                forwarding,
+                l3_flow,
+                meta,
+                packet_icmp,
+                ingress_zone_override,
+                fabric_ingress_scope_ifindex,
+                from_zone_id,
+                0,
+                0,
+                now_ns,
+            )
+        };
+        return fallback
+            || !forwarding.source_nat_rules.is_empty()
             || !forwarding.static_nat.is_empty()
             || !forwarding.nptv6.is_empty();
     }

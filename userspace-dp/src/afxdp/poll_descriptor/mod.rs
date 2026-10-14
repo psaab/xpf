@@ -8405,7 +8405,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         crate::afxdp::frame::l3_enforcement_flow_from_frame(
                                             packet_frame,
                                             meta,
-                                        );
+                                        )
+                                        .map(|mut f| {
+                                            // #12905: adjudicate the FLOWLESS
+                                            // half on the post-translation
+                                            // destination, the SAME tuple the
+                                            // ForwardCandidate flowless gate
+                                            // matches (#2345 doctrine: the
+                                            // verdict must not depend on
+                                            // whether the route resolved).
+                                            if let Some(translated_dst) = decision.nat.rewrite_dst {
+                                                f.dst_ip = translated_dst;
+                                                f.forward_key.dst_ip = translated_dst;
+                                            }
+                                            f
+                                        });
                                     synthetic_l3.as_ref().map(|f| (f, false))
                                 }
                             };
@@ -8530,6 +8544,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 decision.nat,
                                             )
                                         } else {
+                                            // #12905: the recorded decision
+                                            // tells the fence which sides are
+                                            // already applied; a translated
+                                            // destination reinjects through
+                                            // extract_l3_packet_with_nat.
                                             flowless_no_route_requires_nat_translation(
                                                 worker_ctx.forwarding,
                                                 adj_flow,
@@ -8539,6 +8558,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 ingress_nat_scope_ifindex,
                                                 from_zone_id,
                                                 now_ns,
+                                                decision.nat,
                                             )
                                         };
                                         if nat_translation_required {
@@ -8951,12 +8971,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // a reject from — with a PolicyDeny event for
                                     // observability, then PolicyDenied so the trailing
                                     // #1913 reinject chokepoint drops it fail-closed.
-                                    if let Some(l3_flow) =
+                                    if let Some(mut l3_flow) =
                                         crate::afxdp::frame::l3_enforcement_flow_from_frame(
                                             packet_frame,
                                             meta,
                                         )
                                     {
+                                        // #12905: a flowless packet carrying the
+                                        // pre-routing destination rewrite must be
+                                        // adjudicated on the POST-translation
+                                        // destination — the SAME tuple the
+                                        // ForwardCandidate flowless gate matches
+                                        // (#2345 doctrine: the verdict must not
+                                        // depend on whether the next-hop neighbor
+                                        // happens to be resolved). The parked
+                                        // decision replays this rewrite at TX.
+                                        if let Some(translated_dst) = decision.nat.rewrite_dst {
+                                            l3_flow.dst_ip = translated_dst;
+                                            l3_flow.forward_key.dst_ip = translated_dst;
+                                        }
                                         let policy_icmp = policy_packet_icmp(packet_frame, meta);
                                         // #10729 X2-F6: v6+AH evaluates as proto 51 (see the
                                         // ForwardCandidate flowless arm above).
@@ -9023,10 +9056,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             );
                                             break 'missing_neighbor StageOutcome::RecycleAndContinue;
                                         }
-                                        // #6122/#10679: a flowless MissingNeighbor
-                                        // packet has no translation decision for
-                                        // retry. Keep policy precedence, then
-                                        // preserve Pref64 attribution before the
+                                        // #6122/#10679: an untranslated flowless
+                                        // MissingNeighbor packet has no
+                                        // translation decision for retry.
+                                        // #12905: a packet whose decision already
+                                        // carries the safe address-only
+                                        // destination rewrite skips this fence's
+                                        // destination half — the parked decision
+                                        // replays the rewrite at retry TX, so
+                                        // only the source side can leak. Keep
+                                        // policy precedence, then preserve
+                                        // Pref64 attribution before the
                                         // same-family fence.
                                         // A blanket-only masquerade is not proof
                                         // that this tail can be translated
@@ -9057,7 +9097,29 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             break 'missing_neighbor
                                                 StageOutcome::RecycleAndContinue;
                                         }
-                                        let nat_translation_required = if is_non_first {
+                                        let nat_translation_required = if decision
+                                            .nat
+                                            .rewrite_dst
+                                            .is_some()
+                                        {
+                                            // #12905: mirror the ForwardCandidate
+                                            // translated fence — the destination
+                                            // rewrite is applied and carried by
+                                            // the decision the park buffers, so
+                                            // only source-side translation can
+                                            // still require the drop.
+                                            flowless_source_nat_requires_translation(
+                                                worker_ctx.forwarding,
+                                                &l3_flow,
+                                                meta,
+                                                policy_icmp,
+                                                ingress_nat_scope_ifindex,
+                                                from_zone_id,
+                                                to_zone_id,
+                                                decision.resolution.egress_ifindex,
+                                                now_ns,
+                                            )
+                                        } else if is_non_first {
                                             session_gated_reverse_fragment_requires_nat_translation(
                                                 worker_ctx.forwarding,
                                                 &*sessions,
