@@ -1000,6 +1000,11 @@ func zoneInterfaceStanzaMembers(prop *Node) []string {
 // zoneInterfaceHostInboundStrayTokens whether the keyword's subtree holds
 // anything that cannot be body content, which is exactly the dropped-member set.
 func zoneInterfaceMemberPackedTail(iface *Node) (keyword string, tail []string, found bool) {
+	for _, k := range iface.Keys {
+		if zoneInterfaceApplyMetaKeyword(k) {
+			return "", nil, false
+		}
+	}
 	for i, k := range iface.Keys {
 		if k == "" {
 			continue
