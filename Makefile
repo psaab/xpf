@@ -775,7 +775,7 @@ clean:
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The
 # env var flows through to setup.sh (INSTANCE_NAME=${XPF_INSTANCE:-xpf-fw}).
-.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
+.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-nat-frag-needed test-wire-nat-frag-needed-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
 
 test-env-init:
 	./test/incus/setup.sh init
@@ -1090,6 +1090,21 @@ test-wire-hostinbound-deny:
 
 test-wire-hostinbound-deny-lib:
 	./test/incus/wire-hostinbound-deny.sh --selftest
+
+# #12809 — the ICMP frag-needed capture for a NON-ZONE source-NAT scope
+# (to interface reth0.80): the lab proof owed since #12085/#12525. Needs
+# the loss userspace cluster; the script takes the #1875 lock cell itself
+# and is DESTRUCTIVE for its ~1-minute cell (the standing zone-scoped
+# SNAT catch-all is replaced by the non-zone rule-set, then restored and
+# verified). The -lib recipe is the hermetic verdict selftest.
+test-wire-nat-frag-needed:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate wire_nat_frag_needed --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		-- ./test/incus/wire-nat-frag-needed.sh
+
+test-wire-nat-frag-needed-lib:
+	./test/incus/wire-nat-frag-needed.sh --selftest
 
 test-wire-conntrack-lifecycle:
 	./test/incus/with-cluster.sh "wire-conntrack-lifecycle #10030" -- \

@@ -4,7 +4,7 @@
 # Shared verdict core for the wire-deny gates: wire-policy-deny.sh and
 # wire-appmatch-twins.sh (#9531), wire-zone-matrix.sh (#10028),
 # wire-hostinbound-deny.sh (#10029), wire-conntrack-lifecycle.sh (#10030),
-# and wire-routing-separation.sh (#10136).
+# wire-routing-separation.sh (#10136), and wire-nat-frag-needed.sh (#12809).
 # Pure bash, no cluster, no incus, no network — every
 #
 # WHY THIS EXISTS
@@ -711,6 +711,100 @@ wire_conntrack_verdict() {
 		return 1
 	fi
 	printf 'WIRE_GATE wire_conntrack_lifecycle PASS reason=-- %s\n' "$metrics"
+	return 0
+}
+
+# wire_nat_frag_needed_verdict <probe_offered> <snat_observed>
+#   <error_generated> <control_offered> <control_observed>
+#   <error_delivered> <translated_quote> <untranslated_leaks>
+#   <mtu_confirmed> <cksum_bad>
+#
+# #12809 — the ICMP frag-needed capture for a NON-ZONE source-NAT scope
+# (`to interface reth0.80`, interface-mode). Unlike the burst-count deny
+# rows above, this is an EXISTENCE-PROOF gate: one genuine, in-path
+# kernel-generated frag-needed toward the NAT'ed egress address, observed
+# translated onto the original source. Floors are therefore 1 per leg,
+# not the §2 statistical floors — there is no loss-rate claim to make
+# about a single semantic event.
+#
+# The legs, in evidence order:
+#   probe_offered     oversized DF ICMP echo packets the client sent
+#   snat_observed     of those, the WAN-side capture saw arrive with the
+#                     egress address as source (the non-zone rule-set
+#                     translated them) — attribution for the scope
+#   error_generated   genuine kernel frag-needed toward the NAT address,
+#                     counted on the WAN fixture's own egress capture
+#   control_*         a normal-size echo through the same rule-set whose
+#                     reply the client capture saw (window + transit +
+#                     reverse-translation liveness)
+#   error_delivered   frag-needed lines in the CLIENT capture addressed to
+#                     the client's original address (the helper reversed
+#                     the outer destination)
+#   translated_quote  delivered errors whose embedded quote carries the
+#                     CLIENT address as source, not the NAT address
+#   untranslated_leaks any delivered error still quoting the NAT address
+#                     (partial reversal), or any error addressed to the
+#                     NAT address that reached the client raw
+#   mtu_confirmed     delivered errors carrying the fixture MTU (report-
+#                     only: tcpdump prints it under -vv on 4.99.x, but
+#                     the PASS claim does not depend on that string)
+#
+# Order is load-bearing:
+#   1. numeric validity — malformed input can never establish an
+#      observation;
+#   2. positive FAIL evidence first — an untranslated leak or a bad
+#      checksum survives every VOID below it;
+#   3. attribution legs (probe, control offered, SNAT observed, error
+#      generated) — missing legs make the cell VOID, never PASS and
+#      never FAIL: without them the absence of delivery is not
+#      attributable to the dataplane;
+#   4. capture-blind — control observed proves the client window;
+#   5. delivery — with every leg proven, a missing delivery IS the
+#      #12085 regression signature (the error reached the NAT address
+#      and the kernel ate it), a measured FAIL;
+#   6. quote — delivered but untranslated is a distinct FAIL signature
+#      (partial reversal);
+#   7. PASS.
+wire_nat_frag_needed_verdict() {
+	local po="${1:-}" so="${2:-}" eg="${3:-}" co="${4:-}" cb="${5:-}"
+	local ed="${6:-}" tq="${7:-}" ul="${8:-}" mc="${9:-}" ck="${10:-}"
+	local metrics="probe_offered=$po snat_observed=$so error_generated=$eg control_offered=$co control_observed=$cb error_delivered=$ed translated_quote=$tq untranslated_leaks=$ul mtu_confirmed=$mc cksum_bad=$ck"
+	local a
+	for a in "$po" "$so" "$eg" "$co" "$cb" "$ed" "$tq" "$ul" "$mc" "$ck"; do
+		if ! wire_num "$a"; then
+			printf 'WIRE_GATE wire_nat_frag_needed VOID reason=harness-void %s\n' "$metrics"
+			return 2
+		fi
+	done
+	if ((10#$ul > 0)); then
+		printf 'WIRE_GATE wire_nat_frag_needed FAIL reason=-- %s\n' "$metrics"
+		return 1
+	fi
+	if ((10#$ck > 0)); then
+		printf 'WIRE_GATE wire_nat_frag_needed FAIL reason=-- %s\n' "$metrics"
+		return 1
+	fi
+	if ((10#$po == 0)) || ((10#$co == 0)); then
+		printf 'WIRE_GATE wire_nat_frag_needed VOID reason=under-sampled %s\n' "$metrics"
+		return 2
+	fi
+	if ((10#$so == 0)) || ((10#$eg == 0)); then
+		printf 'WIRE_GATE wire_nat_frag_needed VOID reason=env-void %s\n' "$metrics"
+		return 2
+	fi
+	if ((10#$cb == 0)); then
+		printf 'WIRE_GATE wire_nat_frag_needed VOID reason=capture-blind %s\n' "$metrics"
+		return 2
+	fi
+	if ((10#$ed == 0)); then
+		printf 'WIRE_GATE wire_nat_frag_needed FAIL reason=-- %s\n' "$metrics"
+		return 1
+	fi
+	if ((10#$tq == 0)); then
+		printf 'WIRE_GATE wire_nat_frag_needed FAIL reason=-- %s\n' "$metrics"
+		return 1
+	fi
+	printf 'WIRE_GATE wire_nat_frag_needed PASS reason=-- %s\n' "$metrics"
 	return 0
 }
 
