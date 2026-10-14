@@ -11,6 +11,50 @@ Drive **every** open issue to a terminal state — `MERGED`,
 — and open new issues for real bugs/gaps found along the way, then drive
 those too. Stop only when no driveable work remains.
 
+## Standing user orders (2026-10-13, reaffirmed repeatedly — do not relitigate)
+
+- **Lowest number first**: always pick lanes from the smallest/lowest open
+  issue number upward. Do not cherry-pick interesting work over old debt.
+- **PRs landing takes priority**: an open PR is unfinished work, not a queue
+  to admire. Before starting NEW engineering, drain the landing queue:
+  re-confirm folded heads, rebase, squash message violations, and MERGE.
+  New lanes open only after every mergeable PR has landed or been
+  dispositioned. A review verdict sitting unactioned for a turn is a
+  campaign failure.
+- **Zero PRs too**: termination requires zero open PRs as well as zero open
+  issues. Drain reviews/merges continuously; an open PR is not delivered work.
+- **Keep lanes full, parallelism high**: never let engineer or reviewer lanes
+  idle while driveable work exists. Reap idle/dead agents and refill from the
+  lowest-number queue. Parent does folds/small fixes inline when faster than
+  dispatching.
+- **Internal task runners only**: agents via the internal `task` tool with the
+  campaign reviewer/engineer agent types (Codex GPT-6 Astra, Opus 5.5/SMR,
+  GLM-5.3, Muse reviewers). NEVER external CLI model tools (codex/agy/claude
+  CLIs) to run other models.
+- **Full engineer + full reviews**: every PR gets the hostile review gate
+  (independent reviewer at the FINAL head, findings folded, re-review after
+  any fold that changes behavior). Message-shape gate first (see Step 3).
+- **Scratch discipline**: ALL temp files, intermediate files, tests, probes,
+  and worktrees live in `/var/worktrees/` (NOT `/var/tmp`, NOT `/tmp`, NOT
+  inside the repo checkout). `GOCACHE=/var/worktrees/.cache/go-build`,
+  `GOTMPDIR=/var/worktrees/.cache/go-tmp`, per-lane `CARGO_TARGET_DIR` under
+  `/var/worktrees/.cache/` too. Clean up `/var/worktrees` scratch (reviewer
+  worktrees, merged lanes, stale probes) as work completes — prune merged
+  worktrees continuously, not in a final sweep.
+- **Relative-path edit hazard (recurring)**: lanes editing via relative paths
+  have repeatedly spilled changes into the control checkout or lost them.
+  Briefs MUST demand absolute paths + `git -C <worktree> status --short`
+  proof after edits; parent restores control after confirming the worktree
+  copy is complete.
+- **Loss smoke every wave**: after each merge wave, deploy current master to
+  the loss userspace cluster and run connectivity (`make
+  cluster-deploy-and-gate CLUSTER_GATE=test-connectivity`). Known-external
+  failures (e.g. upstream lab IPv6 target dead from the firewall itself) are
+  recorded as such, not chased.
+- **Don't bail**: no yielding at phase boundaries, todo flips, or partial
+  waves. Loop audits until they come back clean; file new issues found on
+  the way and drive those too.
+
 This skill is the orchestration layer ABOVE `/research` and `/engineer`.
 It does not re-implement them — it ranks the backlog, picks a route
 (parallel or serial), fans out agents, and enforces the merge discipline.
@@ -48,8 +92,8 @@ engineer agents CANNOT dispatch their own sub-reviewers. Therefore:
 ## Step 0: Reconcile ground truth (every tick)
 
 ```bash
-git -C /home/ps/git/bpfrx fetch origin master
-git -C /home/ps/git/bpfrx rev-parse --short origin/master
+git fetch origin master
+git rev-parse --short origin/master
 gh issue list --state open --limit 100 --json number,title,labels,body \
   --jq '.[] | "#\(.number) [\(.labels|map(.name)|join(","))] \(.title[0:60]) | \(.body|length)c"' | sort -n
 gh pr list --state open --json number,title,headRefName,mergeable \
@@ -130,7 +174,7 @@ Run as many concurrently as the box allows.
   concurrent `cargo --release` against one target dir thundering-herds and
   starves them all. Cap concurrency to ~cores.
 - Each agent: fresh worktree off CURRENT master
-  (`git worktree add -b fix/<n>-<slug> /var/tmp/worktrees/<n> origin/master`),
+  (`git worktree add -b fix/<n>-campaign-pub /var/worktrees/campaign-pub/wt-<n> origin/master`),
   implement + fail-on-revert tests + build green + open PR ("Closes #<n>")
   + STOP (do not merge, do not dispatch reviewers).
 - **Commit-message standard (lanes, enforced)** — state verbatim in every dispatch/fold brief (including: the PR TITLE MUST use the same `<area>: <summary> (#NNNN)` subject format — it becomes the merge-commit message); parent bounces non-conforming branches before review (`git log` shape check at PR…
@@ -144,7 +188,7 @@ Run as many concurrently as the box allows.
   - PROHIBITED: `Issue #NNNN:` prefix form, ref-less subjects (`Fold review hardening`), title-only commits, `wip`/`fix`/`misc` checkpoint messages on pushed branches, backticks in `git commit -m` (heredoc always — messages contain backticked identifiers).
   - Good: `userspace-dp: refund ICMP budget on policy refusal (#10667)` + Why (refused errors exhaust the 64-burst, starving permitted ones) / What (carry budget_key through reversal arms; refund at TTL/CoS/policy terminals) / Validation (3 cells RED pre-fix; full --bins 6952+1 #9894@<sha>) / Risk (post-queue TX drops still unrefunded — rare, pre-existing).
   - Bad: `fix icmp bug`, `Issue #10667: update embedded_icmp.rs`, `Fold review hardening` (no ref, no behavior, no validation).
-- **Worktree hygiene is absolute**: agents point at `/var/tmp/worktrees/<x>` (OUTSIDE the repo — never `.claude/worktrees/`, which an in-repo wipe can destroy),
+- **Worktree hygiene is absolute**: agents point at `/var/worktrees/campaign-pub/wt-<n>` (OUTSIDE the repo — never `.claude/worktrees/`, which an in-repo wipe can destroy),
   NEVER the main checkout. Read other branches via `git show <ref>:<path>`,
   never `git checkout` in the main checkout.
 
@@ -205,12 +249,12 @@ Per PR, in order:
    `_Log.md`** conflict (keep both blocks, drop the markers), build-check if
    a behavior-relevant file conflicted, push the rebased branch via
    `git -C`. NEVER resolve in the main checkout.
-3. Set the PR title + body first: `gh pr edit <n> --title "<area>: <summary> (#NNNN)" --body-file /tmp/pr<n>_body.md` (body with Why/What/Validation + gate evidence). Then merge with an explicit pair: `gh pr merge <n> --merge -t "<area>: <summary> (#NNNN)" -F - <<<"<same body>" --delete-branch`. Both flags REQUIRED together: `-t` alone yields a title-only merge whose body echoes the subject, and bare merge yields GitHub's `Merge pull request #N` template — both are log pollution (ruled 2026-09-22). `git fetch origin` first if the ref may be stale, then verify with `git log --format=%B -1 origin/master` after merging.
+3. Set the PR title + body first: `gh pr edit <n> --title "<area>: <summary> (#NNNN)" --body-file /var/worktrees/.cache/pr<n>_body.md` (body with Why/What/Validation + gate evidence). Then merge with an explicit pair: `gh pr merge <n> --merge -t "<area>: <summary> (#NNNN)" -F - <<<"<same body>" --delete-branch`. Both flags REQUIRED together: `-t` alone yields a title-only merge whose body echoes the subject, and bare merge yields GitHub's `Merge pull request #N` template — both are log pollution (ruled 2026-09-22). `git fetch origin` first if the ref may be stale, then verify with `git log --format=%B -1 origin/master` after merging.
 4. Verify the issue auto-closed (`Closes #<n>` in the body). If not,
    `gh issue close <n>` with a comment citing the merge SHA + smoke result.
 5. Fetch master; the NEXT PR now needs its own `_Log` rebase vs the new
    master — repeat.
-**Control-cleanliness gate (2026-09-22 incident: 24 lane-leaked files sat in the control tree and silently wedged every `merge --ff-only`, leaving control 15 merges behind; 2026-09-24: scratch trees moved out of the repo to `/var/tmp/worktrees/` so no in-repo wipe can take them):** before EVERY merge-prep, run `git status --short` in control — it MUST show nothing at all: zero M/A/D/R lines AND zero `??` lines (worktrees no longer live under the repo, so any untracked entry is unexpected). If dirty: STOP; `git stash push -m control-rescue-<date>` (tracked only, NEVER `-u`); confirm with `git stash list` BEFORE resetting; `git fetch origin` then `git reset --hard origin/master`; triage the stash per-file (duplicate-of-branch → drop after lane confirms; unique → rescue to the owning lane); triage unexpected `??` paths individually (`mv` aside per-file …
+**Control-cleanliness gate (2026-09-22 incident: 24 lane-leaked files sat in the control tree and silently wedged every `merge --ff-only`, leaving control 15 merges behind; 2026-09-24: scratch trees moved out of the repo to `/var/worktrees/` so no in-repo wipe can take them):** before EVERY merge-prep, run `git status --short` in control — it MUST show nothing at all: zero M/A/D/R lines AND zero `??` lines (worktrees no longer live under the repo, so any untracked entry is unexpected). If dirty: STOP; `git stash push -m control-rescue-<date>` (tracked only, NEVER `-u`); confirm with `git stash list` BEFORE resetting; `git fetch origin` then `git reset --hard origin/master`; triage the stash per-file (duplicate-of-branch → drop after lane confirms; unique → rescue to the owning lane); triage unexpected `??` paths individually (`mv` aside per-file …
 
 **NEVER backticks in `git commit -m`** — use `git commit -F -` heredoc (PR
 bodies + commit messages contain backticked identifiers).
