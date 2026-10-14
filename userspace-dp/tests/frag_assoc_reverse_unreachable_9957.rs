@@ -10,8 +10,17 @@
 //! disposition; this source guard makes the producer/consumer wiring itself
 //! load-bearing.
 //!
-//! FAIL-ON-REVERT: adding a production `.frag_assoc.install(...)` or
-//! `.frag_assoc.lookup(...)` caller anywhere in the tree, moving either
+//! The census matches method FAMILIES, not frozen names: an audited entrypoint
+//! is `install`/`lookup` or any `_`-suffixed variant (`install_with_session`,
+//! `lookup_with_session`, ...). #11359 renamed both production entrypoints to
+//! their `_with_session` forms without changing the wiring, and the frozen-name
+//! census went stale (#12941): it demanded 2 production callers and found 0 on
+//! a healthy master. Family matching keeps the census pinned to the same
+//! admission/consult boundary across parameter-growth renames while every
+//! FAIL-ON-REVERT direction below stays loud.
+//!
+//! FAIL-ON-REVERT: adding a production `.frag_assoc.install*(...)` or
+//! `.frag_assoc.lookup*(...)` caller anywhere in the tree, moving either
 //! audited callsite out of `afxdp/poll_descriptor/frag_assoc.rs`, removing the
 //! ordinary `None` install, or dropping the NAT64 reverse binding reds this
 //! test. Test-only low-level fixtures are excluded by filename.
@@ -86,6 +95,7 @@ struct Site {
     file: PathBuf,
     line: usize,
     offset: usize,
+    method: String,
     third_arg: Option<String>,
 }
 
@@ -131,25 +141,28 @@ fn identifier_at(source: &str, offset: usize) -> Option<(&str, usize)> {
     Some((&source[offset..end], end))
 }
 
+/// Whether a called method belongs to the audited `family`: the bare verb or a
+/// snake-case `_`-suffixed variant (`install`, `install_with_session`, ...).
+/// Parameter-growth renames keep the `_`-suffix convention (#11359), so the
+/// family — not a frozen name — is the stable identity of the audited boundary
+/// (#12941). An identifier that merely starts with the verb (`installation`)
+/// is a different method and stays outside the census.
+fn in_method_family(method: &str, family: &str) -> bool {
+    method == family || method.starts_with(&(family.to_owned() + "_"))
+}
+
 /// Find a method call after either a direct `.frag_assoc` receiver or a local
 /// alias. Whitespace/newlines between every receiver component are accepted.
-fn method_after_receiver(source: &str, receiver_end: usize, method: &str) -> Option<usize> {
+/// Returns the called method name and the offset of its opening parenthesis.
+fn method_after_receiver(source: &str, receiver_end: usize) -> Option<(&str, usize)> {
     let dot = skip_ws(source, receiver_end);
     if source.as_bytes().get(dot) != Some(&b'.') {
         return None;
     }
     let method_start = skip_ws(source, dot + 1);
-    let method_end = method_start + method.len();
-    if source.get(method_start..method_end) != Some(method)
-        || source
-            .as_bytes()
-            .get(method_end)
-            .is_some_and(|byte| is_ident_continue(*byte))
-    {
-        return None;
-    }
+    let (method, method_end) = identifier_at(source, method_start)?;
     let open = skip_ws(source, method_end);
-    (source.as_bytes().get(open) == Some(&b'(')).then_some(open)
+    (source.as_bytes().get(open) == Some(&b'(')).then_some((method, open))
 }
 
 /// Find local names assigned a value containing the fragment-association field.
@@ -246,14 +259,18 @@ fn third_argument(source: &str, open: usize, close: usize) -> Option<String> {
     (commas == 2).then(|| source[arg_start..close].trim().to_string())
 }
 
-fn method_sites_in_source(path: &Path, source: &str, method: &str) -> Vec<Site> {
+/// All calls of an `install`/`lookup`-family method (see `in_method_family`)
+/// on a `.frag_assoc` receiver or on a local alias of one.
+fn method_sites_in_source(path: &Path, source: &str, family: &str) -> Vec<Site> {
     let mut starts = Vec::new();
     let mut search_from = 0usize;
     while let Some(relative) = source[search_from..].find(".frag_assoc") {
         let start = search_from + relative;
         let receiver_end = start + ".frag_assoc".len();
-        if let Some(open) = method_after_receiver(source, receiver_end, method) {
-            starts.push((start, open));
+        if let Some((method, open)) = method_after_receiver(source, receiver_end)
+            && in_method_family(method, family)
+        {
+            starts.push((start, open, method));
         }
         search_from = receiver_end;
     }
@@ -273,9 +290,10 @@ fn method_sites_in_source(path: &Path, source: &str, method: &str) -> Vec<Site> 
                 .is_some_and(|byte| is_ident_continue(*byte));
             if !before_is_ident
                 && !after_is_ident
-                && let Some(open) = method_after_receiver(source, alias_end, method)
+                && let Some((method, open)) = method_after_receiver(source, alias_end)
+                && in_method_family(method, family)
             {
-                starts.push((start, open));
+                starts.push((start, open, method));
             }
             search_from = alias_end;
         }
@@ -284,25 +302,30 @@ fn method_sites_in_source(path: &Path, source: &str, method: &str) -> Vec<Site> 
     starts.dedup();
     starts
         .into_iter()
-        .map(|(offset, open)| {
+        .map(|(offset, open, method)| {
             let close = balanced_call_end(source, open).unwrap_or_else(|| {
-                panic!("unbalanced {method} call at {}:{}", rel(path), line_at(source, offset))
+                panic!(
+                    "unbalanced {family} call at {}:{}",
+                    rel(path),
+                    line_at(source, offset)
+                )
             });
             Site {
                 file: path.to_path_buf(),
                 line: line_at(source, offset),
                 offset,
+                method: method.to_string(),
                 third_arg: third_argument(source, open, close),
             }
         })
         .collect()
 }
 
-fn production_method_sites(method: &str) -> Vec<Site> {
+fn production_method_sites(family: &str) -> Vec<Site> {
     let mut sites = production_sources()
         .into_iter()
         .filter(|(_, source)| source.contains("frag_assoc"))
-        .flat_map(|(path, source)| method_sites_in_source(&path, &source, method))
+        .flat_map(|(path, source)| method_sites_in_source(&path, &source, family))
         .collect::<Vec<_>>();
     sites.sort_by(|left, right| (&left.file, left.offset).cmp(&(&right.file, right.offset)));
     sites
@@ -311,7 +334,7 @@ fn production_method_sites(method: &str) -> Vec<Site> {
 fn listed(sites: &[Site]) -> Vec<String> {
     sites
         .iter()
-        .map(|site| format!("{}:{}", rel(&site.file), site.line))
+        .map(|site| format!("{}:{} {}", rel(&site.file), site.line, site.method))
         .collect()
 }
 
@@ -342,7 +365,7 @@ fn production_fragment_association_installs_keep_family_specific_reverse_info_99
     assert_eq!(
         sites.len(),
         2,
-        "#9957/#10132 production FragAssoc::install caller set changed: {listing:?}"
+        "#9957/#10132 production FragAssoc install-family caller set changed: {listing:?}"
     );
     assert!(
         sites
@@ -352,13 +375,16 @@ fn production_fragment_association_installs_keep_family_specific_reverse_info_99
          poll-descriptor sites: {listing:?}"
     );
     assert!(
-        sites.iter().any(|site| site.third_arg.as_deref() == Some("None")),
+        sites
+            .iter()
+            .any(|site| site.third_arg.as_deref() == Some("None")),
         "#9957 ordinary same-family association must retain reverse=None: {listing:?}"
     );
     assert!(
-        sites
-            .iter()
-            .any(|site| site.third_arg.as_deref().is_some_and(|arg| arg.contains("nat64_reverse"))),
+        sites.iter().any(|site| site
+            .third_arg
+            .as_deref()
+            .is_some_and(|arg| arg.contains("nat64_reverse"))),
         "#10132 NAT64 association must carry Nat64ReverseInfo on AF_INET: {listing:?}"
     );
 }
@@ -370,7 +396,7 @@ fn production_fragment_association_lookups_preserve_nat64_reverse_9957() {
     assert_eq!(
         sites.len(),
         2,
-        "#9957/#10132 production fragment-association lookup caller set changed: {listing:?}"
+        "#9957/#10132 production fragment-association lookup-family caller set changed: {listing:?}"
     );
     assert!(
         sites
@@ -391,7 +417,9 @@ fn production_fragment_association_lookups_preserve_nat64_reverse_9957() {
         })
         .collect::<Vec<_>>();
     assert!(
-        bindings.iter().any(|binding| binding.contains("let(decision,reverse)=")),
+        bindings
+            .iter()
+            .any(|binding| binding.contains("let(decision,reverse)=")),
         "#10132 NAT64 lookup must preserve reverse info: {listing:?}"
     );
     assert!(
@@ -405,34 +433,51 @@ fn production_fragment_association_lookups_preserve_nat64_reverse_9957() {
 #[test]
 fn parser_handles_multiline_fragment_association_receiver_9957() {
     let source = code_only(
-        "let result = forwarding.nat64\n    .frag_assoc\n    .install(\n        key,\n        decision,\n        None,\n        now,\n        generation,\n        owner,\n    );",
+        "let result = forwarding.nat64\n    .frag_assoc\n    .install_with_session(\n        key,\n        decision,\n        None,\n        now,\n        generation,\n        owner,\n    );",
     );
     let sites = method_sites_in_source(Path::new("synthetic.rs"), &source, "install");
     assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].method, "install_with_session");
     assert_eq!(sites[0].third_arg.as_deref(), Some("None"));
 }
 
 #[test]
 fn parser_handles_multiline_fragment_association_alias_9957() {
     let source = code_only(
-        "let cache = forwarding.nat64\n    .frag_assoc;\ncache\n    .install(\n        key,\n        decision,\n        None,\n        now,\n        generation,\n        owner,\n    );",
+        "let cache = forwarding.nat64.frag_assoc;\ncache\n    .install(\n        key,\n        decision,\n        None,\n        now,\n        generation,\n        owner,\n    );",
     );
     let sites = method_sites_in_source(Path::new("synthetic.rs"), &source, "install");
     assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].method, "install");
+    assert_eq!(sites[0].third_arg.as_deref(), Some("None"));
+}
+
+#[test]
+fn census_family_excludes_same_prefix_foreign_methods_9957() {
+    // `installation(` / `installed(` merely share the verb prefix; without the
+    // `_` family boundary they must not count as audited install callers,
+    // while the suffixed production entrypoint does.
+    let source = code_only(
+        "forwarding.nat64.frag_assoc.installation(key, decision, None, now, generation, owner);\nforwarding.nat64.frag_assoc.installed();\nforwarding.nat64.frag_assoc.install_with_session(\n    key,\n    decision,\n    None,\n    now,\n    generation,\n    owner,\n);",
+    );
+    let sites = method_sites_in_source(Path::new("synthetic.rs"), &source, "install");
+    assert_eq!(sites.len(), 1, "{:?}", listed(&sites));
+    assert_eq!(sites[0].method, "install_with_session");
     assert_eq!(sites[0].third_arg.as_deref(), Some("None"));
 }
 
 #[test]
 fn lookup_binding_is_tied_to_the_same_call_9957() {
     let good = code_only(
-        "let (decision, _reverse) = forwarding.nat64\n    .frag_assoc\n    .lookup(\n        &key,\n        now,\n        generation,\n        |_| true,\n    );",
+        "let (decision, _reverse) = forwarding.nat64\n    .frag_assoc\n    .lookup_with_session(\n        &key,\n        now,\n        generation,\n        session_is_live,\n        owner_active,\n    );",
     );
     let good_sites = method_sites_in_source(Path::new("synthetic.rs"), &good, "lookup");
     assert_eq!(good_sites.len(), 1);
+    assert_eq!(good_sites[0].method, "lookup_with_session");
     assert!(lookup_discards_reverse(&good, good_sites[0].offset));
 
     let bad = code_only(
-        "let (decision, reverse) = forwarding.nat64\n    .frag_assoc\n    .lookup(\n        &key,\n        now,\n        generation,\n        |_| true,\n    );",
+        "let (decision, reverse) = forwarding.nat64\n    .frag_assoc\n    .lookup_with_session(\n        &key,\n        now,\n        generation,\n        session_is_live,\n        owner_active,\n    );",
     );
     let bad_sites = method_sites_in_source(Path::new("synthetic.rs"), &bad, "lookup");
     assert_eq!(bad_sites.len(), 1);
