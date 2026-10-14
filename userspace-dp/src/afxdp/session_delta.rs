@@ -260,6 +260,13 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
                 &reverse_key,
                 Some(shared_recycles),
             );
+            // Pressure-shed closes can invalidate other per-binding cache
+            // copies too; the descriptor path evicts its current binding
+            // synchronously, and this worker-loop barrier covers its peers.
+            binding.flow.flow_cache.invalidate_slot(&forward_key, binding.ifindex);
+            if reverse_key != forward_key {
+                binding.flow.flow_cache.invalidate_slot(&reverse_key, binding.ifindex);
+            }
         }
         apply_shared_recycles_to_bindings(bindings, binding_lookup, shared_recycles);
     }

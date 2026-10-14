@@ -196,7 +196,48 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         PROTO_TCP,
         crate::tcp_flags::TCP_ACK,
     ));
+
+    // #12862: a pressure shed must retire shared state synchronously, before
+    // this worker processes another RX descriptor (the Close delta is only
+    // flushed after the batch). Seed both opening rows as if their original
+    // SYNs had already published them.
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    for key in [&opening_a, &opening_b] {
+        let victim_id = sessions.session_id_for(key);
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .insert(
+                key.clone(),
+                SyncedSessionEntry {
+                    key: key.clone(),
+                    decision: stored_decision,
+                    metadata: metadata(false),
+                    source_nat_static: None,
+                    leak_incarnation: 0,
+                    origin: SessionOrigin::ForwardFlow,
+                    protocol: PROTO_TCP,
+                    tcp_flags: TCP_FLAG_SYN,
+                    generation: 0,
+                    session_id: victim_id,
+                    tcp_close_class: 0,
+                    tcp_handshake_state: 1,
+                },
+            );
+    }
     assert_eq!(sessions.len(), 9);
+    // #12862 e2e incarnation fence: both shared rows are same-tuple
+    // REPLACEMENT (different session_id) published in the shed window.
+    // Whichever opening the shed selects, the replacement row must survive
+    // the descriptor-path teardown (the Declined branch), while the true
+    // victim's row is removed.
+    {
+        let mut shared = shared_sessions.lock().expect("shared sessions");
+        for k in [&opening_a, &opening_b] {
+            let row = shared.get_mut(k).expect("shared row");
+            row.session_id = row.session_id.wrapping_add(999);
+        }
+    }
 
     let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
@@ -207,14 +248,14 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
-    let (batch, dbg) = txn_run_descriptor_checked(
+    let (batch, dbg) = txn_run_descriptor_with_shared_sessions(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
-        true,
+        &shared_sessions,
     );
 
     assert_eq!(dbg.tx, 1, "the admitted SYN must be forwarded");
@@ -228,11 +269,98 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         "one opening pair trades for the new pair"
     );
     assert_eq!(sessions.admission_refused(), 0);
+    let admitted = key(31_006);
     let opening_a_removed = sessions.probe_with_origin(&opening_a).is_none();
     let opening_b_removed = sessions.probe_with_origin(&opening_b).is_none();
     assert_ne!(
         opening_a_removed, opening_b_removed,
         "exactly one handshake-incomplete flow should be selected"
+    );
+    let shed_key = if opening_a_removed {
+        &opening_a
+    } else {
+        &opening_b
+    };
+    assert!(
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .contains_key(shed_key),
+        "#12862: a replacement shared row (different session_id) must survive the shed teardown"
+    );
+    let surviving_opening = if opening_a_removed {
+        &opening_b
+    } else {
+        &opening_a
+    };
+    let shared = shared_sessions.lock().expect("shared sessions");
+    assert!(
+        shared.contains_key(surviving_opening),
+        "shedding one opening must retain the unselected shared session"
+    );
+    assert!(
+        shared.contains_key(&admitted),
+        "the replacement SYN must publish its own shared session"
+    );
+    let mut established_replacement = shared
+        .get(surviving_opening)
+        .expect("surviving opening")
+        .clone();
+    established_replacement.key = shed_key.clone();
+    established_replacement.tcp_handshake_state = 4;
+    let replacement_shed = crate::session::PressureShedSession {
+        key: shed_key.clone(),
+        session_id: established_replacement.session_id,
+        decision: established_replacement.decision,
+        is_reverse: established_replacement.metadata.is_reverse,
+        ingress_zone: established_replacement.metadata.ingress_zone,
+        egress_zone: established_replacement.metadata.egress_zone,
+        ingress_zone_check: established_replacement.metadata.ingress_zone_check,
+        egress_zone_check: established_replacement.metadata.egress_zone_check,
+        ingress_ifindex: established_replacement.metadata.ingress_ifindex,
+        ingress_vlan_id: established_replacement.metadata.ingress_vlan_id,
+        owner_rg_id: established_replacement.metadata.owner_rg_id,
+        policy_id: established_replacement.metadata.policy_id,
+    };
+    assert!(
+        !super::poll_descriptor::is_pressure_shed_shared_opening(
+            &established_replacement,
+            &replacement_shed,
+        ),
+        "a same-decision established replacement must not match a shed opening"
+    );
+    // #12862 incarnation fence: same tuple, same decision, still OPENING,
+    // but a different session_id is a replacement incarnation — the shed
+    // predicate must decline it (victim id = replacement id + 1).
+    let mut opening_replacement = established_replacement.clone();
+    opening_replacement.tcp_handshake_state = 1;
+    let victim_shed = crate::session::PressureShedSession {
+        key: replacement_shed.key.clone(),
+        decision: replacement_shed.decision,
+        is_reverse: replacement_shed.is_reverse,
+        ingress_zone: replacement_shed.ingress_zone,
+        egress_zone: replacement_shed.egress_zone,
+        ingress_zone_check: replacement_shed.ingress_zone_check,
+        egress_zone_check: replacement_shed.egress_zone_check,
+        ingress_ifindex: replacement_shed.ingress_ifindex,
+        ingress_vlan_id: replacement_shed.ingress_vlan_id,
+        owner_rg_id: replacement_shed.owner_rg_id,
+        policy_id: replacement_shed.policy_id,
+        session_id: opening_replacement.session_id.wrapping_add(1),
+    };
+    assert!(
+        !super::poll_descriptor::is_pressure_shed_shared_opening(
+            &opening_replacement,
+            &victim_shed,
+        ),
+        "a same-tuple OPENING replacement with a different session_id must survive the shed"
+    );
+    assert!(
+        super::poll_descriptor::is_pressure_shed_shared_opening(
+            &opening_replacement,
+            &replacement_shed,
+        ),
+        "the victim incarnation itself (same session_id) must still match"
     );
     if opening_a_removed {
         assert!(sessions.probe_with_origin(&opening_a_reverse).is_none());
@@ -256,7 +384,6 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
             "pressure shedding must preserve established sessions"
         );
     }
-    let admitted = key(31_006);
     let (admitted_session, _) = sessions
         .probe_with_origin(&admitted)
         .expect("new forward session");
@@ -269,6 +396,15 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
 /// reservation just like the ordinary session reaper does.
 #[test]
 fn txn_pressure_shed_releases_source_nat_pool_port_10890() {
+    txn_pressure_shed_nat_pool_hold_behavior(false);
+}
+
+#[test]
+fn txn_pressure_shed_gate_failure_keeps_shared_row_and_nat_hold_12862() {
+    txn_pressure_shed_nat_pool_hold_behavior(true);
+}
+
+fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
     fn key(port: u16) -> SessionKey {
         SessionKey {
             addr_family: libc::AF_INET as u8,
@@ -355,20 +491,69 @@ fn txn_pressure_shed_releases_source_nat_pool_port_10890() {
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let admitted_meta = txn_meta_v4(24, TCP_FLAG_SYN, admitted_frame.len() as u16);
-    let (admitted_batch, admitted_dbg) = txn_run_descriptor_checked(
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let (victim_entry, _) = sessions
+        .probe_with_origin(&victim_key)
+        .expect("victim local session");
+    shared_sessions
+        .lock()
+        .expect("shared sessions")
+        .insert(
+            victim_key.clone(),
+            SyncedSessionEntry {
+                key: victim_key.clone(),
+                decision: victim_entry.decision,
+                metadata: victim_entry.metadata,
+                source_nat_static: None,
+                leak_incarnation: 0,
+                origin: crate::session::SessionOrigin::ForwardFlow,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_FLAG_SYN,
+                generation: 0,
+                session_id: sessions.session_id_for(&victim_key),
+                tcp_close_class: 0,
+                tcp_handshake_state: 1,
+            },
+        );
+    let _held_lease = if gate_blocks_cleanup {
+        Some(
+            crate::afxdp::bpf_map::global_tuple_gate()
+                .acquire_lease([victim_key.clone()])
+                .expect("victim gate lease"),
+        )
+    } else {
+        None
+    };
+    let (admitted_batch, admitted_dbg) = txn_run_descriptor_with_shared_sessions(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &admitted_frame,
         admitted_meta,
-        true,
+        &shared_sessions,
     );
 
     assert_eq!(admitted_dbg.tx, 1, "the new SYN must be admitted");
     assert_eq!(admitted_batch.session_creates, 2);
     assert_eq!(sessions.len(), 9);
     assert!(sessions.probe_with_origin(&victim_key).is_none());
+    assert_eq!(
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .contains_key(&victim_key),
+        gate_blocks_cleanup,
+        "the shed shared row is removed only when the tuple gate is acquired"
+    );
+    if gate_blocks_cleanup {
+        let pool_held = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
+        assert_eq!(
+            pool_held[0].used_ports, 2,
+            "gate-blocked cleanup must retain the victim NAT hold"
+        );
+        return;
+    }
     let (admitted_session, _) = sessions
         .probe_with_origin(&admitted_key)
         .expect("new pool-SNAT forward session");
