@@ -2178,6 +2178,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             debug.to_zone = Some(resolved.metadata.egress_zone);
                         }
                         session_ingress_zone = Some(resolved.metadata.ingress_zone);
+                        // #12865: session-hit packets credit the session's
+                        // admitted egress zone (a FabricRedirect resolution
+                        // here would otherwise credit the transport).
+                        if admission_to_zone == 0 {
+                            admission_to_zone = resolved.metadata.egress_zone;
+                        }
                         // #5606: carry the matched session's NAT64 reverse info
                         // (original v6 src/dst) so the live forward request built
                         // below translates a v4->v6 reply back to IPv6. Set for
@@ -7362,6 +7368,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         zone_id,
                         fabric_nat_scope_ifindex_for_redirect,
                     ) {
+                        if admission_to_zone == 0 {
+                            admission_to_zone = worker_ctx
+                                .forwarding
+                                .egress_zone_id(intended_egress_ifindex);
+                        }
                         decision.resolution = redirect;
                     }
                 }

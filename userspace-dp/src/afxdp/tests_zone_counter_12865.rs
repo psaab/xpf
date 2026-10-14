@@ -162,8 +162,8 @@ fn zone_counter_12865_slow_path_double_count_with_populated_shim_zone() {
     eprintln!("P3 rows (one packet, shim ingress_zone=lan): {:?}", rows);
     let lan = rows.iter().find(|r| r.zone_id == TEST_LAN_ZONE_ID);
     assert!(
-        lan.is_some_and(|r| r.ingress_packets >= 1),
-        "P3: the packet must be counted at least once"
+        lan.is_some_and(|r| r.ingress_packets == 1),
+        "P3: the packet must be counted exactly once (no double count)"
     );
 }
 
@@ -219,8 +219,8 @@ fn zone_counter_12865_fast_path_second_packet_credits_intended_egress() {
         .iter()
         .find(|r| r.zone_id == TEST_WAN_ZONE_ID)
         .expect("P4: the intended wan egress must be credited by SOME packet");
-    assert!(
-        wan.egress_packets >= 1,
-        "P4: wan egress credit must exist by the second packet"
+    assert_eq!(
+        wan.egress_packets, 2,
+        "P4: BOTH packets (slow punt + session hit) must credit the intended wan egress"
     );
 }
