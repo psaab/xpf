@@ -316,6 +316,7 @@ func policyMatchEmptyAppSetError(scope, policyName, name string) error {
 // persistent seenSets — this is deliberately distinct from ExpandAddressSet
 // (predefined.go), whose visited map backtracks for a different purpose.
 func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
+	show := displayPolicyAddressBookName
 	seen := make(map[string]bool)
 	count := 0 // literal addresses accumulated (mirrors expanded slice length)
 	var firstErr error
@@ -331,7 +332,7 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 			if addr.Value == "" {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("address %q has no configured prefix "+
-						"(it resolves to no usable address)", ref)
+						"(it resolves to no usable address)", show(ref))
 				}
 				return false
 			}
@@ -342,7 +343,7 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 		if set == nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("member %q is not a defined address or "+
-					"address-set", ref)
+					"address-set", show(ref))
 			}
 			return false
 		}
@@ -350,7 +351,7 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("address-set %q has unknown member statement %q; "+
 					"the dropped member leaves the set under-populated",
-					ref, set.UnknownMembers[0])
+					show(ref), set.UnknownMembers[0])
 			}
 			return false
 		}
@@ -374,7 +375,7 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 		if !resolvedAny {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("address-set %q is empty "+
-					"(it expands to no addresses)", ref)
+					"(it expands to no addresses)", show(ref))
 			}
 			return false
 		}
@@ -382,14 +383,14 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 	}
 	if !resolve(name) {
 		if firstErr == nil {
-			firstErr = fmt.Errorf("%q resolves to no address", name)
+			firstErr = fmt.Errorf("%q resolves to no address", show(name))
 		}
 		return firstErr
 	}
 	if count == 0 {
 		// Resolved true but accumulated no literal (e.g. a pure cycle):
 		// mirrors expandUserspacePolicyAddresses' len(values) == 0 reject.
-		return fmt.Errorf("address-set %q expands to no addresses", name)
+		return fmt.Errorf("address-set %q expands to no addresses", show(name))
 	}
 	return nil
 }
@@ -463,7 +464,7 @@ func validatePolicyMatchAddressSetMembersStrict(cfg *Config) error {
 			return nil
 		}
 		if err := policyMatchAddressBookResolves(ab, tok); err != nil {
-			return policyMatchAddressSetError(scope, policyName, field, tok, err)
+			return policyMatchAddressSetError(scope, policyName, field, displayPolicyAddressBookName(tok), err)
 		}
 		return nil
 	}
@@ -508,6 +509,13 @@ func validatePolicyMatchAddressSetMembersStrict(cfg *Config) error {
 	return nil
 }
 
+func displayPolicyAddressBookName(name string) string {
+	if zone, local, ok := ZoneLocalUnqualify(name); ok {
+		return fmt.Sprintf("%s (security-zone %s)", local, zone)
+	}
+	return name
+}
+
 // policyMatchAddressSetError formats the #3149 / #3147 reject, naming the policy
 // scope, the policy, the match field, the unresolved book name, and the inner
 // resolution failure.
@@ -547,9 +555,9 @@ func policyMatchAddressSetError(scope, policyName, field, name string, cause err
 // fails closed rather than silently un-enforcing the rule.
 //
 // Special zone tokens (`any`, `junos-host`, the empty token) are exempt; global
-// policies are not iterated (see policyZoneSpecialTokens). Iteration is in
-// cfg.Security.Policies order, which is deterministic (built in config order by
-// compileSecurityPolicies), so the first-reported error is stable.
+// policies additionally reject the reserved `junos-global` context before
+// undefined-zone validation. Iteration is in cfg.Security.Policies order,
+// then cfg.Security.GlobalPolicies order, so the first-reported error is stable.
 func validatePolicyZoneReferencesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -635,6 +643,16 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 	for _, pol := range cfg.Security.GlobalPolicies {
 		if pol == nil {
 			continue
+		}
+		if slices.Contains(pol.Match.FromZones, JunosGlobalZoneName) {
+			return fmt.Errorf(
+				"security policies global policy %q match from-zone %q names the reserved global-policy context, not a security zone; remove this from-zone match context",
+				pol.Name, JunosGlobalZoneName)
+		}
+		if slices.Contains(pol.Match.ToZones, JunosGlobalZoneName) {
+			return fmt.Errorf(
+				"security policies global policy %q match to-zone %q names the reserved global-policy context, not a security zone; remove this to-zone match context",
+				pol.Name, JunosGlobalZoneName)
 		}
 		// #4626 M03: a scoped-global from-zone/to-zone match context is a zone
 		// SET (`match from-zone [ a b ]`). Validate EVERY element per side —

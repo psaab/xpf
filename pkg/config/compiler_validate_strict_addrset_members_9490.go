@@ -70,12 +70,7 @@ func validateAddressSetMembersDefinedStrict(cfg *Config) error {
 		_, ok := ab.AddressSets[name]
 		return ok
 	}
-	show := func(name string) string {
-		if zone, local, ok := ZoneLocalUnqualify(name); ok {
-			return fmt.Sprintf("%s (security-zone %s)", local, zone)
-		}
-		return name
-	}
+	show := displayPolicyAddressBookName
 	names := make([]string, 0, len(ab.AddressSets))
 	for n := range ab.AddressSets {
 		names = append(names, n)
