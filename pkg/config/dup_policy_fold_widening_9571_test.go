@@ -376,3 +376,27 @@ func TestSiblingPeeledPolicyContainersFoldTogether12820(t *testing.T) {
 		}
 	}
 }
+
+func TestGlobalPeeledWrappersFoldAcross12820(t *testing.T) {
+	// Two bare `policy` wrappers under `global`, same name, deny vs
+	// permit: they must fold into ONE poisoned policy (review fold —
+	// the global arm previously folded each wrapper independently).
+	const any = `match { source-address any; destination-address any; application any; }`
+	text := globalText9571(`policy { p1 { ` + any + ` then { deny; } } } policy { p1 { ` + any + ` then { permit; } } }`)
+	cfg, err := CompileConfigLenient(parse9571(t, text))
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	var p1s []*Policy
+	for _, p := range cfg.Security.GlobalPolicies {
+		if p.Name == "p1" {
+			p1s = append(p1s, p)
+		}
+	}
+	if len(p1s) != 1 {
+		t.Fatalf("global p1 policies = %d, want 1 folded policy", len(p1s))
+	}
+	if !p1s[0].LenientContentDropped {
+		t.Fatalf("cross-wrapper deny/permit fold must poison the merged policy: %+v", p1s[0])
+	}
+}

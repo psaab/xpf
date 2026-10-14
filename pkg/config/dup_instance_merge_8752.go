@@ -117,23 +117,21 @@ func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPoli
 			}
 			// global { policy … }
 			for _, g := range pol.FindChildren("global") {
-				m, w, c := mergeInstancesUnder(g, "policy", askGlobal9571)
-				for _, policyContainer := range g.FindChildren("policy") {
-					if len(policyContainer.Keys) != 1 {
-						continue
-					}
-					pm, pw, pc := mergeInstancesUnder(policyContainer, "policy", askGlobal9571)
-					m = append(pm, m...)
-					w = append(pw, w...)
-					c = append(pc, c...)
-				}
-				merged = append(merged, m...)
-				for _, name := range w {
-					widened = append(widened, foldWidenedPolicy9571{global: true, name: name})
-				}
-				for _, name := range c {
-					conflicting = append(conflicting, directTerminalActionConflict11063{global: true, name: name})
-				}
+				merged, widened, conflicting = foldPolicyInstancesWith12820(g, askGlobal9571, merged,
+					func(names []string) []foldWidenedPolicy9571 {
+						out := make([]foldWidenedPolicy9571, 0, len(names))
+						for _, name := range names {
+							out = append(out, foldWidenedPolicy9571{global: true, name: name})
+						}
+						return out
+					},
+					func(names []string) []directTerminalActionConflict11063 {
+						out := make([]directTerminalActionConflict11063, 0, len(names))
+						for _, name := range names {
+							out = append(out, directTerminalActionConflict11063{global: true, name: name})
+						}
+						return out
+					}, widened, conflicting)
 			}
 		}
 	}
@@ -143,11 +141,26 @@ func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPoli
 func foldPolicyInstances12820(parent *Node, fromKeys, toKeys []string,
 	ask policyActionAsk9571, merged []string, widened []foldWidenedPolicy9571,
 	conflicting []directTerminalActionConflict11063) ([]string, []foldWidenedPolicy9571, []directTerminalActionConflict11063) {
+	return foldPolicyInstancesWith12820(parent, ask, merged,
+		func(w []string) []foldWidenedPolicy9571 { return zonePairWidened9571(fromKeys, toKeys, w) },
+		func(c []string) []directTerminalActionConflict11063 {
+			return zonePairDirectConflicts11063(fromKeys, toKeys, c)
+		}, widened, conflicting)
+}
+
+// foldPolicyInstancesWith12820 folds a container's policy instances plus any
+// peeled `policy { name { ... } }` wrappers into one scratch, so duplicates
+// across wrappers fold together.
+func foldPolicyInstancesWith12820(parent *Node, ask policyActionAsk9571, merged []string,
+	wrapW func([]string) []foldWidenedPolicy9571,
+	wrapC func([]string) []directTerminalActionConflict11063,
+	widened []foldWidenedPolicy9571,
+	conflicting []directTerminalActionConflict11063) ([]string, []foldWidenedPolicy9571, []directTerminalActionConflict11063) {
 	fold := func(container *Node) {
 		m, w, c := mergeInstancesUnder(container, "policy", ask)
 		merged = append(merged, m...)
-		widened = append(widened, zonePairWidened9571(fromKeys, toKeys, w)...)
-		conflicting = append(conflicting, zonePairDirectConflicts11063(fromKeys, toKeys, c)...)
+		widened = append(widened, wrapW(w)...)
+		conflicting = append(conflicting, wrapC(c)...)
 	}
 	fold(parent)
 	if parent != nil {
@@ -163,8 +176,8 @@ func foldPolicyInstances12820(parent *Node, fromKeys, toKeys []string,
 			scratch := &Node{Keys: []string{"policy"}, Children: peeled}
 			m, w, c := mergeInstancesUnder(scratch, "policy", ask)
 			merged = append(merged, m...)
-			widened = append(widened, zonePairWidened9571(fromKeys, toKeys, w)...)
-			conflicting = append(conflicting, zonePairDirectConflicts11063(fromKeys, toKeys, c)...)
+			widened = append(widened, wrapW(w)...)
+			conflicting = append(conflicting, wrapC(c)...)
 			kept := make(map[*Node]struct{}, len(scratch.Children))
 			for _, child := range scratch.Children {
 				kept[child] = struct{}{}
