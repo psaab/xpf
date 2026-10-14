@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/routing"
 )
 
@@ -35,12 +34,26 @@ func (m *Manager) resolveLinkLocalZone9026(kind string, dst net.IP, zone, destin
 	if dst.To4() != nil || !dst.IsLinkLocalUnicast() {
 		return zone, nil
 	}
-	if zone != "" {
-		return config.LinuxIfName(zone), nil
-	}
 	m.mu.RLock()
 	rethMap := m.rethMap
 	m.mu.RUnlock()
+	// #12907: an explicit %zone names the same egress a
+	// destination-interface can, Junos spelling included, so it goes
+	// through the SAME routing.ResolveProbeInterface normalization — RETH
+	// base resolved through rethMap to the local physical member, default
+	// ".0" unit stripped, slashes to dashes. A bare config.LinuxIfName
+	// turned `fe80::1%reth0.0` into "reth0.0", a name no kernel netdev
+	// answers to (ENODEV, probe held), while `destination-interface
+	// reth0.0` resolved to the physical member and probed — one spelling
+	// of one egress decided between holding and probing. Zone keeps its
+	// precedence over destination-interface: ResolveProbeInterface
+	// returns "" only for an empty name, so a typed zone never falls
+	// through. On a rethMap MISS it stays the raw translated name, the
+	// same #7173 fail-closed doctrine the destination-interface path
+	// follows — ENODEV holds the probe rather than probing unpinned.
+	if zone != "" {
+		return routing.ResolveProbeInterface(zone, rethMap), nil
+	}
 	resolved := routing.ResolveProbeInterface(destinationInterface, rethMap)
 	if resolved == "" {
 		return "", fmt.Errorf("%w: %s link-local target %s needs a zone "+
