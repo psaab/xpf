@@ -994,6 +994,16 @@ selected by first-child order.
 
 **Contradictory action spellings within one default-policy stanza are rejected and tolerant-load fail-closed (#12821):** action tokens in trailing keys and nested children are all checked, so bracketed lists and mixed key/body forms cannot silently compile only the first value as permit-all. Strict compilation rejects differing supported actions; tolerant `Load` and `SyncApply` warn naming both and force the no-match default to deny-all. Identical repeated values remain accepted. See `docs/config-schema.md` "#12821".
 
+**Inline default-policy overrides of group choices remain valid (#12823):** an
+inline block or flat value replaces the corresponding group `default-policy`,
+including when group inheritance is nested; `apply-groups-except` presence
+does not change this precedence. Conflicting group defaults without an inline
+resolution, and same-tier ambiguities, remain strict-rejected and tolerant-load
+fail-closed. An empty inline block suppresses the inherited choice without
+providing a replacement. Separate top-level `security` stanzas compile as
+separate roots and do not combine or resolve one another's default-policy
+values. See `docs/config-schema.md` "#12823".
+
 **Implicit default-policy RT_FLOW logging (#3534):** `set security policies
 default-policy-log session-init|session-close` emits RT_FLOW session logs for
 the implicit default verdict, mirroring a named policy's `then log`. It is a
