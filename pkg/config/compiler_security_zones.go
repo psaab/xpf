@@ -762,10 +762,10 @@ func zoneInterfaceMembers(iface *Node) []string {
 	if zoneInterfaceApplyMetaKeyword(iface.Name()) {
 		return nil
 	}
-	names, hasBody := zoneInterfaceKeysBeforeBody(iface)
-	if hasBody {
-		// A body keyword landed on this node's OWN Keys, which means the
-		// statement was written in the packed spelling
+	names, stopped := zoneInterfaceKeysBeforeBody(iface)
+	if stopped {
+		// A body keyword or apply-meta statement landed on this node's OWN
+		// Keys. A body indicates the packed spelling
 		// `<if> host-inbound-traffic system-services ssh` — everything from
 		// that token on is the member's BODY, including this node's CHILDREN
 		// (they are the body's contents, e.g. `system-services ssh`). Recursing
@@ -830,8 +830,8 @@ var zoneInterfaceBodyKeywords = map[string]bool{
 }
 
 // zoneInterfaceKeysBeforeBody splits a member node's Keys at the first body
-// keyword: it returns the interface names that precede it, and whether one was
-// found. Empty keys are skipped.
+// keyword or apply-meta statement: it returns the interface names that precede
+// it and whether a stopping statement was found. Empty keys are skipped.
 //
 // Before #6525 the caller read every key unconditionally. That is correct for
 // every shape `set` can author (SetPath always makes `host-inbound-traffic` a
@@ -848,12 +848,14 @@ var zoneInterfaceBodyKeywords = map[string]bool{
 // and filed on its own; the direction is fail-CLOSED (the override is absent, so
 // the interface admits only what the zone-level stanza admits) rather than the
 // fail-open a phantom membership would produce.
-func zoneInterfaceKeysBeforeBody(iface *Node) (names []string, hasBody bool) {
+func zoneInterfaceKeysBeforeBody(iface *Node) (names []string, stopped bool) {
 	for _, k := range iface.Keys {
 		if k == "" {
 			continue
 		}
-		if zoneInterfaceBodyKeywords[k] {
+		if zoneInterfaceBodyKeywords[k] || zoneInterfaceApplyMetaKeyword(k) {
+			// Meta statements on a packed member's Keys are not interface names;
+			// neither are their arguments or an apply-macro body.
 			return names, true
 		}
 		names = append(names, k)
