@@ -38,6 +38,7 @@ import (
 	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/natpoolalarm"
 	"github.com/psaab/xpf/pkg/rpm"
+	"github.com/psaab/xpf/pkg/scheduler"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -287,40 +288,14 @@ func (s *Server) showSecurityLog(filter string, buf *strings.Builder) {
 	fmt.Fprintf(buf, "(%d events shown)\n", len(events))
 }
 
-// showSchedulers renders the configured scheduler entries
-// (start/stop time + recurrence).
+// showSchedulers renders the configured scheduler entries via the shared
+// pkg/scheduler formatter (#12922), so the gRPC ShowText topic stays
+// byte-identical to the REST show-text surface and the local CLI and —
+// unlike the private copy it replaces — carries the daily exclude/all-day
+// qualifiers and per-weekday override arms. The #12903 nil-slot tolerance
+// now lives in the shared renderer.
 func (s *Server) showSchedulers(cfg *config.Config, buf *strings.Builder) {
-	if cfg == nil || len(cfg.Schedulers) == 0 {
-		buf.WriteString("No schedulers configured\n")
-		return
-	}
-	for name, sched := range cfg.Schedulers {
-		if sched == nil {
-			// #12903: a present-but-nil scheduler map value is admitted by the
-			// tolerant-load / peer-sync path (#1960) — the same nil-tolerant
-			// class the application-set guard below (#5221) and the CLI's
-			// address-book guards (#7197) already skip. Skip it rather than
-			// dereferencing sched.StartTime and panicking the display handler.
-			continue
-		}
-		fmt.Fprintf(buf, "Scheduler: %s\n", name)
-		if sched.StartTime != "" {
-			fmt.Fprintf(buf, "  Start time: %s\n", sched.StartTime)
-		}
-		if sched.StopTime != "" {
-			fmt.Fprintf(buf, "  Stop time:  %s\n", sched.StopTime)
-		}
-		if sched.StartDate != "" {
-			fmt.Fprintf(buf, "  Start date: %s\n", sched.StartDate)
-		}
-		if sched.StopDate != "" {
-			fmt.Fprintf(buf, "  Stop date:  %s\n", sched.StopDate)
-		}
-		if sched.Daily {
-			buf.WriteString("  Recurrence: daily\n")
-		}
-		buf.WriteString("\n")
-	}
+	scheduler.FormatSchedulers(buf, cfg)
 }
 
 // showApplications renders the configured Junos applications and

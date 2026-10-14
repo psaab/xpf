@@ -9,6 +9,7 @@ import (
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/rpm"
+	"github.com/psaab/xpf/pkg/scheduler"
 )
 
 // handleShowServices dispatches `show services ...` to the appropriate
@@ -146,31 +147,15 @@ func (c *CLI) showApplicationIdentificationStatus() error {
 	return nil
 }
 
+// showSchedulers renders the configured scheduler entries via the shared
+// pkg/scheduler formatter (#12922), so the local CLI output stays
+// byte-identical to the REST show-text and gRPC ShowText surfaces and —
+// unlike the private copy it replaces — carries the daily exclude/all-day
+// qualifiers and the per-weekday override arms that decide whether a shown
+// window ever applies.
 func (c *CLI) showSchedulers() error {
-	cfg := c.store.ActiveConfig()
-	if cfg == nil || len(cfg.Schedulers) == 0 {
-		fmt.Println("No schedulers configured")
-		return nil
-	}
-
-	for name, sched := range cfg.Schedulers {
-		fmt.Printf("Scheduler: %s\n", name)
-		if sched.StartTime != "" {
-			fmt.Printf("  Start time: %s\n", sched.StartTime)
-		}
-		if sched.StopTime != "" {
-			fmt.Printf("  Stop time:  %s\n", sched.StopTime)
-		}
-		if sched.StartDate != "" {
-			fmt.Printf("  Start date: %s\n", sched.StartDate)
-		}
-		if sched.StopDate != "" {
-			fmt.Printf("  Stop date:  %s\n", sched.StopDate)
-		}
-		if sched.Daily {
-			fmt.Println("  Recurrence: daily")
-		}
-		fmt.Println()
-	}
+	var buf strings.Builder
+	scheduler.FormatSchedulers(&buf, c.store.ActiveConfig())
+	fmt.Print(buf.String())
 	return nil
 }
