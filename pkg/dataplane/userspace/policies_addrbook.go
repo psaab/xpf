@@ -212,7 +212,7 @@ func buildAddressBookTableWithFeeds(cfg *config.Config, feedOverlay map[string][
 		v4        []string
 		v6        []string
 	}
-	expansions := newAddressBookExpansionResolver(cfg.Security.AddressBook, feedOverlay)
+	expansions := newAddressBookExpansionResolver(cfg.Security.AddressBook, feedOverlay, cfg.Security.DynamicAddress.AddressBindings)
 	contentToBucket := make(map[string]*bucket)
 	for _, name := range allNames {
 		parsedV4, parsedV6 := expandBookNameToParsedCIDRsWithResolver(expansions, name)
@@ -321,7 +321,7 @@ func expandBookNameToCIDRs(cfg *config.Config, feedOverlay map[string][]string, 
 	if cfg == nil {
 		return nil, nil
 	}
-	resolver := newAddressBookExpansionResolver(cfg.Security.AddressBook, feedOverlay)
+	resolver := newAddressBookExpansionResolver(cfg.Security.AddressBook, feedOverlay, cfg.Security.DynamicAddress.AddressBindings)
 	v4, v6 := expandBookNameToParsedCIDRsWithResolver(resolver, name)
 	return addressBookCIDRStrings(v4), addressBookCIDRStrings(v6)
 }
@@ -343,13 +343,14 @@ type addressBookParsedExpansion struct {
 type addressBookExpansionResolver struct {
 	book           *config.AddressBook
 	feeds          map[string][]string
+	bindings       map[string]*config.AddressBinding
 	cache          map[string]addressBookParsedExpansion
 	parsedPrefixes map[string]parsedAddressBookCIDR
 }
 
-func newAddressBookExpansionResolver(book *config.AddressBook, feeds map[string][]string) *addressBookExpansionResolver {
+func newAddressBookExpansionResolver(book *config.AddressBook, feeds map[string][]string, bindings map[string]*config.AddressBinding) *addressBookExpansionResolver {
 	return &addressBookExpansionResolver{
-		book: book, feeds: feeds, cache: make(map[string]addressBookParsedExpansion),
+		book: book, feeds: feeds, bindings: bindings, cache: make(map[string]addressBookParsedExpansion),
 		parsedPrefixes: make(map[string]parsedAddressBookCIDR),
 	}
 }
@@ -361,14 +362,26 @@ func (r *addressBookExpansionResolver) expand(name string, visiting map[string]b
 	if cached, ok := r.cache[name]; ok {
 		return cached, false
 	}
+	if r.book != nil {
+		if _, collision := r.book.CollidingNames[name]; collision {
+			return addressBookParsedExpansion{unknownMember: true}, false
+		}
+	}
 	visiting[name] = true
 	defer delete(visiting, name)
 	var out addressBookParsedExpansion
-	for _, value := range r.feeds[name] {
-		r.appendValue(&out, value)
+	feedValues, feedBound := r.feeds[name]
+	if feedBound {
+		for _, value := range feedValues {
+			r.appendValue(&out, value)
+		}
 	}
+	// An empty row for an explicit fail-mode drop is the binding's match-none
+	// intent. Do not resurrect a same-named static alias after the feed drops.
+	droppedBinding := feedBound && len(feedValues) == 0 &&
+		r.bindings[name] != nil && r.bindings[name].FailMode == "drop"
 	var cycle bool
-	if r.book != nil {
+	if !droppedBinding && r.book != nil {
 		if addr, ok := r.book.Addresses[name]; ok {
 			if addr != nil {
 				r.appendValue(&out, addr.UsableValue())
