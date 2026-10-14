@@ -1953,14 +1953,7 @@ func DefinedZoneNames(cfg *config.Config) map[string]bool {
 		return nil
 	}
 	out := make(map[string]bool, len(cfg.Security.Zones))
-	// #12895: quarantined (ID-collision loser / reserved) zones cannot
-	// forward, so they are not defined for applicability purposes —
-	// wildcard globals must not display as governing their pairs.
-	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
 	for name := range cfg.Security.Zones {
-		if _, excluded := quarantined[name]; excluded {
-			continue
-		}
 		out[name] = true
 	}
 	return out
