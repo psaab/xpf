@@ -278,10 +278,10 @@ fn keyed_siphash_bucket_vectors_12789() {
     let ip = v6_s3_ips(1)[0];
     let src = SynRateSketch::with_cols_seeded(SRC_COLS, 42);
     let dst = SynRateSketch::<RateCounter>::with_cols_seeded(DST_COLS, 42);
-    assert_eq!(src.cell_indices(&ip), [1492, 1468, 405, 1951]);
+    assert_eq!(src.cell_indices(&ip), [1010, 1935, 1290, 1309]);
     assert_eq!(
         dst.cell_indices_ip_port(&ip, 53),
-        [547, 144, 896, 514]
+        [107, 126, 48, 717]
     );
 }
 

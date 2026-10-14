@@ -203,7 +203,7 @@ const _: () = assert!(DST_COLS.is_power_of_two() && SRC_COLS.is_power_of_two());
 /// is independent of the per-boot seed; address-word deltas can therefore form
 /// predictable colliding families across restarts (#12789). The per-boot
 /// `SynRateSketch::seed` (drawn once from `hot_hash_seed::hot_path_hash_seed`,
-/// #2364) is used by keyed SipHash in `cell_index` and `cell_index_ip_port`,
+/// #2364) is used by the keyed hash in `cell_index` and `cell_index_ip_port`,
 /// preventing offline construction of those key-pair collisions.
 const ROW_SEEDS: [u64; ROWS] = [
     0x9E37_79B9_7F4A_7C15,

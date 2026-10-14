@@ -6317,7 +6317,7 @@ pub(crate) fn allocator_capacity(num_addresses: usize, port_low: u16, port_high:
 }
 
 /// Map a source IP to a sticky pool-address slot for `address-persistent`
-/// SNAT. Placement uses the per-process keyed SipHash state so a remote source
+/// SNAT. Placement uses the per-process keyed hash state so a remote source
 /// cannot predict colliding source families offline. Existing allocations are
 /// unchanged; the mapping is stable for a process lifetime but can differ
 /// across process starts or HA nodes.

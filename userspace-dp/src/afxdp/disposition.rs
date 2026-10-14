@@ -1381,7 +1381,7 @@ fn exception_sample_key_wrapper_uses_process_seed_12794() {
                 Some(&debug_tuple()),
                 42,
             ),
-            173452051336367422,
+            12702183349881622083,
             "pinned sampler key"
         );
     }
