@@ -130,6 +130,40 @@ func hoistAndSplitRun8939(children []*Node, container *schemaNode) []*Node {
 // places the authored nesting wins and nothing is lifted. Only an
 // UNAMBIGUOUSLY foreign head -- legal in the container, illegal here -- can be
 // a statement that SetPath misplaced.
+//
+// #12942: "HERE" IS THE WHOLE BODY WHEN THE BODY DECLARES ITS OWN RUN
+// SPELLING. A head may be illegal under the leaf it is nested in yet still be
+// a leaf of the body-owning node this walk started from:
+//
+//	schedulers { scheduler S { tuesday { start-time 09:00:00 {
+//		stop-time 17:00:00; } } } }
+//	                                  ^ illegal under start-time, LEGAL
+//	                                    under tuesday -- and also legal
+//	                                    under scheduler
+//
+// stop-time is a declared leaf of the day schema, and the nested shape is the
+// braced twin of the #8939 flat run `tuesday start-time 09:00:00
+// stop-time 17:00:00`, which SetPath nests identically. The old bound read it
+// as unambiguously foreign because it compared against the immediate parent
+// only, hoisted it to the scheduler level, and the compiler read the phantom
+// as the scheduler's own stop-time: the scalar window filled with StopTime and
+// no StartTime (every non-Tuesday tick warned and failed closed in the
+// scheduler), a daily window beside it was corrupted to the weekday's stop on
+// the tolerant path, and the legitimate daily+weekday pair strict-rejected as
+// an #11358 daily repeat nobody authored.
+//
+// THE GATE IS packedFlatRun, AND THE TUNNEL IS WHY IT MUST BE. `tunnel
+// routing-instance destination VR1 destination 10.0.0.2` nests the tunnel's
+// destination IP under the routing-instance's `destination <name>` leaf, and
+// `destination` resolves under BOTH bodies -- yet there the nested statement
+// is a tunnel leaf SetPath misplaced, and hoisting it is the whole #9156 fix.
+// The difference is DECLARED, not structural: schemaSchedulerDay sets
+// packedFlatRun, so the schema walk and the day reader expand a nested run as
+// the day's own body spelling (schema_walk.go), while the routing-instance
+// body declares no run spelling and its reader reads authored children only.
+// So the body-root ambiguity rule fires only for a body that opted in, and
+// there it keeps the authored nesting exactly as the both-places rule above
+// keeps it for the immediate parent.
 func splitNestedForeignRun8939(n *Node, container *schemaNode) (*Node, []*Node) {
 	if n == nil {
 		return n, nil
@@ -139,6 +173,12 @@ func splitNestedForeignRun8939(n *Node, container *schemaNode) (*Node, []*Node) 
 	// leaves the declared schema. A nil local cannot vouch for a name, so it
 	// disables lifting rather than permitting it -- an undeclared body is
 	// exactly where an unrecognised name is most likely to be someone's value.
+	//
+	// root is the schema of the body this walk must not empty (n's own
+	// position). When the body declares its own flat-run spelling
+	// (packedFlatRun), a head resolving under root is the body's statement,
+	// and the both-places ambiguity rule applies against it too (#12942).
+	root := localSchemaFor8939(n, container)
 	var prune func(node *Node, local *schemaNode, depth int) *Node
 	prune = func(node *Node, local *schemaNode, depth int) *Node {
 		if node == nil || depth > 8 {
@@ -150,9 +190,13 @@ func splitNestedForeignRun8939(n *Node, container *schemaNode) (*Node, []*Node) 
 				continue
 			}
 			sub := localSchemaChild8939(local, c.Keys[0])
-			if local != nil && sub == nil && resolveSchemaChild(container, c.Keys[0]) != nil {
-				// Legal in the ENCLOSING container and illegal HERE: the only
-				// reading is a statement SetPath nested by accident.
+			ownsBodyRun12942 := root != nil && root.packedFlatRun &&
+				localSchemaChild8939(root, c.Keys[0]) != nil
+			if local != nil && sub == nil && !ownsBodyRun12942 &&
+				resolveSchemaChild(container, c.Keys[0]) != nil {
+				// Legal in the ENCLOSING container, illegal under its parent,
+				// and not the declared run spelling of the body it sits in:
+				// the only reading is a statement SetPath nested by accident.
 				lifted = append(lifted, c)
 				continue
 			}
@@ -165,7 +209,7 @@ func splitNestedForeignRun8939(n *Node, container *schemaNode) (*Node, []*Node) 
 		clone.Children = kept
 		return &clone
 	}
-	pruned := prune(n, localSchemaFor8939(n, container), 0)
+	pruned := prune(n, root, 0)
 	return pruned, lifted
 }
 
