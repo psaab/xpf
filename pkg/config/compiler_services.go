@@ -860,18 +860,64 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 					}
 				}
 			case "feed-name":
-				fnName := nodeVal(prop)
-				if len(prop.Children) > 0 {
-					fe := FeedEntry{Name: fnName}
-					for _, c := range prop.Children {
-						if c.Name() == "path" {
-							fe.Path = nodeVal(c)
+				appendFeedEntry := func(entry FeedEntry) {
+					if fs.FeedName != "" {
+						fs.FeedEntries = append(fs.FeedEntries, FeedEntry{Name: fs.FeedName})
+						fs.FeedName = ""
+					}
+					// Identical re-statements are idempotent (Junos set
+					// semantics): do not accumulate duplicates that the
+					// strict uniqueness gate would then reject.
+					for _, existing := range fs.FeedEntries {
+						if existing == entry {
+							return
 						}
 					}
-					fs.FeedEntries = append(fs.FeedEntries, fe)
-				} else {
-					fs.FeedName = fnName
+					if fs.FeedName == entry.Name && entry.Path == "" {
+						return
+					}
+					fs.FeedEntries = append(fs.FeedEntries, entry)
 				}
+				if len(prop.Children) == 0 {
+					name := nodeVal(prop)
+					if name != "" {
+						if len(fs.FeedEntries) == 0 && fs.FeedName == "" {
+							fs.FeedName = name
+						} else {
+							appendFeedEntry(FeedEntry{Name: name})
+						}
+					}
+					break
+				}
+
+				if len(prop.Keys) < 2 {
+					// A peeled feed-name container has named feed children;
+					// the enclosing leaf carries the keyword but no value.
+					for _, feed := range prop.Children {
+						if feed.Name() == "path" {
+							continue // a value child, not a named feed
+						}
+						entry := FeedEntry{Name: feed.Name()}
+						for _, path := range feed.Children {
+							if path.Name() == "path" {
+								entry.Path = nodeVal(path)
+							}
+						}
+						if entry.Name != "" {
+							appendFeedEntry(entry)
+						}
+					}
+					break
+				}
+
+				fnName := nodeVal(prop)
+				entry := FeedEntry{Name: fnName}
+				for _, path := range prop.Children {
+					if path.Name() == "path" {
+						entry.Path = nodeVal(path)
+					}
+				}
+				appendFeedEntry(entry)
 			}
 		}
 
@@ -879,7 +925,10 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 	}
 
 	for _, inst := range namedInstances(node.FindChildren("address-name")) {
-		ab := &AddressBinding{Name: inst.name}
+		ab, found := sec.DynamicAddress.AddressBindings[inst.name]
+		if !found || ab == nil {
+			ab = &AddressBinding{Name: inst.name}
+		}
 		// #9689: every `profile` statement, not the first. Two sibling statements
 		// (`profile feed-name f; profile fail-mode drop;`) leave two profile nodes,
 		// and FindChild returned only the first, silently dropping the second
