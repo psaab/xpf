@@ -9,6 +9,9 @@ set -uo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
+# shellcheck source=active-fw.sh
+source "$ROOT_DIR/test/incus/active-fw.sh"
+
 TARGET=${TARGET:-172.16.80.200}
 N=${N:-12}
 DURATION=${DURATION:-75}
@@ -31,7 +34,13 @@ WRAPPER=${WRAPPER:-$ROOT_DIR/test/incus/fairness_multi_sample.py}
 FAIRNESS_EVAL=${FAIRNESS_EVAL:-$ROOT_DIR/userspace-dp/target/release/fairness-eval}
 EQUAL_FLOW_CAPTURE=${EQUAL_FLOW_CAPTURE:-$ROOT_DIR/test/incus/fairness_equal_flow_capture.py}
 CAPTURE_DATAPLANE=${CAPTURE_DATAPLANE:-1}
-DATAPLANE_VM=${DATAPLANE_VM:-loss:xpf-userspace-fw0}
+# D10-14 (#13069): do not hardcode a cluster node for dataplane
+# telemetry. When DATAPLANE_VM is unset the sweep resolves the active
+# primary itself (below) so /run/xpf/userspace-dp.json snapshots and
+# counter deltas come from the node actually forwarding the traffic,
+# never from a standby after a failover.
+DATAPLANE_VM=${DATAPLANE_VM:-}
+read -r -a DATAPLANE_VM_CANDIDATES <<< "${DATAPLANE_VM_CANDIDATES:-loss:xpf-userspace-fw0 loss:xpf-userspace-fw1}"
 DATAPLANE_STATUS_PATH=${DATAPLANE_STATUS_PATH:-/run/xpf/userspace-dp.json}
 DATAPLANE_STATS_CMD=${DATAPLANE_STATS_CMD:-"cli -c 'show chassis cluster data-plane statistics'"}
 DATAPLANE_CAPTURE_TIMEOUT_SEC=${DATAPLANE_CAPTURE_TIMEOUT_SEC:-20}
@@ -222,6 +231,25 @@ stop_equal_flow_class_capture() {
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
 }
+
+# D10-14 (#13069): the /metrics scraper loop runs in the background for
+# the whole sweep. Without traps, an INT/TERM/HUP/QUIT that ends the
+# sweep leaked it indefinitely (async commands ignore SIGINT/SIGQUIT, so
+# even a terminal Ctrl-C on the process group left the loop alive).
+# Every exit path now stops the live capture; a normal exit re-stops the
+# already-stopped last pid, which is a no-op.
+stop_equal_flow_capture_and_exit() {
+    local status=$1
+    trap - EXIT HUP INT QUIT TERM
+    stop_equal_flow_class_capture "${EQUAL_FLOW_CAPTURE_PID:-}"
+    exit "$status"
+}
+
+trap 'stop_equal_flow_capture_and_exit 129' HUP
+trap 'stop_equal_flow_capture_and_exit 130' INT
+trap 'stop_equal_flow_capture_and_exit 131' QUIT
+trap 'stop_equal_flow_capture_and_exit 143' TERM
+trap 'stop_equal_flow_capture_and_exit "$?"' EXIT
 
 analyze_equal_flow_class_capture() {
     local dir=$1
@@ -539,6 +567,16 @@ HEADER
         mark_dataplane_error
     fi
 }
+
+# Resolve the dataplane VM before any class work is spent: a sweep that
+# cannot tell which node forwards must not run to completion capturing
+# zero-delta telemetry off a standby (#13069).
+if capture_dataplane_enabled && [[ -z "$DATAPLANE_VM" ]]; then
+    if ! DATAPLANE_VM="$(active_fw_detect "${DATAPLANE_VM_CANDIDATES[@]}")"; then
+        echo "fairness-cos-class-sweep: unable to detect the active primary firewall for dataplane capture (tried: ${DATAPLANE_VM_CANDIDATES[*]}); set DATAPLANE_VM explicitly or set CAPTURE_DATAPLANE=0" >&2
+        exit 2
+    fi
+fi
 
 overall_status=0
 dataplane_status=0

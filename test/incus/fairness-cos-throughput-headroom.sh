@@ -5,9 +5,17 @@
 set -uo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# shellcheck source=active-fw.sh
+source "$ROOT_DIR/test/incus/active-fw.sh"
 
-TARGET_VM=${TARGET_VM:-loss:xpf-userspace-fw0}
 APPLY_CONFIG=${APPLY_CONFIG:-1}
+# D10-14 (#13069): do not hardcode a cluster node. Only the RG primary
+# forwards traffic and apply-cos-config.sh must run against it (config
+# sync replicates the commit to the secondary), so an unset TARGET_VM is
+# resolved by probing the candidates below; if no active primary answers
+# the script fails closed instead of configuring the standby.
+TARGET_VM=${TARGET_VM:-}
+read -r -a TARGET_VM_CANDIDATES <<< "${TARGET_VM_CANDIDATES:-loss:xpf-userspace-fw0 loss:xpf-userspace-fw1}"
 COMPARE_SURPLUS_SHARING=${COMPARE_SURPLUS_SHARING:-1}
 CLASS_FILTER=${CLASS_FILTER:-q8,q9,q10}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-}
@@ -40,6 +48,13 @@ if enabled "$APPLY_CONFIG" && [[ ! -x "$APPLY_COS_CONFIG" ]]; then
     exit 2
 fi
 
+if [[ -z "$TARGET_VM" ]]; then
+    if ! TARGET_VM="$(active_fw_detect "${TARGET_VM_CANDIDATES[@]}")"; then
+        echo "fairness-cos-throughput-headroom: unable to detect the active primary firewall (tried: ${TARGET_VM_CANDIDATES[*]}); set TARGET_VM explicitly" >&2
+        exit 2
+    fi
+fi
+
 if [[ -z "$ARTIFACT_ROOT" ]]; then
     ARTIFACT_ROOT=$(mktemp -d -t cos-throughput-headroom.XXXXXX)
 else
@@ -56,7 +71,14 @@ restore_strict_if_needed() {
     [[ "$RESTORE_STRICT_NEEDED" -eq 1 ]] || return 0
     enabled "$APPLY_CONFIG" || return 0
 
-    if "$APPLY_COS_CONFIG" "${COS_DIRECTION_FLAGS[@]}" "$TARGET_VM" \
+    # D10-14 (#13069): restore the CANONICAL forward-only fixture. The
+    # sweep scenarios deliberately apply --symmetric (reverse traffic is
+    # classified on source ports), but carrying those direction flags
+    # into the restore leaves the reverse source-port terms installed
+    # for every later test suite; a flag-less apply deletes the
+    # bandwidth-output-reverse filter and its ge-0-0-1 attachment before
+    # re-applying the strict forward-only sets.
+    if "$APPLY_COS_CONFIG" "$TARGET_VM" \
         > "$ARTIFACT_ROOT/restore-strict.stdout" \
         2> "$ARTIFACT_ROOT/restore-strict.stderr"; then
         RESTORE_STRICT_NEEDED=0
