@@ -158,14 +158,7 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 		}
 		return strings.Join(parts, " ")
 	}
-	scopeQuarantined := func(from, to []string) bool {
-		for _, name := range append(append([]string{}, from...), to...) {
-			if isQuarantined(name) {
-				return true
-			}
-		}
-		return false
-	}
+
 	// #3408: surface a per-policy counter read failure as a warning AFTER all
 	// reads rather than printing clean-zero hit counts.
 	var readErr error
@@ -296,7 +289,12 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 			case 2:
 				action = "reject"
 			}
-			ruleQuarantined := scopeQuarantined(pol.Match.FromZones, pol.Match.ToZones)
+			// #12897: mirror the runtime scrub (#5577) — only a configured
+			// side EMPTIED by quarantine drops the whole global rule; a mixed
+			// scope stays enforced for its live members, so its counters stay
+			// live and the quarantined member alone carries the qualifier in
+			// the zone columns.
+			ruleQuarantined := config.ScopedGlobalQuarantineDropped(pol.Match.FromZones, pol.Match.ToZones, quarantinedZones)
 			ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 			var pkts, bytes uint64
 			published := true
@@ -437,19 +435,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 		}
 		return strings.Join(parts, " ")
 	}
-	scopeQuarantined := func(from, to []string) bool {
-		for _, name := range from {
-			if isQuarantined(name) {
-				return true
-			}
-		}
-		for _, name := range to {
-			if isQuarantined(name) {
-				return true
-			}
-		}
-		return false
-	}
+
 	// #8177: policies whose "Session statistics" block was OMITTED because the
 	// knob is off and the rule carries no `count`. This surface had no trailing
 	// note of any kind — its #7016 sibling case prints "not available (not yet
@@ -613,7 +599,12 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 				fmt.Fprintf(buf, "Global policies:\n")
 				globalHeaderPrinted = true
 			}
-			ruleQuarantined := scopeQuarantined(pol.Match.FromZones, pol.Match.ToZones)
+			// #12897: mirror the runtime scrub (#5577) — only a configured
+			// side EMPTIED by quarantine drops the whole global rule; a mixed
+			// scope stays enforced for its live members, so the Session
+			// statistics block below reads as unavailable only for a rule the
+			// scrub would actually drop.
+			ruleQuarantined := config.ScopedGlobalQuarantineDropped(pol.Match.FromZones, pol.Match.ToZones, quarantinedZones)
 			action := "permit"
 			switch pol.Action {
 			case 1:

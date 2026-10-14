@@ -84,14 +84,6 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 		}
 		return strings.Join(parts, " ")
 	}
-	scopeQuarantined := func(from, to []string) bool {
-		for _, name := range append(append([]string{}, from...), to...) {
-			if isQuarantined(name) {
-				return true
-			}
-		}
-		return false
-	}
 
 	fmt.Println("Logical system: root-logical-system")
 	fmt.Printf("%-8s%-17s%-18s%-24s%-14s%s\n",
@@ -213,7 +205,12 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 			case 2:
 				action = "Reject"
 			}
-			ruleQuarantined := scopeQuarantined(pol.Match.FromZones, pol.Match.ToZones)
+			// #12897: mirror the runtime scrub (#5577) — only a configured
+			// side EMPTIED by quarantine drops the whole global rule; a mixed
+			// scope stays enforced for its live members, so its counters stay
+			// live and the quarantined member alone carries the qualifier in
+			// the zone columns.
+			ruleQuarantined := config.ScopedGlobalQuarantineDropped(pol.Match.FromZones, pol.Match.ToZones, quarantinedZones)
 			ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 			var count uint64
 			published := true
@@ -379,14 +376,7 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 		}
 		return strings.Join(parts, " ")
 	}
-	scopeQuarantined := func(from, to []string) bool {
-		for _, name := range append(append([]string{}, from...), to...) {
-			if isQuarantined(name) {
-				return true
-			}
-		}
-		return false
-	}
+
 	// #3063: the displayed Index must equal the runtime/RT_FLOW policy ID,
 	// which advances by application-set expansion. RuntimePolicyIDs mirrors the
 	// snapshot's PolicyID assignment so an operator cross-referencing a
@@ -482,7 +472,12 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 			case 2:
 				action = "reject"
 			}
-			ruleQuarantined := scopeQuarantined(pol.Match.FromZones, pol.Match.ToZones)
+			// #12897: mirror the runtime scrub (#5577) — only a configured
+			// side EMPTIED by quarantine drops the whole global rule; a mixed
+			// scope stays enforced for its live members, so the Session
+			// statistics block below reads as unavailable only for a rule the
+			// scrub would actually drop.
+			ruleQuarantined := config.ScopedGlobalQuarantineDropped(pol.Match.FromZones, pol.Match.ToZones, quarantinedZones)
 			ruleID := runtimePolicyIndex(runtimeIDs, policySetID, uint32(i))
 			// #3062: scheduler-inactive global policy reports State: inactive.
 			state := policyDetailState(pol.SchedulerName, schedActive, haveSched)

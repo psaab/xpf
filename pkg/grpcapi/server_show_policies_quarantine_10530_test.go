@@ -119,11 +119,21 @@ func TestShowPoliciesTextQuarantineQualifier10530(t *testing.T) {
 	}
 }
 
-// TestGetPoliciesQuarantineBit11072 pins the structured twin: rules whose
-// scope touches a quarantined zone carry Quarantined=true, so a remote show
-// does not present scrubbed permits as live.
+// TestGetPoliciesQuarantineBit11072 pins the structured twin: rules the
+// zone-quarantine scrub DROPS carry Quarantined=true, so a remote show does
+// not present scrubbed permits as live. #12897: a MIXED-scope global (some
+// members quarantined, survivors on every configured side) stays enforced
+// for its live members and reads Quarantined=false with live counters; only
+// a configured side EMPTIED by quarantine drops the whole rule.
 func TestGetPoliciesQuarantineBit11072(t *testing.T) {
 	s := &Server{store: quarantinePolicyTextStore10530(t)}
+	// The wholly-quarantined arm: a scoped global whose configured from-side
+	// is emptied by quarantine is dropped at runtime and must keep the bit.
+	cfg := s.store.ActiveConfig()
+	cfg.Security.GlobalPolicies = append(cfg.Security.GlobalPolicies, &config.Policy{
+		Name: "dead-global", Action: config.PolicyDeny,
+		Match: config.PolicyMatch{FromZones: []string{"z214"}, ToZones: []string{"untrust"}},
+	})
 	resp, err := s.GetPolicies(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("GetPolicies: %v", err)
@@ -134,7 +144,7 @@ func TestGetPoliciesQuarantineBit11072(t *testing.T) {
 			got[pr.Name] = pr.Quarantined
 		}
 	}
-	for name, want := range map[string]bool{"loser-rule": true, "ordinary-rule": false, "scoped-global": true} {
+	for name, want := range map[string]bool{"loser-rule": true, "ordinary-rule": false, "scoped-global": false, "dead-global": true} {
 		if got[name] != want {
 			t.Errorf("rule %q Quarantined=%v, want %v (full=%v)", name, got[name], want, got)
 		}
