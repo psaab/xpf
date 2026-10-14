@@ -445,3 +445,75 @@ fn test_emit_session_create_rt_flow_carries_admitting_policy_id() {
     // (whose [44:48] is repurposed by #2853).
     assert_eq!(p[52], 1, "RT_FLOW event type must be SESSION_CREATE (1)");
 }
+
+#[test]
+fn test_emit_session_create_rt_flow_carries_admission_timestamp() {
+    // #12889 fail-on-revert: an Open delta with a real (non-zero) created_ns
+    // must produce a non-zero `timestamp_ns` (offset 0) on the RT_FLOW
+    // SESSION_CREATE frame — the wall-clock ADMISSION instant, not the Go
+    // socket-drain `time.Now()` a 0 wire stamp degrades to. On master the
+    // producer discards the wall half of its clock reading and the encoder
+    // never writes [0:8], so the stamp stays 0 and this fails. A monotonic
+    // created_ns ~60s in the past must land ~60s before a fresh wall reading,
+    // proving the stamp is the admission instant (drain time would be ~0s).
+    let (handle, rx) = test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let (now_mono, _now_wall) = read_mono_and_wall_clocks();
+    let mut delta = test_close_delta(crate::session::SessionDeltaKind::Open);
+    delta.metadata.log_session_init = true;
+    delta.created_ns = now_mono.saturating_sub(60 * NS_PER_SEC);
+
+    handle.emit_session_create_rt_flow(&delta, 0, 0);
+    let frame = rx.try_recv().expect("RT_FLOW create frame");
+    let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+
+    let ts_ns = u64::from_le_bytes(p[0..8].try_into().unwrap());
+    assert!(
+        ts_ns > 0,
+        "SESSION_CREATE timestamp_ns must be populated, not the #12889 zero"
+    );
+    // Anchor a fresh (mono, wall) pair AFTER the emit so scheduling skew
+    // between the emit-time read and this one cannot push the age negative.
+    let (_m2, wall2) = read_mono_and_wall_clocks();
+    assert!(
+        ts_ns <= wall2,
+        "admission stamp must not be in the future (ts={ts_ns}, wall={wall2})"
+    );
+    let age_ns = wall2.saturating_sub(ts_ns);
+    let age_secs = age_ns / NS_PER_SEC;
+    assert!(
+        (58..=65).contains(&age_secs),
+        "expected ~60s admission age on the wire, got {age_secs}s \
+         (ts_ns={ts_ns}, wall2={wall2})"
+    );
+}
+
+#[test]
+fn test_emit_session_create_rt_flow_zero_created_stays_zero() {
+    // #12889: an Open delta with an UNKNOWN (0) created_ns — the bulk
+    // owner-RG export path, which has no live entry in hand — must keep the
+    // wire timestamp 0 so the Go side falls back to time.Now() (the legacy
+    // tolerant behavior), mirroring the close path's 0/unknown doctrine.
+    // Stamping emit time instead would silently mis-date the record.
+    let (handle, rx) = test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let delta = test_close_delta(crate::session::SessionDeltaKind::Open); // created_ns == 0
+    handle.emit_session_create_rt_flow(&delta, 0, 0);
+    let frame = rx.try_recv().expect("RT_FLOW create frame");
+    let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+    assert_eq!(
+        u64::from_le_bytes(p[0..8].try_into().unwrap()),
+        0,
+        "unknown admission instant must stay 0 (Go time.Now() fallback)"
+    );
+}

@@ -399,6 +399,15 @@ impl EventFrame {
     ///
     /// #11698: the create frame carries the session's admission generation at
     /// [160:168], paired with its frozen install-time policy ID at [44:48].
+    ///
+    /// #12889: the create frame carries the session's ADMISSION instant in the
+    /// [0:8] `timestamp_ns` slot (absolute Unix ns, LITTLE-endian u64) — the
+    /// same slot/format the close frame stamps with the close instant. The
+    /// producer derives it from the monotonic `created_ns` on the Open delta;
+    /// a 0 (unknown admission instant, e.g. a bulk owner-RG export Open delta
+    /// with no entry in hand) stays 0 and keeps the Go-side `time.Now()`
+    /// fallback, so a create record is no longer stamped at socket-drain time
+    /// when the admission instant IS known.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn encode_session_create_rt_flow(
         seq: u64,
@@ -424,11 +433,23 @@ impl EventFrame {
         // at [152:160] so the SESSION_CREATE record carries the SAME id its
         // matching SESSION_CLOSE will, letting a SIEM join the two.
         session_id: u64,
+        // #12889: the absolute wall-clock ADMISSION instant (Unix ns),
+        // converted by the caller from the monotonic `created_ns`. Written LE
+        // at [0:8]; 0 keeps the Go `time.Now()` fallback.
+        create_unix_ns: u64,
     ) -> Self {
         let mut buf = [0u8; super::EVENT_FRAME_CAPACITY];
         let base = FRAME_HEADER_SIZE;
         let wire_af = rt_flow_addr_family(addr_family, src_ip);
 
+        // [0:8] timestamp_ns — #12889: the absolute wall-clock admission
+        // instant (LITTLE-endian u64, matching the Go
+        // binary.LittleEndian.Uint64 read in logEvent/DecodeRawEventRecord).
+        // This is the RT_FLOW_SESSION_CREATE record's event time; the Go
+        // `eventTimeFromWire` guard prefers it over receive time whenever it
+        // is nonzero. When 0 the Go side stamps time.Now() instead (the
+        // legacy drain-time behavior, kept for an unknown instant).
+        buf[base..base + 8].copy_from_slice(&create_unix_ns.to_le_bytes());
         // [8:24] src ip, [24:40] dst ip (16-byte slots, v4 left-aligned).
         write_ip_16(&mut buf, base + 8, src_ip);
         write_ip_16(&mut buf, base + 24, dst_ip);
@@ -464,8 +485,10 @@ impl EventFrame {
         // [104:106] nat src port, [106:108] nat dst port — BIG-endian.
         buf[base + 104..base + 106].copy_from_slice(&nat_src_port.to_be_bytes());
         buf[base + 106..base + 108].copy_from_slice(&nat_dst_port.to_be_bytes());
-        // [108:112] created stamp, [112:128] rev counters — 0 (a create has
-        // no volume yet).
+        // [108:112] created (close-path StartTime seconds) — stays 0 on a
+        // create: the Go side consumes `Created` only for SESSION_CLOSE flow
+        // accounting, and the create's admission instant already rides [0:8]
+        // (#12889). [112:128] rev counters — 0 (a create has no volume yet).
         // [128:132] ingress ifindex — #2615: the admitting binding's
         // interface (LITTLE-endian u32, decoded by the Go side as
         // `binary.LittleEndian.Uint32` -> resolved to the RT_FLOW

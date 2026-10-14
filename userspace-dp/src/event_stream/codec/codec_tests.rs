@@ -592,11 +592,12 @@ fn test_session_create_rt_flow_wire_layout() {
         0,
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
-        42,                    // #3056: admitting policy id
-        41,                    // #11698: admitting policy generation
-        77,                    // #2615: ingress ifindex
-        9,                     // #2615: application id
-        0x1122_3344_5566_7788, // #4915: stable session id (rides [152:160])
+        42,                        // #3056: admitting policy id
+        41,                        // #11698: admitting policy generation
+        77,                        // #2615: ingress ifindex
+        9,                         // #2615: application id
+        0x1122_3344_5566_7788,     // #4915: stable session id (rides [152:160])
+        1_700_000_123_456_789_012, // #12889: admission instant Unix ns ([0:8])
     );
     assert_eq!(frame.data[4], MSG_SESSION_CREATE_RT_FLOW);
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
@@ -644,9 +645,16 @@ fn test_session_create_rt_flow_wire_layout() {
         u32::from_le_bytes(p[140..144].try_into().unwrap()),
         POLICY_CONFIG_GENERATION_MARKER
     );
+    assert_eq!(u64::from_le_bytes(p[160..168].try_into().unwrap()), 41);
+    // #12889 fail-on-revert: the SESSION_CREATE frame carries the admission
+    // instant in the [0:8] timestamp_ns slot (LE u64) — the same slot/format
+    // its SESSION_CLOSE sibling carries the close instant in and the Go
+    // decoder (eventTimeFromWire) prefers over receive time. Reverting the
+    // encoder to leave the slot 0 makes the create record fall back to the
+    // Go socket-drain time.Now() and this assertion fail.
     assert_eq!(
-        u64::from_le_bytes(p[160..168].try_into().unwrap()),
-        41
+        u64::from_le_bytes(p[0..8].try_into().unwrap()),
+        1_700_000_123_456_789_012
     );
 }
 

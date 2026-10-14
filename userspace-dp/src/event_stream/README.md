@@ -224,7 +224,17 @@ periodic ACK from the daemon.
   leaves the #2749 [144:152] class-of-service block zero). The SESSION_CREATE
   frame carries the #3056 admitting policy ID in the usual [44:48] slot (it
   has no created-subsec-nanos), and always sets
-  the gate byte. (#2615) the create frame now also threads the resolved
+  the gate byte. (#12889) the create frame also carries the session's
+  ADMISSION instant in `timestamp_ns` (offset 0, absolute Unix
+  **nanoseconds**, little-endian u64) — the same anchored
+  monotonic→wall-clock conversion the close frame runs (#2465), applied to
+  the Open delta's `created_ns`. The Go decoder (`eventTimeFromWire`)
+  prefers a nonzero wire stamp on both the live `logEvent` path and
+  `DecodeRawEventRecord`, so a backlogged channel can no longer stamp — or
+  misorder — the create record at socket-drain time after its SESSION_CLOSE
+  sibling. A 0 `created_ns` (bulk owner-RG export Open delta with no entry
+  in hand) stays 0 and keeps the Go-side `time.Now()` fallback.
+  (#2615) the create frame now also threads the resolved
   application id (offset 132) and the admitting binding's ingress ifindex
   (offset 128), mirroring the close-side #2520/#2615 fix — so a logged
   session-create no longer logs `application="UNKNOWN"` /
