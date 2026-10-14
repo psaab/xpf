@@ -366,9 +366,9 @@ pub(crate) struct ScreenState {
     /// operator still has a broken screen reference to fix.
     substituted_default_drops: u64,
     /// #3315: set when the just-checked packet crossed `alarm-threshold` (below
-    /// attack-threshold) and the per-zone cadence admits a new alarm. Drained by
-    /// `take_syn_alarm_event()` at the poll stage (which has the packet/zone in
-    /// scope to emit the out-of-band alarm event). The verdict is NOT a drop.
+    /// attack-threshold) and the per-zone cadence admits a new alarm. Drained
+    /// via `take_syn_alarm_event()` by the screen or session-miss poll stage
+    /// while the packet/zone are in scope. The verdict is NOT a drop.
     syn_alarm_pending: bool,
     /// #3315: sub-attribution test seams (per-worker). The drop verdict reuses
     /// the existing `"syn-flood"` reason id (no Go gRPC/CLI change), so these
@@ -502,9 +502,9 @@ impl ScreenState {
 
     /// #3315: drain a pending SYN-flood alarm. Returns true at most once per
     /// second per zone (the cadence is enforced at set-time in the SYN check).
-    /// The poll stage calls this immediately after `check_packet_with_zone_id`
-    /// — where the packet/zone are in scope — to emit the out-of-band alarm
-    /// event. The packet still forwards (the alarm is log-only, not a drop).
+    /// The normal poll stage and the session-miss SYN-ACK path drain this while
+    /// the packet/zone are in scope, emitting the out-of-band alarm against the
+    /// packet that raised it. The alarm is log-only; it does not drop packets.
     pub fn take_syn_alarm_event(&mut self) -> bool {
         let pending = self.syn_alarm_pending;
         self.syn_alarm_pending = false;
