@@ -202,6 +202,22 @@ fn missing_plus_resolved_screen() -> ScreenState {
     screen
 }
 
+/// #12875: profiles resolving ONLY `wan` — `nat_snapshot`'s other zone —
+/// so the GLOBAL stage gates (`has_screen_state()` / `has_profiles()`) arm
+/// while `lan` (the fixture's ifindex-24 zone) has no screen configuration
+/// at all: one screened zone, one unscreened zone.
+fn wan_only_profiles() -> FxHashMap<String, ScreenProfile> {
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "wan".to_string(),
+        ScreenProfile {
+            source_route: true,
+            ..ScreenProfile::default()
+        },
+    );
+    profiles
+}
+
 /// Screen state with only the IP source-route check armed. The
 /// check fires on an actual LSRR/SSRR option decoded from the IPv4
 /// options region (post-#2973) read from the frame at the computed
@@ -670,6 +686,361 @@ fn unresolved_screen_profile_zone_continues_to_policy_5806() {
         "an empty screen state has no unresolved reference, so there is nothing \
          to warn about"
     );
+}
+
+/// #12875: the screen stages' gates were GLOBAL (`has_screen_state()` in
+/// `stage_screen_check`, `has_profiles()` in the session-miss SYN-cookie
+/// stage), so with a profile resolved for ONE zone, a DIFFERENT zone with no
+/// screen configuration at all still ran `extract_screen_info` and
+/// fail-closed its parse error (#2146/#4167): a malformed frame ingressing
+/// the unscreened zone was recycled as an `ip-malformed` screen drop and
+/// never reached policy — a screen-specific denial manufactured purely by a
+/// profile bound to another zone. The one-screened-zone (`wan`) /
+/// one-unscreened-zone (`lan`, the fixture's ifindex-24 zone) shape, same
+/// truncated IPv4 frame through both stages:
+///
+/// - the unscreened zone must return the EXACT `Continue(Pass)` variant with
+///   no counter and no event;
+/// - a zone that IS screened keeps the #2146 fail-close (not weakened);
+/// - a zone carrying an UNRESOLVED or INERT reference keeps the #7168/#7888
+///   substituted-default fail-close (tolerant doctrine stays fail-closed).
+///
+/// RED on revert: drop the per-zone gate and the two Pass subtests fail (the
+/// stages recycle the frame); widen the gate to resolved-profiles-only and
+/// the missing/inert controls fail.
+#[test]
+fn screen_parse_fail_on_unscreened_zone_passes_12875() {
+    let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("reth1.0"),
+        ifindex: 24,
+    };
+    let binding_lookup = WorkerBindingLookup::default();
+    let mirror_targets = MirrorTargetMap::default();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let __pptp_control_12875 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let worker_ctx = WorkerContext {
+        pptp_control: &__pptp_control_12875,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        forwarding: &forwarding,
+        mirror_targets: &mirror_targets,
+        ha_state: &ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: Some(&event_handle),
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+
+    // Ethernet header + 10 bytes of IPv4 header: 10 bytes short of the
+    // mandatory 20-byte base header at l3_off 14, so `extract_screen_info`
+    // returns `Err(TruncatedIpv4Header)` (#4167) regardless of zone.
+    let mut truncated = Vec::new();
+    write_eth_header(
+        &mut truncated,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+        0,
+        0x0800,
+    );
+    truncated.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x40, 0x00, 64, PROTO_TCP,
+    ]);
+    let truncated_meta = tcp_v4_meta(&truncated, TCP_FLAG_SYN);
+    // The flow-present arm needs a `SessionFlow`; the frame bytes (not the
+    // flow) decide the extractor's Err, so parse the flow off a well-formed
+    // frame and hand the stage the truncated one.
+    let flow_frame = tcp_v4_frame(
+        Ipv4Addr::new(192, 0, 2, 10),
+        Ipv4Addr::new(198, 51, 100, 20),
+        49152,
+        443,
+        TCP_FLAG_SYN,
+        1,
+        0,
+    );
+    let flow = parse_session_flow_from_bytes(&flow_frame, tcp_v4_meta(&flow_frame, TCP_FLAG_SYN))
+        .expect("session flow from well-formed SYN");
+
+    // (stage passed, screen_drops) for one `stage_screen_check` run.
+    let run = |screen: &mut ScreenState,
+               flow: Option<&SessionFlow>,
+               counters: &mut BatchCounters|
+     -> bool {
+        matches!(
+            stage_screen_check(
+                flow,
+                &truncated,
+                truncated_meta,
+                None,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
+                screen,
+                counters,
+                &worker_ctx,
+            ),
+            StageOutcome::Continue(ScreenCheckOutcome::Pass)
+        )
+    };
+
+    // THE DEFECT: `wan` carries the only resolved profile, so the GLOBAL
+    // gate is armed; `lan` (ifindex 24) has no screen configuration at all.
+    // Pre-#12875 the stage still fail-closed `lan`'s parse error on BOTH
+    // the flowless and the flow-backed arm.
+    let mut wan_resolved = ScreenState::new();
+    wan_resolved.update_profiles(wan_only_profiles());
+    let mut counters = BatchCounters::default();
+    assert!(
+        run(&mut wan_resolved, None, &mut counters),
+        "#12875 flowless: a malformed frame on a zone with NO screen state \
+         must Continue(Pass) — the profile belongs to another zone"
+    );
+    assert_eq!(counters.screen_drops, 0, "no screen drop may be recorded");
+    assert!(!counters.touched, "no counter batch may be touched");
+    let mut counters = BatchCounters::default();
+    assert!(
+        run(&mut wan_resolved, Some(&flow), &mut counters),
+        "#12875 flow-backed: same stage, same frame, same verdict — the \
+         extract fail-close must not run for an unscreened zone"
+    );
+    assert_eq!(counters.screen_drops, 0, "no screen drop may be recorded");
+    assert!(
+        event_rx.try_recv().is_err(),
+        "no screen-drop event may be emitted for an unscreened zone"
+    );
+
+    // CONTROL (fail-close preserved): `lan` itself screened. The #2146
+    // parse-error drop is untouched by the per-zone gate.
+    let mut lan_screened = source_route_screen();
+    let mut counters = BatchCounters::default();
+    assert!(
+        !run(&mut lan_screened, Some(&flow), &mut counters),
+        "a screened zone keeps the #2146 fail-close on an unparseable frame"
+    );
+    assert_eq!(counters.screen_drops, 1);
+    let screen_event = event_rx
+        .try_recv()
+        .expect("screen-drop event for the screened-zone control")
+        .decode_dataplane_event()
+        .expect("screen-drop payload");
+    assert_eq!(screen_event.kind, DataplaneEventKind::ScreenDrop);
+    assert_eq!(screen_event.ingress_zone_id, TEST_LAN_ZONE_ID);
+
+    // CONTROL (tolerant doctrine stays fail-closed): `lan` carries an
+    // UNRESOLVED reference while `wan` resolves. The #7168 substituted
+    // conservative default still drops the unparseable frame.
+    let mut missing = missing_plus_resolved_screen();
+    let mut counters = BatchCounters::default();
+    assert!(
+        !run(&mut missing, Some(&flow), &mut counters),
+        "#7168: an unresolved reference keeps the substituted-default \
+         fail-close — the per-zone gate admits it and the stage still drops"
+    );
+    assert_eq!(counters.screen_drops, 1);
+
+    // CONTROL (#7888, same doctrine): `lan` carries an INERT reference (a
+    // defined profile enabling no check) while `wan` resolves. Same
+    // fail-close.
+    let mut inert = FxHashMap::default();
+    inert.insert(
+        "lan".to_string(),
+        crate::screen::InertProfileRef {
+            profile: "inert-profile".to_string(),
+            alarm_without_drop: false,
+        },
+    );
+    let mut lan_inert = ScreenState::new();
+    lan_inert.update_profiles(wan_only_profiles());
+    lan_inert.update_inert_profiles(inert);
+    let mut counters = BatchCounters::default();
+    assert!(
+        !run(&mut lan_inert, Some(&flow), &mut counters),
+        "#7888: an inert reference keeps the substituted-default fail-close"
+    );
+    assert_eq!(counters.screen_drops, 1);
+}
+
+/// #12875: the session-miss SYN-cookie-ACK stage had the same shape — a
+/// GLOBAL `has_profiles()` gate, then an unconditional
+/// `extract_screen_info` whose #2146 parse error dropped the frame before
+/// the stage ever consulted whether THIS zone had a profile to validate a
+/// cookie against. With the profile on `wan` only, a malformed ACK-frame on
+/// the unscreened `lan` zone was recycled as a screen drop. The per-zone
+/// gate returns the EXACT `Continue(Pass)` variant; the screened-zone
+/// control keeps the fail-close.
+///
+/// RED on revert: drop the per-zone gate and the Pass assertion fails.
+#[test]
+fn syn_cookie_ack_stage_parse_fail_on_unscreened_zone_passes_12875() {
+    let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("reth1.0"),
+        ifindex: 24,
+    };
+    let binding_lookup = WorkerBindingLookup::default();
+    let mirror_targets = MirrorTargetMap::default();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let __pptp_control_12875 =
+        std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let worker_ctx = WorkerContext {
+        pptp_control: &__pptp_control_12875,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        forwarding: &forwarding,
+        mirror_targets: &mirror_targets,
+        ha_state: &ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: Some(&event_handle),
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+
+    let mut truncated = Vec::new();
+    write_eth_header(
+        &mut truncated,
+        [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+        0,
+        0x0800,
+    );
+    truncated.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x40, 0x00, 64, PROTO_TCP,
+    ]);
+    let truncated_meta = tcp_v4_meta(&truncated, TCP_FLAG_ACK);
+    let ack_frame = tcp_v4_frame(
+        Ipv4Addr::new(192, 0, 2, 10),
+        Ipv4Addr::new(198, 51, 100, 20),
+        49152,
+        443,
+        TCP_FLAG_ACK,
+        2,
+        0xdead_beef,
+    );
+    let flow = parse_session_flow_from_bytes(&ack_frame, tcp_v4_meta(&ack_frame, TCP_FLAG_ACK))
+        .expect("session flow from well-formed ACK");
+
+    let run = |screen: &mut ScreenState, counters: &mut BatchCounters| -> bool {
+        matches!(
+            stage_screen_syn_cookie_ack_on_session_miss(
+                Some(&flow),
+                &truncated,
+                truncated_meta,
+                None,
+                TEST_NOW_NS,
+                TEST_NOW_SECS,
+                screen,
+                counters,
+                &worker_ctx,
+            ),
+            StageOutcome::Continue(SynCookieAckOutcome::Pass)
+        )
+    };
+
+    // THE DEFECT: profile resolved for `wan` only; the malformed ACK on the
+    // unscreened `lan` zone must fall through to the ordinary session-miss
+    // path, not be dropped by a screen the zone does not have.
+    let mut wan_resolved = ScreenState::new();
+    wan_resolved.update_profiles(wan_only_profiles());
+    let mut counters = BatchCounters::default();
+    assert!(
+        run(&mut wan_resolved, &mut counters),
+        "#12875: a malformed session-miss ACK on a zone with NO screen \
+         state must Continue(Pass)"
+    );
+    assert_eq!(counters.screen_drops, 0, "no screen drop may be recorded");
+    assert!(!counters.touched, "no counter batch may be touched");
+    assert!(
+        event_rx.try_recv().is_err(),
+        "no screen-drop event may be emitted for an unscreened zone"
+    );
+
+    // CONTROL (fail-close preserved): `lan` itself screened — the stage's
+    // #2146 parse-error drop is untouched by the per-zone gate.
+    let mut lan_screened = source_route_screen();
+    let mut counters = BatchCounters::default();
+    assert!(
+        !run(&mut lan_screened, &mut counters),
+        "a screened zone keeps the #2146 fail-close on an unparseable frame"
+    );
+    assert_eq!(counters.screen_drops, 1);
+    let screen_event = event_rx
+        .try_recv()
+        .expect("screen-drop event for the screened-zone control")
+        .decode_dataplane_event()
+        .expect("screen-drop payload");
+    assert_eq!(screen_event.kind, DataplaneEventKind::ScreenDrop);
+    assert_eq!(screen_event.ingress_zone_id, TEST_LAN_ZONE_ID);
 }
 
 /// #2145 regression: a priority-tagged VLAN-0 SYN

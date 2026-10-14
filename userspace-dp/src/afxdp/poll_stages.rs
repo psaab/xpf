@@ -690,10 +690,80 @@ fn flowless_l3_addrs(frame: &[u8], addr_family: u8, l3_off: usize) -> (IpAddr, I
     )
 }
 
+/// Resolve the ingress zone for the screen stages, returning
+/// `(zone_id, zone_name)` ONLY when THAT zone has screen state (#12875).
+///
+/// Zone resolution is flow-INDEPENDENT: it is keyed on the packet's
+/// ingress context (logical ifindex / VLAN / fabric override), not on the
+/// transport flow. Resolving it once here lets the flowless
+/// non-first-fragment path (#3064) and the flow-present path reach the
+/// very same zone screen profile.
+///
+/// #3022: resolve the LOGICAL ingress ifindex before the zone lookup.
+/// `ifindex_to_zone_id` is keyed by the logical unit ifindex; the raw
+/// physical bind ifindex either misses (no zone on the parent → screen
+/// skipped entirely) or returns the parent's first-subinterface zone
+/// (wrong profile), bypassing/mis-applying screen profiles on VLAN
+/// subinterfaces. Non-VLAN ports resolve physical == logical.
+///
+/// Two gates in one lookup chain:
+///
+/// - GLOBAL (`has_screen_state`, not `has_profiles` — #6860): the latter
+///   consults only the RESOLVED profile map, so when a zone references a
+///   profile and none resolves anywhere, the stage returned before either
+///   missing-profile WARN branch could run. A zone silently screening
+///   NOTHING is precisely what an operator needs told. This arm also
+///   keeps a box with no screen configuration at all off the resolution
+///   path entirely.
+/// - PER-ZONE (`zone_has_screen_state` — #12875): the old gates stopped at
+///   the global question, so with a profile resolved for ONE zone the
+///   stages ran `extract_screen_info` and fail-closed its #2146 parse
+///   errors for EVERY resolved zone — dropping malformed frames on a zone
+///   with no screen configuration at all, whose own verdict is a silent
+///   Pass. A zone with no screen state has nothing to enforce and nothing
+///   to report; the missing/inert reference zones are still admitted so
+///   their #7168/#7888 substituted default keeps the tolerant doctrines
+///   fail-closed.
+#[inline]
+pub(super) fn screen_zone_with_state<'a>(
+    worker_ctx: &'a WorkerContext,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    screen: &ScreenState,
+) -> Option<(u16, &'a str)> {
+    if !screen.has_screen_state() {
+        return None;
+    }
+    let logical_ifindex = resolve_ingress_logical_ifindex(
+        worker_ctx.forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let zone_id = ingress_zone_override
+        .filter(|id| worker_ctx.forwarding.zone_id_to_name.contains_key(id))
+        .or_else(|| {
+            worker_ctx
+                .forwarding
+                .ifindex_to_zone_id
+                .get(&logical_ifindex)
+                .copied()
+        })?;
+    let zone_name = worker_ctx
+        .forwarding
+        .zone_id_to_name
+        .get(&zone_id)
+        .map(|s| s.as_str())?;
+    screen
+        .zone_has_screen_state(zone_name)
+        .then_some((zone_id, zone_name))
+}
+
 /// Stage 10 — screen / IDS slow-path check.
 ///
-/// Only runs when screen profiles are configured (the `has_profiles`
-/// gate). Resolves the ingress zone name (preferring the
+/// Only runs when the INGRESS zone has screen state (#12875: the global
+/// `has_screen_state` gate plus `zone_has_screen_state` in
+/// `screen_zone_with_state`). Resolves the ingress zone (preferring the
 /// fabric-zone override from stage 9), extracts a `ScreenPacketInfo`
 /// from the packet, and runs `screen.check_packet`. On a Drop
 /// verdict, bumps `counters.screen_drops` (batched, not direct
@@ -713,15 +783,18 @@ pub(super) fn stage_screen_check(
     counters: &mut BatchCounters,
     worker_ctx: &WorkerContext,
 ) -> StageOutcome<ScreenCheckOutcome> {
-    // #6860: has_screen_state, not has_profiles. The latter consults only the
-    // RESOLVED profile map, so when a zone references a profile and none
-    // resolves anywhere, this returned before either missing-profile WARN
-    // branch could run -- the warning never fired in the one configuration it
-    // exists for. A zone silently screening NOTHING is precisely what an
-    // operator needs told.
-    if !screen.has_screen_state() {
+    // #12875: gate on the INGRESS zone's own screen state, not merely on
+    // ANY zone having state. `screen_zone_with_state` keeps the #6860
+    // global gate (has_screen_state, so the missing-profile WARN still
+    // fires in the all-unresolved configuration) and adds the per-zone
+    // question: a zone with no screen configuration must not inherit
+    // another zone's extract_screen_info parse cost and #2146 fail-close
+    // drop.
+    let Some((zone_id, zone_name)) =
+        screen_zone_with_state(worker_ctx, meta, ingress_zone_override, screen)
+    else {
         return StageOutcome::Continue(ScreenCheckOutcome::Pass);
-    }
+    };
     // #4155: a fabric-redirected packet (stage 9 set FABRIC_INGRESS_FLAG on
     // `meta.meta_flags`) was already rate-screened on the peer ingress node
     // before it crossed the fabric link. Skip the rate-based flood counters
@@ -731,44 +804,6 @@ pub(super) fn stage_screen_check(
     // defeat fabric cross-chassis forwarding. The stateless per-packet screens
     // still run (idempotent). See docs/fabric-cross-chassis-fwd.md.
     let skip_rate_flood = (meta.meta_flags & FABRIC_INGRESS_FLAG) != 0;
-    // Zone resolution is flow-INDEPENDENT: it is keyed on the packet's
-    // ingress context (logical ifindex / VLAN / fabric override), not on the
-    // transport flow. Resolving it BEFORE branching on `flow` lets the
-    // flowless non-first-fragment path (#3064) reach the very same zone
-    // screen profile the flow path uses.
-    //
-    // #3022: resolve the LOGICAL ingress ifindex before the zone lookup.
-    // `ifindex_to_zone_id` is keyed by the logical unit ifindex; the raw
-    // physical bind ifindex either misses (no zone on the parent → screen
-    // skipped entirely) or returns the parent's first-subinterface zone
-    // (wrong profile), bypassing/mis-applying screen profiles on VLAN
-    // subinterfaces. Non-VLAN ports resolve physical == logical.
-    let logical_ifindex = resolve_ingress_logical_ifindex(
-        worker_ctx.forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
-    let zone_id = ingress_zone_override
-        .filter(|id| worker_ctx.forwarding.zone_id_to_name.contains_key(id))
-        .or_else(|| {
-            worker_ctx
-                .forwarding
-                .ifindex_to_zone_id
-                .get(&logical_ifindex)
-                .copied()
-        });
-    let Some(zone_id) = zone_id else {
-        return StageOutcome::Continue(ScreenCheckOutcome::Pass);
-    };
-    let Some(zone_name) = worker_ctx
-        .forwarding
-        .zone_id_to_name
-        .get(&zone_id)
-        .map(|s| s.as_str())
-    else {
-        return StageOutcome::Continue(ScreenCheckOutcome::Pass);
-    };
     // L3 starts after the 802.1Q tag whenever a tag is PRESENT, not
     // only when the VID is non-zero. 802.1p priority-tagged frames
     // carry a real tag (TPID 0x8100 + PCP bits) with VID 0, so a
@@ -1089,45 +1124,29 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
     counters: &mut BatchCounters,
     worker_ctx: &WorkerContext,
 ) -> StageOutcome<SynCookieAckOutcome> {
-    // has_profiles is CORRECT here, unlike the #6860 change in
-    // stage_screen_check above. This stage only ENFORCES -- it validates a
-    // SYN-cookie ACK against a zone's resolved profile and emits no
-    // missing-profile diagnostic -- so an unresolved reference gives it nothing
-    // to do. Widening this gate would run the stage on every packet in a state
-    // where it can only fall through, for no signal.
+    // has_profiles is CORRECT as the GLOBAL arm here, unlike the #6860
+    // change in stage_screen_check above. This stage only ENFORCES -- it
+    // validates a SYN-cookie ACK against a zone's resolved profile and
+    // emits no missing-profile diagnostic -- so a configuration where
+    // nothing resolves anywhere gives it nothing to do. Widening this arm
+    // would run the stage on every packet in a state where it can only
+    // fall through, for no signal.
     if !screen.has_profiles() {
         return StageOutcome::Continue(SynCookieAckOutcome::Pass);
     }
     let Some(flow) = flow else {
         return StageOutcome::Continue(SynCookieAckOutcome::Pass);
     };
-    // #3022: resolve the LOGICAL ingress ifindex first (see
-    // `stage_screen_check`) so the SYN-cookie-ACK validation uses the VLAN
-    // subinterface's own zone profile, not the parent's first-subinterface
-    // zone. Non-VLAN ports resolve physical == logical.
-    let logical_ifindex = resolve_ingress_logical_ifindex(
-        worker_ctx.forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
-    let zone_id = ingress_zone_override
-        .filter(|id| worker_ctx.forwarding.zone_id_to_name.contains_key(id))
-        .or_else(|| {
-            worker_ctx
-                .forwarding
-                .ifindex_to_zone_id
-                .get(&logical_ifindex)
-                .copied()
-        });
-    let Some(zone_id) = zone_id else {
-        return StageOutcome::Continue(SynCookieAckOutcome::Pass);
-    };
-    let Some(zone_name) = worker_ctx
-        .forwarding
-        .zone_id_to_name
-        .get(&zone_id)
-        .map(|s| s.as_str())
+    // #12875: per-zone gate, same helper as `stage_screen_check`. The old
+    // code resolved the zone and ran extract_screen_info unconditionally,
+    // so with a profile resolved for a DIFFERENT zone this stage's #2146
+    // parse fail-close dropped malformed session-miss ACKs on a zone with
+    // no screen state at all. A missing/inert-reference zone is still
+    // admitted (the tolerant-doctrine fail-close that stage 10 owns for
+    // this same packet); a zone with a resolved profile keeps the full
+    // validation and its parse fail-close.
+    let Some((zone_id, zone_name)) =
+        screen_zone_with_state(worker_ctx, meta, ingress_zone_override, screen)
     else {
         return StageOutcome::Continue(SynCookieAckOutcome::Pass);
     };
