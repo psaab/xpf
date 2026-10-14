@@ -355,6 +355,19 @@ impl PMechTunnelRow {
             .any(|prefix| prefix.contains(&source))
     }
 
+    /// #9506 S9.5: destination containment in the tunnel's selector
+    /// projection. Construction (`from_snapshot`) admits a row only when
+    /// the canonicalized effective and ingress prefix sets are EQUAL and
+    /// both equal the route-derived recomputation, so membership in
+    /// `ingress_prefixes` is membership in the projection. A forwarded
+    /// (permitted) frame may only re-enter the kernel main table when its
+    /// destination is inside this set.
+    pub(in crate::afxdp) fn allows_destination(&self, destination: IpAddr) -> bool {
+        self.ingress_prefixes
+            .iter()
+            .any(|prefix| prefix.contains(&destination))
+    }
+
     pub(in crate::afxdp) fn selector_projection(
         &self,
     ) -> (&[crate::protocol::IpsecTrafficSelectorSnapshot], &[String]) {

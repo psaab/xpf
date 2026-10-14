@@ -235,6 +235,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         ipsec_inner.ipsec_inner_worker_orphan_reaped_total;
     state.status.ipsec_inner_orphan_provisional_total =
         ipsec_inner.ipsec_inner_orphan_provisional_total;
+    state.status.ipsec_inner_permit_forward_armed_total =
+        ipsec_inner.ipsec_inner_permit_forward_armed_total;
     // #9720: the per-command split of the drops aggregate for the three
     // RG-transition commands (pushes), plus the stale-skip dispositions
     // (RG applications). Each refusal was recorded as transition debt and

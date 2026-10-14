@@ -837,6 +837,13 @@ type ProcessStatus struct {
 	IpsecInnerWorkerRetiredTotal      uint64 `json:"ipsec_inner_worker_retired_total,omitempty"`
 	IpsecInnerWorkerOrphanReapedTotal uint64 `json:"ipsec_inner_worker_orphan_reaped_total,omitempty"`
 	IpsecInnerOrphanProvisionalTotal  uint64 `json:"ipsec_inner_orphan_provisional_total,omitempty"`
+	// #9506 S9.5 permit join: leased adjudicated-TUN writes armed for
+	// worker-adjudicated WouldPermit frames (the Rust half of the
+	// permit-forward evidence; the Go half is the capture pipeline's
+	// Written/Reinjected completions). Surfaced as
+	// xpf_userspace_ipsec_inner_permit_forward_armed_total. Omitempty for
+	// wire compat with older helpers (defaults to 0).
+	IpsecInnerPermitForwardArmedTotal uint64 `json:"ipsec_inner_permit_forward_armed_total,omitempty"`
 	// #2472: locally-generated ICMP Time Exceeded / PTB / `reject` error
 	// replies dropped because the per-reason token bucket was empty. Each
 	// reason has an independent global-per-reason bucket (Linux

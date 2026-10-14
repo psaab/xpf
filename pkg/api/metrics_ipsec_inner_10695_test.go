@@ -9,7 +9,7 @@ import (
 )
 
 func TestIPsecInnerStatusExportEndToEnd10695(t *testing.T) {
-	const payload = `{"zone_gate_unzoned_total":11,"zone_gate_ambiguous_total":12,"zone_gate_stale_total":13,"zone_gate_no_generation_total":14,"ipsec_inner_parse_drops_total":15,"ipsec_inner_ecn_illegal_drops":16,"ipsec_inner_worker_queue_full_total":17,"ipsec_inner_verdict_queue_full_total":18,"ipsec_inner_slab_exhausted_total":19,"ipsec_inner_worker_retired_total":20,"ipsec_inner_worker_orphan_reaped_total":21,"ipsec_inner_orphan_provisional_total":22}`
+	const payload = `{"zone_gate_unzoned_total":11,"zone_gate_ambiguous_total":12,"zone_gate_stale_total":13,"zone_gate_no_generation_total":14,"ipsec_inner_parse_drops_total":15,"ipsec_inner_ecn_illegal_drops":16,"ipsec_inner_worker_queue_full_total":17,"ipsec_inner_verdict_queue_full_total":18,"ipsec_inner_slab_exhausted_total":19,"ipsec_inner_worker_retired_total":20,"ipsec_inner_worker_orphan_reaped_total":21,"ipsec_inner_orphan_provisional_total":22,"ipsec_inner_permit_forward_armed_total":23}`
 	var status dpuserspace.ProcessStatus
 	if err := json.Unmarshal([]byte(payload), &status); err != nil {
 		t.Fatalf("decode helper status: %v", err)
@@ -38,4 +38,5 @@ func TestIPsecInnerStatusExportEndToEnd10695(t *testing.T) {
 	assertCounterClose(t, metrics, collector.userspaceIpsecInnerWorkerRetired, nil, 20)
 	assertCounterClose(t, metrics, collector.userspaceIpsecInnerWorkerOrphanReaped, nil, 21)
 	assertCounterClose(t, metrics, collector.userspaceIpsecInnerOrphanProvisional, nil, 22)
+	assertCounterClose(t, metrics, collector.userspaceIpsecInnerPermitForwardArmed, nil, 23)
 }

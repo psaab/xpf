@@ -37,11 +37,12 @@ func TestIpsecAdvisoryMatchesInstalledDivertDrop10517(t *testing.T) {
 	}
 	for _, want := range []string{
 		"IPsec divert installed",
-		"terminally drops every frame",
-		"V1PermitSuppressed",
+		"adjudicate every frame",
+		"selector containment of source and destination",
+		"A permitted FORWARD frame re-enters through the adjudicated TUN",
+		"including all INPUT traffic and fragments — is terminally dropped",
 		"divert-absent window",
-		"no decrypted plaintext reaches",
-		"installed IPsec divert is fail-closed",
+		"No session, NAT or screen is applied",
 		"until capture is restored",
 	} {
 		if !strings.Contains(advisory, want) {
@@ -51,6 +52,10 @@ func TestIpsecAdvisoryMatchesInstalledDivertDrop10517(t *testing.T) {
 	for _, stale := range []string{
 		"INPUT/host-bound plaintext still reaches the local input path",
 		"until this is enforced",
+		// Pre-#9506-S9.5 deny-only claims that must not return.
+		"terminally drops every frame",
+		"V1PermitSuppressed",
+		"no decrypted plaintext reaches",
 	} {
 		if strings.Contains(advisory, stale) {
 			t.Errorf("advisory retained stale wording %q: %s", stale, advisory)
@@ -113,9 +118,12 @@ func TestIpsecAdvisoryMatchesInstalledDivertDrop10517(t *testing.T) {
 	}
 
 	// Phase routing into submitEligible is covered by
-	// TestCapturePipelineRoutineV1SuppressionHasNoDenyEvent9506. This test
-	// deliberately calls submitEligible directly to pin each Enforcing
-	// per-origin terminal disposition and keep the advisory coupling narrow.
+	// TestCapturePipelineRoutineV1SuppressionHasNoDenyEvent9506 and the
+	// permit cells in pipeline_permit_9506_test.go. This test deliberately
+	// calls submitEligible directly WITHOUT a lease minter: it pins that a
+	// pipeline lacking adjudication authority stays fail-closed (both inet
+	// hooks suppressed, bridge L2 drop, nothing submitted) and keeps the
+	// advisory coupling narrow.
 	p.submitEligible([]CaptureFrame{
 		makeFrame(77, 2, 1, "route-vpn-input", inputOrigin),
 		makeFrame(78, 2, 2, "route-vpn-forward", forwardOrigin),

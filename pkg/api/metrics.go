@@ -637,6 +637,7 @@ type xpfCollector struct {
 	userspaceIpsecInnerWorkerRetired      *prometheus.Desc
 	userspaceIpsecInnerWorkerOrphanReaped *prometheus.Desc
 	userspaceIpsecInnerOrphanProvisional  *prometheus.Desc
+	userspaceIpsecInnerPermitForwardArmed *prometheus.Desc
 	userspaceSyncedImportZoneUnresolved   *prometheus.Desc
 	userspaceSyncedImportUnpublished      *prometheus.Desc
 	// #7398: three Coordinator counters that were computed and never shown.
@@ -1285,6 +1286,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceIpsecInnerWorkerRetired
 	ch <- c.userspaceIpsecInnerWorkerOrphanReaped
 	ch <- c.userspaceIpsecInnerOrphanProvisional
+	ch <- c.userspaceIpsecInnerPermitForwardArmed
 	ch <- c.userspaceSlowPathActive
 	ch <- c.userspaceSlowPathDegraded
 	ch <- c.userspaceSlowPathLiveMTU

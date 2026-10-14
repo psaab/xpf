@@ -967,56 +967,7 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		p.drainDeadlineCancelQueue()
 		return
 	}
-	deadlineMonoNS, deadlineErr := stampReinjectDeadline(p.ackDeadline)
-	if deadlineErr != nil {
-		unexpectedCompletion := false
-		for _, item := range pending {
-			unexpectedCompletion = p.deadlineFailedState(item) || unexpectedCompletion
-		}
-		p.submitGate.RUnlock()
-		p.drainDeadlineCancelQueue()
-		if unexpectedCompletion {
-			p.uncertain("completion before D11 deadline failure")
-		}
-		return
-	}
-	p.mu.Lock()
-	for i := range admitted {
-		admitted[i].DeadlineMonoNS = deadlineMonoNS
-		admitted[i].DeadlineClockID = reinjectDeadlineClockMonotonic
-		pending[i].deadlineMonoNS = deadlineMonoNS
-		pending[i].deadlineArmed = true
-	}
-	p.mu.Unlock()
-	responses, submitErr := p.submitter.SubmitAdjudicated(admitted)
-	var cancelItems []*pendingReinject
-	if submitErr != nil {
-		for _, item := range pending {
-			if p.admissionFailedState(item, "TRANSPORT", submitErr) {
-				cancelItems = append(cancelItems, item)
-			}
-		}
-	} else {
-		for i, item := range pending {
-			if i >= len(responses) {
-				if p.admissionFailedState(item, "TRANSPORT", errors.New("missing admission response")) {
-					cancelItems = append(cancelItems, item)
-				}
-				continue
-			}
-			if failed := p.applyAdmission(item, responses[i]); failed != nil {
-				cancelItems = append(cancelItems, failed)
-			}
-		}
-	}
-	p.submitGate.RUnlock()
-	p.drainDeadlineCancelQueue()
-	if len(cancelItems) != 0 {
-		p.uncertain("D11 admission failure")
-	}
-	for _, item := range cancelItems {
-		p.cancelUncertainLease(item.lease)
-	}
+	p.submitAdmitted(admitted, pending, "D11 admission failure")
 }
 
 func (p *CapturePipeline) deadlineFailedState(item *pendingReinject) bool {

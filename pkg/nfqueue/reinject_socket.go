@@ -36,6 +36,12 @@ const (
 	reinjectMaxAckDeadline         = time.Second
 	reinjectSubmitPMechTailLen     = 79
 
+	// ReinjectSubmitFlagForward mirrors the Rust SUBMIT_FLAG_FORWARD bit:
+	// the submitting plane asks the worker to convert a successful D13/D14
+	// adjudication into a leased adjudicated-TUN write (#9506 S9.5). It is
+	// exported for the daemon wiring and pipeline tests.
+	ReinjectSubmitFlagForward = 0x04
+
 	// Rust admission refusal reasons are closed-world values. Unknown bytes
 	// are version skew and must never be treated as ADMIT_OK.
 	reinjectAdmitOK               = 0
@@ -418,7 +424,7 @@ func encodeSubmitBatch(frames []AdjudicatedFrame) ([]byte, error) {
 		putU64(&out, item.Lease.QueueEpoch)
 		putU16(&out, item.Lease.QueueNumber)
 		putU64(&out, flowTag(item.Frame.FlowKey))
-		out = append(out, 0, family, hook)
+		out = append(out, item.Flags, family, hook)
 		putU32(&out, item.Origin.OwnedIfindex)
 		out = append(out, byte(len(owner)))
 		out = append(out, owner...)

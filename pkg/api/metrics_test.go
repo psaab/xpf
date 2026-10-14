@@ -1428,6 +1428,10 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			"xpf_userspace_ipsec_inner_orphan_provisional_total", "IPsec inner orphan provisional",
 			nil, nil,
 		),
+		userspaceIpsecInnerPermitForwardArmed: prometheus.NewDesc(
+			"xpf_userspace_ipsec_inner_permit_forward_armed_total", "IPsec inner permit forwards armed",
+			nil, nil,
+		),
 		userspaceWgDecapEcnIllegalDrops: prometheus.NewDesc(
 			"xpf_userspace_wg_decap_ecn_illegal_drops_total",
 			"wg decap rfc6040 illegal-combo drops",
@@ -1626,6 +1630,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		IpsecInnerWorkerRetiredTotal:      110,
 		IpsecInnerWorkerOrphanReapedTotal: 111,
 		IpsecInnerOrphanProvisionalTotal:  112,
+		IpsecInnerPermitForwardArmedTotal: 113,
 		// #2317: WG-decap RFC 6040 §4.2 illegal-combo drop counter
 		// emitted unconditionally.
 		WgDecapEcnIllegalDropsTotal: 5,
@@ -1789,13 +1794,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// #10788-F1: strict mirror refusal plus republished/deleted/failed restore
 	// outcomes add four distinct lifetime counters, for 94 total; #11437's
 	// unbuildable-PTB counter adds one more, for 95; #11503 adds distinct
-	// unzoned ingress/egress cause counters, for 97.
+	// unzoned ingress/egress cause counters, for 97; #9506 S9.5 adds the
+	// permit-forward-armed counter, for 98.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 97 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 97 metrics, got %d", len(got))
+	if len(got) != 98 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 98 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1937,6 +1943,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceIpsecInnerWorkerRetired, nil, 110)
 	assertCounterClose(t, got, c.userspaceIpsecInnerWorkerOrphanReaped, nil, 111)
 	assertCounterClose(t, got, c.userspaceIpsecInnerOrphanProvisional, nil, 112)
+	assertCounterClose(t, got, c.userspaceIpsecInnerPermitForwardArmed, nil, 113)
 	// #2317: WG-decap RFC 6040 §4.2 illegal-combo drop counter emitted
 	// unconditionally.
 	assertCounterClose(t, got, c.userspaceWgDecapEcnIllegalDrops, nil, 5)

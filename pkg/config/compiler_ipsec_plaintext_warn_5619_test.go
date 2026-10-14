@@ -37,7 +37,8 @@ func plaintextWarnings5619(cfg *Config) []string {
 
 // TestPlaintextWarningFiresForRouteBasedVPN is the core #5619 assertion: an
 // operator committing a route-based IPsec VPN is told, at commit, that the
-// decrypted plaintext is not evaluated against xpf security policies.
+// decrypted plaintext is adjudicated by the capture path rather than the
+// session/NAT/screen policy stages.
 func TestPlaintextWarningFiresForRouteBasedVPN(t *testing.T) {
 	cfg := compileWarn5619(t,
 		"set security ipsec vpn myvpn bind-interface st0.0",
@@ -46,7 +47,7 @@ func TestPlaintextWarningFiresForRouteBasedVPN(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("want exactly 1 #5619 advisory, got %d: %v", len(got), cfg.Warnings)
 	}
-	for _, want := range []string{"myvpn", "st0.0", "NOT evaluated against xpf security policies"} {
+	for _, want := range []string{"myvpn", "st0.0", "adjudicated by the capture path"} {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("advisory missing %q; got: %s", want, got[0])
 		}
@@ -55,8 +56,9 @@ func TestPlaintextWarningFiresForRouteBasedVPN(t *testing.T) {
 
 // TestPlaintextWarningNamesTheContradictedZone covers the sharpest case: the
 // operator put the tunnel in a security zone and the commit ACCEPTED it, so
-// they have been told something specific and untrue. The advisory must say the
-// zone does not govern the decrypted traffic.
+// the advisory must name the zone and state the residual: decrypted FORWARD
+// traffic is adjudicated statelessly and decrypted INPUT traffic is dropped
+// (#9506 S9.5).
 func TestPlaintextWarningNamesTheContradictedZone(t *testing.T) {
 	cfg := compileWarn5619(t,
 		"set security ipsec vpn myvpn bind-interface st0.0",
@@ -69,15 +71,15 @@ func TestPlaintextWarningNamesTheContradictedZone(t *testing.T) {
 	if !strings.Contains(got[0], `security-zone "vpn"`) {
 		t.Errorf("advisory must name the contradicted zone; got: %s", got[0])
 	}
-	if !strings.Contains(got[0], "does NOT govern its decrypted traffic") {
-		t.Errorf("advisory must state the zone does not govern the plaintext; got: %s", got[0])
+	if !strings.Contains(got[0], "but decrypted FORWARD traffic is adjudicated statelessly") {
+		t.Errorf("advisory must state the stateless-FORWARD residual; got: %s", got[0])
 	}
-	if !strings.Contains(got[0], "ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as zone-adjudicated and is not:") {
+	if !strings.Contains(got[0], "ASSIGNED A ZONE, BUT DECRYPTED TRAFFIC IS NOT FULLY UNDER THAT POLICY — stateless FORWARD adjudication, dropped INPUT:") {
 		t.Errorf("the ZONED case must carry the full corrected heading; got: %s", got[0])
 	}
-	if !strings.Contains(got[0], "reads as zone-adjudicated and is not") {
-		t.Errorf("the ZONED case must ESCALATE — the operator has been told something "+
-			"specific and untrue, and the wording must say so; got: %s", got[0])
+	if !strings.Contains(got[0], "stateless FORWARD adjudication, dropped INPUT") {
+		t.Errorf("the ZONED case must ESCALATE — a zone assignment still reads as full "+
+			"policy enforcement and is not, and the wording must say so; got: %s", got[0])
 	}
 }
 
@@ -387,7 +389,7 @@ func TestPlaintextWarningSeparatesZonedFromUnzoned(t *testing.T) {
 	}
 	adv := got[0]
 	const (
-		wantZonedHeading   = "ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as zone-adjudicated and is not:"
+		wantZonedHeading   = "ASSIGNED A ZONE, BUT DECRYPTED TRAFFIC IS NOT FULLY UNDER THAT POLICY — stateless FORWARD adjudication, dropped INPUT:"
 		wantUnzonedHeading = "NOT ZONE-ADJUDICATED:"
 	)
 	zoneIdx := strings.Index(adv, wantZonedHeading)
@@ -461,7 +463,7 @@ func TestPlaintextWarningMatchesZoneAcrossSpellings(t *testing.T) {
 			if len(got) != 1 {
 				t.Fatalf("want exactly 1 advisory, got %d: %v", len(got), got)
 			}
-			if !strings.Contains(got[0], "ASSIGNED A ZONE THAT DOES NOT GOVERN DECRYPTED TRAFFIC — this reads as zone-adjudicated and is not:") {
+			if !strings.Contains(got[0], "ASSIGNED A ZONE, BUT DECRYPTED TRAFFIC IS NOT FULLY UNDER THAT POLICY — stateless FORWARD adjudication, dropped INPUT:") {
 				t.Errorf("bind-interface %q with a zone on %q must land in the ESCALATED "+
 					"group — they are the same xfrmi (same if_id), and reporting it as "+
 					"unzoned drops the escalation exactly where the operator has been told "+

@@ -182,8 +182,10 @@ func (a *IpsecCapturePipeline) Verdict(packet *nfqueue.Packet, verdict nfqueue.V
 }
 
 // VerdictFrame is the capture terminal. It ignores the requested verdict:
-// until P-MECH forwarding lands, every captured packet is dropped through the
-// S4 supervisor committer, including a shadow-phase ACCEPT.
+// every captured ORIGINAL is dropped through the S4 supervisor committer,
+// including a shadow-phase ACCEPT and including a permitted flow — #9506
+// S9.5 forwards permitted plaintext as a separate adjudicated-TUN re-entry
+// from Rust, so ACCEPT here could only create a duplicate, not a permit.
 func (a *IpsecCapturePipeline) VerdictFrame(frame nfqueue.CaptureFrame, _ nfqueue.Verdict) error {
 	if a == nil || a.supervisor == nil || frame.Packet == nil {
 		return errors.New("ipsec capture: terminal supervisor unavailable")
