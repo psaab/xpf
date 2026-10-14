@@ -15,6 +15,10 @@ set -uo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/test/incus/loss-userspace-cluster.env}"
+# #13070 (D10-15): the incus CLI wrapper comes from the shared CoS
+# schedule + wrapper library instead of a harness-local copy.
+# shellcheck source=cos-apply-lib.sh
+source "$ROOT_DIR/test/incus/cos-apply-lib.sh"
 APPLY_COS_CONFIG="${APPLY_COS_CONFIG:-$ROOT_DIR/test/incus/apply-cos-config.sh}"
 VALIDATOR="${VALIDATOR:-$ROOT_DIR/test/incus/cos_be_contention_validate.py}"
 
@@ -102,16 +106,23 @@ log() {
     printf '==> %s\n' "$*"
 }
 
+# #13070 (D10-15): source the shared CoS schedule + incus wrapper library.
+# shellcheck source=cos-apply-lib.sh
+source "$ROOT_DIR/test/incus/cos-apply-lib.sh"
+
+# run_incus used to be a harness-local `sg incus-admin` wrapper; it now
+# delegates to the shared cos-apply-lib.sh wrappers. The
+# USE_SG_INCUS_ADMIN knob keeps its exact meaning through INCUS_FORCE_SG:
+# enabled (the default) routes every call through `sg incus-admin` exactly
+# as before, disabled lets the shared wrapper auto-detect group membership.
 run_incus() {
     local vm=$1
     local cmd=$2
 
     if enabled "$USE_SG_INCUS_ADMIN"; then
-        local incus_cmd
-        printf -v incus_cmd 'incus exec %q -- bash -lc %q' "$vm" "$cmd"
-        sg incus-admin -c "$incus_cmd"
+        INCUS_FORCE_SG=1 incus_exec_shell "$vm" "$cmd"
     else
-        incus exec "$vm" -- bash -lc "$cmd"
+        incus_exec_shell "$vm" "$cmd"
     fi
 }
 
@@ -132,6 +143,11 @@ run_apply_config() {
     fi
 }
 
+# Deliberately NOT the lib's detect_active_primary (#13070 / D10-15): that
+# one answers "who holds RG0" from `show chassis cluster status` with a
+# tolerant fallback. THIS detector answers "whose data plane is actually
+# forwarding" from data-plane statistics and FAILS (rc 1) when neither
+# node forwards — the contention smoke must not silently pick a node.
 detect_active_fw() {
     local vm
     local stats

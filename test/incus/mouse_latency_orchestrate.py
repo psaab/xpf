@@ -20,7 +20,6 @@ Subcommands:
 import argparse
 import json
 import math
-import os
 import re
 import statistics
 import sys
@@ -34,182 +33,16 @@ from iperf3_sum_parse import parse_sum_bps
 # to decide whether a (ELEPHANT_PORT, SHAPER_BPS) pairing can ever pass.
 _SETTLE_MIN_UTILIZATION = 0.7
 
-# Junos transmit-rate / shaping-rate unit suffixes. Decimal SI
-# (1k = 1000), matching how iperf3 reports bits/sec and how the rest of
-# this harness (fairness-harness.sh) converts the fixture rates.
-_RATE_SUFFIX_MULTIPLIER = {
-    "": 1,
-    "k": 1_000,
-    "m": 1_000_000,
-    "g": 1_000_000_000,
-    "t": 1_000_000_000_000,
-}
-
-# Default location of the canonical CoS fixture relative to this file.
-_DEFAULT_COS_SET = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "cos-iperf-config.set"
+# The fixture parser, rate-cap semantics and CoSFixtureError moved to
+# cos_fixture_spec.py (#13070 / D10-15): the CoS port grid had been
+# restated in eight scripts and drifted; this module is now a CONSUMER of
+# the single parser instead of its owner. The names stay bound here for
+# the subcommands below and for mouse_latency_orchestrate_test.py.
+from cos_fixture_spec import (  # noqa: E402  (sibling module, see header)
+    DEFAULT_COS_SET,
+    CoSFixtureError,
+    parse_cos_class_caps,
 )
-
-
-def _parse_junos_rate(token: str) -> int | None:
-    """Convert a Junos rate token (e.g. '1.0g', '100m', '25g') to bps.
-
-    Returns None for tokens that are not a numeric-rate form (so the
-    caller can skip non-rate scheduler attributes like 'exact').
-    """
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)([kmgt]?)", token.strip().lower())
-    if not m:
-        return None
-    value = float(m.group(1))
-    mult = _RATE_SUFFIX_MULTIPLIER[m.group(2)]
-    return int(value * mult)
-
-
-class CoSFixtureError(ValueError):
-    """Raised when the CoS fixture cannot resolve a port's class cap."""
-
-
-def parse_cos_class_caps(set_text: str) -> dict:
-    """Parse a cos-iperf-config.set fixture into a per-port rate table.
-
-    Returns a dict keyed by destination-port (int) with values:
-        {"forwarding_class": str,
-         "scheduler": str,
-         "cap_bps": int,          # achievable aggregate ceiling
-         "exact": bool}           # True if scheduler is transmit-rate exact
-
-    The ceiling is the scheduler's `transmit-rate` for `exact` classes
-    (the class is hard-capped at that aggregate per
-    docs/cos-traffic-shaping.md), and the interface `shaping-rate` for
-    non-exact classes (best-effort / uncapped), which can only ever burst
-    to the interface shaper. This is the single source of truth the
-    env-consistency guard compares SHAPER_BPS against — it is derived
-    directly from the applied fixture so it cannot drift from it.
-    """
-    # port -> forwarding-class, forwarding-class -> scheduler,
-    # scheduler -> (rate_bps, exact), plus the interface shaping-rate.
-    port_to_class: dict = {}
-    class_to_sched: dict = {}
-    sched_rate: dict = {}
-    sched_exact: dict = {}
-    iface_shaping_bps: int | None = None
-
-    term_class: dict = {}  # term-id -> forwarding-class
-    term_ports: dict = {}  # term-id -> list[int]
-
-    for raw in set_text.splitlines():
-        line = raw.strip()
-        if not line.startswith("set "):
-            continue
-        toks = line.split()
-
-        # set ... filter <name> term <id> from destination-port <port>
-        if "destination-port" in toks and "term" in toks:
-            try:
-                term = toks[toks.index("term") + 1]
-                port = int(toks[toks.index("destination-port") + 1])
-            except (ValueError, IndexError):
-                continue
-            term_ports.setdefault(term, []).append(port)
-            continue
-
-        # set ... filter <name> term <id> then forwarding-class <fc>
-        if "forwarding-class" in toks and "term" in toks and "then" in toks:
-            try:
-                term = toks[toks.index("term") + 1]
-                fc = toks[toks.index("forwarding-class") + 1]
-            except IndexError:
-                continue
-            term_class[term] = fc
-            continue
-
-        # set class-of-service scheduler-maps <map> forwarding-class <fc>
-        #     scheduler <sched>
-        if (
-            "scheduler-maps" in toks
-            and "forwarding-class" in toks
-            and "scheduler" in toks
-        ):
-            try:
-                fc = toks[toks.index("forwarding-class") + 1]
-                sched = toks[toks.index("scheduler") + 1]
-            except IndexError:
-                continue
-            class_to_sched[fc] = sched
-            continue
-
-        # set class-of-service schedulers <sched> transmit-rate <val|exact>
-        if "schedulers" in toks and "transmit-rate" in toks:
-            try:
-                sched = toks[toks.index("schedulers") + 1]
-                val = toks[toks.index("transmit-rate") + 1]
-            except IndexError:
-                continue
-            if val == "exact":
-                sched_exact[sched] = True
-            else:
-                rate = _parse_junos_rate(val)
-                if rate is not None:
-                    sched_rate[sched] = rate
-            continue
-
-        # set class-of-service interfaces <if> unit <u> shaping-rate <val>
-        if "interfaces" in toks and "shaping-rate" in toks:
-            try:
-                val = toks[toks.index("shaping-rate") + 1]
-            except IndexError:
-                continue
-            rate = _parse_junos_rate(val)
-            if rate is not None:
-                iface_shaping_bps = rate
-            continue
-
-    # Stitch term ports -> forwarding-class.
-    for term, ports in term_ports.items():
-        fc = term_class.get(term)
-        if fc is None:
-            continue
-        for port in ports:
-            port_to_class[port] = fc
-
-    out: dict = {}
-    for port, fc in port_to_class.items():
-        sched = class_to_sched.get(fc)
-        if sched is None:
-            # A classified port whose forwarding-class has no scheduler-map
-            # entry would silently fall through to the interface-shaper cap
-            # below, masking fixture drift/misparse and yielding a wrong
-            # cap. The guard's whole point is that it cannot drift from the
-            # fixture, so refuse rather than guess.
-            raise CoSFixtureError(
-                f"port {port} class {fc} has no scheduler-map entry "
-                f"(forwarding-class is classified but unscheduled); the "
-                f"CoS fixture cannot resolve its rate cap"
-            )
-        exact = bool(sched_exact.get(sched, False))
-        if exact:
-            cap = sched_rate.get(sched)
-            if cap is None:
-                raise CoSFixtureError(
-                    f"port {port} class {fc} scheduler {sched} is "
-                    f"transmit-rate exact but has no numeric transmit-rate"
-                )
-        else:
-            # Non-exact classes (best-effort / uncapped) are bounded only
-            # by the interface shaping-rate.
-            if iface_shaping_bps is None:
-                raise CoSFixtureError(
-                    f"port {port} class {fc} is non-exact but the fixture "
-                    f"defines no interface shaping-rate"
-                )
-            cap = iface_shaping_bps
-        out[port] = {
-            "forwarding_class": fc,
-            "scheduler": sched,
-            "cap_bps": cap,
-            "exact": exact,
-        }
-    return out
 
 
 def check_settle_threshold_satisfiable(
@@ -235,7 +68,7 @@ def check_settle_threshold_satisfiable(
     Raises CoSFixtureError if the port is not present in the fixture.
     """
     if set_text is None:
-        with open(_DEFAULT_COS_SET) as f:
+        with open(DEFAULT_COS_SET) as f:
             set_text = f.read()
     caps = parse_cos_class_caps(set_text)
     info = caps.get(elephant_port)

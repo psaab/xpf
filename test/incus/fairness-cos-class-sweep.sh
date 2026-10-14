@@ -8,6 +8,10 @@
 set -uo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# #13070 (D10-15): the class grid below is DERIVED from the shared CoS
+# schedule library instead of a sweep-local copy of cos-iperf-config.set.
+# shellcheck source=cos-apply-lib.sh
+source "$ROOT_DIR/test/incus/cos-apply-lib.sh"
 
 # shellcheck source=active-fw.sh
 source "$ROOT_DIR/test/incus/active-fw.sh"
@@ -117,20 +121,24 @@ cat > "$SUMMARY_TSV" <<'HEADER'
 class	port	queue_id	rate_bps	exit_status	verdict	mean_observed_cov	max_observed_cov	stdev_observed_cov	avg_mbps	avg_rate_utilization	avg_cstruct	mean_gap	max_gap	starved_flows	per_run_verdicts
 HEADER
 
-classes=(
-    "q0-best-effort-root 5200 0 25000000000"
-    "q1-iperf-100m 5201 1 100000000"
-    "q2-iperf-1g 5202 2 1000000000"
-    "q3-iperf-3g 5203 3 3000000000"
-    "q4-iperf-6g 5204 4 6000000000"
-    "q5-iperf-9g 5205 5 9000000000"
-    "q6-iperf-12g 5206 6 12000000000"
-    "q7-iperf-15g 5207 7 15000000000"
-    "q8-iperf-18g 5208 8 18000000000"
-    "q9-iperf-21g 5209 9 21000000000"
-    "q10-iperf-24g 5210 10 24000000000"
-    "q11-iperf-uncapped-root 5211 11 25000000000"
-)
+# One row per canonical class: "<label> <port> <queue> <rate_bps>",
+# derived from cos-apply-lib.sh's grid (#13070 / D10-15 — this array used
+# to be a hand-maintained copy of cos-iperf-config.set). The label keeps
+# the sweep's historical spelling, q<queue>-<class> with a `-root` suffix
+# on the two non-exact classes that are bounded by the interface (root)
+# shaper instead of their own exact scheduler.
+classes=()
+for _cport in "${COS_SCHEDULE_PORTS[@]}"; do
+    _cqueue=$(cos_port_to_queue "$_cport")
+    _cclass=$(cos_port_to_class "$_cport")
+    _crate=$(cos_port_to_rate_bps "$_cport")
+    _clabel="q${_cqueue}-${_cclass}"
+    if ! cos_port_is_exact "$_cport"; then
+        _clabel="${_clabel}-root"
+    fi
+    classes+=("${_clabel} ${_cport} ${_cqueue} ${_crate}")
+done
+unset _cport _cqueue _cclass _crate _clabel
 
 class_selected() {
     local label=$1

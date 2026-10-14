@@ -79,6 +79,11 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# #13070 (D10-15): the port -> filter-term map comes from the shared CoS
+# schedule library (matching the cos-iperf-config.set this cell's cluster
+# actually applies) instead of a step1-local table.
+# shellcheck source=cos-apply-lib.sh
+source "${SCRIPT_DIR}/cos-apply-lib.sh"
 
 FW="loss:xpf-userspace-fw0"
 FW_PEER="loss:xpf-userspace-fw1"
@@ -91,8 +96,11 @@ OUTDIR="$REPO_ROOT/docs/pr/line-rate-investigation/step1-evidence/$COS/p${PORT}-
 mkdir -p "$OUTDIR"
 
 log() { echo "[$(date +%H:%M:%S)] $*" >&2; }
-fw()  { incus exec "$FW"   -- bash -c "$*"; }
-host(){ incus exec "$HOST" -- bash -c "$*"; }
+# #13070 (D10-15): the shared incus wrapper (group membership + %q-safe
+# quoting) replaces bare `incus exec` — same command shape, plus the
+# sg fallback for operators outside incus-admin.
+fw()  { incus_exec "$FW"   bash -c "$*"; }
+host(){ incus_exec "$HOST" bash -c "$*"; }
 
 # bail out via verdict.txt + non-zero exit. Marks the cell SUSPECT
 # (per §5: any invariant failure => SUSPECT; re-run is caller's job).
@@ -441,22 +449,16 @@ if [[ "$COS" == "with-cos" ]]; then
 	if [[ "$COS_IFACE_COUNT" -lt 1 ]]; then
 		add_fail "I10: with-cos but status.cos_interfaces is empty"
 	fi
-	# Filter-term-counter delta — the canonical full-cos.set maps
-	# destination-port -> term_name via:
-	#   5201 -> term 0 (iperf-a, 1 Gbps)
-	#   5202 -> term 1 (iperf-b, 10 Gbps)
-	#   5203 -> term 2 (iperf-c, 25 Gbps)
-	#   5204 -> term 3 (best-effort fallthrough, 100 Mbps)
-	# The previous `term_name | test($p)` test using the port string
-	# never matches (term names are "0".."3", not "5201"..). Use the
-	# explicit mapping. Also sum across inet + inet6 families.
-	case "$PORT" in
-		5201) TERM="0" ;;
-		5202) TERM="1" ;;
-		5203) TERM="2" ;;
-		5204) TERM="3" ;;
-		*)    TERM="" ;;
-	esac
+	# Filter-term-counter delta — the term that classifies $PORT comes
+	# from the shared canonical schedule (cos_port_to_term), which is
+	# pinned to cos-iperf-config.set — the fixture §6 actually applies to
+	# this cluster (#13070 / D10-15). The table here used to restate a
+	# RETIRED 4-port fixture (5201->term 0 .. 5204->term 3, D10-08), so
+	# I10 compared counters of the wrong term on every with-cos cell.
+	# Also sum across inet + inet6 families.
+	if ! TERM=$(cos_port_to_term "$PORT"); then
+		add_fail "I10: cannot resolve filter term for port $PORT in the canonical CoS schedule"
+	fi
 	POST_PKTS=$(jq -r --arg t "$TERM" '
 		(.status.filter_term_counters // [])
 		| map(select(.filter_name == "bandwidth-output" and .term_name == $t))

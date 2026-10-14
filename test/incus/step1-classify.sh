@@ -14,6 +14,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 EVIDENCE="$REPO_ROOT/docs/pr/line-rate-investigation/step1-evidence"
+# #13070 (D10-15): Verdict D's per-port shaper cap comes from the shared
+# CoS schedule library (pinned to cos-iperf-config.set) instead of a
+# classify-local table.
+# shellcheck source=cos-apply-lib.sh
+source "${SCRIPT_DIR}/cos-apply-lib.sh"
 
 # Z thresholds per plan §4.2.
 Z_NOCOS=10
@@ -151,7 +156,12 @@ classify_cell() {
 
 	# Shaper max for verdict D (per plan §4.2):
 	#   no-cos: 25 Gbps cap
-	#   with-cos forward: 1/10/25/0.1 Gbps for ports 5201/5202/5203/5204
+	#   with-cos forward: the port's canonical class cap, from the shared
+	#     schedule (cos_port_to_rate_bps / 1e9 — 0.1/1/3/6 Gbps for ports
+	#     5201..5204 under cos-iperf-config.set). This table used to
+	#     restate a RETIRED 4-port fixture's 1/10/25/0.1 values (D10-08),
+	#     miscalculating Verdict D's cap by up to 60x; it now cannot drift
+	#     from the fixture the cluster actually runs (#13070 / D10-15).
 	#   with-cos reverse: ~20 Gbps (unshaped egress ge-0-0-1, hits 25G)
 	local shaper_max
 	if [[ "$cos" == "no-cos" ]]; then
@@ -159,13 +169,10 @@ classify_cell() {
 	elif [[ "$cdir" == "rev" ]]; then
 		shaper_max=20
 	else
-		case "$port" in
-			5201) shaper_max=1 ;;
-			5202) shaper_max=10 ;;
-			5203) shaper_max=25 ;;
-			5204) shaper_max=0.1 ;;
-			*) shaper_max=25 ;;
-		esac
+		if ! shaper_max=$(cos_port_to_rate_bps "$port" | awk '{printf "%.3g", $1 / 1e9}'); then
+			echo "step1-classify: no canonical shaper cap for port $port; refusing to guess" >&2
+			exit 2
+		fi
 	fi
 
 	local verdict=""

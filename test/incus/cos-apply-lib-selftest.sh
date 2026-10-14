@@ -174,12 +174,36 @@ fi
 # ── incus mock for the rollback / readiness helpers ───────────────────
 # MOCK_ROLLBACK_TRANSCRIPT selects what the mocked CLI prints for the
 # rollback session; MOCK_READY_AFTER makes the readiness probe fail N times
-# before succeeding. MOCK_READY_CALLS counts probes.
+# before succeeding. MOCK_READY_CALLS counts probes. #13070 adds
+# MOCK_INCUS_ARGS (argv recorder), MOCK_CLUSTER_STATUS (canned
+# `show chassis cluster status` for detect_active_primary), and id/sg/
+# getent mocks so incus_run's group-membership branches are deterministic
+# in any environment — the lib helpers now route through incus_run, so
+# hermeticity must not depend on the real invoking user's groups.
 MOCK_ROLLBACK_TRANSCRIPT="ok"
 MOCK_READY_AFTER=0
 MOCK_READY_CALLS=0
+MOCK_INCUS_ARGS="(none)"
+MOCK_CLUSTER_STATUS="(none)"
+
+# id/sg/getent are mocked (not stubbed out) because incus_run consults
+# them to pick the direct vs sg path; flipping ID_GROUPS per cell is the
+# point. Default = member, so the pre-existing rollback/readiness cells
+# below keep taking the direct path they always took.
+ID_GROUPS="psaab sudo incus-admin"
+id() { printf '%s\n' "$ID_GROUPS"; }
+SG_CMD="(none)"
+sg() { SG_CMD="$*"; }
+getent() { return 0; }
 
 incus() {
+	# Record the argv the wrapper actually handed to incus (#13070).
+	MOCK_INCUS_ARGS="$*"
+	# detect_active_primary cells: replay a canned cluster status.
+	if [[ "$*" == *"show chassis cluster status"* ]]; then
+		printf '%s\n' "$MOCK_CLUSTER_STATUS"
+		return 0
+	fi
 	# Only `incus exec <inst> -- /usr/local/sbin/cli ...` is used by the lib.
 	if [[ "$*" == *"-c show system uptime"* ]]; then
 		MOCK_READY_CALLS=$((MOCK_READY_CALLS + 1))
@@ -266,6 +290,132 @@ if cos_wait_daemon_ready "fake:vm" 6; then
 	bad "readiness times out when xpfd never answers"
 else
 	ok "readiness times out when xpfd never answers"
+fi
+
+# ── #13070 (D10-15): the canonical schedule helpers ───────────────────
+# Spot values here; the FULL 24-port parity against cos-iperf-config.set
+# lives in test_cos_apply_lib.py, which parses the fixture independently.
+if [[ "$(cos_port_to_queue 5202)" == "2" && "$(cos_port_to_queue 6210)" == "10" ]]; then
+	ok "cos_port_to_queue answers canonical queue ids on both port families"
+else
+	bad "cos_port_to_queue answers canonical queue ids on both port families"
+fi
+if [[ "$(cos_port_to_class 5200)" == "best-effort" && "$(cos_port_to_class 6211)" == "iperf-uncapped" ]]; then
+	ok "cos_port_to_class answers canonical forwarding classes"
+else
+	bad "cos_port_to_class answers canonical forwarding classes"
+fi
+if [[ "$(cos_port_to_term 5203)" == "3" ]]; then
+	ok "cos_port_to_term answers the bandwidth-output filter term"
+else
+	bad "cos_port_to_term answers the bandwidth-output filter term"
+fi
+if [[ "$(cos_port_to_rate_bps 5201)" == "100000000" && "$(cos_port_to_rate_bps 5211)" == "25000000000" ]]; then
+	ok "cos_port_to_rate_bps answers exact rates and the root shape"
+else
+	bad "cos_port_to_rate_bps answers exact rates and the root shape"
+fi
+if cos_port_to_queue 5212 >/dev/null 2>&1; then
+	bad "an unmapped port fails closed instead of defaulting"
+else
+	ok "an unmapped port fails closed instead of defaulting"
+fi
+cos_port_is_exact 5202; _r0=$?
+cos_port_is_exact 5200; _r1=$?
+cos_port_is_exact 5212; _r2=$?
+if [[ "$_r0" -eq 0 && "$_r1" -eq 1 && "$_r2" -eq 2 ]]; then
+	ok "cos_port_is_exact separates exact / root / unknown (0/1/2)"
+else
+	bad "cos_port_is_exact separates exact / root / unknown (0/1/2)"
+fi
+if [[ "$(printf '%s\n' "${COS_SCHEDULE_PORTS[@]}")" == "$(printf '52%02d\n' 0 1 2 3 4 5 6 7 8 9 10 11)" ]]; then
+	ok "COS_SCHEDULE_PORTS lists the grid in queue order"
+else
+	bad "COS_SCHEDULE_PORTS lists the grid in queue order"
+fi
+
+# ── #13070 (D10-15): incus_run / incus_exec / detect_active_primary ───
+# Direct path: a member of incus-admin hands argv straight to incus.
+ID_GROUPS="psaab sudo incus-admin"
+MOCK_INCUS_ARGS=""
+incus_run exec fake:vm -- echo hi >/dev/null 2>&1
+if [[ "$MOCK_INCUS_ARGS" == "exec fake:vm -- echo hi" ]]; then
+	ok "incus_run passes argv through verbatim for incus-admin members"
+else
+	bad "incus_run passes argv through verbatim for incus-admin members"
+fi
+
+# sg path: a non-member gets ONE sg invocation with %q-safe re-quoting —
+# `sg ... -c "incus $*"` collapses argv across word boundaries (R1 MED 1).
+ID_GROUPS="psaab sudo"
+SG_CMD=""
+MOCK_INCUS_ARGS="(untouched)"
+incus_run exec fake:vm -- echo "two words" >/dev/null 2>&1
+if [[ "$SG_CMD" == 'incus-admin -c incus exec fake:vm -- echo two\ words ' ]]; then
+	ok "incus_run re-quotes argv safely through sg for non-members"
+else
+	bad "incus_run re-quotes argv safely through sg for non-members"
+fi
+if [[ "$MOCK_INCUS_ARGS" == "(untouched)" ]]; then
+	ok "incus_run does not call incus directly on the sg path"
+else
+	bad "incus_run does not call incus directly on the sg path"
+fi
+
+# INCUS_FORCE_SG keeps always-through-sg operator contracts (e.g.
+# cos-be-contention-harness.sh's USE_SG_INCUS_ADMIN=1 default).
+ID_GROUPS="psaab sudo incus-admin"
+SG_CMD=""
+INCUS_FORCE_SG=1 incus_run exec fake:vm -- true >/dev/null 2>&1
+if [[ "$SG_CMD" == 'incus-admin -c incus exec fake:vm -- true ' ]]; then
+	ok "INCUS_FORCE_SG routes members through sg as well"
+else
+	bad "INCUS_FORCE_SG routes members through sg as well"
+fi
+
+# Remote qualification: bare targets gain ${INCUS_REMOTE}:, qualified
+# targets pass through untouched.
+ID_GROUPS="psaab sudo incus-admin"
+INCUS_REMOTE=""
+MOCK_INCUS_ARGS=""
+incus_exec xpf-userspace-fw0 cli -c show >/dev/null 2>&1
+if [[ "$MOCK_INCUS_ARGS" == "exec xpf-userspace-fw0 -- cli -c show" ]]; then
+	ok "incus_exec leaves bare targets alone without INCUS_REMOTE"
+else
+	bad "incus_exec leaves bare targets alone without INCUS_REMOTE"
+fi
+INCUS_REMOTE="loss"
+MOCK_INCUS_ARGS=""
+incus_exec xpf-userspace-fw0 cli -c show >/dev/null 2>&1
+if [[ "$MOCK_INCUS_ARGS" == "exec loss:xpf-userspace-fw0 -- cli -c show" ]]; then
+	ok "incus_exec qualifies bare targets with INCUS_REMOTE"
+else
+	bad "incus_exec qualifies bare targets with INCUS_REMOTE"
+fi
+MOCK_INCUS_ARGS=""
+incus_exec loss:xpf-userspace-fw0 cli -c show >/dev/null 2>&1
+if [[ "$MOCK_INCUS_ARGS" == "exec loss:xpf-userspace-fw0 -- cli -c show" ]]; then
+	ok "incus_exec passes remote-qualified targets through"
+else
+	bad "incus_exec passes remote-qualified targets through"
+fi
+INCUS_REMOTE=""
+
+# detect_active_primary: RG0 primary from a real cluster-status parse,
+# and the documented tolerant fallback when the status is unparseable.
+MOCK_CLUSTER_STATUS=$'Redundancy group: 0 , Failover count: 0\nnode0  200  secondary  no  no  None\nnode1  100  primary    no  no  None'
+_node=$(detect_active_primary xpf-userspace-fw0 xpf-userspace-fw1)
+if [[ "$_node" == "xpf-userspace-fw1" ]]; then
+	ok "detect_active_primary follows an RG0 primary moved to node1"
+else
+	bad "detect_active_primary follows an RG0 primary moved to node1"
+fi
+MOCK_CLUSTER_STATUS="complete garbage"
+_node=$(detect_active_primary xpf-userspace-fw0 xpf-userspace-fw1)
+if [[ "$_node" == "xpf-userspace-fw0" ]]; then
+	ok "detect_active_primary falls back to vm0 on unparseable status"
+else
+	bad "detect_active_primary falls back to vm0 on unparseable status"
 fi
 
 # ── wiring: apply-cos-config.sh must actually USE the gate ────────────

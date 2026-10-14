@@ -11,6 +11,12 @@
 # applied (includes oversubscription-policy guarantee-rate 0.7).
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# #13070 (D10-15): ports/classes/shapes come from the shared CoS schedule
+# library instead of script-local copies of cos-iperf-config.set.
+# shellcheck source=cos-apply-lib.sh
+source "${SCRIPT_DIR}/cos-apply-lib.sh"
+
 DIRECTION="${1:-push}"
 AF="${2:-v4}"
 DURATION="${DURATION:-20}"
@@ -23,7 +29,9 @@ ART="${ART:-/tmp/cos-gate1-$(date +%s)}"
 TARGET="$TARGET_V4"
 [ "$AF" = "v6" ] && TARGET="$TARGET_V6"
 
-declare -a PORTS=(5201 5202 5203 5204)
+# The small four exact classes: 100m/1g/3g/6g (#13070 / D10-15 — derived
+# from the canonical grid, was a hand-listed copy).
+declare -a PORTS=("${COS_SCHEDULE_PORTS[@]:1:4}")
 REV_FLAG=""
 [ "$DIRECTION" = "reverse" ] && REV_FLAG="-R"
 
@@ -34,7 +42,7 @@ declare -a PIDS=()
 for port in "${PORTS[@]}"; do
   (
     rc=0
-    sg incus-admin -c "incus exec $HOST -- iperf3 -c $TARGET -P $STREAMS -t $DURATION -p $port $REV_FLAG --json" \
+    incus_exec "$HOST" iperf3 -c "$TARGET" -P "$STREAMS" -t "$DURATION" -p "$port" $REV_FLAG --json \
       > "$ART/g1_${port}.json" 2>"$ART/g1_${port}.err" || rc=$?
     echo "$rc" > "$ART/g1_${port}.rc"
   ) &
@@ -42,12 +50,17 @@ for port in "${PORTS[@]}"; do
 done
 for pid in "${PIDS[@]}"; do wait "$pid"; done
 
-python3 - "$ART" "$DIRECTION" "$AF" <<'PYEOF'
+python3 - "$ART" "$DIRECTION" "$AF" "$SCRIPT_DIR" <<'PYEOF'
 import json, os, sys
 art, direction, af = sys.argv[1], sys.argv[2], sys.argv[3]
-ports = [5201, 5202, 5203, 5204]
-names = {5201: "iperf-100m", 5202: "iperf-1g", 5203: "iperf-3g", 5204: "iperf-6g"}
-shape = {5201: 0.1, 5202: 1.0, 5203: 3.0, 5204: 6.0}
+# #13070 (D10-15): ports/classes/shapes are DERIVED from the fixture via
+# cos_fixture_spec (this heredoc used to carry its own copy of the grid).
+sys.path.insert(0, sys.argv[4])
+from cos_fixture_spec import canonical_cos_schedule
+schedule = canonical_cos_schedule()
+ports = sorted(p for p in schedule if 5201 <= p <= 5204)
+names = {p: schedule[p]["forwarding_class"] for p in ports}
+shape = {p: schedule[p]["cap_bps"] / 1e9 for p in ports}
 rows = []
 all_pass = True
 for p in ports:

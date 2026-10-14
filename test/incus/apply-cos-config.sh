@@ -195,8 +195,10 @@ fi
 # Re-runs can leave a root-owned temp file behind on the VM. Remove it
 # before pushing so repeated strict/surplus diagnostic applies do not
 # fail with a stale permission error.
-incus exec "$TARGET" -- rm -f "$REMOTE_SETS" >/dev/null 2>&1 || true
-incus file push --mode 0644 "$SETS_TMP" "${TARGET}/${REMOTE_SETS}" >/dev/null
+# #13070 (D10-15): shared wrapper (sg fallback for non-incus-admin
+# operators), same command shapes as the previous bare `incus` calls.
+incus_run exec "$TARGET" -- rm -f "$REMOTE_SETS" >/dev/null 2>&1 || true
+incus_run file push --mode 0644 "$SETS_TMP" "${TARGET}/${REMOTE_SETS}" >/dev/null
 
 # Deletes that may or may not exist depending on whether this is a
 # fresh apply or a re-apply. Swallowed individually inside the single
@@ -226,7 +228,7 @@ fi
 # ---- Phase 1: commit check (dry-run validate) ----
 CHECK_OUT=$(mktemp)
 trap "rm -f '$SETS_TMP' '$CHECK_OUT'" EXIT
-if ! incus exec "$TARGET" -- /usr/local/sbin/cli > "$CHECK_OUT" 2>&1 <<EOF
+if ! incus_run exec "$TARGET" -- /usr/local/sbin/cli > "$CHECK_OUT" 2>&1 <<EOF
 configure
 delete class-of-service
 delete firewall family inet filter bandwidth-output
@@ -268,7 +270,7 @@ fi
 # compensating sets.
 APPLY_OUT=$(mktemp)
 trap "rm -f '$SETS_TMP' '$CHECK_OUT' '$APPLY_OUT'" EXIT
-if ! incus exec "$TARGET" -- /usr/local/sbin/cli > "$APPLY_OUT" 2>&1 <<EOF
+if ! incus_run exec "$TARGET" -- /usr/local/sbin/cli > "$APPLY_OUT" 2>&1 <<EOF
 configure
 delete class-of-service
 delete firewall family inet filter bandwidth-output
@@ -324,7 +326,7 @@ trap "rm -f '$SETS_TMP' '$CHECK_OUT' '$APPLY_OUT' '$VERIFY_OUT'" EXIT
 # xpfd, so its status is meaningful. Swallowing it made an unreachable daemon
 # produce an error transcript that failed the shaper grep below and exited 6
 # blaming a "missing shaper binding" — the misdiagnosis #6440 was filed on.
-if ! incus exec "$TARGET" -- /usr/local/sbin/cli -c "show class-of-service interface" \
+if ! incus_run exec "$TARGET" -- /usr/local/sbin/cli -c "show class-of-service interface" \
 	> "$VERIFY_OUT" 2>&1; then
 	echo "error: 'show class-of-service interface' FAILED on $TARGET (the CLI could not run it)" >&2
 	echo "---- cli output ----" >&2
@@ -370,7 +372,7 @@ fi
 if grep -qE '^set .*oversubscription-policy' "$CONFIG_FILE"; then
 	OVERSUB_OUT=$(mktemp)
 	trap "rm -f '$SETS_TMP' '$CHECK_OUT' '$APPLY_OUT' '$VERIFY_OUT' '$OVERSUB_OUT'" EXIT
-	if ! incus exec "$TARGET" -- /usr/local/sbin/cli -c \
+	if ! incus_run exec "$TARGET" -- /usr/local/sbin/cli -c \
 		"show configuration class-of-service | display set" \
 		> "$OVERSUB_OUT" 2>&1; then
 		echo "error: 'show configuration class-of-service | display set' FAILED on $TARGET" >&2

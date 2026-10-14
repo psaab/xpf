@@ -877,6 +877,7 @@ test-close-keyword-lint-lib:
 
 test-cos-apply-lib:
 	bash ./test/incus/cos-apply-lib-selftest.sh
+	python3 -m unittest discover -s test/incus -p 'test_cos_apply_lib.py'
 	go test -count=1 -run 6440 ./cmd/cli/
 
 # Self-test the #7159 mouse-latency elephant lifecycle. The defect it guards is
