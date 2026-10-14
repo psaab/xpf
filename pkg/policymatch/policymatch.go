@@ -1931,9 +1931,17 @@ func GlobalPolicyAppliesToZonePairInZones(matchFrom, matchTo []string, filterFro
 		return false
 	}
 	for _, axis := range []string{filterFrom, filterTo} {
-		if axis != "" && axis != JunosHostZone && axis != "any" && !defined[axis] {
-			return false
+		if axis == "" || axis == JunosHostZone || axis == "any" || defined[axis] {
+			continue
 		}
+		if axis == filterFrom && filterTo == JunosHostZone {
+			// #12895: host-bound traffic from an unzoned/unknown ingress
+			// still reaches from-any and unscoped-from host globals at
+			// runtime (zone id 0); the transit inventory test must not
+			// drop them from the host filtered view.
+			continue
+		}
+		return false
 	}
 	return GlobalPolicyAppliesToZonePair(matchFrom, matchTo, filterFrom, filterTo)
 }
@@ -1945,7 +1953,14 @@ func DefinedZoneNames(cfg *config.Config) map[string]bool {
 		return nil
 	}
 	out := make(map[string]bool, len(cfg.Security.Zones))
+	// #12895: quarantined (ID-collision loser / reserved) zones cannot
+	// forward, so they are not defined for applicability purposes —
+	// wildcard globals must not display as governing their pairs.
+	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
 	for name := range cfg.Security.Zones {
+		if _, excluded := quarantined[name]; excluded {
+			continue
+		}
 		out[name] = true
 	}
 	return out
