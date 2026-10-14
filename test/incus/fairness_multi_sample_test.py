@@ -7,6 +7,7 @@ import importlib.util
 import json
 import math
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -1514,6 +1515,195 @@ class FairnessMultiSampleTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 2)
             self.assertIn("--out-dir already exists", result.stderr)
+
+    def _run_harness_precheck_with_stub(
+        self,
+        tmp_path: Path,
+        harness_args: list[str],
+        extra_env: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], Path]:
+        # #13068 (D10-13): exercise the real #8040 precheck hermetically.
+        # fairness-harness.sh resolves target-services.sh next to its own
+        # file, so a temp-dir copy of the harness with a recording stub
+        # aborts at the gate without touching the network or the lab
+        # target. The stub fails the check, so the harness must exit 1
+        # right there, before any traffic or lock is taken.
+        harness_copy = tmp_path / "fairness-harness.sh"
+        harness_copy.write_text(HARNESS_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        harness_copy.chmod(0o755)
+        stub_log = tmp_path / "precheck.log"
+        stub = tmp_path / "target-services.sh"
+        stub.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                printf '%s\\n' "$@" >> "$PRECHECK_LOG"
+                exit 1
+                """
+            ),
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if k != "SKIP_TARGET_PRECHECK"}
+        env["PRECHECK_LOG"] = str(stub_log)
+        if extra_env:
+            env.update(extra_env)
+        result = subprocess.run(
+            [str(harness_copy), *harness_args],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            timeout=30,
+        )
+        return result, stub_log
+
+    def test_fairness_harness_mixed_cos_precheck_includes_mixed_port(self) -> None:
+        # #13068 (D10-13): --mixed-cos drives BOTH the primary port and
+        # MIXED_PORT, so the preflight gate must probe both before any
+        # traffic is generated. Master probed only PORT, so a dead
+        # MIXED_PORT listener was discovered only after the full run window.
+        with tempfile.TemporaryDirectory() as tmp:
+            result, stub_log = self._run_harness_precheck_with_stub(
+                Path(tmp), ["--mixed-cos", "127.0.0.1", "5202", "1", "1"]
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(
+                stub_log.read_text(encoding="utf-8").splitlines(),
+                ["check", "5202", "5205"],
+            )
+
+    def test_fairness_harness_precheck_honors_mixed_port_override(self) -> None:
+        # The probe must see the MIXED_PORT the run will actually use, not
+        # just the 5205 default.
+        with tempfile.TemporaryDirectory() as tmp:
+            result, stub_log = self._run_harness_precheck_with_stub(
+                Path(tmp),
+                ["--mixed-cos", "127.0.0.1", "5202", "1", "1"],
+                extra_env={"MIXED_PORT": "6205"},
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(
+                stub_log.read_text(encoding="utf-8").splitlines(),
+                ["check", "5202", "6205"],
+            )
+
+    def test_fairness_harness_single_class_precheck_checks_only_primary_port(self) -> None:
+        # The mixed gate must not over-reject: a single-class run sends to
+        # one port, and that port alone is the predicate (target-services.sh
+        # keeps the diagnosis wide either way).
+        with tempfile.TemporaryDirectory() as tmp:
+            result, stub_log = self._run_harness_precheck_with_stub(
+                Path(tmp), ["127.0.0.1", "5210", "1", "1"]
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(
+                stub_log.read_text(encoding="utf-8").splitlines(),
+                ["check", "5210"],
+            )
+
+    def _kill_group_if_alive(self, pgid: int) -> None:
+        # Keep a RED run of the #13068 abort tests from leaking the fake
+        # harness group the defect leaves behind.
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def _assert_process_group_dead(self, pgid: int, timeout_sec: float = 3.0) -> None:
+        deadline = time.monotonic() + timeout_sec
+        while True:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+            if time.monotonic() >= deadline:
+                self.fail(f"harness process group {pgid} survived the wrapper abort")
+            time.sleep(0.05)
+
+    def _spawn_wrapper_with_leaky_harness(
+        self, tmp_path: Path
+    ) -> tuple[subprocess.Popen[str], int, Path]:
+        # A fake harness whose whole process group must die with the
+        # wrapper: it records its pgid (start_new_session=True makes the
+        # harness the session/group leader, so $$ is the pgid) and leaves a
+        # sentinel-writing descendant behind, mirroring the iperf3 loads
+        # and /metrics scraper the real harness orphans.
+        pgid_file = tmp_path / "harness-pgid"
+        sentinel = tmp_path / "child_ran"
+        harness = tmp_path / "fake-harness.sh"
+        harness.write_text(
+            textwrap.dedent(
+                f"""\
+                #!/usr/bin/env bash
+                echo $$ > {pgid_file}
+                (sleep 10 && touch {sentinel}) &
+                sleep 60
+                """
+            ),
+            encoding="utf-8",
+        )
+        harness.chmod(0o755)
+        wrapper = subprocess.Popen(
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "--samples",
+                "2",
+                "--per-run-timeout-sec",
+                "60",
+                "--out-dir",
+                str(tmp_path / "out"),
+                "--harness",
+                str(harness),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 10
+        while not pgid_file.exists():
+            if wrapper.poll() is not None:
+                _, stderr = wrapper.communicate(timeout=5)
+                self.fail(
+                    f"wrapper exited before the harness started: rc={wrapper.returncode}\n"
+                    f"wrapper stderr:\n{stderr}"
+                )
+            if time.monotonic() >= deadline:
+                wrapper.kill()
+                self.fail("fake harness never started (pgid file missing)")
+            time.sleep(0.05)
+        pgid = int(pgid_file.read_text(encoding="utf-8").strip())
+        self.addCleanup(self._kill_group_if_alive, pgid)
+        return wrapper, pgid, sentinel
+
+    def test_cli_sigint_kills_harness_process_group(self) -> None:
+        # #13068 (D10-13): SIGINT (Ctrl-C) raises KeyboardInterrupt inside
+        # communicate(). Without cleanup-on-unwind the wrapper died and left
+        # the start_new_session=True harness group running as orphans.
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper, pgid, sentinel = self._spawn_wrapper_with_leaky_harness(Path(tmp))
+            wrapper.send_signal(signal.SIGINT)
+            wrapper.wait(timeout=15)
+            wrapper.communicate(timeout=5)
+            self.assertNotEqual(wrapper.returncode, 0)
+            self._assert_process_group_dead(pgid)
+            self.assertFalse(sentinel.exists(), "harness descendant outlived the SIGINT abort")
+
+    def test_cli_sigterm_exits_143_and_kills_harness_process_group(self) -> None:
+        # #13068 (D10-13): SIGTERM's default disposition kills the wrapper
+        # without unwinding, orphaning the harness group and losing the
+        # 128+signal exit status operators rely on to tell an abort from a
+        # verdict.
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper, pgid, sentinel = self._spawn_wrapper_with_leaky_harness(Path(tmp))
+            wrapper.send_signal(signal.SIGTERM)
+            wrapper.wait(timeout=15)
+            _, stderr = wrapper.communicate(timeout=5)
+            self.assertEqual(wrapper.returncode, 128 + signal.SIGTERM)
+            self.assertNotIn("Traceback", stderr)
+            self._assert_process_group_dead(pgid)
+            self.assertFalse(sentinel.exists(), "harness descendant outlived the SIGTERM abort")
 
 
 if __name__ == "__main__":

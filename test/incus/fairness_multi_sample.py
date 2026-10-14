@@ -279,6 +279,20 @@ def _kill_process_group(pgid: int) -> None:
             return
 
 
+def _sigterm_system_exit(signum: int, _frame: Any) -> None:
+    """Turn SIGTERM into SystemExit so the harness group is not orphaned.
+
+    SIGTERM's default disposition terminates the interpreter without
+    unwinding the stack, so the start_new_session=True harness process
+    group — and its iperf3 loads and /metrics scrapers — would survive
+    the wrapper as orphans holding the harness lock. Raising SystemExit
+    instead unwinds through run_samples' process-group cleanup, and
+    exiting 128+signal keeps the shell convention for death-by-signal
+    (#13068).
+    """
+    raise SystemExit(128 + signum)
+
+
 def run_samples(args: argparse.Namespace) -> dict[str, Any]:
     harness_args = list(args.harness_args)
     if harness_args and harness_args[0] == "--":
@@ -317,18 +331,38 @@ def run_samples(args: argparse.Namespace) -> dict[str, Any]:
         pgid = os.getpgid(proc.pid)
         timed_out = False
         try:
-            stdout_text, stderr_text = proc.communicate(timeout=args.per_run_timeout_sec)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _kill_process_group(pgid)
             try:
-                stdout_text, stderr_text = proc.communicate(
-                    timeout=POST_KILL_COMMUNICATE_TIMEOUT_SEC
-                )
-            except subprocess.TimeoutExpired as exc:
+                stdout_text, stderr_text = proc.communicate(timeout=args.per_run_timeout_sec)
+            except subprocess.TimeoutExpired:
+                timed_out = True
                 _kill_process_group(pgid)
-                stdout_text = stream_text(exc.stdout)
-                stderr_text = stream_text(exc.stderr)
+                try:
+                    stdout_text, stderr_text = proc.communicate(
+                        timeout=POST_KILL_COMMUNICATE_TIMEOUT_SEC
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    _kill_process_group(pgid)
+                    stdout_text = stream_text(exc.stdout)
+                    stderr_text = stream_text(exc.stderr)
+        except BaseException:
+            # #13068 (D10-13): SIGINT arrives as KeyboardInterrupt and the
+            # SIGTERM handler installed by main() raises SystemExit; both
+            # unwind through here. start_new_session=True means the
+            # terminal's signal never reaches the harness group, and that
+            # group can still hold live descendants — iperf3 loads, the
+            # /metrics scraper, or a child keeping the stdout pipe open
+            # after the shell leader itself exited — so poll() cannot be
+            # the guard. Strike the whole group on ANY abort so nothing is
+            # orphaned to contaminate later runs or hold the harness lock.
+            _kill_process_group(pgid)
+            raise
+        finally:
+            # Reap the leader so an aborted run leaves no zombie; after
+            # _kill_process_group this returns promptly.
+            try:
+                proc.wait(timeout=POST_KILL_COMMUNICATE_TIMEOUT_SEC)
+            except subprocess.TimeoutExpired:
+                pass
         exit_code = proc.returncode
 
         (sample_dir / "stdout.log").write_text(stdout_text, encoding="utf-8")
@@ -472,6 +506,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    # #13068 (D10-13): convert SIGTERM into SystemExit so run_samples'
+    # process-group cleanup fires on outer timeouts and operator kills.
+    # Without it the interpreter dies mid-communicate() and orphans the
+    # start_new_session=True harness group. SIGINT needs no handler — its
+    # KeyboardInterrupt already unwinds through the same cleanup.
+    signal.signal(signal.SIGTERM, _sigterm_system_exit)
     try:
         summary = run_samples(args)
     except MultiSampleError as exc:

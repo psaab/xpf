@@ -83,14 +83,6 @@ else
     DEFAULT_PORT=5210
 fi
 PORT=${2:-$DEFAULT_PORT}
-# #8040: the target-service contract, checked before any traffic is generated.
-# This harness sends to ONE port, so the predicate is that one port; the
-# diagnosis on failure is still the whole grid.
-if [[ "${SKIP_TARGET_PRECHECK:-0}" != "1" ]]; then
-    TARGET_V4="$TARGET" \
-        "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/target-services.sh" \
-        check "$PORT" || exit 1
-fi
 N=${3:-12}
 T=${4:-120}
 # Default to the historical reverse fixture only when the argument is
@@ -142,6 +134,24 @@ MIXED_GENERATOR_LABEL=${MIXED_GENERATOR_LABEL:-mixed}
 if [[ -n "$IPERF_CMD_PREFIX" || -n "$MIXED_IPERF_CMD_PREFIX" ]]; then
     echo "fairness-harness: IPERF_CMD_PREFIX is deprecated; use IPERF_LAUNCH_ARG_N and IPERF_GENERATOR_ARG_N" >&2
     exit 2
+fi
+
+# #8040: the target-service contract, checked before any traffic is
+# generated and before the work dir or harness lock is taken. The
+# predicate is exactly the ports this run sends to: the primary port,
+# plus MIXED_PORT in --mixed-cos mode. The check runs AFTER the defaults
+# block so a defaulted or overridden MIXED_PORT is what gets probed
+# (#13068: an earlier check on PORT alone let a dead MIXED_PORT listener
+# burn the whole run window before failing). The diagnosis on failure is
+# still the whole grid.
+if [[ "${SKIP_TARGET_PRECHECK:-0}" != "1" ]]; then
+    PRECHECK_PORTS=("$PORT")
+    if [[ "$MIXED_COS" -eq 1 ]]; then
+        PRECHECK_PORTS+=("$MIXED_PORT")
+    fi
+    TARGET_V4="$TARGET" \
+        "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/target-services.sh" \
+        check "${PRECHECK_PORTS[@]}" || exit 1
 fi
 
 WORK_DIR=$(mktemp -d -t fairness-harness.XXXXXX)
