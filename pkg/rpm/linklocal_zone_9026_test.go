@@ -105,6 +105,65 @@ func TestTargetZoneSplit9026(t *testing.T) {
 	}
 }
 
+// TestExplicitZoneUsesProbeInterfaceResolution12907 pins the symmetry #12907
+// reports broken: an explicit `%zone` and a `destination-interface` are two
+// spellings of the same egress, so they must reach the SAME kernel scope —
+// RETH membership resolved through rethMap, the default `.0` unit stripped,
+// VLAN units and Junos slash names normalized. On master the zone spelling
+// took a bare config.LinuxIfName, so `fe80::1%reth0.0` kept the raw
+// "reth0.0" — not a netdev, ENODEV at socket setup, probe HELD — while the
+// identical test with `destination-interface reth0.0` resolved to the
+// physical member and probed. One spelling must not decide between holding
+// and probing.
+func TestExplicitZoneUsesProbeInterfaceResolution12907(t *testing.T) {
+	m := &Manager{}
+	m.SetRethMap(map[string]string{"reth0": "ge-0/0/2"})
+	dst := net.ParseIP("fe80::1")
+	if dst == nil {
+		t.Fatalf("fixture: fe80::1 did not parse")
+	}
+
+	// THE DEFECT CELL from the issue: explicit `%reth0.0` must land on the
+	// physical member, not the kernel-nonexistent "reth0.0".
+	got, err := m.resolveLinkLocalZone9026("tcp", dst, "reth0.0", "")
+	if err != nil || got != "ge-0-0-2" {
+		t.Errorf("%%reth0.0 = (%q, %v), want (%q, nil) — the raw Junos name is "+
+			"not a kernel netdev, so the probe holds on ENODEV while "+
+			"destination-interface reth0.0 probes (#12907)", got, err, "ge-0-0-2")
+	}
+
+	// Equivalence matrix: both spellings of each egress must agree, so no
+	// spelling holds while the other probes. Includes the rethMap MISS
+	// (reth1.0 → raw "reth1"): #7173 fail-closed on both paths alike.
+	for _, spelling := range []string{
+		"reth0.0",  // Junos default unit → bare physical member
+		"reth0",    // RETH base → physical member
+		"reth0.50", // VLAN unit is a real kernel name, preserved
+		"ge-0/0/2.0",
+		"ge-0/0/2",
+		"eth0",
+		"reth1.0", // rethMap miss: raw translated name, both paths
+	} {
+		fromZone, zerr := m.resolveLinkLocalZone9026("tcp", dst, spelling, "")
+		fromIface, ierr := m.resolveLinkLocalZone9026("tcp", dst, "", spelling)
+		if zerr != nil || ierr != nil {
+			t.Fatalf("%s: %%zone err %v / destination-interface err %v", spelling, zerr, ierr)
+		}
+		if fromZone != fromIface {
+			t.Errorf("%s: %%zone resolved to %q but destination-interface to %q — "+
+				"two spellings of one egress must not classify differently (#12907)",
+				spelling, fromZone, fromIface)
+		}
+	}
+
+	// Hold classification is unchanged with a controlled RETH map: a
+	// missing scope still holds (ErrProbeSetup), never counts as path loss.
+	if _, err := m.resolveLinkLocalZone9026("tcp", dst, "", ""); !errors.Is(err, ErrProbeSetup) {
+		t.Errorf("missing-scope err = %v, want ErrProbeSetup — anything else is "+
+			"PATH LOSS and can drive a WAN failover from a probe that never ran", err)
+	}
+}
+
 // TestProbeTCPHoldsOnAnUnscopeableLinkLocal9026 binds the WIRING, not the
 // helper.
 //
