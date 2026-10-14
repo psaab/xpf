@@ -3674,7 +3674,7 @@ fn pool_snat_keyed_index_vector_12789() {
         .iter()
         .map(|src| super::allocator::sticky_pool_index_seeded(*src, 64, 42))
         .collect::<Vec<_>>();
-    assert_eq!(indices, [22, 21, 38, 33]);
+    assert_eq!(indices, [53, 38, 43, 55]);
 }
 
 #[test]

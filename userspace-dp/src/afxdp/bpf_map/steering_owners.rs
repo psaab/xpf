@@ -203,7 +203,7 @@ impl Default for SteeringRowOwners {
     }
 }
 
-/// Seeded keyed-SipHash selection prevents offline shard targeting (#12794).
+/// Seeded keyed-hash selection prevents offline shard targeting (#12794).
 static SHARD_SEED: LazyLock<u64> =
     LazyLock::new(crate::hot_hash_seed::hot_path_hash_seed);
 
@@ -847,7 +847,7 @@ mod tests {
         }
         assert_eq!(assignment(42), assignment(42));
         assert_ne!(assignment(42), assignment(43));
-        assert_eq!(row_shard_idx_with(42, &row(1)), 3, "pinned row shard");
-        assert_eq!(key_shard_idx_with(42, &key(1, 1000)), 40, "pinned key shard");
+        assert_eq!(row_shard_idx_with(42, &row(1)), 51, "pinned row shard");
+        assert_eq!(key_shard_idx_with(42, &key(1, 1000)), 33, "pinned key shard");
     }
 }

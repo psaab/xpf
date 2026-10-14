@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn keyed_siphash_spreads_v6_s3_directory_keys_12778() {
+    fn keyed_hash_spreads_v6_s3_directory_keys_12778() {
         let key = ipsec_key();
         let placement = |seed| {
             let directory = PMechSessionDirectory::with_seed(seed);

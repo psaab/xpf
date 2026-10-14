@@ -4,7 +4,7 @@
 // (5-tuples, ingress ifindex) for placement. FxHasher's seed is additive:
 // a key-pair delta is seed-independent, and selected v6 address words let
 // remote senders construct same-set families for every seed. This module
-// supplies a per-process key to the keyed SipHash builder used for cache
+// supplies a per-process key to the keyed hash builder used for cache
 // sets and session maps (#12603), plus independent per-process
 // fragment-shard secrets (#12602). Each seed is drawn once and remains
 // stable for the life of the process.
@@ -119,7 +119,7 @@ pub(crate) fn os_random_seed_u64() -> u64 {
 
 static HOT_PATH_SEED: OnceLock<u64> = OnceLock::new();
 
-/// Per-process seeded SipHash builder for attacker-keyed table placement.
+/// Per-process seeded keyed-hash builder for attacker-keyed table placement.
 /// FxHasher's seed is additive and therefore cannot prevent key-pair
 /// cancellations in its polynomial hash.
 #[derive(Clone, Copy, Debug)]
@@ -134,16 +134,92 @@ impl HotPathSeededState {
     }
 }
 
-#[allow(deprecated)]
+/// Keyed multiply-mix hasher (#12989): replaces SipHash-2-4, which cost
+/// ~13% of RX CPU in production profiles (fresh SipHasher per placement).
+/// The seed enters through a splitmix64 key schedule and every chunk is
+/// folded through splitmix64, so no constant XOR/additive difference
+/// survives a chunk — the key-pair cancellation families that broke
+/// seed-additive FxHasher, and the multiply-fold bit-63 differential,
+/// do not exist here.
+pub(crate) struct KeyedFxHasher {
+    state: u64,
+}
+
+#[inline]
+fn splitmix64(mut x: u64) -> u64 {
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+const KEYED_FX_K: u64 = 0x9e37_79b9_7f4a_7c15;
+
+impl KeyedFxHasher {
+    #[inline]
+    fn fold(&mut self, chunk: u64) {
+        // splitmix64 per chunk: a pure odd-K multiply fold keeps an
+        // XOR-difference differential (bit63 -> rotated constant cancels
+        // in the next fold), giving seed-independent collision families
+        // for v6 u128 writes. The xor-shift/multiply cascade destroys
+        // constant differences every chunk.
+        self.state = splitmix64(self.state ^ chunk ^ KEYED_FX_K);
+    }
+}
+
+impl std::hash::Hasher for KeyedFxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        splitmix64(self.state)
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            self.fold(u64::from_le_bytes(chunk.try_into().expect("exact chunk")));
+        }
+        let rem = chunks.remainder();
+        if !rem.is_empty() {
+            let mut tail = [0u8; 8];
+            tail[..rem.len()].copy_from_slice(rem);
+            self.fold(u64::from_le_bytes(tail) ^ (rem.len() as u64));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, n: u8) {
+        self.fold(n as u64);
+    }
+
+    #[inline]
+    fn write_u16(&mut self, n: u16) {
+        self.fold(n as u64);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, n: u32) {
+        self.fold(n as u64);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.fold(n);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, n: usize) {
+        self.fold(n as u64);
+    }
+}
+
 impl std::hash::BuildHasher for HotPathSeededState {
-    type Hasher = std::hash::SipHasher;
+    type Hasher = KeyedFxHasher;
 
     #[inline]
     fn build_hasher(&self) -> Self::Hasher {
-        std::hash::SipHasher::new_with_keys(
-            self.seed,
-            self.seed.rotate_left(29) ^ 0x9e37_79b9_7f4a_7c15,
-        )
+        KeyedFxHasher {
+            state: splitmix64(self.seed ^ 0xa076_1d64_78bd_642f),
+        }
     }
 }
 
@@ -195,3 +271,32 @@ pub(crate) fn keyed_shard_index(hash: u64, seed: u64, domain: u64, shards: usize
 #[cfg(test)]
 #[path = "hot_hash_seed_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod keyed_fx_adversarial_tests {
+    use super::*;
+    use std::hash::{BuildHasher, Hasher};
+
+    fn hash_bytes(seed: u64, bytes: &[u8]) -> u64 {
+        let mut h = HotPathSeededState::new(seed).build_hasher();
+        h.write(bytes);
+        h.finish()
+    }
+
+    /// #12989: the multiply-fold bit-63 differential family (flip byte 7
+    /// bit 7 + byte 10 bit 6 of a v6 write) must NOT collide for every
+    /// seed — placement must be seed-dependent for attacker pairs.
+    #[test]
+    fn v6_differential_pair_is_seed_dependent_12989() {
+        let mut a = [0u8; 16];
+        a[0] = 0x20; a[1] = 0x01; a[15] = 1;
+        let mut b = a;
+        b[7] ^= 0x80;
+        b[10] ^= 0x40;
+        let seeds = [0u64, 1, 42, 0x0123_4567_89AB_CDEF, u64::MAX];
+        let collisions = seeds.iter().filter(|&&s| hash_bytes(s, &a) == hash_bytes(s, &b)).count();
+        assert!(collisions < seeds.len(), "differential pair collides for every seed");
+        assert_ne!(hash_bytes(42, &a), hash_bytes(43, &a), "hash must depend on seed");
+        assert_eq!(hash_bytes(42, &a), hash_bytes(42, &a), "hash must be deterministic per seed");
+    }
+}

@@ -1014,13 +1014,13 @@ impl FlowCache {
         (active, rows, cos_counts, truncated)
     }
 
-    /// Set index = low bits of a per-process keyed SipHash over the flow key.
+    /// Set index = low bits of a per-process keyed multiply-mix hash over the flow key.
     ///
     /// #2364/#12603: the set index is keyed by the attacker-controllable
     /// 5-tuple + ingress ifindex; an unkeyed or seed-additive FxHasher lets
     /// an off-box sender precompute a fixed collision family and force
     /// steady 4-way eviction churn. Use `HotPathSeededState` so the secret
-    /// participates nonlinearly in SipHash. The seed is WORKER/PROCESS-LOCAL:
+    /// participates nonlinearly in the keyed hash. The seed is WORKER/PROCESS-LOCAL:
     /// The flow cache is never synced or part of a wire protocol, and the
     /// seed remains stable for the process lifetime, so each flow maps to one
     /// set. Masking and the 4-way layout are

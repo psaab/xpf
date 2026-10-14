@@ -8668,7 +8668,7 @@ fn run_chunked_resync(table: &mut SessionTable, chunk: usize) -> usize {
 
 // ---- #2364/#12603: seeded session-index hashing -------------------------
 
-/// Session indices use keyed SipHash over attacker-controllable keys. Test
+/// Session indices use the keyed hash over attacker-controllable keys. Test
 /// the v6 s3 family that collides under additive FxHasher for every seed.
 #[test]
 fn session_key_seeded_hash_depends_on_seed_and_s3_clique_disperses_12603() {

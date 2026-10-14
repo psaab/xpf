@@ -1028,7 +1028,7 @@ fn the_process_seed_is_wired_and_stable_7752() {
     assert!(first < NUM_SHARDS, "shard index {first} out of range");
 }
 
-/// #12794: v6 s3-clique must disperse under keyed SipHash for every pinned
+/// #12794: v6 s3-clique must disperse under the keyed hash for every pinned
 /// seed, and the exact shard mapping is pinned so an Fx revert fails.
 #[test]
 fn shard_v6_s3_clique_disperses_pinned_and_seed_sensitive_12794() {
@@ -1047,16 +1047,16 @@ fn shard_v6_s3_clique_disperses_pinned_and_seed_sensitive_12794() {
     let dist = |seed: u64| keys.iter().map(|k| shard_idx_with(seed, k)).collect::<Vec<_>>();
     assert_eq!(dist(42), dist(42));
     assert_ne!(dist(42), dist(43));
-    // Pinned vectors (keyed SipHash, seed 42).
-    assert_eq!(shard_idx_with(42, &key_v4(7, 42)), 11, "pinned v4 shard");
+    // Pinned vectors (keyed multiply-mix, seed 42).
+    assert_eq!(shard_idx_with(42, &key_v4(7, 42)), 46, "pinned v4 shard");
     assert_eq!(
         shard_idx_with(42, &(7, IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)))),
-        22,
+        4,
         "pinned v6 shard"
     );
     assert_eq!(
         shard_idx_with(42, &(-1, IpAddr::V6("fd00::dead:beef".parse().unwrap()))),
-        60,
+        27,
         "pinned v6-ula shard"
     );
 }

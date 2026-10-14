@@ -8,7 +8,7 @@
 //! ## Design
 //!
 //! - 64 shards (`NUM_SHARDS = 64`). Standard choice; matches `dashmap`.
-//! - Shard selection uses the per-process keyed SipHash state shared by the
+//! - Shard selection uses the per-process keyed hash state shared by the
 //!   hot-path placement code, then masks to one of 64 shards (#12794).
 //! - Cache-line padding via `#[repr(align(64))]` ensures adjacent
 //!   shards do not share cache lines (false-sharing prevention).
@@ -54,7 +54,7 @@ pub(super) const NUM_SHARDS: usize = 64;
 /// on-demand resolver (`insert_confirmed_if_unchanged`) bypass the cap:
 /// they install real, topology-bounded next-hops, not attacker-driven ones.
 ///
-/// Sizing and the residual shard-concentration risk: keyed SipHash prevents an
+/// Sizing and the residual shard-concentration risk: keyed multiply-mix hash prevents an
 /// attacker from preparing a fixed address family offline and choosing its
 /// target shard. It does not remove the per-shard cap's online or operational
 /// limits. Attacker-driven dynamic learns remain bounded to
@@ -238,7 +238,7 @@ pub(crate) struct ShardedNeighborMap {
     rx_learn_overwrite_refusals: AtomicU64,
 }
 
-/// Seeded keyed-SipHash shard selection prevents offline targeting of the
+/// Seeded keyed-hash shard selection prevents offline targeting of the
 /// per-shard learn cap (#7752/#12794). The process seed is node-local and stable
 /// for this process.
 const _: () = assert!(NUM_SHARDS.is_power_of_two());

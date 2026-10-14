@@ -9,10 +9,10 @@ use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-/// #12603: attacker-keyed session indices use SipHash keyed by the
+/// #12603: attacker-keyed session indices use the keyed hash keyed by the
 /// per-process seed. FxHasher's seed is additive, so key-pair deltas are
 /// seed-independent and v6 address words permit fixed collision families.
-/// A keyed SipHash builder with explicit per-process key words preserves
+/// A keyed hash builder with an explicit per-process seed preserves
 /// stable bucket placement locally while preventing offline collisions.
 type SeededKeyMap<V> = HashMap<SessionKey, V, HotPathSeededState>;
 /// #10985: per-(ingress-zone, IP) session-limit counter map. Thresholds are
@@ -1734,7 +1734,7 @@ impl SessionTable {
     }
 
     pub fn new() -> Self {
-        // #12603: keyed SipHash placement for attacker-controlled keys.
+        // #12603: keyed hash placement for attacker-controlled keys.
         // All maps share one explicit process seed pair, keeping placement
         // stable across this process while preventing offline collision sets.
         let seed = crate::hot_hash_seed::hot_path_hash_seed();
@@ -1752,7 +1752,7 @@ impl SessionTable {
             // the first install bumps this via `insert_record`.
             slot_high_watermark: 0,
             // #2364/#12603: SessionKey-keyed indices use the per-process
-            // keyed SipHash state so attacker-chosen tuples cannot form
+            // keyed hash state so attacker-chosen tuples cannot form
             // predictable collision chains. `state` is cloned across maps.
             key_to_handle: HashMap::with_hasher(state.clone()),
             bare_tuple_index: HashMap::with_hasher(state.clone()),
