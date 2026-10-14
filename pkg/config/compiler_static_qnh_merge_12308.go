@@ -51,6 +51,11 @@ package config
 // mergeQualifiedNextHop12308 folds one qualified-next-hop statement into hops.
 // The entry that already carries stmt's gateway takes every setting stmt
 // authors; otherwise stmt is appended as that gateway's entry.
+//
+// #12909: the fold keys on the authored gateway scalar (Address) and runs
+// BEFORE the interface-only promotion in finalizeQualifiedNextHops12308, so
+// every statement for one gateway — whichever spelling, block or root —
+// still merges on the raw gateway while the entries are address-form.
 func mergeQualifiedNextHop12308(hops []NextHopEntry, stmt NextHopEntry) []NextHopEntry {
 	stmt.qualified = true
 	for i := range hops {
@@ -77,6 +82,18 @@ func mergeQualifiedNextHop12308(hops []NextHopEntry, stmt NextHopEntry) []NextHo
 // skips while qualified entries can still change: a bare qualified next-hop
 // that ends up identical to a plain `next-hop` for the same address collapses
 // into it, exactly as it did before #12308.
+//
+// #12909: closing the window is also where an interface-valued
+// qualified-next-hop gateway (e.g. a floating backup over `st0.0`) is
+// promoted to an interface-only entry, exactly as a plain
+// `next-hop <ifname>` is promoted at parse time (#12036). Left in Address,
+// the tunnel name is neither an IP FRR can render nor a gateway the
+// userspace FIB can parse, so the backup silently never installs — and it
+// skips the #11422 route-vs-selector gate. Promoting HERE, after every
+// #12308 fold, keeps split statements merging on the raw gateway scalar and
+// keeps an authored `interface` modifier authoritative: an entry that merged
+// a real egress interface keeps the address form. Only qualified entries
+// are promoted; plain next-hops were normalized by staticNextHopEntry.
 func finalizeQualifiedNextHops12308(routes []*StaticRoute) {
 	for _, route := range routes {
 		if route == nil {
@@ -84,9 +101,15 @@ func finalizeQualifiedNextHops12308(routes []*StaticRoute) {
 		}
 		qualified := false
 		for i := range route.NextHops {
-			if route.NextHops[i].qualified {
-				route.NextHops[i].qualified = false
-				qualified = true
+			if !route.NextHops[i].qualified {
+				continue
+			}
+			route.NextHops[i].qualified = false
+			qualified = true
+			if route.NextHops[i].Interface == "" &&
+				interfaceOnlyNextHopValue(route.NextHops[i].Address) {
+				route.NextHops[i].Interface, route.NextHops[i].Address =
+					route.NextHops[i].Address, ""
 			}
 		}
 		if qualified {

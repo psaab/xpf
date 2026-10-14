@@ -253,13 +253,22 @@ func isRouteInlineKeyword(tok string) bool {
 	return false
 }
 
+// interfaceOnlyNextHopValue reports whether raw — authored as a next-hop
+// gateway scalar with NO egress-interface modifier — is a bare interface
+// name rather than an address. It is the #12036 promotion predicate, shared
+// by the plain `next-hop` and (since #12909) qualified-next-hop compilers so
+// both clause families normalize an interface-valued gateway identically.
+func interfaceOnlyNextHopValue(raw string) bool {
+	return !isRouteInlineKeyword(raw) && !strings.Contains(raw, "@") &&
+		net.ParseIP(raw) == nil && plausibleInterfaceName(raw)
+}
+
 // staticNextHopEntry compiles a scalar `next-hop <value>`. A bare interface
 // name is a valid Junos next-hop and must be represented as an interface-only
 // entry so both FRR and the userspace snapshot install the same dev route
 // (#12036). IP and `ip@interface` values remain address-form next-hops.
 func staticNextHopEntry(raw, iface string) NextHopEntry {
-	if iface == "" && !isRouteInlineKeyword(raw) && !strings.Contains(raw, "@") &&
-		net.ParseIP(raw) == nil && plausibleInterfaceName(raw) {
+	if iface == "" && interfaceOnlyNextHopValue(raw) {
 		return NextHopEntry{Interface: raw}
 	}
 	return NextHopEntry{Address: raw, Interface: iface}
