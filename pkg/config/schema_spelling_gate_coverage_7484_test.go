@@ -596,7 +596,8 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// #12662 remeasured the master registry. Four `no-install` static-route
 	// leaves arrived as unreachable; seven RSS expectation leaves moved from
 	// `err` to `unreachable`, while two scheduler-name leaves became compared.
-	gateBlindUnreachable: 135, // #12662 measured population.
+	// The net ceiling change is 134 -> 135; the registry records each site.
+	gateBlindUnreachable: 135,
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
