@@ -397,3 +397,33 @@ func TestHostInboundViewIngressLifelineVRFMasterIsNotScoped10431(t *testing.T) {
 		t.Fatalf("shared lifeline VRF deny scope = %v, want empty", got)
 	}
 }
+
+// TestUnzonedHostInboundIngressBareVRFMemberFansDownAllUnits12844 pins the
+// complete path from a bare VRF trunk member through production snapshots to
+// the unzoned sdifname guard. Every configured trunk unit, not just the first
+// key returned by InterfaceUnitRefKeys, must be guarded by its slave identity.
+func TestUnzonedHostInboundIngressBareVRFMemberFansDownAllUnits12844(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*config.InterfaceUnit{
+			50: {Number: 50, VlanID: 50, Addresses: []string{"172.16.50.8/24"}},
+			80: {Number: 80, VlanID: 80, Addresses: []string{"172.16.80.8/24"}},
+		}},
+		"ge-0/0/9": {Name: "ge-0/0/9", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"192.0.2.9/24"}},
+		}},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{
+		Name: "tenant", InstanceType: "virtual-router",
+		Interfaces: []string{"ge-0/0/1"},
+	}}
+
+	snaps := buildInterfaceSnapshotsFrom(cfg, nil)
+	iifnames, sdifnames := BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps, nil)
+	if got, want := strings.Join(iifnames, " "), "ge-0-0-9"; got != want {
+		t.Errorf("unzoned iifname ingress = %q, want only unrelated non-VRF device %q", got, want)
+	}
+	if got, want := strings.Join(sdifnames, " "), "ge-0-0-1 ge-0-0-1.50 ge-0-0-1.80"; got != want {
+		t.Errorf("unzoned VRF sdifname ingress = %q, want every bare-member trunk netdev %q", got, want)
+	}
+}
