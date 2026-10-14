@@ -37,7 +37,22 @@ func LifelineBaseName(name string) string {
 // therefore contributes only fxp0.
 func HostInboundLifelineSet(cfg *Config) map[string]bool {
 	set := map[string]bool{"fxp0": true}
-	if cfg != nil && cfg.Chassis.Cluster != nil {
+	if cfg == nil {
+		return set
+	}
+	// Retain every declared interface identity (false for ordinary links).
+	// The matcher uses key presence to prefer a declared dotted base over
+	// interpreting that same spelling as a unit on the shorter parent.
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if _, known := set[name]; !known {
+			set[name] = false
+		}
+	}
+	if cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
 		for _, name := range []string{cc.ControlInterface, cc.FabricInterface, cc.Fabric1Interface} {
 			if name = strings.TrimSpace(name); name != "" {
@@ -59,15 +74,28 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 
 // HostInboundLifelineInterface reports whether the given logical interface name
 // is an explicitly identified management / cluster-control LIFELINE that must
-// NEVER be subjected to a host-inbound deny. Configured names match exactly;
-// their logical units match by removing only the final unit suffix.
+// NEVER be subjected to a host-inbound deny. Exact and longest declared names
+// take precedence; only an undeclared final suffix is treated as a unit.
 func HostInboundLifelineInterface(name string, lifelines map[string]bool) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return false
 	}
-	if lifelines[name] {
-		return true
+	if isLifeline, declared := lifelines[name]; declared {
+		return isLifeline
 	}
-	return lifelines[LifelineBaseName(name)]
+	for prefix := name; ; {
+		dot := strings.LastIndexByte(prefix, '.')
+		if dot < 0 {
+			break
+		}
+		prefix = prefix[:dot]
+		if isLifeline, declared := lifelines[prefix]; declared {
+			if _, _, err := CanonicalLogicalUnit(name[len(prefix)+1:]); err != nil {
+				return false
+			}
+			return isLifeline
+		}
+	}
+	return false
 }

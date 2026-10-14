@@ -47,3 +47,24 @@ func TestLifelineDottedDeclaredNames12848(t *testing.T) {
 		}
 	}
 }
+
+func TestLifelineDeclaredSiblingOverridesParent12848(t *testing.T) {
+	cfg := &Config{}
+	cfg.Chassis.Cluster = &ClusterConfig{ControlInterface: "hb"}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"hb":     {Name: "hb"},
+		"hb.1":   {Name: "hb.1"},
+		"fxp0.1": {Name: "fxp0.1"},
+	}
+	set := HostInboundLifelineSet(cfg)
+	for _, name := range []string{"hb", "hb.2", "fxp0", "fxp0.2"} {
+		if !HostInboundLifelineInterface(name, set) {
+			t.Errorf("HostInboundLifelineInterface(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"hb.1", "hb.1.0", "hb.2.0", "hb.2.bad", "fxp0.1", "fxp0.1.0"} {
+		if HostInboundLifelineInterface(name, set) {
+			t.Errorf("HostInboundLifelineInterface(%q) = true, want false for declared sibling or invalid unit", name)
+		}
+	}
+}
