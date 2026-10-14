@@ -1421,6 +1421,13 @@ impl ScreenState {
         let Some(zstate) = self.zones.get(zone) else {
             return SynCookieAckVerdict::NotApplicable;
         };
+        // Audit profiles observe screen events but must not enforce cookie
+        // validation: the caller maps `Validated` to an AckRst + recycle, and
+        // `Invalid` to a drop. Return before epoch, budget, and MAC work so
+        // standby/peer-minted ACKs cannot escape the zone-wide audit contract.
+        if zstate.profile.alarm_without_drop {
+            return SynCookieAckVerdict::NotApplicable;
+        }
         if !zstate.profile.syn_cookie
             || zstate.profile.syn_flood_threshold == 0
             || pkt.protocol != PROTO_TCP
