@@ -226,6 +226,18 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
             );
     }
     assert_eq!(sessions.len(), 9);
+    // #12862 e2e incarnation fence: both shared rows are same-tuple
+    // REPLACEMENT (different session_id) published in the shed window.
+    // Whichever opening the shed selects, the replacement row must survive
+    // the descriptor-path teardown (the Declined branch), while the true
+    // victim's row is removed.
+    {
+        let mut shared = shared_sessions.lock().expect("shared sessions");
+        for k in [&opening_a, &opening_b] {
+            let row = shared.get_mut(k).expect("shared row");
+            row.session_id = row.session_id.wrapping_add(999);
+        }
+    }
 
     let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
@@ -270,11 +282,11 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
         &opening_b
     };
     assert!(
-        !shared_sessions
+        shared_sessions
             .lock()
             .expect("shared sessions")
             .contains_key(shed_key),
-        "#12862: shed flow remains in the shared session map until its deferred Close flush"
+        "#12862: a replacement shared row (different session_id) must survive the shed teardown"
     );
     let surviving_opening = if opening_a_removed {
         &opening_b
