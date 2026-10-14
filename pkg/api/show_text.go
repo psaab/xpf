@@ -8,6 +8,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/natshow"
+	"github.com/psaab/xpf/pkg/scheduler"
 )
 
 // sortedKeys returns the keys of a string-keyed map in ascending order. The
@@ -35,35 +36,12 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch topic {
 	case "schedulers":
-		if cfg == nil || len(cfg.Schedulers) == 0 {
-			buf.WriteString("No schedulers configured\n")
-		} else {
-			for _, name := range sortedKeys(cfg.Schedulers) {
-				sched := cfg.Schedulers[name]
-				if sched == nil {
-					// #10439: tolerate present-but-nil slots from lenient
-					// restore/peer-sync loads.
-					continue
-				}
-				fmt.Fprintf(&buf, "Scheduler: %s\n", name)
-				if sched.StartTime != "" {
-					fmt.Fprintf(&buf, "  Start time: %s\n", sched.StartTime)
-				}
-				if sched.StopTime != "" {
-					fmt.Fprintf(&buf, "  Stop time:  %s\n", sched.StopTime)
-				}
-				if sched.StartDate != "" {
-					fmt.Fprintf(&buf, "  Start date: %s\n", sched.StartDate)
-				}
-				if sched.StopDate != "" {
-					fmt.Fprintf(&buf, "  Stop date:  %s\n", sched.StopDate)
-				}
-				if sched.Daily {
-					buf.WriteString("  Recurrence: daily\n")
-				}
-				buf.WriteString("\n")
-			}
-		}
+		// #12922: delegate to the shared pkg/scheduler renderer so this REST
+		// surface, the local CLI, and the gRPC ShowText topic stay
+		// byte-identical and carry the full recurrence detail (daily
+		// exclude / all-day qualifiers and per-weekday override arms) that
+		// the private copy here omitted.
+		scheduler.FormatSchedulers(&buf, cfg)
 
 	case "snmp":
 		if cfg == nil || cfg.System.SNMP == nil {
