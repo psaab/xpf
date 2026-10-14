@@ -195,7 +195,8 @@ func (d *Daemon) clearSessionsForModifiedPolicies(oldCfg, newCfg *config.Config)
 	oldSched := d.policySchedulerActiveStateForApplyLocked(oldCfg, now)
 	newSched := d.policySchedulerActiveStateForApplyLocked(newCfg, now)
 	return d.clearSessionsForPolicyIDs(
-		changedPolicyRuntimeIDs(oldCfg, newCfg, oldSched, newSched),
+		changedPolicyRuntimeIDs(oldCfg, newCfg, oldSched, newSched,
+			d.feedSnapshotsForConfig(oldCfg), d.feedSnapshotsForConfig(newCfg)),
 		dataplane.DeleteReasonPolicyModified,
 		"modified (policy-rematch)",
 	)
@@ -846,7 +847,14 @@ func pruneCapturedV6(c *capturedSessions, removed []dataplane.SessionKeyV6) {
 //
 // Returns nil when oldCfg is nil (boot), policy-rematch is unset, or nothing
 // changed.
-func changedPolicyRuntimeIDs(oldCfg, newCfg *config.Config, oldSched, newSched map[string]bool) map[uint32]struct{} {
+func changedPolicyRuntimeIDs(oldCfg, newCfg *config.Config, oldSched, newSched map[string]bool, feedOverlays ...map[string][]string) map[uint32]struct{} {
+	var oldFeedOverlay, newFeedOverlay map[string][]string
+	if len(feedOverlays) > 0 {
+		oldFeedOverlay = feedOverlays[0]
+	}
+	if len(feedOverlays) > 1 {
+		newFeedOverlay = feedOverlays[1]
+	}
 	if oldCfg == nil || newCfg == nil || !newCfg.Security.PolicyRematch {
 		return nil
 	}
@@ -868,8 +876,8 @@ func changedPolicyRuntimeIDs(oldCfg, newCfg *config.Config, oldSched, newSched m
 	// `policy-rematch` path does no extra work at all.
 	var oldResolved, newResolved map[string]string
 	if newCfg.Security.PolicyRematchExtensive {
-		oldResolved = dpuserspace.PolicyResolvedFingerprints(oldCfg)
-		newResolved = dpuserspace.PolicyResolvedFingerprints(newCfg)
+		oldResolved = dpuserspace.PolicyResolvedFingerprints(oldCfg, oldFeedOverlay)
+		newResolved = dpuserspace.PolicyResolvedFingerprints(newCfg, newFeedOverlay)
 	}
 
 	var changed map[uint32]struct{}

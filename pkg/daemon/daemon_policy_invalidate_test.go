@@ -1135,6 +1135,77 @@ func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
 	}
 }
 
+func TestCaptureExtensiveRematchIncludesLiveFeedStaticSibling12851(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "203.0.113.0/24\n")
+	}))
+	defer server.Close()
+
+	const feedName = "sibling-test-feed"
+	dynamic := config.DynamicAddressConfig{
+		FeedServers: map[string]*config.FeedServer{
+			"srv": {Name: "srv", URL: server.URL, FeedName: feedName, UpdateInterval: 3600},
+		},
+		AddressBindings: map[string]*config.AddressBinding{
+			"feedref": {Name: "feedref", FeedNames: []string{feedName}},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr := feeds.New(func() error { return nil })
+	mgr.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")})
+	mgr.Apply(ctx, &dynamic)
+	defer mgr.StopAll()
+	deadline := time.Now().Add(10 * time.Second)
+	for len(mgr.SnapshotForBindings(&dynamic)["feedref"]) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("live feed overlay never installed: %v", mgr.SnapshotForBindings(&dynamic))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	build := func(hostCIDR string) *config.Config {
+		cfg := extensiveAddrConfig([]string{"h1", "feedref"}, hostCIDR, true, config.PolicyPermit)
+		cfg.Security.AddressBook.Addresses["feedref"] = &config.Address{Name: "feedref", Value: "192.0.2.1/32"}
+		cfg.Security.DynamicAddress = dynamic
+		return cfg
+	}
+	oldCfg := build("10.0.0.1/32")
+	newCfg := build("10.0.9.9/32")
+	const policyKey = "trust->untrust/p-web"
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)[policyKey]
+	if oldID == 0 {
+		t.Fatal("precondition: p-web must have a nonzero runtime policy ID")
+	}
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 1}, DstIP: [4]byte{10, 0, 0, 20},
+		SrcPort: 1234, DstPort: 443, Protocol: 6,
+	}
+	dp := &policyInvalTestDP{
+		v4: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: {
+				State:       dataplane.SessStateEstablished,
+				PolicyID:    oldID,
+				IngressZone: config.StableZoneID("trust"),
+				EgressZone:  config.StableZoneID("untrust"),
+			},
+		},
+		v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+	}
+	d := &Daemon{feeds: mgr}
+	d.setDataplane(dp)
+	d.armPolicyInvalidationPlan(oldCfg, newCfg)
+	d.capturePolicyInvalidationLocked(newCfg)
+	capture := d.policyInvalidationCapture
+	if capture == nil {
+		t.Fatal("static sibling tightening did not produce a pre-publication capture")
+	}
+	if !capture.scanComplete || len(capture.modified.v4) != 1 || capture.modified.v4[0].Key != key {
+		t.Fatalf("#12851: healthy feed + static sibling tightening failed to capture p-web session for reauthorization: %+v", capture)
+	}
+}
+
 type policyListRead12072DP struct {
 	*policyInvalTestDP
 	rows                   []dpuserspace.SessionPolicyMatch

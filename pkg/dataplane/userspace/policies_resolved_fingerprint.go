@@ -38,19 +38,20 @@ import (
 // So this hashes exactly what ships, and adds nothing of its own -- which is
 // also what keeps it from drifting away from the dataplane's view.
 //
-// Scheduler state and feed overlay are nil for both configs so they are computed
-// identically on each side and cannot manufacture a difference; scheduler
-// transitions are handled by policySchedulerBecameInactive, and a feed refresh
-// is not a commit-time event.
-func PolicyResolvedFingerprints(cfg *config.Config) map[string]string {
+// Scheduler state is nil on both sides so it cannot manufacture a difference;
+// scheduler transitions are handled by policySchedulerBecameInactive. Feed
+// overlays are supplied by the daemon from its live feed manager: passing nil
+// here would make every declared binding unresolved, collapse an entire policy
+// side to the unsupported-address sentinel, and hide static sibling changes.
+func PolicyResolvedFingerprints(cfg *config.Config, feedOverlay map[string][]string) map[string]string {
 	if cfg == nil {
 		return nil
 	}
-	_, nameToID, err := buildAddressBookTableWithFeeds(cfg, nil)
+	_, nameToID, err := buildAddressBookTableWithFeeds(cfg, feedOverlay)
 	if err != nil {
 		return nil
 	}
-	rules, err := buildPolicySnapshotsWithAddressBook(cfg, nil, nil, nameToID)
+	rules, err := buildPolicySnapshotsWithAddressBook(cfg, nil, feedOverlay, nameToID)
 	if err != nil {
 		// A config whose snapshot does not build is one the commit path
 		// rejects anyway. Returning nil makes the caller fall back to the
@@ -85,15 +86,15 @@ func PolicyResolvedFingerprints(cfg *config.Config) map[string]string {
 // resolved rule content with stable-name and runtime-id identity fields
 // removed. It is used only to validate an explicit rename ancestry relation;
 // ordinary delete/add pairs must not infer continuity from matching content.
-func PolicyResolvedIdentityStrippedFingerprints(cfg *config.Config) map[string]string {
+func PolicyResolvedIdentityStrippedFingerprints(cfg *config.Config, feedOverlay map[string][]string) map[string]string {
 	if cfg == nil {
 		return nil
 	}
-	_, nameToID, err := buildAddressBookTableWithFeeds(cfg, nil)
+	_, nameToID, err := buildAddressBookTableWithFeeds(cfg, feedOverlay)
 	if err != nil {
 		return nil
 	}
-	rules, err := buildPolicySnapshotsWithAddressBook(cfg, nil, nil, nameToID)
+	rules, err := buildPolicySnapshotsWithAddressBook(cfg, nil, feedOverlay, nameToID)
 	if err != nil {
 		return nil
 	}
