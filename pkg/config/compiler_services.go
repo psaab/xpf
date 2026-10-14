@@ -183,9 +183,10 @@ func validateRPMLinkLocalZoneStrict(cfg *Config) error {
 			if zone == "" && test.DestinationInterface == "" {
 				return fmt.Errorf(
 					"services rpm probe %q test %q: target %q is an IPv6 link-local address "+
-						"with no scope — add an explicit %%zone (fe80::1%%ge-0/0/3, or in a "+
-						"URL target http://[fe80::1%%25ge-0/0/3]/) or a destination-interface "+
-						"so the probe can pick the egress link",
+					"with no scope — add an explicit %%zone (fe80::1%%ge-0/0/3; in a URL "+
+						"target the zone must be kernel-spelled and %%25-escaped, "+
+						"http://[fe80::1%%25ge-0-0-3]/) or a destination-interface so the "+
+						"probe can pick the egress link",
 					probe.Name, test.Name, test.Target)
 			}
 		}
