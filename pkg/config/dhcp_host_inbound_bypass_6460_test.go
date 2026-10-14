@@ -167,3 +167,44 @@ func TestDHCPServerHostInboundBypassWarnings(t *testing.T) {
 		t.Fatalf("(k) ValidateConfig must surface the #6460 advisory (registration), got %v", w)
 	}
 }
+
+func TestDHCPServerHostInboundBypassWarningsCanonicalUnitRef12843(t *testing.T) {
+	cfg := &Config{}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*InterfaceUnit{1: {Number: 1}}},
+	}
+	cfg.Security.Zones = map[string]*ZoneConfig{
+		"untrust": {Interfaces: []string{"ge-0/0/1.1"}, HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}}},
+	}
+	cfg.System.DHCPServer.DHCPLocalServer = mkDHCPGroups("g1", "ge-0/0/1.01")
+
+	if w := validateDHCPServerHostInboundBypassWarnings(cfg); !hasWarn6460(w, `serves interface "ge-0/0/1.01" (security zone "untrust")`) {
+		t.Fatalf("padded DHCP unit alias must resolve to the configured zone and warn, got %v", w)
+	}
+	// Keep effective-policy lookup on the authored ref so an override keyed by
+	// the same spelling still applies for hand-built configs without compile stamps.
+	cfg.Security.Zones["untrust"].InterfaceHostInbound = map[string]*HostInboundTraffic{
+		"ge-0/0/1.01": {SystemServices: []string{"dhcp"}},
+	}
+	if w := validateDHCPServerHostInboundBypassWarnings(cfg); len(w) != 0 {
+		t.Fatalf("padded group ref's exact interface override must still admit dhcp, got %v", w)
+	}
+}
+
+func TestDHCPServerHostInboundBypassWarningsConfigScopedZoneQuarantine12843(t *testing.T) {
+	cfg := &Config{}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*InterfaceUnit{1: {Number: 1}}},
+	}
+	cfg.Security.Zones = map[string]*ZoneConfig{
+		"z214": {Interfaces: []string{"ge-0/0/1.1"}, HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}}},
+	}
+	// This collision exists only in the recorded node/group runtime view, not
+	// among the effective zone keys in Security.Zones.
+	cfg.ZoneQuarantineNames = []string{"z174", "z214"}
+	cfg.System.DHCPServer.DHCPLocalServer = mkDHCPGroups("g1", "ge-0/0/1.1")
+
+	if w := validateDHCPServerHostInboundBypassWarnings(cfg); len(w) != 0 {
+		t.Fatalf("runtime-quarantined zone must not be attributed by advisory, got %v", w)
+	}
+}

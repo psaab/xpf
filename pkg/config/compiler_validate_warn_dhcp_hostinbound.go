@@ -166,7 +166,10 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 				continue
 			}
 			for _, ifn := range g.Interfaces {
-				zname, ok := ifZone[ifn]
+				// Group refs and zone keys use the same canonical logical-unit
+				// identity (#9821); padded unit spellings must resolve alike.
+				ifKey := cfg.SplitInterfaceUnitRef(ifn).Literal
+				zname, ok := ifZone[ifKey]
 				if !ok {
 					continue
 				}
@@ -229,7 +232,7 @@ func dhcpHostInboundZoneMap(cfg *Config) map[string]string {
 		znames = append(znames, name)
 	}
 	sort.Strings(znames)
-	excludedZones := ZoneQuarantineExclusions(znames)
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zname := range znames {
 		if _, excluded := excludedZones[zname]; excluded {
