@@ -621,6 +621,120 @@ fn expired_scheduler_lease_preserves_denying_rules_in_latched_snapshot() {
     }
 }
 
+/// #12860: a scheduled Deny/Reject whose snapshot bit is `inactive:true` is
+/// nevertheless eligible once the scheduler heartbeat lease expires
+/// (`try_match_rule`), so its ICMP type constraint must arm the packet-scoped
+/// bitmaps used by established-session owner/foreign hits.
+#[test]
+fn expired_scheduler_inactive_icmp_deny_arms_packet_gate_12860() {
+    let first_receipt_ns = 1_000;
+    let expired_at = first_receipt_ns + SCHEDULER_HEARTBEAT_LEASE_NS + 1;
+    for action in ["deny", "reject"] {
+        for (label, protocol, icmp_type, src, dst) in [
+            (
+                "icmpv4",
+                "icmp",
+                8_u8,
+                "10.0.61.100".parse::<IpAddr>().expect("src"),
+                "172.16.80.200".parse::<IpAddr>().expect("dst"),
+            ),
+            (
+                "icmpv6",
+                "icmpv6",
+                128_u8,
+                "2001:db8::1".parse::<IpAddr>().expect("src"),
+                "2001:db8:1::1".parse::<IpAddr>().expect("dst"),
+            ),
+        ] {
+            let deny = scheduled_icmp_deny_12860(action, protocol, icmp_type, true);
+            let permit = icmp_app_rule("junos-icmp-all", protocol, None);
+            let state = parse_policy_state("deny", &[deny, permit], &test_zone_name_to_id());
+            assert!(state.scheduler_lease.apply(7, first_receipt_ns));
+            let protocol_number = if protocol == "icmp" {
+                PROTO_ICMP
+            } else {
+                PROTO_ICMPV6
+            };
+            assert!(
+                state.icmp_packet_verdict_may_depend_on_type(protocol_number),
+                "an inactive scheduled {action} with a {label} type constraint must arm \
+                 the packet gate so an expired lease cannot bypass it"
+            );
+            assert!(
+                !state.icmp_verdict_may_depend_on_type(protocol_number),
+                "the frame-independent revocation gate must stay permit-only for {action}"
+            );
+            let evaluate = |now_ns| {
+                evaluate_policy_result_with_icmp_at(
+                    &state,
+                    TEST_LAN_ZONE_ID,
+                    TEST_WAN_ZONE_ID,
+                    src,
+                    dst,
+                    protocol_number,
+                    0,
+                    0,
+                    Some((icmp_type, 0)),
+                    64,
+                    now_ns,
+                )
+                .action
+            };
+            let expected_action = if action == "deny" {
+                PolicyAction::Deny
+            } else {
+                PolicyAction::Reject
+            };
+            assert_eq!(
+                evaluate(first_receipt_ns),
+                PolicyAction::Permit,
+                "while the lease is fresh the inactive {action} must not match ({label})"
+            );
+            assert_eq!(
+                evaluate(expired_at),
+                expected_action,
+                "after lease expiry the scheduled {action} must match its {label} type"
+            );
+        }
+    }
+}
+
+/// #12860 controls: an unscheduled inactive deny must never arm the packet
+/// gate (it can never become eligible), while an active scheduled deny must.
+#[test]
+fn inactive_icmp_deny_gate_controls_12860() {
+    let mut unscheduled_rule = scheduled_icmp_deny_12860("deny", "icmp", 8, true);
+    unscheduled_rule.scheduler_name.clear();
+    let unscheduled = parse_policy_state("deny", &[unscheduled_rule], &test_zone_name_to_id());
+    assert!(
+        !unscheduled.icmp_packet_verdict_may_depend_on_type(PROTO_ICMP),
+        "an unscheduled inactive deny cannot become eligible"
+    );
+    let active = parse_policy_state(
+        "deny",
+        &[scheduled_icmp_deny_12860("deny", "icmp", 8, false)],
+        &test_zone_name_to_id(),
+    );
+    assert!(
+        active.icmp_packet_verdict_may_depend_on_type(PROTO_ICMP),
+        "an active type-constrained deny must arm the packet gate"
+    );
+}
+
+fn scheduled_icmp_deny_12860(
+    action: &str,
+    protocol: &str,
+    icmp_type: u8,
+    inactive: bool,
+) -> PolicyRuleSnapshot {
+    let mut deny = icmp_app_rule("junos-icmp-ping", protocol, Some(icmp_type));
+    deny.name = "scheduled-icmp-deny".to_string();
+    deny.scheduler_name = "workhours".to_string();
+    deny.inactive = inactive;
+    deny.action = action.to_string();
+    deny
+}
+
 #[test]
 fn scheduler_lease_ignores_version_zero_and_rejects_rollback() {
     let lease = SchedulerHeartbeatLease::default();
