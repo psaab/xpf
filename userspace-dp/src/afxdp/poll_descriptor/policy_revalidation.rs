@@ -360,9 +360,15 @@ fn source_nat_translation_still_valid(
     let (from_zone_id, to_zone_id) = if metadata.fabric_ingress || ingress_ifindex == 0 {
         (metadata.ingress_zone, metadata.egress_zone)
     } else {
-        crate::afxdp::forwarding::zone_pair_ids_for_flow_with_override(
+        let logical_ingress_ifindex = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
             forwarding,
             ingress_ifindex,
+            metadata.ingress_vlan_id,
+        )
+        .unwrap_or(ingress_ifindex);
+        crate::afxdp::forwarding::zone_pair_ids_for_flow_with_override(
+            forwarding,
+            logical_ingress_ifindex,
             None,
             egress_ifindex,
         )
