@@ -2,6 +2,7 @@ package policymatch
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -110,9 +111,32 @@ func AnalyzePolicyShadowing(cfg *config.Config) []string {
 // fires, yet the within-list passes certify it clean. Unscoped globals
 // (empty scope = all zones) are deliberately NOT analyzed — an earlier
 // wildcard is not an unreachability proof for them (see the note above).
+//
+// #12894: the pair universe is the runtime's SURVIVING zone scope, not the
+// authored text: cfg.Security.Zones minus the StableZoneID quarantine
+// losers and reserved names the snapshot
+// builder refuses to install (config.ZoneQuarantineExclusionsForConfig, the
+// same set quarantineCollidingZones uses to prune scoped-global members and
+// drop rules whose whole match side collided, #5577). Counting a dead or
+// undefined zone, or a repeated FromZones/ToZones member, in
+// total := len(fromSet) * len(toSet) makes a pair that can never carry
+// traffic look UNCOVERED — downgrading a 100%-unreachable SHADOWED /
+// REDUNDANT verdict to a false PARTIALLY SHADOWED — while the deduplicated
+// covered-pair map counts the surviving pair once. A stanza structurally
+// bound to a quarantined zone is dropped by the runtime, and its pair is no
+// longer in the universe, so it can no longer be credited as a coverer.
 func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePairPolicies, findings []string) []string {
-	var zones []string
+	// Effective (surviving) zone set: authored inventory minus the
+	// quarantine exclusions the snapshot builder prunes with.
+	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
+	defined := make(map[string]bool, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
+		if _, excluded := quarantined[name]; !excluded {
+			defined[name] = true
+		}
+	}
+	var zones []string
+	for name := range defined {
 		zones = append(zones, name)
 	}
 	sort.Strings(zones)
@@ -120,7 +144,17 @@ func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePai
 		if config.IsWildcardZoneSet(set) {
 			return zones
 		}
-		return set
+		// Deduplicate (first occurrence wins) and keep only members of the
+		// surviving runtime zone set; slices.Contains keeps this
+		// allocation-light for the tiny authored sets.
+		out := make([]string, 0, len(set))
+		for _, z := range set {
+			if !defined[z] || slices.Contains(out, z) {
+				continue
+			}
+			out = append(out, z)
+		}
+		return out
 	}
 	for _, global := range cfg.Security.GlobalPolicies {
 		if global == nil {
