@@ -28,17 +28,17 @@ func TestExtractDelegatedPrefixes(t *testing.T) {
 			PreferredLifetime: 3600 * time.Second,
 			ValidLifetime:     7200 * time.Second,
 			Prefix: &net.IPNet{
-				IP:   net.ParseIP("2001:db8:1000::"),
+				IP:   net.ParseIP("2606:4700:1000::"),
 				Mask: net.CIDRMask(48, 128),
 			},
 		})
 		msg.AddOption(iapd)
 
-		pds, _ := extractDelegatedPrefixes(msg, "wan0", now)
+		pds, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 		if len(pds) != 1 {
 			t.Fatalf("got %d prefixes, want 1", len(pds))
 		}
-		want := netip.MustParsePrefix("2001:db8:1000::/48")
+		want := netip.MustParsePrefix("2606:4700:1000::/48")
 		if pds[0].Prefix != want {
 			t.Errorf("prefix = %s, want %s", pds[0].Prefix, want)
 		}
@@ -60,7 +60,7 @@ func TestExtractDelegatedPrefixes(t *testing.T) {
 		}
 		msg.MessageType = dhcpv6.MessageTypeReply
 
-		pds, _ := extractDelegatedPrefixes(msg, "wan0", now)
+		pds, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 		if len(pds) != 0 {
 			t.Errorf("got %d prefixes, want 0", len(pds))
 		}
@@ -80,7 +80,7 @@ func TestExtractDelegatedPrefixes(t *testing.T) {
 			PreferredLifetime: 3600 * time.Second,
 			ValidLifetime:     7200 * time.Second,
 			Prefix: &net.IPNet{
-				IP:   net.ParseIP("2001:db8:1000::"),
+				IP:   net.ParseIP("2606:4700:1000::"),
 				Mask: net.CIDRMask(48, 128),
 			},
 		})
@@ -88,18 +88,18 @@ func TestExtractDelegatedPrefixes(t *testing.T) {
 			PreferredLifetime: 1800 * time.Second,
 			ValidLifetime:     3600 * time.Second,
 			Prefix: &net.IPNet{
-				IP:   net.ParseIP("2001:db8:2000::"),
+				IP:   net.ParseIP("2606:4700:2000::"),
 				Mask: net.CIDRMask(56, 128),
 			},
 		})
 		msg.AddOption(iapd)
 
-		pds, _ := extractDelegatedPrefixes(msg, "wan0", now)
+		pds, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 		if len(pds) != 2 {
 			t.Fatalf("got %d prefixes, want 2", len(pds))
 		}
-		if pds[1].Prefix != netip.MustParsePrefix("2001:db8:2000::/56") {
-			t.Errorf("second prefix = %s, want 2001:db8:2000::/56", pds[1].Prefix)
+		if pds[1].Prefix != netip.MustParsePrefix("2606:4700:2000::/56") {
+			t.Errorf("second prefix = %s, want 2606:4700:2000::/56", pds[1].Prefix)
 		}
 	})
 }

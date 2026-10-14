@@ -185,25 +185,25 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 		{
 			name:    "length 48 accepted",
 			prefLen: 48,
-			want:    "2001:db8:1000::/48",
+			want:    "2606:4700:1000::/48",
 			why:     "Over-reach guard: the common delegation must still decode.",
 		},
 		{
 			name:    "length 56 accepted",
 			prefLen: 56,
-			want:    "2001:db8:1000::/56",
+			want:    "2606:4700:1000::/56",
 			why:     "Over-reach guard: the common delegation must still decode.",
 		},
 		{
 			name:    "length 64 accepted",
 			prefLen: 64,
-			want:    "2001:db8:1000::/64",
+			want:    "2606:4700:1000::/64",
 			why:     "Over-reach guard: the common delegation must still decode.",
 		},
 		{
 			name:    "length 128 accepted",
 			prefLen: 128,
-			want:    "2001:db8:1000::/128",
+			want:    "2606:4700:1000::/128",
 			why: "Legal: a single-address delegation. The upper bound is INCLUSIVE — " +
 				"an off-by-one guard (>= 128) would reject a conforming server.",
 		},
@@ -212,7 +212,7 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 			prefLen: 129,
 			want:    "",
 			why: "First out-of-range value. net.CIDRMask(129, 128) is nil, " +
-				"Size() is (0,0), and the old code stored 2001:db8:1000::/0.",
+				"Size() is (0,0), and the old code stored 2606:4700:1000::/0.",
 		},
 		{
 			name:    "length 130 refused",
@@ -231,9 +231,9 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			msg := decodeReplyWire(t, 1,
-				iaPDWire(iaPrefixWire(tc.prefLen, "2001:db8:1000::", 3600, 7200)))
+				iaPDWire(iaPrefixWire(tc.prefLen, "2606:4700:1000::", 3600, 7200)))
 
-			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", now)
+			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", now, nil)
 
 			if tc.want == "" {
 				if len(live) != 0 {
@@ -271,8 +271,8 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 func TestIAPDPrefixLen6531_BadSiblingDoesNotRideAlong(t *testing.T) {
 	now := time.Now()
 
-	good := func() []byte { return iaPrefixWire(56, "2001:db8:900d::", 3600, 7200) }
-	bad := func() []byte { return iaPrefixWire(200, "2001:db8:bad::", 3600, 7200) }
+	good := func() []byte { return iaPrefixWire(56, "2606:4700:900d::", 3600, 7200) }
+	bad := func() []byte { return iaPrefixWire(200, "2606:4700:bad::", 3600, 7200) }
 
 	for _, tc := range []struct {
 		name  string
@@ -284,13 +284,13 @@ func TestIAPDPrefixLen6531_BadSiblingDoesNotRideAlong(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			msg := decodeReplyWire(t, 2, iaPDWire(tc.order...))
 
-			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", now)
+			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", now, nil)
 
 			if len(live) != 1 {
 				t.Fatalf("got %d live prefixes %v, want exactly the good /56", len(live), live)
 			}
-			if got := live[0].Prefix; got != netip.MustParsePrefix("2001:db8:900d::/56") {
-				t.Errorf("live prefix = %s, want 2001:db8:900d::/56", got)
+			if got := live[0].Prefix; got != netip.MustParsePrefix("2606:4700:900d::/56") {
+				t.Errorf("live prefix = %s, want 2606:4700:900d::/56", got)
 			}
 			if len(withdrawn) != 0 {
 				t.Errorf("withdrawn = %v, want empty", withdrawn)
@@ -309,13 +309,13 @@ func TestIAPDPrefixLen6531_BadSiblingDoesNotRideAlong(t *testing.T) {
 //
 // reconcileDelegatedPDs keys its withdrawal set by exact netip.Prefix
 // equality, so a /0 withdrawal cannot mass-revoke held prefixes today — but
-// letting it through would log a phantom "server withdrew 2001:db8:bad::/0"
+// letting it through would log a phantom "server withdrew 2606:4700:bad::/0"
 // and leave a containment-based matcher one refactor away from a wipe.
 func TestIAPDPrefixLen6531_BadWithdrawalIsDropped(t *testing.T) {
 	msg := decodeReplyWire(t, 1,
-		iaPDWire(iaPrefixWire(129, "2001:db8:bad::", 0, 0)))
+		iaPDWire(iaPrefixWire(129, "2606:4700:bad::", 0, 0)))
 
-	live, withdrawn := extractDelegatedPrefixes(msg, "wan0", time.Now())
+	live, withdrawn := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
 
 	if len(live) != 0 {
 		t.Errorf("live = %v, want empty", live)
@@ -344,14 +344,14 @@ func TestIAPDPrefixLen6531_BadWithdrawalIsDropped(t *testing.T) {
 //     held set — the attack the "retried" wording obscured.
 //
 // RED-on-revert (assertions, not a build break): the length-200 IAPREFIX
-// becomes a live 2001:db8:bad::/0, so assertion 2 reds ("got 1 live prefix …
-// 2001:db8:bad::/0") and assertion 3 reds twice — reconcileDelegatedPDs takes
+// becomes a live 2606:4700:bad::/0, so assertion 2 reds ("got 1 live prefix …
+// 2606:4700:bad::/0") and assertion 3 reds twice — reconcileDelegatedPDs takes
 // the apply=true branch and the /0 lands in the reconciled set alongside the
 // held /56.
 func TestIAPDPrefixLen6531_MixedIANAReplyStaysUsable(t *testing.T) {
 	msg := decodeReplyWire(t, 1,
 		iaNAWire(iaAddrWire("2001:db8:a::5", 3600, 7200)),
-		iaPDWire(iaPrefixWire(200, "2001:db8:bad::", 3600, 7200)))
+		iaPDWire(iaPrefixWire(200, "2606:4700:bad::", 3600, 7200)))
 
 	m := NewManagerForTesting(nil)
 	res, err := m.parseV6Reply(context.Background(), "wan0", msg,
@@ -380,7 +380,7 @@ func TestIAPDPrefixLen6531_MixedIANAReplyStaysUsable(t *testing.T) {
 	// 3. Silence, not withdrawal: the held delegation is retained verbatim.
 	prior := []DelegatedPrefix{{
 		Interface:     "wan0",
-		Prefix:        netip.MustParsePrefix("2001:db8:900d::/56"),
+		Prefix:        netip.MustParsePrefix("2606:4700:900d::/56"),
 		ValidLifetime: 7200 * time.Second,
 	}}
 	got, apply := reconcileDelegatedPDs(prior, res.prefixes, res.withdrawnPDs)
@@ -421,15 +421,15 @@ func TestIAPDPrefixLen6531_NormalDelegationSurvivesSubPrefixDerivation(t *testin
 		subPrefLen int
 		advertised string
 	}{
-		{56, "2001:db8:900d::/56", 64, "2001:db8:900d::/64"},
-		{64, "2001:db8:900d::/64", 64, "2001:db8:900d::/64"},
-		{48, "2001:db8:900d::/48", 0, "2001:db8:900d::/48"},
+		{56, "2606:4700:900d::/56", 64, "2606:4700:900d::/64"},
+		{64, "2606:4700:900d::/64", 64, "2606:4700:900d::/64"},
+		{48, "2606:4700:900d::/48", 0, "2606:4700:900d::/48"},
 	} {
 		t.Run(tc.delegated, func(t *testing.T) {
 			msg := decodeReplyWire(t, 1,
-				iaPDWire(iaPrefixWire(tc.prefLen, "2001:db8:900d::", 3600, 7200)))
+				iaPDWire(iaPrefixWire(tc.prefLen, "2606:4700:900d::", 3600, 7200)))
 
-			live, _ := extractDelegatedPrefixes(msg, "wan0", now)
+			live, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 			if len(live) != 1 {
 				t.Fatalf("a /%d delegation must decode, got %d live prefixes",
 					tc.prefLen, len(live))

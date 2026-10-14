@@ -900,7 +900,12 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 	// Extract IA_PD delegated prefixes, split into live and (RFC 8415
 	// §12.1) explicitly-withdrawn valid-lifetime-0 prefixes (#4874 B).
 	if wantPD {
-		result.prefixes, result.withdrawnPDs = extractDelegatedPrefixes(adv, ifaceName, now, expectedPD)
+		// #10856: extraction also refuses IA_PD prefixes that overlap
+		// configured space. The daemon keeps the protected snapshot current
+		// (SetProtectedIPv6Prefixes on every apply), so a renewal after a
+		// config change re-validates a previously accepted delegation
+		// against the new configuration.
+		result.prefixes, result.withdrawnPDs = extractDelegatedPrefixes(adv, ifaceName, now, m.protectedIPv6Prefixes(), expectedPD)
 		for _, dp := range result.prefixes {
 			slog.Info("DHCPv6: received delegated prefix",
 				"interface", ifaceName,
@@ -1132,7 +1137,18 @@ func (m *Manager) buildDHCPv6Modifiers(ifaceName string, opts *DHCPv6Options) []
 // > 128, or a non-contiguous mask) is dropped and enters NEITHER set — a
 // > 128 length otherwise decodes to a /0 that would be advertised on-link
 // to the LAN (#6531).
-func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Time, expectedIAID ...*[4]byte) (live, withdrawn []DelegatedPrefix) {
+//
+// #10856: an IAPREFIX is also refused unless it is global-unicast space
+// (DelegatedIPv6PrefixRefusalReason: ULA, documentation, link-local,
+// multicast, loopback, unspecified, IPv4-compatible/mapped, site-local are
+// all refused — there is no pin mechanism yet, #12533 tracks one) and unless
+// it overlaps no protected prefix — the configured interface, RA, and NAT64
+// prefixes the daemon injects via SetProtectedIPv6Prefixes. Like the mask
+// arm, both refusals skip only the offending IAPREFIX, so a usable sibling
+// is salvaged. A prefix refused here is NOT withdrawn either: the server
+// did not revoke it, and manufacturing a withdrawal would let a spoofed
+// reply tear down an unrelated held delegation.
+func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Time, protected []netip.Prefix, expectedIAID ...*[4]byte) (live, withdrawn []DelegatedPrefix) {
 	for _, opt := range msg.Options.Options {
 		iapdOpt, ok := opt.(*dhcpv6.OptIAPD)
 		if !ok {
@@ -1208,11 +1224,23 @@ func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Ti
 				continue
 			}
 			delegated := netip.PrefixFrom(ip, ones)
-			if reason := config.DelegatedIPv6PrefixRefusalReasonBlocklist(delegated); reason != "" {
+			if reason := config.DelegatedIPv6PrefixRefusalReason(delegated); reason != "" {
 				slog.Warn("DHCPv6: refusing IA_PD prefix with blocked address class",
 					"interface", ifaceName,
 					"prefix", delegated,
 					"reason", reason)
+				continue
+			}
+			// #10856: a delegation overlapping CONFIGURED space (interface
+			// addresses, static RA prefixes, NAT64 prefixes) must not be
+			// accepted either: re-advertising it on-link + autonomous on the
+			// LAN collides SLAAC hosts with the configured segment. No pin
+			// mechanism exists yet (#12533), so every overlap is refused.
+			if hit := overlappingProtectedPrefix(delegated, protected); hit.IsValid() {
+				slog.Warn("DHCPv6: refusing IA_PD prefix overlapping configured prefix",
+					"interface", ifaceName,
+					"prefix", delegated,
+					"configured", hit)
 				continue
 			}
 			dp := DelegatedPrefix{
@@ -1230,6 +1258,20 @@ func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Ti
 		}
 	}
 	return live, withdrawn
+}
+
+// overlappingProtectedPrefix returns the first protected prefix that shares
+// any address with delegated, or the zero Prefix when there is no overlap.
+// Host bits are ignored on both sides (IPv6PrefixesOverlap), so a delegation
+// is refused whether it contains, is contained by, or straddles configured
+// space.
+func overlappingProtectedPrefix(delegated netip.Prefix, protected []netip.Prefix) netip.Prefix {
+	for _, p := range protected {
+		if config.IPv6PrefixesOverlap(delegated, p) {
+			return p
+		}
+	}
+	return netip.Prefix{}
 }
 
 // waitForLinkLocal waits until the interface has a link-local IPv6 address.

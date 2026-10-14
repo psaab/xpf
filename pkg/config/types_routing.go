@@ -588,6 +588,16 @@ type RAInterfaceConfig struct {
 	NAT64PrefixLife    int      // PREF64 lifetime in seconds (0 = default)
 	LinkMTU            int      // advertised link MTU, 0 = omit
 	SourceLinkLocal    string   // explicit link-local to use as RA source (overrides auto-selected)
+	// ProtectedPrefixes is the box-wide set of CONFIGURED IPv6 prefixes
+	// (interface addresses, static RA prefixes, NAT64 prefixes) that a
+	// DELEGATED prefix must not overlap (#10856). It is set ONLY by the
+	// daemon's buildRAConfigs, exactly like RAPrefix.Delegated: the compiler
+	// leaves it nil, so an operator-authored prefix is never refused against
+	// it. The sender consults it for delegated PIOs only — defense in depth
+	// behind the DHCPv6 decoder, which refuses the same overlaps at
+	// extraction time (#12533 tracks the future pin mechanism that will
+	// scope intentional exceptions).
+	ProtectedPrefixes []string // configured prefixes a delegated prefix must not overlap
 	// ReachableTime / RetransTimer are the RFC 4861 §4.2 RA header fields,
 	// in milliseconds (#4307). 0 = "unspecified" (host uses its own
 	// default), which is the pre-#4307 wire behavior.

@@ -3,6 +3,7 @@ package dhcp
 import (
 	"context"
 	"fmt"
+	"net/netip"
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
 )
@@ -108,4 +109,12 @@ func (m *Manager) HasOptionStateForTesting(ifaceName string, af AddressFamily) b
 	}
 	_, ok := m.v6opts[ifaceName]
 	return ok
+}
+
+// ProtectedIPv6PrefixesForTesting snapshots the set installed by
+// SetProtectedIPv6Prefixes, so callers outside pkg/dhcp (the daemon wiring
+// test) can assert what the daemon installed without real DHCPv6 traffic.
+// Callers must not use this from production code paths.
+func (m *Manager) ProtectedIPv6PrefixesForTesting() []netip.Prefix {
+	return m.protectedIPv6Prefixes()
 }

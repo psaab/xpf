@@ -208,6 +208,13 @@ func (d *Daemon) reconcileDHCPClients(cfg *config.Config) {
 	if d.opts.NoDataplane || d.dhcp == nil {
 		return
 	}
+	// #10856: keep the IA_PD overlap set current BEFORE the reconcile so a
+	// client (re)started by this apply immediately decodes replies against
+	// the new configuration. Deliberately not part of the client
+	// fingerprint: a configured-prefix change must not restart clients or
+	// drop leases — renewals re-validate, and the RA sink refuses overlaps
+	// at emission time.
+	d.dhcp.SetProtectedIPv6Prefixes(config.ConfiguredIPv6Prefixes(cfg))
 	specs := buildDHCPClientSpecs(cfg)
 	if len(specs) == 0 {
 		// Reconcile(nil) stops any running clients; with none running

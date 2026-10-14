@@ -16,6 +16,17 @@ import (
 // buildRAConfigs merges static RA configs from the Junos config with
 // PD-derived prefixes from DHCPv6 prefix delegation.
 func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig {
+	// #10856: every RA carries the box-wide configured-prefix set so the
+	// sender can refuse a DELEGATED PIO that overlaps configured interface,
+	// RA, or NAT64 space — including a delegation acquired before the
+	// overlapping configuration appeared. Computed from static config only;
+	// the PD-derived prefixes merged below are deliberately absent, or each
+	// delegation would overlap itself.
+	protectedPD := config.ConfiguredIPv6Prefixes(cfg)
+	protectedPDStrings := make([]string, 0, len(protectedPD))
+	for _, p := range protectedPD {
+		protectedPDStrings = append(protectedPDStrings, p.String())
+	}
 	// Start with static RA configs from the configuration.
 	raByIface := make(map[string]*config.RAInterfaceConfig)
 	var result []*config.RAInterfaceConfig
@@ -80,6 +91,9 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 	// VLAN subinterface), the RA sender should bind to that address instead
 	// of auto-selecting a transient EUI-64 link-local.
 	for _, ra := range result {
+		// #10856: same slice for every interface — the protected set is
+		// box-wide, and the sender treats it as read-only.
+		ra.ProtectedPrefixes = protectedPDStrings
 		ifc, ll := resolveRASourceLinkLocal(cfg, ra.Interface)
 		if ifc == nil {
 			continue
