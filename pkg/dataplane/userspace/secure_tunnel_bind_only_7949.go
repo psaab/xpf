@@ -110,8 +110,36 @@ func appendBindInterfaceOnlySecureTunnelRows(
 	}
 	haveName := make(map[string]bool, len(out))
 	haveDev := make(map[string]bool, len(out))
+	// When a declared unit > 0 causes the regular builder to emit the base
+	// `st<N>` row, that row is not an ownership claim for unit 0. A zone on
+	// `st<N>.0` names the actual unit-0 identity and must own the shared bare
+	// xfrmi instead of being suppressed by the earlier base row.
+	// Retire that inherited base row only when the base itself was not authored;
+	// explicit bare zone members keep their row and precedence.
+	//
+	// Unit 0 may already have a stanza row. In that case it, not the base row,
+	// is the authoritative row; remove only the non-authored base alias.
 	for i := range out {
 		haveName[out[i].Name] = true
+	}
+	for i := len(out) - 1; i >= 0; i-- {
+		ref := out[i].Name
+		if _, _, hasUnit := strings.Cut(ref, "."); hasUnit || authored[ref] != "" {
+			continue
+		}
+		unitRef := ref + ".0"
+		if authored[unitRef] == "" || haveName[unitRef] {
+			continue
+		}
+		dev, ok := cfg.SecureTunnelNetdevForRef(unitRef)
+		if !ok || dev == "" || out[i].LinuxName != dev {
+			continue
+		}
+		delete(haveName, ref)
+		out = append(out[:i], out[i+1:]...)
+		idents = append(idents[:i], idents[i+1:]...)
+	}
+	for i := range out {
 		if out[i].LinuxName != "" {
 			haveDev[out[i].LinuxName] = true
 		}
@@ -176,10 +204,21 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			parentIfindex, _, _, _ = buildLinkSnapshot(parentLinux)
 		}
 		var cosUnit *config.CoSInterfaceUnit
-		if cfg.ClassOfService != nil && dotted && unit != "" {
+		if cfg.ClassOfService != nil {
 			if cosIface := cfg.ClassOfService.Interfaces[base]; cosIface != nil {
-				if unitNum, err := strconv.Atoi(unit); err == nil {
-					cosUnit = cosIface.Units[unitNum]
+				if dotted && unit != "" {
+					if unitNum, err := strconv.Atoi(unit); err == nil {
+						cosUnit = cosIface.Units[unitNum]
+					}
+				} else {
+					// A bare base ref denotes the base device/zero unit for
+					// CoS. Unit-specific values override the interface-level
+					// binding per Junos precedence; when no unit-0 binding
+					// exists, use the base-level binding directly.
+					cosUnit = cosIface.Units[0]
+					if cosUnit == nil {
+						cosUnit = cosIface.Level
+					}
 				}
 			}
 		}
