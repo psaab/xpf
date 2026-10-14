@@ -564,8 +564,23 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 		node = &clone
 	}
 
-	// Aggressive session aging
-	if agingNode := node.FindChild("aging"); agingNode != nil {
+	// #13009 (second half of #12888): every stanza-sensitive read below
+	// iterates ALL matching siblings and MERGES into sec.Flow. The
+	// hierarchical parser keeps a repeated block as a separate sibling (it
+	// does not merge — same root cause as #4818/#4820/#4821), and
+	// compileSecurity calls compileFlow once per `security flow` stanza, so
+	// the pre-fix FIRST-ONLY FindChild reads silently dropped every later
+	// tcp-session/aging/traceoptions/tcp-mss block, and the per-stanza
+	// `&TCPSessionConfig{}` / FlowTraceoptions recreations wiped every
+	// earlier stanza's settings — while the strict gates already walk every
+	// sibling (#3566), so compiler and gates read different configs. Merge
+	// semantics: each block contributes the fields it sets; a scalar set by
+	// two blocks keeps the LAST occurrence (unchanged for the last stanza,
+	// recovered for earlier ones); lists (trace flags, packet filters,
+	// unknown aging leaves) accumulate.
+
+	// Aggressive session aging (#13009: every `aging` sibling, not first-only)
+	for _, agingNode := range node.FindChildren("aging") {
 		// #9235: the `security flow` expansion above covers `flow`'s OWN
 		// children; `aging`'s are a separate container and were never expanded,
 		// so `aging early-ageout 10 high-watermark 80 low-watermark 60` set
@@ -604,9 +619,13 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 		}
 	}
 
-	tcpNode := node.FindChild("tcp-session")
-	if tcpNode != nil {
-		sec.Flow.TCPSession = &TCPSessionConfig{}
+	// #13009: iterate every `tcp-session` sibling and find-or-create the
+	// struct — the old `sec.Flow.TCPSession = &TCPSessionConfig{}` ran per
+	// stanza and wiped every earlier stanza's timeouts (#4821 doctrine).
+	for _, tcpNode := range node.FindChildren("tcp-session") {
+		if sec.Flow.TCPSession == nil {
+			sec.Flow.TCPSession = &TCPSessionConfig{}
+		}
 		// #8939: a flat `set` command naming several tcp-session leaves is ONE
 		// command, and SetPath nests them rather than making them siblings, so
 		// this loop saw the first and nothing else. Measured: `closing-timeout
@@ -659,8 +678,8 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 		}
 	}
 
-	udpNode := node.FindChild("udp-session")
-	if udpNode != nil {
+	// #13009: every `udp-session` sibling, not first-only.
+	for _, udpNode := range node.FindChildren("udp-session") {
 		for _, opt := range udpNode.Children {
 			if opt.Name() == "timeout" && len(opt.Keys) >= 2 {
 				if v, err := strconv.Atoi(opt.Keys[1]); err == nil {
@@ -670,8 +689,8 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 		}
 	}
 
-	icmpNode := node.FindChild("icmp-session")
-	if icmpNode != nil {
+	// #13009: every `icmp-session` sibling, not first-only.
+	for _, icmpNode := range node.FindChildren("icmp-session") {
 		for _, opt := range icmpNode.Children {
 			if opt.Name() == "timeout" && len(opt.Keys) >= 2 {
 				if v, err := strconv.Atoi(opt.Keys[1]); err == nil {
@@ -681,9 +700,8 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 		}
 	}
 
-	// TCP MSS clamping
-	mssNode := node.FindChild("tcp-mss")
-	if mssNode != nil {
+	// TCP MSS clamping (#13009: every `tcp-mss` sibling, not first-only)
+	for _, mssNode := range node.FindChildren("tcp-mss") {
 		for _, opt := range tcpMSSOptionNodes(mssNode) {
 			switch opt.Name() {
 			case "ipsec-vpn":
@@ -748,7 +766,8 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 	// is rejected at strict commit by the schema typed-leaf validator; on the
 	// tolerant load path it is left at 0 (treated as unset). None of these
 	// reach the dataplane wire — they capture operator intent only.
-	if n := node.FindChild("route-change-timeout"); n != nil {
+	// #13009: every `route-change-timeout` sibling, last occurrence wins.
+	for _, n := range node.FindChildren("route-change-timeout") {
 		if len(n.Keys) >= 2 {
 			if v, err := strconv.Atoi(n.Keys[1]); err == nil {
 				sec.Flow.RouteChangeTimeout = v
@@ -761,7 +780,8 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 	if node.FindChild("force-ip-reassembly") != nil {
 		sec.Flow.ForceIPReassembly = true
 	}
-	if n := node.FindChild("multicast-session-lifetime"); n != nil {
+	// #13009: every `multicast-session-lifetime` sibling, last wins.
+	for _, n := range node.FindChildren("multicast-session-lifetime") {
 		if len(n.Keys) >= 2 {
 			if v, err := strconv.Atoi(n.Keys[1]); err == nil {
 				sec.Flow.MulticastSessionLifetime = v
@@ -772,17 +792,28 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 		sec.Flow.PreserveIncomingFragmentSize = true
 	}
 
-	// syn-flood-protection-mode
-	if spNode := node.FindChild("syn-flood-protection-mode"); spNode != nil {
+	// syn-flood-protection-mode (#13009: every sibling, last wins)
+	for _, spNode := range node.FindChildren("syn-flood-protection-mode") {
 		if len(spNode.Keys) >= 2 {
 			sec.Flow.SynFloodProtectionMode = spNode.Keys[1]
 		}
 	}
 
-	// traceoptions
-	if toNode := node.FindChild("traceoptions"); toNode != nil {
-		to := &FlowTraceoptions{}
-		if fileNode := toNode.FindChild("file"); fileNode != nil {
+	// traceoptions (#13009: merge EVERY `traceoptions` sibling into one
+	// FlowTraceoptions — the old per-stanza `sec.Flow.Traceoptions = to`
+	// wholesale-replaced the struct and discarded earlier stanzas' flags
+	// and packet filters, while the #3566 gates validated every stanza.)
+	for _, toNode := range node.FindChildren("traceoptions") {
+		to := sec.Flow.Traceoptions
+		if to == nil {
+			to = &FlowTraceoptions{}
+			sec.Flow.Traceoptions = to
+		}
+		// Every `file` sibling, last occurrence wins for the name; a block
+		// contributes the size/files values it carries (#13009 — the
+		// #3566 gates walk every file block, so the compiler must not stop
+		// at the first either).
+		for _, fileNode := range toNode.FindChildren("file") {
 			to.File = nodeVal(fileNode)
 			// Read size/files across every AST shape (single-line hierarchical,
 			// block hierarchical, and the #2419 flat-set collapsed child). The
@@ -842,7 +873,6 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 			}
 			to.PacketFilters = append(to.PacketFilters, pf)
 		}
-		sec.Flow.Traceoptions = to
 	}
 
 	return nil
