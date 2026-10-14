@@ -143,7 +143,7 @@ func TestMgmtControlZoneBareUnit0TunnelsAndQuarantinedMembersStayQuiet12830(t *t
 	cfg := &Config{
 		Security: SecurityConfig{Zones: map[string]*ZoneConfig{
 			"mgmt":    {Interfaces: []string{"gr-0/0/0", "ge-0/0/1.0"}},
-			"control": {Interfaces: []string{"ip-0/0/0", "st0", "st1"}},
+			"control": {Interfaces: []string{"ip-0/0/0", "st0"}},
 			"trust":   {Interfaces: []string{"ge-0/0/1.0"}},
 		}},
 		Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
@@ -154,7 +154,6 @@ func TestMgmtControlZoneBareUnit0TunnelsAndQuarantinedMembersStayQuiet12830(t *t
 	}
 	cfg.Security.IPsec.VPNs = map[string]*IPsecVPN{
 		"vpn0": {BindInterface: "st0"},
-		"vpn1": {BindInterface: "st1.0"},
 	}
 	appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
 	for _, w := range cfg.Warnings {
@@ -190,22 +189,36 @@ func TestMgmtControlZoneBareUnknownAndNonZeroUnitsStillWarn12830(t *testing.T) {
 	}
 }
 
-func TestMgmtControlZoneBindOnlySecureTunnelStaysQuiet12830(t *testing.T) {
-	for _, bind := range []string{"st0", "st0.0"} {
-		cfg := &Config{
-			Security: SecurityConfig{
-				Zones: map[string]*ZoneConfig{"mgmt": {Interfaces: []string{"st0"}}},
-				IPsec: IPsecConfig{VPNs: map[string]*IPsecVPN{
-					"vpn0": {BindInterface: bind},
-				}},
-			},
-		}
-		appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
-		for _, w := range cfg.Warnings {
-			if strings.Contains(w, "(#10308)") {
-				t.Errorf("bind-only st0 must stay quiet for bind %q: %q", bind, w)
+func TestMgmtControlZoneBindOnlySecureTunnelOwnership12830(t *testing.T) {
+	for _, tc := range []struct {
+		name, member, bind string
+		wantWarning        bool
+	}{
+		{name: "bare ref with bare bind", member: "st0", bind: "st0"},
+		{name: "dotted ref with dotted bind", member: "st0.0", bind: "st0.0"},
+		{name: "bare ref is not dotted bind device", member: "st0", bind: "st0.0", wantWarning: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				Security: SecurityConfig{
+					Zones: map[string]*ZoneConfig{"mgmt": {Interfaces: []string{tc.member}}},
+					IPsec: IPsecConfig{VPNs: map[string]*IPsecVPN{
+						"vpn0": {BindInterface: tc.bind},
+					}},
+				},
 			}
-		}
+			appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
+			found := false
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "(#10308)") {
+					found = true
+				}
+			}
+			if found != tc.wantWarning {
+				t.Errorf("warning = %t, want %t for member %q / bind %q (warnings=%v)",
+					found, tc.wantWarning, tc.member, tc.bind, cfg.Warnings)
+			}
+		})
 	}
 }
 

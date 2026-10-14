@@ -84,14 +84,6 @@ func userspaceMgmtZoneMemberIsData(cfg *Config, member string) bool {
 	if _, ok := cfg.SecureTunnelNetdevForRef(member); ok {
 		return false
 	}
-	// A bare interface row also represents unit 0. Check its authored tunnel
-	// binding explicitly: the compiler stores a unit-0 tunnel on the unit,
-	// while callers commonly refer to the interface by its bare name.
-	if !split.HasUnit {
-		if _, ok := cfg.SecureTunnelNetdevForRef(base + ".0"); ok {
-			return false
-		}
-	}
 	if cfg.Interfaces.Interfaces == nil {
 		return true
 	}
