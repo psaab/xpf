@@ -37,11 +37,14 @@ The primary deliverable is out-of-process wire verification across live Incus en
 | **CoS & Pacing** *(cluster)* | Concurrent high-priority (voice, DSCP EF, ≥10k pps) and best-effort elephants (calibration per §7) | p99 voice latency within calibrated floor; best-effort throttles under contention; no corruption | `FAIL: cos_starvation (best-effort HoL blocking)` | `wire_cos_fairness` |
 | **HA Failover** *(cluster)* | Kill/isolate primary under steady permitted flow | VIP answers from exactly one node within the calibrated window (GARP watch from both sides); established TCP survives; no dual-primary second GARP source | `FAIL: ha_dual_primary` or `FAIL: ha_session_drop` or `FAIL: ha_failover_timeout` | `wire_ha_failover` |
 | **Conntrack Lifecycle** | Session open → idle past timeout → re-probe; mid-stream pickup attempt; ICMP-error relay for an open flow | Expiry drops and evicts; mid-stream without SYN drops; related ICMP relayed, unrelated dropped | `FAIL: conntrack_stale` or `FAIL: conntrack_midstream_leak` or `FAIL: conntrack_icmp_mishandle` | `wire_conntrack_lifecycle` |
-| **Routing-Instance Separation (Deny)** | VRF-scoped probe toward a prefix leaked only into another table (rib-group / next-table / VRF-miss shape) with no permit path | 100% frame drop on wire (>= 1,000 frames); near-miss control in the leaking table captured in the same window | `FAIL: routing_separation_leak (VRF miss transited another table)` | `wire_routing_separation` |
+| **Routing-Instance Separation (Deny + Populated-RI Positive)** | VRF-scoped probe toward a prefix leaked only into another table (rib-group / next-table / VRF-miss shape) with no permit path; then the same steered tuple with the RI populated by a test-owned GRE member and an exact /32 static route, and again after removing only that route | Miss: 100% frame drop on wire (>= 1,000 frames); near-miss control in the leaking table captured in the same window. Populated (#11416, IPv4/UDP shape): steered tuple MUST reach the peer GRE-encapsulated through the RI member (>= 1,000 observed of >= 1,500 offered, same-window near-miss control observed); after deleting only the RI route the tuple MUST stop in any form (GRE or plain). | `FAIL: routing_separation_leak (VRF miss transited another table)` / `FAIL: populated-RI positive leg (over-deny or route-removal ineffective)` | `wire_routing_separation` |
 
 The Routing-Instance Separation row is exercised by `test-wire-routing-separation`
 (`--gate wire_routing_separation --adapter wire-gate`); its hermetic 9420/9819
-netns cells run in `make selftest` via #9812.
+netns cells run in `make selftest` via #9812. The #11416 populated-RI positive
+leg covers only the existing IPv4/UDP shape; the IPv6 twin, TCP, and
+return-path legs stay blocked on the maintainer ruling recorded in #11416
+(HA-safe config-write environment, options A/B/C).
 
 ## 4. Adversarial Fault Injection & Landing Witnesses
 Only faults with an observable *landing witness* are admitted. Invariants are evaluated strictly after the fault is proven to have landed. Fault rows run under §2 oracles and §6 isolation.

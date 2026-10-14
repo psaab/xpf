@@ -576,7 +576,7 @@ harness_adapt_wire_gate() {
 		direction="lower-better"
 		;;
 	wire_routing_separation)
-		required="probe_offered probe_leaked control_offered control_observed"
+		required="probe_offered probe_leaked control_offered control_observed precommit_control_offered precommit_control_observed populated_offered populated_observed populated_control_offered populated_control_observed removed_offered removed_observed removed_control_offered removed_control_observed"
 		headline="probe_leaked"
 		direction="lower-better"
 		;;
