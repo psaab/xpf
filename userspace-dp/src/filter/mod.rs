@@ -493,15 +493,19 @@ pub(crate) struct TermMatchExtra<'a> {
     pub(crate) fragment_protocol: Option<u8>,
 }
 
-// #7212/#11338 CONTRACT, stated here because this is where the next author looks.
-// `Filter::varies_per_packet_within_flow()` summarises reads of this struct
-// made by `per_packet_l4_matches` ALONE. `port_terms_match` also reads
-// `is_fragment` / `l4_present` / `ports_unknown` when a PORT constraint exists.
-// The protocol matcher reads the sentinel marker here too; the frame builder
-// supplies the recovered header value when available. Session revalidation
-// evaluates the flow key's protocol with `TermMatchExtra::default()`, not the
-// metadata sentinel. Any new read of this struct outside those consumers must
-// be checked against static revalidation and the `Never` bullet in `filter/README.md`.
+// #7212/#11338/#12877 CONTRACT, stated here because this is where the next
+// author looks. `Filter::varies_per_packet_within_flow()` summarises reads of
+// this struct made by `per_packet_l4_matches` ALONE. `port_terms_match` also
+// reads `is_fragment` / `l4_present` / `ports_unknown` when a PORT constraint
+// exists, and #12877 additionally gates that evaluation on
+// `ip_proto::has_l4_ports(protocol)` — the RAW protocol ARGUMENT, not the
+// sentinel-resolved one, so the 255 marker fails closed — which is why the
+// protocol is part of the port predicate. The protocol matcher reads the
+// sentinel marker here too; the frame builder supplies the recovered header
+// value when available. Session revalidation evaluates the flow key's
+// protocol with `TermMatchExtra::default()`, not the metadata sentinel. Any
+// new read of this struct outside those consumers must still be checked
+// against static revalidation and the `Never` bullet in `filter/README.md`.
 
 
 impl<'a> TermMatchExtra<'a> {

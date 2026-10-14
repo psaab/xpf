@@ -367,6 +367,20 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   about the FLOW, so it uses the flow's 5-tuple alone: `default()` leaves the
   fragment gate untriggered and per-packet-L4 conditions inert.
 
+  **#12877: port predicates are gated on `has_l4_ports(protocol)` — the
+  protocol ARGUMENT, which revalidation legitimately has.** The gates above
+  key on `TermMatchExtra` and so must stay inert on a static re-walk; the
+  protocol is different: it is a field of the 5-tuple itself, valid on both
+  the packet path and the revalidation path. An ICMP/ICMPv6 query flow keyed
+  by #3067 carries (identifier, 0) as its pseudo-ports, and pre-#12877 a
+  protocol-unconstrained `destination-port-except` / `source-port` /
+  `source-port-except` term evaluated those pseudo ports for real (except
+  inverted the 0 into a MATCH, a positive term matched the identifier) —
+  falsely dropping or PBR-steering ping. Post-#12877 a
+  port-constrained term never matches a flow whose protocol has no ports, in
+  either polarity; that is the correct static verdict as well, not merely
+  the safe one. TCP/UDP behavior is unchanged.
+
   `protocol_bitmap_matches` also reads `TermMatchExtra` outside
   `per_packet_l4_matches` for #11338. It consults the native-fragment sentinel
   fields only when the shim supplied 255; frame-backed evaluation resolves the

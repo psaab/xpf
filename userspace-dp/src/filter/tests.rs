@@ -559,6 +559,189 @@ fn source_port_except_negation() {
     );
 }
 
+// #12877 (D7-11): a protocol-UNCONSTRAINED port term must never evaluate the
+// ICMP/ICMPv6 query pseudo-ports that parse_flow_ports (#3067) supplies —
+// (identifier, 0) — nor any other portless-protocol tuple. Pre-#12877 the
+// except arm inverted the pseudo destination port 0 into a MATCH, so
+// `destination-port-except 80; then discard` dropped every ping while keeping
+// its TCP/UDP meaning. FAIL-ON-REVERT: drop the has_l4_ports gate in
+// port_terms_match and every ICMP/ICMPv6/GRE assert below goes RED (Discard).
+// The snapshots use `..Default::default()` tails (#7689 ratchet hygiene);
+// every elided field's derived default is the same zero value the exhaustive
+// form would spell out.
+#[test]
+fn destination_port_except_never_matches_portless_protocols_12877() {
+    let state = make_filter_state(
+        &[FirewallFilterSnapshot {
+            name: "dport-except-any".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "deny-except-web".into(),
+                // `protocols` deliberately empty (the Default): the
+                // protocol-unconstrained shape the cross-field preflight
+                // lets through — its never-match reject only fires when a
+                // protocol IS declared.
+                action: "discard".into(),
+                destination_ports_except: vec!["80".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        &[],
+    );
+    let eval = |protocol, src_port, dst_port| {
+        evaluate_filter(
+            &state,
+            "inet:dport-except-any",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            protocol,
+            src_port,
+            dst_port,
+            0,
+            TermMatchExtra::default(),
+        )
+        .action
+    };
+    // Real TCP/UDP behavior is KEPT: port 12345 is not excepted -> discard,
+    // port 80 is excepted -> falls through to the implicit accept.
+    assert_eq!(
+        eval(PROTO_TCP, 54321, 12345),
+        FilterAction::Discard,
+        "TCP dst 12345 must still match the except term"
+    );
+    assert_eq!(
+        eval(PROTO_TCP, 54321, 80),
+        FilterAction::Accept,
+        "TCP dst 80 must still be excepted"
+    );
+    assert_eq!(
+        eval(crate::ip_proto::PROTO_UDP, 54321, 5000),
+        FilterAction::Discard,
+        "UDP dst 5000 must still match the except term"
+    );
+    // ICMP echo query: the session layer's (identifier, 0) pseudo-ports. The
+    // port predicate must NEVER match — ICMP has no destination port to be
+    // "not 80" — so the packet falls through to the implicit accept instead of
+    // being dropped or PBR-steered by a term about TCP/UDP ports.
+    assert_eq!(
+        eval(PROTO_ICMP, 0x1234, 0),
+        FilterAction::Accept,
+        "#12877: ICMP echo (identifier 0x1234, pseudo dst port 0) must not match a destination-port-except term"
+    );
+    assert_eq!(
+        eval(crate::ip_proto::PROTO_ICMPV6, 0x1234, 0),
+        FilterAction::Accept,
+        "#12877: ICMPv6 echo must not match a destination-port-except term"
+    );
+    // Same portless semantics for a non-query protocol tuple: GRE has no
+    // ports either, so a port predicate about it is unsatisfiable.
+    assert_eq!(
+        eval(crate::ip_proto::PROTO_GRE, 0, 0),
+        FilterAction::Accept,
+        "#12877: GRE must not match a destination-port-except term"
+    );
+}
+
+// #12877 positive-source-port shape: the echo IDENTIFIER is not a source
+// port. Pre-#12877 `source-port 4660` matched any ping whose identifier
+// happened to equal the configured port (0x1234 == 4660), discarding it.
+#[test]
+fn source_port_term_never_matches_icmp_identifier_12877() {
+    let state = make_filter_state(
+        &[FirewallFilterSnapshot {
+            name: "sport-pick".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "deny-by-src-port".into(),
+                action: "discard".into(),
+                source_ports: vec!["4660".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        &[],
+    );
+    let eval = |protocol, src_port| {
+        evaluate_filter(
+            &state,
+            "inet:sport-pick",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            protocol,
+            src_port,
+            80,
+            0,
+            TermMatchExtra::default(),
+        )
+        .action
+    };
+    assert_eq!(
+        eval(PROTO_ICMP, 0x1234),
+        FilterAction::Accept,
+        "#12877: an echo identifier numerically equal to the configured source port is NOT that port"
+    );
+    assert_eq!(
+        eval(PROTO_TCP, 0x1234),
+        FilterAction::Discard,
+        "TCP src port 4660 must still match"
+    );
+    assert_eq!(
+        eval(PROTO_TCP, 0x1235),
+        FilterAction::Accept,
+        "TCP src port 4661 must still fall through"
+    );
+}
+
+// #12877 source-except shape: the identifier is also not "a port that differs
+// from 80". Pre-#12877 every ICMP query matched `source-port-except 80`.
+#[test]
+fn source_port_except_never_matches_icmp_query_12877() {
+    let state = make_filter_state(
+        &[FirewallFilterSnapshot {
+            name: "sport-except-any".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "deny-except-dns".into(),
+                action: "discard".into(),
+                source_ports_except: vec!["80".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        &[],
+    );
+    let eval = |protocol, src_port| {
+        evaluate_filter(
+            &state,
+            "inet:sport-except-any",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            protocol,
+            src_port,
+            5000,
+            0,
+            TermMatchExtra::default(),
+        )
+        .action
+    };
+    assert_eq!(
+        eval(PROTO_ICMP, 0x1234),
+        FilterAction::Accept,
+        "#12877: an ICMP query must not match a source-port-except term via its identifier"
+    );
+    assert_eq!(
+        eval(crate::ip_proto::PROTO_UDP, 80),
+        FilterAction::Accept,
+        "UDP src port 80 must still be excepted"
+    );
+    assert_eq!(
+        eval(crate::ip_proto::PROTO_UDP, 81),
+        FilterAction::Discard,
+        "UDP src port 81 must still match the except term"
+    );
+}
+
 #[test]
 fn protocol_matching() {
     let state = make_filter_state(

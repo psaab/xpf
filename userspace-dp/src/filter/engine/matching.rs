@@ -225,7 +225,7 @@ pub(super) fn term_matches_v4(
     ) {
         return false;
     }
-    if !port_terms_match(term, extra, src_port, dst_port) {
+    if !port_terms_match(term, protocol, extra, src_port, dst_port) {
         return false;
     }
     if term.dscp_match_enabled && (term.dscp_bitmap & (1u64 << dscp)) == 0 {
@@ -357,16 +357,55 @@ fn nets_match_v6(constrained: bool, except: bool, nets: &[PrefixV6], ip: Ipv6Add
 /// builder never sees the flow, so it cannot know whether the evaluated
 /// ports are real (a cached tuple survives a DMA-mutated slice). That is the
 /// measurement this paragraph used to defer.
+///
+/// #12877 (D7-11): the gate above keys on the EXTRA (fragment shape /
+/// enforcement context), not on the PROTOCOL — so it never fired for the one
+/// packet family that routinely arrives with synthetic-looking ports: ICMP /
+/// ICMPv6 QUERY traffic. `parse_flow_ports` (#3067) supplies the echo
+/// identifier as a pseudo SOURCE port and a literal 0 as the pseudo
+/// DESTINATION port so query traffic can hold a session key, and those values
+/// flow into every `term_matches_v4/v6` caller (cold frame walk, cached-flow
+/// re-walk, #7212 static revalidation). A protocol-UNCONSTRAINED term — the
+/// legitimate shape the cross-field preflight deliberately allows through
+/// (`check_cross_field_satisfiability` returns Ok on an empty protocol list)
+/// — then evaluated those pseudo ports for real: `destination-port-except 80`
+/// matched every ICMP query (dst "port" 0 is not 80, inverted to MATCH), a
+/// positive `source-port <id>` matched any echo carrying that identifier, and
+/// `source-port-except <n>` matched every query whose identifier differed
+/// from `n`; `then discard` dropped the query, `then routing-instance`
+/// steered it into the wrong table.
+///
+/// The fix is the same predicate the rest of the dataplane already uses as
+/// the single source of truth for "these bytes are a port pair":
+/// `ip_proto::has_l4_ports` (TCP/UDP only, #3111). A port-constrained term
+/// only ever evaluates its port predicates when the evaluated PROTOCOL
+/// carries ports — in BOTH directions (positive and except), fail-closed,
+/// matching the Junos semantic that a port condition on a portless protocol
+/// is unsatisfiable rather than trivially-true. Portless protocols fall
+/// through to the next term exactly as they do when the protocol is
+/// explicitly constrained (which the Go commit gate plus the compiler
+/// backstop already reject as a never-match). The gate uses the RAW protocol
+/// argument, NOT the #11338 fragment-sentinel resolution: a packet whose
+/// protocol argument is the 255 sentinel has no usable L4 header, so it has
+/// no authoritative ports either — failing closed agrees with the fragment
+/// half of the gate above on every reachable shape.
 fn port_terms_match(
     term: &FilterTerm,
+    protocol: u8,
     extra: TermMatchExtra<'_>,
     src_port: u16,
     dst_port: u16,
 ) -> bool {
-    if (term.source_port_constrained || term.dest_port_constrained)
-        && ((extra.is_fragment && !extra.l4_present) || extra.ports_unknown)
-    {
-        return false;
+    if term.source_port_constrained || term.dest_port_constrained {
+        // #12877: an ICMP query's (identifier, 0) pseudo-ports and every other
+        // portless-protocol tuple are NOT ports. Never evaluate a port
+        // predicate against them, in either polarity.
+        if !crate::ip_proto::has_l4_ports(protocol) {
+            return false;
+        }
+        if (extra.is_fragment && !extra.l4_present) || extra.ports_unknown {
+            return false;
+        }
     }
     port_match(
         term.source_port_constrained,
@@ -422,7 +461,7 @@ pub(super) fn term_matches_v6(
     ) {
         return false;
     }
-    if !port_terms_match(term, extra, src_port, dst_port) {
+    if !port_terms_match(term, protocol, extra, src_port, dst_port) {
         return false;
     }
     if term.dscp_match_enabled && (term.dscp_bitmap & (1u64 << dscp)) == 0 {
