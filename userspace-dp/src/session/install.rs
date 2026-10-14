@@ -368,6 +368,7 @@ impl SessionTable {
             };
             shed_sessions.push(PressureShedSession {
                 key: key.clone(),
+                session_id: forward_entry.session_id,
                 decision: forward_entry.decision,
                 is_reverse: forward_entry.metadata.is_reverse,
                 ingress_zone: forward_entry.metadata.ingress_zone,
@@ -385,6 +386,7 @@ impl SessionTable {
                 {
                     shed_sessions.push(PressureShedSession {
                         key: companion_key.clone(),
+                        session_id: companion_entry.session_id,
                         decision: companion_entry.decision,
                         is_reverse: companion_entry.metadata.is_reverse,
                         ingress_zone: companion_entry.metadata.ingress_zone,

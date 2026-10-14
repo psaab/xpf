@@ -1318,11 +1318,10 @@ pub(crate) struct PressureShedSession {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) is_reverse: bool,
-    /// #12862: install-stamped identity of the victim incarnation, compared
-    /// inside the shared-removal lock so a same-tuple replacement installed
-    /// by another worker is never torn down in the victim's place. Local
-    /// entries carry no session_id/generation token, so the metadata
-    /// identity subset is the incarnation fence that exists.
+    /// #12862: victim incarnation id (write-once, minted per install).
+    /// Compared inside the shared-removal lock: a same-tuple replacement
+    /// carries a different id and is never torn down in the victim's place.
+    pub(crate) session_id: u64,
     pub(crate) ingress_zone: u16,
     pub(crate) egress_zone: u16,
     pub(crate) ingress_zone_check: u32,

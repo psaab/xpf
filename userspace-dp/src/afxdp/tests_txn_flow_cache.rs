@@ -203,6 +203,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
     // SYNs had already published them.
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     for key in [&opening_a, &opening_b] {
+        let victim_id = sessions.session_id_for(key);
         shared_sessions
             .lock()
             .expect("shared sessions")
@@ -218,7 +219,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
                     protocol: PROTO_TCP,
                     tcp_flags: TCP_FLAG_SYN,
                     generation: 0,
-                    session_id: 0,
+                    session_id: victim_id,
                     tcp_close_class: 0,
                     tcp_handshake_state: 1,
                 },
@@ -297,6 +298,7 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
     established_replacement.tcp_handshake_state = 4;
     let replacement_shed = crate::session::PressureShedSession {
         key: shed_key.clone(),
+        session_id: established_replacement.session_id,
         decision: established_replacement.decision,
         is_reverse: established_replacement.metadata.is_reverse,
         ingress_zone: established_replacement.metadata.ingress_zone,
@@ -314,6 +316,39 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
             &replacement_shed,
         ),
         "a same-decision established replacement must not match a shed opening"
+    );
+    // #12862 incarnation fence: same tuple, same decision, still OPENING,
+    // but a different session_id is a replacement incarnation — the shed
+    // predicate must decline it (victim id = replacement id + 1).
+    let mut opening_replacement = established_replacement.clone();
+    opening_replacement.tcp_handshake_state = 1;
+    let victim_shed = crate::session::PressureShedSession {
+        key: replacement_shed.key.clone(),
+        decision: replacement_shed.decision,
+        is_reverse: replacement_shed.is_reverse,
+        ingress_zone: replacement_shed.ingress_zone,
+        egress_zone: replacement_shed.egress_zone,
+        ingress_zone_check: replacement_shed.ingress_zone_check,
+        egress_zone_check: replacement_shed.egress_zone_check,
+        ingress_ifindex: replacement_shed.ingress_ifindex,
+        ingress_vlan_id: replacement_shed.ingress_vlan_id,
+        owner_rg_id: replacement_shed.owner_rg_id,
+        policy_id: replacement_shed.policy_id,
+        session_id: opening_replacement.session_id.wrapping_add(1),
+    };
+    assert!(
+        !super::poll_descriptor::is_pressure_shed_shared_opening(
+            &opening_replacement,
+            &victim_shed,
+        ),
+        "a same-tuple OPENING replacement with a different session_id must survive the shed"
+    );
+    assert!(
+        super::poll_descriptor::is_pressure_shed_shared_opening(
+            &opening_replacement,
+            &replacement_shed,
+        ),
+        "the victim incarnation itself (same session_id) must still match"
     );
     if opening_a_removed {
         assert!(sessions.probe_with_origin(&opening_a_reverse).is_none());
@@ -463,7 +498,7 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
                 protocol: PROTO_TCP,
                 tcp_flags: TCP_FLAG_SYN,
                 generation: 0,
-                session_id: 0,
+                session_id: sessions.session_id_for(&victim_key),
                 tcp_close_class: 0,
                 tcp_handshake_state: 1,
             },

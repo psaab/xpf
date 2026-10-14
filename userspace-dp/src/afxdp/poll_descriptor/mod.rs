@@ -459,7 +459,8 @@ pub(super) fn is_pressure_shed_shared_opening(
     // The install-stamped identity subset fences the incarnation; the
     // comparison runs inside the shared-removal lock, so the entry judged
     // is the entry removed.
-    current.decision == shed.decision
+    current.session_id == shed.session_id
+        && current.decision == shed.decision
         && current.metadata.is_reverse == shed.is_reverse
         && current.metadata.ingress_zone == shed.ingress_zone
         && current.metadata.egress_zone == shed.egress_zone
