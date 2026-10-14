@@ -4153,6 +4153,121 @@ fn syn_cookie_alarm_without_drop_forwards_session_miss_ack_l10() {
         "non-audit syn-cookie flow must still drop the invalid ACK (unchanged)"
     );
 }
+// #12874 (D7-07): `validate_syn_cookie_ack_on_session_miss` never consulted
+// `alarm_without_drop`, so on an audit-mode zone a standby/peer-minted VALID
+// cookie ACK still ran epoch+limiter+MAC, returned `Validated`, populated the
+// validated-client whitelist, and the poll caller answered it with `AckRst`
+// and recycled the packet — an audit zone must FORWARD, not reset. The
+// pre-existing audit guards (no latch set under audit; latch cleared on
+// enforce->audit transition) cannot reach the standby path, which validates
+// with NO local latch at all.
+//
+// FAIL-ON-REVERT: delete the `alarm_without_drop` gate at the top of
+// `validate_syn_cookie_ack_on_session_miss` and both audit legs flip back to
+// `Validated` (standby leg) / `Invalid` (active-latch leg) and the whitelist
+// gains an entry.
+#[test]
+fn syn_cookie_audit_zone_does_not_validate_standby_ack_12874() {
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    // A real, MAC-valid cookie minted under the shared key (as a peer or a
+    // pre-audit incarnation of this box would mint) — not a garbage ACK.
+    let cookie_isn = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
+    let mut valid_ack = syn.clone();
+    valid_ack.tcp_flags = TCP_ACK;
+    valid_ack.tcp_seq = 2;
+    valid_ack.tcp_ack = cookie_isn.wrapping_add(1);
+
+    // Audit zone, standby path: no local cookie latch (never armed under
+    // audit), so only an explicit `alarm_without_drop` gate can stop the
+    // standby validation.
+    let mut audit = ScreenProfile::default();
+    audit.syn_flood_threshold = 1;
+    audit.syn_cookie = true;
+    audit.alarm_without_drop = true;
+    let mut astate = make_state("trust", audit);
+    astate.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    astate.set_syn_cookie_full_epoch_for_test(41);
+    assert_eq!(
+        astate.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, 128 * NS, 128),
+        SynCookieAckVerdict::NotApplicable,
+        "audit zone must FORWARD a standby-valid cookie ACK (NotApplicable), \
+         never Validated (which the caller answers with AckRst + recycle)"
+    );
+    assert_eq!(
+        astate.syn_cookie_validated_len(),
+        0,
+        "audit zone must not populate the validated-client whitelist"
+    );
+    assert!(
+        astate.syn_cookie_standby_ack_untouched("trust"),
+        "audit zone must not spend standby validation budget (limiter/MAC) \
+         on an ACK it is configured only to observe"
+    );
+
+    // Audit zone, locally-active leg: an inherited latch must not turn the
+    // same valid ACK (or a closing ACK) into enforcement either.
+    let mut astate2 = make_state(
+        "trust",
+        {
+            let mut p = ScreenProfile::default();
+            p.syn_flood_threshold = 1;
+            p.syn_cookie = true;
+            p.alarm_without_drop = true;
+            p
+        },
+    );
+    astate2.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    astate2.set_syn_cookie_full_epoch_for_test(41);
+    astate2.force_syn_cookie_active_for_test("trust", 192);
+    assert_eq!(
+        astate2.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, 128 * NS, 128),
+        SynCookieAckVerdict::NotApplicable,
+        "audit zone with an inherited active latch must still forward, \
+         not validate-and-reset"
+    );
+    assert_eq!(astate2.syn_cookie_validated_len(), 0);
+    let mut fin_ack = valid_ack.clone();
+    fin_ack.tcp_flags = TCP_ACK | TCP_FIN;
+    assert_eq!(
+        astate2.validate_syn_cookie_ack_on_session_miss("trust", 7, &fin_ack, 128 * NS, 128),
+        SynCookieAckVerdict::NotApplicable,
+        "audit zone must not return Invalid (drop) for a closing ACK either"
+    );
+    let mut invalid_ack = valid_ack.clone();
+    invalid_ack.tcp_ack = 0xdead_beef;
+    assert_eq!(
+        astate2.validate_syn_cookie_ack_on_session_miss("trust", 7, &invalid_ack, 128 * NS, 128),
+        SynCookieAckVerdict::NotApplicable,
+        "audit zone must not return Invalid (drop) for an invalid ACK either"
+    );
+
+    // Non-audit control, identical inputs: the standby-valid ACK still
+    // validates, proving the fix gates on `alarm_without_drop` and does not
+    // neuter standby validation generally.
+    let mut normal = ScreenProfile::default();
+    normal.syn_flood_threshold = 1;
+    normal.syn_cookie = true;
+    let mut nstate = make_state("trust", normal);
+    nstate.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    nstate.set_syn_cookie_full_epoch_for_test(41);
+    assert_eq!(
+        nstate.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, 128 * NS, 128),
+        SynCookieAckVerdict::Validated,
+        "enforcement zone must still validate the same standby cookie ACK"
+    );
+    assert_eq!(nstate.syn_cookie_validated_len(), 1);
+}
 
 #[test]
 fn syn_cookie_ack_validates_on_peer_without_local_active_window() {
