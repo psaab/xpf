@@ -1459,6 +1459,17 @@ its logging/inversion intent (#3684):
   (`build_global_zone_scope` maps both `""` and `"any"` to
   `GlobalZoneScope::Any`), so an idiomatic `match from-zone any` / `to-zone
   any` global is no longer hidden from the affected zones' detail (#3680).
+- Quarantine annotation (#12896): each row carries its LIVE applicability. A
+  `[zone-pair]` row whose set the apply-time scrub
+  (`dataplane/userspace.scrubPoliciesForQuarantinedZones`) would drop — either
+  endpoint a StableZoneID-collision loser — and a `[global]` row whose
+  configured scope that scrub prunes are suffixed with
+  `config.ZoneQuarantinePoliciesQualifier` (a scoped global prints the
+  SURVIVING scope; a side the prune empties keeps the authored scope on the
+  dead row). Wildcard zone-pair sides and unscoped/explicit-any globals list
+  only for an INSTALLED zone: for a quarantined zone only rows that literally
+  name it remain, each scrub-marked, and the callers' block-level qualifier
+  (#10530) still prefixes the whole summary for that zone.
 - `[default] default-policy: <action> [<modifiers>]` -- the effective
   default-policy catch-all is ALWAYS shown (M05), so a zone with no explicit
   rule reports `default-policy: deny` / `permit` / `reject` rather than a bare

@@ -244,6 +244,9 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 			// with the gRPC-text renderer (L10) so the two surfaces cannot
 			// drift. Parity with the REST inventory (pkg/api/security.go) and
 			// gRPC GetPolicies (#3363).
+			// #10530 block-level qualifier: it speaks about the VIEWED zone
+			// (quarantined). The per-row scrub marks for individual rules are
+			// the SSOT's own (#12896), so the two never duplicate.
 			if reason != "" {
 				fmt.Println("  " + config.ZoneQuarantinePoliciesQualifier)
 			}

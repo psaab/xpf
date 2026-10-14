@@ -2,6 +2,7 @@ package policymatch
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -89,21 +90,36 @@ func zoneDetailModifiers(id uint32, schedulerName string, inactive bool, log *co
 // displayed id equals the numeric policy id the RT_FLOW/event path logs even
 // after a multi-application policy shifts the id namespace.
 //
-// schedActive / haveSched come from the caller's live scheduler-state provider
-// (Manager.PolicySchedulerActiveState). When haveSched is false the runtime
-// scheduler state is unknown and no rule is claimed inactive, matching the
-// #3062 policy-detail renderer. A nil cfg returns nil.
-// Quarantine annotation is deliberately a caller concern: the CLI and gRPC
-// zones-detail renderers prefix ZoneQuarantinePoliciesQualifier immediately
-// before this shared block when the requested zone is quarantined. Keeping
-// this SSOT unqualified prevents direct consumers and those two established
-// callers from double-marking the same policy summary (#10530).
+// Quarantine layering (#12896): this function annotates each row's LIVE
+// applicability itself. A zone-pair row whose set the apply-time scrub
+// (dataplane/userspace scrubPoliciesForQuarantinedZones) would drop — either
+// endpoint quarantined, the peer-of-healthy-zone case — and a global row whose
+// configured scope that scrub prunes carry
+// config.ZoneQuarantinePoliciesQualifier, so a scrubbed rule is never read as
+// governing the zone. Wildcard sides and unscoped globals are selected only
+// for an INSTALLED viewed zone: a quarantined zone is omitted by the builder,
+// so nothing can govern it and only rows that literally name it stay (each
+// itself scrub-marked). The CLI and gRPC zones-detail renderers additionally
+// prefix the block-level qualifier when the REQUESTED zone is quarantined
+// (#10530); that line speaks about the zone while these marks speak about
+// individual rules, so neither makes the other redundant.
 func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[string]bool, haveSched bool) []string {
 	if cfg == nil {
 		return nil
 	}
 	runtimeIDs := dpuserspace.RuntimePolicyIDs(cfg)
 	lines := []string{"  Policy summary (evaluation order: zone-pair, global, default-policy):"}
+	// #12896: two quarantine verdict sets, each aligned with the runtime
+	// consumer it mirrors. `excluded` is what the snapshot builder omits
+	// (collision losers + reserved names) — it decides whether the VIEWED
+	// zone is installed, because a wildcard side or an unscoped global can
+	// only affect an installed zone. `scrubbed` is the exact set the policy
+	// scrub (scrubPoliciesForQuarantinedZones) drops rules for — it decides
+	// whether a row is live, so the display verdict can never disagree with
+	// what apply would publish.
+	excluded := config.ZoneQuarantineExclusionsForConfig(cfg)
+	_, viewedExcluded := excluded[zone]
+	scrubbed := config.QuarantinedZoneNames(config.ZoneQuarantineNamesForConfig(cfg))
 
 	// Tier 1: zone-pair policies. Track policySetID across ALL zone-pair sets
 	// (matching or not, nil or not) exactly like the runtime walker so the
@@ -116,7 +132,12 @@ func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[st
 	//     `from any to untrust` set governs a trust->untrust flow (any matches
 	//     trust as ingress), and a `from any to any` set governs every zone —
 	//     yet neither literally names `zone`, so both were omitted. Match a
-	//     side when it equals `zone` OR is the "any" wildcard.
+	//     side when it equals `zone` OR is the "any" wildcard — except that
+	//     the wildcard leg is live-zone-gated (#12896): "every zone" means
+	//     every INSTALLED zone, and a quarantined viewed zone is omitted by
+	//     the builder, so a wildcard cannot govern it. A literal reference
+	//     still selects the set so the row stays visible for diagnosis,
+	//     scrub-marked below.
 	//  2. The runtime evaluates zone-pair sets in TIER order regardless of
 	//     config placement — exact (both sides concrete), then single-wildcard
 	//     (exactly one side "any"), then both-any (see policymatch.go transit
@@ -139,8 +160,15 @@ func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[st
 		}
 		fromAny := zpp.FromZone == "any"
 		toAny := zpp.ToZone == "any"
-		fromAffects := zpp.FromZone == zone || fromAny
-		toAffects := zpp.ToZone == zone || toAny
+		fromAffects := zpp.FromZone == zone || (fromAny && !viewedExcluded)
+		toAffects := zpp.ToZone == zone || (toAny && !viewedExcluded)
+		// #12896: the apply-time scrub drops this whole set when either
+		// endpoint is a collision loser ("any" is a policy sentinel, never a
+		// quarantined name), so every rule in it renders with the qualifier
+		// instead of reading as an active participant.
+		_, fromScrubbed := scrubbed[zpp.FromZone]
+		_, toScrubbed := scrubbed[zpp.ToZone]
+		setScrubbed := fromScrubbed || toScrubbed
 		if fromAffects || toAffects {
 			for i, pol := range zpp.Policies {
 				// #3476: skip a nil rule like the runtime walker does.
@@ -153,6 +181,9 @@ func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[st
 					pol.Count, pol.Match.SourceAddressExcluded, pol.Match.DestinationAddressExcluded)
 				line := fmt.Sprintf("    [zone-pair] %s -> %s: %s (%s) %s",
 					zpp.FromZone, zpp.ToZone, pol.Name, ActionString(pol.Action), mods)
+				if setScrubbed {
+					line += " " + config.ZoneQuarantinePoliciesQualifier
+				}
 				switch {
 				case fromAny && toAny:
 					bothAnyLines = append(bothAnyLines, line)
@@ -179,16 +210,25 @@ func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[st
 		if gp == nil {
 			continue
 		}
-		if !config.GlobalPolicyAppliesToZone(gp.Match, zone) {
+		if !globalAppliesToZoneAfterQuarantine(gp.Match, zone, viewedExcluded) {
 			continue
 		}
+		// #12896: render the scope the apply-time scrub would leave. A
+		// configured side keeps only its surviving members (a side emptied by
+		// the prune drops the whole rule, so the AUTHORED scope stays on the
+		// dead row for diagnosis) and any pruned member earns the qualifier.
+		fromLabel, fromEmptied, fromTouched := scrubbedScopeLabel(gp.Match.FromZones, scrubbed)
+		toLabel, toEmptied, toTouched := scrubbedScopeLabel(gp.Match.ToZones, scrubbed)
 		id := dpuserspace.RuntimePolicyIndex(runtimeIDs, policySetID, uint32(i))
 		inactive := haveSched && dpuserspace.PolicyInactive(gp.SchedulerName, schedActive)
 		mods := zoneDetailModifiers(id, gp.SchedulerName, inactive, gp.Log,
 			gp.Count, gp.Match.SourceAddressExcluded, gp.Match.DestinationAddressExcluded)
-		lines = append(lines, fmt.Sprintf("    [global] %s -> %s: %s (%s) %s",
-			config.ZoneScopeSetLabel(gp.Match.FromZones), config.ZoneScopeSetLabel(gp.Match.ToZones),
-			gp.Name, ActionString(gp.Action), mods))
+		line := fmt.Sprintf("    [global] %s -> %s: %s (%s) %s",
+			fromLabel, toLabel, gp.Name, ActionString(gp.Action), mods)
+		if fromEmptied || toEmptied || fromTouched || toTouched {
+			line += " " + config.ZoneQuarantinePoliciesQualifier
+		}
+		lines = append(lines, line)
 		globalPolicies++
 	}
 	if zonePairPolicies == 0 && globalPolicies == 0 {
@@ -213,4 +253,49 @@ func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[st
 	lines = append(lines, fmt.Sprintf("    [default] %s: %s %s",
 		dataplane.DefaultPolicyName, ActionString(cfg.Security.DefaultPolicy), defMods))
 	return lines
+}
+
+// globalAppliesToZoneAfterQuarantine is the #12896 live-zone-aware tier-2
+// selection predicate. For an INSTALLED viewed zone it is exactly
+// config.GlobalPolicyAppliesToZone (wildcard-or-membership on either side).
+// For a quarantined viewed zone only a scope that LITERALLY names the zone
+// keeps the row visible — an unscoped/explicit-any global "applies to every
+// zone" only in the sense that every zone is installed, and the builder omits
+// this one, so listing it there represented a live rule as governing a zone
+// that cannot carry traffic. The literal spellings stay for diagnosis, each
+// scrub-marked by scrubbedScopeLabel.
+func globalAppliesToZoneAfterQuarantine(m config.PolicyMatch, zone string, viewedExcluded bool) bool {
+	if !viewedExcluded {
+		return config.GlobalPolicyAppliesToZone(m, zone)
+	}
+	return slices.Contains(m.FromZones, zone) || slices.Contains(m.ToZones, zone)
+}
+
+// scrubbedScopeLabel renders one scoped-global match side the way the
+// apply-time policy scrub (scrubPoliciesForQuarantinedZones) would leave it:
+// quarantined members are pruned from a configured set, and a set the prune
+// EMPTIES means the whole rule is dropped, so the authored label stays on the
+// dead row (what the operator wrote) rather than a surviving-scope label.
+// emptied reports the dropped-rule case, touched any pruned member; an
+// omitted or wildcard set is untouched by construction ("any" is a policy
+// sentinel, never a quarantined zone name).
+func scrubbedScopeLabel(zs []string, scrubbed map[string]struct{}) (label string, emptied, touched bool) {
+	if len(zs) == 0 {
+		return config.ZoneScopeSetLabel(zs), false, false
+	}
+	kept := make([]string, 0, len(zs))
+	for _, z := range zs {
+		if _, dead := scrubbed[z]; dead {
+			touched = true
+			continue
+		}
+		kept = append(kept, z)
+	}
+	if len(kept) == 0 {
+		return config.ZoneScopeSetLabel(zs), true, true
+	}
+	if touched {
+		return config.ZoneScopeSetLabel(kept), false, true
+	}
+	return config.ZoneScopeSetLabel(zs), false, false
 }

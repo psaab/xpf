@@ -47,6 +47,11 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 	sort.Strings(allZoneNames)
 	quarantineNames := config.ZoneQuarantineNamesForConfig(cfg)
 	quarantined := config.ZoneQuarantineExclusions(quarantineNames)
+	// #12896: the collision-loser set the apply-time policy scrub drops rules
+	// for — the per-reference qualifier below uses the same verdict the
+	// dataplane would publish, not the broader exclusions set that gates the
+	// zone-level annotations.
+	scrubbedSets := config.QuarantinedZoneNames(quarantineNames)
 	zoneNames := make([]string, 0, len(allZoneNames))
 	for _, name := range allZoneNames {
 		if filter != "" && name != filter {
@@ -197,7 +202,19 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 					dir = "to"
 					peer = zpp.FromZone
 				}
-				policyRefs = append(policyRefs, fmt.Sprintf("%s %s (%d rules)", dir, peer, len(zpp.Policies)))
+				ref := fmt.Sprintf("%s %s (%d rules)", dir, peer, len(zpp.Policies))
+				// #12896: under a healthy viewed zone, a set whose other
+				// endpoint is a collision loser is dropped by the apply-time
+				// scrub, so that particular reference is qualified instead of
+				// reading as live. When the viewed zone itself is quarantined
+				// every listed reference is scrubbed by definition and the
+				// line-level qualifier below already covers them.
+				_, fromScrubbed := scrubbedSets[zpp.FromZone]
+				_, toScrubbed := scrubbedSets[zpp.ToZone]
+				if reason == "" && (fromScrubbed || toScrubbed) {
+					ref += " " + config.ZoneQuarantinePoliciesQualifier
+				}
+				policyRefs = append(policyRefs, ref)
 			}
 		}
 		if len(policyRefs) > 0 {
@@ -263,6 +280,9 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 		// stay byte-identical. Parity with REST (pkg/api/security.go) + gRPC
 		// GetPolicies (#3363).
 		schedActive, haveSched := s.policySchedulerActiveState()
+		// #10530 block-level qualifier: it speaks about the VIEWED zone
+		// (quarantined). The per-row scrub marks for individual rules are the
+		// SSOT's own (#12896), so the two never duplicate.
 		if reason != "" {
 			buf.WriteString("  " + config.ZoneQuarantinePoliciesQualifier + "\n")
 		}
