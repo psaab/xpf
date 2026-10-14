@@ -8507,6 +8507,15 @@ matching.rs`):
   dataplane does not extract ports for (only TCP/UDP — `ip_proto::has_l4_ports`).
   So `from protocol gre; destination-port 80` (also esp/ah/ospf/vrrp/icmp/...,
   and numeric 47) never matches (H01).
+  Since #12877 this fail-closed behavior is enforced by the MATCHER itself and
+  not just by the extracted-port shape: `port_terms_match` gates every port
+  predicate (positive and `*-except`) on `ip_proto::has_l4_ports(protocol)`.
+  That additionally covers the legitimate protocol-UNCONSTRAINED term, whose
+  port predicate used to be evaluated against the ICMP/ICMPv6 query
+  pseudo-ports (identifier, 0) — so `destination-port-except 80` with no
+  `from protocol` matched (and dropped or PBR-steered) every ping. A term
+  with a port predicate now never matches a packet whose protocol carries no
+  ports, in either polarity; TCP/UDP behavior is unchanged.
 - **tcp-flags on a non-TCP protocol** — `per_packet_l4_matches` returns false
   when the packet protocol is not TCP, so `from protocol udp; tcp-flags syn`
   never matches. UDP is port-bearing but still not TCP, so the tcp-flags arm
