@@ -3928,7 +3928,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // the session-miss SYN-ACK hook while its tuple and
                         // zone are still in scope. Otherwise it could attach
                         // to the next flow-backed packet on this worker.
-                        if screen.take_syn_alarm_event() {
+                        // #13000: per-zone gate — the #12875 doctrine applied
+                        // to the last ungated `syn_alarm_pending` drain. That
+                        // flag is worker-GLOBAL and this session-miss arm runs
+                        // for EVERY zone, so an ingress zone with no screen
+                        // state of its own must not consume — and mis-attribute
+                        // a log-only `syn-flood-alarm` against its own tuple
+                        // and `from_zone_id` — a pending alarm a different,
+                        // screened zone raised. `zone_has_screen_state` covers
+                        // the same three sets as the screen stages (resolved
+                        // profile, unresolved reference, inert reference), and
+                        // the gate short-circuits BEFORE the take, so a zone
+                        // with no screen state leaves the flag pending for the
+                        // next screened-zone packet's drain instead of clearing
+                        // it unserved.
+                        if screen.zone_has_screen_state(from_zone) && screen.take_syn_alarm_event()
+                        {
                             emit_screen_alarm_event(
                                 worker_ctx.event_stream,
                                 &screen_pkt,

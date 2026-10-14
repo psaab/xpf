@@ -368,7 +368,10 @@ pub(crate) struct ScreenState {
     /// #3315: set when the just-checked packet crossed `alarm-threshold` (below
     /// attack-threshold) and the per-zone cadence admits a new alarm. Drained
     /// via `take_syn_alarm_event()` by the screen or session-miss poll stage
-    /// while the packet/zone are in scope. The verdict is NOT a drop.
+    /// while the packet/zone are in scope; the session-miss drain additionally
+    /// gates on the ingress zone's own screen state (#13000), so an unscreened
+    /// zone never consumes another zone's pending alarm. The verdict is NOT a
+    /// drop.
     syn_alarm_pending: bool,
     /// #3315: sub-attribution test seams (per-worker). The drop verdict reuses
     /// the existing `"syn-flood"` reason id (no Go gRPC/CLI change), so these
@@ -505,6 +508,12 @@ impl ScreenState {
     /// The normal poll stage and the session-miss SYN-ACK path drain this while
     /// the packet/zone are in scope, emitting the out-of-band alarm against the
     /// packet that raised it. The alarm is log-only; it does not drop packets.
+    /// #13000: the session-miss caller first checks
+    /// `zone_has_screen_state(from_zone)` — the #12875 per-zone doctrine — so
+    /// this worker-GLOBAL flag is only ever consumed on behalf of a zone with
+    /// screen state of its own; on an unscreened zone the caller leaves it
+    /// pending for the next screened-zone packet instead of mis-attributing the
+    /// alarm to that zone's tuple.
     pub fn take_syn_alarm_event(&mut self) -> bool {
         let pending = self.syn_alarm_pending;
         self.syn_alarm_pending = false;

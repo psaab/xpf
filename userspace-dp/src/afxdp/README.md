@@ -563,6 +563,20 @@ sync.
     still admitted, so the #7168/#7888 substituted conservative default
     keeps the tolerant doctrines fail-closed, and a screened zone's
     parse-error fail-close is untouched.
+  - **#13000 — the session-miss SYN-alarm drain gates on the ingress
+    zone's own state too:** `syn_alarm_pending` is a WORKER-GLOBAL flag,
+    and #12875 gated the screen stages' drains by returning early for
+    zones without screen state — but the session-miss drain in
+    `poll_descriptor/mod.rs` (#12872) still ran its `take_syn_alarm_event`
+    for EVERY zone's session-miss packet. An ingress zone with no screen
+    configuration of its own could therefore consume — and emit as its own
+    log-only `syn-flood-alarm`, against its tuple and `from_zone_id` — a
+    pending alarm a different, screened zone raised. The drain now runs
+    only when `zone_has_screen_state(from_zone)` (the same three sets as
+    the stages: resolved profile, unresolved reference, inert reference)
+    and short-circuits BEFORE the take, so an unscreened zone leaves the
+    flag pending for the next screened-zone packet instead of clearing it
+    unserved.
   - **#3291 — zone policy / input filter / PBR on the flowless TRANSIT
     arm:** #3064 restored only the *screen* engine on the flowless path;
     zone security policy, the interface input filter, and firewall-filter
