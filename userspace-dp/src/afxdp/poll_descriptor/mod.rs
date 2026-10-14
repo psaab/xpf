@@ -3870,6 +3870,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow.dst_ip,
                             )
                         });
+                        // #12872 (D7-04): drain a warning-band alarm raised by
+                        // the session-miss SYN-ACK hook while its tuple and
+                        // zone are still in scope. Otherwise it could attach
+                        // to the next flow-backed packet on this worker.
+                        if screen.take_syn_alarm_event() {
+                            emit_screen_alarm_event(
+                                worker_ctx.event_stream,
+                                &screen_pkt,
+                                meta,
+                                from_zone_id,
+                                "syn-flood-alarm",
+                                event_now_ns_from_secs(now_secs),
+                            );
+                        }
                         // #2234: surface a rare (logarithmic) operator alarm
                         // when the scan/sweep source table is saturated and
                         // the detector is displacing stale sources to stay

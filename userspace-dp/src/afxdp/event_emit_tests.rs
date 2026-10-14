@@ -397,6 +397,25 @@ fn screen_alarm_event_is_permit_not_deny() {
         event.timestamp_ns > 0,
         "screen-alarm event must carry a real wall-clock timestamp, got 0"
     );
+    let (syn_handle, syn_rx) = unlimited_handle();
+    emit_screen_alarm_event(
+        Some(&syn_handle),
+        &pkt,
+        test_meta(),
+        7,
+        "syn-flood-alarm",
+        mono_now_ns(),
+    );
+    let syn_alarm = syn_rx
+        .try_recv()
+        .expect("SYN-flood alarm frame")
+        .decode_dataplane_event()
+        .expect("SYN-flood alarm payload");
+    assert_eq!(syn_alarm.action, RT_FLOW_ACTION_PERMIT);
+    assert_eq!(syn_alarm.screen_id, SCREEN_SYN_FLOOD_ALARM);
+    assert_eq!(syn_alarm.ingress_zone_id, 7);
+    assert_eq!(syn_alarm.src_ip, pkt.src_ip);
+    assert_eq!(syn_alarm.dst_ip, pkt.dst_ip);
 }
 
 #[test]

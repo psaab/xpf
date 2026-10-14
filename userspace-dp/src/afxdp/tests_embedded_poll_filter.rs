@@ -10242,6 +10242,102 @@ fn g11332_send_syn(
     batch
 }
 
+/// #12872: drive SYN-ACK misses through the real descriptor path with one
+/// persistent screen runtime. The threshold-crossing event belongs to the
+/// fourth miss's tuple/zone; an unrelated next flow must not inherit it.
+#[test]
+fn syn_ack_miss_alarm_emits_on_originating_packet_12872() {
+    use crate::event_stream::codec::DataplaneEventKind;
+
+    let forwarding = build_forwarding_state(&nat_snapshot());
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "lan".to_string(),
+        crate::screen::ScreenProfile {
+            syn_flood_threshold: 100,
+            syn_flood_alarm_threshold: 3,
+            ..crate::screen::ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(profiles);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = txn_ha_state();
+    let dst = Ipv4Addr::new(198, 51, 100, 20);
+
+    for i in 0..4u8 {
+        let src = Ipv4Addr::new(192, 0, 2, 10 + i);
+        let src_port = 49152 + u16::from(i);
+        let frame = build_txn_tcp_syn_frame_v4(
+            src,
+            dst,
+            src_port,
+            443,
+            0x12, // SYN-ACK: session-miss-only flood accounting.
+            TEST_LAN_MAC,
+        );
+        let meta = txn_meta_v4(24, 0x12, frame.len() as u16);
+        let (_, _, _event_handle, event_rx) =
+            txn_run_descriptor_with_screen_state_capturing_events(
+                &mut binding,
+                &mut sessions,
+                &forwarding,
+                &ha_state,
+                &frame,
+                meta,
+                &mut screen,
+            );
+        if i < 3 {
+            assert!(
+                event_rx.try_recv().is_err(),
+                "SYN-ACK miss {i} is below the warning threshold"
+            );
+            continue;
+        }
+        let event = event_rx
+            .try_recv()
+            .expect("threshold-crossing SYN-ACK alarm")
+            .decode_dataplane_event()
+            .expect("SYN alarm payload");
+        assert_eq!(event.kind, DataplaneEventKind::ScreenDrop);
+        assert_eq!(event.action, 1, "alarm is a PERMIT, not a drop");
+        assert_eq!(event.screen_id, 1 << 20, "syn-flood-alarm reason");
+        assert_eq!(event.ingress_zone_id, TEST_LAN_ZONE_ID);
+        assert_eq!(event.src_ip, IpAddr::V4(src));
+        assert_eq!(event.dst_ip, IpAddr::V4(dst));
+        assert_eq!(event.src_port, src_port);
+        assert_eq!(event.dst_port, 443);
+    }
+
+    // The normal pre-lookup screen stage sees this unrelated SYN next. Without
+    // the descriptor-side drain it would consume the stale SYN-ACK alarm here.
+    let later_src = Ipv4Addr::new(192, 0, 2, 100);
+    let later_frame = build_txn_tcp_syn_frame_v4(
+        later_src,
+        dst,
+        50000,
+        443,
+        0x02,
+        TEST_LAN_MAC,
+    );
+    let later_meta = txn_meta_v4(24, 0x02, later_frame.len() as u16);
+    let (_, _, _event_handle, later_rx) = txn_run_descriptor_with_screen_state_capturing_events(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &later_frame,
+        later_meta,
+        &mut screen,
+    );
+    assert!(
+        later_rx.try_recv().is_err(),
+        "a later flow-backed packet must not receive the previous SYN-ACK alarm"
+    );
+}
+
 #[test]
 fn filtered_syns_do_not_charge_screens_or_receive_syn_cookies_11332() {
     let denied_source = Ipv4Addr::new(203, 0, 113, 10);

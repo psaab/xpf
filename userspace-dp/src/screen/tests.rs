@@ -2718,6 +2718,84 @@ fn syn_ack_session_misses_are_visible_to_syn_flood_gate_10891() {
     }
 }
 
+
+/// #12872 (D7-04): the session-miss caller drains warning-band alarms against
+/// the SYN-ACK tuple/zone, so they cannot attach to a later flow-backed packet.
+#[test]
+fn syn_ack_miss_alarm_is_drained_before_later_packet_12872() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 10;
+    profile.syn_flood_alarm_threshold = 3;
+    let mut state = make_state("trust", profile);
+    let pkt = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+        1234,
+        80,
+        TCP_SYN | TCP_ACK,
+    );
+    for i in 0..4 {
+        assert_eq!(
+            state.syn_ack_flood_drop_on_new_flow("trust", &pkt, 100, 100),
+            None
+        );
+        assert_eq!(state.take_syn_alarm_event(), i == 3);
+        assert!(!state.take_syn_alarm_event());
+    }
+    assert_eq!(state.syn_flood_alarm_events(), 1);
+}
+
+#[test]
+fn syn_ack_miss_drop_src_alarm_is_drained_12872() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 100_000;
+    profile.syn_flood_alarm_threshold = 2;
+    profile.syn_flood_src_threshold = 2;
+    let mut state = make_state("trust", profile);
+    let pkt = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
+        1234,
+        80,
+        TCP_SYN | TCP_ACK,
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            state.syn_ack_flood_drop_on_new_flow("trust", &pkt, 100, 100),
+            None
+        );
+        assert!(!state.take_syn_alarm_event());
+    }
+    assert_eq!(
+        state.syn_ack_flood_drop_on_new_flow("trust", &pkt, 100, 100),
+        Some("syn-flood")
+    );
+    assert!(state.take_syn_alarm_event());
+    assert!(!state.take_syn_alarm_event());
+    assert_eq!(state.syn_flood_alarm_events(), 1);
+}
+/// #12872: fail if a future poll-descriptor refactor stops draining the
+/// session-miss alarm against the SYN-ACK tuple and ingress zone.
+#[test]
+fn syn_ack_miss_alarm_drain_is_wired_to_its_packet_12872() {
+    let src = include_str!("../afxdp/poll_descriptor/mod.rs");
+    let miss_hook = src
+        .find(".syn_ack_flood_drop_on_new_flow(")
+        .expect("session-miss SYN-ACK screening hook");
+    let drain_offset = src[miss_hook..]
+        .find("if screen.take_syn_alarm_event()")
+        .map(|offset| miss_hook + offset)
+        .expect("session-miss path drains pending SYN alarm");
+    let emission = src[drain_offset..]
+        .split(");")
+        .next()
+        .expect("SYN alarm emission call");
+    assert!(emission.contains("emit_screen_alarm_event("));
+    assert!(emission.contains("&screen_pkt"));
+    assert!(emission.contains("from_zone_id"));
+    assert!(emission.contains("\"syn-flood-alarm\""));
+}
+
 #[test]
 fn syn_flood_disabled_passes() {
     let profile = ScreenProfile::default(); // threshold=0 means disabled
