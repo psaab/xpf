@@ -614,8 +614,9 @@ func zoneReferenceableInterfaceBases(cfg *Config) map[string]bool {
 // carries no traffic), just with an operator-visible warning instead of a hard
 // reject. Zones are walked in sorted name order so the first-reported error is
 // deterministic. A bare reference resolves against its base; an explicit
-// logical-unit suffix must exist when the base has a configured interface
-// stanza, except for an interface-level tunnel's implicit unit 0 (#11433).
+// logical-unit suffix must be an authored unit or a daemon-materialized one
+// (lo0.0, the exact bound secure-tunnel unit, or an interface-level tunnel's
+// implicit unit 0) (#11433, #12827).
 func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
