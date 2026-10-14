@@ -336,10 +336,18 @@ pub(super) fn handle(
                         false
                     }
                 };
+                // (keeps_caller_rows, mirror_delete_failed) per variant purge.
                 let delete_tunnel_variants = |key| {
-                    domain
-                        .delete_synced_tunnel_variants(key, sync_req.peer_delete, forward_only)
-                        .keeps_caller_rows()
+                    let outcome = domain.delete_synced_tunnel_variants(
+                        key,
+                        sync_req.peer_delete,
+                        forward_only,
+                        strict_mirror,
+                    );
+                    (
+                        outcome.keeps_caller_rows(),
+                        outcome.mirror_delete_failed(),
+                    )
                 };
                 let mut refused = false;
                 // #7160 (#2387): a bare-5-tuple delete (the `clear security
@@ -444,7 +452,9 @@ pub(super) fn handle(
                     // only when the explicit trailing flag is present; generic
                     // GC/operator deletes retain exact/under-match semantics.
                     refused |= if purge_tunnel_variants {
-                        delete_tunnel_variants(key.clone())
+                        let (keeps, mfail) = delete_tunnel_variants(key.clone());
+                        mirror_delete_error |= mfail;
+                        keeps
                     } else {
                         delete(key.clone())
                     };
@@ -464,7 +474,10 @@ pub(super) fn handle(
                         [] => {
                             if !sync_req.peer_delete {
                                 refused |= if purge_tunnel_variants {
-                                    delete_tunnel_variants(key.clone())
+                                    let (keeps, mfail) =
+                                        delete_tunnel_variants(key.clone());
+                                    mirror_delete_error |= mfail;
+                                    keeps
                                 } else {
                                     delete(key.clone())
                                 };
@@ -476,7 +489,9 @@ pub(super) fn handle(
                             let mut scoped = key.clone();
                             scoped.routing_domain = *rd;
                             refused |= if purge_tunnel_variants {
-                                delete_tunnel_variants(scoped)
+                                let (keeps, mfail) = delete_tunnel_variants(scoped);
+                                mirror_delete_error |= mfail;
+                                keeps
                             } else {
                                 delete(scoped)
                             };

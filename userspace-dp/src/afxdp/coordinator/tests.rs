@@ -12096,7 +12096,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
     );
     coordinator
         .session_domain()
-        .delete_synced_tunnel_variants(target.clone(), false, false);
+        .delete_synced_tunnel_variants(target.clone(), false, false, false);
     let remaining = crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced);
     assert!(
         !remaining.contains_key(&target),
@@ -12111,3 +12111,87 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
         "a different-tuple row must survive the wildcard delete"
     );
 }
+
+/// #12886: a strict-mirror tunnel-variant purge must surface the mirror
+/// outcome instead of discarding it into Applied. In the unit
+/// environment mirror writes fail (no BPF fds), so a strict purge of a
+/// present variant reports RefusedMirrorDelete; the lenient purge of the
+/// same (now removed) tuple stays Applied.
+#[test]
+fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
+    use crate::afxdp::SyncedDeleteOutcome;
+    let coordinator = Coordinator::new();
+    let target = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_GRE,
+        src_ip: "10.0.0.10".parse().unwrap(),
+        dst_ip: "10.0.0.20".parse().unwrap(),
+        src_port: 0,
+        dst_port: 0,
+        discriminator: crate::session::TunnelDiscriminator::Keyed(1),
+        routing_domain: 0,
+    };
+    let entry = crate::afxdp::worker::SyncedSessionEntry {
+        key: target.clone(),
+        decision: crate::afxdp::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: crate::nat::NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: crate::session::SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        leak_incarnation: 0,
+        origin: crate::afxdp::SessionOrigin::SyncImport,
+        protocol: target.protocol,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        source_nat_static: None,
+    };
+    crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+        .insert(target.clone(), entry);
+    let outcome = coordinator
+        .session_domain()
+        .delete_synced_tunnel_variants(target.clone(), false, false, true);
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::RefusedMirrorDelete,
+        "strict variant purge must not discard the mirror outcome"
+    );
+    let lenient = coordinator
+        .session_domain()
+        .delete_synced_tunnel_variants(target.clone(), false, false, false);
+    assert_eq!(lenient, SyncedDeleteOutcome::Applied);
+}
+

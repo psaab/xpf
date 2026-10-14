@@ -1426,6 +1426,7 @@ impl crate::afxdp::ha::SessionDomain {
         key: SessionKey,
         peer_delete: bool,
         forward_only: bool,
+        strict_mirror: bool,
     ) -> SyncedDeleteOutcome {
         let variants: Vec<SessionKey> = lock_shared_recover(&self.sessions.synced)
             .keys()
@@ -1442,13 +1443,20 @@ impl crate::afxdp::ha::SessionDomain {
             .collect();
         let mut outcome = SyncedDeleteOutcome::Applied;
         for variant in variants {
+            // #12886: honor strict_mirror and never discard a local
+            // outcome — a gate-busy / mirror-write refusal must surface.
             let next = if peer_delete {
-                self.delete_peer_synced_session(variant, forward_only)
+                if strict_mirror {
+                    self.delete_peer_synced_session_mirror(variant, forward_only)
+                } else {
+                    self.delete_peer_synced_session(variant, forward_only)
+                }
+            } else if strict_mirror {
+                self.delete_synced_session_mirror(variant, forward_only)
             } else {
-                self.delete_synced_session(variant, forward_only);
-                SyncedDeleteOutcome::Applied
+                self.delete_synced_session(variant, forward_only)
             };
-            if next.keeps_caller_rows() {
+            if next.keeps_caller_rows() || next.mirror_delete_failed() {
                 outcome = next;
             }
         }
