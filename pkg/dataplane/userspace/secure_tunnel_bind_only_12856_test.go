@@ -127,9 +127,9 @@ func TestBindOnlyBareAuthoredZoneKeepsBaseRow12856(t *testing.T) {
 	}
 }
 
-// The mixed shape WITHOUT a stanza anywhere: bind st0, zones st0.0+st0.1,
-// no `interfaces st0` stanza at all — st0.0 already synthesized today;
-// keep it and do not also emit a bare st0 row.
+// The mixed unit-N stanza shape: bind st0 with a unit 1 stanza (no unit 0
+// stanza), zones st0.0+st0.1 — st0.0 is synthesized from the bind; keep it
+// and do not also emit a bare st0 row.
 func TestBindOnlyDottedZonesNoBareRow12856(t *testing.T) {
 	cfg := compileForTest5619(t,
 		"set security ipsec vpn v bind-interface st0",
