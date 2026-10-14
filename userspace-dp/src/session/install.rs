@@ -370,6 +370,14 @@ impl SessionTable {
                 key: key.clone(),
                 decision: forward_entry.decision,
                 is_reverse: forward_entry.metadata.is_reverse,
+                ingress_zone: forward_entry.metadata.ingress_zone,
+                egress_zone: forward_entry.metadata.egress_zone,
+                ingress_zone_check: forward_entry.metadata.ingress_zone_check,
+                egress_zone_check: forward_entry.metadata.egress_zone_check,
+                ingress_ifindex: forward_entry.metadata.ingress_ifindex,
+                ingress_vlan_id: forward_entry.metadata.ingress_vlan_id,
+                owner_rg_id: forward_entry.metadata.owner_rg_id,
+                policy_id: forward_entry.metadata.policy_id,
             });
             if companion_is_opening == Some(true) {
                 if let Some(companion_entry) =
@@ -379,6 +387,14 @@ impl SessionTable {
                         key: companion_key.clone(),
                         decision: companion_entry.decision,
                         is_reverse: companion_entry.metadata.is_reverse,
+                        ingress_zone: companion_entry.metadata.ingress_zone,
+                        egress_zone: companion_entry.metadata.egress_zone,
+                        ingress_zone_check: companion_entry.metadata.ingress_zone_check,
+                        egress_zone_check: companion_entry.metadata.egress_zone_check,
+                        ingress_ifindex: companion_entry.metadata.ingress_ifindex,
+                        ingress_vlan_id: companion_entry.metadata.ingress_vlan_id,
+                        owner_rg_id: companion_entry.metadata.owner_rg_id,
+                        policy_id: companion_entry.metadata.policy_id,
                     });
                 }
             }

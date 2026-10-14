@@ -1318,6 +1318,19 @@ pub(crate) struct PressureShedSession {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) is_reverse: bool,
+    /// #12862: install-stamped identity of the victim incarnation, compared
+    /// inside the shared-removal lock so a same-tuple replacement installed
+    /// by another worker is never torn down in the victim's place. Local
+    /// entries carry no session_id/generation token, so the metadata
+    /// identity subset is the incarnation fence that exists.
+    pub(crate) ingress_zone: u16,
+    pub(crate) egress_zone: u16,
+    pub(crate) ingress_zone_check: u32,
+    pub(crate) egress_zone_check: u32,
+    pub(crate) ingress_ifindex: u32,
+    pub(crate) ingress_vlan_id: u16,
+    pub(crate) owner_rg_id: i32,
+    pub(crate) policy_id: u32,
 }
 
 pub(crate) type PressureShedSessions = SmallVec<[PressureShedSession; 2]>;

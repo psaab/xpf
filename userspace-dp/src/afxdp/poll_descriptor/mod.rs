@@ -448,6 +448,30 @@ pub(super) fn dns_reply_fastpath_admit(
         && dns_reply_qr_set(packet_frame, meta)
 }
 
+
+pub(super) fn is_pressure_shed_shared_opening(
+    current: &SyncedSessionEntry,
+    shed: &crate::session::PressureShedSession,
+) -> bool {
+    // #12862: decision + opening state alone cannot distinguish the victim
+    // incarnation from a same-tuple replacement another worker installed
+    // (structurally identical decisions exist for no-NAT/static-NAT flows).
+    // The install-stamped identity subset fences the incarnation; the
+    // comparison runs inside the shared-removal lock, so the entry judged
+    // is the entry removed.
+    current.decision == shed.decision
+        && current.metadata.is_reverse == shed.is_reverse
+        && current.metadata.ingress_zone == shed.ingress_zone
+        && current.metadata.egress_zone == shed.egress_zone
+        && current.metadata.ingress_zone_check == shed.ingress_zone_check
+        && current.metadata.egress_zone_check == shed.egress_zone_check
+        && current.metadata.ingress_ifindex == shed.ingress_ifindex
+        && current.metadata.ingress_vlan_id == shed.ingress_vlan_id
+        && current.metadata.owner_rg_id == shed.owner_rg_id
+        && current.metadata.policy_id == shed.policy_id
+        && matches!(current.tcp_handshake_state, 1..=3)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
@@ -4955,7 +4979,70 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // teardown, not just a table deletion. Release
                                     // this worker's NAT holds exactly as the GC reap
                                     // does, including when the new SYN is later refused.
+                                    // #12862: ONE lease over every shed key:
+                                    // per-key leases drop between forward and
+                                    // companion, opening a window where a
+                                    // cross-worker pair install completes in
+                                    // between. On contention, retain every
+                                    // NAT hold rather than make allocations
+                                    // reusable while stale authority remains.
+                                    let shed_keys: Vec<_> = pressure_shed_sessions
+                                        .iter()
+                                        .map(|shed| shed.key.clone())
+                                        .collect();
+                                    let shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
+                                        .acquire_lease(shed_keys);
+                                    if shed_lease.is_ok() {
                                     for shed in pressure_shed_sessions {
+                                        // Remove shared authority before this
+                                        // worker processes another descriptor
+                                        // in the batch. The Close delta is
+                                        // flushed only after the batch.
+                                        let shared_removal =
+                                            crate::afxdp::shared_ops::remove_shared_session_if(
+                                                worker_ctx.shared_sessions,
+                                                worker_ctx.shared_nat_sessions,
+                                                worker_ctx.shared_forward_wire_sessions,
+                                                worker_ctx.shared_owner_rg_indexes,
+                                                &shed.key,
+                                                |current| {
+                                                    is_pressure_shed_shared_opening(
+                                                        current, &shed,
+                                                    )
+                                                },
+                                            );
+                                        if matches!(
+                                            shared_removal,
+                                            crate::afxdp::shared_ops::SharedRemoval::Declined
+                                        ) {
+                                            continue;
+                                        }
+                                        crate::afxdp::bpf_map::release_coordinator_session_rows(
+                                            binding.bpf_maps.session_map.handle(),
+                                            &shed.key,
+                                        );
+                                        binding
+                                            .flow
+                                            .flow_cache
+                                            .invalidate_slot(&shed.key, binding.ifindex);
+                                        let _ = crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                                            conntrack_v4_fd,
+                                            conntrack_v6_fd,
+                                            &shed.key,
+                                        );
+                                        if !shed.is_reverse {
+                                            crate::afxdp::checksum::delete_dnat_table_entry(
+                                                &worker_ctx.dnat_fds,
+                                                &shed.key,
+                                                shed.decision.nat,
+                                            );
+                                        }
+                                        crate::afxdp::bpf_map::delete_live_session_entry(
+                                            binding.bpf_maps.session_map.handle(),
+                                            &shed.key,
+                                            shed.decision.nat,
+                                            shed.is_reverse,
+                                        );
                                         crate::nat::release_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
                                             &worker_ctx.forwarding.source_nat_rules,
@@ -4973,6 +5060,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             now_ns,
                                             worker_id,
                                         );
+                                        // Do not make sibling NAT-holder
+                                        // release depend on the bounded local
+                                        // Close-delta ring. Queue order puts a
+                                        // replacement Upsert behind this delete.
+                                        crate::afxdp::session_glue::replicate_session_delete_repairing(
+                                            worker_ctx.peer_worker_commands,
+                                            worker_ctx.worker_commands_by_id,
+                                            worker_ctx.forwarding,
+                                            &shed.key,
+                                            shed.decision.nat,
+                                            shed.is_reverse,
+                                            now_ns,
+                                        );
+                                    }
                                     }
                                     if needed_sessions > 0 && !admission_allowed {
                                         sessions.note_admission_refused();
