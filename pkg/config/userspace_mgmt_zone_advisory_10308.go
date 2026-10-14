@@ -25,7 +25,16 @@ func appendUserspaceMgmtZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 	if cfg == nil || opts.suppressContestedTrunkZoneAdvisory || cfg.Security.Zones == nil {
 		return
 	}
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	quarantinedRefs := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zoneName := range []string{"control", "mgmt"} {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil || len(zone.Interfaces) == 0 {
 			continue
@@ -38,7 +47,14 @@ func appendUserspaceMgmtZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 				continue
 			}
 			seen[member] = struct{}{}
-			if !userspaceMgmtZoneMemberIsData(cfg, member) {
+			quarantined := false
+			for _, key := range zoneIfaceLogicalKeys(cfg, member) {
+				if _, found := quarantinedRefs[key]; found {
+					quarantined = true
+					break
+				}
+			}
+			if quarantined || !userspaceMgmtZoneMemberIsData(cfg, member) {
 				continue
 			}
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
@@ -68,6 +84,14 @@ func userspaceMgmtZoneMemberIsData(cfg *Config, member string) bool {
 	if _, ok := cfg.SecureTunnelNetdevForRef(member); ok {
 		return false
 	}
+	// A bare interface row also represents unit 0. Check its authored tunnel
+	// binding explicitly: the compiler stores a unit-0 tunnel on the unit,
+	// while callers commonly refer to the interface by its bare name.
+	if !split.HasUnit {
+		if _, ok := cfg.SecureTunnelNetdevForRef(base + ".0"); ok {
+			return false
+		}
+	}
 	if cfg.Interfaces.Interfaces == nil {
 		return true
 	}
@@ -78,12 +102,16 @@ func userspaceMgmtZoneMemberIsData(cfg *Config, member string) bool {
 	if ifc.Tunnel != nil || ifc.LocalFabricMember != "" {
 		return false
 	}
+	unitNum := 0
 	if split.HasUnit {
-		if unitNum, err := strconv.Atoi(split.UnitTok); err == nil {
-			if unit := ifc.Units[unitNum]; unit != nil && unit.Tunnel != nil {
-				return false
-			}
+		parsedUnit, err := strconv.Atoi(split.UnitTok)
+		if err != nil {
+			return true
 		}
+		unitNum = parsedUnit
+	}
+	if unit := ifc.Units[unitNum]; unit != nil && unit.Tunnel != nil {
+		return false
 	}
 	return true
 }

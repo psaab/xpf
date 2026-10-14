@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -134,4 +135,100 @@ func TestMgmtControlZoneSecureTunnelAliasStillWarns10308(t *testing.T) {
 		}
 	}
 	t.Fatalf("distinct secure-tunnel alias must retain the zone-name advisory: %v", cfg.Warnings)
+}
+
+// #12830: bare references to unit-0 tunnels and bare secure-tunnel bindings
+// are non-data, and quarantined claims must not produce an advisory.
+func TestMgmtControlZoneBareUnit0TunnelsAndQuarantinedMembersStayQuiet12830(t *testing.T) {
+	cfg := &Config{
+		Security: SecurityConfig{Zones: map[string]*ZoneConfig{
+			"mgmt":    {Interfaces: []string{"gr-0/0/0", "ge-0/0/1.0"}},
+			"control": {Interfaces: []string{"ip-0/0/0", "st0", "st1"}},
+			"trust":   {Interfaces: []string{"ge-0/0/1.0"}},
+		}},
+		Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+			"gr-0/0/0": {Name: "gr-0/0/0", Units: map[int]*InterfaceUnit{0: {Tunnel: &TunnelConfig{}}}},
+			"ip-0/0/0": {Name: "ip-0/0/0", Units: map[int]*InterfaceUnit{0: {Tunnel: &TunnelConfig{}}}},
+			"ge-0/0/1": {Name: "ge-0/0/1"},
+		}},
+	}
+	cfg.Security.IPsec.VPNs = map[string]*IPsecVPN{
+		"vpn0": {BindInterface: "st0"},
+		"vpn1": {BindInterface: "st1.0"},
+	}
+	appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "(#10308)") {
+			t.Fatalf("bare unit-0/secure-tunnel or quarantined members must stay quiet: %q (warnings=%v)", w, cfg.Warnings)
+		}
+	}
+}
+
+// #12830 mutants: an absent unknown interface and a bare non-zero or
+// non-tunnel unit must still warn; interpreting every bare reference as unit
+// 0 without tunnel evidence, or any st-looking name as secure tunnel, fails.
+func TestMgmtControlZoneBareUnknownAndNonZeroUnitsStillWarn12830(t *testing.T) {
+	cfg := &Config{
+		Security: SecurityConfig{Zones: map[string]*ZoneConfig{
+			"mgmt": {Interfaces: []string{"ge-9/0/0", "gr-0/0/0"}},
+		}},
+		Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+			"gr-0/0/0": {Name: "gr-0/0/0", Units: map[int]*InterfaceUnit{1: {Tunnel: &TunnelConfig{}}}},
+		}},
+	}
+	appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
+	for _, member := range []string{"ge-9/0/0", "gr-0/0/0"} {
+		found := false
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "(#10308)") && strings.Contains(w, member) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("member %q must retain (#10308) advisory; warnings=%v", member, cfg.Warnings)
+		}
+	}
+}
+
+func TestMgmtControlZoneBindOnlySecureTunnelStaysQuiet12830(t *testing.T) {
+	for _, bind := range []string{"st0", "st0.0"} {
+		cfg := &Config{
+			Security: SecurityConfig{
+				Zones: map[string]*ZoneConfig{"mgmt": {Interfaces: []string{"st0"}}},
+				IPsec: IPsecConfig{VPNs: map[string]*IPsecVPN{
+					"vpn0": {BindInterface: bind},
+				}},
+			},
+		}
+		appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "(#10308)") {
+				t.Errorf("bind-only st0 must stay quiet for bind %q: %q", bind, w)
+			}
+		}
+	}
+}
+
+func TestMgmtControlZoneQuarantinedByIDCollisionStaysQuiet12830(t *testing.T) {
+	collision := ""
+	for i := range 1_000_000 {
+		candidate := fmt.Sprintf("a-%d", i)
+		if StableZoneID(candidate) == StableZoneID("mgmt") {
+			collision = candidate
+			break
+		}
+	}
+	if collision == "" {
+		t.Fatal("could not find deterministic zone-id collision fixture")
+	}
+	cfg := &Config{Security: SecurityConfig{Zones: map[string]*ZoneConfig{
+		"mgmt":    {Interfaces: []string{"ge-0/0/0"}},
+		collision: {},
+	}}}
+	appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "(#10308)") {
+			t.Fatalf("quarantined mgmt zone must not warn: %q", w)
+		}
+	}
 }
