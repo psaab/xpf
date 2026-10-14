@@ -125,6 +125,16 @@ func AnalyzePolicyShadowing(cfg *config.Config) []string {
 // covered-pair map counts the surviving pair once. A stanza structurally
 // bound to a quarantined zone is dropped by the runtime, and its pair is no
 // longer in the universe, so it can no longer be credited as a coverer.
+//
+// #12892: host-inbound globals (`match to-zone junos-host`,
+// config.IsHostToZoneScope) are NOT analyzed. They are enforced on the
+// SEPARATE host gate (matchJunosHostWithMemo: exact `to-zone junos-host`
+// pair, then `from-zone any to-zone junos-host`, then host globals — never
+// the transit tiers swept here), so no zone-pair stanza — however broad its
+// `to-zone any` — can make one unreachable, and crediting transit coverage
+// for its `junos-host` pair is the false SHADOWED/REDUNDANT this pass must
+// not emit (the same exclusion globalScopeCovers applies within the global
+// list, #5720).
 func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePairPolicies, findings []string) []string {
 	// Effective (surviving) zone set: authored inventory minus the
 	// quarantine exclusions the snapshot builder prunes with.
@@ -162,6 +172,17 @@ func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePai
 		}
 		if config.IsWildcardZoneSet(global.Match.FromZones) && config.IsWildcardZoneSet(global.Match.ToZones) {
 			continue // unscoped: unchanged behavior
+		}
+		// #12892: a host-inbound global rides the host gate, which never
+		// falls through to the transit tiers — the runtime reaches it for
+		// host-bound traffic no zone-pair stanza can intercept, so this pass
+		// must not credit transit coverage to its `junos-host` pair. The
+		// surviving-scope filter below happens to empty the to-axis (the
+		// reserved `junos-host` token is never an installed zone), but that
+		// is a quarantine invariant, not an enforcement-path one: state the
+		// gate here so the exclusion stands even if that universe changes.
+		if config.IsHostToZoneScope(global.Match.ToZones) {
+			continue // host gate: transit tiers never cover it
 		}
 		fromSet := expand(global.Match.FromZones)
 		toSet := expand(global.Match.ToZones)
