@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -164,47 +163,18 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 				fmt.Println("  Interface details:")
 				for _, ifName := range zone.Interfaces {
 					fmt.Printf("    %s:\n", ifName)
-					// #5325: a zone binds a LOGICAL interface such as
+					// #5325/#12898: a zone binds a LOGICAL interface such as
 					// "ge-0/0/9.0" or "reth0.50", but
 					// cfg.Interfaces.Interfaces is keyed by the BASE name
-					// ("ge-0/0/9" / "reth0"). The prior direct lookup missed
-					// every unit-qualified reference, so a correctly addressed
-					// interface rendered with NO Address/DHCP lines and looked
-					// unaddressed in this policy-audit surface. Split off the
-					// unit suffix, look up the base, and (when a unit was
-					// named) render only that unit's addresses/DHCP. Mirrors the
-					// #4908/C175-HC-116 repair in showChassisClusterStatus.
-					base := ifName
-					wantUnit := -1
-					if parts := strings.SplitN(ifName, ".", 2); len(parts) == 2 {
-						base = parts[0]
-						if u, err := strconv.Atoi(parts[1]); err == nil {
-							wantUnit = u
-						}
+					// ("ge-0/0/9" / "reth0"). The split + base lookup +
+					// per-unit filter + nil-safe unit walk (#5910) now live
+					// in config.ZoneMemberDetailLines, the ONE shared
+					// presenter the gRPC-text zones-detail renderer also
+					// uses, so the two surfaces cannot drift. A bare member
+					// still renders all units, byte-identical (#5325).
+					for _, line := range config.ZoneMemberDetailLines(cfg, ifName) {
+						fmt.Println(line)
 					}
-					ifc, ok := config.LookupInterface(cfg, base)
-					// #5910: `ok` proves KEY presence, not a non-nil value — the
-					// tolerant load / HA config-sync path admits a present-but-nil
-					// InterfaceConfig (#3494/#5068). Guard nil AND walk units via
-					// the shared nil-safe iterator (a raw `range ifc.Units` /
-					// `unit.Number` nil-derefs and panics the daemon).
-					if !ok || ifc == nil {
-						continue
-					}
-					config.RangeUnits(ifc, func(_ int, unit *config.InterfaceUnit) {
-						if wantUnit >= 0 && unit.Number != wantUnit {
-							return
-						}
-						for _, addr := range unit.Addresses {
-							fmt.Printf("      Address: %s\n", addr)
-						}
-						if unit.DHCP {
-							fmt.Printf("      DHCPv4: enabled\n")
-						}
-						if unit.DHCPv6 {
-							fmt.Printf("      DHCPv6: enabled\n")
-						}
-					})
 				}
 			}
 
