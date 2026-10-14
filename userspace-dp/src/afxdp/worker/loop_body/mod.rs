@@ -263,6 +263,8 @@ fn rematch_bound_first_policy_sessions(
     let mut purged = 0;
     for (key, decision, metadata, origin) in candidates {
         let mut retained = false;
+        let local_delivery = decision.resolution.disposition
+            == crate::afxdp::ForwardingDisposition::LocalDelivery;
         if ancestry.len() == 1 {
             let descriptor = ancestry[0];
             if ancestry_source_zone_matches(
@@ -272,13 +274,25 @@ fn rematch_bound_first_policy_sessions(
                 descriptor.source_from_zone_any,
                 metadata.ingress_zone,
             )
-                && ancestry_source_zone_matches(
-                    old_forwarding,
-                    &descriptor.source_to_zone,
-                    descriptor.source_to_zone_id,
-                    descriptor.source_to_zone_any,
-                    metadata.egress_zone,
-                )
+                // #12858: the LocalDelivery classifier stamps its interface
+                // zone as `metadata.egress_zone`; the admitting policy's
+                // destination is nevertheless the reserved junos-host zone.
+                // Only explicit host ancestry can prove this is the same
+                // policy domain. Transit rows continue to use their real
+                // stamped egress zone and cannot use this exception.
+                && (if local_delivery {
+                    descriptor.source_to_zone == "junos-host"
+                        && descriptor.source_to_zone_id == crate::policy::ZONE_ID_RESERVED_MIN
+                        && metadata.egress_zone != 0
+                } else {
+                    ancestry_source_zone_matches(
+                        old_forwarding,
+                        &descriptor.source_to_zone,
+                        descriptor.source_to_zone_id,
+                        descriptor.source_to_zone_any,
+                        metadata.egress_zone,
+                    )
+                })
                 && let Ok(ifindex) = i32::try_from(metadata.ingress_ifindex)
                 // Untagged physical ports carry no (parent, vlan) entry; fall
                 // back to the physical ifindex exactly like the flow-cache
@@ -310,14 +324,25 @@ fn rematch_bound_first_policy_sessions(
                     true,
                 )
                 .is_some()
-                && let Some(to_id) = ancestry_destination_zone_id(
-                    new_forwarding,
-                    &descriptor.destination_to_zone,
-                    descriptor.destination_to_zone_id,
-                    descriptor.destination_to_zone_any,
-                    metadata.egress_zone,
-                    false,
-                )
+                && let Some(to_id) = if local_delivery {
+                    ancestry_destination_zone_id(
+                        new_forwarding,
+                        &descriptor.destination_to_zone,
+                        descriptor.destination_to_zone_id,
+                        descriptor.destination_to_zone_any,
+                        crate::policy::JUNOS_HOST_ZONE_ID,
+                        true,
+                    )
+                } else {
+                    ancestry_destination_zone_id(
+                        new_forwarding,
+                        &descriptor.destination_to_zone,
+                        descriptor.destination_to_zone_id,
+                        descriptor.destination_to_zone_any,
+                        metadata.egress_zone,
+                        false,
+                    )
+                }
                 && to_id != 0
                 && let Some(_destination_rule) = new_forwarding
                     .policy
@@ -325,18 +350,33 @@ fn rematch_bound_first_policy_sessions(
             {
                 let policy_dst_ip = decision.nat.rewrite_dst.unwrap_or(key.dst_ip);
                 let policy_dst_port = decision.nat.rewrite_dst_port.unwrap_or(key.dst_port);
-                let result = crate::policy::evaluate_policy_result_without_counting(
-                    &new_forwarding.policy,
-                    from_id,
-                    to_id,
-                    key.src_ip,
-                    policy_dst_ip,
-                    key.protocol,
-                    key.src_port,
-                    policy_dst_port,
-                    None,
-                );
-                if result.action == crate::policy::PolicyAction::Permit
+                let result = if local_delivery {
+                    crate::policy::evaluate_junos_host_policy_l3_aware_without_counting(
+                        &new_forwarding.policy,
+                        from_id,
+                        key.src_ip,
+                        policy_dst_ip,
+                        key.protocol,
+                        key.src_port,
+                        policy_dst_port,
+                        None,
+                        true,
+                    )
+                } else {
+                    Some(crate::policy::evaluate_policy_result_without_counting(
+                        &new_forwarding.policy,
+                        from_id,
+                        to_id,
+                        key.src_ip,
+                        policy_dst_ip,
+                        key.protocol,
+                        key.src_port,
+                        policy_dst_port,
+                        None,
+                    ))
+                };
+                if let Some(result) = result
+                    && result.action == crate::policy::PolicyAction::Permit
                     && result.policy_counter_idx != 0
                     && let Some(matched_rule) = result
                         .policy_counter_idx
@@ -360,7 +400,14 @@ fn rematch_bound_first_policy_sessions(
                         policy_id: result.policy_id,
                         rule_id: matched_rule.rule_id.clone(),
                         ingress_zone: from_id,
-                        egress_zone: to_id,
+                        // Preserve the LocalDelivery metadata contract: its
+                        // egress zone is the local interface's real zone, not
+                        // the reserved zone used to evaluate junos-host policy.
+                        egress_zone: if local_delivery {
+                            metadata.egress_zone
+                        } else {
+                            to_id
+                        },
                         tunnel_discriminator: key.discriminator.to_wire(),
                     };
                     retained = rebind_policy_sessions_from_snapshot(

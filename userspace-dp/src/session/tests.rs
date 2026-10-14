@@ -7163,6 +7163,71 @@ fn session_limit_count_moves_with_policy_rebind_before_delete_10985() {
     assert_eq!(table.session_limit_dst_count(TEST_TRUST_ZONE_ID, dst), 0);
 }
 
+#[test]
+fn local_delivery_single_entry_rebinds_policy_without_reverse_12858() {
+    let mut table = SessionTable::new();
+    let key = limit_key(12, 12, 40_128);
+    let mut local_decision = decision();
+    local_decision.resolution.disposition =
+        crate::afxdp::ForwardingDisposition::LocalDelivery;
+    let mut local_metadata = metadata();
+    local_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        local_decision,
+        local_metadata,
+        SessionOrigin::LocalMiss,
+        1_000_000_000,
+        PROTO_TCP,
+        0x02,
+    ));
+    let counter = std::sync::Arc::new(crate::policy::PolicyRuleCounter::default());
+    assert!(table.rebind_policy_pair(
+        &key,
+        12858,
+        1,
+        counter.clone(),
+        TEST_LAN_ZONE_ID,
+        TEST_LAN_ZONE_ID,
+    ));
+    let entries = table
+        .policy_rebind_pair_entries(&key)
+        .expect("a rebound LocalMiss session has one live entry");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, key);
+    assert_eq!(entries[0].metadata.policy_id, 12858);
+    assert!(std::sync::Arc::ptr_eq(
+        entries[0]
+            .metadata
+            .policy_counter
+            .as_ref()
+            .expect("the local entry must be rebound"),
+        &counter
+    ));
+
+    // A single-entry transit session is still invalid: the missing reverse
+    // companion is tolerated only for LocalDelivery.
+    let transit_key = limit_key(13, 13, 40_129);
+    assert!(table.install_with_protocol_with_origin(
+        transit_key.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000_000_001,
+        PROTO_TCP,
+        0x02,
+    ));
+    assert!(!table.rebind_policy_pair(
+        &transit_key,
+        12859,
+        1,
+        counter,
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+    ));
+    assert!(table.policy_rebind_pair_entries(&transit_key).is_none());
+}
+
 
 /// §5.2 established-flow regression (the r2 BLOCKER): the per-packet
 /// session HIT path (`lookup` / `touch`) must NOT change the per-IP
