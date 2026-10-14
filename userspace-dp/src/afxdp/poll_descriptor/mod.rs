@@ -45,6 +45,7 @@ pub(in crate::afxdp) mod frag_assoc;
 mod host_inbound_policy;
 mod nat64_icmp_error;
 mod nat_exception;
+mod noroute_adjudication;
 mod prerouting_scope;
 
 mod policy_revalidation;
@@ -90,6 +91,7 @@ use host_inbound_policy::{
     session_host_bound_policy_dst,
 };
 use nat64_icmp_error::try_translate_nat64_icmp_error;
+use noroute_adjudication::noroute_policy_adjudication;
 use rx_telemetry::record_rx_descriptor_telemetry;
 use session_admission::{new_flow_session_limit_drop, strict_syn_check_drops_new_flow};
 use session_hit_authority::{
@@ -8455,18 +8457,29 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // fragment / no L4) is rebuilt from meta and evaluated with
                             // ports = 0 and `l4_present = false`, so port-bearing terms
                             // fail closed while address/protocol/`any` still match.
+                            //
+                            // #12906: the adjudication tuple and the zone-pair
+                            // binding now match the sibling policy sites instead
+                            // of diverging on this arm. The gate judges the #2345
+                            // POST-translation destination (DNAT/static-DNAT/
+                            // NPTv6 from `decision.nat`, NAT64 from a dest-only
+                            // re-classify) — the ForwardCandidate and
+                            // MissingNeighbor views — so a NAT-dependent deny
+                            // lands identically whether or not the translated
+                            // destination resolved a route, and the deny event /
+                            // cached `CachedPolicyDeny` attribute to the rule the
+                            // operator wrote for the translated tuple. The
+                            // zone-encoded fabric stamp takes the #6458 V2
+                            // owner-RG gate first, exactly like the session-miss
+                            // zone-pair site and the MissingNeighbor arm; the
+                            // gated value shadows the raw stamp for the NAT
+                            // fences and the deny seed below.
                             let ingress_logical = resolve_ingress_logical_ifindex(
                                 worker_ctx.forwarding,
                                 meta.ingress_ifindex as i32,
                                 meta.ingress_vlan_id,
                             )
                             .unwrap_or(meta.ingress_ifindex as i32);
-                            let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
-                                worker_ctx.forwarding,
-                                ingress_logical,
-                                ingress_zone_override,
-                                decision.resolution.egress_ifindex,
-                            );
                             // A frame with NO derivable L3 identity falls through
                             // UNADJUDICATED, matching the three sibling sites (the
                             // association-HIT arm, the session-MISS arm and the
@@ -8506,25 +8519,41 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 }
                             };
                             if let Some((adj_flow, l4_present)) = adjudicated {
-                                let ports = l4_present.then(|| {
-                                    (adj_flow.forward_key.src_port, adj_flow.forward_key.dst_port)
-                                });
                                 let policy_icmp = policy_packet_icmp(packet_frame, meta);
-                                if let Some(policy_result) =
-                                    crate::afxdp::forwarding::noroute_policy_denial_gated_at(
-                                        worker_ctx.forwarding,
-                                        from_zone_id,
-                                        to_zone_id,
-                                        decision.resolution.egress_ifindex,
-                                        adj_flow.src_ip,
-                                        adj_flow.dst_ip,
-                                        meta.protocol,
-                                        ports,
-                                        policy_icmp,
-                                        desc.len as u64,
-                                        now_ns,
-                                    )
-                                {
+                                // #12906: adjudicate on the #6458 owner-RG-gated
+                                // zone pair and the #2345 POST-translation
+                                // destination tuple (DNAT/static-DNAT/NPTv6 from
+                                // `decision.nat`, NAT64 from a dest-only
+                                // re-classify) — the same view the ForwardCandidate
+                                // and MissingNeighbor paths match, so a NAT-dependent
+                                // deny lands identically whether or not the
+                                // translated destination resolved a route. The
+                                // gated stamp shadows the raw one so the NAT fences
+                                // and the deny seed below see the same zone the
+                                // policy judged. Pure function; see
+                                // `noroute_adjudication` and its cells.
+                                let adjudication = noroute_policy_adjudication(
+                                    worker_ctx.forwarding,
+                                    worker_ctx.ha_state,
+                                    now_secs,
+                                    ingress_logical,
+                                    ingress_zone_override,
+                                    decision.resolution,
+                                    decision.nat,
+                                    flow.is_some(),
+                                    adj_flow,
+                                    meta.protocol,
+                                    l4_present,
+                                    policy_icmp,
+                                    desc.len as u64,
+                                    now_ns,
+                                );
+                                let ingress_zone_override =
+                                    adjudication.gated_ingress_zone_override;
+                                let from_zone_id = adjudication.from_zone_id;
+                                let to_zone_id = adjudication.to_zone_id;
+                                let ports = adjudication.ports;
+                                if let Some(policy_result) = adjudication.denial {
                                     let app_id = ports
                                         .map(|(_, policy_dst_port)| {
                                             resolve_policy_deny_app_id(
