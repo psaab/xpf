@@ -190,6 +190,14 @@ func appendBindInterfaceOnlySecureTunnelRows(
 		}
 		ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(dev)
 		base, unit, dotted := strings.Cut(ref, ".")
+		// A replaced base row still owns interface-level admin state. Mirror
+		// the regular builder: disabled parents suppress live addresses on all
+		// unit rows, including this synthesized one.
+		adminDisabled := false
+		if iface := cfg.Interfaces.Interfaces[base]; iface != nil && iface.Disable {
+			adminDisabled = true
+			addresses = nil
+		}
 		// The parent netdev, resolved the way the builder loop resolves it for
 		// a unit row whose interface has no stanza: snapshotLinuxName returns
 		// config.LinuxIfName(ifName) when iface is nil. Not inventing a parent
@@ -223,11 +231,12 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			}
 		}
 		out = append(out, InterfaceSnapshot{
-			Name: ref,
+			Name:   ref,
+			IsUnit: dotted && unit != "",
 			// #9821 #22: same rule as the idents entry below — a dotted
 			// ref with a unit part is a unit row (st-family-correct: a
 			// bare `st0` bind stays a base row).
-			IsUnit:          dotted && unit != "",
+			AdminDisabled:   adminDisabled,
 			Zone:            zone,
 			RoutingInstance: ifaceRoutingInstance[ref],
 			RoutingDomain:   routingDomainForInterfaceKey(ref, ifaceRoutingInstance, quarantinedKeys),

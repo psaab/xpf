@@ -265,3 +265,41 @@ func TestBindOnlyUnitZeroDoesNotInheritSiblingZone12856(t *testing.T) {
 			row.Zone, row.EgressZone)
 	}
 }
+
+// Replacing the regular base row must carry its interface-level disabled
+// state onto synthesized unit 0 and suppress live addresses, just like the
+// ordinary builder does for configured units.
+func TestBindOnlyReplacementPreservesDisabledParent12856(t *testing.T) {
+	cfg := compileForTest5619(t,
+		"set security ipsec vpn v bind-interface st0",
+		"set interfaces st0 unit 1 family inet address 10.5.5.1/30",
+		"set security zones security-zone vpn interfaces st0.0",
+		"set security zones security-zone dmz interfaces st0.1",
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+		"set security zones security-zone trust interfaces ge-0/0/0.0",
+	)
+	cfg.Interfaces.Interfaces["st0"].Disable = true
+	previous := buildLinkSnapshot
+	t.Cleanup(func() { buildLinkSnapshot = previous })
+	buildLinkSnapshot = func(name string) (int, int, string, []InterfaceAddressSnapshot) {
+		switch name {
+		case "st0":
+			return 42, 1400, "", []InterfaceAddressSnapshot{{Family: "inet", Address: "10.5.5.1/30"}}
+		case "ge-0-0-0":
+			return 11, 1500, "", nil
+		default:
+			return 0, 0, "", nil
+		}
+	}
+	rows := buildInterfaceSnapshotsFrom(cfg, map[string]bool{})
+	row, ok := rowByName7949(rows, "st0.0")
+	if !ok {
+		t.Fatalf("no synthesized st0.0 row; rows=%v", rows)
+	}
+	if !row.AdminDisabled {
+		t.Errorf("synthesized st0.0 AdminDisabled = false, want true from disabled st0 parent")
+	}
+	if len(row.Addresses) != 0 {
+		t.Errorf("disabled synthesized st0.0 retained live addresses: %+v", row.Addresses)
+	}
+}
