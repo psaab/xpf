@@ -437,6 +437,7 @@ run_bash test/incus/failover-client-selftest.sh
 # #11872: host-clock resync after crash reboot; mocked incus/date, no cluster.
 run_bash test/incus/failover-clock-selftest.sh
 run_bash test/incus/screen-probe-selftest.sh
+run_bash test/incus/v6-na-recovery-12495-selftest.sh
 run_bash test/incus/target-services-selftest.sh
 run_bash test/incus/with-cluster-selftest.sh
 # #11873: keep failover failure-journal evidence inside the test window.
