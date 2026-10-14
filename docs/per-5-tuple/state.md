@@ -97,9 +97,15 @@ from work-conserving surplus-sharing:
   `MOUSE_PROBE_MIN_INTERVAL_MS=20`, so the gate measures established
   mouse echo transactions instead of the target echo daemon's TCP
   accept/close rate or unpaced echo throughput. The reducer selects the
-  representative rep by the same percentile it gates and rejects idle vs
+  representative rep by the same percentile it gates, reports the
+  across-rep spread for that percentile, and rejects idle vs
   loaded gate comparisons captured with different probe modes or
-  minimum-interval pacing. Surplus matrix runs must set
+  minimum-interval pacing. Valid reps that declare different
+  `(mouse_target, elephant_target)` pairs (a partially re-run cell)
+  mark the cell `INCONSISTENT-TARGETS` — deciding as
+  `INSUFFICIENT-DATA` instead of silently dropping the targets, which
+  let a shared-target cell bypass the `VOID-NOT-ATTRIBUTABLE` guard
+  and PASS (#13066). Surplus matrix runs must set
   `MOUSE_COS_SURPLUS_SHARING=1`; the per-rep harness reapplies CoS
   before every preflight/rep, so manually applying the surplus fixture
   once before the matrix is overwritten by the runner. Each rep manifest
