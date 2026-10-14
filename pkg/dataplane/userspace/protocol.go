@@ -1000,6 +1000,9 @@ type ConfigSnapshot struct {
 	// documented configuration-ownership fallback, while the RSS allowlist
 	// consumes it to grant no reshape permission without kernel evidence.
 	xfrmDumpFailed bool
+	// wgFanUpBaseRows is local provenance used by WG map construction. It is
+	// excluded from snapshot JSON and the content hash.
+	wgFanUpBaseRows map[string]bool `json:"-"`
 	// policySnapshotIdentity is the cached policy/rename authorization identity.
 	// It is manager-local, excluded from the wire and snapshot content hash, and
 	// survives partial snapshot copies that change only non-policy sections.

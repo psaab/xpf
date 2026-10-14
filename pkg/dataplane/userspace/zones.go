@@ -151,3 +151,25 @@ func buildInterfaceZoneMap(cfg *config.Config) map[string]string {
 	// canonicalisation.
 	return config.InterfaceZoneMap(cfg)
 }
+
+// wgFanUpBaseRows identifies snapshot BASE rows whose Zone exists only because
+// InterfaceZoneMap fanned a unit reference up to its physical parent. The WG
+// mapper needs this provenance to avoid treating that derived label as a
+// direct untagged owner or address owner.
+func wgFanUpBaseRows(cfg *config.Config) map[string]bool {
+	if cfg == nil {
+		return nil
+	}
+	zones := buildInterfaceZoneMap(cfg)
+	if len(zones) == 0 {
+		return nil
+	}
+	authored := authoredZoneRefs(cfg)
+	rows := make(map[string]bool)
+	for name := range cfg.Interfaces.Interfaces {
+		if zones[name] != "" && authored[name] == "" {
+			rows[name] = true
+		}
+	}
+	return rows
+}

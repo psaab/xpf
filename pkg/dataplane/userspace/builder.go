@@ -241,6 +241,7 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 		Zones:                zones,
 		Interfaces:           interfaces,
 		Fabrics:              buildFabricSnapshotsFrom(cfg, liveXfrm),
+		wgFanUpBaseRows:      wgFanUpBaseRows(cfg),
 		TunnelEndpoints:      buildTunnelEndpointSnapshots(cfg, interfaces),
 		Neighbors:            buildNeighborSnapshots(cfg),
 		ForwardingTables:     forwardingTables,
