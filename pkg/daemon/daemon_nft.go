@@ -1384,54 +1384,38 @@ func hostInboundFenceMandatoryAdmits() []string {
 	}
 }
 
+// emitHostInboundFenceWGAdmits scopes the whole-table cold-boot/lo0 fence's
+// WireGuard exception exactly like the steady-state chain: it reuses the
+// #12846 zone mapping, so lifeline-shared addresses withheld into
+// IngressDenyV4/V6 (#12959) keep their unique-owner zone admit during a fence
+// window, while ambiguous or unknown sources stay denied. Zones without a
+// configured listener gain no ports, so no global port exception is possible.
 func emitHostInboundFenceWGAdmits(rules *[]string, views []dpuserspace.ZoneHostInboundView, wgZonePorts map[string][]uint16) {
-	for _, v := range views {
-		ports := wgZonePorts[v.Zone]
-		emitHostInboundFenceWGFamilyAdmit(rules, views, v, "ip", v.V4Addrs, ports)
-		emitHostInboundFenceWGFamilyAdmit(rules, views, v, "ip6", v.V6Addrs, ports)
+	ingress := hostInboundWireGuardZoneIngress(views)
+	for _, family := range [...]string{"ip", "ip6"} {
+		zones, addresses, _ := hostInboundWireGuardZoneAddresses(views, family)
+		for _, zone := range zones {
+			emitHostInboundWGIngressAccepts(rules, ingress[zone], family, addresses[zone], wgZonePorts[zone])
+		}
 	}
 }
 
+// emitHostInboundGapFenceWGAdmits scopes the additive gap fence's WireGuard
+// exception with the same steady-state mapping (#12959), narrowed to the gap's
+// uncovered destination set — a gap accept must never extend beyond it.
 func emitHostInboundGapFenceWGAdmits(rules *[]string, views []dpuserspace.ZoneHostInboundView, uncoveredV4, uncoveredV6 []string, wgZonePorts map[string][]uint16) {
-	for _, v := range views {
-		ports := wgZonePorts[v.Zone]
-		v4 := intersectHostInboundAddresses(v.V4Addrs, uncoveredV4)
-		v6 := intersectHostInboundAddresses(v.V6Addrs, uncoveredV6)
-		emitHostInboundFenceWGFamilyAdmit(rules, views, v, "ip", v4, ports)
-		emitHostInboundFenceWGFamilyAdmit(rules, views, v, "ip6", v6, ports)
-	}
-}
-
-func emitHostInboundFenceWGFamilyAdmit(rules *[]string, views []dpuserspace.ZoneHostInboundView, view dpuserspace.ZoneHostInboundView, family string, candidates []string, ports []uint16) {
-	if len(candidates) == 0 || len(ports) == 0 {
-		return
-	}
-	ingress := hostInboundWireGuardZoneIngress(views)[view.Zone]
-	if len(ingress.IIFNames()) == 0 {
-		return
-	}
-	owners := make(map[string]string)
-	ambiguous := make(map[string]bool)
-	for _, v := range views {
-		addrs := v.V4Addrs
+	ingress := hostInboundWireGuardZoneIngress(views)
+	for _, family := range [...]string{"ip", "ip6"} {
+		uncovered := uncoveredV4
 		if family == "ip6" {
-			addrs = v.V6Addrs
+			uncovered = uncoveredV6
 		}
-		for _, addr := range addrs {
-			if owner, ok := owners[addr]; ok && owner != v.Zone {
-				ambiguous[addr] = true
-				continue
-			}
-			owners[addr] = v.Zone
+		zones, addresses, _ := hostInboundWireGuardZoneAddresses(views, family)
+		for _, zone := range zones {
+			emitHostInboundWGIngressAccepts(rules, ingress[zone], family,
+				intersectHostInboundAddresses(addresses[zone], uncovered), wgZonePorts[zone])
 		}
 	}
-	var unique []string
-	for _, addr := range candidates {
-		if owners[addr] == view.Zone && !ambiguous[addr] {
-			unique = append(unique, addr)
-		}
-	}
-	emitHostInboundWGIngressAccepts(rules, ingress, family, unique, ports)
 }
 
 // hostInboundStaleReplyGuardText renders the #10752/#10764 catalog drops before
