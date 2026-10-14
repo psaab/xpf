@@ -115,7 +115,9 @@
 //! zone" invariant. `update_profiles` rebuilds `zones` per reconfigure,
 //! carrying over each persisting zone's in-flight state and reconciling its
 //! threshold-gated sub-state (see `ZoneScreenState::reconcile_substate`),
-//! preserving the exact pre-#4969 retention/reset behaviour. String keys are
+//! preserving the pre-#4969 retention/reset behaviour except where the
+//! cookie-active latch is deliberately cleared on an audit transition
+//! (#9425) or an activation-slice edit (#12876). String keys are
 //! retained for now; numeric zone-id keying is deferred to #4421.
 //!
 //! ## Source-independent screen single-sourcing (#6238)
@@ -475,15 +477,28 @@ impl ScreenState {
                     // Zone persists: carry over live mutable state, reconciling
                     // the threshold-gated sub-state against the new profile.
                     // #2446: bump the SYN-cookie profile generation when a
-                    // SYN-cookie-relevant field changes — only `syn_cookie` and
-                    // `syn_flood_threshold` gate the validated cache, so
-                    // unrelated edits (teardrop, port-scan, …) do NOT churn it.
+                    // SYN-cookie-relevant field changes — `syn_cookie`,
+                    // `syn_flood_threshold`, or `syn_flood_src_threshold` gate
+                    // the validated cache, so unrelated edits (teardrop,
+                    // port-scan, …) do NOT churn it.
                     let old_sig = Self::syn_cookie_profile_signature(&old.profile);
                     if old_sig != new_sig {
                         old.syn_cookie_profile_gen = self.next_syn_cookie_profile_gen();
                     }
+                    // #12876: the cookie-ACTIVE latch is derived state — a
+                    // measurement ("aggregate over attack threshold") made
+                    // under the OLD profile's activation slice (`syn_cookie`,
+                    // `syn_flood_threshold`). When that slice changes, the
+                    // latch is stale by construction and must not survive the
+                    // commit: `reconcile_substate` clears it. A still-real
+                    // flood re-latches on the next over-attack SYN (the
+                    // count-all aggregate counter is carried over untouched).
+                    let activation_slice_changed = (
+                        old.profile.syn_cookie,
+                        old.profile.syn_flood_threshold,
+                    ) != (profile.syn_cookie, profile.syn_flood_threshold);
                     old.profile = profile;
-                    old.reconcile_substate();
+                    old.reconcile_substate(activation_slice_changed);
                     old
                 }
                 None => {
@@ -584,11 +599,27 @@ impl ScreenState {
     /// cache: a tuple validated under one may bypass the SYN-flood counter
     /// under the other without changing the security posture. Any change here
     /// bumps the zone's profile generation and invalidates its cached
-    /// validations. `(syn_cookie, syn_flood_threshold)` — NOT the stateless
-    /// screens, scan/sweep, or other flood thresholds, which never gate the
-    /// validated cache.
-    fn syn_cookie_profile_signature(profile: &ScreenProfile) -> (bool, u32) {
-        (profile.syn_cookie, profile.syn_flood_threshold)
+    /// validations. `(syn_cookie, syn_flood_threshold, syn_flood_src_threshold)`
+    /// — NOT the stateless screens, scan/sweep, or the other flood thresholds,
+    /// which never gate the validated cache.
+    ///
+    /// #12876: `syn_flood_src_threshold` is in the signature because the
+    /// #9945 validated-client bypass skips the per-SOURCE cap (and the
+    /// aggregate challenge), so a cached validation is a certificate that its
+    /// source may exceed `syn_flood_src_threshold` as configured AT
+    /// VALIDATION TIME. Tightening that threshold without invalidating the
+    /// cache would leave already-validated sources exempt from the stricter
+    /// cap for up to the cache TTL — the operator's commit would silently not
+    /// apply to exactly the sources most likely to be flooding. Recertification
+    /// (generation bump, a re-challenge on the next over-attack SYN) is the
+    /// fail-closed direction; the symmetric churn on a LOOSENING edit is
+    /// accepted because the signature is not directional.
+    fn syn_cookie_profile_signature(profile: &ScreenProfile) -> (bool, u32, u32) {
+        (
+            profile.syn_cookie,
+            profile.syn_flood_threshold,
+            profile.syn_flood_src_threshold,
+        )
     }
 
     /// #9740: the next SYN-cookie profile generation, from one counter for the

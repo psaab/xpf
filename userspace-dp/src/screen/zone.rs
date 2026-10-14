@@ -115,10 +115,11 @@ pub(super) struct ZoneScreenState {
     pub(super) syn_cookie_active_ack_counter: TokenBucket,
     /// #2446 per-zone SYN-cookie profile generation. Bumped by `update_profiles`
     /// whenever a zone's SYN-cookie-relevant profile fields (`syn_cookie`,
-    /// `syn_flood_threshold`) change (including gaining/losing a profile). The
-    /// current generation is stamped into a validated-cache entry on insert and
-    /// compared on consume, so a tuple validated under an old profile is a cache
-    /// miss after the profile changes and is re-validated under the new one.
+    /// `syn_flood_threshold`, `syn_flood_src_threshold` — #12876) change
+    /// (including gaining/losing a profile). The current generation is stamped
+    /// into a validated-cache entry on insert and compared on consume, so a
+    /// tuple validated under an old profile is a cache miss after the profile
+    /// changes and is re-validated under the new one.
     /// Values come from `ScreenState`'s single generation counter, so a zone that
     /// is removed and re-created never reuses a generation its previous
     /// incarnation's validated entries carry (#9740).
@@ -213,7 +214,8 @@ impl ZoneScreenState {
     /// is reset to `u64::MAX` when the alarm is disabled (mirroring the old
     /// remove-on-disable so a later re-enable starts fresh) and otherwise
     /// preserved. Aggregate counters, standby budget, and profile generation are
-    /// inherited untouched from the retained value.
+    /// inherited untouched from the retained value; the cookie-active latch is
+    /// cleared on the two conditions documented below (#9425, #12876).
     ///
     /// #9425 member 2: the SYN-cookie active-until latch is NO LONGER inherited
     /// unconditionally. A zone under a live flood latches cookie-active for
@@ -239,7 +241,27 @@ impl ZoneScreenState {
     /// Clearing it whenever the NEW profile is in audit mode is idempotent with
     /// that guard: audit mode never sets the latch, so under audit the only
     /// value it can hold is one inherited from a pre-audit epoch.
-    pub(super) fn reconcile_substate(&mut self) {
+    ///
+    /// #12876: the same composition defect survived every OTHER edit to the
+    /// latch's activation slice. The latch is derived state — "the aggregate
+    /// crossed `syn_flood_threshold` while `syn_cookie` was on" — measured
+    /// under the OLD profile, yet it was inherited across a `syn-cookie`
+    /// disable/re-enable cycle and across an attack-threshold INCREASE: a zone
+    /// whose operator had just raised the threshold (or cycled cookies off and
+    /// back on inside one 64 s epoch) kept skipping the configured per-source
+    /// sketch and hard-dropping unrelated session-miss ACKs as `Invalid` for up
+    /// to `EPOCH_SECS` after the commit, on terms the latch was never measured
+    /// under. `activation_slice_changed` (computed by `update_profiles` from
+    /// `(syn_cookie, syn_flood_threshold)` — exactly the fields that gate
+    /// whether `syn_flood_gate` may set the latch) clears it here. Fail-closed
+    /// in the only direction that matters: a still-real flood re-latches on its
+    /// next over-attack SYN because the count-all aggregate counter IS carried
+    /// over; only the stale window is dropped. A `syn_flood_src_threshold`-only
+    /// edit does NOT clear the latch — the source cap never gates the latch,
+    /// and cookie-active deliberately skips it (D3/#9945); that edit instead
+    /// invalidates the validated-client cache via
+    /// `syn_cookie_profile_signature`.
+    pub(super) fn reconcile_substate(&mut self, activation_slice_changed: bool) {
         reconcile_flood_sketch(
             &mut self.icmp_dst_sketch,
             self.profile.icmp_flood_threshold > 0,
@@ -263,8 +285,8 @@ impl ZoneScreenState {
         if self.profile.syn_flood_alarm_threshold == 0 {
             self.syn_alarm_last_emit_sec = u64::MAX;
         }
-        // #9425 member 2 — see the doc comment above.
-        if self.profile.alarm_without_drop {
+        // #9425 member 2 and #12876 — see the doc comment above.
+        if self.profile.alarm_without_drop || activation_slice_changed {
             self.syn_cookie_active_until_secs = 0;
         }
     }
