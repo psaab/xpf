@@ -16,7 +16,7 @@ use super::*;
 /// Sampled ONCE at drain-batch start; same value used for every
 /// pop in the batch so the eligible-set is stable.
 #[inline]
-fn compute_drain_target_bps(queue: &CoSQueueRuntime) -> u64 {
+pub(in crate::afxdp) fn compute_drain_target_bps(queue: &CoSQueueRuntime) -> u64 {
     let Some(ff) = queue.flow_fair_state.as_ref() else {
         return u64::MAX;
     };

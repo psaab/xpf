@@ -95,6 +95,16 @@ mod.rs for further file-level breakdown.
   from the not-found sentinel and become a permanently unselectable
   active bucket whose packets never drain. This mirrors the R-8(b)/#4271
   vtime-sentinel clamp for the head-finish domain #4271 did not cover.
+  Since #13062 (deep-review D1-04) the two drain families are also
+  fairness-gated identically: `build_cos_batch_from_queue` samples
+  `compute_drain_target_bps` once per build (#1229 v7 per-bucket cap —
+  it serves lazily-promoted non-exact guaranteed queues AND
+  `surplus_sharing` exact queues in Phase 3, not just FIFO best-effort)
+  and runs the #917 `cos_queue_v_min_continue` gate on the
+  `shared_exact` surplus path, so a surplus-draining worker can no
+  longer publish `queue_vtime` far past the peer floor. Unshaped /
+  non-flow-fair builds are byte-identical (`u64::MAX` target, V_min
+  self-gated no-op).
 - Single-writer per FlowFairState. The owner worker that polls a
   binding is the same worker that owns the queue's
   `FlowFairState`; therefore `observed_bps` updates and reads do not
