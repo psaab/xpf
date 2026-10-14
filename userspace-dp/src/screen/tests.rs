@@ -2782,8 +2782,10 @@ fn syn_ack_miss_alarm_drain_is_wired_to_its_packet_12872() {
     let miss_hook = src
         .find(".syn_ack_flood_drop_on_new_flow(")
         .expect("session-miss SYN-ACK screening hook");
+    // #13000: the take moved inside a `zone_has_screen_state(from_zone)`
+    // condition; match the call itself, not the `if` prefix.
     let drain_offset = src[miss_hook..]
-        .find("if screen.take_syn_alarm_event()")
+        .find("screen.take_syn_alarm_event()")
         .map(|offset| miss_hook + offset)
         .expect("session-miss path drains pending SYN alarm");
     let emission = src[drain_offset..]
@@ -2794,6 +2796,46 @@ fn syn_ack_miss_alarm_drain_is_wired_to_its_packet_12872() {
     assert!(emission.contains("&screen_pkt"));
     assert!(emission.contains("from_zone_id"));
     assert!(emission.contains("\"syn-flood-alarm\""));
+}
+
+/// #13000: the session-miss SYN-alarm drain must be gated on the INGRESS
+/// zone's own screen state — the #12875 per-zone doctrine applied to the
+/// last ungated `syn_alarm_pending` drain. That flag is worker-GLOBAL and
+/// the session-miss arm runs for every zone, so without the gate an
+/// unscreened zone's session-miss packet could consume a screened zone's
+/// pending alarm and emit it against its own tuple and `from_zone_id`
+/// (log-only mis-attribution). The gate must short-circuit BEFORE the take
+/// so the flag is never cleared unserved.
+#[test]
+fn miss_syn_alarm_drain_is_gated_on_ingress_zone_13000() {
+    let src = include_str!("../afxdp/poll_descriptor/mod.rs");
+    let miss_hook = src
+        .find(".syn_ack_flood_drop_on_new_flow(")
+        .expect("session-miss SYN-ACK screening hook");
+    let gate_offset = src[miss_hook..]
+        .find("zone_has_screen_state(from_zone)")
+        .map(|offset| miss_hook + offset)
+        .expect(
+            "session-miss SYN alarm drain is gated on the ingress zone's \
+             own screen state (#13000)",
+        );
+    let take_offset = src[miss_hook..]
+        .find("screen.take_syn_alarm_event()")
+        .map(|offset| miss_hook + offset)
+        .expect("session-miss path drains pending SYN alarm");
+    assert!(
+        gate_offset < take_offset,
+        "the per-zone gate must be evaluated with (before) the take"
+    );
+    // One `if` condition — `zone_has_screen_state(from_zone) &&
+    // screen.take_syn_alarm_event()` — so the gate short-circuits before
+    // the take; a gate on a separate path could still clear the flag.
+    let condition = &src[gate_offset..take_offset + "screen.take_syn_alarm_event()".len()];
+    let condensed: String = condition.chars().filter(|c| !c.is_whitespace()).collect();
+    assert_eq!(
+        condensed, "zone_has_screen_state(from_zone)&&screen.take_syn_alarm_event()",
+        "gate and drain must be one condition, gate first (#13000)"
+    );
 }
 
 #[test]
