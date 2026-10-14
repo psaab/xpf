@@ -274,7 +274,7 @@ fn cell_ip_port_mapping_is_stable_and_depends_on_per_boot_seed_12789() {
 
 
 #[test]
-fn keyed_siphash_bucket_vectors_12789() {
+fn keyed_hash_bucket_vectors_12789() {
     let ip = v6_s3_ips(1)[0];
     let src = SynRateSketch::with_cols_seeded(SRC_COLS, 42);
     let dst = SynRateSketch::<RateCounter>::with_cols_seeded(DST_COLS, 42);

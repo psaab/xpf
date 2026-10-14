@@ -1,5 +1,7 @@
-// #12989: SipHash-2-4 vs keyed multiply-mix cost. Bin-crate internals are
-// pub(crate), so both hashers are re-implemented verbatim here (same pattern
+// #12989: SipHash vs keyed multiply-mix cost. Baseline is std
+// DefaultHasher (SipHash-1-3, unkeyed) — cheaper than the replaced
+// production SipHash-2-4 keyed hasher, so deltas are conservative.
+// The keyed side re-implements KeyedFxHasher verbatim (same pattern
 // as session_table.rs). Workload: the placements that profiled hot —
 // 40-byte steering row, v6 5-tuple bytes, single u64 shard key.
 use criterion::{Criterion, criterion_group, criterion_main, Throughput};

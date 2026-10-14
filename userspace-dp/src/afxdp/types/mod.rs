@@ -910,7 +910,7 @@ mod bare_tuple_keyed_hash_tests_12778 {
     use std::net::{IpAddr, Ipv6Addr};
 
     #[test]
-    fn shared_bare_tuple_index_uses_keyed_siphash_12778() {
+    fn shared_bare_tuple_index_uses_keyed_hash_12778() {
         let placement = |seed| {
             let index = SharedSessionBareTupleIndex::with_seed(seed);
             (0..256u16)

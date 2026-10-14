@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn keyed_siphash_spreads_neighbor_limiter_buckets_12778() {
+    fn keyed_hash_spreads_neighbor_limiter_buckets_12778() {
         let placement = |seed| {
             (0..256u16)
                 .map(|i| {

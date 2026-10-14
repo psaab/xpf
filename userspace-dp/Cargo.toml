@@ -127,7 +127,7 @@ harness = false
 name = "b2_capture_bridge"
 harness = false
 
-# #12989: SipHash-2-4 vs keyed multiply-mix placement-hash cost.
+# #12989: SipHash vs keyed multiply-mix placement-hash cost.
 [[bench]]
 name = "hot_hash"
 harness = false
