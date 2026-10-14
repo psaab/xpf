@@ -1926,6 +1926,60 @@ pub(super) fn txn_run_descriptor_with_screen_state(
     )
 }
 
+/// Descriptor driver variant that keeps a caller-owned screen runtime and
+/// captures its emitted dataplane events across repeated packets.
+pub(super) fn txn_run_descriptor_with_screen_state_capturing_events(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    screen: &mut ScreenState,
+) -> (
+    BatchCounters,
+    DebugPollCounters,
+    crate::event_stream::EventStreamWorkerHandle,
+    std::sync::mpsc::Receiver<crate::event_stream::codec::EventFrame>,
+) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        40,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let (batch, debug) = txn_run_descriptor_inner_with_slow_path_impl(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        None,
+        None,
+        None,
+        None,
+        123_000_000_000,
+        123,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        Some(screen),
+        Some(&event_handle),
+        -1,
+        -1,
+    );
+    (batch, debug, event_handle, event_rx)
+}
+
 pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
     binding: &mut BindingWorker,
     sessions: &mut SessionTable,
