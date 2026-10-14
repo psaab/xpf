@@ -147,6 +147,22 @@ func joinDisplayAddressNames(addrs []string) string {
 	return strings.Join(out, ", ")
 }
 
+// flatMatchAddresses renders one standard-view address list — the joined
+// display names, annotated " (except)" when the match sense is inverted
+// (source-address-excluded / destination-address-excluded, #3336). The
+// standard view prints the set on ONE line, so the inversion marker rides the
+// list rather than the header, matching the remote flat renderer
+// (cmd/cli/show_security.go). Without it a rule matching every address
+// EXCEPT the listed ones rendered identically to one matching exactly them —
+// the operator read the rule's reachability backwards.
+func flatMatchAddresses(addrs []string, excluded bool) string {
+	s := joinDisplayAddressNames(addrs)
+	if excluded {
+		s += " (except)"
+	}
+	return s
+}
+
 // resolveAddressDetail looks up the CIDR for a named address in the global
 // address book, falling back to the name itself if not found.
 //
@@ -277,6 +293,38 @@ func (c *CLI) handleShowSecurity(args []string) error {
 			// the Prometheus collector. When the knob is off the column
 			// reads 0 (we skip the dataplane read).
 			statsEnabled := cfg.Security.PolicyStatsEnabled
+			// #12901: mirror the hit-count/detail quarantine doctrine
+			// (#10530/#5577) — a rule whose zone is quarantined was scrubbed
+			// from the applied snapshot, so the helper will NEVER publish its
+			// counter. Reading it anyway failed with
+			// ErrPolicyCounterUnpublished, the Hits cell read "n/a", and the
+			// trailing note blamed "not yet published by the dataplane" — a
+			// wait-that-ends promise for a counter that is not coming. Such
+			// rows instead carry the live-counter-unavailable disposition and
+			// the zone qualifier, exactly like the hit-count twin one
+			// dispatcher over.
+			quarantinedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+			isQuarantined := func(name string) bool {
+				_, ok := quarantinedZones[name]
+				return ok
+			}
+			qualifyZone := func(name string) string {
+				if isQuarantined(name) {
+					return name + " " + config.ZoneQuarantinePoliciesQualifier
+				}
+				return name
+			}
+			qualifyScopeLabel := func(zones []string, placeholder string) string {
+				label := config.ScopeLabelOr(zones, placeholder)
+				if len(zones) == 0 || config.IsWildcardZoneSet(zones) {
+					return label
+				}
+				parts := strings.Fields(label)
+				for i, name := range parts {
+					parts[i] = qualifyZone(name)
+				}
+				return strings.Join(parts, " ")
+			}
 			// #3408: surface a per-policy counter read failure as a warning
 			// AFTER all reads rather than rendering a clean "0" hits column.
 			var readErr error
@@ -335,13 +383,20 @@ func (c *CLI) handleShowSecurity(args []string) error {
 						case 2:
 							action = "reject"
 						}
+						// #12901: a quarantined endpoint scrubs the whole
+						// zone-pair rule; its counter is never coming, so the
+						// read below (and its "not yet published" bookkeeping)
+						// must not run for it.
+						ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
 						ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 						// Default to "0" (consistent with the hit-count table
 						// and the gRPC/REST surfaces, which render 0 whenever
 						// the counter is unavailable or the knob is off);
 						// overwrite only on a successful gated read.
 						hits := "0"
-						if (statsEnabled || pol.Count) && readPolicy != nil {
+						if ruleQuarantined {
+							hits = config.ZoneQuarantineLiveCountersUnavailable
+						} else if (statsEnabled || pol.Count) && readPolicy != nil {
 							counters, err := readPolicy(ruleID)
 							switch {
 							case err == nil:
@@ -362,7 +417,7 @@ func (c *CLI) handleShowSecurity(args []string) error {
 							statsDisabled++
 						}
 						fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
-							zpp.FromZone, zpp.ToZone, pol.Name, action, hits)
+							qualifyZone(zpp.FromZone), qualifyZone(zpp.ToZone), pol.Name, action, hits)
 					}
 				}
 			}
@@ -388,11 +443,19 @@ func (c *CLI) handleShowSecurity(args []string) error {
 					case 2:
 						action = "reject"
 					}
+					// #12897: mirror the runtime scrub (#5577) — only a configured
+					// side EMPTIED by quarantine drops the whole global rule; a
+					// mixed scope stays enforced for its live members, so its
+					// counter stays live and only the quarantined member carries
+					// the qualifier in the From/To columns.
+					ruleQuarantined := config.ScopedGlobalQuarantineDropped(pol.Match.FromZones, pol.Match.ToZones, quarantinedZones)
 					ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
 					// Default to "0" for the same cross-surface
 					// consistency reason as the zone-pair branch above.
 					hits := "0"
-					if (statsEnabled || pol.Count) && readPolicy != nil {
+					if ruleQuarantined {
+						hits = config.ZoneQuarantineLiveCountersUnavailable
+					} else if (statsEnabled || pol.Count) && readPolicy != nil {
 						counters, err := readPolicy(ruleID)
 						switch {
 						case err == nil:
@@ -415,8 +478,8 @@ func (c *CLI) handleShowSecurity(args []string) error {
 					// #3286/#4626: a scoped global (#3148) shows its zone SET
 					// in the From/To columns instead of the all-zones "*"; an
 					// unscoped global still reads "*"/"*".
-					briefFrom := config.ScopeLabelOr(pol.Match.FromZones, "*")
-					briefTo := config.ScopeLabelOr(pol.Match.ToZones, "*")
+					briefFrom := qualifyScopeLabel(pol.Match.FromZones, "*")
+					briefTo := qualifyScopeLabel(pol.Match.ToZones, "*")
 					fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
 						briefFrom, briefTo, pol.Name, action, hits)
 				}
@@ -490,13 +553,19 @@ func (c *CLI) handleShowSecurity(args []string) error {
 							fmt.Printf("    Description: %s\n", pol.Description)
 						}
 						fmt.Printf("    Source addresses: %s\n",
-							joinDisplayAddressNames(pol.Match.SourceAddresses))
+							flatMatchAddresses(pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded))
 						fmt.Printf("    Destination addresses: %s\n",
-							joinDisplayAddressNames(pol.Match.DestinationAddresses))
+							flatMatchAddresses(pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded))
 						fmt.Printf("    Applications: %s\n",
 							strings.Join(pol.Match.Applications, ", "))
 						actionStr := action
-						if pol.Log != nil {
+						// #12901: an EMPTY log block (a leniently-loaded bare
+						// `then log`, #3060 — the strict commit path rejects it)
+						// emits no session records and must not read as
+						// logging. SessionLogModes is the SSOT the detail
+						// renderers already gate on, so the standard view
+						// cannot drift from them.
+						if len(pol.Log.SessionLogModes()) > 0 {
 							actionStr += ", log"
 						}
 						fmt.Printf("    Action: %s\n", actionStr)
@@ -551,13 +620,14 @@ func (c *CLI) handleShowSecurity(args []string) error {
 				fmt.Printf("    From zones: %s\n", globalFromZone)
 				fmt.Printf("    To zones: %s\n", globalToZone)
 				fmt.Printf("    Source addresses: %s\n",
-					joinDisplayAddressNames(pol.Match.SourceAddresses))
+					flatMatchAddresses(pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded))
 				fmt.Printf("    Destination addresses: %s\n",
-					joinDisplayAddressNames(pol.Match.DestinationAddresses))
+					flatMatchAddresses(pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded))
 				fmt.Printf("    Applications: %s\n",
 					strings.Join(pol.Match.Applications, ", "))
 				actionStr := action
-				if pol.Log != nil {
+				// #12901: same empty-log gate as the zone-pair branch above.
+				if len(pol.Log.SessionLogModes()) > 0 {
 					actionStr += ", log"
 				}
 				fmt.Printf("    Action: %s\n", actionStr)
