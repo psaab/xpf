@@ -1134,6 +1134,10 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 				hasConflictingDefaultPolicyValues12821(tree.Children))) {
 		cfg.Security.DefaultPolicy = PolicyDeny
 	}
+	if opts.lenientPolicyStatsSystemWide12825 &&
+		hasInvalidOrConflictingPolicyStatsSystemWide12825(tree.Children) {
+		cfg.Security.PolicyStatsEnabled = false
+	}
 
 	// P5 (#4406 step 5): cross-section derivations. Extracted into
 	// resolveDerivedConfig (compiler_derivations.go) — the contiguous,

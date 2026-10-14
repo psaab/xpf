@@ -80,11 +80,16 @@ func compileSecurity(node *Node, sec *SecurityConfig) error {
 				}
 			}
 		case "policy-stats":
-			if sw := child.FindChild("system-wide"); sw != nil {
-				sec.PolicyStatsEnabled = nodeVal(sw) == "enable"
+			for _, sw := range child.FindChildren("system-wide") {
+				enabled, valid := policyStatsValue12825(nodeVal(sw))
+				if valid {
+					sec.PolicyStatsEnabled = enabled
+				}
 			}
 		case "pre-id-default-policy":
-			sec.PreIDDefaultPolicy = &PreIDDefaultPolicy{}
+			if sec.PreIDDefaultPolicy == nil {
+				sec.PreIDDefaultPolicy = &PreIDDefaultPolicy{}
+			}
 			// #3850: read EVERY `then {}` block, not just the first via
 			// FindChild — a duplicate then block (load merge/override) would
 			// otherwise have its session-log modes silently dropped.
