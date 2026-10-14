@@ -324,6 +324,11 @@ fn worker_decap_presents_inner_under_the_tunnel_zone_8274() {
     // would be the #7167 invariant-2 failure: inner traffic would get the WAN's
     // policy, which is a different and equally wrong answer from the old
     // no-policy-at-all behaviour.
+    assert_ne!(
+        decapped.meta.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG,
+        0,
+        "#12864: WG transport decap must mark inner meta tunnel-decap so reject replies are suppressed"
+    );
     assert_eq!(
         decapped.meta.ingress_ifindex as i32, TUNNEL_LOGICAL_IFINDEX,
         "the decapsulated inner packet must present the TUNNEL's logical \

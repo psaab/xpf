@@ -21,6 +21,10 @@ pub(super) const GRE_DECAP_INGRESS_FLAG: u8 = 0x40;
 /// header whose source/destination MACs are zero, not a return-path L2
 /// address. Locally generated rejects must not reflect that header onto the
 /// tunnel's physical binding; this flag is distinct from the GRE MSS marker.
+/// Note: the retired-eBPF header `bpf/headers/xpf_common.h` defines
+/// `META_FLAG_INGRESS_RESOLVED = (1<<5) = 0x20` (same numeric bit), but it
+/// is DEAD — never written by the AF_XDP shim — so there is no runtime
+/// collision today; a revival of that header bit must pick another value.
 pub(super) const TUNNEL_DECAP_INGRESS_FLAG: u8 = 0x20;
 
 /// RFC 1812 §4.3.2.7 / RFC 792 / RFC 4443 §2.4 error-suppression gate
