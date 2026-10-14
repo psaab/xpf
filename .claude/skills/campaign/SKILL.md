@@ -77,10 +77,12 @@ campaign; `CronDelete` when the backlog is terminal.
 Run a permanent smoke-feedback lane OUTSIDE the parallel agent lanes
 (it does not count against lane limits and never gates a merge):
 
-- A background service loops `test-connectivity.sh cluster` against the
-  current master tip every ~15 min, appending one line per run
-  (`[ts tip=<sha>] Results: ... fails: ...`) to
-  `/var/worktrees/.cache/smoke-watch/smoke-watch.log`.
+- A background service loops every ~15 min against the current master
+  tip: (1) `test-connectivity.sh cluster`, (2) LIVE node CLI probes on
+  the operator's firewall (`incus exec loss:xpf-userspace-fw0 -- cli -c
+  "show chassis forwarding"` + flow statistics; FWDD state and
+  created==closed session balance are the tripwires). Appends one line
+  per run to `/var/worktrees/.cache/smoke-watch/smoke-watch.log`.
 - The parent reads the latest lines at every landing-queue check. A NEW
   failure (not the known external Internet-IPv6 one) or a tip regression
   vs the previous line = a correctness feedback signal: file an issue
