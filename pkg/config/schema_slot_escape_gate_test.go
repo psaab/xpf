@@ -508,6 +508,10 @@ func TestSlotEscapeCoverage(t *testing.T) {
 			refusedByDesign = append(refusedByDesign, s+"  ("+why+")")
 			continue
 		}
+		if why := unsupportedLeafRefusal12553(s); why != "" {
+			refusedByDesign = append(refusedByDesign, s+"  ("+why+")")
+			continue
+		}
 		t.Errorf("multi leaf %q carries NO slot-escape verdict: it does not commit clean under a "+
 			"synthetic parent path, and it has no row in slotEscapeRows. Add one — a prerequisite "+
 			"base config that commits clean, a value the leaf accepts, and one it must reject.", s)
@@ -545,6 +549,36 @@ func TestSlotEscapeCoverage(t *testing.T) {
 // site that starts accepting a value -- because the gate was relaxed, or
 // because the leaf stopped being family-specific -- stops being excused here
 // and goes back to demanding a real row, which is the direction we want.
+// unsupportedLeafRefusal12553: a leaf strict commits refuse for EVERY
+// value (unsupported-by-design) can carry no slot-escape row — there is
+// no accepted value to pair with a rejected one. Measured, like
+// familyAnyRefusal9017: the excuse exists only if a representative
+// commit is actually refused as not implemented.
+func unsupportedLeafRefusal12553(site string) string {
+	if site != "routing-options rib-groups <*> import-policy" {
+		return ""
+	}
+	tr := &ConfigTree{}
+	for _, l := range []string{
+		"set policy-options policy-statement P1 then accept",
+		"set routing-options rib-groups rg1 import-policy P1",
+	} {
+		pth, err := ParseSetCommand(l)
+		if err != nil {
+			return ""
+		}
+		tr.SetPath(pth)
+	}
+	_, err := CompileConfig(tr)
+	if err == nil {
+		return "" // it DOES accept a value — demand a real row
+	}
+	if !strings.Contains(err.Error(), "is not implemented") {
+		return ""
+	}
+	return "strict commits reject rib-group import-policy as not implemented (#11314)"
+}
+
 func familyAnyRefusal9017(site string) string {
 	const prefix = "firewall family any filter <*> term <*> from "
 	if !strings.HasPrefix(site, prefix) {
