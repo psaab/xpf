@@ -17,6 +17,12 @@ python3 test/incus/policy_scheduler_validate.py \
 
 Validator result: `PASS`.
 
+Since #12913 the validator also consumes `inactive-traffic.stdout` as the
+positive control for the inactive scheduler window: the probe offered
+3 packets with 3 received and 0% loss while `lan->wan/scheduled-allow`
+stayed flat at 5/490 and the fall-through `lan->wan/allow-all` rule
+advanced 94 → 95 packets.
+
 Counter summary for `lan->wan/scheduled-allow`:
 
 | Phase | Packets | Bytes |
