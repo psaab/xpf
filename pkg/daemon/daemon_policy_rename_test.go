@@ -556,7 +556,7 @@ func TestExpandAnyZoneRenameSetsWireAnyFlags10592(t *testing.T) {
 
 // N3f: expandPolicyRenameAncestry validator table — every reachable reject
 // branch fails closed (!ok, nil, nil) on its trigger, and only its trigger.
-// Row order follows source order (:108 → :220). Fingerprint + dup-source are
+// Row order follows source order. Fingerprint + dup-source are
 // covered by the existing 10511 ambiguous-proof test (not duplicated here);
 // zero-pairs (:164) by the N3a untouched cell. :117 (empty fingerprints with
 // non-empty IDs) is defensive-only: IDs and fingerprints diverge solely on
@@ -612,6 +612,16 @@ func TestExpandValidatorsRejectBranchTable10592(t *testing.T) {
 			o, n := fresh()
 			n.Security.Policies = nil
 			return o, n, []configstore.RenameDescriptor{policyRenameDescriptor("p-old", "p-new")}
+		}},
+		{"conflicting-zone-source", func() (*config.Config, *config.Config, []configstore.RenameDescriptor) {
+			o, n := zoneRenameEvaluatorConfigs()
+			return o, n, []configstore.RenameDescriptor{
+				policyZoneDescriptor("lan", "lan2"), policyZoneDescriptor("lan", "lan3")}
+		}},
+		{"conflicting-zone-destination", func() (*config.Config, *config.Config, []configstore.RenameDescriptor) {
+			o, n := zoneRenameEvaluatorConfigs()
+			return o, n, []configstore.RenameDescriptor{
+				policyZoneDescriptor("lan", "lan2"), policyZoneDescriptor("wan", "lan2")}
 		}},
 		{"zone-collision", func() (*config.Config, *config.Config, []configstore.RenameDescriptor) {
 			o, n := fresh()
