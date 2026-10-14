@@ -51,7 +51,7 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 		if z == nil {
 			z = &zoneFlood{
 				v4: make(map[string]struct{}), v6: make(map[string]struct{}),
-				ingress: make(map[string]struct{}),
+				ingress:    make(map[string]struct{}),
 				fallbackV4: make(map[string]struct{}), fallbackV6: make(map[string]struct{}),
 				vrfIngress: make(map[string]map[string]struct{}),
 			}

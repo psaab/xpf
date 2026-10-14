@@ -18,7 +18,7 @@ func TestHostInboundScreenFloodRulesMixedDirectAndAddressFallback12847(t *testin
 			SYNFloodThreshold: 100, SYNFloodSrcThreshold: 5,
 		},
 		{
-			Zone: "wan", // ambiguous ingress: destination fallback only
+			Zone:    "wan", // ambiguous ingress: destination fallback only
 			V4Addrs: []string{"192.0.2.2"}, V6Addrs: []string{"2001:db8::2"},
 			UDPFloodThreshold: 20, ICMPFloodThreshold: 30,
 			SYNFloodThreshold: 100, SYNFloodSrcThreshold: 5,

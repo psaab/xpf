@@ -12,7 +12,7 @@ func TestHostInboundScreenFloodTextMixedIngressAddressFallback12847(t *testing.T
 		Zone: "wan", Family: "ip", Protocol: "udp",
 		AggregateThreshold: 160, SourceThreshold: 20,
 		IngressNetdevs: []string{"ge-0-0-0"},
-		Addresses: []string{"192.0.2.2"},
+		Addresses:      []string{"192.0.2.2"},
 	}
 	var rules []string
 	emitHostInboundScreenFloodText(&rules, []xnft.HostInboundScreenFloodRule{screen}, false)
