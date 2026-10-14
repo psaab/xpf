@@ -596,8 +596,12 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// #12662 remeasured the master registry. Four `no-install` static-route
 	// leaves arrived as unreachable; seven RSS expectation leaves moved from
 	// `err` to `unreachable`, while two scheduler-name leaves became compared.
-	// The net ceiling change is 134 -> 135; the registry records each site.
-	gateBlindUnreachable: 135,
+	// #12937: 135 -> 133. `schedulers scheduler <*> daily exclude` left this
+	// class for `flag` once #12822 carried the exclusion through the typed
+	// compiler (`DailyExclude`); `security policy-stats system-wide` moved to
+	// advisory with #12825 (`aa37d9e0c`) once its ignored-value warning landed.
+	// The member registry records both reclassifications.
+	gateBlindUnreachable: 133,
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
@@ -626,7 +630,10 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// it includes four CoS rewrite code-point leaves and four BGP prefix-limit
 	// maximum leaves. Retain the names in the member registry rather than
 	// broadening the schema or treating Junos keywords as misspellings.
-	gateBlindAdvisory: 44,
+	// #12825 adds `security policy-stats system-wide` to this class after its
+	// accepted value began warning as ignored; the member registry records it.
+	// #12937 measures this population at 45.
+	gateBlindAdvisory: 45,
 	// #7132 raised this 175 -> 176 for `system ntp server ... prefer`.
 	//
 	// Raised deliberately, and it is the one kind of raise that is not a
@@ -718,7 +725,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// named in the members registry diff, not just counted.
 	// #10078's four modeled ALG `disable` leaves are value-less flags, raising
 	// the measured ceiling 239 -> 243; their kind roots leave `unreachable`.
-	gateBlindFlag: 194, // #12662 tightens to the measured 194-member population.
+	gateBlindFlag: 195, // #12937: 194 -> 195; daily exclude moved here (#12822).
 	// #9882 raises it 43 -> 44. The three-color twin,
 	// `firewall three-color-policer <*> then forwarding-class`, lands here
 	// because the differential's three-color parent stanza does not compile
