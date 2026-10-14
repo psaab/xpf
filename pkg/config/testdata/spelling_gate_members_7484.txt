@@ -680,7 +680,7 @@ COMPARED	routing-options static route <*> qualified-next-hop <*> preference
 flag (read, but value-less)	routing-options static route <*> reject
 advisory (read, value ignored, warning says so)	routing-options static route <*> rib-group
 flag (read, but value-less)	schedulers scheduler <*> daily all-day
-flag (read, but value-less)	schedulers scheduler <*> daily exclude
+unreachable (leaf changed nothing)	schedulers scheduler <*> daily exclude
 COMPARED	schedulers scheduler <*> daily start-time
 COMPARED	schedulers scheduler <*> daily stop-time
 unreachable (leaf changed nothing)	schedulers scheduler <*> description

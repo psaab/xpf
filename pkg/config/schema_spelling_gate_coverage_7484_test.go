@@ -596,10 +596,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// #12662 remeasured the master registry. Four `no-install` static-route
 	// leaves arrived as unreachable; seven RSS expectation leaves moved from
 	// `err` to `unreachable`, while two scheduler-name leaves became compared.
-	// #12826 preserves AllDay across repeated daily windows, making `daily
-	// exclude` observable in the spelling probe; the measured population
-	// shifts one leaf from unreachable to flag (135 -> 134; 194 -> 195).
-	gateBlindUnreachable: 134,
+	gateBlindUnreachable: 135, // #12662 measured population.
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
@@ -720,7 +717,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// named in the members registry diff, not just counted.
 	// #10078's four modeled ALG `disable` leaves are value-less flags, raising
 	// the measured ceiling 239 -> 243; their kind roots leave `unreachable`.
-	gateBlindFlag: 195, // #12662 + #12826 measured population.
+	gateBlindFlag: 194, // #12662 tightens to the measured 194-member population.
 	// #9882 raises it 43 -> 44. The three-color twin,
 	// `firewall three-color-policer <*> then forwarding-class`, lands here
 	// because the differential's three-color parent stanza does not compile
