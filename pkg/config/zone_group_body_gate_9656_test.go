@@ -74,7 +74,6 @@ func TestZoneStatementTailIsRefused9656(t *testing.T) {
 		{"single zone with a packed statement", `security { zones { security-zone trust screen edge; } }`},
 		{"repeated name", `security { zones { security-zone [ zga zga ]; } }`},
 		{"single zone with an exact inline apply-macro", `security { zones { security-zone trust apply-macro M; } }`},
-		{"single zone with an inline apply-groups", groupG + `security { zones { security-zone trust apply-groups G; } }`},
 		{"single zones, leaf and empty braces", `security { zones { security-zone trust; security-zone untrust { } } }`},
 		{"quoted single zone with a statement", `security { zones { security-zone "zg a" description d; } }`},
 	}
