@@ -1208,9 +1208,16 @@ fn forwarding_with_icmp_type_split_9949() -> ForwardingState {
     build_forwarding_state(&snapshot)
 }
 
-fn forwarding_with_icmp_type_deny_then_any_permit_11064() -> ForwardingState {
+fn forwarding_with_icmp_type_deny_then_any_permit_11064(
+    inactive_scheduled_deny: bool,
+) -> ForwardingState {
     let mut snapshot = policy_deny_snapshot();
     snapshot.generation = 7;
+    // #12860: keep the actual typeless ICMP session alive beyond the
+    // scheduler's 300-second heartbeat lease for the packet-path transition.
+    if inactive_scheduled_deny {
+        snapshot.flow.icmp_session_timeout = 600;
+    }
     snapshot.fib_generation = 9;
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "reth2.0".into(),
@@ -1231,9 +1238,12 @@ fn forwarding_with_icmp_type_deny_then_any_permit_11064() -> ForwardingState {
         link_local: false,
         ..Default::default()
     });
-    snapshot
-        .policies
-        .push(icmp_type_rule_9949("echo-deny", "deny", 8));
+    let mut echo_deny = icmp_type_rule_9949("echo-deny", "deny", 8);
+    if inactive_scheduled_deny {
+        echo_deny.scheduler_name = "workhours".into();
+        echo_deny.inactive = true;
+    }
+    snapshot.policies.push(echo_deny);
     snapshot.policies.push(PolicyRuleSnapshot {
         name: "icmp-any-permit".into(),
         from_zone: "lan".into(),
@@ -1278,6 +1288,29 @@ fn drive_owner_icmp_type_9949(
         &frame,
         meta,
         true,
+    );
+    dbg
+}
+
+fn drive_owner_icmp_type_at_12860(
+    binding: &mut BindingWorker,
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    icmp_type: u8,
+    now_ns: u64,
+) -> DebugPollCounters {
+    let frame = icmp_frame_type_9949(icmp_type, TEST_LAN_MAC);
+    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    let (_batch, dbg) = txn_run_descriptor_at(
+        binding,
+        sessions,
+        forwarding,
+        &BTreeMap::new(),
+        &frame,
+        meta,
+        now_ns,
     );
     dbg
 }
@@ -1436,7 +1469,7 @@ fn stateful_snat_icmp_type_switch_keeps_session_mapping_11064() {
 
 #[test]
 fn type_constrained_deny_is_enforced_when_icmp_type_switches_on_session_11064() {
-    let forwarding = forwarding_with_icmp_type_deny_then_any_permit_11064();
+    let forwarding = forwarding_with_icmp_type_deny_then_any_permit_11064(false);
     assert!(
         !forwarding
             .policy
@@ -1485,6 +1518,93 @@ fn type_constrained_deny_is_enforced_when_icmp_type_switches_on_session_11064() 
         ),
         (1, 1, 0),
         "the denied type must not poison the live session for a permitted type"
+    );
+}
+
+/// #12860: exercise the lease transition on the actual owner session-hit path.
+/// The inactive scheduled type-specific deny is omitted while the lease is
+/// fresh, then becomes eligible without rebuilding policy; an echo reusing the
+/// same typeless session key must be denied exactly as a cold policy match is.
+#[test]
+fn expired_scheduler_activates_inactive_icmp_deny_on_session_hit_12860() {
+    let forwarding = forwarding_with_icmp_type_deny_then_any_permit_11064(true);
+    let receipt_ns = crate::afxdp::monotonic_nanos();
+    assert!(
+        forwarding.policy.scheduler_lease.apply(1, receipt_ns),
+        "fixture must install a fresh scheduler heartbeat"
+    );
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+
+    // Establish the typeless key under a fresh lease with a non-echo query.
+    let admitted =
+        drive_owner_icmp_type_at_12860(&mut binding, &forwarding, &mut sessions, 13, receipt_ns);
+    assert_eq!(
+        (
+            admitted.session_hit,
+            admitted.session_create,
+            admitted.tx,
+            admitted.policy_deny
+        ),
+        (0, 2, 1, 0),
+        "the non-echo query must establish the owner session"
+    );
+
+    // The same key is still allowed while the heartbeat is fresh: the
+    // scheduled echo deny is inactive, and the broad permit remains eligible.
+    let fresh_echo =
+        drive_owner_icmp_type_at_12860(&mut binding, &forwarding, &mut sessions, 8, receipt_ns + 1);
+    assert_eq!(
+        (
+            fresh_echo.session_hit,
+            fresh_echo.tx,
+            fresh_echo.policy_deny
+        ),
+        (1, 1, 0),
+        "the inactive scheduled deny must not affect a fresh-lease session hit"
+    );
+
+    // No policy reparse or snapshot rebuild: age only the shared heartbeat
+    // receipt to simulate lease expiry deterministically, then compare the
+    // real hit verdict to a cold evaluator with actual type/code.
+    let expired_at = crate::afxdp::monotonic_nanos();
+    let stale_receipt_ns =
+        expired_at.saturating_sub(crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 1);
+    assert!(
+        forwarding.policy.scheduler_lease.apply(1, stale_receipt_ns),
+        "same-version stale heartbeat must update the receipt timestamp"
+    );
+    let cold = crate::policy::evaluate_policy_result_with_icmp_at(
+        &forwarding.policy,
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+        IpAddr::V4(SRC),
+        IpAddr::V4(DST),
+        PROTO_ICMP,
+        0,
+        0,
+        Some((8, 0)),
+        64,
+        expired_at,
+    );
+    assert_eq!(cold.action, PolicyAction::Deny);
+    let expired_echo =
+        drive_owner_icmp_type_at_12860(&mut binding, &forwarding, &mut sessions, 8, expired_at);
+    assert_eq!(
+        (
+            expired_echo.session_hit,
+            expired_echo.tx,
+            expired_echo.policy_deny
+        ),
+        (1, 0, 1),
+        "after lease expiry the same owner hit must be denied by its packet type"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "packet deny must not poison session"
     );
 }
 fn drive_foreign_icmp_type_9949(
