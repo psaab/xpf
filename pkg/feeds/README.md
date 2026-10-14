@@ -93,14 +93,24 @@ and old/new counts; another candidate or baseline requires a new review. A
 normal successful install clears a pending acknowledgement; `Manager.Apply`
 drops it when producer config is replaced. An explicit positive
 `hold-interval` also applies to a refusal: once it expires, the shared hold
-policy drops the last-good set and publishes the configured hold-expiry result.
-The next successful fetch is a bootstrap; if it is below the remembered epoch
-high-water threshold, it installs with the same audit warning.
+policy drops the last-good set and publishes the configured hold-expiry
+result — but the drop does NOT release the refusal (#12882). Clearing it
+turned the expiry into a laundering step: the exact refused candidate came
+back with no live snapshot, skipped the guards, and installed the refused
+relaxation unacknowledged. The refusal and its acknowledgeable tuple survive
+the drop, so the exact refused candidate re-served afterwards is refused
+again (previous-good enforcement persists through the omitted-binding
+preflight) until its exact acknowledgement lands; the acknowledgement is
+accepted without a live installed baseline to compare against, and the
+acknowledged candidate installs and rebases the epoch. A DIFFERENT successful
+fetch after the drop follows the bootstrap rule: if it is below the
+remembered epoch high-water threshold it installs with the same audit
+warning, clearing the refusal.
 
 The guard logs an initial Warn and re-Warns at most hourly for a persistent
 refusal. Prometheus exposes an active gauge and a per-feed counter for refused
 shrink or content-churn candidates. Alert on the active refusal and on any
-refusal observed during the last hour so a later install or hold expiry cannot
+refusal observed during the last hour so a later install cannot
 erase evidence before it is scraped:
 
 ```yaml
@@ -382,7 +392,11 @@ applies a *retain-last-good* policy rather than installing a partial/empty set:
   fail-open. This is the operator-chosen posture and deliberately diverges
   from Junos hold-interval-then-drop. Only when `hold-interval` is explicitly
   configured > 0 does the snapshot drop to empty after that interval elapses
-  (clearing `StaleSince`/`Hash`) and fire an `onUpdate`.
+  (clearing `StaleSince`/`Hash`) and fire an `onUpdate`. The drop retains an
+  outstanding refused-shrink candidate (#12882): the exact refused candidate
+  stays refused until acknowledged — see "Drastic-shrink protection" — so the
+  expiry cannot launder a refused relaxation into an unacknowledged
+  bootstrap.
 
   **The drop does NOT make enforcement see an empty set (#9527).** The
   dropped feed has no installed snapshot, so `SnapshotForBindings` omits every

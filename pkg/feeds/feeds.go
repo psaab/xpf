@@ -1740,10 +1740,15 @@ func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, candidate
 	if !fs.shrinkRefused {
 		return fmt.Errorf("dynamic-address feed %q has no current refused shrink", name)
 	}
+	// The installed-baseline currency check applies only while a snapshot is
+	// installed: after a hold-interval drop there is no installed hash to
+	// compare against, yet the surviving refusal still names the baseline
+	// that was dropped (#12882) and stays acknowledgeable. Any install
+	// clears the refusal, so a surviving tuple is never stale.
 	if fs.shrinkRefusalID != refusalID ||
 		candidateHash != fmt.Sprintf("%x", fs.shrinkCandidateHash) ||
 		baselineHash != fmt.Sprintf("%x", fs.shrinkBaselineHash) ||
-		fs.hash != fs.shrinkBaselineHash ||
+		(fs.hasSnapshot && fs.hash != fs.shrinkBaselineHash) ||
 		oldCount != fs.shrinkCandidateOldCount ||
 		newCount != fs.shrinkCandidateNewCount {
 		return fmt.Errorf("dynamic-address feed %q refusal candidate tuple is stale", name)
@@ -1874,6 +1879,11 @@ func thresholdsForFeed(fs *feedState) shrinkGuardThresholds {
 // until the exact candidate is acknowledged. Bootstrap is installable; a
 // same-manager re-created feed with fewer prefixes or changed same-sized
 // content is installed with an audit warning instead of a silent bootstrap.
+// A hold-interval drop does not release the refusal (#12882): the exact
+// refused candidate re-served after the drop is refused again (previous-good
+// enforcement persists via the omitted-binding preflight) until its exact
+// acknowledgement lands; a different candidate follows the bootstrap rule
+// above and its install clears the refusal.
 func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	m.mu.Lock()
 	// Staleness suppress (#9916 F-133): Apply swaps the producer set without
@@ -1931,6 +1941,17 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	bootstrapDiffersFromHighWater := !fs.hasSnapshot && fs.shrinkHighWaterCount > 0 &&
 		len(res.prefixes) <= fs.shrinkHighWaterCount &&
 		(len(res.prefixes) < fs.shrinkHighWaterCount || res.hash != fs.shrinkHighWaterHash)
+	// #12882: an outstanding refusal SURVIVES a hold-interval drop, so the
+	// exact refused candidate cannot return as an unacknowledged bootstrap.
+	// With no live snapshot the trip predicates above have nothing to compare
+	// against, so the pin matches the fetch against the remembered candidate
+	// tuple and anchors its baseline hash and old count on that tuple rather
+	// than the emptied installed state. A different candidate is NOT pinned:
+	// it takes the ordinary bootstrap path (audited against the remembered
+	// high-water) and a successful install clears the refusal, as before.
+	refusedAfterDrop := !fs.hasSnapshot && fs.shrinkRefused &&
+		res.hash == fs.shrinkCandidateHash &&
+		len(res.prefixes) == fs.shrinkCandidateNewCount
 	rememberedHighWaterCount := fs.shrinkHighWaterCount
 	rememberedHighWaterHash := fs.shrinkHighWaterHash
 
@@ -1953,7 +1974,11 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		}
 		candidateReason += "retained content overlap below floor"
 	}
-	if fs.hasSnapshot && (shrinkTripped || churnTripped) {
+	if refusedAfterDrop {
+		baselineHash = fs.shrinkBaselineHash
+		candidateOldCount = fs.shrinkCandidateOldCount
+	}
+	if (fs.hasSnapshot && (shrinkTripped || churnTripped)) || refusedAfterDrop {
 		newCount := len(res.prefixes)
 		if fs.shrinkAckMatches(res.hash, baselineHash, candidateOldCount, newCount) {
 			guardBypass = true
@@ -1982,11 +2007,16 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 				fs.shrinkLastWarn = now
 			}
 			var ferr error
-			if shrinkTripped {
+			switch {
+			case refusedAfterDrop:
+				ferr = fmt.Errorf(
+					"refused shrink re-served after hold-interval drop: candidate %d prefixes vs %d remembered high-water; the exact acknowledgement is required to install this candidate (previous-good enforcement retained)",
+					newCount, highWaterCount)
+			case shrinkTripped:
 				ferr = fmt.Errorf(
 					"drastic shrink refused against epoch high-water baseline: candidate %d prefixes vs %d high-water (%d currently installed); retain-percent floor %d%% and minimum drop %d; retaining last-good snapshot",
 					newCount, highWaterCount, oldCount, thresholds.minRetainPercent, thresholds.minDrop)
-			} else {
+			default:
 				ferr = fmt.Errorf(
 					"content overlap below floor: candidate %d prefixes retain less than %d%% of the %d currently installed prefixes; retaining last-good snapshot",
 					newCount, thresholds.minRetainPercent, oldCount)
@@ -1999,7 +2029,9 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 			refusalBaselineHash := fmt.Sprintf("%x", baselineHash)
 			m.mu.Unlock()
 			logMessage := "dynamic-address: feed drastic shrink REFUSED — retaining last-good snapshot"
-			if churnTripped && !shrinkTripped {
+			if refusedAfterDrop {
+				logMessage = "dynamic-address: feed drastic shrink REFUSED after hold-interval drop — awaiting exact acknowledgement"
+			} else if churnTripped && !shrinkTripped {
 				logMessage = "dynamic-address: feed content-churn REFUSED — retaining last-good snapshot"
 			}
 			if warn {
@@ -2124,7 +2156,11 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 //     elapsed (measured from StaleSince) is the snapshot dropped to empty
 //     (fail-closed) with an onUpdate so enforcement sees the now-empty set;
 //     StaleSince is then cleared (no snapshot is retained as stale anymore,
-//     Copilot #2).
+//     Copilot #2). The drop RETAINS an outstanding refused-shrink candidate
+//     (#12882): the exact refused candidate must not resurface as an
+//     unacknowledged bootstrap once the snapshot it was refused against is
+//     gone, so the refusal and its acknowledgeable tuple survive the drop
+//     and installSnapshot keeps re-refusing that exact candidate.
 //
 // A one-time slog.Warn fires when the feed first ENTERS the stale state, not
 // on every failing tick, so a persistently-down feed does not flood the log.
@@ -2180,7 +2216,14 @@ func dropSnapshotToEmptyLocked(fs *feedState) {
 	fs.invalidLines = 0
 	fs.invalidSample = nil
 	fs.holdDropped = true
-	clearShrinkCandidate(fs)
+	// #12882: an outstanding refused shrink SURVIVES the drop. Clearing it
+	// here made the hold expiry a laundering step — the next fetch of the
+	// exact refused candidate arrived with no live snapshot, skipped the
+	// hasSnapshot-keyed guards, and installed the refused relaxation as an
+	// unacknowledged "bootstrap" (audit warning only). The refusal and its
+	// candidate tuple stay acknowledgeable instead; installSnapshot
+	// re-refuses the exact candidate until the acknowledgement lands, and
+	// any different acceptable fetch installs and clears it as before.
 }
 
 func (m *Manager) recordFailure(fs *feedState, ferr error) {
