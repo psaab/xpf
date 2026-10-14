@@ -1208,13 +1208,15 @@ func (d *Daemon) reauthorizePolicyCandidates(
 		}
 		if match.DNAT && match.NATDstIP != "" {
 			translated := net.ParseIP(match.NATDstIP)
-			if family == 4 {
+			if config.NATAddrFamily(match.NATDstIP) == "v4" {
 				translated = translated.To4()
+				query.DstFamily = "v4"
 			} else {
 				translated = translated.To16()
 				if translated == nil || translated.To4() != nil {
 					return false
 				}
+				query.DstFamily = "v6"
 			}
 			if translated == nil {
 				return false
