@@ -869,23 +869,28 @@ func junosHostSvcAdmitsIKE(svc []string) bool {
 // into a single bit and widened a per-interface `ike`/`ident-reset` exception to
 // every interface in the zone.
 //
-// A netdev admits IKE / RSTs ident if ANY interface ref whose host-bound traffic
-// arrives on it (its own logical unit, or — for a VLAN subunit riding a physical
-// parent — the parent) admits it. For VRF members, LOCAL_IN sees the VRF master;
-// the raw member netdev is therefore translated to its master before filtering
-// against `netdevs`. The union mirrors the coarse host-inbound gate (which keys on
-// the interface's effective set, InterfaceHostInboundEffective) so IKE warning
-// metadata and the retained ident RST scope never miss a configured per-interface
-// override, while a sibling interface that configured no exception is left out.
+// A netdev admits IKE / RSTs if an interface ref whose host-bound traffic
+// arrives on it admits it. For a VLAN subunit riding a physical parent, the
+// parent row also contributes. For a same-netdev unit-0 collapse, unit 0 is
+// authoritative and the redundant bare physical row is omitted (#12838 /
+// #5699): its separate per-ref effective set can contradict unit 0's
+// replacement override. Distinct VLAN/tunnel unit-0 devices retain their
+// physical row. For VRF members, LOCAL_IN sees the VRF master; the raw member
+// netdev is therefore translated to its master before filtering against
+// `netdevs`.
+//
+// The union mirrors the coarse host-inbound gate (which keys on the interface's
+// effective set, InterfaceHostInboundEffective) so IKE warning metadata and the
+// retained ident RST scope never miss a configured per-interface override,
+// while a sibling interface that configured no exception is left out.
 // A genuinely zone-level exception (authored on the zone's own
 // host-inbound-traffic) is folded into every interface's effective set, so its
 // subset equals `netdevs`.
 //
-// The netdev→ref row walk mirrors JunosHostZoneIngressNetdevs exactly (physical
-// row + one row per unit, plus the physical parent for a VLAN subunit) so the
-// two agree on which ref feeds which netdev; results are filtered to `netdevs`
-// so a cross-zone-ambiguous parent excluded from the iifname scope is never
-// included in warning metadata or ident RST scope.
+// The netdev→ref row walk mirrors JunosHostZoneIngressNetdevs except for the
+// deliberate same-netdev physical/unit-0 deduplication above; results are
+// filtered to `netdevs` so a cross-zone-ambiguous parent excluded from the
+// iifname scope is never included in warning metadata or ident RST scope.
 func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, netdevs []string, vrfScopes []HostInboundVRFIngressScope) (ikeNetdevs, identNetdevs []string, ikeVRFScopes, identVRFScopes []HostInboundVRFIngressScope) {
 	tunNames := tunnelNameMapFn(cfg)
 	if cfg == nil || zone == nil || (len(netdevs) == 0 && len(vrfScopes) == 0) {
@@ -979,7 +984,18 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 		if iface == nil {
 			continue
 		}
-		addRow(ifName, junosHostLinuxNameWith(cfg, ifName, nil, tunNames), "", 0)
+		physicalNetdev := junosHostLinuxNameWith(cfg, ifName, nil, tunNames)
+		// #12838 / #5699: a physical snapshot is redundant when unit 0
+		// collapses onto the same kernel netdev. Unit 0 is the authoritative
+		// carrier and resolves its own effective override; consulting the bare
+		// physical ref here can grant or suppress exemptions contrary to it.
+		// Keep the physical row for VLAN/tunnel unit 0, whose netdev is distinct.
+		unit0 := iface.Units[0]
+		unit0Name := fmt.Sprintf("%s.0", ifName)
+		if unit0 == nil || zoneByIface[unit0Name] != zoneName ||
+			junosHostLinuxNameWith(cfg, ifName, unit0, tunNames) != physicalNetdev {
+			addRow(ifName, physicalNetdev, "", 0)
+		}
 		unitNums := make([]int, 0, len(iface.Units))
 		for u := range iface.Units {
 			unitNums = append(unitNums, u)
@@ -992,7 +1008,7 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 			}
 			unitName := fmt.Sprintf("%s.%d", ifName, un)
 			addRow(unitName, junosHostLinuxNameWith(cfg, ifName, unit, tunNames),
-				junosHostLinuxNameWith(cfg, ifName, nil, tunNames), unit.VlanID)
+				physicalNetdev, unit.VlanID)
 		}
 	}
 	for _, nd := range netdevs {
