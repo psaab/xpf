@@ -177,13 +177,6 @@ legs_filter() {
 	printf "'( tcp or udp ) and dst host %s and ( dst port %s or dst port %s or dst port %s or dst port %s )'" \
 		"$SINK" "$T80" "$T8080" "$U53" "$U5353"
 }
-leg_count() {
-	local n
-	n=$(grep -cE "\.${2}:" "$1" 2>/dev/null || true)
-	n=$(printf '%s' "$n" | tr -d ' \n' || true)
-	[[ "$n" =~ ^[0-9]+$ ]] || n=0
-	printf '%s' "$n"
-}
 
 # parse_leg <port> — offered count for one twin from the SENT legs= line.
 # Anchored on `legs=` with an optional comma-terminated prefix so port 80
@@ -379,13 +372,11 @@ U35O=$(parse_leg $U5353)
 sleep 5
 kill "$CAP_PID" 2>/dev/null || true
 wait "$CAP_PID" 2>/dev/null || true
-T80B=$(leg_count "$CAPLOG" $T80)
-T88B=$(leg_count "$CAPLOG" $T8080)
-U53B=$(leg_count "$CAPLOG" $U53)
-U35B=$(leg_count "$CAPLOG" $U5353)
-CKS=$(grep -ciE "bad (udp|ip|tcp) (cksum|checksum)" "$CAPLOG" 2>/dev/null || true)
-CKS=$(printf '%s' "$CKS" | tr -d ' \n' || true)
-[[ "$CKS" =~ ^[0-9]+$ ]] || CKS=0
+T80B=$(wire_count_dst_frames "$CAPLOG" $T80)
+T88B=$(wire_count_dst_frames "$CAPLOG" $T8080)
+U53B=$(wire_count_dst_frames "$CAPLOG" $U53)
+U35B=$(wire_count_dst_frames "$CAPLOG" $U5353)
+CKS=$(wire_count_bad_cksum "$CAPLOG" 'udp|ip|tcp')
 rm -f "$CAPLOG"
 echo "offered: 80=$T80O 8080=$T88O 53=$U53O 5353=$U35O | observed: 80=$T80B 8080=$T88B 53=$U53B 5353=$U35B cksum_bad=$CKS"
 

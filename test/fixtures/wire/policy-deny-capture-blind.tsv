@@ -1,0 +1,5 @@
+# wire_policy_deny --fixture transcript: a real under-collected capture window
+# (burst rate 2000/s outpaced tcpdump: 913 of 1000 control frames captured),
+# from the first #11056 generation run. Zero probe leaks still cannot PASS:
+# the verdict must read capture-blind.
+probe_offered=1000 probe_leaked=0 control_offered=1000 control_observed=913 cksum_bad=0

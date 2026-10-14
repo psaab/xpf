@@ -1,0 +1,54 @@
+# real tcpdump UDP corruption annotations (veth tx offload on — no checksum is computed before the frame hits the wire); generated 2026-10-14 in an isolated 3-netns veth topology (prober 10.9.0.1 -> nft forward-drop DUT stand-in 10.9.0.254/10.9.1.254 -> sink/capture 10.9.1.2) with the real wire_probe_burst.py / wire_tcp_accept.py and the gate tcpdump flag sets; see docs/log/11056.md
+# Real tcpdump text, unmodified: an excerpt of the first 25 matching packet blocks per counted port/flag, banner kept, per-run footer dropped (an excerpt is not the full capture).
+# Source capture: udp-badcksum.cap (60 packet blocks total). The counts the reduction cells assert live in wire-gate-hermetic-selftest.sh.
+tcpdump: listening on vB0, link-type EN10MB (Ethernet), snapshot length 262144 bytes
+13:51:56.449731 IP (tos 0x0, ttl 63, id 39747, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x93ba!] UDP, length 64
+13:51:56.461262 IP (tos 0x0, ttl 63, id 39749, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x2eef!] UDP, length 1400
+13:51:56.471433 IP (tos 0x0, ttl 63, id 39752, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x93b8!] UDP, length 64
+13:51:56.481607 IP (tos 0x0, ttl 63, id 39754, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x2eed!] UDP, length 1400
+13:51:56.491753 IP (tos 0x0, ttl 63, id 39755, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x93b6!] UDP, length 64
+13:51:56.501927 IP (tos 0x0, ttl 63, id 39756, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x2eeb!] UDP, length 1400
+13:51:56.512098 IP (tos 0x0, ttl 63, id 39757, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x93b4!] UDP, length 64
+13:51:56.522259 IP (tos 0x0, ttl 63, id 39759, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x2ee9!] UDP, length 1400
+13:51:56.532433 IP (tos 0x0, ttl 63, id 39761, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x93b2!] UDP, length 64
+13:51:56.542571 IP (tos 0x0, ttl 63, id 39763, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x2ee7!] UDP, length 1400
+13:51:56.552786 IP (tos 0x0, ttl 63, id 39764, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x9df7!] UDP, length 64
+13:51:56.562941 IP (tos 0x0, ttl 63, id 39767, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x382d!] UDP, length 1400
+13:51:56.573107 IP (tos 0x0, ttl 63, id 39769, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x9bf7!] UDP, length 64
+13:51:56.583275 IP (tos 0x0, ttl 63, id 39770, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x362d!] UDP, length 1400
+13:51:56.593430 IP (tos 0x0, ttl 63, id 39771, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x99f7!] UDP, length 64
+13:51:56.603629 IP (tos 0x0, ttl 63, id 39773, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x342d!] UDP, length 1400
+13:51:56.613774 IP (tos 0x0, ttl 63, id 39774, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x97f7!] UDP, length 64
+13:51:56.623936 IP (tos 0x0, ttl 63, id 39775, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x322d!] UDP, length 1400
+13:51:56.634151 IP (tos 0x0, ttl 63, id 39777, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x95f7!] UDP, length 64
+13:51:56.644326 IP (tos 0x0, ttl 63, id 39779, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x302d!] UDP, length 1400
+13:51:56.654510 IP (tos 0x0, ttl 63, id 39782, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x9df6!] UDP, length 64
+13:51:56.664715 IP (tos 0x0, ttl 63, id 39784, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x382c!] UDP, length 1400
+13:51:56.674873 IP (tos 0x0, ttl 63, id 39786, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x9bf6!] UDP, length 64
+13:51:56.685092 IP (tos 0x0, ttl 63, id 39788, offset 0, flags [DF], proto UDP (17), length 1428)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x1aa6 -> 0x362c!] UDP, length 1400
+13:51:56.695266 IP (tos 0x0, ttl 63, id 39789, offset 0, flags [DF], proto UDP (17), length 92)
+    10.9.0.1.41496 > 10.9.1.2.54903: [bad udp cksum 0x156e -> 0x99f6!] UDP, length 64

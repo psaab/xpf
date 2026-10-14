@@ -323,6 +323,64 @@ wire_parse_transcript() {
 	done
 	return 0
 }
+#
+# ── Capture reduction (#11056) ────────────────────────────────────────
+#
+# The emerge/reply COUNTS the live gates grep out of a tcpdump transcript
+# were, until #11056, inline one-liners in each gate script with no hermetic
+# proof: a regex that stopped matching real tcpdump output would surface only
+# as a live VOID (capture-blind) on a gate that has never run. These are the
+# same reductions as pure functions so the gates, the committed transcripts
+# under test/fixtures/wire/, and the hermetic selftest
+# (wire-gate-hermetic-selftest.sh) all count with ONE implementation — the
+# same single-source argument as the verdict cores above.
+
+# wire_count_dst_frames <capture> <port> — frames whose DESTINATION port is
+# <port>. tcpdump renders the destination as `<addr>.<port>:` (the port
+# immediately before the protocol token or `Flags`), so a SOURCE port render
+# (`<addr>.<port> >`) never matches and a near-miss port never matches inside
+# a longer one. Works for UDP (`…> h.p: UDP, length N`) and TCP
+# (`…> h.p: Flags [S]`) because both put the destination port before `: `.
+wire_count_dst_frames() {
+	local n
+	n=$(grep -cE "\.${2}:" "${1:-}" 2>/dev/null || true)
+	n=$(printf '%s' "$n" | tr -d ' \n' || true)
+	[[ "$n" =~ ^[0-9]+$ ]] || n=0
+	printf '%s' "$n"
+}
+
+# wire_has_dst_frames <capture> <port> — rc 0 iff at least one frame to
+# <port> emerged (the baseline-liveness shape; no count needed).
+wire_has_dst_frames() {
+	grep -qE "\.${2}:" "${1:-}" 2>/dev/null
+}
+
+# wire_count_flag_replies <capture> <port> <flag-regex> — packets FROM
+# service port <port> carrying the tcpdump flag rendering <flag-regex>
+# (e.g. `S\.` for SYN-ACK, `R` for a reset). Reply direction is what makes a
+# management port EXPOSED (#10029): the prober's outbound SYN renders
+# `<src>.<ephemeral> > <dut>.<port>: Flags [S]` and never matches
+# `.<port> > `.
+wire_count_flag_replies() {
+	local n
+	n=$(grep -cE "\.${2} > .*Flags \[${3}" "${1:-}" 2>/dev/null || true)
+	n=$(printf '%s' "$n" | tr -d ' \n' || true)
+	[[ "$n" =~ ^[0-9]+$ ]] || n=0
+	printf '%s' "$n"
+}
+
+# wire_count_bad_cksum <capture> <protocol-alternation> — tcpdump `-vv`
+# corruption annotations, e.g. `[bad udp cksum 0x… -> 0x…]`. The caller names
+# the protocol family it filtered for (`udp|ip` for the UDP gates, `tcp|ip`
+# for #10029) so a gate never counts corruption on a transport it did not
+# capture. Case-insensitive: tcpdump prints `checksum` on some link types.
+wire_count_bad_cksum() {
+	local n
+	n=$(grep -ciE "bad (${2}) (cksum|checksum)" "${1:-}" 2>/dev/null || true)
+	n=$(printf '%s' "$n" | tr -d ' \n' || true)
+	[[ "$n" =~ ^[0-9]+$ ]] || n=0
+	printf '%s' "$n"
+}
 # wire_matrix_verdict <cksum_bad> <cell_count> [<cell-key> <control-identity-mask> <probe64-offered> <probe64-observed> <probe1400-offered> <probe1400-observed> <control64-offered> <control64-observed> <control1400-offered> <control1400-observed>]...
 #
 # The zone-matrix verdict (#10028) is deliberately not a generic N-cell
