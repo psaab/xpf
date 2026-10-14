@@ -11,48 +11,88 @@ import (
 	"github.com/psaab/xpf/pkg/zonecounters"
 )
 
-// isPolicyFilterKeyword reports whether tok is a leading `show security
-// policies` subcommand keyword (brief/detail/hit-count/global) rather than a
-// zone filter. These carry no value and are not from-zone/to-zone selectors, so
-// the selector validator permits them while still rejecting a genuinely
-// unrecognized token.
-func isPolicyFilterKeyword(tok string) bool {
-	switch tok {
-	case "brief", "detail", "hit-count", "global":
-		return true
-	}
-	return false
+// policyShowQuery is the parsed tail of a `show security policies` command:
+// the from-zone/to-zone selector pair, the display keyword that selects the
+// view ("" = the standard view), whether `global` scopes the output to
+// global policies, and the selector tail in operator order — the exact
+// string forwarded to a daemon text topic.
+type policyShowQuery struct {
+	fromZone, toZone string
+	view             string // "", "brief", "detail", "hit-count"
+	globalOnly       bool
+	filterText       string
 }
 
-// validatePolicyZoneSelectors rejects BOTH a from-zone/to-zone selector missing
-// its zone value (e.g. "... from-zone trust to-zone") AND an unrecognized filter
-// token (e.g. a typo'd `from-zonee`, or a stray word). The remote `show security
-// policies` wrappers below build the forwarded filter by copying ONLY
-// from-zone/to-zone pairs and silently DROP everything else, so a mistyped
-// selector key (`from-zonee trust`) left that filter dimension empty and WIDENED
-// the view to every zone — an operator could read a narrow policy set as the
-// whole table (#4908 / #5557). Rejecting the unknown key here makes that failure
-// reach the operator surface, mirroring the daemon-side gRPC parseZoneFilter's
-// default-error rule (pkg/grpcapi/server_show_policies_text.go), which the CLI
-// otherwise never exercised because it stripped the bad token before forwarding.
-// A leading subcommand keyword is permitted; the token following from-zone/
-// to-zone is consumed as its value unconditionally.
-func validatePolicyZoneSelectors(args []string) error {
+// parsePolicyShowQuery walks the whole argument tail in ONE
+// position-independent pass and returns everything the dispatcher must
+// honour: the selector pair, the display keyword, and `global`.
+//
+// #12902 (D9-12): the validator admitted brief/detail/hit-count/global at
+// any unconsumed position while the dispatch tested only args[1], so a
+// modifier after the zone selectors (`from-zone X to-zone Y detail`) or a
+// second keyword (`brief global`) was validated and then silently
+// DISCARDED — the wrappers below forwarded only the from-zone/to-zone
+// pair, so the operator got the standard, unscoped view and a success
+// return. One walk for admission AND dispatch removes the mismatch:
+// everything the parse admits is honoured wherever it sits, and a
+// combination no view can render — two display keywords, or a display
+// keyword with `global` — is REJECTED (fail-closed) instead of narrowed. A
+// display keyword repeated verbatim is idempotent and therefore admitted.
+// This is the local CLI's parsePolicyShowQuery twin
+// (pkg/cli/cli_show_security_dispatch.go); keep the two in lockstep.
+//
+// The token following from-zone/to-zone is consumed as its value
+// unconditionally, so a zone literally named "detail" is a selector value,
+// never a display keyword. The loop stays a classic counted for: the body
+// advances i past a consumed value, which a range loop cannot do.
+func parsePolicyShowQuery(args []string) (q policyShowQuery, err error) {
+	var filterParts []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "from-zone", "to-zone":
 			if i+1 >= len(args) || args[i+1] == "from-zone" || args[i+1] == "to-zone" {
-				return fmt.Errorf("missing zone name after %q", args[i])
+				return q, fmt.Errorf("missing zone name after %q", args[i])
+			}
+			filterParts = append(filterParts, args[i], args[i+1])
+			if args[i] == "from-zone" {
+				q.fromZone = args[i+1]
+			} else {
+				q.toZone = args[i+1]
 			}
 			i++ // skip the consumed value
-		default:
-			if isPolicyFilterKeyword(args[i]) {
-				continue
+		case "brief", "detail", "hit-count":
+			if q.view != "" && q.view != args[i] {
+				return q, fmt.Errorf("conflicting display keywords %q and %q (choose one of brief, detail, hit-count)",
+					q.view, args[i])
 			}
-			return fmt.Errorf("unrecognized filter token %q (expected from-zone/to-zone)", args[i])
+			q.view = args[i]
+		case "global":
+			q.globalOnly = true
+		default:
+			return q, fmt.Errorf("unrecognized filter token %q (expected from-zone/to-zone)", args[i])
 		}
 	}
-	return nil
+	if q.view != "" && q.globalOnly {
+		return q, fmt.Errorf("keyword %q cannot be combined with %q", q.view, "global")
+	}
+	q.filterText = strings.Join(filterParts, " ")
+	return q, nil
+}
+
+// validatePolicyZoneSelectors rejects BOTH a from-zone/to-zone selector
+// missing its zone value (e.g. "... from-zone trust to-zone") AND an
+// unrecognized filter token (e.g. a typo'd `from-zonee`, or a stray word).
+// Before #4908/#5557 the remote wrappers built the forwarded filter by
+// copying ONLY from-zone/to-zone pairs and silently DROPping everything
+// else, so a mistyped selector key (`from-zonee trust`) left that filter
+// dimension empty and WIDENED the view to every zone. Rejecting the
+// unknown key here makes that failure reach the operator surface, mirroring
+// the daemon-side gRPC parseZoneFilter's default-error rule
+// (pkg/grpcapi/server_show_policies_text.go). Since #12902 the grammar
+// lives in parsePolicyShowQuery; this predicate is its error face.
+func validatePolicyZoneSelectors(args []string) error {
+	_, err := parsePolicyShowQuery(args)
+	return err
 }
 
 func (c *ctl) handleShowSecurity(args []string) error {
@@ -88,60 +128,27 @@ func (c *ctl) handleShowSecurity(args []string) error {
 		}
 		return c.showZones(zsplit.Selector)
 	case "policies":
-		// #4908 (C175-HC-126): reject a from-zone/to-zone selector missing its
-		// zone value (e.g. "... from-zone trust to-zone"). The loose parse below
-		// silently dropped the dangling predicate and returned a broader/
-		// one-sided inventory.
-		if err := validatePolicyZoneSelectors(args[1:]); err != nil {
+		// #4908 (C175-HC-126) rejects a from-zone/to-zone selector missing
+		// its zone value, and #5557 an unrecognized token — both inside
+		// parsePolicyShowQuery. #12902: the SAME walk now owns dispatch, so
+		// a view keyword or `global` after the selectors
+		// (`from-zone X to-zone Y detail`, `brief global`) is honoured —
+		// or rejected when no view can render it — instead of silently
+		// dropped the way the args[1] ladder above did.
+		q, err := parsePolicyShowQuery(args[1:])
+		if err != nil {
 			return err
 		}
-		if len(args) >= 2 && args[1] == "brief" {
-			var fromZone, toZone string
-			for i := 2; i+1 < len(args); i++ {
-				switch args[i] {
-				case "from-zone":
-					fromZone = args[i+1]
-					i++
-				case "to-zone":
-					toZone = args[i+1]
-					i++
-				}
-			}
-			return c.showPoliciesBriefFiltered(fromZone, toZone)
-		}
-		if len(args) >= 2 && args[1] == "detail" {
-			var filterParts []string
-			for i := 2; i+1 < len(args); i++ {
-				if args[i] == "from-zone" || args[i] == "to-zone" {
-					filterParts = append(filterParts, args[i], args[i+1])
-					i++
-				}
-			}
-			return c.showTextFiltered("policies-detail", strings.Join(filterParts, " "))
-		}
-		if len(args) >= 2 && args[1] == "hit-count" {
-			var filterParts []string
-			for i := 2; i+1 < len(args); i++ {
-				if args[i] == "from-zone" || args[i] == "to-zone" {
-					filterParts = append(filterParts, args[i], args[i+1])
-					i++
-				}
-			}
-			return c.showTextFiltered("policies-hit-count", strings.Join(filterParts, " "))
-		}
-		var fromZone, toZone string
-		for i := 1; i+1 < len(args); i++ {
-			switch args[i] {
-			case "from-zone":
-				i++
-				fromZone = args[i]
-			case "to-zone":
-				i++
-				toZone = args[i]
-			}
+		switch q.view {
+		case "brief":
+			return c.showPoliciesBriefFiltered(q.fromZone, q.toZone)
+		case "detail":
+			return c.showTextFiltered("policies-detail", q.filterText)
+		case "hit-count":
+			return c.showTextFiltered("policies-hit-count", q.filterText)
 		}
 		// #8321 finding 10: honour `global` instead of silently widening.
-		return c.showPoliciesFiltered(fromZone, toZone, len(args) >= 2 && args[1] == "global")
+		return c.showPoliciesFiltered(q.fromZone, q.toZone, q.globalOnly)
 	case "screen":
 		if len(args) >= 2 && args[1] == "ids-option" && len(args) >= 3 {
 			if len(args) >= 4 && args[3] == "detail" {
@@ -496,15 +503,15 @@ func (c *ctl) showZones(filter string) error {
 // showPoliciesFiltered renders the policy inventory, optionally narrowed.
 //
 // #8321 finding 10: `globalOnly` exists because `show security policies global`
-// was VALIDATED as a keyword by isPolicyFilterKeyword and then had no branch —
+// was VALIDATED as a keyword by the selector validator and then had no branch —
 // so the remote CLI accepted it, dropped it, and returned the ENTIRE policy
 // database. An operator asking which global policies exist got every zone-pair
 // policy too, with nothing saying the filter had been ignored.
 //
-// The local CLI has handled it since #3357 (`globalOnly := args[1] == "global"`,
-// cli_show_security_dispatch.go), so this was a local/remote divergence rather
-// than a missing feature — the discriminator was already here, in the
-// `FromZone == "*" && ToZone == "*"` branch below.
+// The local CLI has handled it since #3357 (now `q.globalOnly` from
+// parsePolicyShowQuery, cli_show_security_dispatch.go), so this was a
+// local/remote divergence rather than a missing feature — the discriminator
+// was already here, in the `FromZone == "*" && ToZone == "*"` branch below.
 func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) error {
 	resp, err := c.client.GetPolicies(c.ctx(), &pb.GetPoliciesRequest{})
 	if err != nil {
