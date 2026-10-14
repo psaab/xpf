@@ -4760,6 +4760,181 @@ fn syn_cookie_validated_cache_invalidated_on_disable_reenable() {
     );
 }
 
+
+// #12876 fail-on-revert (part 1 — the decisive check): the per-zone
+// cookie-ACTIVE latch is derived state ("aggregate crossed
+// `syn_flood_threshold` while `syn_cookie` was on") and must NOT survive a
+// commit that changes those activation terms. Raising the attack threshold
+// mid-flood used to leave the latch latched for the rest of the 64 s epoch:
+// the zone kept skipping its configured per-source sketch and kept
+// hard-dropping unrelated session-miss ACKs as `Invalid` on terms the latch
+// was never measured under. RED on pristine master (Invalid + four Pass);
+// GREEN with the reconcile fix (NotApplicable + per-source Drop).
+#[test]
+fn syn_cookie_attack_threshold_raise_releases_active_latch_12876() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    profile.syn_flood_src_threshold = 4;
+    let mut state = make_state("trust", profile.clone());
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+
+    let src = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
+    let syn = tcp_pkt(src, dst, 49152, 443, TCP_SYN);
+    // t=128: first SYN is admitted (it charges this source's sketch cell
+    // once), the second crosses attack threshold 1 → the zone latches
+    // cookie-active until 128 + EPOCH_SECS (192) and mints a challenge.
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Pass
+    );
+    assert!(matches!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::SynCookieChallenge(_)
+    ));
+
+    // Operator raises the attack threshold 1 → 10: the activation terms the
+    // latch was measured under no longer hold.
+    let mut raised = profile.clone();
+    raised.syn_flood_threshold = 10;
+    let mut profiles = FxHashMap::default();
+    profiles.insert("trust".to_string(), raised);
+    state.update_profiles(profiles);
+
+    // (a) An unrelated session-miss ACK at t=129 (the stale latch would run
+    // to 192). Its cookie ISN is outside the epoch window, so the active arm
+    // would refuse it as `Invalid` — a hard drop — while the standby arm
+    // (latch released) correctly returns `NotApplicable`.
+    let mut ack = tcp_pkt(src, dst, 49152, 443, TCP_ACK);
+    ack.tcp_seq = 2;
+    ack.tcp_ack = 0xdead_beefu32;
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 129 * NS, 129),
+        SynCookieAckVerdict::NotApplicable,
+        "a session-miss ACK must not take the flood-active Invalid arm after \
+         the attack threshold was raised (stale latch)"
+    );
+
+    // (b) The configured per-SOURCE sketch must run again immediately. At
+    // t=129 the source's trailing window is 1 (the first flood SYN) + n;
+    // with src threshold 4 the 4th SYN is over. The aggregate stays under
+    // the new threshold 10 (trailing 2 + 4 = 6), so only the source cap can
+    // fire. A stale latch would skip it and admit all four.
+    for _ in 0..3 {
+        assert_eq!(
+            state.check_packet_with_zone_id("trust", 7, &syn, 129),
+            ScreenVerdict::Pass
+        );
+    }
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 129),
+        ScreenVerdict::Drop("syn-flood"),
+        "the per-source SYN-flood cap must not stay skipped after the \
+         attack threshold was raised (stale latch)"
+    );
+    assert_eq!(state.syn_flood_src_drops(), 1);
+}
+
+// #12876 fail-on-revert (part 2 — disable/re-enable): the same stale latch
+// also survived a `syn-cookie` disable/re-enable cycle inside one epoch.
+// While disabled the latch is inert (both consumers gate on `syn_cookie`),
+// so the harm surfaced on RE-ENABLE: a zone with no measured flood under
+// the new configuration still dropped session-miss ACKs as `Invalid`.
+#[test]
+fn syn_cookie_disable_reenable_releases_active_latch_12876() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile.clone());
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+
+    let src = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
+    let syn = tcp_pkt(src, dst, 49152, 443, TCP_SYN);
+    assert_eq!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::Pass
+    );
+    assert!(matches!(
+        state.check_packet_with_zone_id("trust", 7, &syn, 128),
+        ScreenVerdict::SynCookieChallenge(_)
+    ));
+
+    // Disable, then re-enable inside the same 64 s epoch (latch would run to
+    // 192). Neither commit measures anything; the latch must not survive.
+    let mut disabled = profile.clone();
+    disabled.syn_cookie = false;
+    let mut profiles = FxHashMap::default();
+    profiles.insert("trust".to_string(), disabled);
+    state.update_profiles(profiles);
+    let mut profiles = FxHashMap::default();
+    profiles.insert("trust".to_string(), profile);
+    state.update_profiles(profiles);
+
+    let mut ack = tcp_pkt(src, dst, 49152, 443, TCP_ACK);
+    ack.tcp_seq = 2;
+    ack.tcp_ack = 0xdead_beefu32;
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 129 * NS, 129),
+        SynCookieAckVerdict::NotApplicable,
+        "a re-enabled cookie mode must start from a clean latch, not drop \
+         session-miss ACKs for the rest of the pre-disable flood epoch"
+    );
+}
+
+// #12876 fail-on-revert (part 3 — validated-cache signature): the validated
+// client's #9945 bypass skips the per-SOURCE cap, so a cached validation is
+// a certificate against `syn_flood_src_threshold` AS CONFIGURED AT
+// VALIDATION TIME. Tightening that threshold used to leave the cached source
+// certified (the generation signature omitted the field), so it kept its
+// `SynCookieBypass` against the SYN-flood gate after the operator tightened
+// the per-source cap. RED on pristine master (SynCookieBypass); GREEN with
+// `syn_flood_src_threshold` in `syn_cookie_profile_signature` (challenge).
+#[test]
+fn syn_cookie_src_threshold_tightening_recertifies_validated_client_12876() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile.clone());
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+
+    install_validated_syn_cookie_entry(&mut state, "trust", 7);
+
+    // Tighten ONLY the per-source threshold: 0 (disabled) → 4. `syn_cookie`
+    // and `syn_flood_threshold` are untouched, so on master the signature is
+    // unchanged, the generation does not bump, and the cached validation
+    // stays consumable.
+    let mut tightened = profile.clone();
+    tightened.syn_flood_src_threshold = 4;
+    let mut profiles = FxHashMap::default();
+    profiles.insert("trust".to_string(), tightened);
+    state.update_profiles(profiles);
+
+    // t=129: the aggregate trailing window is 2 + 1 = 3 > attack threshold 1,
+    // so the gate is over-attack. A stale HIT would return the certified
+    // source's `SynCookieBypass`; with the bumped generation the entry is a
+    // MISS and the SYN gets a fresh challenge.
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    assert!(
+        matches!(
+            state.check_packet_with_zone_id("trust", 7, &syn, 129),
+            ScreenVerdict::SynCookieChallenge(_)
+        ),
+        "a client validated under the old syn_flood_src_threshold must \
+         recertify (challenge), not keep its cache bypass"
+    );
+}
+
 // #2446 no-regression: within the SAME profile generation a validated
 // tuple is still a hit (the cache works normally). An UNRELATED profile
 // edit (a stateless screen toggle) does NOT bump the generation, so the
