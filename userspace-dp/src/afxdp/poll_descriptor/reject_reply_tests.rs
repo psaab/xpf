@@ -3338,3 +3338,81 @@ fn stamped_fabric_reject_flood_consumes_no_budget_or_token_12051() {
     );
     reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
 }
+
+/// #12864 (D6-05): a GRE/WireGuard-decapsulated inner packet carries a
+/// fabricated Ethernet header with twelve zero MAC bytes and its inner meta
+/// is marked `TUNNEL_DECAP_INGRESS_FLAG`. A `then reject` on it must NOT
+/// reflect that fabricated L2 and transmit an unencapsulated reply on the
+/// physical binding: it is unreplyable, exactly like a stamped-fabric
+/// arrival. Pre-fix there is no tunnel-decap gate, so the TCP legs enqueue a
+/// zero-MAC RST and the UDP legs enqueue a zero-MAC ICMP unreachable — every
+/// assertion below is RED on current master. Control: clearing the flag from
+/// the same frame must restore the normal native reply (kills an
+/// over-broad/frame-keyed mutant).
+#[test]
+fn tunnel_decap_reject_suppresses_unencapsulated_replies_12864() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    for protocol in [PROTO_TCP, crate::ip_proto::PROTO_UDP] {
+        crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+            crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+            0,
+        );
+        let (mut frame, mut meta, flow) = if protocol == PROTO_TCP {
+            tcp_v4_syn()
+        } else {
+            policy_reject_packet_v4(protocol)
+        };
+        frame[6..12].fill(0);
+        meta.meta_flags |= crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG;
+        let forwarding = policy_reject_forwarding();
+        let mut pipeline = tx_pipeline(
+            SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+            SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+        );
+        let mut counters = BatchCounters::default();
+        assert!(
+            !enqueue_policy_reject_reply(
+                &mut pipeline,
+                &forwarding,
+                5,
+                &frame,
+                meta,
+                &flow,
+                &mut counters,
+            ),
+            "tunnel-decapsulated protocol {protocol} must not emit an unencapsulated reply"
+        );
+        assert!(pipeline.pending_tx_local.is_empty());
+        assert_eq!(counters.policy_reject_sent, 0);
+        assert_eq!(counters.policy_reject_reply_budget_drops, 0);
+    }
+
+    // Native ingress has real L2 and retains existing reply behavior.
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (frame, meta, flow) = tcp_v4_syn();
+    let forwarding = policy_reject_forwarding();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 1);
+    assert_eq!(pipeline.pending_tx_local.len(), 1);
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+}

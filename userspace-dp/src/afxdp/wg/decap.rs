@@ -417,12 +417,13 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame_with_input_filter(
                 // header is still in the frame.
                 outer_ecn: outer_ecn_bits(frame, meta),
                 ecn_illegal_drops: &crate::afxdp::gre::WG_DECAP_ECN_ILLEGAL_DROPS,
-                // NOT `GRE_DECAP_INGRESS_FLAG`. The GRE flag selects the
-                // `tcp-mss gre-in` clamp value (#2486), which is the wrong number
-                // for a WireGuard tunnel — its clamp is computed from the endpoint
-                // by `wg_tcp_mss` on the EGRESS side. "Whatever GRE passes" is
-                // explicitly not an answer for another protocol.
-                meta_flags: 0,
+                // NOT `GRE_DECAP_INGRESS_FLAG`: that flag selects the
+                // `tcp-mss gre-in` clamp value (#2486), which is wrong for
+                // WireGuard. Its endpoint clamp is computed by `wg_tcp_mss`
+                // on egress. Mark tunnel provenance separately so reject
+                // handling will not reflect the fabricated zero-MAC Ethernet
+                // header onto the physical binding.
+                meta_flags: crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG,
                 rx_queue_index: meta.rx_queue_index,
                 // Inherited from the triggering RX meta, which is the whole reason
                 // this decap belongs in the worker. See the module comment.
