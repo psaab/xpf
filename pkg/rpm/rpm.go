@@ -956,7 +956,16 @@ func canonicalizeHTTPTarget(target string) (string, error) {
 }
 
 func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts probeSockOpts) (time.Duration, error) {
-	url, err := canonicalizeHTTPTarget(test.Target)
+	// #12908: attach the IPv6 link-local scope BEFORE any request, exactly
+	// as probeTCP / probeICMP do (#9026) — scopeHTTPTargetZone12908. Without
+	// it an unscoped http://[fe80::1]/ reached http.Client, whose dial error
+	// this package counts as PATH LOSS (SuccFail++, state transition,
+	// ip-monitoring failover) — for a probe that never left the box.
+	target, err := m.scopeHTTPTargetZone12908(test.Target, test.DestinationInterface)
+	if err != nil {
+		return 0, err
+	}
+	url, err := canonicalizeHTTPTarget(target)
 	if err != nil {
 		return 0, err
 	}
