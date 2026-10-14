@@ -3970,6 +3970,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -5403,6 +5404,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -6835,6 +6837,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -8267,6 +8270,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -9702,6 +9706,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -11136,6 +11141,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -12318,6 +12324,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -13382,6 +13389,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -14445,6 +14453,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -15508,6 +15517,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -16574,6 +16584,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }
@@ -17639,6 +17650,7 @@
             "NAT64PrefixLife": 0,
             "LinkMTU": 0,
             "SourceLinkLocal": "",
+            "ProtectedPrefixes": null,
             "ReachableTime": 0,
             "RetransTimer": 0
           }

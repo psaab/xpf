@@ -135,6 +135,14 @@ type Manager struct {
 	renewV6ServerIdentityRejects atomic.Uint64
 	recompileWG                  sync.WaitGroup
 	stateDir                     string
+	// protectedPDOverlaps is the configured-prefix set an IA_PD delegation
+	// must not overlap (#10856): every configured interface, RA, and NAT64
+	// IPv6 prefix, installed by the daemon on each apply. Guarded by mu; the
+	// decode path snapshots it (protectedIPv6Prefixes) so client goroutines
+	// never iterate a slice the daemon may be replacing. nil = no configured
+	// prefixes (or a standalone Manager), which refuses nothing on overlap —
+	// the class policy still applies.
+	protectedPDOverlaps []netip.Prefix
 
 	// runClientForTest replaces the per-family run goroutine body in
 	// tests so reconcile/registry behavior can be exercised without
@@ -287,6 +295,38 @@ func (m *Manager) DelegatedPrefixesForRA() []PDRAMapping {
 		}
 	}
 	return result
+}
+
+// SetProtectedIPv6Prefixes installs the configured-prefix set an IA_PD
+// delegation must not overlap (#10856). The daemon calls it on every config
+// apply, before the client reconcile, so renewals always validate against the
+// current configuration. The slice is copied and stored masked; passing nil
+// clears the set. This is deliberately NOT part of DHCPv6Options or the
+// reconcile fingerprint: a protected-prefix change must not restart clients
+// or drop held leases — the next renewal re-validates each delegation, and
+// the RA sink enforces the overlap immediately.
+func (m *Manager) SetProtectedIPv6Prefixes(prefixes []netip.Prefix) {
+	masked := make([]netip.Prefix, 0, len(prefixes))
+	for _, p := range prefixes {
+		if p.IsValid() && p.Addr().Is6() {
+			masked = append(masked, p.Masked())
+		}
+	}
+	m.mu.Lock()
+	if len(masked) == 0 {
+		m.protectedPDOverlaps = nil
+	} else {
+		m.protectedPDOverlaps = masked
+	}
+	m.mu.Unlock()
+}
+
+// protectedIPv6Prefixes snapshots the protected-prefix set for the decode
+// path. Callers must not retain or mutate the returned slice.
+func (m *Manager) protectedIPv6Prefixes() []netip.Prefix {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.protectedPDOverlaps
 }
 
 // Start begins a DHCP client for the given interface and address family.

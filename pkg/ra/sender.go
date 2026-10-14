@@ -933,10 +933,24 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 			continue
 		}
 		if pfx.Delegated {
-			if reason := config.DelegatedIPv6PrefixRefusalReasonBlocklist(prefix.Masked()); reason != "" {
+			if reason := config.DelegatedIPv6PrefixRefusalReason(prefix.Masked()); reason != "" {
 				slog.Warn("ra: refusing to advertise delegated prefix with blocked address class",
 					"prefix", pfx.Prefix, "interface", s.cfg.Interface,
 					"reason", reason)
+				continue
+			}
+			// #10856: a delegated prefix overlapping CONFIGURED space must
+			// not reach the wire even when it was accepted before the
+			// overlapping configuration appeared — the decoder refuses new
+			// extractions, this sink refuses the emission of a delegation
+			// still held from an earlier reply. ProtectedPrefixes is
+			// daemon-populated (nil for a sender driven by hand-built
+			// config, which has no box-wide knowledge). No pin mechanism
+			// exists yet, so every overlap is refused (#12533).
+			if hit := s.delegatedOverlapsProtected(prefix.Masked()); hit != "" {
+				slog.Warn("ra: refusing to advertise delegated prefix overlapping configured prefix",
+					"prefix", pfx.Prefix, "interface", s.cfg.Interface,
+					"configured", hit)
 				continue
 			}
 		}
@@ -1262,4 +1276,23 @@ func clampPIOSeconds12193(v int64) int64 {
 		return int64(^uint32(0))
 	}
 	return v
+}
+
+// delegatedOverlapsProtected returns the first ProtectedPrefixes entry that
+// shares any address with the (already masked) delegated prefix, or "" when
+// there is no overlap. Entries that do not parse are skipped — the daemon
+// populates the set from parsed configuration, so an unparseable entry here
+// means a hand-built config, and refusing on it would punish a sender whose
+// operator prefixes parse fine.
+func (s *sender) delegatedOverlapsProtected(delegated netip.Prefix) string {
+	for _, raw := range s.cfg.ProtectedPrefixes {
+		protected, err := netip.ParsePrefix(raw)
+		if err != nil || !protected.Addr().Is6() {
+			continue
+		}
+		if config.IPv6PrefixesOverlap(delegated, protected) {
+			return protected.Masked().String()
+		}
+	}
+	return ""
 }
