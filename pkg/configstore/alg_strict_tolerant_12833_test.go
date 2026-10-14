@@ -61,8 +61,12 @@ func TestALGStrictAndTolerantPaths12833(t *testing.T) {
 	// an older persisted configuration on tolerant ingress.
 	legacyPath := filepath.Join(t.TempDir(), "legacy-config")
 	legacy := newTestStoreAt(t, legacyPath)
+	logs := captureWarnLogs(t)
 	if _, err := legacy.SyncApply(`security { alg { ftp desable; } }`, nil); err != nil {
 		t.Fatalf("SyncApply bricked on a legacy packed typo: %v", err)
+	}
+	if !strings.Contains(logs.String(), "desable") {
+		t.Fatalf("tolerant SyncApply must warn with the misspelled token, logs=%q", logs.String())
 	}
 	legacyBoot := newTestStoreAt(t, legacyPath)
 	if err := legacyBoot.Load(); err != nil {
