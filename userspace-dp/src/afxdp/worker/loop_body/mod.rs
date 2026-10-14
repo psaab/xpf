@@ -261,8 +261,10 @@ fn rematch_bound_first_policy_sessions(
 
     let mut rebound = 0;
     let mut purged = 0;
+    let mut rematch_declined = 0;
     for (key, decision, metadata, origin) in candidates {
         let mut retained = false;
+        let mut declined = false;
         let local_delivery = decision.resolution.disposition
             == crate::afxdp::ForwardingDisposition::LocalDelivery;
         if ancestry.len() == 1 {
@@ -348,6 +350,19 @@ fn rematch_bound_first_policy_sessions(
                     .policy
                     .rule_for_stable_id(&descriptor.destination_rule_id)
             {
+                // #12859: the retained session has no packet ICMP type, so a
+                // type-constrained ICMP term makes the frame-independent
+                // rematch unable to distinguish a valid type-specific permit
+                // from a newly inserted type-specific deny. Decline: retain
+                // and let the packet-scoped session-hit path adjudicate.
+                // Missing or invalid ancestry still fails closed above.
+                if new_forwarding
+                    .policy
+                    .icmp_packet_verdict_may_depend_on_type(key.protocol)
+                {
+                    retained = true;
+                    declined = true;
+                }
                 let policy_dst_ip = decision.nat.rewrite_dst.unwrap_or(key.dst_ip);
                 let policy_dst_port = decision.nat.rewrite_dst_port.unwrap_or(key.dst_port);
                 let result = if local_delivery {
@@ -363,7 +378,7 @@ fn rematch_bound_first_policy_sessions(
                         true,
                     )
                 } else {
-                    Some(crate::policy::evaluate_policy_result_without_counting(
+                    Some(crate::policy::evaluate_policy_result_without_counting_at(
                         &new_forwarding.policy,
                         from_id,
                         to_id,
@@ -373,9 +388,11 @@ fn rematch_bound_first_policy_sessions(
                         key.src_port,
                         policy_dst_port,
                         None,
+                        now_ns,
                     ))
                 };
-                if let Some(result) = result
+                if !declined
+                    && let Some(result) = result
                     && result.action == crate::policy::PolicyAction::Permit
                     && result.policy_counter_idx != 0
                     && let Some(matched_rule) = result
@@ -453,9 +470,18 @@ fn rematch_bound_first_policy_sessions(
                 worker_id,
             );
             purged += 1;
+        } else if declined {
+            rematch_declined += 1;
         } else {
             rebound += 1;
         }
+    }
+    if rematch_declined > 0 {
+        debug_log!(
+            "RENAMED_FIRST_POLICY_REMAP_DECLINED: worker={} declined={}",
+            worker_id,
+            rematch_declined
+        );
     }
     (rebound, purged)
 }

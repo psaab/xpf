@@ -1848,3 +1848,295 @@ fn extensive_rotation_does_not_retain_transit_row_under_junos_host_ancestry_1285
     drop(shared);
     harness.shutdown();
 }
+
+
+// #12859: the ancestry rematch must not evaluate a retained ICMP session with
+// `packet_icmp = None` when the destination snapshot carries a
+// type-constrained PERMIT. CompactApplications::matches fails the
+// type-constrained term closed for None, so a destination `junos-icmp-ping`
+// permit cannot retain the flow; the code falls through to default deny and
+// purges both halves. The #8618/#9386 honesty gate is the fix: while the
+// verdict MAY depend on the packet's ICMP type, this frame-independent
+// derivation must DECLINE the candidate outright (no retain, no purge), exactly
+// as `policy_revalidation.rs` declines on session hits. Separately, the caller
+// `now_ns` must reach the evaluation via `evaluate_policy_result_without_counting_at`
+// (the pre-fix call used the scheduler-now wrapper, ignoring the caller's clock).
+//
+// FAIL-ON-REVERT: delete the decline (or the `_at` switch) and the pair is
+// purged below; the assertions distinguish "declined" (pair survives bound to
+// the OLD rule id, no new counter stamp) from both retain (new stamp) and
+// purge (pair gone).
+#[test]
+fn extensive_rematch_declines_icmp_with_type_constrained_permit_12859() {
+    let forward_key = SessionKey {
+        protocol: crate::ip_proto::PROTO_ICMP,
+        ..key(40201)
+    };
+    let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
+    let counter = policy(&[rule("p-first", 0), rule("p-web", 1)])
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose p-first's counter");
+    let mut forward = entry(forward_key.clone(), false, Some(counter.clone()));
+    forward.protocol = crate::ip_proto::PROTO_ICMP;
+    let mut reverse = entry(reverse_key.clone(), true, Some(counter));
+    reverse.protocol = crate::ip_proto::PROTO_ICMP;
+
+    let harness = RotationHarness::start_with_extra(&[forward, reverse]);
+    // Destination: the renamed rule permits ONLY icmp echo-request
+    // (junos-icmp-ping, type 8). The verdict for an ICMP session now depends on
+    // a packet type this rematch does not have, so it must decline.
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->wan/p-first".to_string(),
+        destination_rule_id: "lan->wan/p-ping".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "wan".to_string(),
+        destination_from_zone: "lan".to_string(),
+        destination_to_zone: "wan".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: 2,
+        destination_from_zone_id: 1,
+        destination_to_zone_id: 2,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    let mut ping = rule("p-ping", 0);
+    ping.applications = vec!["junos-icmp-ping".to_string()];
+    ping.application_terms = vec![crate::PolicyApplicationSnapshot {
+        name: "junos-icmp-ping".to_string(),
+        protocol: "icmp".to_string(),
+        source_port: String::new(),
+        destination_port: String::new(),
+        icmp_type: Some(8),
+        icmp_code: None,
+        inactivity_timeout: None,
+    }];
+    harness.publish(2, &[ping, rule("p-web", 1)], true, &[ancestry], None);
+    let shared = harness.synced.lock().expect("shared synced map");
+    for pair_key in [&forward_key, &reverse_key] {
+        let stored = shared.get(pair_key).expect(
+            "#12859: a type-constrained-permit ICMP rematch must decline, not purge the pair",
+        );
+        assert_eq!(
+            stored
+                .metadata
+                .policy_counter
+                .as_ref()
+                .expect("bound p-first identity")
+                .rule_id(),
+            "lan->wan/p-first",
+            "#12859: a declined rematch must not rebind the session to a new rule"
+        );
+    }
+    drop(shared);
+    harness.shutdown();
+}
+
+/// #12859 sibling: a renamed type-constrained DENY ahead of an unconstrained
+/// ICMP permit. `packet_icmp = None` skips the DENY's constrained term, so a
+/// type-blind walk falls through to `junos-icmp-all` and REBINDS the live
+/// session to it — the bypass the issue names. With the #9386 permit-only gate
+/// this still declines (the DENY is not evaluated), so the pair must survive
+/// bound to the OLD rule id rather than to the broad ICMP permit's counter.
+/// Packet-scoped enforcement of the DENY is #11064's job on the hit path, not
+/// this frame-independent rematch's.
+
+
+/// this frame-independent rematch's.
+#[test]
+fn extensive_rematch_declines_icmp_with_type_constrained_deny_then_broad_permit_12859() {
+    let forward_key = SessionKey {
+        protocol: crate::ip_proto::PROTO_ICMP,
+        ..key(40202)
+    };
+    let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
+    let counter = policy(&[rule("p-first", 0), rule("p-web", 1)])
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose p-first's counter");
+    let mut forward = entry(forward_key.clone(), false, Some(counter.clone()));
+    forward.protocol = crate::ip_proto::PROTO_ICMP;
+    let mut reverse = entry(reverse_key.clone(), true, Some(counter));
+    reverse.protocol = crate::ip_proto::PROTO_ICMP;
+
+    let harness = RotationHarness::start_with_extra(&[forward, reverse]);
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->wan/p-first".to_string(),
+        destination_rule_id: "lan->wan/p-icmp-all".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "wan".to_string(),
+        destination_from_zone: "lan".to_string(),
+        destination_to_zone: "wan".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: 2,
+        destination_from_zone_id: 1,
+        destination_to_zone_id: 2,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    let mut block = rule("p-block-ping", 0);
+    block.action = "deny".to_string();
+    block.applications = vec!["junos-icmp-ping".to_string()];
+    block.application_terms = vec![crate::PolicyApplicationSnapshot {
+        name: "junos-icmp-ping".to_string(),
+        protocol: "icmp".to_string(),
+        source_port: String::new(),
+        destination_port: String::new(),
+        icmp_type: Some(8),
+        icmp_code: None,
+        inactivity_timeout: None,
+    }];
+    let mut all = rule("p-icmp-all", 1);
+    all.applications = vec!["junos-icmp-all".to_string()];
+    all.application_terms = vec![crate::PolicyApplicationSnapshot {
+        name: "junos-icmp-all".to_string(),
+        protocol: "icmp".to_string(),
+        source_port: String::new(),
+        destination_port: String::new(),
+        icmp_type: None,
+        icmp_code: None,
+        inactivity_timeout: None,
+    }];
+    harness.publish(2, &[block, all], true, &[ancestry], None);
+    let shared = harness.synced.lock().expect("shared synced map");
+    for pair_key in [&forward_key, &reverse_key] {
+        let stored = shared
+            .get(pair_key)
+            .expect("#12859: the session pair must survive the rematch");
+        let rule_id = stored
+            .metadata
+            .policy_counter
+            .as_ref()
+            .expect("bound p-first identity")
+            .rule_id();
+        assert_eq!(
+            rule_id, "lan->wan/p-first",
+            "#12859: the pair must stay bound to its admission rule, not fall \
+             through the skipped type-constrained DENY to the broad p-icmp-all permit"
+        );
+    }
+    drop(shared);
+    harness.shutdown();
+}
+
+/// #12859 control: an UNCONSTRAINED icmp permit (junos-icmp-all) still retains
+/// and rebinds the pair — the decline is scoped to type-constrained verdicts,
+/// not to ICMP as a protocol. Guards against an over-broad fix that declines
+/// every ICMP rematch.
+
+
+/// every ICMP rematch.
+#[test]
+fn extensive_rematch_retains_icmp_with_unconstrained_permit_12859() {
+    let forward_key = SessionKey {
+        protocol: crate::ip_proto::PROTO_ICMP,
+        ..key(40203)
+    };
+    let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
+    let counter = policy(&[rule("p-first", 0), rule("p-web", 1)])
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose p-first's counter");
+    let mut forward = entry(forward_key.clone(), false, Some(counter.clone()));
+    forward.protocol = crate::ip_proto::PROTO_ICMP;
+    let mut reverse = entry(reverse_key.clone(), true, Some(counter));
+    reverse.protocol = crate::ip_proto::PROTO_ICMP;
+
+    let harness = RotationHarness::start_with_extra(&[forward, reverse]);
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->wan/p-first".to_string(),
+        destination_rule_id: "lan->wan/p-icmp-all".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "wan".to_string(),
+        destination_from_zone: "lan".to_string(),
+        destination_to_zone: "wan".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: 2,
+        destination_from_zone_id: 1,
+        destination_to_zone_id: 2,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    let mut all = rule("p-icmp-all", 0);
+    all.applications = vec!["junos-icmp-all".to_string()];
+    all.application_terms = vec![crate::PolicyApplicationSnapshot {
+        name: "junos-icmp-all".to_string(),
+        protocol: "icmp".to_string(),
+        source_port: String::new(),
+        destination_port: String::new(),
+        icmp_type: None,
+        icmp_code: None,
+        inactivity_timeout: None,
+    }];
+    harness.publish(2, &[all, rule("p-web", 1)], true, &[ancestry], None);
+    let shared = harness.synced.lock().expect("shared synced map");
+    for pair_key in [&forward_key, &reverse_key] {
+        let stored = shared
+            .get(pair_key)
+            .expect("#12859 control: an unconstrained icmp permit must retain the pair");
+        assert_eq!(
+            stored
+                .metadata
+                .policy_counter
+                .as_ref()
+                .expect("rebound p-icmp-all identity")
+                .rule_id(),
+            "lan->wan/p-icmp-all",
+            "#12859 control: the pair must rebind to the renamed unconstrained permit"
+        );
+    }
+    drop(shared);
+    harness.shutdown();
+}
+
+/// #12859 boundary: type-dependent ICMP is declined only after a unique,
+/// validated ancestry rematch candidate. A missing ancestry descriptor must
+/// preserve the existing fail-closed teardown even when the new snapshot has
+/// type-constrained rules; otherwise the ICMP decline would weaken the
+/// established missing-ancestry contract.
+
+
+/// established missing-ancestry contract.
+#[test]
+fn extensive_rematch_still_purges_icmp_without_ancestry_12859() {
+    let forward_key = SessionKey {
+        protocol: crate::ip_proto::PROTO_ICMP,
+        ..key(40204)
+    };
+    let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
+    let counter = policy(&[rule("p-first", 0), rule("p-web", 1)])
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose p-first's counter");
+    let mut forward = entry(forward_key.clone(), false, Some(counter.clone()));
+    forward.protocol = crate::ip_proto::PROTO_ICMP;
+    let mut reverse = entry(reverse_key.clone(), true, Some(counter));
+    reverse.protocol = crate::ip_proto::PROTO_ICMP;
+    let harness = RotationHarness::start_with_extra(&[forward, reverse]);
+
+    let mut ping = rule("p-new", 0);
+    ping.applications = vec!["junos-icmp-ping".to_string()];
+    ping.application_terms = vec![crate::PolicyApplicationSnapshot {
+        name: "junos-icmp-ping".to_string(),
+        protocol: "icmp".to_string(),
+        source_port: String::new(),
+        destination_port: String::new(),
+        icmp_type: Some(8),
+        icmp_code: None,
+        inactivity_timeout: None,
+    }];
+    harness.publish(2, &[ping], true, &[], None);
+    let shared = harness.synced.lock().expect("shared synced map");
+    assert!(
+        !shared.contains_key(&forward_key) && !shared.contains_key(&reverse_key),
+        "without validated ancestry, type-dependent ICMP must retain the fail-closed purge"
+    );
+    drop(shared);
+    harness.shutdown();
+}
