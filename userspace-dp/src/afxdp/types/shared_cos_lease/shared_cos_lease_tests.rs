@@ -990,6 +990,98 @@ fn equal_flow_acquire_side_cap_check_is_read_only_on_inconsistent_snapshot() {
     );
 }
 
+/// #13071 (deep-review D2-06): `equal_flow_cap_v8` must size the worker
+/// cap from the epoch-consistent flow count (#1745 sticky-max acquire-time
+/// sample), not the live `worker_active_flow_buckets` count. A peer flow
+/// that drains mid-epoch decrements the live count AFTER the epoch's fair
+/// budget was computed for — and partially consumed by — the original
+/// count; multiplying the live count retroactively shrank the worker cap
+/// below bytes already spent, starving the remaining flows for the rest
+/// of the epoch and feeding false cap-hit/suppressed-grant telemetry.
+#[test]
+fn v8_equal_flow_cap_preserves_remaining_flow_share_when_sibling_flow_drains_mid_epoch() {
+    let lease = new_equal_flow_lease();
+    seed_two_valid_skewed_equal_flow_epochs(&lease);
+    let v8 = lease.v8.as_ref().expect("v8 lease");
+    let tag = v8.equal_flow.epoch_tag.load(Ordering::Acquire);
+    assert_eq!(lease.v8_equal_flow_target_per_flow(), 1_800);
+
+    // In-flight epoch 3: worker 0 (4 flows) acquires once so the
+    // epoch-tagged sticky-max sample (tag, 4) is recorded — the same
+    // denominator the rotation publisher used for this epoch.
+    let live0 = lease.worker_active_flow_buckets_for(0).unwrap();
+    assert_eq!(live0.load(Ordering::Relaxed), 4);
+    assert_eq!(lease.acquire_v8(0, 3 * EPOCH_DURATION_NS + 1_000, 1), 1);
+
+    // Flows F1..F3 each consumed their 1_800 B per-flow target.
+    v8.worker_grants[0]
+        .0
+        .store(PackedEpochGrant::pack(tag, 3 * 1_800), Ordering::Release);
+
+    // F3 drains its last packet mid-epoch: live 4 -> 3, while the
+    // epoch-sticky sample stays 4.
+    live0.fetch_sub(1, Ordering::Relaxed);
+
+    // Decisive check: the cap keeps the epoch-consistent 4-flow budget
+    // instead of collapsing to the drained live count (3 * 1_800).
+    assert_eq!(lease.equal_flow_cap_v8(v8, 0, tag), Some(7_200));
+
+    let cap_hits_before = lease.v8_equal_flow_cap_hit_events();
+    let suppressed_before = lease.v8_equal_flow_suppressed_grant_bytes();
+
+    // F4 asks for its own 1_800 B share later in the same epoch: the
+    // 5_400 B already consumed must only count against the full 7_200 B
+    // epoch budget, and a legitimate grant must not be miscounted as
+    // equal-flow suppression telemetry.
+    let f4 = lease.acquire_v8(0, 3 * EPOCH_DURATION_NS + 100_000, 1_800);
+    assert_eq!(f4, 1_800, "remaining flow must keep its per-flow share");
+    assert_eq!(lease.v8_equal_flow_cap_hit_events(), cap_hits_before);
+    assert_eq!(
+        lease.v8_equal_flow_suppressed_grant_bytes(),
+        suppressed_before
+    );
+
+    // All four flows have now drained (live -> 0): a straggler acquire
+    // still evaluates against the epoch-consistent budget, not a
+    // synthetic zero cap.
+    live0.store(0, Ordering::Relaxed);
+    assert_eq!(
+        lease.equal_flow_cap_v8(v8, 0, tag),
+        Some(7_200),
+        "drained-live worker must keep the epoch-consistent cap"
+    );
+}
+
+/// #13071 (deep-review D2-06) zero-denominator doctrine: a worker with
+/// no live flows AND no epoch sample must not receive a synthetic
+/// `Some(0)` cap — that denied every remaining byte of the epoch and
+/// counted cap-hit/suppressed telemetry for a cap that was zero only
+/// because the flow count was. Match the read-only `target == 0` /
+/// stale-tag doctrine: `None`.
+#[test]
+fn v8_equal_flow_cap_is_none_for_worker_with_no_flows_and_no_epoch_sample() {
+    let lease = new_equal_flow_lease();
+    seed_two_valid_skewed_equal_flow_epochs(&lease);
+    let v8 = lease.v8.as_ref().expect("v8 lease");
+    let tag = v8.equal_flow.epoch_tag.load(Ordering::Acquire);
+
+    // Worker 0: live count drained to zero mid-epoch, and its sample
+    // slot carries no sample for the current epoch tag.
+    lease
+        .worker_active_flow_buckets_for(0)
+        .unwrap()
+        .store(0, Ordering::Relaxed);
+    v8.worker_equal_flow_active_samples[0]
+        .0
+        .store(PackedEpochGrant::pack(tag, 0), Ordering::Release);
+
+    assert_eq!(
+        lease.equal_flow_cap_v8(v8, 0, tag),
+        None,
+        "idle-at-cap-eval worker must fail open read-only, not Some(0)"
+    );
+}
+
 #[test]
 fn equal_flow_epoch_payload_is_visible_after_tag_under_concurrent_readers() {
     let lease = new_equal_flow_lease();
