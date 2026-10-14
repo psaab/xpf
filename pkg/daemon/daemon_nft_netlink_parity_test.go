@@ -85,6 +85,14 @@ func runNftNetlinkParityInner(t *testing.T) {
 		`iifname "lifeline-vrf" meta sdifname "ge-lifeline-vrf" ip daddr 192.0.2.88 udp dport 51823 accept`) {
 		t.Fatalf("text oracle lacks WG ingress admission for IngressDeny address:\n%s", oracle)
 	}
+	// #12959: the cold-boot/lo0/gap fence WG admits must carry the same
+	// IngressDeny destination as the steady-state mapping; the cold_boot_fence /
+	// lo0_cold_boot_fence / gap_fence parity cases below pin text/netlink
+	// rule-equality for it.
+	if oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, wgZones, nil, nil, dhcpBackstopLists{}); !strings.Contains(oracle,
+		`iifname "lifeline-vrf" meta sdifname "ge-lifeline-vrf" ip daddr 192.0.2.88 udp dport 51823 accept`) {
+		t.Fatalf("text fence oracle lacks WG admission for IngressDeny address:\n%s", oracle)
+	}
 	t.Run("host_inbound", func(t *testing.T) {
 		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wgZones, true)
 		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, wgZones, true)

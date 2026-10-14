@@ -25,48 +25,20 @@ func emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p *nlPlan) {
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).emit(verdictAccept()...)
 }
 
-// emitHostInboundFenceWGAdmitsNetlink scopes the fence exception to a unique
-// destination owner and the matching transport-zone ingress.
+// emitHostInboundFenceWGAdmitsNetlink scopes the whole-table cold-boot/lo0
+// fence's WireGuard exception exactly like the steady-state chain: it reuses
+// the #12846 zone mapping, so lifeline-shared addresses withheld into
+// IngressDenyV4/V6 (#12959) keep their unique-owner zone admit during a fence
+// window, while ambiguous or unknown sources stay denied. Mirrors the text
+// oracle's emitHostInboundFenceWGAdmits rule-for-rule.
 func emitHostInboundFenceWGAdmitsNetlink(p *nlPlan, views []HostInboundZoneView, wgZonePorts map[string][]uint16) {
-	for _, v := range views {
-		ports := wgZonePorts[v.Zone]
-		emitFenceWGIngressAcceptNetlink(p, views, v, famV4, v.V4Addrs, ports)
-		emitFenceWGIngressAcceptNetlink(p, views, v, famV6, v.V6Addrs, ports)
-	}
-}
-
-func emitFenceWGIngressAcceptNetlink(p *nlPlan, views []HostInboundZoneView, view HostInboundZoneView, f nlFamily, candidates []string, ports []uint16) {
-	ingress := HostInboundWGIngressByZone(views)[view.Zone]
-	if len(ingress.IIFNames()) == 0 || len(candidates) == 0 || len(ports) == 0 {
-		return
-	}
-	addrs := uniqueFenceWGAddresses(views, view.Zone, f, candidates)
-	emitHostInboundWGIngressAcceptNetlink(p, ingress, f, addrs, ports)
-}
-
-func uniqueFenceWGAddresses(views []HostInboundZoneView, zone string, f nlFamily, candidates []string) []string {
-	owners := make(map[string]string)
-	ambiguous := make(map[string]bool)
-	for _, v := range views {
-		addrs := v.V4Addrs
-		if f == famV6 {
-			addrs = v.V6Addrs
-		}
-		for _, addr := range addrs {
-			if owner, ok := owners[addr]; ok && owner != v.Zone {
-				ambiguous[addr] = true
-				continue
-			}
-			owners[addr] = v.Zone
+	ingress := HostInboundWGIngressByZone(views)
+	for _, f := range [...]nlFamily{famV4, famV6} {
+		zones, addresses, _ := hostInboundWGZoneAddresses(views, f)
+		for _, zone := range zones {
+			emitHostInboundWGIngressAcceptNetlink(p, ingress[zone], f, addresses[zone], wgZonePorts[zone])
 		}
 	}
-	var unique []string
-	for _, addr := range candidates {
-		if owners[addr] == zone && !ambiguous[addr] {
-			unique = append(unique, addr)
-		}
-	}
-	return unique
 }
 
 // intersectFenceWGAddresses returns the zone addresses also covered by a gap
@@ -87,13 +59,22 @@ func intersectFenceWGAddresses(zoneAddrs, uncovered []string) []string {
 	return scoped
 }
 
+// emitHostInboundGapFenceWGAdmitsNetlink scopes the additive gap fence's
+// WireGuard exception with the same steady-state mapping (#12959), narrowed
+// to the gap's uncovered destination set. Mirrors the text oracle's
+// emitHostInboundGapFenceWGAdmits rule-for-rule.
 func emitHostInboundGapFenceWGAdmitsNetlink(p *nlPlan, spec GapFenceSpec) {
-	for _, v := range spec.Views {
-		ports := spec.WGZonePorts[v.Zone]
-		v4 := intersectFenceWGAddresses(v.V4Addrs, spec.UncoveredV4)
-		v6 := intersectFenceWGAddresses(v.V6Addrs, spec.UncoveredV6)
-		emitFenceWGIngressAcceptNetlink(p, spec.Views, v, famV4, v4, ports)
-		emitFenceWGIngressAcceptNetlink(p, spec.Views, v, famV6, v6, ports)
+	ingress := HostInboundWGIngressByZone(spec.Views)
+	for _, f := range [...]nlFamily{famV4, famV6} {
+		uncovered := spec.UncoveredV4
+		if f == famV6 {
+			uncovered = spec.UncoveredV6
+		}
+		zones, addresses, _ := hostInboundWGZoneAddresses(spec.Views, f)
+		for _, zone := range zones {
+			emitHostInboundWGIngressAcceptNetlink(p, ingress[zone], f,
+				intersectFenceWGAddresses(addresses[zone], uncovered), spec.WGZonePorts[zone])
+		}
 	}
 }
 
