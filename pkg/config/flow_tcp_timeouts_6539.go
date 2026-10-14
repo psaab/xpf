@@ -1,10 +1,5 @@
 package config
 
-import (
-	"fmt"
-	"strings"
-)
-
 // #6539: the `security flow tcp-session <kind>-timeout` leaves, and whether
 // each one actually reaches the userspace AF_XDP dataplane.
 //
@@ -19,13 +14,13 @@ import (
 // than a plainly unimplemented feature, because the surface an operator checks
 // AFTER committing confirms the false belief.
 //
-// The table below is the SINGLE authority for which leaves are enforced. The
-// commit-time advisory (compiler_validate_warn.go, the #2078 accepted-only
-// doctrine) and all three render surfaces read it, so an operator cannot be
-// told one thing at commit and a different thing by `show`. Three surfaces
-// disagreeing about whether a knob is enforced is always a bug and never a
-// legitimate divergence, so they share one authority rather than each carrying
-// a copy of the wording.
+// The table below is the SINGLE authority for which leaves are enforced, and
+// the three render surfaces read it: surfaces disagreeing about whether a knob
+// is enforced is always a bug and never a legitimate divergence, so they share
+// one authority rather than each carrying a copy of the wording. A commit-time
+// advisory read this table from #6539 until #8129 deleted it — its deferral
+// was "one release past the boundary", v0.9.3 shipped 2026-03 and master is
+// far past it — so the render surfaces are the table's only readers now.
 //
 // Do not restate the table's contents in prose anywhere, including here. The
 // enforced/unenforced split changed once already (#7342) and every sentence
@@ -156,20 +151,21 @@ func TCPSessionTimeoutNote(leaf string) string {
 
 // unenforcedTCPSessionTimeouts returns the configured-but-unenforced timeout
 // leaves of ts, in config order. A leaf is "configured" only when positive: 0
-// means unset, and warning about a knob the operator never set would train
-// them to ignore the advisory.
+// means unset, and reporting a knob the operator never set is noise that
+// trains them to ignore the report.
 func unenforcedTCPSessionTimeouts(ts *TCPSessionConfig) []string {
 	return unenforcedTCPSessionTimeoutsIn(tcpSessionTimeoutEnforcement, ts)
 }
 
 // unenforcedTCPSessionTimeoutsIn is the body, against a caller-supplied table.
 //
-// #7342 made every entry in the production table `Enforced`, so the advisory
-// path this feeds is now INERT — and an inert path is one whose claims nothing
-// checks. It is kept rather than deleted because
-// `TestTCPSessionTimeoutTableCoversSchema_6539` exists precisely so that a
-// FIFTH timeout leaf added to the schema cannot render unannotated and
-// unadvised; deleting the machinery would remove the thing that test protects.
+// #7342 made every entry in the production table `Enforced`, and #8129 deleted
+// the commit-time advisory that consumed this, so against the production table
+// it selects nothing and no production caller remains. It is kept rather than
+// deleted because `TestTCPSessionTimeoutTableCoversSchema_6539` exists
+// precisely so that a FIFTH timeout leaf added to the schema cannot render
+// unannotated and unadvised; that leaf's advisory will need this selection,
+// and deleting the machinery would remove the thing that test protects.
 // Taking the table as a parameter is what lets a test drive it with a synthetic
 // unenforced leaf, so the mechanism stays proven while the production data no
 // longer exercises it.
@@ -195,93 +191,6 @@ func unenforcedTCPSessionTimeoutsIn(
 		}
 	}
 	return out
-}
-
-// tcpSessionTimeoutAdvisory builds the commit-time advisory for the tcp-session
-// timeout leaves, or "" when none of the newly-enforced three is set.
-//
-// #6539 shipped this saying "configured but accepted-only". #7342 made those
-// three leaves live, which turns that sentence false — and leaves a sharper
-// problem behind it: the population that configured one of them is exactly the
-// operators who did so AFTER being told it did nothing. For them the upgrade
-// silently activates a value they had no reason to keep realistic, and
-// `initial-timeout` is the sharp one, since a large value turns the half-open
-// window from a fixed 20s bound into a session-table pin.
-//
-// So the advisory is INVERTED rather than deleted: it now fires for exactly the
-// same set and says the value is in force. The surface an operator checks is
-// the commit they are about to run, not a release note they read last month —
-// saying nothing there is the failure mode #6539 was filed to fix, pointed the
-// other way.
-//
-// Two bounds are stated because they are what make activating defensible rather
-// than merely intended, and an operator cannot check either from the config
-// alone:
-//
-//   - an UNSET leaf stays unset. `0` means "use the dataplane default" on this
-//     wire, exactly as the established / UDP / ICMP seconds already do, so this
-//     changes nothing for anyone who never configured one.
-//   - a zone with `screen ... syn-flood timeout` (#3527) is already bounded
-//     regardless of `initial-timeout`: the per-zone override takes precedence
-//     over the global window for that zone's half-opens, so the screen control
-//     an operator set per zone cannot be outranked by a global default.
-//
-// It is deliberately NOT keyed to a magnitude. A threshold would need a
-// derivation nobody has, and a warning whose bound cannot be defended is one
-// operators learn to tune out — which costs the warnings that matter.
-//
-// TEMPORARY, and tracked so that is not merely an intention: #8129 exists to
-// delete this and nothing else. Automatic retirement would need a
-// release-version predicate, which is a mechanism with its own failure modes
-// for a message that costs one commit-time line — so the removal gets an object
-// instead, the way the UNSURFACED queue and the dead-entry-rejecting accepted
-// list do.
-func tcpSessionTimeoutAdvisory(ts *TCPSessionConfig) string {
-	if ts == nil {
-		return ""
-	}
-	// The three #7342 made live, in Junos config order. established-timeout is
-	// excluded: it has been enforced since long before #6539, so nothing about
-	// it changed and warning would be pure noise.
-	var set []string
-	for _, e := range []struct {
-		leaf  string
-		value int
-	}{
-		{TCPSessionInitialTimeoutLeaf, ts.InitialTimeout},
-		{TCPSessionClosingTimeoutLeaf, ts.ClosingTimeout},
-		{TCPSessionTimeWaitTimeoutLeaf, ts.TimeWaitTimeout},
-	} {
-		// Positive only: 0 is unset, and telling an operator that a knob they
-		// never set is now enforced is the noise this advisory has to avoid.
-		if e.value > 0 {
-			set = append(set, e.leaf)
-		}
-	}
-	if len(set) == 0 {
-		return ""
-	}
-	// The half-open warning is the sharp one, and it is CONDITIONAL: it applies
-	// only when initial-timeout is among the leaves set. Emitting it
-	// unconditionally would put a leaf name in the advisory that the operator
-	// did not configure — which is both confusing and the thing that turns a
-	// targeted warning into a blanket one nobody reads.
-	halfOpen := ""
-	if ts.InitialTimeout > 0 {
-		halfOpen = fmt.Sprintf(
-			" A large half-open window pins handshake-incomplete sessions in the session table for that "+
-				"long instead of bounding them at %ds, so it is a session-table exposure as well as a "+
-				"timeout; a zone with `screen ... syn-flood timeout` (#3527) stays bounded by that "+
-				"override regardless.",
-			DataplaneTCPOpeningWindowSecs)
-	}
-	return fmt.Sprintf(
-		"security flow tcp-session %s is now ENFORCED (#7342) — until this release these leaves were "+
-			"accepted-only and the dataplane kept fixed windows (half-open %ds, FIN close %ds); the value "+
-			"you committed now governs the session directly, so verify it is one you want in force. An "+
-			"UNSET leaf is unaffected (0 = keep the dataplane default).%s",
-		strings.Join(set, ", "),
-		DataplaneTCPOpeningWindowSecs, DataplaneTCPClosingWindowSecs, halfOpen)
 }
 
 // AnnotateTCPSessionTimeout appends leaf's not-enforced annotation to an

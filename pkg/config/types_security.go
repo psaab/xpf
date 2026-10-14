@@ -334,7 +334,7 @@ type ALGConfig struct {
 // four timeout leaves: which ones the dataplane enforces
 // (TCPSessionTimeoutEnforcement) and what window each falls back to when the
 // operator leaves it unset (TCPSessionTimeoutDataplaneDefault). Both are read
-// by the commit advisory and all three `show` surfaces.
+// by all three `show` surfaces.
 //
 // Deliberately not restated here. These fields used to carry per-field
 // "NOT enforced" comments and the type doc used to describe the #6539
