@@ -294,8 +294,8 @@ func TestShrinkRefusalRespectsConfiguredHoldInterval11059(t *testing.T) {
 		t.Fatalf("expired explicit hold interval retained %d prefixes, want drop-to-empty", got)
 	}
 	info := m.AllFeeds()[fs.name]
-	if !info.HoldDropped || info.ShrinkRefused || !strings.Contains(info.LastError, "drastic shrink refused") {
-		t.Fatalf("hold expiry did not drop the retained shrink refusal: %+v", info)
+	if !info.HoldDropped || !info.ShrinkRefused || !strings.Contains(info.LastError, "drastic shrink refused") {
+		t.Fatalf("hold expiry dropped the snapshot but not the refusal state: %+v", info)
 	}
 	if updates != 2 {
 		t.Fatalf("hold-expiry publication count = %d, want initial install plus drop", updates)
