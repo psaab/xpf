@@ -699,16 +699,17 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 		}
 	}
 	// Any unknown child makes the zone's effective intent ambiguous. Tolerant
-	// Load/SyncApply keeps the node bootable but removes every interface binding
-	// and screen claim, so neither the kernel dataplane nor userspace can present
-	// a partially compiled zone.
+	// Load/SyncApply keeps the node bootable but removes every interface binding,
+	// interface-level host-inbound override and screen claim, so neither the
+	// kernel dataplane nor userspace can present a partially compiled zone.
 	// Apply after all repeated security-zone blocks so later siblings cannot
-	// restore bindings after the poison was recorded.
+	// restore bindings or overrides after the poison was recorded.
 	for _, zone := range sec.Zones {
 		if zone == nil || !zone.DroppedEnforcementChild {
 			continue
 		}
 		zone.Interfaces = nil
+		zone.InterfaceHostInbound = nil
 		zone.ScreenProfile = ""
 		zone.ScreenProfileConfigured = false
 	}
