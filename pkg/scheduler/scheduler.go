@@ -414,6 +414,13 @@ func (s *Scheduler) CarryRecoveryStateFrom(previous *Scheduler, now time.Time) {
 	s.mu.Lock()
 	s.lastEval = lastEval
 	s.lastWallUnixNano = lastWallUnixNano
+	// #12884: the replacement was primed BEFORE this carry, so its initial
+	// evaluate saw a zero lastEval and could not detect a wall-clock
+	// discontinuity between the previous scheduler's last tick and this
+	// commit. Detect it now, against the copied history, and hold.
+	if s.wallClockDiscontinuousLocked(now) {
+		unsafeUntil = now.Add(wallClockRecoveryHold)
+	}
 	s.unsafeUntil = unsafeUntil
 	s.republishPending = republishPending
 	s.republishFirstFail = republishFirstFail
