@@ -2,7 +2,11 @@
 // physical trunk base row claim untagged ingress or WireGuard address ownership.
 package userspace
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
+)
 
 func wgZone12855Key(ifindex uint32, vlan uint16) userspaceWGIngressZoneKey {
 	return userspaceWGIngressZoneKey{Ifindex: ifindex, VLANID: vlan}
@@ -128,5 +132,34 @@ func TestBuildUserspaceWGZoneMapsNilSnapshot12855(t *testing.T) {
 	}
 	if len(plan.ingress) != 0 || len(plan.admission) != 0 {
 		t.Fatalf("nil snapshot produced WG maps: %+v", plan)
+	}
+}
+
+func TestWGFanUpBaseRowsDerivation12855(t *testing.T) {
+	// Derivation wiring (review F1): a compiled config zoning only the
+	// .100 unit must flag exactly the physical base; an authored bare
+	// base ref must NOT be flagged.
+	tree := &config.ConfigTree{}
+	for _, l := range []string{
+		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
+		"set interfaces ge-0/0/0 unit 100 vlan-id 100 family inet address 10.0.100.1/24",
+		"set security zones security-zone wan interfaces ge-0/0/0.0",
+		"set security zones security-zone lan interfaces ge-0/0/0.100",
+	} {
+		p, err := config.ParseSetCommand(l)
+		if err != nil {
+			t.Fatalf("parse %q: %v", l, err)
+		}
+		if err := tree.SetPath(p); err != nil {
+			t.Fatalf("setpath %q: %v", l, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	rows := wgFanUpBaseRows(cfg)
+	if len(rows) != 1 || !rows["ge-0/0/0"] {
+		t.Fatalf("fan-up base rows = %v, want exactly {ge-0/0/0}", rows)
 	}
 }
