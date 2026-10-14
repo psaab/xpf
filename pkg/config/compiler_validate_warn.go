@@ -238,8 +238,13 @@ func ValidateConfig(cfg *Config) []string {
 		// cannot produce a userspace ALG tag. The per-application pin is absent
 		// from the snapshot; tags are inferred from well-known service tuples
 		// (FTP TCP/21, DNS UDP/53, SIP TCP/UDP/5060), and TFTP has no tag.
-		// Neither case changes the dataplane or rejects the config. Keep unknown
-		// names distinct so their original typo/name advisory remains explicit.
+		// #12837: alias protocol spellings (junos-tcp-any / junos-udp-any)
+		// resolve to tcp/udp like the appid SSOT, and `security alg <proto>
+		// disable` makes every tuple of that ALG untagged (the global bitfield
+		// is the only ALG signal on the wire), so a disabled well-known pin
+		// warns naming the knob. Neither case changes the dataplane or rejects
+		// the config. Keep unknown names distinct so their original typo/name
+		// advisory remains explicit.
 		if app.ALG != "" {
 			if !validApplicationALG(app.ALG) {
 				warnings = append(warnings, fmt.Sprintf(
@@ -248,8 +253,8 @@ func ValidateConfig(cfg *Config) []string {
 						"unrecognized alg name commits but has no effect (enforcement "+
 						"deferred to the per-application ALG slice of #2008)",
 					name, app.ALG))
-			} else if !applicationALGHasDataplaneTag(app) {
-				warnings = append(warnings, applicationALGInertWarning(name, app))
+			} else if !applicationALGHasDataplaneTag(app, &cfg.Security.ALG) {
+				warnings = append(warnings, applicationALGInertWarning(name, app, &cfg.Security.ALG))
 			}
 		}
 	}

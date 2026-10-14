@@ -469,6 +469,12 @@ the Junos semantics of `alg disable` — the ALG is turned **off**, traffic is
 themselves — payload doctoring / dynamic pinholes — so a non-disabled ALG only
 sets the type; see "DNS ALG with NAT" below.)
 
+The per-application `alg` inert-pin advisory honors the same bitfield and the
+same service tuples (#12837): a pin is declared tagless only when its
+protocol/port tuple is truly outside them (alias spellings such as
+`junos-tcp-any` resolve like the appid SSOT) or when the ALG's own global
+disable knob is set — the disabled case names the knob in the warning.
+
 The unimplemented ALG protos below (H.323, MGCP, SCCP, MSRPC, SunRPC, PPTP,
 RTSP, RSH, IKE-ESP) are **accepted-but-inert (#4232, fable-167 P-4a)**:
 `compileALG` recognizes only `dns`/`ftp`/`sip`/`tftp`, so a `security alg

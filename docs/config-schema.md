@@ -15492,7 +15492,13 @@ gaps lived under that opacity:
   `ValidateConfig` now warns when its configured protocol/destination-port has
   no matching session tag — for example, `alg ftp destination-port 2121` is
   accepted but the FTP pin has no dataplane effect. TFTP also warns because
-  xpf has no TFTP session tagging at any port. This covers top-level `app.ALG`
+  xpf has no TFTP session tagging at any port. The tag-eligibility check
+  matches the tagger exactly (#12837): protocol aliases `junos-tcp-any` /
+  `junos-udp-any` and the canonical numerics 6/17 resolve to tcp/udp like
+  `appid.ProtocolNumber`, and `security alg <proto> disable` un-tags every
+  tuple of that ALG (`alg_type_for_session` stamps none), so a pin on the
+  well-known port of a globally disabled ALG warns naming the
+  `security alg <proto> disable` knob. This covers top-level `app.ALG`
   and inline-term `alg` (the term app carries it); no dataplane behavior is
   changed.
 
@@ -15535,7 +15541,11 @@ unreferenced, supported alg names accepted on both paths, predefined-app
 reference not rejected).
 `pkg/config/compiler_application_alg_customport_11673_test.go` additionally
 pins known custom-port and TFTP inert-pin warnings plus well-known-port silent
-controls (#11673).
+controls (#11673). `pkg/config/compiler_application_alg_scope_12837_test.go`
+pins the #12837 scope alignment: alias-protocol pins on a taggable tuple stay
+silent, alias pins on a foreign protocol or custom port still warn, a globally
+disabled ALG warns naming the `security alg <proto> disable` knob (service
+port, no port, and a spanning range), and an unrelated disable stays silent.
 
 ### #4336 — application `source-port` / `destination-port` `0-N` range floor
 
