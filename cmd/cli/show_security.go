@@ -274,15 +274,38 @@ func (c *ctl) showZones(filter string) error {
 			continue
 		}
 		matched = true
+		// #12899: the structured response carries the quarantine verdict
+		// (QuarantineState + survivor name) that the local and gRPC-text
+		// surfaces derive from config; consume it here so the remote standard
+		// summary stops presenting a collision loser as an ordinary installed
+		// zone. UNKNOWN (a pre-quarantine-wire server) degrades to the
+		// historical unqualified view rather than guessing a verdict.
+		quarantined := z.GetQuarantineState() == pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_QUARANTINED
+		survivor := z.GetQuarantineSurvivorZone()
 		if z.Id > 0 {
-			fmt.Printf("Zone: %s (id: %d)\n", z.Name, z.Id)
+			if quarantined {
+				fmt.Printf("Zone: %s (id: %d) %s\n", z.Name, z.Id,
+					config.ZoneQuarantineIDQualifierFor(survivor))
+			} else {
+				fmt.Printf("Zone: %s (id: %d)\n", z.Name, z.Id)
+			}
 		} else {
 			fmt.Printf("Zone: %s\n", z.Name)
+		}
+		if quarantined {
+			// Same shared spellings the local/gRPC-text detail renderers use
+			// (config/zone_quarantine_show.go), so the surfaces stay identical.
+			fmt.Println(config.ZoneQuarantineHeadlineFor(uint16(z.Id), survivor))
 		}
 		if z.Description != "" {
 			fmt.Printf("  Description: %s\n", z.Description)
 		}
-		fmt.Printf("  Interfaces: %s\n", strings.Join(z.Interfaces, ", "))
+		if quarantined {
+			fmt.Printf("  Interfaces: %s %s\n", strings.Join(z.Interfaces, ", "),
+				config.ZoneQuarantineInterfacesQualifier)
+		} else {
+			fmt.Printf("  Interfaces: %s\n", strings.Join(z.Interfaces, ", "))
+		}
 		if z.TcpRst {
 			fmt.Println("  TCP RST: enabled")
 		}
@@ -303,7 +326,16 @@ func (c *ctl) showZones(filter string) error {
 		}) {
 			fmt.Println(line)
 		}
-		renderZoneTraffic6895(z)
+		// #12899: a quarantined zone has no attributable counters — the builder
+		// omits the zone, so the survivor's live volume must never read under
+		// the quarantined name (the F4 rule the local/gRPC-text surfaces
+		// follow). The generic unavailable line stays for a healthy zone whose
+		// counters the server could not populate.
+		if quarantined {
+			fmt.Println(config.ZoneQuarantineCountersLine)
+		} else {
+			renderZoneTraffic6895(z)
+		}
 
 		// #3683 (M01): render all THREE policy tiers the runtime evaluates, in
 		// order — zone-pair, applicable global, then the effective
@@ -315,8 +347,30 @@ func (c *ctl) showZones(filter string) error {
 		// default-policy row (#3363) were both hidden — an operator scraping the
 		// ctl binary could miss a global or default-policy rule that governs the
 		// zone's transit.
+		//
+		// #12899: three residuals of that hand-rolled walk, fixed by mirroring
+		// policymatch.ZoneDetailPolicySummary's selection and ordering:
+		//
+		//   - a WILDCARD zone-pair side ("any") governs this zone too, but the
+		//     literal `FromZone == z.Name || ToZone == z.Name` test dropped
+		//     `any -> zone`, `zone -> any`, and `any -> any` rows entirely;
+		//   - tier-one rows now print in runtime precedence order (exact, then
+		//     single-wildcard, then both-any; config order within each bucket)
+		//     instead of raw response order;
+		//   - the per-rule Quarantined scrub verdict the server already stamps
+		//     on every row (and the zone-level QuarantineState above) are
+		//     rendered, so a scrubbed rule can no longer read as a live
+		//     participant.
 		if polResp != nil {
+			// #10530/#12899 block-level qualifier when the VIEWED zone is
+			// quarantined: it speaks about the zone, while the per-row scrub
+			// marks below speak about individual rules — the same split the
+			// local/gRPC-text zones renderers use.
+			if quarantined {
+				fmt.Println("  " + config.ZoneQuarantinePoliciesQualifier)
+			}
 			fmt.Println("  Policy summary (evaluation order: zone-pair, global, default-policy):")
+			var exactLines, singleWildLines, bothAnyLines, globalLines []string
 			zonePairPolicies := 0
 			globalPolicies := 0
 			var defaultName, defaultAction string
@@ -337,29 +391,81 @@ func (c *ctl) showZones(filter string) error {
 					// the all-zones group to a zone pair; an unscoped or
 					// explicit-"any" scope is the all-zones wildcard
 					// (config.IsWildcardZone), so the global is listed whenever
-					// the zone can appear on either side of a pair it matches
-					// (config.GlobalPolicyAppliesToZone — the same predicate the
-					// local/gRPC-text tier renderers use).
+					// the zone can appear on either side of a pair it matches.
+					// #12899: the predicate is the SSOT's live-zone-aware
+					// variant (policymatch.GlobalPolicyAppliesToZoneAfterQuarantine)
+					// — an unscoped global cannot govern a quarantined zone the
+					// builder omits; only a scope that literally names it stays,
+					// matching the detail summary row for row.
 					for _, rule := range pi.Rules {
-						if !config.GlobalPolicyAppliesToZone(config.PolicyMatch{
+						if !policymatch.GlobalPolicyAppliesToZoneAfterQuarantine(config.PolicyMatch{
 							FromZones: effectiveMatchFromZones(rule),
 							ToZones:   effectiveMatchToZones(rule),
-						}, z.Name) {
+						}, z.Name, quarantined) {
 							continue
 						}
-						fmt.Printf("    [global] %s -> %s: %s (%s)\n",
+						line := fmt.Sprintf("    [global] %s -> %s: %s (%s)",
 							config.ZoneScopeSetLabel(effectiveMatchFromZones(rule)),
 							config.ZoneScopeSetLabel(effectiveMatchToZones(rule)),
 							rule.Name, rule.Action)
+						if rule.GetQuarantined() {
+							line += " " + config.ZoneQuarantinePoliciesQualifier
+						}
+						globalLines = append(globalLines, line)
 						globalPolicies++
 					}
-				case pi.FromZone == z.Name || pi.ToZone == z.Name:
+				default:
+					// Zone-pair tier. #12899: match a side when it equals the
+					// zone OR is the explicit "any" wildcard — a `from any to
+					// untrust` set governs a trust->untrust flow, and `any ->
+					// any` governs every zone, yet neither literally names the
+					// zone, so the pre-fix filter dropped both. The wildcard leg
+					// is live-zone-gated: "every zone" means every INSTALLED
+					// zone, and a quarantined zone is omitted by the builder, so
+					// a wildcard cannot govern it — a literal reference still
+					// selects the set so the row stays visible for diagnosis,
+					// carrying the server's per-rule scrub verdict.
+					fromAny := pi.FromZone == "any"
+					toAny := pi.ToZone == "any"
+					fromAffects := pi.FromZone == z.Name || (fromAny && !quarantined)
+					toAffects := pi.ToZone == z.Name || (toAny && !quarantined)
+					if !fromAffects && !toAffects {
+						continue
+					}
 					for _, rule := range pi.Rules {
-						fmt.Printf("    [zone-pair] %s -> %s: %s (%s)\n",
+						line := fmt.Sprintf("    [zone-pair] %s -> %s: %s (%s)",
 							pi.FromZone, pi.ToZone, rule.Name, rule.Action)
+						if rule.GetQuarantined() {
+							line += " " + config.ZoneQuarantinePoliciesQualifier
+						}
+						switch {
+						case fromAny && toAny:
+							bothAnyLines = append(bothAnyLines, line)
+						case fromAny || toAny:
+							singleWildLines = append(singleWildLines, line)
+						default:
+							exactLines = append(exactLines, line)
+						}
 						zonePairPolicies++
 					}
 				}
+			}
+			// Tier-one buckets in runtime precedence order (the response is
+			// config-ordered, so a both-any set authored FIRST would otherwise
+			// print above the exact set that actually shadows it), then the
+			// global tier — collected above because the summary must read
+			// tier-by-tier regardless of group positions in the response.
+			for _, line := range exactLines {
+				fmt.Println(line)
+			}
+			for _, line := range singleWildLines {
+				fmt.Println(line)
+			}
+			for _, line := range bothAnyLines {
+				fmt.Println(line)
+			}
+			for _, line := range globalLines {
+				fmt.Println(line)
 			}
 			if zonePairPolicies == 0 && globalPolicies == 0 {
 				fmt.Println("    (no zone-pair or global policies affecting this zone)")
