@@ -64,6 +64,23 @@ declare -A SHAPE_GBPS=(
   [5211]=0     # uncapped → priority-low; gate 2 is ≥ 5% of ceiling
 )
 
+
+# #11769 live-cluster preflight. Every measurement leg of this gate runs
+# on the shared loss cluster through `sg incus-admin`, and no hermetic
+# recipe can stand in for that. On a host without the prerequisites, SKIP
+# (exit 77 — the repo's preflight-skip convention, e.g. test-wire-
+# properties.sh) with the reason instead of failing all 11 generators and
+# reading as a gate FAIL: a missing lab is not a CoS regression. The
+# hermetic verdict layer (this script's reducer over fixture transcripts)
+# is exercised by cos-simul-load-smoke-selftest.sh instead.
+if ! command -v incus >/dev/null 2>&1; then
+  echo "SKIP: incus not found in PATH — the #1614 simul-load measurement legs are lab-only (#11769)" >&2
+  exit 77
+fi
+if ! sg incus-admin -c true >/dev/null 2>&1; then
+  echo "SKIP: cannot execute through sg incus-admin — the #1614 simul-load measurement legs are lab-only (#11769)" >&2
+  exit 77
+fi
 mkdir -p "$ART"
 echo "#1614 simul-load smoke: direction=$DIRECTION duration=${DURATION}s streams=$STREAMS host=$HOST art=$ART"
 

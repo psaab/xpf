@@ -19,6 +19,24 @@ APPLY_COS_CONFIG="${APPLY_COS_CONFIG:-$ROOT_DIR/test/incus/apply-cos-config.sh}"
 VALIDATOR="${VALIDATOR:-$ROOT_DIR/test/incus/cos_be_contention_validate.py}"
 
 TARGET_IP="${TARGET_IP:-172.16.80.200}"
+# #11769 live-cluster preflight, ahead of the #8040 target precheck so a
+# lab-less host skips before anything is spent. The four contention cells
+# measure the shared loss cluster; no hermetic recipe can stand in for
+# that. A host without the cluster prerequisites SKIPS (exit 77 — the
+# repo's preflight-skip convention) with the reason, instead of failing
+# the precheck or a cell and reading as an exact-queue regression: a
+# missing lab is not a gate FAIL. The hermetic verdict layer (this
+# harness's capture/validation pipeline over a scripted incus) is
+# exercised by cos-be-contention-harness-selftest.sh instead.
+if ! command -v incus >/dev/null 2>&1; then
+    echo "SKIP: incus not found in PATH — the contention measurement legs are lab-only (#11769)" >&2
+    exit 77
+fi
+if [[ "${USE_SG_INCUS_ADMIN:-1}" =~ ^(1|true|yes|on)$ ]] \
+    && ! sg incus-admin -c true >/dev/null 2>&1; then
+    echo "SKIP: cannot execute through sg incus-admin — the contention measurement legs are lab-only (#11769)" >&2
+    exit 77
+fi
 # #8040: fail on the target-service contract BEFORE the CoS fixture is applied
 # and the lock is spent. Scoped to the four ports this smoke actually uses, so
 # an unrelated class being down does not block it — but the report on failure
@@ -78,11 +96,7 @@ require_cmd() {
     fi
 }
 
-require_cmd incus
 require_cmd python3
-if enabled "$USE_SG_INCUS_ADMIN"; then
-    require_cmd sg
-fi
 if [[ ! -x "$VALIDATOR" ]]; then
     echo "cos-be-contention-harness: validator is not executable: $VALIDATOR" >&2
     exit 2

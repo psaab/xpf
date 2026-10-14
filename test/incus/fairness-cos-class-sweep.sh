@@ -41,6 +41,19 @@ if [[ -z "$COS_IFINDEX" ]]; then
     echo "fairness-cos-class-sweep: COS_IFINDEX is required for the shaped egress interface" >&2
     exit 2
 fi
+
+# #11769 live-cluster preflight. Each class sample drives real traffic
+# through the shared loss cluster and scrapes the live daemon's metrics;
+# no hermetic recipe can stand in for that. A host without incus SKIPS
+# (exit 77 — the repo's preflight-skip convention) with the reason
+# instead of running a sweep whose dataplane legs all error out. The
+# hermetic verdict layer (this sweep over a scripted incus, a stub
+# metrics endpoint and the REAL fairness-eval binary) is exercised by
+# fairness-cos-class-sweep-selftest.sh instead.
+if ! command -v incus >/dev/null 2>&1; then
+    echo "SKIP: incus not found in PATH — the per-class fairness measurement legs are lab-only (#11769)" >&2
+    exit 77
+fi
 if [[ ! -x "$HARNESS" ]]; then
     echo "fairness-cos-class-sweep: harness is not executable: $HARNESS" >&2
     exit 2

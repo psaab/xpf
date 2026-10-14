@@ -27,6 +27,22 @@ declare -a PORTS=(5201 5202 5203 5204)
 REV_FLAG=""
 [ "$DIRECTION" = "reverse" ] && REV_FLAG="-R"
 
+
+# #11769 live-cluster preflight. The Gate 1 measurement runs on the shared
+# loss cluster through `sg incus-admin`; no hermetic recipe can stand in
+# for it. On a host without the prerequisites, SKIP (exit 77 — the repo's
+# preflight-skip convention) with the reason instead of failing all four
+# generators and reading as a gate FAIL. The hermetic verdict layer (the
+# reducer over fixture transcripts) is exercised by
+# cos-gate1-small-four-alone-selftest.sh instead.
+if ! command -v incus >/dev/null 2>&1; then
+  echo "SKIP: incus not found in PATH — the #1630 Gate 1 measurement legs are lab-only (#11769)" >&2
+  exit 77
+fi
+if ! sg incus-admin -c true >/dev/null 2>&1; then
+  echo "SKIP: cannot execute through sg incus-admin — the #1630 Gate 1 measurement legs are lab-only (#11769)" >&2
+  exit 77
+fi
 mkdir -p "$ART"
 echo "#1630 Gate1 small-four-alone: dir=$DIRECTION af=$AF target=$TARGET dur=${DURATION}s streams=$STREAMS art=$ART"
 

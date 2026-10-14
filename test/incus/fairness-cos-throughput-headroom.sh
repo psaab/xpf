@@ -40,6 +40,19 @@ if enabled "$APPLY_CONFIG" && [[ ! -x "$APPLY_COS_CONFIG" ]]; then
     exit 2
 fi
 
+# #11769 live-cluster preflight. Both scenarios apply CoS fixtures to the
+# shared loss cluster and then measure it through the sweep; no hermetic
+# recipe can stand in for that. With APPLY_CONFIG enabled (the default) a
+# host without incus SKIPS (exit 77 — the repo's preflight-skip
+# convention) with the reason instead of failing mid-comparison. The
+# hermetic orchestration layer (scenario sequencing, strict-restore and
+# summary aggregation over a scripted sweep/apply) is exercised by
+# fairness-cos-throughput-headroom-selftest.sh instead.
+if enabled "$APPLY_CONFIG" && ! command -v incus >/dev/null 2>&1; then
+    echo "SKIP: incus not found in PATH — the headroom measurement legs are lab-only (#11769)" >&2
+    exit 77
+fi
+
 if [[ -z "$ARTIFACT_ROOT" ]]; then
     ARTIFACT_ROOT=$(mktemp -d -t cos-throughput-headroom.XXXXXX)
 else

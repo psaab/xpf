@@ -775,7 +775,7 @@ clean:
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The
 # env var flows through to setup.sh (INSTANCE_NAME=${XPF_INSTANCE:-xpf-fw}).
-.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-nat-frag-needed test-wire-nat-frag-needed-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
+.PHONY: test-cos-fairness-gates-lib test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-nat-frag-needed test-wire-nat-frag-needed-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy
 
 .PHONY: test-v6-na-recovery-lib
 test-env-init:
@@ -878,6 +878,27 @@ test-close-keyword-lint-lib:
 test-cos-apply-lib:
 	bash ./test/incus/cos-apply-lib-selftest.sh
 	go test -count=1 -run 6440 ./cmd/cli/
+
+# #11769: hermetic legs of the five live CoS/fairness GATE harnesses
+# (cos-simul-load-smoke, cos-gate1-small-four-alone, cos-be-contention,
+# fairness-cos-class-sweep, fairness-cos-throughput-headroom — all
+# declared GATE-unreached in test/incus/HARNESSES.unreached). Their
+# measurement legs run on the shared loss cluster and are LAB-ONLY: the
+# harnesses SKIP (exit 77) with the reason on a host without the cluster
+# prerequisites, and nothing here fakes a live number. What this target
+# runs is everything else, through the real scripts: the verdict/reducer
+# layers over fixture transcripts (mock incus / fixture iperf3 / stub
+# metrics endpoint), the FAIL direction of every gate, and the lab-only
+# skip contract itself. fairness-eval is built first because a fresh
+# checkout has no userspace-dp/target — that missing binary was itself
+# one of the "unrunnable" findings (#11769).
+test-cos-fairness-gates-lib:
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned build --manifest-path userspace-dp/Cargo.toml --release --bin fairness-eval
+	bash ./test/incus/cos-simul-load-smoke-selftest.sh
+	bash ./test/incus/cos-gate1-small-four-alone-selftest.sh
+	bash ./test/incus/cos-be-contention-harness-selftest.sh
+	bash ./test/incus/fairness-cos-class-sweep-selftest.sh
+	bash ./test/incus/fairness-cos-throughput-headroom-selftest.sh
 
 # Self-test the #7159 mouse-latency elephant lifecycle. The defect it guards is
 # a CORRUPT MEASUREMENT rather than an error: the rep script stopped its

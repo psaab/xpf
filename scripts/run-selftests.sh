@@ -424,6 +424,16 @@ run_bash test/incus/cluster-build-identity-selftest.sh
 run_bash test/incus/cluster-cell-selftest.sh
 run_bash test/incus/cluster-env-selftest.sh
 run_bash test/incus/cos-apply-lib-selftest.sh
+# #11769: hermetic legs of the five live CoS/fairness GATE harnesses
+# (census-declared GATE-unreached; their measurement legs are lab-only
+# and SKIP inside these self-tests rather than being faked). The sweep
+# self-test self-SKIPs (77) when fairness-eval is not built;
+# `make test-cos-fairness-gates-lib` builds it first.
+run_bash test/incus/cos-simul-load-smoke-selftest.sh
+run_bash test/incus/cos-gate1-small-four-alone-selftest.sh
+run_bash test/incus/cos-be-contention-harness-selftest.sh
+run_bash test/incus/fairness-cos-class-sweep-selftest.sh
+run_bash test/incus/fairness-cos-throughput-headroom-selftest.sh
 run_bash test/incus/host-inbound-selftest.sh
 run_bash test/incus/iperf-throughput-selftest.sh
 # #12199: RG1 movement must settle in both node views; real-output
