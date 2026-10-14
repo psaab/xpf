@@ -1000,14 +1000,17 @@ func zoneInterfaceStanzaMembers(prop *Node) []string {
 // zoneInterfaceHostInboundStrayTokens whether the keyword's subtree holds
 // anything that cannot be body content, which is exactly the dropped-member set.
 func zoneInterfaceMemberPackedTail(iface *Node) (keyword string, tail []string, found bool) {
-	for _, k := range iface.Keys {
-		if zoneInterfaceApplyMetaKeyword(k) {
-			return "", nil, false
-		}
-	}
 	for i, k := range iface.Keys {
 		if k == "" {
 			continue
+		}
+		if zoneInterfaceApplyMetaKeyword(k) {
+			// Meta BEFORE any body keyword owns the remaining tokens
+			// (apply-macro body) — not member evidence. Meta AFTER a body
+			// keyword is an ordinary tail token: it must not void the
+			// packed-tail signal for stray members preceding it (#12835
+			// review B1).
+			return "", nil, false
 		}
 		if !zoneInterfaceBodyKeywords[k] {
 			continue
