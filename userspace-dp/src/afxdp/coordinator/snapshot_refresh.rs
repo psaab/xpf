@@ -524,6 +524,20 @@ impl super::Coordinator {
                 .collect();
             slow_path.publish_reinject_epochs(snapshot.permit_epoch, &queue_epochs);
         }
+        if let Some(slow_path) = self.slow_path.as_ref() {
+            // Same-plan refresh preserves the live reinjector. Reconcile its
+            // TUN after the new runtime view is published, matching the
+            // successful full-apply path.
+            super::reconcile::snapshot::reconcile_preserved_slow_path_mtu(
+                slow_path,
+                snapshot.slow_path_mtu(),
+                &mut self.last_slow_path_mtu_reconciled,
+                crate::slowpath::set_if_mtu,
+            );
+            self.last_slow_path_status = slow_path.status();
+            self.last_slow_path_delegated_status = slow_path.delegated_status();
+            self.last_s5_reinject_status = slow_path.reinject_status();
+        }
         // #1432 S2a (Copilot C1): reconcile WG control threads on every
         // runtime-snapshot refresh, not just initial bring-up, so a
         // same-plan apply that adds/removes/changes a WG endpoint starts,
@@ -555,5 +569,45 @@ impl super::Coordinator {
         // the 1s snapshot-level rate-limit coalesces config storms.
         self.queue_warm_pass(false);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod slow_path_mtu_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_snapshot_refresh_reconciles_preserved_slow_path_mtu_13528() {
+        let mut coord = Coordinator::new();
+        let preserved = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+        coord.slow_path = Some(Arc::clone(&preserved));
+        let snapshot = crate::ConfigSnapshot {
+            interfaces: vec![crate::InterfaceSnapshot {
+                name: "eth0".into(),
+                linux_name: "eth0".into(),
+                ifindex: 2,
+                mtu: 9000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(snapshot.slow_path_mtu(), 9000);
+
+        coord
+            .refresh_runtime_snapshot_disarmed(&snapshot)
+            .expect("runtime snapshot refresh succeeds");
+
+        assert_eq!(
+            coord.last_slow_path_mtu_reconciled, 9000,
+            "the fast refresh must attempt the preserved-TUN MTU reconcile"
+        );
+        assert_eq!(
+            preserved.mtu(), 1500,
+            "the test reinjector has no real TUN name; failed ioctl retains its live MTU"
+        );
+        assert!(
+            preserved.status().degraded,
+            "the injected constructor's empty device name makes the attempted SIOCSIFMTU fail"
+        );
     }
 }
