@@ -31,15 +31,15 @@ import (
 // 0": traffic after the clear repopulates the row and the counters resume from
 // zero, but until then there is nothing to report rather than a zero to report.
 func (m *Manager) ClearZoneCounters() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	var errs []error
 	if m.bpfShim != nil {
 		if err := m.bpfShim.ClearZoneCounters(); err != nil {
 			errs = append(errs, err)
 		}
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err := m.clearHelperZoneCountersLocked(); err != nil {
 		errs = append(errs, err)
 	}
@@ -56,6 +56,7 @@ func (m *Manager) ClearZoneCounters() error {
 func (m *Manager) clearHelperZoneCountersLocked() error {
 	if m.proc == nil || m.proc.Process == nil {
 		m.lastStatus.ZoneTrafficCounters = nil
+		m.republishLastStatusLocked()
 		return nil
 	}
 

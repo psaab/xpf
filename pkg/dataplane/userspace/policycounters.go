@@ -156,6 +156,9 @@ func (m *Manager) ReadPolicyCounters(policyID uint32) (dataplane.CounterValue, e
 		if innerErr != nil {
 			return dataplane.CounterValue{}, innerErr
 		}
+		if total == (dataplane.CounterValue{}) {
+			return dataplane.CounterValue{}, ErrPolicyCounterUnpublished
+		}
 		return total, nil
 	}
 	total.Packets += counter.Packets
@@ -306,15 +309,15 @@ func NewPolicyCounterReader(dp any, cfg *config.Config, fallback func(uint32) (d
 }
 
 func (m *Manager) ClearPolicyCounters() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	var errs []error
 	if m.bpfShim != nil {
 		if err := m.bpfShim.ClearPolicyCounters(); err != nil {
 			errs = append(errs, err)
 		}
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err := m.clearHelperPolicyCountersLocked(); err != nil {
 		errs = append(errs, err)
 	}
@@ -416,6 +419,7 @@ func (m *Manager) clearHelperPolicyCountersLocked() error {
 			m.lastStatus.PolicyRuleCounters[i].Packets = 0
 			m.lastStatus.PolicyRuleCounters[i].Bytes = 0
 		}
+		m.republishLastStatusLocked()
 		return nil
 	}
 

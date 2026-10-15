@@ -56,6 +56,17 @@ func (m *Manager) setLastStatusLocked(status ProcessStatus) {
 	m.publishHAWatchdogSnapshotLocked()
 }
 
+// republishLastStatusLocked publishes a manager-local mutation of the cached
+// status without claiming that a helper observation occurred. Caller holds
+// m.mu. Offline counter clears use this to refresh lock-free readers and the
+// freshness sequence while preserving helperStatusObserved.
+func (m *Manager) republishLastStatusLocked() {
+	status := m.lastStatus
+	m.helperStatusView.Store(&status)
+	m.lastStatusSeq++
+	m.publishHAWatchdogSnapshotLocked()
+}
+
 // clearLastStatusLocked forgets the helper status and the observation together.
 // It is called where the helper is gone (stopLocked, a restart): a version read
 // from a process that no longer exists is not an observation about the one that
