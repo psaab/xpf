@@ -6,7 +6,6 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -157,61 +156,13 @@ func TestAnUnmarkedDeleteNeverReadsAPeerRefusal9714(t *testing.T) {
 	}
 }
 
-// #9714 review round 2, finding 1: ONLY a key the helper EXPLICITLY applied loses its
-// BPF mirror row, and a row that is already gone neither counts as deleted nor stops
-// the rest.
-//
-// This cell used to drive deleteUnrefusedMirrorRows, which deleted the COMPLEMENT of
-// the refused set. That complement is strictly larger than "applied": it also holds
-// keys whose transport failed and keys the batch never sent at all after an
-// unreachable helper. At THIS layer those three are indistinguishable — each is
-// simply absent from `applied` — so the cell asserts only what it can observe here,
-// and the refused-versus-never-answered distinction is asserted upstream where it is
-// observable, by TestAnAbortedBatchReportsTheUnsentTailAsNotAttempted9714.
-func TestOnlyAnAppliedKeyLosesItsMirrorRow9714(t *testing.T) {
-	keys := scopedKeys9364(100007, 1234, 1235, 1236)
-	// The helper answered for two of the three. keys[0] is NOT applied — refused,
-	// transport-failed, or never sent; this layer cannot tell them apart and does
-	// not need to, because none of them licenses deleting the row.
-	applied := []dataplane.ScopedSessionKey{keys[1], keys[2]}
-	var attempted []dataplane.ScopedSessionKey
-	deleted, err := deleteAppliedMirrorRows(applied, func(sk dataplane.ScopedSessionKey) error {
-		attempted = append(attempted, sk)
-		if sk == keys[1] {
-			return ebpf.ErrKeyNotExist
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("a missing mirror row is not an error: %v", err)
-	}
-	if slices.Contains(attempted, keys[0]) {
-		t.Errorf("a key the helper did not apply had its BPF mirror row deleted; bulk export would then drop " +
-			"a flow the helper kept, and refresh cannot recreate it (BPF_EXIST) (#9714)")
-	}
-	if len(attempted) != 2 || deleted != 1 {
-		t.Errorf("attempted %d rows and counted %d deleted, want 2 and 1: a missing row must neither count nor "+
-			"stop the rest", len(attempted), deleted)
-	}
-}
-
 // #9714 review round 2, finding 1 — the WIRING, not the pure function.
 //
-// TestOnlyAnAppliedKeyLosesItsMirrorRow9714 drives deleteAppliedMirrorRows with a
-// LITERAL slice, so it cannot see whether anything still fills that slice. A
-// mutation run proved the gap rather than guessing at it: deleting the `applied`
-// collection arm from BOTH the V4 and V6 marked-delete twins broke no cell anywhere,
-// while leaving the batch deleting zero mirror rows — a silent regression in the
-// direction of doing nothing, which no existing assertion could see.
-//
-// The gap was introduced by the fix itself. Before the inversion the teardown was
-// driven by `scoped` directly, so there was no collection step that could break.
-// It asserts on the COLLECTION ARM directly rather than on a mirror-row count,
-// deliberately. Seeding real rows needs injectSessionMaps, which builds real eBPF
-// maps and SKIPS without CAP_BPF — and a cell that skips is not coverage, least of
-// all in the environment where this gap was found. The arm is reachable without
-// privileges through the session socket, so the cell measures the mutated code
-// itself instead of a downstream consequence of it.
+// The applied-key collection is the exact helper-confirmed delete result
+// returned by BatchDeletePeerSyncedSessionsExactScoped. A mutation that removes
+// the collection arm would return no deleted/applied keys despite successful
+// helper requests. This session-socket fixture observes the arm without
+// requiring CAP_BPF.
 func TestAPeerBatchCollectsTheAppliedKeysByName9714(t *testing.T) {
 	m, rec := newSyncOnlyManager9146(t)
 	rec.refuseFirst(peerDeleteRefusedLocalOwned)
@@ -230,9 +181,9 @@ func TestAPeerBatchCollectsTheAppliedKeysByName9714(t *testing.T) {
 		t.Errorf("refused = %v, want exactly the first key: the helper refused it and it must be named", refused)
 	}
 	if !slices.Equal(applied, keys[1:]) {
-		t.Errorf("applied = %v, want every key the helper answered WITHOUT refusing. The applied set is what "+
-			"drives the mirror-row teardown, so a short or empty set silently tears down nothing, and a set "+
-			"that wrongly includes the refused key tears down a live local session (#9714 r2 F1)", applied)
+		t.Errorf("applied = %v, want every key the helper answered WITHOUT refusing. The applied set is the "+
+			"exact result returned to the session store; a short or empty set silently loses successful deletes, "+
+			"and one including the refused key would tear down a live local session (#9714 r2 F1)", applied)
 	}
 }
 
