@@ -207,9 +207,15 @@ fn seed_retirement_preserves_same_id_non_seed_replacement_10419() {
 /// this production-order pin binds the worker bridge that drains ordinary
 /// expiry Close deltas before the next poll. Removing the bridge or moving
 /// seed retirement after resource teardown makes this cell RED.
+///
+/// #13075: the expiry walk moved verbatim into
+/// `run_session_housekeeping` (housekeeping.rs), which `worker_loop` calls
+/// before `poll_binding` every tick. The ordered steps are therefore read
+/// from housekeeping.rs, and mod.rs is pinned to call the housekeeping fn
+/// before the poll — the same production order, one module boundary over.
 #[test]
 fn worker_loop_orders_expiry_teardown_before_poll_10419() {
-    let src = include_str!("mod.rs");
+    let src = include_str!("housekeeping.rs");
     let executable_lines: Vec<_> = src
         .lines()
         .map(str::trim)
@@ -229,26 +235,37 @@ fn worker_loop_orders_expiry_teardown_before_poll_10419() {
         .expect("worker loop must reap expiry resources");
     let overflow = executable_lines
         .iter()
-        .position(|line| {
-            line.starts_with("expiry_overflow_deltas.extend(")
-        })
+        .position(|line| line.starts_with("expiry_overflow_deltas.extend("))
         .expect("worker loop must retain expiry overflow records");
     let drain = executable_lines
         .iter()
         .enumerate()
         .skip(reap)
-        .find(|(_, line)| **line == "let _ = drain_and_flush_all!();")
+        .find(|(_, line)| line.starts_with("let _ = drain_and_flush_all_impl("))
         .map(|(index, _)| index)
         .expect("worker loop must drain expiry teardown");
-    let poll = executable_lines
+    assert!(
+        expiry < retire && retire < reap && reap < drain && drain < overflow,
+        "expiry must retire seeds, reap resources, drain Close deltas, then collect overflow"
+    );
+    // The poll half of the original pin: housekeeping must run before the
+    // per-tick `poll_binding` sweep in the loop that calls it.
+    let loop_src = include_str!("mod.rs");
+    let loop_lines: Vec<_> = loop_src
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//"))
+        .collect();
+    let housekeeping = loop_lines
+        .iter()
+        .position(|line| line.starts_with("if run_session_housekeeping("))
+        .expect("worker loop must call session housekeeping");
+    let poll = loop_lines
         .iter()
         .position(|line| line.starts_with("if poll_binding("))
         .expect("worker loop must poll bindings");
-    // The 1278 drain (first match past reap) flushes the expiry walk's
-    // ring-accepted Closes before overflow collection; d2425efb5's extra
-    // pre-chunk drain does not disturb this order.
     assert!(
-        expiry < retire && retire < reap && reap < drain && drain < overflow && overflow < poll,
-        "expiry must retire seeds, reap resources, drain Close deltas, then poll"
+        housekeeping < poll,
+        "session housekeeping (expiry teardown) must run before poll_binding"
     );
 }

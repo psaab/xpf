@@ -107,8 +107,8 @@ fn view_with_policy_metadata(
         .unwrap_or(0);
     forwarding.ifindex_to_zone_id.insert(11, ingress_zone);
     let forwarding = Arc::new(forwarding);
-    let view = Arc::new(RuntimeView::new( // runtime-view-canary: test-local
-
+    let view = Arc::new(RuntimeView::new(
+        // runtime-view-canary: test-local
         ValidationState {
             snapshot_installed: true,
             config_generation: generation,
@@ -1430,8 +1430,7 @@ fn stale_removed_zone_reverse_replay_does_not_resurrect_10612() {
         "the rotation purge must remove the old removed-zone victim first"
     );
 
-    let reverse_key =
-        crate::session::reverse_session_key(&harness.unbound, stale.decision.nat);
+    let reverse_key = crate::session::reverse_session_key(&harness.unbound, stale.decision.nat);
     let mut reversed = stale;
     reversed.key = reverse_key.clone();
     reversed.metadata.is_reverse = true;
@@ -1555,13 +1554,7 @@ fn extensive_rematch_purges_nonzero_admission_id_after_first_rule_move_12072() {
 
     // C1 moves p-first from nonzero to zero. p-web was the old first rule and
     // remains present, so this first rotation must leave the p-first pair live.
-    harness.publish(
-        2,
-        &[rule("p-first", 0), rule("p-web", 1)],
-        true,
-        &[],
-        None,
-    );
+    harness.publish(2, &[rule("p-first", 0), rule("p-web", 1)], true, &[], None);
     {
         let shared = harness.synced.lock().expect("shared synced map");
         for pair_key in [&forward_key, &reverse_key] {
@@ -1594,13 +1587,7 @@ fn extensive_rematch_purges_nonzero_admission_id_after_first_rule_move_12072() {
         destination_from_zone_any: false,
         destination_to_zone_any: false,
     };
-    harness.publish(
-        3,
-        &[rule("p-other", 0)],
-        true,
-        &[ancestry],
-        None,
-    );
+    harness.publish(3, &[rule("p-other", 0)], true, &[ancestry], None);
     let shared = harness.synced.lock().expect("shared synced map");
     assert!(
         !shared.contains_key(&forward_key),
@@ -1611,8 +1598,7 @@ fn extensive_rematch_purges_nonzero_admission_id_after_first_rule_move_12072() {
         "the reverse companion admitted by the deleted first rule survived"
     );
     assert!(
-        shared.contains_key(&harness.first_forward)
-            && shared.contains_key(&harness.first_reverse),
+        shared.contains_key(&harness.first_forward) && shared.contains_key(&harness.first_reverse),
         "unrelated p-web sessions must remain outside the p-first rematch"
     );
     drop(shared);
@@ -1849,7 +1835,6 @@ fn extensive_rotation_does_not_retain_transit_row_under_junos_host_ancestry_1285
     harness.shutdown();
 }
 
-
 // #12859: the ancestry rematch must not evaluate a retained ICMP session with
 // `packet_icmp = None` when the destination snapshot carries a
 // type-constrained PERMIT. CompactApplications::matches fails the
@@ -1943,7 +1928,6 @@ fn extensive_rematch_declines_icmp_with_type_constrained_permit_12859() {
 /// Packet-scoped enforcement of the DENY is #11064's job on the hit path, not
 /// this frame-independent rematch's.
 
-
 /// this frame-independent rematch's.
 #[test]
 fn extensive_rematch_declines_icmp_with_type_constrained_deny_then_broad_permit_12859() {
@@ -2028,7 +2012,6 @@ fn extensive_rematch_declines_icmp_with_type_constrained_deny_then_broad_permit_
 /// not to ICMP as a protocol. Guards against an over-broad fix that declines
 /// every ICMP rematch.
 
-
 /// every ICMP rematch.
 #[test]
 fn extensive_rematch_retains_icmp_with_unconstrained_permit_12859() {
@@ -2100,7 +2083,6 @@ fn extensive_rematch_retains_icmp_with_unconstrained_permit_12859() {
 /// preserve the existing fail-closed teardown even when the new snapshot has
 /// type-constrained rules; otherwise the ICMP decline would weaken the
 /// established missing-ancestry contract.
-
 
 /// established missing-ancestry contract.
 #[test]

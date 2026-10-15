@@ -10153,7 +10153,8 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
 /// flush test can still pass.
 #[test]
 fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
-    let src = include_str!("../worker/loop_body/mod.rs");
+    // #13075: the expiry-overflow walk moved into loop_body/housekeeping.rs.
+    let src = include_str!("../worker/loop_body/housekeeping.rs");
     let executable_lines: Vec<_> = src
         .lines()
         .map(str::trim)
@@ -10171,7 +10172,7 @@ fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
         .iter()
         .enumerate()
         .skip(chunk_loop)
-        .find(|(_, line)| **line == "flush_drained_session_deltas!(&deltas[..handled]);")
+        .find(|(_, line)| line.starts_with("flush_deltas("))
         .map(|(index, _)| index)
         .expect("worker loop must route each expiry overflow chunk to global consumers");
     assert!(

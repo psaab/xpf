@@ -263,8 +263,7 @@ pub(super) fn emit_periodic_report(
     // packets stop being redirected to XSK.
     if let Some(stats) = read_degraded_path_stats() {
         if !stats.is_empty() {
-            let s: Vec<String> =
-                stats.iter().map(|(n, v)| format!("{n}={v}")).collect();
+            let s: Vec<String> = stats.iter().map(|(n, v)| format!("{n}={v}")).collect();
             eprintln!("DBG w{}: XDP_DEGRADED: {}", worker_id, s.join(" "));
         }
     }
@@ -375,8 +374,7 @@ pub(super) fn check_and_dump_stall(
         // Dump degraded-path stats at stall time.
         if let Some(stats) = read_degraded_path_stats() {
             if !stats.is_empty() {
-                let s: Vec<String> =
-                    stats.iter().map(|(n, v)| format!("{n}={v}")).collect();
+                let s: Vec<String> = stats.iter().map(|(n, v)| format!("{n}={v}")).collect();
                 eprintln!("DBG STALL_DEGRADED: {}", s.join(" "));
             }
         }
@@ -416,10 +414,7 @@ pub(super) fn check_and_dump_stall(
 /// `dbg.tx_tcp_rst` is accumulated here (it is fed from per-binding
 /// `WorkerTelemetry`, not from `DebugPollCounters`), so the caller passes
 /// `&mut DbgCounters`. Otherwise this is verbatim the block that was inline.
-pub(super) fn build_binding_summary(
-    bindings: &[BindingWorker],
-    dbg: &mut DbgCounters,
-) -> String {
+pub(super) fn build_binding_summary(bindings: &[BindingWorker], dbg: &mut DbgCounters) -> String {
     let mut binding_summary = String::new();
     for (i, b) in bindings.iter().enumerate() {
         use std::fmt::Write;
