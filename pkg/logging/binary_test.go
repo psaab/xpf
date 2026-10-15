@@ -420,6 +420,37 @@ func TestDecodeRawEventCarriesCreatedStamp(t *testing.T) {
 	}
 }
 
+// TestDecodeRawEventCarriesIngressIfindex13556 pins #13556: the wire
+// [128:132] ingress ifindex (#2615) decoded into rawEvent.IngressIfindex
+// must survive DecodeRawEventRecord into EventRecord.IngressIfindex.
+// The production consumers (daemon flowExportCallback /
+// ipfixExportCallback via the userspace eventstream raw path) copy
+// rec.IngressIfindex into SessionCloseData.InIf, which the exporters
+// encode as NetFlow v9 IN_SNMP / IPFIX ingressInterface (IE 10).
+// Dropping the field makes every decoded close export InIf=0.
+func TestDecodeRawEventCarriesIngressIfindex13556(t *testing.T) {
+	const ingressIfindex = uint32(0x0A0B0C0D)
+	data := make([]byte, rawEventWireSize)
+	binary.LittleEndian.PutUint64(data[0:8], uint64(1_700_000_300_000_000_000))
+	data[40], data[41] = 0x30, 0x39
+	data[42], data[43] = 0x01, 0xbb
+	data[52] = eventTypeSessionClose
+	data[53] = 6
+	data[55] = addrFamilyInet
+	copy(data[8:12], net.ParseIP("10.0.1.102").To4())
+	copy(data[24:28], net.ParseIP("172.16.80.200").To4())
+	binary.LittleEndian.PutUint32(data[128:132], ingressIfindex)
+
+	rec, ok := DecodeRawEventRecord(data)
+	if !ok {
+		t.Fatal("DecodeRawEventRecord rejected a valid SESSION_CLOSE frame")
+	}
+	if rec.IngressIfindex != ingressIfindex {
+		t.Fatalf("rec.IngressIfindex = 0x%08x, want 0x%08x ([128:132] LE u32 dropped by DecodeRawEventRecord)",
+			rec.IngressIfindex, ingressIfindex)
+	}
+}
+
 // TestDecodeRawEventCarriesCreatedSubNanos is the #2853 cross-language layout
 // check: the Rust encoder writes the creation instant's sub-second NANOSECOND
 // remainder into the SESSION_CLOSE-unused policy_id slot at offset 44 (LE u32).

@@ -1374,6 +1374,8 @@ func TestEventStreamSessionCloseRTFlowRoutesToRawCallback(t *testing.T) {
 		0, // close reason none
 		0,
 	)
+	const ingressIfindex13556 = uint32(0x0A0B0C0D)
+	binary.LittleEndian.PutUint32(payload[128:132], ingressIfindex13556)
 	if err := writeFrame(conn, EventFrameTypeSessionClose, 11, payload); err != nil {
 		t.Fatalf("write session-close frame: %v", err)
 	}
@@ -1382,6 +1384,10 @@ func TestEventStreamSessionCloseRTFlowRoutesToRawCallback(t *testing.T) {
 	case rec := <-rawSeen:
 		if rec.Type != "SESSION_CLOSE" {
 			t.Fatalf("Type = %q, want SESSION_CLOSE", rec.Type)
+		}
+		if rec.IngressIfindex != ingressIfindex13556 {
+			t.Fatalf("SESSION_CLOSE ingress ifindex = 0x%08x, want 0x%08x (raw RT_FLOW decode lost wire [128:132])",
+				rec.IngressIfindex, ingressIfindex13556)
 		}
 		if rec.SrcAddr != "10.0.1.102:12345" || rec.DstAddr != "172.16.80.200:443" {
 			t.Fatalf("tuple = %s -> %s, want 10.0.1.102:12345 -> 172.16.80.200:443",
