@@ -93,7 +93,7 @@ use ipv6_ext_walk::{
     EH_CLASS_TERMINAL, FragHdr, MAX_EXT_HDRS, PROTO_FRAGMENT_NO_L4, eh_class, eh_class_table,
     read_bytes,
 };
-use ipv6_len_gate::ipv6_declared_end;
+use ipv6_len_gate::{ipv6_declared_end, ipv6_udp_first_payload_byte_in_datagram};
 use tunnel_frag::{
     degraded_interface_nat_esp_passes_to_kernel, interface_nat_tunnel_passes_to_kernel,
 };
@@ -1940,7 +1940,7 @@ fn parse_ipv6(
     let flow_lbl0 = ip6[1];
     let dscp = ((version_priority & 0x0f) << 2) | (flow_lbl0 >> 6);
     let payload_len = u16::from_be_bytes([ip6[4], ip6[5]]);
-    let (payload_offset, tcp_flags, flow_src_port, flow_dst_port, icmp_type, udp_wg_transport_data) =
+    let (payload_offset, tcp_flags, flow_src_port, flow_dst_port, icmp_type, mut udp_wg_transport_data) =
         parse_l4(data, data_end, offset, protocol, data_end)?;
     // #10662: keep the capture-bound L4 parse EXACTLY as before. Passing a
     // declared bound through parse_l4 multiplied verifier states past the
@@ -1953,6 +1953,14 @@ fn parse_ipv6(
     let l4_truncated = payload_offset as usize > declared_end;
     if l4_truncated {
         return None;
+    }
+    // #13084: the capture-bound 9-byte UDP read can see Ethernet pad when
+    // payload_len ends at the UDP header. Keep parsing ports and the packet,
+    // but never let that out-of-datagram byte claim the packet as WG data.
+    if protocol == PROTO_UDP
+        && !ipv6_udp_first_payload_byte_in_datagram(offset as usize, declared_end)
+    {
+        udp_wg_transport_data = false;
     }
     // #8249 EXPERIMENT: reuse the already-validated 40-byte header slice
     // instead of re-reading the addresses from the packet. `ip6` covers
