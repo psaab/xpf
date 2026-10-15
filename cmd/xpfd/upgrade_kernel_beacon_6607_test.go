@@ -40,7 +40,7 @@ func TestNewKernelConfig_WiresGate4DataplaneProbe_6607(t *testing.T) {
 	restoreActive := swapUnitActive(func(context.Context, string) (bool, error) { return true, nil })
 	defer restoreActive()
 
-	cfg := newKernelConfig("/unused-journal", false, time.Second)
+	cfg := newKernelConfig("/unused-journal", false, time.Second, "xpfd")
 
 	ok, err := cfg.Sys.ForwardBeacon(50 * time.Millisecond)
 	if !statusCalled {
@@ -66,7 +66,7 @@ func TestNewKernelConfig_WiresGate4DataplaneProbe_6607(t *testing.T) {
 // a nil-check while being free to drift from config.IsManagementIfName, which
 // #7515 records as always a bug.
 func TestNewKernelConfig_WiresBeaconTargetClassifier_7157(t *testing.T) {
-	cfg := newKernelConfig("/unused-journal", false, time.Second)
+	cfg := newKernelConfig("/unused-journal", false, time.Second, "xpfd")
 	v := reflect.Indirect(reflect.ValueOf(cfg.Sys))
 	if v.Kind() != reflect.Struct {
 		t.Fatalf("kernel system is %s, not a struct", v.Kind())

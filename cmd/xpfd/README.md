@@ -54,6 +54,7 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
 - `xpfd publish-generation` — publishes a complete staged binary generation.
 - `xpfd verify-dataplane` — verifies the embedded userspace shim without
   touching production dataplane state.
+
 - `xpfd check-config <config-file>` — runs strict config validation and the
   device-map management-stranding preflight, then prints any non-fatal compile
   advisories as `warning:` lines while retaining a successful exit status.
@@ -89,6 +90,12 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   real firewall/fallback is installed or a no-enforcement teardown completes.
 - A kernel without bridge nf_tables reports degraded success with a warning
   when the inet barrier is active; inet failures and real bridge errors fail.
+
+The `version`, `protocol-versions`, and `verify-dataplane` probes reject
+positional arguments rather than silently ignoring them. Kernel-upgrade flags
+precede the arm target, for example
+`xpfd upgrade kernel arm --strict-watchdog 6.18.1`; the promotion gate honors
+its `--unit` value when checking the active service.
 
 ## TTY detection
 
