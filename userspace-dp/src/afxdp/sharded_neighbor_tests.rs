@@ -105,34 +105,39 @@ fn len_sums_across_shards() {
 #[test]
 fn len_releases_each_shard_before_waiting_for_the_next() {
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let map = std::sync::Arc::new(ShardedNeighborMap::new());
     let last_shard = map.lock_shard(NUM_SHARDS - 1);
     let worker_map = std::sync::Arc::clone(&map);
-    let (started_tx, started_rx) = mpsc::channel();
+    let (reached_last_tx, reached_last_rx) = mpsc::sync_channel(1);
+    let (continue_tx, continue_rx) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
-        started_tx.send(()).unwrap();
+        LEN_AFTER_SHARD_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |index| {
+                if index == NUM_SHARDS - 2 {
+                    reached_last_tx.send(()).unwrap();
+                    continue_rx.recv().unwrap();
+                }
+            }));
+        });
         worker_map.len()
     });
-    started_rx.recv().unwrap();
 
-    // The new `len()` blocks on the held final shard only after releasing
-    // every previous one. The old all-shard lock kept shard 0 held here.
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let released_early = loop {
-        if let Ok(guard) = map.shards[0].0.try_lock() {
-            drop(guard);
-            break true;
-        }
-        if Instant::now() >= deadline {
-            break false;
-        }
-        std::thread::yield_now();
-    };
+    // The worker has released shard 62, and will try the held shard 63 as
+    // soon as the test lets it continue. Unlike a "thread started" signal,
+    // this synchronization proves it reached the boundary before the probe.
+    // The bounded wait lets the old all-shards-at-once implementation
+    // proceed after the assertion state is sampled rather than hanging.
+    let reached_boundary = reached_last_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    let lower_shard_available = map.shards[0].0.try_lock().is_ok();
+    continue_tx.send(()).unwrap();
     drop(last_shard);
     let _ = worker.join().unwrap();
-    assert!(released_early, "len held shard 0 while waiting for shard 63");
+    assert!(
+        reached_boundary && lower_shard_available,
+        "len failed to release shard 0 before waiting for shard 63"
+    );
 }
 
 #[test]
@@ -192,18 +197,18 @@ fn padded_shard_align_at_least_64() {
 #[test]
 fn shard_distribution_ipv4_24_constant_ifindex() {
     for &seed in SHARD_SEEDS_7752 {
-    let mut counts = [0usize; NUM_SHARDS];
-    for last in 0..=255u8 {
-        counts[shard_idx_with(seed, &key_v4(7, last))] += 1;
-    }
-    let max = *counts.iter().max().unwrap();
-    assert!(
-        max <= 12,
-        "shard distribution too skewed under seed {:#x}: {:?} (max {})",
-        seed,
-        counts,
-        max
-    );
+        let mut counts = [0usize; NUM_SHARDS];
+        for last in 0..=255u8 {
+            counts[shard_idx_with(seed, &key_v4(7, last))] += 1;
+        }
+        let max = *counts.iter().max().unwrap();
+        assert!(
+            max <= 12,
+            "shard distribution too skewed under seed {:#x}: {:?} (max {})",
+            seed,
+            counts,
+            max
+        );
     }
 }
 
@@ -211,21 +216,21 @@ fn shard_distribution_ipv4_24_constant_ifindex() {
 #[test]
 fn shard_distribution_ipv4_16() {
     for &seed in SHARD_SEEDS_7752 {
-    let mut counts = [0usize; NUM_SHARDS];
-    for second_last in 0..=255u16 {
-        for last in 0..=15u16 {
-            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, second_last as u8, last as u8));
-            counts[shard_idx_with(seed, &(7, ip))] += 1;
+        let mut counts = [0usize; NUM_SHARDS];
+        for second_last in 0..=255u16 {
+            for last in 0..=15u16 {
+                let ip = IpAddr::V4(Ipv4Addr::new(10, 0, second_last as u8, last as u8));
+                counts[shard_idx_with(seed, &(7, ip))] += 1;
+            }
         }
-    }
-    // 4096 keys, 64 shards → ideal 64/shard. Acceptance: max ≤ 2× ideal.
-    let max = *counts.iter().max().unwrap();
-    assert!(
-        max <= 128,
-        "shard distribution too skewed under seed {:#x}: max {} (ideal 64)",
-        seed,
-        max
-    );
+        // 4096 keys, 64 shards → ideal 64/shard. Acceptance: max ≤ 2× ideal.
+        let max = *counts.iter().max().unwrap();
+        assert!(
+            max <= 128,
+            "shard distribution too skewed under seed {:#x}: max {} (ideal 64)",
+            seed,
+            max
+        );
     }
 }
 
@@ -233,30 +238,30 @@ fn shard_distribution_ipv4_16() {
 #[test]
 fn shard_distribution_ipv6_slaac() {
     for &seed in SHARD_SEEDS_7752 {
-    let mut counts = [0usize; NUM_SHARDS];
-    for i in 0..256u32 {
-        for j in 0..16u32 {
-            let ip = IpAddr::V6(Ipv6Addr::new(
-                0xfe80,
-                0,
-                0,
-                0,
-                0xabcd,
-                0xef01,
-                (i & 0xFFFF) as u16,
-                (j & 0xFFFF) as u16,
-            ));
-            counts[shard_idx_with(seed, &(7, ip))] += 1;
+        let mut counts = [0usize; NUM_SHARDS];
+        for i in 0..256u32 {
+            for j in 0..16u32 {
+                let ip = IpAddr::V6(Ipv6Addr::new(
+                    0xfe80,
+                    0,
+                    0,
+                    0,
+                    0xabcd,
+                    0xef01,
+                    (i & 0xFFFF) as u16,
+                    (j & 0xFFFF) as u16,
+                ));
+                counts[shard_idx_with(seed, &(7, ip))] += 1;
+            }
         }
-    }
-    // 4096 keys, 64 shards → ideal 64/shard. Acceptance: max ≤ 2× ideal.
-    let max = *counts.iter().max().unwrap();
-    assert!(
-        max <= 128,
-        "ipv6 shard distribution too skewed under seed {:#x}: max {} (ideal 64)",
-        seed,
-        max
-    );
+        // 4096 keys, 64 shards → ideal 64/shard. Acceptance: max ≤ 2× ideal.
+        let max = *counts.iter().max().unwrap();
+        assert!(
+            max <= 128,
+            "ipv6 shard distribution too skewed under seed {:#x}: max {} (ideal 64)",
+            seed,
+            max
+        );
     }
 }
 
@@ -803,7 +808,10 @@ fn keys_in_shard(target_shard: usize, count: usize) -> Vec<(i32, IpAddr)> {
     let mut out = Vec::with_capacity(count);
     let mut i: u32 = 0;
     while out.len() < count {
-        let k = (7, IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32.wrapping_add(i))));
+        let k = (
+            7,
+            IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32.wrapping_add(i))),
+        );
         if ShardedNeighborMap::shard_index(&k) == target_shard {
             out.push(k);
         }
@@ -902,7 +910,11 @@ fn learned_source_admitted_and_update_survives_full_shard() {
     // The first key is a legitimate learn; it lands and is resolvable.
     let legit = keys[0];
     map.learn_pair_if_changed(&[legit], entry(0xAA));
-    assert_eq!(map.get(&legit), Some(entry(0xAA)), "legit learn must be admitted");
+    assert_eq!(
+        map.get(&legit),
+        Some(entry(0xAA)),
+        "legit learn must be admitted"
+    );
 
     // Fill the rest of the shard with a spoofed flood until it caps.
     for k in &keys[1..] {
@@ -972,12 +984,22 @@ fn get_with_capacity_reports_at_cap_on_full_shard() {
     let fresh = keys[MAX_DYNAMIC_NEIGHBORS_PER_SHARD];
     let (fresh_entry, fresh_at_cap) = map.get_with_capacity(&fresh);
     assert_eq!(fresh_entry, None, "the fresh key is not yet learned");
-    assert!(fresh_at_cap, "a full shard must report at-capacity for a new key");
+    assert!(
+        fresh_at_cap,
+        "a full shard must report at-capacity for a new key"
+    );
     // An EXISTING key in the same full shard still reports its entry, so the
     // caller does NOT treat it as all-new (an update is not growth).
     let (existing_entry, existing_at_cap) = map.get_with_capacity(&keys[0]);
-    assert_eq!(existing_entry, Some(entry(0x44)), "existing key still readable at cap");
-    assert!(existing_at_cap, "shard is full regardless of the probed key's presence");
+    assert_eq!(
+        existing_entry,
+        Some(entry(0x44)),
+        "existing key still readable at cap"
+    );
+    assert!(
+        existing_at_cap,
+        "shard is full regardless of the probed key's presence"
+    );
 }
 
 /// #7752: fixed seeds for the distribution tests.
@@ -1068,7 +1090,12 @@ fn the_process_seed_is_wired_and_stable_7752() {
 #[test]
 fn shard_v6_s3_clique_disperses_pinned_and_seed_sensitive_12794() {
     let keys: Vec<(i32, IpAddr)> = (0..256u16)
-        .map(|i| (7, IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1))))
+        .map(|i| {
+            (
+                7,
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1)),
+            )
+        })
         .collect();
     for seed in [1u64, 42, 0x0123_4567_89AB_CDEF, u64::MAX] {
         let distinct: std::collections::BTreeSet<usize> =
@@ -1079,13 +1106,23 @@ fn shard_v6_s3_clique_disperses_pinned_and_seed_sensitive_12794() {
             distinct.len()
         );
     }
-    let dist = |seed: u64| keys.iter().map(|k| shard_idx_with(seed, k)).collect::<Vec<_>>();
+    let dist = |seed: u64| {
+        keys.iter()
+            .map(|k| shard_idx_with(seed, k))
+            .collect::<Vec<_>>()
+    };
     assert_eq!(dist(42), dist(42));
     assert_ne!(dist(42), dist(43));
     // Pinned vectors (keyed multiply-mix, seed 42).
     assert_eq!(shard_idx_with(42, &key_v4(7, 42)), 46, "pinned v4 shard");
     assert_eq!(
-        shard_idx_with(42, &(7, IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)))),
+        shard_idx_with(
+            42,
+            &(
+                7,
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
+            )
+        ),
         4,
         "pinned v6 shard"
     );
@@ -1154,7 +1191,10 @@ fn empty_bulk_calls_do_not_bump_the_generation_9071() {
     // property of the empty call rather than of the fixture.
     let start = m.insert_generation();
     m.bulk_replace_neighbors(&[], &[(3, key_v4(3, 9).1, entry(0x99))]);
-    assert!(m.insert_generation() > start, "fixture: a real bulk insert must bump");
+    assert!(
+        m.insert_generation() > start,
+        "fixture: a real bulk insert must bump"
+    );
 
     let before = m.insert_generation();
     m.bulk_replace_neighbors(&[], &[]);
