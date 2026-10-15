@@ -382,6 +382,11 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 								appTerms = append(appTerms, term)
 							}
 						}
+						if isOff && (err != nil || len(expanded) == 0) {
+							slog.Warn("userspace snapshot: destination NAT off exemption has an empty or broken application set; widening that application axis to match all (#12631)",
+								"ruleset", rs.Name, "rule", rule.Name, "application", appName, "error", err)
+							appTerms = append(appTerms, appTerm{})
+						}
 					} else if isOff {
 						slog.Warn("userspace snapshot: destination NAT off exemption has an unresolved application reference; widening that application axis to match all (#12631)",
 							"ruleset", rs.Name, "rule", rule.Name, "application", appName)
