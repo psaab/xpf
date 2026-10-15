@@ -253,8 +253,8 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 					}
 				} else {
 					for _, c := range p.Children {
-						if c.Name() == "hostname" && len(c.Keys) >= 2 {
-							gw.DynamicHostname = c.Keys[1]
+						if c.Name() == "hostname" {
+							gw.DynamicHostname = nodeVal(c)
 						}
 					}
 				}
