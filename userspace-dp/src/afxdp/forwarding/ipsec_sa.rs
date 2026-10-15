@@ -1012,6 +1012,81 @@ fn build_getsa_dump_request(seq: u32) -> [u8; GETSA_DUMP_REQUEST_LEN] {
     request
 }
 
+/// Result of consuming one datagram while waiting for a dump sequence.
+#[derive(Debug, PartialEq, Eq)]
+enum DumpStep {
+    NeedMore,
+    Complete,
+    Failed,
+}
+
+/// Consume one dump datagram. Mismatched sequences must not abort the read:
+/// multicast notifications (`seq == 0`) and stale replies can precede the
+/// current dump on the shared socket. Such notifications invalidate this
+/// snapshot, but drain through the current sequence's terminal message before
+/// retrying so its unread response cannot poison every subsequent request.
+fn consume_dump_datagram(
+    store: &IpsecSaStore,
+    entries: &mut FastMap<IpsecSaKey, IpsecSaEpoch>,
+    seq: u32,
+    bytes: &[u8],
+    dump_invalid: &mut bool,
+) -> DumpStep {
+    let mut offset = 0usize;
+    while offset + NLMSG_HDR_LEN <= bytes.len() {
+        let len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        if len < NLMSG_HDR_LEN || offset + len > bytes.len() {
+            return DumpStep::Failed;
+        }
+        let msg_type = u16::from_ne_bytes(bytes[offset + 4..offset + 6].try_into().unwrap());
+        let flags = u16::from_ne_bytes(bytes[offset + 6..offset + 8].try_into().unwrap());
+        let msg_seq = u32::from_ne_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
+        if msg_seq != seq {
+            if msg_seq == 0 {
+                *dump_invalid = true;
+            }
+            offset += (len + 3) & !3;
+            continue;
+        }
+        if (flags & 0x0010) != 0 {
+            *dump_invalid = true;
+        }
+        if msg_type == NLMSG_DONE {
+            if offset + ((len + 3) & !3) != bytes.len() {
+                return DumpStep::Failed;
+            }
+            if *dump_invalid {
+                return DumpStep::Failed;
+            }
+            store
+                .counters
+                .netlink_redump_upserts
+                .fetch_add(entries.len() as u64, Ordering::Relaxed);
+            store.publish_full_dump(std::mem::take(entries));
+            return DumpStep::Complete;
+        }
+        if msg_type == NLMSG_ERROR || msg_type == NLMSG_OVERRUN {
+            return DumpStep::Failed;
+        }
+        if msg_type == XFRM_MSG_NEWSA {
+            let payload = &bytes[offset + NLMSG_HDR_LEN..offset + len];
+            if let Some((key, add_time)) = parse_sa_payload_with_epoch(payload, true) {
+                entries.insert(
+                    key,
+                    IpsecSaEpoch {
+                        generation: add_time,
+                        incarnation: 0,
+                    },
+                );
+            }
+        }
+        offset += (len + 3) & !3;
+    }
+    if offset != bytes.len() {
+        return DumpStep::Failed;
+    }
+    DumpStep::NeedMore
+}
 fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
     let request = build_getsa_dump_request(seq);
     let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
@@ -1032,6 +1107,7 @@ fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
         return false;
     }
     let mut entries = FastMap::default();
+    let mut dump_invalid = false;
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
@@ -1044,52 +1120,16 @@ fn full_dump(fd: libc::c_int, store: &IpsecSaStore, seq: u32) -> bool {
             }
             return false;
         }
-        let bytes = &buf[..n as usize];
-        let mut offset = 0usize;
-        while offset + NLMSG_HDR_LEN <= bytes.len() {
-            let len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-            if len < NLMSG_HDR_LEN || offset + len > bytes.len() {
-                return false;
-            }
-            let msg_type = u16::from_ne_bytes(bytes[offset + 4..offset + 6].try_into().unwrap());
-            let flags = u16::from_ne_bytes(bytes[offset + 6..offset + 8].try_into().unwrap());
-            let msg_seq = u32::from_ne_bytes(bytes[offset + 8..offset + 12].try_into().unwrap());
-            // A multicast event interleaving a dump, or the kernel's
-            // NLM_F_DUMP_INTR marker, invalidates the candidate snapshot.
-            // Abort and retry rather than publishing a pre-delete map.
-            if msg_seq != seq || (flags & 0x0010) != 0 {
-                return false;
-            }
-            let payload = &bytes[offset + NLMSG_HDR_LEN..offset + len];
-            if msg_type == NLMSG_DONE {
-                if offset + ((len + 3) & !3) != bytes.len() {
-                    return false;
-                }
-                store
-                    .counters
-                    .netlink_redump_upserts
-                    .fetch_add(entries.len() as u64, Ordering::Relaxed);
-                store.publish_full_dump(entries);
-                return true;
-            }
-            if msg_type == NLMSG_ERROR || msg_type == NLMSG_OVERRUN {
-                return false;
-            }
-            if msg_type == XFRM_MSG_NEWSA {
-                if let Some((key, add_time)) = parse_sa_payload_with_epoch(payload, true) {
-                    entries.insert(
-                        key,
-                        IpsecSaEpoch {
-                            generation: add_time,
-                            incarnation: 0,
-                        },
-                    );
-                }
-            }
-            offset += (len + 3) & !3;
-        }
-        if offset != bytes.len() {
-            return false;
+        match consume_dump_datagram(
+            store,
+            &mut entries,
+            seq,
+            &buf[..n as usize],
+            &mut dump_invalid,
+        ) {
+            DumpStep::NeedMore => {}
+            DumpStep::Complete => return true,
+            DumpStep::Failed => return false,
         }
     }
 }
@@ -1906,6 +1946,81 @@ mod tests {
         message[4..6].copy_from_slice(&msg_type.to_ne_bytes());
         message[NLMSG_HDR_LEN..NLMSG_HDR_LEN + payload.len()].copy_from_slice(payload);
         message
+    }
+
+    fn set_netlink_header(message: &mut [u8], seq: u32, flags: u16) {
+        message[6..8].copy_from_slice(&flags.to_ne_bytes());
+        message[8..12].copy_from_slice(&seq.to_ne_bytes());
+    }
+
+    #[test]
+    fn dump_drains_interleaved_multicast_and_interrupted_responses() {
+        let seq = 19;
+        let store = IpsecSaStore::new();
+        let retained = key(99);
+        let mut baseline = FastMap::default();
+        baseline.insert(
+            retained,
+            IpsecSaEpoch {
+                generation: 1,
+                incarnation: 0,
+            },
+        );
+        store.publish_full_dump(baseline);
+        let mut entries = FastMap::default();
+        let mut invalid = false;
+
+        let mut multicast = one_netlink_message(XFRM_MSG_FLUSHSA, &[]);
+        set_netlink_header(&mut multicast, 0, 0);
+        assert_eq!(
+            consume_dump_datagram(&store, &mut entries, seq, &multicast, &mut invalid),
+            DumpStep::NeedMore
+        );
+        assert!(invalid);
+
+        let mut done = one_netlink_message(NLMSG_DONE, &[]);
+        set_netlink_header(&mut done, seq, 0);
+        assert_eq!(
+            consume_dump_datagram(&store, &mut entries, seq, &done, &mut invalid),
+            DumpStep::Failed
+        );
+        assert_eq!(store.lookup(retained), IpsecSaLookup::Hit);
+
+        let mut entries = FastMap::default();
+        let mut invalid = false;
+        let mut interrupted = one_netlink_message(XFRM_MSG_NEWSA, &[]);
+        set_netlink_header(&mut interrupted, seq, 0x0010);
+        assert_eq!(
+            consume_dump_datagram(&store, &mut entries, seq, &interrupted, &mut invalid),
+            DumpStep::NeedMore
+        );
+        assert!(invalid);
+        assert_eq!(
+            consume_dump_datagram(&store, &mut entries, seq, &done, &mut invalid),
+            DumpStep::Failed
+        );
+        assert_eq!(store.lookup(retained), IpsecSaLookup::Hit);
+    }
+
+    #[test]
+    fn dump_skips_stale_reply_before_publishing_current_sequence() {
+        let seq = 21;
+        let store = IpsecSaStore::new();
+        let mut entries = FastMap::default();
+        let mut invalid = false;
+        let mut stale_done = one_netlink_message(NLMSG_DONE, &[]);
+        set_netlink_header(&mut stale_done, seq - 1, 0);
+        assert_eq!(
+            consume_dump_datagram(&store, &mut entries, seq, &stale_done, &mut invalid),
+            DumpStep::NeedMore
+        );
+        let mut done = one_netlink_message(NLMSG_DONE, &[]);
+        set_netlink_header(&mut done, seq, 0);
+        assert_eq!(
+            consume_dump_datagram(&store, &mut entries, seq, &done, &mut invalid),
+            DumpStep::Complete
+        );
+        assert_eq!(store.entries_len(), 0);
     }
 
     fn xfrm_id_payload(dst: Ipv4Addr, spi: u32, proto: u8) -> Vec<u8> {
