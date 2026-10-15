@@ -152,7 +152,7 @@ func TestCollectStillCallsTheOverflowEmitter6845(t *testing.T) {
 	// It must sit AFTER the status fetch, or it would be handed a nil status on
 	// every scrape and the gauge would be permanently absent — indistinguishable
 	// from "no helper", and wrong on a healthy box.
-	fetch := strings.Index(src, "userspaceStatus := fetchUserspaceStatus(dp)")
+	fetch := strings.Index(src, "userspaceStatus = fetchUserspaceStatus(dp)")
 	if fetch < 0 {
 		t.Fatal("could not find the status fetch to order against")
 	}

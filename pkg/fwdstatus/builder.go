@@ -199,19 +199,9 @@ func Build(
 				continue
 			}
 			anyKnown = true
-			// The legacy in-flight count excludes frames waiting in the
-			// fill queue. Other worker-local TX/recycle queues may already
-			// be represented by that aggregate, so use the greater count
-			// rather than double-counting their overlapping ownership.
-			pendingFrames := uint64(b.DebugPendingFillFrames) +
-				uint64(b.DebugPendingTXPrepared) +
-				uint64(b.DebugPendingTXLocal) +
-				uint64(b.DebugInFlightRecycles)
-			umemFrames := uint64(b.UmemInflightFrames)
-			if pendingFrames > umemFrames {
-				umemFrames = pendingFrames
-			}
-			umemPct := float64(umemFrames) * 100.0 / float64(b.UmemTotalFrames)
+			// Buffer utilization tracks frames actually in flight, not
+			// frames intentionally held idle in the userspace fill queue.
+			umemPct := float64(b.UmemInflightFrames) * 100.0 / float64(b.UmemTotalFrames)
 			var txPct float64
 			if b.TxRingCapacity > 0 {
 				txPct = float64(b.OutstandingTX) * 100.0 / float64(b.TxRingCapacity)

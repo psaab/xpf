@@ -849,6 +849,14 @@ type xpfCollector struct {
 	// debug-state tick.
 	bindingActiveFlowCount   *prometheus.Desc
 	bindingFlowCacheCapacity *prometheus.Desc
+	// #13299: UMEM capacity and frame inventories are distinct from
+	// in-flight utilization; fill-ring inventory is intentionally idle.
+	bindingUMEMTotalFrames         *prometheus.Desc
+	bindingUMEMInflightFrames      *prometheus.Desc
+	bindingPendingFillFrames       *prometheus.Desc
+	bindingPendingTXPreparedFrames *prometheus.Desc
+	bindingPendingTXLocalFrames    *prometheus.Desc
+	bindingPendingRecycleFrames    *prometheus.Desc
 	// #1241: per-binding AF_XDP TX completion service telemetry.
 	// These signals let fairness measurements distinguish scheduler/RSS
 	// skew from per-queue completion-ring service asymmetry.
@@ -1506,6 +1514,12 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerColdPathLayoutUnknownTotal
 	ch <- c.bindingActiveFlowCount
 	ch <- c.bindingFlowCacheCapacity
+	ch <- c.bindingUMEMTotalFrames
+	ch <- c.bindingUMEMInflightFrames
+	ch <- c.bindingPendingFillFrames
+	ch <- c.bindingPendingTXPreparedFrames
+	ch <- c.bindingPendingTXLocalFrames
+	ch <- c.bindingPendingRecycleFrames
 	ch <- c.bindingTXCompletions
 	ch <- c.bindingTXCompletionRingAvailable
 	ch <- c.bindingTXCompletionRingAvailableMax
@@ -2141,7 +2155,13 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	c.collectZoneCounters(ch, c.srv.dp)
 
 	dp := c.srv.dp
-	c.collectFwdStatus(ch)
+	var userspaceStatus *dpuserspace.ProcessStatus
+	if dp != nil && dp.IsLoaded() {
+		// One fetched snapshot is shared with the forwarding summary and all
+		// userspace metric families below; do not issue a second Status RPC.
+		userspaceStatus = fetchUserspaceStatus(dp)
+	}
+	c.collectFwdStatus(ch, dp, userspaceStatus)
 	// #8321 finding 14: the CONTROL-PLANE collectors run BEFORE the dataplane
 	// gate below, because none of them reads dataplane state and all of them
 	// matter most when the dataplane is absent.
@@ -2171,17 +2191,6 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	if dp == nil || !dp.IsLoaded() {
 		return
 	}
-
-	// #5317: fetch the userspace-dp helper status ONCE per scrape and share the
-	// snapshot across collectFilterCounters (filter-term hit merge) and
-	// collectUserspaceStatus (CoS / worker-runtime / fairness / neighbor / ...
-	// families). Before this each of those collectors issued its own
-	// control-socket Status() round trip, so a single scrape did two serialized
-	// `status` RPCs — doubling contention with session installs during bulk sync
-	// (CLAUDE.md "Control socket contention"). nil = no Status() surface or a
-	// failed round trip; both collectors degrade exactly as they did on their
-	// own failed/absent fetch.
-	userspaceStatus := fetchUserspaceStatus(dp)
 
 	c.collectGlobalCounters(ch, dp)
 	c.collectInterfaceCounters(ch, dp)

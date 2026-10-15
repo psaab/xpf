@@ -16,6 +16,37 @@ func (c *xpfCollector) initBindingDescriptors() {
 		"Flow-cache capacity published by the userspace helper for this binding.",
 		[]string{"binding_slot", "queue_id", "worker_id", "iface"}, nil,
 	)
+	labels := []string{"binding_slot", "queue_id", "worker_id", "iface"}
+	c.bindingUMEMTotalFrames = prometheus.NewDesc(
+		"xpf_userspace_binding_umem_total_frames",
+		"UMEM frames assigned to this binding (#13299).",
+		labels, nil,
+	)
+	c.bindingUMEMInflightFrames = prometheus.NewDesc(
+		"xpf_userspace_binding_umem_inflight_frames",
+		"UMEM frames currently in flight, excluding idle fill-queue inventory (#13299).",
+		labels, nil,
+	)
+	c.bindingPendingFillFrames = prometheus.NewDesc(
+		"xpf_userspace_binding_pending_fill_frames",
+		"Idle UMEM frames waiting in this binding's worker-local fill queue (#13299).",
+		labels, nil,
+	)
+	c.bindingPendingTXPreparedFrames = prometheus.NewDesc(
+		"xpf_userspace_binding_pending_tx_prepared_frames",
+		"Frames in this binding's worker-local prepared-TX queue (#13299).",
+		labels, nil,
+	)
+	c.bindingPendingTXLocalFrames = prometheus.NewDesc(
+		"xpf_userspace_binding_pending_tx_local_frames",
+		"Frames in this binding's worker-local TX queue (#13299).",
+		labels, nil,
+	)
+	c.bindingPendingRecycleFrames = prometheus.NewDesc(
+		"xpf_userspace_binding_pending_recycle_frames",
+		"Frames in this binding's worker-local in-flight recycle queue (#13299).",
+		labels, nil,
+	)
 	c.bindingTXCompletions = prometheus.NewDesc(
 		"xpf_userspace_binding_tx_completions_total",
 		"Cumulative AF_XDP TX completions reaped by this binding's owner worker (#1241).",
