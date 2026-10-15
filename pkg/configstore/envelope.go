@@ -37,11 +37,11 @@ var ErrConfigDBUnreadable = errors.New("config DB present but unreadable")
 var ErrConfigCompile = errors.New("config DB present but does not compile")
 
 // ErrConfigAbsentWithHistory tags a Store.Load failure where active.json is
-// ABSENT but rollback/.configdb markers survive — numbered text rollback
-// slots, DB rollback slots, or a pending commit-confirmed record (#10297).
-// Every commit pushes the pre-commit tree into the rollback history, so such
-// markers prove the box previously committed: this is a deleted/lost DB, not
-// a never-booted store. It is distinct from an absent DB with no markers
+// ABSENT but rollback/.configdb markers survive — numbered text rollback slots
+// or a pending commit-confirmed record (#10297). Every commit pushes the
+// pre-commit tree into the rollback history, so such markers prove the box
+// previously committed: this is a deleted/lost DB, not a never-booted store.
+// It is distinct from an absent DB with no markers
 // (start-fresh, no error), from ErrConfigDBUnreadable (present but unreadable
 // bytes), and from ErrConfigCompile (present bytes that no longer compile).
 //
@@ -147,9 +147,8 @@ const (
 	// committed= marker — is authenticated instead of freely editable.
 	EnvelopeFormatVersion = 2
 
-	// EnvelopeASTVersion is the current config AST/schema version the
-	// writer stamps. Informational today (carried for future migrations);
-	// not gated on read.
+	// EnvelopeASTVersion is the config AST/schema version supported by this
+	// reader and stamped by the writer.
 	EnvelopeASTVersion = 1
 
 	// EnvelopeMinReaderVersion is the minimum envelope-format version a
@@ -173,10 +172,8 @@ const (
 	// migrate to v2 on their next write, so there is no flag day.
 	envelopeAADFormatVersion = 2
 
-	// EnvelopeRollbackFormatVersion is the rollback-slot DB format version
-	// (carried so a future rollback-format change is detectable). The
-	// auto-rollback DB-restore path (xpf-upgrade) keys binary+DB atomic
-	// rollback on this matching.
+	// EnvelopeRollbackFormatVersion is the rollback-slot format supported by
+	// this reader and stamped by the writer.
 	EnvelopeRollbackFormatVersion = 1
 )
 
@@ -195,11 +192,13 @@ const committedFieldKey = "committed"
 
 // envelopeHeader is the parsed content of the magic header line.
 type envelopeHeader struct {
-	FormatVersion  int
-	Writer         string
-	ASTVersion     int
-	MinReader      int
-	RollbackFormat int
+	FormatVersion     int
+	Writer            string
+	ASTVersion        int
+	MinReader         int
+	RollbackFormat    int
+	hasASTVersion     bool
+	hasRollbackFormat bool
 
 	// Committed records the #1922 step-0 marker. It defaults to TRUE — a
 	// header that omits the committed= field (an older-build DB, or any
@@ -373,6 +372,7 @@ func parseEnvelopeHeader(line string) (*envelopeHeader, error) {
 				return nil, fmt.Errorf("config envelope: bad ast=%q: %w", v, err)
 			}
 			hdr.ASTVersion = n
+			hdr.hasASTVersion = true
 		case "min-reader":
 			n, err := strconv.Atoi(v)
 			if err != nil {
@@ -385,6 +385,7 @@ func parseEnvelopeHeader(line string) (*envelopeHeader, error) {
 				return nil, fmt.Errorf("config envelope: bad rollback-fmt=%q: %w", v, err)
 			}
 			hdr.RollbackFormat = n
+			hdr.hasRollbackFormat = true
 		case committedFieldKey:
 			// #7176 (C179-053): CANONICAL parse. This was strconv.Atoi followed
 			// by `n != 0`, which accepted "2", "-1", "+1", "007" and " 1" as
@@ -413,6 +414,14 @@ func parseEnvelopeHeader(line string) (*envelopeHeader, error) {
 			// Unknown fields are tolerated (additive forward-compat); the
 			// v=/min-reader gate is what governs readability.
 		}
+	}
+	if hdr.hasASTVersion && hdr.ASTVersion != EnvelopeASTVersion {
+		return nil, fmt.Errorf("config envelope AST version %d is unsupported (this build supports %d); refusing to load",
+			hdr.ASTVersion, EnvelopeASTVersion)
+	}
+	if hdr.hasRollbackFormat && hdr.RollbackFormat != EnvelopeRollbackFormatVersion {
+		return nil, fmt.Errorf("config envelope rollback format %d is unsupported (this build supports %d); refusing to load",
+			hdr.RollbackFormat, EnvelopeRollbackFormatVersion)
 	}
 	if !seenVersion {
 		return nil, fmt.Errorf("config envelope: header missing required v= field: %q", line)

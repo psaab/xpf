@@ -87,16 +87,6 @@ func rollbackSlotIdentityForPath(path string) (rollbackSlotIdentity, bool) {
 	}, true
 }
 
-func (s *Store) writeRollbackMetadata(entries []rollbackSlotMetadataEntry) error {
-	generation := uint64(0)
-	for _, entry := range entries {
-		if entry.Generation > generation {
-			generation = entry.Generation
-		}
-	}
-	return s.writeRollbackMetadataGeneration(generation, entries)
-}
-
 func (s *Store) writeRollbackMetadataGeneration(generation uint64, entries []rollbackSlotMetadataEntry) error {
 	path := s.rollbackMetadataPath()
 	activeHash, activeIdentity := s.rollbackActiveBindingForWrite()
@@ -119,11 +109,6 @@ func (s *Store) writeRollbackMetadataGeneration(generation uint64, entries []rol
 		return fmt.Errorf("persist rollback metadata: %w", err)
 	}
 	return nil
-}
-
-func (s *Store) readRollbackMetadata() []rollbackSlotMetadataEntry {
-	_, _, _, entries := s.readRollbackMetadataSnapshot()
-	return entries
 }
 
 func (s *Store) readRollbackMetadataSnapshot() (uint64, string, rollbackSlotIdentity, []rollbackSlotMetadataEntry) {

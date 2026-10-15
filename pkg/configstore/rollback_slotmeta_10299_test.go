@@ -155,14 +155,15 @@ func TestRollbackSlotMetadataRejectsStaleManifestForDuplicateBytes_10299(t *test
 	if _, err := s.CommitWithDescription("same-bytes-old"); err != nil {
 		t.Fatalf("first no-op commit: %v", err)
 	}
-	stale := append([]rollbackSlotMetadataEntry(nil), s.readRollbackMetadata()...)
+	_, _, _, stale := s.readRollbackMetadataSnapshot()
+	stale = append([]rollbackSlotMetadataEntry(nil), stale...)
 	if len(stale) == 0 || stale[0].Comment != "same-bytes-old" {
 		t.Fatalf("setup: stale sidecar lacks the duplicate-byte comment: %#v", stale)
 	}
 	if _, err := s.CommitWithDescription("same-bytes-new"); err != nil {
 		t.Fatalf("second no-op commit: %v", err)
 	}
-	fresh := s.readRollbackMetadata()
+	_, _, _, fresh := s.readRollbackMetadataSnapshot()
 	if len(fresh) == 0 || fresh[0].Hash != stale[0].Hash {
 		t.Fatalf("setup: no-op commits did not retain identical slot bytes: stale=%#v fresh=%#v", stale, fresh)
 	}
@@ -172,7 +173,13 @@ func TestRollbackSlotMetadataRejectsStaleManifestForDuplicateBytes_10299(t *test
 
 	// Model a crash after the slot rewrite but before the metadata-sidecar
 	// rename: the old manifest is visible alongside the new slot inode.
-	if err := s.writeRollbackMetadata(stale); err != nil {
+	generation := uint64(0)
+	for _, entry := range stale {
+		if entry.Generation > generation {
+			generation = entry.Generation
+		}
+	}
+	if err := s.writeRollbackMetadataGeneration(generation, stale); err != nil {
 		t.Fatalf("restore stale metadata: %v", err)
 	}
 	s2 := newTestStoreAt(t, path)
