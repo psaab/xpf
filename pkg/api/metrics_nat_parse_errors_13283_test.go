@@ -14,21 +14,23 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// #13283 (D3-08): NAT reconcile parse errors counted in the helper must
-// reach Prometheus as xpf_userspace_nat_parse_errors_total. Driving the
-// real Collect (not the emitter) proves the wiring; RED pre-fix because
-// ProcessStatus has no NATParseErrorsTotal field and no series exists.
+// #13283 (D3-08): parse/validation failures must retain their NAT builder
+// type from the helper through ProcessStatus and the Prometheus scrape.
 func TestNATParseErrorsReachScrape13283(t *testing.T) {
 	store := newDescriptorCoverageStore(t)
 	srv := &Server{store: store, gc: conntrack.NewGC(nil, time.Minute), startTime: time.Now()}
 	srv.dp = &descriptorCoverageDP{
 		Manager: dataplane.New(),
-		status:  dpuserspace.ProcessStatus{NATParseErrorsTotal: 7},
+		status: dpuserspace.ProcessStatus{
+			SourceNATParseErrors:      7,
+			DestinationNATParseErrors: 11,
+			StaticNATParseErrors:      13,
+		},
 	}
 	c := newCollector(srv)
 	ch := make(chan prometheus.Metric, 4096)
 	done := make(chan struct{})
-	found := -1.0
+	found := make(map[string]float64)
 	go func() {
 		defer close(done)
 		for m := range ch {
@@ -37,20 +39,33 @@ func TestNATParseErrorsReachScrape13283(t *testing.T) {
 				continue
 			}
 			if strings.Contains(m.Desc().String(), `"xpf_userspace_nat_parse_errors_total"`) {
-				found = pbm.GetCounter().GetValue()
+				kind := ""
+				for _, label := range pbm.GetLabel() {
+					if label.GetName() == "type" {
+						kind = label.GetValue()
+						break
+					}
+				}
+				found[kind] = pbm.GetCounter().GetValue()
 			}
 		}
 	}()
 	c.Collect(ch)
 	close(ch)
 	<-done
-	if found != 7 {
-		t.Fatalf("xpf_userspace_nat_parse_errors_total = %v, want 7", found)
+	for kind, want := range map[string]float64{"source": 7, "destination": 11, "static": 13} {
+		if found[kind] != want {
+			t.Errorf("xpf_userspace_nat_parse_errors_total{type=%q} = %v, want %v", kind, found[kind], want)
+		}
 	}
 }
 
 func TestNATParseErrorsStatusJSON13283(t *testing.T) {
-	input := dpuserspace.ProcessStatus{NATParseErrorsTotal: 17}
+	input := dpuserspace.ProcessStatus{
+		SourceNATParseErrors:      17,
+		DestinationNATParseErrors: 19,
+		StaticNATParseErrors:      23,
+	}
 	raw, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
@@ -59,14 +74,23 @@ func TestNATParseErrorsStatusJSON13283(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if string(fields["nat_parse_errors_total"]) != "17" {
-		t.Fatalf("nat_parse_errors_total = %s, want 17", fields["nat_parse_errors_total"])
+	for key, want := range map[string]string{
+		"source_nat_parse_errors":      "17",
+		"destination_nat_parse_errors": "19",
+		"static_nat_parse_errors":      "23",
+	} {
+		if string(fields[key]) != want {
+			t.Errorf("%s = %s, want %s", key, fields[key], want)
+		}
 	}
 	var output dpuserspace.ProcessStatus
 	if err := json.Unmarshal(raw, &output); err != nil {
 		t.Fatal(err)
 	}
-	if output.NATParseErrorsTotal != 17 {
-		t.Fatalf("decoded NATParseErrorsTotal = %d, want 17", output.NATParseErrorsTotal)
+	if output.SourceNATParseErrors != 17 ||
+		output.DestinationNATParseErrors != 19 ||
+		output.StaticNATParseErrors != 23 {
+		t.Fatalf("decoded NAT parse counts = (%d, %d, %d), want (17, 19, 23)",
+			output.SourceNATParseErrors, output.DestinationNATParseErrors, output.StaticNATParseErrors)
 	}
 }

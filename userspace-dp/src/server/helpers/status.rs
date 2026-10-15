@@ -593,7 +593,10 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.nptv6_outbound_translations = nptv6.outbound_translations;
     state.status.nptv6_untranslatable_drops = nptv6.untranslatable_drops;
     state.status.filter_term_counters = state.afxdp.filter_term_counters();
-    state.status.nat_parse_errors_total = state.afxdp.nat_parse_errors();
+    let (source, destination, static_nat) = state.afxdp.nat_parse_errors_by_type();
+    state.status.source_nat_parse_errors = source;
+    state.status.destination_nat_parse_errors = destination;
+    state.status.static_nat_parse_errors = static_nat;
     // #3651: publish the pre-summed per-zone traffic block. Stamp the layout
     // version only when there is data (rows or overflow) so a helper with no
     // configured/active zones keeps the wire omitted (cold-path convention).

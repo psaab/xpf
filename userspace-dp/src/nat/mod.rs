@@ -455,14 +455,12 @@ type NatCounterRegistry = FxHashMap<u32, Arc<NatRuleCounter>>;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NatCounterStore {
     counters: Arc<Mutex<NatCounterRegistry>>,
-    /// #4718: cumulative count of NAT reconcile PARSE failures — a rule or
-    /// match prefix the Go control plane sent whose IP/prefix/pool field this
-    /// helper could not parse, so the offending rule/prefix was dropped from
-    /// the rebuilt forwarding state. Shared behind an `Arc` so a clone handed
-    /// to `from_snapshots` increments the SAME atomic the coordinator (and the
-    /// fail-on-revert test) reads. Monotonic error counter, not a gauge: it is
-    /// only bumped, never reset by a reconcile.
-    parse_errors: Arc<AtomicU64>,
+    /// #4718: cumulative NAT reconcile parse/validation failures, partitioned
+    /// by the builder that rejected or repaired the configured field. Shared
+    /// behind `Arc`s so cloned stores update the coordinator-visible totals.
+    source_parse_errors: Arc<AtomicU64>,
+    destination_parse_errors: Arc<AtomicU64>,
+    static_parse_errors: Arc<AtomicU64>,
     /// #6823: the `record_parse_error` DETAILS, captured in test builds so a
     /// test can bind what the operator is told and not merely how many drops
     /// happened. Two drops with different causes are indistinguishable by
@@ -593,13 +591,37 @@ impl NatCounterStore {
     /// the fail-on-revert test asserts. These reconcilers run only during
     /// control-plane config apply / peer-sync, never the packet hot path, so
     /// the log adds no forwarding latency.
-    pub(crate) fn record_parse_error(&self, detail: &str) {
-        self.parse_errors.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_source_parse_error(&self, detail: &str) {
+        self.record_parse_error(&self.source_parse_errors, detail);
+    }
+
+    pub(crate) fn record_destination_parse_error(&self, detail: &str) {
+        self.record_parse_error(&self.destination_parse_errors, detail);
+    }
+
+    pub(crate) fn record_static_parse_error(&self, detail: &str) {
+        self.record_parse_error(&self.static_parse_errors, detail);
+    }
+
+    fn record_parse_error(&self, counter: &AtomicU64, detail: &str) {
+        counter.fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         if let Ok(mut d) = self.parse_error_details.lock() {
             d.push(detail.to_string());
         }
-        eprintln!("xpf nat reconcile: dropping rule (unparseable field): {detail}");
+        eprintln!("xpf nat reconcile: parse/validation failure: {detail}");
+    }
+
+    pub(crate) fn source_parse_errors(&self) -> u64 {
+        self.source_parse_errors.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn destination_parse_errors(&self) -> u64 {
+        self.destination_parse_errors.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn static_parse_errors(&self) -> u64 {
+        self.static_parse_errors.load(Ordering::Relaxed)
     }
 
     /// #6823: the details recorded by [`record_parse_error`](Self::record_parse_error),
@@ -613,10 +635,11 @@ impl NatCounterStore {
             .unwrap_or_default()
     }
 
-    /// #4718: cumulative NAT reconcile parse-failure count. A `> 0` value
-    /// means at least one configured NAT rule/prefix was dropped at the helper
-    /// boundary and did NOT reach the dataplane.
+    /// #4718: aggregate parse/validation failure count across all NAT builders.
+    #[cfg(test)]
     pub(crate) fn parse_errors(&self) -> u64 {
-        self.parse_errors.load(Ordering::Relaxed)
+        self.source_parse_errors()
+            + self.destination_parse_errors()
+            + self.static_parse_errors()
     }
 }

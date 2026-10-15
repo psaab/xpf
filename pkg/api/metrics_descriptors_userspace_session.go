@@ -15,8 +15,8 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 	)
 	c.userspaceNATParseErrorsTotal = prometheus.NewDesc(
 		"xpf_userspace_nat_parse_errors_total",
-		"Configured NAT rules dropped by the helper because a snapshot field could not be parsed or represented.",
-		nil, nil,
+		"Cumulative NAT snapshot parse or validation failures, partitioned by source, destination, and static NAT rules.",
+		[]string{"type"}, nil,
 	)
 	// #8447: source-NAT rule-match outcomes. Consulted is the denominator that
 	// makes the other three readable — it counts every packet that REACHED the

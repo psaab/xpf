@@ -3171,5 +3171,17 @@ fn dnat_unknown_protocol_token_surfaces_parse_error_13283() {
         }],
         &counters,
     );
-    assert_eq!(counters.parse_errors(), 1, "#13283: unknown DNAT protocol token must be counted");
+    assert_eq!(counters.destination_parse_errors(), 1);
+}
+
+#[test]
+fn nat_parse_errors_are_partitioned_by_builder_13283() {
+    let counters = crate::nat::NatCounterStore::default();
+    counters.record_source_parse_error("source test");
+    counters.record_destination_parse_error("destination test");
+    counters.record_static_parse_error("static test");
+    assert_eq!(counters.source_parse_errors(), 1);
+    assert_eq!(counters.destination_parse_errors(), 1);
+    assert_eq!(counters.static_parse_errors(), 1);
+    assert_eq!(counters.parse_errors(), 3);
 }

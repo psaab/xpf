@@ -1070,7 +1070,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 		),
 		userspaceNATParseErrorsTotal: prometheus.NewDesc(
-			"xpf_userspace_nat_parse_errors_total", "nat parse errors", nil, nil,
+			"xpf_userspace_nat_parse_errors_total", "nat parse errors", []string{"type"}, nil,
 		),
 		// #8447: source-NAT rule-match outcome quartet.
 		userspaceSourceNATMatchConsulted: prometheus.NewDesc(
@@ -1762,7 +1762,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		EmbeddedQuoteSubminimalRefusedTotal:         47,
 		EmbeddedErrorPerSessionSuppressedTotal:      59,
 		InterfaceSNATIdentityExhaustionTotal:        19,
-		NATParseErrorsTotal: 7,
+		SourceNATParseErrors:      7,
+		DestinationNATParseErrors: 11,
+		StaticNATParseErrors:      13,
 		InterfaceSNATSyncIdentityConflictDropsTotal: 29,
 		InterfaceSNATRegistryCapExhaustionTotal:     23,
 		// #1861: install-refusal trio emitted unconditionally.
@@ -1885,13 +1887,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// outcomes add four distinct lifetime counters, for 94 total; #11437's
 	// unbuildable-PTB counter adds one more, for 95; #11503 adds distinct
 	// unzoned ingress/egress cause counters, for 97; #9506 S9.5 adds the
-	// permit-forward-armed counter, for 98.
+	// permit-forward-armed counter, for 98. #13283 adds three typed NAT parse
+	// failure series, bringing this emitter census to 101.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
-	// an unverified metric. All new series ARE asserted below, so the original
-	// claim still holds and the number moves with the population.
-if len(got) != 102 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 102 metrics, got %d", len(got))
+	// #13283 replaces one aggregate series with three typed counters, bringing the count to 104.
+	// All new series are asserted below so the census remains an assertion gate.
+	if len(got) != 104 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 104 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1916,7 +1919,9 @@ if len(got) != 102 {
 	// #7056: assert the VALUES, not merely that two more series appeared — a
 	// census bump alone would pass against emits wired to the wrong field.
 	assertCounterClose(t, got, c.userspaceNAT64FragCrossDomainMisses, nil, 23)
-	assertCounterClose(t, got, c.userspaceNATParseErrorsTotal, nil, 7)
+	assertCounterClose(t, got, c.userspaceNATParseErrorsTotal, map[string]string{"type": "source"}, 7)
+	assertCounterClose(t, got, c.userspaceNATParseErrorsTotal, map[string]string{"type": "destination"}, 11)
+	assertCounterClose(t, got, c.userspaceNATParseErrorsTotal, map[string]string{"type": "static"}, 13)
 	assertCounterClose(t, got, c.userspaceIPv6AHFlowlessTotal, nil, 31)
 	assertCounterClose(t, got, c.userspaceNAT64FragProtocolAliasMisses, nil, 29)
 	assertCounterClose(t, got, c.userspaceNAT64OverBudgetTotal, nil, 41)
