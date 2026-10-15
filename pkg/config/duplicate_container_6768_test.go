@@ -20,28 +20,18 @@ import (
 // from the hierarchical shape — which is exactly the dual-AST-equivalence
 // invariant the #5180 gate already exists to enforce.
 //
-// Population measured at master: SIX sites, in three distinct loss modes.
+// Population measured at master: three sites, in three distinct loss modes.
 //
 //	security log stream <n>      last-writer-wins  Streams[name] = stream
 //	security log profile <n>     last-writer-wins  Profiles[name] = p
 //	protocols bgp group <n>      split instances   per-instance local state
-//	services flow-monitoring     first-wins        FindChild
-//	services rpm                 first-wins        FindChild
-//	services ip-monitoring       first-wins        FindChild
 //
-// Three of the six are the effects the issue names; the other three came from
-// the predicate. A count that rises when the population is derived properly is
-// the derivation working, not scope creep.
-//
-// The fix registers all six in the #5180 duplicate-named-block gate: strict
-// reject on commit / commit-check, warn on the tolerant load / peer-sync path
-// (#1960 no-brick). It deliberately does NOT fold the blocks together. #6992
-// folded `system login user` because two READERS picked different blocks — a
-// credential authored under a VIEW-only block could authenticate into a
-// super-user CLI — and a fold was the only way to remove the divergence. There
-// is no divergent reader here: the loss is a plain silent drop, which is the
-// shape `groups` / `interfaces` / `screen ids-option` are handled with, so the
-// gate alone is the matching remedy.
+// The services rows from the original report have been fixed by accumulating
+// sibling containers in the compiler and are covered by TestCompileServicesMultipleSiblingBlocks13216.
+
+// The remaining rows use the #5180 duplicate-named-block gate: strict reject
+// on commit / commit-check, warn on tolerant load / peer-sync (#1960 no-brick).
+// These sites still have divergent last-writer/split-instance behavior.
 
 // dup6768Case is one registry row plus the fixture that reproduces its loss.
 type dup6768Case struct {
@@ -152,60 +142,6 @@ protocols {
     }
 }`,
 		},
-		{
-			name:     "services_flow_monitoring",
-			kind:     "services container",
-			instance: "flow-monitoring",
-			effect:   "FIRST block",
-			dupSrc: `services {
-    flow-monitoring { version9 { template t { flow-active-timeout 30; } } }
-    flow-monitoring { version-ipfix { template u { flow-active-timeout 40; } } }
-}`,
-			oneSrc: `services {
-    flow-monitoring {
-        version9 { template t { flow-active-timeout 30; } }
-        version-ipfix { template u { flow-active-timeout 40; } }
-    }
-}`,
-		},
-		{
-			name:     "services_rpm",
-			kind:     "services container",
-			instance: "rpm",
-			effect:   "FIRST block",
-			dupSrc: `services {
-    rpm { probe p1 { test t1 { target address 10.0.0.1; } } }
-    rpm { probe p2 { test t2 { target address 10.0.0.2; } } }
-}`,
-			oneSrc: `services {
-    rpm {
-        probe p1 { test t1 { target address 10.0.0.1; } }
-        probe p2 { test t2 { target address 10.0.0.2; } }
-    }
-}`,
-		},
-		{
-			name:     "services_ip_monitoring",
-			kind:     "services container",
-			instance: "ip-monitoring",
-			effect:   "FIRST block",
-			dupSrc: `services {
-    rpm { probe pr { test tt { target address 10.0.0.1; } } }
-    ip-monitoring {
-        policy a { match { rpm-probe pr; } then { preferred-route { route 0.0.0.0/0 { next-hop 10.0.0.254; } } } }
-    }
-    ip-monitoring {
-        policy b { match { rpm-probe pr; } then { preferred-route { route 1.0.0.0/8 { next-hop 10.0.0.253; } } } }
-    }
-}`,
-			oneSrc: `services {
-    rpm { probe pr { test tt { target address 10.0.0.1; } } }
-    ip-monitoring {
-        policy a { match { rpm-probe pr; } then { preferred-route { route 0.0.0.0/0 { next-hop 10.0.0.254; } } } }
-        policy b { match { rpm-probe pr; } then { preferred-route { route 1.0.0.0/8 { next-hop 10.0.0.253; } } } }
-    }
-}`,
-		},
 	}
 }
 
@@ -285,20 +221,13 @@ func TestUnregisteredContainerRepeatStillAccepted_6768(t *testing.T) {
 		t.Fatalf("CompileConfig rejected a repeated presence flag, which loses nothing: %v", err)
 	}
 
-	// And a REGISTERED container repeated as an empty leaf. The singleton walk
-	// skips `c.IsLeaf` deliberately: two empty `flow-monitoring;` statements
-	// carry no configuration, so neither can lose any, and rejecting them would
-	// be a false positive on a config that is merely redundant. Without this
-	// cell the guard is unbound — the mutation matrix removed it and every
-	// other cell stayed green, because the presence-flag fixture above uses a
-	// keyword that is not in the registry at all and so never reaches it.
+	// Repeated empty flow-monitoring leaves carry no config and remain accepted.
 	leafTree := parseHier5180(t, `services {
     flow-monitoring;
     flow-monitoring;
 }`)
 	if _, err := CompileConfig(leafTree); err != nil {
-		t.Fatalf("CompileConfig rejected two EMPTY flow-monitoring statements, which "+
-			"cannot lose configuration: %v", err)
+		t.Fatalf("CompileConfig rejected two EMPTY flow-monitoring statements, which cannot lose configuration: %v", err)
 	}
 }
 
@@ -357,12 +286,13 @@ func TestDuplicateContainerInGroupBodyCaught_6768(t *testing.T) {
     }
 }
 apply-groups g1;`)
-	_, err := CompileConfig(tree)
-	if err == nil {
-		t.Fatal("CompileConfig accepted a duplicate container authored inside an applied group body")
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig rejected merged service siblings in applied group: %v", err)
 	}
-	if !strings.Contains(err.Error(), "flow-monitoring") {
-		t.Errorf("error %q does not name the duplicated container", err.Error())
+	fm := cfg.Services.FlowMonitoring
+	if fm == nil || fm.Version9 == nil || fm.VersionIPFIX == nil {
+		t.Fatalf("applied group service siblings were not accumulated: %+v", fm)
 	}
 }
 
@@ -418,22 +348,17 @@ protocols {
 		}
 	})
 
-	t.Run("monitoring_state_erased", func(t *testing.T) {
+	t.Run("monitoring_state_accumulated", func(t *testing.T) {
 		cfg := lenientHier6768(t, `services {
     flow-monitoring { version9 { template t { flow-active-timeout 30; } } }
     flow-monitoring { version-ipfix { template u { flow-active-timeout 40; } } }
 }`)
 		fm := cfg.Services.FlowMonitoring
-		if fm == nil {
-			t.Fatal("flow-monitoring missing entirely")
+		if fm == nil || fm.Version9 == nil || fm.Version9.Templates["t"] == nil {
+			t.Fatalf("version9 state missing: %+v", fm)
 		}
-		if fm.Version9 == nil {
-			t.Error("version9 (the FIRST block) should survive")
-		}
-		if fm.VersionIPFIX != nil {
-			t.Fatal("version-ipfix survived; the measured pre-gate behaviour is that " +
-				"compileServices reads flow-monitoring with FindChild, so the whole " +
-				"second block is ignored")
+		if fm.VersionIPFIX == nil || fm.VersionIPFIX.Templates["u"] == nil {
+			t.Fatalf("version-ipfix sibling was not accumulated: %+v", fm)
 		}
 	})
 }
