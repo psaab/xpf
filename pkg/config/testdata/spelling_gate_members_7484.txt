@@ -873,8 +873,8 @@ unreachable (leaf changed nothing)	security nat source interface port-overloadin
 COMPARED	security nat source pool <*> address
 COMPARED	security nat source pool <*> persistent-nat inactivity-timeout
 unreachable (leaf changed nothing)	security nat source pool <*> persistent-nat permit
-err (parent stanza does not compile)	security nat source pool <*> port deterministic block-size
-err (parent stanza does not compile)	security nat source pool <*> port deterministic host address
+COMPARED	security nat source pool <*> port deterministic block-size
+COMPARED	security nat source pool <*> port deterministic host address
 flag (read, but value-less)	security nat source pool <*> port no-translation
 COMPARED	security nat source pool <*> port-overloading-factor
 COMPARED	security nat source pool <*> routing-instance

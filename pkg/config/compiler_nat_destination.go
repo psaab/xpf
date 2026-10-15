@@ -87,32 +87,23 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			case "port":
 				// Top-level `port <N>` form (flat-set / older configs).
 				if v := nodeVal(prop); v != "" {
-					// #3450: preserve the raw token so the strict gate and the
-					// snapshot builder can reject a configured-but-invalid port
-					// (0/out-of-range/non-numeric) rather than wrap on a uint16
-					// cast or collapse to the preserve-destination-port default.
 					pool.PortRaw = v
 					if n, err := strconv.Atoi(v); err == nil {
 						pool.Port = n
 					}
 				}
 			case "routing-instance":
-				// #4292: destination-pool translation-target routing-instance.
-				// Accepted + recorded for the advisory (ValidateConfig); not
-				// enforced (the dataplane does not route the post-translation
-				// packet against a non-ingress table).
 				if v := nodeVal(prop); v != "" {
 					pool.RoutingInstance = v
 				}
+			default:
+				// #13538: keep destination-pool leaves visible to the symmetric
+				// source/destination strict gate; unsupported options must not vanish.
+				pool.UnknownLeaves = append(pool.UnknownLeaves, prop.Name())
 			}
 		}
 
 		if existing := sec.NAT.Destination.Pools[pool.Name]; existing != nil {
-			// A repeated hierarchical pool block is the same named object
-			// as its flat-set counterpart. Merge fields instead of replacing
-			// the prior object, otherwise a block carrying only `port` or
-			// `routing-instance` silently discards the address from the first
-			// (and vice versa).
 			if pool.Address != "" {
 				existing.Address = pool.Address
 				existing.AddressInvalidSpec = pool.AddressInvalidSpec
@@ -124,6 +115,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			if pool.RoutingInstance != "" {
 				existing.RoutingInstance = pool.RoutingInstance
 			}
+			existing.UnknownLeaves = append(existing.UnknownLeaves, pool.UnknownLeaves...)
 		} else {
 			sec.NAT.Destination.Pools[pool.Name] = pool
 		}

@@ -408,7 +408,9 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // unit of slack would let either restored leaf go blind again unnoticed.
 // #13112 makes the wildcard-inherited zone `tcp-rst` leaf observable to the
 // differential, moving it from flag to compared; tighten both ratchets.
-const gateCoverageFloor = 789
+// #13538 moves the two deterministic source-pool validations from compiler-time
+// errors to uniform strict gates, so the spelling differential can compare them.
+const gateCoverageFloor = 791
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent
@@ -737,9 +739,10 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// class, so the new leaf inherits the family's harness blindness rather
 	// than introducing a new one. Making the parent compile in the harness
 	// would move the whole then-family out together and is a harness change
-	// beyond this leaf's verdict, deliberately not folded in here. No leaf
-	// changed class (the members registry names only arrivals).
-	gateBlindErr: 37, // #12662 tightens to the measured 37-member population.
+	// beyond this leaf's verdict, deliberately not folded in here.
+	// #13538 moved two source-pool deterministic checks to the uniform gate,
+	// restoring spelling comparisons; tighten the measured error population.
+	gateBlindErr: 35,
 	// TIGHTENED 1 -> 0. The single member of this class was
 	// `policy-options policy-statement <*> then`, and it is gone because the
 	// schema now declares that node's children instead of calling it a bare
