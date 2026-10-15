@@ -2585,3 +2585,129 @@ fn stage11_raw_esp_tail_still_reassembles_after_neighbor_resolution_10957() {
         "raw ESP reassembly requires the original passthrough source"
     );
 }
+
+#[test]
+fn missing_neighbor_first_fragment_installs_frag_assoc_13526() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors.clear();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-lan-wan".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+
+    let first = udp_frag_frame_5689(0x2000, 0xbeef);
+    let (_batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        udp_native_frag_meta_5689(),
+        true,
+    );
+    assert_eq!(
+        dbg.missing_neigh, 1,
+        "#13526 premise: the first fragment must take the missing-neighbor path"
+    );
+    assert_eq!(sessions.len(), 1, "#13526 premise: the seed installs exactly one session");
+
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(), 1,
+        "#13526: a committed first-fragment MissingNeighborSeed must publish its fragment association"
+    );
+}
+#[test]
+fn missing_neighbor_syn_sheds_opening_session_at_capacity_13526() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.neighbors.clear();
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(1);
+    let opening_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+        src_port: 40000,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    assert!(sessions.install_with_protocol(
+        opening_key.clone(),
+        frag_test_decision(),
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 24,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_SYN,
+    ));
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(172, 16, 80, 200),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let ha_state = BTreeMap::new();
+    let (_batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    assert_eq!(dbg.missing_neigh, 1, "#13526 premise: seed takes neighbor-miss arm");
+    let mut opening_present = false;
+    sessions.iter_with_origin(|key, _, _, _| {
+        opening_present |= key == &opening_key;
+    });
+    assert!(
+        !opening_present,
+        "#13526: an incomplete local TCP opening must be pressure-shed before seed refusal"
+    );
+    assert_eq!(sessions.len(), 1, "#13526: new missing-neighbor seed occupies the reclaimed slot");
+    let mut seeds = Vec::new();
+    sessions.iter_with_origin(|key, _, _, origin| {
+        if origin == SessionOrigin::MissingNeighborSeed {
+            seeds.push(key.clone());
+        }
+    });
+    assert_eq!(seeds.len(), 1, "#13526: successful pressure admission commits one seed");
+}

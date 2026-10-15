@@ -9834,7 +9834,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // application timeout on the seed.
                                         seed_inactivity_timeout,
                                     );
-                                    let pending_capacity_available =
+                                    let reuse_fits =
                                         if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {
                                             sessions.can_admit_after_closing_tcp_pair_for_syn(
                                                 1,
@@ -9842,9 +9842,100 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                             )
                                         } else {
-                                            true
+                                            sessions.can_admit(1)
                                         };
-                                    if owner_syn_reuse && pending_capacity_available {
+                                    let (pending_capacity_available, pressure_shed_sessions) =
+                                        if reuse_fits {
+                                            (true, crate::session::PressureShedSessions::new())
+                                        } else {
+                                            sessions.can_admit_new_syn(
+                                                1,
+                                                meta.protocol,
+                                                meta.tcp_flags,
+                                            )
+                                        };
+                                    let shed_keys: Vec<_> = pressure_shed_sessions
+                                        .iter()
+                                        .map(|shed| shed.key.clone())
+                                        .collect();
+                                    let shed_lease = crate::afxdp::bpf_map::global_tuple_gate()
+                                        .acquire_lease(shed_keys);
+                                    if shed_lease.is_ok() {
+                                        for shed in pressure_shed_sessions {
+                                            let shared_removal =
+                                                crate::afxdp::shared_ops::remove_shared_session_if(
+                                                    worker_ctx.shared_sessions,
+                                                    worker_ctx.shared_nat_sessions,
+                                                    worker_ctx.shared_forward_wire_sessions,
+                                                    &worker_ctx.shared_owner_rg_indexes,
+                                                    &shed.key,
+                                                    |current| {
+                                                        is_pressure_shed_shared_opening(
+                                                            current, &shed,
+                                                        )
+                                                    },
+                                                );
+                                            if matches!(
+                                                shared_removal,
+                                                crate::afxdp::shared_ops::SharedRemoval::Declined
+                                            ) {
+                                                continue;
+                                            }
+                                            crate::afxdp::bpf_map::release_coordinator_session_rows(
+                                                binding.bpf_maps.session_map.handle(),
+                                                &shed.key,
+                                            );
+                                            binding
+                                                .flow
+                                                .flow_cache
+                                                .invalidate_slot(&shed.key, binding.ifindex);
+                                            let _ = crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+                                                conntrack_v4_fd,
+                                                conntrack_v6_fd,
+                                                &shed.key,
+                                            );
+                                            if !shed.is_reverse {
+                                                crate::afxdp::checksum::delete_dnat_table_entry(
+                                                    &worker_ctx.dnat_fds,
+                                                    &shed.key,
+                                                    shed.decision.nat,
+                                                );
+                                            }
+                                            crate::afxdp::bpf_map::delete_live_session_entry(
+                                                binding.bpf_maps.session_map.handle(),
+                                                &shed.key,
+                                                shed.decision.nat,
+                                                shed.is_reverse,
+                                            );
+                                            crate::nat::release_source_nat_allocation_for_worker(
+                                                &worker_ctx.forwarding.iface_nat_allocators,
+                                                &worker_ctx.forwarding.source_nat_rules,
+                                                &shed.key,
+                                                shed.decision.nat,
+                                                shed.is_reverse,
+                                                now_ns,
+                                                worker_id,
+                                            );
+                                            crate::nat64::release_nat64_allocation_for_worker(
+                                                &worker_ctx.forwarding.nat64,
+                                                &shed.key,
+                                                shed.decision.nat,
+                                                shed.is_reverse,
+                                                now_ns,
+                                                worker_id,
+                                            );
+                                            crate::afxdp::session_glue::replicate_session_delete_repairing(
+                                                worker_ctx.peer_worker_commands,
+                                                worker_ctx.worker_commands_by_id,
+                                                worker_ctx.forwarding,
+                                                &shed.key,
+                                                shed.decision.nat,
+                                                shed.is_reverse,
+                                                now_ns,
+                                            );
+                                        }
+                                    }
+                                    if owner_syn_reuse && reuse_fits {
                                         crate::afxdp::shared_ops::evict_owner_closing_tcp_pair_for_syn(
                                             sessions,
                                             worker_ctx.shared_sessions,
@@ -9877,6 +9968,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             .installed_session_info(&flow.forward_key)
                                             .expect("successful neighbor seed has a table entry")
                                     });
+                                    if let Some(install_info) = pending_install_info.as_ref()
+                                        && let Some(l3_packet) = packet_frame.get(
+                                            verified_l3_or_stamp(
+                                                packet_frame,
+                                                meta.l3_offset,
+                                                meta.addr_family,
+                                            )..,
+                                        )
+                                    {
+                                        let frag_authority =
+                                            frag_ingress_authority_with_nat_scope(
+                                                worker_ctx.forwarding,
+                                                meta,
+                                                ingress_zone_override,
+                                                ingress_nat_scope_ifindex,
+                                            );
+                                        if frag_assoc::missing_neighbor_install_fragment_assoc(
+                                            worker_ctx.forwarding,
+                                            l3_packet,
+                                            meta.addr_family as i32,
+                                            frag_authority,
+                                            &pending_decision,
+                                            &flow.forward_key,
+                                            install_info.session_id,
+                                            now_ns,
+                                        ) {
+                                            telemetry.counters.record_nat64_frag_assoc_evicted();
+                                        }
+                                    }
                                     if pending_installed {
                                         if let Some(incarnation) = pending_leak_incarnation {
                                             sessions.stamp_leak_incarnation(
