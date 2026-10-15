@@ -371,18 +371,32 @@ func routingInstanceTunnelDeviceClaims(cfg *Config) []routingInstanceTunnelDevic
 		if ifc == nil {
 			continue
 		}
-		if tc := ifc.Tunnel; tc != nil && tc.RoutingInstance != "" {
-			out = append(out, routingInstanceTunnelDeviceClaim{
-				LinuxName: tc.Name, Instance: tc.RoutingInstance,
-				Member: fmt.Sprintf("%s tunnel routing-instance", ifName),
-				Tunnel: tc,
-			})
-		}
 		unitNums := make([]int, 0, len(ifc.Units))
 		for unitNum := range ifc.Units {
 			unitNums = append(unitNums, unitNum)
 		}
 		sort.Ints(unitNums)
+		if tc := ifc.Tunnel; tc != nil && tc.RoutingInstance != "" {
+			// A unit tunnel overrides the interface tunnel on that row,
+			// including unit 0 where both share a Linux device. Keep the
+			// interface claim only when a row still inherits it (#13139).
+			inherited := len(ifc.Units) == 0
+			for _, unitNum := range unitNums {
+				unit := ifc.Units[unitNum]
+				if unit == nil || unit.Tunnel == nil {
+					inherited = true
+					break
+				}
+			}
+			if inherited {
+				out = append(out, routingInstanceTunnelDeviceClaim{
+					LinuxName: tc.Name, Instance: tc.RoutingInstance,
+					Member: fmt.Sprintf("%s tunnel routing-instance", ifName),
+					Tunnel: tc,
+				})
+			}
+		}
+		// unitNums above also defines deterministic claim order.
 		for _, unitNum := range unitNums {
 			unit := ifc.Units[unitNum]
 			if unit == nil || unit.Tunnel == nil || unit.Tunnel.RoutingInstance == "" {
