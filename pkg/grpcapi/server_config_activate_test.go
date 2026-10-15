@@ -7,6 +7,8 @@ import (
 
 	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // newGRPCConfigStore returns a store in config mode with an active
@@ -148,5 +150,31 @@ func TestSetRPCDeactivateTabSeparatorRoutes(t *testing.T) {
 	}
 	if strings.Contains(out, "set deactivate") {
 		t.Fatalf("tab-separated deactivate mangled into a junk set path:\n%s", out)
+	}
+}
+func TestSetRPCAnnotateRoutesAndPersistsComment13554(t *testing.T) {
+	store := newGRPCConfigStore(t)
+	s := &Server{store: store}
+	if _, err := s.Set(ctxWithAuthorizedRoot(ctxWithPeerUID(0)), &pb.SetRequest{
+		Input: `annotate system host-name "edge fw"`,
+	}); err != nil {
+		t.Fatalf("Set(annotate): %v", err)
+	}
+	if out := store.ShowCandidate(); !strings.Contains(out, "/* edge fw */") {
+		t.Fatalf("candidate missing annotation:\n%s", out)
+	}
+}
+
+func TestSetRPCAnnotateRejectsMissingComment13554(t *testing.T) {
+	store := newGRPCConfigStore(t)
+	s := &Server{store: store}
+	_, err := s.Set(ctxWithAuthorizedRoot(ctxWithPeerUID(0)), &pb.SetRequest{
+		Input: "annotate system host-name",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Set(annotate without quoted comment) error = %v, want InvalidArgument", err)
+	}
+	if out := store.ShowCandidate(); strings.Contains(out, "/*") {
+		t.Fatalf("malformed annotate changed candidate:\n%s", out)
 	}
 }

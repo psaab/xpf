@@ -380,6 +380,12 @@ func (s *Store) Annotate(path []string, comment string) error {
 // AnnotateAs is Annotate scoped to a config-lock holder session (#5379,
 // mirroring the #5059 *As mutators). sessionID == "" bypasses ownership.
 func (s *Store) AnnotateAs(sessionID string, path []string, comment string) error {
+	return s.AnnotateAsPlantClass(sessionID, "", path, comment)
+}
+
+// AnnotateAsPlantClass binds the authenticated planting class atomically with
+// the annotation mutation.
+func (s *Store) AnnotateAsPlantClass(sessionID, plantClass string, path []string, comment string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -392,30 +398,19 @@ func (s *Store) AnnotateAs(sessionID string, path []string, comment string) erro
 	if s.candidate == nil {
 		return fmt.Errorf("not in configuration mode")
 	}
-	// #3900: reject a comment delimiter (or control character) in the
-	// annotation up front. An annotation is emitted verbatim into a
-	// `/* */` comment, so a `*/` would close the comment early and let the
-	// trailing text be re-parsed as configuration on the next Format→Parse
-	// (HA config sync, rollback/archive reload). The strict commit path
-	// enforces the same rule; this is the immediate-feedback layer.
+	// #3900: reject comments that could escape the emitted block comment or
+	// inject control characters. The strict commit path remains a backstop.
 	if err := config.ValidateAnnotationText(comment); err != nil {
 		return err
 	}
 
-	// #4587: resolve the target via the shared navigatePath traversal
-	// (ConfigTree.AnnotatePath) instead of a hand-rolled walk. The old walk
-	// consumed ONE path token per node but matched it against ANY key in a
-	// node's Keys, so a named / multi-key container — Keys=[security-zone,
-	// trust], [from-zone,untrust,to-zone,trust,policy,p], [family,inet] — was
-	// entered on its first key and then failed to find the argument token
-	// (trust, inet, ...) as a child: "path not found" for every zone, policy,
-	// interface-unit, and family-inet path. Annotate worked only for a chain
-	// of pure single-key nodes such as `system`. navigatePath consumes a
-	// multi-key node as a unit, so those paths now resolve; the single-key
-	// case is unchanged.
+	// #4587: navigatePath consumes multi-key configuration nodes as units,
+	// unlike the original one-token-per-node walk.
+	beforeTree := s.candidate.Clone()
 	if err := s.candidate.AnnotatePath(path, comment); err != nil {
 		return err
 	}
+	config.StampChangedEventPlantClasses(beforeTree, s.candidate, plantClass)
 	s.touchConfigLockLocked()       // #4476: refresh the config-lock idle lease
 	s.bumpCandidateMutationLocked() // #5848: candidate changed — advance the generation
 	s.dirty = true

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -148,6 +149,19 @@ func (s *Server) Set(ctx context.Context, req *pb.SetRequest) (*pb.SetResponse, 
 		return nil, status.Errorf(codes.PermissionDenied, "%v", err)
 	}
 	input := req.Input
+	fields := strings.Fields(input)
+	if len(fields) > 0 && fields[0] == "annotate" {
+		line := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
+		pathText, comment, ok := cliterm.AnnotateCommentFromLine(line)
+		if !ok || len(strings.Fields(pathText)) == 0 {
+			return nil, status.Error(codes.InvalidArgument, `usage: annotate <path> "comment"`)
+		}
+		path := strings.Fields(pathText)
+		if err := s.store.AnnotateAsPlantClass(sessionID, plantClass, path, comment); err != nil {
+			return nil, configMutationStatus(err)
+		}
+		return &pb.SetResponse{}, nil
+	}
 	if strings.HasPrefix(input, "copy ") || strings.HasPrefix(input, "rename ") {
 		return s.handleCopyRename(sessionID, plantClass, input)
 	}

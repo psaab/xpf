@@ -362,6 +362,23 @@ func (c *ctl) dispatchConfig(line string) error {
 		}
 		return nil
 
+	case "annotate":
+		// #13554: annotate rides Set like the other config mutations routed
+		// through Server.Set, with the verb retained for authorization.
+		remainder := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
+		pathText, comment, ok := cliterm.AnnotateCommentFromLine(remainder)
+		if !ok || len(strings.Fields(pathText)) == 0 {
+			fmt.Println("usage: annotate <path> \"comment\"")
+			return nil
+		}
+		fullPath := append(append([]string{}, c.editPath...), strings.Fields(pathText)...)
+		input := "annotate " + strings.Join(fullPath, " ") + " \"" + comment + "\""
+		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: input})
+		if err != nil {
+			return fmt.Errorf("%v", err)
+		}
+		fmt.Println("annotation set")
+		return nil
 	case "copy", "rename":
 		toIdx := -1
 		for i, p := range parts {
