@@ -494,6 +494,23 @@ pub(crate) enum ForwardNatQuoteLookup {
     Unique(ForwardSessionMatch),
 }
 
+/// #13078 (D5-05): single-probe expiry classification per index map.
+/// `IdleCrossed` keeps a stale local record fail-closed (its shared replica
+/// must not resurrect it); `Absent` means the index row does not exist.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SessionExpiryProbe<T> {
+    Live(T),
+    IdleCrossed,
+    Absent,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ForwardNatExpiryProbe {
+    Live(ForwardSessionMatch),
+    IdleCrossed,
+    Absent,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionOrigin {
     ForwardFlow,

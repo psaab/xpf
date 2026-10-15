@@ -1072,12 +1072,10 @@ fn probe_local_exact_at(
     key: &SessionKey,
     now_ns: u64,
 ) -> LocalExpiryProbe<(SessionLookup, SessionOrigin)> {
-    if let Some(hit) = sessions.probe_with_origin_at(key, now_ns) {
-        LocalExpiryProbe::Live(hit)
-    } else if sessions.probe_with_origin(key).is_some() {
-        LocalExpiryProbe::Stale
-    } else {
-        LocalExpiryProbe::Absent
+    match sessions.probe_with_origin_expiry(key, now_ns) {
+        crate::session::SessionExpiryProbe::Live(hit) => LocalExpiryProbe::Live(hit),
+        crate::session::SessionExpiryProbe::IdleCrossed => LocalExpiryProbe::Stale,
+        crate::session::SessionExpiryProbe::Absent => LocalExpiryProbe::Absent,
     }
 }
 
@@ -1086,12 +1084,10 @@ fn probe_local_wire_at(
     key: &SessionKey,
     now_ns: u64,
 ) -> LocalExpiryProbe<(ForwardSessionMatch, SessionOrigin)> {
-    if let Some(hit) = sessions.find_forward_wire_match_with_origin_at(key, now_ns) {
-        LocalExpiryProbe::Live(hit)
-    } else if sessions.find_forward_wire_match_with_origin(key).is_some() {
-        LocalExpiryProbe::Stale
-    } else {
-        LocalExpiryProbe::Absent
+    match sessions.find_forward_wire_match_expiry(key, now_ns) {
+        crate::session::SessionExpiryProbe::Live(hit) => LocalExpiryProbe::Live(hit),
+        crate::session::SessionExpiryProbe::IdleCrossed => LocalExpiryProbe::Stale,
+        crate::session::SessionExpiryProbe::Absent => LocalExpiryProbe::Absent,
     }
 }
 
@@ -1279,25 +1275,21 @@ pub(super) fn lookup_session_across_scopes_with_shared(
     // #10636: defer TCP close-state until the #9519 authority verdict names
     // the owner (applied by `apply_deferred_owner_close` after an Owner
     // verdict). A foreign RST/FIN must not drive close state it is dropped for.
-    if let Some((lookup, origin)) =
-        sessions.lookup_with_origin_deferring_close(key, now_ns, tcp_flags)
-    {
-        if is_fabric_wire_placeholder(
-            lookup.metadata.fabric_ingress,
-            lookup.metadata.is_reverse,
-            lookup.decision,
-        ) && let Some(shared) =
-            lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
-        {
-            return Some(ResolvedSessionLookup::shared(shared));
+    match sessions.lookup_with_origin_deferring_close_expiry(key, now_ns, tcp_flags) {
+        crate::session::SessionExpiryProbe::Live((lookup, origin)) => {
+            if is_fabric_wire_placeholder(
+                lookup.metadata.fabric_ingress,
+                lookup.metadata.is_reverse,
+                lookup.decision,
+            ) && let Some(shared) =
+                lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+            {
+                return Some(ResolvedSessionLookup::shared(shared));
+            }
+            return Some(ResolvedSessionLookup::local_query(lookup, origin));
         }
-        return Some(ResolvedSessionLookup::local_query(lookup, origin));
-    }
-    if matches!(
-        probe_local_exact_at(sessions, key, now_ns),
-        LocalExpiryProbe::Stale
-    ) {
-        return None;
+        crate::session::SessionExpiryProbe::IdleCrossed => return None,
+        crate::session::SessionExpiryProbe::Absent => {}
     }
     match probe_local_wire_at(sessions, key, now_ns) {
         LocalExpiryProbe::Live((matched, origin)) => {
@@ -1618,21 +1610,21 @@ fn lookup_forward_nat_across_scopes_inner(
         }
         ReverseDomainAdmission::QuotedTupleOnly => reply_key.routing_domain,
     };
-    let local_match = if let Some(now) = now_ns {
-        sessions.find_forward_nat_match_at(reply_key, now, &egress_domain)
-    } else {
-        sessions.find_forward_nat_match(reply_key, &egress_domain)
+    let local_match = match now_ns {
+        Some(now) => match sessions.find_forward_nat_match_expiry(
+            reply_key,
+            now,
+            &egress_domain,
+        ) {
+            crate::session::ForwardNatExpiryProbe::Live(hit) => Some(hit),
+            crate::session::ForwardNatExpiryProbe::IdleCrossed => {
+                // Do not resurrect an expired local entry from its shared clone.
+                return None;
+            }
+            crate::session::ForwardNatExpiryProbe::Absent => None,
+        },
+        None => sessions.find_forward_nat_match(reply_key, &egress_domain),
     };
-    if now_ns.is_some()
-        && local_match.is_none()
-        && sessions
-            .find_forward_nat_match(reply_key, &egress_domain)
-            .is_some()
-    {
-        // A wheel-lazy local entry was found but failed the strict age gate.
-        // Do not resurrect its shared-map clone on this worker.
-        return None;
-    }
     if let Some(local) = local_match {
         if is_fabric_wire_placeholder(
             local.metadata.fabric_ingress,

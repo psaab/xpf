@@ -18902,3 +18902,29 @@ fn session_upsert_fan_out_sheds_dead_sibling_12192() {
         "only the live sibling's queue attempt is counted as enqueued"
     );
 }
+
+#[test]
+fn across_scopes_absent_exact_key_uses_one_primary_index_probe_13078() {
+    let mut sessions = SessionTable::new();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let absent = test_key();
+
+    assert!(
+        lookup_session_across_scopes_for_test(
+            &mut sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &absent,
+            1_000_000,
+            TCP_FLAG_ACK,
+        )
+        .is_none(),
+        "absent key must miss across all scopes"
+    );
+    assert_eq!(
+        sessions.expiry_key_index_probe_count_for_test(),
+        1,
+        "#13078: the mutable exact lookup already distinguishes absent from stale"
+    );
+}
