@@ -240,6 +240,9 @@ type ProcessStatus struct {
 	// thus `show security nat source/destination/static rule`) reports the
 	// live translation count instead of a perpetual 0.
 	NATRuleCounters    []NATRuleCounterStatus            `json:"nat_rule_counters,omitempty"`
+	// NATParseErrorsTotal (#13283) counts helper-side NAT snapshot rules dropped
+	// because a field could not be parsed or represented.
+	NATParseErrorsTotal uint64 `json:"nat_parse_errors_total,omitempty"`
 	FilterTermCounters []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
 	// #3651: per-zone ingress/egress traffic (packet + byte) volume, summed
 	// across every worker/binding by the helper (ProcessStatus-level

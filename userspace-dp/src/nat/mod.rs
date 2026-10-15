@@ -613,14 +613,9 @@ impl NatCounterStore {
             .unwrap_or_default()
     }
 
-    /// #4718: cumulative NAT reconcile parse-failure count (see
-    /// [`record_parse_error`](Self::record_parse_error)). A `> 0` value means
-    /// at least one configured NAT rule/prefix was dropped at the helper
-    /// boundary and did NOT reach the dataplane. The operator-facing surface is
-    /// the per-drop `eprintln!` (journald); this accessor is the testable seam
-    /// the fail-on-revert tests assert, so it is gated to test builds to avoid
-    /// a dead-code warning until a metrics surface consumes it.
-    #[cfg(test)]
+    /// #4718: cumulative NAT reconcile parse-failure count. A `> 0` value
+    /// means at least one configured NAT rule/prefix was dropped at the helper
+    /// boundary and did NOT reach the dataplane.
     pub(crate) fn parse_errors(&self) -> u64 {
         self.parse_errors.load(Ordering::Relaxed)
     }

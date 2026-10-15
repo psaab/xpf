@@ -549,6 +549,10 @@ impl StaticNatTable {
                 if ext_prefix.base.is_ipv4() != int_prefix.base.is_ipv4()
                     || ext_prefix.len != int_prefix.len
                 {
+                    nat_counters.record_parse_error(&format!(
+                        "static-NAT rule {:?}: block prefixes {}/{} and {}/{} have mismatched family or length",
+                        snap.name, ext_prefix.base, ext_prefix.len, int_prefix.base, int_prefix.len
+                    ));
                     continue;
                 }
                 // #5658: a zero-length (`/0`) block prefix maps the ENTIRE
@@ -586,6 +590,10 @@ impl StaticNatTable {
                 // already rejects this; this is the lenient-load / peer-sync
                 // backstop, mirroring the host-side #2491 fail-closed behavior.
                 if snap.match_destination_port != 0 || snap.mapped_port != 0 {
+                    nat_counters.record_parse_error(&format!(
+                        "static-NAT rule {:?}: block prefix pair cannot represent destination or mapped ports",
+                        snap.name
+                    ));
                     continue;
                 }
                 table.blocks.push(StaticNatBlock {

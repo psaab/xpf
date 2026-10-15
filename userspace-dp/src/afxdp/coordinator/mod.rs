@@ -1625,6 +1625,10 @@ impl Coordinator {
     pub fn nat_rule_counters(&self) -> Vec<crate::protocol::NatRuleCounterStatus> {
         self.nat_counters.snapshots()
     }
+    /// #13283: cumulative helper-side NAT snapshot parse failures.
+    pub fn nat_parse_errors(&self) -> u64 {
+        self.nat_counters.parse_errors()
+    }
 
     /// Aggregate NPTv6 translation counters published with helper status.
     pub fn nptv6_counters(&self) -> crate::nptv6::Nptv6CounterSnapshot {

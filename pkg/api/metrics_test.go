@@ -1069,6 +1069,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceNATParseErrorsTotal: prometheus.NewDesc(
+			"xpf_userspace_nat_parse_errors_total", "nat parse errors", nil, nil,
+		),
 		// #8447: source-NAT rule-match outcome quartet.
 		userspaceSourceNATMatchConsulted: prometheus.NewDesc(
 			"xpf_userspace_source_nat_match_consulted_total", "consulted", nil, nil,
@@ -1759,6 +1762,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		EmbeddedQuoteSubminimalRefusedTotal:         47,
 		EmbeddedErrorPerSessionSuppressedTotal:      59,
 		InterfaceSNATIdentityExhaustionTotal:        19,
+		NATParseErrorsTotal: 7,
 		InterfaceSNATSyncIdentityConflictDropsTotal: 29,
 		InterfaceSNATRegistryCapExhaustionTotal:     23,
 		// #1861: install-refusal trio emitted unconditionally.
@@ -1886,8 +1890,8 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 101 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 101 metrics, got %d", len(got))
+if len(got) != 102 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 102 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1912,6 +1916,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// #7056: assert the VALUES, not merely that two more series appeared — a
 	// census bump alone would pass against emits wired to the wrong field.
 	assertCounterClose(t, got, c.userspaceNAT64FragCrossDomainMisses, nil, 23)
+	assertCounterClose(t, got, c.userspaceNATParseErrorsTotal, nil, 7)
 	assertCounterClose(t, got, c.userspaceIPv6AHFlowlessTotal, nil, 31)
 	assertCounterClose(t, got, c.userspaceNAT64FragProtocolAliasMisses, nil, 29)
 	assertCounterClose(t, got, c.userspaceNAT64OverBudgetTotal, nil, 41)

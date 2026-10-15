@@ -694,7 +694,13 @@ impl DnatTable {
                 }
                 token => match crate::ip_proto::proto_number(token) {
                     Some(p) => u16::from(p),
-                    None => continue,
+                    None => {
+                        nat_counters.record_parse_error(&format!(
+                            "DNAT rule {:?}: unknown protocol token {:?}",
+                            snap.name, token
+                        ));
+                        continue;
+                    }
                 },
             };
             let hit_counter = nat_counters.rule_counter(snap.counter_id);
