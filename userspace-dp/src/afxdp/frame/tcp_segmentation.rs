@@ -200,10 +200,12 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
     if mtu == 0 {
         return None;
     }
-    let Some(l3) = frame_l3_offset(frame) else {
-        return None;
-    };
+    let l3 = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?.l3;
     if l3 >= frame.len() {
+        return None;
+    }
+    // #13634: segmentation mutates authenticated bytes and must decline AH.
+    if ipv6_ah_sighted(frame, meta.addr_family, l3) {
         return None;
     }
     // #5148: defense in depth — never segment ANY IP fragment (first or
@@ -235,12 +237,9 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
     if payload.len() <= mtu {
         return None;
     }
-    let Some(frame_l4) = frame_l4_offset(frame, meta.addr_family) else {
-        return None;
-    };
-    let Some(tcp_offset) = frame_l4.checked_sub(l3) else {
-        return None;
-    };
+    // Resolve L4 only inside the IP-declared datagram. The frame-wide helper
+    // can otherwise walk extension bytes in trailing backing slack.
+    let tcp_offset = packet_rel_l4_offset(payload, meta.addr_family)?;
     let (ip_header_len, tcp_offset) = match meta.addr_family as i32 {
         libc::AF_INET => {
             if payload.len() < 20 {
@@ -1723,7 +1722,72 @@ mod mode_aware_segmentation_tests {
     fn native_gre_inner_mtu_for_test(outer_mtu: usize) -> usize {
         outer_mtu - 20 - 4
     }
+    // #13634 D2-06 regression: AH authenticates IPv6 payload length and the
+    // inner TCP header/payload. Segmenting mutates those bytes and invalidates
+    // AH integrity, so an oversized packet must remain on the normal path.
+    fn ipv6_ah_tcp_frame_13634(declared_data: usize) -> Vec<u8> {
+        let payload_len = (12 + 20 + declared_data) as u16;
+        let mut frame = Vec::new();
+        write_eth_header(
+            &mut frame,
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+            [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08],
+            0,
+            0x86dd,
+        );
+        frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+        frame.extend_from_slice(&payload_len.to_be_bytes());
+        frame.push(51); // next header = AH
+        frame.push(64);
+        let mut src = [0u8; 16];
+        src[0] = 0x20;
+        src[1] = 0x01;
+        src[2] = 0x0d;
+        src[3] = 0xb8;
+        src[15] = 0x05;
+        let mut dst = src;
+        dst[15] = 0x09;
+        frame.extend_from_slice(&src);
+        frame.extend_from_slice(&dst);
+        // AH: next=TCP, payload-len=1 ((1+2)*4=12B), reserved, SPI, seq, ICV.
+        frame.extend_from_slice(&[PROTO_TCP, 0x01, 0x00, 0x00]);
+        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        frame.extend_from_slice(&40000u16.to_be_bytes());
+        frame.extend_from_slice(&5201u16.to_be_bytes());
+        frame.extend_from_slice(&[
+            0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x10, 0x00, 0x3f, 0x00, 0x00,
+            0x00, 0x00,
+        ]);
+        frame.extend(std::iter::repeat(0x41u8).take(declared_data));
+        frame
+    }
+
+    #[test]
+    fn segment_forwarded_tcp_declines_ipv6_ah_authenticated_packet_13634() {
+        let mtu = 1280usize;
+        let mut state = ForwardingState::default();
+        state.egress.insert(EGRESS_IFINDEX, egress_iface(mtu));
+        let decision = SessionDecision {
+            resolution: plain_resolution(),
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let frame = ipv6_ah_tcp_frame_13634(1400);
+        let mut meta = meta_v6();
+        meta.l4_offset = (14 + 40 + 12) as u16;
+        assert!(ipv6_ah_sighted(&frame, libc::AF_INET6 as u8, 14));
+        assert!(
+            segment_forwarded_tcp_frames_from_frame(
+                &frame, meta, &decision, &state, false, None,
+            )
+            .is_none(),
+            "AH-bearing TCP must not be segmented"
+        );
+    }
 }
+
 
 #[cfg(test)]
 mod saturating_segment_len_8321 {

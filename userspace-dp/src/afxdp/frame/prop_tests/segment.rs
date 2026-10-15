@@ -284,7 +284,10 @@ proptest! {
         // declines them (None) and the caller forwards the original frame
         // unchanged. Reassembly identity applies only to WHOLE (unfragmented)
         // over-MTU datagrams.
-        if is_any_fragment(&pkt.frame[pkt.l3..], pkt.addr_family) {
+        if is_any_fragment(&pkt.frame[pkt.l3..], pkt.addr_family)
+            || ipv6_ah_sighted(&pkt.frame, pkt.addr_family, pkt.l3)
+        {
+            // Fragments and AH-authenticated datagrams remain unchanged.
             prop_assert_eq!(result, None);
         } else {
             let segs = result.expect("oversized valid TCP frame must segment");
@@ -321,7 +324,11 @@ proptest! {
         // #5148: fragments (incl. the strategy's IPv6 Fragment-header ext
         // chain) are declined by the splitter — NAT composition applies only
         // to WHOLE over-MTU datagrams.
-        if is_any_fragment(&pkt.frame[pkt.l3..], pkt.addr_family) {
+        // #13634: neither fragments nor AH-authenticated packets can be
+        // transformed by segmentation.
+        if is_any_fragment(&pkt.frame[pkt.l3..], pkt.addr_family)
+            || ipv6_ah_sighted(&pkt.frame, pkt.addr_family, pkt.l3)
+        {
             prop_assert_eq!(result, None);
         } else {
             let segs = result.expect("oversized valid TCP frame must segment under NAT");
@@ -386,7 +393,9 @@ proptest! {
         let result = segment_forwarded_tcp_frames_from_frame(
             &pkt.frame, pkt.meta, &decision, &forwarding, false, None,
         );
-        if is_any_fragment(&pkt.frame[pkt.l3..], pkt.addr_family) {
+        if is_any_fragment(&pkt.frame[pkt.l3..], pkt.addr_family)
+            || ipv6_ah_sighted(&pkt.frame, pkt.addr_family, pkt.l3)
+        {
             prop_assert_eq!(result, None);
         } else {
             let segs = result.expect(

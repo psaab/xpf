@@ -42,8 +42,13 @@ pub(super) fn segment_forwarded_tcp_frames_into_prepared(
     if mtu == 0 {
         return None;
     }
-    let l3 = frame_l3_offset(frame)?;
+    let l3 = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?.l3;
     if l3 >= frame.len() {
+        return None;
+    }
+    // #13634: preserve AH-authenticated IPv6 packets unchanged, matching the
+    // copy-path segmentation builder.
+    if ipv6_ah_sighted(frame, meta.addr_family, l3) {
         return None;
     }
     // #5148: defense in depth — never segment ANY IP fragment (first or
@@ -70,8 +75,9 @@ pub(super) fn segment_forwarded_tcp_frames_into_prepared(
     if payload.len() <= mtu {
         return None;
     }
-    let frame_l4 = frame_l4_offset(frame, meta.addr_family)?;
-    let tcp_offset = frame_l4.checked_sub(l3)?;
+    // Resolve L4 only inside the IP-declared datagram, not trailing frame
+    // slack. This stays in lockstep with the copy-path segmentation twin.
+    let tcp_offset = packet_rel_l4_offset(payload, meta.addr_family)?;
     let (ip_header_len, tcp_offset) = match meta.addr_family as i32 {
         libc::AF_INET => {
             if payload.len() < 20 {
