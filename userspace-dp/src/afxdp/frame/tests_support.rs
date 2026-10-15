@@ -840,6 +840,7 @@ pub(super) fn test_descriptor(
         nat64: false,
         nptv6: false,
         apply_nat_on_fabric: false,
+        last_queue_id: None,
     }
 }
 

@@ -189,6 +189,7 @@ fn make_descriptor(pkt: &ValidPacket, nat: NatDecision, tx_vlan: u16) -> Rewrite
         nat64: false,
         nptv6: false,
         apply_nat_on_fabric: false,
+        last_queue_id: None,
     }
 }
 
@@ -258,6 +259,7 @@ fn descriptor_fast_path_gre_preserves_l4_header() {
         nat64: false,
         nptv6: false,
         apply_nat_on_fabric: false,
+        last_queue_id: None,
     };
 
     let res = apply_rewrite_descriptor(&area, desc, meta, &rd, None)

@@ -130,6 +130,21 @@ pub(super) struct RewriteDescriptor {
     pub(super) nptv6: bool,
     #[allow(dead_code)] // populated for future flow-cache fast-path TX
     pub(super) apply_nat_on_fabric: bool,
+    /// #13077: queue this flow's packets were last actually served on.
+    /// Seeded in `FlowCache::insert` from `tx_selection.queue_id` and
+    /// mutated in place on every served cache hit with the effective
+    /// (possibly BA-reclassified) queue, because a `ba_reclassify` flow
+    /// deliberately serves successive packets on different queues while
+    /// `tx_selection.queue_id` stays frozen at seed time. Unlike every
+    /// other descriptor field this is NOT constant for the session's
+    /// lifetime, and it is read only by the debug scan
+    /// (`active_flow_debug_entries`), never by the rewrite path. `None`
+    /// until a queue is known (deny entries, queue-less tx selections);
+    /// the scan falls back to `tx_selection.queue_id` only then, so
+    /// telemetry never invents a queue. Living on the descriptor (not the
+    /// entry) lets the hit path store it through the entry borrow it
+    /// already holds — no second cache scan on the hot path.
+    pub(super) last_queue_id: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -649,6 +664,7 @@ impl FlowCacheEntry {
                 // `should_cache`), so its flag stays false here.
                 nptv6: decision.nat.nptv6,
                 apply_nat_on_fabric,
+                last_queue_id: None,
             },
             decision,
             policy_deny: None,
@@ -975,7 +991,17 @@ impl FlowCache {
                 continue;
             }
             active = active.saturating_add(1);
-            if let Some(queue_id) = entry.descriptor.tx_selection.queue_id {
+            // #13077: report the queue the flow's packets were actually
+            // last served on, not the frozen seed selection: a BA-cached
+            // flow reclassifies per packet, so the seed queue misattributes
+            // both the per-queue counts and the per-flow rows (and every
+            // gauge/estimator derived from them). The seed is only the
+            // fallback for an entry never stamped with a served queue.
+            let effective_queue_id = entry
+                .descriptor
+                .last_queue_id
+                .or(entry.descriptor.tx_selection.queue_id);
+            if let Some(queue_id) = effective_queue_id {
                 let key = (entry.descriptor.egress_ifindex, queue_id);
                 let count = cos_counts.entry(key).or_insert(0);
                 *count = count.saturating_add(1);
@@ -995,7 +1021,7 @@ impl FlowCache {
                 reverse_canonical_key: crate::protocol::FlowTupleStatus::from_session_key(
                     &reverse_canonical,
                 ),
-                cos_queue_id: entry.descriptor.tx_selection.queue_id,
+                cos_queue_id: effective_queue_id,
                 dscp_rewrite: entry.descriptor.tx_selection.dscp_rewrite,
                 age_epochs,
                 observed_bytes: entry.observed_bytes,
@@ -1287,6 +1313,11 @@ impl FlowCache {
         if self.binding_ifindex != 0 {
             entry.ingress_ifindex = self.binding_ifindex;
         }
+        // #13077: the seed packet was served on the seed selection's queue;
+        // stamp it so the entry reports a truthful attribution even before
+        // its first cache hit refreshes it. A re-inserted (re-resolved)
+        // entry carries no stale served stamp from the previous decision.
+        entry.descriptor.last_queue_id = entry.descriptor.tx_selection.queue_id;
         let set = Self::set_index(&entry.key, entry.ingress_ifindex);
         let base = set * FLOW_CACHE_WAYS;
         // Dedup-on-insert: if this set already holds the same key

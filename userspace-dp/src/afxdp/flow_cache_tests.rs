@@ -46,6 +46,7 @@ fn make_descriptor() -> RewriteDescriptor {
         nat64: false,
         nptv6: false,
         apply_nat_on_fabric: false,
+        last_queue_id: None,
     }
 }
 
@@ -2313,6 +2314,121 @@ fn active_flow_debug_entries_count_cos_queues_without_row_limit_loss() {
     assert_eq!(cos_counts[1].ifindex, 6);
     assert_eq!(cos_counts[1].queue_id, 5);
     assert_eq!(cos_counts[1].active_flow_count, 1);
+}
+
+// #13077 test helper: stamp the served queue exactly as the hit path does —
+// through the mutable entry borrow the lookup hands out.
+fn stamp_served_queue(cache: &mut FlowCache, key: &crate::session::SessionKey, queue_id: Option<u8>) {
+    let set = FlowCache::set_index(key, 7);
+    let base = set * FLOW_CACHE_WAYS;
+    for way in 0..FLOW_CACHE_WAYS {
+        if let Some(entry) = &mut cache.entries[base + way] {
+            if entry.key == *key {
+                entry.descriptor.last_queue_id = queue_id;
+                return;
+            }
+        }
+    }
+    panic!("entry not found for served-queue stamp");
+}
+
+// #13077: a BA-cached flow's seed selection freezes the SYN-time queue, but
+// its data packets are BA-reclassified and served on another queue. The
+// debug scan must attribute the flow (counts + row) to the last SERVED
+// queue stamped by `record_served_queue_id`, not the seed. Reverting the
+// served stamp/scan fallback makes both assertions below report queue 0.
+#[test]
+fn active_flow_debug_entries_use_last_served_queue_after_ba_reclassify() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let key = make_key();
+    let mut entry = make_entry(key.clone(), stamp, 0);
+    // Seed: SYN at DSCP 0 -> queue 0, BA-reclassifiable.
+    entry.descriptor.tx_selection.queue_id = Some(0);
+    entry.descriptor.tx_selection.ba_reclassify = true;
+    cache.insert(entry);
+    cache.tick_advance_epoch();
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+    // Data packet BA-reclassified to queue 3 and served there: the hit
+    // path stamps the served queue through the entry borrow it holds.
+    stamp_served_queue(&mut cache, &key, Some(3));
+
+    let (active_count, rows, cos_counts, truncated) = cache.active_flow_debug_entries(8);
+    assert_eq!(active_count, 1);
+    assert!(!truncated);
+    assert_eq!(cos_counts.len(), 1);
+    assert_eq!(cos_counts[0].ifindex, 6);
+    assert_eq!(cos_counts[0].queue_id, 3);
+    assert_eq!(cos_counts[0].active_flow_count, 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].cos_queue_id, Some(3));
+
+    // A later packet reclassifies back to queue 1: attribution follows the
+    // latest served queue, never the seed.
+    stamp_served_queue(&mut cache, &key, Some(1));
+    let (_, rows, cos_counts, _) = cache.active_flow_debug_entries(8);
+    assert_eq!(cos_counts.len(), 1);
+    assert_eq!(cos_counts[0].queue_id, 1);
+    assert_eq!(rows[0].cos_queue_id, Some(1));
+}
+
+// #13077: `FlowCache::insert` seeds the served stamp from the seed
+// selection, so a never-hit entry reports its seed queue; entries with no
+// CoS queue (`queue_id: None`) stay unattributed rather than inventing one.
+#[test]
+fn active_flow_debug_entries_seed_stamp_and_queueless_entries() {
+    let rg_epochs = default_rg_epochs();
+    let mut cache = FlowCache::new();
+    let stamp = FlowCacheStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        owner_rg_id: 0,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 1,
+        fib_generation: 1,
+    };
+
+    let key = make_key();
+    let mut entry = make_entry(key.clone(), stamp, 0);
+    entry.descriptor.tx_selection.queue_id = Some(2);
+    cache.insert(entry);
+    cache.tick_advance_epoch();
+    assert!(cache.lookup(&key, lookup, 0, &rg_epochs).is_some());
+
+    let mut keyless = make_key();
+    keyless.src_port = 45679;
+    // tx_selection.queue_id stays None.
+    cache.insert(make_entry(keyless.clone(), stamp, 0));
+    cache.tick_advance_epoch();
+    assert!(cache.lookup(&keyless, lookup, 0, &rg_epochs).is_some());
+
+    let (active_count, rows, cos_counts, _) = cache.active_flow_debug_entries(8);
+    assert_eq!(active_count, 2);
+    assert_eq!(cos_counts.len(), 1);
+    assert_eq!(cos_counts[0].queue_id, 2, "insert seeded the seed queue");
+    assert_eq!(cos_counts[0].active_flow_count, 1);
+    let seeded = rows.iter().find(|row| row.session_key.src_port == 45678).unwrap();
+    assert_eq!(seeded.cos_queue_id, Some(2));
+    let unattributed = rows.iter().find(|row| row.session_key.src_port == 45679).unwrap();
+    assert_eq!(unattributed.cos_queue_id, None);
 }
 
 #[test]

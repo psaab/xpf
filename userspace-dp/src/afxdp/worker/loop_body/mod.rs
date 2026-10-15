@@ -3558,6 +3558,7 @@ mod flow_cache_invalidation_tests {
                 nat64: false,
                 nptv6: false,
                 apply_nat_on_fabric: false,
+                last_queue_id: None,
             },
             decision,
             metadata: reap_metadata(),
