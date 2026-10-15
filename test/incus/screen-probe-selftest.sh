@@ -261,6 +261,29 @@ else
 	fails=$((fails + 1))
 fi
 
+# #13128: the live aggregate subject sample must bracket only the subject
+# command. The witness itself increments this aggregate, so sampling the
+# baseline before the witness falsely calls every witness drop a subject drop.
+witness_send_line="$(grep -n 'eval "\$WITNESS_CMD"' "$LIVE" | head -1 | cut -d: -f1)"
+witness_sample_line="$(grep -n '^witness_after="$(metrics xpf_screen_drops_by_reason_total' "$LIVE" | head -1 | cut -d: -f1)"
+subject_before_line="$(grep -n '^subject_before="$(metrics xpf_screen_drops_total' "$LIVE" | head -1 | cut -d: -f1)"
+subject_send_line="$(grep -n 'eval "\$SUBJECT_CMD"' "$LIVE" | head -1 | cut -d: -f1)"
+subject_after_line="$(grep -n '^subject_after="$(metrics xpf_screen_drops_total' "$LIVE" | head -1 | cut -d: -f1)"
+if [[ -n "$witness_send_line" && -n "$witness_sample_line" &&
+	-n "$subject_before_line" && -n "$subject_send_line" && -n "$subject_after_line" ]] &&
+	(( witness_send_line < witness_sample_line &&
+		witness_sample_line < subject_before_line &&
+		subject_before_line < subject_send_line &&
+		subject_send_line < subject_after_line )); then
+	printf 'ok   the live probe samples aggregate drops after the witness and before the subject\n'
+else
+	printf 'FAIL the live probe must isolate subject aggregate drops from the witness (witness=%s witness-sample=%s baseline=%s subject=%s after=%s) (#13128)\n' \
+		"${witness_send_line:-none}" "${witness_sample_line:-none}" \
+		"${subject_before_line:-none}" "${subject_send_line:-none}" \
+		"${subject_after_line:-none}"
+	fails=$((fails + 1))
+fi
+
 # --- totality --------------------------------------------------------------
 #
 # Every verdict call must produce exactly one line beginning with one of the
