@@ -4528,8 +4528,11 @@ type NATDestInfo struct {
 	// false/"" and behaves exactly as before.
 	NotInstalled       bool   `protobuf:"varint,6,opt,name=not_installed,json=notInstalled,proto3" json:"not_installed,omitempty"`
 	NotInstalledReason string `protobuf:"bytes,7,opt,name=not_installed_reason,json=notInstalledReason,proto3" json:"not_installed_reason,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// #13199: distinct from translate_ip (the pool's address), this identifies
+	// the configured pool for accurate names and rule-stat hit lookups.
+	PoolName      string `protobuf:"bytes,8,opt,name=pool_name,json=poolName,proto3" json:"pool_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NATDestInfo) Reset() {
@@ -4607,6 +4610,13 @@ func (x *NATDestInfo) GetNotInstalled() bool {
 func (x *NATDestInfo) GetNotInstalledReason() string {
 	if x != nil {
 		return x.NotInstalledReason
+	}
+	return ""
+}
+
+func (x *NATDestInfo) GetPoolName() string {
+	if x != nil {
+		return x.PoolName
 	}
 	return ""
 }
@@ -9854,7 +9864,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\x19GetNATDestinationResponse\x12)\n" +
 	"\x05rules\x18\x01 \x03(\v2\x13.xpf.v1.NATDestInfoR\x05rules\x12:\n" +
 	"\x19total_active_translations\x18\x02 \x01(\x05R\x17totalActiveTranslations\x12F\n" +
-	"\x11rule_set_sessions\x18\x03 \x03(\v2\x1a.xpf.v1.NATRuleSetSessionsR\x0fruleSetSessions\"\xf8\x01\n" +
+	"\x11rule_set_sessions\x18\x03 \x03(\v2\x1a.xpf.v1.NATRuleSetSessionsR\x0fruleSetSessions\"\x95\x02\n" +
 	"\vNATDestInfo\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\bdst_addr\x18\x02 \x01(\tR\adstAddr\x12\x19\n" +
@@ -9862,7 +9872,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\ftranslate_ip\x18\x04 \x01(\tR\vtranslateIp\x12%\n" +
 	"\x0etranslate_port\x18\x05 \x01(\rR\rtranslatePort\x12#\n" +
 	"\rnot_installed\x18\x06 \x01(\bR\fnotInstalled\x120\n" +
-	"\x14not_installed_reason\x18\a \x01(\tR\x12notInstalledReason\"\x12\n" +
+	"\x14not_installed_reason\x18\a \x01(\tR\x12notInstalledReason\x12\x1b\n" +
+	"\tpool_name\x18\b \x01(\tR\bpoolName\"\x12\n" +
 	"\x10GetScreenRequest\"A\n" +
 	"\x11GetScreenResponse\x12,\n" +
 	"\ascreens\x18\x01 \x03(\v2\x12.xpf.v1.ScreenInfoR\ascreens\"\xbb\x01\n" +

@@ -73,8 +73,9 @@ func (s *Server) GetNATDestination(ctx context.Context, _ *pb.GetNATDestinationR
 	for _, rs := range cfg.Security.NAT.Destination.RuleSets {
 		for _, rule := range rs.Rules {
 			info := &pb.NATDestInfo{
-				Name:    rule.Name,
-				DstAddr: natshow.RuleMatchDestination(rule),
+				Name:     rule.Name,
+				DstAddr:  natshow.RuleMatchDestination(rule),
+				PoolName: rule.Then.PoolName,
 			}
 			if rule.Match.DestinationPort > 0 {
 				info.DstPort = uint32(rule.Match.DestinationPort)

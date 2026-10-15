@@ -130,6 +130,10 @@ func TestGetNATDestinationCarriesCompleteMatch_10437(t *testing.T) {
 			t.Errorf("#10437 control: rule %q translate_ip = %q, want 10.0.0.5",
 				tc.name, got.GetTranslateIp())
 		}
+		if got.GetPoolName() != "dp1" {
+			t.Errorf("#13199: rule %q pool_name = %q, want configured destination pool dp1",
+				tc.name, got.GetPoolName())
+		}
 		wantNotInstalled := config.DestinationNATRuleNotInstalledReason(cfg, tc.rule) != ""
 		if got.GetNotInstalled() != wantNotInstalled {
 			t.Errorf("#10437 control: rule %q not_installed = %v, predicate says %v",

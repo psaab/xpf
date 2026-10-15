@@ -667,6 +667,9 @@ message NATDestInfo {
   // false/"" and behaves exactly as before.
   bool not_installed = 6;
   string not_installed_reason = 7;
+  // #13199: distinct from translate_ip (the pool's address), this identifies
+  // the configured pool for accurate names and rule-stat hit lookups.
+  string pool_name = 8;
 }
 
 message GetScreenRequest {}
