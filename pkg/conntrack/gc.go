@@ -15,15 +15,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// GCStats holds statistics from the most recent GC sweep.
+// GCStats holds statistics from the most recent GC sweep and cumulative totals.
 type GCStats struct {
-	LastSweepTime       time.Time
-	LastSweepDuration   time.Duration
-	TotalEntries        int
-	EstablishedSessions int
-	ExpiredDeleted      int
-	DeadlinesSaturated  int
-	NextSweepDelay      time.Duration
+	LastSweepTime               time.Time
+	LastSweepDuration           time.Duration
+	TotalEntries                int
+	EstablishedSessions         int
+	ExpiredDeleted              int
+	DeadlinesSaturated          int
+	NextSweepDelay              time.Duration
+	SweepsTotal                 uint64
+	ExpiredDeletedTotal         uint64
+	DeadlinesSaturatedTotal     uint64
+	SweepIterErrorsTotal        uint64
+	SweepDeleteErrorsTotal      uint64
+	SessionCountSyncErrorsTotal uint64
+	PersistentNATExpiredTotal   uint64
 }
 
 // MaxSessions is the maximum number of session entries in the BPF map.
@@ -208,6 +215,13 @@ func (gc *GC) Stats() GCStats {
 	return gc.stats
 }
 
+// IsAggressiveAging reports whether the GC is currently using early aging.
+func (gc *GC) IsAggressiveAging() bool {
+	gc.mu.RLock()
+	defer gc.mu.RUnlock()
+	return gc.agingActive
+}
+
 // Run starts the GC loop. It blocks until ctx is cancelled.
 func (gc *GC) Run(ctx context.Context) {
 	slog.Info("conntrack GC started", "interval", gc.interval)
@@ -360,6 +374,9 @@ func (gc *GC) sweep() time.Duration {
 		return true
 	})
 	if err != nil {
+		gc.mu.Lock()
+		gc.stats.SweepIterErrorsTotal++
+		gc.mu.Unlock()
 		slog.Error("conntrack GC iteration failed", "err", err)
 		return gc.interval
 	}
@@ -376,6 +393,9 @@ func (gc *GC) sweep() time.Duration {
 		}
 		exact, err := gc.sessions.DeleteBatchKnownExactV4(toDelete, dataplane.DeleteReasonGCExpired, false)
 		if err != nil {
+			gc.mu.Lock()
+			gc.stats.SweepDeleteErrorsTotal++
+			gc.mu.Unlock()
 			slog.Debug("conntrack GC v4 delete failed", "err", err)
 		}
 		expired += len(exact)
@@ -449,6 +469,9 @@ func (gc *GC) sweep() time.Duration {
 			return true
 		})
 		if err != nil {
+			gc.mu.Lock()
+			gc.stats.SweepIterErrorsTotal++
+			gc.mu.Unlock()
 			slog.Error("conntrack GC v6 iteration failed", "err", err)
 			return gc.interval
 		}
@@ -466,6 +489,9 @@ func (gc *GC) sweep() time.Duration {
 		}
 		exact, err := gc.sessions.DeleteBatchKnownExactV6(toDeleteV6, dataplane.DeleteReasonGCExpired, false)
 		if err != nil {
+			gc.mu.Lock()
+			gc.stats.SweepDeleteErrorsTotal++
+			gc.mu.Unlock()
 			slog.Debug("conntrack GC v6 delete failed", "err", err)
 		}
 		expired += len(exact)
@@ -486,9 +512,13 @@ func (gc *GC) sweep() time.Duration {
 		pnat = gc.persistent.GetPersistentNAT()
 	}
 	if pnat != nil {
-		if removed := pnat.GC(); removed > 0 {
+		removed := pnat.GC()
+		if removed > 0 {
 			slog.Info("persistent NAT GC", "removed", removed)
 		}
+		gc.mu.Lock()
+		gc.stats.PersistentNATExpiredTotal += uint64(removed)
+		gc.mu.Unlock()
 	}
 
 	// Exact-delete APIs report removed forward rows. Count a reverse companion
@@ -508,10 +538,20 @@ func (gc *GC) sweep() time.Duration {
 	// Push per-IP session counts to BPF maps for xdp_screen limiting.
 	if countSessions {
 		for k, c := range srcCounts {
-			_ = gc.sessionCount.UpdateSessionCountSrc(k, c)
+			if err := gc.sessionCount.UpdateSessionCountSrc(k, c); err != nil {
+				gc.mu.Lock()
+				gc.stats.SessionCountSyncErrorsTotal++
+				gc.mu.Unlock()
+				slog.Warn("conntrack GC source session-count sync failed", "err", err)
+			}
 		}
 		for k, c := range dstCounts {
-			_ = gc.sessionCount.UpdateSessionCountDst(k, c)
+			if err := gc.sessionCount.UpdateSessionCountDst(k, c); err != nil {
+				gc.mu.Lock()
+				gc.stats.SessionCountSyncErrorsTotal++
+				gc.mu.Unlock()
+				slog.Warn("conntrack GC destination session-count sync failed", "err", err)
+			}
 		}
 	}
 
@@ -543,15 +583,16 @@ func (gc *GC) sweep() time.Duration {
 	nextDelay := gc.nextSweepDelay(earliestDeadline, countSessions, isPrimary, total, agingActive, earlyAgeout)
 
 	gc.mu.Lock()
-	gc.stats = GCStats{
-		LastSweepTime:       sweepStart,
-		LastSweepDuration:   time.Since(sweepStart),
-		TotalEntries:        total,
-		EstablishedSessions: established,
-		ExpiredDeleted:      expired,
-		DeadlinesSaturated:  saturated,
-		NextSweepDelay:      nextDelay,
-	}
+	gc.stats.LastSweepTime = sweepStart
+	gc.stats.LastSweepDuration = time.Since(sweepStart)
+	gc.stats.TotalEntries = total
+	gc.stats.EstablishedSessions = established
+	gc.stats.ExpiredDeleted = expired
+	gc.stats.DeadlinesSaturated = saturated
+	gc.stats.NextSweepDelay = nextDelay
+	gc.stats.SweepsTotal++
+	gc.stats.ExpiredDeletedTotal += uint64(expired)
+	gc.stats.DeadlinesSaturatedTotal += uint64(saturated)
 	gc.mu.Unlock()
 
 	return nextDelay
