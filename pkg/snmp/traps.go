@@ -235,7 +235,7 @@ func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool,
 	// time-stamp, variable-bindings.
 	var pduBody []byte
 	pduBody = append(pduBody, berEncodeTLV(tagObjectIdentifier, berEncodeOID(oidSnmpTraps))...)
-	agentAddr := agentAddrForTargetOnVRF(target, a.vrfDevice)
+	agentAddr := agentAddrForTargetOnVRF(target, a.getVRFDevice())
 	pduBody = append(pduBody, berEncodeTLV(tagIPAddress, agentAddr[:])...)
 	pduBody = append(pduBody, berEncodeIntegerTLV(genericTrap)...)
 	pduBody = append(pduBody, berEncodeIntegerTLV(0)...) // specific-trap
@@ -285,18 +285,30 @@ func sendTrap(target string, pkt []byte) error {
 }
 
 func (a *Agent) sendTrapViaVRF(target string, pkt []byte) error {
-	return sendTrapOnVRF(target, pkt, a.vrfDevice)
+	return sendTrapOnVRF(target, pkt, a.getVRFDevice())
+}
+
+// normalizeTrapDialAddr adds the default trap port and canonicalizes bracketed
+// address literals before JoinHostPort. SplitHostPort rejects bracketed IPv6
+// literals without an explicit port, and accepts a trailing empty port; both
+// forms need the same :162 default as a bare address.
+func normalizeTrapDialAddr(target string) string {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		host, port = target, "162"
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
+		}
+	}
+	if port == "" {
+		port = "162"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // sendTrapOnVRF sends one trap with an optional VRF device pin.
 func sendTrapOnVRF(target string, pkt []byte, device string) error {
-	// Ensure the target has a port.
-	host, port, err := net.SplitHostPort(target)
-	if err != nil {
-		host = target
-		port = "162"
-	}
-	addr := net.JoinHostPort(host, port)
+	addr := normalizeTrapDialAddr(target)
 	dialer := net.Dialer{Timeout: 2 * time.Second, Control: snmpVRFSocketControl(device)}
 	conn, err := dialer.Dial("udp", addr)
 	if err != nil {

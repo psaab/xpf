@@ -715,7 +715,17 @@ func (a *Agent) SetIfDataFn(fn func() []IfData) {
 // device. Call it before Bind; an empty device preserves the default routing
 // context.
 func (a *Agent) SetVRFDevice(device string) {
+	a.mu.Lock()
 	a.vrfDevice = device
+	a.mu.Unlock()
+}
+
+// getVRFDevice returns the configured socket device. The setting is normally
+// installed before Bind, but trap workers may outlive concurrent reconfiguration.
+func (a *Agent) getVRFDevice() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.vrfDevice
 }
 
 // getIfData returns sorted interface data from the callback, or nil.
@@ -865,7 +875,7 @@ func (a *Agent) Bind(ctx context.Context) error {
 		return fmt.Errorf("snmp: resolve address: %w", err)
 	}
 
-	listener := net.ListenConfig{Control: snmpVRFSocketControl(a.vrfDevice)}
+	listener := net.ListenConfig{Control: snmpVRFSocketControl(a.getVRFDevice())}
 	packetConn, err := listener.ListenPacket(ctx, "udp", addr.String())
 	if err != nil {
 		return fmt.Errorf("snmp: listen: %w", err)
