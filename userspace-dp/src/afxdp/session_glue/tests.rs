@@ -18903,3 +18903,45 @@ fn session_upsert_fan_out_sheds_dead_sibling_12192() {
         "only the live sibling's queue attempt is counted as enqueued"
     );
 }
+
+
+/// D5-07 source-level probe budget: the caller paths must consume the resolved
+/// lookup/install snapshot rather than querying the same flow key by field.
+#[test]
+fn resolved_flow_callers_reuse_snapshots_without_reprobing_13079() {
+    let glue = include_str!("mod.rs");
+    let resolver = function_body(glue, "fn resolve_flow_session_decision_with_conntrack(");
+    let poll = include_str!("../poll_descriptor/mod.rs");
+    let descriptor = function_body(poll, "fn poll_binding_process_descriptor_with_injection(");
+    let keyed_probe_sites = [
+        "source_nat_static_for(&flow.forward_key",
+        "session_id_for(&flow.forward_key",
+        "leak_incarnation(&flow.forward_key",
+        "timeout_secs_for(&flow.forward_key",
+        "handshake_state_wire_for(&flow.forward_key",
+        "mark_source_nat_revalidated(&flow.forward_key",
+    ];
+
+    for site in keyed_probe_sites {
+        assert!(
+            !resolver.contains(site),
+            "resolver must reuse SessionLookup auxiliary data instead of {site}"
+        );
+        assert!(
+            !descriptor.contains(site),
+            "descriptor path must reuse the install snapshot instead of {site}"
+        );
+    }
+}
+
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let function = source
+        .split_once(signature)
+        .map(|(_, tail)| tail)
+        .unwrap_or_else(|| panic!("source must contain {signature}"));
+    let body_start = function.find('{').expect("function body opener") + 1;
+    function[body_start..]
+        .split_once("\n}\n")
+        .map(|(body, _)| body)
+        .expect("function body closer")
+}
