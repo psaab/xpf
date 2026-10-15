@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Aggregate live descriptor budget: queued + write-started + terminal but
 /// not yet drained. A descriptor releases this slot only at completion drain.
@@ -459,9 +459,6 @@ impl AuthorityState {
         }
     }
 
-    pub(crate) fn reset_baseline(&mut self) {
-        *self = Self::default();
-    }
     pub(crate) fn close_permit(&mut self, permit_epoch: u64) {
         if permit_epoch == 0 {
             return;
@@ -683,7 +680,6 @@ struct CoreInner {
     /// Once true the run is fail-closed for all new request IDs; clearing is
     /// allowed only on a new authority run.
     terminal_tombstone_overflow: bool,
-    announce_events: VecDeque<Vec<u8>>,
     provenance: VecDeque<ReinjectProvenanceRow>,
     stats: ReinjectStats,
     shutdown: bool,
@@ -705,7 +701,6 @@ impl ReinjectCore {
                 flow_order: BTreeMap::new(),
                 ready_count: 0,
                 reserved: BTreeSet::new(),
-                announce_events: VecDeque::new(),
                 provenance: VecDeque::new(),
                 stats: ReinjectStats::default(),
                 terminal_tombstone_overflow: false,
@@ -744,6 +739,11 @@ impl ReinjectCore {
                 // provenance and request-ID tombstones must not be relabeled
                 // under the new run.
                 inner.provenance.clear();
+                // Purge the old run's records and flow queues. Purging adds
+                // terminal ID tombstones, so clear them only after the purge
+                // because the daemon restarts its request-ID sequence.
+                let ids: Vec<u64> = inner.entries.keys().copied().collect();
+                Self::purge_ids(&mut inner, &ids);
                 inner.terminal_tombstones.clear();
                 inner.terminal_tombstone_overflow = false;
             }
@@ -753,10 +753,6 @@ impl ReinjectCore {
         accepted
     }
 
-    pub(crate) fn reset_epoch_baseline(&self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.authority.reset_baseline();
-    }
 
     pub(crate) fn authority_snapshot(&self) -> (String, u64, u64, bool, Vec<(u16, u64)>) {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -833,24 +829,6 @@ impl ReinjectCore {
         } else {
             inner.terminal_tombstone_overflow = target_tombstone_overflow;
         }
-    }
-    pub(crate) fn enqueue_announce_ack(&self, payload: Vec<u8>) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.announce_events.push_back(payload);
-    }
-
-    pub(crate) fn peek_announce_ack(&self) -> Option<Vec<u8>> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .announce_events
-            .front()
-            .cloned()
-    }
-
-    pub(crate) fn ack_announce_ack(&self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.announce_events.pop_front();
     }
     /// Validate-only admission. This intentionally never inserts an entry,
     /// touches the worker channel, or reaches any TUN writer.
@@ -1085,6 +1063,15 @@ impl ReinjectCore {
             Some(EntryState::Terminal(_)) => EntryView::Terminal,
         }
     }
+    pub(crate) fn connection_id_for(&self, lease: &ReinjectLease) -> Option<u64> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner
+            .entries
+            .get(&lease.request_id)
+            .filter(|entry| entry.lease == *lease)
+            .map(|entry| entry.connection_id)
+    }
+
 
     /// Dequeue-side epoch/connection check. A stale queued lease becomes
     /// terminal without touching the TUN; this is the only authority check
@@ -1162,27 +1149,35 @@ impl ReinjectCore {
     /// writer thread's `resolve_write` terminal (Written/Refused/Fenced),
     /// so the verdict must not terminalize it. That is the permit join.
     pub(crate) fn resolve_ipsec_inner_verdict(&self, verdict: IpsecInnerVerdict) -> bool {
-        let (request_id, outcome, reason) = match verdict {
+        let is_would_permit = matches!(&verdict, IpsecInnerVerdict::WouldPermit { .. });
+        let (request_id, connection_id, outcome, reason) = match verdict {
             IpsecInnerVerdict::Deny {
-                request_id, reason, ..
+                request_id,
+                connection_id,
+                reason,
+                ..
             } if reason == ipsec_reason::VERDICT_UNCERTAIN => {
-                (request_id, ReinjectOutcome::Uncertain, reason)
+                (request_id, connection_id, ReinjectOutcome::Uncertain, reason)
             }
             IpsecInnerVerdict::Deny {
-                request_id, reason, ..
-            } => (request_id, ReinjectOutcome::Denied, reason),
-            IpsecInnerVerdict::WouldPermit { request_id } => {
-                (request_id, ReinjectOutcome::WouldPermit, 0)
-            }
+                request_id,
+                connection_id,
+                reason,
+                ..
+            } => (request_id, connection_id, ReinjectOutcome::Denied, reason),
+            IpsecInnerVerdict::WouldPermit {
+                request_id,
+                connection_id,
+            } => (request_id, connection_id, ReinjectOutcome::WouldPermit, 0),
         };
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = inner.entries.get(&request_id) else {
             return false;
         };
-        if !matches!(entry.state, EntryState::Queued) {
+        if entry.connection_id != connection_id || !matches!(entry.state, EntryState::Queued) {
             return false;
         }
-        if matches!(verdict, IpsecInnerVerdict::WouldPermit { .. }) && entry.write_armed {
+        if is_would_permit && entry.write_armed {
             return true;
         }
         Self::terminalize_with_reason(&mut inner, request_id, outcome, 0, reason)
@@ -1194,25 +1189,43 @@ impl ReinjectCore {
     /// verdict (posted after the forward attempt) can never terminalize an
     /// armed entry. Returns false when no such Queued entry exists.
     pub(crate) fn arm_write(&self, lease: &ReinjectLease) -> bool {
+        self.arm_write_for(0, lease)
+    }
+
+    pub(crate) fn arm_write_for(&self, connection_id: u64, lease: &ReinjectLease) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = inner.entries.get_mut(&lease.request_id) else {
             return false;
         };
-        if entry.lease != *lease || !matches!(entry.state, EntryState::Queued) {
+        if entry.connection_id != connection_id
+            || entry.lease != *lease
+            || !matches!(entry.state, EntryState::Queued)
+        {
             return false;
         }
         entry.write_armed = true;
         true
     }
 
-    /// Mark a queued descriptor as a definitive no-write refusal. Also the
-    /// rollback for a write that was armed but could not be enqueued.
-    pub(crate) fn refuse_queued(&self, lease: &ReinjectLease, _reason: String) -> bool {
+    /// Mark a queued descriptor as a definitive no-write refusal.
+    pub(crate) fn refuse_queued(&self, lease: &ReinjectLease, reason: String) -> bool {
+        self.refuse_queued_for(0, lease, reason)
+    }
+
+    pub(crate) fn refuse_queued_for(
+        &self,
+        connection_id: u64,
+        lease: &ReinjectLease,
+        _reason: String,
+    ) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = inner.entries.get(&lease.request_id) else {
             return false;
         };
-        if !matches!(entry.state, EntryState::Queued) || entry.lease != *lease {
+        if entry.connection_id != connection_id
+            || !matches!(entry.state, EntryState::Queued)
+            || entry.lease != *lease
+        {
             return false;
         }
         Self::terminalize(&mut inner, lease.request_id, ReinjectOutcome::Refused, 0)
@@ -1371,20 +1384,6 @@ impl ReinjectCore {
         Self::purge_ids(&mut inner, &ids)
     }
 
-    /// Hygiene for records whose owning side disappeared without a clean
-    /// socket close. The caller controls the conservative TTL.
-    pub(crate) fn sweep_orphans(&self, ttl: Duration) -> (u64, u64) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let now = Instant::now();
-        let ids: Vec<u64> = inner
-            .entries
-            .iter()
-            .filter_map(|(id, entry)| {
-                (now.saturating_duration_since(entry.since) >= ttl).then_some(*id)
-            })
-            .collect();
-        Self::purge_ids(&mut inner, &ids)
-    }
 
     fn purge_ids(inner: &mut CoreInner, ids: &[u64]) -> (u64, u64) {
         let mut queued = 0;
@@ -1446,12 +1445,6 @@ impl ReinjectCore {
         }
     }
 
-    pub(crate) fn is_shutdown(&self) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .shutdown
-    }
 
     pub(crate) fn stats_snapshot(&self) -> ReinjectStats {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());

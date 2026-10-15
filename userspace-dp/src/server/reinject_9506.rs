@@ -13,12 +13,13 @@ use crate::slowpath_reinject_9506::{
 use arc_swap::ArcSwapOption;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+
+static NEXT_SUBMIT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) fn derive_reinject_submit_path(control_socket: &str) -> String {
     derive_path(control_socket, "reinject-submit.sock")
 }
@@ -124,6 +125,7 @@ fn serve_submit_conn_with_running(
     target: &Arc<ArcSwapOption<SlowPathReinjector>>,
     running: &Arc<AtomicBool>,
 ) {
+    let connection_id = NEXT_SUBMIT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
     let mut reader = FrameReader::new();
@@ -178,7 +180,10 @@ fn serve_submit_conn_with_running(
                                 core.refuse_shutdown(frame)
                             }
                         } else if let Some(reinjector) = target_reinjector.as_ref() {
-                            reinjector.submit_adjudicated_frame(frame.clone())
+                            reinjector.submit_adjudicated_frame_for_connection(
+                                frame.clone(),
+                                connection_id,
+                            )
                         } else {
                             core.refuse_shutdown(frame)
                         }
@@ -199,6 +204,7 @@ fn serve_submit_conn_with_running(
             _ => break,
         }
     }
+    fallback_core.purge_connection(connection_id);
 }
 
 /// Stream terminal completions in per-flow order. The completion table owns
@@ -363,10 +369,6 @@ pub(crate) fn spawn_reinject_socket_servers(
     })
 }
 
-#[allow(dead_code)]
-fn _socket_parent_exists(control_socket: &str) -> bool {
-    Path::new(control_socket).parent().is_some_and(Path::exists)
-}
 
 #[cfg(test)]
 #[path = "reinject_9506_tests.rs"]

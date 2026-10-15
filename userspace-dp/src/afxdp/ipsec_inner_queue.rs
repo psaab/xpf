@@ -172,6 +172,7 @@ pub(crate) struct IpsecInnerDescriptor {
     pub phase_epoch: u64,
     pub worker_set_generation: u64,
     pub request_id: u64,
+    pub connection_id: u64,
     pub flags: u8,
     /// Go-stamped absolute CLOCK_MONOTONIC acknowledgement deadline.
     pub deadline_mono_ns: u64,
@@ -186,21 +187,31 @@ pub(crate) struct IpsecInnerDescriptor {
 pub(crate) enum IpsecInnerVerdict {
     Deny {
         request_id: u64,
+        connection_id: u64,
         stage: &'static str,
         reason: u8,
         policy_id: u32,
     },
     WouldPermit {
         request_id: u64,
+        connection_id: u64,
     },
 }
 
 impl IpsecInnerVerdict {
     pub(crate) fn request_id(&self) -> u64 {
         match self {
-            Self::Deny { request_id, .. } | Self::WouldPermit { request_id } => *request_id,
+            Self::Deny { request_id, .. } | Self::WouldPermit { request_id, .. } => *request_id,
         }
     }
+
+    pub(crate) fn connection_id(&self) -> u64 {
+        match self {
+            Self::Deny { connection_id, .. } | Self::WouldPermit { connection_id, .. } => {
+                *connection_id
+            }
+            }
+        }
 }
 
 /// Slab slot lifecycle states.
@@ -1866,7 +1877,11 @@ impl IpsecInnerWorkerTransport {
         let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = active
             .iter_mut()
-            .find(|entry| entry.worker_id == worker_id && entry.desc.request_id == verdict.request_id())
+            .find(|entry| {
+                entry.worker_id == worker_id
+                    && entry.desc.request_id == verdict.request_id()
+                    && entry.desc.connection_id == verdict.connection_id()
+            })
         else {
             return Err(verdict);
         };
@@ -1874,6 +1889,7 @@ impl IpsecInnerWorkerTransport {
         if self.verdicts.try_post(verdict.clone()).is_err() {
             let fallback = IpsecInnerVerdict::Deny {
                 request_id: verdict.request_id(),
+                connection_id: verdict.connection_id(),
                 stage: "d11_verdict_queue_full",
                 reason: reason::VERDICT_UNCERTAIN,
                 policy_id: 0,
@@ -1898,7 +1914,11 @@ impl IpsecInnerWorkerTransport {
         let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = active
             .iter_mut()
-            .find(|entry| entry.worker_id == worker_id && entry.desc.request_id == verdict.request_id())
+            .find(|entry| {
+                entry.worker_id == worker_id
+                    && entry.desc.request_id == verdict.request_id()
+                    && entry.desc.connection_id == verdict.connection_id()
+            })
         else {
             return false;
         };
@@ -1908,6 +1928,7 @@ impl IpsecInnerWorkerTransport {
         }
         uncertain.push_back(IpsecInnerVerdict::Deny {
             request_id: verdict.request_id(),
+            connection_id: verdict.connection_id(),
             stage: "d11_verdict_queue_full",
             reason: reason::VERDICT_UNCERTAIN,
             policy_id: 0,
@@ -1940,7 +1961,10 @@ impl IpsecInnerWorkerTransport {
         for verdict in queue_scratch.drain(..) {
             let Some(index) = active
                 .iter()
-                .position(|entry| entry.desc.request_id == verdict.request_id())
+                .position(|entry| {
+                    entry.desc.request_id == verdict.request_id()
+                        && entry.desc.connection_id == verdict.connection_id()
+                })
             else {
                 continue;
             };
@@ -2181,6 +2205,7 @@ mod tests {
             phase_epoch: 1,
             worker_set_generation: 1,
             request_id,
+            connection_id: 0,
             deadline_mono_ns: 0,
             enqueue_ns: 0,
             flags: 0,
@@ -2233,7 +2258,10 @@ mod tests {
         let queue = IpsecInnerVerdictQueue::new();
         let guard = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
         assert!(queue
-            .try_post(IpsecInnerVerdict::WouldPermit { request_id: 81 })
+            .try_post(IpsecInnerVerdict::WouldPermit {
+                request_id: 81,
+                connection_id: 0,
+            })
             .is_err());
         drop(guard);
         assert_eq!(
@@ -2308,6 +2336,7 @@ mod tests {
             queue
                 .try_post(IpsecInnerVerdict::Deny {
                     request_id: i as u64 + 1,
+                    connection_id: 0,
                     stage: "test",
                     reason: ZONE_UNZONED,
                     policy_id: 0,
@@ -2315,7 +2344,10 @@ mod tests {
                 .expect("fits");
         }
         assert!(queue
-            .try_post(IpsecInnerVerdict::WouldPermit { request_id: 9999 })
+            .try_post(IpsecInnerVerdict::WouldPermit {
+                request_id: 9999,
+                connection_id: 0,
+            })
             .is_err());
         assert_eq!(
             IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.load(Ordering::Relaxed) - before,
@@ -2478,17 +2510,44 @@ mod tests {
 
         let mut batch = IpsecInnerDoubleBatch::new();
         assert_eq!(transport.drain_worker(3, &mut batch), 1);
-        assert!(transport
-            .post_worker_verdict(3, IpsecInnerVerdict::WouldPermit { request_id: 31 })
-            .is_ok());
         let mut queue_scratch = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
         let mut out = Vec::with_capacity(IPSEC_INNER_VERDICT_QUEUE_DEPTH);
+        transport
+            .verdicts
+            .try_post(IpsecInnerVerdict::WouldPermit {
+                request_id: 31,
+                connection_id: 99,
+            })
+            .expect("queue stale owner verdict");
         transport.drain_verdicts_into(
             &mut queue_scratch,
             &mut out,
             IPSEC_INNER_DRAIN_BUDGET,
         );
-        assert_eq!(out, vec![IpsecInnerVerdict::WouldPermit { request_id: 31 }]);
+        assert!(out.is_empty(), "stale owner verdict must not be exposed");
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP - 1);
+
+        assert!(transport
+            .post_worker_verdict(
+                3,
+                IpsecInnerVerdict::WouldPermit {
+                    request_id: 31,
+                    connection_id: 0,
+                },
+            )
+            .is_ok());
+        transport.drain_verdicts_into(
+            &mut queue_scratch,
+            &mut out,
+            IPSEC_INNER_DRAIN_BUDGET,
+        );
+        assert_eq!(
+            out,
+            vec![IpsecInnerVerdict::WouldPermit {
+                request_id: 31,
+                connection_id: 0,
+            }]
+        );
         assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
     }
 

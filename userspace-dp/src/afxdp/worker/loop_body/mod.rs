@@ -708,6 +708,7 @@ pub(crate) fn worker_loop(
                             || {
                                 let verdict = IpsecInnerVerdict::Deny {
                                     request_id: descriptor.request_id,
+                                    connection_id: descriptor.connection_id,
                                     stage: "d11_deadline_expired",
                                     reason: ipsec_reason::SUBMIT_UNAVAILABLE,
                                     policy_id: 0,
@@ -789,6 +790,7 @@ pub(crate) fn worker_loop(
                                             bytes.to_vec(),
                                             lease,
                                             descriptor.flow_tag,
+                                            descriptor.connection_id,
                                         ),
                                         None => false,
                                     },

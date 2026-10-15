@@ -133,6 +133,7 @@ struct PacketRequest {
     /// legacy adjudicated caller intentionally retain lease=None semantics.
     lease: Option<ReinjectLease>,
     flow_tag: u64,
+    connection_id: u64,
 }
 fn admission_class(queue: PacketQueue) -> Option<AdmissionClass> {
     match queue {
@@ -737,6 +738,7 @@ fn ipsec_inner_descriptor(
     frame: &SubmitFrame,
     slab_id: u32,
     worker_set_generation: u64,
+    connection_id: u64,
 ) -> IpsecInnerDescriptor {
     let bytes = &frame.bytes;
     let (inner_family, inner_eth_proto) = match bytes.first().map(|byte| byte >> 4) {
@@ -797,6 +799,7 @@ fn ipsec_inner_descriptor(
         phase_epoch: 0,
         worker_set_generation,
         request_id: frame.lease.request_id,
+        connection_id,
         flags: frame.flags,
         deadline_mono_ns: frame.deadline_mono_ns,
         enqueue_ns: 0,
@@ -1207,8 +1210,9 @@ impl SlowPathReinjector {
         bytes: Vec<u8>,
         lease: ReinjectLease,
         flow_tag: u64,
+        connection_id: u64,
     ) -> bool {
-        if !self.reinject_core.arm_write(&lease) {
+        if !self.reinject_core.arm_write_for(connection_id, &lease) {
             return false;
         }
         match self.enqueue_request(
@@ -1218,6 +1222,7 @@ impl SlowPathReinjector {
             PacketQueue::Adjudicated,
             Some(lease),
             flow_tag,
+            connection_id,
             false,
         ) {
             Ok(EnqueueOutcome::Accepted) => {
@@ -1227,8 +1232,11 @@ impl SlowPathReinjector {
             }
             outcome => {
                 let _ = outcome;
-                self.reinject_core
-                    .refuse_queued(&lease, "permit forward enqueue refused".to_string());
+                self.reinject_core.refuse_queued_for(
+                    connection_id,
+                    &lease,
+                    "permit forward enqueue refused".to_string(),
+                );
                 false
             }
         }
@@ -1242,7 +1250,7 @@ impl SlowPathReinjector {
         bytes: Vec<u8>,
         queue: PacketQueue,
     ) -> Result<EnqueueOutcome, String> {
-        self.enqueue_request(tx, status, bytes, queue, None, 0, true)
+        self.enqueue_request(tx, status, bytes, queue, None, 0, 0, true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1254,6 +1262,7 @@ impl SlowPathReinjector {
         queue: PacketQueue,
         lease: Option<ReinjectLease>,
         flow_tag: u64,
+        connection_id: u64,
         record_class: bool,
     ) -> Result<EnqueueOutcome, String> {
         let packet_len = bytes.len() as u64;
@@ -1304,6 +1313,7 @@ impl SlowPathReinjector {
             queue,
             lease,
             flow_tag,
+            connection_id,
         }) {
             Ok(()) => {
                 #[cfg(test)]
@@ -1400,18 +1410,27 @@ impl SlowPathReinjector {
     /// and hand the descriptor to the Rust worker transport. This branch is
     /// deliberately before the legacy TUN MTU/limiter path: V1 never enters
     /// q0 and never asks Rust to permit a frame.
-    fn submit_ipsec_inner_v1(&self, frame: SubmitFrame) -> AdmitDecision {
-        let mut decision = self
-            .reinject_core
-            .admit_p2_with_class(&frame, AdmissionClass::Adjudicated);
+    fn submit_ipsec_inner_v1(
+        &self,
+        frame: SubmitFrame,
+        connection_id: u64,
+    ) -> AdmitDecision {
+        let mut decision = self.reinject_core.admit_with_class_owner(
+            &frame,
+            Some(AdmissionClass::Adjudicated),
+            connection_id,
+            true,
+        );
         if !decision.admitted {
             return decision;
         }
 
         let refuse = |decision: &mut AdmitDecision, reason: u8, message: &str| {
-            let _ = self
-                .reinject_core
-                .refuse_queued(&frame.lease, message.to_string());
+            let _ = self.reinject_core.refuse_queued_for(
+                connection_id,
+                &frame.lease,
+                message.to_string(),
+            );
             self.reinject_core
                 .record_class_refused(AdmissionClass::Adjudicated);
             decision.admitted = false;
@@ -1437,6 +1456,7 @@ impl SlowPathReinjector {
             &frame,
             slab_id,
             self.ipsec_inner_transport.authority().generation(),
+            connection_id,
         );
         if let Err(reason) = self.ipsec_inner_transport.admit_descriptor(descriptor) {
             let admit_reason = match reason {
@@ -1452,13 +1472,21 @@ impl SlowPathReinjector {
 
 
     pub(crate) fn submit_adjudicated_frame(&self, frame: SubmitFrame) -> AdmitDecision {
+        self.submit_adjudicated_frame_for_connection(frame, 0)
+    }
+
+    pub(crate) fn submit_adjudicated_frame_for_connection(
+        &self,
+        frame: SubmitFrame,
+        connection_id: u64,
+    ) -> AdmitDecision {
         if frame.flags & SUBMIT_FLAG_DRY_RUN != 0 {
             self.reinject_core
                 .record_class_refused(AdmissionClass::Adjudicated);
             return self.reinject_core.refuse_non_dry_run(&frame);
         }
         if self.ipsec_inner_v1_enabled {
-            return self.submit_ipsec_inner_v1(frame);
+            return self.submit_ipsec_inner_v1(frame, connection_id);
         }
         let packet_len = frame.bytes.len() as u64;
         let live_mtu = self.status_delegated.live_mtu.load(Ordering::Relaxed);
@@ -1487,9 +1515,12 @@ impl SlowPathReinjector {
             };
         }
 
-        let mut decision = self
-            .reinject_core
-            .admit_with_class(&frame, Some(AdmissionClass::Adjudicated));
+        let mut decision = self.reinject_core.admit_with_class_owner(
+            &frame,
+            Some(AdmissionClass::Adjudicated),
+            connection_id,
+            false,
+        );
         if !decision.admitted {
             return decision;
         }
@@ -1499,7 +1530,7 @@ impl SlowPathReinjector {
         };
         if !allowed {
             self.reinject_core
-                .refuse_queued(&frame.lease, "rate limited".to_string());
+                .refuse_queued_for(connection_id, &frame.lease, "rate limited".to_string());
             self.reinject_core
                 .record_class_refused(AdmissionClass::Adjudicated);
             self.status_delegated
@@ -1524,6 +1555,7 @@ impl SlowPathReinjector {
             queue: PacketQueue::Adjudicated,
             lease: Some(frame.lease),
             flow_tag: frame.flow_tag,
+            connection_id,
         };
         match self.tx_delegated.try_send(request) {
             Ok(()) => decision,
@@ -1541,7 +1573,7 @@ impl SlowPathReinjector {
                     .dropped_bytes
                     .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
                 self.reinject_core
-                    .refuse_queued(&frame.lease, "queue full".to_string());
+                    .refuse_queued_for(connection_id, &frame.lease, "queue full".to_string());
                 self.reinject_core
                     .record_class_refused(AdmissionClass::Adjudicated);
                 decision.admitted = false;
@@ -1558,8 +1590,11 @@ impl SlowPathReinjector {
                 self.status_delegated
                     .dropped_bytes
                     .fetch_add(req.bytes.len() as u64, Ordering::Relaxed);
-                self.reinject_core
-                    .refuse_queued(&frame.lease, "worker stopped".to_string());
+                self.reinject_core.refuse_queued_for(
+                    connection_id,
+                    &frame.lease,
+                    "worker stopped".to_string(),
+                );
                 self.reinject_core
                     .record_class_refused(AdmissionClass::Adjudicated);
                 decision.admitted = false;
@@ -1758,7 +1793,7 @@ fn slow_path_worker(
         if let Some(lease) = lease {
             let pre = reinject_core
                 .as_ref()
-                .map(|core| core.pre_write_check(&lease))
+                .map(|core| core.pre_write_check_for(req.connection_id, &lease))
                 .unwrap_or(crate::slowpath_reinject_9506::PreWrite::Unknown);
             if !matches!(pre, crate::slowpath_reinject_9506::PreWrite::Proceed) {
                 status.dropped_packets.fetch_add(1, Ordering::Relaxed);
@@ -1782,7 +1817,7 @@ fn slow_path_worker(
         {
             // No post-write epoch check: a definitive full-frame success
             // after WRITE_STARTED is the REINJECT COMMIT point.
-            core.resolve_write(&lease, verdict);
+            core.resolve_write_for(req.connection_id, &lease, verdict);
         }
         apply_slowpath_outcome(outcome, &mut mode, bytes_len, &status);
     }

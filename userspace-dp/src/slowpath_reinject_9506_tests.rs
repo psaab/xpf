@@ -87,6 +87,7 @@ fn ipsec_inner_verdict_bridge_terminalizes_deny_and_would_permit() {
     assert!(core.admit(&frame(901, 17, 64)).admitted);
     assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::Deny {
         request_id: 901,
+        connection_id: 0,
         stage: "d14",
         reason: 32,
         policy_id: 0,
@@ -98,7 +99,10 @@ fn ipsec_inner_verdict_bridge_terminalizes_deny_and_would_permit() {
 
     assert!(core.admit(&frame(902, 17, 64)).admitted);
     assert!(core.resolve_ipsec_inner_verdict(
-        IpsecInnerVerdict::WouldPermit { request_id: 902 }
+        IpsecInnerVerdict::WouldPermit {
+            request_id: 902,
+            connection_id: 0,
+        }
     ));
     assert_eq!(
         core.drain_ready(1)[0].outcome,
@@ -112,6 +116,7 @@ fn ipsec_inner_verdict_bridge_maps_e24_to_uncertain() {
     assert!(core.admit(&frame(903, 17, 64)).admitted);
     assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::Deny {
         request_id: 903,
+        connection_id: 0,
         stage: "d11",
         reason: ipsec_reason::VERDICT_UNCERTAIN,
         policy_id: 0,
@@ -1871,7 +1876,8 @@ fn armed_would_permit_waits_for_the_write_terminal_9506() {
     assert!(core.admit(&frame(950, 17, 64)).admitted);
     assert!(core.arm_write(&lease(950)));
     assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::WouldPermit {
-        request_id: 950
+        request_id: 950,
+        connection_id: 0,
     }));
     assert!(
         core.peek_ready(8).is_empty(),
@@ -1897,11 +1903,70 @@ fn unarmed_would_permit_keeps_deny_only_terminal_9506() {
     let core = open_core();
     assert!(core.admit(&frame(951, 18, 64)).admitted);
     assert!(core.resolve_ipsec_inner_verdict(IpsecInnerVerdict::WouldPermit {
-        request_id: 951
+        request_id: 951,
+        connection_id: 0,
     }));
     let ready = core.peek_ready(8);
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].request_id, 951);
     assert_eq!(ready[0].outcome, ReinjectOutcome::WouldPermit);
     assert_eq!(ready[0].bytes_written, 0);
+}
+
+#[test]
+fn run_change_purges_inflight_entries_13195() {
+    let core = open_core();
+    assert!(core
+        .announce_epochs("run-a", 1, PERMIT, true, &[(1, QEPOCH)])
+        .to_owned());
+    assert!(core.admit_for_connection(&frame(1, 7, 64), 77).admitted);
+    assert!(core.admit_for_connection(&frame(2, 7, 64), 77).admitted);
+    assert_eq!(core.pre_write_check_for(77, &lease(2)), PreWrite::Proceed);
+    assert!(core.resolve_write_for(77, &lease(2), written(64)));
+    assert_eq!(core.live_count(), 2);
+    assert!(core.announce_epochs("run-b", 2, PERMIT, true, &[(1, QEPOCH)]));
+    assert_eq!(core.live_count(), 0, "run change must purge in-flight entries");
+    assert!(core.ready_len() == 0 && core.peek_ready(8).is_empty());
+    let stats = core.stats_snapshot();
+    assert_eq!(stats.purged_queued, 1);
+    assert_eq!(stats.purged_unacked, 1);
+    // New run can reuse request ids without ADMIT_BAD_LEASE collisions.
+    assert!(core.admit_for_connection(&frame(1, 7, 64), 88).admitted);
+}
+
+#[test]
+fn purge_connection_drops_only_owning_connection_13195() {
+    let core = open_core();
+    assert!(core.admit_for_connection(&frame(10, 7, 64), 42).admitted);
+    assert!(core.admit_for_connection(&frame(11, 8, 64), 99).admitted);
+    assert_eq!(core.purge_connection(42), (1, 0));
+    assert_eq!(core.live_count(), 1);
+    assert_eq!(core.pre_write_check_for(99, &lease(11)), PreWrite::Proceed);
+}
+#[test]
+fn old_run_worker_result_cannot_touch_reused_request_id_13195() {
+    let core = open_core();
+    assert!(core.announce_epochs("run-a", 1, PERMIT, true, &[(1, QEPOCH)]));
+    assert!(core
+        .admit_for_connection(&frame(1, 7, 64), 41)
+        .admitted);
+    assert!(core.announce_epochs("run-b", 2, PERMIT, true, &[(1, QEPOCH)]));
+    assert!(core
+        .admit_for_connection(&frame(1, 7, 64), 42)
+        .admitted);
+
+    assert!(!core.resolve_ipsec_inner_verdict(
+        IpsecInnerVerdict::WouldPermit {
+            request_id: 1,
+            connection_id: 41,
+        }
+    ));
+    assert!(!core.arm_write_for(41, &lease(1)));
+    assert!(!core.refuse_queued_for(
+        41,
+        &lease(1),
+        "stale worker".to_string(),
+    ));
+    assert_eq!(core.live_count(), 1);
+    assert_eq!(core.view(&lease(1)), EntryView::Queued);
 }
