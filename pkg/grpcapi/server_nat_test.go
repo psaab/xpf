@@ -244,7 +244,7 @@ func TestGetNATPoolStatsUsesSessionStoreProvider(t *testing.T) {
 			interfacePools++
 		}
 	}
-	if interfacePools != 2 {
-		t.Fatalf("interface pool count = %d, want 2", interfacePools)
+	if interfacePools != 1 {
+		t.Fatalf("interface pool count = %d, want 1 (one row per from/to zone pair)", interfacePools)
 	}
 }
