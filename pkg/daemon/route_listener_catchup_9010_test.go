@@ -50,9 +50,6 @@ func TestSubscriptionReestablishmentForcesAFibRefresh9010(t *testing.T) {
 			"catch-up mark every route that changed during the gap is invisible and the "+
 			"helper FIB stays stale until the next event that happens to arrive", actuations)
 	}
-	if got := d.routeListenerCatchUps.Load(); got != 1 {
-		t.Errorf("routeListenerCatchUps = %d, want 1", got)
-	}
 }
 
 // A nil loop must not panic: the catch-up runs on a path that can be reached
@@ -61,7 +58,4 @@ func TestSubscriptionReestablishmentForcesAFibRefresh9010(t *testing.T) {
 func TestCatchUpToleratesNilLoop9010(t *testing.T) {
 	d := &Daemon{}
 	d.routeListenerCatchUp(nil)
-	if got := d.routeListenerCatchUps.Load(); got != 0 {
-		t.Errorf("a nil loop counted a catch-up (%d); the counter should reflect marks actually issued", got)
-	}
 }

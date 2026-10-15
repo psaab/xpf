@@ -467,6 +467,9 @@ func (m *Manager) FormatInformation() string {
 	fmt.Fprintf(&b, "  Heartbeat packets sent:     %d\n", hbStats.Sent)
 	fmt.Fprintf(&b, "  Heartbeat packets received: %d\n", hbStats.Received)
 	fmt.Fprintf(&b, "  Heartbeat packet errors:    %d\n", hbStats.SendErrors+hbStats.RecvErrors)
+	if hbStats.ForeignSrcDropped > 0 {
+		fmt.Fprintf(&b, "  Foreign-source heartbeats dropped: %d\n", hbStats.ForeignSrcDropped)
+	}
 	fmt.Fprintf(&b, "  Heartbeats without epoch:   %d%s\n", hbStats.EpochlessAdmitted,
 		epochlessExposureNote(hbStats))
 	fmt.Fprintf(&b, "  Epoch downgrades rejected:  %d\n", hbStats.EpochDowngradeRejected)
@@ -490,6 +493,22 @@ func (m *Manager) FormatInformation() string {
 		}
 		fmt.Fprintf(&b, "  Status: %s\n", connected)
 		fmt.Fprintf(&b, "  Errors: %d\n", syncStats.Errors)
+		if syncStats.PreKeyAuthEvictions > 0 {
+			fmt.Fprintf(&b, "  Pre-key authentication evictions: %d\n", syncStats.PreKeyAuthEvictions)
+		}
+		if syncStats.DeletesSuppressedPeerIncapable > 0 {
+			fmt.Fprintf(&b, "  Deletes suppressed for incapable peer: %d\n", syncStats.DeletesSuppressedPeerIncapable)
+		}
+		if syncStats.DeletesSuppressedPurgeRetirement > 0 {
+			fmt.Fprintf(&b, "  Purge-retirement deletes suppressed: %d\n", syncStats.DeletesSuppressedPurgeRetirement)
+		}
+		if syncStats.DeletesSuppressedScopedPolicy > 0 {
+			fmt.Fprintf(&b, "  Scoped-policy deletes suppressed: %d\n", syncStats.DeletesSuppressedScopedPolicy)
+		}
+		if syncStats.InstallsSuppressedNoPeerInstallTable > 0 {
+			fmt.Fprintf(&b, "  Installs suppressed (peer lacks install-table support): %d\n",
+				syncStats.InstallsSuppressedNoPeerInstallTable)
+		}
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}
@@ -779,6 +798,9 @@ func (m *Manager) FormatStatistics() string {
 	fmt.Fprintf(&b, "    Heartbeat packets sent:     %d\n", hbStats.Sent)
 	fmt.Fprintf(&b, "    Heartbeat packets received: %d\n", hbStats.Received)
 	fmt.Fprintf(&b, "    Heartbeat packet errors:    %d\n", hbStats.SendErrors+hbStats.RecvErrors)
+	if hbStats.ForeignSrcDropped > 0 {
+		fmt.Fprintf(&b, "    Foreign-source heartbeats dropped: %d\n", hbStats.ForeignSrcDropped)
+	}
 	fmt.Fprintf(&b, "    Heartbeats without epoch:   %d%s\n", hbStats.EpochlessAdmitted,
 		epochlessExposureNote(hbStats))
 	fmt.Fprintf(&b, "    Epoch downgrades rejected:  %d\n", hbStats.EpochDowngradeRejected)
@@ -829,6 +851,26 @@ func (m *Manager) FormatStatistics() string {
 			"", syncStats.SessionsInstalled)
 		fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Errors",
 			syncStats.Errors, "")
+		if syncStats.PreKeyAuthEvictions > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Pre-key auth evictions",
+				syncStats.PreKeyAuthEvictions, "")
+		}
+		if syncStats.DeletesSuppressedPeerIncapable > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Deletes suppressed (peer incapable)",
+				syncStats.DeletesSuppressedPeerIncapable, "")
+		}
+		if syncStats.DeletesSuppressedPurgeRetirement > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Deletes suppressed (purge retirement)",
+				syncStats.DeletesSuppressedPurgeRetirement, "")
+		}
+		if syncStats.DeletesSuppressedScopedPolicy > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Deletes suppressed (scoped policy)",
+				syncStats.DeletesSuppressedScopedPolicy, "")
+		}
+		if syncStats.InstallsSuppressedNoPeerInstallTable > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Installs suppressed (no peer install table)",
+				syncStats.InstallsSuppressedNoPeerInstallTable, "")
+		}
 		if syncStats.LastFenceSeq > 0 {
 			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Install fence seq",
 				syncStats.LastFenceSeq, "")
@@ -849,6 +891,9 @@ func (m *Manager) FormatControlPlaneStatistics() string {
 	fmt.Fprintf(&b, "    Heartbeat packets received: %d\n", hbStats.Received)
 	fmt.Fprintf(&b, "    Heartbeat send errors:      %d\n", hbStats.SendErrors)
 	fmt.Fprintf(&b, "    Heartbeat receive errors:   %d\n", hbStats.RecvErrors)
+	if hbStats.ForeignSrcDropped > 0 {
+		fmt.Fprintf(&b, "    Foreign-source heartbeats dropped: %d\n", hbStats.ForeignSrcDropped)
+	}
 	fmt.Fprintf(&b, "    Heartbeats without epoch:   %d%s\n", hbStats.EpochlessAdmitted,
 		epochlessExposureNote(hbStats))
 	fmt.Fprintf(&b, "    Epoch downgrades rejected:  %d\n", hbStats.EpochDowngradeRejected)

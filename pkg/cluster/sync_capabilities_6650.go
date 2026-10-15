@@ -67,13 +67,11 @@ func (s *SessionSync) PeerSnapshotProtocolVersion() uint16 {
 }
 
 // PeerSnapshotState is the capability observation that authorizes an outgoing
-// config snapshot. Learned follows the existing #6650 convention: nonzero
-// versions are learned, while 0 is incapable whether absent or explicit.
+// config snapshot. Version zero is incapable whether absent or explicit.
 // Generation changes when the advertised protocol changes or is cleared, so a
 // sender can bind a later queue operation to this exact observation.
 type PeerSnapshotState struct {
 	Version    uint16
-	Learned    bool
 	Generation uint64
 	Connected  bool
 }
@@ -107,7 +105,6 @@ func (s *SessionSync) peerSnapshotStateLocked() PeerSnapshotState {
 	}
 	return PeerSnapshotState{
 		Version:    version,
-		Learned:    version != 0,
 		Generation: s.peerSnapshotProtocolGeneration,
 		Connected:  s.stats.Connected.Load(),
 	}
