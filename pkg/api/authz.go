@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"strings"
@@ -479,7 +480,8 @@ func (s *Server) peerIsLocalNow(p *pendingPeer) bool {
 // both passes would read the same answer, while peerIsLocalNow drives a full
 // interface enumeration. The LIVE half — the config snapshot and the api-auth
 // credential, the two things a commit can change underneath an in-flight
-// request — is deliberately NOT memoized and is re-read on every pass.
+// request — is re-read on every pass and checked against a successful
+// request-scoped memo whose policy and expiry conditions must still match.
 //
 // The residual this fixes in place rather than closing: locality is answered
 // from an enumeration started on the FIRST pass, so an address added to this
@@ -490,10 +492,46 @@ func (s *Server) peerIsLocalNow(p *pendingPeer) bool {
 // the alternative — an enumeration per pass — makes every credentialed mutation
 // pay twice for an answer about addresses that did not change.
 type requestIdentity struct {
-	pending      *pendingPeer
-	id           authz.PeerIdentity
-	localityDone bool
-	local        bool
+	pending            *pendingPeer
+	id                 authz.PeerIdentity
+	localityDone       bool
+	local              bool
+	credentialResolver func(AuthConfig, *http.Request) (string, string, bool)
+	credMemo           *credentialMemo
+}
+
+type credentialMemo struct {
+	headers  [2]string
+	policy   AuthConfig // shallow snapshot; published auth maps are immutable
+	identity string
+	class    string
+	expires  time.Time
+}
+
+func sameAuthConfig(a, b AuthConfig) bool {
+	return maps.Equal(a.Users, b.Users) && maps.Equal(a.UserClasses, b.UserClasses) &&
+		sameTimes(a.UserExpires, b.UserExpires) && maps.Equal(a.APIKeys, b.APIKeys) &&
+		maps.Equal(a.APIKeyNames, b.APIKeyNames) && maps.Equal(a.APIKeyClasses, b.APIKeyClasses) &&
+		sameTimes(a.APIKeyExpires, b.APIKeyExpires)
+}
+
+func sameTimes(a, b map[string]time.Time) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		other, ok := b[key]
+		if !ok || !value.Equal(other) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *credentialMemo) valid(a AuthConfig, r *http.Request) bool {
+	return m != nil && time.Now().Before(m.expires) &&
+		m.headers == [2]string{r.Header.Get("Authorization"), r.Header.Get("X-API-Key")} &&
+		sameAuthConfig(m.policy, a)
 }
 
 // isLocalNow answers the credential row's locality question for ri, driving at
@@ -664,6 +702,40 @@ func (s *Server) reauthorizeInputs(r *http.Request, ri *requestIdentity) (*confi
 //
 // The ORDER in which its two inputs are obtained — the peer wait and the config
 // read — is argued on authorizeInputs, which is the only caller.
+func (s *Server) memoizedCredentialPrincipalUser(a AuthConfig, r *http.Request, ri *requestIdentity) (string, bool) {
+	if ri.credMemo.valid(a, r) {
+		return ri.credMemo.identity, true
+	}
+	resolve := ri.credentialResolver
+	if resolve == nil {
+		resolve = credentialPrincipalIdentity
+	}
+	identity, class, ok := resolve(a, r)
+	if !ok {
+		ri.credMemo = nil
+		return "", false
+	}
+	expiry := time.Time{}
+	for _, candidate := range a.UserExpires {
+		if !candidate.IsZero() && (expiry.IsZero() || candidate.Before(expiry)) {
+			expiry = candidate
+		}
+	}
+	for _, candidate := range a.APIKeyExpires {
+		if !candidate.IsZero() && (expiry.IsZero() || candidate.Before(expiry)) {
+			expiry = candidate
+		}
+	}
+	if expiry.IsZero() {
+		expiry = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	}
+	ri.credMemo = &credentialMemo{
+		headers: [2]string{r.Header.Get("Authorization"), r.Header.Get("X-API-Key")},
+		policy:  a, identity: identity, class: class, expires: expiry,
+	}
+	return identity, true
+}
+
 func (s *Server) principalFrom(r *http.Request, cfg *config.Config, ri *requestIdentity) authz.Principal {
 	// The listener's OWN authentication gate is evaluated exactly once, by
 	// dynamicAuthMiddleware, before this middleware is entered — which is
@@ -691,7 +763,7 @@ func (s *Server) principalFrom(r *http.Request, cfg *config.Config, ri *requestI
 	// gate that writes it; a caller racing a credential change gets a refusal
 	// with a reason either way.
 	if a := s.authForRequest(r); a != nil {
-		if _, ok := credentialPrincipalUser(*a, r); !ok {
+		if _, ok := s.memoizedCredentialPrincipalUser(*a, r, ri); !ok {
 			return authz.Unauthenticated(
 				"api-auth credential was revoked, rotated, or newly required while this " +
 					"request was being adjudicated")
@@ -707,7 +779,12 @@ func (s *Server) principalFrom(r *http.Request, cfg *config.Config, ri *requestI
 	if id.Local {
 		return authz.Unauthenticated("caller is local but could not be identified: " + id.Detail)
 	}
-	if _, ok := s.credential(r); ok {
+	a := s.authForRequest(r)
+	_, credentialOK := "", false
+	if a != nil {
+		_, credentialOK = s.memoizedCredentialPrincipalUser(*a, r, ri)
+	}
+	if credentialOK {
 		// (4), but only once the off-box verdict is confirmed against an
 		// enumeration started by THIS request. The verdict that got us here was
 		// cached at accept and lags an address add; a caller that is in fact on
@@ -750,34 +827,24 @@ func (s *Server) principalFrom(r *http.Request, cfg *config.Config, ri *requestI
 		// is entitled to have it stop working, and the whole point of ReplaceAuth
 		// (#5866) is that revocation needs no listener bounce.
 		//
-		// Re-checking the credential rather than comparing snapshot POINTERS is
-		// deliberate: reconcileTo republishes on every commit, so pointer
-		// identity would 403 a valid caller for an unrelated commit. This denies
-		// exactly when the presented credential no longer satisfies the live
-		// policy, and it costs one more constant-time compare on a row that has
-		// already proven it holds a valid secret.
-		live, still := s.credential(r)
+		// The request-scoped memo uses semantic policy equality rather than
+		// snapshot POINTERS: reconcileTo republishes on every commit, including
+		// unrelated ones. It reuses a successful verification only while the
+		// presented credential, every policy field, and the expiry cap remain
+		// unchanged; a revocation or rotation therefore invalidates it before
+		// this live principal is returned.
+		liveAuth := s.authForRequest(r)
+		if liveAuth == nil {
+			return authz.Unauthenticated("api-auth credential was revoked while this request was being adjudicated")
+		}
+		identity, still := s.memoizedCredentialPrincipalUser(*liveAuth, r, ri)
 		if !still {
 			return authz.Unauthenticated(
 				"api-auth credential was revoked or rotated while this request was being adjudicated")
 		}
-		return live
+		return authz.CredentialPrincipal(identity, ri.credMemo.class)
 	}
 	return authz.Unauthenticated(id.Detail)
-}
-
-// credential returns the principal for a valid api-auth credential on r, if the
-// listener has an auth policy and the request satisfies it.
-func (s *Server) credential(r *http.Request) (authz.Principal, bool) {
-	a := s.authForRequest(r)
-	if a == nil {
-		return authz.Principal{}, false
-	}
-	identity, class, ok := credentialPrincipalIdentity(*a, r)
-	if !ok {
-		return authz.Principal{}, false
-	}
-	return authz.CredentialPrincipal(identity, class), true
 }
 
 // credentialPrincipalIdentity reports the name and login class of a valid

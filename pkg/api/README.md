@@ -695,13 +695,14 @@ they superseded had already been captured:
   sent must still answer 403), because an assertion on the status alone passes
   under either ordering.
 - The credential principal was minted *before* the enumeration. It is a value
-  and `ReplaceAuth` swaps a pointer, so a rotated or revoked secret did not
-  invalidate a principal already speaking. The credential is now re-validated
-  against the LIVE snapshot after the enumeration (`authz.go`, the second
-  `s.credential(r)` inside the credential branch); a request whose secret was
-  revoked mid-flight is denied. The re-check compares the *credential*, not
-  snapshot pointer identity — the reconciler republishes on every commit, so
-  pointer identity would 403 a valid caller for an unrelated commit.
+  and `ReplaceAuth` swaps a pointer, so a rotated or revoked secret must not
+  invalidate a principal already speaking. The live credential policy is
+  re-read after enumeration and compared semantically with the policy under
+  which this request verified its credential (`authz.go`, `requestIdentity`
+  memo). A matching policy and unchanged presented headers reuse the request's
+  successful verification; any credential or scope change re-verifies against
+  the live snapshot and denies revoked credentials. Snapshot pointer identity
+  is not used because the reconciler republishes on unrelated commits.
 
 The residual is named rather than papered over: a `/etc/passwd` read still
 separates the snapshot from the verdict on the peer-UID row. Snapshot and
@@ -718,13 +719,14 @@ The next section says why.
 
 **What `TestRevokedCredentialCannotFinishAnInFlightRequest_5561` actually
 proves, stated precisely (#6645 r21).** It proves a DISJUNCTION — that *at
-least one* live credential re-validation happens between `PeerLocalityFn` and
-the handler — not that the re-read inside the credential branch is the thing
-doing it. There are two independent live re-validations on that path, and they
-MASK EACH OTHER: reverting the credential branch to return the principal minted
-before the enumeration leaves the test green, because the mutation gate's second
-pass (`reauthorizeInputs`) still re-derives; deleting that second pass also
-leaves it green, because the credential branch still re-reads. Measured, at
+least one* live credential-policy check happens between `PeerLocalityFn` and
+the handler — not that the branch's re-resolution is the thing doing it.
+There are two independent checks on that path, and they MASK EACH OTHER:
+removing the credential-branch check leaves the test green because the mutation
+gate's second pass (`reauthorizeInputs`) still checks the live policy; removing
+that second pass leaves it green because the credential branch still checks.
+When semantic policy and headers are unchanged, the request-scoped memo avoids
+repeating bcrypt while preserving those live-policy comparisons. Measured, at
 `-count=2`, all three cells:
 
 | mutation | result |
