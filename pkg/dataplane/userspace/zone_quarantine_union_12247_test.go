@@ -396,8 +396,13 @@ func schedPolicyPresentInConfig12247(cfg *config.Config, toZone, name string) bo
 // installs that name, so it must not quarantine the live zone on any compile
 // path: the live zone keeps its interface and stays published.
 //
-// The strict gate still counts View 1's raw groups scan and keeps rejecting
-// these configs; that pre-existing false positive is unchanged here.
+// The strict gate still counts View 1's raw groups scan for concrete
+// group-only names and keeps rejecting those configs. A wildcard template
+// is the exception since #13113: `<*>` is a pattern, not an installed zone,
+// so it claims no StableZoneID and strict commit accepts it (pinned by
+// TestZoneIDCollisionIgnoresWildcardAndReserved13113). The wildcard row
+// therefore asserts strict acceptance, not the pre-#13113 collision
+// (#13361).
 func TestGroupOnlyZoneNameDoesNotQuarantineLiveZone12247(t *testing.T) {
 	const wildcardCollider = "z65162"
 	if config.StableZoneID("<*>") != config.StableZoneID(wildcardCollider) {
@@ -409,16 +414,18 @@ func TestGroupOnlyZoneNameDoesNotQuarantineLiveZone12247(t *testing.T) {
 interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }`
 	}
 	for _, tc := range []struct {
-		name    string
-		text    string
-		live    string
-		phantom string
+		name       string
+		text       string
+		live       string
+		phantom    string
+		strictColl bool
 	}{
 		{
-			name:    "group nothing applies",
-			text:    "groups { unused { security { zones { security-zone z174; } } } }\n" + liveZone("z214"),
-			live:    "z214",
-			phantom: "z174",
+			name:       "group nothing applies",
+			text:       "groups { unused { security { zones { security-zone z174; } } } }\n" + liveZone("z214"),
+			live:       "z214",
+			phantom:    "z174",
+			strictColl: true,
 		},
 		{
 			name: "wildcard template",
@@ -428,17 +435,22 @@ interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }`
 			phantom: "<*>",
 		},
 		{
-			name: "group applied under another stanza",
-			text: "groups { g1 { security { zones { security-zone z174; } } } }\nsystem { apply-groups g1; host-name p; }\n" +
-				liveZone("z214"),
-			live:    "z214",
-			phantom: "z174",
+			name:       "group applied under another stanza",
+			text:       "groups { g1 { security { zones { security-zone z174; } } } }\nsystem { apply-groups g1; host-name p; }\n" + liveZone("z214"),
+			live:       "z214",
+			phantom:    "z174",
+			strictColl: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := parseTree12247(t, tc.text)
-			if _, err := config.CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "zone id collision") {
-				t.Fatalf("strict compile error = %v, want the unchanged View-1 zone id collision", err)
+			_, strictErr := config.CompileConfig(tree)
+			if tc.strictColl {
+				if strictErr == nil || !strings.Contains(strictErr.Error(), "zone id collision") {
+					t.Fatalf("strict compile error = %v, want the unchanged View-1 zone id collision", strictErr)
+				}
+			} else if strictErr != nil {
+				t.Fatalf("strict compile error = %v, want acceptance of the wildcard template (#13113)", strictErr)
 			}
 			for _, nodeID := range []int{-1, 0, 1} {
 				cfg := lenientCompile12247(t, tree, nodeID)
