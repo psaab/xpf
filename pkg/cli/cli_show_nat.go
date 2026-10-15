@@ -112,14 +112,18 @@ func (c *CLI) showNATSource(cfg *config.Config, args []string) error {
 			for _, addr := range pool.Addresses {
 				fmt.Printf("    Address: %s\n", addr)
 			}
-			portLow, portHigh := pool.PortLow, pool.PortHigh
-			if portLow == 0 {
-				portLow = 1024
+			if pool.PortNoTranslation {
+				fmt.Println("    Port translation: no-translation (source port preserved)")
+			} else {
+				portLow, portHigh := pool.PortLow, pool.PortHigh
+				if portLow == 0 {
+					portLow = 1024
+				}
+				if portHigh == 0 {
+					portHigh = 65535
+				}
+				fmt.Printf("    Port range: %d-%d\n", portLow, portHigh)
 			}
-			if portHigh == 0 {
-				portHigh = 65535
-			}
-			fmt.Printf("    Port range: %d-%d\n", portLow, portHigh)
 		}
 		fmt.Println()
 	}
@@ -756,14 +760,16 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 			if line := natNotInstalledLine(excludedReason, false); line != "" {
 				fmt.Println("  " + line)
 			}
-			if rule.Match.DestinationAddress != "" {
-				fmt.Printf("    Match destination-address: %s\n", rule.Match.DestinationAddress)
+			if match := natshow.RuleMatchDestination(rule); match != "0.0.0.0/0" {
+				fmt.Printf("    Match destination-address: %s\n", match)
 			}
 			if rule.Match.DestinationPort != 0 {
 				fmt.Printf("    Match destination-port: %d\n", rule.Match.DestinationPort)
 			}
 			if rule.Then.PoolName != "" {
 				fmt.Printf("    Then pool: %s\n", rule.Then.PoolName)
+			} else {
+				fmt.Printf("    Action: %s\n", natshow.DestRuleAction(rule))
 			}
 
 			// Show hit counters if dataplane is loaded and the rule was installed.
@@ -1050,11 +1056,7 @@ func (c *CLI) showNATDestinationRuleSet(cfg *config.Config, rsName string) error
 			if rule.Match.DestinationPort != 0 {
 				fmt.Printf("    Match destination-port: %d\n", rule.Match.DestinationPort)
 			}
-			action := "off"
-			if rule.Then.PoolName != "" {
-				action = "pool " + rule.Then.PoolName
-			}
-			fmt.Printf("    Action: %s\n", action)
+			fmt.Printf("    Action: %s\n", natshow.DestRuleAction(rule))
 
 			// A refused rule owns no live translation counter.
 			if c.dp != nil && cr != nil && excludedReason == "" {
@@ -1096,10 +1098,7 @@ func (c *CLI) showNATDestinationRuleAll(cfg *config.Config) error {
 			if rule.Match.DestinationPort != 0 {
 				dstMatch += fmt.Sprintf(":%d", rule.Match.DestinationPort)
 			}
-			action := "off"
-			if rule.Then.PoolName != "" {
-				action = "pool " + rule.Then.PoolName
-			}
+			action := natshow.DestRuleAction(rule)
 
 			fmt.Printf("Rule-set: %-20s Rule: %-12s from %s  Action: %s\n",
 				rs.Name, rule.Name, rs.FromZone, action)

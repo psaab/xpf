@@ -59,6 +59,21 @@ func SourceRuleAction(rule *config.NATRule) string {
 	}
 }
 
+// DestRuleAction renders the action of a destination-NAT rule consistently
+// across text and structured output. An actionless rule is not explicitly off.
+func DestRuleAction(rule *config.NATRule) string {
+	switch {
+	case rule == nil:
+		return "none"
+	case rule.Then.PoolName != "":
+		return "pool " + rule.Then.PoolName
+	case rule.Then.Off:
+		return "off"
+	default:
+		return "none"
+	}
+}
+
 // RuleMatchSource renders a rule's complete source-address match, or the
 // caller-visible "any" spelling when it has none. See match_addresses_7363.go
 // for why the plural supersedes the singular rather than joining it.

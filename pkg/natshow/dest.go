@@ -110,18 +110,8 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			// skipped rule ships no snapshot row and owns no counter, so the
 			// hits line must not print for one.
 			excludedReason := config.DestinationNATRuleExcludedReason(dnat, rule)
-			// #7640: as in the source renderer, do not claim an action the
-			// rule does not carry. This defaulted to "off", so an ACTIONLESS
-			// destination rule displayed as an explicit exemption the operator
-			// never wrote. The observable disposition happens to match (the
-			// builder skips such a rule), but the display asserted intent.
-			action := "none"
-			switch {
-			case rule.Then.PoolName != "":
-				action = "pool " + rule.Then.PoolName
-			case rule.Then.Off:
-				action = "off"
-			}
+			// #7640: share the action spelling with structured output.
+			action := DestRuleAction(rule)
 			// #7363: the FULL match — bracket list and address-book names —
 			// not just the singular back-compat field.
 			dstMatch := natMatchAddresses(

@@ -308,16 +308,23 @@ func (s *Server) GetNATPoolStats(ctx context.Context, _ *pb.GetNATPoolStatsReque
 	// is masked by every row showing the global count (#3417). The
 	// per-rule-set breakdown is already computed in counts.ruleSetSessions
 	// (keyed by ingress/egress zone name) and surfaced via resp.RuleSetSessions.
+	ifacePoolSeen := make(map[natRuleSetKey]struct{})
 	for _, rs := range cfg.Security.NAT.Source {
+		key := natRuleSetKey{rs.FromZone, rs.ToZone}
 		for _, rule := range rs.Rules {
-			if rule.Then.Interface {
-				resp.Pools = append(resp.Pools, &pb.NATPoolStats{
-					Name:        fmt.Sprintf("%s->%s", rs.FromZone, rs.ToZone),
-					Address:     "interface",
-					UsedPorts:   clampInt32(counts.ruleSetSessions[natRuleSetKey{rs.FromZone, rs.ToZone}]),
-					IsInterface: true,
-				})
+			if !rule.Then.Interface {
+				continue
 			}
+			if _, exists := ifacePoolSeen[key]; exists {
+				continue
+			}
+			ifacePoolSeen[key] = struct{}{}
+			resp.Pools = append(resp.Pools, &pb.NATPoolStats{
+				Name:        fmt.Sprintf("%s->%s", rs.FromZone, rs.ToZone),
+				Address:     "interface",
+				UsedPorts:   clampInt32(counts.ruleSetSessions[key]),
+				IsInterface: true,
+			})
 		}
 	}
 
@@ -432,10 +439,7 @@ func (s *Server) GetNATRuleStats(_ context.Context, req *pb.GetNATRuleStatsReque
 					continue
 				}
 				for _, rule := range rs.Rules {
-					action := "off"
-					if rule.Then.PoolName != "" {
-						action = "pool " + rule.Then.PoolName
-					}
+					action := natshow.DestRuleAction(rule)
 					// #8580: same singular-only copy, destination side.
 					dstMatch := natshow.RuleMatchDestination(rule)
 					if rule.Match.DestinationPort != 0 {

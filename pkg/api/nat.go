@@ -438,16 +438,23 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	ifacePoolSeen := make(map[[2]string]struct{})
 	for _, rs := range cfg.Security.NAT.Source {
+		key := [2]string{rs.FromZone, rs.ToZone}
 		for _, rule := range rs.Rules {
-			if rule.Then.Interface {
-				result = append(result, NATPoolStatsInfo{
-					Name:        fmt.Sprintf("%s->%s", rs.FromZone, rs.ToZone),
-					Address:     "interface",
-					UsedPorts:   ruleSetUsed[[2]string{rs.FromZone, rs.ToZone}],
-					IsInterface: true,
-				})
+			if !rule.Then.Interface {
+				continue
 			}
+			if _, exists := ifacePoolSeen[key]; exists {
+				continue
+			}
+			ifacePoolSeen[key] = struct{}{}
+			result = append(result, NATPoolStatsInfo{
+				Name:        fmt.Sprintf("%s->%s", rs.FromZone, rs.ToZone),
+				Address:     "interface",
+				UsedPorts:   ruleSetUsed[key],
+				IsInterface: true,
+			})
 		}
 	}
 
