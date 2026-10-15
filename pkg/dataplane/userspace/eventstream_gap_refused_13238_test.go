@@ -105,3 +105,29 @@ func TestEventStreamOversizedFrameAcrossGapIsGap_13238(t *testing.T) {
 	}
 	assertGap13238(t, es, resyncCalls)
 }
+
+// Over-ceiling headers may be desync garbage, so their sequence number must
+// not bypass the existing rate-limited oversized-frame resync policy.
+func TestEventStreamOverCeilingGarbageHeaderDoesNotTriggerSessionGap_13238(t *testing.T) {
+	es, conn, _, resyncCalls, _ := gap13238Setup(t)
+	declaredLength := uint32(maxDiscardableOversizedFrameBytes + 1)
+	if err := writeOversizedFrameHeader(conn, EventTypeSessionOpen, 10, declaredLength, nil); err != nil {
+		t.Fatalf("write over-ceiling garbage header: %v", err)
+	}
+	waitForDisconnected(t, es)
+	if got := es.SeqGaps.Load(); got != 0 {
+		t.Fatalf("SeqGaps = %d, want 0 for untrusted over-ceiling header", got)
+	}
+	if got := es.SessionSyncResyncs.Load(); got != 0 {
+		t.Fatalf("SessionSyncResyncs = %d, want 0 for untrusted over-ceiling header", got)
+	}
+	if got := resyncCalls.Load(); got != 0 {
+		t.Fatalf("onFullResync calls = %d, want 0 for untrusted over-ceiling header", got)
+	}
+	if got := es.DecodeResyncSuppressed.Load(); got != 1 {
+		t.Fatalf("DecodeResyncSuppressed = %d, want 1 for rate-limited oversized resync", got)
+	}
+	if got := es.lastAppliedSeq.Load(); got != 1 {
+		t.Fatalf("lastAppliedSeq = %d, want 1; untrusted sequence must not advance ACK", got)
+	}
+}
