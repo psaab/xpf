@@ -1093,6 +1093,7 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 		SessionBytes:    evt.SessionBytes,
 		RevSessionPkts:  evt.RevPackets,
 		RevSessionBytes: evt.RevBytes,
+		IngressIfindex:  evt.IngressIfindex,
 		CloseReason:     closeReasonName(evt.CloseReason),
 		// #2465: carry the absolute session-creation Unix seconds. A zero value
 		// is unknown (old frame / synthesized close); exporters preserve that
