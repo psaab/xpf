@@ -1947,6 +1947,12 @@ set. Reading the effective set would make it go **silent on exactly the
 interfaces the flip just narrowed**, so the operator whose DHCP server stopped
 receiving DISCOVER would be told nothing.
 
+When the zone names a bare physical interface, the advisory expands it to its
+configured units, matching the per-unit enforcement stamp. A DHCP server on
+unit 0 therefore does not make a sibling VLAN unit appear withheld, and a
+client on that sibling does not make unit 0 appear retained. A configured
+per-interface host-inbound stanza still suppresses that interface's entry.
+
 Three details that matter:
 
 - **A zone-level `all` counts.** `all` expands to the named-service union, which
@@ -1956,7 +1962,9 @@ Three details that matter:
   fixes it is a different edit. An advisory that reported only the named token
   would have left the `all` case as a silent deviation.
 - **`dhcpv6` is deliberately NOT covered.** The vendor sentence names DHCP and
-  BOOTP. Extending it to the v6 token would be an inference, not a citation.
+  BOOTP. Extending it to the v6 token would be an inference, not a citation. The
+  same v4-only boundary applies to the role classifier: `dhcpv6-local-server`
+  does not trigger withholding of the IPv4 `dhcp` / `bootp` tokens.
 - **An interface that authorized the service ITSELF is not named.** The advisory
   fires for an interface whose EFFECTIVE set admits the token while its OWN
   interface-level stanza does not — i.e. the zone-level token is the authorizer.
