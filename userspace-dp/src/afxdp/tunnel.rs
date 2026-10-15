@@ -588,15 +588,11 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             resolution.status(None, forwarding).disposition
         ));
     }
-    // #13182: both halves of the GRE TUN-origin pair carry the tunnel
-    // instance's identity, keeping stale-generation revalidation there.
-    let (table, (install_table_domain, install_table_check)) =
-        tun_origin_reverse_route_table(forwarding, resolution.egress_ifindex);
     let decision = SessionDecision {
         resolution,
         nat: NatDecision::default(),
-        install_table_domain,
-        install_table_check,
+        install_table_domain: 0,
+        install_table_check: 0,
     };
     let mut flow = parse_session_flow_from_bytes(&inner_frame, meta)
         .ok_or_else(|| "parse_local_origin_session_flow_failed".to_string())?;
@@ -632,6 +628,10 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     if zone_id == 0 {
         return Err("local_tunnel_unzoned_egress".to_string());
     }
+    // #10038/#12503: the tunnel instance table selects the local source and
+    // reverse route; forward session re-resolution remains endpoint-pinned.
+    let (table, table_identity) =
+        tun_origin_reverse_route_table(forwarding, decision.resolution.egress_ifindex);
     let ipv6_table = forwarding
         .ifindex_to_routing_instance
         .get(&decision.resolution.egress_ifindex)
@@ -752,6 +752,7 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     // re-resolve stays there (#12503). The zone and source-ownership gates
     // above ensure only authorized local traffic reaches this point.
     let reverse_session_entry = session_entry.as_ref().and_then(|entry| {
+        let (install_table_domain, install_table_check) = table_identity;
         let mut reverse =
             crate::afxdp::shared_ops::synthesized_synced_reverse_entry_in_table(
                 forwarding,
