@@ -154,3 +154,78 @@ func TestVLANMapGateLenientWarnsNoBrick6178(t *testing.T) {
 		t.Fatalf("lenient compile must warn about the unsupported vlan-map; warnings = %v", cfg.Warnings)
 	}
 }
+
+// TestVLANMapPeeledUnitRejected13146 covers D2-15 subcase A: the peeled
+// 3-level `unit { 0 { ... } }` spelling, which compileInterfaces compiles via
+// namedInstances, must not bypass the #6178 gate (which previously only
+// matched two-key `unit 0` nodes).
+func TestVLANMapPeeledUnitRejected13146(t *testing.T) {
+	tree := hierTree(t, `interfaces {
+    ge-0/0/0 {
+        vlan-tagging;
+        unit {
+            0 {
+                vlan-id 100;
+                input-vlan-map { push; }
+                family inet { address 10.0.1.1/24; }
+            }
+        }
+    }
+}`)
+	mustRejectVLANMap6178(t, tree)
+}
+
+// TestVLANMapDuplicateUnitStatementsRetained13146 covers D2-15 subcase B:
+// multiple same-key unit findings must retain every unsupported statement.
+// CompileConfig rejects duplicate unit blocks via its independent #8427 gate,
+// so call the #6178 validator directly to isolate its union behavior.
+func TestVLANMapDuplicateUnitStatementsRetained13146(t *testing.T) {
+	first := hierTree(t, `interfaces {
+    ge-0/0/0 {
+        unit 0 { input-vlan-map { push; } }
+    }
+}`)
+	second := hierTree(t, `interfaces {
+    ge-0/0/0 {
+        unit 0 { output-vlan-map { pop; } }
+    }
+}`)
+	firstIface := first.FindChildren("interfaces")[0].FindChild("ge-0/0/0")
+	secondIface := second.FindChildren("interfaces")[0].FindChild("ge-0/0/0")
+	firstIface.Children = append(firstIface.Children, secondIface.FindChild("unit"))
+
+	_, err := validateVLANMapAST(first, false)
+	if err == nil {
+		t.Fatal("expected #6178 validator to reject duplicate-unit vlan-map")
+	}
+	if !strings.Contains(err.Error(), "input-vlan-map") ||
+		!strings.Contains(err.Error(), "output-vlan-map") {
+		t.Fatalf("duplicate-unit finding lost a vlan-map statement: %v", err)
+	}
+}
+
+// TestVLANMapLiteralNodeGroupRejected13146 covers D2-15 subcase C: a literal
+// `groups "${node}"` + `apply-groups "${node}"` config defeats per-node
+// group expansion, but the vlan-map sits in the top-level interfaces stanza
+// the compiler still compiles, so the gate must reject it instead of
+// silently returning no findings.
+func TestVLANMapLiteralNodeGroupRejected13146(t *testing.T) {
+	tree := hierTree(t, `groups {
+    "${node}" {
+        interfaces {
+            ge-0/0/0 { vlan-tagging; }
+        }
+    }
+}
+apply-groups "${node}";
+interfaces {
+    ge-0/0/0 {
+        unit 0 {
+            vlan-id 100;
+            input-vlan-map { push; }
+            family inet { address 10.0.1.1/24; }
+        }
+    }
+}`)
+	mustRejectVLANMap6178(t, tree)
+}
