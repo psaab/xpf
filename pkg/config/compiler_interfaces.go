@@ -295,19 +295,37 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			// #9156: expand the flat-set run before reading it. An untyped head
 			// (`keepalive-retry`, `routing-instance`) admits the whole run past
 			// the strict gate and this loop would then read only the head.
+			// #13215: retain values from braced scalar blocks before
+			// tunnelRunChildren9156 flattens their body into sibling nodes.
+			for _, rawProp := range tunnelNode.Children {
+				switch rawProp.Name() {
+				case "source":
+					if v := nodeVal(rawProp); v != "" {
+						tc.Source = v
+					}
+				case "destination":
+					if v := nodeVal(rawProp); v != "" {
+						tc.Destination = v
+					}
+				case "mode":
+					if v := nodeVal(rawProp); v != "" {
+						tc.Mode = v
+					}
+				}
+			}
 			for _, prop := range tunnelRunChildren9156(tunnelNode) {
 				switch prop.Name() {
 				case "source":
-					if len(prop.Keys) >= 2 {
-						tc.Source = prop.Keys[1]
+					if v := nodeVal(prop); v != "" {
+						tc.Source = v
 					}
 				case "destination":
-					if len(prop.Keys) >= 2 {
-						tc.Destination = prop.Keys[1]
+					if v := nodeVal(prop); v != "" {
+						tc.Destination = v
 					}
 				case "mode":
-					if len(prop.Keys) >= 2 {
-						tc.Mode = prop.Keys[1]
+					if v := nodeVal(prop); v != "" {
+						tc.Mode = v
 					}
 				case "key":
 					raw := nodeVal(prop)
@@ -795,14 +813,16 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 											dc.ClientIATypes = append(dc.ClientIATypes, v)
 										}
 									case "prefix-delegating":
-										if plNode := prop.FindChild("preferred-prefix-length"); plNode != nil {
+										pdNode := packedBody(prop,
+											schemaForPath("interfaces", "x", "unit", "family", "inet6", "dhcpv6-client", "prefix-delegating"))
+										if plNode := pdNode.FindChild("preferred-prefix-length"); plNode != nil {
 											if v := nodeVal(plNode); v != "" {
 												if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcpv6-client prefix-delegating preferred-prefix-length", v); ok {
 													dc.PrefixDelegatingPrefixLen = n
 												}
 											}
 										}
-										if slNode := prop.FindChild("sub-prefix-length"); slNode != nil {
+										if slNode := pdNode.FindChild("sub-prefix-length"); slNode != nil {
 											if v := nodeVal(slNode); v != "" {
 												if n, ok := parseIntLeaf(warnings, "interfaces "+ifName+" dhcpv6-client prefix-delegating sub-prefix-length", v); ok {
 													dc.PrefixDelegatingSubPrefLen = n
@@ -814,7 +834,9 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 											dc.ReqOptions = append(dc.ReqOptions, v)
 										}
 									case "update-router-advertisement":
-										if ifNode := prop.FindChild("interface"); ifNode != nil {
+										uraNode := packedBody(prop,
+											schemaForPath("interfaces", "x", "unit", "family", "inet6", "dhcpv6-client", "update-router-advertisement"))
+										if ifNode := uraNode.FindChild("interface"); ifNode != nil {
 											dc.UpdateRAInterface = nodeVal(ifNode)
 										}
 									}
@@ -944,7 +966,8 @@ func parseTunnelWireguard(tc *TunnelConfig, wgNode *Node) {
 	// both AST shapes via namedInstances and append one WgPeerConfig
 	// per instance (preserving config order — the snapshot builder
 	// sorts by pubkey for HA determinism).
-	for _, prop := range expandResolvingRuns9792(wgNode.Children, tunnelWireguardSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
+	expanded := expandResolvingRuns9792(wgNode.Children, tunnelWireguardSchema9792()) // #9792: expand a lenient-path packed run (#9235).
+	for _, prop := range expanded {
 		switch prop.Name() {
 		case "listen-port":
 			if v := nodeVal(prop); v != "" {
@@ -958,7 +981,13 @@ func parseTunnelWireguard(tc *TunnelConfig, wgNode *Node) {
 			}
 		}
 	}
-	for _, inst := range namedInstances(wgNode.FindChildren("peer")) {
+	var peers []*Node
+	for _, prop := range expanded {
+		if prop.Name() == "peer" {
+			peers = append(peers, prop)
+		}
+	}
+	for _, inst := range namedInstances(peers) {
 		if inst.name == "" {
 			continue
 		}
@@ -982,7 +1011,8 @@ func parseTunnelWireguard(tc *TunnelConfig, wgNode *Node) {
 // commit-time hex validator rejects it.
 func parseTunnelWireguardPeer(pubkey string, peerNode *Node) WgPeerConfig {
 	peer := WgPeerConfig{PublicKeyHex: strings.ToLower(pubkey)}
-	for _, prop := range expandResolvingRuns9792(peerNode.Children, tunnelWireguardPeerSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
+	peerBody := packedBody(peerNode, tunnelWireguardPeerSchema9792())
+	for _, prop := range expandResolvingRuns9792(peerBody.Children, tunnelWireguardPeerSchema9792()) {
 		switch prop.Name() {
 		case "allowed-ips":
 			// Multi-value (#2419): a bracketed list `allowed-ips [ a b ]`
