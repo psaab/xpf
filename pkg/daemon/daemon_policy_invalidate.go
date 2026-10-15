@@ -781,15 +781,26 @@ func pruneCapturedV4(c *capturedSessions, removed []dataplane.SessionKey) {
 	if len(removed) == 0 || len(c.v4) == 0 {
 		return
 	}
-	removedCount := make(map[dataplane.SessionKey]int, len(removed))
-	for _, key := range removed {
-		removedCount[key]++
+	type candidateIdentity struct {
+		identity  policySessionIdentityV4
+		ambiguous bool
+	}
+	byKey := make(map[dataplane.SessionKey]candidateIdentity, len(c.v4))
+	for _, entry := range c.v4 {
+		id := policyEntryIdentityV4(entry)
+		candidate, exists := byKey[entry.Key]
+		if !exists {
+			byKey[entry.Key] = candidateIdentity{identity: id}
+		} else if candidate.identity != id {
+			candidate.ambiguous = true
+			byKey[entry.Key] = candidate
+		}
 	}
 	removedIdentity := make(map[policySessionIdentityV4]struct{}, len(removed))
-	for _, entry := range c.v4 {
-		if removedCount[entry.Key] > 0 {
-			removedCount[entry.Key]--
-			removedIdentity[policyEntryIdentityV4(entry)] = struct{}{}
+	for _, key := range removed {
+		candidate, exists := byKey[key]
+		if exists && !candidate.ambiguous {
+			removedIdentity[candidate.identity] = struct{}{}
 		}
 	}
 	remaining := c.v4[:0]
@@ -805,15 +816,26 @@ func pruneCapturedV6(c *capturedSessions, removed []dataplane.SessionKeyV6) {
 	if len(removed) == 0 || len(c.v6) == 0 {
 		return
 	}
-	removedCount := make(map[dataplane.SessionKeyV6]int, len(removed))
-	for _, key := range removed {
-		removedCount[key]++
+	type candidateIdentity struct {
+		identity  policySessionIdentityV6
+		ambiguous bool
+	}
+	byKey := make(map[dataplane.SessionKeyV6]candidateIdentity, len(c.v6))
+	for _, entry := range c.v6 {
+		id := policyEntryIdentityV6(entry)
+		candidate, exists := byKey[entry.Key]
+		if !exists {
+			byKey[entry.Key] = candidateIdentity{identity: id}
+		} else if candidate.identity != id {
+			candidate.ambiguous = true
+			byKey[entry.Key] = candidate
+		}
 	}
 	removedIdentity := make(map[policySessionIdentityV6]struct{}, len(removed))
-	for _, entry := range c.v6 {
-		if removedCount[entry.Key] > 0 {
-			removedCount[entry.Key]--
-			removedIdentity[policyEntryIdentityV6(entry)] = struct{}{}
+	for _, key := range removed {
+		candidate, exists := byKey[key]
+		if exists && !candidate.ambiguous {
+			removedIdentity[candidate.identity] = struct{}{}
 		}
 	}
 	remaining := c.v6[:0]

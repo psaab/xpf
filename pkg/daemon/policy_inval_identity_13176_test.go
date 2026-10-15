@@ -130,7 +130,7 @@ func TestPruneCapturedPolicyRowsKeepsDistinctVRFRow13176(t *testing.T) {
 	}
 }
 
-func TestPruneCapturedKeepsDistinctVRFRow13176(t *testing.T) {
+func TestPruneCapturedKeepsAmbiguousVRFRows13176(t *testing.T) {
 	key := sessionEntryKey13176()
 	key6 := sessionEntryKeyV613176()
 	c := &capturedSessions{
@@ -143,13 +143,15 @@ func TestPruneCapturedKeepsDistinctVRFRow13176(t *testing.T) {
 			{Key: key6, Value: dataplane.SessionValueV6{RoutingDomain: 2, RTFlowSessionID: 202}},
 		},
 	}
+	// The delete API returns only bare keys; it cannot say which incarnation
+	// succeeded when equal keys span VRFs. Keep both identities pending.
 	pruneCapturedV4(c, []dataplane.SessionKey{key})
-	if len(c.v4) != 1 || c.v4[0].Value.RoutingDomain != 2 {
-		t.Fatalf("#13176: exact-v4 prune removed the surviving VRF-2 row: %+v", c.v4)
+	if len(c.v4) != 2 {
+		t.Fatalf("#13176: ambiguous exact-v4 delete pruned an identity: %+v", c.v4)
 	}
 	pruneCapturedV6(c, []dataplane.SessionKeyV6{key6})
-	if len(c.v6) != 1 || c.v6[0].Value.RoutingDomain != 2 {
-		t.Fatalf("#13176: exact-v6 prune removed the surviving VRF-2 row: %+v", c.v6)
+	if len(c.v6) != 2 {
+		t.Fatalf("#13176: ambiguous exact-v6 delete pruned an identity: %+v", c.v6)
 	}
 }
 
