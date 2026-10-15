@@ -475,15 +475,13 @@ func TestHostInboundExcept10292StandaloneModifierFails(t *testing.T) {
 	}
 }
 
-func TestHostInboundExcept10292NestedNonExceptChildrenDoNotAdmit(t *testing.T) {
+func TestHostInboundExcept10292NestedNonExceptChildrenAreRejected(t *testing.T) {
 	const prefix = `security { zones { security-zone trust { host-inbound-traffic { `
 	const suffix = ` } } } }`
-	t.Run("nested-token-is-not-a-value", func(t *testing.T) {
-		got := hostInbound10292(t, parse10292(t, prefix+`system-services { ssh { ping; } }`+suffix))
-		if !reflect.DeepEqual(got.SystemServices, []string{"ssh"}) {
-			t.Fatalf("effective system-services = %v, want [ssh]", got.SystemServices)
-		}
-	})
+	_, err := CompileConfig(parse10292(t, prefix+`system-services { ssh { ping; } }`+suffix))
+	if err == nil || !strings.Contains(err.Error(), "ping") {
+		t.Fatalf("nested non-except child committed, error = %v; want rejection naming ping", err)
+	}
 	t.Run("payload-after-except-is-rejected", func(t *testing.T) {
 		_, err := CompileConfig(parse10292(t,
 			prefix+`system-services { ssh { except; ping; } }`+suffix))
