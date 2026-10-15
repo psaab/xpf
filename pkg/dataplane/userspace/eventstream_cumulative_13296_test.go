@@ -9,16 +9,16 @@ import "testing"
 // published status must keep reporting the cumulative totals (non-nil
 // EventStream) while no helper is running.
 func TestEventStreamCountersSurviveHelperRestart13296(t *testing.T) {
-	m := &Manager{}
+	m := New()
 
 	es1 := NewEventStream("")
 	es1.paused.Store(true)
 	es1.ackBatch.Store(13)
 	es1.FramesRead.Store(42)
-	es1.FramesWritten.Store(7)
-	es1.TelemetryGapResyncs.Store(6)
-	es1.PendingOverflowDisconnects.Store(9)
-	es1.PeerCredRejections.Store(2)
+	es1.DecodeErrors.Store(3)
+	es1.telemetryGapResyncs.Store(6)
+	es1.pendingOverflowDisconnects.Store(9)
+	es1.peerCredRejections.Store(2)
 	es1.SeqGaps.Store(2)
 	es1.PolicyDenyEvents.Store(17)
 	es1.ScreenDropEvents.Store(5)
@@ -59,7 +59,7 @@ func TestEventStreamCountersSurviveHelperRestart13296(t *testing.T) {
 	es2.ackBatch.Store(4)
 	es2.FramesRead.Store(10)
 	es2.PolicyDenyEvents.Store(1)
-	es2.TelemetryGapResyncs.Store(1)
+	es2.telemetryGapResyncs.Store(1)
 	m.eventStream = es2
 
 	st2 := ProcessStatus{}
