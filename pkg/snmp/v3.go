@@ -494,7 +494,7 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 			return a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errNoError, 0, vbs)
 		})
 		if !ok {
-			return a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errTooBig, 0, nil)
+			return a.buildV3TooBigResponse(msgID, msgFlags, user, echoContext, requestID, maxSize)
 		}
 		return resp
 
@@ -517,18 +517,13 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 			errIdx = 1
 		}
 		maxSize := effectiveMaxSize(msgMaxSize)
+
 		resp := a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errNotWritable, errIdx, respVarbinds)
 		if len(resp) > maxSize {
-			// The fallback still echoes the request's contextName, which is
-			// accepted without a length bound, so recheck the fully-encoded
-			// fallback against the same maximum and discard it if it still
-			// does not fit (RFC 3416 §4.2.5) rather than emitting an
-			// over-size datagram the manager cannot receive.
-			fallback := a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errTooBig, 0, nil)
-			if len(fallback) > maxSize {
-				return nil
-			}
-			return fallback
+			// RFC 3416 §4.2.5: return tooBig only when the fully encoded
+			// fallback fits the same effective maximum; contextName is
+			// echoed and is not length-bounded during request parsing.
+			return a.buildV3TooBigResponse(msgID, msgFlags, user, echoContext, requestID, maxSize)
 		}
 		return resp
 
@@ -544,8 +539,9 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 	// §4.2.1/§4.2.2) rather than emitting an over-size datagram — the v3
 	// residual of #2612, which bounded only GETBULK.
 	resp := a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errNoError, 0, respVarbinds)
-	if len(resp) > effectiveMaxSize(msgMaxSize) {
-		return a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errTooBig, 0, nil)
+	maxSize := effectiveMaxSize(msgMaxSize)
+	if len(resp) > maxSize {
+		return a.buildV3TooBigResponse(msgID, msgFlags, user, echoContext, requestID, maxSize)
 	}
 	return resp
 }
@@ -1216,6 +1212,19 @@ func (a *Agent) buildV3Response(msgID int, reqFlags byte, user *usmUser,
 	}
 
 	return wholeMsg
+}
+
+// buildV3TooBigResponse returns the RFC 3416 empty-varbind fallback only when
+// the complete encoded v3 message fits the manager's effective maximum. The
+// echoed contextName is accepted without a length bound, so even this minimal
+// response can exceed msgMaxSize and must then be dropped.
+func (a *Agent) buildV3TooBigResponse(msgID int, msgFlags byte, user *usmUser,
+	contextName []byte, requestID, maxSize int) []byte {
+	resp := a.buildV3Response(msgID, msgFlags, user, contextName, requestID, errTooBig, 0, nil)
+	if len(resp) > maxSize {
+		return nil
+	}
+	return resp
 }
 
 // insertAuthMAC writes the computed HMAC into the USM
