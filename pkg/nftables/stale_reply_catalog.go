@@ -394,6 +394,14 @@ func staleReplyOwnerAdmits(views []HostInboundZoneView, unzonedV4, unzonedV6 []s
 	for _, v := range views {
 		addView(v, "ip", v.V4Addrs)
 		addView(v, "ip6", v.V6Addrs)
+		// Lifeline-shared addresses are outside the destination-only sets but
+		// remain owner-denied for stale-reply protection (#12229, #13171).
+		for _, raw := range v.IngressDenyV4 {
+			ensure(raw)
+		}
+		for _, raw := range v.IngressDenyV6 {
+			ensure(raw)
+		}
 	}
 	for _, raw := range unzonedV4 {
 		ensure(raw)

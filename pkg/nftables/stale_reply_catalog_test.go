@@ -256,6 +256,46 @@ func TestHostInboundStaleReplyGuardsCoverLifelineWithheldAddresses12229(t *testi
 	}
 }
 
+// TestHostInboundStaleReplyGuardsCoverIngressDenyOwnerAdmits13171 (#13171,
+// D5-02): staleReplyOwnerAdmits must register IngressDenyV4/V6 destinations
+// as owner-denied (empty admit) so the ambiguous-ingress (IngressDenyNetdevs)
+// and uncovered-ingress negated fallback guards cover lifeline-shared
+// addresses on default-deny zones. Pre-fix both guards omit them.
+func TestHostInboundStaleReplyGuardsCoverIngressDenyOwnerAdmits13171(t *testing.T) {
+	views := []HostInboundZoneView{{
+		Zone:          "dmz",
+		IngressDenyV4: []string{"192.0.2.50"}, IngressDenyV6: []string{"2001:db8::50"},
+		IngressDenyNetdevs: []string{"ge-0-0-3"},
+		IngressNetdevs:     []string{"ge-0-0-3"},
+	}}
+	rules := HostInboundStaleReplyGuardRules(views, nil, nil, nil, false)
+	for _, tc := range []struct{ family, address string }{
+		{"ip", "192.0.2.50"}, {"ip6", "2001:db8::50"},
+	} {
+		if !guardRuleHasIngressTuple(rules, []string{"ge-0-0-3"}, false, tc.address, tc.family, config.HostInboundProtoTCP, 22) {
+			t.Errorf("ambiguous-ingress stale-reply guard missing for IngressDeny %s %s", tc.family, tc.address)
+		}
+		if !guardRuleHasIngressTuple(rules, []string{"ge-0-0-3"}, true, tc.address, tc.family, config.HostInboundProtoTCP, 22) {
+			t.Errorf("uncovered-ingress fallback stale-reply guard missing for IngressDeny %s %s", tc.family, tc.address)
+		}
+	}
+}
+
+// TestHostInboundReinjectDestinationsIncludeIngressDeny13171 (#13171, D5-02).
+func TestHostInboundReinjectDestinationsIncludeIngressDeny13171(t *testing.T) {
+	views := []HostInboundZoneView{{
+		Zone: "dmz", V4Addrs: []string{"192.0.2.1"},
+		IngressDenyV4: []string{"192.0.2.50"}, IngressDenyV6: []string{"2001:db8::50"},
+	}}
+	v4, v6 := hostInboundReinjectDestinations(views)
+	if len(v4) != 2 || v4[1] != "192.0.2.50" {
+		t.Errorf("reinject v4 = %v, want [192.0.2.1 192.0.2.50]", v4)
+	}
+	if len(v6) != 1 || v6[0] != "2001:db8::50" {
+		t.Errorf("reinject v6 = %v, want [2001:db8::50]", v6)
+	}
+}
+
 func TestHostInboundStaleReplyNetlinkEmitsIngressScope10752(t *testing.T) {
 	views := []HostInboundZoneView{
 		{Zone: "deny", SystemServices: []string{"snmp"}, V4Addrs: []string{"192.0.2.10"}, IngressNetdevs: []string{"eth-deny"}},
