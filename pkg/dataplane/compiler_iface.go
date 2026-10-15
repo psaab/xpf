@@ -1156,10 +1156,11 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			// not an ethertype but the first two octets of the IP SOURCE
 			// address, so an inner source in 8.0.0.0/16 makes it parse an IPv4
 			// header 14 bytes into the real one. Refusing the ATTACH — rather
-			// than only re-ordering inside the shim — is what also covers the
-			// ctrl-DISABLED path, which never consults the ingress set by
-			// design and would otherwise evaluate its local/control exemption
-			// against that misparse.
+			// than only re-ordering inside the shim — also covers a raw-L3
+			// netdev that is in the ingress set: the ctrl-DISABLED shim path
+			// (#13632) rejects unadjudicated ifindexes before parsing, but an
+			// admitted raw-L3 row still reaches the Ethernet parser and could feed
+			// its misparsed destination into the local/control exemption.
 			//
 			// Recorded as an unarmed surface, not skipped silently: an UP,
 			// zoned netdev with no XDP is exactly the state #5275's arm-

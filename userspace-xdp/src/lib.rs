@@ -1427,6 +1427,16 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
 }
 
 fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Result<u32, i64> {
+    // #13632: disabled control must not parse or pass any frame from an
+    // interface the shim does not adjudicate. Raw-L3 source octets can look
+    // like any Ethernet ethertype, so delaying the #8279 authority check
+    // until after parse_l2 still permits an attacker-selected L2/control pass.
+    // Unlike the enabled path, ctrl-disabled transit MUST NOT pass to the
+    // kernel outside xpf policy; fail closed with the established counter.
+    let (_, ingress_iface_flags) = userspace_ingress_metadata(ctx);
+    if ingress_iface_flags & USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED == 0 {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
+    }
     let data = ctx.data();
     let data_end = ctx.data_end();
     let Some((eth_proto, vlan_id, vlan_pcp, vlan_present, outer_stag, l3_offset)) =
@@ -1435,10 +1445,8 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     };
     // #10655: a single outer S-tag (0x88a8) is an explicit DROP, on the IP
-    // and non-IP degraded arms alike. This entry has no ingress-interface
-    // test by design — it fails closed on all attached interfaces — so one
-    // check above the match covers both. The `!is_vlan_tpid` guard keeps
-    // the #9888 taxonomy: a double tag with an 88a8 outer still takes the
+    // and non-IP degraded arms alike. The `!is_vlan_tpid` guard keeps the
+    // #9888 taxonomy: a double tag with an 88a8 outer still takes the
     // qinq_drop arm below, never stag_drop.
     if outer_stag && !is_vlan_tpid(eth_proto) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_STAG_DROP);
@@ -1459,7 +1467,6 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     let Some(parsed) = parsed else {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     };
-    let (_, ingress_iface_flags) = userspace_ingress_metadata(ctx);
     if is_tagged_only_vid0_local_destination(ingress_iface_flags, &parsed) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }

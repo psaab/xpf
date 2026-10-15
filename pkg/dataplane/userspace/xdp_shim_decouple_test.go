@@ -108,6 +108,48 @@ func TestUserspaceXDPDegradedCtrlDisabledDropsTransit(t *testing.T) {
 	assertUserspaceXDPDegradedPathStat(t, coll, "ctrl_disabled")
 	assertUserspaceXDPDegradedPathStat(t, coll, "transit_drop")
 }
+
+// #13632 fail-on-revert: raw-L3 bytes on an interface absent from the
+// adjudicated-ingress map must never reach the degraded local-destination
+// exemption. Without the ingress gate, parse_l2 reads the raw IP source's
+// 0x0800 octets as an Ethernet ethertype, then the shifted IPv4 parser reads
+// the crafted destination as local and passes this transit packet to the
+// kernel while ctrl is disabled.
+func TestUserspaceXDPDegradedCtrlDisabledRawL3CannotTakeLocalExemption13632(t *testing.T) {
+	coll := loadUserspaceXDPTestCollection(t)
+	updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
+		Enabled:            0,
+		MetadataVersion:    userspaceMetadataVersion,
+		Workers:            1,
+		QueueCount:         1,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
+	})
+	local := [4]byte{192, 0, 2, 1}
+	updateUserspaceXDPTestLocalV4(t, coll, local)
+
+	// This is a raw IPv4 packet, with no Ethernet header. The first two
+	// octets of its source are 8.0. The shim mistakes them for ETH_P_IP,
+	// shifts its IPv4 parse by 14 bytes, then finds `local` at that shifted
+	// parse's destination offset (raw packet bytes 30..34).
+	raw := make([]byte, 54)
+	raw[12], raw[13] = 0x08, 0x00 // bogus Ethernet ethertype from raw source
+	raw[14] = 0x45                // shifted parser sees a valid IPv4 header
+	raw[16], raw[17] = 0, 40      // total length at the shifted parse offset
+	raw[22] = 64
+	raw[23] = 17
+	copy(raw[26:30], []byte{198, 51, 100, 10}) // shifted source
+	copy(raw[30:34], local[:])
+
+	ret := runUserspaceXDPTestPacket(t, coll, raw)
+	if ret != xdpActionDrop {
+		t.Fatalf("ctrl-disabled raw-L3 packet action = %d, want XDP_DROP; "+
+			"the absent adjudicated-ingress row must block the misparsed local "+
+			"kernel-pass exemption", ret)
+	}
+	assertUserspaceXDPDegradedPathStat(t, coll, "ctrl_disabled")
+	assertUserspaceXDPDegradedPathStat(t, coll, "transit_drop")
+	assertUserspaceXDPDegradedPathStatAbsent(t, coll, "pass_to_kernel")
+}
 func TestUserspaceXDPDegradedCtrlDisabledNDPRequiresLocalDestination(t *testing.T) {
 	local := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
 	transit := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20}
@@ -143,6 +185,7 @@ func TestUserspaceXDPDegradedCtrlDisabledNDPRequiresLocalDestination(t *testing.
 				QueueCount:         1,
 				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
+			updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 			if tc.isLocal {
 				updateUserspaceXDPTestLocalV6(t, coll, tc.dst)
 			}
@@ -172,6 +215,7 @@ func TestUserspaceXDPDegradedCtrlDisabledPassesLocalControl(t *testing.T) {
 		QueueCount:         1,
 		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
+	updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 	updateUserspaceXDPTestLocalV4(t, coll, local)
 
 	ret := runUserspaceXDPTestPacket(t, coll, udpIPv4TestPacket(
@@ -256,6 +300,7 @@ func TestUserspaceXDPIPLocalControlUsesCPUMapWhenAvailable(t *testing.T) {
 		Flags:              userspaceCtrlFlagCPUMap,
 		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
+	updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 	updateUserspaceXDPTestLocalV4(t, coll, local)
 
 	ret := runUserspaceXDPTestPacket(t, coll, udpIPv4TestPacket(
@@ -318,6 +363,7 @@ func TestUserspaceXDPDegradedESPToInterfaceNATPassesLocalControl(t *testing.T) {
 		QueueCount:         1,
 		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
+	updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 	updateUserspaceXDPTestInterfaceNATV4(t, coll, natLocal)
 
 	ret := runUserspaceXDPTestPacket(t, coll, espIPv4TestPacket(
@@ -342,6 +388,7 @@ func TestUserspaceXDPDegradedNonIPL2PassesDirect(t *testing.T) {
 		Flags:              userspaceCtrlFlagCPUMap,
 		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
+	updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 
 	ret := runUserspaceXDPTestPacket(t, coll, arpTestPacket())
 	if ret != xdpActionPass {

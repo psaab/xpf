@@ -18,13 +18,14 @@ import "github.com/vishvananda/netlink"
 //   - 129.0.0.0/16 and 136.168.0.0/16 take the VLAN branch and re-read the
 //     ethertype four bytes further in.
 //
-// #8279 fixed the ORDERING half of this in the shim (the ingress-set test now
-// precedes the L3 parse, so a non-adjudicated ifindex is never parsed). This
-// file closes the other half at the source: a netdev that cannot carry an
-// Ethernet header must not carry the shim AT ALL. That is the only fix that
-// also covers the ctrl-DISABLED path, which never consults the ingress set by
-// design — a disabled ctrl must fail closed on every attached interface — and
-// therefore evaluates its local/control exemption against the misparse.
+// #8279 fixed the ORDERING half of this in the enabled shim path (the
+// ingress-set test precedes its L3 parse). #13632 adds the same authority
+// check before any packet parsing in the ctrl-DISABLED path, which drops
+// unadjudicated traffic instead of evaluating a local/control exemption
+// against source-octet misparsing. A raw-L3 netdev admitted into the ingress
+// set still reaches the Ethernet parser, though, so this file closes the
+// remaining case at the source: a netdev that cannot carry an Ethernet
+// header must not carry the shim AT ALL.
 //
 // WHY THE ENCAP TYPE AND NOT THE LINK KIND. Measured, because the two
 // disagree on exactly the case that matters: a TUN and a TAP are BOTH

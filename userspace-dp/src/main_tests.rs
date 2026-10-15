@@ -5614,12 +5614,11 @@ fn shim_ingress_test_precedes_the_l3_parse_8279() {
         .join("userspace-xdp/src/lib.rs");
     let src = std::fs::read_to_string(&lib).expect("read shim lib.rs");
 
-    // Scope to `try_xdp_userspace`'s body. `degraded_ctrl_disabled_action` has
-    // a BYTE-IDENTICAL parse arm, then reads ingress metadata only for the
-    // #12055 tagged-only local-delivery guard; it does not use the adjudicated
-    // bit as the active path's ingress gate. Transit still fails closed for
-    // every attached interface in that path (#5485). Keep this ordering rule
-    // scoped to the active gate, not the implementation convenience.
+    // Scope to `try_xdp_userspace`'s body. `degraded_ctrl_disabled_action`
+    // now has its own #13632 ADJUDICATED gate, with the deliberately stricter
+    // ctrl-disabled transit-DROP disposition; this #8279 ordering pin covers
+    // the enabled path's cpumap/pass disposition, whose placement after the
+    // non-IP L2 arm preserves ARP/LLDP handling.
     let start = src
         .find("\nfn try_xdp_userspace(")
         .expect("#8279: `fn try_xdp_userspace(` not found -- the slice below would be empty");
@@ -5702,6 +5701,122 @@ fn shim_ingress_test_precedes_the_l3_parse_8279() {
              The ingress test must come first."
         );
     }
+}
+
+/// #13632: ctrl-disabled handling must test ingress authority before parsing
+/// any frame bytes, and must keep its fail-closed DROP disposition distinct
+/// from the enabled path's unadjudicated cpumap/pass.
+///
+/// An attached raw-L3 tunnel can be absent from the ingress map. Without this
+/// gate its source octets are read as an Ethernet ethertype; shifted parsing can
+/// drop attacker-selected traffic or feed a false destination into the
+/// local/control kernel-pass exemption. Passing an unadjudicated frame to the
+/// kernel while ctrl is disabled would itself bypass policy. Pin the gate order
+/// and its fail-closed disposition together.
+#[test]
+fn shim_degraded_ctrl_disabled_tests_adjudicated_before_parse_13632() {
+    let lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("userspace-xdp/src/lib.rs");
+    let src = std::fs::read_to_string(&lib).expect("read shim lib.rs");
+    let start = src
+        .find("\nfn degraded_ctrl_disabled_action(")
+        .expect("#13632: degraded_ctrl_disabled_action not found");
+    let rest = &src[start + 1..];
+    let end = rest[1..]
+        .find("\nfn ")
+        .map(|i| i + 1)
+        .expect("#13632: no following top-level fn");
+    let toks = shim_token_vec(&rest[..end]);
+    assert!(toks.len() > 100, "#13632: degraded function slice too short");
+
+    fn hits(toks: &[String], needle: &[&str]) -> Vec<usize> {
+        toks.windows(needle.len())
+            .enumerate()
+            .filter(|(_, w)| w.iter().zip(needle).all(|(a, b)| a.as_str() == *b))
+            .map(|(i, _)| i)
+            .collect()
+    }
+    fn only(toks: &[String], needle: &[&str], label: &str) -> usize {
+        let found = hits(toks, needle);
+        assert_eq!(
+            found.len(),
+            1,
+            "#13632: expected one {label} site in degraded_ctrl_disabled_action, found {}",
+            found.len()
+        );
+        found[0]
+    }
+
+    let fetch = hits(&toks, &["userspace_ingress_metadata", "(", "ctx", ")"]);
+    assert!(
+        !fetch.is_empty(),
+        "#13632: degraded path never fetches ingress metadata"
+    );
+    let gate_fetch = fetch[0];
+    let gate_bit = only(
+        &toks,
+        &[
+            "ingress_iface_flags",
+            "&",
+            "USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED",
+            "=",
+            "=",
+        ],
+        "ADJUDICATED bit test",
+    );
+    let l2 = only(
+        &toks,
+        &["parse_l2", "(", "data", ",", "data_end", ")"],
+        "parse_l2",
+    );
+    let v4 = only(
+        &toks,
+        &["parse_ipv4", "(", "data", ",", "data_end", ","],
+        "parse_ipv4",
+    );
+    let v6 = only(
+        &toks,
+        &["parse_ipv6", "(", "data", ",", "data_end", ","],
+        "parse_ipv6",
+    );
+    let exemption = only(
+        &toks,
+        &["is_degraded_local_or_control", "(", "ctrl", ","],
+        "local/control exemption",
+    );
+    for (label, idx) in [
+        ("parse_l2", l2),
+        ("parse_ipv4", v4),
+        ("parse_ipv6", v6),
+        ("local/control exemption", exemption),
+    ] {
+        assert!(
+            gate_fetch < idx && gate_bit < idx,
+            "#13632: {label} is reached before ingress adjudication (fetch={gate_fetch}, \
+             bit test={gate_bit}, site={idx}); raw-L3 source octets must never \
+             influence this disabled-mode DROP/local-control decision"
+        );
+    }
+
+    let drop = [
+        "return",
+        "drop_degraded_transit",
+        "(",
+        "ctrl",
+        ",",
+        "USERSPACE_FALLBACK_REASON_CTRL_DISABLED",
+        ")",
+    ];
+    let after_gate = &toks[gate_bit + 5..];
+    assert!(
+        after_gate
+            .windows(drop.len())
+            .take(40)
+            .any(|w| w.iter().zip(drop).all(|(a, b)| a.as_str() == b)),
+        "#13632: non-adjudicated ctrl-disabled branch must DROP transit; \
+         passing to the kernel would bypass policy on an attached interface"
+    );
 }
 
 // ---------------------------------------------------------------------------

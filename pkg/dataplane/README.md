@@ -1143,13 +1143,14 @@ snapshot as enforced.
 > so the rollback failed on a missing map and reached `Enabled=0` through
 > the wrong branch.
 
-**The transient the new ordering opens is strictly safe.** Between a
-successful publish and the detach, an interface still carries the shim
-while the applied snapshot no longer lists it. In both ctrl states that
-is at least as strict as the detached state it precedes: an ifindex
-absent from `userspace_ingress_ifaces` takes `cpumap_or_pass`, which is
-the kernel path a detached interface would have taken anyway, and a
-still-disabled ctrl drops its transit.
+**The transient the new ordering opens is bounded.** Between a successful
+publish and detach, an interface still carries the shim while the applied
+snapshot no longer lists it. In the enabled state an absent ingress-map row
+takes `cpumap_or_pass`, the kernel path a detached interface would take. In
+the disabled state #13632 preserves fail-closed enforcement: every frame on
+that attached but unadjudicated interface is dropped before parsing. Thus
+disabled transit is stricter than detachment; the enabled transient remains
+the separately documented unadjudicated-forward window.
 
 > **#8279 — that safety claim was FALSE for one arm, and the fix is what
 > makes the paragraph above true.** "An ifindex absent from
@@ -1186,19 +1187,31 @@ still-disabled ctrl drops its transit.
 > local L2 state machine.
 >
 > **The admission half, fixed in the same change.** The ordering fix alone
-> leaves two things: a raw-L3 netdev that IS in the ingress set (the base
-> row of a canonically spelled WireGuard tunnel is not excluded) still has
+> left two things: a raw-L3 netdev that IS in the ingress set (the base
+> row of a canonically spelled WireGuard tunnel is not excluded) still had
 > the misparse fed into adjudication, and the ctrl-DISABLED path
-> (`degraded_ctrl_disabled_action`) never consults the ingress map at all
-> — by design, since a disabled ctrl must fail closed on every attached
-> interface — so its local/control exemption is evaluated against the
-> misparsed header, which is fail-OPEN.
+> (`degraded_ctrl_disabled_action`) did not consult the ingress map before
+> parsing. In that path the bad parse could select a local/control exemption
+> and pass transit to the kernel, which is fail-OPEN.
 >
-> Both close at the source: `compileZones` now refuses to put a netdev
-> into `pendingXDP` unless its link-layer type is Ethernet
-> (`netdevCarriesEthernetFraming`, `netdev_framing_8279.go`). If the shim
-> is never attached, neither the misparse nor the degraded-path exemption
-> can happen.
+> The disabled path now tests the ADJUDICATED bit before parsing any frame
+> bytes. Its disposition deliberately differs from the enabled #8279 arm:
+> an unadjudicated ifindex in the enabled path takes `cpumap_or_pass`, but
+> when ctrl is disabled every frame on that interface takes the ctrl-disabled
+> transit DROP. Passing it to the kernel would violate the fail-closed
+> invariant above: attached transit would be forwarded outside xpf policy
+> while the daemon reports the previous-good snapshot as retained. The early
+> authority gate also makes the degraded verdict independent of raw-L3 source
+> octets and prevents either misparsed or misleading L2 bytes from reaching
+> the local/control exemption. Regression
+> `shim_degraded_ctrl_disabled_tests_adjudicated_before_parse_13632` pins the
+> order and this distinct degraded-mode disposition; ARP/LLDP retain their
+> direct-kernel L2 handling on adjudicated interfaces.
+>
+> Separately, `compileZones` refuses to put a netdev into `pendingXDP`
+> unless its link-layer type is Ethernet (`netdevCarriesEthernetFraming`,
+> `netdev_framing_8279.go`). If the shim is never attached, neither the
+> misparse nor the degraded-path exemption can happen.
 >
 > The predicate keys on `netlink.LinkAttrs.EncapType`, **not** on the link
 > kind, and that distinction was measured rather than assumed — a TUN and
