@@ -20,11 +20,25 @@ SPEC.loader.exec_module(policy_validate)
 
 
 RULE_ID = "trust->untrust/scheduled-allow"
+FALLTHROUGH_ID = "trust->untrust/allow-all"
 
 
-def _status(packets: int, bytes_: int | None = None) -> dict:
+def _status(
+    packets: int,
+    bytes_: int | None = None,
+    fallthrough_packets: int | None = None,
+) -> dict:
     if bytes_ is None:
         bytes_ = packets * 64
+    counters = [{"rule_id": RULE_ID, "packets": packets, "bytes": bytes_}]
+    if fallthrough_packets is not None:
+        counters.append(
+            {
+                "rule_id": FALLTHROUGH_ID,
+                "packets": fallthrough_packets,
+                "bytes": fallthrough_packets * 64,
+            }
+        )
     return {
         "ok": True,
         "status": {
@@ -34,9 +48,7 @@ def _status(packets: int, bytes_: int | None = None) -> dict:
             "dataplane_mode": "userspace_strict",
             "capabilities": {"forwarding_supported": True},
             "entry_programs": {"4": "xdp_userspace_prog"},
-            "policy_rule_counters": [
-                {"rule_id": RULE_ID, "packets": packets, "bytes": bytes_}
-            ],
+            "policy_rule_counters": counters,
         },
     }
 
@@ -61,12 +73,20 @@ def _write_artifacts(
     rebuild_packets: int = 3,
     inactive_packets: int = 3,
     failover_packets: int = 4,
+    rebuild_fallthrough_packets: int = 3,
+    inactive_fallthrough_packets: int = 4,
     inactive_traffic: str | None = None,
     missing_text: str = 'policy "scheduled-allow" references undefined scheduler "missing"',
 ) -> None:
     _write_json(root / "active-status.json", _status(active_packets))
-    _write_json(root / "rebuild-status.json", _status(rebuild_packets))
-    _write_json(root / "inactive-status.json", _status(inactive_packets))
+    _write_json(
+        root / "rebuild-status.json",
+        _status(rebuild_packets, fallthrough_packets=rebuild_fallthrough_packets),
+    )
+    _write_json(
+        root / "inactive-status.json",
+        _status(inactive_packets, fallthrough_packets=inactive_fallthrough_packets),
+    )
     _write_json(root / "failover-status.json", _status(failover_packets))
     (root / "inactive-traffic.stdout").write_text(
         _ping_stats(3, 3) if inactive_traffic is None else inactive_traffic,
@@ -100,6 +120,37 @@ class PolicySchedulerValidateTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 policy_validate.ValidationFailure,
                 "counter changed while scheduler was inactive",
+            ):
+                policy_validate.validate_artifacts(root, rule_id=RULE_ID)
+
+    def test_fails_when_allowed_inactive_traffic_has_no_counter_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifacts(
+                root,
+                rebuild_fallthrough_packets=3,
+                inactive_fallthrough_packets=3,
+            )
+
+            with self.assertRaisesRegex(
+                policy_validate.ValidationFailure,
+                "fall-through policy counters did not advance",
+            ):
+                policy_validate.validate_artifacts(root, rule_id=RULE_ID)
+
+    def test_fails_when_policy_counter_rule_id_is_duplicated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifacts(root)
+            duplicate = _status(3)
+            duplicate["status"]["policy_rule_counters"].append(
+                {"rule_id": RULE_ID, "packets": 3, "bytes": 192}
+            )
+            _write_json(root / "inactive-status.json", duplicate)
+
+            with self.assertRaisesRegex(
+                policy_validate.ValidationFailure,
+                "duplicate policy_rule_counters entry",
             ):
                 policy_validate.validate_artifacts(root, rule_id=RULE_ID)
 

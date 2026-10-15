@@ -91,17 +91,54 @@ def _counter_int(label: str, rule_id: str, field: str, value: Any) -> int:
     return value
 
 
-def _policy_counter(label: str, status: dict[str, Any], rule_id: str) -> PolicyCounter:
-    counters = status.get("policy_rule_counters", [])
-    if not isinstance(counters, list):
+def _policy_counters(label: str, status: dict[str, Any]) -> dict[str, PolicyCounter]:
+    rows = status.get("policy_rule_counters", [])
+    if not isinstance(rows, list):
         raise ValidationFailure(f"{label}: policy_rule_counters must be a list")
-    for counter in counters:
-        if isinstance(counter, dict) and counter.get("rule_id") == rule_id:
-            return PolicyCounter(
-                packets=_counter_int(label, rule_id, "packets", counter.get("packets")),
-                bytes=_counter_int(label, rule_id, "bytes", counter.get("bytes")),
+    result: dict[str, PolicyCounter] = {}
+    for counter in rows:
+        if not isinstance(counter, dict):
+            raise ValidationFailure(
+                f"{label}: policy_rule_counters entries must be objects"
             )
-    raise ValidationFailure(f"{label}: missing policy_rule_counters entry {rule_id!r}")
+        rule_id = counter.get("rule_id")
+        if not isinstance(rule_id, str) or not rule_id:
+            raise ValidationFailure(
+                f"{label}: policy_rule_counters entry has invalid rule_id {rule_id!r}"
+            )
+        if rule_id in result:
+            raise ValidationFailure(
+                f"{label}: duplicate policy_rule_counters entry {rule_id!r}"
+            )
+        result[rule_id] = PolicyCounter(
+            packets=_counter_int(label, rule_id, "packets", counter.get("packets")),
+            bytes=_counter_int(label, rule_id, "bytes", counter.get("bytes")),
+        )
+    return result
+
+
+def _policy_counter(label: str, status: dict[str, Any], rule_id: str) -> PolicyCounter:
+    counters = _policy_counters(label, status)
+    try:
+        return counters[rule_id]
+    except KeyError as exc:
+        raise ValidationFailure(
+            f"{label}: missing policy_rule_counters entry {rule_id!r}"
+        ) from exc
+
+
+def _fallthrough_packets(
+    counters: dict[str, PolicyCounter], rule_id: str
+) -> int:
+    prefix, separator, _ = rule_id.partition("/")
+    if not separator or not prefix:
+        return 0
+    zone_pair_prefix = prefix + "/"
+    return sum(
+        counter.packets
+        for candidate, counter in counters.items()
+        if candidate.startswith(zone_pair_prefix) and candidate != rule_id
+    )
 
 
 def _read_text(path: Path) -> str:
@@ -182,9 +219,19 @@ def validate_artifacts(
     for label, status in statuses:
         _require_userspace_runtime(label, status)
 
+    rebuild_counters = _policy_counters("rebuild", rebuild)
+    inactive_counters = _policy_counters("inactive", inactive)
     active_counter = _policy_counter("active", active, rule_id)
-    rebuild_counter = _policy_counter("rebuild", rebuild, rule_id)
-    inactive_counter = _policy_counter("inactive", inactive, rule_id)
+    rebuild_counter = rebuild_counters.get(rule_id)
+    inactive_counter = inactive_counters.get(rule_id)
+    if rebuild_counter is None:
+        raise ValidationFailure(
+            f"rebuild: missing policy_rule_counters entry {rule_id!r}"
+        )
+    if inactive_counter is None:
+        raise ValidationFailure(
+            f"inactive: missing policy_rule_counters entry {rule_id!r}"
+        )
 
     if active_counter.packets < min_active_packets:
         raise ValidationFailure(
@@ -209,7 +256,16 @@ def validate_artifacts(
     inactive_witness = _inactive_traffic_witness(
         root / inactive_traffic, min_inactive_packets
     )
-
+    if inactive_witness["outcome"] == "allowed":
+        rebuild_fallthrough = _fallthrough_packets(rebuild_counters, rule_id)
+        inactive_fallthrough = _fallthrough_packets(inactive_counters, rule_id)
+        fallthrough_delta = inactive_fallthrough - rebuild_fallthrough
+        if fallthrough_delta < min_inactive_packets:
+            raise ValidationFailure(
+                "inactive: fall-through policy counters did not advance by the "
+                "offered traffic "
+                f"({fallthrough_delta} < {min_inactive_packets})"
+            )
     failover_counter: PolicyCounter | None = None
     if failover is not None:
         failover_counter = _policy_counter("failover", failover, rule_id)
