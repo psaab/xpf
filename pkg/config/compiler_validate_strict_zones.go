@@ -1190,6 +1190,13 @@ func validateZoneInterfacesNonEmptyStrict(tree *ConfigTree) error {
 				continue
 			}
 			for _, inst := range bracketedGroupInstances8794(zonesNode.FindChildren("security-zone")) {
+				if hasPackedZoneInterfaces13108(inst.node.Children) {
+					return fmt.Errorf(
+						"security zone %q has a packed `interfaces` resolving run; "+
+							"the interface body is ambiguous with zone-level properties — "+
+							"rewrite the stanza using explicit blocks",
+						inst.name)
+				}
 				for _, prop := range inst.node.Children {
 					if prop.Name() != "interfaces" {
 						continue
@@ -1300,6 +1307,13 @@ func validateZoneInterfacePackedTailStrict(tree *ConfigTree) error {
 				continue
 			}
 			for _, inst := range bracketedGroupInstances8794(zonesNode.FindChildren("security-zone")) {
+				if hasPackedZoneInterfaces13108(inst.node.Children) {
+					return fmt.Errorf(
+						"security zone %q has a packed `interfaces` resolving run; "+
+							"the interface body is ambiguous with zone-level properties — "+
+							"rewrite the stanza using explicit blocks",
+						inst.name)
+				}
 				for _, prop := range inst.node.Children {
 					if prop.Name() != "interfaces" {
 						continue
