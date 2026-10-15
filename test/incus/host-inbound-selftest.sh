@@ -274,6 +274,12 @@ set security zones security-zone wan host-inbound-traffic system-services any-se
 # xpf rejects this combination in strict validation; tolerant compilation
 # retains the packet-wide full-admit token, so it must never certify ABSENT.
 checkz ZONE_ANY_EXCEPT_STAYS_OPEN FAIL "$ZONES_ANY_EXCEPT" wan ssh ABSENT
+ZONES_ANY_SSH_EXCEPT='set security zones security-zone wan interfaces reth0.50
+set security zones security-zone wan host-inbound-traffic system-services any-service
+set security zones security-zone wan host-inbound-traffic system-services ssh except'
+# CompileConfigLenient retains any-service despite this unsupported subtraction.
+checkz ZONE_ANY_SSH_EXCEPT_REMAINS_OPEN FAIL "$ZONES_ANY_SSH_EXCEPT" wan ssh ABSENT
+checkz ZONE_ANY_SSH_EXCEPT_PRESENT      PASS "$ZONES_ANY_SSH_EXCEPT" wan ssh PRESENT
 # THE MIDDLE ROW AGAIN, for the precondition: an unreadable config must not be
 # allowed to answer an ABSENT question. "wan does not admit ssh" and "I could
 # not read the config" are the same string to grep, and only one of them is a

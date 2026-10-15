@@ -161,21 +161,24 @@ hi_config_readable() {
 hi_zone_scope_admits() {
 	local lines="$1" prefix="$2" svc="$3" base
 	base="${prefix} host-inbound-traffic system-services"
-	# Service-specific exclusions subtract even from `all`.
+	# `any-service` is the packet-wide full-admit token (#12054). The compiler
+	# retains it even when paired with a named `except`, so it must dominate
+	# every named-service exclusion in this posture oracle.
+	if grep -qxF "${base} any-service" <<<"$lines"; then
+		printf 'all\n'; return 0
+	fi
+	# Service-specific exclusions subtract from the `all` expansion.
 	if grep -qxF "${base} ${svc} except" <<<"$lines"; then
 		printf 'no\n'; return 0
 	fi
 	if grep -qxF "${base} ${svc}" <<<"$lines"; then
 		printf 'yes\n'; return 0
 	fi
-	# `all except` removes the named-service blanket. `any-service` is a
-	# distinct full admit (#12054); its except form is rejected by config.
-	if grep -qxF "${base} all except" <<<"$lines" \
-		&& ! grep -qxF "${base} any-service" <<<"$lines"; then
+	# `all except` removes the named-service blanket.
+	if grep -qxF "${base} all except" <<<"$lines"; then
 		printf 'no\n'; return 0
 	fi
-	if grep -qxF "${base} all" <<<"$lines" \
-		|| grep -qxF "${base} any-service" <<<"$lines"; then
+	if grep -qxF "${base} all" <<<"$lines"; then
 		printf 'all\n'; return 0
 	fi
 	# Any host-inbound declaration makes this scope a replacement scope
