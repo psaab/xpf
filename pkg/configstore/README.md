@@ -302,9 +302,9 @@ inline archive-site-password warning in #651).
   `.configdb` (#9617).** The bullet above is an INPUT bound, and a config
   that passes it can still serialize past 16 MiB: a JSON tree is many times
   its config text (18x for a run of small `groups` stanzas). `active.json`,
-  `candidate.json`, `rollback.N.json` and `confirm.json` are all read back
-  under `ReadBoundedFile(path, MaxConfigSize)`, and before #9617 no writer
-  checked. An accepted commit could therefore write an `active.json` the next
+  `rollback.N.json` and `confirm.json` are read back under
+  `ReadBoundedFile(path, MaxConfigSize)`, and before #9617 no writer checked.
+  An accepted commit could therefore write an `active.json` the next
   `Load` refuses (`ErrConfigDBUnreadable`: the daemon does not come back), and
   a successful `commit confirmed` could write a `confirm.json` the next boot
   refuses (#8566 reports that as degraded health, but the rollback window is

@@ -184,16 +184,6 @@ func (db *DB) activePath() string {
 	return filepath.Join(db.dir, "active.json")
 }
 
-// candidatePath returns the path to the candidate config file.
-func (db *DB) candidatePath() string {
-	return filepath.Join(db.dir, "candidate.json")
-}
-
-// rollbackPath returns the path for rollback slot n (1-based).
-func (db *DB) rollbackPath(n int) string {
-	return filepath.Join(db.dir, fmt.Sprintf("rollback.%d.json", n))
-}
-
 // ReadActive loads the active configuration from disk.
 // Returns nil (no error) if the file doesn't exist.
 func (db *DB) ReadActive() (*config.ConfigTree, error) {
@@ -223,67 +213,6 @@ func (db *DB) WriteActive(tree *config.ConfigTree) error {
 // the empty tree on disk must NOT later classify as operator-committed-empty.
 func (db *DB) WriteActiveMarker(tree *config.ConfigTree, committed bool) error {
 	return db.writeTreeMarked(db.activePath(), tree, committed)
-}
-
-// ReadCandidate loads the candidate configuration from disk.
-// Returns nil (no error) if the file doesn't exist.
-func (db *DB) ReadCandidate() (*config.ConfigTree, error) {
-	tree, _, err := db.readTreeMeta(db.candidatePath())
-	return tree, err
-}
-
-// WriteCandidate persists the candidate configuration to disk atomically.
-func (db *DB) WriteCandidate(tree *config.ConfigTree) error {
-	return db.writeTreeMarked(db.candidatePath(), tree, true)
-}
-
-// DeleteCandidate removes the candidate file from disk.
-//
-// The removal is a DURABLE transition like DeleteConfirm (#4864): the unlink
-// plus a parent-dir fsync, both through the rbRemove/rbSyncDir seams (#9898
-// F-112), so a power cut cannot replay the deleted slot. Absent still falls
-// through to the dir sync (the #5835 rule): a retry after an
-// unlinked-but-unsynced removal must not launder the owed sync into a false
-// success.
-func (db *DB) DeleteCandidate() error {
-	if err := rbRemove(db.candidatePath()); err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("delete candidate: %w", err)
-		}
-	}
-	if err := rbSyncDir(filepath.Dir(db.candidatePath())); err != nil {
-		return fmt.Errorf("sync dir after delete candidate: %w", err)
-	}
-	return nil
-}
-
-// ReadRollback loads a rollback configuration from slot n (1-based).
-// Returns nil (no error) if the file doesn't exist.
-func (db *DB) ReadRollback(n int) (*config.ConfigTree, error) {
-	tree, _, err := db.readTreeMeta(db.rollbackPath(n))
-	return tree, err
-}
-
-// WriteRollback persists a rollback configuration to slot n (1-based).
-func (db *DB) WriteRollback(n int, tree *config.ConfigTree) error {
-	return db.writeTreeMarked(db.rollbackPath(n), tree, true)
-}
-
-// DeleteRollback removes rollback slot n from disk.
-//
-// Durable like DeleteCandidate above (unlink + dir fsync through the seams,
-// absent falls through to the sync): a power cut cannot replay the deleted
-// slot (#9898 F-112).
-func (db *DB) DeleteRollback(n int) error {
-	if err := rbRemove(db.rollbackPath(n)); err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("delete rollback %d: %w", n, err)
-		}
-	}
-	if err := rbSyncDir(filepath.Dir(db.rollbackPath(n))); err != nil {
-		return fmt.Errorf("sync dir after delete rollback %d: %w", n, err)
-	}
-	return nil
 }
 
 // confirmRecord is the persisted pending commit-confirmed state (#4577). It
@@ -776,12 +705,12 @@ func (db *DB) writeTreeMarked(path string, tree *config.ConfigTree, committed bo
 		return err
 	}
 
-	// Owner-only 0600 (#4056): active.json / candidate.json /
-	// rollback.N.json carry the full config, including secret leaves (IKE
-	// PSK, WireGuard/auth keys, SNMP community). When master-password is
-	// set the body is AES-GCM encrypted, but when it is not the secrets are
-	// cleartext — either way the DB must not be world-readable. The daemon
-	// runs as the owner, so 0600 does not affect read-back.
+	// Owner-only 0600 (#4056): active.json and confirm.json carry configuration
+	// state, including secret leaves (IKE PSK, WireGuard/auth keys, SNMP
+	// community). When master-password is set the body is AES-GCM encrypted,
+	// but when it is not the secrets are cleartext — either way the DB must not
+	// be world-readable. The daemon runs as the owner, so 0600 does not affect
+	// read-back.
 	if err := fsatomic.WriteFileDurable(path, data, 0600); err != nil {
 		return fmt.Errorf("persist %s: %w", path, err)
 	}
@@ -825,9 +754,8 @@ func (db *DB) encodeConfirm(rec *confirmRecord) ([]byte, error) {
 // ErrPersistExceedsReadCeiling reports that an artifact the store is about to
 // persist is larger than the ceiling its own reader enforces (#9617).
 //
-// Every tree and record this package writes is read back through
-// ReadBoundedFile(path, MaxConfigSize): active.json at Load, rollback.N.json,
-// candidate.json, and confirm.json at boot recovery. Before #9617 no writer
+// Every active tree and confirm record this package writes is read back through
+// ReadBoundedFile(path, MaxConfigSize) at Load/recovery. Before #9617 no writer
 // checked the bytes it was about to persist against that ceiling, so an
 // accepted commit could write an active DB the next Load refuses
 // (ErrConfigDBUnreadable: the daemon does not come back), and a successful

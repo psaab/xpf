@@ -19,10 +19,9 @@ import (
 // enforced only AFTER the file is resident "bounds what the store will ACCEPT,
 // never what a caller will ALLOCATE".
 //
-// Six reads had not been brought along, and the two most important were the
-// SSOT the daemon must load to take over (active.json / candidate.json /
-// rollback slots, via readTreeMeta) and the commit-confirmed record
-// (confirm.json, via ReadConfirm).
+// Six reads had not been brought along, and the most important was the
+// SSOT the daemon must load to take over (active.json via readTreeMeta) and
+// the commit-confirmed record (confirm.json via ReadConfirm).
 //
 // The finding names those two. A census of os.ReadFile in this package found
 // SIX: the rescue config text, the text rollback slots, and both master-key
