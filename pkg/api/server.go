@@ -33,6 +33,7 @@ import (
 	"github.com/psaab/xpf/pkg/flowexport"
 	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/fsatomic"
+	"github.com/psaab/xpf/pkg/fwdstatus"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/ipsec"
@@ -207,6 +208,7 @@ type Config struct {
 	PeerLocalityFn func(client, server net.Addr) bool
 	Store          *configstore.Store
 	DP             apiRuntimeDataPlane
+	FwdSampler     *fwdstatus.Sampler
 	EventBuf       *logging.EventBuffer
 	GC             *conntrack.GC
 	Routing        *routing.Manager
@@ -658,6 +660,7 @@ type Server struct {
 	peerLocalityFn func(client, server net.Addr) bool
 	store          *configstore.Store
 	dp             apiRuntimeDataPlane
+	fwdSampler     *fwdstatus.Sampler
 	eventBuf       *logging.EventBuffer
 	gc             *conntrack.GC
 	routing        *routing.Manager
@@ -792,6 +795,7 @@ func NewServer(cfg Config) *Server {
 	s := &Server{
 		store:                                cfg.Store,
 		dp:                                   cfg.DP,
+		fwdSampler:                           cfg.FwdSampler,
 		eventBuf:                             cfg.EventBuf,
 		gc:                                   cfg.GC,
 		routing:                              cfg.Routing,

@@ -51,6 +51,7 @@ type ForwardingStatus struct {
 	DaemonCPUWindowValid [numCPUWindows]bool
 	WorkerCPUWindowValid [numCPUWindows]bool
 	CPUDataStale         bool
+	SamplerReadErrors    uint64
 	UserHZApprox         bool // USER_HZ fell back to the Linux ABI default.
 
 	// WorkerCPUMode distinguishes the eBPF "no workers" path from

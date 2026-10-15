@@ -31,7 +31,6 @@ func kernelUserHZ() (int, bool) {
 // when Buffer% cannot be read on userspace-dp.
 const followupUMEMBuffer = 878
 
-
 // MapStats is the package-local BPF map utilization shape Build needs.
 type MapStats struct {
 	Type       string
@@ -70,6 +69,7 @@ func Build(
 		BufferKnown:       false,
 		BufferFollowupRef: followupUMEMBuffer,
 		UserHZApprox:      userHZApprox,
+		SamplerReadErrors: snap.ReadErrors,
 	}
 
 	// --- Uptime: shared PID-start anchor ---------------------------
@@ -199,7 +199,19 @@ func Build(
 				continue
 			}
 			anyKnown = true
-			umemPct := float64(b.UmemInflightFrames) * 100.0 / float64(b.UmemTotalFrames)
+			// The legacy in-flight count excludes frames waiting in the
+			// fill queue. Other worker-local TX/recycle queues may already
+			// be represented by that aggregate, so use the greater count
+			// rather than double-counting their overlapping ownership.
+			pendingFrames := uint64(b.DebugPendingFillFrames) +
+				uint64(b.DebugPendingTXPrepared) +
+				uint64(b.DebugPendingTXLocal) +
+				uint64(b.DebugInFlightRecycles)
+			umemFrames := uint64(b.UmemInflightFrames)
+			if pendingFrames > umemFrames {
+				umemFrames = pendingFrames
+			}
+			umemPct := float64(umemFrames) * 100.0 / float64(b.UmemTotalFrames)
 			var txPct float64
 			if b.TxRingCapacity > 0 {
 				txPct = float64(b.OutstandingTX) * 100.0 / float64(b.TxRingCapacity)
