@@ -1877,7 +1877,7 @@ fn icmp_embed_builder_nonbearing_quoted_icmp_keeps_word_13650() {
     frame6[emb6_l4] = 1;
     frame6[emb6_l4 + 4..emb6_l4 + 6].copy_from_slice(&0x1234u16.to_be_bytes());
     frame6[emb6_l4 + 2..emb6_l4 + 4].copy_from_slice(&[0, 0]);
-    let valid_csum = checksum16_ipv6(client6, server6, PROTO_ICMPV6, &frame6[emb6_l4..emb6_l4 + 8]);
+    let valid_csum = checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &frame6[emb6_l4..emb6_l4 + 8]);
     frame6[emb6_l4 + 2..emb6_l4 + 4].copy_from_slice(&valid_csum.to_be_bytes());
     let mut m6 = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
     m6.embedded_proto = PROTO_ICMPV6;
@@ -1903,4 +1903,117 @@ fn icmp_embed_builder_nonbearing_quoted_icmp_keeps_word_13650() {
     let out6_snat = build_snat_outbound_icmp_error_v6(&frame6, meta6, &m6).expect("v6 snat-outbound builds");
     assert_eq!(&out6_snat[emb6_l4 + 4..emb6_l4 + 6], &0x1234u16.to_be_bytes(),
         "#13650: SNAT-outbound quoted ICMPv6 Dest-Unreach bytes 4..6 must not be rewritten");
+}
+
+/// #13650 advisory: quoted ICMPv6 checksum repair must be incremental.
+/// (a) A quoted Echo whose embedded IPv6 payload_len declares MORE than
+/// the captured quote (truncated original datagram: 100-byte payload,
+/// only 8 L4 bytes quoted) must retain a checksum that verifies only
+/// when the receiver's full-datagram sum is reconstructed -- here we
+/// assert the stored checksum equals the RFC1624 adjust of the
+/// original over (src,dst,id) deltas, NOT a recompute over the 8
+/// captured bytes. (b) A quoted non-Echo (type 1) with address rewrite
+/// gets the address-delta repair but no identifier rewrite.
+#[test]
+fn icmp_embed_v6_truncated_quote_incremental_checksum_13650() {
+    let router6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let snat6: Ipv6Addr = "2001:db8:1::100".parse().unwrap();
+    let client6: Ipv6Addr = "fd00::102".parse().unwrap();
+    let server6: Ipv6Addr = "2001:db8:2::1".parse().unwrap();
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    // Build frame, then inflate embedded payload_len to 100 (declared
+    // original ICMPv6 datagram = 100 bytes; quote captures only 8).
+    // Original quoted checksum: computed over a hypothetical 100-byte
+    // echo (8 hdr + 92 zero payload) from snat6->server6 id=snat_port.
+    let mut frame6 = build_icmpv6_te_frame(router6, snat6, server6, snat_port, 80, PROTO_ICMPV6);
+    let emb_ip = 14 + 40 + 8;
+    let emb_l4 = emb_ip + 40;
+    frame6[emb_ip + 4..emb_ip + 6].copy_from_slice(&100u16.to_be_bytes());
+    let mut full_echo = vec![0u8; 100];
+    full_echo[0] = 128;
+    full_echo[4..6].copy_from_slice(&snat_port.to_be_bytes());
+    full_echo[6..8].copy_from_slice(&1u16.to_be_bytes());
+    let orig_csum = checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &full_echo);
+    frame6[emb_l4..emb_l4 + 8].copy_from_slice(&full_echo[..8]);
+    frame6[emb_l4 + 2..emb_l4 + 4].copy_from_slice(&orig_csum.to_be_bytes());
+    let mut m6 = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
+    m6.embedded_proto = PROTO_ICMPV6;
+    m6.original_dst = IpAddr::V6(server6);
+    let meta6 = icmpv6_te_meta(54);
+    let out = build_nat_reversed_icmp_error_v6(&frame6, meta6, &m6).expect("v6 builds");
+    assert_eq!(&out[emb_l4 + 4..emb_l4 + 6], &client_port.to_be_bytes());
+    // Expected: incremental adjust over src delta + id delta.
+    let mut wo = crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()).to_vec();
+    wo.push(snat_port);
+    let mut wn = crate::afxdp::frame::ipv6_words_from_octets(client6.octets()).to_vec();
+    wn.push(client_port);
+    let mut expected = checksum16_adjust(orig_csum, &wo, &wn);
+    if expected == 0 { expected = 0xffff; }
+    let stored = u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]);
+    assert_eq!(stored, expected, "#13650: truncated quote must keep RFC1624-incremental checksum, not a recompute over captured bytes");
+    // And it verifies against the reconstructed full datagram:
+    let mut full_out = vec![0u8; 100];
+    full_out[..8].copy_from_slice(&out[emb_l4..emb_l4 + 8]);
+    assert_eq!(checksum16_ipv6(client6, server6, PROTO_ICMPV6, &full_out), 0);
+    // (b) non-Echo type 1: bytes kept, address-delta repair applied.
+    let mut f2 = build_icmpv6_te_frame(router6, snat6, server6, snat_port, 80, PROTO_ICMPV6);
+    f2[emb_l4] = 1;
+    f2[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&0x1234u16.to_be_bytes());
+    let mut full_err = vec![0u8; 8];
+    full_err[0] = 1;
+    full_err[4..6].copy_from_slice(&0x1234u16.to_be_bytes());
+    let err_csum = checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &full_err);
+    f2[emb_l4 + 2..emb_l4 + 4].copy_from_slice(&err_csum.to_be_bytes());
+    let out2 = build_nat_reversed_icmp_error_v6(&f2, meta6, &m6).expect("v6 non-echo builds");
+    assert_eq!(&out2[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes());
+    let mut wo2 = crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()).to_vec();
+    let mut wn2 = crate::afxdp::frame::ipv6_words_from_octets(client6.octets()).to_vec();
+    let _ = (&mut wo2, &mut wn2);
+    let mut exp2 = checksum16_adjust(err_csum,
+        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()),
+        &crate::afxdp::frame::ipv6_words_from_octets(client6.octets()));
+    if exp2 == 0 { exp2 = 0xffff; }
+    assert_eq!(u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]), exp2,
+        "#13650: non-Echo quoted ICMPv6 must get address-delta checksum repair");
+}
+
+/// #13650: SNAT-outbound v6 quoted non-Echo must keep bytes 4..6 AND
+/// get the embedded-dst address-delta checksum repair (DNAT-only /
+/// non-Echo outbound must not be skipped by the bearing gate).
+#[test]
+fn icmp_embed_v6_snat_outbound_non_echo_addr_delta_13650() {
+    let router6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let snat6: Ipv6Addr = "2001:db8:1::100".parse().unwrap();
+    let client6: Ipv6Addr = "fd00::102".parse().unwrap();
+    let server6: Ipv6Addr = "2001:db8:2::1".parse().unwrap();
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    let mut f = build_icmpv6_te_frame(router6, snat6, server6, snat_port, 80, PROTO_ICMPV6);
+    let emb_l4 = 14 + 40 + 8 + 40;
+    // Outbound quote: quoted packet is server6 -> client6(pre-NAT dst);
+    // builder rewrites emb dst client6 -> snat6. Fixture quote is
+    // snat6->server6, so set match original_dst=server6 and expect dst
+    // delta server6->snat6 per builder semantics (emb dst overwritten
+    // with snat regardless); checksum oracle uses that delta.
+    f[emb_l4] = 1;
+    f[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&0x1234u16.to_be_bytes());
+    let mut hdr = vec![0u8; 8];
+    hdr[0] = 1;
+    hdr[4..6].copy_from_slice(&0x1234u16.to_be_bytes());
+    let c0 = checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &hdr);
+    f[emb_l4 + 2..emb_l4 + 4].copy_from_slice(&c0.to_be_bytes());
+    let mut m6 = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
+    m6.embedded_proto = PROTO_ICMPV6;
+    m6.original_dst = IpAddr::V6(server6);
+    m6.nat.rewrite_src_port = Some(snat_port);
+    let out = build_snat_outbound_icmp_error_v6(&f, icmpv6_te_meta(54), &m6).expect("snat v6 builds");
+    assert_eq!(&out[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes(),
+        "outbound non-Echo bytes 4..6 kept");
+    let mut exp = checksum16_adjust(c0,
+        &crate::afxdp::frame::ipv6_words_from_octets(server6.octets()),
+        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()));
+    if exp == 0 { exp = 0xffff; }
+    assert_eq!(u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]), exp,
+        "#13650: outbound non-Echo must get dst address-delta repair");
 }

@@ -288,34 +288,42 @@ pub(in crate::afxdp::icmp_embed) fn build_nat_reversed_icmp_error_v6(
         if matches!(emb_proto, PROTO_TCP | PROTO_UDP) && pkt.len() >= emb_l4_offset + 2 {
             pkt.get_mut(emb_l4_offset..emb_l4_offset + 2)?
                 .copy_from_slice(&icmp_match.original_src_port.to_be_bytes());
-        } else if emb_proto == PROTO_ICMPV6 && pkt.len() >= emb_l4_offset + 6
-            && crate::afxdp::frame::icmp_identifier_bearing(PROTO_ICMPV6, pkt[emb_l4_offset]) {
-            // #13650: quoted ICMPv6 checksum covers egress pseudo-header;
-            // recompute fully below instead of incremental identifier-only adjust.
-            let old_id_bytes = pkt.get(emb_l4_offset + 4..emb_l4_offset + 6)?;
-            let old_id = u16::from_be_bytes([old_id_bytes[0], old_id_bytes[1]]);
-            if old_id != icmp_match.original_src_port {
+        } else if emb_proto == PROTO_ICMPV6 && pkt.len() >= emb_l4_offset + 8 {
+            // #13650: RFC 1624 incremental repair of the QUOTED ICMPv6
+            // checksum -- never a full recompute: the quote is truncated
+            // (RFC 4443 quotes only part of the invoking packet and the
+            // embedded IPv6 payload_len declares the ORIGINAL datagram,
+            // whose tail is absent), so recomputing from captured bytes
+            // manufactures an invalid checksum. Deltas: embedded src
+            // (always restored above), embedded dst (only on dst-NAT),
+            // and the identifier (only identifier-bearing types).
+            let cur_csum = u16::from_be_bytes([pkt[emb_l4_offset+2], pkt[emb_l4_offset+3]]);
+            let mut words_old: Vec<u16> = Vec::new();
+            let mut words_new: Vec<u16> = Vec::new();
+            // We reconstruct old addresses from icmp_match: emb src was
+            // the NAT address (rewrite_src) if set, else already client.
+            if let Some(IpAddr::V6(nat_src)) = icmp_match.nat.rewrite_src {
+                words_old.extend(crate::afxdp::frame::ipv6_words_from_octets(nat_src.octets()));
+                words_new.extend(crate::afxdp::frame::ipv6_words_from_octets(original_client_bytes));
+            }
+            if had_dst_nat {
+                if let Some(IpAddr::V6(nat_dst)) = icmp_match.nat.rewrite_dst {
+                    words_old.extend(crate::afxdp::frame::ipv6_words_from_octets(nat_dst.octets()));
+                    words_new.extend(crate::afxdp::frame::ipv6_words_from_octets(original_dst_bytes));
+                }
+            }
+            let bearing = crate::afxdp::frame::icmp_identifier_bearing(PROTO_ICMPV6, pkt[emb_l4_offset]);
+            let old_id = u16::from_be_bytes([pkt[emb_l4_offset+4], pkt[emb_l4_offset+5]]);
+            if bearing && old_id != icmp_match.original_src_port {
                 pkt.get_mut(emb_l4_offset + 4..emb_l4_offset + 6)?
                     .copy_from_slice(&icmp_match.original_src_port.to_be_bytes());
-                // checksum repaired by full pseudo-header recompute below
+                words_old.push(old_id);
+                words_new.push(icmp_match.original_src_port);
             }
-        }
-    }
-    // #13650: repair quoted ICMPv6 checksum over egress embedded
-    // addresses (src/dst as now rewritten) + identifier delta.
-    if icmp_match.embedded_proto == PROTO_ICMPV6 {
-        if let Some((emb_rel_l4, _)) = emb_l4 {
-            let off = emb_ip_offset.checked_add(emb_rel_l4)?;
-            if pkt.len() >= off + 8
-                && crate::afxdp::frame::icmp_identifier_bearing(PROTO_ICMPV6, pkt[off]) {
-                let src = Ipv6Addr::from(<[u8;16]>::try_from(pkt.get(emb_ip_offset+8..emb_ip_offset+24)?).ok()?);
-                let dst = Ipv6Addr::from(<[u8;16]>::try_from(pkt.get(emb_ip_offset+24..emb_ip_offset+40)?).ok()?);
-                pkt.get_mut(off+2..off+4)?.copy_from_slice(&[0,0]);
-                let end = pkt.len().min(emb_ip_offset + 40 + u16::from_be_bytes([pkt[emb_ip_offset+4],pkt[emb_ip_offset+5]]) as usize);
-                let data = pkt.get(off..end)?;
-                let c = checksum16_ipv6(src, dst, PROTO_ICMPV6, data);
-                let c = if c==0 {0xffff} else {c};
-                pkt.get_mut(off+2..off+4)?.copy_from_slice(&c.to_be_bytes());
+            if !words_old.is_empty() && cur_csum != 0 {
+                let mut nc = checksum16_adjust(cur_csum, &words_old, &words_new);
+                if nc == 0 { nc = 0xffff; }
+                pkt.get_mut(emb_l4_offset+2..emb_l4_offset+4)?.copy_from_slice(&nc.to_be_bytes());
             }
         }
     }
@@ -577,19 +585,29 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
         if matches!(emb_proto, PROTO_TCP | PROTO_UDP) && pkt.len() >= emb_l4_offset + 4 {
             pkt.get_mut(emb_l4_offset + 2..emb_l4_offset + 4)?
                 .copy_from_slice(&xlated.to_be_bytes());
-        } else if emb_proto == PROTO_ICMPV6 && pkt.len() >= emb_l4_offset + 6
-            && crate::afxdp::frame::icmp_identifier_bearing(PROTO_ICMPV6, pkt[emb_l4_offset]) {
-            pkt.get_mut(emb_l4_offset + 4..emb_l4_offset + 6)?
-                .copy_from_slice(&xlated.to_be_bytes());
-            // #13650: full pseudo-header recompute over egress emb addrs.
-            let src = Ipv6Addr::from(<[u8;16]>::try_from(pkt.get(emb_ip_offset+8..emb_ip_offset+24)?).ok()?);
-            let dst = Ipv6Addr::from(<[u8;16]>::try_from(pkt.get(emb_ip_offset+24..emb_ip_offset+40)?).ok()?);
-            pkt.get_mut(emb_l4_offset+2..emb_l4_offset+4)?.copy_from_slice(&[0,0]);
-            let end = pkt.len().min(emb_ip_offset + 40 + u16::from_be_bytes([pkt[emb_ip_offset+4],pkt[emb_ip_offset+5]]) as usize);
-            let data = pkt.get(emb_l4_offset..end)?;
-            let c = checksum16_ipv6(src, dst, PROTO_ICMPV6, data);
-            let c = if c==0 {0xffff} else {c};
-            pkt.get_mut(emb_l4_offset+2..emb_l4_offset+4)?.copy_from_slice(&c.to_be_bytes());
+        } else if emb_proto == PROTO_ICMPV6 && pkt.len() >= emb_l4_offset + 8 {
+            // #13650: incremental RFC 1624 repair (truncated quote; never
+            // full-recompute): embedded dst -> snat_bytes delta always,
+            // identifier delta only for identifier-bearing types.
+            let cur_csum = u16::from_be_bytes([pkt[emb_l4_offset+2], pkt[emb_l4_offset+3]]);
+            let old_id = u16::from_be_bytes([pkt[emb_l4_offset+4], pkt[emb_l4_offset+5]]);
+            let bearing = crate::afxdp::frame::icmp_identifier_bearing(PROTO_ICMPV6, pkt[emb_l4_offset]);
+            let mut wo: Vec<u16> = Vec::new();
+            let mut wn: Vec<u16> = Vec::new();
+            if let IpAddr::V6(old_dst) = icmp_match.original_dst {
+                wo.extend(crate::afxdp::frame::ipv6_words_from_octets(old_dst.octets()));
+                wn.extend(crate::afxdp::frame::ipv6_words_from_octets(snat_bytes));
+            }
+            if bearing && old_id != xlated {
+                pkt.get_mut(emb_l4_offset + 4..emb_l4_offset + 6)?
+                    .copy_from_slice(&xlated.to_be_bytes());
+                wo.push(old_id); wn.push(xlated);
+            }
+            if !wo.is_empty() && cur_csum != 0 {
+                let mut nc = checksum16_adjust(cur_csum, &wo, &wn);
+                if nc == 0 { nc = 0xffff; }
+                pkt.get_mut(emb_l4_offset+2..emb_l4_offset+4)?.copy_from_slice(&nc.to_be_bytes());
+            }
         }
     }
 
