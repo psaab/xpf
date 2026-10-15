@@ -31,10 +31,6 @@ func kernelUserHZ() (int, bool) {
 // when Buffer% cannot be read on userspace-dp.
 const followupUMEMBuffer = 878
 
-// UMEMBufferFollowup returns the issue number printed when Buffer%
-// cannot be read on userspace-dp.  Callers may override to 0 if they
-// want to suppress the reference.
-func UMEMBufferFollowup() int { return followupUMEMBuffer }
 
 // MapStats is the package-local BPF map utilization shape Build needs.
 type MapStats struct {

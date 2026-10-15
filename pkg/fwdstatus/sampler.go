@@ -116,12 +116,12 @@ func (s *Sampler) sample(now time.Time) {
 	// independent 1 Hz "status" requests doubled the shared
 	// control-socket rate and starved session installs during bulk
 	// sync (CLAUDE.md "Control socket contention"). CachedStatus()
-	// MUST NOT touch the control socket; on a miss (helper not yet
-	// polled) the worker counters hold at their previous values,
-	// preserving series monotonicity exactly as the old Status()
-	// error path did. #2114: the provider IS a CachedStatusProvider
-	// now — the per-tick type assertion is gone.
-	workerThread, workerWall := s.lastWorkerThread, s.lastWorkerWall
+	// MUST NOT touch the control socket; a cache miss holds prior values.
+	// on a cache miss, saved counters are reused under the ring lock,
+	// preserving series monotonicity as the old Status() error path did.
+	// #2114: the provider IS a CachedStatusProvider now — the per-tick
+	// type assertion is gone.
+	var workerThread, workerWall uint64
 	workerHeld := false
 	if s.dp != nil {
 		if st, ok := s.dp.CachedStatus(); ok {
@@ -137,6 +137,13 @@ func (s *Sampler) sample(now time.Time) {
 	}
 
 	s.mu.Lock()
+	// Select held counters under the same lock that appends the sample.
+	// A cache miss may have blocked while another sample committed newer
+	// values; reading before CachedStatus would roll that state backward.
+	if s.dp == nil || workerHeld {
+		workerThread, workerWall = s.lastWorkerThread, s.lastWorkerWall
+	}
+
 	s.ring[s.head] = cpuSample{
 		wall:           now,
 		daemonCPUNs:    daemonNs,
@@ -223,24 +230,39 @@ func computeCPUWindows(snap SamplerSnapshot) (
 		if wallDelta <= 0 {
 			continue
 		}
-		// Guard against non-monotonic counters. A userspace-dp
-		// restart can reset the cumulative series; an unchecked
-		// subtract on uint64 would underflow and report a bogus rate.
+		// Any decrease inside the window means the cumulative counters
+		// span multiple daemon/helper lifetimes. Do not derive a rate
+		// across that discontinuity, even if endpoints are monotonic.
+		daemonMonotonic := true
+		for j := idx + 1; j < len(snap.Samples); j++ {
+			if snap.Samples[j].daemonCPUNs < snap.Samples[j-1].daemonCPUNs {
+				daemonMonotonic = false
+				break
+			}
+		}
 		wallNs := uint64(wallDelta.Nanoseconds())
-		if newest.daemonCPUNs >= then.daemonCPUNs {
+		if daemonMonotonic && newest.daemonCPUNs >= then.daemonCPUNs {
 			daemonDelta := newest.daemonCPUNs - then.daemonCPUNs
 			daemonPct[i] = float64(daemonDelta) * 100.0 / float64(wallNs)
 			daemonValid[i] = true
 		}
 
-		workerHeld := false
+		workerHeld, workerMonotonic := false, true
 		for j := idx; j < len(snap.Samples); j++ {
-			if snap.Samples[j].workerHeld {
+			sample := snap.Samples[j]
+			if sample.workerHeld {
 				workerHeld = true
-				break
+			}
+			if j > idx {
+				prev := snap.Samples[j-1]
+				if sample.workerWallNs < prev.workerWallNs ||
+					sample.workerThreadNs < prev.workerThreadNs {
+					workerMonotonic = false
+				}
 			}
 		}
-		if !workerHeld && newest.workerWallNs > then.workerWallNs &&
+		if !workerHeld && workerMonotonic &&
+			newest.workerWallNs > then.workerWallNs &&
 			newest.workerThreadNs >= then.workerThreadNs {
 			workerWallDelta := newest.workerWallNs - then.workerWallNs
 			workerThreadDelta := newest.workerThreadNs - then.workerThreadNs
