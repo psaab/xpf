@@ -570,22 +570,17 @@ func (c *xpfCollector) emitUserspaceEventStreamStatus(ch chan<- prometheus.Metri
 		count  uint64
 	}{
 		{"session_sync_gap", es.SessionSyncResyncs},
-		{"decode_suppressed", es.DecodeResyncSuppressed},
 		{"telemetry_gap", es.TelemetryGapResyncs},
 	} {
 		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamResyncsTotal,
 			prometheus.CounterValue, float64(item.count), item.reason)
 	}
-	for _, item := range []struct {
-		reason string
-		count  uint64
-	}{
-		{"pending_callback_overflow", es.PendingOverflowDisconnects},
-		{"peer_cred_rejection", es.PeerCredRejections},
-	} {
-		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDisconnectsTotal,
-			prometheus.CounterValue, float64(item.count), item.reason)
-	}
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamResyncSuppressedTotal,
+		prometheus.CounterValue, float64(es.DecodeResyncSuppressed))
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDisconnectsTotal,
+		prometheus.CounterValue, float64(es.PendingOverflowDisconnects), "pending_callback_overflow")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamPeerCredRejectionsTotal,
+		prometheus.CounterValue, float64(es.PeerCredRejections))
 	for _, item := range []struct {
 		label string
 		count uint64
