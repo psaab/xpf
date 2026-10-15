@@ -40,7 +40,7 @@ func natFixtureConfig() *config.Config {
 		},
 		RuleSets: []*config.NATRuleSet{
 			{
-				Name: "rs-dst", FromZone: "untrust", ToZone: "dmz",
+				Name: "rs-dst", FromZone: "untrust",
 				Rules: []*config.NATRule{
 					{
 						Name:  "d1",
@@ -103,7 +103,7 @@ func TestRenderDestRuleDetailGolden(t *testing.T) {
 	RenderDestRuleDetail(context.Background(), &b, cfg, dp, nil)
 	want := "destination NAT rule: d1\n" +
 		"  Rule-set: rs-dst                        ID: 1\n" +
-		"    From zone: untrust    To zone: dmz\n" +
+		"    From zone: untrust    To zone: \n" +
 		"    Match:\n" +
 		"      Destination addresses: 198.51.100.7/32\n" +
 		"      Destination port:      443\n" +
@@ -300,7 +300,7 @@ func TestRenderDestRuleDetailLoadedGolden(t *testing.T) {
 	RenderDestRuleDetail(context.Background(), &b, cfg, dp, func() *dataplane.ApplyResult { return cr })
 	want := "destination NAT rule: d1\n" +
 		"  Rule-set: rs-dst                        ID: 1\n" +
-		"    From zone: untrust    To zone: dmz\n" +
+		"    From zone: untrust    To zone: \n" +
 		"    Match:\n" +
 		"      Destination addresses: 198.51.100.7/32\n" +
 		"      Destination port:      443\n" +

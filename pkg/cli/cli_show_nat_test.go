@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -144,5 +145,51 @@ func TestNATRuleCounterReadsRequireInstalledRule11743(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type destinationSummarySessionCLIDP13243 struct {
+	*dataplane.Manager
+	result *dataplane.ApplyResult
+}
+
+func (d *destinationSummarySessionCLIDP13243) IsLoaded() bool { return true }
+
+func (d *destinationSummarySessionCLIDP13243) LastApplyResult() *dataplane.ApplyResult {
+	return d.result
+}
+
+func (d *destinationSummarySessionCLIDP13243) IterateSessions(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
+	fn(dataplane.SessionKey{}, dataplane.SessionValue{
+		Flags: dataplane.SessFlagDNAT, IngressZone: 8, EgressZone: 9,
+	})
+	return nil
+}
+
+func TestShowNATDestinationSummaryCountsFromZoneOnly13243(t *testing.T) {
+	dp := &destinationSummarySessionCLIDP13243{
+		Manager: dataplane.New(),
+		result: &dataplane.ApplyResult{ZoneIDs: map[string]uint16{
+			"untrust": 8, "dmz": 9,
+		}},
+	}
+	cfg := &config.Config{Security: config.SecurityConfig{NAT: config.NATConfig{
+		Destination: &config.DestinationNATConfig{
+			Pools: map[string]*config.NATPool{"p": {Name: "p", Address: "10.0.0.1"}},
+			RuleSets: []*config.NATRuleSet{{
+				Name: "dnat-rs", FromZone: "untrust",
+				Rules: []*config.NATRule{{Name: "r1", Then: config.NATThen{PoolName: "p"}}},
+			}},
+		},
+	}}}
+	c := &CLI{dp: dp}
+	out := captureStdout(t, func() {
+		if err := c.showNATDestinationSummary(cfg); err != nil {
+			t.Fatalf("showNATDestinationSummary: %v", err)
+		}
+	})
+	wantRow := fmt.Sprintf("%-30s %-12d", "untrust -> ", 1)
+	if !strings.Contains(out, wantRow) {
+		t.Fatalf("destination summary missing %q:\n%s", wantRow, out)
 	}
 }
