@@ -70,10 +70,11 @@ func validateTunnelRoutingInstanceTargetsStrict12520(cfg *Config) error {
 // whose identity is already owned is removed from the compiled config, so the
 // kernel tunnel manager and the snapshot builder both see only the owner.
 // Duplicates among non-quarantined tunnels predate this gate and stay with
-// #10654. An interface-level tunnel is removed the way #9909 removes one; a
-// unit-level tunnel takes its unit with it, as the tolerant #9899 unit skip
-// does, because a unit left without its tunnel would inherit any
-// interface-level tunnel.
+// #10654. An interface-level tunnel is removed the way #9909 removes one;
+// units that inherited it must also go, or they survive as live non-tunnel
+// interfaces. A unit-level tunnel takes its unit with it, as the tolerant
+// #9899 unit skip does, because a unit left without its tunnel would inherit
+// any interface-level tunnel.
 func skipQuarantinedGRECollisions12520(cfg *Config, quarantined map[*TunnelConfig]string) {
 	if len(quarantined) == 0 {
 		return
@@ -127,13 +128,22 @@ func skipQuarantinedGRECollisions12520(cfg *Config, quarantined map[*TunnelConfi
 		if ifc == nil {
 			continue
 		}
+		skipInterfaceTunnel := false
 		if ifc.Tunnel != nil {
-			if _, skip := skipped[ifc.Tunnel]; skip {
+			_, skipInterfaceTunnel = skipped[ifc.Tunnel]
+			if skipInterfaceTunnel {
 				ifc.Tunnel = nil
 			}
 		}
 		for unitNum, unit := range ifc.Units {
-			if unit == nil || unit.Tunnel == nil {
+			if unit == nil {
+				continue
+			}
+			if skipInterfaceTunnel && unit.Tunnel == nil {
+				delete(ifc.Units, unitNum)
+				continue
+			}
+			if unit.Tunnel == nil {
 				continue
 			}
 			if _, skip := skipped[unit.Tunnel]; skip {

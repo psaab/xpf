@@ -338,3 +338,109 @@ func TestTunnelRITargetPreservesEstablishedTailGatePriority12520(t *testing.T) {
 		})
 	}
 }
+
+// TestSkippedInterfaceGREDeletesInheritingUnits13139: a quarantined
+// interface-level GRE tunnel that loses its cleared outer identity must not
+// leave its inheriting unit behind as a live non-tunnel interface; a unit
+// with its own tunnel keeps it.
+func TestSkippedInterfaceGREDeletesInheritingUnits13139(t *testing.T) {
+	cfg, err := CompileConfigLenient(treeFromSet(t, []string{
+		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",
+		"set interfaces gr-0/0/0 tunnel destination 192.0.2.2",
+		"set interfaces gr-0/0/0 tunnel routing-instance destination missing",
+		"set interfaces gr-0/0/0 unit 0 family inet address 10.10.10.1/30",
+		"set interfaces gr-0/0/0 unit 1 tunnel source 192.0.2.5",
+		"set interfaces gr-0/0/0 unit 1 tunnel destination 192.0.2.6",
+		"set interfaces gr-0/0/0 unit 1 family inet address 10.10.20.1/30",
+		"set interfaces gr-0/0/1 unit 0 tunnel source 192.0.2.1",
+		"set interfaces gr-0/0/1 unit 0 tunnel destination 192.0.2.2",
+		"set interfaces gr-0/0/1 unit 0 family inet address 10.10.30.1/30",
+	}))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	ifc := cfg.Interfaces.Interfaces["gr-0/0/0"]
+	if ifc == nil || ifc.Tunnel != nil {
+		t.Fatalf("quarantined interface tunnel not skipped: %+v", ifc)
+	}
+	if _, ok := ifc.Units[0]; ok {
+		t.Errorf("inheriting unit 0 survived skipped interface-level tunnel: %+v", ifc.Units[0])
+	}
+	if u, ok := ifc.Units[1]; !ok || u == nil || u.Tunnel == nil {
+		t.Errorf("unit 1 with its own tunnel was removed: %v", ifc.Units)
+	}
+	for _, ep := range EmitTunnelEndpointNames(cfg) {
+		if ep.Name == "gr-0/0/0.0" {
+			t.Errorf("skipped tunnel still emitted as %s", ep.Name)
+		}
+	}
+}
+
+// TestUnitTunnelRIShadowsInterfaceLevelClaim13139: a unit tunnel cloned from
+// an interface-level tunnel shares its Linux device; the unit's explicit
+// routing-instance is the device's only claim.
+func TestUnitTunnelRIShadowsInterfaceLevelClaim13139(t *testing.T) {
+	base := []string{
+		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",
+		"set interfaces gr-0/0/0 tunnel destination 192.0.2.2",
+		"set interfaces gr-0/0/0 tunnel routing-instance destination vrfA",
+		"set interfaces gr-0/0/0 unit 0 tunnel routing-instance destination vrfB",
+		"set interfaces gr-0/0/0 unit 0 family inet address 10.10.10.1/30",
+		"set routing-instances vrfA instance-type virtual-router",
+		"set routing-instances vrfB instance-type virtual-router",
+	}
+	if _, err := CompileConfig(treeFromSet(t, base)); err != nil {
+		t.Fatalf("strict compile rejected unit-0 override: %v", err)
+	}
+	claims := routingInstanceTunnelDeviceClaims(mustCompile13139(t, base))
+	if len(claims) != 1 || claims[0].Instance != "vrfB" {
+		t.Fatalf("claims = %+v, want single vrfB claim", claims)
+	}
+	// Shadowed undefined interface target must not cause #12520 rejection or
+	// tolerant clearing of the effective unit tunnel.
+	shadowed := append([]string(nil), base...)
+	shadowed[2] = "set interfaces gr-0/0/0 tunnel routing-instance destination missing"
+	if _, err := CompileConfig(treeFromSet(t, shadowed)); err != nil {
+		t.Fatalf("strict compile rejected shadowed undefined target: %v", err)
+	}
+	cfg, err := CompileConfigLenient(treeFromSet(t, shadowed))
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	if got := cfg.Interfaces.Interfaces["gr-0/0/0"].Units[0].Tunnel.RoutingInstance; got != "vrfB" {
+		t.Errorf("effective unit target = %q, want vrfB", got)
+	}
+	// A unit-1 (distinct device) unit must not shadow the interface claim.
+	multi := append(append([]string(nil), base...),
+		"set interfaces gr-0/0/0 unit 1 tunnel source 192.0.2.5",
+		"set interfaces gr-0/0/0 unit 1 tunnel destination 192.0.2.6",
+		"set interfaces gr-0/0/0 unit 1 tunnel routing-instance destination vrfB",
+		"set interfaces gr-0/0/0 unit 1 family inet address 10.10.20.1/30")
+	claims = routingInstanceTunnelDeviceClaims(mustCompile13139(t, multi))
+	if len(claims) != 2 || claims[0].Instance != "vrfB" || claims[1].Instance != "vrfB" {
+		t.Fatalf("multi-device claims = %+v, want only the unit 0 and unit 1 overrides", claims)
+	}
+	// A unit without a tunnel stanza still inherits the interface tunnel.
+	inherited := &Config{Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+		"gr-0/0/0": {
+			Tunnel: &TunnelConfig{Name: "gr-0-0-0", RoutingInstance: "vrfA"},
+			Units: map[int]*InterfaceUnit{
+				0: {Tunnel: &TunnelConfig{Name: "gr-0-0-0", RoutingInstance: "vrfB"}},
+				1: {},
+			},
+		},
+	}}}
+	claims = routingInstanceTunnelDeviceClaims(inherited)
+	if len(claims) != 2 || claims[0].Instance != "vrfA" || claims[1].Instance != "vrfB" {
+		t.Fatalf("inherited-row claims = %+v, want interface vrfA plus unit-0 vrfB", claims)
+	}
+}
+
+func mustCompile13139(t *testing.T, lines []string) *Config {
+	t.Helper()
+	cfg, err := CompileConfig(treeFromSet(t, lines))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	return cfg
+}
