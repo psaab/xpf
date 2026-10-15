@@ -29,8 +29,8 @@ func TestRun_CutBoundarySnapshotPreservesCopyCommit10307(t *testing.T) {
 	}
 
 	dbFile := filepath.Join(cfg.ConfigDBDir, "active.json")
-	const committedDuringCopy = "#xpf-config-envelope v=1\n{\"gen\":\"committed-during-copy\"}"
-	mkfile(t, dbFile, "#xpf-config-envelope v=1\n{\"gen\":\"pre-upgrade\"}")
+	const committedDuringCopy = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"committed-during-copy\"}"
+	mkfile(t, dbFile, "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"pre-upgrade\"}")
 	stageSecondCut(t, r, cfg, fs)
 
 	// The existing copyTree durability seam lets this cell commit immediately
@@ -66,8 +66,8 @@ func TestRun_CutBoundarySnapshotPreservesVerifyCommit10307(t *testing.T) {
 	}
 
 	dbFile := filepath.Join(cfg.ConfigDBDir, "active.json")
-	const committedDuringVerify = "#xpf-config-envelope v=1\n{\"gen\":\"committed-during-verify\"}"
-	mkfile(t, dbFile, "#xpf-config-envelope v=1\n{\"gen\":\"pre-upgrade\"}")
+	const committedDuringVerify = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"committed-during-verify\"}"
+	mkfile(t, dbFile, "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"pre-upgrade\"}")
 	stageSecondCut(t, r, cfg, fs)
 
 	// Verify is pure and the old daemon remains live here. Model a commit that
@@ -96,7 +96,7 @@ func TestRun_CutBoundarySnapshotDoesNotResurrectConfirmedState10307(t *testing.T
 
 	confirmPath := filepath.Join(cfg.ConfigDBDir, "confirm.json")
 	dbFile := filepath.Join(cfg.ConfigDBDir, "active.json")
-	mkfile(t, dbFile, "#xpf-config-envelope v=1\n{\"gen\":\"pre-upgrade\"}")
+	mkfile(t, dbFile, "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"pre-upgrade\"}")
 	mkfile(t, confirmPath, `{"pending":"before-stop"}`)
 	stageSecondCut(t, r, cfg, fs)
 	if _, err := os.Stat(confirmPath); err != nil {
@@ -106,7 +106,7 @@ func TestRun_CutBoundarySnapshotDoesNotResurrectConfirmedState10307(t *testing.T
 	// StopUnit entry is the last instant at which the old daemon can commit.
 	// A snapshot taken before StopUnit loses both this commit and the durable
 	// confirmation deletion; the snapshot must be taken after StopUnit returns.
-	const committedAtStop = "#xpf-config-envelope v=1\n{\"gen\":\"committed-at-stop-boundary\"}"
+	const committedAtStop = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"committed-at-stop-boundary\"}"
 	fs.stopHook = func() {
 		mkfile(t, dbFile, committedAtStop)
 		if err := os.Remove(confirmPath); err != nil {

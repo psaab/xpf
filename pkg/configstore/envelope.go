@@ -415,16 +415,22 @@ func parseEnvelopeHeader(line string) (*envelopeHeader, error) {
 			// v=/min-reader gate is what governs readability.
 		}
 	}
-	if hdr.hasASTVersion && hdr.ASTVersion != EnvelopeASTVersion {
+	if !seenVersion {
+		return nil, fmt.Errorf("config envelope: header missing required v= field: %q", line)
+	}
+	if !hdr.hasASTVersion {
+		return nil, fmt.Errorf("config envelope: header missing required ast= field: %q", line)
+	}
+	if !hdr.hasRollbackFormat {
+		return nil, fmt.Errorf("config envelope: header missing required rollback-fmt= field: %q", line)
+	}
+	if hdr.ASTVersion != EnvelopeASTVersion {
 		return nil, fmt.Errorf("config envelope AST version %d is unsupported (this build supports %d); refusing to load",
 			hdr.ASTVersion, EnvelopeASTVersion)
 	}
-	if hdr.hasRollbackFormat && hdr.RollbackFormat != EnvelopeRollbackFormatVersion {
+	if hdr.RollbackFormat != EnvelopeRollbackFormatVersion {
 		return nil, fmt.Errorf("config envelope rollback format %d is unsupported (this build supports %d); refusing to load",
 			hdr.RollbackFormat, EnvelopeRollbackFormatVersion)
-	}
-	if !seenVersion {
-		return nil, fmt.Errorf("config envelope: header missing required v= field: %q", line)
 	}
 	return hdr, nil
 }
