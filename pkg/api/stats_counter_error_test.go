@@ -95,3 +95,75 @@ func TestCollectGlobalCountersSkipsAndCountsReadErrors(t *testing.T) {
 		t.Errorf("xpf_counter_read_errors_total = %v, want > 0", errTotal)
 	}
 }
+
+type globalCounterUnsupportedDP13274 struct {
+	*dataplane.Manager
+}
+
+func (d *globalCounterUnsupportedDP13274) IsLoaded() bool { return true }
+
+func (d *globalCounterUnsupportedDP13274) ReadGlobalCounter(idx uint32) (uint64, error) {
+	switch idx {
+	case dataplane.GlobalCtrFlowCacheFlush, dataplane.GlobalCtrFlowCacheInvalidate,
+		dataplane.GlobalCtrTCEgressPackets, dataplane.GlobalCtrFabricRedirect:
+		return 0, dataplane.ErrCounterNotPopulated
+	default:
+		return uint64(idx) + 1, nil
+	}
+}
+
+func TestCollectGlobalCountersUnsupportedIsNotReadFailure13274(t *testing.T) {
+	c := newCollector(&Server{})
+	dp := &globalCounterUnsupportedDP13274{Manager: dataplane.New()}
+	ch := make(chan prometheus.Metric, 64)
+	c.collectGlobalCounters(ch, dp)
+	c.emitCounterReadErrors(ch)
+	close(ch)
+
+	var errorTotal float64
+	var sawErrorTotal, sawFlowHit, sawFlowMiss, sawFlowFlush, sawFlowInvalidate, sawTCEgress bool
+	for m := range ch {
+		desc := m.Desc().String()
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("metric write: %v", err)
+		}
+		if strings.Contains(desc, "xpf_counter_read_errors_total") {
+			sawErrorTotal = true
+			errorTotal = pb.GetCounter().GetValue()
+			continue
+		}
+		if strings.Contains(desc, "xpf_tc_egress_packets_total") {
+			sawTCEgress = true
+		}
+		if strings.Contains(desc, "xpf_flow_cache_total") {
+			for _, label := range pb.GetLabel() {
+				if label.GetName() == "type" {
+					switch label.GetValue() {
+					case "hit":
+						sawFlowHit = true
+					case "miss":
+						sawFlowMiss = true
+					case "flush":
+						sawFlowFlush = true
+					case "invalidate":
+						sawFlowInvalidate = true
+					}
+				}
+			}
+		}
+	}
+	if !sawErrorTotal || errorTotal != 0 {
+		t.Errorf("error total emitted=%v value=%v, want present and zero", sawErrorTotal, errorTotal)
+	}
+	if !sawFlowHit || !sawFlowMiss {
+		t.Errorf("supported flow-cache series hit/miss present = %v/%v, want both", sawFlowHit, sawFlowMiss)
+	}
+	if sawFlowFlush || sawFlowInvalidate || sawTCEgress {
+		t.Errorf("unsupported series flush/invalidate/TC-egress present = %v/%v/%v, want omitted",
+			sawFlowFlush, sawFlowInvalidate, sawTCEgress)
+	}
+	if got := c.counterReadErrors.Load(); got != 0 {
+		t.Errorf("counterReadErrors = %d for unsupported reads, want 0", got)
+	}
+}

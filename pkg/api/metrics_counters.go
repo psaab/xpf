@@ -436,7 +436,13 @@ func (c *xpfCollector) collectGlobalCounters(ch chan<- prometheus.Metric, dp api
 	emit := func(desc *prometheus.Desc, idx uint32, labels ...string) {
 		v, err := dp.ReadGlobalCounter(idx)
 		if err != nil {
-			c.counterReadErrors.Add(1)
+			// #13274: this counter is explicitly unsupported by the active
+			// userspace dataplane. Omit it without raising a read-failure alert;
+			// genuine dataplane read failures still follow the #3345
+			// omit-and-count contract.
+			if !errors.Is(err, dataplane.ErrCounterNotPopulated) {
+				c.counterReadErrors.Add(1)
+			}
 			return
 		}
 		ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(v), labels...)
