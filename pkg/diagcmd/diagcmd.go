@@ -13,8 +13,122 @@ package diagcmd
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
+
+// PingRequestOptions is the validated CLI ping selector set. Numeric values
+// are parsed here so command surfaces cannot silently ignore malformed input.
+type PingRequestOptions struct {
+	Target, Source, RoutingInstance string
+	Count, Size                     int
+	SizeSet                         bool
+}
+
+// TracerouteRequestOptions is the validated CLI traceroute selector set.
+type TracerouteRequestOptions struct {
+	Target, Source, RoutingInstance string
+}
+
+// ParsePingOptions parses the positional target and its optional selectors.
+func ParsePingOptions(args []string) (PingRequestOptions, error) {
+	if len(args) == 0 {
+		return PingRequestOptions{}, fmt.Errorf("ping requires a target")
+	}
+	out := PingRequestOptions{Target: args[0], Count: DefaultPingCount}
+	seen := map[string]bool{}
+	for i := 1; i < len(args); i++ {
+		key := args[i]
+		if key != "count" && key != "source" && key != "size" && key != "routing-instance" {
+			return PingRequestOptions{}, fmt.Errorf("ping: unknown option %q", key)
+		}
+		if seen[key] {
+			return PingRequestOptions{}, fmt.Errorf("ping: duplicate option %q", key)
+		}
+		seen[key] = true
+		if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+			return PingRequestOptions{}, fmt.Errorf("ping: option %q requires a value", key)
+		}
+		value := args[i+1]
+		if value == "count" || value == "source" || value == "size" || value == "routing-instance" {
+			return PingRequestOptions{}, fmt.Errorf("ping: option %q requires a non-option value", key)
+		}
+		i++
+		switch key {
+		case "count":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return PingRequestOptions{}, fmt.Errorf("ping: invalid count %q: must be a number", value)
+			}
+			out.Count = n
+		case "size":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return PingRequestOptions{}, fmt.Errorf("ping: invalid size %q: must be a number", value)
+			}
+			out.Size = n
+			out.SizeSet = true
+		case "source":
+			out.Source = value
+		case "routing-instance":
+			out.RoutingInstance = value
+		}
+	}
+	return out, nil
+}
+
+// ParseTracerouteOptions parses the positional target and its optional selectors.
+func ParseTracerouteOptions(args []string) (TracerouteRequestOptions, error) {
+	if len(args) == 0 {
+		return TracerouteRequestOptions{}, fmt.Errorf("traceroute requires a target")
+	}
+	out := TracerouteRequestOptions{Target: args[0]}
+	seen := map[string]bool{}
+	for i := 1; i < len(args); i++ {
+		key := args[i]
+		if key != "source" && key != "routing-instance" {
+			return TracerouteRequestOptions{}, fmt.Errorf("traceroute: unknown option %q", key)
+		}
+		if seen[key] {
+			return TracerouteRequestOptions{}, fmt.Errorf("traceroute: duplicate option %q", key)
+		}
+		seen[key] = true
+		if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+			return TracerouteRequestOptions{}, fmt.Errorf("traceroute: option %q requires a value", key)
+		}
+		value := args[i+1]
+		if value == "source" || value == "routing-instance" {
+			return TracerouteRequestOptions{}, fmt.Errorf("traceroute: option %q requires a non-option value", key)
+		}
+		i++
+		if key == "source" {
+			out.Source = value
+		} else {
+			out.RoutingInstance = value
+		}
+	}
+	return out, nil
+}
+
+// ParseTestInterface parses test security-zone's one required interface selector.
+func ParseTestInterface(args []string) (value string, present bool, err error) {
+	if len(args) == 0 {
+		return "", false, nil
+	}
+	if args[0] != "interface" {
+		return "", false, fmt.Errorf("unknown selector %q (want \"interface <name>\")", args[0])
+	}
+	if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+		return "", false, fmt.Errorf("selector \"interface\" requires a value")
+	}
+	if strings.ContainsAny(args[1], ",=") {
+		return "", false, fmt.Errorf("interface %q contains a comma or equals, which the test security-zone topic cannot carry", args[1])
+	}
+	if len(args) > 2 {
+		return "", false, fmt.Errorf("unknown selector %q (want \"interface <name>\")", args[2])
+	}
+	return args[1], true, nil
+}
 
 // vrfPrefix is the prefix the daemon uses for the kernel VRF master
 // device that backs a Junos routing-instance (a routing-instance named

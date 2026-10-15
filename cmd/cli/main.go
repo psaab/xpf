@@ -21,6 +21,7 @@ import (
 	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/diagcmd"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/osident"
 	"github.com/psaab/xpf/pkg/policymatch"
@@ -503,62 +504,13 @@ func (c *ctl) handlePing(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: ping <host> [count N] [source IP] [size N] [routing-instance NAME]")
 	}
-	// #9065: every option here was parsed with its error DISCARDED — a bare
-	// `if v, err := strconv.Atoi(...); err == nil` with no else, and an
-	// `if i+1 < len(args)` with no else. So `ping host count abc` and
-	// `ping host count` both ran a 5-packet ping and said nothing, and the
-	// operator got a different ping from the one they typed. Same family as the
-	// dropped selectors above: the command succeeds while answering a different
-	// question.
-	//
-	// SCOPED to the four declared options. An UNKNOWN trailing token is still
-	// ignored rather than refused — that is a second claim about this loop which
-	// this change does not measure, and turning it into an error could refuse a
-	// form some script relies on. The silent handling of a KNOWN option's own
-	// value is what is fixed.
-	req := &pb.PingRequest{Target: args[0], Count: 5}
-	takePingValue := func(i *int, kw string) (string, error) {
-		if *i+1 >= len(args) {
-			return "", fmt.Errorf("missing value for %q", kw)
-		}
-		*i++
-		return args[*i], nil
+	parsed, err := diagcmd.ParsePingOptions(args)
+	if err != nil {
+		return err
 	}
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "count":
-			v, err := takePingValue(&i, "count")
-			if err != nil {
-				return err
-			}
-			n, cerr := strconv.Atoi(v)
-			if cerr != nil {
-				return fmt.Errorf("invalid count %q: must be a number", v)
-			}
-			req.Count = int32(n)
-		case "source":
-			v, err := takePingValue(&i, "source")
-			if err != nil {
-				return err
-			}
-			req.Source = v
-		case "size":
-			v, err := takePingValue(&i, "size")
-			if err != nil {
-				return err
-			}
-			n, cerr := strconv.Atoi(v)
-			if cerr != nil {
-				return fmt.Errorf("invalid size %q: must be a number", v)
-			}
-			req.Size = int32(n)
-		case "routing-instance":
-			v, err := takePingValue(&i, "routing-instance")
-			if err != nil {
-				return err
-			}
-			req.RoutingInstance = v
-		}
+	req := &pb.PingRequest{
+		Target: parsed.Target, Count: int32(parsed.Count), Source: parsed.Source,
+		Size: int32(parsed.Size), RoutingInstance: parsed.RoutingInstance,
 	}
 	ctx, cancel := context.WithTimeout(c.ctx(), 60*time.Second)
 	defer cancel()
@@ -583,20 +535,12 @@ func (c *ctl) handleTraceroute(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: traceroute <host> [source IP] [routing-instance NAME]")
 	}
-	req := &pb.TracerouteRequest{Target: args[0]}
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "source":
-			if i+1 < len(args) {
-				i++
-				req.Source = args[i]
-			}
-		case "routing-instance":
-			if i+1 < len(args) {
-				i++
-				req.RoutingInstance = args[i]
-			}
-		}
+	parsed, err := diagcmd.ParseTracerouteOptions(args)
+	if err != nil {
+		return err
+	}
+	req := &pb.TracerouteRequest{
+		Target: parsed.Target, Source: parsed.Source, RoutingInstance: parsed.RoutingInstance,
 	}
 	ctx, cancel := context.WithTimeout(c.ctx(), 60*time.Second)
 	defer cancel()
@@ -840,18 +784,17 @@ func (c *ctl) testRouting(args []string) error {
 }
 
 func (c *ctl) testSecurityZone(args []string) error {
-	var ifName string
-	for i := 0; i < len(args); i++ {
-		if args[i] == "interface" && i+1 < len(args) {
-			i++
-			ifName = args[i]
-		}
-	}
-
-	if ifName == "" {
+	if len(args) == 0 {
 		fmt.Println("usage: test security-zone interface <name>")
 		return nil
 	}
-
+	ifName, present, err := diagcmd.ParseTestInterface(args)
+	if err != nil {
+		return err
+	}
+	if !present {
+		fmt.Println("usage: test security-zone interface <name>")
+		return nil
+	}
 	return c.showText("test-zone:interface=" + ifName)
 }
