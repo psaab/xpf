@@ -2006,6 +2006,13 @@ fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket, ingress_ifindex:
     {
         return false;
     }
+    // #13085 (D6-10): transport data is never steered (`local && !transport`
+    // in wg_steer_to_kernel_on_port_match), so skip the destination map
+    // lookups entirely for it — they were evaluated on every WG
+    // transport-data packet and discarded.
+    if pkt.udp_wg_transport_data {
+        return false;
+    }
     // Handshake/cookie records go to the kernel control socket; transport
     // data stays in the worker so its authenticated plaintext is policy
     // checked. The owner-map fallback is restricted to the exact configured
