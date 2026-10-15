@@ -1,6 +1,7 @@
 package conntrack
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -48,5 +49,103 @@ func TestGCSweepPostDeletionCounts13236(t *testing.T) {
 	}
 	if delay != time.Second {
 		t.Fatalf("next delay=%v want %v for empty table", delay, time.Second)
+	}
+}
+func TestGCSweepPostDeletionCountsMixedAndMissingCompanion13236(t *testing.T) {
+	now := uint64(100)
+	expired := dataplane.SessionKey{Protocol: 6, SrcPort: 1000}
+	survivor := dataplane.SessionKey{Protocol: 6, SrcPort: 1001}
+	dp := &mockGCDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			expired:  {State: dataplane.SessStateEstablished, LastSeen: 1, Timeout: 1, ReverseKey: dataplane.SessionKey{Protocol: 6, SrcPort: 2000}},
+			survivor: {State: dataplane.SessStateEstablished, LastSeen: now, Timeout: 100},
+		},
+		v6sessions: make(map[dataplane.SessionKeyV6]dataplane.SessionValueV6),
+	}
+	gc := NewGC(dp, time.Second)
+	gc.testNow = func() uint64 { return now }
+
+	gc.sweep()
+	stats := gc.Stats()
+	if stats.TotalEntries != 1 || stats.EstablishedSessions != 1 || gc.lastTotal != 1 {
+		t.Fatalf("mixed sweep counts = total:%d established:%d lastTotal:%d; want 1/1/1",
+			stats.TotalEntries, stats.EstablishedSessions, gc.lastTotal)
+	}
+}
+
+type reverseOnlyDeleteFailureStore struct {
+	*mockGCDP
+}
+
+func (s *reverseOnlyDeleteFailureStore) DeleteBatchKnownExactV4(entries []dataplane.SessionEntryV4, _ dataplane.DeleteReason, _ bool) ([]dataplane.SessionKey, error) {
+	for _, entry := range entries {
+		if entry.Value.ReverseKey.Protocol != 0 {
+			if err := s.DeleteSession(entry.Value.ReverseKey); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return nil, errors.New("forward delete failed after reverse delete")
+}
+func (s *reverseOnlyDeleteFailureStore) DeleteBatchKnownExactV6(entries []dataplane.SessionEntryV6, _ dataplane.DeleteReason, _ bool) ([]dataplane.SessionKeyV6, error) {
+	for _, entry := range entries {
+		if entry.Value.ReverseKey.Protocol != 0 {
+			if err := s.DeleteSessionV6(entry.Value.ReverseKey); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return nil, errors.New("forward delete failed after reverse delete")
+}
+
+func TestGCSweepCountsReverseRemovedBeforeForwardErrorV613236(t *testing.T) {
+	now := uint64(100)
+	forward := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 1000}
+	reverse := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 2000}
+	dp := &mockGCDP{
+		v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue),
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			forward: {State: dataplane.SessStateEstablished, LastSeen: 1, Timeout: 1, ReverseKey: reverse},
+			reverse: {State: dataplane.SessStateEstablished, IsReverse: 1, LastSeen: 1, Timeout: 1, ReverseKey: forward},
+		},
+	}
+	store := &reverseOnlyDeleteFailureStore{mockGCDP: dp}
+	gc := NewGCWithDomains(store, mockGCTelemetry{}, nil, nil, time.Second)
+	gc.testNow = func() uint64 { return now }
+
+	gc.sweep()
+	stats := gc.Stats()
+	if len(dp.v6sessions) != 1 {
+		t.Fatalf("remaining v6 entries=%d want 1 after reverse-only delete", len(dp.v6sessions))
+	}
+	if stats.TotalEntries != 1 || stats.EstablishedSessions != 1 || gc.lastTotal != 1 {
+		t.Fatalf("partial v6-delete counts = total:%d established:%d lastTotal:%d; want 1/1/1",
+			stats.TotalEntries, stats.EstablishedSessions, gc.lastTotal)
+	}
+}
+
+func TestGCSweepCountsReverseRemovedBeforeForwardError13236(t *testing.T) {
+	now := uint64(100)
+	forward := dataplane.SessionKey{Protocol: 6, SrcPort: 1000}
+	reverse := dataplane.SessionKey{Protocol: 6, SrcPort: 2000}
+	dp := &mockGCDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			forward: {State: dataplane.SessStateEstablished, LastSeen: 1, Timeout: 1, ReverseKey: reverse},
+			reverse: {State: dataplane.SessStateEstablished, IsReverse: 1, LastSeen: 1, Timeout: 1, ReverseKey: forward},
+		},
+		v6sessions: make(map[dataplane.SessionKeyV6]dataplane.SessionValueV6),
+	}
+	store := &reverseOnlyDeleteFailureStore{mockGCDP: dp}
+	gc := NewGCWithDomains(store, mockGCTelemetry{}, nil, nil, time.Second)
+	gc.testNow = func() uint64 { return now }
+
+	gc.sweep()
+	stats := gc.Stats()
+	if len(dp.v4sessions) != 1 {
+		t.Fatalf("remaining entries=%d want 1 after reverse-only delete", len(dp.v4sessions))
+	}
+	if stats.TotalEntries != 1 || stats.EstablishedSessions != 1 || gc.lastTotal != 1 {
+		t.Fatalf("partial-delete counts = total:%d established:%d lastTotal:%d; want 1/1/1",
+			stats.TotalEntries, stats.EstablishedSessions, gc.lastTotal)
 	}
 }
