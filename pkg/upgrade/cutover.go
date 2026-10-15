@@ -404,7 +404,10 @@ func (r *Runner) Run(opts Options) (err error) {
 				if err := r.gc(j); err != nil {
 					r.logf("upgrade: WARN gc of finished stale cut failed: %v", err)
 				}
-				_ = r.clearJournal()
+				if err := r.clearJournal(); err != nil {
+					return fmt.Errorf("clear stale cut journal: %w", err)
+				}
+				r.recordCommittedCut(j.TargetVersion)
 				r.removeAllPartials()
 				j = &Journal{State: StateInit}
 			}
