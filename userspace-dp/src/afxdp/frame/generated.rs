@@ -42,11 +42,8 @@ use super::*;
 /// leaked past the filter. The bytes are our own, so `None` is a logic bug —
 /// the caller attributes it on a dedicated parse-error counter.
 ///
-/// The returned `ForwardPacketMeta`:
-///   - `addr_family` / `protocol` / `dscp` are read from the generated L3
-///     header;
-///   - `flow_src_port` / `flow_dst_port` carry the L4 ports for TCP/UDP, or
-///     0 for ICMP/ICMPv6;
+///   - `tcp_flags` is read from the generated TCP header, and TCP packets whose
+///     IP-declared length ends before that byte fail closed;
 ///   - `pkt_len` is the L3-onwards length of the generated frame (what the
 ///     output-filter byte counter should be charged);
 ///   - `ingress_*` fields are left neutral/zero: the reply is host-
@@ -92,6 +89,7 @@ fn parse_generated_v4(packet: &[u8], l3_offset: usize) -> Option<(SessionKey, Fo
     // `generated_reply_classify_parse_errors`) rather than misclassifying it
     // with substituted (0,0) ports past an output `discard`.
     let (src_port, dst_port) = generated_l4_ports(packet, ihl, protocol, pkt_len)?;
+    let tcp_flags = generated_tcp_flags(packet, ihl, protocol, pkt_len)?;
     finish_generated_key(
         libc::AF_INET as u8,
         protocol,
@@ -103,6 +101,7 @@ fn parse_generated_v4(packet: &[u8], l3_offset: usize) -> Option<(SessionKey, Fo
         pkt_len,
         l3_offset,
         ihl,
+        tcp_flags,
     )
 }
 
@@ -126,6 +125,7 @@ fn parse_generated_v6(packet: &[u8], l3_offset: usize) -> Option<(SessionKey, Fo
     // header (bounded by `pkt_len`, not the backing slice), drops rather than
     // misclassifies with (0,0).
     let (src_port, dst_port) = generated_l4_ports(packet, rel_l4, protocol, pkt_len)?;
+    let tcp_flags = generated_tcp_flags(packet, rel_l4, protocol, pkt_len)?;
     finish_generated_key(
         libc::AF_INET6 as u8,
         protocol,
@@ -137,6 +137,7 @@ fn parse_generated_v6(packet: &[u8], l3_offset: usize) -> Option<(SessionKey, Fo
         pkt_len,
         l3_offset,
         rel_l4,
+        tcp_flags,
     )
 }
 
@@ -180,6 +181,22 @@ fn generated_l4_ports(
     }
 }
 
+/// TCP flag byte for the generated reply, bounded by the IP-declared packet.
+/// A TCP packet whose declared datagram ends before the flag byte is not
+/// classifiable for a `tcp-flags` output-filter term, so fail closed just as
+/// for missing ports. Non-TCP protocols carry no TCP flags.
+fn generated_tcp_flags(packet: &[u8], rel_l4: usize, protocol: u8, pkt_len: usize) -> Option<u8> {
+    if protocol != PROTO_TCP {
+        return Some(0);
+    }
+    let end = rel_l4.checked_add(14)?;
+    if end > pkt_len {
+        return None;
+    }
+    packet.get(rel_l4.checked_add(13)?).copied()
+}
+
+
 #[allow(clippy::too_many_arguments)]
 fn finish_generated_key(
     addr_family: u8,
@@ -192,6 +209,7 @@ fn finish_generated_key(
     pkt_len: usize,
     l3_offset: usize,
     rel_l4: usize,
+    tcp_flags: u8,
 ) -> Option<(SessionKey, ForwardPacketMeta)> {
     let key = SessionKey {
         addr_family,
@@ -210,6 +228,7 @@ fn finish_generated_key(
         l3_offset: u16::try_from(l3_offset).unwrap_or(0),
         l4_offset: u16::try_from(l3_offset.saturating_add(rel_l4)).unwrap_or(0),
         pkt_len: u16::try_from(pkt_len).unwrap_or(u16::MAX),
+        tcp_flags,
         flow_src_port: src_port,
         flow_dst_port: dst_port,
         ..ForwardPacketMeta::default()
