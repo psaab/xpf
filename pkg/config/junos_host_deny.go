@@ -1324,6 +1324,7 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 		}
 		cand[zone][nd] = cand[zone][nd] || own
 	}
+	vrfMasterByNetdev := junosHostVRFMasterNetdevs(cfg, tunNames)
 	// One "row" per physical interface + one per unit, mirroring the dataplane
 	// interface snapshot: the row's own netdev is the candidate, plus (for a VLAN
 	// subunit whose frames ride the physical parent) the parent netdev.
@@ -1336,8 +1337,12 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 			return
 		}
 		addCand(zone, own, true)
+		// A tagged unit's physical parent can be a different VRF member
+		// (unit 0). It is not a candidate for the tagged zone.
 		if vlan != 0 && parent != "" {
-			addCand(zone, parent, false)
+			if _, parentInVRF := vrfMasterByNetdev[parent]; !parentInVRF {
+				addCand(zone, parent, false)
+			}
 		}
 	}
 	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
@@ -1345,7 +1350,6 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 		ifNames = append(ifNames, n)
 	}
 	sort.Strings(ifNames)
-	vrfMasterByNetdev := junosHostVRFMasterNetdevs(cfg, tunNames)
 	// Walk every physical interface + unit row, mirroring the dataplane
 	// interface snapshot.
 	for _, ifName := range ifNames {
@@ -1575,9 +1579,8 @@ func junosHostLinuxNameWith(cfg *Config, ifName string, unit *InterfaceUnit, tun
 // unit produced by a bare ref to its security zone. Unlike InterfaceZoneMap, it
 // does not fan an ordinary physical/VLAN unit ref up to the physical base —
 // that base row is a distinct dataplane ingress owned only by an explicit
-// bare/base reference or unit-0's own netdev row (#12839). It does bind a
-// tunnel unit's family base: the snapshot has no separate unit candidate for
-// that row, and the base row is its only snapshot-side ingress candidate.
+// bare/base reference or a unit-0 row that resolves to the same kernel device
+// as its base. A distinct VLAN or tunnel unit never claims a sibling's base.
 func junosHostZoneByInterface(cfg *Config) map[string]string {
 	out := make(map[string]string, len(cfg.Security.Zones))
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
@@ -1614,17 +1617,26 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 				}
 			}
 			if s.HasUnit {
-				// Ordinary units do not own their physical base. Preserve the
-				// base candidate only where the snapshot has no equivalent unit
-				// ingress candidate: secure-tunnel family rows and VRF-master
-				// scoping of a parent device.
+				// A unit may claim the base only when its own ingress device
+				// is that base device. Distinct VLAN/tunnel netdevs must not
+				// claim a sibling's base merely because that sibling is VRF-bound.
 				_, tunnelUnit := cfg.SecureTunnelUnitNetdev(s.Literal)
 				if !tunnelUnit {
 					tunnelUnit = tunNames[s.Literal] != ""
 				}
 				baseLinux := junosHostLinuxNameWith(cfg, s.Base, nil, tunNames)
 				_, vrfParent := vrfMasterByNetdev[baseLinux]
-				if s.Base != "" && (tunnelUnit || vrfParent) {
+				ownsBaseDevice := false
+				if iface := cfg.Interfaces.Interfaces[s.Base]; iface != nil {
+					for unitNum, unit := range iface.Units {
+						if unit == nil || s.Literal != fmt.Sprintf("%s.%d", s.Base, unitNum) {
+							continue
+						}
+						ownsBaseDevice = junosHostLinuxNameWith(cfg, s.Base, unit, tunNames) == baseLinux
+						break
+					}
+				}
+				if s.Base != "" && ownsBaseDevice && (tunnelUnit || vrfParent) {
 					if _, conflicted := conflictedInterfaces[s.Literal]; conflicted {
 						continue
 					}
