@@ -350,7 +350,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	lifelines := hostInboundLifelineSet(cfg)
 	lifelineShared := hostInboundLifelineSharedAddrsFromSnaps(cfg, snaps)
 	unzonedFanUpBaseRows := hostInboundUnzonedFanUpBaseRows(cfg, snaps)
-	nativeVLANUnits := nativeVLANUnitRefs(cfg)
+	nativeVLANUnits := nativeVLANUnitRefs(cfg, snaps)
 	// #9637: netdevs that can never be an ingress scope.
 	vrfEnslaved := config.HostInboundVRFEnslavedNetdevs(cfg)
 	vrfMasters := hostInboundVRFMasterNetdevs(cfg, ifaceSnaps)
@@ -504,7 +504,17 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		if snap.AdminDisabled {
 			continue
 		}
-		if snap.Zone == "" {
+		policyIface := snap.Name
+		viewZone := snap.Zone
+		nativeUnit := nativeVLANUnitOwner{}
+		if !snap.IsUnit {
+			nativeUnit = nativeVLANUnits[snap.Name]
+			if nativeUnit.name != "" {
+				policyIface = nativeUnit.name
+				viewZone = nativeUnit.zone
+			}
+		}
+		if viewZone == "" {
 			// An unzoned unit still participates in netdev ambiguity: nft only
 			// sees iifname/sdifname, so a zoned sibling cannot safely own it.
 			if snap.IsUnit {
@@ -512,21 +522,13 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			}
 			continue
 		}
-		if _, drop := quarantined[snap.Zone]; drop {
+		if _, drop := quarantined[viewZone]; drop {
 			if snap.IsUnit {
 				claimNetdev(snap.LinuxName, "")
 			}
 			continue
 		}
-		policyIface := snap.Name
-		nativeUnit := ""
-		if !snap.IsUnit {
-			nativeUnit = nativeVLANUnits[snap.Name]
-			if nativeUnit != "" {
-				policyIface = nativeUnit
-			}
-		}
-		if unzonedFanUpBaseRows[snap.Name] && nativeUnit == "" {
+		if unzonedFanUpBaseRows[snap.Name] && nativeUnit.name == "" {
 			continue
 		}
 		// #5699: a PHYSICAL (no-unit) snapshot whose unit 0 COLLAPSES onto the
@@ -562,22 +564,21 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 				}
 			}
 		}
-		zone := cfg.Security.Zones[snap.Zone]
+		zone := cfg.Security.Zones[viewZone]
 		if !configured(zone) {
 			continue
 		}
 		svc, proto := effectiveHostInboundTokens(zone, policyIface, overrideByIface[policyIface])
-		// #9637: only a unit row's netdev is an ingress identity. A physical
-		// row's netdev is either the trunk parent of VLAN units, whose frames
-		// arrive on the subunit netdevs, or the netdev its unit 0 collapses onto,
-		// which that unit claims. Claiming a trunk parent would have one zone
-		// judge untagged frames no unit owns.
-		// #9821 #22: structural — only unit rows claim netdevs, so a dotted
-		// base row's netdev is claimed by its collapsing unit, not twice.
-		if snap.IsUnit || nativeUnit != "" {
-			claimNetdev(snap.LinuxName, snap.Zone+"\x00"+config.CanonicalHostInboundTokenSig(svc, proto))
+		// #9637: unit netdevs are ingress identities. A physical row is not
+		// normally an identity: its frames arrive on tagged subunit devices,
+		// or a collapsing unit 0 claims the same device. A verified native-VLAN
+		// unit is the deliberate exception — its surviving zone owns untagged
+		// arrivals on the parent netdev. #9821 #22: a dotted base remains a base
+		// row, and its collapsing unit owns the shared netdev only once.
+		if snap.IsUnit || nativeUnit.name != "" {
+			claimNetdev(snap.LinuxName, viewZone+"\x00"+config.CanonicalHostInboundTokenSig(svc, proto))
 		}
-		g := getGroup(snap.Zone, svc, proto, policyIface)
+		g := getGroup(viewZone, svc, proto, policyIface)
 		for _, a := range snap.Addresses {
 			if excludeScopeLink && hostInboundScopeLinkUnresolved(snap.Name, a, configuredAddrs) {
 				continue
