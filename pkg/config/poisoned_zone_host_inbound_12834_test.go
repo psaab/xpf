@@ -87,11 +87,12 @@ func TestPoisonedZoneStampedOverrideAbsent12834(t *testing.T) {
 	if svc, _, overridden := alpha.InterfaceHostInboundEffective("ge-0/0/0.0"); overridden || len(svc) != 0 {
 		t.Fatalf("poisoned zone effective = %v overridden=%v, want empty/not overridden", svc, overridden)
 	}
-	// Healthy zone control: zulu's override still resolves.
+	// The poisoned zone's authored membership remains part of quarantine, so
+	// the contested unit override must not leak through the healthy zone view.
 	zulu := cfg.Security.Zones["zulu"]
 	svc, _, overridden := zulu.InterfaceHostInboundEffective("ge-0/0/0.0")
-	if !overridden || !hostInboundAdmitsSystemService(svc, "ssh") {
-		t.Fatalf("healthy zulu effective = %v overridden=%v, want ssh override", svc, overridden)
+	if overridden || len(svc) != 0 {
+		t.Fatalf("contested zulu effective = %v overridden=%v, want no unit override", svc, overridden)
 	}
 }
 
