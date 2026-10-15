@@ -1,7 +1,6 @@
 package userspace
 
 import (
-	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -46,12 +45,11 @@ func hostIPFromCIDR(s string) string {
 //
 //   - canonicalised through CanonicalInterfaceUnitRef, so ".01" and ".1" agree
 //     with the snapshot's unit naming;
-//   - a BARE interface reference is fanned DOWN onto that interface's configured
-//     units, because in xpf `security-zone lan interfaces ge-0/0/1` MEANS "every
-//     unit of ge-0/0/1 is in lan" — that is the semantics buildInterfaceZoneMap
-//     defines and the ingress half has always enforced, so a unit of a bare-
-//     referenced interface really is authored, not inheriting a sentence about
-//     somebody else;
+//   - a BARE interface reference is fanned DOWN onto that interface's
+//     configured units, or its bound IPsec units when no interface stanza
+//     exists. In xpf `security-zone lan interfaces ge-0/0/1` MEANS "every unit
+//     of ge-0/0/1 is in lan" — the rule buildInterfaceZoneMap also enforces.
+//     A collision-vetoed IPsec unit is not claimed on tolerant loads;
 //   - a unit-suffixed reference is NOT fanned UP to its base. That is the
 //     direction that manufactures a claim about a DIFFERENT identity: `st0.1`
 //     names one unit, and writing `st0` from it says something about `st0.0`
@@ -103,34 +101,15 @@ func authoredZoneRefs(cfg *config.Config) map[string]string {
 			if rawIface == "" {
 				continue
 			}
-			// #9821: resolve declared-first like the mirrors: a ref naming a
-			// declared interface fans down even when dotted; a unit ref binds
-			// its canonical Literal so padded spellings agree.
-			s := cfg.SplitInterfaceUnitRef(rawIface)
-			if _, conflicted := conflictedInterfaces[s.Literal]; !conflicted {
-				if _, exists := out[s.Literal]; !exists {
-					out[s.Literal] = zoneName
+			// Share the zone binder's declared-first canonicalization and bare
+			// fan-down, including bind-interface-only secure-tunnel units.
+			// Unit refs never fan up into a separately named base device.
+			for _, key := range config.InterfaceUnitRefKeys(cfg, rawIface) {
+				if _, conflicted := conflictedInterfaces[key]; conflicted {
+					continue
 				}
-			}
-			// A unit-suffixed reference speaks for exactly that unit. Do NOT
-			// write the base (that is buildInterfaceZoneMap's fan-UP, the
-			// derivation this map exists to keep out).
-			if s.HasUnit {
-				continue
-			}
-			// A bare reference speaks for every configured unit of the
-			// interface. Mirrors buildInterfaceZoneMap's fan-down exactly,
-			// including that a present-but-nil unit slot still takes a key, so
-			// the two maps hold the same references.
-			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
-				for unitNum := range ifCfg.Units {
-					unitName := fmt.Sprintf("%s.%d", s.Base, unitNum)
-					if _, conflicted := conflictedInterfaces[unitName]; conflicted {
-						continue
-					}
-					if _, exists := out[unitName]; !exists {
-						out[unitName] = zoneName
-					}
+				if _, exists := out[key]; !exists {
+					out[key] = zoneName
 				}
 			}
 		}

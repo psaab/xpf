@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // The EFFECTIVE host-inbound view, shared by the dataplane enforcement builders
@@ -48,8 +49,10 @@ import (
 //     the #9063 hazard pointed the other way.
 //   - a BARE reference ("ge-0/0/0") binds the base key AND every configured
 //     unit, because in xpf a bare reference MEANS "every unit of this
-//     interface" (the #6722 cells say so for zones). The base key is kept so a
-//     consumer looking up the physical row still resolves.
+//     interface" (the #6722 cells say so for zones). With no interface stanza,
+//     daemon-materialized IPsec bind-interface units are fanned down instead;
+//     a colliding or unbound tunnel never adds a unit. The base key remains so
+//     consumers of a physical row still resolve.
 //   - a trailing-dot form ("ge-0/0/0.") binds the literal only. The #5933
 //     strict gate skips it as bare and no subsystem's runtime has ever fanned
 //     it down; changing that here would be an unreviewed behaviour change on a
@@ -72,7 +75,7 @@ func InterfaceUnitRefKeys(cfg *Config, rawRef string) []string {
 	// bare-vs-unit (#8994 precedence). A ref naming a declared interface IS
 	// that interface — even dotted — and fans down like any bare ref; a unit
 	// of a declared dotted base binds its canonical Literal. cfg-free and
-	// undeclared inputs degrade to the legacy canon-then-cut, byte-identical.
+	// undeclared non-tunnel inputs degrade to the legacy canon-then-cut.
 	s := cfg.SplitInterfaceUnitRef(rawRef)
 	if s.HasUnit {
 		// A unit reference, a degenerate ".<unit>", or the trailing-dot form:
@@ -84,15 +87,52 @@ func InterfaceUnitRefKeys(cfg *Config, rawRef string) []string {
 		return keys
 	}
 	ifCfg := cfg.Interfaces.Interfaces[s.Base]
-	if ifCfg == nil {
+	var units []int
+	if ifCfg != nil {
+		units = make([]int, 0, len(ifCfg.Units))
+		for unitNum := range ifCfg.Units {
+			units = append(units, unitNum)
+		}
+	} else {
+		if len(cfg.Security.IPsec.VPNs) == 0 || !IsSecureTunnelIfName(s.Base) {
+			return keys
+		}
+		// #13100: a bind-interface-only secure tunnel has no interface stanza,
+		// but its materialized logical units are still covered by a bare zone
+		// member. Resolve each candidate through the XFRM ownership/collision
+		// gate; never invent an unbound or colliding unit on tolerant loads.
+		for _, vpn := range cfg.Security.IPsec.VPNs {
+			if vpn == nil {
+				continue
+			}
+			base, suffix, dotted := strings.Cut(vpn.BindInterface, ".")
+			if base != s.Base {
+				continue
+			}
+			unitNum := 0
+			if dotted {
+				var err error
+				unitNum, _, err = CanonicalLogicalUnit(suffix)
+				if err != nil {
+					continue
+				}
+			}
+			unitRef := fmt.Sprintf("%s.%d", s.Base, unitNum)
+			if _, bound := cfg.SecureTunnelNetdevForRef(unitRef); bound {
+				units = append(units, unitNum)
+			}
+		}
+	}
+	if len(units) == 0 {
 		return keys
 	}
-	units := make([]int, 0, len(ifCfg.Units))
-	for unitNum := range ifCfg.Units {
-		units = append(units, unitNum)
+	if len(units) > 1 {
+		sort.Ints(units)
 	}
-	sort.Ints(units)
-	for _, unitNum := range units {
+	for i, unitNum := range units {
+		if i > 0 && unitNum == units[i-1] {
+			continue
+		}
 		keys = append(keys, fmt.Sprintf("%s.%d", s.Base, unitNum))
 	}
 	return keys
@@ -253,7 +293,8 @@ func MergeHostInboundTraffic(a, b *HostInboundTraffic) *HostInboundTraffic {
 //     into the winning zone's effective set on the lenient multi-owner warn
 //     path). This mirrors the physical branch's #3720 cross-zone guard below.
 //   - A ref naming a physical interface (no unit suffix) expands to each of its
-//     configured units (mirroring InterfaceZoneMap), but NOT onto a unit
+//     configured or daemon-materialized secure-tunnel units (mirroring
+//     InterfaceZoneMap), but NOT onto a unit
 //     resolved to a DIFFERENT zone (#3720 M01 quarantine — a physical override
 //     must not leak its tokens cross-zone on the lenient multi-owner warn path).
 //     The expansion MERGES so a same-zone unit override unions rather than being
@@ -353,19 +394,16 @@ func resolveInterfaceHostInbound(cfg *Config, merge hostInboundOverrideMerge) ma
 					out[s.Literal] = hib
 				}
 			}
-			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
-				for unitNum := range ifCfg.Units {
-					un := fmt.Sprintf("%s.%d", s.Base, unitNum)
-					// #3720 M01: do not leak a physical override onto a unit that
-					// resolves to a different zone.
-					if _, conflicted := conflictedInterfaces[un]; conflicted {
-						continue
-					}
-					if z := zoneByIface[un]; z != "" && z != zn {
-						continue
-					}
-					out[un] = merge(un, zn, ref, out[un], hib)
+			for _, un := range InterfaceUnitRefKeys(cfg, ref)[1:] {
+				// #3720 M01: do not leak a physical override onto a unit that
+				// resolves to a different zone.
+				if _, conflicted := conflictedInterfaces[un]; conflicted {
+					continue
 				}
+				if z := zoneByIface[un]; z != "" && z != zn {
+					continue
+				}
+				out[un] = merge(un, zn, ref, out[un], hib)
 			}
 		}
 	}

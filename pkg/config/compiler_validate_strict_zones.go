@@ -200,11 +200,11 @@ func validateZoneCountStrict(cfg *Config) error {
 //     interface split and must not be rejected. (buildInterfaceZoneMap's bare
 //     `base` fallback for untagged lookups is a coarse first-writer-wins
 //     artifact, not an operator-visible second assignment.)
-//   - A bare entry (`base`, no unit) claims the whole physical interface: the
-//     bare key `base` plus every configured unit `base.<n>` from
-//     cfg.Interfaces. Listing the same physical interface bare in two zones, or
-//     bare in one zone and a unit of it in another, is a genuine multi-zone
-//     assignment.
+//   - A bare entry (`base`, no unit) claims the whole interface: the base
+//     key plus every configured unit, or each noncolliding IPsec-bound unit
+//     when the interface has no stanza. Listing the same interface bare in
+//     two zones, or bare in one zone and a unit in another, is a genuine
+//     multi-zone assignment.
 //
 // A trailing-dot form (`base.`) is treated as bare (no specific unit), matching
 // buildInterfaceZoneMap which falls through to the unit-expansion branch when
@@ -227,19 +227,9 @@ func zoneIfaceLogicalKeys(cfg *Config, iface string) []string {
 	if base == "" {
 		base = iface
 	}
-	keys := []string{base}
-	if cfg != nil {
-		if ifCfg := cfg.Interfaces.Interfaces[base]; ifCfg != nil {
-			units := make([]int, 0, len(ifCfg.Units))
-			for unitNum := range ifCfg.Units {
-				units = append(units, unitNum)
-			}
-			sort.Ints(units)
-			for _, unitNum := range units {
-				keys = append(keys, fmt.Sprintf("%s.%d", base, unitNum))
-			}
-		}
-	}
+	// Include daemon-materialized secure-tunnel units too, so strict commit
+	// rejects a bare tunnel member in one zone and its unit in another.
+	keys := InterfaceUnitRefKeys(cfg, base)
 	sort.Strings(keys)
 	return keys
 }

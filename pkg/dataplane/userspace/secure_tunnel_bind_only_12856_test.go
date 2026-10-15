@@ -150,7 +150,7 @@ func TestBindOnlyDottedZonesNoBareRow12856(t *testing.T) {
 }
 
 // Bare-ref CoS: bind-only `st0` zoned as bare `st0` with an
-// interface-level CoS binding — the synthesized base row must carry it.
+// interface-level CoS binding — the synthesized unit-0 row must carry it.
 func TestBindOnlyBareRefCarriesInterfaceLevelCoS12856(t *testing.T) {
 	lines := []string{
 		"set security ipsec vpn v bind-interface st0",
@@ -164,12 +164,12 @@ func TestBindOnlyBareRefCarriesInterfaceLevelCoS12856(t *testing.T) {
 	cfg := compileForTest5619(t, lines...)
 	stubD413Links(t)
 	rows := buildInterfaceSnapshots(cfg)
-	row, ok := rowByName7949(rows, "st0")
+	row, ok := rowByName7949(rows, "st0.0")
 	if !ok {
-		t.Fatalf("no bare st0 row for bind-only tunnel; rows=%v", rows)
+		t.Fatalf("no st0.0 row for bare-zoned bind-only tunnel; rows=%v", rows)
 	}
 	if row.CoSSchedulerMap != "edge-map" || row.CoSShapingRateBytesPerSec == 0 {
-		t.Errorf("bare st0 row CoS = map %q rate %d, want edge-map / >0 (interface-level CoS dropped by the dotted gate)",
+		t.Errorf("bare-zoned st0.0 row CoS = map %q rate %d, want edge-map / >0 (interface-level CoS lost after unit normalization)",
 			row.CoSSchedulerMap, row.CoSShapingRateBytesPerSec)
 	}
 }
