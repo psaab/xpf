@@ -241,12 +241,10 @@ func TestFlowExportCollectorMetricsDistinctLabelsetPerGroup(t *testing.T) {
 }
 
 // TestFlowExportCollectorMetricsLabelSet is the descriptor↔emission label
-// canary for #3741: every sample in the xpf_flow_export_collector_* family
-// must carry EXACTLY {protocol, instance, template, collector, source}.
-// The emitted label NAMES come from the *prometheus.Desc (so a descriptor
-// that drops a label fails here), and MustNewConstMetric would panic if
-// the emission supplied the wrong VALUE arity — so this asserts the two
-// sides agree.
+// canary: every sample in the xpf_flow_export_collector_* family must carry
+// EXACTLY {protocol, instance, template, family, collector, source}.
+// The emitted label names come from the prometheus.Desc and
+// MustNewConstMetric panics for wrong value arity, so this verifies agreement.
 func TestFlowExportCollectorMetricsLabelSet(t *testing.T) {
 	s := &Server{
 		flowCollectorHealthFn: func() []flowexport.ExporterCollectorHealth {
@@ -272,7 +270,7 @@ func TestFlowExportCollectorMetricsLabelSet(t *testing.T) {
 		t.Fatalf("Gather: %v", err)
 	}
 	wantLabels := map[string]bool{
-		"protocol": true, "instance": true, "template": true,
+		"protocol": true, "instance": true, "template": true, "family": true,
 		"collector": true, "source": true,
 	}
 	families := map[string]bool{

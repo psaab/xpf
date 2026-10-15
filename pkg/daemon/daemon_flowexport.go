@@ -701,13 +701,19 @@ func (d *Daemon) ipfixExportCallback(rec logging.EventRecord, raw []byte) {
 	}
 }
 
+// flowExportAddressFamily returns the configuration-family label used by
+// flow-export telemetry for an already-partitioned exporter group.
+func flowExportAddressFamily(isV6 bool) string {
+	if isV6 {
+		return "inet6"
+	}
+	return "inet"
+}
+
 // FlowCollectorHealth returns the per-collector write-health for every
 // running NetFlow v9 and IPFIX exporter group (#2464). The slice is
 // empty when no flow export is configured. Safe to call concurrently
-// with reconcile and the export-flush goroutines: it reads the live
-// bundles lock-free and each exporter's health() snapshot is mutex/atomic
-// guarded. The returned type lives in pkg/flowexport so pkg/api and
-// pkg/grpcapi (which cannot import pkg/daemon) can name it.
+
 func (d *Daemon) FlowCollectorHealth() []flowexport.ExporterCollectorHealth {
 	var out []flowexport.ExporterCollectorHealth
 	if b := d.flowBundle.Load(); b != nil {
@@ -717,6 +723,7 @@ func (d *Daemon) FlowCollectorHealth() []flowexport.ExporterCollectorHealth {
 					Protocol:        "netflow-v9",
 					Instance:        g.ec.InstanceName,
 					Template:        g.ec.TemplateName,
+					Family:          flowExportAddressFamily(g.ec.GroupIsV6),
 					CollectorHealth: h,
 				})
 			}
@@ -729,6 +736,7 @@ func (d *Daemon) FlowCollectorHealth() []flowexport.ExporterCollectorHealth {
 					Protocol:        "ipfix",
 					Instance:        g.ec.InstanceName,
 					Template:        g.ec.TemplateName,
+					Family:          flowExportAddressFamily(g.ec.GroupIsV6),
 					CollectorHealth: h,
 				})
 			}
@@ -753,6 +761,7 @@ func (d *Daemon) FlowExportBatchStats() []flowexport.ExporterBatchStats {
 				Protocol:       "netflow-v9",
 				Instance:       g.ec.InstanceName,
 				Template:       g.ec.TemplateName,
+				Family:         flowExportAddressFamily(g.ec.GroupIsV6),
 				Depth:          g.exp.BatchDepth(),
 				MaxDepth:       g.exp.BatchMaxDepth(),
 				Dropped:        g.exp.BatchDropped(),
@@ -766,6 +775,7 @@ func (d *Daemon) FlowExportBatchStats() []flowexport.ExporterBatchStats {
 				Protocol:       "ipfix",
 				Instance:       g.ec.InstanceName,
 				Template:       g.ec.TemplateName,
+				Family:         flowExportAddressFamily(g.ec.GroupIsV6),
 				Depth:          g.exp.BatchDepth(),
 				MaxDepth:       g.exp.BatchMaxDepth(),
 				Dropped:        g.exp.BatchDropped(),

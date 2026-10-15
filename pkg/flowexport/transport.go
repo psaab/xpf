@@ -74,6 +74,7 @@ type ExporterCollectorHealth struct {
 	Protocol string `json:"protocol"`
 	Instance string `json:"instance"`
 	Template string `json:"template"`
+	Family   string `json:"family"`
 	CollectorHealth
 }
 
@@ -664,6 +665,7 @@ type ExporterBatchStats struct {
 	Protocol string `json:"protocol"`
 	Instance string `json:"instance"`
 	Template string `json:"template"`
+	Family   string `json:"family"`
 	// Depth is the current combined (v4+v6) pending record count.
 	Depth uint64 `json:"depth"`
 	// MaxDepth is the high-water mark of the combined pending depth.
