@@ -212,7 +212,7 @@ pub(super) fn rematch_bound_first_policy_sessions(
     let mut rebound = 0;
     let mut purged = 0;
     let mut rematch_declined = 0;
-    for (key, decision, metadata, origin) in candidates {
+    for (key, decision, mut metadata, origin) in candidates {
         let mut retained = false;
         let mut declined = false;
         let local_delivery =
@@ -319,22 +319,67 @@ pub(super) fn rematch_bound_first_policy_sessions(
                     .policy
                     .rule_for_stable_id(&descriptor.destination_rule_id)
             {
-                // #12859: the retained session has no packet ICMP type, so a
-                // type-constrained ICMP term makes the frame-independent
-                // rematch unable to distinguish a valid type-specific permit
-                // from a newly inserted type-specific deny. Decline: retain
-                // and let the packet-scoped session-hit path adjudicate.
-                // Missing or invalid ancestry still fails closed above.
+                // #12859/#13655: preserve packet-scoped adjudication for
+                // type-dependent ICMP, but carry validated zone identity
+                // forward now. The later packet hit needs the current zones
+                // even though its policy identity remains the admitting rule.
                 if new_forwarding
                     .policy
                     .icmp_packet_verdict_may_depend_on_type(key.protocol)
                 {
-                    retained = true;
                     declined = true;
+                    let zone_egress = if local_delivery {
+                        metadata.egress_zone
+                    } else {
+                        to_id
+                    };
+                    retained = sessions.rebind_zones_pair(&key, from_id, zone_egress);
+                    if retained {
+                        metadata.ingress_zone = from_id;
+                        metadata.egress_zone = zone_egress;
+                    }
+                    if retained {
+                        let entries = sessions.policy_rebind_pair_entries(&key);
+                        if let Some(entries) = entries {
+                            let bpf_ok = entries.iter().all(|entry| {
+                                restamp_bpf_conntrack_policy(
+                                    conntrack_v4_fd,
+                                    conntrack_v6_fd,
+                                    &entry.key,
+                                    &entry.metadata,
+                                )
+                            });
+                            if bpf_ok {
+                                crate::afxdp::shared_ops::restamp_shared_policy_entries(
+                                    shared_sessions,
+                                    shared_nat_sessions,
+                                    shared_forward_wire_sessions,
+                                    &entries,
+                                );
+                                for entry in entries {
+                                    publish_worker_session_map_entry(
+                                        session_map.handle(),
+                                        new_forwarding,
+                                        &entry.key,
+                                        entry.decision,
+                                        &entry.metadata,
+                                        entry.origin,
+                                        true,
+                                    );
+                                }
+                            } else {
+                                retained = false;
+                            }
+                        } else {
+                            retained = false;
+                        }
+                    }
                 }
                 let policy_dst_ip = decision.nat.rewrite_dst.unwrap_or(key.dst_ip);
                 let policy_dst_port = decision.nat.rewrite_dst_port.unwrap_or(key.dst_port);
-                let result = if local_delivery {
+                let result = if declined {
+                    None
+                } else if local_delivery {
                     crate::policy::evaluate_junos_host_policy_l3_aware_without_counting(
                         &new_forwarding.policy,
                         from_id,

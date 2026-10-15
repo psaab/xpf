@@ -3828,6 +3828,56 @@ impl SessionTable {
         }
         rebound
     }
+    /// #13655: restamp only the zone identity of a retained pair, leaving
+    /// policy identity (policy_id/policy_counter) untouched for later
+    /// packet-scoped adjudication. Uses the same pair/companion validation
+    /// and counted transfer as `rebind_policy_pair`. LocalDelivery rows
+    /// may be single entries; their egress is the real local-interface zone,
+    /// so callers pass it through unchanged.
+    pub(crate) fn rebind_zones_pair(
+        &mut self,
+        key: &SessionKey,
+        ingress_zone: u16,
+        egress_zone: u16,
+    ) -> bool {
+        let Some(forward) = self.entry_by_key(key) else {
+            return false;
+        };
+        if forward.metadata.is_reverse {
+            return false;
+        }
+        let old_ingress_zone = forward.metadata.ingress_zone;
+        let forward_counted = install::session_limit_origin_counted(forward.origin);
+        let single_local_delivery = forward.decision.resolution.disposition
+            == crate::afxdp::ForwardingDisposition::LocalDelivery;
+        let companion_key = reverse_session_key(key, forward.decision.nat);
+        if companion_key != *key {
+            match self.entry_by_key(&companion_key) {
+                Some(companion) if companion.metadata.is_reverse => {}
+                Some(_) => return false,
+                None if !single_local_delivery => return false,
+                None => {}
+            }
+        }
+        let mut rebound = false;
+        if let Some(record) = self.entry_by_key_mut(key) {
+            record.metadata.ingress_zone = ingress_zone;
+            record.metadata.egress_zone = egress_zone;
+            rebound = true;
+        }
+        if companion_key != *key
+            && let Some(record) = self.entry_by_key_mut(&companion_key)
+        {
+            record.metadata.ingress_zone = egress_zone;
+            record.metadata.egress_zone = ingress_zone;
+            rebound = true;
+        }
+        if rebound && forward_counted && old_ingress_zone != ingress_zone {
+            self.session_limit_dec(old_ingress_zone, key.src_ip, key.dst_ip);
+            self.session_limit_inc(ingress_zone, key.src_ip, key.dst_ip);
+        }
+        rebound
+    }
 
     /// Return the live rebind entries after a policy rebind so mirror layers
     /// can be restamped with the same policy identity. LocalDelivery rows may
