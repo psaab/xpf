@@ -3,9 +3,11 @@ package api
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -83,5 +85,23 @@ func TestMetricsUserspaceHATakeoverReadyAndBlockerSeries13301(t *testing.T) {
 		if !found {
 			t.Errorf("missing metric %s label %s", check.name, check.label)
 		}
+	}
+}
+
+func TestMetricsHATakeoverReadinessUsesPublishedAdapter13301(t *testing.T) {
+	manager := dpuserspace.New()
+	adapter := dpuserspace.NewLegacyDataPlaneAdapter(manager)
+	srv := &Server{
+		store:     newDescriptorCoverageStore(t),
+		gc:        conntrack.NewGC(nil, time.Minute),
+		startTime: time.Now(),
+		dp:        adapter,
+	}
+	samples := gatherCollect(t, newCollector(srv))
+	if ready, ok := findSample(samples, "xpf_userspace_ha_takeover_ready", nil); !ok || ready != 0 {
+		t.Fatalf("takeover-ready metric = (%v, %v), want present and 0 from the published adapter", ready, ok)
+	}
+	if blocker, ok := findSample(samples, "xpf_userspace_ha_takeover_blocker", map[string]string{"blocker": "helper_down"}); !ok || blocker != 1 {
+		t.Fatalf("helper_down blocker = (%v, %v), want present and 1 from the published adapter", blocker, ok)
 	}
 }
