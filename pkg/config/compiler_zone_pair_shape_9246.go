@@ -34,8 +34,12 @@ func isSyntheticFromZoneCensusPlaceholder9246(n *Node) bool {
 		n.KeyBracketed(1) || n.KeyBracketed(2) || n.KeyBracketed(3) {
 		return false
 	}
+	// #13096 (D1-13): the census placeholder is xpfarg in EVERY value
+	// token; a trailing real zone name (`... to-zone untrust`) is not
+	// census-like and must not be exempted — it compiled as a phantom
+	// pair `xpfarg->"to-zone"` with the real zone swallowed.
 	return n.Keys[1] == "xpfarg" && n.Keys[2] == "xpfarg" &&
-		(n.Keys[3] == "xpfarg" || n.Keys[3] == "to-zone")
+		(n.Keys[3] == "xpfarg" || (n.Keys[3] == "to-zone" && len(n.Keys) > 4 && n.Keys[4] == "xpfarg"))
 }
 
 func malformedZonePairShape9246(n *Node) string {
