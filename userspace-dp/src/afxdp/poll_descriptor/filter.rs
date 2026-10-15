@@ -1137,27 +1137,63 @@ pub(super) fn evaluate_input_filter_on_session_hit(
         return (None, false);
     };
     if filter.varies_per_packet_within_flow() {
-        // #1430/#2362 — unchanged. The extra-build stays after the gate so the
-        // no-such-filter case never pays it.
+        // #1430/#2362 — the frame-derived predicates govern the PBR walk too:
+        // a matched routing-instance discard/reject is terminal even though
+        // the ordinary non-routing walk defers that term.
         let extra = term_match_extra_from_frame(frame, meta);
-        // #2620: the session-HIT re-eval is the SOLE counter for this packet —
-        // it never calls `ingress_route_table_override`/the routing evaluator.
-        // Pass `routing_eval_follows = false` so it counts on every exit
-        // (per-packet, pre-#2620 behavior), even when the filter is
-        // route-lookup-affecting.
-        // #10566: the counted evaluator ran — the seed must not charge again.
+        let mut eval = evaluate_non_pbr_input_filter(
+            forwarding,
+            extra,
+            Some(flow),
+            meta,
+            ingress_zone_override,
+            false,
+        );
+        let mut log_source = FilterLogSource::Input;
+        if eval.action == crate::filter::FilterAction::Accept
+            && filter.affects_route_lookup
+            && let Some(pbr) = crate::filter::evaluate_filter_ref_routing_instance_uncounted(
+                filter,
+                flow.src_ip,
+                flow.dst_ip,
+                flow.forward_key.protocol,
+                flow.forward_key.src_port,
+                flow.forward_key.dst_port,
+                meta.dscp,
+                extra,
+            )
+            && pbr.action != crate::filter::FilterAction::Accept
+            && let Some(counted) = crate::filter::evaluate_filter_ref_routing_instance_event_counted(
+                filter,
+                flow.src_ip,
+                flow.dst_ip,
+                flow.forward_key.protocol,
+                flow.forward_key.src_port,
+                flow.forward_key.dst_port,
+                meta.dscp,
+                extra,
+                meta.pkt_len as u64,
+            )
+        {
+            eval = NonPbrInputFilterEval {
+                action: counted.action,
+                cached_log: counted.log_match.map(|log_match| CachedInputFilterLog {
+                    log_match,
+                    ingress_zone_id: filter_log_ingress_zone_id(
+                        forwarding,
+                        meta,
+                        ingress_zone_override,
+                        ingress_ifindex,
+                    ),
+                }),
+            };
+            log_source = FilterLogSource::Pbr;
+        }
         return (
             Some(SessionHitInputFilterEval {
-            eval: evaluate_non_pbr_input_filter(
-                forwarding,
-                extra,
-                Some(flow),
-                meta,
-                ingress_zone_override,
-                false,
-            ),
-            revoked_key: None,
-            log_source: FilterLogSource::Input,
+                eval,
+                revoked_key: None,
+                log_source,
             }),
             true,
         );

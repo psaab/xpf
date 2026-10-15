@@ -3386,3 +3386,75 @@ fn unchanged_non_ingress_fib_local_session_is_not_revoked_12056() {
         "unchanged FIB-local resolution with the same route identity must not revoke: {route:?}"
     );
 }
+/// #13648: a per-packet term takes the session-hit path away from the static
+/// PBR deny evaluator. A coexisting PBR discard must still be enforced.
+fn pbr_deny_after_per_packet_fixture(
+    v6: bool,
+    deny_action: &str,
+) -> (ForwardingState, SessionFlow) {
+    let dscp = FirewallTermSnapshot {
+        name: "ef-accept".into(),
+        protocols: vec!["tcp".into()],
+        dscp_values: vec![46],
+        action: "accept".into(),
+        ..Default::default()
+    };
+    let pbr = pbr_term("pbr-drop", "5201", deny_action);
+    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, v6, vec![dscp, pbr]);
+    (forwarding, if v6 { v6_flow(5201) } else { v4_flow(5201) })
+}
+
+#[test]
+fn per_packet_shape_preserves_pbr_discard_on_hit_13648() {
+    for v6 in [false, true] {
+        let (forwarding, flow) = pbr_deny_after_per_packet_fixture(v6, "discard");
+        let filter =
+            crate::filter::interface_input_filter(&forwarding.filter_state, LAN_IFINDEX, v6)
+                .expect("the filter is attached");
+        assert!(filter.varies_per_packet_within_flow());
+        assert!(filter.affects_route_lookup);
+        let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
+        let (hit, already_counted) = evaluate_input_filter_on_session_hit(
+            &forwarding,
+            &mut sessions,
+            &flow.forward_key,
+            &frame(),
+            Some(&flow),
+            meta(LAN_IFINDEX as u32, 0, v6),
+            Some(TEST_LAN_ZONE_ID),
+        );
+        let hit = hit.expect("PBR discard must produce a session-hit verdict");
+        assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+        assert_eq!(hit.log_source, crate::afxdp::event_emit::FilterLogSource::Pbr);
+        assert!(already_counted, "PBR deny replay must be counted");
+        assert_eq!(
+            filter.terms[1]
+                .counter
+                .packets
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the PBR deny counter must be charged once"
+        );
+    }
+}
+
+#[test]
+fn per_packet_shape_preserves_pbr_reject_on_hit_13648() {
+    let (forwarding, flow) = pbr_deny_after_per_packet_fixture(false, "reject");
+    let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+    );
+    let hit = hit.expect("PBR reject must produce a session-hit verdict");
+    assert!(matches!(
+        hit.eval.action,
+        crate::filter::FilterAction::Reject(_)
+    ));
+    assert_eq!(hit.log_source, crate::afxdp::event_emit::FilterLogSource::Pbr);
+}
