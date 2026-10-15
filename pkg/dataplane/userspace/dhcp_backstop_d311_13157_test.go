@@ -75,6 +75,31 @@ func TestD311_13157_SharedDenySuppressesAdmit(t *testing.T) {
 	}
 }
 
+func TestD311_13412_VRFSharedDenySuppressesAdmit(t *testing.T) {
+	cfg := mk13157(nil, nil, []*config.RoutingInstanceConfig{{Name: "blue", InstanceType: "vrf", Interfaces: []string{"ge-0/0/0.0", "ge-0-0-0.0"}}})
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
+		"ge-0-0-0": {Name: "ge-0-0-0", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"wan": {Name: "wan", Interfaces: []string{"ge-0/0/0.0"}, HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}}},
+		"lan": {Name: "lan", Interfaces: []string{"ge-0-0-0.0"}, HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"dhcpv6"}}},
+	}
+	got := BuildDHCPHostInboundBackstopNetdevs(cfg, nil)
+	if containsString(got.AdmitVRFSlavesV6, "ge-0-0-0") {
+		t.Errorf("AdmitVRFSlavesV6=%v must not contain ge-0-0-0 (wan denies dhcpv6 on shared VRF netdev)", got.AdmitVRFSlavesV6)
+	}
+	if containsString(got.AdmitV6, "ge-0-0-0") {
+		t.Errorf("AdmitV6=%v must not contain ge-0-0-0 (wan denies dhcpv6 on shared netdev)", got.AdmitV6)
+	}
+	if !containsString(got.VRFSlavesV6, "ge-0-0-0") {
+		t.Errorf("VRFSlavesV6 drop backstop=%v want ge-0-0-0", got.VRFSlavesV6)
+	}
+	if !containsString(got.V6, "ge-0-0-0") {
+		t.Errorf("V6 drop backstop=%v want ge-0-0-0", got.V6)
+	}
+}
+
 func TestD311_13157_UnzonedOnlyAdmit(t *testing.T) {
 	cfg := mk13157(nil, nil, nil)
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
