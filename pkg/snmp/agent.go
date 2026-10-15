@@ -303,6 +303,17 @@ type Agent struct {
 	serveBudget *snmpServeBudget
 }
 
+// ServeBudgetStats returns cumulative requests shed by the SNMP admission
+// budget, source-bucket evictions, and the current tracked-source count.
+// The values are safe to read while Serve is running. A bare Agent without a
+// budget returns zeroes.
+func (a *Agent) ServeBudgetStats() (shed, evictions, trackedSources uint64) {
+	if a == nil {
+		return 0, 0, 0
+	}
+	return a.serveBudget.stats()
+}
+
 // trapJob is one queued trap-delivery unit: a destination target (host or
 // host:port) plus either a pre-built SNMP packet or, for the v1 leg, the
 // parameters the worker builds it from. Prebuilt packets are assembled on the

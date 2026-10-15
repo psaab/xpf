@@ -612,6 +612,15 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		IPsec:    d.ipsec,
 		DHCP:     d.dhcp,
 		VRRPMgr:  d.vrrpMgr,
+		SNMPServeBudgetStatsFn: func() (uint64, uint64, uint64) {
+			d.snmpReconMu.Lock()
+			agent := d.snmpAgent
+			d.snmpReconMu.Unlock()
+			if agent == nil {
+				return 0, 0, 0
+			}
+			return agent.ServeBudgetStats()
+		},
 		// #5054: HTTP/REST commits sync to the peer on the SAME
 		// RG0-ownership policy as gRPC/local-shell. Peer convergence
 		// is transport-independent (decided in commitAndApplyOperator),

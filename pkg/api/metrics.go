@@ -141,6 +141,9 @@ type xpfCollector struct {
 	dataplaneArmTotalSurfaces            *prometheus.Desc
 	dataplaneXDPAttachModeSurfaces       *prometheus.Desc
 	dataplaneSafetyOnce                  sync.Once
+	snmpRequestsShedTotal                *prometheus.Desc
+	snmpSourceBucketEvictionsTotal       *prometheus.Desc
+	snmpTrackedSources                   *prometheus.Desc
 
 	// Interface counters
 	ifacePacketsTotal *prometheus.Desc
@@ -1686,6 +1689,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.routeMaskCacheLookupErrors
 	ch <- c.routeMaskCacheEntries
 	c.describeDataplaneSafety(ch)
+	c.describeSNMPServeBudget(ch)
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -1730,6 +1734,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// them in precisely the case they exist for.
 	defer c.emitDataplaneSilentSkips(ch)
 	defer c.emitDataplaneSafety(ch)
+	defer c.emitSNMPServeBudget(ch)
 
 	// #1799: config-persist health is a control-plane signal — emit it
 	// BEFORE the dataplane gate below so the degraded state stays

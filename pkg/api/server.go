@@ -516,6 +516,10 @@ type Config struct {
 	// exist — while a `show` still renders the collector as configured.
 	// Optional; if nil, the family is omitted.
 	SyslogDropsFn func() []logging.SyslogDropStat
+	// SNMPServeBudgetStatsFn returns SNMP request shedding, source-bucket
+	// eviction, and tracked-source counts for the xpf_snmp_* telemetry.
+	// Optional; nil omits these metrics when SNMP is not wired.
+	SNMPServeBudgetStatsFn func() (shed, evictions, trackedSources uint64)
 	// DDNSStatsFn surfaces the DHCP dynamic-DNS counter snapshot for the
 	// xpf_dhcp_ddns_* metric family (#1387 inc-2). The daemon owns the
 	// always-on DDNS manager; the API reads it through this function so the
@@ -723,6 +727,7 @@ type Server struct {
 	rpmPinFailedFn                       func() float64
 	feedsFn                              func() map[string]feeds.FeedInfo
 	syslogDropsFn                        func() []logging.SyslogDropStat
+	snmpServeBudgetStatsFn               func() (shed, evictions, trackedSources uint64)
 	ddnsStatsFn                          func() *dhcpserver.DDNSStats
 	surfaceAStatsFn                      func() *ddns.SurfaceAStats
 	flowCollectorHealthFn                func() []flowexport.ExporterCollectorHealth
@@ -857,6 +862,7 @@ func NewServer(cfg Config) *Server {
 		rpmPinFailedFn:                       cfg.RPMPinFailedFn,
 		feedsFn:                              cfg.FeedsFn,
 		syslogDropsFn:                        cfg.SyslogDropsFn,
+		snmpServeBudgetStatsFn:               cfg.SNMPServeBudgetStatsFn,
 		ddnsStatsFn:                          cfg.DDNSStatsFn,
 		surfaceAStatsFn:                      cfg.SurfaceAStatsFn,
 		flowCollectorHealthFn:                cfg.FlowCollectorHealthFn,

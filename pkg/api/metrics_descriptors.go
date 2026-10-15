@@ -36,5 +36,6 @@ func newCollector(srv *Server) *xpfCollector {
 	c.initFlowExportDescriptors()
 	c.initFwdStatusDescriptors()
 	c.initHATakeoverDescriptors13301()
+	c.initSNMPServeBudgetDescriptors()
 	return c
 }
