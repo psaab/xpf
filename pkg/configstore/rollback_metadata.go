@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -198,6 +199,40 @@ func rollbackMetadataForSlot(entries []rollbackSlotMetadataEntry, slot int, data
 	if entry.Hash == "" || entry.Hash != rollbackSlotHash(data) ||
 		entry.Device != identity.Device || entry.Inode != identity.Inode ||
 		!entry.ModTime.Equal(identity.ModTime) {
+		return time.Time{}, "", false
+	}
+	return entry.Timestamp, entry.Comment, true
+}
+
+// rollbackMetadataForOversizedSlot validates an unreadable-by-bound slot
+// against the manifest without materializing its contents. The file is only
+// eligible when it is a regular oversized file, and its full streaming hash
+// and identity must match the saved metadata.
+func rollbackMetadataForOversizedSlot(entries []rollbackSlotMetadataEntry, slot int, path string) (time.Time, string, bool) {
+	if slot < 0 || slot >= len(entries) {
+		return time.Time{}, "", false
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return time.Time{}, "", false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= MaxConfigSize {
+		return time.Time{}, "", false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return time.Time{}, "", false
+	}
+	sum := sha256.New()
+	if _, err := io.Copy(sum, f); err != nil {
+		return time.Time{}, "", false
+	}
+	entry := entries[slot]
+	if entry.Hash == "" || entry.Hash != hex.EncodeToString(sum.Sum(nil)) ||
+		entry.Device != uint64(stat.Dev) || entry.Inode != stat.Ino ||
+		!entry.ModTime.Equal(info.ModTime()) {
 		return time.Time{}, "", false
 	}
 	return entry.Timestamp, entry.Comment, true
