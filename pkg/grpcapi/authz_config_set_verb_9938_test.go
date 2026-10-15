@@ -100,3 +100,10 @@ func TestEveryResolvedConfigLineIsVerbLed9938(t *testing.T) {
 			"empty set reports a clean board", resolved)
 	}
 }
+func TestSetAnnotateRemainsVerbLedForConfigurationGate13554(t *testing.T) {
+	input := `annotate system host-name "edge fw"`
+	got := setLine9938(t, input)
+	if got != input {
+		t.Fatalf("Set annotate resolved to %q, want unchanged verb-led line %q", got, input)
+	}
+}

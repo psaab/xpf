@@ -24,6 +24,29 @@ import (
 	"github.com/chzyer/readline"
 )
 
+// StripSurroundingQuotes removes one layer of matching leading/trailing
+// single or double quotes. Mismatched and unterminated quotes are preserved.
+func StripSurroundingQuotes(s string) string {
+	if len(s) >= 2 {
+		q := s[0]
+		if (q == '"' || q == '\'') && s[len(s)-1] == q {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
+// AnnotateCommentFromLine splits an `annotate <path> "comment"` line into
+// the path text and comment, peeling one layer of matching quotes from the
+// comment. ok is false when the line has no double-quoted comment.
+func AnnotateCommentFromLine(line string) (pathText, comment string, ok bool) {
+	quoteIdx := strings.Index(line, "\"")
+	if quoteIdx < 0 {
+		return "", "", false
+	}
+	return strings.TrimSpace(line[:quoteIdx]), StripSurroundingQuotes(line[quoteIdx:]), true
+}
+
 // SecureReadlineHistory creates a history file or tightens its permissions
 // before readline opens it. Readline requests mode 0666 for new files, so
 // relying on the process umask can leave command history readable by others.

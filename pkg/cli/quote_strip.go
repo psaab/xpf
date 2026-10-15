@@ -1,6 +1,10 @@
 package cli
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/psaab/xpf/pkg/cliterm"
+)
 
 // stripSurroundingQuotes removes ONE layer of matching leading/trailing single
 // or double quotes, and otherwise returns s unchanged.
@@ -34,13 +38,7 @@ import "strings"
 // typed, and preserving it is the same verbatim property as the apostrophe
 // case. Guessing that they meant to close it is the behaviour being removed.
 func stripSurroundingQuotes(s string) string {
-	if len(s) >= 2 {
-		q := s[0]
-		if (q == '"' || q == '\'') && s[len(s)-1] == q {
-			return s[1 : len(s)-1]
-		}
-	}
-	return s
+	return cliterm.StripSurroundingQuotes(s)
 }
 
 // commitCommentFromArgs builds the commit comment from `commit comment ...`
@@ -64,9 +62,5 @@ func commitCommentFromArgs(args []string) string {
 // persisted into the stored configuration, and a test of the helper alone
 // cannot see this site stop calling it.
 func annotateCommentFromLine(line string) (pathText, comment string, ok bool) {
-	quoteIdx := strings.Index(line, "\"")
-	if quoteIdx < 0 {
-		return "", "", false
-	}
-	return strings.TrimSpace(line[:quoteIdx]), stripSurroundingQuotes(line[quoteIdx:]), true
+	return cliterm.AnnotateCommentFromLine(line)
 }
