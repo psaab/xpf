@@ -200,6 +200,16 @@ func policyThenSchemaChildren() map[string]*schemaNode {
 // #11367: shared strict and compiler diagnostic for an ambiguous choice block.
 const defaultPolicyAmbiguousBlockDiagnostic = "expected exactly one block value, found %d children"
 
+func validateZoneTCPRstNode13119(node *Node, _ *schemaNode) error {
+	if node == nil {
+		return nil
+	}
+	if len(node.Keys) > 1 || len(node.Children) > 0 {
+		return fmt.Errorf("tcp-rst is a presence-only flag and accepts no trailing tokens or body")
+	}
+	return nil
+}
+
 var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: true, children: map[string]*schemaNode{
 	// #9878: closed-world arm. Leaf-completeness audit (the schema.go
 	// contract: only flip a LEAF-COMPLETE subtree). zones children =
@@ -234,7 +244,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					"host-inbound-traffic": {desc: "Per-interface host inbound traffic", children: hostInboundSchemaChildren()},
 				},
 			}},
-			"tcp-rst":              {desc: "Send TCP RST for non-SYN TCP transit session misses", children: nil},
+			"tcp-rst":              {desc: "Send TCP RST for non-SYN TCP transit session misses", nodeValidator: validateZoneTCPRstNode13119, children: nil},
 			"screen":               {desc: "Screen profile name", args: 1, scalar: true, placeholder: "<screen-name>", children: nil},
 			"host-inbound-traffic": {desc: "Host inbound traffic", children: hostInboundSchemaChildren()},
 			// #3061: zone-local address book. Same entry grammar as the
