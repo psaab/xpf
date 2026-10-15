@@ -889,7 +889,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 			if k := interfaceFilterSamplingSetTarget12508(*current, nodeKeys, schema, path[0] == "groups"); k >= 0 {
 				n := (*current)[k]
 				if n.IsLeaf {
-					braceCompactStatement12508(n, nodeKeys, quotedRange(keyStart, i), groupedRange(keyStart, i), closed...)
+					braceCompactStatement12508(n, nodeKeys, childSchema, quotedRange(keyStart, i), groupedRange(keyStart, i), closed...)
 				}
 				current = &n.Children
 				found = true
@@ -1650,26 +1650,42 @@ func editableStatement12508(n *Node, nodeKeys []string, schema *schemaNode) bool
 }
 
 // braceCompactStatement12508 rewrites a compact single-statement leaf such as
-// `filter input A;` into its braced form in place. The node keeps its sibling
-// position and inactive marker, so the edit lands where the binding is read.
-// quoted and bracketed are the set path's masks for the container keys.
-func braceCompactStatement12508(n *Node, nodeKeys []string, quoted, bracketed []bool, closed ...bool) {
+// `filter input A;` into its braced form in place, expanding packed tails
+// through the container schema so nested paths become real AST containers.
+// The node keeps its sibling position and inactive marker.
+func braceCompactStatement12508(n *Node, nodeKeys []string, schema *schemaNode, quoted, bracketed []bool, closed ...bool) {
 	oldKeys, oldQuoted, oldBracketed := n.Keys, n.KeysQuoted, n.KeysBracketed
-	child := &Node{
-		Keys:   append([]string(nil), oldKeys[len(nodeKeys):]...),
-		IsLeaf: true,
-	}
+	packed := &Node{Keys: oldKeys}
 	if len(oldQuoted) == len(oldKeys) {
-		child.setKeysQuoted(oldQuoted[len(nodeKeys):])
+		packed.setKeysQuoted(oldQuoted)
 	}
 	if len(oldBracketed) == len(oldKeys) {
-		child.setKeysBracketed(oldBracketed[len(nodeKeys):])
+		packed.setKeysBracketed(oldBracketed)
 	}
+	children := packedBodyChildren(packed, schema)
+	markPackedBodyLeaves(children, schema)
 	n.Keys = append([]string(nil), nodeKeys...)
 	n.setKeysQuoted(quoted)
 	n.setKeysBracketed(bracketed, closed...)
 	n.IsLeaf = false
-	n.Children = []*Node{child}
+	n.Children = children
+}
+
+// markPackedBodyLeaves restores the parser's leaf flags on schema-expanded
+// nodes before they are inserted into the mutable AST.
+func markPackedBodyLeaves(nodes []*Node, parentSchema *schemaNode) {
+	for _, node := range nodes {
+		if node == nil || len(node.Keys) == 0 {
+			continue
+		}
+		childSchema := resolveSchemaChild(parentSchema, node.Keys[0])
+		if childSchema == nil {
+			continue
+		}
+		_, childSchema = consumeNodeKeys(node.Keys, childSchema)
+		node.IsLeaf = len(childSchema.children) == 0 && childSchema.wildcard == nil
+		markPackedBodyLeaves(node.Children, childSchema)
+	}
 }
 
 // deleteInterfaceFilterSampling12508 removes the compiler-visible binding
@@ -1930,7 +1946,7 @@ func markBelowRepeatedSiblingInactive12714(parent *Node, keys []string, inactive
 // deepRepeatedSiblingSchema12761 marks repeated containers whose editors
 // must descend through nested braced children as well as direct leaves.
 func deepRepeatedSiblingSchema12761(candidate *schemaNode) bool {
-	if candidate == schemaForwardingOptions.children["sampling"] {
+	if schemaForwardingOptions != nil && candidate == schemaForwardingOptions.children["sampling"] {
 		return true
 	}
 	if schemaInterfaces == nil || schemaInterfaces.wildcard == nil {
