@@ -2097,6 +2097,87 @@ fn bump_fib_generation_rejects_generation_rollback() {
         "rejected rollback must not revive an old worker FIB generation"
     );
 }
+/// #13197 (D1-06): a rollback must also be refused when the coordinator's
+/// validation generation lags `guard.status.last_fib_generation` — the
+/// disarmed case where apply advanced the published pair but `ValidationState`
+/// stayed at 0. A bump also invalidates the stored snapshot's content digest
+/// when it changes P-MECH authority.
+#[test]
+fn bump_fib_generation_rejects_disarmed_rollback_and_invalidates_digest() {
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let state = new_state(ProcessStatus::default());
+    // Disarmed apply advances status/snapshot to fib 5 while coordinator
+    // validation stays 0 (forwarding not armed).
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            fib_generation: 5,
+            content_digest: "digest-5".to_string(),
+            generated_at: chrono::Utc::now(),
+            ..ConfigSnapshot::default()
+        });
+        assert!(run_request(state.clone(), request).ok);
+    }
+    {
+        let guard = state.lock().expect("state");
+        assert_eq!(guard.status.last_fib_generation, 5);
+        assert_eq!(
+            guard.afxdp.fib_generation(),
+            0,
+            "precondition: disarmed apply must leave coordinator validation at 0"
+        );
+    }
+    // Stale bump 2 (< published 5, > coordinator 0) must be refused.
+    let mut request = req("bump_fib_generation");
+    request.snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        fib_generation: 2,
+        generated_at: chrono::Utc::now(),
+        ..ConfigSnapshot::default()
+    });
+    let response = run_request(state.clone(), request);
+    assert!(
+        !response.ok,
+        "rollback against published status must be rejected (#13197)"
+    );
+    assert!(
+        response.error.contains("fib generation rollback rejected"),
+        "unexpected error: {}",
+        response.error
+    );
+    {
+        let guard = state.lock().expect("state");
+        assert_eq!(guard.status.last_fib_generation, 5);
+        assert_eq!(
+            guard.snapshot.as_ref().expect("stored").fib_generation,
+            5
+        );
+    }
+    // An accepted forward bump mutates stored P-MECH authority, so its
+    // content digest must be invalidated.
+    {
+        let mut request = req("bump_fib_generation");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            fib_generation: 7,
+            ipsec_tunnel_snapshot_generation: 9,
+            generated_at: chrono::Utc::now(),
+            ..ConfigSnapshot::default()
+        });
+        assert!(run_request(state.clone(), request).ok);
+    }
+    let guard = state.lock().expect("state");
+    let stored = guard.snapshot.as_ref().expect("stored");
+    assert_eq!(stored.fib_generation, 7);
+    assert_eq!(stored.ipsec_tunnel_snapshot_generation, 9);
+    assert!(
+        stored.content_digest.is_empty(),
+        "accepted bump must clear stored content_digest (#13197), got {:?}",
+        stored.content_digest
+    );
+}
 
 /// #3767 M2: an accepted bump_fib_generation must PERSIST the new
 /// generation. Previously the handler mutated status + stored snapshot in
