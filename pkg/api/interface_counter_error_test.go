@@ -30,6 +30,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+
 	"strings"
 	"testing"
 
@@ -191,5 +193,41 @@ func TestCollectInterfaceCountersSkipsAndCountsReadErrors(t *testing.T) {
 	if errTotal <= 0 {
 		t.Errorf("xpf_interface_counter_read_errors_total = %v, want > 0 (a read failure "+
 			"must bump the interface scrape-error counter)", errTotal)
+	}
+}
+func TestCollectInterfaceCountersMissingLinkCountsReadError13273(t *testing.T) {
+	const missingIfName = "ge-13273-absent"
+	if _, err := net.InterfaceByName(missingIfName); err == nil {
+		t.Fatalf("test precondition: %q unexpectedly exists", missingIfName)
+	}
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure(): %v", err)
+	}
+	if _, err := store.LoadSet("set interfaces " + missingIfName + " unit 0 family inet"); err != nil {
+		t.Fatalf("LoadSet(): %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit(): %v", err)
+	}
+	c := newCollector(&Server{store: store})
+	ch := make(chan prometheus.Metric, 8)
+	c.collectInterfaceCounters(ch, &ifaceCounterErrAPIDP{Manager: dataplane.New()})
+	c.emitInterfaceCounterReadErrors(ch)
+	close(ch)
+
+	var errorTotal float64
+	for metric := range ch {
+		if !strings.Contains(metric.Desc().String(), "xpf_interface_counter_read_errors_total") {
+			continue
+		}
+		var pbm dto.Metric
+		if err := metric.Write(&pbm); err != nil {
+			t.Fatalf("metric.Write(): %v", err)
+		}
+		errorTotal = pbm.GetCounter().GetValue()
+	}
+	if errorTotal != 1 {
+		t.Fatalf("xpf_interface_counter_read_errors_total = %v for missing netdev, want 1", errorTotal)
 	}
 }

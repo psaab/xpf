@@ -518,6 +518,8 @@ func (c *xpfCollector) collectInterfaceCounters(ch chan<- prometheus.Metric, dp 
 		// Translate Junos config name to Linux kernel ifname (#1565).
 		iface, err := net.InterfaceByName(cfg.ResolveKernelIfName(ifName))
 		if err != nil {
+			// #13273: missing netdev is a failed interface-counter read too.
+			c.interfaceCounterReadErrors.Add(1)
 			continue
 		}
 		ctrs, err := dp.ReadInterfaceCounters(iface.Index)
