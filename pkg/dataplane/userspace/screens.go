@@ -29,6 +29,7 @@ func buildScreenSnapshots(cfg *config.Config) []ScreenProfileSnapshot {
 	// (needless control-socket + dataplane work, can re-arm SYN-cookie state).
 	// Sorting by zone name (the wire key, == the map key) makes the wire bytes
 	// stable so the content hash matches and the reconcile skips (#3962).
+	zoneExclusions := config.ZoneQuarantineExclusionsForConfig(cfg)
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
@@ -37,6 +38,9 @@ func buildScreenSnapshots(cfg *config.Config) []ScreenProfileSnapshot {
 	for _, name := range zoneNames {
 		zone := cfg.Security.Zones[name]
 		if zone == nil || zone.DroppedEnforcementChild || zone.ScreenProfile == "" {
+			continue
+		}
+		if _, excluded := zoneExclusions[name]; excluded {
 			continue
 		}
 		sp := cfg.Security.Screen[zone.ScreenProfile]
@@ -427,11 +431,15 @@ func buildScreenMissingProfileRefs(cfg *config.Config) []ScreenMissingProfileRef
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	zoneExclusions := config.ZoneQuarantineExclusionsForConfig(cfg)
 	for _, name := range zoneNames {
 		zone := cfg.Security.Zones[name]
 		if zone == nil || zone.DroppedEnforcementChild || (zone.ScreenProfile == "" && !zone.ScreenProfileConfigured) {
 			// No screen configured for this zone — legit Pass, not a
 			// missing reference.
+			continue
+		}
+		if _, excluded := zoneExclusions[name]; excluded {
 			continue
 		}
 		if zone.ScreenProfile != "" && cfg.Security.Screen[zone.ScreenProfile] != nil {
@@ -650,8 +658,12 @@ func userspaceSynCookieProtectionActive(cfg *config.Config) bool {
 	if cfg == nil || cfg.Security.Flow.SynFloodProtectionMode != "syn-cookie" {
 		return false
 	}
-	for _, zone := range cfg.Security.Zones {
+	zoneExclusions := config.ZoneQuarantineExclusionsForConfig(cfg)
+	for name, zone := range cfg.Security.Zones {
 		if zone == nil || zone.DroppedEnforcementChild || zone.ScreenProfile == "" {
+			continue
+		}
+		if _, excluded := zoneExclusions[name]; excluded {
 			continue
 		}
 		profile := cfg.Security.Screen[zone.ScreenProfile]
@@ -736,10 +748,14 @@ func buildScreenInertProfileRefs(cfg *config.Config) []ScreenMissingProfileRef {
 	}
 	sort.Strings(zoneNames)
 	var out []ScreenMissingProfileRef
+	zoneExclusions := config.ZoneQuarantineExclusionsForConfig(cfg)
 	for _, name := range zoneNames {
 		zone := cfg.Security.Zones[name]
 		if zone == nil || zone.DroppedEnforcementChild || zone.ScreenProfile == "" {
 			continue // no screen configured — legit Pass, not a finding
+		}
+		if _, excluded := zoneExclusions[name]; excluded {
+			continue
 		}
 		if cfg.Security.Screen[zone.ScreenProfile] == nil {
 			continue // UNDEFINED — that is ScreenMissingProfileRefs' surface, not this one
