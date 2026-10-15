@@ -324,6 +324,60 @@ func TestHostInboundStaleReplyLifelineSharedFallbackPreservesManagement13413(t *
 	}
 }
 
+func TestHostInboundStaleReplyLifelineOnlyVRFSharedFallback13442(t *testing.T) {
+	const address = "192.0.2.51"
+	lifelineScope := []config.HostInboundVRFIngressScope{{
+		Master: "vrf-blue", Slaves: []string{"fxp0"},
+	}}
+	sharedRules := HostInboundStaleReplyGuardRules([]HostInboundZoneView{{
+		Zone: "deny", IngressDenyV4: []string{address},
+		IngressNetdevs: []string{"ge-data"}, LifelineNetdevs: []string{"fxp0"},
+		LifelineVRFScopes: lifelineScope,
+	}}, nil, nil, nil, false)
+	foundDirectFallback, foundVRFFallback := false, false
+	hasTCP22 := func(ports []uint16) bool {
+		for _, port := range ports {
+			if port == 22 {
+				return true
+			}
+		}
+		return false
+	}
+	for _, rule := range sharedRules {
+		if rule.Family != "ip" || rule.Proto != config.HostInboundProtoTCP || !hasTCP22(rule.Ports) {
+			continue
+		}
+		if rule.IngressNegated && len(rule.Ingress) == 3 &&
+			rule.Ingress[0] == "fxp0" && rule.Ingress[1] == "ge-data" &&
+			rule.Ingress[2] == "vrf-blue" {
+			foundDirectFallback = true
+		}
+		if rule.IngressVRFNegated && len(rule.IngressVRFScopes) == 1 &&
+			rule.IngressVRFScopes[0].Master == "vrf-blue" &&
+			len(rule.IngressVRFScopes[0].Slaves) == 1 &&
+			rule.IngressVRFScopes[0].Slaves[0] == "fxp0" {
+			foundVRFFallback = true
+		}
+	}
+	if !foundDirectFallback || !foundVRFFallback {
+		t.Fatalf("lifeline-only VRF fallback did not spare fxp0 before the direct master match: %+v", sharedRules)
+	}
+
+	ordinaryRules := HostInboundStaleReplyGuardRules([]HostInboundZoneView{{
+		Zone: "deny", V4Addrs: []string{address},
+		IngressNetdevs: []string{"ge-data"}, LifelineNetdevs: []string{"fxp0"},
+		LifelineVRFScopes: lifelineScope,
+	}}, nil, nil, nil, false)
+	if !guardRuleHasIngressTuple(ordinaryRules, []string{"ge-data"}, true, address, "ip", config.HostInboundProtoTCP, 22) {
+		t.Fatalf("ordinary address lost its direct fallback: %+v", ordinaryRules)
+	}
+	for _, rule := range ordinaryRules {
+		if len(rule.IngressVRFScopes) > 0 {
+			t.Fatalf("lifeline-only VRF must not emit an empty-slave ordinary fallback: %+v", rule)
+		}
+	}
+}
+
 // TestHostInboundReinjectDestinationsIncludeIngressDeny13171 (#13171, D5-02).
 func TestHostInboundReinjectDestinationsIncludeIngressDeny13171(t *testing.T) {
 	views := []HostInboundZoneView{{
