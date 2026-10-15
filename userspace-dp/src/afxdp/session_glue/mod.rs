@@ -3025,6 +3025,11 @@ fn materialize_shared_session_hit(
                 decision: replica.decision,
                 metadata: replica.metadata,
                 forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux {
+                    session_id: replica.session_id,
+                    source_nat_static: replica.source_nat_static,
+                    leak_incarnation: replica.leak_incarnation,
+                },
             },
             !materialized,
         );
@@ -3240,20 +3245,23 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         // its entry out of `hit`; local-only hits read it from the table below.
         let shared_session_id = hit.shared_entry.as_ref().map(|entry| entry.session_id);
         let shared_leak_incarnation = hit.shared_entry.as_ref().map(|entry| entry.leak_incarnation);
-        let source_nat_static = match hit.shared_entry.as_ref() {
-            Some(entry) => entry.source_nat_static,
-            None => sessions.source_nat_static_for(hit.key.as_ref(&flow.forward_key)),
-        };
+        let source_nat_static = hit
+            .shared_entry
+            .as_ref()
+            .map(|entry| entry.source_nat_static)
+            .unwrap_or(hit.lookup.aux.source_nat_static);
         let keep_transient = poison_key.is_some_and(|(key, decision, metadata, origin)| {
             should_keep_synced_hit_transient(ha_state, now_secs, key, decision, metadata, origin)
         });
         let session_id_before_purge = shared_session_id
             .filter(|session_id| *session_id != 0)
-            .or_else(|| {
-                (!shared_was_present)
-                    .then(|| sessions.session_id_for(hit.key.as_ref(&flow.forward_key)))
-            })
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                if shared_was_present {
+                    0
+                } else {
+                    hit.lookup.aux.session_id
+                }
+            });
         let source_nat_validation_key = if keep_transient {
             shared_source_nat_original_key(
                 shared.forward_wire_sessions,
@@ -3291,13 +3299,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             sessions.forwarding_resolution_is_stale(resolved.forwarding_generation);
         let session_id = shared_session_id
             .filter(|session_id| *session_id != 0)
-            .unwrap_or_else(|| {
-                if keep_transient {
-                    session_id_before_purge
-                } else {
-                    sessions.session_id_for(resolved_key)
-                }
-            });
+            .unwrap_or(session_id_before_purge);
         let previous_policy_to_zone_id = forwarding_stale.then(|| {
             if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
                 resolved.metadata.egress_zone
@@ -3309,7 +3311,8 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         let resolution_target = resolution_target_for_session(flow, decision);
         let leak_incarnation = shared_leak_incarnation
             .filter(|incarnation| *incarnation != 0)
-            .or_else(|| sessions.leak_incarnation(&resolved_key));
+            .or((hit.lookup.aux.leak_incarnation != 0)
+                .then_some(hit.lookup.aux.leak_incarnation));
         let leak_revoked = leak_incarnation.is_some_and(|incarnation| {
             !super::forwarding::leak_incarnation_is_live(forwarding, resolution_target, incarnation)
         });
@@ -3421,6 +3424,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         return Some(ResolvedFlowSessionDecision {
             key: resolved_key.clone(),
             session_id,
+            timeout_secs: 0,
             decision,
             source_nat_static,
             metadata,
@@ -3580,9 +3584,11 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         flag_install_table_purge(worker_id);
     }
     let metadata = resolved.metadata;
+    let install_info = sessions.installed_session_info(&flow.forward_key);
     Some(ResolvedFlowSessionDecision {
         key: flow.forward_key.clone(),
-        session_id: sessions.session_id_for(&flow.forward_key),
+        session_id: install_info.map_or(0, |info| info.session_id),
+        timeout_secs: install_info.map_or(0, |info| info.timeout_secs),
         decision,
         source_nat_static: None,
         metadata,

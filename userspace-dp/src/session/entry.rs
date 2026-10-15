@@ -472,11 +472,27 @@ pub(crate) struct ForwardingGenerationStamp {
     pub(crate) valid: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionInstallInfo {
+    pub(crate) session_id: u64,
+    pub(crate) source_nat_static: Option<bool>,
+    pub(crate) timeout_secs: u32,
+    pub(crate) handshake_state_wire: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionLookupAux {
+    pub(crate) session_id: u64,
+    pub(crate) source_nat_static: Option<bool>,
+    pub(crate) leak_incarnation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionLookup {
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
     pub(crate) forwarding_generation: ForwardingGenerationStamp,
+    pub(crate) aux: SessionLookupAux,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

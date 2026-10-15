@@ -2169,10 +2169,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #5213: mirror the STABLE session id from the just-
                             // installed table entry so `show security flow
                             // session` reports the SAME id RT_FLOW emits.
-                            let session_id = sessions.session_id_for(&flow.forward_key);
+                            let session_id = resolved.session_id;
                             // #8125: resolved from the same entry, so the row's
                             // `Timeout:` column reports the window in force.
-                            let timeout_secs = sessions.timeout_secs_for(&flow.forward_key);
+                            let timeout_secs = resolved.timeout_secs;
                             publish_bpf_conntrack_entry_with_source_nat(
                                 conntrack_v4_fd,
                                 conntrack_v6_fd,
@@ -4562,9 +4562,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // #5213: stamp the stable id from the installed
                                 // host-local entry so the mirror row matches
                                 // RT_FLOW.
-                                let session_id = sessions.session_id_for(&flow.forward_key);
+                                let install_info = sessions
+                                    .installed_session_info(&flow.forward_key)
+                                    .expect("successful local session install has a table entry");
+                                let session_id = install_info.session_id;
                                 // #8125: see the sibling site.
-                                let timeout_secs = sessions.timeout_secs_for(&flow.forward_key);
+                                let timeout_secs = install_info.timeout_secs;
                                 publish_bpf_conntrack_entry(
                                     conntrack_v4_fd,
                                     conntrack_v6_fd,
@@ -5512,11 +5515,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                                 source_nat_static,
                                             );
+                                    let forward_install_info = forward_installed.then(|| {
+                                        sessions
+                                            .installed_session_info(&flow.forward_key)
+                                            .expect("successful forward install has a table entry")
+                                    });
                                     if forward_installed {
-                                        sessions.mark_source_nat_revalidated(
-                                            &flow.forward_key,
-                                            source_nat_static,
-                                        );
                                         if let Some(incarnation) = leak_incarnation {
                                             sessions.stamp_leak_incarnation(
                                                 &flow.forward_key,
@@ -5610,8 +5614,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     frag_authority_zone_override,
                                                     frag_authority_nat_scope_ifindex,
                                                 );
-                                            let frag_session_id =
-                                                sessions.session_id_for(&flow.forward_key);
+                                            let frag_session_id = forward_install_info
+                                                .expect("installed forward session info")
+                                                .session_id;
                                             if frag_session_id != 0 {
                                                 if nat64_install_forward_fragment_assoc(
                                                     worker_ctx.forwarding,
@@ -5660,9 +5665,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             // A replica can then announce a close it alone
                                             // sees with the same id the Open delta, the mirror
                                             // row and the #9412 sender memo use (#5212).
-                                            session_id: sessions.session_id_for(&flow.forward_key),
+                                            session_id: forward_install_info
+                                                .expect("installed forward session info")
+                                                .session_id,
                                             tcp_close_class: 0,
-                                            tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key),
+                                            tcp_handshake_state: forward_install_info
+                                                .expect("installed forward session info")
+                                                .handshake_state_wire,
                                         };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
@@ -5741,11 +5750,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // #5213: the stable id of the session
                                         // just installed, so the mirrored row
                                         // reports the SAME id RT_FLOW emits.
-                                        let ct_session_id =
-                                            sessions.session_id_for(&flow.forward_key);
+                                        let install_info = forward_install_info
+                                            .expect("installed forward session info");
+                                        let ct_session_id = install_info.session_id;
                                         // #8125: see the sibling site.
-                                        let ct_timeout_secs =
-                                            sessions.timeout_secs_for(&flow.forward_key);
+                                        let ct_timeout_secs = install_info.timeout_secs;
                                         publish_bpf_conntrack_entry_under_gate_with_source_nat(
                                             conntrack_v4_fd,
                                             conntrack_v6_fd,
@@ -6047,7 +6056,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             // fresh id at install — no carried id.
                                             session_id: 0,
                                             tcp_close_class: 0,
-                                            tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key),
+                                            tcp_handshake_state: forward_install_info
+                                                .expect("installed forward session info")
+                                                .handshake_state_wire,
                                             source_nat_static: None,
                                         };
                                         publish_shared_session(
@@ -9876,11 +9887,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                                 source_nat_static,
                                             );
+                                    let pending_install_info = pending_installed.then(|| {
+                                        sessions
+                                            .installed_session_info(&flow.forward_key)
+                                            .expect("successful neighbor seed has a table entry")
+                                    });
                                     if pending_installed {
-                                        sessions.mark_source_nat_revalidated(
-                                            &flow.forward_key,
-                                            source_nat_static,
-                                        );
                                         if let Some(incarnation) = pending_leak_incarnation {
                                             sessions.stamp_leak_incarnation(
                                                 &flow.forward_key,
@@ -9916,9 +9928,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             generation: 0,
                                             // #9582: carry the seed's stable id, so replicas
                                             // adopt it (see the forward-flow publish above).
-                                            session_id: sessions.session_id_for(&flow.forward_key),
+                                            session_id: pending_install_info
+                                                .expect("installed neighbor seed info")
+                                                .session_id,
                                             tcp_close_class: 0,
-                                            tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key),
+                                            tcp_handshake_state: pending_install_info
+                                                .expect("installed neighbor seed info")
+                                                .handshake_state_wire,
                                         };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
@@ -9963,10 +9979,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // #5213: stable id from the just-installed
                                         // neighbor-seed entry so the mirror row
                                         // matches RT_FLOW.
-                                        let session_id = sessions.session_id_for(&flow.forward_key);
+                                        let install_info = pending_install_info
+                                            .expect("installed neighbor seed info");
+                                        let session_id = install_info.session_id;
                                         // #8125: see the sibling site.
-                                        let timeout_secs =
-                                            sessions.timeout_secs_for(&flow.forward_key);
+                                        let timeout_secs = install_info.timeout_secs;
                                         publish_bpf_conntrack_entry_with_source_nat(
                                             conntrack_v4_fd,
                                             conntrack_v6_fd,
