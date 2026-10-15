@@ -3,8 +3,11 @@ package fwdstatus
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // #13237 (D5-08): a helper restart mid-window resets cumulative worker
@@ -56,6 +59,60 @@ func TestComputeCPUWindows_MidWindowDaemonReset(t *testing.T) {
 }
 
 // Concurrent sample() calls must protect lastWorker* state with s.mu.
+type interleavedCacheProvider struct {
+	calls   int32
+	entered chan struct{}
+	release chan struct{}
+	status  userspace.ProcessStatus
+}
+
+func (p *interleavedCacheProvider) CachedStatus() (userspace.ProcessStatus, bool) {
+	if atomic.AddInt32(&p.calls, 1) == 1 {
+		close(p.entered)
+		<-p.release
+		return userspace.ProcessStatus{}, false
+	}
+	return p.status, true
+}
+
+// A cache miss must load the saved counters only after acquiring the final
+// lock. Otherwise a delayed miss can overwrite newer counters committed by
+// another sample call while the miss is blocked in CachedStatus().
+func TestSamplerCacheMissDoesNotRollbackCounters(t *testing.T) {
+	now := time.Now()
+	provider := &interleavedCacheProvider{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		status: userspace.ProcessStatus{
+			WorkerRuntime: []userspace.WorkerRuntimeStatus{
+				{ThreadCPUNS: 700, WallNS: 900},
+			},
+		},
+	}
+	s := NewSampler(provider, fixedProcReader{})
+	missDone := make(chan struct{})
+	go func() {
+		s.sample(now)
+		close(missDone)
+	}()
+
+	<-provider.entered
+	s.sample(now.Add(time.Second))
+	close(provider.release)
+	<-missDone
+
+	snap := s.Snapshot()
+	if got := snap.Samples[len(snap.Samples)-1]; got.workerThreadNs != 700 || got.workerWallNs != 900 {
+		t.Errorf("delayed cache miss appended stale worker counters %d/%d; want latest 700/900",
+			got.workerThreadNs, got.workerWallNs)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastWorkerThread != 700 || s.lastWorkerWall != 900 {
+		t.Errorf("delayed cache miss rolled back saved counters to %d/%d; want 700/900",
+			s.lastWorkerThread, s.lastWorkerWall)
+	}
+}
 func TestSamplerConcurrentSampleRaceFree(t *testing.T) {
 	s := NewSampler(nil, fixedProcReader{})
 	base := time.Now()

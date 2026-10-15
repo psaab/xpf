@@ -116,14 +116,12 @@ func (s *Sampler) sample(now time.Time) {
 	// independent 1 Hz "status" requests doubled the shared
 	// control-socket rate and starved session installs during bulk
 	// sync (CLAUDE.md "Control socket contention"). CachedStatus()
-	// MUST NOT touch the control socket; on a miss (helper not yet
-	// polled) the worker counters hold at their previous values,
-	// preserving series monotonicity exactly as the old Status()
-	// error path did. #2114: the provider IS a CachedStatusProvider
-	// now — the per-tick type assertion is gone.
-	s.mu.Lock()
-	workerThread, workerWall := s.lastWorkerThread, s.lastWorkerWall
-	s.mu.Unlock()
+	// MUST NOT touch the control socket; a cache miss holds prior values.
+	// on a cache miss, saved counters are reused under the ring lock,
+	// preserving series monotonicity as the old Status() error path did.
+	// #2114: the provider IS a CachedStatusProvider now — the per-tick
+	// type assertion is gone.
+	var workerThread, workerWall uint64
 	workerHeld := false
 	if s.dp != nil {
 		if st, ok := s.dp.CachedStatus(); ok {
@@ -139,6 +137,13 @@ func (s *Sampler) sample(now time.Time) {
 	}
 
 	s.mu.Lock()
+	// Select held counters under the same lock that appends the sample.
+	// A cache miss may have blocked while another sample committed newer
+	// values; reading before CachedStatus would roll that state backward.
+	if s.dp == nil || workerHeld {
+		workerThread, workerWall = s.lastWorkerThread, s.lastWorkerWall
+	}
+
 	s.ring[s.head] = cpuSample{
 		wall:           now,
 		daemonCPUNs:    daemonNs,
