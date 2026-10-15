@@ -1121,6 +1121,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.journalPermsDegraded
 	ch <- c.userspacePolicyContentRejected
 	ch <- c.userspaceZoneIDCollision
+	ch <- c.routeListenerMarks
+	ch <- c.routeListenerRepublishes
 	ch <- c.ipmonPolicyFailed
 	ch <- c.ipmonPolicyTransitions
 	ch <- c.ipmonRoutesApplied
@@ -1195,6 +1197,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.workerIdleLoops
 	ch <- c.workerCoSQueueLeaseAcquireV8Calls
 	ch <- c.workerCoSQueueLeaseAcquireV8GrantedBytes
+	ch <- c.workerSessionVolumeHighWater
 	ch <- c.workerCoSWheelTicksAdvancedTotal
 	ch <- c.workerCoSWheelTicksAdvancedMax
 	ch <- c.workerCoSQueueLeaseUndergrant

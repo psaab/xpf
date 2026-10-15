@@ -3,6 +3,7 @@ package api
 import (
 	"net"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -464,9 +465,10 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 				{RemoteAddr: "10.0.0.9:514", Protocol: "udp", Writes: 2},
 			}
 		},
-		// #1827: wire a non-nil ip-monitoring status source so the
-		// xpf_ipmon_* family emits and the canary covers its
-		// descriptor declarations.
+		// #13242: emit both route-listener counters so the pedantic registry
+		// checks their descriptors against Describe().
+		routeListenerMarksFn:       func() uint64 { return 7 },
+		routeListenerRepublishesFn: func() uint64 { return 3 },
 		ipmonStatusFn: func() []ipmon.PolicyStatus {
 			return []ipmon.PolicyStatus{{
 				Name:        "wan-failover",
@@ -519,9 +521,12 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		t.Logf("dhcp.New unavailable in this environment (%v); skipping the "+
 			"DHCP descriptor family only", err)
 	}
+	workerVolume := uint64(11)
+	status := populatedCoverageStatus()
+	status.WorkerRuntime[0].SessionVolumeHighWater = &workerVolume
 	srv.dp = &descriptorCoverageDP{
 		Manager: dataplane.New(),
-		status:  populatedCoverageStatus(),
+		status:  status,
 		apply: &dataplane.ApplyResult{
 			ZoneIDs:   map[string]uint16{"trust": 1, "untrust": 2},
 			FilterIDs: map[string]uint32{"inet:fin": 0, "inet6:fin6": 100},
@@ -544,7 +549,8 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 	}
 
 	reg := prometheus.NewPedanticRegistry()
-	reg.MustRegister(newCollector(srv))
+	collector := newCollector(srv)
+	reg.MustRegister(collector)
 
 	mfs, err := reg.Gather()
 	if err != nil {
@@ -557,6 +563,31 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 	if len(mfs) == 0 {
 		t.Fatal("collector emitted no metric families — fixture/dp not wired " +
 			"(canary would be vacuous)")
+	}
+	described := describedSet(collector)
+	collectorValue := reflect.ValueOf(collector).Elem()
+	collectorType := collectorValue.Type()
+	descType := reflect.TypeOf((*prometheus.Desc)(nil))
+	for i := range collectorType.NumField() {
+		field := collectorType.Field(i)
+		if field.Type != descType {
+			continue
+		}
+		desc := collectorValue.Field(i)
+		if desc.IsNil() {
+			t.Errorf("collector descriptor field %s is nil", field.Name)
+			continue
+		}
+		found := false
+		for declared := range described {
+			if reflect.ValueOf(declared).Pointer() == desc.Pointer() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("collector descriptor field %s is missing from Describe()", field.Name)
+		}
 	}
 
 	for _, mf := range mfs {
@@ -844,15 +875,17 @@ func TestFairnessThroughputDescriptorCoverage(t *testing.T) {
 
 // describedSet captures the full Describe() descriptor set of a collector.
 func describedSet(c *xpfCollector) map[*prometheus.Desc]struct{} {
-	// Buffer must hold the FULL Describe() set (sent synchronously before the
-	// drain); size comfortably above the descriptor count so adding a
-	// descriptor does not silently deadlock this capture.
-	ch := make(chan *prometheus.Desc, 512)
-	c.Describe(ch)
-	close(ch)
+	ch := make(chan *prometheus.Desc)
+	done := make(chan struct{})
+	go func() {
+		c.Describe(ch)
+		close(ch)
+		close(done)
+	}()
 	out := map[*prometheus.Desc]struct{}{}
 	for d := range ch {
 		out[d] = struct{}{}
 	}
+	<-done
 	return out
 }
