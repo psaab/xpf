@@ -192,6 +192,70 @@ impl SessionTable {
             record.entry.origin,
         ))
     }
+    /// Expiry-aware lookup that distinguishes an idle-crossed indexed record
+    /// from an absent key without probing `key_to_handle` a second time.
+    pub(crate) fn probe_with_origin_expiry(
+        &self,
+        key: &SessionKey,
+        now_ns: u64,
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
+        let Some(record) = self.probe_record_with_origin(key) else {
+            return SessionExpiryProbe::Absent;
+        };
+        if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
+            return SessionExpiryProbe::IdleCrossed;
+        }
+        SessionExpiryProbe::Live((
+            SessionLookup {
+                decision: record.entry.decision,
+                metadata: record.entry.metadata.clone_without_policy_counter(),
+                forwarding_generation: record.entry.forwarding_generation,
+            },
+            record.entry.origin,
+        ))
+    }
+
+    /// Expiry-aware forward-wire match with stale/local-miss distinction from
+    /// the same candidate walk.
+    pub(crate) fn find_forward_wire_match_expiry(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: u64,
+    ) -> SessionExpiryProbe<(ForwardSessionMatch, SessionOrigin)> {
+        let Some(bucket) = self.forward_wire_index.get(wire_key) else {
+            return SessionExpiryProbe::Absent;
+        };
+        let mut idle_crossed = false;
+        for &handle in bucket.iter() {
+            let Some(record) = self.entries.get(handle as usize) else {
+                continue;
+            };
+            let entry = &record.entry;
+            if entry.metadata.is_reverse
+                || forward_wire_key(&record.key, entry.decision.nat) != *wire_key
+            {
+                continue;
+            }
+            if now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns {
+                idle_crossed = true;
+                continue;
+            }
+            return SessionExpiryProbe::Live((
+                ForwardSessionMatch {
+                    key: record.key.clone(),
+                    decision: entry.decision,
+                    metadata: entry.metadata.clone(),
+                    forwarding_generation: entry.forwarding_generation,
+                },
+                entry.origin,
+            ));
+        }
+        if idle_crossed {
+            SessionExpiryProbe::IdleCrossed
+        } else {
+            SessionExpiryProbe::Absent
+        }
+    }
 
     pub fn lookup_with_origin(
         &mut self,
@@ -691,6 +755,69 @@ impl SessionTable {
         F: Fn(i32) -> u32,
     {
         self.find_forward_nat_match_inner(reply_key, Some(now_ns), &egress_routing_domain)
+    }
+    /// Expiry-aware NAT lookup that records stale candidates during the same
+    /// reverse-index walk used to select a live candidate.
+    pub(crate) fn find_forward_nat_match_expiry<F>(
+        &self,
+        reply_key: &SessionKey,
+        now_ns: u64,
+        egress_routing_domain: F,
+    ) -> ForwardNatExpiryProbe
+    where
+        F: Fn(i32) -> u32,
+    {
+        let zeroed;
+        let probe: &SessionKey = if reply_key.routing_domain == 0 {
+            reply_key
+        } else {
+            zeroed = reverse_match_key(reply_key);
+            &zeroed
+        };
+        let Some(bucket) = self.nat_reverse_index.get(probe) else {
+            return ForwardNatExpiryProbe::Absent;
+        };
+        let mut idle_crossed = false;
+        for &handle in bucket.iter() {
+            let Some(record) = self.entries.get(handle as usize) else {
+                continue;
+            };
+            let entry = &record.entry;
+            if entry.metadata.is_reverse
+                || !reply_matches_forward_session(&record.key, entry.decision.nat, probe)
+            {
+                continue;
+            }
+            let forward_domain = record.key.routing_domain;
+            if (crate::session::is_quarantined_routing_domain(forward_domain)
+                || crate::session::is_quarantined_routing_domain(reply_key.routing_domain))
+                && forward_domain != reply_key.routing_domain
+            {
+                continue;
+            }
+            if !crate::session::is_quarantined_routing_domain(forward_domain)
+                && !crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+                && egress_routing_domain(entry.decision.resolution.egress_ifindex)
+                    != reply_key.routing_domain
+            {
+                continue;
+            }
+            if now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns {
+                idle_crossed = true;
+                continue;
+            }
+            return ForwardNatExpiryProbe::Live(ForwardSessionMatch {
+                key: record.key.clone(),
+                decision: entry.decision,
+                metadata: entry.metadata.clone(),
+                forwarding_generation: entry.forwarding_generation,
+            });
+        }
+        if idle_crossed {
+            ForwardNatExpiryProbe::IdleCrossed
+        } else {
+            ForwardNatExpiryProbe::Absent
+        }
     }
 
     /// Find a live forward NAT candidate for an embedded quote without

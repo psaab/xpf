@@ -98,6 +98,35 @@ pub(in crate::session) fn metadata() -> SessionMetadata {
 }
 
 #[test]
+fn expiry_probe_classifies_live_idle_crossed_and_absent_13078() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        10,
+        PROTO_TCP,
+        0,
+    ));
+
+    assert!(matches!(
+        table.probe_with_origin_expiry(&key, 10),
+        SessionExpiryProbe::Live(_)
+    ));
+    assert_eq!(
+        table.probe_with_origin_expiry(&key, u64::MAX),
+        SessionExpiryProbe::IdleCrossed,
+        "an expired indexed entry is distinct from a missing key"
+    );
+    assert_eq!(
+        table.probe_with_origin_expiry(&key_v6(), 10),
+        SessionExpiryProbe::Absent,
+        "an absent index row stays absent"
+    );
+}
+
+#[test]
 fn pmech_install_reserves_reply_alias_and_local_capacity() {
     let mut forward_key = key_v4();
     forward_key.src_ip = IpAddr::V4(Ipv4Addr::new(10, 95, 6, 1));
