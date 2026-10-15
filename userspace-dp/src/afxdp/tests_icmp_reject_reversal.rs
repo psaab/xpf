@@ -1827,3 +1827,80 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
     );
 }
 
+
+/// #13650: embedded-ICMP NAT builders must not rewrite bytes 4..6 of a
+/// QUOTED ICMP/ICMPv6 message unless it is identifier-bearing. For a
+/// quoted Destination-Unreachable those bytes are the unused/MTU word,
+/// not an echo Identifier. Echo quotes keep the rewrite (control), and
+/// the quoted ICMPv6 checksum must verify over the egress pseudo-header.
+#[test]
+fn icmp_embed_builder_nonbearing_quoted_icmp_keeps_word_13650() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    let mut frame = build_icmp_te_frame_v4(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_ICMP);
+    let emb_l4 = 14 + 20 + 8 + 20;
+    frame[emb_l4] = 3;
+    frame[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&0x1234u16.to_be_bytes());
+    let m4 = EmbeddedIcmpMatch {
+        nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_src_port: Some(snat_port), ..NatDecision::default() },
+        original_src: IpAddr::V4(client_ip), original_src_port: client_port,
+        original_dst: IpAddr::V4(server_ip), original_dst_port: 80,
+        embedded_proto: PROTO_ICMP,
+        resolution: icmp_err_resolution_v4(client_ip),
+        metadata: icmp_err_metadata(), related_expected_zone: 0, outbound_snat: false,
+        budget_key: icmp_budget_test_key(),
+    };
+    let out = build_nat_reversed_icmp_error_v4(&frame, icmp_err_meta_v4(), &m4).expect("v4 reversal builds");
+    assert_eq!(&out[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes(),
+        "#13650: quoted ICMPv4 Dest-Unreach bytes 4..6 must not be rewritten as an identifier");
+    assert_eq!(out[emb_l4], 3);
+    let mut echo_frame = frame.clone();
+    echo_frame[emb_l4] = 8;
+    echo_frame[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&snat_port.to_be_bytes());
+    let out_echo = build_nat_reversed_icmp_error_v4(&echo_frame, icmp_err_meta_v4(), &m4).expect("v4 echo reversal builds");
+    assert_eq!(&out_echo[emb_l4 + 4..emb_l4 + 6], &client_port.to_be_bytes(),
+        "quoted Echo Request identifier must still be restored");
+    let out_snat = build_snat_outbound_icmp_error_v4(&frame, icmp_err_meta_v4(), &m4).expect("v4 snat-outbound builds");
+    assert_eq!(&out_snat[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes(),
+        "#13650: SNAT-outbound quoted ICMPv4 Dest-Unreach bytes 4..6 must not be rewritten");
+
+    let router6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let snat6: Ipv6Addr = "2001:db8:1::100".parse().unwrap();
+    let client6: Ipv6Addr = "fd00::102".parse().unwrap();
+    let server6: Ipv6Addr = "2001:db8:2::1".parse().unwrap();
+    let mut frame6 = build_icmpv6_te_frame(router6, snat6, server6, snat_port, 80, PROTO_ICMPV6);
+    let emb6_l4 = 14 + 40 + 8 + 40;
+    frame6[emb6_l4] = 1;
+    frame6[emb6_l4 + 4..emb6_l4 + 6].copy_from_slice(&0x1234u16.to_be_bytes());
+    frame6[emb6_l4 + 2..emb6_l4 + 4].copy_from_slice(&[0, 0]);
+    let valid_csum = checksum16_ipv6(client6, server6, PROTO_ICMPV6, &frame6[emb6_l4..emb6_l4 + 8]);
+    frame6[emb6_l4 + 2..emb6_l4 + 4].copy_from_slice(&valid_csum.to_be_bytes());
+    let mut m6 = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
+    m6.embedded_proto = PROTO_ICMPV6;
+    m6.original_dst = IpAddr::V6(server6);
+    let meta6 = icmpv6_te_meta(54);
+    let out6 = build_nat_reversed_icmp_error_v6(&frame6, meta6, &m6).expect("v6 reversal builds");
+    assert_eq!(&out6[emb6_l4 + 4..emb6_l4 + 6], &0x1234u16.to_be_bytes(),
+        "#13650: quoted ICMPv6 Dest-Unreach bytes 4..6 must not be rewritten as an identifier");
+    let stored = u16::from_be_bytes([out6[emb6_l4 + 2], out6[emb6_l4 + 3]]);
+    let verify = checksum16_ipv6(client6, server6, PROTO_ICMPV6, &out6[emb6_l4..emb6_l4 + 8]);
+    assert_eq!(verify, 0, "#13650: quoted ICMPv6 checksum must verify over egress pseudo-header (stored {stored:#06x})");
+    let mut echo6 = frame6.clone();
+    echo6[emb6_l4] = 128;
+    echo6[emb6_l4 + 4..emb6_l4 + 6].copy_from_slice(&snat_port.to_be_bytes());
+    echo6[emb6_l4 + 2..emb6_l4 + 4].copy_from_slice(&[0, 0]);
+    let ec = checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &echo6[emb6_l4..emb6_l4 + 8]);
+    echo6[emb6_l4 + 2..emb6_l4 + 4].copy_from_slice(&ec.to_be_bytes());
+    let out6_echo = build_nat_reversed_icmp_error_v6(&echo6, meta6, &m6).expect("v6 echo reversal builds");
+    assert_eq!(&out6_echo[emb6_l4 + 4..emb6_l4 + 6], &client_port.to_be_bytes(),
+        "quoted ICMPv6 Echo Request identifier must still be restored");
+    let verify_echo = checksum16_ipv6(client6, server6, PROTO_ICMPV6, &out6_echo[emb6_l4..emb6_l4 + 8]);
+    assert_eq!(verify_echo, 0, "quoted ICMPv6 echo checksum must verify over egress pseudo-header after address+identifier delta");
+    let out6_snat = build_snat_outbound_icmp_error_v6(&frame6, meta6, &m6).expect("v6 snat-outbound builds");
+    assert_eq!(&out6_snat[emb6_l4 + 4..emb6_l4 + 6], &0x1234u16.to_be_bytes(),
+        "#13650: SNAT-outbound quoted ICMPv6 Dest-Unreach bytes 4..6 must not be rewritten");
+}
