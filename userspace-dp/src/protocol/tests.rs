@@ -3822,3 +3822,21 @@ fn process_status_s5_reinject_absent_vs_zero_and_written_not_delivered_10478() {
         assert_eq!(zero_block[key], 0, "zero counter {key} must be explicit");
     }
 }
+
+#[test]
+fn process_status_nptv6_counters_roundtrip() {
+    let status = ProcessStatus {
+        nptv6_inbound_translations: 2,
+        nptv6_outbound_translations: 3,
+        nptv6_untranslatable_drops: 5,
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&status).expect("serialize NPTv6 status");
+    assert_eq!(value["nptv6_inbound_translations"], 2);
+    assert_eq!(value["nptv6_outbound_translations"], 3);
+    assert_eq!(value["nptv6_untranslatable_drops"], 5);
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize NPTv6 status");
+    assert_eq!(back.nptv6_inbound_translations, 2);
+    assert_eq!(back.nptv6_outbound_translations, 3);
+    assert_eq!(back.nptv6_untranslatable_drops, 5);
+}

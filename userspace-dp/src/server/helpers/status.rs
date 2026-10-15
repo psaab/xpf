@@ -588,6 +588,10 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.cos_active_flow_counts_truncated = cos_active_flow_counts_truncated;
     state.status.policy_rule_counters = state.afxdp.policy_rule_counters();
     state.status.nat_rule_counters = state.afxdp.nat_rule_counters();
+    let nptv6 = state.afxdp.nptv6_counters();
+    state.status.nptv6_inbound_translations = nptv6.inbound_translations;
+    state.status.nptv6_outbound_translations = nptv6.outbound_translations;
+    state.status.nptv6_untranslatable_drops = nptv6.untranslatable_drops;
     state.status.filter_term_counters = state.afxdp.filter_term_counters();
     // #3651: publish the pre-summed per-zone traffic block. Stamp the layout
     // version only when there is data (rows or overflow) so a helper with no

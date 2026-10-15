@@ -806,7 +806,11 @@ fn build_fallible_forwarding_state(
     // assigned, and it fast-outs before any work when no prefix contributes a
     // domain.
     crate::nat::wire_nat64_overlap_peers(&mut state.source_nat_rules, &mut state.nat64.prefixes);
-    state.nptv6 = Nptv6State::try_from_snapshots(&snapshot.nptv6_rules)?;
+    let mut nptv6 = Nptv6State::try_from_snapshots(&snapshot.nptv6_rules)?;
+    if let Some(previous) = previous {
+        nptv6.retain_counters_from(&previous.nptv6);
+    }
+    state.nptv6 = nptv6;
     state.screen_profiles = build_screen_profiles(snapshot);
     state.screen_missing_profiles = build_screen_missing_profiles(snapshot);
     state.screen_inert_profiles = build_screen_inert_profiles(snapshot);

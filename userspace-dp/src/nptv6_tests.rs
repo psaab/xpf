@@ -6,6 +6,50 @@
 use super::*;
 
 #[test]
+fn nptv6_tracks_inbound_outbound_translations_and_untranslatable_drops() {
+    let state = Nptv6State::from_snapshots(&[
+        Nptv6RuleSnapshot {
+            name: "test".to_string(),
+            from_zone: String::new(),
+            internal_prefix: "fd00:1::/48".to_string(),
+            external_prefix: "2001:db8:1::/48".to_string(),
+        },
+        Nptv6RuleSnapshot {
+            name: "zero-iid".to_string(),
+            from_zone: String::new(),
+            internal_prefix: "fd00:2:0:1::/64".to_string(),
+            external_prefix: "2001:db8:2:0::/64".to_string(),
+        },
+    ]);
+    let mut dst: Ipv6Addr = "2001:db8:1:abcd::1".parse().unwrap();
+    assert_eq!(
+        state.translate_inbound_result(&mut dst, ""),
+        Nptv6Translation::Translated
+    );
+    state.record_translation(true);
+    let mut src: Ipv6Addr = "fd00:1:0:abcd::1".parse().unwrap();
+    assert_eq!(
+        state.translate_outbound_result(&mut src, ""),
+        Nptv6Translation::Translated
+    );
+    state.record_translation(false);
+    let mut bad_dst: Ipv6Addr = "2001:db8:2::".parse().unwrap();
+    assert_eq!(
+        state.translate_inbound_result(&mut bad_dst, ""),
+        Nptv6Translation::Untranslatable
+    );
+    state.record_untranslatable_drop();
+    let counters = state.counters();
+    assert_eq!(counters.inbound_translations, 1);
+    assert_eq!(counters.outbound_translations, 1);
+    assert_eq!(counters.untranslatable_drops, 1);
+    let mut replacement = Nptv6State::from_snapshots(&[]);
+    replacement.retain_counters_from(&state);
+    replacement.record_translation(true);
+    assert_eq!(state.counters().inbound_translations, 2);
+}
+
+#[test]
 fn parse_prefix_48() {
     let (prefix, words) = parse_prefix("2001:db8:1::/48").unwrap();
     assert_eq!(words, 3);
