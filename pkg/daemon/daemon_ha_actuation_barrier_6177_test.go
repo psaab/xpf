@@ -254,6 +254,51 @@ func TestFailoverActuationBarrier_BatchTakesTheFirstFailure(t *testing.T) {
 	}
 }
 
+// TestFailoverActuationBarrier_BatchFailureConsumesSiblingBarriers is the
+// #13221 regression: when the FIRST RG in a batch fails, the batch wait must
+// still release every sibling barrier (resolved ones consumed, unresolved
+// ones disarmed) instead of leaking them in failoverActuateWait for the
+// daemon's lifetime. The pre-fix early return only failed when the LAST
+// member failed, which is why the sibling test above never saw the leak.
+//
+// Fail-on-revert: restore the early return in waitFailoverActuatedBatch and
+// the resolved-sibling leak assertion fails; the second case also pins that
+// unresolved siblings are disarmed without waiting through their timeout.
+func TestFailoverActuationBarrier_BatchFailureConsumesSiblingBarriers(t *testing.T) {
+	// Case 1: sibling already resolved successfully before the batch wait.
+	d := newBarrierDaemon(150 * time.Millisecond)
+	for _, rgID := range []int{1, 2} {
+		d.armFailoverActuation(rgID, 42)
+	}
+	d.signalFailoverActuationFailed(1, errFenceRejected)
+	d.signalFailoverActuated(2)
+	if err := d.waitFailoverActuatedBatch([]int{1, 2}, 42); !errors.Is(err, errFenceRejected) {
+		t.Fatalf("batch verdict = %v, want the first member's rejection", err)
+	}
+	if n := armedBarriers(d); n != 0 {
+		t.Fatalf("armed barriers after failed batch (resolved sibling) = %d, want 0", n)
+	}
+
+	// Case 2: sibling never resolves; it must be disarmed, not waited on for
+	// its full timeout and not leaked.
+	d = newBarrierDaemon(150 * time.Millisecond)
+	for _, rgID := range []int{1, 2, 3} {
+		d.armFailoverActuation(rgID, 43)
+	}
+	d.signalFailoverActuationFailed(1, errFenceRejected)
+	d.signalFailoverActuated(3)
+	start := time.Now()
+	if err := d.waitFailoverActuatedBatch([]int{1, 2, 3}, 43); !errors.Is(err, errFenceRejected) {
+		t.Fatalf("batch verdict = %v, want the first member's rejection", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 150*time.Millisecond {
+		t.Fatalf("failed batch took %v; siblings must be released without waiting out their timeout", elapsed)
+	}
+	if n := armedBarriers(d); n != 0 {
+		t.Fatalf("armed barriers after failed batch (unresolved sibling) = %d, want 0", n)
+	}
+}
+
 // TestFailoverActuationBarrier_ResolveIsIdempotentUnderConcurrency drives the
 // double-close path the demotion handler can reach when two events for one RG
 // land back to back, and lets -race see the arm/resolve/wait interleaving. A
