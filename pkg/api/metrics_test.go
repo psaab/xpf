@@ -1194,8 +1194,8 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
-		userspacePptpUnassociatedDrops: prometheus.NewDesc(
-			"xpf_userspace_pptp_unassociated_drops_total", "pptp", nil, nil,
+		userspacePptpUnassociatedPackets: prometheus.NewDesc(
+			"xpf_userspace_pptp_unassociated_packets_total", "pptp", nil, nil,
 		),
 		userspacePptpExpiredIdle: prometheus.NewDesc(
 			"xpf_userspace_pptp_expired_idle_total", "pptp", nil, nil,
@@ -1783,7 +1783,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		SessionCreateDrops:             9,
 		SessionInstallAdmissionRefused: 8,
 		SessionInstallPartial:          1,
-		PptpUnassociatedDrops:          101,
+		PptpUnassociatedPackets:        101,
 		PptpExpiredIdle:                103,
 		PptpHandleCollisions:           107,
 		PptpAllocatorCollisions:        109,
@@ -2106,7 +2106,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceSessionCreateDrops, nil, 9)
 	assertCounterClose(t, got, c.userspaceSessionInstallAdmissionRefused, nil, 8)
 	assertCounterClose(t, got, c.userspaceSessionInstallPartial, nil, 1)
-	assertCounterClose(t, got, c.userspacePptpUnassociatedDrops, nil, 101)
+	assertCounterClose(t, got, c.userspacePptpUnassociatedPackets, nil, 101)
 	assertCounterClose(t, got, c.userspacePptpExpiredIdle, nil, 103)
 	assertCounterClose(t, got, c.userspacePptpHandleCollisions, nil, 107)
 	assertCounterClose(t, got, c.userspacePptpAllocatorCollisions, nil, 109)

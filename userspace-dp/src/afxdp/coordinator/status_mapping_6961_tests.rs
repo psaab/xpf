@@ -96,7 +96,7 @@ macro_rules! for_each_shared_scalar {
             nat_reverse_key_collisions,
             nat_reverse_key_collisions_distinct_src,
             session_create_drops,
-            pptp_unassociated_drops,
+            pptp_unassociated_packets,
             pptp_expired_idle,
             pptp_handle_collisions,
             pptp_allocator_collisions,

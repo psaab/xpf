@@ -1029,7 +1029,7 @@ fn install_refusal_trio_roundtrip_and_key_absent_defaults() {
         session_create_drops: 7,
         session_install_admission_refused: 5,
         session_install_partial: 1,
-        pptp_unassociated_drops: 11,
+        pptp_unassociated_packets: 11,
         pptp_expired_idle: 13,
         pptp_handle_collisions: 17,
         pptp_allocator_collisions: 19,
@@ -1040,7 +1040,7 @@ fn install_refusal_trio_roundtrip_and_key_absent_defaults() {
     assert_eq!(value["session_create_drops"], 7);
     assert_eq!(value["session_install_admission_refused"], 5);
     assert_eq!(value["session_install_partial"], 1);
-    assert_eq!(value["pptp_unassociated_drops"], 11);
+    assert_eq!(value["pptp_unassociated_packets"], 11);
     assert_eq!(value["pptp_expired_idle"], 13);
     assert_eq!(value["pptp_handle_collisions"], 17);
     assert_eq!(value["pptp_allocator_collisions"], 19);
@@ -1048,7 +1048,7 @@ fn install_refusal_trio_roundtrip_and_key_absent_defaults() {
     assert_eq!(back.session_create_drops, 7);
     assert_eq!(back.session_install_admission_refused, 5);
     assert_eq!(back.session_install_partial, 1);
-    assert_eq!(back.pptp_unassociated_drops, 11);
+    assert_eq!(back.pptp_unassociated_packets, 11);
     assert_eq!(back.pptp_expired_idle, 13);
     assert_eq!(back.pptp_handle_collisions, 17);
     assert_eq!(back.pptp_allocator_collisions, 19);
@@ -1063,7 +1063,7 @@ fn install_refusal_trio_roundtrip_and_key_absent_defaults() {
         "session_create_drops",
         "session_install_admission_refused",
         "session_install_partial",
-        "pptp_unassociated_drops",
+        "pptp_unassociated_packets",
         "pptp_expired_idle",
         "pptp_handle_collisions",
         "pptp_allocator_collisions",
@@ -1081,7 +1081,7 @@ fn install_refusal_trio_roundtrip_and_key_absent_defaults() {
         session_create_drops: 3,
         session_install_admission_refused: 2,
         session_install_partial: 1,
-        pptp_unassociated_drops: 23,
+        pptp_unassociated_packets: 23,
         pptp_expired_idle: 29,
         pptp_handle_collisions: 31,
         pptp_allocator_collisions: 37,
@@ -1089,7 +1089,7 @@ fn install_refusal_trio_roundtrip_and_key_absent_defaults() {
     };
     let value = serde_json::to_value(&worker).expect("serialize WorkerRuntimeStatus to Value");
     assert_eq!(value["session_create_drops"], 3);
-    assert_eq!(value["pptp_unassociated_drops"], 23);
+    assert_eq!(value["pptp_unassociated_packets"], 23);
     assert_eq!(value["pptp_expired_idle"], 29);
     assert_eq!(value["pptp_handle_collisions"], 31);
     assert_eq!(value["pptp_allocator_collisions"], 37);
@@ -1098,7 +1098,7 @@ fn install_refusal_trio_roundtrip_and_key_absent_defaults() {
     assert_eq!(back.session_create_drops, 3);
     assert_eq!(back.session_install_admission_refused, 2);
     assert_eq!(back.session_install_partial, 1);
-    assert_eq!(back.pptp_unassociated_drops, 23);
+    assert_eq!(back.pptp_unassociated_packets, 23);
     assert_eq!(back.pptp_expired_idle, 29);
     assert_eq!(back.pptp_handle_collisions, 31);
     assert_eq!(back.pptp_allocator_collisions, 37);
@@ -1111,7 +1111,7 @@ fn install_refusal_trio_roundtrip_and_key_absent_defaults() {
         "session_create_drops",
         "session_install_admission_refused",
         "session_install_partial",
-        "pptp_unassociated_drops",
+        "pptp_unassociated_packets",
         "pptp_expired_idle",
         "pptp_handle_collisions",
         "pptp_allocator_collisions",

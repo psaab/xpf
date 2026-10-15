@@ -1688,7 +1688,7 @@ impl super::Coordinator {
                     // #4800: per-worker transit new-flow installs.
                     new_flow_installs: s.new_flow_installs,
                     session_create_drops: s.session_create_drops,
-                    pptp_unassociated_drops: s.pptp_unassociated_drops,
+                    pptp_unassociated_packets: s.pptp_unassociated_packets,
                     pptp_expired_idle: s.pptp_expired_idle,
                     pptp_handle_collisions: s.pptp_handle_collisions,
                     pptp_allocator_collisions: s.pptp_allocator_collisions,

@@ -356,7 +356,7 @@ pub(crate) fn run() -> Result<(), String> {
             linked_zstd_version: env!("XPF_LINKED_ZSTD_VERSION").to_string(),
             build_host_libbpf_version: env!("XPF_BUILD_HOST_LIBBPF_VERSION").to_string(),
             started_at: Utc::now(),
-            pptp_unassociated_drops: 0,
+            pptp_unassociated_packets: 0,
             pptp_expired_idle: 0,
             pptp_handle_collisions: 0,
             pptp_allocator_collisions: 0,

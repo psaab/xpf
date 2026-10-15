@@ -1939,7 +1939,7 @@ func TestCoSQueueStatusLeaseClaimFlowWire(t *testing.T) {
 // #13282: raw old-binary-compatible payloads expose missing status fields as
 // a runtime wire regression on the pre-fix branch (rather than a compile error).
 func TestPptpStatusCounterWireKeys13282(t *testing.T) {
-	const raw = `{"pptp_unassociated_drops":11,"pptp_expired_idle":13,"pptp_handle_collisions":17,"pptp_allocator_collisions":19}`
+	const raw = `{"pptp_unassociated_packets":11,"pptp_expired_idle":13,"pptp_handle_collisions":17,"pptp_allocator_collisions":19}`
 	for _, status := range []any{&ProcessStatus{}, &WorkerRuntimeStatus{}} {
 		if err := json.Unmarshal([]byte(raw), status); err != nil {
 			t.Fatalf("unmarshal %T: %v", status, err)
@@ -1953,7 +1953,7 @@ func TestPptpStatusCounterWireKeys13282(t *testing.T) {
 			t.Fatalf("unmarshal %T object: %v", status, err)
 		}
 		for _, key := range []string{
-			"pptp_unassociated_drops",
+			"pptp_unassociated_packets",
 			"pptp_expired_idle",
 			"pptp_handle_collisions",
 			"pptp_allocator_collisions",
@@ -1977,7 +1977,7 @@ func TestProcessStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		SessionCreateDrops:             7,
 		SessionInstallAdmissionRefused: 5,
 		SessionInstallPartial:          1,
-		PptpUnassociatedDrops:          11,
+		PptpUnassociatedPackets:        11,
 		PptpExpiredIdle:                13,
 		PptpHandleCollisions:           17,
 		PptpAllocatorCollisions:        19,
@@ -1994,7 +1994,7 @@ func TestProcessStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		"session_create_drops",
 		"session_install_admission_refused",
 		"session_install_partial",
-		"pptp_unassociated_drops",
+		"pptp_unassociated_packets",
 		"pptp_expired_idle",
 		"pptp_handle_collisions",
 		"pptp_allocator_collisions",
@@ -2011,7 +2011,7 @@ func TestProcessStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 	if back.SessionCreateDrops != in.SessionCreateDrops ||
 		back.SessionInstallAdmissionRefused != in.SessionInstallAdmissionRefused ||
 		back.SessionInstallPartial != in.SessionInstallPartial ||
-		back.PptpUnassociatedDrops != in.PptpUnassociatedDrops ||
+		back.PptpUnassociatedPackets != in.PptpUnassociatedPackets ||
 		back.PptpExpiredIdle != in.PptpExpiredIdle ||
 		back.PptpHandleCollisions != in.PptpHandleCollisions ||
 		back.PptpAllocatorCollisions != in.PptpAllocatorCollisions {
@@ -2038,7 +2038,7 @@ func TestWorkerRuntimeStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		SessionCreateDrops:             3,
 		SessionInstallAdmissionRefused: 2,
 		SessionInstallPartial:          1,
-		PptpUnassociatedDrops:          41,
+		PptpUnassociatedPackets:        41,
 		PptpExpiredIdle:                43,
 		PptpHandleCollisions:           47,
 		PptpAllocatorCollisions:        53,
@@ -2055,7 +2055,7 @@ func TestWorkerRuntimeStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		"session_create_drops",
 		"session_install_admission_refused",
 		"session_install_partial",
-		"pptp_unassociated_drops",
+		"pptp_unassociated_packets",
 		"pptp_expired_idle",
 		"pptp_handle_collisions",
 		"pptp_allocator_collisions",
@@ -2070,7 +2070,7 @@ func TestWorkerRuntimeStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 	}
 	if back.SessionCreateDrops != 3 || back.SessionInstallAdmissionRefused != 2 ||
 		back.SessionInstallPartial != 1 ||
-		back.PptpUnassociatedDrops != 41 || back.PptpExpiredIdle != 43 ||
+		back.PptpUnassociatedPackets != 41 || back.PptpExpiredIdle != 43 ||
 		back.PptpHandleCollisions != 47 || back.PptpAllocatorCollisions != 53 {
 		t.Fatalf("WorkerRuntimeStatus round trip mismatch: got %+v want %+v", back, in)
 	}

@@ -118,7 +118,7 @@ type ProcessStatus struct {
 	SessionCreateDrops             uint64 `json:"session_create_drops,omitempty"`
 	SessionInstallAdmissionRefused uint64 `json:"session_install_admission_refused,omitempty"`
 	SessionInstallPartial          uint64 `json:"session_install_partial,omitempty"`
-	PptpUnassociatedDrops          uint64 `json:"pptp_unassociated_drops,omitempty"`
+	PptpUnassociatedPackets        uint64 `json:"pptp_unassociated_packets,omitempty"`
 	PptpExpiredIdle                uint64 `json:"pptp_expired_idle,omitempty"`
 	PptpHandleCollisions           uint64 `json:"pptp_handle_collisions,omitempty"`
 	PptpAllocatorCollisions        uint64 `json:"pptp_allocator_collisions,omitempty"`
@@ -1176,7 +1176,7 @@ type WorkerRuntimeStatus struct {
 	SessionCreateDrops             uint64 `json:"session_create_drops,omitempty"`
 	SessionInstallAdmissionRefused uint64 `json:"session_install_admission_refused,omitempty"`
 	SessionInstallPartial          uint64 `json:"session_install_partial,omitempty"`
-	PptpUnassociatedDrops          uint64 `json:"pptp_unassociated_drops,omitempty"`
+	PptpUnassociatedPackets        uint64 `json:"pptp_unassociated_packets,omitempty"`
 	PptpExpiredIdle                uint64 `json:"pptp_expired_idle,omitempty"`
 	PptpHandleCollisions           uint64 `json:"pptp_handle_collisions,omitempty"`
 	PptpAllocatorCollisions        uint64 `json:"pptp_allocator_collisions,omitempty"`

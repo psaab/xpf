@@ -230,8 +230,8 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 	c.userspaceSessionGCHealedOnPromote = prometheus.NewDesc("xpf_userspace_session_gc_healed_on_promote_total", "Peer-synced sessions self-healed after local RG promotion.", nil, nil)
 	c.userspaceSessionGCAgedOwnerRGZeroActiveNode = prometheus.NewDesc("xpf_userspace_session_gc_aged_owner_rg_zero_active_node_total", "Owner-RG-zero sessions aged on a node forwarding another RG.", nil, nil)
 	c.userspaceSessionGCKeptAliveByCompanion = prometheus.NewDesc("xpf_userspace_session_gc_kept_alive_by_companion_total", "Idle-crossed session entries retained by their active companion.", nil, nil)
-	c.userspacePptpUnassociatedDrops = prometheus.NewDesc(
-		"xpf_userspace_pptp_unassociated_drops_total",
+	c.userspacePptpUnassociatedPackets = prometheus.NewDesc(
+		"xpf_userspace_pptp_unassociated_packets_total",
 		"Cumulative GREv1 packets without a PPTP association; they remain "+
 			"flowless but are forwarded (#13282).",
 		nil, nil,

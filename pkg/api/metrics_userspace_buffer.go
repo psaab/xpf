@@ -85,8 +85,8 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.SessionInstallPartial),
 	)
-	ch <- prometheus.MustNewConstMetric(c.userspacePptpUnassociatedDrops, prometheus.CounterValue,
-		float64(status.PptpUnassociatedDrops))
+	ch <- prometheus.MustNewConstMetric(c.userspacePptpUnassociatedPackets, prometheus.CounterValue,
+		float64(status.PptpUnassociatedPackets))
 	ch <- prometheus.MustNewConstMetric(c.userspacePptpExpiredIdle, prometheus.CounterValue,
 		float64(status.PptpExpiredIdle))
 	ch <- prometheus.MustNewConstMetric(c.userspacePptpHandleCollisions, prometheus.CounterValue,
