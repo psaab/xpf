@@ -482,26 +482,8 @@ pub(super) fn retry_pending_neigh(
             .pending_neigh
             .remove(&key)
             .expect("key from this map");
-        let mut decision = pkt.decision;
-        // #10683: a packet may have been buffered before this forwarding
-        // snapshot was published. Recheck the immutable selector fence after
-        // neighbor resolution and before any rewrite/TX, including its saved
-        // post-NAT decision.
         let pending_meta: ForwardPacketMeta = pkt.meta.into();
-        if matches!(
-            decision.resolution.disposition,
-            ForwardingDisposition::MissingNeighbor
-                | ForwardingDisposition::ForwardCandidate
-                | ForwardingDisposition::FabricRedirect
-        ) && pending_meta.l3_addrs_unfiltered().is_some_and(|(source, destination)| {
-            forwarding
-                .bindless_ipsec_selector_fence
-                .matches_with_nat(source, destination, decision.nat)
-        }) {
-            counters.touched = true;
-            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
-            continue;
-        }
+        let mut decision = pkt.decision;
         if pending_meta
             .l3_addrs_unfiltered()
             .is_some_and(|(source, _)| {
@@ -640,6 +622,31 @@ pub(super) fn retry_pending_neigh(
                     }
                 }
             }
+        }
+        // #10683 + #13527: recheck the selector fence after retry-time
+        // flowless NAT has populated `decision.nat`. The fence examines both
+        // the original and translated tuples, so running it above the
+        // retry_flowless_fragment_nat block would miss selectors reached only
+        // by the deferred source rewrite.
+        // This is the same late TX safety check as #10683's initial site.
+        if matches!(
+            decision.resolution.disposition,
+            ForwardingDisposition::MissingNeighbor
+                | ForwardingDisposition::ForwardCandidate
+                | ForwardingDisposition::FabricRedirect
+        ) && pending_meta
+            .l3_addrs_unfiltered()
+            .is_some_and(|(source, destination)| {
+                forwarding.bindless_ipsec_selector_fence.matches_with_nat(
+                    source,
+                    destination,
+                    decision.nat,
+                )
+            })
+        {
+            counters.touched = true;
+            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+            continue;
         }
         // #10659 (residual of #9950 F-035): retry-time overlap re-check. A
         // fragment admitted via the MissingNeighbor park-and-retry path was
@@ -855,6 +862,47 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
+        // Match the immediate TX path's TCP segmentation before PMTU/PTB:
+        // without this deferred path submits the oversized whole frame even
+        // when the ordinary dispatcher can split it to the egress MTU.
+        if pkt.meta.protocol == PROTO_TCP && !decision.nat.nat64 {
+            if let Some(segments) = crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame(
+                source_frame,
+                pkt.meta,
+                &decision,
+                forwarding,
+                false,
+                None,
+            ) {
+                let target = binding_by_index_mut(left, binding_index, binding, right, target_idx)
+                    .expect("target index resolved from current binding set");
+                for (segment_index, bytes) in segments.into_iter().enumerate() {
+                    let len = bytes.len();
+                    target.tx_pipeline.pending_tx_local.push_back(TxRequest {
+                        bytes,
+                        expected_ports: None,
+                        expected_addr_family: pkt.meta.addr_family,
+                        expected_protocol: pkt.meta.protocol,
+                        flow_key: (segment_index == 0).then(|| pkt.flow_key.clone()).flatten(),
+                        egress_ifindex: decision.resolution.egress_ifindex,
+                        cos_queue_id: cos.queue_id,
+                        dscp_rewrite: cos.dscp_rewrite,
+                        mirror_clone: false,
+                        overlap_admissions: None,
+                        enqueue_ns: 0,
+                    });
+                    bound_pending_tx_local(target);
+                    target.tx_counters.pending_copy_tx_packets += 1;
+                    dbg.enqueue_ok += 1;
+                    dbg.enqueue_copy += 1;
+                    dbg.tx_bytes_total += len as u64;
+                    dbg.tx_max_frame = dbg.tx_max_frame.max(len as u32);
+                }
+                counters.touched = true;
+                binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+                continue;
+            }
+        }
         // #11410: match the immediate forward ordering. The replay output
         // verdict and target binding have both been resolved above; a
         // discard/reject or missing target binding must not trigger a PTB.
@@ -1508,6 +1556,9 @@ mod deferred_verdict_tests;
 #[cfg(test)]
 #[path = "neighbor_dispatch_ipsec_selector_fence_10683_tests.rs"]
 mod ipsec_selector_fence_10683_tests;
+#[cfg(test)]
+#[path = "neighbor_dispatch_retry_nat_fence_13527_tests.rs"]
+mod retry_nat_fence_13527_tests;
 #[cfg(test)]
 #[path = "neighbor_dispatch_seed_timeout_10267_tests.rs"]
 mod seed_timeout_10267_tests;
