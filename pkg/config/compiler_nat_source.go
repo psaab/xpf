@@ -1111,6 +1111,8 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 			// review).
 			for _, thenNode := range ruleInst.node.FindChildren("then") {
 				rule.Then = NATThen{}
+				rule.unknownThenLeaves = nil
+				rule.thenAuthored = natThenAuthoredOccurrences(thenNode, "source-nat")
 				recordSourceNATUnknownThen(rule, thenNode)
 				// #7014: the FULLY-COMPACT authoring `then source-nat off;`
 				// packs every token onto the `then` node itself, so there is no
@@ -1180,17 +1182,8 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 				}
 			}
 
-			// #7013: record what ONE `then` container authored, so a block that
-			// named the same pool twice is still visible after NATThen's scalar
-			// collapsed it. Kept PER CONTAINER, not summed: duplicate `then`
-			// containers are #3850's accepted last-wins, and summing across them
-			// false-rejects a config the suite already pins as legal. The worst
-			// single container is the one worth reporting.
-			for _, thenNode := range ruleInst.node.FindChildren("then") {
-				if c := natThenAuthoredOccurrences(thenNode, "source-nat"); c.worseThan(rule.thenAuthored) {
-					rule.thenAuthored = c
-				}
-			}
+			// thenAuthored, unknownThenLeaves, and Then are all scoped to the
+			// winning `then` container (#3850 last-wins).
 			// #9874: poison a rule whose authored `match` constrains nothing, so
 			// the tolerant load / peer-sync path ships it fail-closed instead of
 			// as an unconstrained catch-all. The SAME predicate the #8430 strict
