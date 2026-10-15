@@ -995,7 +995,7 @@ type SessionCloseData struct {
 // actual start; report a zero-duration flow at its close time instead of
 // presenting a heuristic as measured data. The bool reports a missing stamp
 // so exporters can retain their EstimatedDurations counter.
-func flowStartTime(rec logging.EventRecord) (time.Time, bool) {
+func flowStartTime(rec logging.EventRecord) (time.Time, bool, bool) {
 	if rec.Created > 0 {
 		// #2853: combine the integer Unix second (rec.Created) with the
 		// sub-second nanosecond remainder (rec.CreatedNanos, carried on the
@@ -1012,11 +1012,11 @@ func flowStartTime(rec logging.EventRecord) (time.Time, bool) {
 		// across the monotonic→wall conversion): clamp to the EndTime so the
 		// flow never reports a negative duration.
 		if created.After(rec.Time) {
-			return rec.Time, false
+			return rec.Time, false, true
 		}
-		return created, false
+		return created, false, false
 	}
-	return rec.Time, true
+	return rec.Time, true, false
 }
 
 // resolvePostNAT returns the post-NAT tuple for a flow record, falling back

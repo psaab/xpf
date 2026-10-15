@@ -87,4 +87,21 @@ func (c *xpfCollector) initFlowExportDescriptors() {
 		"xpf_flowexport_routemask_cache_entries",
 		"Current number of cached route-mask entries.", nil, nil,
 	)
+	// #13305: flow-record data-quality events, per configured exporter group.
+	labels := []string{"protocol", "instance", "template", "family"}
+	c.flowExportRouteMaskUnresolvedTotal = prometheus.NewDesc(
+		"xpf_flow_export_route_mask_unresolved_total",
+		"Total exported source/destination route-mask halves unresolved in the FIB.",
+		labels, nil,
+	)
+	c.flowExportMissingStartTimeTotal = prometheus.NewDesc(
+		"xpf_flow_export_missing_start_time_total",
+		"Total exported close records without a session creation timestamp.",
+		labels, nil,
+	)
+	c.flowExportClockSkewClampedTotal = prometheus.NewDesc(
+		"xpf_flow_export_clock_skew_clamped_total",
+		"Total exported close records whose future creation timestamp was clamped to the close time.",
+		labels, nil,
+	)
 }

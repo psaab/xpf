@@ -362,3 +362,38 @@ func TestFlowExportCollectorMetricsLabelSet(t *testing.T) {
 		}
 	}
 }
+
+// #13305 (D6-04): flow-export data-quality counters must reach Prometheus,
+// not remain stranded behind exporter-only getters.
+func TestFlowExportDataQualityMetrics13305(t *testing.T) {
+	s := &Server{
+		flowExportBatchStatsFn: func() []flowexport.ExporterBatchStats {
+			return []flowexport.ExporterBatchStats{{
+				Protocol: "netflow-v9", Instance: "i", Template: "t", Family: "ipv4",
+				RouteMaskUnresolved: 2, EstimatedDurations: 3, ClockSkewClamped: 4,
+			}}
+		},
+	}
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(newCollector(s))
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	want := map[string]float64{
+		"xpf_flow_export_route_mask_unresolved_total": 2,
+		"xpf_flow_export_missing_start_time_total":    3,
+		"xpf_flow_export_clock_skew_clamped_total":    4,
+	}
+	values := make(map[string]float64, len(mfs))
+	for _, mf := range mfs {
+		if len(mf.GetMetric()) > 0 && mf.GetMetric()[0].GetCounter() != nil {
+			values[mf.GetName()] = mf.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+	for name, value := range want {
+		if got, ok := values[name]; !ok || got != value {
+			t.Errorf("%s = %v (present=%v), want %v", name, got, ok, value)
+		}
+	}
+}

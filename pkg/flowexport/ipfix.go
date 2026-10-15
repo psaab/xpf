@@ -779,6 +779,9 @@ type IPFIXExporter struct {
 	// exported as an unresolved 0 (no FIB route / cold cache) rather than a
 	// real matched-route prefix length.
 	routeMaskUnresolved atomic.Uint64
+	// #13305: close records whose Created timestamp is later than close time,
+	// clamped to zero duration.
+	clockSkewClamped atomic.Uint64
 }
 
 // NewIPFIXExporter creates a new IPFIX exporter. cfg is held by pointer
@@ -846,9 +849,12 @@ func (e *IPFIXExporter) Run(ctx context.Context) {
 func (e *IPFIXExporter) ExportSessionClose(rec logging.EventRecord, evt SessionCloseData) {
 	// #2465/#11699: a missing creation timestamp cannot establish flow age;
 	// use the close time and count that fallback for operator visibility.
-	startTime, missingCreated := flowStartTime(rec)
+	startTime, missingCreated, clockSkewClamped := flowStartTime(rec)
 	if missingCreated {
 		e.estimatedDurations.Add(1)
+	}
+	if clockSkewClamped {
+		e.clockSkewClamped.Add(1)
 	}
 	// #2526: resolve the post-NAT tuple with pre-NAT fallback so every
 	// exported record carries the RFC 5103 / RFC 8158 post-NAT fields
@@ -926,6 +932,10 @@ func (e *IPFIXExporter) EstimatedDurations() uint64 {
 func (e *IPFIXExporter) RouteMaskUnresolved() uint64 {
 	return e.routeMaskUnresolved.Load()
 }
+
+// ClockSkewClamped returns the number of exported close records whose future
+// creation timestamp was clamped to the close time (#13305).
+func (e *IPFIXExporter) ClockSkewClamped() uint64 { return e.clockSkewClamped.Load() }
 
 // BatchDepth returns the current number of flow records pending in the export
 // batch (both families combined). See Exporter.BatchDepth (#3747).
