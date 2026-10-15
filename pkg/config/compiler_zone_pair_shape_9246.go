@@ -90,6 +90,11 @@ func malformedZonePairShape9246(n *Node) string {
 				break
 			}
 		}
+		// Grouped/parser-built trees may retain the absorbed rule as a
+		// proper descendant instead of packing `policy` into c.Keys.
+		if !carriesRule {
+			carriesRule = hasPolicyIntent12629(c)
+		}
 		if !carriesRule {
 			continue
 		}
