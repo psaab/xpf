@@ -459,17 +459,22 @@ The flow-cache fast path (`afxdp/poll_descriptor/flow_cache_hit.rs`) is
 the ONLY code path that refreshes a forwarded flow's `last_seen_ns` — a
 flow served entirely from the per-worker flow cache never re-runs the
 slow path that would otherwise touch the session. Every cached candidate is
-first admitted by the read-only `session_is_live_at` deadline check; missing
+first admitted by the read-only `session_is_live_at` deadline check. Missing
 or idle-crossed backing sessions fall through before filters, policers, logs,
-accounting, or TX side effects. After the TTL check, `touch_if_stale` is
-the keepalive it calls on every admitted cache hit: it re-stamps the matched
+accounting, or TX side effects. A cached `PolicyDenied` or `DiscardRoute` hit
+also uses the alias-aware `has_session_hit_at` probe to detect a newly
+installed live session before replaying the terminal verdict; it invalidates
+the stale deny slot and falls through, preventing an earlier unsolicited
+packet's cached reject from blackholing or RST-killing a subsequently
+established reverse flow. After the TTL check, `touch_if_stale` is the
+keepalive it calls on every admitted cache hit: it re-stamps the matched
 session ONLY once that session has gone idle for at least
 `expires_after_ns / SESSION_KEEPALIVE_DIVISOR` (a quarter of its OWN
 timeout). An actively-forwarding cached flow is thus re-stamped whenever
 its idle time crosses `expires_after_ns / N`, keeping its age ~`T/N` in
 steady state regardless of co-resident flow rates, so it can never be
 GC'd mid-flow (reaped only if a real inter-packet gap exceeds `T`). The
-steady-state per-hit cost is two warm `key_to_handle` probes (admission plus
+steady-state per-hit cost is two warm session-index probes (admission plus
 keepalive) and integer compares; the `last_seen_ns` write + throttled
 `push_to_wheel` run only when actually stale. Allocation-free.
 
