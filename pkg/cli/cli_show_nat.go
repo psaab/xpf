@@ -99,7 +99,8 @@ func (c *CLI) showNATSource(cfg *config.Config, args []string) error {
 	// Show configured source NAT pools
 	if cfg != nil && len(cfg.Security.NAT.SourcePools) > 0 {
 		fmt.Println("Source NAT pools:")
-		for name, pool := range cfg.Security.NAT.SourcePools {
+		for _, name := range sortedInstanceNames(cfg.Security.NAT.SourcePools) {
+			pool := cfg.Security.NAT.SourcePools[name]
 			fmt.Printf("  Pool: %s\n", name)
 			// #8580: this view rendered a DISARMED pool identically to an armed
 			// one. Its four siblings each say so — the summary via
@@ -228,7 +229,8 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 	// under-reported every prefix member, and missed the singular `address`
 	// field entirely.
 	overBudget := config.SourceNATAggregateOverBudgetPools(cfg)
-	for name, pool := range cfg.Security.NAT.SourcePools {
+	for _, name := range sortedInstanceNames(cfg.Security.NAT.SourcePools) {
+		pool := cfg.Security.NAT.SourcePools[name]
 		portLow, portHigh := pool.PortLow, pool.PortHigh
 		if portLow == 0 {
 			portLow = 1024
@@ -488,7 +490,8 @@ func (c *CLI) showNATSourcePool(cfg *config.Config, poolName string) error {
 	detailOccupancy := c.sourceNATPoolOccupancy()
 
 	detailOverBudget := config.SourceNATAggregateOverBudgetPools(cfg)
-	for name, pool := range cfg.Security.NAT.SourcePools {
+	for _, name := range sortedInstanceNames(cfg.Security.NAT.SourcePools) {
+		pool := cfg.Security.NAT.SourcePools[name]
 		if !showAll && name != poolName {
 			continue
 		}
@@ -739,7 +742,8 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 	// Show destination NAT pools
 	if len(dnat.Pools) > 0 {
 		fmt.Println("Destination NAT pools:")
-		for name, pool := range dnat.Pools {
+		for _, name := range sortedInstanceNames(dnat.Pools) {
+			pool := dnat.Pools[name]
 			fmt.Printf("  Pool: %s\n", name)
 			fmt.Printf("    Address: %s\n", pool.Address)
 			if pool.Port != 0 {
@@ -911,7 +915,8 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 	fmt.Println()
 	fmt.Printf("%-20s %-20s %-8s %-12s\n",
 		"Pool", "Address", "Port", "Hits")
-	for name, pool := range dnat.Pools {
+	for _, name := range sortedInstanceNames(dnat.Pools) {
+		pool := dnat.Pools[name]
 		portStr := "-"
 		if pool.Port != 0 {
 			portStr = fmt.Sprintf("%d", pool.Port)
@@ -978,7 +983,8 @@ func (c *CLI) showNATDestinationPool(cfg *config.Config, poolName string) error 
 	showAll := poolName == "" || poolName == "all"
 	cr := c.applyResult()
 
-	for name, pool := range dnat.Pools {
+	for _, name := range sortedInstanceNames(dnat.Pools) {
+		pool := dnat.Pools[name]
 		if !showAll && name != poolName {
 			continue
 		}

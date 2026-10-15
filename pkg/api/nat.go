@@ -267,7 +267,8 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Named pools
 	overBudgetPools := config.SourceNATAggregateOverBudgetPools(cfg)
-	for name, pool := range cfg.Security.NAT.SourcePools {
+	for _, name := range sortedKeys(cfg.Security.NAT.SourcePools) {
+		pool := cfg.Security.NAT.SourcePools[name]
 		// Config-derived fallback for capacity (used only when the helper has
 		// no runtime entry for this pool — e.g. before the first apply lands).
 		portLow, portHigh := pool.PortLow, pool.PortHigh
@@ -402,10 +403,7 @@ func (s *Server) natPoolStatsHandler(w http.ResponseWriter, r *http.Request) {
 		// 0 rather than a wrong aggregate.
 		var zoneByID map[uint16]string
 		if cr != nil {
-			zoneByID = make(map[uint16]string, len(cr.ZoneIDs))
-			for name, id := range cr.ZoneIDs {
-				zoneByID[id] = name
-			}
+			zoneByID = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 		}
 		if err := s.dp.IterateSessions(func(_ dataplane.SessionKey, val dataplane.SessionValue) bool {
 			if walkCtx.Err() != nil {
