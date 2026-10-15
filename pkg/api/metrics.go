@@ -58,14 +58,14 @@ type xpfCollector struct {
 	// xpf_screen_drops_total above cannot answer "which screen fired?"; this
 	// labeled series can, now that the userspace bridge populates the per-reason
 	// GlobalCtrScreen* counters.
-	screenDropsByReasonTotal        *prometheus.Desc
+	screenDropsByReasonTotal               *prometheus.Desc
 	userspaceScreenSubstitutedDefaultDrops *prometheus.Desc
-	userspaceScreenSYNFloodDstDrops *prometheus.Desc
-	userspaceScreenSYNFloodSrcDrops *prometheus.Desc
-	userspaceScreenSYNFloodAlarmEvents *prometheus.Desc
-	userspaceScreenAlarmWithoutDropEvents *prometheus.Desc
-	userspaceScreenProfileWarns *prometheus.Desc
-	userspaceScreenTrackerPressureEvents *prometheus.Desc
+	userspaceScreenSYNFloodDstDrops        *prometheus.Desc
+	userspaceScreenSYNFloodSrcDrops        *prometheus.Desc
+	userspaceScreenSYNFloodAlarmEvents     *prometheus.Desc
+	userspaceScreenAlarmWithoutDropEvents  *prometheus.Desc
+	userspaceScreenProfileWarns            *prometheus.Desc
+	userspaceScreenTrackerPressureEvents   *prometheus.Desc
 	// #5806: unresolved screen-profile references (see the descriptor).
 	screenUnresolvedProfileZones *prometheus.Desc
 	screenInertProfileZones      *prometheus.Desc
@@ -640,18 +640,21 @@ type xpfCollector struct {
 	userspaceWorkerCommandQueueDrops       *prometheus.Desc
 	userspaceSharedSessionPoisonRecoveries *prometheus.Desc
 	// #13280: Rust ProcessStatus operational and HA counters.
-	userspaceCosNoOwnerBindingDrops          *prometheus.Desc
-	userspaceIoUringWriteRefused             *prometheus.Desc
-	userspaceIoUringWriteRefusedBytes        *prometheus.Desc
-	userspaceRouteChangeUnrejudgedSessions   *prometheus.Desc
-	userspaceOwnerRGFilingsDeclined          *prometheus.Desc
-	userspaceHATransitionDropped             *prometheus.Desc
-	userspaceHATransitionStaleSkipped        *prometheus.Desc
-	userspaceSessionDeleteRefusedIdentity    *prometheus.Desc
-	userspaceSessionDeleteDroppedReleased    *prometheus.Desc
-	userspaceTunnelPurgeReservationsReleased *prometheus.Desc
-	userspaceSyncedReverseRederived          *prometheus.Desc
-	userspaceS5Reinject                      *prometheus.Desc
+	userspaceCosNoOwnerBindingDrops           *prometheus.Desc
+	userspaceIoUringWriteRefused              *prometheus.Desc
+	userspaceIoUringWriteRefusedBytes         *prometheus.Desc
+	userspaceRouteChangeUnrejudgedSessions    *prometheus.Desc
+	userspaceOwnerRGFilingsDeclined           *prometheus.Desc
+	userspaceHATransitionDropped              *prometheus.Desc
+	userspaceHATransitionStaleSkipped         *prometheus.Desc
+	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc
+	userspaceSessionDeleteDroppedReleased     *prometheus.Desc
+	userspaceTunnelPurgeReservationsReleased  *prometheus.Desc
+	userspaceSyncedReverseRederived           *prometheus.Desc
+	userspacePeerDeleteRefusedLocalOwned      *prometheus.Desc
+	userspaceS5Reinject                       *prometheus.Desc
+	userspaceSessionDeleteReplicaDropped      *prometheus.Desc
+	userspaceSessionDeleteReplicaDropRepaired *prometheus.Desc
 	// #9900: frame-ownership violation counters — kernel-fault and
 	// request-path fault signals, zero on a healthy dataplane.
 	userspaceTxCompletionSkew            *prometheus.Desc
@@ -1331,6 +1334,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceTunnelPurgeReservationsReleased
 	ch <- c.userspaceSyncedReverseRederived
 	ch <- c.userspaceS5Reinject
+	ch <- c.userspacePeerDeleteRefusedLocalOwned
+	ch <- c.userspaceSessionDeleteReplicaDropped
+	ch <- c.userspaceSessionDeleteReplicaDropRepaired
 	ch <- c.userspaceSharedSessionPoisonRecoveries
 	ch <- c.userspaceTxCompletionSkew
 	ch <- c.userspaceTxCompletionInvalid

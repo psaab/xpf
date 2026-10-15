@@ -58,6 +58,21 @@ func (c *xpfCollector) initUserspaceStatus13280Descriptors() {
 		"Peer-synced reverse companions re-derived during reconcile replay.",
 		nil, nil,
 	)
+	c.userspacePeerDeleteRefusedLocalOwned = prometheus.NewDesc(
+		"xpf_userspace_peer_delete_refused_local_owned_total",
+		"Peer session deletes refused because the session is owned by a locally active redundancy group.",
+		nil, nil,
+	)
+	c.userspaceSessionDeleteReplicaDropped = prometheus.NewDesc(
+		"xpf_userspace_session_delete_replica_dropped_total",
+		"Session replica-delete updates dropped at worker queue capacity.",
+		nil, nil,
+	)
+	c.userspaceSessionDeleteReplicaDropRepaired = prometheus.NewDesc(
+		"xpf_userspace_session_delete_replica_drop_repaired_total",
+		"Session replica-delete drops repaired by coordinator state reconciliation.",
+		nil, nil,
+	)
 	c.userspaceS5Reinject = prometheus.NewDesc(
 		"xpf_userspace_s5_reinject_total",
 		"Helper-reported q0 S5 reinjections with terminal written outcomes.",
