@@ -147,12 +147,8 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName st
 		if ro.RibGroups == nil {
 			ro.RibGroups = make(map[string]*RibGroup)
 		}
-		for _, inst := range namedInstances(rgNode.FindChildren("")) {
+		for _, inst := range namedInstances([]*Node{rgNode}) {
 			mergeRibGroupDefinition(ro.RibGroups, compileRibGroup(inst.name, inst.node), warnings)
-		}
-		// Also handle direct children (non-named instances).
-		for _, child := range rgNode.Children {
-			mergeRibGroupDefinition(ro.RibGroups, compileRibGroup(child.Name(), child), warnings)
 		}
 	}
 
@@ -1170,31 +1166,8 @@ func compileRoutingInstances(node *Node, cfg *Config, opts compileOpts) error {
 				ri.RibGroups = ro.RibGroups
 				ri.ForwardingTableExport = ro.ForwardingTableExport
 				ri.ForwardingTableExports = ro.ForwardingTableExports
-				// Parse interface-routes rib-group
-				if irNode := prop.FindChild("interface-routes"); irNode != nil {
-					if rgNode := irNode.FindChild("rib-group"); rgNode != nil {
-						// #8939: the routing-instance TWIN of the global site
-						// above. Fixing one and not the other is how this class
-						// keeps coming back.
-						for _, rgChild := range expandFlatRun(rgNode.Children, interfaceRoutesRibGroupSchema8939()) {
-							switch rgChild.Name() {
-							case "inet":
-								ri.InterfaceRoutesRibGroup = nodeVal(rgChild)
-							case "inet6":
-								ri.InterfaceRoutesRibGroupV6 = nodeVal(rgChild)
-							}
-						}
-						// Also handle inline: "rib-group inet NAME"
-						for i := 1; i < len(rgNode.Keys)-1; i++ {
-							switch rgNode.Keys[i] {
-							case "inet":
-								ri.InterfaceRoutesRibGroup = rgNode.Keys[i+1]
-							case "inet6":
-								ri.InterfaceRoutesRibGroupV6 = rgNode.Keys[i+1]
-							}
-						}
-					}
-				}
+				ri.InterfaceRoutesRibGroup = ro.InterfaceRoutesRibGroup
+				ri.InterfaceRoutesRibGroupV6 = ro.InterfaceRoutesRibGroupV6
 			case "protocols":
 				var proto ProtocolsConfig
 				if err := compileProtocols(prop, &proto, opts, &cfg.Warnings); err != nil {
@@ -1444,10 +1417,11 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 				cd.Members = append(cd.Members, firewallMatchValues(entry)...)
 			}
 		}
-		// Handle flat set syntax where `members` collapses onto the community
-		// instance node itself: Keys like ["members", "65000:100", ...].
-		if len(inst.node.Keys) > 1 && inst.node.Keys[0] == "members" {
-			cd.Members = append(cd.Members, inst.node.Keys[1:]...)
+		// Compact members values can follow the community name on the same
+		// instance node in either namedInstances AST shape.
+		tail := instanceValueTail(inst.node, inst.name)
+		if len(tail) >= 2 && tail[0] == "members" {
+			cd.Members = append(cd.Members, tail[1:]...)
 		}
 	}
 
@@ -2929,6 +2903,12 @@ func compileRibGroup(name string, node *Node) *RibGroup {
 	rg := &RibGroup{Name: name}
 	for _, irNode := range node.FindChildren("import-rib") {
 		rg.ImportRibs = append(rg.ImportRibs, plainListValues(irNode)...)
+	}
+	// A compact rib-group instance can carry `import-rib` and its values on
+	// the instance node itself (Keys=[NAME, "import-rib", ...]).
+	tail := instanceValueTail(node, name)
+	if len(tail) >= 2 && tail[0] == "import-rib" {
+		rg.ImportRibs = append(rg.ImportRibs, tail[1:]...)
 	}
 	return rg
 }

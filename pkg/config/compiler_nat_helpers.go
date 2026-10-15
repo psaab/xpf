@@ -99,49 +99,6 @@ func isHostMaskAddress(addr string) (host bool, parsed bool) {
 	return maskPart == wantMask, true
 }
 
-// parseZoneList extracts zone names from a from/to node.
-// Handles every AST shape the parser can produce for `from zone ...`:
-//   - `from` carries the list inline: Keys=["from","zone","A","B","C"] → ["A","B","C"]
-//   - Unified bracket list (#2419): one "zone" child with the whole list
-//     collapsed onto its Keys — Keys=["zone","A","B","C"] → ["A","B","C"].
-//     This is the shape flat-set `set ... from zone [ A B C ]` now produces;
-//     before #2419 it split into a "zone" child plus orphan leaf children, and
-//     reading only nodeVal here silently dropped every zone but the first
-//     (FAIL-OPEN static NAT — the dropped zone's whole rule-set vanished).
-//   - Hierarchical / legacy block: multiple "zone" children, each
-//     Keys=["zone","A"] (from `from { zone A; zone B; }` or repeated
-//     `set ... from zone A` / `from zone B` set commands).
-//
-// For each "zone" child we accumulate Keys[1:] AND any orphan leaf children,
-// mirroring firewallMatchValues (compiler_firewall.go) — the #2419 contract for
-// reading a multi-value leaf across both AST shapes.
-func parseZoneList(node *Node) []string {
-	// `from` carries the zone list inline on its own Keys.
-	if len(node.Keys) >= 3 && node.Keys[1] == "zone" {
-		return node.Keys[2:]
-	}
-	var zones []string
-	for _, child := range node.Children {
-		if child.Name() != "zone" {
-			continue
-		}
-		// Unified bracket list / single value: every token after "zone".
-		for _, k := range child.Keys[1:] {
-			if k != "" {
-				zones = append(zones, k)
-			}
-		}
-		// Legacy bracket-expanded orphan leaf children (defensive — older
-		// trees that still split the list into child leaves).
-		for _, grandchild := range child.Children {
-			if grandchild.IsLeaf && len(grandchild.Keys) >= 1 && grandchild.Keys[0] != "" {
-				zones = append(zones, grandchild.Keys[0])
-			}
-		}
-	}
-	return zones
-}
-
 // natMatchScope is one (kind, value) scope token from a NAT rule-set
 // `from`/`to` clause. kind is one of "zone" | "interface" |
 // "routing-instance" (#3096).
