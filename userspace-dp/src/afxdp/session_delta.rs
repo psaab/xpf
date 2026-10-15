@@ -207,6 +207,17 @@ pub(super) fn purge_close_cancel_keys(
     ))
 }
 
+/// The tuple keys fenced while retiring a Close. Purge-retirement closes
+/// retire only their forward tuple; ordinary closes also own the reverse key.
+pub(super) fn close_install_keys(delta: &SessionDelta) -> [SessionKey; 2] {
+    let reverse = if delta.purge_retirement {
+        delta.key.clone()
+    } else {
+        reverse_session_key(&delta.key, delta.decision.nat)
+    };
+    [delta.key.clone(), reverse]
+}
+
 pub(super) fn purge_queued_flows_for_closed_deltas(
     bindings: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
@@ -224,10 +235,7 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
         // continue draining commands. The caller requeues this delta suffix
         // and retries on a later poll, preserving the close and its cleanup.
         let _close_install_permits = if delta.kind == SessionDeltaKind::Close {
-            let close_keys = [
-                delta.key.clone(),
-                reverse_session_key(&delta.key, delta.decision.nat),
-            ];
+            let close_keys = close_install_keys(delta);
             match crate::afxdp::bpf_map::global_tuple_gate().try_acquire_installs(close_keys) {
                 Ok(permits) => permits,
                 Err(_) => return delta_index,
@@ -614,17 +622,20 @@ pub(super) fn flush_session_deltas(
             continue;
         }
         let _close_install_permits = if delta.kind == SessionDeltaKind::Close {
-            let close_keys = [
-                delta.key.clone(),
-                reverse_session_key(&delta.key, delta.decision.nat),
-            ];
+            let close_keys = close_install_keys(delta);
             match crate::afxdp::bpf_map::global_tuple_gate().try_acquire_installs(close_keys) {
                 Ok(permits) => permits,
                 Err(_) => {
-                    if let Some(sessions) = current_sessions.as_deref_mut() {
+                    let requeued = if let Some(sessions) = current_sessions.as_deref_mut() {
                         sessions.requeue_deltas_front(&deltas[delta_index..]);
-                    }
-                    event_stream_out_of_sync = true;
+                        true
+                    } else {
+                        false
+                    };
+                    // A retry slot preserves this suffix. Only a caller with
+                    // no place to retain it has lost the event-stream delta
+                    // and requires the owner-RG resync.
+                    event_stream_out_of_sync |= !requeued;
                     break;
                 }
             }

@@ -10613,6 +10613,177 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         "open delta must still reach the recent-deltas buffer"
     );
 }
+/// #13654 (D6-02): tuple-gate contention on a Close whose suffix is
+/// requeued losslessly is a local retry, NOT a lossy event-stream drop —
+/// it must not latch the owner-RG LossResync. The None fallback (no retry
+/// slot) still owes the resync, an already-latched wedge stays latched,
+/// and every drained delta stays in the retry slot in order.
+#[cfg(test)]
+mod flush_tuple_gate_contention_13654 {
+    use super::*;
+
+    fn close_delta(key: &SessionKey, session_id: u64, purge_retirement: bool) -> SessionDelta {
+        SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id,
+        bulk_resync: false,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        purge_retirement, source_nat_static: None }
+    }
+
+
+    fn flush_gate_contention(
+        deltas: &[SessionDelta],
+        with_slot: bool,
+        worker_lossless_wedged: &mut bool,
+    ) -> (bool, Option<SessionTable>) {
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+        let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+        let forwarding = ForwardingState::default();
+        let ident = BindingIdentity {
+            slot: 0,
+            queue_id: 0,
+            worker_id: 0,
+            interface: Arc::<str>::from(""),
+            ifindex: -1,
+        };
+        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+        let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let __r3_reader = __r3_channel.reader();
+        let mut slot = SessionTable::new();
+        let out_of_sync = flush_session_deltas(
+            &ident,
+            None,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &dnat_fds,
+            deltas,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &recent_session_deltas,
+            &peer_worker_commands,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &None,
+            &forwarding,
+            &__r3_reader,
+            worker_lossless_wedged,
+            if with_slot { Some(&mut slot) } else { None },
+        );
+        (out_of_sync, with_slot.then_some(slot))
+    }
+
+    #[test]
+    fn tuple_gate_contention_requeued_close_stays_in_sync_13654() {
+        // Ordinary closes still fence the reverse key; contention there is
+        // retryable and must not trigger a full LossResync.
+        let mut key = test_key();
+        key.src_port += 41;
+        let held_key = reverse_session_key(&key, crate::nat::NatDecision::default());
+        let _held = crate::afxdp::bpf_map::global_tuple_gate()
+            .try_acquire_installs([held_key])
+            .expect("test holds the contending reverse-key permit");
+        let deltas = [close_delta(&key, 41, false)];
+        let mut wedged = false;
+        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, &mut wedged);
+        assert!(!out_of_sync, "#13654: a requeued close must not latch LossResync");
+        assert!(!wedged, "#13654: a requeued close must not wedge the drain cycle");
+        let mut slot = slot.expect("retry slot returned");
+        assert!(!slot.take_delta_loss(), "#13654: no delta may be recorded lost");
+        let retry = slot.drain_deltas(8);
+        assert_eq!(retry.len(), 1, "#13654: the contended close must stay queued");
+        assert_eq!(retry[0].key, key);
+        assert_eq!(retry[0].session_id, 41);
+    }
+
+    #[test]
+    fn tuple_gate_contention_without_retry_slot_still_resyncs_13654() {
+        let mut key = test_key();
+        key.src_port += 43;
+        let held_key = reverse_session_key(&key, crate::nat::NatDecision::default());
+        let _held = crate::afxdp::bpf_map::global_tuple_gate()
+            .try_acquire_installs([held_key])
+            .expect("test holds the contending install permit");
+        let deltas = [close_delta(&key, 43, false)];
+        let mut wedged = false;
+        let (out_of_sync, _) = flush_gate_contention(&deltas, false, &mut wedged);
+        assert!(
+            out_of_sync,
+            "#13654: with no retry slot the contended close is lost and must resync"
+        );
+        assert!(wedged, "#13654: the unrecoverable close must wedge the drain cycle");
+
+        // Monotonicity: an already-wedged cycle keeps its latch even when
+        // this flush only requeues.
+        let mut pre_wedged = true;
+        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, &mut pre_wedged);
+        assert!(out_of_sync, "#13654: a prior wedge must remain latched");
+        assert!(pre_wedged);
+        drop(slot);
+    }
+
+    #[test]
+    fn tuple_gate_contention_requeues_the_whole_suffix_13654() {
+        let mut key = test_key();
+        key.src_port += 51;
+        let held_key = reverse_session_key(&key, crate::nat::NatDecision::default());
+        let _held = crate::afxdp::bpf_map::global_tuple_gate()
+            .try_acquire_installs([held_key])
+            .expect("test holds the contending install permit");
+        let deltas = [
+            close_delta(&key, 51, false),
+            close_delta(&key, 52, false),
+            close_delta(&key, 53, false),
+        ];
+        let mut wedged = false;
+        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, &mut wedged);
+        assert!(!out_of_sync, "#13654: a fully requeued suffix must stay in sync");
+        let mut slot = slot.expect("retry slot returned");
+        let retry = slot.drain_deltas(8);
+        let ids: Vec<u64> = retry.iter().map(|delta| delta.session_id).collect();
+        assert_eq!(ids, [51, 52, 53], "#13654: the suffix must retry in FIFO order");
+    }
+
+    #[test]
+    fn purge_retirement_close_fences_only_the_forward_tuple_13654() {
+        let mut key = test_key();
+        key.src_port += 71;
+        let purge = close_delta(&key, 71, true);
+        assert_eq!(
+            crate::afxdp::session_delta::close_install_keys(&purge),
+            [key.clone(), key.clone()],
+            "#13654: purge retirement must not fence the reverse tuple"
+        );
+        let ordinary = close_delta(&key, 72, false);
+        assert_eq!(
+            crate::afxdp::session_delta::close_install_keys(&ordinary),
+            [
+                key.clone(),
+                reverse_session_key(&key, crate::nat::NatDecision::default()),
+            ],
+            "#13654: ordinary closes keep the reverse-tuple fence"
+        );
+    }
+
+}
+
 
 /// #9630 FAIL-ON-REVERT: a CommandExport already delivered the complete
 /// paged control response, so its event-stream echo must not be sent again.
