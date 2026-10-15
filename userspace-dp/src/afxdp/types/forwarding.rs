@@ -133,7 +133,13 @@ pub(in crate::afxdp) struct ForwardingState {
     /// wildcarded across routing instances.
     pub(in crate::afxdp) interface_nat_tables_v4: FastMap<Ipv4Addr, FastSet<String>>,
     pub(in crate::afxdp) interface_nat_tables_v6: FastMap<Ipv6Addr, FastSet<String>>,
+    /// #13644: ingress-keyed connected prefixes used by post-admission
+    /// neighbor learning. Kept separate from the route vector so cache hits
+    /// inspect only the ingress interface's prefixes, not every interface.
+    pub(in crate::afxdp) connected_v4_by_ifindex: FastMap<i32, Vec<PrefixV4>>,
+    pub(in crate::afxdp) connected_v6_by_ifindex: FastMap<i32, Vec<PrefixV6>>,
     pub(in crate::afxdp) connected_v4: Vec<ConnectedRouteV4>,
+    pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
     /// #10689: build-time index of IPv4 connected-prefix directed broadcasts,
     /// keyed by routing domain so overlapping prefixes do not poison other
     /// routing instances.
@@ -142,7 +148,6 @@ pub(in crate::afxdp) struct ForwardingState {
     /// connected subnet-directed broadcast on its own interface. Unlike the
     /// domain-keyed source martian index above, this key includes ifindex.
     pub(in crate::afxdp) connected_v4_directed_broadcast_neighbor_keys: FastSet<(i32, Ipv4Addr)>,
-    pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
     pub(in crate::afxdp) routes_v4: FastMap<String, Vec<RouteEntryV4>>,
     pub(in crate::afxdp) routes_v6: FastMap<String, Vec<RouteEntryV6>>,
     /// Canonical tables explicitly typed by Go as forwarding instances. In
@@ -1090,11 +1095,41 @@ impl ForwardingState {
     /// adds the genuine interface IPs that the NAT exclusion stripped.
     /// NAT-translated POOL addresses are in
     /// neither set, so the gate still scopes to addresses the router owns.
+
     #[inline]
     pub(in crate::afxdp) fn owns_configured_ip(&self, ip: IpAddr) -> bool {
         match ip {
             IpAddr::V4(v4) => self.configured_iface_v4.contains(&v4) || self.local_v4.contains(&v4),
             IpAddr::V6(v6) => self.configured_iface_v6.contains(&v6) || self.local_v6.contains(&v6),
+        }
+    }
+    /// #13644: source-MAC learning from admitted L3 traffic is valid only
+    /// when the claimed address lies in a connected prefix on this ingress.
+    /// Match the VLAN-resolved ingress identity, not a different subnet on
+    /// its physical parent; RX may store aliases separately after validation.
+    #[inline]
+    pub(in crate::afxdp) fn src_ip_on_link_for_ingress(
+        &self,
+        ingress_ifindex: i32,
+        ingress_vlan_id: u16,
+        ip: IpAddr,
+    ) -> bool {
+        let ingress_logical_ifindex =
+            super::super::forwarding::resolve_ingress_logical_ifindex(
+                self,
+                ingress_ifindex,
+                ingress_vlan_id,
+            )
+            .unwrap_or(ingress_ifindex);
+        match ip {
+            IpAddr::V4(ip) => self
+                .connected_v4_by_ifindex
+                .get(&ingress_logical_ifindex)
+                .is_some_and(|prefixes| prefixes.iter().any(|prefix| prefix.contains(ip))),
+            IpAddr::V6(ip) => self
+                .connected_v6_by_ifindex
+                .get(&ingress_logical_ifindex)
+                .is_some_and(|prefixes| prefixes.iter().any(|prefix| prefix.contains(ip))),
         }
     }
     /// Base address ownership for Stage 11: interface addresses remain local

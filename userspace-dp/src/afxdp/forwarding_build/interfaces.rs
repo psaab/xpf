@@ -926,6 +926,11 @@ pub(super) fn populate_interfaces(
                             .connected_v4_directed_broadcast_neighbor_keys
                             .insert((iface.ifindex, directed_broadcast));
                     }
+                    state
+                        .connected_v4_by_ifindex
+                        .entry(iface.ifindex)
+                        .or_default()
+                        .push(prefix);
                     state.connected_v4.push(ConnectedRouteV4 {
                         prefix,
                         host: v4.addr(),
@@ -970,8 +975,14 @@ pub(super) fn populate_interfaces(
                             .or_default()
                             .insert(connected_table_v6.clone());
                     }
+                    let prefix = PrefixV6::from_net(v6);
+                    state
+                        .connected_v6_by_ifindex
+                        .entry(iface.ifindex)
+                        .or_default()
+                        .push(prefix);
                     state.connected_v6.push(ConnectedRouteV6 {
-                        prefix: PrefixV6::from_net(v6),
+                        prefix,
                         host: v6.addr(),
                         scope: addr.scope,
                         ifindex: iface.ifindex,
