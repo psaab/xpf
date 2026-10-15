@@ -3588,20 +3588,21 @@ never lock an operator out of a remote box it manages.
 
   **A MALFORMED address token fails the install CLOSED (#6512).** #3433 dropped
   a malformed token silently, so an ALL-malformed positive list reached
-  "constrained + empty -> match nothing". That resolution is wrong for the two
-  shapes #6512 filed. A PARTIALLY malformed positive list installed a NARROWED
-  rule — a `discard`/`reject` term enforcing a smaller address set than the
-  operator wrote, with the dropped range falling through to the implicit accept
-  (fail-OPEN). And an EXCEPT list narrowed to empty takes the "empty except ->
-  match ALL" arm above, so the direction becomes UNCONSTRAINED (fail-OPEN in the
-  other direction) — which is why "skip the bad entry" can never be the fix
-  here. Both builders now refuse: `nftFamilyAddrs` (oracle) keeps the token
-  VERBATIM so `nft -f -` rejects the whole ruleset, and `filterFamilyAddrs`
-  (`pkg/nftables/netlink_lo0.go`, the production builder) returns an error that
-  fails the plan and aborts the install — the same posture both already had for
-  an unrepresentable port / DSCP token (#6405). Wrong-family and `any`/empty
-  tokens are unaffected: those are legitimate drops that match the userspace
-  matcher.
+  "constrained + empty -> match nothing". A PARTIALLY malformed positive list
+  installed a NARROWED rule — a `discard`/`reject` term enforcing a smaller
+  address set than the operator wrote, with the dropped range falling through
+  to the implicit accept (fail-OPEN). And an EXCEPT list narrowed to empty takes
+  the "empty except -> match ALL" arm above, so the direction becomes
+  UNCONSTRAINED (fail-OPEN in the other direction) — which is why "skip the bad
+  entry" can never be the fix here. Both builders now refuse:
+  `nftFamilyAddrs` (oracle) keeps the token VERBATIM so `nft -f -` rejects the
+  whole ruleset, and `filterFamilyAddrs` (`pkg/nftables/netlink_lo0.go`, the
+  production builder) returns an error that fails the plan and aborts the
+  install — the same posture both already had for an unrepresentable port / DSCP
+  token (#6405). Wrong-family literals remain family-filtered.
+  Match-any tokens (`any`, `0.0.0.0/0`, `::/0`) retain their universe semantics
+  per family: positive scope matches the full family, while `any except` matches
+  no addresses and skips the term (#13173).
 
   Fail-closed here does not mean fail-to-boot (#1960): the install error makes
   `applyLo0Filter` install the #6476 cold-boot fail-closed fence (lifelines
