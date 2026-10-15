@@ -101,9 +101,8 @@ type CompileResult struct {
 	FilterSpans map[string]FilterCounterSpan
 
 	PolicyScheduleRuleSlots []PolicyScheduleRuleSlot
-
-	Lo0FilterV4 uint32 // lo0 inet filter ID (0=none), set by compileFirewallFilters
-	Lo0FilterV6 uint32 // lo0 inet6 filter ID (0=none), set by compileFirewallFilters
+	Lo0FilterV4             uint32 // lo0 inet filter ID (0=none), set by compileFirewallFilters
+	Lo0FilterV6             uint32 // lo0 inet6 filter ID (0=none), set by compileFirewallFilters
 
 	// hostMutations records the CLASSES of live host state this compile
 	// actually changed (#4960), so an abort after the Phase-2 mutation point can
@@ -112,8 +111,10 @@ type CompileResult struct {
 	// a converged re-apply records nothing. See compiler_hostmutation_4960.go.
 	hostMutations map[string]bool
 
-	nextAddrID   uint32            // next available address ID (after address book)
-	implicitSets map[string]uint32 // cache of implicit set key -> set ID
+	nextAddrID         uint32            // next available address ID (after address book)
+	implicitSets       map[string]uint32 // cache of implicit set key -> set ID
+	literalAddrIDs     map[string]uint32 // CIDR/IP tokens materialized from policy matches
+	policyFamilySetIDs map[bool]uint32   // compiled family-wildcard implicit sets
 	// NATCounterIDs maps a type-namespaced NAT rule key (NATCounterKey →
 	// "natType/rulesetName/ruleName") to its per-rule translation hit counter
 	// ID. The ID is DERIVED from the key by a stable hash (assignNATCounterID),
@@ -1013,57 +1014,160 @@ func compileApplications(dp DataPlane, cfg *config.Config, result *CompileResult
 // If the list has one entry, returns that entry's ID directly.
 // If the list has multiple entries, creates an implicit address-set containing
 // all referenced addresses and returns the set's ID.
-func resolveAddrList(dp DataPlane, names []string, result *CompileResult) (uint32, error) {
+// resolveAddrList resolves address-book names and policy address tokens to one
+// address ID. ID 0 is the match-any sentinel; dynamic bindings without feed
+// contents cannot be represented by this compiler and are rejected rather
+// than widened to match-any.
+func resolveAddrList(dp DataPlane, cfg *config.Config, names []string, result *CompileResult) (uint32, error) {
 	if len(names) == 0 {
 		return 0, nil
 	}
-
-	// Filter out "any" entries
 	var filtered []string
-	for _, n := range names {
-		if n != "any" {
-			filtered = append(filtered, n)
+	for _, name := range names {
+		if name == "any" {
+			return 0, nil
 		}
+		filtered = append(filtered, name)
 	}
-	if len(filtered) == 0 {
-		return 0, nil // all "any"
+	resolveFamily := func(keyword string) (uint32, error) {
+		v4, v6, ok := config.PolicyAddressWildcardFamilies(keyword)
+		if !ok || v4 == v6 {
+			return 0, fmt.Errorf("unsupported policy address wildcard %q", keyword)
+		}
+		isV4 := v4
+		if id, ok := result.policyFamilySetIDs[isV4]; ok {
+			return id, nil
+		}
+		if result.policyFamilySetIDs == nil {
+			result.policyFamilySetIDs = make(map[bool]uint32)
+		}
+		setID := result.nextAddrID
+		result.nextAddrID++
+		fallbackID := result.nextAddrID
+		result.nextAddrID++
+		cidr := config.PolicyAddressKeywordLiteral(keyword)
+		if err := dp.SetAddressBookEntry(cidr, fallbackID); err != nil {
+			return 0, fmt.Errorf("set implicit address %s: %w", cidr, err)
+		}
+		if err := dp.SetAddressMembership(fallbackID, fallbackID); err != nil {
+			return 0, fmt.Errorf("set self-membership for implicit %s: %w", cidr, err)
+		}
+		if err := dp.SetAddressMembership(fallbackID, setID); err != nil {
+			return 0, fmt.Errorf("set family wildcard membership %s: %w", cidr, err)
+		}
+		if cfg != nil && cfg.Security.AddressBook != nil {
+			for name, addr := range cfg.Security.AddressBook.Addresses {
+				familyV4, valid := policyAddressTokenFamily(addr.Value)
+				if !valid || familyV4 != isV4 {
+					continue
+				}
+				id, found := result.AddrIDs[name]
+				if !found {
+					continue
+				}
+				if err := dp.SetAddressMembership(id, setID); err != nil {
+					return 0, fmt.Errorf("set family wildcard membership %s: %w", name, err)
+				}
+			}
+		}
+		for existingCIDR, id := range result.literalAddrIDs {
+			familyV4, valid := policyAddressTokenFamily(existingCIDR)
+			if !valid || familyV4 != isV4 {
+				continue
+			}
+			if err := dp.SetAddressMembership(id, setID); err != nil {
+				return 0, fmt.Errorf("set family wildcard membership %s: %w", existingCIDR, err)
+			}
+		}
+		result.policyFamilySetIDs[isV4] = setID
+		return setID, nil
 	}
-
-	// Single address: return its ID directly
+	resolve := func(name string) (uint32, error) {
+		if v4, v6, ok := config.PolicyAddressWildcardFamilies(name); ok && v4 != v6 {
+			return resolveFamily(name)
+		}
+		// Policy wildcard keywords precede any same-named book object;
+		// ordinary CIDR/IP-shaped names retain name-before-literal resolution.
+		if config.IsPolicyAddressWildcardKeyword(name) {
+			name = config.PolicyAddressKeywordLiteral(name)
+		} else if id, ok := result.AddrIDs[name]; ok {
+			return id, nil
+		}
+		cidr := name
+		if !strings.Contains(cidr, "/") {
+			if ip := net.ParseIP(cidr); ip != nil {
+				if ip.To4() != nil {
+					cidr += "/32"
+				} else {
+					cidr += "/128"
+				}
+			}
+		}
+		if _, _, err := net.ParseCIDR(cidr); err == nil {
+			if result.literalAddrIDs == nil {
+				result.literalAddrIDs = make(map[string]uint32)
+			}
+			if id, ok := result.literalAddrIDs[cidr]; ok {
+				return id, nil
+			}
+			id := result.nextAddrID
+			result.nextAddrID++
+			if err := dp.SetAddressBookEntry(cidr, id); err != nil {
+				return 0, fmt.Errorf("set implicit address %s: %w", cidr, err)
+			}
+			if err := dp.SetAddressMembership(id, id); err != nil {
+				return 0, fmt.Errorf("set self-membership for implicit %s: %w", cidr, err)
+			}
+			result.literalAddrIDs[cidr] = id
+			if familyV4, valid := policyAddressTokenFamily(cidr); valid {
+				if setID, hasWildcard := result.policyFamilySetIDs[familyV4]; hasWildcard {
+					if err := dp.SetAddressMembership(id, setID); err != nil {
+						return 0, fmt.Errorf("set family wildcard membership %s: %w", cidr, err)
+					}
+				}
+			}
+			return id, nil
+		}
+		if cfg != nil && cfg.Security.DynamicAddress.AddressBindings[name] != nil {
+			return 0, fmt.Errorf("dynamic address %q has no feed prefixes in the legacy dataplane compiler", name)
+		}
+		return 0, fmt.Errorf("address %q not found", name)
+	}
 	if len(filtered) == 1 {
-		id, ok := result.AddrIDs[filtered[0]]
-		if !ok {
-			return 0, fmt.Errorf("address %q not found", filtered[0])
-		}
-		return id, nil
+		return resolve(filtered[0])
 	}
-
-	// Multiple addresses: build implicit address-set
-	sorted := make([]string, len(filtered))
-	copy(sorted, filtered)
+	sorted := append([]string(nil), filtered...)
 	sort.Strings(sorted)
 	cacheKey := strings.Join(sorted, ",")
-
 	if setID, ok := result.implicitSets[cacheKey]; ok {
 		return setID, nil
 	}
-
 	setID := result.nextAddrID
 	result.nextAddrID++
-
 	for _, name := range sorted {
-		memberID, ok := result.AddrIDs[name]
-		if !ok {
-			return 0, fmt.Errorf("address %q not found", name)
+		memberID, err := resolve(name)
+		if err != nil {
+			return 0, err
 		}
 		if err := dp.SetAddressMembership(memberID, setID); err != nil {
 			return 0, fmt.Errorf("set implicit membership %s in set %d: %w", name, setID, err)
 		}
 	}
-
 	result.implicitSets[cacheKey] = setID
 	slog.Debug("implicit address-set created", "id", setID, "members", sorted)
 	return setID, nil
+}
+func policyAddressTokenFamily(token string) (ipv4, ok bool) {
+	if !strings.Contains(token, "/") {
+		if ip := net.ParseIP(token); ip != nil {
+			return ip.To4() != nil, true
+		}
+	}
+	ip, _, err := net.ParseCIDR(token)
+	if err != nil {
+		return false, false
+	}
+	return ip.To4() != nil, true
 }
 
 func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) error {
@@ -1204,14 +1308,14 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 			}
 
 			// Source address (supports multiple via implicit address-set)
-			srcID, err := resolveAddrList(dp, pol.Match.SourceAddresses, result)
+			srcID, err := resolveAddrList(dp, cfg, pol.Match.SourceAddresses, result)
 			if err != nil {
 				return fmt.Errorf("policy %s source address: %w", pol.Name, err)
 			}
 			rule.SrcAddrID = srcID
 
 			// Destination address (supports multiple via implicit address-set)
-			dstID, err := resolveAddrList(dp, pol.Match.DestinationAddresses, result)
+			dstID, err := resolveAddrList(dp, cfg, pol.Match.DestinationAddresses, result)
 			if err != nil {
 				return fmt.Errorf("policy %s destination address: %w", pol.Name, err)
 			}
@@ -1336,13 +1440,13 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 				}
 			}
 
-			srcID, err := resolveAddrList(dp, pol.Match.SourceAddresses, result)
+			srcID, err := resolveAddrList(dp, cfg, pol.Match.SourceAddresses, result)
 			if err != nil {
 				return fmt.Errorf("global policy %s source address: %w", pol.Name, err)
 			}
 			rule.SrcAddrID = srcID
 
-			dstID, err := resolveAddrList(dp, pol.Match.DestinationAddresses, result)
+			dstID, err := resolveAddrList(dp, cfg, pol.Match.DestinationAddresses, result)
 			if err != nil {
 				return fmt.Errorf("global policy %s destination address: %w", pol.Name, err)
 			}
