@@ -14,6 +14,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/psaab/xpf/pkg/appid"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/logging"
 )
@@ -252,16 +254,49 @@ func (f *monitorFlowFilter) matches(rec *logging.EventRecord) bool {
 		}
 	}
 	if f.Protocol != "" {
-		if !strings.EqualFold(rec.Protocol, f.Protocol) {
+		want, ok := appid.ProtocolNumber(f.Protocol)
+		if !ok {
+			return false
+		}
+		got := rec.ProtocolNum
+		// Hand-built and legacy records may not populate ProtocolNum; parse
+		// the rendered form only in that case. A non-zero raw number remains
+		// authoritative, including protocols with one-way display names.
+		if got == 0 {
+			if n, valid := appid.ProtocolNumber(rec.Protocol); valid {
+				got = n
+			}
+		}
+		if got != want {
 			return false
 		}
 	}
-	if f.Iface != "" {
-		if rec.IngressIface != f.Iface {
-			return false
-		}
+	if f.Iface != "" && !monitorIfaceNamesMatch(f.Iface, rec.IngressIface) {
+		return false
 	}
 	return true
+}
+
+// monitorIfaceNamesMatch compares config/Junos interface names with kernel
+// names. LinuxIfName is the shared conversion used when events are produced.
+func monitorIfaceNamesMatch(filter, record string) bool {
+	return filter == record ||
+		config.LinuxIfName(filter) == record ||
+		filter == config.LinuxIfName(record)
+}
+
+// normalizeMonitorProtocol validates and canonicalizes a flow-filter protocol
+// using the shared protocol table. Named protocols remain readable; protocols
+// without a display name use their decimal number.
+func normalizeMonitorProtocol(token string) (string, bool) {
+	n, ok := appid.ProtocolNumber(token)
+	if !ok {
+		return "", false
+	}
+	if name := appid.ProtocolName(n); name != "" {
+		return name, true
+	}
+	return strconv.Itoa(int(n)), true
 }
 
 // monitorFlowState holds the daemon-side state for "monitor security flow".
@@ -602,14 +637,19 @@ func (c *CLI) handleMonitorSecurityFlowFilter(args []string) error {
 				return nil
 			}
 			i++
-			f.Protocol = args[i]
+			protocol, ok := normalizeMonitorProtocol(args[i])
+			if !ok {
+				fmt.Printf("error: invalid protocol: %s\n", args[i])
+				return nil
+			}
+			f.Protocol = protocol
 		case "interface":
 			if i+1 >= len(args) {
 				fmt.Println("error: interface requires a value")
 				return nil
 			}
 			i++
-			f.Iface = args[i]
+			f.Iface = config.LinuxIfName(args[i])
 		default:
 			fmt.Printf("error: unknown flow filter option: %s\n", args[i])
 			return nil
