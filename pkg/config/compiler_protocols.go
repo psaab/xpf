@@ -328,7 +328,12 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		// ENTIRE stanza on it (`if bgp != nil && bgp.LocalAS > 0`), so FRR
 		// receives NO `router bgp` block at all: no sessions, no routes, and
 		// `show configuration` renders exactly what the operator typed.
-		for _, child := range expandFlatRun(bgpNode.Children, bgpLeafSchema8939()) {
+		// Read top-level leaves and named groups from the same expanded
+		// view: a flat run can chain a group after local-as.
+		bgpSchema := bgpLeafSchema8939()
+		bgpChildren := expandFlatRun(flattenChainedChildren(bgpNode.Children, bgpSchema), bgpSchema)
+		bgpExpanded := &Node{Keys: bgpNode.Keys, Children: bgpChildren}
+		for _, child := range bgpChildren {
 			switch child.Name() {
 			case "local-as":
 				if len(child.Keys) >= 2 {
@@ -408,7 +413,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			}
 		}
 
-		for _, groupInst := range namedInstances(bgpNode.FindChildren("group")) {
+		for _, groupInst := range namedInstances(bgpExpanded.FindChildren("group")) {
 			var peerAS uint32
 			var groupLocalAS uint32
 			var groupLocalAddress string
@@ -454,7 +459,8 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			// error -- because `neighbor` nests under `peer-as` and pass 1
 			// never sees a child named `neighbor`. The group is then
 			// configured with NOBODY IN IT, which reads as intentional.
-			groupChildren := expandFlatRun(groupInst.node.Children, bgpGroupSchema9181())
+			groupSchema := bgpGroupSchema9181()
+			groupChildren := expandFlatRun(packedBodyChildren(groupInst.node, groupSchema), groupSchema)
 			applyGroupFamily := func(familyNode *Node, afi string) error {
 				scope := fmt.Sprintf("BGP group %q family %s", groupInst.name, afi)
 				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, afi, scope, opts, warnings, &groupSAFIWarningRecords)
@@ -728,7 +734,10 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 	if ospf3Node != nil {
 		proto.OSPFv3 = &OSPFv3Config{}
 
-		for _, child := range ospf3Node.Children {
+		ospf3Schema := ospf3Schema13531()
+		ospf3Children := expandFlatRun(flattenChainedChildren(ospf3Node.Children, ospf3Schema), ospf3Schema)
+		ospf3Expanded := &Node{Keys: ospf3Node.Keys, Children: ospf3Children}
+		for _, child := range ospf3Children {
 			switch child.Name() {
 			case "router-id":
 				if len(child.Keys) >= 2 {
@@ -741,10 +750,14 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			}
 		}
 
-		for _, areaInst := range namedInstances(ospf3Node.FindChildren("area")) {
+		for _, areaInst := range namedInstances(ospf3Expanded.FindChildren("area")) {
 			area := &OSPFv3Area{ID: areaInst.name}
 
-			for _, ifInst := range bracketedGroupInstances8794(areaInst.node.FindChildren("interface")) {
+			areaSchema := schemaForPath("protocols", "ospf3", "area")
+			areaChildren := expandFlatRun(packedBodyChildren(areaInst.node, areaSchema), areaSchema)
+			areaNode := &Node{Keys: areaInst.node.Keys, Children: areaChildren}
+
+			for _, ifInst := range bracketedGroupInstances8794(areaNode.FindChildren("interface")) {
 				// #8436: FIND-OR-CREATE within the slice, keyed on the
 				// interface NAME.
 				//
@@ -839,9 +852,8 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			// reader at both levels so elided, braced-leaf, and braced-container
 			// spellings all populate the same model. Junos calls the flag
 			// "no-summaries"; FRR's area command uses "no-summary".
-			areaSchema := schemaForPath("protocols", "ospf3", "area")
 			areaTypeSchema := schemaForPath("protocols", "ospf3", "area", "area-type")
-			for _, typeNode := range packedBodyChildren(areaInst.node, areaSchema) {
+			for _, typeNode := range packedBodyChildren(areaNode, areaSchema) {
 				if typeNode.Name() != "area-type" {
 					continue
 				}

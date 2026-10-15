@@ -19,9 +19,10 @@ package config
 // GATED ON THE SCHEMA, never applied blanket. A nested body is legitimate under
 // a leaf that DECLARES children, and hoisting it would turn that body into
 // sibling statements of the container: `then reject <message-type>` is the
-// worked example, where `reject` declares fourteen message types. Only a leaf
-// the schema says holds NOTHING can have something nested under it by the
-// chain, and that is the discriminator.
+// worked example, where `reject` declares fourteen message types. Multi-value
+// leaves also own their children, which are values rather than statements.
+// Only a non-multi leaf the schema says holds NOTHING can have something nested
+// under it by the chain, and that is the discriminator.
 //
 // WHY A READER RATHER THAN A REJECT. The chain is a SUPPORTED spelling --
 // `set applications application a1 protocol tcp destination-port 80` is tested
@@ -44,7 +45,7 @@ func flattenChainedChildren(children []*Node, container *schemaNode) []*Node {
 			return
 		}
 		leaf := resolveSchemaChild(container, n.Name())
-		if leaf == nil || len(leaf.children) > 0 || leaf.wildcard != nil || len(n.Children) == 0 {
+		if leaf == nil || leaf.multi || len(leaf.children) > 0 || leaf.wildcard != nil || len(n.Children) == 0 {
 			out = append(out, n)
 			return
 		}
