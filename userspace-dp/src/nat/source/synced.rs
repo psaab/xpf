@@ -614,14 +614,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
             // idle-expiry index is keyed on. `is_some()` is the same candidacy
             // predicate `any` gave, so the pool-membership decision below is
             // unchanged.
-            let addr_index = match rewrite_src {
-                IpAddr::V4(v4) => rule.pool_addresses_v4.iter().position(|a| *a == v4),
-                IpAddr::V6(v6) => rule
-                    .pool_addresses_v6
-                    .iter()
-                    .position(|a| *a == v6)
-                    .map(|i| rule.pool_addresses_v4.len() + i),
-            };
+            let addr_index = rule.pool_index_of(rewrite_src);
             let Some(addr_index) = addr_index else {
                 continue;
             };
@@ -744,14 +737,7 @@ fn reserve_synced_on_first_pool_owner<'a>(
         // v4 addresses occupy `[0, len_v4)`, v6 addresses follow at
         // `[len_v4, len_v4 + len_v6)` (see `address_index` / the v6_offset in
         // `match_source_nat_result_for_tuple`).
-        let addr_index = match rewrite_src {
-            IpAddr::V4(v4) => rule.pool_addresses_v4.iter().position(|a| *a == v4),
-            IpAddr::V6(v6) => rule
-                .pool_addresses_v6
-                .iter()
-                .position(|a| *a == v6)
-                .map(|i| rule.pool_addresses_v4.len() + i),
-        };
+        let addr_index = rule.pool_index_of(rewrite_src);
         let Some(addr_index) = addr_index else {
             continue;
         };

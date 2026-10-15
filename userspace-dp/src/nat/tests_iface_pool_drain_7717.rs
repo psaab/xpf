@@ -312,7 +312,7 @@ fn nat64_mint_fails_closed_while_a_pool_drains_the_same_address_7799() {
     assert_eq!(gen1[0].pool_allocator.live_flow_count(), 1, "setup");
 
     // A NAT64 rule-set whose pool is the SAME address the pool SNAT holds.
-    let nat64 = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+    let mut nat64 = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
         name: "n64".to_string(),
         prefix: "64:ff9b::/96".to_string(),
         pool_addresses: vec![E.to_string()],
@@ -330,7 +330,7 @@ fn nat64_mint_fails_closed_while_a_pool_drains_the_same_address_7799() {
 
     // Quarantine the pool. Its allocator is RETAINED, so it is still holding
     // the live flow from gen1 — the draining state, not the drained one.
-    let draining = parse_source_nat_rules_with_previous(
+    let mut draining = parse_source_nat_rules_with_previous(
         &[pool_snapshot(true)],
         Some(&gen1),
         &NatCounterStore::default(),
@@ -345,6 +345,7 @@ fn nat64_mint_fails_closed_while_a_pool_drains_the_same_address_7799() {
         1,
         "setup: still draining, not drained"
     );
+    crate::nat::wire_nat64_overlap_peers(&mut draining, &mut nat64.prefixes);
 
     match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining, 0) {
         Err(SourceNatFailureReason::Nat64OverlapDraining) => {}
@@ -372,7 +373,7 @@ fn nat64_deterministic_mint_also_fails_closed_while_draining_7799() {
     }
 
     // A DETERMINISTIC (mode 2) NAT64 prefix whose pool is the drained address.
-    let nat64 = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+    let mut nat64 = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
         name: "n64-det".to_string(),
         prefix: "64:ff9b::/96".to_string(),
         pool_addresses: vec![E.to_string()],
@@ -395,12 +396,13 @@ fn nat64_deterministic_mint_also_fails_closed_while_draining_7799() {
         .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &gen1, 0)
         .expect("control: a deterministic NAPT64 mint must succeed with no draining pool");
 
-    let draining = parse_source_nat_rules_with_previous(
+    let mut draining = parse_source_nat_rules_with_previous(
         &[pool_snapshot(true)],
         Some(&gen1),
         &NatCounterStore::default(),
         0,
     );
+    crate::nat::wire_nat64_overlap_peers(&mut draining, &mut nat64.prefixes);
     match nat64.allocate_source_for_worker(0, TCP, client, dst_v4, 6001, 443, 0, 0, &draining, 0) {
         Err(SourceNatFailureReason::Nat64OverlapDraining) => {}
         other => panic!(
@@ -408,4 +410,84 @@ fn nat64_deterministic_mint_also_fails_closed_while_draining_7799() {
              fail closed on a draining address too. Got {other:?}"
         ),
     }
+}
+// #13083 (D6-04): pool membership/index must be O(1) over a /16 pool, not a
+// linear Vec scan — and the NAT64 draining check must not be O(N*M). These
+// tests call the new index APIs; on pre-fix master they fail to compile
+// (RED), and the disjoint-pool NAT64 mint guards the quadratic gate.
+
+fn large_pool_snapshot(quarantined: bool) -> SourceNATRuleSnapshot {
+    SourceNATRuleSnapshot {
+        name: "pool-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "P".to_string(),
+        pool_addresses: vec!["198.51.0.0/16".to_string()],
+        pool_unusable: quarantined,
+        pool_unusable_reason: if quarantined {
+            "iface_snat_egress_overlap".to_string()
+        } else {
+            String::new()
+        },
+        ..SourceNATRuleSnapshot::default()
+    }
+}
+
+#[test]
+fn pool_index_maps_large_pool_membership_and_positions_13083() {
+    let rules = parse_source_nat_rules(&[large_pool_snapshot(false)]);
+    let rule = &rules[0];
+    assert_eq!(rule.pool_addresses_v4.len(), 65_536, "setup: /16 pool");
+    let first: IpAddr = "198.51.0.0".parse().expect("first");
+    let last: IpAddr = "198.51.255.255".parse().expect("last");
+    let outside: IpAddr = "203.0.113.9".parse().expect("outside");
+    assert!(rule.pool_contains_address(first));
+    assert!(rule.pool_contains_address(last));
+    assert!(!rule.pool_contains_address(outside));
+    assert_eq!(rule.pool_index_of(first), Some(0));
+    assert_eq!(rule.pool_index_of(last), Some(65_535));
+    assert_eq!(rule.pool_index_of(outside), None);
+    assert_eq!(
+        rule.pool_index_of("198.51.0.7".parse().expect("mid")),
+        Some(7)
+    );
+}
+
+#[test]
+fn nat64_draining_check_with_disjoint_large_pools_mints_13083() {
+    let gen1 = parse_source_nat_rules(&[large_pool_snapshot(false)]);
+    let reg = InterfaceNatAllocators::default();
+    match admit(&reg, &gen1, "10.0.0.1", 5555) {
+        SourceNatLookup::Matched(_) => {}
+        other => panic!("setup: healthy large pool must admit: {other:?}"),
+    }
+    let mut draining = parse_source_nat_rules_with_previous(
+        &[large_pool_snapshot(true)],
+        Some(&gen1),
+        &NatCounterStore::default(),
+        0,
+    );
+    // Disjoint pools cannot collide, so the mint succeeds. Previously this
+    // checked 65,536 NAT64 addresses against 65,536 draining SNAT addresses.
+    // NAT64 snapshots carry explicit hosts rather than CIDRs.
+    let nat64_pool: Vec<String> = (0..65_536_u32)
+        .map(|offset| {
+            std::net::Ipv4Addr::from(u32::from(std::net::Ipv4Addr::new(203, 0, 0, 0)) + offset)
+                .to_string()
+        })
+        .collect();
+    let mut nat64 = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+        name: "n64".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: nat64_pool,
+        ..Default::default()
+    }]);
+    crate::nat::wire_nat64_overlap_peers(&mut draining, &mut nat64.prefixes);
+    assert_eq!(nat64.prefixes[0].pool_v4.len(), 65_536, "setup");
+    let client: std::net::Ipv6Addr = "2001:db8::1".parse().expect("client v6");
+    let dst_v4: std::net::Ipv4Addr = SRV.parse().expect("server v4");
+    nat64
+        .allocate_source_for_worker(0, TCP, client, dst_v4, 6000, 443, 0, 0, &draining, 0)
+        .expect("#13083: disjoint draining pool must not quarantine NAT64 mint");
 }

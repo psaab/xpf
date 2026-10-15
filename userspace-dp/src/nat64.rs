@@ -185,6 +185,7 @@ use crate::nat::{
     reserve_nat64_pool_port,
 };
 use crate::session::SessionDecision;
+use rustc_hash::FxHashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -196,6 +197,15 @@ use std::sync::{Arc, Mutex};
 const NAT64_PORT_LOW: u16 = 1024;
 const NAT64_PORT_HIGH: u16 = 65535;
 
+fn nat64_pool_index(pool: &[Ipv4Addr]) -> Arc<FxHashMap<Ipv4Addr, usize>> {
+    let mut index = FxHashMap::default();
+    index.reserve(pool.len());
+    for (position, address) in pool.iter().enumerate() {
+        index.entry(*address).or_insert(position);
+    }
+    Arc::new(index)
+}
+
 /// NAT64 prefix configuration — one per `security nat nat64` rule.
 #[derive(Debug)]
 pub(crate) struct Nat64Prefix {
@@ -203,6 +213,11 @@ pub(crate) struct Nat64Prefix {
     pub(crate) prefix_bytes: [u8; 12],
     /// IPv4 source pool addresses for SNAT.
     pub(crate) pool_v4: Vec<Ipv4Addr>,
+    /// Live-drain allocators whose configured pool intersects this prefix's
+    /// `pool_v4`; occupancy is time-varying, but this address relation is not.
+    pub(crate) draining_pool_allocators: Vec<PortAllocator>,
+    /// Address-to-position index; `pool_v4` remains the allocator's ordering.
+    pub(crate) pool_index_v4: Arc<FxHashMap<Ipv4Addr, usize>>,
     /// Round-robin index for pool allocation (atomic for thread safety).
     ///
     /// #4381: retained for the empty-pool / liveness probe only. The
@@ -277,12 +292,14 @@ impl Nat64Prefix {
     ) -> Self {
         Self {
             prefix_bytes,
+            pool_index_v4: nat64_pool_index(&pool_v4),
             pool_v4,
             pool_index: AtomicUsize::new(0),
             port_allocator,
             deterministic_v6: None,
             over_budget: false,
             overlap_owners: None,
+            draining_pool_allocators: Vec::new(),
         }
     }
 }
@@ -292,12 +309,14 @@ impl Clone for Nat64Prefix {
         Self {
             prefix_bytes: self.prefix_bytes,
             pool_v4: self.pool_v4.clone(),
+            pool_index_v4: self.pool_index_v4.clone(),
             pool_index: AtomicUsize::new(self.pool_index.load(Ordering::Relaxed)),
             // Clone shares the Arc-backed allocator state (see field doc).
             port_allocator: self.port_allocator.clone(),
             deterministic_v6: self.deterministic_v6,
             over_budget: self.over_budget,
             overlap_owners: self.overlap_owners.clone(),
+            draining_pool_allocators: self.draining_pool_allocators.clone(),
         }
     }
 }
@@ -999,9 +1018,11 @@ impl Nat64State {
                     snap.name, snap.deterministic_host_base_v6
                 );
             }
+            let pool_index_v4 = nat64_pool_index(&pool_v4);
             prefixes.push(Nat64Prefix {
                 prefix_bytes,
                 pool_v4,
+                pool_index_v4,
                 pool_index: AtomicUsize::new(0),
                 port_allocator,
                 deterministic_v6,
@@ -1009,6 +1030,7 @@ impl Nat64State {
                 // Filled in by `wire_nat64_overlap_peers` once source-NAT rules
                 // and NAT64 prefixes both exist (#8115 R3).
                 overlap_owners: None,
+                draining_pool_allocators: Vec::new(),
             });
         }
         Self {
@@ -1349,22 +1371,18 @@ impl Nat64State {
             .ok_or(SourceNatFailureReason::AllocatorExhausted)?;
         // #7799 RUNTIME MINT QUARANTINE for NAT64, the third occupancy domain.
         //
-        // The gate is checked over the WHOLE pool rather than the single
-        // address the allocator is about to pick, because the pick happens
-        // inside `allocate_translation` and `occupancy` is indexed by the
-        // address's POSITION in `pool_v4` — filtering the slice would shift
-        // every index and corrupt the bitmap. Refusing the mint is also the
-        // posture #7717 settled on for a domain whose reservations this one
-        // cannot enumerate, and it is self-limiting: it lifts when the last
-        // draining flow closes.
+        // The address relation is precomputed at forwarding-build time, so
+        // this packet-path gate only checks the live counts of draining
+        // allocators that share at least one pool address. Those counts remain
+        // dynamic and the refusal lifts when the last draining flow closes.
         //
         // Placed BEFORE the deterministic branch so both mint paths are
         // covered. The deterministic (NAPT64 mode 2) path allocates from the
         // same `pool_v4` and has the same collision.
-        if !draining_rules.is_empty()
-            && prefix.pool_v4.iter().any(|addr| {
-                crate::nat::address_has_draining_pool_occupancy(draining_rules, IpAddr::V4(*addr))
-            })
+        if prefix
+            .draining_pool_allocators
+            .iter()
+            .any(|allocator| allocator.live_flow_count() > 0)
         {
             return Err(SourceNatFailureReason::Nat64OverlapDraining);
         }
@@ -1884,7 +1902,7 @@ fn reserve_synced_nat64_allocation_with_holder(
         IpAddr::V4(_) => None,
     };
     if let Some(prefix) = narrowed.and_then(|idx| nat64.prefixes.get(idx)) {
-        if let Some(addr_index) = prefix.pool_v4.iter().position(|a| *a == snat_v4) {
+        if let Some(addr_index) = prefix.pool_index_v4.get(&snat_v4).copied() {
             // #9021: peer-ownership refusal applies here too.
             return reserve_synced_nat64_port_unless_peer_owns(
                 prefix,
@@ -1904,7 +1922,7 @@ fn reserve_synced_nat64_allocation_with_holder(
         // The NAT64 allocator is sized to `pool_v4.len()` with
         // `family_offset == 0`, so the absolute allocator index equals the
         // address's position in `pool_v4` (mirrors `allocate_nat64_pool_port`).
-        let Some(addr_index) = prefix.pool_v4.iter().position(|a| *a == snat_v4) else {
+        let Some(addr_index) = prefix.pool_index_v4.get(&snat_v4).copied() else {
             continue;
         };
         // #5178: a NAPT64 (mode 2) deterministic prefix must tag its synced

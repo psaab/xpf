@@ -243,6 +243,10 @@ pub(crate) struct SourceNatRule {
     pub(crate) persistent_nat_timeout_ns: u64,
     pub(crate) pool_addresses_v4: Vec<Ipv4Addr>,
     pub(crate) pool_addresses_v6: Vec<Ipv6Addr>,
+    /// Address-to-position indexes for constant-time membership and allocator
+    /// slot lookup. Keep Vec order authoritative; these maps only index it.
+    pub(crate) pool_index_v4: Arc<FxHashMap<Ipv4Addr, usize>>,
+    pub(crate) pool_index_v6: Arc<FxHashMap<Ipv6Addr, usize>>,
     /// The pool's CONFIGURED port range after snapshot defaulting (1024-65535
     /// when unset). Carried on the rule — config, not allocator state — so the
     /// pool status view (`source_nat_pool_statuses`) and the allocator key
@@ -376,10 +380,21 @@ impl SourceNatRule {
     }
 
     /// Does this rule's pool contain `addr` as a member address?
-    fn pool_contains_address(&self, addr: IpAddr) -> bool {
+    pub(crate) fn pool_contains_address(&self, addr: IpAddr) -> bool {
         match addr {
-            IpAddr::V4(v4) => self.pool_addresses_v4.contains(&v4),
-            IpAddr::V6(v6) => self.pool_addresses_v6.contains(&v6),
+            IpAddr::V4(v4) => self.pool_index_v4.contains_key(&v4),
+            IpAddr::V6(v6) => self.pool_index_v6.contains_key(&v6),
+        }
+    }
+
+    /// Return the allocator slot for a member address.
+    pub(crate) fn pool_index_of(&self, addr: IpAddr) -> Option<usize> {
+        match addr {
+            IpAddr::V4(v4) => self.pool_index_v4.get(&v4).copied(),
+            IpAddr::V6(v6) => self
+                .pool_index_v6
+                .get(&v6)
+                .map(|index| self.pool_addresses_v4.len() + index),
         }
     }
 
@@ -1405,11 +1420,7 @@ pub(crate) fn source_nat_translation_matches(
             if rule.pool_failure.is_some() {
                 return false;
             }
-            let address_matches = match translated_src {
-                IpAddr::V4(addr) => rule.pool_addresses_v4.contains(&addr),
-                IpAddr::V6(addr) => rule.pool_addresses_v6.contains(&addr),
-            };
-            if !address_matches {
+            if !rule.pool_contains_address(translated_src) {
                 return false;
             }
             if rule.no_translation
@@ -1774,6 +1785,8 @@ fn parse_source_nat_rules_inner(
                 invalid_pool_address = true;
             }
         }
+        rule.pool_index_v4 = Arc::new(first_index_by_address(&rule.pool_addresses_v4));
+        rule.pool_index_v6 = Arc::new(first_index_by_address(&rule.pool_addresses_v6));
         let total_pool = rule.pool_addresses_v4.len() + rule.pool_addresses_v6.len();
         let port_low = if snap.port_low > 0 {
             snap.port_low

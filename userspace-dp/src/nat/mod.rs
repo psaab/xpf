@@ -280,8 +280,7 @@ pub(crate) use source::{
 };
 // #7560 residual: nat64.rs is the third reseed call site and needs the same note.
 pub(crate) use source::report_dropped_leases;
-// #7799: the NAT64 mint path (`crate::nat64`) needs the same drain-occupancy
-// test the interface-mode mint path uses.
+// #7799: the NAT64 mint path checks its precomputed draining-pool allocator list.
 pub(crate) use source::address_has_draining_pool_occupancy;
 // #8447: rule-match outcome counters (process-global).
 pub(crate) use source::{SourceNatMatchSnapshot, process_source_nat_match_counters};
