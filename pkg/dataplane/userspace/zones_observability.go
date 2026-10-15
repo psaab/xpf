@@ -28,6 +28,15 @@ type AddresslessEnforcingZone struct {
 	Interfaces []string
 }
 
+func hostInboundInterfaceAdminDisabled(cfg *config.Config, ref string) bool {
+	if cfg == nil {
+		return false
+	}
+	base, _, _ := strings.Cut(ref, ".")
+	ifc := cfg.Interfaces.Interfaces[base]
+	return ifc != nil && ifc.Disable
+}
+
 // addresslessEnforcingZonesFromSnapshots is the AddresslessEnforcingZones
 // core over ONE caller-supplied snapshot. Scoping reads the zone views
 // rendered from that snapshot with kernel scope-link rows EXCLUDED (#10751
@@ -69,7 +78,7 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 	zoneByIface := buildInterfaceZoneMap(cfg)
 	dhcpIntent := make(map[string]bool)
 	for ifName, iface := range cfg.Interfaces.Interfaces {
-		if iface == nil {
+		if iface == nil || iface.Disable {
 			continue
 		}
 		for un, unit := range iface.Units {
@@ -113,7 +122,8 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 		seen := make(map[string]bool, len(zone.Interfaces))
 		for _, ref := range zone.Interfaces {
 			ref = strings.TrimSpace(ref)
-			if ref == "" || seen[ref] || hostInboundLifelineInterface(ref, lifelines) {
+			if ref == "" || seen[ref] || hostInboundLifelineInterface(ref, lifelines) ||
+				hostInboundInterfaceAdminDisabled(cfg, ref) {
 				continue
 			}
 			// Match the zone mapper's canonical logical-key expansion. A
@@ -250,6 +260,9 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 		m[family] = true
 	}
 	for _, snap := range snaps {
+		if snap.AdminDisabled {
+			continue
+		}
 		for _, a := range snap.Addresses {
 			if hostInboundScopeLinkUnresolved(snap.Name, a, configuredAddrs) {
 				continue
@@ -266,7 +279,7 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 	sort.Strings(ifNames)
 	for _, ifName := range ifNames {
 		iface := cfg.Interfaces.Interfaces[ifName]
-		if iface == nil {
+		if iface == nil || iface.Disable {
 			continue
 		}
 		for un, unit := range iface.Units {
@@ -296,7 +309,7 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 	var out []AddresslessEnforcingInterface
 	for _, ifName := range ifNames {
 		iface := cfg.Interfaces.Interfaces[ifName]
-		if iface == nil {
+		if iface == nil || iface.Disable {
 			continue
 		}
 		unitNums := make([]int, 0, len(iface.Units))
