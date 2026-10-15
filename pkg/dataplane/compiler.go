@@ -1798,9 +1798,10 @@ func parsePortRange(spec string) (uint16, uint16, error) {
 	return uint16(port), uint16(port), nil
 }
 
-// parentHasVlanSubinterface resolves cfgName in cfg and asks
-// config.InterfaceHasVlanSubinterface about it. #5268 gates the fail-closed
-// RX-VLAN-offload activation check on this.
+// parentHasVlanSubinterface resolves cfgName in cfg and checks its configured
+// VLAN units. For physical RETH members it also checks the logical RETH parent,
+// where the VLAN units are configured. #5268 gates the fail-closed RX-VLAN
+// offload activation check on this.
 //
 // The predicate itself moved to pkg/config in #9946 because the post-link-cycle
 // re-disable in pkg/daemon must use the SAME scope — it holds an
@@ -1810,11 +1811,21 @@ func parentHasVlanSubinterface(cfg *config.Config, cfgName string) bool {
 	if cfg == nil {
 		return false
 	}
-	ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]
-	if !ok {
+	ifCfg := cfg.Interfaces.Interfaces[cfgName]
+	if ifCfg == nil {
 		return false
 	}
-	return config.InterfaceHasVlanSubinterface(ifCfg)
+	if config.InterfaceHasVlanSubinterface(ifCfg) {
+		return true
+	}
+	// RETH VLAN units are configured on the logical parent, while the
+	// RX-VLAN offload is disabled on each physical member. Apply the same
+	// fail-closed check to the member's physical NIC.
+	if ifCfg.RedundantParent == "" {
+		return false
+	}
+	return config.InterfaceHasVlanSubinterface(
+		cfg.Interfaces.Interfaces[ifCfg.RedundantParent])
 }
 
 // rxVlanOffloadActivationError decides whether a failure to disable RX-VLAN
