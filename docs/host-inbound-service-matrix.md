@@ -2357,9 +2357,9 @@ RETH unit therefore resolves to its member netdev on the node (`reth1.0` →
 - The fences (#5644 cold-boot, #5789 gap) are unchanged. They drop by destination
   address, with no per-service accepts and no `xpf-usp0` exemption, over the
   same address set.
-- `make test-host-inbound` probes from the LAN host. Its `wan` ssh cells are
-  now ADMIT via the reinject exemption above; telnet stays DENY (no zone
-  admits it) and ping stays ADMIT as the control.
+- At the time of #9637, `make test-host-inbound` sent all probes from the
+  LAN host and measured WAN VIPs through the userspace reinject exemption.
+  The current smoke probes the WAN units from their own ingress networks.
 
 Pinned by:
 
@@ -2953,39 +2953,37 @@ clean pass while asserting the wrong thing.
 ### The matrix on `loss:xpf-userspace-fw0`
 
 `lan` admits `ssh` + `ping`. `wan` admits `ping` + `gre` and owns the two tagged
-sub-units `reth0.50` / `reth0.80`. Every probe comes from `cluster-userspace-host`,
-so every probe **arrives on `lan`** (`reth1`). Since #9637, host-inbound is judged
-by the zone a packet arrives on, whichever address it names, so the smoke scores
-lan's own addresses against `lan`'s posture, and the `wan`
-sub-units against the reinject-path residual:
+sub-units `reth0.50` / `reth0.80`. Each destination is probed from a host on the
+matching ingress network: `cluster-userspace-host` for `lan`,
+`xpf-zone-matrix-dmz` for VLAN 50, and `xpf-mouse-target` for VLAN 80. A LAN
+packet addressed to a WAN VIP still arrives on `lan`; it cannot measure the
+WAN zone's host-inbound policy.
 
-| target | interface | owning zone | tcp/22 | tcp/23 | icmp |
-|---|---|---|---|---|---|
-| `10.0.61.1` | `reth1.0` (untagged) | lan | RST → **admitted** | timeout → denied | reply |
-| `2001:559:8585:ef00::1` | `reth1.0` (untagged) | lan | RST → **admitted** | timeout → denied | reply |
-| `172.16.50.8` | `reth0.50` (**VLAN 50**) | wan | RST → **admitted** | timeout → denied | reply |
-| `2001:559:8585:50::8` | `reth0.50` (**VLAN 50**) | wan | RST → **admitted** | timeout → denied | reply |
-| `172.16.80.8` | `reth0.80` (**VLAN 80**) | wan | RST → **admitted** | timeout → denied | reply |
-| `2001:559:8585:80::8` | `reth0.80` (**VLAN 80**) | wan | RST → **admitted** | timeout → denied | reply |
+| target | interface | owning zone | probe origin | tcp/22 | tcp/23 | icmp |
+|---|---|---|---|---|---|---|
+| `10.0.61.1` | `reth1.0` (untagged) | lan | LAN host | RST → **admitted** | timeout → denied | reply |
+| `2001:559:8585:ef00::1` | `reth1.0` (untagged) | lan | LAN host | RST → **admitted** | timeout → denied | reply |
+| `172.16.50.8` | `reth0.50` (**VLAN 50**) | wan | `xpf-zone-matrix-dmz` | timeout → **denied** | timeout → denied | reply |
+| `2001:559:8585:50::8` | `reth0.50` (**VLAN 50**) | wan | `xpf-zone-matrix-dmz` | timeout → **denied** | timeout → denied | reply |
+| `172.16.80.8` | `reth0.80` (**VLAN 80**) | wan | `xpf-mouse-target` | timeout → **denied** | timeout → denied | reply |
+| `2001:559:8585:80::8` | `reth0.80` (**VLAN 80**) | wan | `xpf-mouse-target` | timeout → **denied** | timeout → denied | reply |
 
-The four `wan` rows admit tcp/22: every probe arrives on `lan`, which admits
-ssh, and the #9637 residual fix exempts the userspace-adjudicated reinject
-through `xpf-usp0` to view addresses. These are interface-NAT addresses, so
-the userspace dataplane reinjects the SYN through `xpf-usp0`, where the
-kernel chain now trusts that adjudication instead of judging by the
-address's owner (§ "Ingress-zone judgement (#9637)"). The cells stay
-load-bearing through the tcp/22 and tcp/23 pair at the *same address*: port
-22 completes (the run holds an accept-and-close listener on both firewalls)
-while port 23 — which no zone admits — stays silent. Port 23 is the
-over-admission tripwire: the run also listens on :23, so a widened chain
-would complete a telnet handshake and flip those cells RED; silence there
-is a real deny, not an unobservable one. A posture check asserts that
-`lan` owns `reth1.0`, the prober's ingress interface, so the ssh cells
-cannot quietly be scored against the wrong zone.
+The smoke checks the effective per-interface posture on both WAN VLAN units
+before probing. This detects an interface-level `host-inbound-traffic` override
+that would replace the zone default. WAN ssh/telnet DENY cells are paired with
+an ICMP control from the same prober, address, family, and run; silence is only
+scored as a deny if that control replied.
 
-This prober cannot see the other direction: a client arriving on `wan` that names
-a `lan` address. The #9637 lab gate measured that direction separately, from the
-WAN-side `xpf-mouse-target` (`docs/log/9637.md`).
+The TCP/22 and TCP/23 listeners on both firewalls make admission observable:
+the LAN ssh handshake completes while telnet remains silent, and a widened
+WAN policy completes ssh and flips its DENY cells RED. The listeners are
+accept-and-close probes; their per-port ownership is verified before any
+matrix cell is scored.
+
+This matrix measures ingress on the target's own zone. The complementary
+LAN-to-WAN-VIP behavior (including the #9637 userspace reinject exemption) is
+not inferred from these cells; it is covered by the dedicated #9637 gate
+(`docs/log/9637.md`).
 
 `xpfd` binds its own listeners (gRPC 50051, HTTP 8080) on `127.0.0.1` only, so
 a probe of a non-listening port on a firewall-local address comes back as an

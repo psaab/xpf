@@ -232,8 +232,8 @@ set security zones security-zone lan host-inbound-traffic system-services ssh
 set security zones security-zone lan host-inbound-traffic system-services ping'
 
 checkz() {
-	local name="$1" want="$2" lines="$3" zone="$4" svc="$5" expect="$6" got verdict
-	got="$(hi_zone_service_verdict "$lines" "$zone" "$svc" "$expect")"
+	local name="$1" want="$2" lines="$3" zone="$4" svc="$5" expect="$6" iface="${7:-}" got verdict
+	got="$(hi_zone_service_verdict "$lines" "$zone" "$svc" "$expect" "$iface")"
 	verdict="${got%% *}"
 	if [[ "$verdict" == "$want" ]]; then
 		pass=$((pass + 1)); printf 'ok   %-34s -> %s\n' "$name" "$verdict"
@@ -249,6 +249,31 @@ checkz ZONE_WAN_DENIES_SSH    PASS "$ZONES" wan ssh ABSENT
 checkz ZONE_WAN_ADMITS_PING   PASS "$ZONES" wan ping PRESENT
 checkz ZONE_LAN_SSH_NOT_ABSENT FAIL "$ZONES" lan ssh ABSENT
 checkz ZONE_WAN_SSH_NOT_PRESENT FAIL "$ZONES" wan ssh PRESENT
+checkz ZONE_WAN_INTERFACE_SSH_ADMITS FAIL "$ZONES" wan ssh PRESENT reth0.50
+checkz ZONE_WAN_INTERFACE_SSH_DENIED PASS "$ZONES" wan ssh ABSENT reth0.50
+ZONES_IFACE_SSH='set security zones security-zone wan interfaces reth0.50
+set security zones security-zone wan host-inbound-traffic system-services all
+set security zones security-zone wan interfaces reth0.50 host-inbound-traffic system-services ssh'
+checkz ZONE_IFACE_OVERRIDE_ADMITS PASS "$ZONES_IFACE_SSH" wan ssh PRESENT reth0.50
+checkz ZONE_IFACE_OVERRIDE_REPLACES PASS "$ZONES_IFACE_SSH" wan telnet ABSENT reth0.50
+ZONES_ALL_EXCEPT='set security zones security-zone wan interfaces reth0.50
+set security zones security-zone wan host-inbound-traffic system-services all
+set security zones security-zone wan host-inbound-traffic system-services ssh except'
+checkz ZONE_ALL_EXCEPT_DENIES FAIL "$ZONES_ALL_EXCEPT" wan ssh PRESENT
+checkz ZONE_ALL_EXCEPT_ABSENT PASS "$ZONES_ALL_EXCEPT" wan ssh ABSENT
+ZONES_ANY='set security zones security-zone wan interfaces reth0.50
+set security zones security-zone wan host-inbound-traffic system-services any-service'
+checkz ZONE_ANY_ADMITS PASS "$ZONES_ANY" wan ssh PRESENT
+checkz ZONE_ANY_DEFEATS_ABSENT FAIL "$ZONES_ANY" wan ssh ABSENT
+ZONES_ALL_TOKEN_EXCEPT='set security zones security-zone wan interfaces reth0.50
+set security zones security-zone wan host-inbound-traffic system-services all except'
+checkz ZONE_ALL_TOKEN_EXCEPT_ABSENT PASS "$ZONES_ALL_TOKEN_EXCEPT" wan ssh ABSENT
+ZONES_ANY_EXCEPT='set security zones security-zone wan interfaces reth0.50
+set security zones security-zone wan host-inbound-traffic system-services any-service
+set security zones security-zone wan host-inbound-traffic system-services any-service except'
+# xpf rejects this combination in strict validation; tolerant compilation
+# retains the packet-wide full-admit token, so it must never certify ABSENT.
+checkz ZONE_ANY_EXCEPT_STAYS_OPEN FAIL "$ZONES_ANY_EXCEPT" wan ssh ABSENT
 # THE MIDDLE ROW AGAIN, for the precondition: an unreadable config must not be
 # allowed to answer an ABSENT question. "wan does not admit ssh" and "I could
 # not read the config" are the same string to grep, and only one of them is a
@@ -497,6 +522,21 @@ HI_FAKE_FOREIGN_PORT=23 HI_FAKE_FOREIGN_PID=9876 \
 	gate_case GATE_LIVE_FOREIGN_23_DIES dies 22
 # Both owned: the only world that may reach the info line.
 gate_case GATE_LIVE_BOTH_OWNED_PASSES passes 22 23
+# A fatal precondition must still publish the same structured envelope as a
+# completed run. The old die() exited 2 before the normal-summary WIRE_GATE.
+HI_DIE_SRC="$(sed -n '/^die() {/,/^}/p' "${SCRIPT_DIR}/test-host-inbound.sh")"
+die_out="$(HI_DIE_SRC="$HI_DIE_SRC" bash -c '
+	eval "$HI_DIE_SRC"
+	PASS=3 FAIL=1 POSTURE_PASS=2 POSTURE_FAIL=1 WITH_FAILOVER=0
+	die "fixture precondition failed"
+' 2>&1)"
+die_rc=$?
+if [[ "$die_rc" -eq 2 ]] && grep -qxF 'WIRE_GATE test-host-inbound VOID reason=harness-void cells_passed=3 cells_failed=1 posture_passed=2 posture_failed=1' <<<"$die_out"; then
+	pass=$((pass + 1)); printf 'ok   %-34s -> fatal WIRE_GATE envelope\n' "GATE_FATAL_LEDGER"
+else
+	fail=$((fail + 1)); printf 'FAIL %-34s -> fatal WIRE_GATE missing or malformed: rc=%s output=%s\n' "GATE_FATAL_LEDGER" "$die_rc" "$die_out"
+fi
+
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
