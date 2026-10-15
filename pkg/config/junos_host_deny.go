@@ -1155,6 +1155,12 @@ func junosHostVRFMasterNetdevs(cfg *Config, tunnelNames map[string]string) map[s
 	if cfg == nil {
 		return out
 	}
+	quarantinedDevices := make(map[string]struct{}, len(cfg.QuarantinedRIMemberDeviceConflicts))
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		if conflict.LinuxName != "" {
+			quarantinedDevices[conflict.LinuxName] = struct{}{}
+		}
+	}
 	masters := map[string]string{ManagementVRFInstanceName: ManagementVRFDeviceName}
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" ||
@@ -1193,7 +1199,31 @@ func junosHostVRFMasterNetdevs(cfg *Config, tunnelNames map[string]string) map[s
 		if claim.Instance == "" {
 			continue
 		}
+		if _, quarantined := quarantinedDevices[claim.LinuxName]; quarantined {
+			continue
+		}
 		recordMaster(claim.LinuxName, masters[claim.Instance])
+	}
+	for netdev := range quarantinedDevices {
+		out[netdev] = ""
+	}
+	// Management-class interfaces are bound to vrf-mgmt independently of RI
+	// membership claims. Include each configured unit: VLAN interfaces have
+	// distinct enslaved netdev names at LOCAL_IN.
+	for ifName, iface := range cfg.Interfaces.Interfaces {
+		if !IsManagementIfName(ifName) || iface == nil {
+			continue
+		}
+		if nd := junosHostLinuxNameWith(cfg, ifName, nil, tunnelNames); nd != "" {
+			out[nd] = ManagementVRFDeviceName
+		}
+		for _, unit := range iface.Units {
+			if unit != nil {
+				if nd := junosHostLinuxNameWith(cfg, ifName, unit, tunnelNames); nd != "" {
+					out[nd] = ManagementVRFDeviceName
+				}
+			}
+		}
 	}
 	return out
 }
