@@ -200,7 +200,11 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
     if mtu == 0 {
         return None;
     }
-    let l3 = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?.l3;
+    // Prefer the wire Ethernet header, like the dispatcher: VLAN metadata may
+    // lag normalization, making a stale stamp at byte 14 look nibble-valid.
+    let l3 = frame_l3_offset(frame).or_else(|| {
+        nibble_trusted_stamp(frame, meta.l3_offset, meta.addr_family)
+    })?;
     if l3 >= frame.len() {
         return None;
     }
