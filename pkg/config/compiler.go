@@ -1256,6 +1256,12 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// contested interfaces are rejected/quarantined, but must not expose
 	// partially compiled enforcement state to callers.
 	clearDroppedEnforcementZoneBindings11575(cfg)
+	if opts.lenientTunnelRITarget12520 || opts.lenientWireguardRoutingInstance ||
+		opts.lenientRIDualClaim11060 || opts.lenientRIMgmtMember11392 {
+		// #13138: this advisory consumes the final effective ingress ownership,
+		// matching BuildJunosHostDenyProjection downstream.
+		cfg.Warnings = append(cfg.Warnings, validateJunosHostDirectDeliveryWarnings(cfg)...)
+	}
 
 	// #1539: the structural invariant `cfg.System.DPDKDataplane = nil`
 	// was added on master (PR #1553) as a runtime safeguard against

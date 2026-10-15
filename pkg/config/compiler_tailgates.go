@@ -22,10 +22,14 @@ import "fmt"
 // tail-gate sequence and warning-append order remain unchanged; #11571 adds
 // the managed-multicast migration gate immediately after ValidateConfig.
 func runTailGates(cfg *Config, opts compileOpts) error {
-	if warnings := ValidateConfig(cfg); len(warnings) > 0 {
-		for _, w := range warnings {
-			cfg.Warnings = append(cfg.Warnings, w)
-		}
+	// #13138: defer the VRF-sensitive advisory only when a tolerant quarantine
+	// can change the effective ingress that the projection observes. All other
+	// ValidateConfig warnings remain in their established phase and order.
+	deferJunosHostWarnings := opts.lenientTunnelRITarget12520 ||
+		opts.lenientWireguardRoutingInstance || opts.lenientRIDualClaim11060 ||
+		opts.lenientRIMgmtMember11392
+	for _, warning := range validateConfig(cfg, !deferJunosHostWarnings) {
+		cfg.Warnings = append(cfg.Warnings, warning)
 	}
 
 	// #11571: managed routing protocols enabled on a zone interface must be
