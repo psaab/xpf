@@ -3840,3 +3840,43 @@ fn process_status_nptv6_counters_roundtrip() {
     assert_eq!(back.nptv6_outbound_translations, 3);
     assert_eq!(back.nptv6_untranslatable_drops, 5);
 }
+
+#[test]
+fn screen_security_counters_roundtrip_in_binding_status_13285() {
+    let status = BindingStatus {
+        screen_substituted_default_drops: 2,
+        screen_syn_flood_dst_drops: 3,
+        screen_syn_flood_src_drops: 5,
+        screen_syn_flood_alarm_events: 7,
+        screen_alarm_without_drop_events: 11,
+        screen_missing_profile_warns: 13,
+        screen_inert_profile_warns: 17,
+        screen_scan_sweep_skipped_pressure: 19,
+        screen_scan_sweep_evicted_pressure: 23,
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&status).expect("serialize BindingStatus");
+    for (key, expected) in [
+        ("screen_substituted_default_drops", 2),
+        ("screen_syn_flood_dst_drops", 3),
+        ("screen_syn_flood_src_drops", 5),
+        ("screen_syn_flood_alarm_events", 7),
+        ("screen_alarm_without_drop_events", 11),
+        ("screen_missing_profile_warns", 13),
+        ("screen_inert_profile_warns", 17),
+        ("screen_scan_sweep_skipped_pressure", 19),
+        ("screen_scan_sweep_evicted_pressure", 23),
+    ] {
+        assert_eq!(value[key], expected, "wire field {key}");
+    }
+    let back: BindingStatus = serde_json::from_value(value).expect("deserialize BindingStatus");
+    assert_eq!(back.screen_substituted_default_drops, 2);
+    assert_eq!(back.screen_syn_flood_dst_drops, 3);
+    assert_eq!(back.screen_syn_flood_src_drops, 5);
+    assert_eq!(back.screen_syn_flood_alarm_events, 7);
+    assert_eq!(back.screen_alarm_without_drop_events, 11);
+    assert_eq!(back.screen_missing_profile_warns, 13);
+    assert_eq!(back.screen_inert_profile_warns, 17);
+    assert_eq!(back.screen_scan_sweep_skipped_pressure, 19);
+    assert_eq!(back.screen_scan_sweep_evicted_pressure, 23);
+}

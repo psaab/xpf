@@ -352,12 +352,11 @@ pub(crate) struct ScreenState {
     /// from `missing_profile_warn_counters` so each set's `retain` on config
     /// update cannot evict the other's counters.
     inert_profile_warn_counters: FxHashMap<String, RateCounter>,
-    /// #3082: count of WARNs actually emitted (post rate-limit). Test seam so a
-    /// unit test can assert the WARN path was taken without scraping stderr.
+    /// #3082: cumulative count of missing-profile WARNs actually emitted after
+    /// rate limiting. Exported through userspace worker status (#13285).
     missing_profile_warn_count: u64,
-    /// #7888: count of inert-profile WARNs actually emitted (post rate-limit).
-    /// Test seam, and separately assertable from the missing-profile count so
-    /// a test can prove the RIGHT warning fired, not merely that one did.
+    /// #7888: cumulative inert-profile WARN count after rate limiting,
+    /// separate from missing-profile warnings and exported in worker status.
     inert_profile_warn_count: u64,
     /// #7168: packets DROPPED by the conservative default substituted for an
     /// unresolved screen reference. Distinct from the ordinary screen drop
@@ -375,23 +374,16 @@ pub(crate) struct ScreenState {
     /// zone never consumes another zone's pending alarm. The verdict is NOT a
     /// drop.
     syn_alarm_pending: bool,
-    /// #3315: sub-attribution test seams (per-worker). The drop verdict reuses
-    /// the existing `"syn-flood"` reason id (no Go gRPC/CLI change), so these
-    /// counters let tests assert WHICH sub-threshold tripped without scraping
-    /// the event stream. Surfacing them on `show security screen` is a tracked
-    /// follow-up; the drops are already counted via `screen_drops` and emit a
-    /// `syn-flood` event, and the alarm emits a `syn-flood-alarm` event.
+    /// #3315: per-worker SYN-flood sub-attribution counters, exported by
+    /// userspace worker status (#13285). The drop verdict retains the existing
+    /// `"syn-flood"` reason id; these distinguish destination/source quotas and
+    /// alarm-threshold crossings without changing packet verdicts.
     syn_flood_dst_drops: u64,
     syn_flood_src_drops: u64,
     syn_flood_alarm_events: u64,
-    /// Count of screen DROP verdicts SUPPRESSED because the ingress zone's
-    /// profile is in `alarm-without-drop` (audit/log-only) mode: the packet
-    /// forwarded and a log-only alarm event was raised instead. Bumped by the
-    /// verdict consumers (`poll_stages`/`poll_descriptor`) via
-    /// `record_alarm_without_drop`. Like `syn_flood_alarm_events` this is a
-    /// per-worker test/diagnostic seam — the production signal is the emitted
-    /// screen ALARM event; surfacing it on `show security screen` is a tracked
-    /// follow-up.
+    /// Count screen DROP verdicts suppressed by `alarm-without-drop` mode: the
+    /// packet is permitted and a log-only alarm event is raised. Exported as
+    /// worker telemetry (#13285).
     alarm_without_drop_events: u64,
 }
 
@@ -437,10 +429,7 @@ impl ScreenState {
         }
     }
 
-    /// #3082: number of missing-profile WARNs actually emitted (post
-    /// rate-limit). Test seam.
-    #[cfg(test)]
-    /// #7168: packets dropped by the substituted conservative default.
+    /// #13285: screen security and saturation counters exported by worker status.
     pub(crate) fn substituted_default_drops(&self) -> u64 {
         self.substituted_default_drops
     }
@@ -449,9 +438,6 @@ impl ScreenState {
         self.missing_profile_warn_count
     }
 
-    /// #7888: number of inert-profile WARNs actually emitted (post rate-limit).
-    /// Test seam, separate from `missing_profile_warn_count` so a test can
-    /// assert WHICH warning fired rather than that some warning did.
     pub(crate) fn inert_profile_warn_count(&self) -> u64 {
         self.inert_profile_warn_count
     }
@@ -582,23 +568,16 @@ impl ScreenState {
         self.alarm_without_drop_events = self.alarm_without_drop_events.wrapping_add(1);
     }
 
-    /// #3315: sub-attribution test seams (per-destination / per-source drops,
-    /// alarm events). Used by unit tests to assert WHICH SYN-flood sub-threshold
-    /// tripped without scraping the event stream.
-    #[cfg(test)]
+    /// #3315: sub-attribution and alarm counters surfaced in status.
     pub(crate) fn syn_flood_dst_drops(&self) -> u64 {
         self.syn_flood_dst_drops
     }
-    #[cfg(test)]
     pub(crate) fn syn_flood_src_drops(&self) -> u64 {
         self.syn_flood_src_drops
     }
-    #[cfg(test)]
     pub(crate) fn syn_flood_alarm_events(&self) -> u64 {
         self.syn_flood_alarm_events
     }
-    /// Test seam: count of drops suppressed by `alarm-without-drop` mode.
-    #[cfg(test)]
     pub(crate) fn alarm_without_drop_events(&self) -> u64 {
         self.alarm_without_drop_events
     }
@@ -1430,20 +1409,16 @@ impl ScreenState {
         (port_scan_floor, ip_sweep_floor)
     }
 
-    /// #2209: total scan/sweep records skipped because a per-zone source
-    /// cap or per-source unique-entry cap was hit (fail-safe overflow
-    /// pressure). Pure observability; never affects a verdict.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// #2209: total scan/sweep records skipped because a per-zone source cap
+    /// or per-source unique-entry cap was hit. Published in worker status
+    /// (#13285); the counter never affects a verdict.
     pub fn scan_sweep_skipped_pressure(&self) -> u64 {
         self.port_scan.skipped_pressure() + self.ip_sweep.skipped_pressure()
     }
 
-    /// #2234/#4418: total bounded evictions on the scan/sweep source-saturation
-    /// path. A non-zero value means the per-zone source table hit its cap and
-    /// the detector displaced the least-suspicious sources to keep a fresh real
-    /// scanner trackable (it no longer silently drops new sources on a full
-    /// table). Pure observability; never affects a verdict.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// #2234/#4418: total bounded scan/sweep source-saturation evictions,
+    /// published in worker status (#13285). A non-zero value means the
+    /// per-zone source table displaced entries to keep fresh scanners trackable.
     pub fn scan_sweep_evicted_pressure(&self) -> u64 {
         self.port_scan.evicted_pressure() + self.ip_sweep.evicted_pressure()
     }

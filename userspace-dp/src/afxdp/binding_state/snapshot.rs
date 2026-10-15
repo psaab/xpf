@@ -116,6 +116,15 @@ impl BindingLiveState {
             screen_reason_drops: std::array::from_fn(|i| {
                 self.screen_reason_drops[i].load(Ordering::Relaxed)
             }),
+            screen_substituted_default_drops: self.screen_substituted_default_drops.load(Ordering::Relaxed),
+            screen_syn_flood_dst_drops: self.screen_syn_flood_dst_drops.load(Ordering::Relaxed),
+            screen_syn_flood_src_drops: self.screen_syn_flood_src_drops.load(Ordering::Relaxed),
+            screen_syn_flood_alarm_events: self.screen_syn_flood_alarm_events.load(Ordering::Relaxed),
+            screen_alarm_without_drop_events: self.screen_alarm_without_drop_events.load(Ordering::Relaxed),
+            screen_missing_profile_warns: self.screen_missing_profile_warns.load(Ordering::Relaxed),
+            screen_inert_profile_warns: self.screen_inert_profile_warns.load(Ordering::Relaxed),
+            screen_scan_sweep_skipped_pressure: self.screen_scan_sweep_skipped_pressure.load(Ordering::Relaxed),
+            screen_scan_sweep_evicted_pressure: self.screen_scan_sweep_evicted_pressure.load(Ordering::Relaxed),
             syn_cookie_challenges: self.syn_cookie_challenges.load(Ordering::Relaxed),
             syn_cookie_secret_unavailable: self
                 .syn_cookie_secret_unavailable

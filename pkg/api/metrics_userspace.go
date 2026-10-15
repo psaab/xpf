@@ -78,6 +78,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 	c.emitFabricSkipCounters(ch, status)
 	c.emitLearnedRouteImportCapped(ch, status)
 	c.emitDropClassCounters(ch, status)
+	c.emitUserspaceScreenStateMetrics(ch, status)
 	c.emitFabricTrustBoundaryCounters(ch, status)
 }
 
