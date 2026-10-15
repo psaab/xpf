@@ -514,6 +514,26 @@ impl super::Coordinator {
         crate::fragment_assoc::NAT64_FRAG_CROSS_DOMAIN_MISSES.load(Ordering::Relaxed)
     }
 
+    /// #13284 (D3-09): process-global NAT64 aggregate-budget refusal count.
+    pub fn nat64_over_budget_total(&self) -> u64 {
+        crate::nat64::NAT64_OVER_BUDGET_COUNT.load(Ordering::Relaxed)
+    }
+
+    /// #13284 (D3-09): installed NAT64 prefixes currently refused by budget.
+    pub fn nat64_over_budget_prefixes(&self) -> usize {
+        self.forwarding
+            .nat64
+            .prefixes
+            .iter()
+            .filter(|prefix| prefix.over_budget)
+            .count()
+    }
+
+    /// #13284 (D3-09): process-global deterministic NAPT64 downgrade count.
+    pub fn nat64_deterministic_v6_downgrades_total(&self) -> u64 {
+        crate::nat64::DETERMINISTIC_V6_DOWNGRADE_COUNT.load(Ordering::Relaxed)
+    }
+
     /// #10729 X2-F6: v6 chains declined to flowless for sighting AH.
     /// Surfaced as `xpf_userspace_ipv6_ah_flowless_total`.
     pub fn ipv6_ah_flowless_total(&self) -> u64 {

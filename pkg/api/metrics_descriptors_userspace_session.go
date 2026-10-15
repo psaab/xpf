@@ -89,6 +89,21 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"bearing the identity of a datagram admitted in another.",
 		nil, nil,
 	)
+	c.userspaceNAT64OverBudgetTotal = prometheus.NewDesc(
+		"xpf_userspace_nat64_over_budget_total",
+		"NAT64 prefix installations refused by the aggregate allocator budget.",
+		nil, nil,
+	)
+	c.userspaceNAT64OverBudgetPrefixes = prometheus.NewDesc(
+		"xpf_userspace_nat64_over_budget_prefixes",
+		"Currently installed NAT64 prefixes refused by the aggregate allocator budget.",
+		nil, nil,
+	)
+	c.userspaceNAT64DeterministicDowngrades = prometheus.NewDesc(
+		"xpf_userspace_nat64_deterministic_v6_downgrades_total",
+		"Deterministic NAT64 subscriber mappings downgraded to dynamic PAT.",
+		nil, nil,
+	)
 	c.userspaceIPv6AHFlowlessTotal = prometheus.NewDesc(
 		"xpf_userspace_ipv6_ah_flowless_total",
 		"#10729 X2-F6: v6 chains declined to flowless for sighting an "+

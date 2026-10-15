@@ -430,6 +430,9 @@ pub(crate) fn run() -> Result<(), String> {
             // #6751 PR 2/3: interface-mode SNAT identity registry counters.
             interface_snat_pat_collisions_total: 0,
             nat64_frag_cross_domain_misses_total: 0,
+            nat64_over_budget_total: 0,
+            nat64_over_budget_prefixes: 0,
+            nat64_deterministic_v6_downgrades_total: 0,
             ipv6_ah_flowless_total: 0,
             nat64_frag_protocol_alias_misses_total: 0,
             frag_max_lifetime_evictions_total: 0,
