@@ -37,29 +37,12 @@ func (c *xpfCollector) emitCoSActiveFlowCount(ch chan<- prometheus.Metric, statu
 // `Status() (dpuserspace.ProcessStatus, error)` interface — if the
 // assertion fails we skip silently (not an error).
 func (c *xpfCollector) emitCoSOwnerProfile(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
-	for _, iface := range status.CoSInterfaces {
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
-		for _, queue := range iface.Queues {
-			// Only exact queues with a named owner worker have
-			// meaningful owner-profile telemetry. See cosfmt.go for
-			// the same gating on the CLI side.
-			if queue.OwnerWorkerID == nil {
-				continue
-			}
-			queueLabel := strconv.Itoa(queue.QueueID)
-			emitHistogram(ch, c.cosDrainLatencyBucket,
-				queue.DrainLatencyHist, ifindexLabel, queueLabel)
-			emitHistogram(ch, c.cosRedirectAcquireBucket,
-				queue.RedirectAcquireHist, ifindexLabel, queueLabel)
-			ch <- prometheus.MustNewConstMetric(c.cosDrainInvocationsTotal,
-				prometheus.CounterValue, float64(queue.DrainInvocations),
-				ifindexLabel, queueLabel)
-			ch <- prometheus.MustNewConstMetric(c.cosOwnerPPS,
-				prometheus.GaugeValue, float64(queue.OwnerPPS),
-				ifindexLabel, queueLabel)
-			ch <- prometheus.MustNewConstMetric(c.cosPeerPPS,
-				prometheus.GaugeValue, float64(queue.PeerPPS),
-				ifindexLabel, queueLabel)
+		for j := range iface.Queues {
+			queue := &iface.Queues[j]
+			c.emitCoSQueueTelemetry(ch, cosOwnerProfileMetric, queue, ifindexLabel, strconv.Itoa(queue.QueueID))
 		}
 	}
 }
@@ -70,28 +53,12 @@ func (c *xpfCollector) emitCoSOwnerProfile(ch chan<- prometheus.Metric, status *
 // `*_while_exact_backlogged`, and shared-exact queues still produce a
 // truthful guarantee/surplus phase split.
 func (c *xpfCollector) emitCoSDrainPhaseTelemetry(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
-	for _, iface := range status.CoSInterfaces {
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
-		for _, queue := range iface.Queues {
-			queueLabel := strconv.Itoa(queue.QueueID)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosDrainGuaranteeSentBytes,
-				prometheus.CounterValue,
-				float64(queue.DrainGuaranteeSentBytes),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosDrainSurplusSentBytes,
-				prometheus.CounterValue,
-				float64(queue.DrainSurplusSentBytes),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosDrainNonExactSentBytesWhileExactBacklogged,
-				prometheus.CounterValue,
-				float64(queue.DrainNonExactSentBytesWhileExactBacklogged),
-				ifindexLabel, queueLabel,
-			)
+		for j := range iface.Queues {
+			queue := &iface.Queues[j]
+			c.emitCoSQueueTelemetry(ch, cosDrainPhaseMetric, queue, ifindexLabel, strconv.Itoa(queue.QueueID))
 		}
 	}
 }
@@ -108,34 +75,12 @@ func (c *xpfCollector) emitCoSDrainPhaseTelemetry(ch chan<- prometheus.Metric, s
 // the queue row is already owner-attributed, and a parked best-effort
 // queue is precisely the row an operator needs to see.
 func (c *xpfCollector) emitCoSParkReasonTelemetry(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
-	for _, iface := range status.CoSInterfaces {
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
-		for _, queue := range iface.Queues {
-			queueLabel := strconv.Itoa(queue.QueueID)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosRootTokenStarvationParks,
-				prometheus.CounterValue,
-				float64(queue.RootTokenStarvationParks),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosQueueTokenStarvationParks,
-				prometheus.CounterValue,
-				float64(queue.QueueTokenStarvationParks),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosDrainParkRootTokens,
-				prometheus.CounterValue,
-				float64(queue.DrainParkRootTokens),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosDrainParkQueueTokens,
-				prometheus.CounterValue,
-				float64(queue.DrainParkQueueTokens),
-				ifindexLabel, queueLabel,
-			)
+		for j := range iface.Queues {
+			queue := &iface.Queues[j]
+			c.emitCoSQueueTelemetry(ch, cosParkReasonMetric, queue, ifindexLabel, strconv.Itoa(queue.QueueID))
 		}
 	}
 }
@@ -149,63 +94,13 @@ func (c *xpfCollector) emitCoSParkReasonTelemetry(ch chan<- prometheus.Metric, s
 // path. Not gated on OwnerWorkerID: a queue's row is owner-attributed
 // already, and the per-interface MIN is computed coordinator-side.
 func (c *xpfCollector) emitCoSWaterfillTelemetry(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
-	for _, iface := range status.CoSInterfaces {
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
-		ch <- prometheus.MustNewConstMetric(
-			c.cosWaterfillEpochs,
-			prometheus.CounterValue,
-			float64(iface.WaterfillEpochs),
-			ifindexLabel,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.cosWaterfillPhase1BudgetBreaks,
-			prometheus.CounterValue,
-			float64(iface.WaterfillPhase1BudgetBreaks),
-			ifindexLabel,
-		)
-		// #1628 (code-review r2): u64::MAX is the "no active-backlog
-		// lock-in candidate" sentinel — suppress the gauge entirely for
-		// idle interfaces so the emitted series is alertable: an emitted
-		// value of 0 then unambiguously means a hard 0-epoch lock-in (a
-		// backlogged binding that completed zero epochs), not "idle".
-		if iface.WaterfillMinEpochsPerWorker != math.MaxUint64 {
-			ch <- prometheus.MustNewConstMetric(
-				c.cosWaterfillMinEpochsPerWorker,
-				prometheus.GaugeValue,
-				float64(iface.WaterfillMinEpochsPerWorker),
-				ifindexLabel,
-			)
-		}
-		for _, queue := range iface.Queues {
-			queueLabel := strconv.Itoa(queue.QueueID)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosWaterfillPhase1Admissions,
-				prometheus.CounterValue,
-				float64(queue.WaterfillPhase1Admissions),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosWaterfillPhase2Admissions,
-				prometheus.CounterValue,
-				float64(queue.WaterfillPhase2Admissions),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosWaterfillEligibleVisits,
-				prometheus.CounterValue,
-				float64(queue.WaterfillEligibleVisits),
-				ifindexLabel, queueLabel,
-			)
-			// hb166 T-2: Phase-1 honored selections that made zero TX
-			// progress (budget + honored bit refunded). Climbing here
-			// with flat phase1_admissions = TX-ring pressure eating a
-			// small class's guarantee pass (#1630/#4256).
-			ch <- prometheus.MustNewConstMetric(
-				c.cosWaterfillPhase1SelectedNoProgress,
-				prometheus.CounterValue,
-				float64(queue.WaterfillPhase1SelectedNoProgress),
-				ifindexLabel, queueLabel,
-			)
+		c.emitCoSWaterfillInterface(ch, iface, ifindexLabel)
+		for j := range iface.Queues {
+			queue := &iface.Queues[j]
+			c.emitCoSQueueTelemetry(ch, cosWaterfillMetric, queue, ifindexLabel, strconv.Itoa(queue.QueueID))
 		}
 	}
 }
@@ -218,44 +113,12 @@ func (c *xpfCollector) emitCoSWaterfillTelemetry(ch chan<- prometheus.Metric, st
 // emitted per queue row unconditionally (they already exist on the
 // wire; this surfaces them to Prometheus for drop-site attribution).
 func (c *xpfCollector) emitCoSLeaseClaimFlow(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
-	for _, iface := range status.CoSInterfaces {
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
-		for _, queue := range iface.Queues {
-			queueLabel := strconv.Itoa(queue.QueueID)
-			for workerID, requested := range queue.LeaseV8WorkerRequestedBytes {
-				ch <- prometheus.MustNewConstMetric(
-					c.cosLeaseV8RequestedBytes,
-					prometheus.CounterValue,
-					float64(requested),
-					ifindexLabel, queueLabel, strconv.Itoa(workerID),
-				)
-			}
-			for workerID, granted := range queue.LeaseV8WorkerGrantedBytes {
-				ch <- prometheus.MustNewConstMetric(
-					c.cosLeaseV8GrantedBytes,
-					prometheus.CounterValue,
-					float64(granted),
-					ifindexLabel, queueLabel, strconv.Itoa(workerID),
-				)
-			}
-			ch <- prometheus.MustNewConstMetric(
-				c.cosAdmissionFlowShareDrops,
-				prometheus.CounterValue,
-				float64(queue.AdmissionFlowShareDrops),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosAdmissionBufferDrops,
-				prometheus.CounterValue,
-				float64(queue.AdmissionBufferDrops),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosAdmissionEcnMarked,
-				prometheus.CounterValue,
-				float64(queue.AdmissionEcnMarked),
-				ifindexLabel, queueLabel,
-			)
+		for j := range iface.Queues {
+			queue := &iface.Queues[j]
+			c.emitCoSQueueTelemetry(ch, cosLeaseClaimMetric, queue, ifindexLabel, strconv.Itoa(queue.QueueID))
 		}
 	}
 }
@@ -268,28 +131,12 @@ func (c *xpfCollector) emitCoSLeaseClaimFlow(ch chan<- prometheus.Metric, status
 // are MAX-merged across worker instances and workers upstream (worst
 // instance); see the AGGREGATION contract on the Rust CoSQueueStatus.
 func (c *xpfCollector) emitCoSSojourn(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
-	for _, iface := range status.CoSInterfaces {
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
-		for _, queue := range iface.Queues {
-			queueLabel := strconv.Itoa(queue.QueueID)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosSojournEwmaNS,
-				prometheus.GaugeValue,
-				float64(queue.SojournEwmaNS),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosSojournPeakNS,
-				prometheus.GaugeValue,
-				float64(queue.SojournPeakNS),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosSojournWindowedMinNS,
-				prometheus.GaugeValue,
-				float64(queue.SojournWindowedMinNS),
-				ifindexLabel, queueLabel,
-			)
+		for j := range iface.Queues {
+			queue := &iface.Queues[j]
+			c.emitCoSQueueTelemetry(ch, cosSojournMetric, queue, ifindexLabel, strconv.Itoa(queue.QueueID))
 		}
 	}
 }
@@ -303,103 +150,177 @@ func (c *xpfCollector) emitCoSSojourn(ch chan<- prometheus.Metric, status *dpuse
 // per-worker xpf_userspace_cos_active_flow_count (#1248), pre-aggregated
 // to exactly match the buckets gauge's (ifindex, queue_id) grain.
 func (c *xpfCollector) emitCoSFlowFairOccupancy(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
-	for _, iface := range status.CoSInterfaces {
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
-		for _, queue := range iface.Queues {
-			queueLabel := strconv.Itoa(queue.QueueID)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosFlowFairBucketsOccupied,
-				prometheus.GaugeValue,
-				float64(queue.FlowFairBucketsOccupied),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosFlowFairFlowsActive,
-				prometheus.GaugeValue,
-				float64(queue.FlowFairFlowsActive),
-				ifindexLabel, queueLabel,
-			)
+		for j := range iface.Queues {
+			queue := &iface.Queues[j]
+			c.emitCoSQueueTelemetry(ch, cosFlowOccupancyMetric, queue, ifindexLabel, strconv.Itoa(queue.QueueID))
 		}
 	}
 }
 
 func (c *xpfCollector) emitCoSEqualFlowEnforcement(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
-	for _, iface := range status.CoSInterfaces {
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
-		for _, queue := range iface.Queues {
-			if !queue.EqualFlowEnforcement {
-				continue
-			}
-			queueLabel := strconv.Itoa(queue.QueueID)
-			enforced := 0.0
-			if queue.EqualFlowEnforced {
-				enforced = 1.0
-			}
-			ch <- prometheus.MustNewConstMetric(
-				c.cosEqualFlowEnforcementEnabled,
-				prometheus.GaugeValue,
-				1,
-				ifindexLabel, queueLabel,
-			)
-			// #1746: sibling info metric naming the active target
-			// policy. The Rust status overlay always populates the
-			// label for equal-flow leases; guard anyway so a
-			// mixed-version helper (older Rust, empty label) emits no
-			// empty-label series.
-			if queue.EqualFlowTargetPolicy != "" {
-				ch <- prometheus.MustNewConstMetric(
-					c.cosEqualFlowTargetPolicy,
-					prometheus.GaugeValue,
-					1,
-					ifindexLabel, queueLabel, queue.EqualFlowTargetPolicy,
-				)
-			}
-			ch <- prometheus.MustNewConstMetric(
-				c.cosEqualFlowEnforced,
-				prometheus.GaugeValue,
-				enforced,
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosEqualFlowTargetPerFlowBPS,
-				prometheus.GaugeValue,
-				float64(queue.EqualFlowTargetPerFlowBPS),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosEqualFlowMaxWorkerCapBytes,
-				prometheus.GaugeValue,
-				float64(queue.EqualFlowMaxWorkerCapBytes),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosEqualFlowCapHitEvents,
-				prometheus.CounterValue,
-				float64(queue.EqualFlowCapHitEvents),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosEqualFlowSuppressedGrantBytes,
-				prometheus.CounterValue,
-				float64(queue.EqualFlowSuppressedGrantBytes),
-				ifindexLabel, queueLabel,
-			)
-			ch <- prometheus.MustNewConstMetric(
-				c.cosEqualFlowStaleOrTagMismatchEvents,
-				prometheus.CounterValue,
-				float64(queue.EqualFlowStaleOrTagMismatchEvents),
-				ifindexLabel, queueLabel,
-			)
-			reason := queue.EqualFlowFailOpenReason
-			if reason == "" {
-				reason = "none"
-			}
-			ch <- prometheus.MustNewConstMetric(
-				c.cosEqualFlowFailOpen,
-				prometheus.GaugeValue,
-				1,
-				ifindexLabel, queueLabel, reason,
-			)
+		for j := range iface.Queues {
+			queue := &iface.Queues[j]
+			c.emitCoSQueueTelemetry(ch, cosEqualFlowMetric, queue, ifindexLabel, strconv.Itoa(queue.QueueID))
 		}
+	}
+}
+
+type cosQueueMetricSet uint16
+
+const (
+	cosOwnerProfileMetric cosQueueMetricSet = 1 << iota
+	cosDrainPhaseMetric
+	cosParkReasonMetric
+	cosWaterfillMetric
+	cosLeaseClaimMetric
+	cosSojournMetric
+	cosFlowOccupancyMetric
+	cosEqualFlowMetric
+	cosAllQueueMetrics = cosOwnerProfileMetric | cosDrainPhaseMetric | cosParkReasonMetric |
+		cosWaterfillMetric | cosLeaseClaimMetric | cosSojournMetric |
+		cosFlowOccupancyMetric | cosEqualFlowMetric
+)
+
+// emitCoSTelemetry traverses the status snapshot once. The single pointer-
+// indexed pass avoids copying the large interface/queue rows and reuses the
+// decimal labels across every CoS metric emitted for a queue.
+func (c *xpfCollector) emitCoSTelemetry(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
+	for i := range status.CoSInterfaces {
+		iface := &status.CoSInterfaces[i]
+		ifindexLabel := strconv.Itoa(iface.Ifindex)
+		c.emitCoSWaterfillInterface(ch, iface, ifindexLabel)
+		for j := range iface.Queues {
+			queue := &iface.Queues[j]
+			c.emitCoSQueueTelemetry(ch, cosAllQueueMetrics, queue, ifindexLabel, strconv.Itoa(queue.QueueID))
+		}
+	}
+}
+
+func (c *xpfCollector) emitCoSWaterfillInterface(
+	ch chan<- prometheus.Metric,
+	iface *dpuserspace.CoSInterfaceStatus,
+	ifindexLabel string,
+) {
+	ch <- prometheus.MustNewConstMetric(c.cosWaterfillEpochs,
+		prometheus.CounterValue, float64(iface.WaterfillEpochs), ifindexLabel)
+	ch <- prometheus.MustNewConstMetric(c.cosWaterfillPhase1BudgetBreaks,
+		prometheus.CounterValue, float64(iface.WaterfillPhase1BudgetBreaks), ifindexLabel)
+	// The max sentinel means there is no active-backlog candidate, so it
+	// is omitted; zero is a real, alertable hard-lock-in value.
+	if iface.WaterfillMinEpochsPerWorker != math.MaxUint64 {
+		ch <- prometheus.MustNewConstMetric(c.cosWaterfillMinEpochsPerWorker,
+			prometheus.GaugeValue, float64(iface.WaterfillMinEpochsPerWorker), ifindexLabel)
+	}
+}
+
+func (c *xpfCollector) emitCoSQueueTelemetry(
+	ch chan<- prometheus.Metric,
+	metrics cosQueueMetricSet,
+	queue *dpuserspace.CoSQueueStatus,
+	ifindexLabel, queueLabel string,
+) {
+	if metrics&cosOwnerProfileMetric != 0 && queue.OwnerWorkerID != nil {
+		emitHistogram(ch, c.cosDrainLatencyBucket, queue.DrainLatencyHist, ifindexLabel, queueLabel)
+		emitHistogram(ch, c.cosRedirectAcquireBucket, queue.RedirectAcquireHist, ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosDrainInvocationsTotal,
+			prometheus.CounterValue, float64(queue.DrainInvocations), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosOwnerPPS,
+			prometheus.GaugeValue, float64(queue.OwnerPPS), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosPeerPPS,
+			prometheus.GaugeValue, float64(queue.PeerPPS), ifindexLabel, queueLabel)
+	}
+	if metrics&cosDrainPhaseMetric != 0 {
+		ch <- prometheus.MustNewConstMetric(c.cosDrainGuaranteeSentBytes,
+			prometheus.CounterValue, float64(queue.DrainGuaranteeSentBytes), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosDrainSurplusSentBytes,
+			prometheus.CounterValue, float64(queue.DrainSurplusSentBytes), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosDrainNonExactSentBytesWhileExactBacklogged,
+			prometheus.CounterValue, float64(queue.DrainNonExactSentBytesWhileExactBacklogged), ifindexLabel, queueLabel)
+	}
+	if metrics&cosParkReasonMetric != 0 {
+		ch <- prometheus.MustNewConstMetric(c.cosRootTokenStarvationParks,
+			prometheus.CounterValue, float64(queue.RootTokenStarvationParks), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosQueueTokenStarvationParks,
+			prometheus.CounterValue, float64(queue.QueueTokenStarvationParks), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosDrainParkRootTokens,
+			prometheus.CounterValue, float64(queue.DrainParkRootTokens), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosDrainParkQueueTokens,
+			prometheus.CounterValue, float64(queue.DrainParkQueueTokens), ifindexLabel, queueLabel)
+	}
+	if metrics&cosWaterfillMetric != 0 {
+		ch <- prometheus.MustNewConstMetric(c.cosWaterfillPhase1Admissions,
+			prometheus.CounterValue, float64(queue.WaterfillPhase1Admissions), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosWaterfillPhase2Admissions,
+			prometheus.CounterValue, float64(queue.WaterfillPhase2Admissions), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosWaterfillEligibleVisits,
+			prometheus.CounterValue, float64(queue.WaterfillEligibleVisits), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosWaterfillPhase1SelectedNoProgress,
+			prometheus.CounterValue, float64(queue.WaterfillPhase1SelectedNoProgress), ifindexLabel, queueLabel)
+	}
+	if metrics&cosLeaseClaimMetric != 0 {
+		for workerID, requested := range queue.LeaseV8WorkerRequestedBytes {
+			ch <- prometheus.MustNewConstMetric(c.cosLeaseV8RequestedBytes,
+				prometheus.CounterValue, float64(requested), ifindexLabel, queueLabel, strconv.Itoa(workerID))
+		}
+		for workerID, granted := range queue.LeaseV8WorkerGrantedBytes {
+			ch <- prometheus.MustNewConstMetric(c.cosLeaseV8GrantedBytes,
+				prometheus.CounterValue, float64(granted), ifindexLabel, queueLabel, strconv.Itoa(workerID))
+		}
+		ch <- prometheus.MustNewConstMetric(c.cosAdmissionFlowShareDrops,
+			prometheus.CounterValue, float64(queue.AdmissionFlowShareDrops), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosAdmissionBufferDrops,
+			prometheus.CounterValue, float64(queue.AdmissionBufferDrops), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosAdmissionEcnMarked,
+			prometheus.CounterValue, float64(queue.AdmissionEcnMarked), ifindexLabel, queueLabel)
+	}
+	if metrics&cosSojournMetric != 0 {
+		ch <- prometheus.MustNewConstMetric(c.cosSojournEwmaNS,
+			prometheus.GaugeValue, float64(queue.SojournEwmaNS), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosSojournPeakNS,
+			prometheus.GaugeValue, float64(queue.SojournPeakNS), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosSojournWindowedMinNS,
+			prometheus.GaugeValue, float64(queue.SojournWindowedMinNS), ifindexLabel, queueLabel)
+	}
+	if metrics&cosFlowOccupancyMetric != 0 {
+		ch <- prometheus.MustNewConstMetric(c.cosFlowFairBucketsOccupied,
+			prometheus.GaugeValue, float64(queue.FlowFairBucketsOccupied), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosFlowFairFlowsActive,
+			prometheus.GaugeValue, float64(queue.FlowFairFlowsActive), ifindexLabel, queueLabel)
+	}
+	if metrics&cosEqualFlowMetric != 0 && queue.EqualFlowEnforcement {
+		enforced := 0.0
+		if queue.EqualFlowEnforced {
+			enforced = 1.0
+		}
+		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowEnforcementEnabled,
+			prometheus.GaugeValue, 1, ifindexLabel, queueLabel)
+		if queue.EqualFlowTargetPolicy != "" {
+			ch <- prometheus.MustNewConstMetric(c.cosEqualFlowTargetPolicy,
+				prometheus.GaugeValue, 1, ifindexLabel, queueLabel, queue.EqualFlowTargetPolicy)
+		}
+		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowEnforced,
+			prometheus.GaugeValue, enforced, ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowTargetPerFlowBPS,
+			prometheus.GaugeValue, float64(queue.EqualFlowTargetPerFlowBPS), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowMaxWorkerCapBytes,
+			prometheus.GaugeValue, float64(queue.EqualFlowMaxWorkerCapBytes), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowCapHitEvents,
+			prometheus.CounterValue, float64(queue.EqualFlowCapHitEvents), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowSuppressedGrantBytes,
+			prometheus.CounterValue, float64(queue.EqualFlowSuppressedGrantBytes), ifindexLabel, queueLabel)
+		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowStaleOrTagMismatchEvents,
+			prometheus.CounterValue, float64(queue.EqualFlowStaleOrTagMismatchEvents), ifindexLabel, queueLabel)
+		reason := queue.EqualFlowFailOpenReason
+		if reason == "" {
+			reason = "none"
+		}
+		ch <- prometheus.MustNewConstMetric(c.cosEqualFlowFailOpen,
+			prometheus.GaugeValue, 1, ifindexLabel, queueLabel, reason)
 	}
 }

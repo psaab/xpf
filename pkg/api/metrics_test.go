@@ -3485,3 +3485,108 @@ func TestEmitWorkerSessionLookupMisses7919(t *testing.T) {
 		}
 	}
 }
+
+func TestEmitCoSTelemetryMatchesIndividualEmitters(t *testing.T) {
+	c := newCollector(nil)
+	owner := uint32(3)
+	status := dpuserspace.ProcessStatus{
+		CoSInterfaces: []dpuserspace.CoSInterfaceStatus{
+			{
+				Ifindex:                     80,
+				WaterfillEpochs:             11,
+				WaterfillPhase1BudgetBreaks: 2,
+				WaterfillMinEpochsPerWorker: math.MaxUint64,
+				Queues: []dpuserspace.CoSQueueStatus{
+					{
+						QueueID:                 4,
+						OwnerWorkerID:           &owner,
+						DrainLatencyHist:        []uint64{1, 2, 3},
+						RedirectAcquireHist:     []uint64{4, 5},
+						DrainInvocations:        6,
+						OwnerPPS:                7,
+						PeerPPS:                 8,
+						DrainGuaranteeSentBytes: 9,
+						DrainSurplusSentBytes:   10,
+						DrainNonExactSentBytesWhileExactBacklogged: 11,
+						RootTokenStarvationParks:                   12,
+						QueueTokenStarvationParks:                  13,
+						DrainParkRootTokens:                        14,
+						DrainParkQueueTokens:                       15,
+						WaterfillPhase1Admissions:                  16,
+						WaterfillPhase2Admissions:                  17,
+						WaterfillEligibleVisits:                    18,
+						WaterfillPhase1SelectedNoProgress:          19,
+						LeaseV8WorkerRequestedBytes:                []uint64{20, 21},
+						LeaseV8WorkerGrantedBytes:                  []uint64{22, 23},
+						AdmissionFlowShareDrops:                    24,
+						AdmissionBufferDrops:                       25,
+						AdmissionEcnMarked:                         26,
+						SojournEwmaNS:                              27,
+						SojournPeakNS:                              28,
+						SojournWindowedMinNS:                       29,
+						FlowFairBucketsOccupied:                    30,
+						FlowFairFlowsActive:                        31,
+						EqualFlowEnforcement:                       true,
+						EqualFlowEnforced:                          true,
+						EqualFlowTargetPolicy:                      "test-policy",
+						EqualFlowTargetPerFlowBPS:                  32,
+						EqualFlowMaxWorkerCapBytes:                 33,
+						EqualFlowCapHitEvents:                      34,
+						EqualFlowSuppressedGrantBytes:              35,
+						EqualFlowStaleOrTagMismatchEvents:          36,
+						EqualFlowFailOpenReason:                    "test-reason",
+					},
+					{
+						QueueID:                   5,
+						DrainGuaranteeSentBytes:   40,
+						WaterfillPhase1Admissions: 41,
+						EqualFlowEnforcement:      true,
+					},
+				},
+			},
+			{
+				Ifindex:                     81,
+				WaterfillEpochs:             42,
+				WaterfillPhase1BudgetBreaks: 43,
+				WaterfillMinEpochsPerWorker: 0,
+				Queues: []dpuserspace.CoSQueueStatus{{
+					QueueID:                 6,
+					EqualFlowEnforcement:    true,
+					EqualFlowFailOpenReason: "",
+				}},
+			},
+		},
+	}
+
+	collect := func(emit func(chan<- prometheus.Metric)) map[string]int {
+		ch := make(chan prometheus.Metric, 1024)
+		emit(ch)
+		close(ch)
+		got := make(map[string]int)
+		for metric := range ch {
+			var pb dto.Metric
+			if err := metric.Write(&pb); err != nil {
+				t.Fatalf("write metric: %v", err)
+			}
+			got[metric.Desc().String()+pb.String()]++
+		}
+		return got
+	}
+
+	individual := collect(func(ch chan<- prometheus.Metric) {
+		c.emitCoSOwnerProfile(ch, &status)
+		c.emitCoSDrainPhaseTelemetry(ch, &status)
+		c.emitCoSParkReasonTelemetry(ch, &status)
+		c.emitCoSWaterfillTelemetry(ch, &status)
+		c.emitCoSLeaseClaimFlow(ch, &status)
+		c.emitCoSSojourn(ch, &status)
+		c.emitCoSFlowFairOccupancy(ch, &status)
+		c.emitCoSEqualFlowEnforcement(ch, &status)
+	})
+	fused := collect(func(ch chan<- prometheus.Metric) {
+		c.emitCoSTelemetry(ch, &status)
+	})
+	if !reflect.DeepEqual(fused, individual) {
+		t.Fatalf("fused CoS telemetry differs from individual emitters:\nfused: %v\nindividual: %v", fused, individual)
+	}
+}

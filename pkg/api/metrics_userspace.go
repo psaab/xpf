@@ -52,14 +52,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 		return
 	}
 	status := *statusPtr
-	c.emitCoSOwnerProfile(ch, &status)
-	c.emitCoSDrainPhaseTelemetry(ch, &status)
-	c.emitCoSParkReasonTelemetry(ch, &status)
-	c.emitCoSWaterfillTelemetry(ch, &status)
-	c.emitCoSLeaseClaimFlow(ch, &status)
-	c.emitCoSEqualFlowEnforcement(ch, &status)
-	c.emitCoSSojourn(ch, &status)
-	c.emitCoSFlowFairOccupancy(ch, &status)
+	c.emitCoSTelemetry(ch, &status)
 	c.emitWorkerRuntime(ch, status)
 	c.emitUserspaceDynamicBufferMetrics(ch, status)
 	c.emitUserspaceEventStream(ch, status)
