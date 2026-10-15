@@ -29,13 +29,19 @@
 # show that error arriving dst 10.0.61.102 with the embedded quote reading
 # `10.0.61.102 > 198.18.128.1` — full reverse translation.
 #
+# #12809: the deployed cluster config may carry the standing catch-all as
+# `rule pool-snat ... source-nat pool pool-snat-pool` instead of the
+# interface form. Both are the same standing zone-scoped SNAT the cell
+# replaces; preflight accepts either and records which was present.
+# Restore re-adds the exact original rule (interface form, or the pool
+# rule plus its pool definition when that was the deployed shape).
+#
 # DESTRUCTIVE: deletes the standing zone-scoped catch-all (`rule snat`
-# under lan-to-wan) for the cell so the non-zone rule-set is the SOLE
-# registrar of 172.16.80.8 — otherwise the zone row would register the
-# address regardless and prove nothing. Internet-bound LAN traffic loses
-# its catch-all for the cell's duration (~1 min, under the cluster lock).
-# Restore is verified by sorted display-set compare (rule ORDER inside a
-# rule-set is not part of the compared invariant; see restore_config).
+# or `rule pool-snat` under lan-to-wan) for the cell so the non-zone
+# rule-set is the SOLE registrar of 172.16.80.8 — otherwise the zone row
+# would register the address regardless and prove nothing. Internet-bound
+# LAN traffic loses its catch-all for the cell's duration (~1 min, under
+# the cluster lock). Restore is verified by sorted display-set compare.
 #
 # Strict Tri-State Exit Discipline (#8244):
 #   Exit 0:  PASS  (frag-needed delivered, outer dst AND embedded quote
@@ -171,6 +177,7 @@ TARGET_SETUP=0
 PREV_FWD=""
 BASE_NAT=""
 BASE_RT=""
+CATCHALL_FORM=""
 CCAP_PID=""; TCAP_PID=""
 CLIENT_CAP="/tmp/xpf-wire-nfn-client.cap"
 TARGET_CAP="/tmp/xpf-wire-nfn-target.cap"
@@ -190,13 +197,20 @@ cli_config() {
 
 restore_config() {
     ((RESTORE_NEEDED)) || return 0
-    cli_config restore "configure\nrollback 0\ndelete security nat source rule-set ${RULESET}\ndelete routing-options static route ${LAB_DST_NET}\nset security nat source rule-set lan-to-wan rule snat match source-address 0.0.0.0/0\nset security nat source rule-set lan-to-wan rule snat then source-nat interface\ncommit check\ncommit\nexit\nquit\n" || RESTORE_OK=0
-    # Sorted compare: restoring `rule snat` by delete+re-add lands it after
-    # snat6 rather than between pool-snat and snat6. Rule order inside this
-    # rule-set cannot change semantics here (pool-snat matches a source
-    # range nothing else in the set matches and is v4-only; snat6 is
-    # v6-only), so order is explicitly NOT part of the restored invariant;
-    # membership is.
+    local restore_block="configure\nrollback 0\ndelete security nat source rule-set ${RULESET}\ndelete routing-options static route ${LAB_DST_NET}\n"
+    if [[ "$CATCHALL_FORM" == pool ]]; then
+        while IFS= read -r line; do
+            restore_block+="set security nat source rule-set lan-to-wan rule pool-snat ${line#* rule pool-snat }\n"
+        done < <(printf '%s\n' "$BASE_NAT" | grep '^set security nat source rule-set lan-to-wan rule pool-snat ')
+    else
+        while IFS= read -r line; do
+            restore_block+="set security nat source rule-set lan-to-wan rule snat ${line#* rule snat }\n"
+        done < <(printf '%s\n' "$BASE_NAT" | grep '^set security nat source rule-set lan-to-wan rule snat ')
+    fi
+    restore_block+="commit check\ncommit\nexit\nquit\n"
+    cli_config restore "$restore_block" || RESTORE_OK=0
+    # Delete+re-add moves the rule after siblings; compare restored
+    # membership independent of order, which is not semantically relevant.
     [[ "$(snapshot 'security nat source' | sort_lines)" == "$(printf '%s\n' "$BASE_NAT" | sort_lines)" ]] || RESTORE_OK=0
     [[ "$(snapshot 'routing-options static' | sort_lines)" == "$(printf '%s\n' "$BASE_RT" | sort_lines)" ]] || RESTORE_OK=0
     RESTORE_NEEDED=0
@@ -243,7 +257,13 @@ BASE_RT="$(snapshot 'routing-options static')"
 BASE_FLOW="$(snapshot 'security flow')"
 BASE_IF="$(snapshot 'interfaces reth0')"
 
-[[ "$BASE_NAT" == *"set security nat source rule-set lan-to-wan rule snat then source-nat interface"* ]] || fail_void env-void
+if [[ "$BASE_NAT" == *"set security nat source rule-set lan-to-wan rule snat then source-nat interface"* ]]; then
+    CATCHALL_FORM=interface
+elif [[ "$BASE_NAT" == *"set security nat source rule-set lan-to-wan rule pool-snat then source-nat pool pool-snat-pool"* && "$BASE_NAT" == *"set security nat source pool pool-snat-pool"* ]]; then
+    CATCHALL_FORM=pool
+else
+    fail_void env-void
+fi
 [[ "$BASE_NAT" != *"${RULESET}"* ]] || fail_void env-void
 [[ "$BASE_RT" != *"${LAB_DST_NET}"* ]] || fail_void env-void
 [[ "$BASE_FLOW" == *"set security flow allow-embedded-icmp"* ]] || fail_void env-void
@@ -271,7 +291,11 @@ DST_RE="$(esc "$LAB_DST")"
 
 # ── fixture: non-zone rule-set becomes the sole registrar ────────────
 RESTORE_NEEDED=1
-cli_config mutate "configure\nrollback 0\ndelete security nat source rule-set lan-to-wan rule snat\nset security nat source rule-set ${RULESET} from zone lan\nset security nat source rule-set ${RULESET} to interface reth0.80\nset security nat source rule-set ${RULESET} rule probe match source-address ${CLIENT_IP}/32\nset security nat source rule-set ${RULESET} rule probe then source-nat interface\nset routing-options static route ${LAB_DST_NET} next-hop ${TARGET_IP}\ncommit check\ncommit\nexit\nquit\n" || fail_void harness-void
+if [[ "$CATCHALL_FORM" == pool ]]; then
+    cli_config mutate "configure\nrollback 0\ndelete security nat source rule-set lan-to-wan rule pool-snat\nset security nat source rule-set ${RULESET} from zone lan\nset security nat source rule-set ${RULESET} to interface reth0.80\nset security nat source rule-set ${RULESET} rule probe match source-address ${CLIENT_IP}/32\nset security nat source rule-set ${RULESET} rule probe then source-nat interface\nset routing-options static route ${LAB_DST_NET} next-hop ${TARGET_IP}\ncommit check\ncommit\nexit\nquit\n" || fail_void harness-void
+else
+    cli_config mutate "configure\nrollback 0\ndelete security nat source rule-set lan-to-wan rule snat\nset security nat source rule-set ${RULESET} from zone lan\nset security nat source rule-set ${RULESET} to interface reth0.80\nset security nat source rule-set ${RULESET} rule probe match source-address ${CLIENT_IP}/32\nset security nat source rule-set ${RULESET} rule probe then source-nat interface\nset routing-options static route ${LAB_DST_NET} next-hop ${TARGET_IP}\ncommit check\ncommit\nexit\nquit\n" || fail_void harness-void
+fi
 
 TARGET_SETUP=1
 $SG "incus exec ${UNTRUST_REF} -- sysctl -qw net.ipv4.ip_forward=1" >/dev/null 2>&1 || fail_void harness-void
