@@ -590,6 +590,18 @@ func (t *pendingTableOf[K]) evictions() uint64 {
 	return t.evicted
 }
 
+// addEvictions adds a prior table's cumulative count after its live bindings
+// have been adopted. The table is otherwise newly initialized, but its
+// evictions counter belongs to the interface lifetime.
+func (t *pendingTableOf[K]) addEvictions(n uint64) {
+	if t == nil || n == 0 {
+		return
+	}
+	t.mu.Lock()
+	t.evicted += n
+	t.mu.Unlock()
+}
+
 // occupancy returns the number of RING SLOTS in use — the quantity that is
 // actually compared against capacity, and therefore the one that predicts
 // eviction. Surfaced as RelayStats.PendingSize.
