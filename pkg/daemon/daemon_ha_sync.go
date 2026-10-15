@@ -1108,6 +1108,38 @@ func (d *Daemon) publishFabricRefreshChansIfCurrent(gen uint64, ch0, ch1 chan st
 	return true
 }
 
+// unpublishSessionSyncIfCurrent removes ss from the published slot iff it is
+// still the live object of epoch gen (#13545). It returns false when a newer
+// epoch has already replaced ss (or stopClusterComms already cleared it), so
+// the caller must not Stop() an object it no longer owns — the newer epoch's
+// teardown owns that instance.
+func (d *Daemon) unpublishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSync) bool {
+	d.clusterCommsMu.Lock()
+	defer d.clusterCommsMu.Unlock()
+	if gen != d.clusterCommsGen || d.sessionSync != ss {
+		return false
+	}
+	d.sessionSync = nil
+	return true
+}
+
+// sessionSyncStartAttempts / sessionSyncStartRetryDelay bound the Start retry
+// loop in startClusterComms. They are package vars only so tests can exhaust
+// the loop instantly (#13545); production keeps 30 attempts x 2s.
+var (
+	sessionSyncStartAttempts   = 30
+	sessionSyncStartRetryDelay = 2 * time.Second
+)
+
+// retireUnstartedSessionSync withdraws and stops a session-sync object whose
+// Start never succeeded. The identity/epoch check ensures this constructor
+// cannot stop an object that a newer comms epoch published.
+func (d *Daemon) retireUnstartedSessionSync(gen uint64, ss *cluster.SessionSync) {
+	if d.unpublishSessionSyncIfCurrent(gen, ss) {
+		ss.Stop()
+	}
+}
+
 // startClusterComms starts heartbeat and session sync after VRF membership is
 // applied, then binds each socket only to the VRF of its selected transport.
 //
@@ -1319,7 +1351,8 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 
 			// Retry sync start: the VRF device and address binding may not
 			// be ready during daemon startup (networkd race).
-			for i := 0; i < 30; i++ {
+			started := false
+			for i := 0; i < sessionSyncStartAttempts; i++ {
 				// #82: wire the runtime and the ownership predicates BEFORE
 				// Start opens the listeners and dialers, not after it returns.
 				//
@@ -1403,10 +1436,11 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 					select {
 					case <-commsCtx.Done():
 						return
-					case <-time.After(2 * time.Second):
+					case <-time.After(sessionSyncStartRetryDelay):
 					}
 					continue
 				}
+				started = true
 				slog.Info("cluster session sync started",
 					"local", syncLocal, "peer", syncPeer, "vrf", syncVRFDevice)
 
@@ -1429,6 +1463,13 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				}
 
 				break
+			}
+
+			if !started {
+				// No retry owner remains after bounded exhaustion. Withdraw the
+				// published object and stop any partial resources from failed
+				// Start attempts before the auxiliary loops continue.
+				d.retireUnstartedSessionSync(commsGen, ss)
 			}
 
 			d.startClusterSyncAuxLoops(commsCtx, cc)

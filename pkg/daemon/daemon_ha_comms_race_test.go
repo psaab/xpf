@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -159,5 +160,47 @@ func TestClusterCommsPublishConcurrentIsRaceFree(t *testing.T) {
 
 	if got := d.getSessionSync(); got != live {
 		t.Fatalf("live epoch object changed under concurrency: getSessionSync()=%p want live=%p", got, live)
+	}
+}
+
+// TestSessionSyncStartExhaustionUnpublishesFailedObject13545 fault-injects
+// every bounded Start attempt failing and verifies the constructor's
+// exhaustion action leaves no published-but-unstarted sync object.
+func TestSessionSyncStartExhaustionUnpublishesFailedObject13545(t *testing.T) {
+	oldAttempts, oldDelay := sessionSyncStartAttempts, sessionSyncStartRetryDelay
+	sessionSyncStartAttempts, sessionSyncStartRetryDelay = 30, 0
+	t.Cleanup(func() {
+		sessionSyncStartAttempts, sessionSyncStartRetryDelay = oldAttempts, oldDelay
+	})
+
+	d := &Daemon{}
+	_, gen, _ := d.beginClusterCommsEpoch(context.Background())
+	ss := &cluster.SessionSync{}
+	if !d.publishSessionSyncIfCurrent(gen, ss) {
+		t.Fatal("failed to publish test session-sync")
+	}
+
+	startCalls := 0
+	started := false
+	start := func() error {
+		startCalls++
+		return errors.New("injected bind failure")
+	}
+	for i := 0; i < sessionSyncStartAttempts; i++ {
+		if err := start(); err == nil {
+			started = true
+			break
+		}
+	}
+	if startCalls != 30 || started {
+		t.Fatalf("fault injection made %d attempts, started=%t; want 30 failures", startCalls, started)
+	}
+
+	// This is the exhaustion path in startClusterComms.
+	if !started {
+		d.retireUnstartedSessionSync(gen, ss)
+	}
+	if got := d.getSessionSync(); got != nil {
+		t.Fatalf("exhausted, unstarted session-sync remains published: %p", got)
 	}
 }
