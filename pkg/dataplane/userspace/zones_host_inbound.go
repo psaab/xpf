@@ -1030,27 +1030,16 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 		addUnzoned(target.addr)
 	}
 
-	// A quarantined zone or contested membership is unzoned for host-inbound
-	// purposes. InterfaceZoneMap omits those bindings, so it cannot identify
-	// the source of a configured VIP; reconstruct only the relevant keys from
-	// authored zone references and place their VIPs in the catch-all deny set.
-	quarantinedMemberships := config.QuarantinedZoneInterfaceKeys(cfg)
-	if len(quarantined) > 0 || len(quarantinedMemberships) > 0 {
-		quarantinedVIPUnits := make(map[string]struct{})
-		for zoneName, zone := range cfg.Security.Zones {
-			if zone == nil {
-				continue
-			}
-			_, zoneDropped := quarantined[zoneName]
-			for _, rawRef := range zone.Interfaces {
-				for _, key := range config.InterfaceUnitRefKeys(cfg, rawRef) {
-					_, membershipDropped := quarantinedMemberships[key]
-					if zoneDropped || membershipDropped {
-						quarantinedVIPUnits[key] = struct{}{}
-					}
-				}
-			}
-		}
+	// Config-derived VRRP VIPs: a VIP is kernel-materialized only on the
+	// VRRP master, so on a backup (or before election) the snapshot walk
+	// above misses it. Every VIP whose unit is unzoned for host-inbound
+	// purposes — no zone, a quarantined/contested zone, or a zone unbound
+	// by DroppedEnforcementChild (#11575/#12623) — must still enter the
+	// catch-all, mirroring buildFenceAddrSetsFromSnaps (#10786/#12623).
+	// buildInterfaceZoneMap omits quarantined, contested, and poisoned
+	// bindings; zoneByIface is the authoritative unzoned test, and a VIP
+	// co-owned by a surviving zoned unit is subtracted via addUnzoned.
+	{
 		ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
 		for name := range cfg.Interfaces.Interfaces {
 			ifNames = append(ifNames, name)
@@ -1075,7 +1064,7 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 				if hostInboundLifelineInterface(unitName, lifelines) {
 					continue
 				}
-				if _, drop := quarantinedVIPUnits[unitName]; !drop {
+				if zoneByIface[unitName] != "" {
 					continue
 				}
 				for _, vg := range unit.VRRPGroups {
