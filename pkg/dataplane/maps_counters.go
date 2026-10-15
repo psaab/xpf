@@ -345,14 +345,20 @@ func (m *Manager) ClearZoneCounters() error {
 	return clearArrayEntriesIn(zm, "zone_counters", 128, zero)
 }
 
-// ClearAllCounters zeroes all counter maps (global, interface, zone, policy, filter).
+// ClearAllCounters zeroes all counter maps and userspace counter offsets.
 //
 // #2114 A3 class 3 nested-call rule: the composition runs through the
 // UNGATED raw internals (clearInterfaceCountersRaw / clearPolicyCountersRaw /
-// clearFilterCountersRaw) and the class-3 public clears (global/zone —
+// clearFilterCountersRaw) and the class-3 public clears (global/zone/NAT —
 // ungated by design), never the gated class-1 public forms, so the pinned
 // pre-arm legacy error texts survive byte-for-byte in every registry state.
 func (m *Manager) ClearAllCounters() error {
+	// Clear sparse userspace offsets before any map operation can fail. This is
+	// required for mapless/userspace-only managers: the legacy interface map
+	// lookup below still returns its pinned error, but must not strand counters.
+	m.ClearZoneCounterOffsets()
+	m.ClearFloodCounterOffsets()
+	m.ClearNATRuleCounterOffsets()
 	if err := m.ClearGlobalCounters(); err != nil {
 		return err
 	}
@@ -362,9 +368,9 @@ func (m *Manager) ClearAllCounters() error {
 	if err := m.ClearZoneCounters(); err != nil {
 		return err
 	}
-	// #3643: drop the userspace-reported per-zone flood offsets too (no dense
-	// map to zero -- flood counters live only in the sparse offset map now).
-	m.ClearFloodCounterOffsets()
+	if err := m.ClearNATRuleCounters(); err != nil {
+		return err
+	}
 	if err := m.clearPolicyCountersRaw(); err != nil {
 		return err
 	}
