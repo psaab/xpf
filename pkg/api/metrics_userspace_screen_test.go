@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -8,45 +10,65 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
+// This exercises the production status collector using only the wire payload,
+// so the test compiles on master: without the D3-11 fields and emitters, the
+// requested Prometheus series are absent rather than the test failing to build.
 func TestUserspaceScreenStateMetricsAggregateWorkerTransportSlots(t *testing.T) {
-	c := &xpfCollector{
-		userspaceScreenSubstitutedDefaultDrops: prometheus.NewDesc("xpf_userspace_screen_substituted_default_drops_total", "", nil, nil),
-		userspaceScreenSYNFloodDstDrops:        prometheus.NewDesc("xpf_userspace_screen_syn_flood_dst_drops_total", "", nil, nil),
-		userspaceScreenSYNFloodSrcDrops:        prometheus.NewDesc("xpf_userspace_screen_syn_flood_src_drops_total", "", nil, nil),
-		userspaceScreenSYNFloodAlarmEvents:     prometheus.NewDesc("xpf_userspace_screen_syn_flood_alarm_events_total", "", nil, nil),
-		userspaceScreenAlarmWithoutDropEvents:  prometheus.NewDesc("xpf_userspace_screen_alarm_without_drop_events_total", "", nil, nil),
-		userspaceScreenProfileWarns:            prometheus.NewDesc("xpf_userspace_screen_profile_warns_total", "", []string{"profile"}, nil),
-		userspaceScreenTrackerPressureEvents:   prometheus.NewDesc("xpf_userspace_screen_tracker_pressure_events_total", "", []string{"action"}, nil),
+	var status dpuserspace.ProcessStatus
+	payload := []byte(`{"bindings":[
+		{"screen_substituted_default_drops":2,"screen_syn_flood_dst_drops":3,"screen_syn_flood_src_drops":5,"screen_syn_flood_alarm_events":7,"screen_alarm_without_drop_events":11,"screen_missing_profile_warns":13,"screen_inert_profile_warns":17,"screen_scan_sweep_skipped_pressure":19,"screen_scan_sweep_evicted_pressure":23},
+		{"screen_substituted_default_drops":29,"screen_syn_flood_dst_drops":31,"screen_syn_flood_src_drops":37,"screen_syn_flood_alarm_events":41,"screen_alarm_without_drop_events":43,"screen_missing_profile_warns":47,"screen_inert_profile_warns":53,"screen_scan_sweep_skipped_pressure":59,"screen_scan_sweep_evicted_pressure":61}
+	]}`)
+	if err := json.Unmarshal(payload, &status); err != nil {
+		t.Fatalf("unmarshal worker status: %v", err)
 	}
-	status := dpuserspace.ProcessStatus{Bindings: []dpuserspace.BindingStatus{
-		{ScreenSubstitutedDefaultDrops: 2, ScreenSYNFloodDstDrops: 3, ScreenSYNFloodSrcDrops: 5, ScreenSYNFloodAlarmEvents: 7, ScreenAlarmWithoutDropEvents: 11, ScreenMissingProfileWarns: 13, ScreenInertProfileWarns: 17, ScreenScanSweepSkippedPressure: 19, ScreenScanSweepEvictedPressure: 23},
-		{ScreenSubstitutedDefaultDrops: 29, ScreenSYNFloodDstDrops: 31, ScreenSYNFloodSrcDrops: 37, ScreenSYNFloodAlarmEvents: 41, ScreenAlarmWithoutDropEvents: 43, ScreenMissingProfileWarns: 47, ScreenInertProfileWarns: 53, ScreenScanSweepSkippedPressure: 59, ScreenScanSweepEvictedPressure: 61},
-	}}
 
-	ch := make(chan prometheus.Metric, 9)
-	c.emitUserspaceScreenStateMetrics(ch, status)
+	c := newCollector(nil)
+	ch := make(chan prometheus.Metric, 512)
+	c.collectUserspaceStatus(ch, &status)
 	close(ch)
-	want := []float64{31, 34, 42, 48, 54, 60, 70, 78, 84}
-	wantLabels := []string{"", "", "", "", "", "missing", "inert", "skipped", "evicted"}
-	count := 0
-	for i, metric := range ch {
-		count++
-		var got dto.Metric
-		if err := metric.Write(&got); err != nil {
-			t.Fatalf("write metric %d: %v", i, err)
+
+	want := map[string]float64{
+		"xpf_userspace_screen_substituted_default_drops_total": 31,
+		"xpf_userspace_screen_syn_flood_dst_drops_total":        34,
+		"xpf_userspace_screen_syn_flood_src_drops_total":        42,
+		"xpf_userspace_screen_syn_flood_alarm_events_total":     48,
+		"xpf_userspace_screen_alarm_without_drop_events_total":  54,
+		"xpf_userspace_screen_profile_warns_total|missing":      60,
+		"xpf_userspace_screen_profile_warns_total|inert":        70,
+		"xpf_userspace_screen_tracker_pressure_events_total|skipped": 78,
+		"xpf_userspace_screen_tracker_pressure_events_total|evicted": 84,
+	}
+	got := make(map[string]float64, len(want))
+	for metric := range ch {
+		var sample dto.Metric
+		if err := metric.Write(&sample); err != nil {
+			t.Fatalf("write metric: %v", err)
 		}
-		if value := got.GetCounter().GetValue(); value != want[i] {
-			t.Errorf("metric %d = %v, want %v", i, value, want[i])
-		}
-		if wantLabels[i] != "" {
-			if len(got.GetLabel()) != 1 || got.GetLabel()[0].GetValue() != wantLabels[i] {
-				t.Errorf("metric %d labels = %v, want %s", i, got.GetLabel(), wantLabels[i])
+		desc := metric.Desc().String()
+		for key, value := range want {
+			name, labelValue, hasLabel := strings.Cut(key, "|")
+			if !strings.Contains(desc, `fqName: "`+name+`"`) {
+				continue
 			}
-		} else if len(got.GetLabel()) != 0 {
-			t.Errorf("metric %d has unexpected labels %v", i, got.GetLabel())
+			if hasLabel {
+				labels := sample.GetLabel()
+				if len(labels) != 1 || labels[0].GetValue() != labelValue {
+					continue
+			}
+			}
+			if _, duplicate := got[key]; duplicate {
+				t.Fatalf("duplicate metric sample %q", key)
+			}
+			got[key] = sample.GetCounter().GetValue()
+			if got[key] != value {
+				t.Errorf("%s = %v, want %v", key, got[key], value)
+			}
 		}
 	}
-	if count != len(want) {
-		t.Fatalf("emitted %d metrics, want %d", count, len(want))
+	for key := range want {
+		if _, ok := got[key]; !ok {
+			t.Errorf("missing metric sample %q", key)
+		}
 	}
 }

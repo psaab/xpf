@@ -1031,15 +1031,12 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #10679 adds one unconditional u64 flowless-NAT-fence counter before both
 // sentinels; offsets advance by 8 bytes while the 2496-byte alignment unit
 // remains unchanged.
-// #10729 adds one AtomicBool hugepage-backing flag; padding absorbs it before
-// the first sentinel, so only the second pinned offset moves (+1).
-// #11061 adds three unconditional u64 fabric trust-drop counters before both
-// sentinels; #11066 adds one unconditional u64 flow-backed NoRoute-NAT-fence
-// counter. Combined offsets advance by 32 bytes; size verified by the
-// compiler below (padding absorbed the #11061+#11066 fields).
-const _: [(); 2496] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2360] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2489] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+// #13285 adds nine worker-local screen counter atomics. Their cache-line and
+// layout cost is intentional: the worker publishes one cumulative sample per
+// second, and the size/offset assertions below pin the resulting footprint.
+const _: [(); 2624] = [(); std::mem::size_of::<BindingLiveState>()];
+const _: [(); 2432] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2561] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
