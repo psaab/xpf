@@ -410,7 +410,7 @@ impl super::Coordinator {
         // additive get-or-create already ran inside the build; see
         // `forwarding_build::commit_zone_counter_prune` for why the two halves
         // are split.
-        crate::afxdp::forwarding_build::commit_zone_counter_prune(&self.forwarding, snapshot);
+        crate::afxdp::forwarding_build::commit_zone_counter_prune(&self.forwarding);
         // #7010: the policy / NAT hit-counter prune, moved down from above the
         // swap to sit beside the zone one. BEHAVIOUR-NEUTRAL on this path —
         // nothing between the old position and here can return, so the prune

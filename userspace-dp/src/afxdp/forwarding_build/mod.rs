@@ -419,7 +419,10 @@ fn attach_zone_counters(
 ) {
     use crate::afxdp::flood_counters::{FloodCounterSlotMap, FloodCounterStore};
     use crate::afxdp::zone_counters::{ZoneCounterSlotMap, ZoneCounterStore};
-    let zone_ids: Vec<u16> = snapshot.zones.iter().map(|z| z.id).collect();
+    // `populate_zones` is the admission boundary: only ids represented in
+    // `zone_id_to_name` are configured, non-empty, nonzero, and non-reserved.
+    // Slot maps must use that exact admitted set, not raw snapshot rows.
+    let zone_ids: Vec<u16> = state.zone_id_to_name.keys().copied().collect();
     let store = previous
         .map(|p| p.zone_counter_store.clone())
         .unwrap_or_else(ZoneCounterStore::default);
@@ -500,11 +503,11 @@ fn attach_zone_counters(
 /// `committed_refresh_prunes_zone_counters_for_removed_zones_6832`, one per
 /// existing call site. They bind the sites that EXIST; they cannot bind a site
 /// that does not exist yet. If you add an apply path, add its row.
-pub(in crate::afxdp) fn commit_zone_counter_prune(
-    state: &ForwardingState,
-    snapshot: &ConfigSnapshot,
-) {
-    let configured: rustc_hash::FxHashSet<u16> = snapshot.zones.iter().map(|z| z.id).collect();
+pub(in crate::afxdp) fn commit_zone_counter_prune(state: &ForwardingState) {
+    // Match `populate_zones` admission so invalid and reserved snapshot rows
+    // cannot keep counter blocks alive after a committed apply.
+    let configured: rustc_hash::FxHashSet<u16> =
+        state.zone_id_to_name.keys().copied().collect();
     state.zone_counter_store.reconcile(&configured);
     // #3651 flood half: same commit point, same `configured` set, same
     // function — for the reason spelled out in `attach_zone_counters`. A

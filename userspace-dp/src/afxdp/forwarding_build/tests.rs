@@ -10523,7 +10523,7 @@ fn accepted_build_defers_the_prune_to_the_commit_point() {
     // Half 2 — the commit point still prunes. This is the anti-over-fix
     // control: reverting `commit_zone_counter_prune` to a no-op (rather than
     // moving it) reds here, and every rejected-apply assertion stays green.
-    commit_zone_counter_prune(&next, &good_snapshot);
+    commit_zone_counter_prune(&next);
 
     let live = next.zone_counter_store.snapshot();
     assert_eq!(
@@ -10654,7 +10654,7 @@ fn accepted_build_defers_the_flood_prune_to_the_commit_point_3651() {
     );
 
     // Half 2 — the commit point prunes BOTH families.
-    commit_zone_counter_prune(&next, &good_snapshot);
+    commit_zone_counter_prune(&next);
     assert_eq!(
         flood_store_zone_ids(&next),
         vec![100],
@@ -14382,5 +14382,58 @@ fn recursive_expansion_keeps_same_preference_rows_as_tiers_12613() {
     assert_eq!(
         route.next_hops[0].next_hop,
         Some(Ipv4Addr::new(192, 0, 2, 254))
+    );
+}
+
+// #13183 (D6-09): rows `populate_zones` skips — an empty-named row and a
+// reserved-id row — must not consume hot-path counter slots. `attach_zone_counters`
+// previously fed raw `snapshot.zones` ids to both slot maps, so skipped rows
+// stole slots from configured zones.
+#[test]
+fn attach_zone_counters_ignores_skipped_zone_rows_13183() {
+    use crate::ZoneSnapshot;
+
+    let mut zones: Vec<ZoneSnapshot> = (2..=64u16)
+        .map(|id| ZoneSnapshot {
+            name: format!("z{id}"),
+            id,
+            ..Default::default()
+        })
+        .collect();
+    zones.insert(
+        0,
+        ZoneSnapshot {
+            name: String::new(),
+            id: 1,
+            ..Default::default()
+        },
+    );
+    zones.push(ZoneSnapshot {
+        name: "junos-global".into(),
+        id: crate::policy::ZONE_ID_RESERVED_MIN,
+        ..Default::default()
+    });
+    let snapshot = ConfigSnapshot {
+        zones,
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert_eq!(state.zone_id_to_name.len(), 63);
+    assert!(
+        !state.zone_counter_slot_map.overflow_active,
+        "skipped zone rows must not consume traffic counter slots"
+    );
+    assert!(
+        !state.flood_counter_slot_map.overflow_active,
+        "skipped zone rows must not consume flood counter slots"
+    );
+    assert_ne!(state.zone_counter_slot_map.slot_of(64), 0);
+    assert_ne!(state.flood_counter_slot_map.slot_of(64), 0);
+    assert_eq!(state.zone_counter_slot_map.slot_of(1), 0);
+    assert_eq!(
+        state
+            .zone_counter_slot_map
+            .slot_of(crate::policy::ZONE_ID_RESERVED_MIN),
+        0
     );
 }
