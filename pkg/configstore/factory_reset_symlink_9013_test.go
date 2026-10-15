@@ -8,10 +8,9 @@ import (
 	"testing"
 )
 
-// #9013 archive half. Unlike FactoryResetConfigDir (whose only callers are
-// tests -- pkg/grpcapi's zeroizeConfigDir is the twin production runs),
-// FactoryResetArchiveDir IS called from the production wipe, so this guards a
-// reachable path.
+// #9013 archive half. FactoryResetArchiveDir is called by the production wipe,
+// so this guards a reachable path alongside the shared FactoryResetConfigDir
+// primitive's config-root checks.
 //
 // The archive holds config-<ts>.<seq>.conf snapshots: 0600 copies of the full
 // committed config TEXT with cleartext IKE PSKs, WireGuard private keys, SNMP

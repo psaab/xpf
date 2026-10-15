@@ -9,11 +9,10 @@ import (
 	"testing"
 )
 
-// R-1 configstore twin (#10100): eraseConfigDB checks .configdb + master.key
-// only, then RemoveAll. A real .configdb holding a symlinked active.json (or
-// any other interior file) has the link unlinked while the target config text
-// survives, nil returned. The grpcapi twin is the one production runs, but
-// #9013's lesson is the pair must not drift.
+// R-1 configstore primitive (#10100): a real .configdb holding a symlinked
+// active.json (or any other interior file) has the link unlinked while target
+// config text survives, so the reset must report the skipped target. grpcapi
+// now invokes this same primitive rather than maintaining a duplicate wipe.
 
 const interiorSecret10100 = "SECRET-10100-INTERIOR-TWIN"
 

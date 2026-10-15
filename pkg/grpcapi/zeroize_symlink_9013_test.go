@@ -15,11 +15,8 @@ import (
 // bytes on the target volume while the operator is told "System zeroized.
 // Configuration erased."
 //
-// These cells drive PerformZeroizeWipe, the primitive BOTH the gRPC zeroize and
-// the console (via the zeroizeFullWipe seam) actually run. The sibling
-// configstore.FactoryResetConfigDir has no non-test caller, so a guard written
-// only against it would be inert against production — that duplication is why
-// the predicate is shared rather than re-spelled.
+// These cells drive PerformZeroizeWipe, whose config-root leg calls the shared
+// configstore.FactoryResetConfigDir implementation.
 const symlinkPSK9013 = "PSK-SUPERSECRET-DO-NOT-SURVIVE"
 
 func TestZeroizeRefusesSymlinkedTargets9013(t *testing.T) {

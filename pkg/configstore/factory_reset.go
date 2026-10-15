@@ -174,12 +174,8 @@ func (e *FactoryResetHardlinkError) Error() string {
 // A path that does not exist is not a symlink: the callers treat absence as
 // "nothing to erase", matching RemoveAll's nil-on-absent contract.
 //
-// Exported because the zeroize erase logic exists TWICE — here and in
-// pkg/grpcapi's zeroizeConfigDir, which is the one production actually runs
-// (this file's FactoryResetConfigDir has no non-test caller). Sharing the
-// predicate is the only thing keeping the #9013 guard from landing on one of
-// the pair and silently missing the other, which is how the duplication bit
-// the first time.
+// Shared by the config-store reset primitive and grpcapi's coordinator so the
+// #9013 guard cannot drift between callers.
 func SymlinkTarget(path string) (SymlinkedTarget, bool) {
 	fi, err := os.Lstat(path)
 	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
@@ -242,12 +238,19 @@ func SymlinkTarget(path string) (SymlinkedTarget, bool) {
 // Full closure needs descriptor-relative traversal (see
 // ResolveFactoryResetRoot), excluded like every path-based guard.
 func CollectInteriorSymlinks(root, exclude string) ([]SymlinkedTarget, error) {
+	cleanExclude := ""
+	if exclude != "" {
+		cleanExclude = filepath.Clean(exclude)
+	}
 	fi, err := os.Lstat(root)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if cleanExclude != "" && filepath.Clean(root) == cleanExclude {
+		return nil, nil
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
 		target, rerr := os.Readlink(root)
@@ -260,10 +263,6 @@ func CollectInteriorSymlinks(root, exclude string) ([]SymlinkedTarget, error) {
 		return nil, nil
 	}
 	var out []SymlinkedTarget
-	cleanExclude := ""
-	if exclude != "" {
-		cleanExclude = filepath.Clean(exclude)
-	}
 	walkErr := filepath.WalkDir(root, func(p string, d os.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
@@ -271,8 +270,10 @@ func CollectInteriorSymlinks(root, exclude string) ([]SymlinkedTarget, error) {
 		if p == root {
 			return nil
 		}
-		_ = d
 		if cleanExclude != "" && filepath.Clean(p) == cleanExclude {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if sk, isLink := SymlinkTarget(p); isLink {
@@ -577,10 +578,9 @@ func ValidateFactoryResetRoot(configDir string) error {
 // is lexical, while the wipe's ReadDir/RemoveAll follow links — so a root that
 // REACHES a forbidden directory through a symlink passes the guard and the wipe
 // deletes xpf-named files under a tree xpf does not own, reporting success.
-// Resolving before BOTH validation and wipe closes the bypass; both wipe
-// copies (FactoryResetConfigDir here and grpcapi.zeroizeConfigDir, the one
-// production runs) and both early-gate resolvers share this one function so
-// the pair cannot drift (#9013's lesson).
+// Resolving before BOTH validation and wipe closes the bypass. The config-store
+// primitive is used by grpcapi's zeroizeConfigDir and both early-gate resolvers
+// share this helper, so root validation cannot drift (#9013's lesson).
 //
 // BOTH the lexical path and the resolved target are validated, and either
 // refusal wins: validating the resolved target alone would launder a
@@ -694,12 +694,10 @@ func canonicalForbiddenAlias(resolved string) string {
 	return ""
 }
 
-// FactoryResetConfigDir securely erases the on-disk configuration STATE under
-// configDir as part of a factory reset (#4858). It is the single shared
-// primitive behind `request system zeroize` so the on-box CLI and any RPC
-// factory-reset path wipe exactly the same artifacts, and none of them can
-// report success while the authoritative config DB + encryption key survive to
-// re-activate on the next boot.
+// FactoryResetConfigDir erases the config-root leg of a factory reset (#4858).
+// grpcapi's coordinator uses the same primitive exposed by configstore, so
+// callers share the same ownership, durability, and artifact rules while the
+// coordinator runs the other system-wide reset legs separately.
 //
 // configBase is the config file's base name (e.g. "xpf.conf"), used to
 // recognize the numbered text rollback slots "<configBase>.<N>".
@@ -717,6 +715,14 @@ func canonicalForbiddenAlias(resolved string) string {
 //   - .configdb/            — the SSOT: active.json, candidate.json,
 //     rollback.N.json. Store.Load reloads active.json on the next boot, so the
 //     whole tree must go or the "erased" config is restored.
+//   - .configdb.restore.partial / .configdb.old — key-bearing DB recovery copies
+//     that can remain after an interrupted rollback restore (#9236).
+//   - tls/                     — the generated REST API certificate and private
+//     key, regenerated on the next boot (#4599).
+//   - dhcpv6-duid-*            — per-interface client identities retained under
+//     the config root (#10769).
+//   - owned editor backups     — backup names for config, journal, DUID, and
+//     rollback artifacts only; unrelated neighboring backups survive (#10769).
 //   - .config.journal[.N]   — the JSONL audit journal + rotated segments
 //     (prior-tenant commit history; legacy fat lines may carry full config).
 //   - <configBase>          — the LIVE config file, matched by EXACT name (#5768)
@@ -724,9 +730,9 @@ func canonicalForbiddenAlias(resolved string) string {
 //     `*.conf` glob no longer catches unowned siblings.
 //   - rescue.conf           — the rescue config (RescueConfigBase / rescuePath):
 //     the full active-config TEXT with cleartext secret leaves (#4056).
-//   - .day0-config-applied — the day-0 loader's successful-config stamp;
-//     removing it permits provisioning from a new medium after factory reset
-//     (#10740).
+//   - .day0-config-applied — the day-0 loader's successful-config stamp is
+//     removed after a normal reset (#10740); a pending-reset record is preserved
+//     by this leg until the coordinator completes every other wipe leg.
 //   - <configBase>.<N>      — the canonical text rollback slots (full config
 //     text with cleartext secret leaves; loadRollbackHistory reads them at
 //     boot, so leaving them behind allows a rollback to the prior config).
@@ -764,6 +770,16 @@ func canonicalForbiddenAlias(resolved string) string {
 // grpcapi erases it after fencing the daemon's persistence callback. Neither
 // artifact belongs in the exact-name top-level configDir census below.
 func FactoryResetConfigDir(configDir, configBase string) error {
+	return FactoryResetConfigDirWithSync(configDir, configBase, rbSyncDir)
+}
+
+// FactoryResetConfigDirWithSync performs the config-root zeroize leg with the
+// supplied, non-nil directory-sync barrier. grpcapi delegates to this shared
+// implementation while retaining its package-local sync seam for failure tests.
+func FactoryResetConfigDirWithSync(configDir, configBase string, syncDir func(string) error) error {
+	if syncDir == nil {
+		return fmt.Errorf("zeroize: directory sync barrier is required")
+	}
 	// #5684: refuse to wipe a shared/parent/system directory. configDir is
 	// filepath.Dir(store.ConfigPath()); a custom -config placed in (or resolving
 	// to) a shared directory must never let the reset RemoveAll <configDir>/.configdb
@@ -775,7 +791,7 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 	// path that REACHES a forbidden directory through a symlink must be
 	// refused, and a link to a dedicated root is wiped AT THE RESOLVED
 	// TARGET (where the daemon's live secrets are), so every path below
-	// uses the resolved root. Shared with the grpcapi twin.
+	// uses the resolved root.
 	resolved, rerr := ResolveFactoryResetRoot(configDir)
 	if rerr != nil {
 		return rerr
@@ -815,50 +831,69 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 		found, herr := CollectHardlinkedFiles(dbDir, "")
 		hardlinks = append(hardlinks, found...)
 		fail(herr)
-		skipped = append(skipped, eraseConfigDB(dbDir, fail)...)
+		skipped = append(skipped, eraseConfigDB(dbDir, fail, syncDir)...)
 	}
 
-	// Top-level artifacts in a single ReadDir pass. #5768: match ONLY names xpf
-	// itself created/tracks — the live config file, the rescue config, the audit
-	// journal (+ rotated segments), the numbered text rollback slots, and
-	// fsatomic crash temps. The pre-#5768 code matched a broad `*.conf` suffix and
-	// `rollback*` prefix, which — when a custom -config resolved configDir to a
-	// shared or subdir location that slipped past ValidateFactoryResetRoot —
-	// deleted UNOWNED siblings (a neighbor's foo.conf, xpf's own rendered
-	// /etc/frr/frr.conf, an unrelated rollback-notes file). Ownership scoping,
-	// not a bigger denylist, bounds the wipe to xpf's own artifacts. Note the
-	// exact live-config match also erases a non-".conf" -config base (e.g.
-	// site.cfg) the old suffix glob would have LEFT behind. configstore no longer
-	// writes any top-level `rollback*` file: the canonical text rollback slots are
-	// "<configBase>.<N>" (isTextRollbackSlot) and the DB slots live inside
-	// .configdb (RemoveAll'd above), so dropping the legacy `rollback*` prefix
-	// loses no owned artifact. isFsatomicTemp stays a shape match: under-scoping a
-	// temp risks stranding an owned secret-bearing temp (#5475), the worse failure.
+	// The live reset also erases crash-recovery copies of the DB, REST TLS
+	// material, DHCPv6 client identifiers, and editor backups of owned files.
+	for _, suffix := range []string{".restore.partial", ".old"} {
+		copyDir := dbDir + suffix
+		if _, statErr := os.Lstat(copyDir); statErr != nil {
+			fail(statErr)
+			continue
+		}
+		found, herr := CollectHardlinkedFiles(copyDir, "")
+		hardlinks = append(hardlinks, found...)
+		fail(herr)
+		skipped = append(skipped, eraseFactoryResetDBCopy(copyDir, fail, syncDir)...)
+	}
+	tlsDir := filepath.Join(configDir, "tls")
+	if sk, isLink := SymlinkTarget(tlsDir); isLink {
+		skipped = append(skipped, sk)
+	} else {
+		found, herr := CollectHardlinkedFiles(tlsDir, "")
+		hardlinks = append(hardlinks, found...)
+		fail(herr)
+		interior, cerr := CollectInteriorSymlinks(tlsDir, "")
+		if len(interior) == 1 && interior[0].Path == tlsDir {
+			skipped = append(skipped, interior...)
+		} else {
+			skipped = append(skipped, interior...)
+			fail(cerr)
+			fail(os.RemoveAll(tlsDir))
+		}
+	}
+
+	// A pending marker gates boot-time configuration loading and must survive
+	// this config-state leg; its owner removes it only after the complete reset.
+	pendingMarker, markerErr := IsFactoryResetPending(configDir)
+	if markerErr != nil {
+		fail(fmt.Errorf("zeroize: inspect config-root pending marker: %w", markerErr))
+		pendingMarker = true
+	}
+
+	// Top-level artifacts in a single ReadDir pass, scoped to owned names.
 	entries, err := os.ReadDir(configDir)
 	fail(err)
 	for _, f := range entries {
 		name := f.Name()
-		if name == configBase || // the live config file (exact name, any extension)
-			name == RescueConfigBase || // the rescue config (rescuePath)
-			name == Day0ConfigAppliedBase || // allow day-0 configuration after reset (#10740)
+		full := filepath.Join(configDir, name)
+		if name == Day0ConfigAppliedBase && pendingMarker {
+			continue
+		}
+		if name == configBase || // live config, exact name
+			name == RescueConfigBase ||
+			name == Day0ConfigAppliedBase ||
 			name == ".config.journal" ||
 			strings.HasPrefix(name, ".config.journal.") ||
-			isTextRollbackSlot(name, configBase) || // <configBase>.<N> text slots
+			strings.HasPrefix(name, "dhcpv6-duid-") ||
+			isTextRollbackSlot(name, configBase) ||
+			isOwnedFactoryResetBackup(name, configBase) ||
 			isFsatomicTemp(name) {
-			full := filepath.Join(configDir, name)
-			// #9013: os.Remove on a symlink unlinks the LINK and returns nil,
-			// leaving the real file — the live config, the rescue config, the
-			// audit journal and the numbered rollback slots each carry the full
-			// config text with cleartext secret leaves. Record and skip.
-			// NOTE (#10769 d05-F6 scope): unlink-then-report is intentional
-			// here too (erase, then report survivors below).
 			found, herr := CollectHardlinkedFiles(full, "")
 			hardlinks = append(hardlinks, found...)
 			fail(herr)
 			if sk, isLink := SymlinkTarget(full); isLink {
-				slog.Warn("zeroize: config artifact is a symlink; NOT erasing it — "+
-					"removing it would unlink the link and leave the config text",
-					"path", sk.Path, "target", sk.Target)
 				skipped = append(skipped, sk)
 				continue
 			}
@@ -872,7 +907,7 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 	// (#5197): a failed fsync means the erasure may not be on stable storage,
 	// so it must not be reported as a clean zeroize. ErrNotExist (configDir
 	// itself absent → nothing to wipe) is excluded by fail().
-	fail(rbSyncDir(configDir))
+	fail(syncDir(configDir))
 	var result []error
 	if len(skipped) > 0 {
 		result = append(result, &FactoryResetSymlinkError{Skipped: skipped})
@@ -893,11 +928,68 @@ func FactoryResetConfigDir(configDir, configBase string) error {
 	}
 }
 
+// eraseFactoryResetDBCopy applies the key-first erase discipline to a sibling
+// recovery copy of .configdb. The caller inventories hard links beforehand.
+func eraseFactoryResetDBCopy(dir string, fail func(error), syncDir func(string) error) []SymlinkedTarget {
+	if sk, isLink := SymlinkTarget(dir); isLink {
+		return []SymlinkedTarget{sk}
+	}
+	keyPath := filepath.Join(dir, "master.key")
+	interior, cerr := CollectInteriorSymlinks(dir, keyPath)
+	if len(interior) == 1 && interior[0].Path == dir {
+		return interior
+	}
+	skipped := append([]SymlinkedTarget(nil), interior...)
+	if cerr != nil {
+		fail(cerr)
+	}
+	if sk, isLink := SymlinkTarget(keyPath); isLink {
+		skipped = append(skipped, sk)
+		fail(os.RemoveAll(dir))
+		return skipped
+	}
+	keyErr := rbRemove(keyPath)
+	fail(keyErr)
+	if keyErr == nil {
+		fail(syncDir(dir))
+	}
+	fail(os.RemoveAll(dir))
+	return skipped
+}
+
+// isOwnedFactoryResetBackup limits editor backups to xpf-owned top-level
+// artifacts, avoiding collateral deletion of neighboring files.
+func isOwnedFactoryResetBackup(name, configBase string) bool {
+	stem, ok := factoryResetBackupStem(name)
+	if !ok {
+		return false
+	}
+	return stem == configBase ||
+		stem == RescueConfigBase ||
+		stem == Day0ConfigAppliedBase ||
+		stem == ".config.journal" ||
+		strings.HasPrefix(stem, ".config.journal.") ||
+		strings.HasPrefix(stem, "dhcpv6-duid-") ||
+		isTextRollbackSlot(stem, configBase)
+}
+
+func factoryResetBackupStem(name string) (string, bool) {
+	if strings.HasSuffix(name, "~") {
+		return strings.TrimSuffix(name, "~"), true
+	}
+	for _, suffix := range []string{".bak", ".old", ".orig"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix), true
+		}
+	}
+	return "", false
+}
+
 // eraseConfigDB erases the .configdb SSOT key-first. Split out of
 // FactoryResetConfigDir (#9013) so the symlink refusal can skip the block
 // WHOLE — key removal included — instead of interleaving a guard with it. The
 // key-first ordering and its #5197 durability argument are unchanged.
-func eraseConfigDB(dbDir string, fail func(error)) []SymlinkedTarget {
+func eraseConfigDB(dbDir string, fail func(error), syncDir func(string) error) []SymlinkedTarget {
 	var skipped []SymlinkedTarget
 	keyPath := filepath.Join(dbDir, "master.key")
 	// #10100 R-1: census ANY interior symlink BEFORE the master.key check,
@@ -953,7 +1045,7 @@ func eraseConfigDB(dbDir string, fail func(error)) []SymlinkedTarget {
 		// The key existed and was unlinked: make that unlink durable before the
 		// ciphertext body removal. An absent .configdb yields ErrNotExist, which
 		// fail() excludes (nothing was removed, so nothing to make durable).
-		fail(rbSyncDir(dbDir))
+		fail(syncDir(dbDir))
 	}
 	// The config SSOT (active.json, candidate.json, rollback.N.json + any
 	// residual key). RemoveAll erases the whole tree and is nil on absent.

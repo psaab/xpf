@@ -1176,20 +1176,21 @@ per-path:
   the artifacts xpf itself created/tracks — the live config file (by EXACT
   name, `configBase`, so a non-`.conf` `-config` base like `site.cfg` is
   erased too), `rescue.conf` (`RescueConfigBase`), the day-0 loader stamp
-  `.day0-config-applied` (removed so a factory-default device can provision
-  from new media after reset, #10740), `.config.journal[.N]`, the numbered
-  text rollback slots `<configBase>.<N>`, and fsatomic crash temps — NEVER a
-  broad `*.conf` suffix or `rollback*` prefix glob. The old globs deleted
-  UNOWNED siblings when a custom `-config` resolved the config root to a
-  shared directory or a subdir that slipped past the
+  `.day0-config-applied` (removed after a normal reset so a factory-default
+  device can provision from new media, #10740; a pending-reset record is
+  retained until the coordinator completes all wipe legs), `.config.journal[.N]`,
+  the numbered text rollback slots `<configBase>.<N>`, and fsatomic crash
+  temps — NEVER a broad `*.conf` suffix or `rollback*` prefix glob. The old
+  globs deleted UNOWNED siblings when a custom `-config` resolved the config
+  root to a shared directory or a subdir that slipped past the
   `FactoryResetForbiddenRoots` denylist (`/data/xpf.conf` → wipes `/data/*`;
   `/etc/frr/x.conf` → deletes xpf's own rendered `frr.conf`). A denylist is
   inherently incomplete on a wildcard wipe; ownership scoping bounds the
   deletion to xpf's own files instead, with the denylist kept as
-  defense-in-depth. `FactoryResetConfigDir` (CLI) and the gRPC
-  `zeroizeConfigDir` mirror apply the identical scoped match; the dedicated
-  `<root>/.configdb` and (gRPC-only) `<root>/tls` subdir `RemoveAll`s stay —
-  those are exclusively xpf-owned subdirectories.
+  defense-in-depth. `FactoryResetConfigDir` is the shared config-root
+  primitive used by `grpcapi.zeroizeConfigDir`; the dedicated `<root>/.configdb`
+  and `<root>/tls` subdir `RemoveAll`s stay because those are exclusively
+  xpf-owned subdirectories.
 - **Symlinked erase targets are REFUSED, not unlinked (#9013).** `os.Remove`
   and `os.RemoveAll` act on the **link** when a path's FINAL component is a
   symlink: they unlink it, return `nil`, and the real bytes stay on the target
@@ -1220,13 +1221,12 @@ per-path:
     erasure in the other direction against a backup of the DB. There the body
     erase still proceeds: the key cannot be destroyed, but removing the
     ciphertext leaves nothing on this box for it to decrypt.
-  - **The guard is applied to BOTH twins.** This erase logic exists twice, and
-    `FactoryResetConfigDir` in this package has **no non-test caller** —
-    `pkg/grpcapi`'s `zeroizeConfigDir` is the one production runs, via
-    `PerformZeroizeWipe` (the gRPC path and, through the `zeroizeFullWipe` seam,
-    the console). A guard written only against this package's copy would have
-    been inert in production, which is why the predicate is shared rather than
-    re-spelled. `tls/` is gRPC-only and is covered there.
+  - **One shared config-root primitive.** `FactoryResetConfigDir` is called by
+    `grpcapi.zeroizeConfigDir` through `PerformZeroizeWipe`, used by both gRPC
+    and console reset paths. CLI and RPC callers therefore share the same
+    root validation, symlink/hard-link checks, and artifact sweep. The other
+    wipe legs (archive, rendered configs, snapshots, and system state) remain
+    coordinated outside this config-root primitive.
 
 - **`FactoryResetArchiveDir` — local config-archive erasure (#5186).**
   `zeroize` must remove EVERY on-box generation of config secrets. The
