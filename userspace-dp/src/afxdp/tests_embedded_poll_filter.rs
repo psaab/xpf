@@ -10822,6 +10822,8 @@ fn stage11_local_ike_passthrough_honors_ingress_input_filter_13637() {
             source_addresses: vec![client.to_string()],
             protocols: vec!["udp".to_string()],
             destination_ports: vec!["500".to_string()],
+            routing_instance: "tenant-a".to_string(),
+            count: "hits-13637".to_string(),
             action: "discard".to_string(),
             ..Default::default()
         }],
@@ -10872,7 +10874,7 @@ fn stage11_local_ike_passthrough_honors_ingress_input_filter_13637() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = Arc::<str>::from("reth0.80");
     let mut sessions = SessionTable::new();
-    let (_, dbg) = txn_run_descriptor_checked(
+    let (_, _dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -10882,9 +10884,18 @@ fn stage11_local_ike_passthrough_honors_ingress_input_filter_13637() {
         true,
     );
 
+    let pbr_filter = forwarding
+        .filter_state
+        .filters
+        .get("inet:block-ike-source")
+        .expect("the ingress filter compiled");
     assert_eq!(
-        dbg.policy_deny, 1,
-        "the real Stage 11 local-IKE path must apply the ingress input filter"
+        pbr_filter.terms[0]
+            .counter
+            .packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the real Stage 11 local-IKE path must count and enforce a routing-instance discard"
     );
     assert!(
         binding.scratch.scratch_forwards.is_empty(),

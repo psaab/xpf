@@ -1223,6 +1223,32 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
+                            // Stage 11 bypasses the ordinary route-evaluation
+                            // stage, so independently enforce route-filter
+                            // routing-instance discard/reject terms before
+                            // handing a claimed packet to the host.
+                            let route_override =
+                                crate::afxdp::forwarding::ingress_route_table_override(
+                                    worker_ctx.forwarding,
+                                    stage11_packet_frame,
+                                    meta,
+                                    flow,
+                                    ingress_zone_override,
+                                    worker_ctx.event_stream,
+                                    now_ns,
+                                    Some(crate::afxdp::forwarding::PbrRejectSink {
+                                        tx_pipeline: &mut binding.tx_pipeline,
+                                        ingress_ifindex: binding.ifindex,
+                                        counters: telemetry.counters,
+                                    }),
+                                );
+                            if matches!(
+                                route_override,
+                                crate::afxdp::forwarding::RouteOverride::Drop
+                            ) {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
                         }
                         // Reserve and settle fragment ownership before handing
                         // the frame to XFRM. A terminal fragment must never be
