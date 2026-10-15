@@ -1452,6 +1452,36 @@ pub(super) fn populate_egress(
 ) -> Result<(), crate::policy::SnapshotIntegrityError> {
     let mut tagged_only_ingress_ifindexes = FastSet::default();
     let mut untagged_unit_ifindexes = FastSet::default();
+    let mut row_zone_by_ifindex = BTreeMap::<i32, Option<u16>>::new();
+    for iface in &snapshot.interfaces {
+        if iface.ifindex <= 0 {
+            continue;
+        }
+        let zone_id = state
+            .zone_name_to_id
+            .get(&iface.zone)
+            .copied()
+            .filter(|zone_id| *zone_id != 0);
+        match row_zone_by_ifindex.entry(iface.ifindex) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(zone_id);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry)
+                if *entry.get() != zone_id =>
+            {
+                entry.insert(None);
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
+    }
+    let consistent_zoned_ifindexes: BTreeSet<i32> = row_zone_by_ifindex
+        .into_iter()
+        .filter_map(|(ifindex, zone_id)| {
+            let zone_id = zone_id?;
+            (state.ifindex_unambiguous_zone_id.get(&ifindex) == Some(&zone_id))
+                .then_some(ifindex)
+        })
+        .collect();
 
     // #11434: preserve the base interface's native VLAN selection so VID 0
     // can resolve to the matching logical unit instead of inheriting unit 0's
@@ -1630,7 +1660,7 @@ pub(super) fn populate_egress(
                     },
                 );
             }
-            if existing.zone_id != 0 && zone_id != 0 {
+            if consistent_zoned_ifindexes.contains(&iface.ifindex) {
                 ensure_shared_ifindex_value(
                     iface.ifindex,
                     &iface.name,
@@ -1647,48 +1677,58 @@ pub(super) fn populate_egress(
                 )?;
             }
             if existing.mtu != 0 && mtu != 0 {
-                ensure_shared_ifindex_value(
-                    iface.ifindex,
-                    &iface.name,
-                    "mtu",
-                    &existing.mtu,
-                    &mtu,
-                )?;
+                if consistent_zoned_ifindexes.contains(&iface.ifindex) {
+                    ensure_shared_ifindex_value(
+                        iface.ifindex,
+                        &iface.name,
+                        "mtu",
+                        &existing.mtu,
+                        &mtu,
+                    )?;
+                }
             } else if existing.mtu == 0 {
                 existing.mtu = mtu;
             }
             if existing.src_mac != [0; 6] && src_mac != [0; 6] {
                 if existing.src_mac != src_mac {
-                    return Err(
-                        crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexAttributeConflict {
-                            ifindex: iface.ifindex,
-                            attribute: "src_mac",
-                            first_value: format!("{:02x?}", existing.src_mac),
-                            second_value: format!("{:02x?}", src_mac),
-                            interface: iface.name.clone(),
-                        },
-                    );
+                    if consistent_zoned_ifindexes.contains(&iface.ifindex) {
+                        return Err(
+                            crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexAttributeConflict {
+                                ifindex: iface.ifindex,
+                                attribute: "src_mac",
+                                first_value: format!("{:02x?}", existing.src_mac),
+                                second_value: format!("{:02x?}", src_mac),
+                                interface: iface.name.clone(),
+                            },
+                        );
+                    }
+                    existing.src_mac = src_mac;
                 }
             } else if existing.src_mac == [0; 6] {
                 existing.src_mac = src_mac;
             }
-            if let (Some(first), Some(second)) = (existing.primary_v4, primary_v4) {
-                ensure_shared_ifindex_value(
-                    iface.ifindex,
-                    &iface.name,
-                    "primary_v4",
-                    &first,
-                    &second,
-                )?;
-            }
-            if let (Some(first), Some(second)) = (existing.primary_v6, primary_v6) {
-                ensure_shared_ifindex_value(
-                    iface.ifindex,
-                    &iface.name,
-                    "primary_v6",
-                    &first,
-                    &second,
-                )?;
+            // Tunnel logical units sharing a netdev legitimately carry
+            // different primary addresses; the runtime egress row represents
+            // the shared device and keeps the first available family address.
+            if consistent_zoned_ifindexes.contains(&iface.ifindex) && !iface.tunnel {
+                if let (Some(first), Some(second)) = (existing.primary_v4, primary_v4) {
+                    ensure_shared_ifindex_value(
+                        iface.ifindex,
+                        &iface.name,
+                        "primary_v4",
+                        &first,
+                        &second,
+                    )?;
+                }
+                if let (Some(first), Some(second)) = (existing.primary_v6, primary_v6) {
+                    ensure_shared_ifindex_value(
+                        iface.ifindex,
+                        &iface.name,
+                        "primary_v6",
+                        &first,
+                        &second,
+                    )?;
+                }
             }
             // Merge available family primaries; a row without a family cannot
             // erase the first address selected for that family.
