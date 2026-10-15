@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path/filepath"
 	"strings"
 	"time"
@@ -429,7 +430,18 @@ func (m *Manager) requestSessionSyncLocked(req ControlRequest) error {
 	return err
 }
 
-func (m *Manager) requestSessionSyncResponseLocked(req ControlRequest) (ControlResponse, error) {
+func (m *Manager) requestSessionSyncResponseLocked(req ControlRequest) (response ControlResponse, retErr error) {
+	m.sessionSocketRequests.Add(1)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		m.sessionSocketErrors.Add(1)
+		var netErr net.Error
+		if errors.As(retErr, &netErr) && netErr.Timeout() {
+			m.sessionSocketTimeouts.Add(1)
+		}
+	}()
 	sockPath := m.sessionSocketPath()
 	if sockPath == "" {
 		return ControlResponse{}, errors.New("session socket not configured")
@@ -573,7 +585,18 @@ func (m *Manager) requestHAWatchdogSessionAtPathForGeneration(
 
 // requestHAWatchdogSessionLockedAtPath performs ONE session-socket HA round
 // trip. The caller MUST already hold m.sessionMu; it is not reentrant.
-func (m *Manager) requestHAWatchdogSessionLockedAtPath(groups []HAGroupStatus, sockPath string) error {
+func (m *Manager) requestHAWatchdogSessionLockedAtPath(groups []HAGroupStatus, sockPath string) (retErr error) {
+	m.sessionSocketRequests.Add(1)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		m.sessionSocketErrors.Add(1)
+		var netErr net.Error
+		if errors.As(retErr, &netErr) && netErr.Timeout() {
+			m.sessionSocketTimeouts.Add(1)
+		}
+	}()
 	req := ControlRequest{
 		Type:           "update_ha_state",
 		SuppressStatus: true,

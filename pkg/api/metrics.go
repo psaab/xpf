@@ -46,6 +46,12 @@ type xpfCollector struct {
 	sessionGaugeValid       bool
 	sessionGaugeTTLOverride time.Duration
 
+	userspaceHATakeoverReady            *prometheus.Desc
+	userspaceHATakeoverBlocker          *prometheus.Desc
+	userspaceSessionSocketRequestsTotal *prometheus.Desc
+	userspaceSessionSocketErrorsTotal   *prometheus.Desc
+	userspaceSessionSocketTimeoutsTotal *prometheus.Desc
+	userspaceSyncedImportRefusalsTotal  *prometheus.Desc
 	// Global counters
 	packetsTotal          *prometheus.Desc
 	dropsTotal            *prometheus.Desc
@@ -1041,6 +1047,12 @@ type xpfCollector struct {
 }
 
 func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.userspaceHATakeoverReady
+	ch <- c.userspaceHATakeoverBlocker
+	ch <- c.userspaceSessionSocketRequestsTotal
+	ch <- c.userspaceSessionSocketErrorsTotal
+	ch <- c.userspaceSessionSocketTimeoutsTotal
+	ch <- c.userspaceSyncedImportRefusalsTotal
 	ch <- c.packetsTotal
 	ch <- c.dropsTotal
 	ch <- c.unknownVLANDropsTotal
@@ -2147,6 +2159,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	c.collectSurfaceADDNSMetrics(ch)
 	c.collectSystemMetrics(ch)
 	c.collectConntrackGCMetrics(ch)
+	if dp != nil {
+		c.emitHATakeoverReadiness13301(ch, dp)
+	}
 
 	if dp == nil || !dp.IsLoaded() {
 		return

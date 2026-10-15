@@ -398,6 +398,7 @@ func (m *Manager) desiredForwardingArmedLocked() bool {
 // While restart inventory debt is outstanding, it also asks the connected peer
 // for a complete session bulk, throttled to avoid duplicate requests.
 func (m *Manager) TakeoverReady() (bool, []string) {
+
 	m.mu.Lock()
 	ready, reasons := m.takeoverReadyLocked()
 	generation := m.sessionInventoryDebtGen
@@ -424,6 +425,76 @@ func (m *Manager) TakeoverReady() (bool, []string) {
 		request(generation)
 	}
 	return ready, reasons
+}
+
+// HATakeoverReadiness is a bounded, scrape-safe snapshot of the Go-side HA
+// takeover gates. Blockers contain stable enum values, never diagnostic text.
+type HATakeoverReadiness struct {
+	Ready                 bool
+	Blockers              []string
+	SessionMirrorFailed   bool
+	RepairOverflow        bool
+	InventoryDebtOwed     bool
+	PendingHAStateClear   bool
+	PendingHAStateReplay  bool
+	SyncedImportRefusals  uint64
+	SessionSocketRequests uint64
+	SessionSocketErrors   uint64
+	SessionSocketTimeouts uint64
+}
+
+// HATakeoverReadiness returns the current readiness gates and session-socket
+// transport counters without performing RPCs or changing Manager state.
+func (m *Manager) HATakeoverReadiness() HATakeoverReadiness {
+	m.mu.Lock()
+	ready, reasons := m.takeoverReadyLocked()
+	s := HATakeoverReadiness{
+		Ready: ready, SessionMirrorFailed: m.sessionMirrorFailed,
+		RepairOverflow:        m.sessionRepairOverflowErr != "",
+		InventoryDebtOwed:     m.sessionInventoryDebtGen != 0 || m.sessionInventoryDebtOwed,
+		PendingHAStateClear:   m.pendingHAStateClear,
+		PendingHAStateReplay:  m.pendingHAStateReplay,
+		SyncedImportRefusals:  m.syncedImportRefusals.Load(),
+		SessionSocketRequests: m.sessionSocketRequests.Load(),
+		SessionSocketErrors:   m.sessionSocketErrors.Load(),
+		SessionSocketTimeouts: m.sessionSocketTimeouts.Load(),
+	}
+	m.mu.Unlock()
+	for _, reason := range reasons {
+		switch {
+		case strings.Contains(reason, "helper not running"):
+			s.Blockers = append(s.Blockers, "helper_down")
+		case strings.Contains(reason, "not enabled"):
+			s.Blockers = append(s.Blockers, "not_enabled")
+		case strings.Contains(reason, "forwarding unsupported"):
+			s.Blockers = append(s.Blockers, "forwarding_unsupported")
+		case strings.Contains(reason, "not armed"):
+			s.Blockers = append(s.Blockers, "not_armed")
+		case strings.Contains(reason, "not active"):
+			s.Blockers = append(s.Blockers, "not_active")
+		case strings.Contains(reason, "liveness failed"):
+			s.Blockers = append(s.Blockers, "xsk_liveness_failed")
+		case strings.Contains(reason, "liveness not proven"):
+			s.Blockers = append(s.Blockers, "xsk_unproven")
+		case strings.Contains(reason, "session mirror unhealthy"):
+			s.Blockers = append(s.Blockers, "session_mirror_failed")
+		case strings.Contains(reason, "repair overflow"):
+			s.Blockers = append(s.Blockers, "repair_overflow")
+		case strings.Contains(reason, "session inventory not reconciled"):
+			s.Blockers = append(s.Blockers, "inventory_debt_owed")
+		case strings.Contains(reason, "snapshot retry debt"):
+			s.Blockers = append(s.Blockers, "snapshot_retry_debt")
+		case strings.Contains(reason, "HA state clear pending"):
+			s.Blockers = append(s.Blockers, "pending_ha_clear")
+		case strings.Contains(reason, "HA state replay pending"):
+			s.Blockers = append(s.Blockers, "pending_ha_replay")
+		case strings.Contains(reason, "event stream listener not bound"):
+			s.Blockers = append(s.Blockers, "event_stream_unbound")
+		default:
+			s.Blockers = append(s.Blockers, "forwarding_unsupported")
+		}
+	}
+	return s
 }
 
 const sessionInventoryRequestRetryInterval = 5 * time.Second
@@ -525,6 +596,12 @@ func (m *Manager) takeoverReadyLocked() (bool, []string) {
 	// bound stream; this defense-in-depth gate keeps that contract explicit.
 	if m.eventStream == nil || !m.eventStream.ListenerBound() {
 		reasons = append(reasons, "userspace event stream listener not bound")
+	}
+	if m.pendingHAStateClear {
+		reasons = append(reasons, "userspace HA state clear pending")
+	}
+	if m.pendingHAStateReplay {
+		reasons = append(reasons, "userspace HA state replay pending")
 	}
 	return len(reasons) == 0, reasons
 }
