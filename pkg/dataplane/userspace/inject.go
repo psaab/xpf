@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -57,10 +58,16 @@ func DecodeInjectPacketTarget(target string) (map[string]string, error) {
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(target, injectPacketTargetExtraPrefix)), &extra); err != nil {
 		return nil, fmt.Errorf("invalid userspace inject target extras: %w", err)
 	}
+	if extra == nil {
+		return nil, errors.New("invalid userspace inject target extras: expected an object")
+	}
 	return extra, nil
 }
 
 func BuildInjectPacketRequest(slot uint32, mode string, extra map[string]string, status ProcessStatus) (InjectPacketRequest, error) {
+	if slot >= dataplane.BindingSlotMapMaxEntries {
+		return InjectPacketRequest{}, fmt.Errorf("inject slot %d out of range [0, %d)", slot, dataplane.BindingSlotMapMaxEntries)
+	}
 	req := InjectPacketRequest{
 		Slot:             slot,
 		PacketLength:     128,
@@ -108,6 +115,16 @@ func BuildInjectPacketRequest(slot uint32, mode string, extra map[string]string,
 		}
 		if err := populateInjectPacketTuple(&req, extra, status); err != nil {
 			return InjectPacketRequest{}, err
+		}
+	} else if mode != "metadata-parse-error" && req.DestinationIP != "" {
+		destinationIP, err := netip.ParseAddr(req.DestinationIP)
+		if err != nil {
+			return InjectPacketRequest{}, fmt.Errorf("invalid destination-ip %q: %w", req.DestinationIP, err)
+		}
+		if destinationIP.Is4() {
+			req.AddrFamily = uint8(syscall.AF_INET)
+		} else {
+			req.AddrFamily = uint8(syscall.AF_INET6)
 		}
 	}
 	return req, nil
