@@ -1073,17 +1073,20 @@ type xpfCollector struct {
 	// without bound and silently. These surface the backlog and any bounded
 	// drops. Labels: protocol {netflow-v9,ipfix}, instance, template (bounded
 	// — one series per configured flow-server group).
-	flowExportBatchDepth           *prometheus.Desc
-	flowExportBatchMaxDepth        *prometheus.Desc
-	flowExportBatchDroppedTotal    *prometheus.Desc
-	flowExportFlowsExportedTotal   *prometheus.Desc
-	flowExportPacketsExportedTotal *prometheus.Desc
-	routeMaskCacheHits             *prometheus.Desc
-	routeMaskCacheMisses           *prometheus.Desc
-	routeMaskCacheFullClears       *prometheus.Desc
-	routeMaskCacheInflightDrops    *prometheus.Desc
-	routeMaskCacheLookupErrors     *prometheus.Desc
-	routeMaskCacheEntries          *prometheus.Desc
+	flowExportBatchDepth               *prometheus.Desc
+	flowExportBatchMaxDepth            *prometheus.Desc
+	flowExportBatchDroppedTotal        *prometheus.Desc
+	flowExportFlowsExportedTotal       *prometheus.Desc
+	flowExportPacketsExportedTotal     *prometheus.Desc
+	routeMaskCacheHits                 *prometheus.Desc
+	routeMaskCacheMisses               *prometheus.Desc
+	routeMaskCacheFullClears           *prometheus.Desc
+	routeMaskCacheInflightDrops        *prometheus.Desc
+	routeMaskCacheLookupErrors         *prometheus.Desc
+	routeMaskCacheEntries              *prometheus.Desc
+	flowExportRouteMaskUnresolvedTotal *prometheus.Desc
+	flowExportMissingStartTimeTotal    *prometheus.Desc
+	flowExportClockSkewClampedTotal    *prometheus.Desc
 }
 
 func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -1692,6 +1695,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.routeMaskCacheInflightDrops
 	ch <- c.routeMaskCacheLookupErrors
 	ch <- c.routeMaskCacheEntries
+	ch <- c.flowExportRouteMaskUnresolvedTotal
+	ch <- c.flowExportMissingStartTimeTotal
+	ch <- c.flowExportClockSkewClampedTotal
 	c.describeDataplaneSafety(ch)
 	c.describeSNMPServeBudget(ch)
 }

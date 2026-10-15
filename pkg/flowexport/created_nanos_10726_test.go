@@ -18,7 +18,7 @@ func TestFlowStartTimeClampsUntrustedCreatedNanos10726(t *testing.T) {
 		CreatedNanos: 1_000_000_000,
 	}
 	before := logging.InvalidCreatedNanos()
-	got, missingCreated := flowStartTime(rec)
+	got, missingCreated, _ := flowStartTime(rec)
 	if missingCreated {
 		t.Fatal("real Created timestamp must not be reported missing")
 	}

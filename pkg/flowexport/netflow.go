@@ -574,6 +574,9 @@ type Exporter struct {
 	// the only operator-visible signal that an exported mask-0 is unresolved
 	// versus a real default-route /0.
 	routeMaskUnresolved atomic.Uint64
+	// #13305: close records whose Created timestamp is later than close time,
+	// clamped to zero duration.
+	clockSkewClamped atomic.Uint64
 }
 
 // NewExporter creates a new NetFlow v9 exporter. cfg is held by pointer
@@ -641,9 +644,12 @@ func (e *Exporter) Run(ctx context.Context) {
 func (e *Exporter) ExportSessionClose(rec logging.EventRecord, evt SessionCloseData) {
 	// #2465/#11699: a missing creation timestamp cannot establish flow age;
 	// use the close time and count that fallback for operator visibility.
-	startTime, missingCreated := flowStartTime(rec)
+	startTime, missingCreated, clockSkewClamped := flowStartTime(rec)
 	if missingCreated {
 		e.estimatedDurations.Add(1)
+	}
+	if clockSkewClamped {
+		e.clockSkewClamped.Add(1)
 	}
 	// #2526: resolve the post-NAT tuple with pre-NAT fallback so every
 	// exported record carries the RFC 5103 post-NAT fields (post == pre when
@@ -710,6 +716,10 @@ func (e *Exporter) EstimatedDurations() uint64 {
 func (e *Exporter) RouteMaskUnresolved() uint64 {
 	return e.routeMaskUnresolved.Load()
 }
+
+// ClockSkewClamped returns the number of exported close records whose future
+// creation timestamp was clamped to the close time (#13305).
+func (e *Exporter) ClockSkewClamped() uint64 { return e.clockSkewClamped.Load() }
 
 // BatchDepth returns the current number of flow records pending in the export
 // batch (both families combined). Normally near 0 — the Run goroutine drains

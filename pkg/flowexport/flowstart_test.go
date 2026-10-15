@@ -22,7 +22,7 @@ func TestFlowStartTimeUsesRealCreated(t *testing.T) {
 		Protocol:    "TCP",
 	}
 
-	start, missingCreated := flowStartTime(rec)
+	start, missingCreated, _ := flowStartTime(rec)
 	if missingCreated {
 		t.Fatal("a real created timestamp must not be reported missing")
 	}
@@ -41,7 +41,7 @@ func TestFlowStartTimeWithoutCreationStampUsesEndTime(t *testing.T) {
 		SessionPkts: ^uint64(0),
 		Protocol:    "TCP",
 	}
-	start, missingCreated := flowStartTime(rec)
+	start, missingCreated, _ := flowStartTime(rec)
 	if !missingCreated {
 		t.Fatal("a zero created timestamp must be reported missing")
 	}
@@ -58,9 +58,12 @@ func TestFlowStartTimeClampsFutureCreated(t *testing.T) {
 		Time:    end,
 		Created: 1_700_000_500, // 500s AFTER the close — impossible, clamp
 	}
-	start, missingCreated := flowStartTime(rec)
+	start, missingCreated, clamped := flowStartTime(rec)
 	if missingCreated {
 		t.Fatal("a non-zero created timestamp must not be reported missing")
+	}
+	if !clamped {
+		t.Fatal("a future created timestamp must be reported clamped")
 	}
 	if !start.Equal(end) {
 		t.Fatalf("StartTime = %v, want clamp to EndTime %v", start, end)
@@ -190,8 +193,8 @@ func TestFlowStartTimeKeepsSubSecondResolution(t *testing.T) {
 		Created: sec, CreatedNanos: 700_000_000, // .700s
 	}
 
-	startEarly, missingEarly := flowStartTime(recEarly)
-	startLate, missingLate := flowStartTime(recLate)
+	startEarly, missingEarly, _ := flowStartTime(recEarly)
+	startLate, missingLate, _ := flowStartTime(recLate)
 	if missingEarly || missingLate {
 		t.Fatal("a real created timestamp must not be reported missing")
 	}

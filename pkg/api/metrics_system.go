@@ -142,35 +142,33 @@ func (c *xpfCollector) collectSurfaceADDNSMetrics(ch chan<- prometheus.Metric) {
 // rows collide on an identical labelset, and Prometheus either rejects the
 // duplicate series (scrape error) or silently collapses the failing group.
 func (c *xpfCollector) collectFlowExportMetrics(ch chan<- prometheus.Metric) {
-	var health []flowexport.ExporterCollectorHealth
 	if c.srv.flowCollectorHealthFn != nil {
-		health = c.srv.flowCollectorHealthFn()
-	}
-	for _, h := range health {
-		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteAttemptsTotal,
-			prometheus.CounterValue, float64(h.WriteAttempts), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
-		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteFailuresTotal,
-			prometheus.CounterValue, float64(h.WriteFailures), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
-		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteSkippedTotal,
-			prometheus.CounterValue, float64(h.WriteSkipped), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
-		healthy := 0.0
-		if h.Healthy {
-			healthy = 1
+		for _, h := range c.srv.flowCollectorHealthFn() {
+			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteAttemptsTotal,
+				prometheus.CounterValue, float64(h.WriteAttempts), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
+			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteFailuresTotal,
+				prometheus.CounterValue, float64(h.WriteFailures), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
+			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteSkippedTotal,
+				prometheus.CounterValue, float64(h.WriteSkipped), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
+			healthy := 0.0
+			if h.Healthy {
+				healthy = 1
+			}
+			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorHealthy,
+				prometheus.GaugeValue, healthy, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
+			var lastSuccess float64
+			if !h.LastSuccessTime.IsZero() {
+				lastSuccess = float64(h.LastSuccessTime.Unix())
+			}
+			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorLastSuccessSeconds,
+				prometheus.GaugeValue, lastSuccess, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
+			var lastFailure float64
+			if !h.LastFailureTime.IsZero() {
+				lastFailure = float64(h.LastFailureTime.Unix())
+			}
+			ch <- prometheus.MustNewConstMetric(c.flowExportCollectorLastFailureSeconds,
+				prometheus.GaugeValue, lastFailure, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 		}
-		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorHealthy,
-			prometheus.GaugeValue, healthy, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
-		var lastSuccess float64
-		if !h.LastSuccessTime.IsZero() {
-			lastSuccess = float64(h.LastSuccessTime.Unix())
-		}
-		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorLastSuccessSeconds,
-			prometheus.GaugeValue, lastSuccess, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
-		var lastFailure float64
-		if !h.LastFailureTime.IsZero() {
-			lastFailure = float64(h.LastFailureTime.Unix())
-		}
-		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorLastFailureSeconds,
-			prometheus.GaugeValue, lastFailure, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 	}
 	c.collectFlowExportBatchMetrics(ch)
 	c.collectRouteMaskCacheMetrics(ch)
@@ -208,6 +206,12 @@ func (c *xpfCollector) collectFlowExportBatchMetrics(ch chan<- prometheus.Metric
 			prometheus.CounterValue, float64(s.ExportedFlows), s.Protocol, s.Instance, s.Template, s.Family)
 		ch <- prometheus.MustNewConstMetric(c.flowExportPacketsExportedTotal,
 			prometheus.CounterValue, float64(s.ExportedPackets), s.Protocol, s.Instance, s.Template, s.Family)
+		ch <- prometheus.MustNewConstMetric(c.flowExportRouteMaskUnresolvedTotal,
+			prometheus.CounterValue, float64(s.RouteMaskUnresolved), s.Protocol, s.Instance, s.Template, s.Family)
+		ch <- prometheus.MustNewConstMetric(c.flowExportMissingStartTimeTotal,
+			prometheus.CounterValue, float64(s.EstimatedDurations), s.Protocol, s.Instance, s.Template, s.Family)
+		ch <- prometheus.MustNewConstMetric(c.flowExportClockSkewClampedTotal,
+			prometheus.CounterValue, float64(s.ClockSkewClamped), s.Protocol, s.Instance, s.Template, s.Family)
 	}
 }
 

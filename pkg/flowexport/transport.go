@@ -684,4 +684,8 @@ type ExporterBatchStats struct {
 	// the daemon aggregates the same event across retired-and-discarded
 	// exporters.
 	HandoffDropped uint64 `json:"handoff_dropped"`
+	// Data quality counters for exported records (#13305).
+	RouteMaskUnresolved uint64 `json:"route_mask_unresolved"`
+	EstimatedDurations  uint64 `json:"estimated_durations"`
+	ClockSkewClamped    uint64 `json:"clock_skew_clamped"`
 }
