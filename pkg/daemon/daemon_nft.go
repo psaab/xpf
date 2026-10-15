@@ -3192,6 +3192,14 @@ func nftAddrPredicate(field, family string, addrs []string, except, constrained 
 		return "", false
 	}
 	famAddrs := nftFamilyAddrs(family, addrs)
+	if familyAddrsIncludeAnyText(family, addrs) {
+		if except {
+			// Excluding the whole family leaves no matching address.
+			return "", true
+		}
+		// A positive match on the whole family needs no predicate.
+		return "", false
+	}
 	if len(famAddrs) == 0 {
 		if except {
 			// Empty except set -> "match every address NOT in {}" = match ALL ->
@@ -3207,6 +3215,35 @@ func nftAddrPredicate(field, family string, addrs []string, except, constrained 
 		op = family + " " + field + " != "
 	}
 	return op + nftAddrSet(famAddrs), false
+}
+
+// familyAddrsIncludeAnyText reports a valid match-any token for one nft family.
+// A malformed token must still reach nft so the atomic load fails closed.
+func familyAddrsIncludeAnyText(family string, addrs []string) bool {
+	wantV6 := family == "ip6"
+	hasAny := false
+	for _, a := range addrs {
+		if a == "" {
+			continue
+		}
+		if a == "any" {
+			hasAny = true
+			continue
+		}
+		if pfx, err := netip.ParsePrefix(a); err == nil {
+			if pfx.Addr().Is6() == wantV6 {
+				if pfx.Bits() == 0 {
+					hasAny = true
+				}
+			}
+			continue
+		}
+		if _, err := netip.ParseAddr(a); err == nil {
+			continue
+		}
+		return false
+	}
+	return hasAny
 }
 
 // nftRulesFromTerm converts a firewall filter term to the nftables rule lines

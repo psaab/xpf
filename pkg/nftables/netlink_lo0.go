@@ -337,6 +337,14 @@ func lo0AddrScope(f nlFamily, addrs []string, except, constrained bool) (out []s
 	if err != nil {
 		return nil, false, err
 	}
+	if familyAddrsIncludeAny(f, addrs) {
+		if except {
+			// Excluding the whole family leaves no matching address.
+			return nil, true, nil
+		}
+		// A positive match on the whole family needs no predicate.
+		return nil, false, nil
+	}
 	if len(fam) == 0 {
 		if except {
 			// Empty except set -> match ALL -> no predicate.
@@ -346,6 +354,23 @@ func lo0AddrScope(f nlFamily, addrs []string, except, constrained bool) (out []s
 		return nil, true, nil
 	}
 	return fam, false, nil
+}
+
+// familyAddrsIncludeAny reports whether a valid address token denotes the
+// entire requested family. filterFamilyAddrs has already rejected malformed
+// tokens before this helper is called.
+func familyAddrsIncludeAny(f nlFamily, addrs []string) bool {
+	for _, a := range addrs {
+		if a == "any" {
+			return true
+		}
+		if pfx, err := netip.ParsePrefix(a); err == nil && pfx.Addr().Is6() == f.v6 {
+			if pfx.Bits() == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // filterFamilyAddrs keeps only this family's literals, dropping empty/"any" and
