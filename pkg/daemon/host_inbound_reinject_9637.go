@@ -24,6 +24,8 @@ func hostInboundReinjectDestinations(views []dpuserspace.ZoneHostInboundView) (v
 	for _, v := range views {
 		add(&v4, seen4, v.V4Addrs)
 		add(&v6, seen6, v.V6Addrs)
+		add(&v4, seen4, v.IngressDenyV4)
+		add(&v6, seen6, v.IngressDenyV6)
 	}
 	return v4, v6
 }

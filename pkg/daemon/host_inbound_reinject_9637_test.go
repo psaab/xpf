@@ -28,6 +28,21 @@ func reinjectViews9637() ([]dpuserspace.ZoneHostInboundView, []string, []string)
 	return views, []string{"10.0.99.1"}, []string{"2001:db8:99::1"}
 }
 
+// TestHostInboundReinjectDestinationsIncludeIngressDeny13171 (#13171, D5-02).
+func TestHostInboundReinjectDestinationsIncludeIngressDeny13171(t *testing.T) {
+	views := []dpuserspace.ZoneHostInboundView{{
+		Zone: "dmz", V4Addrs: []string{"192.0.2.1"},
+		IngressDenyV4: []string{"192.0.2.50"}, IngressDenyV6: []string{"2001:db8::50"},
+	}}
+	v4, v6 := hostInboundReinjectDestinations(views)
+	if len(v4) != 2 || v4[1] != "192.0.2.50" {
+		t.Errorf("reinject v4 = %v, want [192.0.2.1 192.0.2.50]", v4)
+	}
+	if len(v6) != 1 || v6[0] != "2001:db8::50" {
+		t.Errorf("reinject v6 = %v, want [2001:db8::50]", v6)
+	}
+}
+
 // reinjectAcceptLines returns the rendered reinject-accept rule lines
 // (excluding stale-reply guard DROPs, which also name xpf-usp0 in their
 // negated fallback scope when fresh).
