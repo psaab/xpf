@@ -457,7 +457,11 @@ type ZoneConfig struct {
 	// enforcement, so it quarantines the zone rather than applying an
 	// incomplete stanza or resolving missing zone-local objects globally.
 	DroppedEnforcementChild bool `json:"-"`
-	HostInboundTraffic      *HostInboundTraffic
+	// DroppedEnforcementInterfaces retains authored membership solely so the
+	// tolerant compiler can quarantine conflicts after clearing poisoned zone
+	// bindings from the returned config.
+	DroppedEnforcementInterfaces []string `json:"-"`
+	HostInboundTraffic           *HostInboundTraffic
 	// InterfaceHostInbound holds per-interface host-inbound-traffic overrides
 	// (#3362), keyed by the interface ref exactly as it appears under
 	// `security zones security-zone <z> interfaces <ref>` (e.g. "ge-0/0/0.0").

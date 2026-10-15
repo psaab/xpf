@@ -114,6 +114,19 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 		if z == nil || z.AddressBook == nil {
 			return false
 		}
+		if z.DroppedEnforcementChild {
+			if _, ok := z.AddressBook.CollidingNames[name]; ok {
+				return true
+			}
+			for _, entry := range z.AddressBook.UnknownBookEntries {
+				for _, candidate := range entry.Names {
+					if candidate == name {
+						return true
+					}
+				}
+			}
+			return false
+		}
 		if _, ok := z.AddressBook.Addresses[name]; ok {
 			return true
 		}
@@ -158,6 +171,17 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 			for name := range z.AddressBook.CollidingNames {
 				gb.CollidingNames[zoneLocalQualify(zoneName, name)] = struct{}{}
 			}
+		}
+		if z.DroppedEnforcementChild {
+			// Unknown-book names must still be collision-quarantined so a
+			// poisoned zone cannot make an unresolved policy token fall back to
+			// an unrelated global address. Do not fold any enforcement entries.
+			for _, entry := range z.AddressBook.UnknownBookEntries {
+				for _, name := range entry.Names {
+					markFoldCollision(zoneLocalQualify(zoneName, name))
+				}
+			}
+			continue
 		}
 		for name, addr := range z.AddressBook.Addresses {
 			q := zoneLocalQualify(zoneName, name)

@@ -256,22 +256,24 @@ func zoneInterfaceMembershipConflicts(cfg *Config) []zoneInterfaceMembershipConf
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
-	// #13095: exclusions come from the recorded runtime zone-name union
-	// (ZoneQuarantineNamesForConfig), not the local zone map alone — a zone
-	// quarantined cluster-wide by a peer-node StableZoneID collision (#10248)
-	// must not keep contesting its interfaces against healthy zones here, or
-	// QuarantinedZoneInterfaceKeys strips them from the healthy zone too.
-	// With no recorded union this is byte-identical to the local-zone set.
+	// Recorded peer-node exclusions must not keep contesting local interfaces
+	// (#13095). Locally poisoned zones are different: their authored bindings
+	// must remain visible long enough to quarantine a conflict with a healthy
+	// claimant, even though the poisoned zone itself will be omitted.
 	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 	for _, zoneName := range zoneNames {
-		if _, excluded := excludedZones[zoneName]; excluded {
+		if _, excluded := excludedZones[zoneName]; excluded && !isPoisonedZoneForConfig(cfg, zoneName) {
 			continue
 		}
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {
 			continue
 		}
-		for _, iface := range zone.Interfaces {
+		interfaces := zone.Interfaces
+		if zone.DroppedEnforcementChild && zone.DroppedEnforcementInterfaces != nil {
+			interfaces = zone.DroppedEnforcementInterfaces
+		}
+		for _, iface := range interfaces {
 			if iface == "" {
 				continue
 			}
