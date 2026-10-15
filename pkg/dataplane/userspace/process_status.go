@@ -493,6 +493,14 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				m.mu.Unlock()
 				continue
 			}
+			// PrepareLinkCycle can acquire the lease while this status RPC is
+			// off-lock. Do not apply its stale status or service any level-triggered
+			// worker/rebind debt after the cycle has stopped workers.
+			if m.linkCycleInFlight() {
+				m.mu.Unlock()
+				slog.Debug("userspace: status poll discarded; RETH MAC link cycle started during helper RPC")
+				continue
+			}
 			if err := pollErr; err == nil {
 				// #9651: an answered poll resets the wedge count.
 				m.noteStatusPollResultLocked(nil, time.Now())

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -127,4 +128,104 @@ func TestStatusReadAPIsDoNotWaitForManagerLock13093(t *testing.T) {
 		t.Fatal("read-only status APIs blocked on Manager.mu (#13093)")
 	}
 	m.mu.Unlock()
+}
+
+// TestStatusPollDoesNotRearmWorkersAfterLinkCycleStarts13093 covers the race
+// opened when the status poll releases m.mu for its helper RPC: a link cycle
+// may acquire the lease and stop workers before that response comes back. The
+// old helper response must not publish a worker-arm snapshot into the cycle.
+func TestStatusPollDoesNotRearmWorkersAfterLinkCycleStarts13093(t *testing.T) {
+	oldInterval := statusLoopInterval
+	statusLoopInterval = 5 * time.Millisecond
+	t.Cleanup(func() { statusLoopInterval = oldInterval })
+
+	m := New()
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.proc = &exec.Cmd{Process: proc}
+	m.lastSnapshot = &ConfigSnapshot{Generation: 5, DeferWorkers: true}
+	m.pendingWorkerArm = true
+
+	statusEntered := make(chan struct{})
+	statusRelease := make(chan struct{})
+	stoppedWorkers := make(chan struct{}, 1)
+	appliedSnapshot := make(chan struct{}, 1)
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		switch req.Type {
+		case "status":
+			select {
+			case statusEntered <- struct{}{}:
+			default:
+			}
+			<-statusRelease
+			if status != nil {
+				*status = ProcessStatus{
+					PID:                              os.Getpid(),
+					Workers:                          1,
+					ConfigSnapshotProtocolVersion:    ProtocolVersion,
+					InjectPacketTupleProtocolVersion: InjectPacketTupleProtocolVersion,
+				}
+			}
+		case "stop_workers":
+			select {
+			case stoppedWorkers <- struct{}{}:
+			default:
+			}
+		case "apply_snapshot":
+			select {
+			case appliedSnapshot <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}
+
+	var releaseOnce sync.Once
+	releaseStatus := func() { releaseOnce.Do(func() { close(statusRelease) }) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.statusLoop(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		releaseStatus()
+		<-done
+		m.releaseLinkCycleLease()
+	})
+
+	select {
+	case <-statusEntered:
+	case <-time.After(time.Second):
+		t.Fatal("status loop did not enter the blocked helper poll")
+	}
+
+	prepared := make(chan error, 1)
+	go func() { prepared <- m.PrepareLinkCycle() }()
+	select {
+	case <-stoppedWorkers:
+	case <-time.After(time.Second):
+		t.Fatal("PrepareLinkCycle did not stop workers while status poll was blocked")
+	}
+	if !m.linkCycleInFlight() {
+		t.Fatal("PrepareLinkCycle returned from stop_workers without an active link-cycle lease")
+	}
+	select {
+	case err := <-prepared:
+		if err != nil {
+			t.Fatalf("PrepareLinkCycle: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PrepareLinkCycle did not finish after stop_workers")
+	}
+
+	releaseStatus()
+	select {
+	case <-appliedSnapshot:
+		t.Fatal("status poll published apply_snapshot after link-cycle workers were stopped")
+	case <-time.After(50 * time.Millisecond):
+	}
 }
