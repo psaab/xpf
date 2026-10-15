@@ -558,6 +558,15 @@ pub(crate) enum SnapshotIntegrityError {
         second_group: i32,
         interface: String,
     },
+    /// #13181: rows sharing one runtime ifindex disagree on a single-valued
+    /// egress property, so installing either row's value would be order-dependent.
+    InterfaceSharedIfindexAttributeConflict {
+        ifindex: i32,
+        attribute: &'static str,
+        first_value: String,
+        second_value: String,
+        interface: String,
+    },
     /// #2410: a tunnel-endpoint snapshot's `ttl` is outside the 0..=255 range
     /// representable in the outer IP TTL/hop-limit octet (`TunnelEndpoint.ttl`,
     /// a u8). The pre-fix code narrowed it with `endpoint.ttl.max(0) as u8`, so
@@ -1157,6 +1166,17 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "interface {:?} shares ifindex {} across redundancy groups {} and {} — refusing to install ambiguous HA ownership",
                 interface, ifindex, first_group, second_group
+            ),
+            Self::InterfaceSharedIfindexAttributeConflict {
+                ifindex,
+                attribute,
+                first_value,
+                second_value,
+                interface,
+            } => write!(
+                f,
+                "interface {:?} shares ifindex {} with conflicting {} values {} and {} — refusing order-dependent egress state",
+                interface, ifindex, attribute, first_value, second_value
             ),
             Self::TunnelTtlOutOfRange { tunnel_id, ttl } => write!(
                 f,

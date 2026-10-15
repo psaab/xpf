@@ -14668,3 +14668,117 @@ fn shared_ifindex_conflicting_redundancy_groups_fail_closed_13181() {
         "conflicting HA ownership must reject the snapshot, got {result:?}"
     );
 }
+
+#[test]
+fn shared_ifindex_incompatible_mtu_and_vlan_fail_closed_13181() {
+    use crate::ZoneSnapshot;
+
+    fn snapshot() -> ConfigSnapshot {
+        ConfigSnapshot {
+            zones: vec![ZoneSnapshot {
+                name: "vpn".into(),
+                id: 1,
+                ..Default::default()
+            }],
+            interfaces: vec![
+                InterfaceSnapshot {
+                    name: "st0.0".into(),
+                    ifindex: 50,
+                    zone: "vpn".into(),
+                    egress_zone: "vpn".into(),
+                    tunnel: true,
+                    hardware_addr: "02:00:00:00:00:01".into(),
+                    ..Default::default()
+                },
+                InterfaceSnapshot {
+                    name: "st0.1".into(),
+                    ifindex: 50,
+                    zone: "vpn".into(),
+                    egress_zone: "vpn".into(),
+                    tunnel: true,
+                    hardware_addr: "02:00:00:00:00:01".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    let mut mtu_snapshot = snapshot();
+    mtu_snapshot.interfaces[0].mtu = 1500;
+    mtu_snapshot.interfaces[1].mtu = 9000;
+    assert!(matches!(
+        try_build_forwarding_state_with_policy_counters(
+            &mtu_snapshot,
+            &PolicyCounterStore::default()
+        ),
+        Err(crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexAttributeConflict {
+            attribute: "mtu",
+            ..
+        })
+    ));
+
+    let mut vlan_snapshot = snapshot();
+    vlan_snapshot.interfaces[0].vlan_id = 0;
+    vlan_snapshot.interfaces[1].vlan_id = 100;
+    assert!(matches!(
+        try_build_forwarding_state_with_policy_counters(
+            &vlan_snapshot,
+            &PolicyCounterStore::default()
+        ),
+        Err(crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexAttributeConflict {
+            attribute: "vlan_id",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn zone_to_rgs_requires_unambiguous_egress_zone_and_zoned_aliases_13181() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "vpn".into(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "st0".into(),
+                ifindex: 50,
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 1,
+                hardware_addr: "02:00:00:00:00:01".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "st0.0".into(),
+                ifindex: 50,
+                zone: "vpn".into(),
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 1,
+                hardware_addr: "02:00:00:00:00:01".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        !state.zone_to_rgs.contains_key(&1),
+        "an unzoned alias sharing the runtime ifindex must prevent RG attribution"
+    );
+
+    let mut missing_ledger = snapshot;
+    missing_ledger.interfaces[0].zone = "vpn".into();
+    missing_ledger.interfaces[0].egress_zone.clear();
+    missing_ledger.interfaces[1].egress_zone.clear();
+    let state = build_forwarding_state(&missing_ledger);
+    assert!(
+        !state.zone_to_rgs.contains_key(&1),
+        "rows without an admitted egress-zone ledger entry must not claim HA groups"
+    );
+}

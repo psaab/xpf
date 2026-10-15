@@ -1424,6 +1424,27 @@ pub(super) fn populate_interfaces(
     })
 }
 
+fn ensure_shared_ifindex_value<T: PartialEq + std::fmt::Debug>(
+    ifindex: i32,
+    interface: &str,
+    attribute: &'static str,
+    first: &T,
+    second: &T,
+) -> Result<(), crate::policy::SnapshotIntegrityError> {
+    if first == second {
+        return Ok(());
+    }
+    Err(
+        crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexAttributeConflict {
+            ifindex,
+            attribute,
+            first_value: format!("{first:?}"),
+            second_value: format!("{second:?}"),
+            interface: interface.to_string(),
+        },
+    )
+}
+
 pub(super) fn populate_egress(
     snapshot: &ConfigSnapshot,
     state: &mut ForwardingState,
@@ -1609,18 +1630,73 @@ pub(super) fn populate_egress(
                     },
                 );
             }
-            // Shared ifindex aliases contribute separate address families. Keep
-            // the first available address in each family; a missing family on
-            // a later row must not erase an earlier row's source address.
+            if existing.zone_id != 0 && zone_id != 0 {
+                ensure_shared_ifindex_value(
+                    iface.ifindex,
+                    &iface.name,
+                    "bind_ifindex",
+                    &existing.bind_ifindex,
+                    &bind_ifindex,
+                )?;
+                ensure_shared_ifindex_value(
+                    iface.ifindex,
+                    &iface.name,
+                    "vlan_id",
+                    &existing.vlan_id,
+                    &vlan_id,
+                )?;
+            }
+            if existing.mtu != 0 && mtu != 0 {
+                ensure_shared_ifindex_value(
+                    iface.ifindex,
+                    &iface.name,
+                    "mtu",
+                    &existing.mtu,
+                    &mtu,
+                )?;
+            } else if existing.mtu == 0 {
+                existing.mtu = mtu;
+            }
+            if existing.src_mac != [0; 6] && src_mac != [0; 6] {
+                if existing.src_mac != src_mac {
+                    return Err(
+                        crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexAttributeConflict {
+                            ifindex: iface.ifindex,
+                            attribute: "src_mac",
+                            first_value: format!("{:02x?}", existing.src_mac),
+                            second_value: format!("{:02x?}", src_mac),
+                            interface: iface.name.clone(),
+                        },
+                    );
+                }
+            } else if existing.src_mac == [0; 6] {
+                existing.src_mac = src_mac;
+            }
+            if let (Some(first), Some(second)) = (existing.primary_v4, primary_v4) {
+                ensure_shared_ifindex_value(
+                    iface.ifindex,
+                    &iface.name,
+                    "primary_v4",
+                    &first,
+                    &second,
+                )?;
+            }
+            if let (Some(first), Some(second)) = (existing.primary_v6, primary_v6) {
+                ensure_shared_ifindex_value(
+                    iface.ifindex,
+                    &iface.name,
+                    "primary_v6",
+                    &first,
+                    &second,
+                )?;
+            }
+            // Merge available family primaries; a row without a family cannot
+            // erase the first address selected for that family.
             existing.primary_v4 = existing.primary_v4.or(primary_v4);
             existing.primary_v6 = existing.primary_v6.or(primary_v6);
             if existing.redundancy_group == 0 {
                 existing.redundancy_group = iface.redundancy_group;
             }
-            existing.bind_ifindex = bind_ifindex;
-            existing.vlan_id = vlan_id;
-            existing.mtu = mtu;
-            existing.src_mac = src_mac;
             existing.zone_id = zone_id;
             continue;
         }
@@ -1696,19 +1772,26 @@ pub(super) fn populate_egress(
 pub(super) fn populate_zone_to_rgs(snapshot: &ConfigSnapshot, state: &mut ForwardingState) {
     let mut row_zone_by_ifindex = BTreeMap::<i32, Option<u16>>::new();
     for iface in &snapshot.interfaces {
-        if iface.ifindex <= 0 || iface.zone.is_empty() {
+        if iface.ifindex <= 0 {
             continue;
         }
-        let Some(zone_id) = state.zone_name_to_id.get(&iface.zone).copied() else {
-            continue;
+        // A blank or unresolved row is still part of the shared ifindex's
+        // ownership claim; it must prevent a zoned sibling from lending it
+        // HA ownership.
+        let zone_id = if iface.zone.is_empty() {
+            None
+        } else {
+            state
+                .zone_name_to_id
+                .get(&iface.zone)
+                .copied()
+                .filter(|zone_id| *zone_id != 0)
         };
         match row_zone_by_ifindex.entry(iface.ifindex) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(Some(zone_id));
+                entry.insert(zone_id);
             }
-            std::collections::btree_map::Entry::Occupied(mut entry)
-                if *entry.get() != Some(zone_id) =>
-            {
+            std::collections::btree_map::Entry::Occupied(mut entry) if *entry.get() != zone_id => {
                 entry.insert(None);
             }
             std::collections::btree_map::Entry::Occupied(_) => {}
@@ -1724,10 +1807,7 @@ pub(super) fn populate_zone_to_rgs(snapshot: &ConfigSnapshot, state: &mut Forwar
         };
         if zone_id == 0
             || row_zone_by_ifindex.get(&iface.ifindex) != Some(&Some(zone_id))
-            || state
-                .ifindex_unambiguous_zone_id
-                .get(&iface.ifindex)
-                .is_some_and(|egress_zone| *egress_zone != zone_id)
+            || state.ifindex_unambiguous_zone_id.get(&iface.ifindex) != Some(&zone_id)
         {
             continue;
         }
