@@ -1298,18 +1298,58 @@ def deploy_libvirt(ap, runner, start):
         # Cleanup on partial failure (fable-165 H-27): a die() partway through
         # (bad hostdev resolve, virt-install/virsh error) otherwise leaves the
         # per-VM overlay (and maybe a defined domain) behind, dead-ending the
-        # re-run. Undefine the domain + remove the overlay we created, then
-        # re-raise the original error (SystemExit keeps its message).
+        # re-run. Undefine the domain + remove the overlay and day-0 ISO we
+        # created, then re-raise the original error (SystemExit keeps its message).
         if not runner.dry:
             overlay = libvirt_overlay_path(name)
-            _cleanup_libvirt(name, overlay)
+            _cleanup_libvirt(name, overlay, iso)
         raise
 
 
-def _cleanup_libvirt(name, overlay):
+def _remove_with_sudo(path, *, fatal):
+    """Remove a path after an unprivileged unlink failed; never imply success
+    unless sudo actually removed it. Cleanup is best-effort; explicit destroy
+    is fail-closed so operators know a disk/secret remains."""
+    try:
+        result = subprocess.run(["sudo", "-n", "rm", "-f", path],
+                                capture_output=True, text=True)
+    except OSError as exc:
+        result = None
+        detail = str(exc)
+    else:
+        detail = (result.stderr or result.stdout or "").strip()
+    if result is None or result.returncode != 0 or os.path.exists(path):
+        if not detail:
+            detail = "file still exists after sudo rm"
+        message = f"could not remove {path} with sudo: {detail}"
+        if fatal:
+            die(message)
+        print(f"==> WARNING: {message}")
+        return False
+    return True
+
+
+def _remove_libvirt_artifact(path, label=None, *, fatal):
+    if not os.path.isfile(path):
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        if not _remove_with_sudo(path, fatal=fatal):
+            return
+        via = " (sudo)"
+    else:
+        via = ""
+    description = label or path
+    print(f"==> removed {description}{via}")
+
+
+def _cleanup_libvirt(name, overlay, iso=None):
     """Best-effort teardown of a half-created libvirt VM: destroy+undefine the
-    domain (if it got defined) and remove the per-VM overlay. Tolerant of a
-    missing domain / file (fable-165 H-27)."""
+    domain and remove its per-VM overlay and day-0 ISO. Tolerant of a missing
+    domain / file (fable-165 H-27)."""
+    if iso is None:
+        iso = day0_iso_path(name)
     state, uris = _virsh_domain_locate(name)
     if state == DOMAIN_UNKNOWN:
         # #8977: this is the cleanup path of a FAILED deploy, so it must not
@@ -1321,8 +1361,9 @@ def _cleanup_libvirt(name, overlay):
         # failure and re-raising would replace its diagnosis with this one.
         print(f"==> WARNING: cannot determine whether libvirt domain '{name}' "
               f"exists (libvirtd unreachable, permission denied, or timed out)")
-        print(f"==> leaving {overlay} in place rather than risk deleting a "
-              f"running VM's disk; remove it by hand once libvirtd is reachable")
+        print(f"==> leaving {overlay} and {iso} in place rather than risk "
+              f"deleting files of a running VM; remove them by hand once "
+              f"libvirtd is reachable")
         return
     if state == DOMAIN_PRESENT:
         print(f"==> deploy of '{name}' failed; cleaning up the libvirt domain "
@@ -1336,17 +1377,12 @@ def _cleanup_libvirt(name, overlay):
             # fresh probe that reports the domain gone permits the unlink.
             print(f"==> WARNING: libvirt domain '{name}' is not confirmed gone "
                   f"after destroy and undefine (probe: {after})")
-            print(f"==> leaving {overlay} in place rather than risk deleting a "
-                  f"running VM's disk; remove it by hand once the domain is gone")
+            print(f"==> leaving {overlay} and {iso} in place rather than risk "
+                  f"deleting files of a running VM; remove them by hand once "
+                  f"the domain is gone")
             return
-    if os.path.isfile(overlay):
-        try:
-            os.remove(overlay)
-            print(f"==> removed overlay {overlay}")
-        except OSError:
-            subprocess.run(["sudo", "rm", "-f", overlay],
-                           capture_output=True, text=True)
-
+    _remove_libvirt_artifact(overlay, f"overlay {overlay}", fatal=False)
+    _remove_libvirt_artifact(iso, f"day-0 drive {iso}", fatal=False)
 
 def _deploy_libvirt_inner(ap, runner, start, iso):
     name = ap["name"]
@@ -1433,6 +1469,7 @@ def destroy_incus(ap, runner):
     iso = day0_iso_path(name)
     if runner.dry:
         runner.run(["incus", "delete", "--force", name])
+        runner.run(["rm", "-f", iso])
     else:
         # #9325: three states, as for libvirt. The day-0 drive is removed only
         # once incus affirmatively reports the instance gone.
@@ -1464,7 +1501,7 @@ def destroy_libvirt(ap, runner):
         for uri in LIBVIRT_PROBE_URIS:
             runner.run(["virsh", "-c", uri, "destroy", name])
             runner.run(["virsh", "-c", uri, "undefine", "--nvram", name])
-        runner.run(["rm", "-f", overlay])
+        runner.run(["rm", "-f", overlay, iso])
         return
     state, uris = _virsh_domain_locate(name)
     if state == DOMAIN_UNKNOWN:
@@ -1500,14 +1537,9 @@ def destroy_libvirt(ap, runner):
                 f"dominfo {name}` both report it missing, then re-run destroy.")
     else:
         print(f"==> libvirt domain '{name}' not present (nothing to destroy)")
-    for f in (overlay, iso):
-        if os.path.isfile(f):
-            try:
-                os.remove(f)
-                print(f"==> removed {f}")
-            except OSError:
-                subprocess.run(["sudo", "rm", "-f", f], capture_output=True, text=True)
-                print(f"==> removed {f} (sudo)")
+    for f, label in ((overlay, f"overlay {overlay}"),
+                     (iso, f"day-0 drive {iso}")):
+        _remove_libvirt_artifact(f, label, fatal=True)
 
 
 def destroy(ap, args):
