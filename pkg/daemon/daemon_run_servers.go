@@ -865,6 +865,18 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// Daemon for why both halves are needed to read either.
 		RouteListenerMarksFn:       d.RouteListenerMarks,
 		RouteListenerRepublishesFn: d.RouteListenerRepublishes,
+		SNMPTrapStatsFn: func() (uint64, uint64, uint64) {
+			d.snmpReconMu.Lock()
+			defer d.snmpReconMu.Unlock()
+			enqueued, sent, dropped := d.snmpTrapsEnqueued, d.snmpTrapsSent, d.snmpTrapsDropped
+			if d.snmpAgent != nil {
+				activeEnqueued, activeSent, activeDropped := d.snmpAgent.TrapStats()
+				enqueued += activeEnqueued
+				sent += activeSent
+				dropped += activeDropped
+			}
+			return enqueued, sent, dropped
+		},
 		IPMonActuationFailuresFn: func() uint64 {
 			if d.ipmon != nil {
 				return d.ipmon.ActuationFailures()

@@ -257,6 +257,8 @@ type Agent struct {
 	// link-monitor path.
 	trapQueue      chan trapJob
 	trapWorkerOnce sync.Once
+	trapsEnqueued  atomic.Uint64
+	trapsSent      atomic.Uint64
 	trapsDropped   atomic.Uint64
 	// trapPerTarget counts admitted-but-not-yet-dequeued trap jobs per
 	// normalized receiver (#9917 F-140). Guarded by mu; lazily created in

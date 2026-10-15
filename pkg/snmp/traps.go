@@ -503,13 +503,22 @@ func (a *Agent) decTrapPerTarget(key string) {
 	a.mu.Unlock()
 }
 
+// TrapStats returns cumulative process-lifetime trap submissions, successful
+// deliveries, and drops. Every call to enqueueTrap contributes to enqueued,
+// including submissions refused after Stop or by queue admission limits.
+// Consequently enqueued == sent + dropped once the worker has drained its
+// admitted work. Counters reset when the Agent is replaced/restarted.
+func (a *Agent) TrapStats() (enqueued, sent, dropped uint64) {
+	return a.trapsEnqueued.Load(), a.trapsSent.Load(), a.trapsDropped.Load()
+}
+
 // enqueueTrap hands a pre-built trap to the async worker (#2991). It starts the
-// worker on first use (so both NewAgent and bare-struct test agents get it) and
 // never blocks the caller: when the bounded queue is full the trap is dropped
 // and trapsDropped is incremented. Dropping is the correct backpressure policy
 // here — the queue only fills when targets are not draining, and blocking the
 // link monitor on SNMP observability is exactly the failure #2991 fixes.
 func (a *Agent) enqueueTrap(job trapJob) {
+	a.trapsEnqueued.Add(1)
 	a.mu.Lock()
 	if a.stopped {
 		// #4916: the agent has been stopped (day-2 disable / rotation). Never
@@ -689,6 +698,7 @@ func (a *Agent) trapWorker(queue chan trapJob, stop chan struct{}) {
 					"event", job.event, "iface", job.iface,
 					"err", err, "dropped_total", dropped)
 			} else {
+				a.trapsSent.Add(1)
 				slog.Info("SNMP trap sent",
 					"target", job.target, "group", job.group,
 					"event", job.event, "iface", job.iface, "ifindex", job.ifindex)

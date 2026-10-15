@@ -679,7 +679,12 @@ type Daemon struct {
 	snmpHashSet        bool               // true once snmpHash reflects a running agent
 	snmpVRFDevice      string             // VRF device pinned by the running listener; empty means main table
 	snmpMonitorRunning bool               // true while the link-state trap monitor goroutine is live
-	snmpBootReady      bool               // set true after the boot block; gates the reconcile START path
+	// Cumulative SNMP trap counters survive Agent replacement during
+	// disable/re-enable and management-VRF changes. Guarded by snmpReconMu.
+	snmpTrapsEnqueued uint64
+	snmpTrapsSent     uint64
+	snmpTrapsDropped  uint64
+	snmpBootReady     bool // set true after the boot block; gates the reconcile START path
 	// snmpServe binds the agent's UDP/161 listener and then serves for the
 	// lifetime of ctx. It reports the bind outcome on `ready` exactly once —
 	// nil once bound (before serving), or the bind error — so startSNMPLocked

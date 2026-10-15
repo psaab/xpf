@@ -135,6 +135,22 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 		"Total nf_conntrack_tcp_loose=0 establish/verify failures (#10752).",
 		nil, nil,
 	)
+	// #13308: asynchronous SNMP trap delivery, sampled from the live Agent.
+	c.snmpTrapsEnqueued = prometheus.NewDesc(
+		"xpf_snmp_traps_enqueued_total",
+		"Total SNMP traps submitted to the asynchronous sender (#13308).",
+		nil, nil,
+	)
+	c.snmpTrapsSent = prometheus.NewDesc(
+		"xpf_snmp_traps_sent_total",
+		"Total SNMP traps successfully sent to their receivers (#13308).",
+		nil, nil,
+	)
+	c.snmpTrapsDropped = prometheus.NewDesc(
+		"xpf_snmp_traps_dropped_total",
+		"Total SNMP traps dropped before successful delivery (#13308).",
+		nil, nil,
+	)
 	// #6800: an xpf-managed service configuration file converges on disk and the
 	// applier then gates its RUNTIME reload on "did the on-disk set change".
 	// That gate erased the debt of a FAILED reload — the file was already

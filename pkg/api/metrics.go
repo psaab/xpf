@@ -308,6 +308,9 @@ type xpfCollector struct {
 	hostInboundConntrackRevocationFailures *prometheus.Desc
 	hostInboundTCPlooseDisabled            *prometheus.Desc
 	hostInboundTCPloosePostureFailures     *prometheus.Desc
+	snmpTrapsEnqueued                      *prometheus.Desc
+	snmpTrapsSent                          *prometheus.Desc
+	snmpTrapsDropped                       *prometheus.Desc
 
 	// #6800: the xpf-managed service configuration files (rsyslog drop-ins,
 	// chrony sources/threshold) converge on disk and then gate a RUNTIME reload
@@ -669,21 +672,21 @@ type xpfCollector struct {
 	userspaceIoUringRetainedBuffers *prometheus.Desc
 	userspaceIoUringRetainedBytes   *prometheus.Desc
 	// #13280: Rust ProcessStatus operational and HA counters.
-	userspaceCosNoOwnerBindingDrops          *prometheus.Desc
-	userspaceIoUringWriteRefused             *prometheus.Desc
-	userspaceIoUringWriteRefusedBytes        *prometheus.Desc
-	userspaceRouteChangeUnrejudgedSessions   *prometheus.Desc
-	userspaceOwnerRGFilingsDeclined          *prometheus.Desc
-	userspaceHATransitionDropped             *prometheus.Desc
-	userspaceHATransitionStaleSkipped        *prometheus.Desc
-	userspaceSessionDeleteRefusedIdentity    *prometheus.Desc
-	userspaceSessionDeleteDroppedReleased    *prometheus.Desc
-	userspaceTunnelPurgeReservationsReleased *prometheus.Desc
-	userspaceSyncedReverseRederived          *prometheus.Desc
-	userspacePeerDeleteRefusedLocalOwned     *prometheus.Desc
-	userspaceS5Reinject                      *prometheus.Desc
-	userspaceS5ReinjectCompletions           *prometheus.Desc
-	userspaceSessionDeleteReplicaDropped     *prometheus.Desc
+	userspaceCosNoOwnerBindingDrops           *prometheus.Desc
+	userspaceIoUringWriteRefused              *prometheus.Desc
+	userspaceIoUringWriteRefusedBytes         *prometheus.Desc
+	userspaceRouteChangeUnrejudgedSessions    *prometheus.Desc
+	userspaceOwnerRGFilingsDeclined           *prometheus.Desc
+	userspaceHATransitionDropped              *prometheus.Desc
+	userspaceHATransitionStaleSkipped         *prometheus.Desc
+	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc
+	userspaceSessionDeleteDroppedReleased     *prometheus.Desc
+	userspaceTunnelPurgeReservationsReleased  *prometheus.Desc
+	userspaceSyncedReverseRederived           *prometheus.Desc
+	userspacePeerDeleteRefusedLocalOwned      *prometheus.Desc
+	userspaceS5Reinject                       *prometheus.Desc
+	userspaceS5ReinjectCompletions            *prometheus.Desc
+	userspaceSessionDeleteReplicaDropped      *prometheus.Desc
 	userspaceSessionDeleteReplicaDropRepaired *prometheus.Desc
 	// #13289: process-wide #10597 WireGuard uncovered forwarding counters.
 	userspaceWGUncoveredPacketsTotal *prometheus.Desc
@@ -1214,6 +1217,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.hostInboundConntrackRevocationFailures
 	ch <- c.hostInboundTCPlooseDisabled
 	ch <- c.hostInboundTCPloosePostureFailures
+	ch <- c.snmpTrapsEnqueued
+	ch <- c.snmpTrapsSent
+	ch <- c.snmpTrapsDropped
 	ch <- c.managedServiceReloadPending
 	ch <- c.managedServiceReloadFailures
 	ch <- c.remoteArchivePendingSites
@@ -1881,6 +1887,12 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 		ch <- prometheus.MustNewConstMetric(c.hostInboundTCPloosePostureFailures,
 			prometheus.CounterValue,
 			float64(c.srv.hostInboundTCPloosePostureFailuresFn()))
+	}
+	if c.srv.snmpTrapStatsFn != nil {
+		enqueued, sent, dropped := c.srv.snmpTrapStatsFn()
+		ch <- prometheus.MustNewConstMetric(c.snmpTrapsEnqueued, prometheus.CounterValue, float64(enqueued))
+		ch <- prometheus.MustNewConstMetric(c.snmpTrapsSent, prometheus.CounterValue, float64(sent))
+		ch <- prometheus.MustNewConstMetric(c.snmpTrapsDropped, prometheus.CounterValue, float64(dropped))
 	}
 
 	// #6800: managed-service reload debt. Emitted BEFORE the dataplane gate for
