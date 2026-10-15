@@ -107,6 +107,12 @@ func ToleratedTypedLeafWarnings(cfg *Config) []string {
 // Returns warnings for unresolved references and operator-visible
 // compatibility/deprecation conditions.
 func ValidateConfig(cfg *Config) []string {
+	return validateConfig(cfg, true)
+}
+
+// validateConfig optionally defers junos-host direct-delivery coverage
+// warnings until tolerant compiler quarantines finalize effective ingress.
+func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	var warnings []string
 	warnings = append(warnings, lo0AddressWarnings(cfg)...)
 
@@ -1884,7 +1890,9 @@ func ValidateConfig(cfg *Config) []string {
 	// legal Junos and the enforcement decision (a/b) is PLAN-DEFERRED
 	// (availability-vs-security tradeoff). See docs/host-inbound-service-
 	// matrix.md "to-zone junos-host and the direct host-bound path".
-	warnings = append(warnings, validateJunosHostDirectDeliveryWarnings(cfg)...)
+	if includeJunosHostWarnings {
+		warnings = append(warnings, validateJunosHostDirectDeliveryWarnings(cfg)...)
+	}
 
 	// #4308: the remaining typed interface parity knobs are still accepted-only.
 	warnings = append(warnings, validateInterfaceParityWarnings(cfg)...)
