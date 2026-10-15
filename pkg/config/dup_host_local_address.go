@@ -130,7 +130,9 @@ func buildZoneInterfaceMapLocal(cfg *Config) map[string]string {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
-	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	// #13095: union-derived exclusion set (ZoneQuarantineNamesForConfig),
+	// matching the dataplane builders this map mirrors.
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zn := range zoneNames {
 		if _, excluded := excludedZones[zn]; excluded {

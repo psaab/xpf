@@ -37,11 +37,11 @@ func appendUserspaceMgmtZoneAdvisoryLocked(cfg *Config, opts compileOpts) {
 	if !hasCandidate {
 		return
 	}
-	zoneNames := make([]string, 0, len(cfg.Security.Zones))
-	for name := range cfg.Security.Zones {
-		zoneNames = append(zoneNames, name)
-	}
-	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	// #13095: same union-derived exclusion set as the runtime zone builders
+	// (ZoneQuarantineNamesForConfig) — a cluster-quarantined mgmt/control
+	// zone must not draw the data-NIC advisory for interfaces the dataplane
+	// already dropped with it.
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 	quarantinedRefs := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zoneName := range []string{"control", "mgmt"} {
 		if _, excluded := excludedZones[zoneName]; excluded {
