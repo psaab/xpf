@@ -716,3 +716,72 @@ func TestSingleCollapsedUnitWithPerUnitSiblingIsSilent7509(t *testing.T) {
 			"cannot contest the parent; got %v", cfg.Warnings)
 	}
 }
+
+// #13116 (D1-12) subcase A: native-vlan-id disambiguates untagged ingress.
+// With native-vlan-id 100 and a zoned unit 100, VID 0 maps to that unit via
+// #11434, so an unzoned addressed unit 0 must not draw the shared-device
+// "left UNZONED" advisory — mirroring contestedTrunkZonesWithMaps.
+func TestSharedDeviceNativeVlanDisambiguatedUnitZeroIsSilent13116(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "ge-0/0/0", false,
+		map[int]int{0: 0, 100: 100},
+		map[string][]string{"trust": {"ge-0/0/0.100"}})
+	ifc := cfg.Interfaces.Interfaces["ge-0/0/0"]
+	ifc.NativeVlanID = 100
+	ifc.Units[0].Addresses = []string{"10.0.0.1/24"}
+	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("#13116: native-vlan-id 100 disambiguates untagged ingress to "+
+			"ge-0/0/0.100, so unzoned unit 0 must be silent; got %v", cfg.Warnings)
+	}
+}
+
+// #13116 subcase A control: without native-vlan-id the same shape must
+// still warn (proves the exemption is keyed on nativeIngressDisambiguatesParent).
+func TestSharedDeviceNoNativeVlanStillWarns13116(t *testing.T) {
+	cfg := sharedDeviceCfg7509(t, "ge-0/0/0", false,
+		map[int]int{0: 0, 100: 100},
+		map[string][]string{"trust": {"ge-0/0/0.100"}})
+	cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0].Addresses =
+		[]string{"10.0.0.1/24"}
+	appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
+	if len(warningsMentioning(cfg, "ge-0/0/0.0")) != 1 {
+		t.Fatalf("#13116 control: without native-vlan-id the addressed unzoned "+
+			"unit 0 must still warn once; got %v", cfg.Warnings)
+	}
+}
+
+// #13116 subcase B: a DHCP/DHCPv6 unit is an active L3 unit. Its shared-device
+// advisory must use the addressed (#5659 sentinel) host-bound shape, not the
+// address-less "without L3 / None => true admitted" shape.
+func TestSharedDeviceDHCPUnitIsAddressed13116(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*InterfaceUnit)
+	}{
+		{"dhcp", func(u *InterfaceUnit) { u.DHCP = true }},
+		{"dhcpv6", func(u *InterfaceUnit) { u.DHCPv6 = true }},
+		{"dhcpv6-client", func(u *InterfaceUnit) {
+			u.DHCPv6Client = &DHCPv6ClientConfig{}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := sharedDeviceCfg7509(t, "ge-0/0/0", false,
+				map[int]int{0: 0, 100: 100},
+				map[string][]string{"trust": {"ge-0/0/0.100"}})
+			tc.apply(cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0])
+			appendSharedDeviceUnzonedUnitAdvisoryLocked(cfg, compileOpts{})
+			got := warningsMentioning(cfg, "ge-0/0/0.0")
+			if len(got) != 1 {
+				t.Fatalf("#13116: %s unit must draw exactly one advisory; got %v",
+					tc.name, cfg.Warnings)
+			}
+			if !strings.Contains(got[0], "#5659") ||
+				strings.Contains(got[0], "None => true") ||
+				strings.Contains(got[0], "address-less") {
+				t.Fatalf("#13116: %s is an addressed L3 unit, advisory must use "+
+					"the #5659 addressed shape not the address-less shape; got: %s",
+					tc.name, got[0])
+			}
+		})
+	}
+}
