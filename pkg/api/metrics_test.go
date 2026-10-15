@@ -4,6 +4,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -920,6 +921,18 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 			[]string{"pool", "rule"},
 			nil,
 		),
+		userspaceSNATPoolRecycleScanPopsTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_recycle_scan_pops_total",
+			"recycle scan pops",
+			[]string{"pool", "rule"},
+			nil,
+		),
+		userspaceSNATPoolRecycleScanWalksTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_recycle_scan_walks_total",
+			"recycle scan walks",
+			[]string{"pool", "rule"},
+			nil,
+		),
 	}
 	status := dpuserspace.ProcessStatus{
 		SourceNATPools: []dpuserspace.SourceNATPoolStatus{{
@@ -933,18 +946,14 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 			ReusesTotal:                  5,
 			ExhaustionTotal:              7,
 			IdleLeaseImportCapacityTotal: 17,
-			// #4800: distinct from each other and from every other field
-			// above, so a mis-wired collector cannot pass by coincidence.
-			LiveLockAcquisitionsTotal: 11,
-			LiveLockContendedTotal:    4,
-			// #8447: distinct values, for the reason the #4800 pair below
-			// records — a collector that emitted one of the pair into the
-			// other's series would pass on equal fixtures.
-			PersistentAdmittedTotal: 13,
-			PersistentDeclinedTotal: 6,
+			LiveLockAcquisitionsTotal:    11,
+			LiveLockContendedTotal:       4,
+			PersistentAdmittedTotal:      13,
+			PersistentDeclinedTotal:      6,
+			RecycleScanPopsTotal:         77,
+			RecycleScanWalksTotal:        11,
 		}},
 	}
-
 	ch := make(chan prometheus.Metric)
 	go func() {
 		c.emitUserspaceSourceNATPoolMetrics(ch, status)
@@ -954,12 +963,9 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	// 6 core pool metrics + two persistent-NAT pairs + the capacity counter
-	// + the #9896 max-tracked-flows denominator.
-	if len(got) != 12 {
-		t.Fatalf("emitUserspaceSourceNATPoolMetrics: want 12 metrics, got %d", len(got))
+	if len(got) != 14 {
+		t.Fatalf("emitUserspaceSourceNATPoolMetrics: want 14 metrics, got %d", len(got))
 	}
-
 	labels := map[string]string{"pool": "pool-a", "rule": "snat-a"}
 	assertGaugeClose(t, got, c.userspaceSNATPoolLiveFlows, labels, 2)
 	assertGaugeClose(t, got, c.userspaceSNATPoolMaxTrackedFlows, labels, 64)
@@ -969,18 +975,84 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceSNATPoolReusesTotal, labels, 5)
 	assertCounterClose(t, got, c.userspaceSNATPoolExhaustionsTotal, labels, 7)
 	assertCounterClose(t, got, c.userspaceSNATPoolIdleLeaseImportCapacityTotal, labels, 17)
-	// #4800: both legs of the pair carry through to Prometheus. Distinct
-	// fixture values so a collector that emitted the same field twice
-	// (acquisitions into the contended series, or vice versa) fails here
-	// rather than passing on a coincidence.
 	assertCounterClose(t, got, c.userspaceSNATPoolLiveLockAcquisitionsTotal, labels, 11)
 	assertCounterClose(t, got, c.userspaceSNATPoolLiveLockContendedTotal, labels, 4)
-	// #8447: same discipline for the persistent-NAT admission pair. Swapping
-	// the two emissions fails here rather than passing on equal fixtures —
-	// which matters more than usual for this pair, because its whole purpose
-	// is telling "declined" apart from "never ran".
 	assertCounterClose(t, got, c.userspaceSNATPoolPersistentAdmittedTotal, labels, 13)
 	assertCounterClose(t, got, c.userspaceSNATPoolPersistentDeclinedTotal, labels, 6)
+	assertCounterClose(t, got, c.userspaceSNATPoolRecycleScanPopsTotal, labels, 77)
+	assertCounterClose(t, got, c.userspaceSNATPoolRecycleScanWalksTotal, labels, 11)
+}
+
+// #13278 (D2-01): emitUserspaceSourceNATPoolMetrics must never emit two
+// samples with identical {pool, rule} labels. The helper publishes one
+// SourceNATPoolStatus row per compiled SNAT rule, and two rule-sets may
+// legally reuse the same rule name against the same pool; iterating the
+// raw rows broke Registry.Gather() (HTTP 500 on /metrics). Rows carrying
+// the same allocator identity report identical shared-allocator values,
+// so the deduped emission is one series per (pool, rule).
+
+func TestEmitUserspaceSourceNATPoolMetricsDeduplicatesDuplicateLabels(t *testing.T) {
+	c := newCollector(&Server{})
+	row := dpuserspace.SourceNATPoolStatus{
+		PoolName: "pool-shared", RuleName: "snat-default",
+		LiveFlows: 42, MaxTrackedFlows: 128, UsedPorts: 42,
+		PersistentLeases: 3, AllocationsTotal: 100, ReusesTotal: 9,
+		PersistentAdmittedTotal: 20, PersistentDeclinedTotal: 1,
+		ExhaustionTotal: 2, IdleLeaseImportCapacityTotal: 4,
+		LiveLockAcquisitionsTotal: 50, LiveLockContendedTotal: 5,
+	}
+	status := dpuserspace.ProcessStatus{SourceNATPools: []dpuserspace.SourceNATPoolStatus{row, row}}
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitUserspaceSourceNATPoolMetrics(ch, status)
+		close(ch)
+	}()
+	seen := map[string]struct{}{}
+	count := 0
+	for m := range ch {
+		pb := &dto.Metric{}
+		if err := m.Write(pb); err != nil {
+			t.Fatalf("metric write: %v", err)
+		}
+		var lbls []string
+		for _, lp := range pb.GetLabel() {
+			lbls = append(lbls, lp.GetName()+"="+lp.GetValue())
+		}
+		key := m.Desc().String() + "|" + strings.Join(lbls, ",")
+		if _, dup := seen[key]; dup {
+			t.Fatalf("duplicate series emitted: %s", key)
+		}
+		seen[key] = struct{}{}
+		count++
+	}
+	// 14 metrics are emitted once for this shared pool.
+	if count != 14 {
+		t.Fatalf("want 14 deduped metrics, got %d", count)
+	}
+}
+
+func TestEmitUserspaceSourceNATPoolMetricsDeduplicatesSharedPool(t *testing.T) {
+	c := newCollector(&Server{})
+	status := dpuserspace.ProcessStatus{
+		SourceNATPools: []dpuserspace.SourceNATPoolStatus{
+			{PoolName: "pool-shared", RuleName: "rule-trust", MaxTrackedFlows: 128, UsedPorts: 42, LiveFlows: 42},
+			{PoolName: "pool-shared", RuleName: "rule-dmz", MaxTrackedFlows: 128, UsedPorts: 42, LiveFlows: 42},
+		},
+	}
+	ch := make(chan prometheus.Metric)
+	go func() {
+		c.emitUserspaceSourceNATPoolMetrics(ch, status)
+		close(ch)
+	}()
+	var got []prometheus.Metric
+	for m := range ch {
+		got = append(got, m)
+	}
+	if len(got) != 14 {
+		t.Fatalf("want one set of 14 pool metrics, got %d", len(got))
+	}
+	assertGaugeClose(t, got, c.userspaceSNATPoolUsedPorts,
+		map[string]string{"pool": "pool-shared", "rule": "rule-trust"}, 42)
 }
 
 func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
