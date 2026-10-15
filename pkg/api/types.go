@@ -74,6 +74,10 @@ type GlobalStats struct {
 	FlowCacheMisses      uint64 `json:"flow_cache_misses"`
 	FlowCacheFlushes     uint64 `json:"flow_cache_flushes"`
 	FlowCacheInvalidates uint64 `json:"flow_cache_invalidations"`
+	// UnavailableCounters names global-counter fields that are unsupported
+	// by the active dataplane. Their corresponding numeric fields are not
+	// authoritative; other available global stats remain present.
+	UnavailableCounters []string `json:"unavailable_counters,omitempty"`
 }
 
 // HostInboundKernelDenyCount is one zone/family kernel nftables host-inbound
