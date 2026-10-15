@@ -165,7 +165,9 @@ func sharedUnitIsAddressedOrTunnel(
 			if fmt.Sprintf("%s.%d", base, num) != name {
 				continue
 			}
-			if ifc.Tunnel != nil || (unit != nil && len(unit.Addresses) > 0) {
+			if ifc.Tunnel != nil || (unit != nil &&
+				(len(unit.Addresses) > 0 || unit.DHCP || unit.DHCPv6 ||
+					unit.DHCPv6Client != nil || unit.Tunnel != nil)) {
 				return true
 			}
 		}
@@ -386,6 +388,13 @@ func sharedDeviceUnzonedUnitsWithMaps(
 			unitName := fmt.Sprintf("%s.%d", name, num)
 			if zoneByIface[unitName] != "" {
 				zoned = true
+				continue
+			}
+			if num == 0 && unit.VlanID == 0 &&
+				nativeIngressDisambiguatesParent(cfg, name, zoneByIface, tunnelNames) {
+				// Untagged ingress is mapped to (or rejected for) the native
+				// VLAN, not attributed to unit 0. The corresponding contest
+				// advisory already suppresses this parent shape.
 				continue
 			}
 			sharesDevice := snapshotUnitDevice(cfg, unitName, tunnelNames) == baseDevice
