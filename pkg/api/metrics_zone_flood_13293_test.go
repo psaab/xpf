@@ -136,7 +136,7 @@ func TestCollectCallsZoneFloodEmitter13293(t *testing.T) {
 	if !strings.Contains(src, call) {
 		t.Fatalf("Collect does not call emitZoneFloodCounters; flood series emitted by nothing")
 	}
-	fetch := strings.Index(src, "userspaceStatus := fetchUserspaceStatus(dp)")
+	fetch := strings.Index(src, "userspaceStatus = fetchUserspaceStatus(dp)")
 	if fetch < 0 || strings.Index(src, call) < fetch {
 		t.Error("emitZoneFloodCounters called before status fetch")
 	}
