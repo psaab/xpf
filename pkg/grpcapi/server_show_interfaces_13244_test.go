@@ -33,6 +33,23 @@ func interfaces13244Server(t *testing.T, body string) *Server {
 	return &Server{store: store}
 }
 
+func TestInterfaceUnitKernelName13244(t *testing.T) {
+	tests := []struct {
+		name   string
+		vlanID int
+		want   string
+	}{
+		{name: "ge-0/0/0", vlanID: 50, want: "ge-0-0-0.50"},
+		{name: "ge-0/0/0", vlanID: 0, want: "ge-0-0-0"},
+	}
+	for _, tt := range tests {
+		if got := interfaceUnitKernelName(tt.name, tt.vlanID); got != tt.want {
+			t.Errorf("interfaceUnitKernelName(%q, %d) = %q, want %q",
+				tt.name, tt.vlanID, got, tt.want)
+		}
+	}
+}
+
 func TestShowInterfacesExtensiveFilterHonoursReth13244(t *testing.T) {
 	cfg := &config.Config{
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{

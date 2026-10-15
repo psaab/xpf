@@ -15,6 +15,17 @@ import (
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
+// interfaceUnitKernelName returns the Linux netdev used to read a logical
+// unit's addresses. Junos names use slashes, unlike Linux interface names;
+// VLAN addresses are on the dot-suffixed VLAN netdev.
+func interfaceUnitKernelName(physName string, vlanID int) string {
+	kernelName := config.LinuxIfName(physName)
+	if vlanID > 0 {
+		return fmt.Sprintf("%s.%d", kernelName, vlanID)
+	}
+	return kernelName
+}
+
 func (s *Server) GetInterfaces(_ context.Context, _ *pb.GetInterfacesRequest) (*pb.GetInterfacesResponse, error) {
 	cfg := s.store.ActiveConfig()
 	if cfg == nil {
@@ -319,10 +330,7 @@ func (s *Server) ShowInterfacesDetail(_ context.Context, req *pb.ShowInterfacesD
 
 		// Show each logical unit
 		for _, li := range group {
-			lookupName := config.LinuxIfName(physName)
-			if li.vlanID > 0 {
-				lookupName = fmt.Sprintf("%s.%d", lookupName, li.vlanID)
-			}
+			lookupName := interfaceUnitKernelName(physName, li.vlanID)
 
 			fmt.Fprintf(&buf, "\n  Logical interface %s.%d", physName, li.unitNum)
 			if li.vlanID > 0 {
