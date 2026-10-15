@@ -198,4 +198,24 @@ func TestAnnotateAdmissionMatchesHandlerWhitespace13628(t *testing.T) {
 			}
 		})
 	}
+	for _, sep := range []string{" ", "\t"} {
+		t.Run(map[string]string{" ": "space", "\t": "tab"}[sep]+" embedded quotes", func(t *testing.T) {
+			req := &pb.SetRequest{
+				Input: "annotate" + sep + `system host-name "say "hi" team"`,
+			}
+			called := false
+			_, err := s.principalUnaryInterceptor(
+				ctxWithPeerUID(authzUIDOperator), req,
+				&grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_Set_FullMethodName},
+				func(ctx context.Context, request any) (any, error) {
+					called = true
+					return s.Set(ctx, request.(*pb.SetRequest))
+				},
+			)
+			if status.Code(err) != codes.PermissionDenied || called {
+				t.Fatalf("embedded-quote annotate err=%v handlerCalled=%v, want PermissionDenied and no handler",
+					err, called)
+			}
+		})
+	}
 }
