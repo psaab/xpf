@@ -23,6 +23,7 @@ import (
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/osident"
 )
 
 // config_authz_5561_test.go is the fail-on-revert gate for #5561: the REST
@@ -720,11 +721,12 @@ func TestHalfCloseCannotBorrowCredential_5561(t *testing.T) {
 		t.Skip("running as root: UID 0 is authorized unconditionally, so the class " +
 			"this case restricts cannot be observed")
 	}
-	name, ok := authz.UsernameForUID(uint32(uid))
-	if !ok {
+	id := osident.ForUID(int(uid))
+	if !id.Resolved() {
 		t.Skipf("uid %d has no /etc/passwd entry on this machine", uid)
 	}
 
+	name := id.Name
 	cfgText := fmt.Sprintf("system {\n    host-name authz-halfclose;\n    login {\n        user %s {\n            class read-only;\n        }\n    }\n}\n", name)
 	auth := &AuthConfig{Users: map[string]string{"webadmin": "s3cret"}}
 	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("webadmin:s3cret"))
@@ -1135,11 +1137,12 @@ func TestProductionServerEnforcesRealPeerIdentity_5561(t *testing.T) {
 		t.Skip("running as root: UID 0 is authorized unconditionally, so the class " +
 			"evaluation this case pins cannot be observed")
 	}
-	name, ok := authz.UsernameForUID(uint32(uid))
-	if !ok {
+	id := osident.ForUID(int(uid))
+	if !id.Resolved() {
 		t.Skipf("uid %d has no /etc/passwd entry on this machine", uid)
 	}
 
+	name := id.Name
 	for _, tc := range []struct {
 		class      string
 		wantDenied bool
