@@ -4,11 +4,13 @@ package conntrack
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"log/slog"
 	"reflect"
 	"sync"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"golang.org/x/sys/unix"
 )
@@ -377,7 +379,7 @@ func (gc *GC) sweep() time.Duration {
 			slog.Debug("conntrack GC v4 delete failed", "err", err)
 		}
 		expired += len(exact)
-		removedV4, establishedRemovedV4 = deletedCountsV4(toDelete, exact, reverseKeys)
+		removedV4, establishedRemovedV4 = deletedCountsV4(gc.sessions, toDelete, exact, reverseKeys)
 		if gc.OnDeleteV4 != nil {
 			for _, key := range exact {
 				gc.OnDeleteV4(key)
@@ -467,7 +469,7 @@ func (gc *GC) sweep() time.Duration {
 			slog.Debug("conntrack GC v6 delete failed", "err", err)
 		}
 		expired += len(exact)
-		removedV6, establishedRemovedV6 = deletedCountsV6(toDeleteV6, exact, reverseKeys)
+		removedV6, establishedRemovedV6 = deletedCountsV6(gc.sessions, toDeleteV6, exact, reverseKeys)
 		if gc.OnDeleteV6 != nil {
 			for _, key := range exact {
 				gc.OnDeleteV6(key)
@@ -601,48 +603,40 @@ func monotonicSeconds() uint64 {
 	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
 	return uint64(ts.Sec)
 }
-func deletedCountsV4(entries []dataplane.SessionEntryV4, exact []dataplane.SessionKey, reverseKeys map[dataplane.SessionKey]struct{}) (int, int) {
-	values := make(map[dataplane.SessionKey]dataplane.SessionValue, len(entries))
-	for _, entry := range entries {
-		values[entry.Key] = entry.Value
-	}
-	removed := make(map[dataplane.SessionKey]struct{}, len(exact)*2)
+func deletedCountsV4(store dataplane.SessionStore, entries []dataplane.SessionEntryV4, exact []dataplane.SessionKey, reverseKeys map[dataplane.SessionKey]struct{}) (int, int) {
+	exactKeys := make(map[dataplane.SessionKey]struct{}, len(exact))
 	for _, key := range exact {
-		removed[key] = struct{}{}
-		if value, ok := values[key]; ok {
-			if _, present := reverseKeys[value.ReverseKey]; present {
-				removed[value.ReverseKey] = struct{}{}
-			}
-		}
+		exactKeys[key] = struct{}{}
 	}
-	established := 0
-	for key := range removed {
-		if value, ok := values[key]; ok && value.IsReverse == 0 && value.State == dataplane.SessStateEstablished {
+	removed, established := len(exactKeys), 0
+	for _, entry := range entries {
+		if _, deleted := exactKeys[entry.Key]; deleted && entry.Value.State == dataplane.SessStateEstablished {
 			established++
 		}
 	}
-	return len(removed), established
+	for key := range reverseKeys {
+		if _, err := store.GetV4(key); errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, unix.ENOENT) {
+			removed++
+		}
+	}
+	return removed, established
 }
 
-func deletedCountsV6(entries []dataplane.SessionEntryV6, exact []dataplane.SessionKeyV6, reverseKeys map[dataplane.SessionKeyV6]struct{}) (int, int) {
-	values := make(map[dataplane.SessionKeyV6]dataplane.SessionValueV6, len(entries))
-	for _, entry := range entries {
-		values[entry.Key] = entry.Value
-	}
-	removed := make(map[dataplane.SessionKeyV6]struct{}, len(exact)*2)
+func deletedCountsV6(store dataplane.SessionStore, entries []dataplane.SessionEntryV6, exact []dataplane.SessionKeyV6, reverseKeys map[dataplane.SessionKeyV6]struct{}) (int, int) {
+	exactKeys := make(map[dataplane.SessionKeyV6]struct{}, len(exact))
 	for _, key := range exact {
-		removed[key] = struct{}{}
-		if value, ok := values[key]; ok {
-			if _, present := reverseKeys[value.ReverseKey]; present {
-				removed[value.ReverseKey] = struct{}{}
-			}
-		}
+		exactKeys[key] = struct{}{}
 	}
-	established := 0
-	for key := range removed {
-		if value, ok := values[key]; ok && value.IsReverse == 0 && value.State == dataplane.SessStateEstablished {
+	removed, established := len(exactKeys), 0
+	for _, entry := range entries {
+		if _, deleted := exactKeys[entry.Key]; deleted && entry.Value.State == dataplane.SessStateEstablished {
 			established++
 		}
 	}
-	return len(removed), established
+	for key := range reverseKeys {
+		if _, err := store.GetV6(key); errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, unix.ENOENT) {
+			removed++
+		}
+	}
+	return removed, established
 }
