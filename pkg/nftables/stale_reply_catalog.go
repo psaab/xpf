@@ -279,9 +279,9 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 	if deny := staleReplySortedUniqueStrings(collectIngressDenyNetdevs(views)); len(deny) > 0 {
 		appendOwnerGuards(deny, false, nil, false)
 	}
-	// Direct fallback excludes only direct netdevs and the trusted reinject
-	// device. VRF masters are handled separately so excluding a master cannot
-	// accidentally exempt every slave, including unzoned slaves.
+	// Direct fallback excludes covered direct netdevs, VRF masters and the
+	// trusted reinject device. VRF-scoped fallback separately guards uncovered
+	// slaves, so excluding the master here does not exempt the whole VRF.
 	var coveredDirect []string
 	vrfMembers := map[string]map[string]struct{}{}
 	hasScopedIngress := false
@@ -295,6 +295,10 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 				continue
 			}
 			hasScopedIngress = true
+			// A VRF-covered slave is represented by its master in iifname
+			// matches. Exclude that master from the owner fallback; the
+			// scoped VRF fallback below separately covers unowned slaves.
+			coveredDirect = append(coveredDirect, scope.Master)
 			if vrfMembers[scope.Master] == nil {
 				vrfMembers[scope.Master] = map[string]struct{}{}
 			}
