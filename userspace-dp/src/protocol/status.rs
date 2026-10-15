@@ -1033,6 +1033,12 @@ pub(crate) struct ProcessStatus {
     pub ipsec_sa_netlink_redumps_total: u64,
     #[serde(rename = "ipsec_sa_netlink_redump_upserts_total", default)]
     pub ipsec_sa_netlink_redump_upserts_total: u64,
+    /// #13290: live IKE exchange seeds evicted by the table cap.
+    #[serde(rename = "ike_exchange_evictions_total", default)]
+    pub ike_exchange_evictions_total: u64,
+    /// #13290: current live IKE exchange seed table occupancy.
+    #[serde(rename = "ike_exchange_entries", default)]
+    pub ike_exchange_entries: u64,
     #[serde(rename = "neighbor_pending_keys", default)]
     pub neighbor_pending_keys: u64,
     #[serde(rename = "neg_neigh_keys", default)]

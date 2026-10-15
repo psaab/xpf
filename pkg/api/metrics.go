@@ -58,14 +58,14 @@ type xpfCollector struct {
 	// xpf_screen_drops_total above cannot answer "which screen fired?"; this
 	// labeled series can, now that the userspace bridge populates the per-reason
 	// GlobalCtrScreen* counters.
-	screenDropsByReasonTotal        *prometheus.Desc
+	screenDropsByReasonTotal               *prometheus.Desc
 	userspaceScreenSubstitutedDefaultDrops *prometheus.Desc
-	userspaceScreenSYNFloodDstDrops *prometheus.Desc
-	userspaceScreenSYNFloodSrcDrops *prometheus.Desc
-	userspaceScreenSYNFloodAlarmEvents *prometheus.Desc
-	userspaceScreenAlarmWithoutDropEvents *prometheus.Desc
-	userspaceScreenProfileWarns *prometheus.Desc
-	userspaceScreenTrackerPressureEvents *prometheus.Desc
+	userspaceScreenSYNFloodDstDrops        *prometheus.Desc
+	userspaceScreenSYNFloodSrcDrops        *prometheus.Desc
+	userspaceScreenSYNFloodAlarmEvents     *prometheus.Desc
+	userspaceScreenAlarmWithoutDropEvents  *prometheus.Desc
+	userspaceScreenProfileWarns            *prometheus.Desc
+	userspaceScreenTrackerPressureEvents   *prometheus.Desc
 	// #5806: unresolved screen-profile references (see the descriptor).
 	screenUnresolvedProfileZones *prometheus.Desc
 	screenInertProfileZones      *prometheus.Desc
@@ -949,6 +949,8 @@ type xpfCollector struct {
 	ipsecSANetlinkEnobufsTotal        *prometheus.Desc
 	ipsecSANetlinkRedumpsTotal        *prometheus.Desc
 	ipsecSANetlinkRedumpUpsertsTotal  *prometheus.Desc
+	ikeExchangeEvictionsTotal         *prometheus.Desc
+	ikeExchangeEntries                *prometheus.Desc
 	// #3773 (M13): fabric-link skip diagnostics — malformed value vs
 	// unresolved (empty) peer/local MAC.
 	fabricLinkSkippedMalformedTotal   *prometheus.Desc
@@ -1506,6 +1508,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.ipsecSANetlinkEnobufsTotal
 	ch <- c.ipsecSANetlinkRedumpsTotal
 	ch <- c.ipsecSANetlinkRedumpUpsertsTotal
+	ch <- c.ikeExchangeEvictionsTotal
+	ch <- c.ikeExchangeEntries
 	ch <- c.neighborResolverGetAttemptsTotal
 	ch <- c.neighborResolverGetResolvedTotal
 	ch <- c.neighborResolverProbeOnStaleTotal

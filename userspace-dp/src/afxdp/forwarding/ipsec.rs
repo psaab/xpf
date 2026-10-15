@@ -573,7 +573,6 @@ impl IkeExchangeTable {
     }
 
     /// Test/telemetry seam: current entry count.
-    #[cfg(test)]
     pub(in crate::afxdp) fn len(&self) -> usize {
         self.lock_entries().index.len()
     }
@@ -879,8 +878,15 @@ mod tests {
             "spi 1 is now the least-recently-touched entry and must be the victim; \
              if it survived, something other than the LRU head was evicted",
         );
-        assert!(table.matches(&key(cap), cap + 3), "the new seed must be resident");
-        assert_eq!(table.evictions(), 1, "exactly one live exchange was evicted");
+        assert!(
+            table.matches(&key(cap), cap + 3),
+            "the new seed must be resident"
+        );
+        assert_eq!(
+            table.evictions(),
+            1,
+            "exactly one live exchange was evicted"
+        );
     }
 
     /// #6747: the eviction path must recycle slots rather than grow the slab.
@@ -970,7 +976,10 @@ mod tests {
             seen += 1;
             assert!(seen <= inner.slots.len(), "recency list contains a cycle");
         }
-        assert_eq!(back, inner.tail, "tail is not the last node reached from head");
+        assert_eq!(
+            back, inner.tail,
+            "tail is not the last node reached from head"
+        );
         assert_eq!(
             seen,
             inner.index.len(),
@@ -996,8 +1005,8 @@ mod tests {
                     dst_ip,
                     src_port: 500,
                     dst_port,
-                                    discriminator: Default::default(),
-                                    routing_domain: 0,
+                    discriminator: Default::default(),
+                    routing_domain: 0,
                 },
             }
         }

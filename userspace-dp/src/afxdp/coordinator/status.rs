@@ -973,6 +973,18 @@ impl super::Coordinator {
     pub fn ipsec_sa_counters(&self) -> IpsecSaCounterSnapshot {
         self.neighbors.ipsec_sa_monitor.store.counters.snapshot()
     }
+    /// #13290: live IKE-exchange seed evictions caused by the fixed table cap.
+    /// Read on the status path; packet workers update the atomic without
+    /// touching status state.
+    pub fn ike_exchange_evictions_total(&self) -> u64 {
+        self.ike_exchanges.evictions()
+    }
+
+    /// #13290: current number of live IKE-exchange seeds retained for the
+    /// Stage-11 established-vs-forged discriminator.
+    pub fn ike_exchange_entries(&self) -> u64 {
+        self.ike_exchanges.len() as u64
+    }
 
     /// #1772: neighbor/ARP resolution LATENCY telemetry. Returns the
     /// pending-dwell + resolver GETNEIGH-RTT histogram snapshots plus the

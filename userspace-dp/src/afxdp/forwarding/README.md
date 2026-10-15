@@ -1168,8 +1168,9 @@ class (`classify_ipsec_admission`):
   evict a long-lived exchange that DPD refreshes in favour of a brand-new
   forged initiation, which is worse under the flood the cap exists for
   (`exchange_eviction_is_recency_not_insertion_order_6747`). The
-  previously unobservable eviction condition now has a counter
-  (`IkeExchangeTable::evictions`).
+  eviction and occupancy are exported through ProcessStatus and Prometheus
+  (`xpf_userspace_ike_exchange_evictions_total` and
+  `xpf_userspace_ike_exchange_entries`).
 
 **Two enforcement paths.** The PRIMARY host-inbound enforcement for
 IPsec-to-self is the kernel nftables chain (`pkg/daemon/daemon_nft.go`).

@@ -694,6 +694,8 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_ipsec_sa_netlink_enobufs_total",
 		"xpf_userspace_ipsec_sa_netlink_redumps_total",
 		"xpf_userspace_ipsec_sa_netlink_redump_upserts_total",
+		"xpf_userspace_ike_exchange_evictions_total",
+		"xpf_userspace_ike_exchange_entries",
 		// #1865 WireGuard telemetry family (emitWireguardTelemetry)
 		"xpf_userspace_wg_handshakes_completed_total",
 		"xpf_userspace_wg_handshake_rx_drops_total",

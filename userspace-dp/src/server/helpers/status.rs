@@ -435,6 +435,9 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.ipsec_sa_netlink_enobufs_total = sa.netlink_enobufs;
     state.status.ipsec_sa_netlink_redumps_total = sa.netlink_redumps;
     state.status.ipsec_sa_netlink_redump_upserts_total = sa.netlink_redump_upserts;
+    // #13290: IKE seed-table cap pressure and current occupancy.
+    state.status.ike_exchange_evictions_total = state.afxdp.ike_exchange_evictions_total();
+    state.status.ike_exchange_entries = state.afxdp.ike_exchange_entries();
     // #1771 §2.6: per-binding-summed gauges — distinct unresolved
     // next-hop keys in pending_neigh + keys in the negative caches.
     state.status.neighbor_pending_keys = state.afxdp.neighbor_pending_keys_total();
@@ -510,14 +513,30 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         .iter()
         .map(|w| w.session_install_partial)
         .sum();
-    state.status.pptp_unassociated_packets = state.status.worker_runtime.iter()
-        .map(|w| w.pptp_unassociated_packets).sum();
-    state.status.pptp_expired_idle = state.status.worker_runtime.iter()
-        .map(|w| w.pptp_expired_idle).sum();
-    state.status.pptp_handle_collisions = state.status.worker_runtime.iter()
-        .map(|w| w.pptp_handle_collisions).sum();
-    state.status.pptp_allocator_collisions = state.status.worker_runtime.iter()
-        .map(|w| w.pptp_allocator_collisions).sum();
+    state.status.pptp_unassociated_packets = state
+        .status
+        .worker_runtime
+        .iter()
+        .map(|w| w.pptp_unassociated_packets)
+        .sum();
+    state.status.pptp_expired_idle = state
+        .status
+        .worker_runtime
+        .iter()
+        .map(|w| w.pptp_expired_idle)
+        .sum();
+    state.status.pptp_handle_collisions = state
+        .status
+        .worker_runtime
+        .iter()
+        .map(|w| w.pptp_handle_collisions)
+        .sum();
+    state.status.pptp_allocator_collisions = state
+        .status
+        .worker_runtime
+        .iter()
+        .map(|w| w.pptp_allocator_collisions)
+        .sum();
     state.status.max_sessions = state
         .status
         .worker_runtime
@@ -994,5 +1013,29 @@ mod status_wiring_tests {
                 u
             );
         }
+    }
+    #[test]
+    fn ike_exchange_evictions_and_entries_are_surfaced_in_process_status() {
+        let refresh = squeeze(&code_only(&read("src/server/helpers/status.rs")));
+        assert!(
+            refresh.contains(
+                "state.status.ike_exchange_evictions_total=state.afxdp.ike_exchange_evictions_total();"
+            ),
+            "#13290: IkeExchangeTable::evictions (#6747) is never copied into \
+             ProcessStatus, so IKE cap churn is invisible to operators"
+        );
+        assert!(
+            refresh
+                .contains("state.status.ike_exchange_entries=state.afxdp.ike_exchange_entries();"),
+            "#13290: IkeExchangeTable occupancy is never copied into \
+             ProcessStatus, so IKE table saturation is invisible to operators"
+        );
+        let proto = code_only(&read("src/protocol/status.rs"));
+        assert!(
+            proto.contains("pub ike_exchange_evictions_total: u64")
+                && proto.contains("pub ike_exchange_entries: u64"),
+            "#13290: ProcessStatus must carry ike_exchange_evictions_total \
+             and ike_exchange_entries wire fields"
+        );
     }
 }
