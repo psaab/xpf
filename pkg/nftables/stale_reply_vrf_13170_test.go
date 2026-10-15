@@ -55,3 +55,36 @@ func TestHostInboundStaleReplyGuardRulesVRFScoped13170(t *testing.T) {
 		t.Fatal("uncovered ingress stale-reply guard missing")
 	}
 }
+
+func TestHostInboundStaleReplyGuardRulesVRFMasterExcludedFromDirectFallback13411(t *testing.T) {
+	views := []HostInboundZoneView{
+		{Zone: "strict-vrf", SystemServices: []string{"ping"}, V4Addrs: []string{"192.0.2.1"},
+			IngressNetdevs:   []string{"vrf-blue"},
+			IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-blue", Slaves: []string{"ge-0-0-1"}}}},
+		{Zone: "open-vrf", SystemServices: []string{"ssh"}, V4Addrs: []string{"192.0.2.2"},
+			IngressNetdevs:   []string{"vrf-blue"},
+			IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-blue", Slaves: []string{"ge-0-0-2"}}}},
+		{Zone: "direct-view", SystemServices: []string{"ping"}, V4Addrs: []string{"192.0.2.3"},
+			IngressNetdevs: []string{"eth-direct"}},
+	}
+	rules := HostInboundStaleReplyGuardRules(views, nil, nil, nil, true)
+	foundFallback := false
+	for _, r := range rules {
+		if !r.IngressNegated || len(r.IngressVRFScopes) != 0 {
+			continue
+		}
+		foundFallback = true
+		for _, want := range []string{"eth-direct", "vrf-blue", HostInboundReinjectIfname} {
+			found := false
+			for _, got := range r.Ingress {
+				found = found || got == want
+			}
+			if !found {
+				t.Errorf("direct fallback does not exclude %q: %+v", want, r)
+			}
+		}
+	}
+	if !foundFallback {
+		t.Fatal("mixed direct/VRF trusted-reinject fallback missing")
+	}
+}
