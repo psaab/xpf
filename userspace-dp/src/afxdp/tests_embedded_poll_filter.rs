@@ -1072,6 +1072,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                 123_000_000_000,
                 123,
                 false,
+                None,
             ),
             "PolicyDenied is non-transmitting and is not a new policy evaluation"
         );
@@ -3304,6 +3305,111 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_6474() {
     assert!(fwd.flow_key.is_none());
     assert_eq!(sessions.len(), sessions_before, "no new session minted");
 }
+/// #13649 (D5-04) FAIL-ON-REVERT: an OUTBOUND SNAT ICMP error must be judged
+/// by `lan -> wan` zone policy on the PRE-SNAT (internal) outer source, not on
+/// the re-NAT'd external source the builder writes before the queued-prebuilt
+/// gate runs. Policy set below denies the internal sender's /32 and permits
+/// only the SNAT pool, so evaluating the rewritten frame defeats the deny
+/// (#9382 / #12867: zone policy always judges pre-SNAT source identity).
+///
+/// RED on master: the deny leg still queues one re-NAT'd forward because the
+/// gate parses the post-SNAT source from the rewritten prebuilt. The permit
+/// leg is the mirror control: denying the SNAT pool while permitting the
+/// internal sender must still deliver, proving the fix evaluates the internal
+/// identity rather than merely refusing outbound SNAT errors.
+#[test]
+fn poll_descriptor_snat_outbound_icmp_error_policy_judges_pre_snat_src_13649() {
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+
+    for (deny_src, permit_src, expect_queued) in [
+        (client_ip, snat_ip, false),
+        (snat_ip, client_ip, true),
+    ] {
+        let mut frame = build_icmp_te_frame_v4_with_mac(client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP, TEST_LAN_MAC);
+        frame[34] = 3;
+        frame[35] = 3;
+        frame[36] = 0;
+        frame[37] = 0;
+        let icmp_csum = checksum16(&frame[34..]);
+        frame[36..38].copy_from_slice(&icmp_csum.to_be_bytes());
+
+        let mut snapshot = nat_snapshot();
+        snapshot.flow.allow_embedded_icmp = true;
+        snapshot.default_policy = "deny".to_string();
+        snapshot.policies = vec![
+            PolicyRuleSnapshot {
+                name: "deny-outbound-icmp-error-src".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec![format!("{deny_src}/32")],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                application_terms: Vec::new(),
+                action: "deny".to_string(),
+                ..Default::default()
+            },
+            PolicyRuleSnapshot {
+                name: "permit-outbound-icmp-error-src".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec![format!("{permit_src}/32")],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                application_terms: Vec::new(),
+                action: "permit".to_string(),
+                ..Default::default()
+            },
+        ];
+        let forwarding = build_forwarding_state(&snapshot);
+        let ha_state = txn_ha_state();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        n6474_install_snat_session(
+            &mut sessions,
+            IpAddr::V4(client_ip),
+            IpAddr::V4(server_ip),
+            IpAddr::V4(snat_ip),
+            libc::AF_INET as u8,
+            0,
+        );
+        let sessions_before = sessions.len();
+        let meta = n6474_meta(24, libc::AF_INET as u8, PROTO_ICMP, frame.len());
+        txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+
+        if expect_queued {
+            assert_eq!(
+                binding.scratch.scratch_forwards.len(),
+                1,
+                "#13649: policy permitting the PRE-SNAT source must deliver the re-NAT'd error even when the SNAT pool source is denied"
+            );
+            let out = match &binding.scratch.scratch_forwards[0].frame {
+                PendingForwardFrame::Prebuilt(bytes) => bytes,
+                _ => panic!("#13649: permitted outbound SNAT error must queue a PREBUILT frame"),
+            };
+            let ip = &out[18..];
+            assert_eq!(
+                &ip[12..16],
+                &snat_ip.octets(),
+                "#13649: a permitted error keeps the RFC 5508 re-NAT'd outer source on the wire"
+            );
+            assert!(binding.scratch.scratch_recycle.is_empty());
+        } else {
+            assert!(
+                binding.scratch.scratch_forwards.is_empty(),
+                "#13649: a lan -> wan deny on the internal sender must refuse the outbound SNAT error (RED on master: gate judged the post-SNAT source)"
+            );
+            assert_eq!(
+                binding.scratch.scratch_recycle.len(),
+                1,
+                "#13649: a policy-refused outbound SNAT error recycles its owned descriptor"
+            );
+            assert_eq!(sessions.len(), sessions_before, "no new session minted");
+        }
+    }
+}
 
 /// #6474 FAIL-ON-REVERT (v6): the SNAT66 twin — an internal v6 host emits
 /// an ICMPv6 Destination-Unreachable about the session's reply; the wire
@@ -3389,6 +3495,89 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_6474() {
         "re-NAT'd error egresses toward the server (WAN unit reth0.80 / its parent)"
     );
     assert!(fwd.flow_key.is_none());
+}
+/// #13649 sibling-path parity: the SNAT66 outbound error must be evaluated
+/// against the pre-SNAT IPv6 source, with only the permitted frame re-NAT'd.
+#[test]
+fn poll_descriptor_snat66_outbound_icmp_error_policy_judges_pre_snat_src_13649() {
+    let client_ip: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("client v6");
+    let server_ip: Ipv6Addr = "2001:db8::1".parse().expect("server v6");
+    let snat_ip: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat v6");
+    for (deny_src, permit_src, expect_queued) in [
+        (client_ip, snat_ip, false),
+        (snat_ip, client_ip, true),
+    ] {
+        let mut frame = build_icmpv6_te_frame_with_mac(
+            client_ip, server_ip, client_ip, 80, 12345, PROTO_TCP, TEST_LAN_MAC,
+        );
+        let l4 = 54;
+        frame[l4] = 1;
+        frame[l4 + 1] = 4;
+        frame[l4 + 2] = 0;
+        frame[l4 + 3] = 0;
+        let checksum = checksum16_ipv6(client_ip, server_ip, PROTO_ICMPV6, &frame[l4..]);
+        frame[l4 + 2..l4 + 4].copy_from_slice(&checksum.to_be_bytes());
+
+        let mut snapshot = nat_snapshot();
+        snapshot.flow.allow_embedded_icmp = true;
+        snapshot.default_policy = "deny".to_string();
+        snapshot.policies = vec![
+            PolicyRuleSnapshot {
+                name: "deny-outbound-icmpv6-error-src".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec![format!("{deny_src}/128")],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                application_terms: Vec::new(),
+                action: "deny".to_string(),
+                ..Default::default()
+            },
+            PolicyRuleSnapshot {
+                name: "permit-outbound-icmpv6-error-src".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec![format!("{permit_src}/128")],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                application_terms: Vec::new(),
+                action: "permit".to_string(),
+                ..Default::default()
+            },
+        ];
+        let forwarding = build_forwarding_state(&snapshot);
+        let ha_state = txn_ha_state();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        n6474_install_snat_session(
+            &mut sessions,
+            IpAddr::V6(client_ip),
+            IpAddr::V6(server_ip),
+            IpAddr::V6(snat_ip),
+            libc::AF_INET6 as u8,
+            0,
+        );
+        let meta = n6474_meta(24, libc::AF_INET6 as u8, PROTO_ICMPV6, frame.len());
+        txn_run_descriptor_checked(
+            &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+        );
+        if expect_queued {
+            assert_eq!(binding.scratch.scratch_forwards.len(), 1);
+            let out = match &binding.scratch.scratch_forwards[0].frame {
+                PendingForwardFrame::Prebuilt(bytes) => bytes,
+                _ => panic!("permitted outbound SNAT66 error must queue a PREBUILT frame"),
+            };
+            assert_eq!(&out[18 + 8..18 + 24], &snat_ip.octets());
+            assert!(binding.scratch.scratch_recycle.is_empty());
+        } else {
+            assert!(
+                binding.scratch.scratch_forwards.is_empty(),
+                "internal-source deny must refuse outbound SNAT66 error (RED on master)"
+            );
+            assert_eq!(binding.scratch.scratch_recycle.len(), 1);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
