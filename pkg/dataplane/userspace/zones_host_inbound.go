@@ -341,6 +341,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	lifelines := hostInboundLifelineSet(cfg)
 	lifelineShared := hostInboundLifelineSharedAddrsFromSnaps(cfg, snaps)
 	unzonedFanUpBaseRows := hostInboundUnzonedFanUpBaseRows(cfg, snaps)
+	nativeVLANUnits := nativeVLANUnitRefs(cfg)
 	// #9637: netdevs that can never be an ingress scope.
 	vrfEnslaved := config.HostInboundVRFEnslavedNetdevs(cfg)
 	vrfMasters := hostInboundVRFMasterNetdevs(cfg, ifaceSnaps)
@@ -508,7 +509,15 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			}
 			continue
 		}
-		if unzonedFanUpBaseRows[snap.Name] {
+		policyIface := snap.Name
+		nativeUnit := ""
+		if !snap.IsUnit {
+			nativeUnit = nativeVLANUnits[snap.Name]
+			if nativeUnit != "" {
+				policyIface = nativeUnit
+			}
+		}
+		if unzonedFanUpBaseRows[snap.Name] && nativeUnit == "" {
 			continue
 		}
 		// #5699: a PHYSICAL (no-unit) snapshot whose unit 0 COLLAPSES onto the
@@ -548,7 +557,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		if !configured(zone) {
 			continue
 		}
-		svc, proto := effectiveHostInboundTokens(zone, snap.Name, overrideByIface[snap.Name])
+		svc, proto := effectiveHostInboundTokens(zone, policyIface, overrideByIface[policyIface])
 		// #9637: only a unit row's netdev is an ingress identity. A physical
 		// row's netdev is either the trunk parent of VLAN units, whose frames
 		// arrive on the subunit netdevs, or the netdev its unit 0 collapses onto,
@@ -556,10 +565,10 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		// judge untagged frames no unit owns.
 		// #9821 #22: structural — only unit rows claim netdevs, so a dotted
 		// base row's netdev is claimed by its collapsing unit, not twice.
-		if snap.IsUnit {
+		if snap.IsUnit || nativeUnit != "" {
 			claimNetdev(snap.LinuxName, snap.Zone+"\x00"+config.CanonicalHostInboundTokenSig(svc, proto))
 		}
-		g := getGroup(snap.Zone, svc, proto, snap.Name)
+		g := getGroup(snap.Zone, svc, proto, policyIface)
 		for _, a := range snap.Addresses {
 			if excludeScopeLink && hostInboundScopeLinkUnresolved(snap.Name, a, configuredAddrs) {
 				continue
