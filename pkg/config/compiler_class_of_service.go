@@ -145,8 +145,16 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		// queue is explicitly allowed so `load merge` /
 		// `load override` paths that re-apply the same line
 		// remain clean.
-		queueOwner := make(map[int]string) // queue_id → FC name
-		fcQueue := make(map[string]int)    // FC name → queue_id
+		queueOwner := make(map[int]string, len(cos.ForwardingClasses)) // queue_id → FC name
+		fcQueue := make(map[string]int, len(cos.ForwardingClasses))    // FC name → queue_id
+		// Seed the indexes from earlier roots so the checks below enforce the
+		// same bijection across all class-of-service blocks.
+		for name, fc := range cos.ForwardingClasses {
+			if fc != nil {
+				queueOwner[fc.Queue] = name
+				fcQueue[name] = fc.Queue
+			}
+		}
 		for _, queueNode := range fcNode.FindChildren("queue") {
 			if len(queueNode.Keys) < 3 {
 				continue
@@ -720,9 +728,15 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 	}
 
 	for _, inst := range namedInstances(node.FindChildren("scheduler-maps")) {
-		schedMap := &CoSSchedulerMap{
-			Name:    inst.name,
-			Entries: make(map[string]*CoSSchedulerMapEntry),
+		schedMap := cos.SchedulerMaps[inst.name]
+		if schedMap == nil {
+			schedMap = &CoSSchedulerMap{
+				Name:    inst.name,
+				Entries: make(map[string]*CoSSchedulerMapEntry),
+			}
+		}
+		if schedMap.Entries == nil {
+			schedMap.Entries = make(map[string]*CoSSchedulerMapEntry)
 		}
 		for _, child := range inst.node.Children {
 			if child.Name() != "forwarding-class" || len(child.Keys) < 2 {
