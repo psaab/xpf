@@ -536,7 +536,26 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 	if cfg.ClassOfService != nil && view.cosUnit != nil {
 		schedulerMap := cfg.ClassOfService.SchedulerMaps[view.cosUnit.SchedulerMap]
 		if schedulerMap != nil {
-			for className, entry := range schedulerMap.Entries {
+			// #13088 (D7-09): Entries is a map, so ranging it directly
+			// visited classes in randomized order. Two forwarding classes
+			// sharing one queue ID (a committable shape — the strict
+			// validator rejects only duplicate CLASS names, not shared
+			// queue ids) then non-deterministically overwrote each other
+			// in queueViews below, flipping the rendered Class / Priority
+			// / Transmit rate / Buffer of the shared queue across
+			// consecutive `show class-of-service interface` runs. Iterate
+			// in ascending class order — the same order
+			// buildClassOfServiceSnapshot (userspace/cos.go) emits the
+			// entries onto the wire — so the shared-queue collapse is
+			// stable: the lexicographically last class sharing a queue
+			// owns the row, run after run.
+			entryNames := make([]string, 0, len(schedulerMap.Entries))
+			for className := range schedulerMap.Entries {
+				entryNames = append(entryNames, className)
+			}
+			sort.Strings(entryNames)
+			for _, className := range entryNames {
+				entry := schedulerMap.Entries[className]
 				class := cfg.ClassOfService.ForwardingClasses[className]
 				if class == nil {
 					continue
@@ -572,6 +591,50 @@ func buildCoSQueueViews(cfg *config.Config, view cosInterfaceView) []cosQueueVie
 		}
 	}
 	configuredQueueCount := len(queueViews)
+	// #13088 (D7-09): the dataplane admits any unit with a shaping rate or
+	// a resolved scheduler map and then ALWAYS materializes a synthetic
+	// best-effort fallback queue for unclassified traffic
+	// (build_cos_iface_config, userspace-dp/src/afxdp/forwarding_build/
+	// cos.rs: lowest unused queue id — preferring 0 —, priority "low",
+	// guaranteed at the interface shaping rate, sized from the interface
+	// burst pool). The formatter modeled only the configured scheduler-map
+	// entries, so an admitted unit whose map omitted best-effort — or a
+	// shaped unit with no scheduler-map at all — rendered fewer queues
+	// than the dataplane actually shapes, down to "Queues: none" for the
+	// shaped-no-map case with runtime status unavailable. Mirror the
+	// dataplane fallback here so the config-only view matches what the
+	// runtime merge below overlays when a snapshot exists.
+	//
+	// Placed AFTER configuredQueueCount so isOldJSONSyntheticDefaultQueue
+	// still sees the pre-synthesis "nothing configured" signal it keys on;
+	// the runtime merge overwrites these defaults with live values.
+	if view.cosUnit != nil &&
+		(view.cosUnit.ShapingRateBytes > 0 || configuredQueueCount > 0) {
+		hasBestEffort := false
+		for _, qv := range queueViews {
+			if qv.forwardingClass == "best-effort" {
+				hasBestEffort = true
+				break
+			}
+		}
+		if !hasBestEffort {
+			queueID := 0
+			for {
+				if _, taken := queueViews[queueID]; !taken {
+					break
+				}
+				queueID++
+			}
+			queueViews[queueID] = cosQueueView{
+				queueID:          queueID,
+				forwardingClass:  "best-effort",
+				priority:         "low",
+				transmitRate:     view.cosUnit.ShapingRateBytes,
+				guaranteeEnabled: true,
+				bufferBytes:      cosUnitBurstPoolBytes(view.cosUnit),
+			}
+		}
+	}
 	if view.interfaceState != nil {
 		for _, runtimeQueue := range view.interfaceState.Queues {
 			qv := queueViews[int(runtimeQueue.QueueID)]
