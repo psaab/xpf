@@ -48,4 +48,19 @@ func (c *xpfCollector) initUserspaceStreamDescriptors() {
 		"Userspace event-stream frames dropped because their frame type is unknown.",
 		nil, nil,
 	)
+	c.userspaceEventStreamResyncsTotal = prometheus.NewDesc(
+		"xpf_userspace_event_stream_resyncs_total",
+		"Daemon-side userspace event-stream full resyncs by trigger reason.",
+		[]string{"reason"}, nil,
+	)
+	c.userspaceEventStreamDisconnectsTotal = prometheus.NewDesc(
+		"xpf_userspace_event_stream_disconnects_total",
+		"Daemon-side userspace event-stream disconnect triggers by reason.",
+		[]string{"reason"}, nil,
+	)
+	c.userspaceEventStreamState = prometheus.NewDesc(
+		"xpf_userspace_event_stream_state",
+		"Current userspace event-stream state values: connected, paused, events_since_ack, sequence, and acked sequence.",
+		[]string{"state"}, nil,
+	)
 }

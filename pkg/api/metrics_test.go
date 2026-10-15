@@ -479,6 +479,9 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 		userspaceEventStreamDataplaneEventsTotal: mkOneLabel("xpf_userspace_event_stream_dataplane_events_total", "type"),
 		userspaceEventStreamDataplaneDropsTotal:  mkOneLabel("xpf_userspace_event_stream_dataplane_event_drops_total", "type"),
 		userspaceEventStreamUnknownDropsTotal:    mkNoLabel("xpf_userspace_event_stream_unknown_frame_drops_total"),
+		userspaceEventStreamResyncsTotal:         mkOneLabel("xpf_userspace_event_stream_resyncs_total", "reason"),
+		userspaceEventStreamDisconnectsTotal:     mkOneLabel("xpf_userspace_event_stream_disconnects_total", "reason"),
+		userspaceEventStreamState:                mkOneLabel("xpf_userspace_event_stream_state", "state"),
 	}
 	status := dpuserspace.ProcessStatus{
 		EventStreamSent:                      101,
@@ -510,22 +513,32 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 		EventStreamSessionCreateRateLimited:  29,
 		EventStreamSessionCreateQueueFull:    30,
 		EventStreamSessionCreateDisconnected: 31,
+		EventStreamConnected:                 true,
+		EventStreamSeq:                       42,
+		EventStreamAcked:                     40,
 		EventStream: &dpuserspace.EventStreamStatus{
-			FramesRead:          11,
-			FramesWritten:       7,
-			DecodeErrors:        2,
-			SeqGaps:             3,
-			PolicyDenyEvents:    5,
-			ScreenDropEvents:    6,
-			FilterLogEvents:     8,
-			SessionCloseEvents:  14,
-			SessionCreateEvents: 15,
-			PolicyDenyDrops:     1,
-			ScreenDropDrops:     4,
-			FilterLogDrops:      9,
-			SessionCloseDrops:   2,
-			SessionCreateDrops:  3,
-			UnknownFrameDrops:   10,
+			FramesRead:                 11,
+			FramesWritten:              7,
+			DecodeErrors:               2,
+			SeqGaps:                    3,
+			SessionSyncResyncs:         4,
+			DecodeResyncSuppressed:     5,
+			TelemetryGapResyncs:        6,
+			PendingOverflowDisconnects: 7,
+			PeerCredRejections:         8,
+			Paused:                     true,
+			EventsSinceAck:             9,
+			PolicyDenyEvents:           5,
+			ScreenDropEvents:           6,
+			FilterLogEvents:            8,
+			SessionCloseEvents:         14,
+			SessionCreateEvents:        15,
+			PolicyDenyDrops:            1,
+			ScreenDropDrops:            4,
+			FilterLogDrops:             9,
+			SessionCloseDrops:          2,
+			SessionCreateDrops:         3,
+			UnknownFrameDrops:          10,
 		},
 	}
 	ch := make(chan prometheus.Metric)
@@ -595,6 +608,26 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceEventStreamDataplaneDropsTotal, map[string]string{"type": "session_close"}, 2)
 	assertCounterClose(t, got, c.userspaceEventStreamDataplaneDropsTotal, map[string]string{"type": "session_create"}, 3)
 	assertCounterClose(t, got, c.userspaceEventStreamUnknownDropsTotal, nil, 10)
+	assertCounterClose(t, got, c.userspaceEventStreamResyncsTotal,
+		map[string]string{"reason": "session_sync_gap"}, 4)
+	assertCounterClose(t, got, c.userspaceEventStreamResyncsTotal,
+		map[string]string{"reason": "decode_suppressed"}, 5)
+	assertCounterClose(t, got, c.userspaceEventStreamResyncsTotal,
+		map[string]string{"reason": "telemetry_gap"}, 6)
+	assertCounterClose(t, got, c.userspaceEventStreamDisconnectsTotal,
+		map[string]string{"reason": "pending_callback_overflow"}, 7)
+	assertCounterClose(t, got, c.userspaceEventStreamDisconnectsTotal,
+		map[string]string{"reason": "peer_cred_rejection"}, 8)
+	assertGaugeClose(t, got, c.userspaceEventStreamState,
+		map[string]string{"state": "connected"}, 1)
+	assertGaugeClose(t, got, c.userspaceEventStreamState,
+		map[string]string{"state": "sequence"}, 42)
+	assertGaugeClose(t, got, c.userspaceEventStreamState,
+		map[string]string{"state": "acked_sequence"}, 40)
+	assertGaugeClose(t, got, c.userspaceEventStreamState,
+		map[string]string{"state": "paused"}, 1)
+	assertGaugeClose(t, got, c.userspaceEventStreamState,
+		map[string]string{"state": "events_since_ack"}, 9)
 }
 
 func newSchedulerCounterMetricsStore(t *testing.T) *configstore.Store {
@@ -1774,9 +1807,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		EmbeddedQuoteSubminimalRefusedTotal:         47,
 		EmbeddedErrorPerSessionSuppressedTotal:      59,
 		InterfaceSNATIdentityExhaustionTotal:        19,
-		SourceNATParseErrors:      7,
-		DestinationNATParseErrors: 11,
-		StaticNATParseErrors:      13,
+		SourceNATParseErrors:                        7,
+		DestinationNATParseErrors:                   11,
+		StaticNATParseErrors:                        13,
 		InterfaceSNATSyncIdentityConflictDropsTotal: 29,
 		InterfaceSNATRegistryCapExhaustionTotal:     23,
 		// #1861: install-refusal trio emitted unconditionally.

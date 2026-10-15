@@ -58,14 +58,14 @@ type xpfCollector struct {
 	// xpf_screen_drops_total above cannot answer "which screen fired?"; this
 	// labeled series can, now that the userspace bridge populates the per-reason
 	// GlobalCtrScreen* counters.
-	screenDropsByReasonTotal        *prometheus.Desc
+	screenDropsByReasonTotal               *prometheus.Desc
 	userspaceScreenSubstitutedDefaultDrops *prometheus.Desc
-	userspaceScreenSYNFloodDstDrops *prometheus.Desc
-	userspaceScreenSYNFloodSrcDrops *prometheus.Desc
-	userspaceScreenSYNFloodAlarmEvents *prometheus.Desc
-	userspaceScreenAlarmWithoutDropEvents *prometheus.Desc
-	userspaceScreenProfileWarns *prometheus.Desc
-	userspaceScreenTrackerPressureEvents *prometheus.Desc
+	userspaceScreenSYNFloodDstDrops        *prometheus.Desc
+	userspaceScreenSYNFloodSrcDrops        *prometheus.Desc
+	userspaceScreenSYNFloodAlarmEvents     *prometheus.Desc
+	userspaceScreenAlarmWithoutDropEvents  *prometheus.Desc
+	userspaceScreenProfileWarns            *prometheus.Desc
+	userspaceScreenTrackerPressureEvents   *prometheus.Desc
 	// #5806: unresolved screen-profile references (see the descriptor).
 	screenUnresolvedProfileZones *prometheus.Desc
 	screenInertProfileZones      *prometheus.Desc
@@ -782,6 +782,9 @@ type xpfCollector struct {
 	userspaceEventStreamDataplaneEventsTotal *prometheus.Desc
 	userspaceEventStreamDataplaneDropsTotal  *prometheus.Desc
 	userspaceEventStreamUnknownDropsTotal    *prometheus.Desc
+	userspaceEventStreamResyncsTotal         *prometheus.Desc
+	userspaceEventStreamDisconnectsTotal     *prometheus.Desc
+	userspaceEventStreamState                *prometheus.Desc
 	// #925 Phase 2: liveness gauge for the supervisor's catch_unwind
 	// state. 1 = worker has panicked and the supervisor has caught it;
 	// 0 = healthy. Set-only in Phase 1 (cleared by daemon restart).
@@ -1411,6 +1414,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceEventStreamDataplaneEventsTotal
 	ch <- c.userspaceEventStreamDataplaneDropsTotal
 	ch <- c.userspaceEventStreamUnknownDropsTotal
+	ch <- c.userspaceEventStreamResyncsTotal
+	ch <- c.userspaceEventStreamDisconnectsTotal
+	ch <- c.userspaceEventStreamState
 	ch <- c.workerDead
 	// #1635: cold-path histogram descriptors. xpfCollector is a CHECKED
 	// collector — every Desc emitted by Collect() (via emitWorkerColdPath)
