@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // lifeline.go is the SSOT for host-inbound LIFELINE interface matching (#3682).
 // Before #3682 the matcher lived privately in pkg/dataplane/userspace/zones.go
@@ -54,17 +57,42 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 	}
 	if cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
-		for _, name := range []string{cc.ControlInterface, cc.FabricInterface, cc.Fabric1Interface} {
-			if name = strings.TrimSpace(name); name != "" {
-				set[name] = true
+		markBaseLifeline := func(base string) {
+			set[base] = true
+			if iface := cfg.Interfaces.Interfaces[base]; iface != nil {
+				for unit := range iface.Units {
+					set[base+"."+strconv.Itoa(unit)] = unit == 0
+				}
 			}
 		}
-		// fabric-options member-interfaces are also explicit role configuration.
-		// Preserve the declared name so dotted siblings stay distinct.
+		for _, name := range []string{cc.ControlInterface, cc.FabricInterface, cc.Fabric1Interface} {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			set[name] = true
+			// An untagged unit 0 shares the parent kernel netdev. Mark
+			// that netdev as a lifeline too; do not promote non-zero units.
+			split := cfg.SplitInterfaceUnitRef(name)
+			if split.HasUnit {
+				if _, unit, err := CanonicalLogicalUnit(split.UnitTok); err == nil && unit == "0" {
+					markBaseLifeline(split.Base)
+				}
+			}
+		}
+		// fabric-options member-interfaces also identify their fabric
+		// aggregate and the physical member links carrying fabric traffic.
 		for name, ifc := range cfg.Interfaces.Interfaces {
-			if ifc != nil && len(ifc.FabricMembers) > 0 {
-				if name = strings.TrimSpace(name); name != "" {
-					set[name] = true
+			if ifc == nil || len(ifc.FabricMembers) == 0 {
+				continue
+			}
+			// Keep the fabric interface itself exempt as before; its
+			// member links are independent lifelines as well.
+			set[strings.TrimSpace(name)] = true
+			for _, member := range ifc.FabricMembers {
+				member = strings.TrimSpace(member)
+				if member != "" {
+					markBaseLifeline(member)
 				}
 			}
 		}
