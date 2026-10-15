@@ -119,7 +119,7 @@ func stableRethLinkLocalTargets(cfg *config.Config) []stableRethLinkLocalTarget 
 			continue
 		}
 		ifc := cfg.Interfaces.Interfaces[ifName]
-		if ifc == nil || stableRethUnitHasConfiguredLinkLocal(ifc, 0) {
+		if ifc == nil || ifc.Disable || stableRethUnitHasConfiguredLinkLocal(ifc, 0) {
 			continue
 		}
 		addr := stableRethLinkLocalString(clusterID, rgID)
@@ -491,6 +491,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			lifelineNetdevs[snap.LinuxName] = true // #9637: never an ingress scope
 			continue
 		}
+		if snap.AdminDisabled {
+			continue
+		}
 		if snap.Zone == "" {
 			continue
 		}
@@ -582,7 +585,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	sort.Strings(ifNames)
 	for _, ifName := range ifNames {
 		iface := cfg.Interfaces.Interfaces[ifName]
-		if iface == nil {
+		if iface == nil || iface.Disable {
 			continue
 		}
 		unitNums := make([]int, 0, len(iface.Units))
@@ -997,6 +1000,9 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 		if hostInboundLifelineInterface(snap.Name, lifelines) {
 			continue
 		}
+		if snap.AdminDisabled {
+			continue
+		}
 		if snap.Zone != "" {
 			if _, drop := quarantined[snap.Zone]; !drop {
 				continue
@@ -1052,7 +1058,7 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 		sort.Strings(ifNames)
 		for _, ifName := range ifNames {
 			iface := cfg.Interfaces.Interfaces[ifName]
-			if iface == nil {
+			if iface == nil || iface.Disable {
 				continue
 			}
 			unitNums := make([]int, 0, len(iface.Units))
@@ -1446,6 +1452,9 @@ func forEachFirewallLocalAddrFromSnaps(cfg *config.Config, snaps []InterfaceSnap
 	// populates the dataplane (so DHCP/DHCPv6-learned addresses are included
 	// exactly like static ones — the #3224 argument).
 	for _, snap := range snaps {
+		if snap.AdminDisabled {
+			continue
+		}
 		for _, a := range snap.Addresses {
 			visit(snap.Name, a.Address)
 		}
@@ -1461,7 +1470,7 @@ func forEachFirewallLocalAddrFromSnaps(cfg *config.Config, snaps []InterfaceSnap
 	sort.Strings(ifNames)
 	for _, ifName := range ifNames {
 		iface := cfg.Interfaces.Interfaces[ifName]
-		if iface == nil {
+		if iface == nil || iface.Disable {
 			continue
 		}
 		unitNums := make([]int, 0, len(iface.Units))
