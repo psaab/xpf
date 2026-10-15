@@ -119,6 +119,8 @@ func flowExportConfigHash(ecs []*flowexport.ExportConfig) [32]byte {
 // (#2461), filling per-zone sampling directions on each. Returns nil when
 // flow export is not configured.
 func (d *Daemon) buildFlowExportConfigs(cfg *config.Config) []*flowexport.ExportConfig {
+	d.flowExcludedFlowServers.Store(int64(flowexport.CountExcludedFlowServers(
+		&cfg.Services, &cfg.ForwardingOptions, config.FlowServerVersion9)))
 	ecs := flowexport.ResolveV9TemplateGroups(&cfg.Services, &cfg.ForwardingOptions)
 	if len(ecs) == 0 {
 		return nil
@@ -135,6 +137,8 @@ func (d *Daemon) buildFlowExportConfigs(cfg *config.Config) []*flowexport.Export
 // committed config into one ExportConfig per template group. Returns nil
 // when IPFIX export is not configured.
 func (d *Daemon) buildIPFIXExportConfigs(cfg *config.Config) []*flowexport.ExportConfig {
+	d.ipfixExcludedFlowServers.Store(int64(flowexport.CountExcludedFlowServers(
+		&cfg.Services, &cfg.ForwardingOptions, config.FlowServerVersionIPFIX)))
 	ecs := flowexport.ResolveIPFIXTemplateGroups(&cfg.Services, &cfg.ForwardingOptions)
 	if len(ecs) == 0 {
 		return nil
@@ -710,7 +714,37 @@ func flowExportAddressFamily(isV6 bool) string {
 	return "inet"
 }
 
-// FlowCollectorHealth returns the per-collector write-health for every
+// FlowExportSamplingStats snapshots per-instance sampling decisions for
+// Prometheus. Template groups share stats, so emit one bounded row per
+// (protocol, instance), rather than duplicating totals per template.
+func (d *Daemon) FlowExportSamplingStats() []flowexport.SamplingStatsSnapshot {
+	var out []flowexport.SamplingStatsSnapshot
+	seen := make(map[string]bool)
+	appendStats := func(protocol string, ec *flowexport.ExportConfig) {
+		key := protocol + "\x00" + ec.InstanceName
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		evaluated, selected, zoneFiltered := ec.SamplingStats()
+		out = append(out, flowexport.SamplingStatsSnapshot{
+			Protocol: protocol, Instance: ec.InstanceName,
+			Evaluated: evaluated, Selected: selected, ZoneFiltered: zoneFiltered,
+		})
+	}
+	if b := d.flowBundle.Load(); b != nil {
+		for _, g := range b.groups {
+			appendStats("netflow-v9", g.ec)
+		}
+	}
+	if b := d.ipfixBundlePtr.Load(); b != nil {
+		for _, g := range b.groups {
+			appendStats("ipfix", g.ec)
+		}
+	}
+	return out
+}
+
 // running NetFlow v9 and IPFIX exporter group (#2464). The slice is
 // empty when no flow export is configured. Safe to call concurrently
 

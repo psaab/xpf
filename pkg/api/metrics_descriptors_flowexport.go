@@ -104,4 +104,21 @@ func (c *xpfCollector) initFlowExportDescriptors() {
 		"Total exported close records whose future creation timestamp was clamped to the close time.",
 		labels, nil,
 	)
+	// #13307: decisions before export. These bounded per-instance counters
+	// distinguish zone-filtered and rate-sampled records from an idle exporter.
+	c.flowExportSamplingEvaluatedTotal = prometheus.NewDesc(
+		"xpf_flow_export_sampling_evaluated_total",
+		"Eligible flow sessions evaluated by the 1-in-N flow exporter sampler.",
+		[]string{"protocol", "instance"}, nil,
+	)
+	c.flowExportSamplingSelectedTotal = prometheus.NewDesc(
+		"xpf_flow_export_sampling_selected_total",
+		"Eligible flow sessions selected for export after 1-in-N sampling.",
+		[]string{"protocol", "instance"}, nil,
+	)
+	c.flowExportZoneFilteredTotal = prometheus.NewDesc(
+		"xpf_flow_export_zone_filtered_total",
+		"Flow sessions rejected because neither zone matches sampling direction.",
+		[]string{"protocol", "instance"}, nil,
+	)
 }

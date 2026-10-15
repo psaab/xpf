@@ -34,4 +34,7 @@ type BuildState struct {
 	// the #3742 build-before-swap keeps export UP rather than tearing a healthy
 	// set down.
 	BuildFailed bool
+	// ExcludedFlowServers is the active config's excluded stanza count,
+	// including instances that produced no surviving exporter group.
+	ExcludedFlowServers int
 }

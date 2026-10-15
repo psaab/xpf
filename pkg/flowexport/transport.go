@@ -689,3 +689,12 @@ type ExporterBatchStats struct {
 	EstimatedDurations  uint64 `json:"estimated_durations"`
 	ClockSkewClamped    uint64 `json:"clock_skew_clamped"`
 }
+
+// SamplingStatsSnapshot is one sampling instance's exported decision totals.
+type SamplingStatsSnapshot struct {
+	Protocol     string
+	Instance     string
+	Evaluated    uint64
+	Selected     uint64
+	ZoneFiltered uint64
+}

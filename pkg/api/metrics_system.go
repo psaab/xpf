@@ -215,6 +215,20 @@ func (c *xpfCollector) collectFlowExportBatchMetrics(ch chan<- prometheus.Metric
 	}
 }
 
+func (c *xpfCollector) collectFlowExportSamplingMetrics(ch chan<- prometheus.Metric) {
+	if c.srv.flowExportSamplingStatsFn == nil {
+		return
+	}
+	for _, s := range c.srv.flowExportSamplingStatsFn() {
+		ch <- prometheus.MustNewConstMetric(c.flowExportSamplingEvaluatedTotal,
+			prometheus.CounterValue, float64(s.Evaluated), s.Protocol, s.Instance)
+		ch <- prometheus.MustNewConstMetric(c.flowExportSamplingSelectedTotal,
+			prometheus.CounterValue, float64(s.Selected), s.Protocol, s.Instance)
+		ch <- prometheus.MustNewConstMetric(c.flowExportZoneFilteredTotal,
+			prometheus.CounterValue, float64(s.ZoneFiltered), s.Protocol, s.Instance)
+	}
+}
+
 func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 	// Daemon uptime
 	ch <- prometheus.MustNewConstMetric(c.daemonUptime, prometheus.GaugeValue,

@@ -27,14 +27,16 @@ func (d *Daemon) FlowExportBuildStates() []flowexport.BuildState {
 	}
 	return []flowexport.BuildState{
 		{
-			Family:           "netflow-v9",
-			ConfiguredGroups: int(d.flowConfiguredGroups.Load()),
-			BuildFailed:      d.flowExportBuildFailed(),
+			Family:              "netflow-v9",
+			ConfiguredGroups:    int(d.flowConfiguredGroups.Load()),
+			BuildFailed:         d.flowExportBuildFailed(),
+			ExcludedFlowServers: int(d.flowExcludedFlowServers.Load()),
 		},
 		{
-			Family:           "ipfix",
-			ConfiguredGroups: int(d.ipfixConfiguredGroups.Load()),
-			BuildFailed:      d.ipfixExportBuildFailed(),
+			Family:              "ipfix",
+			ConfiguredGroups:    int(d.ipfixConfiguredGroups.Load()),
+			BuildFailed:         d.ipfixExportBuildFailed(),
+			ExcludedFlowServers: int(d.ipfixExcludedFlowServers.Load()),
 		},
 	}
 }

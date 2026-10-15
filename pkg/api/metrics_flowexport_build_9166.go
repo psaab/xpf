@@ -27,6 +27,11 @@ func (c *xpfCollector) initFlowExportBuildDescriptors() {
 			"exporters, 0 otherwise.",
 		[]string{"family"}, nil,
 	)
+	c.flowExportExcludedFlowServers = prometheus.NewDesc(
+		"xpf_flowexport_excluded_flow_servers",
+		"Configured flow-server stanzas excluded because they cannot receive records, by family.",
+		[]string{"family"}, nil,
+	)
 }
 
 // collectFlowExportBuildState emits the #9166 build-health family.
@@ -58,5 +63,7 @@ func (c *xpfCollector) collectFlowExportBuildState(ch chan<- prometheus.Metric) 
 		}
 		ch <- prometheus.MustNewConstMetric(c.flowExportBuildFailed,
 			prometheus.GaugeValue, failed, st.Family)
+		ch <- prometheus.MustNewConstMetric(c.flowExportExcludedFlowServers,
+			prometheus.GaugeValue, float64(st.ExcludedFlowServers), st.Family)
 	}
 }

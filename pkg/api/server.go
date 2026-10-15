@@ -553,6 +553,10 @@ type Config struct {
 	// with no depth or drop visibility. Optional; if nil (or it returns nil),
 	// the family is omitted.
 	FlowExportBatchStatsFn func() []flowexport.ExporterBatchStats
+	// FlowExportSamplingStatsFn surfaces per-instance sampling decisions
+	// (eligible evaluations, selected sessions, zone-filtered sessions and
+	// excluded flow-server stanzas) for #13307.
+	FlowExportSamplingStatsFn func() []flowexport.SamplingStatsSnapshot
 	// FeedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#2049): an address-name -> union-of-feed-CIDRs map for the active
 	// config, the same view the AF_XDP helper enforces. It is consulted by
@@ -733,6 +737,7 @@ type Server struct {
 	flowCollectorHealthFn                func() []flowexport.ExporterCollectorHealth
 	flowExportBuildStateFn               func() []flowexport.BuildState
 	flowExportBatchStatsFn               func() []flowexport.ExporterBatchStats
+	flowExportSamplingStatsFn            func() []flowexport.SamplingStatsSnapshot
 	feedOverlayFn                        func() map[string][]string
 	policySchedActiveFn                  func() (map[string]bool, bool)
 	haActiveFn                           func() bool
@@ -868,6 +873,7 @@ func NewServer(cfg Config) *Server {
 		flowCollectorHealthFn:                cfg.FlowCollectorHealthFn,
 		flowExportBuildStateFn:               cfg.FlowExportBuildStateFn,
 		flowExportBatchStatsFn:               cfg.FlowExportBatchStatsFn,
+		flowExportSamplingStatsFn:            cfg.FlowExportSamplingStatsFn,
 		feedOverlayFn:                        cfg.FeedOverlayFn,
 		policySchedActiveFn:                  cfg.PolicySchedulerActiveStateFn,
 		haActiveFn:                           cfg.HAActiveFn,
