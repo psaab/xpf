@@ -694,13 +694,9 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 				warnings = append(warnings, withCoverage(key, pick(p.Action)(fmt.Sprintf(
 					"%q (from-zone %q)", p.Name, zpp.FromZone), reason)))
 			} else if p.Action == PolicyPermit {
-				// #7374: the APPLICATION dimension. Checked separately because
-				// it needs the zone's effective admit set, which the
-				// action+match predicate above cannot see -- and because it is
-				// a COMPARISON, not a token test: an application-narrowed
-				// permit is only stricter when the gate admits something the
-				// permit does not cover.
-				if gap, reason := junosHostPermitApplicationGap(cfg, zoneByName(cfg, zpp.FromZone), p.Match); gap {
+				// #7374: compare an application-narrowed permit with the
+				// effective host-inbound services of each applicable zone.
+				if gap, reason := junosHostPermitApplicationGapForZonePair(cfg, zpp.FromZone, p.Match); gap {
 					warnings = append(warnings, withCoverage(key, permitMsg(fmt.Sprintf(
 						"%q (from-zone %q)", p.Name, zpp.FromZone), reason)))
 				}
@@ -723,11 +719,14 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 		if stricter, reason := junosHostPolicyStricterThanCoarseGate(p.Action, p.Match); stricter {
 			warnings = append(warnings, withCoverage(key, pick(p.Action)(fmt.Sprintf("global %q", p.Name), reason)))
 		} else if p.Action == PolicyPermit {
-			// #7374: a global `to-zone junos-host` permit applies from EVERY
-			// zone, so it has a gap if ANY zone's gate admits something it does
-			// not cover. Zones are walked in sorted order so the first-reported
-			// gap is deterministic.
+			// #7374: a global policy applies only to its from-zone scope.
+			excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 			for _, zn := range sortedZoneNames(cfg) {
+				if _, excluded := excludedZones[zn]; excluded ||
+					!junosHostZoneHasOrdinaryHostInboundPath(cfg, zn) ||
+					!(IsWildcardZoneSet(p.Match.FromZones) || containsZone(p.Match.FromZones, zn)) {
+					continue
+				}
 				if gap, reason := junosHostPermitApplicationGap(cfg, zoneByName(cfg, zn), p.Match); gap {
 					warnings = append(warnings, withCoverage(key, permitMsg(fmt.Sprintf("global %q", p.Name), reason)))
 					break
@@ -736,6 +735,40 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 		}
 	}
 	return warnings
+}
+
+// junosHostPermitApplicationGapForZonePair resolves the source zone(s) of a
+// host-inbound zone-pair before checking the #7374 application gap. `any` is a
+// wildcard, not a literal zone name; quarantined and lifeline-only zones have no
+// ordinary direct host-bound path whose gate can diverge from the policy.
+func junosHostPermitApplicationGapForZonePair(cfg *Config, fromZone string, m PolicyMatch) (bool, string) {
+	if fromZone != "any" {
+		return junosHostPermitApplicationGap(cfg, zoneByName(cfg, fromZone), m)
+	}
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
+	for _, zn := range sortedZoneNames(cfg) {
+		if _, excluded := excludedZones[zn]; excluded || !junosHostZoneHasOrdinaryHostInboundPath(cfg, zn) {
+			continue
+		}
+		if gap, reason := junosHostPermitApplicationGap(cfg, zoneByName(cfg, zn), m); gap {
+			return true, reason
+		}
+	}
+	return false, ""
+}
+
+func junosHostZoneHasOrdinaryHostInboundPath(cfg *Config, zoneName string) bool {
+	zone := zoneByName(cfg, zoneName)
+	if zone == nil {
+		return false
+	}
+	lifelines := HostInboundLifelineSet(cfg)
+	for _, ref := range zone.Interfaces {
+		if ref != "" && !HostInboundLifelineInterface(ref, lifelines) {
+			return true
+		}
+	}
+	return false
 }
 
 // validatePreIDDefaultPolicyLogWarnings emits a WARN-only commit-time message
@@ -919,6 +952,7 @@ func validateHostInboundOverrideReplaceWarnings(cfg *Config) []string {
 			if fullAdmit {
 				continue
 			}
+			zoneSvc := zone.ZoneLevelSystemServicesFor(zone.HostInboundTraffic.SystemServices, ref)
 			lostSvc := hostInboundLostTokens(zoneSvc, effSvc, false)
 			lostProto := hostInboundLostTokens(zoneProto, effProto, true)
 			if len(lostSvc) == 0 && len(lostProto) == 0 {
