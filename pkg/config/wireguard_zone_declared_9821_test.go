@@ -272,11 +272,9 @@ func TestWGZoneDeclaredSplitAgreement9821(t *testing.T) {
 // End-to-end through the lenient compile: a padded dotted unit tunnel meets
 // its canonical zone member in the advisory the operator actually sees —
 // proving the declared-set harvest works on the group-expanded tree, not just
-// on hand-parsed fixtures. Lenient, not strict: the strict zone-member
-// existence gate still strips the suffix at the FIRST dot
-// (validateZoneInterfaceDefinedStrict), so it rejects `p.0.1` before the
-// advisory runs — that gate's Split migration belongs to its owning slice,
-// and this cell will graduate to strict alongside it.
+// on hand-parsed fixtures. This remains lenient because this cell exercises
+// advisory behavior; strict declared-dotted zone-member acceptance is covered
+// by TestZoneInterfaceDeclaredDottedAndBareBindCommit13110.
 func TestWGZoneDeclaredLenientEndToEnd9821(t *testing.T) {
 	lines := wgTunnel5618("p.0", 1, 51820, wgKeyA, wgKeyB)
 	for i := range lines {

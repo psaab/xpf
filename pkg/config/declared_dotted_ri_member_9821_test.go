@@ -210,22 +210,16 @@ func TestDeclaredDottedMemberStrictProbe9821(t *testing.T) {
 	}
 }
 
-// TestZoneMemberStillRejectsSingleDeclaredDotted9821 pins the preserved
-// asymmetry: strict zone admission (DEFINED gate) still rejects a dotted
-// zone member whose cut base is undeclared, while strict RI accepts the
-// same spelling. See the plan's zone disposition: admission preserved,
-// runtime made consistent.
-func TestZoneMemberStillRejectsSingleDeclaredDotted9821(t *testing.T) {
+// TestDeclaredDottedZoneMemberStrictlyAccepted9821 pins declared-first
+// precedence in the strict zone gate: a declared dotted interface is a valid
+// zone member even when no interface with its first-dot prefix exists.
+func TestDeclaredDottedZoneMemberStrictlyAccepted9821(t *testing.T) {
 	tree := vrfTree9809(t, []string{
 		"set interfaces ge-0/0/5.0 unit 0 family inet address 10.55.0.1/24",
 		"set security zones security-zone z interfaces ge-0/0/5.0",
 	})
-	_, err := CompileConfig(tree)
-	if err == nil {
-		t.Fatal("strict compile accepted a single-declared dotted zone member")
-	}
-	if !strings.Contains(err.Error(), "not defined under `interfaces`") {
-		t.Fatalf("reject reason %q is not the DEFINED gate", err.Error())
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("strict compile rejected a declared dotted zone member: %v", err)
 	}
 }
 
