@@ -2523,9 +2523,9 @@ the drop fails loudly instead of going quietly vacuous.
   error: it covers a helper predating the accounting, a zone past the hot-path
   slot capacity, and a zone that has never tripped a flood check, so the surfaces
   keep rendering an explicit "not available" (with the CAUSE named, not the
-  retracted "not implemented" claim). There is still no per-zone flood REST or
-  Prometheus surface — the aggregate `xpf_screen_drops_total` by reason (#3343)
-  remains the alerting surface for flood drops. An operator clear
+  retracted "not implemented" claim). There is still no per-zone flood REST
+  surface; Prometheus exports `xpf_userspace_zone_flood_drops_total{zone,
+  flood_type}` and `xpf_userspace_flood_counter_overflow_active` (#13293).
   (`ClearAllCounters`) sends a `clear_flood_counters` IPC so the helper's
   cumulative store resets and the cleared value does not snap back on the next
   1 s poll. Pinned by `pkg/dataplane/flood_counter_retention_3651_test.go`,

@@ -157,6 +157,18 @@ func (c *xpfCollector) initZoneDescriptors() {
 			"there was no helper to ask, not that there is no overflow.",
 		nil, nil,
 	)
+	c.floodCounterOverflowActive = prometheus.NewDesc(
+		"xpf_userspace_flood_counter_overflow_active",
+		"1 while the userspace helper's per-zone screen flood-counter slot "+
+			"table has overflowed; emitted only when a helper status was read.",
+		nil, nil,
+	)
+	c.zoneFloodDropsTotal = prometheus.NewDesc(
+		"xpf_userspace_zone_flood_drops_total",
+		"Cumulative userspace screen flood drops attributed to a security "+
+			"zone, by flood type (syn_flood, icmp_flood, or udp_flood).",
+		[]string{"zone", "flood_type"}, nil,
+	)
 	c.zoneCountersUnpopulatedZones = prometheus.NewDesc(
 		"xpf_zone_counters_unpopulated_zones",
 		"Number of configured security zones whose per-zone traffic counters "+

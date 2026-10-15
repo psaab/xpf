@@ -159,6 +159,10 @@ type xpfCollector struct {
 	// Emitted only when a helper status was actually read, so its ABSENCE means
 	// "no helper to ask" rather than "no overflow" — see the descriptor.
 	zoneCountersOverflowActive *prometheus.Desc
+	// #13293: userspace per-zone screen flood counters and the helper's
+	// separate flood-counter slot overflow sentinel.
+	zoneFloodDropsTotal        *prometheus.Desc
+	floodCounterOverflowActive *prometheus.Desc
 
 	// Policy counters. policyCountersUnpublishedRules is the policy analogue of
 	// zoneCountersUnpopulatedZones: the explicit "no counter published for this
@@ -1069,6 +1073,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.zoneBytesTotal
 	ch <- c.zoneCountersUnpopulatedZones
 	ch <- c.zoneCountersOverflowActive
+	ch <- c.zoneFloodDropsTotal
+	ch <- c.floodCounterOverflowActive
 	ch <- c.policyHitsTotal
 	ch <- c.policyCountersUnpublishedRules
 	ch <- c.filterHitsTotal
@@ -2138,6 +2144,9 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// actually read — see emitZoneCounterOverflow for why its absence and its 0
 	// mean different things.
 	c.emitZoneCounterOverflow(ch, userspaceStatus)
+	// #13293: userspace screen flood counters and flood-slot overflow share
+	// the already-fetched helper status snapshot.
+	c.emitZoneFloodCounters(ch, userspaceStatus, c.srv.store.ActiveConfig())
 	// #9040: the degraded-path drop reasons, same status pointer and the same
 	// emitted-only-if-read contract.
 	c.emitDegradedPathCounters(ch, userspaceStatus)
