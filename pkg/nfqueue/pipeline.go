@@ -1132,7 +1132,7 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 		p.retireFlow(pending.frame.FlowKey)
 		resolved++
 	}
-p.dispatchEligible()
+	p.dispatchEligible()
 	return resolved
 }
 
