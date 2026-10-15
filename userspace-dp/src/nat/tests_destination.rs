@@ -3154,3 +3154,34 @@ fn dnat_host_any_translate_beats_prefix_pinned_off_9879() {
         "the prefix off still exempts addresses outside the translate host"
     );
 }
+
+// #13283 (D3-08): an unknown DNAT protocol token must bump parse_errors.
+#[test]
+fn dnat_unknown_protocol_token_surfaces_parse_error_13283() {
+    let counters = crate::nat::NatCounterStore::default();
+    let _table = DnatTable::from_snapshots(
+        &[DestinationNATRuleSnapshot {
+            name: "bad-proto".to_string(),
+            destination_address: "203.0.113.10".to_string(),
+            destination_port: 80,
+            protocol: "not-a-protocol".to_string(),
+            pool_address: "192.168.1.10".to_string(),
+            pool_port: 8080,
+            ..DestinationNATRuleSnapshot::default()
+        }],
+        &counters,
+    );
+    assert_eq!(counters.destination_parse_errors(), 1);
+}
+
+#[test]
+fn nat_parse_errors_are_partitioned_by_builder_13283() {
+    let counters = crate::nat::NatCounterStore::default();
+    counters.record_source_parse_error("source test");
+    counters.record_destination_parse_error("destination test");
+    counters.record_static_parse_error("static test");
+    assert_eq!(counters.source_parse_errors(), 1);
+    assert_eq!(counters.destination_parse_errors(), 1);
+    assert_eq!(counters.static_parse_errors(), 1);
+    assert_eq!(counters.parse_errors(), 3);
+}

@@ -1504,3 +1504,18 @@ fn static_nat_zero_length_block_is_rejected_before_expansion_7219() {
         );
     }
 }
+
+// #13283 (D3-08): mismatched CIDR and block-with-port static rules must count.
+#[test]
+fn static_nat_silent_skips_surface_parse_errors_13283() {
+    let counters = NatCounterStore::default();
+    let _t1 = StaticNatTable::from_snapshots(
+        &[block_rule_7219("mismatch", "203.0.113.0/24", "192.168.0.0/25")],
+        &counters,
+    );
+    assert_eq!(counters.static_parse_errors(), 1, "#13283: mismatched static CIDR must be counted");
+    let mut port_rule = block_rule_7219("blockport", "203.0.113.0/24", "192.168.0.0/24");
+    port_rule.match_destination_port = 80;
+    let _t2 = StaticNatTable::from_snapshots(&[port_rule], &counters);
+    assert_eq!(counters.static_parse_errors(), 2, "#13283: block static rule with port must be counted");
+}

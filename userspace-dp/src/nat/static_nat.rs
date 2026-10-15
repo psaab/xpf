@@ -55,7 +55,7 @@ impl SourceConstraint {
                             v6.push(PrefixV6::from_net(net));
                         }
                     }
-                    Err(_) => nat_counters.record_parse_error(&format!(
+                    Err(_) => nat_counters.record_static_parse_error(&format!(
                         "static-NAT rule {rule_name:?}: unparseable match source-address \
                          {prefix:?} (entry dropped; rule stays source-scoped and fails closed)"
                     )),
@@ -520,7 +520,7 @@ impl StaticNatTable {
             let ext_prefix = match parse_nat_prefix(&snap.external_ip) {
                 Some(p) => p,
                 None => {
-                    nat_counters.record_parse_error(&format!(
+                    nat_counters.record_static_parse_error(&format!(
                         "static-NAT rule {:?}: unparseable external-ip {:?}",
                         snap.name, snap.external_ip
                     ));
@@ -530,7 +530,7 @@ impl StaticNatTable {
             let int_prefix = match parse_nat_prefix(&snap.internal_ip) {
                 Some(p) => p,
                 None => {
-                    nat_counters.record_parse_error(&format!(
+                    nat_counters.record_static_parse_error(&format!(
                         "static-NAT rule {:?}: unparseable internal-ip {:?}",
                         snap.name, snap.internal_ip
                     ));
@@ -549,6 +549,10 @@ impl StaticNatTable {
                 if ext_prefix.base.is_ipv4() != int_prefix.base.is_ipv4()
                     || ext_prefix.len != int_prefix.len
                 {
+                    nat_counters.record_static_parse_error(&format!(
+                        "static-NAT rule {:?}: block prefixes {}/{} and {}/{} have mismatched family or length",
+                        snap.name, ext_prefix.base, ext_prefix.len, int_prefix.base, int_prefix.len
+                    ));
                     continue;
                 }
                 // #5658: a zero-length (`/0`) block prefix maps the ENTIRE
@@ -568,7 +572,7 @@ impl StaticNatTable {
                 // peer-sync backstop. No non-zero floor is imposed — a legitimate
                 // large-but-intentional block (e.g. `/8`, `/64`) still installs.
                 if ext_prefix.len == 0 || int_prefix.len == 0 {
-                    nat_counters.record_parse_error(&format!(
+                    nat_counters.record_static_parse_error(&format!(
                         "static-NAT rule {:?}: block prefix {}/{} <-> {}/{} has a \
                          zero-length (/0) prefix that remaps the entire address \
                          family 1:1 (identity NAT shadowing all destinations) — \
@@ -586,6 +590,10 @@ impl StaticNatTable {
                 // already rejects this; this is the lenient-load / peer-sync
                 // backstop, mirroring the host-side #2491 fail-closed behavior.
                 if snap.match_destination_port != 0 || snap.mapped_port != 0 {
+                    nat_counters.record_static_parse_error(&format!(
+                        "static-NAT rule {:?}: block prefix pair cannot represent destination or mapped ports",
+                        snap.name
+                    ));
                     continue;
                 }
                 table.blocks.push(StaticNatBlock {

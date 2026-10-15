@@ -1934,7 +1934,7 @@ fn parse_match_prefix(
             // pre-#2398 fail-open collapse to match-any), but the drop was
             // SILENT — surface it loudly + count it so an operator sees the
             // configured match prefix that never reached the dataplane.
-            Err(_) => nat_counters.record_parse_error(&format!(
+            Err(_) => nat_counters.record_source_parse_error(&format!(
                 "source-NAT rule {rule_name:?}: unparseable {axis} match prefix {prefix:?}"
             )),
         },

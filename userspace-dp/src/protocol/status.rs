@@ -1082,6 +1082,13 @@ pub(crate) struct ProcessStatus {
     /// keyed by the compiler-assigned counter_id.
     #[serde(rename = "nat_rule_counters", default)]
     pub nat_rule_counters: Vec<NatRuleCounterStatus>,
+    /// #13283: cumulative NAT parse/validation failures, partitioned by builder.
+    #[serde(rename = "source_nat_parse_errors", default)]
+    pub source_nat_parse_errors: u64,
+    #[serde(rename = "destination_nat_parse_errors", default)]
+    pub destination_nat_parse_errors: u64,
+    #[serde(rename = "static_nat_parse_errors", default)]
+    pub static_nat_parse_errors: u64,
     #[serde(rename = "filter_term_counters", default)]
     pub filter_term_counters: Vec<FirewallFilterTermCounterStatus>,
     /// #3651: per-zone ingress/egress traffic (packet + byte) volume, summed

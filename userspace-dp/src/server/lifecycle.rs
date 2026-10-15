@@ -560,6 +560,9 @@ pub(crate) fn run() -> Result<(), String> {
             cos_interfaces: Vec::new(),
             policy_rule_counters: Vec::new(),
             nat_rule_counters: Vec::new(),
+            source_nat_parse_errors: 0,
+            destination_nat_parse_errors: 0,
+            static_nat_parse_errors: 0,
             filter_term_counters: Vec::new(),
             // #3651: per-zone traffic block is empty until the first status
             // refresh reads the helper's zone-counter store.

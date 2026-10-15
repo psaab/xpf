@@ -571,7 +571,7 @@ impl DnatTable {
                             // mixed-version pair or a direct control-socket
                             // write — the same class of caller #4718's own arms
                             // exist for.
-                            nat_counters.record_parse_error(&format!(
+                            nat_counters.record_destination_parse_error(&format!(
                                 "DNAT rule {:?}: unparseable destination prefix {:?}; \
                                  falling back to the host destination address {:?} — \
                                  the configured block is NOT being translated",
@@ -580,7 +580,7 @@ impl DnatTable {
                             DnatDest::Host(ip)
                         }
                         Err(_) => {
-                            nat_counters.record_parse_error(&format!(
+                            nat_counters.record_destination_parse_error(&format!(
                                 "DNAT rule {:?}: unparseable destination prefix {:?} and address {:?}",
                                 snap.name, snap.destination_prefix, snap.destination_address
                             ));
@@ -593,7 +593,7 @@ impl DnatTable {
                     Ok(ip) => DnatDest::Host(ip),
                     // #4718: surface the drop loudly instead of a silent skip.
                     Err(_) => {
-                        nat_counters.record_parse_error(&format!(
+                        nat_counters.record_destination_parse_error(&format!(
                             "DNAT rule {:?}: unparseable destination address {:?}",
                             snap.name, snap.destination_address
                         ));
@@ -632,7 +632,7 @@ impl DnatTable {
             let pool_ip: IpAddr = if snap.off {
                 IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
             } else if snap.pool_address.is_empty() {
-                nat_counters.record_parse_error(&format!(
+                nat_counters.record_destination_parse_error(&format!(
                     "DNAT rule {:?}: no translation action (neither a pool nor \
                      `off`) — a malformed rule admitted by a tolerant load; the \
                      rule is dropped and matching traffic falls through",
@@ -644,7 +644,7 @@ impl DnatTable {
                     Ok(ip) => ip,
                     // #4718: surface the drop loudly instead of a silent skip.
                     Err(_) => {
-                        nat_counters.record_parse_error(&format!(
+                        nat_counters.record_destination_parse_error(&format!(
                             "DNAT rule {:?}: unparseable pool address {:?}",
                             snap.name, snap.pool_address
                         ));
@@ -694,7 +694,13 @@ impl DnatTable {
                 }
                 token => match crate::ip_proto::proto_number(token) {
                     Some(p) => u16::from(p),
-                    None => continue,
+                    None => {
+                        nat_counters.record_destination_parse_error(&format!(
+                            "DNAT rule {:?}: unknown protocol token {:?}",
+                            snap.name, token
+                        ));
+                        continue;
+                    }
                 },
             };
             let hit_counter = nat_counters.rule_counter(snap.counter_id);
@@ -741,7 +747,7 @@ impl DnatTable {
                         // stopped matching had no signal that its only source
                         // entry never reached the dataplane. Fail-closed is
                         // the right behaviour; being quiet about it is not.
-                        Err(_) => nat_counters.record_parse_error(&format!(
+                        Err(_) => nat_counters.record_destination_parse_error(&format!(
                             "DNAT rule {:?}: unparseable match source-address {:?} \
                              (entry dropped; rule stays source-scoped and fails closed)",
                             snap.name, prefix

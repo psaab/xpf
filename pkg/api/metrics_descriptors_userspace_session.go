@@ -13,6 +13,11 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 		"Aggregate userspace session-table capacity across workers.",
 		nil, nil,
 	)
+	c.userspaceNATParseErrorsTotal = prometheus.NewDesc(
+		"xpf_userspace_nat_parse_errors_total",
+		"Cumulative NAT snapshot parse or validation failures, partitioned by source, destination, and static NAT rules.",
+		[]string{"type"}, nil,
+	)
 	// #8447: source-NAT rule-match outcomes. Consulted is the denominator that
 	// makes the other three readable — it counts every packet that REACHED the
 	// match path, including ones that matched nothing, so a zero elsewhere can

@@ -3921,3 +3921,20 @@ fn screen_security_counters_roundtrip_in_binding_status_13285() {
     assert_eq!(back.screen_scan_sweep_skipped_pressure, 19);
     assert_eq!(back.screen_scan_sweep_evicted_pressure, 23);
 }
+#[test]
+fn process_status_roundtrips_typed_nat_parse_errors_13283() {
+    let status = ProcessStatus {
+        source_nat_parse_errors: 17,
+        destination_nat_parse_errors: 19,
+        static_nat_parse_errors: 23,
+        ..ProcessStatus::default()
+    };
+    let value = serde_json::to_value(&status).unwrap();
+    assert_eq!(value["source_nat_parse_errors"], 17);
+    assert_eq!(value["destination_nat_parse_errors"], 19);
+    assert_eq!(value["static_nat_parse_errors"], 23);
+    let decoded: ProcessStatus = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.source_nat_parse_errors, 17);
+    assert_eq!(decoded.destination_nat_parse_errors, 19);
+    assert_eq!(decoded.static_nat_parse_errors, 23);
+}

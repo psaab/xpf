@@ -211,6 +211,25 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.InterfaceSNATPATCollisionsTotal),
 	)
+	// #13283: NAT parse/validation failures, partitioned by the builder.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceNATParseErrorsTotal,
+		prometheus.CounterValue,
+		float64(status.SourceNATParseErrors),
+		"source",
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceNATParseErrorsTotal,
+		prometheus.CounterValue,
+		float64(status.DestinationNATParseErrors),
+		"destination",
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceNATParseErrorsTotal,
+		prometheus.CounterValue,
+		float64(status.StaticNATParseErrors),
+		"static",
+	)
 	// #7056: emitted unconditionally like the sibling above — a published 0 is
 	// the informative reading (no alias was ever refused), not an absent series.
 	ch <- prometheus.MustNewConstMetric(
