@@ -1049,6 +1049,19 @@ pub(super) fn populate_interfaces(
             }
         }
     }
+    // An unzoned sibling row may have armed an empty-zone host-inbound
+    // sentinel before another row on the same ifindex establishes a valid
+    // zone. In that case host-bound traffic must use the retained zone's
+    // admission policy, not the sibling row's deny-all sentinel.
+    empty_zone_host_inbound_sentinels.retain(|ifindex| {
+        if state.ifindex_to_zone_id.contains_key(ifindex) {
+            state.ifindex_host_inbound.remove(ifindex);
+            false
+        } else {
+            true
+        }
+    });
+
 
     // #10503: contested-ifindex host-inbound fail-closed backstop — SYMMETRY
     // with the #5659 addressed-empty-zone backstop above. Despite its historical
