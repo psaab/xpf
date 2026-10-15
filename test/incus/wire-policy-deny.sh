@@ -488,30 +488,31 @@ wire_policy_deny_cleanup() {
 }
 wire_policy_deny_arm_finalizer
 
-# ── Phase 2: shared capture window + bursts ──────────────────────────
-# Probe at the §2 drop floor (1000, zero must emerge); control with a
-# loss margin (offered 1500, ≥1000 must emerge) so routine path loss
-# cannot manufacture a capture-blind VOID. Two sender runs under ONE
-# capture window.
-echo "--- capture window + bursts (probe $BURST, control $CONTROL_BURST) ---"
+# ── Phase 2: shared capture window with interleaved witness/probe traffic ──
+# The control sends half its offered frames before and half after the probe;
+# the leading witness proves tcpdump was attached before any probe could leak.
+echo "--- capture window + interleaved bursts (probe $BURST, control $CONTROL_BURST) ---"
 CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-cap.XXXXXX")"
 $SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -i any -n -vv udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$CAPLOG" 2>&1 &
 CAP_PID=$!
 sleep 3 # let tcpdump settle before the first datagram
-SENT_P="$($SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --probe-port $PROBE_PORT --control-port $PROBE_PORT --count $((BURST / 2)) --rate 200" 2>&1 | grep -E '^SENT' || true)"
-SENT_C="$($SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --probe-port $CONTROL_PORT --control-port $CONTROL_PORT --count $((CONTROL_BURST / 2)) --rate 200" 2>&1 | grep -E '^SENT' || true)"
-echo "sender probe: $SENT_P"
-echo "sender control: $SENT_C"
-# Both legs of each run target the SAME port, so offered = probe + control.
-# Portable sed (no gawk match() arrays): extract-or-empty, then add.
-_pp=$(sed -E 's/.*probe=([0-9]+).*/\1/;t;d' <<<"$SENT_P" 2>/dev/null || true)
-_pc=$(sed -E 's/.*control=([0-9]+).*/\1/;t;d' <<<"$SENT_P" 2>/dev/null || true)
-_cp=$(sed -E 's/.*probe=([0-9]+).*/\1/;t;d' <<<"$SENT_C" 2>/dev/null || true)
-_cc=$(sed -E 's/.*control=([0-9]+).*/\1/;t;d' <<<"$SENT_C" 2>/dev/null || true)
+SENT="$($SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --leg $CONTROL_PORT:$((CONTROL_BURST / 2)) --leg $PROBE_PORT:$BURST --leg $CONTROL_PORT:$((CONTROL_BURST / 2)) --sizes 64,1400 --rate 200" 2>&1 | grep -E '^SENT legs=' || true)"
+echo "sender interleaved legs: $SENT"
 POFFERED=0
 COFFERED=0
-[[ "$_pp" =~ ^[0-9]+$ && "$_pc" =~ ^[0-9]+$ ]] && POFFERED=$((_pp + _pc))
-[[ "$_cp" =~ ^[0-9]+$ && "$_cc" =~ ^[0-9]+$ ]] && COFFERED=$((_cp + _cc))
+if [[ "$SENT" =~ ^SENT\\ legs= ]]; then
+    IFS=',' read -ra SENT_LEGS <<<"${SENT#SENT legs=}"
+    for leg in "${SENT_LEGS[@]}"; do
+        port="${leg%%=*}"
+        count="${leg#*=}"
+        [[ "$count" =~ ^[0-9]+$ ]] || count=0
+        if [[ "$port" == "$PROBE_PORT" ]]; then
+            POFFERED=$((POFFERED + count))
+        elif [[ "$port" == "$CONTROL_PORT" ]]; then
+            COFFERED=$((COFFERED + count))
+        fi
+    done
+fi
 sleep 5 # drain: datagrams in flight when the sender exits
 kill "$CAP_PID" 2>/dev/null || true
 wait "$CAP_PID" 2>/dev/null || true
