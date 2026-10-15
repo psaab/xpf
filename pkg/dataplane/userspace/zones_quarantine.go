@@ -77,7 +77,7 @@ func (c ZoneIDCollision) String() string {
 // Collision records remain sorted for deterministic operator output (nil in
 // the common no-collision case).
 func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
-	if snap == nil || len(snap.Zones) == 0 {
+	if snap == nil {
 		return nil
 	}
 	names := config.ZoneQuarantineNamesForConfig(snap.Config)
@@ -166,6 +166,38 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 		if _, drop := quarantined[snap.TunnelEndpoints[i].Zone]; drop {
 			snap.TunnelEndpoints[i].Zone = ""
 		}
+	}
+	// Screen and diagnostic rows use the same quarantine view as zones. This
+	// includes reserved names and peer-only collision losers.
+	screens := snap.Screens[:0]
+	syncookieActive := false
+	for _, screen := range snap.Screens {
+		if _, drop := quarantined[screen.Zone]; drop {
+			continue
+		}
+		screens = append(screens, screen)
+		if screen.SYNCookie && screen.SYNFloodThreshold > 0 {
+			syncookieActive = true
+		}
+	}
+	snap.Screens = screens
+	missing := snap.ScreenMissingProfiles[:0]
+	for _, ref := range snap.ScreenMissingProfiles {
+		if _, drop := quarantined[ref.Zone]; !drop {
+			missing = append(missing, ref)
+		}
+	}
+	snap.ScreenMissingProfiles = missing
+	inert := snap.ScreenInertProfiles[:0]
+	for _, ref := range snap.ScreenInertProfiles {
+		if _, drop := quarantined[ref.Zone]; !drop {
+			inert = append(inert, ref)
+		}
+	}
+	snap.ScreenInertProfiles = inert
+	if !syncookieActive {
+		snap.SYNCookieMasterKey = ""
+		snap.SYNCookieKeyRing = nil
 	}
 	// Scrub collision-loser zone references so the snapshot carries no dangling
 	// policy->zone reference (which the Rust UnresolvableZoneReference preflight
