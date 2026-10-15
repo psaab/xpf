@@ -707,6 +707,10 @@ func (d *Daemon) teardownSNMPLocked() {
 	}
 	if d.snmpAgent != nil {
 		d.snmpAgent.Stop()
+		enqueued, sent, dropped := d.snmpAgent.TrapStats()
+		d.snmpTrapsEnqueued += enqueued
+		d.snmpTrapsSent += sent
+		d.snmpTrapsDropped += dropped
 	}
 	d.snmpAgent = nil
 	d.snmpCtx = nil

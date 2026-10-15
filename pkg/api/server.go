@@ -353,6 +353,9 @@ type Config struct {
 	// kernel-route-listener pair. Optional; nil leaves both metrics unemitted.
 	RouteListenerMarksFn       func() uint64
 	RouteListenerRepublishesFn func() uint64
+	// SNMPTrapStatsFn supplies cumulative submissions, successful sends, and
+	// drops for the xpf_snmp_traps_* counters. Optional; nil omits the family.
+	SNMPTrapStatsFn func() (enqueued, sent, dropped uint64)
 	// EventActionStatsFn surfaces event-options remediation action
 	// counters for the xpf_event_actions_* / xpf_event_action_queue_depth
 	// metrics (#2157). Optional; if nil, the family is omitted.
@@ -698,6 +701,7 @@ type Server struct {
 	hostInboundConntrackFlushFailuresFn  func() uint64
 	hostInboundTCPlooseDisabledFn        func() bool
 	hostInboundTCPloosePostureFailuresFn func() uint64
+	snmpTrapStatsFn                      func() (enqueued, sent, dropped uint64)
 	managedServiceReloadOwedFn           func() map[string]bool
 	managedServiceReloadFailuresFn       func() map[string]uint64
 	remoteArchiveStatusFn                func() (uint64, uint64)
@@ -830,6 +834,7 @@ func NewServer(cfg Config) *Server {
 		hostInboundConntrackRevocationOwedFn: cfg.HostInboundConntrackRevocationOwedFn,
 		hostInboundConntrackFlushFailuresFn:  cfg.HostInboundConntrackFlushFailuresFn,
 		hostInboundTCPlooseDisabledFn:        cfg.HostInboundTCPlooseDisabledFn,
+		snmpTrapStatsFn:                      cfg.SNMPTrapStatsFn,
 		hostInboundTCPloosePostureFailuresFn: cfg.HostInboundTCPloosePostureFailuresFn,
 		managedServiceReloadOwedFn:           cfg.ManagedServiceReloadOwedFn,
 		managedServiceReloadFailuresFn:       cfg.ManagedServiceReloadFailuresFn,
