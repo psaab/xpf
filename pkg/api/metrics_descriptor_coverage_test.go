@@ -642,6 +642,10 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_dynamic_neighbor_present",                           // #1782 cold-start H2 dump
 		"xpf_userspace_session_publish_errors_total",                       // #1789 publish failures
 		"xpf_userspace_policy_revoked_sessions_total",                      // #10021 policy-revoked sessions
+		"xpf_userspace_pptp_unassociated_drops_total",                      // #13282 flowless GREv1 packets
+		"xpf_userspace_pptp_expired_idle_total",                            // #13282 association expiry
+		"xpf_userspace_pptp_handle_collisions_total",                       // #13282 fail-closed collisions
+		"xpf_userspace_pptp_allocator_collisions_total",                    // #13282 fail-closed alias collisions
 		"xpf_userspace_unzoned_ingress_denied_total",                       // #11503 direction-specific cause
 		"xpf_userspace_unzoned_egress_denied_total",                        // #11503 direction-specific cause
 		"xpf_userspace_dnat_publish_errors_total",                          // #2244 dnat_table reverse-NAT publish failures

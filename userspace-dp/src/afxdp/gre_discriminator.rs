@@ -282,7 +282,7 @@ mod tests {
     fn an_unassociated_call_is_flowless_and_counted_7699() {
         let mut sessions = crate::session::SessionTable::new();
         install_call(&mut sessions, 100, 200);
-        let before = sessions.pptp().unassociated_count();
+        let before = sessions.pptp().unassociated();
 
         let (f, m) = pptp_v4_frame(PEER_A, PEER_B, 999);
         assert!(
@@ -291,7 +291,7 @@ mod tests {
              its own would let it alias the next call that reuses the id"
         );
         assert_eq!(
-            sessions.pptp().unassociated_count(),
+            sessions.pptp().unassociated(),
             before + 1,
             "the unassociated packet was not counted. The counter is the only \
              signal that this path is reachable at all, and it reads the same \

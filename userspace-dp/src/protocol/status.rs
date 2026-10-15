@@ -228,6 +228,15 @@ pub(crate) struct ProcessStatus {
     /// it (defaults to 0).
     #[serde(rename = "session_create_drops", default)]
     pub session_create_drops: u64,
+    /// #13282: cumulative PPTP association outcomes, summed across workers.
+    #[serde(rename = "pptp_unassociated_drops", default)]
+    pub pptp_unassociated_drops: u64,
+    #[serde(rename = "pptp_expired_idle", default)]
+    pub pptp_expired_idle: u64,
+    #[serde(rename = "pptp_handle_collisions", default)]
+    pub pptp_handle_collisions: u64,
+    #[serde(rename = "pptp_allocator_collisions", default)]
+    pub pptp_allocator_collisions: u64,
     /// #1861: aggregate pair-admission preflight refusals (one per
     /// refused flow) — the new-flow transaction boundary dropping a
     /// trigger packet at/near max_sessions. Additive.

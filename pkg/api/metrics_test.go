@@ -1194,6 +1194,18 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspacePptpUnassociatedDrops: prometheus.NewDesc(
+			"xpf_userspace_pptp_unassociated_drops_total", "pptp", nil, nil,
+		),
+		userspacePptpExpiredIdle: prometheus.NewDesc(
+			"xpf_userspace_pptp_expired_idle_total", "pptp", nil, nil,
+		),
+		userspacePptpHandleCollisions: prometheus.NewDesc(
+			"xpf_userspace_pptp_handle_collisions_total", "pptp", nil, nil,
+		),
+		userspacePptpAllocatorCollisions: prometheus.NewDesc(
+			"xpf_userspace_pptp_allocator_collisions_total", "pptp", nil, nil,
+		),
 		// #10021: policy-revoked-sessions total emitted unconditionally.
 		userspacePolicyRevokedSessions: prometheus.NewDesc(
 			"xpf_userspace_policy_revoked_sessions_total",
@@ -1771,6 +1783,10 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		SessionCreateDrops:             9,
 		SessionInstallAdmissionRefused: 8,
 		SessionInstallPartial:          1,
+		PptpUnassociatedDrops:          101,
+		PptpExpiredIdle:                103,
+		PptpHandleCollisions:           107,
+		PptpAllocatorCollisions:        109,
 		Bindings: []dpuserspace.BindingStatus{
 			{
 				Slot:              0,
@@ -1887,14 +1903,16 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// outcomes add four distinct lifetime counters, for 94 total; #11437's
 	// unbuildable-PTB counter adds one more, for 95; #11503 adds distinct
 	// unzoned ingress/egress cause counters, for 97; #9506 S9.5 adds the
-	// permit-forward-armed counter, for 98. #13283 adds three typed NAT parse
-	// failure series, bringing this emitter census to 101.
+	// permit-forward-armed counter, for 98; #13283 adds three typed NAT parse
+	// failure series, for 101, and replaces an aggregate with three typed
+	// counters, bringing this emitter census to 104. #13282 adds four PPTP
+	// lifecycle counters, for 108.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
-	// #13283 replaces one aggregate series with three typed counters, bringing the count to 104.
-	// All new series are asserted below so the census remains an assertion gate.
-	if len(got) != 104 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 104 metrics, got %d", len(got))
+	// an unverified metric. All new series ARE asserted below, so the original
+	// claim still holds and the number moves with the population.
+	if len(got) != 108 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 108 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -2088,6 +2106,10 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceSessionCreateDrops, nil, 9)
 	assertCounterClose(t, got, c.userspaceSessionInstallAdmissionRefused, nil, 8)
 	assertCounterClose(t, got, c.userspaceSessionInstallPartial, nil, 1)
+	assertCounterClose(t, got, c.userspacePptpUnassociatedDrops, nil, 101)
+	assertCounterClose(t, got, c.userspacePptpExpiredIdle, nil, 103)
+	assertCounterClose(t, got, c.userspacePptpHandleCollisions, nil, 107)
+	assertCounterClose(t, got, c.userspacePptpAllocatorCollisions, nil, 109)
 	assertGaugeClose(t, got, c.userspaceFlowCacheActiveFlows, nil, 12)
 	assertGaugeClose(t, got, c.userspaceFlowCacheCapacity, nil, 20)
 	assertGaugeClose(t, got, c.bindingFlowCacheCapacity, map[string]string{

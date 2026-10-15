@@ -592,6 +592,11 @@ pub(crate) fn worker_loop(
                 // #1861: install-refusal trio from the worker's
                 // SessionTable (create_drops was write-only before).
                 wr_counters.session_create_drops = sessions.create_drops();
+                let pptp = sessions.pptp().counters();
+                wr_counters.pptp_unassociated_drops = pptp.unassociated;
+                wr_counters.pptp_expired_idle = pptp.expired_idle;
+                wr_counters.pptp_handle_collisions = pptp.handle_collisions;
+                wr_counters.pptp_allocator_collisions = pptp.allocator_collisions;
                 // #7919: (no handle, stale handle, key mismatch)
                 let (miss_nh, miss_sh, miss_km) = sessions.lookup_miss_counts();
                 wr_counters.session_lookup_miss_no_handle = miss_nh;

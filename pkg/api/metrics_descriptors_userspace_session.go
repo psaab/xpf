@@ -230,6 +230,27 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 	c.userspaceSessionGCHealedOnPromote = prometheus.NewDesc("xpf_userspace_session_gc_healed_on_promote_total", "Peer-synced sessions self-healed after local RG promotion.", nil, nil)
 	c.userspaceSessionGCAgedOwnerRGZeroActiveNode = prometheus.NewDesc("xpf_userspace_session_gc_aged_owner_rg_zero_active_node_total", "Owner-RG-zero sessions aged on a node forwarding another RG.", nil, nil)
 	c.userspaceSessionGCKeptAliveByCompanion = prometheus.NewDesc("xpf_userspace_session_gc_kept_alive_by_companion_total", "Idle-crossed session entries retained by their active companion.", nil, nil)
+	c.userspacePptpUnassociatedDrops = prometheus.NewDesc(
+		"xpf_userspace_pptp_unassociated_drops_total",
+		"Cumulative GREv1 packets without a PPTP association; they remain "+
+			"flowless but are forwarded (#13282).",
+		nil, nil,
+	)
+	c.userspacePptpExpiredIdle = prometheus.NewDesc(
+		"xpf_userspace_pptp_expired_idle_total",
+		"Cumulative PPTP call associations expired idle, across workers (#13282).",
+		nil, nil,
+	)
+	c.userspacePptpHandleCollisions = prometheus.NewDesc(
+		"xpf_userspace_pptp_handle_collisions_total",
+		"Fail-closed PPTP association handle collision refusals (#13282).",
+		nil, nil,
+	)
+	c.userspacePptpAllocatorCollisions = prometheus.NewDesc(
+		"xpf_userspace_pptp_allocator_collisions_total",
+		"Fail-closed PPTP allocator Call-ID collision refusals (#13282).",
+		nil, nil,
+	)
 	// #4800: the process-global publish + replication legs of the
 	// new-flow-install contention surface. Each contended counter ships
 	// with the acquisition counter that is its denominator, because a

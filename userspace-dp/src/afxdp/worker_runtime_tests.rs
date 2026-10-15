@@ -44,6 +44,10 @@ fn snapshot_roundtrip() {
         session_create_drops: 31,
         session_install_admission_refused: 17,
         session_install_partial: 1,
+        pptp_unassociated_drops: 41,
+        pptp_expired_idle: 43,
+        pptp_handle_collisions: 47,
+        pptp_allocator_collisions: 53,
         new_flow_installs: 9_876,
         // #7919 / #7689: this literal enumerated every field, so three new
         // counters broke it. Given a tail rather than three more lines — the
@@ -111,6 +115,10 @@ fn snapshot_roundtrip() {
         c.session_install_admission_refused
     );
     assert_eq!(s.session_install_partial, c.session_install_partial);
+    assert_eq!(s.pptp_unassociated_drops, c.pptp_unassociated_drops);
+    assert_eq!(s.pptp_expired_idle, c.pptp_expired_idle);
+    assert_eq!(s.pptp_handle_collisions, c.pptp_handle_collisions);
+    assert_eq!(s.pptp_allocator_collisions, c.pptp_allocator_collisions);
     // #4800: per-worker transit new-flow installs survive publish/snapshot.
     assert_eq!(s.new_flow_installs, c.new_flow_installs);
 }

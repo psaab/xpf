@@ -222,6 +222,16 @@ pub(crate) enum PptpInstallError {
     AllocatorCollision { allocator: IpAddr, call_id: u16, owner: u32 },
 }
 
+/// Cumulative PPTP association lifecycle and fail-closed install outcomes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PptpCounters {
+    pub(crate) unassociated: u64,
+    pub(crate) expired_idle: u64,
+    pub(crate) handle_collisions: u64,
+    pub(crate) allocator_collisions: u64,
+}
+
+
 /// The learned associations, indexed for packet resolution.
 #[derive(Default)]
 pub(crate) struct PptpAssociations {
@@ -241,6 +251,9 @@ pub(crate) struct PptpAssociations {
     /// counter is a "PPTP is running unattributed" signal, NOT an error rate,
     /// and reading it as one is how a routinely non-zero counter gets ignored.
     unassociated: u64,
+    expired_idle: u64,
+    handle_collisions: u64,
+    allocator_collisions: u64,
 }
 
 impl PptpAssociations {
@@ -267,6 +280,7 @@ impl PptpAssociations {
                 return Ok(handle);
             }
             Some(existing) => {
+                self.handle_collisions = self.handle_collisions.saturating_add(1);
                 return Err(PptpInstallError::HandleCollision {
                     existing: existing.call,
                     handle,
@@ -283,6 +297,7 @@ impl PptpAssociations {
             if let Some(owner) = self.by_allocator.get(&(allocator, call_id))
                 && *owner != handle
             {
+                self.allocator_collisions = self.allocator_collisions.saturating_add(1);
                 return Err(PptpInstallError::AllocatorCollision {
                     allocator,
                     call_id,
@@ -365,6 +380,7 @@ impl PptpAssociations {
         for handle in &stale {
             self.remove(*handle);
         }
+        self.expired_idle = self.expired_idle.saturating_add(stale.len() as u64);
         stale.len()
     }
 
@@ -446,8 +462,16 @@ impl PptpAssociations {
         self.unassociated = self.unassociated.saturating_add(1);
     }
 
-    pub(crate) fn unassociated_count(&self) -> u64 {
+    pub(crate) fn unassociated(&self) -> u64 {
         self.unassociated
+    }
+    pub(crate) fn counters(&self) -> PptpCounters {
+        PptpCounters {
+            unassociated: self.unassociated,
+            expired_idle: self.expired_idle,
+            handle_collisions: self.handle_collisions,
+            allocator_collisions: self.allocator_collisions,
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -678,11 +702,65 @@ mod tests_7699 {
     fn an_unassociated_packet_resolves_to_none_and_is_counted_7699() {
         let mut t = PptpAssociations::default();
         assert_eq!(t.resolve(ip("203.0.113.9"), 0x2222), None);
-        assert_eq!(t.unassociated_count(), 0, "resolve must not itself count");
+        assert_eq!(t.unassociated(), 0, "resolve must not itself count");
         t.note_unassociated();
         t.note_unassociated();
-        assert_eq!(t.unassociated_count(), 2);
+        assert_eq!(t.unassociated(), 2);
     }
+    /// #13282: counter snapshot must retain all PPTP lifecycle/failure signals.
+    #[test]
+    fn pptp_counters_report_unassociated_expiry_and_collisions_13282() {
+        let (a, b, c) = (
+            ip("198.51.100.7"),
+            ip("203.0.113.9"),
+            ip("203.0.113.10"),
+        );
+        let mut table = PptpAssociations::default();
+        table.note_unassociated();
+        table.note_unassociated();
+        let first = PptpCall::new(a, 0x1111, b, 0x2222);
+        let second = PptpCall::new(a, 0x3333, c, 0x4444);
+        table.install(first, ctl(a, b), 0).expect("first");
+        table.install(second, ctl(a, c), 0).expect("second");
+        let same_handle_different_call = PptpCall::new(a, 0x5555, b, 0x6666);
+        let mut handle_collision = PptpAssociations::default();
+        handle_collision.force_handle_for_test(first, same_handle_different_call.handle());
+        assert!(matches!(
+            handle_collision.install(same_handle_different_call, ctl(a, b), 1),
+            Err(PptpInstallError::HandleCollision { .. })
+        ));
+        let alias_collision = PptpCall::new(a, 0x1111, c, 0x7777);
+        assert!(matches!(
+            table.install(alias_collision, ctl(a, c), 1),
+            Err(PptpInstallError::AllocatorCollision { .. })
+        ));
+        assert_eq!(
+            table.expire_idle(ASSOCIATION_IDLE_TIMEOUT_NS + 1, ASSOCIATION_IDLE_TIMEOUT_NS),
+            2
+        );
+        let counters = table.counters();
+        assert_eq!(counters.unassociated, 2);
+        assert_eq!(counters.expired_idle, 2);
+        assert_eq!(counters.allocator_collisions, 1);
+        assert_eq!(handle_collision.counters().handle_collisions, 1);
+        let mut sessions = crate::session::SessionTable::new();
+        sessions.pptp_mut().note_unassociated();
+        sessions
+            .pptp_mut()
+            .install(first, ctl(a, b), 0)
+            .expect("session-table call 1");
+        sessions
+            .pptp_mut()
+            .install(second, ctl(a, c), 0)
+            .expect("session-table call 2");
+        let _ = sessions.expire_stale_entries_ha(
+            ASSOCIATION_IDLE_TIMEOUT_NS + 1,
+            None,
+        );
+        assert_eq!(sessions.pptp().counters().expired_idle, 2);
+        assert_eq!(sessions.pptp().unassociated(), 1);
+    }
+
 
     /// Teardown must remove BOTH allocator entries.
     ///
