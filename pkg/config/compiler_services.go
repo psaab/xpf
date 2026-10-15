@@ -183,7 +183,7 @@ func validateRPMLinkLocalZoneStrict(cfg *Config) error {
 			if zone == "" && test.DestinationInterface == "" {
 				return fmt.Errorf(
 					"services rpm probe %q test %q: target %q is an IPv6 link-local address "+
-					"with no scope — add an explicit %%zone (fe80::1%%ge-0/0/3; in a URL "+
+						"with no scope — add an explicit %%zone (fe80::1%%ge-0/0/3; in a URL "+
 						"target the zone must be kernel-spelled and %%25-escaped, "+
 						"http://[fe80::1%%25ge-0-0-3]/) or a destination-interface so the "+
 						"probe can pick the egress link",
@@ -463,7 +463,7 @@ func compileDHCPLocalServer(node *Node, dhcp *DHCPServerConfig, isV6 bool) error
 	// represent two different servers. mergeDHCPDynamicDNS is retained ONLY for
 	// the degenerate same-family-block-seen-twice case (compileDHCPLocalServer
 	// runs once per family, so it is effectively a defensive no-op now).
-	if ddnsNode := node.FindChild("dynamic-dns"); ddnsNode != nil {
+	for _, ddnsNode := range node.FindChildren("dynamic-dns") {
 		if ddns := compileDHCPDynamicDNS(ddnsNode); ddns != nil {
 			if isV6 {
 				dhcp.DynamicDNSv6 = mergeDHCPDynamicDNS(dhcp.DynamicDNSv6, ddns)
@@ -1030,17 +1030,17 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 }
 
 func compileServices(node *Node, svc *ServicesConfig, warnings *[]string) error {
-	if fmNode := node.FindChild("flow-monitoring"); fmNode != nil {
+	for _, fmNode := range node.FindChildren("flow-monitoring") {
 		if err := compileFlowMonitoring(fmNode, svc); err != nil {
 			return err
 		}
 	}
-	if rpmNode := node.FindChild("rpm"); rpmNode != nil {
+	for _, rpmNode := range node.FindChildren("rpm") {
 		if err := compileRPM(rpmNode, svc); err != nil {
 			return err
 		}
 	}
-	if ipmNode := node.FindChild("ip-monitoring"); ipmNode != nil {
+	for _, ipmNode := range node.FindChildren("ip-monitoring") {
 		if err := compileIPMonitoring(ipmNode, svc); err != nil {
 			return err
 		}
@@ -1142,7 +1142,13 @@ func servicesSSLProxyWarnings(node *Node, seen map[string]struct{}) []string {
 // Two set lines for the same (routing-instance, route) merge into one
 // PreferredRoute (next-hop + preferred-metric arrive on separate lines).
 func compileIPMonitoring(node *Node, svc *ServicesConfig) error {
-	cfg := &IPMonitoringConfig{Policies: make(map[string]*IPMonitoringPolicy)}
+	cfg := svc.IPMonitoring
+	if cfg == nil {
+		cfg = &IPMonitoringConfig{Policies: make(map[string]*IPMonitoringPolicy)}
+	}
+	if cfg.Policies == nil {
+		cfg.Policies = make(map[string]*IPMonitoringPolicy)
+	}
 
 	for _, polInst := range namedInstances(node.FindChildren("policy")) {
 		pol := &IPMonitoringPolicy{Name: polInst.name}
@@ -1186,9 +1192,19 @@ func compileIPMonitoring(node *Node, svc *ServicesConfig) error {
 		for _, key := range order {
 			pol.PreferredRoutes = append(pol.PreferredRoutes, routes[key])
 		}
-		cfg.Policies[pol.Name] = pol
+		existing := cfg.Policies[pol.Name]
+		if existing == nil {
+			cfg.Policies[pol.Name] = pol
+			continue
+		}
+		if pol.MatchRPMProbe != "" {
+			existing.MatchRPMProbe = pol.MatchRPMProbe
+		}
+		if pol.HoldDownSecs != 0 {
+			existing.HoldDownSecs = pol.HoldDownSecs
+		}
+		existing.PreferredRoutes = append(existing.PreferredRoutes, pol.PreferredRoutes...)
 	}
-
 	svc.IPMonitoring = cfg
 	return nil
 }
@@ -1275,7 +1291,13 @@ func validateIPMonitoringStrict(cfg *Config) error {
 			instances[ri.Name] = ri
 		}
 	}
-	for name, pol := range ipm.Policies {
+	policyNames := make([]string, 0, len(ipm.Policies))
+	for name := range ipm.Policies {
+		policyNames = append(policyNames, name)
+	}
+	sort.Strings(policyNames)
+	for _, name := range policyNames {
+		pol := ipm.Policies[name]
 		if pol == nil {
 			continue
 		}
@@ -1401,7 +1423,13 @@ func resolveIPMonitoringInterfaceNextHop(cfg *Config, polName string, pr *Prefer
 }
 
 func compileRPM(node *Node, svc *ServicesConfig) error {
-	rpmCfg := &RPMConfig{Probes: make(map[string]*RPMProbe)}
+	rpmCfg := svc.RPM
+	if rpmCfg == nil {
+		rpmCfg = &RPMConfig{Probes: make(map[string]*RPMProbe)}
+	}
+	if rpmCfg.Probes == nil {
+		rpmCfg.Probes = make(map[string]*RPMProbe)
+	}
 	defaultProbeLimit := 0
 
 	if probeLimitNode := node.FindChild("probe-limit"); probeLimitNode != nil {
@@ -1563,9 +1591,12 @@ func compileRPM(node *Node, svc *ServicesConfig) error {
 }
 
 func compileFlowMonitoring(node *Node, svc *ServicesConfig) error {
-	fm := &FlowMonitoringConfig{}
+	fm := svc.FlowMonitoring
+	if fm == nil {
+		fm = &FlowMonitoringConfig{}
+	}
 
-	if v9Node := node.FindChild("version9"); v9Node != nil {
+	for _, v9Node := range node.FindChildren("version9") {
 		v9cfg := &NetFlowV9Config{
 			Templates: make(map[string]*NetFlowV9Template),
 		}
@@ -1625,10 +1656,19 @@ func compileFlowMonitoring(node *Node, svc *ServicesConfig) error {
 			}
 			v9cfg.Templates[tmpl.Name] = tmpl
 		}
-		fm.Version9 = v9cfg
+		if fm.Version9 == nil {
+			fm.Version9 = v9cfg
+		} else {
+			if fm.Version9.Templates == nil {
+				fm.Version9.Templates = make(map[string]*NetFlowV9Template)
+			}
+			for name, tmpl := range v9cfg.Templates {
+				fm.Version9.Templates[name] = tmpl
+			}
+		}
 	}
 
-	if ipfixNode := node.FindChild("version-ipfix"); ipfixNode != nil {
+	for _, ipfixNode := range node.FindChildren("version-ipfix") {
 		ipfixCfg := &NetFlowIPFIXConfig{
 			Templates: make(map[string]*NetFlowIPFIXTemplate),
 		}
@@ -1684,11 +1724,21 @@ func compileFlowMonitoring(node *Node, svc *ServicesConfig) error {
 			}
 			ipfixCfg.Templates[tmpl.Name] = tmpl
 		}
-		fm.VersionIPFIX = ipfixCfg
+		if fm.VersionIPFIX == nil {
+			fm.VersionIPFIX = ipfixCfg
+		} else {
+			if fm.VersionIPFIX.Templates == nil {
+				fm.VersionIPFIX.Templates = make(map[string]*NetFlowIPFIXTemplate)
+			}
+			for name, tmpl := range ipfixCfg.Templates {
+				fm.VersionIPFIX.Templates[name] = tmpl
+			}
+		}
 	}
 
 	svc.FlowMonitoring = fm
 	return nil
+
 }
 
 func compileForwardingOptions(node *Node, fo *ForwardingOptionsConfig) error {

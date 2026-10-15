@@ -432,15 +432,7 @@ var namedDupRules = []namedDupRule{
 	{stanza: "security", inner: "ipsec", keyword: "proposal", kind: "ipsec proposal", effect: dupEffectLastWins},
 }
 
-var singletonDupRules = []singletonDupRule{
-	// #6768. compileServices reads each of these with FindChild — the FIRST
-	// sibling only — so a second block is silently ignored in full. Measured:
-	// `services { flow-monitoring { version9 … } flow-monitoring { version-ipfix
-	// … } }` compiles the v9 half and drops the IPFIX half entirely, with zero
-	// warnings. `application-identification` is excluded deliberately: it is a
-	// presence flag, so a repeat loses nothing.
-	{stanza: "services", keywords: []string{"flow-monitoring", "rpm", "ip-monitoring"}, kind: "services container"},
-}
+var singletonDupRules = []singletonDupRule{}
 
 // dupEffectStrict / dupEffectLenient render what a duplicate actually costs for
 // one container. The original single sentence said the EARLIER block is
