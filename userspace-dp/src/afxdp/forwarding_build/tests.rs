@@ -2474,55 +2474,103 @@ fn unzoned_tunnel_base_row_must_not_clobber_zoned_unit_zone_host_inbound_13180()
     const PROTO_TCP: u8 = 6;
     const PROTO_ICMP: u8 = 1;
 
-    let snapshot = ConfigSnapshot {
-        zones: vec![ZoneSnapshot {
-            name: "vpn".into(),
-            id: VPN_ZONE,
-            host_inbound_configured: true,
-            host_inbound_system_services: vec!["ping".into()],
+    let zones = vec![ZoneSnapshot {
+        name: "vpn".into(),
+        id: VPN_ZONE,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["ping".into()],
+        host_inbound_protocols: vec!["bgp".into()],
+        ..Default::default()
+    }];
+    let base = InterfaceSnapshot {
+        name: "st0".into(),
+        ifindex: SHARED_IFINDEX,
+        tunnel: true,
+        zone: String::new(),
+        ..Default::default()
+    };
+    let unit = InterfaceSnapshot {
+        name: "st0.0".into(),
+        ifindex: SHARED_IFINDEX,
+        tunnel: true,
+        zone: "vpn".into(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.10.10.1/30".into(),
             ..Default::default()
         }],
-        interfaces: vec![
-            InterfaceSnapshot {
-                name: "st0".into(),
-                ifindex: SHARED_IFINDEX,
-                tunnel: true,
-                zone: String::new(),
-                ..Default::default()
-            },
-            InterfaceSnapshot {
-                name: "st0.0".into(),
-                ifindex: SHARED_IFINDEX,
-                tunnel: true,
-                zone: "vpn".into(),
-                addresses: vec![InterfaceAddressSnapshot {
-                    family: "inet".into(),
-                    address: "10.10.10.1/30".into(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        ],
         ..Default::default()
     };
 
-    let state = build_forwarding_state(&snapshot);
-    assert_eq!(
-        state.ifindex_to_zone_id.get(&SHARED_IFINDEX).copied(),
-        Some(VPN_ZONE),
-        "zoned unit row must establish vpn on the shared ifindex"
+    // Row order must not decide whether the unzoned base sentinel shadows the
+    // valid unit zone.
+    for unit_first in [false, true] {
+        let mut interfaces = vec![base.clone(), unit.clone()];
+        if unit_first {
+            interfaces.reverse();
+        }
+        let snapshot = ConfigSnapshot {
+            zones: zones.clone(),
+            interfaces,
+            ..Default::default()
+        };
+        let state = build_forwarding_state(&snapshot);
+        assert_eq!(
+            state.ifindex_to_zone_id.get(&SHARED_IFINDEX).copied(),
+            Some(VPN_ZONE),
+            "zoned unit row must establish vpn on the shared ifindex"
+        );
+        assert!(
+            !state.ifindex_host_inbound.contains_key(&SHARED_IFINDEX),
+            "unzoned base row sentinel must not survive a retained zone on the ifindex"
+        );
+        assert!(
+            host_inbound_admits_iface(&state, SHARED_IFINDEX, VPN_ZONE, PROTO_ICMP, 0, false, 8),
+            "zone-level ping on st0.0 (zone vpn) must not be blocked by unzoned base row st0"
+        );
+        assert!(
+            host_inbound_admits_iface(&state, SHARED_IFINDEX, VPN_ZONE, PROTO_TCP, 179, false, 0),
+            "zone-level bgp on st0.0 (zone vpn) must not be blocked by unzoned base row st0"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED_IFINDEX, VPN_ZONE, PROTO_TCP, 22, false, 0),
+            "zone vpn (ping+bgp only) still denies ssh"
+        );
+    }
+
+    // An explicit interface override remains authoritative rather than being
+    // removed by the shared-ifindex sentinel cleanup.
+    let mut override_unit = unit;
+    override_unit.host_inbound_configured = true;
+    override_unit.host_inbound_system_services = vec!["ssh".into()];
+    let override_state = build_forwarding_state(&ConfigSnapshot {
+        zones,
+        interfaces: vec![base, override_unit],
+        ..Default::default()
+    });
+    assert!(
+        host_inbound_admits_iface(
+            &override_state,
+            SHARED_IFINDEX,
+            VPN_ZONE,
+            PROTO_TCP,
+            22,
+            false,
+            0
+        ),
+        "explicit interface ssh override must not be removed by sentinel cleanup"
     );
     assert!(
-        !state.ifindex_host_inbound.contains_key(&SHARED_IFINDEX),
-        "unzoned base row sentinel must not survive a retained zone on the ifindex"
-    );
-    assert!(
-        host_inbound_admits_iface(&state, SHARED_IFINDEX, VPN_ZONE, PROTO_ICMP, 0, false, 8),
-        "zone-level ping on st0.0 (zone vpn) must not be blocked by unzoned base row st0"
-    );
-    assert!(
-        !host_inbound_admits_iface(&state, SHARED_IFINDEX, VPN_ZONE, PROTO_TCP, 22, false, 0),
-        "zone vpn (ping only) still denies ssh"
+        !host_inbound_admits_iface(
+            &override_state,
+            SHARED_IFINDEX,
+            VPN_ZONE,
+            PROTO_ICMP,
+            0,
+            false,
+            8
+        ),
+        "explicit interface ssh override must take precedence over zone ping"
     );
 }
 
