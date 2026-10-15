@@ -40,14 +40,13 @@ import (
 //
 //	bind-interface st0.0  : NoRoute before -> MissingNeighbor after
 //
-// So every consumer's disposition toward a zoned secure-tunnel row is already
-// decided, shipped, and reviewed — by Shape A. This appends a row that is
-// FIELD-IDENTICAL to the one Shape A produces for the same tunnel, including
-// every unit CoS field from the same compiled binding and coSUnit* helpers.
-// This makes the per-consumer question "should the two spellings of one
-// tunnel behave the same?" rather than five independent judgements. #7949's
-// acceptance criteria are met as a parity assertion, with CoS pinned
-// separately in secure_tunnel_bind_only_7949_test.go.
+// Shape A already establishes the consumer disposition for a zoned tunnel.
+// For an authored unit ref the synthesized row matches that Shape A unit,
+// including the unit's compiled CoS fields. #13100 also resolves a stanza-less
+// bare zone member to the bound logical unit, so ingress netdevs and unit
+// overrides do not get lost on an IsUnit=false base row. A declared base
+// stanza remains authoritative. Unit parity and CoS are pinned separately in
+// secure_tunnel_bind_only_7949_test.go.
 //
 // THE THREE REQUIREMENTS THE ISSUE PLACES ON ANY IMPLEMENTATION.
 //
@@ -115,7 +114,8 @@ func appendBindInterfaceOnlySecureTunnelRows(
 	// `st<N>.0` names the actual unit-0 identity and must own the shared bare
 	// xfrmi instead of being suppressed by the earlier base row.
 	// Retire that inherited base row only when the base itself was not authored;
-	// explicit bare zone members keep their row and precedence.
+	// explicit bare stanza rows keep their row and precedence. Stanza-less
+	// secure tunnels are normalized to their logical unit below.
 	//
 	// Unit 0 may already have a stanza row. In that case it, not the base row,
 	// is the authoritative row; remove only the non-authored base alias.
@@ -173,6 +173,16 @@ func appendBindInterfaceOnlySecureTunnelRows(
 		if haveName[ref] {
 			continue
 		}
+		// #13100: a stanza-less bare st0 bind also owns logical st0.0.
+		// Emit its UNIT identity instead of the base alias: only unit rows
+		// claim ingress netdevs and resolve st0.0's host-inbound override.
+		// If the unit is contested on tolerant load, its authored key is
+		// quarantined and the base must not resurrect a zone winner.
+		if !strings.Contains(ref, ".") && cfg.Interfaces.Interfaces[ref] == nil {
+			if _, bound := cfg.SecureTunnelNetdevForRef(ref + ".0"); bound {
+				continue
+			}
+		}
 		dev, ok := cfg.SecureTunnelNetdevForRef(ref)
 		if !ok || dev == "" {
 			continue
@@ -217,6 +227,12 @@ func appendBindInterfaceOnlySecureTunnelRows(
 				if dotted && unit != "" {
 					if unitNum, err := strconv.Atoi(unit); err == nil {
 						cosUnit = cosIface.Units[unitNum]
+						// #13100: a stanza-less bare st0 member now emits
+						// st0.0 instead of a base row. Preserve its base-level
+						// CoS when no unit-0 binding overrides it.
+						if unitNum == 0 && cosUnit == nil && cfg.Interfaces.Interfaces[base] == nil {
+							cosUnit = cosIface.Level
+						}
 					}
 				} else {
 					// A bare base ref denotes the base device/zero unit for
@@ -234,8 +250,8 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			Name:   ref,
 			IsUnit: dotted && unit != "",
 			// #9821 #22: same rule as the idents entry below — a dotted
-			// ref with a unit part is a unit row (st-family-correct: a
-			// bare `st0` bind stays a base row).
+			// ref with a unit part is a unit row. A stanza-less bare
+			// bind is represented by its materialized unit-0 ref.
 			AdminDisabled:   adminDisabled,
 			Zone:            zone,
 			RoutingInstance: ifaceRoutingInstance[ref],
