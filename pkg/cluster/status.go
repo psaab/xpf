@@ -216,36 +216,56 @@ func FormatVRRPConfigRows(cfg *config.Config) string {
 		return ""
 	}
 	var b strings.Builder
-	for _, zone := range cfg.Security.Zones {
-		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	for _, zoneName := range zoneNames {
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
 			continue
 		}
-		for _, ifaceRef := range zone.Interfaces {
+		ifaceRefs := append([]string(nil), zone.Interfaces...)
+		sort.Strings(ifaceRefs)
+		for _, ifaceRef := range ifaceRefs {
 			// #4908 (C175-HC-116): a zone binds a LOGICAL interface such as
 			// "ge-0/0/0.0" or "reth0.50", but cfg.Interfaces.Interfaces is
-			// keyed by the BASE interface name ("ge-0/0/0" / "reth0"). Split
-			// off the unit suffix, look up the base, and (when a unit was
-			// named) show only that unit's groups.
+			// keyed by the BASE interface name ("ge-0/0/0" / "reth0").
 			base := ifaceRef
 			wantUnit := -1
 			if parts := strings.SplitN(ifaceRef, ".", 2); len(parts) == 2 {
 				base = parts[0]
-				if u, err := strconv.Atoi(parts[1]); err == nil {
-					wantUnit = u
+				u, err := strconv.Atoi(parts[1])
+				if err != nil || u < 0 {
+					continue
 				}
+				wantUnit = u
 			}
 			ifCfg, ok := config.LookupInterface(cfg, base)
 			if !ok {
 				continue
 			}
-			for _, unit := range ifCfg.Units {
-				if unit == nil { // #5886: skip present-but-nil InterfaceUnit
+			unitNumbers := make([]int, 0, len(ifCfg.Units))
+			for number := range ifCfg.Units {
+				unitNumbers = append(unitNumbers, number)
+			}
+			sort.Ints(unitNumbers)
+			for _, unitNumber := range unitNumbers {
+				unit := ifCfg.Units[unitNumber]
+				if unit == nil {
 					continue
 				}
 				if wantUnit >= 0 && unit.Number != wantUnit {
 					continue
 				}
-				for addr, vg := range unit.VRRPGroups {
+				addresses := make([]string, 0, len(unit.VRRPGroups))
+				for addr := range unit.VRRPGroups {
+					addresses = append(addresses, addr)
+				}
+				sort.Strings(addresses)
+				for _, addr := range addresses {
+					vg := unit.VRRPGroups[addr]
 					if vg == nil {
 						continue
 					}

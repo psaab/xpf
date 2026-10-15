@@ -1309,6 +1309,7 @@ func (d *Daemon) reconcileRGState() {
 	for rgID := range seen {
 		rgIDs = append(rgIDs, rgID)
 	}
+	sort.Ints(rgIDs)
 
 	// Evaluate per-RG readiness for the takeover gate.
 	noRethVRRP := d.isNoRethVRRP()
