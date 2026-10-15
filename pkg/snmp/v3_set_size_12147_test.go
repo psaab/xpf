@@ -173,3 +173,86 @@ func TestV3Set_OversizedFallbackDropped(t *testing.T) {
 		t.Fatal("test setup: SET request must pass authenticated SHA validation")
 	}
 }
+
+// buildV3RequestCtx builds a complete authenticated v3 request with an
+// arbitrary PDU type, an explicit echoed contextName, and an advertised size.
+// For GETBULK, first and second are nonRepeaters and maxRepetitions.
+func buildV3RequestCtx(t *testing.T, authProto, userName string, engineID, authKey []byte,
+	boots, tm, msgMaxSize int, contextName []byte, pduTag byte, first, second int, oids [][]int) []byte {
+	t.Helper()
+	hashFn, _ := authHashFunc(authProto)
+	if hashFn == nil {
+		t.Fatalf("unknown auth proto %q", authProto)
+	}
+	truncLen := authTruncLen(authProto)
+	usmFields := berEncodeTLV(tagOctetString, engineID)
+	usmFields = append(usmFields, berEncodeIntegerTLV(boots)...)
+	usmFields = append(usmFields, berEncodeIntegerTLV(tm)...)
+	usmFields = append(usmFields, berEncodeTLV(tagOctetString, []byte(userName))...)
+	usmFields = append(usmFields, berEncodeTLV(tagOctetString, make([]byte, truncLen))...)
+	usmFields = append(usmFields, berEncodeTLV(tagOctetString, nil)...)
+	usmOctet := berEncodeTLV(tagOctetString, berEncodeTLV(tagSequence, usmFields))
+	hdr := berEncodeIntegerTLV(11)
+	hdr = append(hdr, berEncodeIntegerTLV(msgMaxSize)...)
+	hdr = append(hdr, berEncodeTLV(tagOctetString, []byte{msgFlagAuth})...)
+	hdr = append(hdr, berEncodeIntegerTLV(usmSecurityModel)...)
+	hdrSeq := berEncodeTLV(tagSequence, hdr)
+	var vbList []byte
+	for _, oid := range oids {
+		vb := berEncodeTLV(tagObjectIdentifier, berEncodeOID(oid))
+		vb = append(vb, berEncodeTLV(tagNull, nil)...)
+		vbList = append(vbList, berEncodeTLV(tagSequence, vb)...)
+	}
+	pduBody := berEncodeIntegerTLV(77)
+	pduBody = append(pduBody, berEncodeIntegerTLV(first)...)
+	pduBody = append(pduBody, berEncodeIntegerTLV(second)...)
+	pduBody = append(pduBody, berEncodeTLV(tagSequence, vbList)...)
+	scopedBody := berEncodeTLV(tagOctetString, engineID)
+	scopedBody = append(scopedBody, berEncodeTLV(tagOctetString, contextName)...)
+	scopedBody = append(scopedBody, berEncodeTLV(pduTag, pduBody)...)
+	scopedPDU := berEncodeTLV(tagSequence, scopedBody)
+	msgBody := berEncodeIntegerTLV(snmpVersion3)
+	msgBody = append(msgBody, hdrSeq...)
+	msgBody = append(msgBody, usmOctet...)
+	msgBody = append(msgBody, scopedPDU...)
+	wholeMsg := berEncodeTLV(tagSequence, msgBody)
+	start, end, ok := usmAuthParamsRange(wholeMsg)
+	if !ok || end-start != truncLen {
+		t.Fatalf("usmAuthParamsRange failed on built request (ok=%v len=%d)", ok, end-start)
+	}
+	mac := hmac.New(hashFn, authKey)
+	mac.Write(wholeMsg)
+	copy(wholeMsg[start:end], mac.Sum(nil)[:truncLen])
+	return wholeMsg
+}
+
+// TestV3OversizedFallbackDropped (#13557): all request classes must drop an
+// errTooBig fallback whose echoed contextName makes it exceed msgMaxSize.
+// fail-on-revert: removing the recheck from any fallback path returns an
+// over-cap response in its subtest.
+func TestV3OversizedFallbackDropped(t *testing.T) {
+	a, authKey, engineID, boots, tm := v3GetBulkAgent(t, nil)
+	ctx := bytes.Repeat([]byte{'C'}, 1024)
+	oids := setTestOIDs(48)
+	cases := []struct {
+		name          string
+		tag           byte
+		first, second int
+	}{
+		{name: "get", tag: pduGetRequest},
+		{name: "getnext", tag: pduGetNextRequest},
+		{name: "getbulk", tag: pduGetBulkRequest, second: 100},
+		{name: "set-control", tag: pduSetRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := buildV3RequestCtx(t, "sha", "alice", engineID, authKey, boots, tm, minMsgMaxSize, ctx, tc.tag, tc.first, tc.second, oids)
+			if len(req) > maxPacketSize {
+				t.Fatalf("test setup: request %d bytes exceeds maxPacketSize %d", len(req), maxPacketSize)
+			}
+			if resp := a.handlePacket(req); resp != nil {
+				t.Fatalf("oversized tooBig fallback transmitted: %d bytes > msgMaxSize %d", len(resp), minMsgMaxSize)
+			}
+		})
+	}
+}
