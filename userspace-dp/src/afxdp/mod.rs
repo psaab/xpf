@@ -761,6 +761,9 @@ mod tests_9950;
 #[path = "tests_ipsec_selector_fence_10683.rs"]
 mod tests_ipsec_selector_fence_10683;
 #[cfg(test)]
+#[path = "tests_session_hit_guards_13638.rs"]
+mod tests_session_hit_guards_13638;
+#[cfg(test)]
 #[path = "tests_bindless_fence_ordering_12904.rs"]
 mod tests_bindless_fence_ordering_12904;
 #[path = "worker/mod.rs"]
