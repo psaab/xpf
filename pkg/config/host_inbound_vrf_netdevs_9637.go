@@ -63,10 +63,18 @@ func HostInboundDHCPVRFEnslavedNetdevs(cfg *Config) map[string]bool {
 	}
 
 	out := make(map[string]bool)
-	for ifName := range cfg.Interfaces.Interfaces {
-		if IsManagementIfName(ifName) {
-			if linuxName := LinuxIfName(ifName); linuxName != "" {
-				out[linuxName] = true
+	for ifName, iface := range cfg.Interfaces.Interfaces {
+		if !IsManagementIfName(ifName) || iface == nil {
+			continue
+		}
+		if linuxName := junosHostLinuxNameWith(cfg, ifName, nil, tunnelNames); linuxName != "" {
+			out[linuxName] = true
+		}
+		for _, unit := range iface.Units {
+			if unit != nil {
+				if linuxName := junosHostLinuxNameWith(cfg, ifName, unit, tunnelNames); linuxName != "" {
+					out[linuxName] = true
+				}
 			}
 		}
 	}
