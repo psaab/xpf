@@ -844,6 +844,22 @@ wire_conntrack_verdict() {
 	return 0
 }
 
+# wire_nat_standing_catchall_form <display-set-source-nat>
+#   Print `interface` or `pool` for the two deployed zone catch-all forms.
+#   Unknown or incomplete configuration is refused; callers must not mutate
+#   a rule-set unless its exact standing rule can be restored.
+wire_nat_standing_catchall_form() {
+	local config="${1:-}"
+	if [[ "$config" == *"set security nat source rule-set lan-to-wan rule snat then source-nat interface"* ]]; then
+		printf 'interface\n'
+	elif [[ "$config" == *"set security nat source rule-set lan-to-wan rule pool-snat then source-nat pool pool-snat-pool"* &&
+		"$config" == *"set security nat source pool pool-snat-pool"* ]]; then
+		printf 'pool\n'
+	else
+		return 1
+	fi
+}
+
 # wire_nat_frag_needed_verdict <probe_offered> <snat_observed>
 #   <error_generated> <control_offered> <control_observed>
 #   <error_delivered> <translated_quote> <untranslated_leaks>

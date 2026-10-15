@@ -102,6 +102,15 @@ if [[ "$MODE" == selftest ]]; then
     else
         echo "  FAIL  cleanup finalizer shields restore"; fail=$((fail + 1))
     fi
+    interface_config='set security nat source rule-set lan-to-wan rule snat then source-nat interface'
+    pool_config=$'set security nat source rule-set lan-to-wan rule pool-snat then source-nat pool pool-snat-pool\nset security nat source pool pool-snat-pool address 172.16.80.8/32'
+    if [[ "$(wire_nat_standing_catchall_form "$interface_config")" == interface &&
+        "$(wire_nat_standing_catchall_form "$pool_config")" == pool ]] &&
+        ! wire_nat_standing_catchall_form 'set security nat source rule-set lan-to-wan rule incomplete then source-nat pool'; then
+        echo "  PASS  interface and pool catch-all forms selected, incomplete config refused"; pass=$((pass + 1))
+    else
+        echo "  FAIL  deployed source-NAT catch-all selection"; fail=$((fail + 1))
+    fi
     # probe snat gen ctl_off ctl_obs delivered quote leaks mtu cksum
     check "delivered+translated frag-needed passes" PASS 0 3 3 3 2 2 3 3 0 3 0
     check "untranslated quote leak fails" FAIL 1 3 3 3 2 2 3 3 1 3 0
@@ -257,11 +266,7 @@ BASE_RT="$(snapshot 'routing-options static')"
 BASE_FLOW="$(snapshot 'security flow')"
 BASE_IF="$(snapshot 'interfaces reth0')"
 
-if [[ "$BASE_NAT" == *"set security nat source rule-set lan-to-wan rule snat then source-nat interface"* ]]; then
-    CATCHALL_FORM=interface
-elif [[ "$BASE_NAT" == *"set security nat source rule-set lan-to-wan rule pool-snat then source-nat pool pool-snat-pool"* && "$BASE_NAT" == *"set security nat source pool pool-snat-pool"* ]]; then
-    CATCHALL_FORM=pool
-else
+if ! CATCHALL_FORM="$(wire_nat_standing_catchall_form "$BASE_NAT")"; then
     fail_void env-void
 fi
 [[ "$BASE_NAT" != *"${RULESET}"* ]] || fail_void env-void
