@@ -37,7 +37,7 @@ type HostInboundScreenFloodRule struct {
 // HostInboundScreenFloodRules coalesces per-interface host-inbound views into
 // one screen budget per zone and address family. Ingress device scopes cover
 // unambiguous views; Addresses retains the destination fallback for views
-// without an unambiguous ingress device.
+// without a usable ingress scope, including withheld ingress-deny addresses.
 func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScreenFloodRule {
 	type zoneFlood struct {
 		v4, v6, ingress, fallbackV4, fallbackV6 map[string]struct{}
@@ -63,26 +63,42 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 		for _, addr := range view.V6Addrs {
 			z.v6[addr] = struct{}{}
 		}
+		for _, addr := range view.IngressDenyV4 {
+			z.v4[addr] = struct{}{}
+		}
+		for _, addr := range view.IngressDenyV6 {
+			z.v6[addr] = struct{}{}
+		}
 		direct := hostInboundDirectIngressNetdevs(view)
 		for _, name := range direct {
 			z.ingress[name] = struct{}{}
 		}
+		hasVRFScope := false
 		for _, scope := range view.IngressVRFScopes {
-			if scope.Master == "" {
+			if scope.Master == "" || len(scope.Slaves) == 0 {
 				continue
 			}
 			if z.vrfIngress[scope.Master] == nil {
 				z.vrfIngress[scope.Master] = make(map[string]struct{}, len(scope.Slaves))
 			}
 			for _, slave := range scope.Slaves {
-				z.vrfIngress[scope.Master][slave] = struct{}{}
+				if slave != "" {
+					z.vrfIngress[scope.Master][slave] = struct{}{}
+					hasVRFScope = true
+				}
 			}
 		}
-		if len(direct) == 0 && len(view.IngressVRFScopes) == 0 {
+		if len(direct) == 0 && !hasVRFScope {
 			for _, addr := range view.V4Addrs {
 				z.fallbackV4[addr] = struct{}{}
 			}
 			for _, addr := range view.V6Addrs {
+				z.fallbackV6[addr] = struct{}{}
+			}
+			for _, addr := range view.IngressDenyV4 {
+				z.fallbackV4[addr] = struct{}{}
+			}
+			for _, addr := range view.IngressDenyV6 {
 				z.fallbackV6[addr] = struct{}{}
 			}
 		}
