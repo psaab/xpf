@@ -15,3 +15,14 @@ fn pmech_replay_drain_is_a_sibling_stage_13081() {
         "the large poll function must not inline PMech replay-stage control flow"
     );
 }
+#[test]
+fn expired_injected_pmech_replay_returns_frame_to_tx_pool_13636() {
+    let source = include_str!("pmech_replay.rs");
+    assert!(
+        source.contains("if held.is_injected")
+            && source.contains("tx_recycle.push_back(held.desc.addr)")
+            && source.contains("scratch_recycle.push(held.desc.addr)"),
+        "expired injected descriptors return to TX pool while RX descriptors \
+         return to RX recycle"
+    );
+}
