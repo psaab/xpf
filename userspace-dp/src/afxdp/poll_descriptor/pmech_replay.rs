@@ -8,15 +8,19 @@ use crate::session::{PMechSessionDirectory, PMechTokenProbe};
 /// Move newly-live reverse packets to the replay queue, retain still-pending
 /// packets, and recycle packets whose owner token has expired or changed.
 ///
-/// The queue and recycle borrows are disjoint from the RX ring borrow held by
-/// the caller; keeping this stage's state boundary explicit preserves that
-/// split-borrow discipline.
+/// Descriptor origin is preserved on drop (#13636): an injected WireGuard
+/// plaintext descriptor came from this binding's `free_tx_frames` pool, so
+/// its addr goes to `tx_recycle`, never `scratch_recycle` (dropping it into
+/// the RX list hands a TX address to the RX fill ring and strands the TX
+/// frame — the #10597 contract). Native RX descriptors go to
+/// `scratch_recycle` and return to the RX fill ring.
 #[inline(never)]
 pub(super) fn drain_pending_pmech_replays(
     directory: &PMechSessionDirectory,
     pending_reverse: &mut VecDeque<PendingPMechReversePacket>,
     pending_replay: &mut VecDeque<PendingPMechReversePacket>,
     scratch_recycle: &mut Vec<u64>,
+    tx_recycle: &mut VecDeque<u64>,
 ) {
     let scan_len = pending_reverse.len();
     for _ in 0..scan_len {
@@ -47,7 +51,11 @@ pub(super) fn drain_pending_pmech_replays(
                     held.waiter.arrival_worker_id,
                     held.waiter.defer_id,
                 );
-                scratch_recycle.push(held.desc.addr);
+                if held.is_injected {
+                    tx_recycle.push_back(held.desc.addr);
+                } else {
+                    scratch_recycle.push(held.desc.addr);
+                }
             }
         }
     }

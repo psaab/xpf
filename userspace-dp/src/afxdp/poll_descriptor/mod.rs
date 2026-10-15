@@ -581,6 +581,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
         &mut binding.pending_pmech_reverse,
         &mut binding.pending_pmech_replay,
         &mut binding.scratch.scratch_recycle,
+        &mut binding.tx_pipeline.free_tx_frames,
     );
     loop {
         let (desc, injected_meta, is_injected) =
