@@ -61,9 +61,15 @@ capture_stop() {
     wait "$CAP_PID" >/dev/null 2>&1 || true
     CAP_PID=""
 }
+count_any_len() {
+    local port="$1" out
+    out="$(grep -cE "\\.${port}:" "$CAPLOG" 2>/dev/null || true)"
+    [[ "$out" =~ ^[0-9]+$ ]] || out=0
+    printf '%s' "$out"
+}
 count_len() {
     local port="$1" size="$2" out
-    out="$(grep -cE "\\.${port}:.*length ${size}([,[:space:]]|$)" "$CAPLOG" 2>/dev/null || true)"
+    out="$(grep -cE "\.${port}:.*length ${size}([,[:space:]]|$)" "$CAPLOG" 2>/dev/null || true)"
     [[ "$out" =~ ^[0-9]+$ ]] || out=0
     printf '%s' "$out"
 }
@@ -102,7 +108,12 @@ measure_cell() {
     done
     CELL_P64O=$(( (totalp + 1) / 2 )); CELL_P1400O=$(( totalp / 2 ))
     CELL_C64O=$(( (totalc + 1) / 2 )); CELL_C1400O=$(( totalc / 2 ))
+    CELL_P_ANY="$(count_any_len "$PROBE_PORT")"
     CELL_P64B="$(count_len "$PROBE_PORT" 64)"; CELL_P1400B="$(count_len "$PROBE_PORT" 1400)"
+    if [[ "$mode" == deny ]]; then
+        local other_len=$((CELL_P_ANY - CELL_P64B - CELL_P1400B))
+        ((other_len > 0)) && CELL_P64B=$((CELL_P64B + other_len))
+    fi
     CELL_CONTROL_IDENTITY_MASK=0
     if [[ "$mode" == deny ]]; then
         # All six pair-specific controls share the probe's capture window.
@@ -127,7 +138,7 @@ measure_cell() {
             CELL_CONTROL_IDENTITY_MASK=$((1 << pair_index))
         fi
     fi
-    checksum="$(grep -ciE 'bad (udp )?(cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"
+    checksum="$(grep -ciE 'bad (udp|ip) (cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"
     [[ "$checksum" =~ ^[0-9]+$ ]] || checksum=0
     CELL_CK="$checksum"
     echo "cell ${mode} src=${src} dst=${dst} sent=${totalp}/${totalc} observed=${CELL_P64B}/${CELL_P1400B}/${CELL_C64B}/${CELL_C1400B} control_identity_mask=${CELL_CONTROL_IDENTITY_MASK}"
@@ -285,6 +296,17 @@ if [[ "$MODE" == selftest ]]; then
     matrix_measure_case swap
     matrix_measure_case blind
     matrix_measure_case leak
+    CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/wire-zone-parser.XXXXXX")"
+    printf '00:00:00 IP 10.0.0.1.40000 > 10.0.0.2.%s: UDP, length 100\n00:00:01 IP 10.0.0.1 > 10.0.0.2: bad ip cksum\n' \
+        "$PROBE_PORT" >"$CAPLOG"
+    any_len="$(count_any_len "$PROBE_PORT")"
+    bad_ip="$(grep -ciE 'bad (udp|ip) (cksum|checksum)' "$CAPLOG" || true)"
+    if [[ "$any_len" == 1 && "$bad_ip" == 1 ]]; then
+        echo "  PASS  deny parser counts nonstandard lengths and IPv4 checksum errors"; pass=$((pass + 1))
+    else
+        echo "  FAIL  deny parser misses nonstandard length/checksum (length=$any_len checksum=$bad_ip)"; fail=$((fail + 1))
+    fi
+    rm -f "$CAPLOG"; CAPLOG=""
     if wire_gate_finalizer_selftest; then
         echo "  PASS  cleanup finalizer shields restore"; pass=$((pass + 1))
     else
@@ -458,9 +480,7 @@ restore_routes() {
             [[ "$host" == "$UNTRUST_HOST" && "$prefix" == "172.16.80.0/24" ]] && continue
             [[ "$host" == "$DMZ_HOST" && "$prefix" == "172.16.50.0/24" ]] && continue
             key="$host|$prefix"; old="${ROUTE_SNAPSHOT[$key]:-}"
-            if ! $SG "incus exec ${INCUS_REMOTE}:${host} -- ip route del ${prefix}" >/dev/null 2>&1; then
-                RESTORE_OK=0
-            fi
+            $SG "incus exec ${INCUS_REMOTE}:${host} -- ip route del ${prefix}" >/dev/null 2>&1 || true
             if [[ -n "$old" ]] && ! $SG "incus exec ${INCUS_REMOTE}:${host} -- ip route replace ${old}" >/dev/null 2>&1; then
                 RESTORE_OK=0
             fi
@@ -480,22 +500,33 @@ restore_stage_ok() {
 }
 restore_config() {
     ((RESTORE_NEEDED)) || return 0
+    local current_policy current_apps current_zone
+    current_policy="$(snapshot 'show configuration security policies | display set')"
+    current_apps="$(snapshot 'show configuration applications | display set')"
+    current_zone="$(snapshot 'show configuration security zones | display set')"
+    if [[ "$current_policy" == "$POLICY_SNAP" &&
+        "$current_apps" == "$APP_SNAP" && "$current_zone" == "$ZONE_SNAP" ]]; then
+        RESTORE_NEEDED=0
+        return 0
+    fi
     local restore_log=/tmp/xpf-wire-zone-matrix-restore.log
     local policy_log="${restore_log}.policy" context_log="${restore_log}.context" zone_log="${restore_log}.zone"
     : >"$restore_log"; : >"$policy_log"; : >"$context_log"; : >"$zone_log"
     local cmds='configure\n' context_cmds='configure\n' slug context_needed=0 i
     for ((i = 0; i < ${#PAIR_NAMES[@]}; i++)); do
         slug="${PAIR_NAMES[$i]}"
-        cmds+="delete security policies from-zone ${PAIR_FROM[$i]} to-zone ${PAIR_TO[$i]} policy ${POLICY_PREFIX}-${slug}\n"
-        # The initial snapshot proves this whole context was absent.  Only
-        # then remove the empty parent left by the owned policy deletion.
-        if [[ "$POLICY_SNAP" != *"from-zone ${PAIR_FROM[$i]} to-zone ${PAIR_TO[$i]}"* ]]; then
-            context_cmds+="delete security policies from-zone ${PAIR_FROM[$i]} to-zone ${PAIR_TO[$i]}\n"
-            context_needed=1
+        if grep -q "security policies from-zone ${PAIR_FROM[$i]} to-zone ${PAIR_TO[$i]} policy ${POLICY_PREFIX}-${slug} " <<<"$current_policy"; then
+            cmds+="delete security policies from-zone ${PAIR_FROM[$i]} to-zone ${PAIR_TO[$i]} policy ${POLICY_PREFIX}-${slug}\n"
+            if [[ "$POLICY_SNAP" != *"from-zone ${PAIR_FROM[$i]} to-zone ${PAIR_TO[$i]}"* ]]; then
+                context_cmds+="delete security policies from-zone ${PAIR_FROM[$i]} to-zone ${PAIR_TO[$i]}\n"
+                context_needed=1
+            fi
         fi
     done
-    cmds+="delete security policies from-zone lan to-zone wan policy allow-all match application\n"
-    if [[ -n "$BROKEN_FIXTURE" ]]; then
+    if grep -q 'set security policies from-zone lan to-zone wan policy allow-all match application ' <<<"$current_policy"; then
+        cmds+="delete security policies from-zone lan to-zone wan policy allow-all match application\n"
+    fi
+    if [[ -n "$BROKEN_FIXTURE" ]] && grep -q "policy ${BROKEN_POLICY} " <<<"$current_policy"; then
         cmds+="delete security policies from-zone wan to-zone lan policy ${BROKEN_POLICY}\n"
     fi
     while IFS= read -r line; do
@@ -506,8 +537,12 @@ restore_config() {
     done <<<"$POLICY_SNAP"
     for ((i = 0; i < ${#PAIR_NAMES[@]}; i++)); do
         slug="${PAIR_NAMES[$i]}"
-        cmds+="delete applications application-set ${CONTROL_SET}-${slug}\n"
-        cmds+="delete applications application ${APP_NAME}-${slug}\n"
+        if grep -q "application-set ${CONTROL_SET}-${slug} " <<<"$current_apps"; then
+            cmds+="delete applications application-set ${CONTROL_SET}-${slug}\n"
+        fi
+        if grep -q "application ${APP_NAME}-${slug} " <<<"$current_apps"; then
+            cmds+="delete applications application ${APP_NAME}-${slug}\n"
+        fi
     done
     cmds+="commit\nexit\n"
     if ! printf '%b' "$cmds" | $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$policy_log" 2>&1; then
@@ -523,7 +558,25 @@ restore_config() {
         cat "$context_log" >>"$restore_log"
         restore_stage_ok "$context_log" || RESTORE_OK=0
     fi
-    if ! printf '%b' 'configure\ndelete security zones security-zone dmz\ndelete security zones security-zone wan interfaces reth0.80\nset security zones security-zone wan interfaces reth0.50\nset security zones security-zone wan interfaces reth0.80\nset security policies default-policy deny-all\ncommit\nexit\n' |
+    local zone_cmds='configure\n'
+    local current_zone
+    current_zone="$(snapshot 'show configuration security zones | display set')"
+    if grep -q '^set security zones security-zone dmz ' <<<"$current_zone"; then
+        zone_cmds+='delete security zones security-zone dmz\n'
+    fi
+    for local_iface in reth0.50 reth0.80; do
+        if grep -q "^set security zones security-zone wan interfaces ${local_iface} " <<<"$current_zone"; then
+            zone_cmds+="delete security zones security-zone wan interfaces ${local_iface}\n"
+        fi
+    done
+    while IFS= read -r line; do
+        case "$line" in
+        'set security zones security-zone wan interfaces reth0.50'*|'set security zones security-zone wan interfaces reth0.80'*)
+            zone_cmds+="${line}"$'\n' ;;
+        esac
+    done <<<"$ZONE_SNAP"
+    zone_cmds+='set security policies default-policy deny-all\ncommit\nexit\n'
+    if ! printf '%b' "$zone_cmds" |
         $SG "incus exec ${NODE} -- bash -lc 'cli'" >"$zone_log" 2>&1; then
         RESTORE_OK=0
     fi
@@ -622,8 +675,11 @@ route_is_clear "$UNTRUST_HOST" 10.0.61.0/24 || fail_void env-void
 route_is_clear "$UNTRUST_HOST" 172.16.50.0/24 || fail_void env-void
 route_is_clear "$DMZ_HOST" 10.0.61.0/24 || fail_void env-void
 route_is_clear "$DMZ_HOST" 172.16.80.0/24 || fail_void env-void
-ROUTES_MUTATED=1
-$SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace 10.0.61.0/24 via 172.16.80.8" >/dev/null 2>&1 || fail_void no-prober
+if $SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace 10.0.61.0/24 via 172.16.80.8" >/dev/null 2>&1; then
+    ROUTES_MUTATED=1
+else
+    fail_void no-prober
+fi
 $SG "incus exec ${INCUS_REMOTE}:${UNTRUST_HOST} -- ip route replace 172.16.50.0/24 via 172.16.80.8" >/dev/null 2>&1 || fail_void no-prober
 $SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace 10.0.61.0/24 via 172.16.50.8" >/dev/null 2>&1 || fail_void no-prober
 $SG "incus exec ${INCUS_REMOTE}:${DMZ_HOST} -- ip route replace 172.16.80.0/24 via 172.16.50.8" >/dev/null 2>&1 || fail_void no-prober
@@ -664,13 +720,13 @@ apply_mode() {
         cmds+="set security policies default-policy permit-all\n"
     fi
     cmds+="commit\nexit\n"
+    RESTORE_NEEDED=1
     printf '%b' "$cmds" | run_cli >/tmp/xpf-wire-zone-matrix-commit.log 2>&1
     grep -qE 'commit (complete|succeeded)' /tmp/xpf-wire-zone-matrix-commit.log || return 1
-    ! grep -qE '(^|[[:space:]])(error:|Error:)' /tmp/xpf-wire-zone-matrix-commit.log
+    ! grep -qE '(^|[[:space:]])(error:|Error:)' /tmp/xpf-wire-zone-matrix-commit.log || return 1
 }
 
 
-RESTORE_NEEDED=1
 MATRIX=()
 CKSUM_BAD=0
 # Deny arm: all six probes must drop, with an explicit same-pair control

@@ -146,11 +146,62 @@ wire_policy_deny_finalizer_selftest() {
 	return 0
 }
 
+wire_policy_deny_parse_legs() {
+	local sent="$1" leg port count
+	POFFERED=0
+	COFFERED=0
+	[[ "$sent" == "SENT legs="* ]] || return 1
+	IFS=',' read -ra _sent_legs <<<"${sent#SENT legs=}"
+	for leg in "${_sent_legs[@]}"; do
+		port="${leg%%=*}"
+		count="${leg#*=}"
+		[[ "$port" =~ ^[0-9]+$ && "$count" =~ ^[0-9]+$ ]] || return 1
+		if [[ "$port" == "$PROBE_PORT" ]]; then
+			POFFERED=$((POFFERED + count))
+		elif [[ "$port" == "$CONTROL_PORT" ]]; then
+			COFFERED=$((COFFERED + count))
+		else
+			return 1
+		fi
+	done
+	return 0
+}
+wire_policy_deny_capture_ready() {
+	grep -q 'listening on ' "$1"
+}
 if [[ "$MODE" == "selftest" ]]; then
 	# Hermetic matrix over the shared verdict core. Each row feeds one
 	# input shape and asserts the exact line + exit code.
 	pass=0
 	fail=0
+	PROBE_PORT=54901
+	CONTROL_PORT=54902
+	if wire_policy_deny_parse_legs 'SENT legs=54902=750,54901=1000,54902=750' &&
+		[[ "$POFFERED" == 1000 && "$COFFERED" == 1500 ]]; then
+		echo "  PASS  interleaved sender legs preserve offered floors"
+		pass=$((pass + 1))
+	else
+		echo "  FAIL  interleaved sender legs preserve offered floors (probe=$POFFERED control=$COFFERED)"
+		fail=$((fail + 1))
+	fi
+	_capture_log="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-policy-capture.XXXXXX")"
+	printf 'tcpdump: listening on eth0, link-type EN10MB (Ethernet), snapshot length 262144 bytes\n' >"$_capture_log"
+	if wire_policy_deny_capture_ready "$_capture_log"; then
+		echo "  PASS  capture readiness is confirmed before sending"
+		pass=$((pass + 1))
+	else
+		echo "  FAIL  capture readiness is confirmed before sending"
+		fail=$((fail + 1))
+	fi
+	: >"$_capture_log"
+	if ! wire_policy_deny_capture_ready "$_capture_log"; then
+		echo "  PASS  missing capture readiness is rejected"
+		pass=$((pass + 1))
+	else
+		echo "  FAIL  missing capture readiness is rejected"
+		fail=$((fail + 1))
+	fi
+	rm -f "$_capture_log"
 	cell() { # cell <label> <want_verdict> <want_rc> -- <counts...>
 		local label="$1" want_v="$2" want_rc="$3"
 		shift 3
@@ -488,30 +539,31 @@ wire_policy_deny_cleanup() {
 }
 wire_policy_deny_arm_finalizer
 
-# ── Phase 2: shared capture window + bursts ──────────────────────────
-# Probe at the §2 drop floor (1000, zero must emerge); control with a
-# loss margin (offered 1500, ≥1000 must emerge) so routine path loss
-# cannot manufacture a capture-blind VOID. Two sender runs under ONE
-# capture window.
-echo "--- capture window + bursts (probe $BURST, control $CONTROL_BURST) ---"
+# ── Phase 2: shared capture window with interleaved witness/probe traffic ──
+# The control sends half its offered frames before and half after the probe;
+# the leading witness proves tcpdump was attached before any probe could leak.
+echo "--- capture window + interleaved bursts (probe $BURST, control $CONTROL_BURST) ---"
 CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-cap.XXXXXX")"
-$SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -i any -n -vv udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$CAPLOG" 2>&1 &
+$SG "incus exec $SINK_EXEC -- timeout $STEP_TIMEOUT tcpdump -l -i any -n -vv udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$CAPLOG" 2>&1 &
 CAP_PID=$!
-sleep 3 # let tcpdump settle before the first datagram
-SENT_P="$($SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --probe-port $PROBE_PORT --control-port $PROBE_PORT --count $((BURST / 2)) --rate 200" 2>&1 | grep -E '^SENT' || true)"
-SENT_C="$($SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --probe-port $CONTROL_PORT --control-port $CONTROL_PORT --count $((CONTROL_BURST / 2)) --rate 200" 2>&1 | grep -E '^SENT' || true)"
-echo "sender probe: $SENT_P"
-echo "sender control: $SENT_C"
-# Both legs of each run target the SAME port, so offered = probe + control.
-# Portable sed (no gawk match() arrays): extract-or-empty, then add.
-_pp=$(sed -E 's/.*probe=([0-9]+).*/\1/;t;d' <<<"$SENT_P" 2>/dev/null || true)
-_pc=$(sed -E 's/.*control=([0-9]+).*/\1/;t;d' <<<"$SENT_P" 2>/dev/null || true)
-_cp=$(sed -E 's/.*probe=([0-9]+).*/\1/;t;d' <<<"$SENT_C" 2>/dev/null || true)
-_cc=$(sed -E 's/.*control=([0-9]+).*/\1/;t;d' <<<"$SENT_C" 2>/dev/null || true)
-POFFERED=0
-COFFERED=0
-[[ "$_pp" =~ ^[0-9]+$ && "$_pc" =~ ^[0-9]+$ ]] && POFFERED=$((_pp + _pc))
-[[ "$_cp" =~ ^[0-9]+$ && "$_cc" =~ ^[0-9]+$ ]] && COFFERED=$((_cp + _cc))
+CAP_READY=0
+for ((i = 0; i < 30; i++)); do
+	if wire_policy_deny_capture_ready "$CAPLOG"; then
+		CAP_READY=1
+		break
+	fi
+	sleep 0.5
+done
+if ((CAP_READY == 0)); then
+	echo "capture did not report listening before the sender burst"
+	exit 2
+fi
+SENT="$($SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --leg $CONTROL_PORT:$((CONTROL_BURST / 2)) --leg $PROBE_PORT:$BURST --leg $CONTROL_PORT:$((CONTROL_BURST / 2)) --sizes 64,1400 --rate 200" 2>&1 | grep -E '^SENT legs=' || true)"
+echo "sender interleaved legs: $SENT"
+if ! wire_policy_deny_parse_legs "$SENT"; then
+	POFFERED=0
+	COFFERED=0
+fi
 sleep 5 # drain: datagrams in flight when the sender exits
 kill "$CAP_PID" 2>/dev/null || true
 wait "$CAP_PID" 2>/dev/null || true
