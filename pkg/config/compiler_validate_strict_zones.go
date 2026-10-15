@@ -668,15 +668,17 @@ func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 			// is always present even without an authored interfaces stanza.
 			if !ref.HasUnit && base != "lo0" && cfg.Interfaces.Interfaces[base] == nil {
 				if _, bound := cfg.SecureTunnelNetdevForRef(ifName); !bound {
-					return fmt.Errorf(
-						"security zone %q references interface %q, which is not "+
-							"defined under `interfaces` (nor materialized as the lo0 "+
-							"loopback or an IPsec secure-tunnel bind-interface); Junos "+
-							"rejects a zone member that names no configured interface — "+
-							"define the interface or fix the typo (the daemon brings an "+
-							"unconfigured interface DOWN, so the zone member silently "+
-							"carries no traffic)",
-						zoneName, ifName)
+					if _, unitZeroBound := cfg.SecureTunnelNetdevForRef(ifName + ".0"); !unitZeroBound {
+						return fmt.Errorf(
+							"security zone %q references interface %q, which is not "+
+								"defined under `interfaces` (nor materialized as the lo0 "+
+								"loopback or an IPsec secure-tunnel bind-interface); Junos "+
+								"rejects a zone member that names no configured interface — "+
+								"define the interface or fix the typo (the daemon brings an "+
+								"unconfigured interface DOWN, so the zone member silently "+
+								"carries no traffic)",
+							zoneName, ifName)
+					}
 				}
 			}
 			if ref.HasUnit && ref.UnitTok != "" {
