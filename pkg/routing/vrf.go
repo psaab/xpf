@@ -76,31 +76,63 @@ func (v *vrfManager) Create(name string, tableID int) error {
 	if v.term != nil {
 		v.termRequired = true
 		if err := setVRFMissTerminator(v.term, true); err != nil {
-			return errors.Join(err, v.createLocked(name, tableID))
+			return err
 		}
 	}
 	return v.createLocked(name, tableID)
 }
 
 // createLocked creates a VRF and appends it to v.vrfs. Caller must
-// hold mu. If the named VRF already exists in the kernel, createLocked
-// leaves it alone and does NOT adopt it into v.vrfs (this single-VRF
-// helper is a fast path; Reconcile is the adoption / orphan-reap entry
-// point per the namespace-claim policy).
+// hold mu. If the named VRF already exists in the kernel, it is checked
+// against the requested type and table before it is brought up and adopted.
 func (v *vrfManager) createLocked(name string, tableID int) error {
 	vrfName := "vrf-" + name
-	if existing, err := v.ops.LinkByName(vrfName); err == nil {
-		if err := v.ops.LinkSetUp(existing); err != nil {
-			slog.Debug("failed to set existing VRF up", "name", vrfName, "err", err)
+	existing, err := v.ops.LinkByName(vrfName)
+	if err != nil {
+		if !isLinkNotFound(err) {
+			return fmt.Errorf("lookup VRF %s: %w", vrfName, err)
 		}
-		slog.Debug("VRF already exists", "name", vrfName, "table", tableID)
-		return nil
+		added, err := createLinkedVRF(v.ops, vrfName, tableID)
+		if added && !containsVRFName(v.vrfs, vrfName) {
+			v.vrfs = append(v.vrfs, vrfName)
+		}
+		return err
 	}
-	added, err := createLinkedVRF(v.ops, vrfName, tableID)
-	if added {
+	vrf, ok := existing.(*netlink.Vrf)
+	if !ok || vrf == nil || vrf.Attrs() == nil {
+		return fmt.Errorf("refusing to create VRF %s: existing link is %s, not a VRF",
+			vrfName, existing.Type())
+	}
+	if vrf.Table != uint32(tableID) {
+		if err := v.ops.LinkDel(existing); err != nil {
+			return fmt.Errorf("delete stale VRF %s: %w", vrfName, err)
+		}
+		added, err := createLinkedVRF(v.ops, vrfName, tableID)
+		if added && !containsVRFName(v.vrfs, vrfName) {
+			v.vrfs = append(v.vrfs, vrfName)
+		}
+		return err
+	}
+	if err := v.ops.LinkSetUp(existing); err != nil {
+		if !containsVRFName(v.vrfs, vrfName) {
+			v.vrfs = append(v.vrfs, vrfName)
+		}
+		return fmt.Errorf("set VRF %s up: %w", vrfName, err)
+	}
+	if !containsVRFName(v.vrfs, vrfName) {
 		v.vrfs = append(v.vrfs, vrfName)
 	}
-	return err
+	slog.Debug("VRF already exists", "name", vrfName, "table", tableID)
+	return nil
+}
+
+func containsVRFName(names []string, name string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
 }
 
 // IsManaged reports whether the given logical VRF name (e.g. "mgmt",
@@ -145,23 +177,24 @@ func (v *vrfManager) IsManaged(name string) bool {
 // #9819: when any VRF is desired, Reconcile installs the VRF miss terminator
 // BEFORE it creates a device, so no VRF is ever live with its misses falling
 // through to main. When nothing is desired and nothing is still owned, it
-// removes the terminator afterwards. A terminator failure is returned beside
-// the link reconcile's error and never skips the link reconcile.
+// removes the terminator afterwards. A failed install prevents any link
+// reconciliation: no desired VRF may be live without its miss barrier.
 func (v *vrfManager) Reconcile(desired []VRFSpec) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	var termErr error
 	if v.term != nil && len(desired) > 0 {
 		v.termRequired = true
 		v.termRemovePending = false
-		termErr = setVRFMissTerminator(v.term, true)
+		if err := setVRFMissTerminator(v.term, true); err != nil {
+			return err
+		}
 	}
 	newVrfs, err := reconcileVRFs(v.ops, v.vrfs, desired)
 	v.vrfs = newVrfs
 	// A VRF whose delete failed stays tracked and is still in the kernel, so
 	// its misses still need ending: remove only once nothing is owned.
 	if v.term != nil && len(desired) == 0 && len(newVrfs) == 0 {
-		termErr = setVRFMissTerminator(v.term, false)
+		termErr := setVRFMissTerminator(v.term, false)
 		if termErr == nil {
 			v.termRequired = false
 			v.termRemovePending = false
@@ -169,17 +202,13 @@ func (v *vrfManager) Reconcile(desired []VRFSpec) error {
 			v.termRequired = false
 			v.termRemovePending = true
 		}
-	} else if len(newVrfs) > 0 {
+		return errors.Join(err, termErr)
+	}
+	if len(newVrfs) > 0 {
 		v.termRequired = true
 		v.termRemovePending = false
 	}
-	switch {
-	case termErr == nil:
-		return err
-	case err == nil:
-		return termErr
-	}
-	return errors.Join(err, termErr)
+	return err
 }
 
 // ReassertMissTerminator restores the managed pref-2000 l3mdev unreachable
