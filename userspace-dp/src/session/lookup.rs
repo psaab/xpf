@@ -231,6 +231,15 @@ impl SessionTable {
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone_without_policy_counter(),
                 forwarding_generation: record.entry.forwarding_generation,
+                aux: SessionLookupAux {
+                    session_id: record.entry.session_id,
+                    source_nat_static: record.entry.source_nat_static,
+                    leak_incarnation: self
+                        .leak_incarnations
+                        .get(&record.key)
+                        .copied()
+                        .unwrap_or(0),
+                },
             },
             record.entry.origin,
         ))
@@ -267,6 +276,15 @@ impl SessionTable {
                     decision: entry.decision,
                     metadata: entry.metadata.clone(),
                     forwarding_generation: entry.forwarding_generation,
+                    aux: SessionLookupAux {
+                        session_id: entry.session_id,
+                        source_nat_static: entry.source_nat_static,
+                        leak_incarnation: self
+                            .leak_incarnations
+                            .get(&record.key)
+                            .copied()
+                            .unwrap_or(0),
+                    },
                 },
                 entry.origin,
             ));
@@ -767,6 +785,7 @@ impl SessionTable {
             decision: record.entry.decision,
             metadata: record.entry.metadata.clone(),
             forwarding_generation: record.entry.forwarding_generation,
+            aux: SessionLookupAux::default(),
         })
     }
 
@@ -849,6 +868,7 @@ impl SessionTable {
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
                 forwarding_generation: entry.forwarding_generation,
+            aux: SessionLookupAux::default(),
             });
         }
         if idle_crossed {
@@ -912,6 +932,7 @@ impl SessionTable {
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone(),
                 forwarding_generation: record.entry.forwarding_generation,
+            aux: SessionLookupAux::default(),
             })
         } else {
             ForwardNatQuoteLookup::NoMatch
@@ -957,6 +978,7 @@ impl SessionTable {
             decision: record.entry.decision,
             metadata: record.entry.metadata.clone(),
             forwarding_generation: record.entry.forwarding_generation,
+            aux: SessionLookupAux::default(),
         })
     }
 
@@ -1026,6 +1048,7 @@ impl SessionTable {
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
                 forwarding_generation: entry.forwarding_generation,
+            aux: SessionLookupAux::default(),
             });
         }
         None
@@ -1154,6 +1177,15 @@ impl SessionTable {
                     decision: entry.decision,
                     metadata: entry.metadata.clone(),
                     forwarding_generation: entry.forwarding_generation,
+                    aux: SessionLookupAux {
+                        session_id: entry.session_id,
+                        source_nat_static: entry.source_nat_static,
+                        leak_incarnation: self
+                            .leak_incarnations
+                            .get(&record.key)
+                            .copied()
+                            .unwrap_or(0),
+                    },
                 },
                 entry.origin,
             ));
