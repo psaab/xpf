@@ -267,6 +267,11 @@ fn submit_conn_survives_idle_before_target_publication() {
     assert_eq!(target_core.live_count(), 1);
     drop(client);
     handle.join().unwrap();
+    assert_eq!(
+        target_core.live_count(),
+        0,
+        "disconnect must purge entries from a core published after connect"
+    );
 }
 
 #[test]

@@ -126,6 +126,7 @@ fn serve_submit_conn_with_running(
     running: &Arc<AtomicBool>,
 ) {
     let connection_id = NEXT_SUBMIT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed).max(1);
+    let mut active_core = fallback_core.clone();
     let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
     let mut reader = FrameReader::new();
@@ -140,17 +141,20 @@ fn serve_submit_conn_with_running(
             }
             Ok(FrameRead::Closed) | Err(_) => break,
         };
-        // Both the fallback and every published target share the same core,
-        // so target replacement requires no cross-core authority handoff.
         // The Go client keeps one connection for the daemon lifetime. Resolve
-        // the target for every message so a client that connects during
-        // startup (before the first snapshot creates the slow path) does not
-        // pin the temporary fallback forever.
+        // the target for every message so a client connected during startup
+        // does not pin the temporary fallback forever. When target publication
+        // moves this connection to a different core, retire its entries from
+        // the old core before using the new authority.
         let target_reinjector = target.load_full();
         let core = target_reinjector
             .as_ref()
             .map(|reinjector| reinjector.reinject_core())
             .unwrap_or_else(|| fallback_core.clone());
+        if !Arc::ptr_eq(&active_core, &core) {
+            active_core.purge_connection(connection_id);
+            active_core = core.clone();
+        }
         match message_type {
             MSG_ANNOUNCE => {
                 let announcement = match decode_announce(&payload) {
@@ -204,7 +208,7 @@ fn serve_submit_conn_with_running(
             _ => break,
         }
     }
-    fallback_core.purge_connection(connection_id);
+    active_core.purge_connection(connection_id);
 }
 
 /// Stream terminal completions in per-flow order. The completion table owns
