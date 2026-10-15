@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
@@ -23,7 +22,10 @@ func (c *ctl) handleShowSystem(args []string) error {
 
 	case "rollback":
 		if len(args) >= 2 {
-			if args[1] == "compare" && len(args) >= 3 {
+			if args[1] == "compare" {
+				if len(args) != 3 {
+					return fmt.Errorf("usage: show system rollback compare <N>")
+				}
 				// #5052: parse the slot into the int32 the RPC carries.
 				// strconv.Atoi + int32() wrapped an out-of-range value
 				// (e.g. 4294967297 -> 1) and silently compared the wrong
@@ -51,16 +53,18 @@ func (c *ctl) handleShowSystem(args []string) error {
 			if err != nil {
 				return err
 			}
-			format := pb.ConfigFormat_HIERARCHICAL
-			rest := strings.Join(args[2:], " ")
-			if strings.Contains(rest, "| display set") {
-				format = pb.ConfigFormat_SET
-			} else if strings.Contains(rest, "| display xml") {
-				format = pb.ConfigFormat_XML
-			} else if strings.Contains(rest, "compare") {
-				resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{
-					RollbackN: n,
-				})
+			path, pipe, err := splitShowPipe(args[2:])
+			if err != nil {
+				return err
+			}
+			if len(path) > 0 {
+				return fmt.Errorf("usage: show system rollback <N> [| display set|xml | compare]")
+			}
+			if len(pipe) > 0 && pipe[0] == "compare" {
+				if len(pipe) != 1 {
+					return fmt.Errorf("usage: show system rollback <N> | compare")
+				}
+				resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{RollbackN: n})
 				if err != nil {
 					return fmt.Errorf("%v", err)
 				}
@@ -70,6 +74,10 @@ func (c *ctl) handleShowSystem(args []string) error {
 					fmt.Print(resp.Output)
 				}
 				return nil
+			}
+			format, err := parseShowDisplay(pipe, false, false)
+			if err != nil {
+				return err
 			}
 			resp, err := c.client.ShowRollback(c.ctx(), &pb.ShowRollbackRequest{
 				N:      n,
