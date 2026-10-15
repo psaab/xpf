@@ -1237,26 +1237,20 @@ type Daemon struct {
 	// would bury the real diagnostics under ~2900 identical lines a day.
 	mgmtReassertNoticed atomic.Bool
 
-	// hostInboundCoveredAddrs is the set of firewall-local DESTINATION addresses
-	// (keyed "<fam>|<addr>", fam '4'/'6') that the currently-RETAINED host-inbound
-	// enforcement (the last successfully-loaded real table OR address-scoped
-	// cold-boot fence) installs a catch-all DROP for. It is the #5789 coverage
-	// discriminator: hostInboundEnforced only proves SOME protecting table loaded
-	// at SOME earlier generation, NOT that the retained generation covers the
-	// CURRENT desired destination set. When a new static/DHCP/SLAAC address appears
-	// and the next real render fails, atomic nft retention keeps the OLD generation
-	// — which has no deny for the new address (fail-open). Comparing this covered
-	// set against the current desired drop set detects those uncovered destinations
-	// so an ADDITIVE gap fence (inet xpf_hostinbound_gap, a separate input-hook
-	// table that preserves the retained table's accepts) can deny only them.
-	// Updated to the desired set on a successful real load / address-scoped fence;
-	// CLEARED on a successful teardown (#5790, no table covers nothing); left
-	// UNCHANGED on any failure (atomic retention keeps the old generation, so its
-	// coverage claim also stands). Serialized under applySem, like the
-	// hostInboundFailOpen maps; a nil/empty map means "nothing retained is known to
-	// be covered" (cold boot).
+	// hostInboundCoveredAddrs tracks all unicast destinations denied by the
+	// retained enforcement, including per-ingress IngressDeny addresses. Keys are
+	// "<fam>|<addr>" ('4'/'6'). It is compared to the complete real-table desired
+	// set and handoff newcomer set. Updated only after a successful real table or
+	// cold-boot fence install; left unchanged on failure because nft retention
+	// preserves that generation; cleared after successful teardown.
 	hostInboundCoveredAddrs map[string]struct{}
 
+	// hostInboundDHCPRetainedAddrs is the narrower destination-wide subset used
+	// to exempt addresses from the new-interface DHCP backstop. IngressDeny
+	// addresses are deliberately excluded: those rules are scoped to the old
+	// ingress netdevs and cannot suppress a later unleased-DHCP interface guard.
+	// Updated and cleared alongside hostInboundCoveredAddrs under applySem.
+	hostInboundDHCPRetainedAddrs map[string]struct{}
 	// lo0Enforced records whether the currently-loaded xpf_lo0 table is a REAL
 	// operator filter (the #6476 lo0 cold-boot fence gate). It is set true ONLY by
 	// a successful real InstallLo0 that RENDERED AT LEAST ONE KERNEL RULE. A cold-boot

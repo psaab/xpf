@@ -113,6 +113,10 @@ func TestHostInboundDHCPManagementVRFGapDelivery12127(t *testing.T) {
 		hostInboundDropAddrKey('4', "192.0.2.2"):        {},
 		hostInboundDropAddrKey('6', "2001:db8:1212::2"): {},
 	}
+	d.hostInboundDHCPRetainedAddrs = map[string]struct{}{
+		hostInboundDropAddrKey('4', "192.0.2.2"):        {},
+		hostInboundDropAddrKey('6', "2001:db8:1212::2"): {},
+	}
 	cfg := dhcpVRFConfig12127()
 	snapshot := dhcpVRFSnapshot12127(
 		"192.0.2.2/24", "192.0.2.3/24",
