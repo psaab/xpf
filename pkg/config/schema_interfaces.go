@@ -375,7 +375,10 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 	// accepted at commit and the group silently vanishes -- parseVRRPGroups does
 	// strconv.Atoi(name) and `continue`s on error. Range and sign are already
 	// caught by an existing strict gate; this closes only the silent case.
-	return &schemaNode{desc: "VRRP group", args: 1, placeholder: "<group-id>", keyValidator: ValidateVRRPGroupID, children: map[string]*schemaNode{
+	// A same-line flat `set ... priority <n> virtual-address <vip>` nests
+	// virtual-address under priority in SetPath. The schema walker and
+	// parseVRRPGroups both expand this declared packed run.
+	return &schemaNode{desc: "VRRP group", args: 1, placeholder: "<group-id>", keyValidator: ValidateVRRPGroupID, packedFlatRun: true, children: map[string]*schemaNode{
 		"virtual-address": {
 			desc:          "Virtual IP address",
 			args:          1,
