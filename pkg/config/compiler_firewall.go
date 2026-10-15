@@ -1069,7 +1069,7 @@ func prefixFamily(p string) (v4, v6 bool) {
 // firewallPrefixListFamilies collects, for every `policy-options prefix-list
 // NAME`, the address families its resolved prefixes cover. It mirrors
 // compilePolicyOptions' prefix reading exactly (namedInstances +
-// inst.node.Children, each child's full Keys slice — the #3996 dual-shape
+// instanceValueTail plus each child's full Keys slice — the #3996 dual-shape
 // read), so the family verdict matches what the compiler actually loads. The
 // tree passed here is already apply-groups-expanded, so applied group
 // prefix-lists are inlined at top level; an un-applied group's prefix-list is
@@ -1086,6 +1086,18 @@ func firewallPrefixListFamilies(nodes []*Node) map[string]plFamily {
 				continue
 			}
 			fam := out[inst.name]
+			// Match compilePolicyOptions: compact and bracketed prefix values
+			// live in the instance's trailing keys rather than its children.
+			for _, p := range instanceValueTail(inst.node, inst.name) {
+				if p == "" {
+					continue
+				}
+				if v4, v6 := prefixFamily(p); v4 {
+					fam.hasV4 = true
+				} else if v6 {
+					fam.hasV6 = true
+				}
+			}
 			for _, entry := range inst.node.Children {
 				for _, p := range entry.Keys {
 					if p == "" {
