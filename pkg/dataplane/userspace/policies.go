@@ -98,8 +98,33 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 	}
 	var totalExpanded uint64
 	policySetID := uint32(0)
+	// The snapshot quarantine later removes collision losers and poisoned
+	// zones' zone-pair rules. Exclude those sets before expansion accounting
+	// too: discarded rules must neither overflow a namespace / total cap nor
+	// appear in policy-ID maps. Keep the raw set index stable for survivors.
+	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
+	for name := range quarantined {
+		switch name {
+		case config.JunosGlobalZoneName, config.ReservedWildcardZoneName, "junos-host":
+			// Reserved policy sentinels are handled by the rule poison paths,
+			// not by collision quarantine. A poisoned definition is excluded
+			// here just as quarantineCollidingZones excludes it.
+			zone := cfg.Security.Zones[name]
+			if zone == nil || !zone.DroppedEnforcementChild {
+				delete(quarantined, name)
+			}
+		}
+	}
 	for _, zpp := range cfg.Security.Policies {
 		if zpp == nil {
+			policySetID++
+			continue
+		}
+		if _, drop := quarantined[zpp.FromZone]; drop {
+			policySetID++
+			continue
+		}
+		if _, drop := quarantined[zpp.ToZone]; drop {
 			policySetID++
 			continue
 		}
