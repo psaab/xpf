@@ -161,6 +161,41 @@ func (c *xpfCollector) initGlobalDescriptors() {
 		"Total packets dropped by screen/IDS checks, by reason.",
 		[]string{"reason"}, nil,
 	)
+	c.userspaceScreenSubstitutedDefaultDrops = prometheus.NewDesc(
+		"xpf_userspace_screen_substituted_default_drops_total",
+		"Total packets dropped by the substituted fail-closed screen profile.",
+		nil, nil,
+	)
+	c.userspaceScreenSYNFloodDstDrops = prometheus.NewDesc(
+		"xpf_userspace_screen_syn_flood_dst_drops_total",
+		"Total screen SYN-flood drops attributed to destination quotas.",
+		nil, nil,
+	)
+	c.userspaceScreenSYNFloodSrcDrops = prometheus.NewDesc(
+		"xpf_userspace_screen_syn_flood_src_drops_total",
+		"Total screen SYN-flood drops attributed to source quotas.",
+		nil, nil,
+	)
+	c.userspaceScreenSYNFloodAlarmEvents = prometheus.NewDesc(
+		"xpf_userspace_screen_syn_flood_alarm_events_total",
+		"Total screen SYN-flood alarm-threshold crossings below the drop threshold.",
+		nil, nil,
+	)
+	c.userspaceScreenAlarmWithoutDropEvents = prometheus.NewDesc(
+		"xpf_userspace_screen_alarm_without_drop_events_total",
+		"Total screen alarm-without-drop matches that were permitted.",
+		nil, nil,
+	)
+	c.userspaceScreenProfileWarns = prometheus.NewDesc(
+		"xpf_userspace_screen_profile_warns_total",
+		"Total rate-limited warnings emitted for screen profiles.",
+		[]string{"profile"}, nil,
+	)
+	c.userspaceScreenTrackerPressureEvents = prometheus.NewDesc(
+		"xpf_userspace_screen_tracker_pressure_events_total",
+		"Total scan/sweep tracker table pressure events by action.",
+		[]string{"action"}, nil,
+	)
 	// #5806: 1 per zone whose configured `screen ids-option` profile does NOT
 	// resolve to a defined profile. Strict commit rejects a dangling reference,
 	// but tolerant startup/recovery, HA config-sync from a schema-skewed peer,

@@ -235,3 +235,28 @@ fn binding_live_snapshot_propagates_710_drop_counters() {
         "atomic remains readable for the coordinator-level aggregation"
     );
 }
+
+#[test]
+fn binding_live_snapshot_propagates_screen_security_counters_13285() {
+    let live = BindingLiveState::new();
+    live.screen_substituted_default_drops.store(2, Ordering::Relaxed);
+    live.screen_syn_flood_dst_drops.store(3, Ordering::Relaxed);
+    live.screen_syn_flood_src_drops.store(5, Ordering::Relaxed);
+    live.screen_syn_flood_alarm_events.store(7, Ordering::Relaxed);
+    live.screen_alarm_without_drop_events.store(11, Ordering::Relaxed);
+    live.screen_missing_profile_warns.store(13, Ordering::Relaxed);
+    live.screen_inert_profile_warns.store(17, Ordering::Relaxed);
+    live.screen_scan_sweep_skipped_pressure.store(19, Ordering::Relaxed);
+    live.screen_scan_sweep_evicted_pressure.store(23, Ordering::Relaxed);
+
+    let snapshot = live.snapshot();
+    assert_eq!(snapshot.screen_substituted_default_drops, 2);
+    assert_eq!(snapshot.screen_syn_flood_dst_drops, 3);
+    assert_eq!(snapshot.screen_syn_flood_src_drops, 5);
+    assert_eq!(snapshot.screen_syn_flood_alarm_events, 7);
+    assert_eq!(snapshot.screen_alarm_without_drop_events, 11);
+    assert_eq!(snapshot.screen_missing_profile_warns, 13);
+    assert_eq!(snapshot.screen_inert_profile_warns, 17);
+    assert_eq!(snapshot.screen_scan_sweep_skipped_pressure, 19);
+    assert_eq!(snapshot.screen_scan_sweep_evicted_pressure, 23);
+}

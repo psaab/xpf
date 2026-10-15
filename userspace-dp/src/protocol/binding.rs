@@ -606,6 +606,26 @@ pub(crate) struct BindingStatus {
     /// key is stable.
     #[serde(rename = "screen_reason_drops", default)]
     pub screen_reason_drops: [u64; crate::screen::SCREEN_REASON_DROP_COUNT],
+    /// #13285: worker-local ScreenState telemetry, carried on one binding per
+    /// worker and summed into process-wide Prometheus series by Go.
+    #[serde(rename = "screen_substituted_default_drops", default)]
+    pub screen_substituted_default_drops: u64,
+    #[serde(rename = "screen_syn_flood_dst_drops", default)]
+    pub screen_syn_flood_dst_drops: u64,
+    #[serde(rename = "screen_syn_flood_src_drops", default)]
+    pub screen_syn_flood_src_drops: u64,
+    #[serde(rename = "screen_syn_flood_alarm_events", default)]
+    pub screen_syn_flood_alarm_events: u64,
+    #[serde(rename = "screen_alarm_without_drop_events", default)]
+    pub screen_alarm_without_drop_events: u64,
+    #[serde(rename = "screen_missing_profile_warns", default)]
+    pub screen_missing_profile_warns: u64,
+    #[serde(rename = "screen_inert_profile_warns", default)]
+    pub screen_inert_profile_warns: u64,
+    #[serde(rename = "screen_scan_sweep_skipped_pressure", default)]
+    pub screen_scan_sweep_skipped_pressure: u64,
+    #[serde(rename = "screen_scan_sweep_evicted_pressure", default)]
+    pub screen_scan_sweep_evicted_pressure: u64,
     #[serde(rename = "syn_cookie_challenges", default)]
     pub syn_cookie_challenges: u64,
     #[serde(rename = "syn_cookie_secret_unavailable", default)]

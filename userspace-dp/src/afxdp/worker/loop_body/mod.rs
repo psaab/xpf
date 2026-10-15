@@ -42,6 +42,7 @@ use crate::slowpath_reinject_9506::{ReinjectLease, SUBMIT_FLAG_FORWARD};
 // initial ArcSwap load_fulls, binding construction, BPF-map-FD
 // cache, initial cos_status publish) lives in loop_body/setup.rs.
 mod setup;
+mod screen_status;
 
 // #1776: the cfg(debug-log) verbose per-second report + stall dump +
 // per-interval DbgCounters live in loop_body/debug_report.rs. The
@@ -1774,6 +1775,7 @@ pub(crate) fn worker_loop(
                     &bindings,
                     &sessions,
                 );
+                screen_status::publish_screen_state_status(&screen_state, &bindings);
                 for b in bindings.iter_mut() {
                     // #802: publish ring-pressure counters into BindingLiveState
                     // BEFORE resetting the worker-local window. The worker-local
