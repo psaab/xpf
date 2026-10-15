@@ -14435,5 +14435,350 @@ fn attach_zone_counters_ignores_skipped_zone_rows_13183() {
             .zone_counter_slot_map
             .slot_of(crate::policy::ZONE_ID_RESERVED_MIN),
         0
+// #13181 (D6-07): logical units sharing one ifindex in the same zone merge
+// their per-family primary addresses instead of last-write-wins clobbering.
+#[test]
+fn shared_ifindex_units_merge_primaries_13181() {
+    use crate::ZoneSnapshot;
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "vpn".into(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "st0.0".into(),
+                ifindex: 50,
+                zone: "vpn".into(),
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 1,
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.0.0.1/30".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "st0.1".into(),
+                ifindex: 50,
+                zone: "vpn".into(),
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 1,
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: "fd00::1/64".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let egress = state.egress.get(&50).expect("egress 50");
+    assert_eq!(egress.primary_v4, Some(Ipv4Addr::new(10, 0, 0, 1)));
+    assert_eq!(
+        egress.primary_v6,
+        Some("fd00::1".parse::<std::net::Ipv6Addr>().unwrap())
+    );
+    assert_eq!(state.zone_to_rgs.get(&1), Some(&vec![1]));
+}
+
+// #13181 (D6-07): distinct member ifindexes in one zone must all contribute
+// their redundancy groups.
+#[test]
+fn zone_to_rgs_includes_each_member_interface_13181() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "lan".into(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0.100".into(),
+                ifindex: 20,
+                zone: "lan".into(),
+                egress_zone: "lan".into(),
+                redundancy_group: 1,
+                vlan_id: 100,
+                hardware_addr: "02:00:00:00:00:14".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth1.200".into(),
+                ifindex: 21,
+                zone: "lan".into(),
+                egress_zone: "lan".into(),
+                redundancy_group: 2,
+                vlan_id: 200,
+                hardware_addr: "02:00:00:00:00:15".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let mut rgs = state.zone_to_rgs.get(&1).cloned().unwrap_or_default();
+    rgs.sort_unstable();
+    assert_eq!(rgs, vec![1, 2], "all member RGs must reach zone_to_rgs");
+}
+
+// #13181 (D6-07) positive control: same-RG shared rows remain valid.
+#[test]
+fn shared_ifindex_same_rg_control_13181() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "vpn".into(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "st0.0".into(),
+                ifindex: 50,
+                zone: "vpn".into(),
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 1,
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "st0.1".into(),
+                ifindex: 50,
+                zone: "vpn".into(),
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 1,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert_eq!(state.zone_to_rgs.get(&1), Some(&vec![1]));
+}
+
+// #13181 (D6-07): parent trunk inheritance must not inject the parent's RG
+// into the child's zone. reth0 is unzoned (RG 1) and inherits lan only for
+// ingress attribution; lan's only zoned member is reth0.100 with RG 0.
+#[test]
+fn parent_inherited_zone_does_not_inject_parent_rg_13181() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "lan".into(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0".into(),
+                ifindex: 20,
+                zone: String::new(),
+                redundancy_group: 1,
+                hardware_addr: "02:00:00:00:00:14".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth0.100".into(),
+                ifindex: 21,
+                parent_ifindex: 20,
+                zone: "lan".into(),
+                redundancy_group: 0,
+                vlan_id: 100,
+                hardware_addr: "02:00:00:00:00:15".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&20).copied(),
+        Some(1),
+        "precondition: parent inherits child zone for ingress"
+    );
+    assert!(
+        !state.zone_to_rgs.contains_key(&1),
+        "parent RG 1 must not be attributed to lan whose only member has RG 0: {:?}",
+        state.zone_to_rgs
+    );
+}
+
+// #13181 (D6-07): conflicting nonzero HA ownership on one runtime ifindex
+// rejects the snapshot instead of selecting whichever alias appears last.
+#[test]
+fn shared_ifindex_conflicting_redundancy_groups_fail_closed_13181() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "vpn".into(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "st0.0".into(),
+                ifindex: 50,
+                zone: "vpn".into(),
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 1,
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "st0.1".into(),
+                ifindex: 50,
+                zone: "vpn".into(),
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 2,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let result =
+        try_build_forwarding_state_with_policy_counters(&snapshot, &PolicyCounterStore::default());
+    assert!(
+        matches!(
+            result,
+            Err(
+                crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexRedundancyGroup {
+                    ifindex: 50,
+                    first_group: 1,
+                    second_group: 2,
+                    ..
+                }
+            )
+        ),
+        "conflicting HA ownership must reject the snapshot, got {result:?}"
+    );
+}
+
+#[test]
+fn shared_ifindex_incompatible_mtu_and_vlan_fail_closed_13181() {
+    use crate::ZoneSnapshot;
+
+    fn snapshot() -> ConfigSnapshot {
+        ConfigSnapshot {
+            zones: vec![ZoneSnapshot {
+                name: "vpn".into(),
+                id: 1,
+                ..Default::default()
+            }],
+            interfaces: vec![
+                InterfaceSnapshot {
+                    name: "st0.0".into(),
+                    ifindex: 50,
+                    zone: "vpn".into(),
+                    egress_zone: "vpn".into(),
+                    tunnel: true,
+                    hardware_addr: "02:00:00:00:00:01".into(),
+                    ..Default::default()
+                },
+                InterfaceSnapshot {
+                    name: "st0.1".into(),
+                    ifindex: 50,
+                    zone: "vpn".into(),
+                    egress_zone: "vpn".into(),
+                    tunnel: true,
+                    hardware_addr: "02:00:00:00:00:01".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    let mut mtu_snapshot = snapshot();
+    mtu_snapshot.interfaces[0].mtu = 1500;
+    mtu_snapshot.interfaces[1].mtu = 9000;
+    assert!(matches!(
+        try_build_forwarding_state_with_policy_counters(
+            &mtu_snapshot,
+            &PolicyCounterStore::default()
+        ),
+        Err(crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexAttributeConflict {
+            attribute: "mtu",
+            ..
+        })
+    ));
+
+    let mut vlan_snapshot = snapshot();
+    vlan_snapshot.interfaces[0].vlan_id = 0;
+    vlan_snapshot.interfaces[1].vlan_id = 100;
+    assert!(matches!(
+        try_build_forwarding_state_with_policy_counters(
+            &vlan_snapshot,
+            &PolicyCounterStore::default()
+        ),
+        Err(crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexAttributeConflict {
+            attribute: "vlan_id",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn zone_to_rgs_requires_unambiguous_egress_zone_and_zoned_aliases_13181() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "vpn".into(),
+            id: 1,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "st0".into(),
+                ifindex: 50,
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 1,
+                hardware_addr: "02:00:00:00:00:01".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "st0.0".into(),
+                ifindex: 50,
+                zone: "vpn".into(),
+                egress_zone: "vpn".into(),
+                tunnel: true,
+                redundancy_group: 1,
+                hardware_addr: "02:00:00:00:00:01".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        !state.zone_to_rgs.contains_key(&1),
+        "an unzoned alias sharing the runtime ifindex must prevent RG attribution"
+    );
+
+    let mut missing_ledger = snapshot;
+    missing_ledger.interfaces[0].zone = "vpn".into();
+    missing_ledger.interfaces[0].egress_zone.clear();
+    missing_ledger.interfaces[1].egress_zone.clear();
+    let state = build_forwarding_state(&missing_ledger);
+    assert!(
+        !state.zone_to_rgs.contains_key(&1),
+        "rows without an admitted egress-zone ledger entry must not claim HA groups"
     );
 }

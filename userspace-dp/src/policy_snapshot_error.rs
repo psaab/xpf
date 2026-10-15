@@ -548,6 +548,25 @@ pub(crate) enum SnapshotIntegrityError {
         first_interface: String,
         second_interface: String,
     },
+    /// #13181: one kernel ifindex is claimed by logical rows in conflicting
+    /// HA redundancy groups. Runtime egress and fabric ownership are indexed by
+    /// ifindex, so selecting the final row would silently route under whichever
+    /// group's identity sorted last.
+    InterfaceSharedIfindexRedundancyGroup {
+        ifindex: i32,
+        first_group: i32,
+        second_group: i32,
+        interface: String,
+    },
+    /// #13181: rows sharing one runtime ifindex disagree on a single-valued
+    /// egress property, so installing either row's value would be order-dependent.
+    InterfaceSharedIfindexAttributeConflict {
+        ifindex: i32,
+        attribute: &'static str,
+        first_value: String,
+        second_value: String,
+        interface: String,
+    },
     /// #2410: a tunnel-endpoint snapshot's `ttl` is outside the 0..=255 range
     /// representable in the outer IP TTL/hop-limit octet (`TunnelEndpoint.ttl`,
     /// a u8). The pre-fix code narrowed it with `endpoint.ttl.max(0) as u8`, so
@@ -1137,6 +1156,27 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 second_ifindex,
                 bind_ifindex,
                 vlan_id
+            ),
+            Self::InterfaceSharedIfindexRedundancyGroup {
+                ifindex,
+                first_group,
+                second_group,
+                interface,
+            } => write!(
+                f,
+                "interface {:?} shares ifindex {} across redundancy groups {} and {} — refusing to install ambiguous HA ownership",
+                interface, ifindex, first_group, second_group
+            ),
+            Self::InterfaceSharedIfindexAttributeConflict {
+                ifindex,
+                attribute,
+                first_value,
+                second_value,
+                interface,
+            } => write!(
+                f,
+                "interface {:?} shares ifindex {} with conflicting {} values {} and {} — refusing order-dependent egress state",
+                interface, ifindex, attribute, first_value, second_value
             ),
             Self::TunnelTtlOutOfRange { tunnel_id, ttl } => write!(
                 f,
