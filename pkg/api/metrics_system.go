@@ -186,14 +186,13 @@ func (c *xpfCollector) collectRouteMaskCacheMetrics(ch chan<- prometheus.Metric)
 	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheEntries, prometheus.GaugeValue, float64(s.Entries))
 }
 
-// collectFlowExportBatchMetrics emits the xpf_flow_export_batch_* family from
-// the per-exporter pending-batch queue stats (#3747). The family is omitted
-// entirely when no FlowExportBatchStatsFn is wired or when no flow export is
-// configured (empty slice). Labels: protocol {netflow-v9,ipfix}, instance,
-// template — one series per configured flow-server group (bounded). The
-// export batch used to be unbounded: a stalled/overrun drain grew memory
-// without bound and silently. depth / max_depth expose the backlog and
-// dropped_total exposes the bounded drops that now replace that growth.
+// collectFlowExportBatchMetrics emits per-exporter batch and exported-record
+// counters from FlowExportBatchStatsFn. Metrics are omitted when the callback
+// is unwired or returns an empty slice. Labels are protocol, instance,
+// template, and address family — one bounded series per configured exporter
+// group and family. The bounded batch gauges and drop counter expose backlog
+// pressure; exported flow and data-packet counters count successful writes
+// and exclude template refreshes (#13304).
 func (c *xpfCollector) collectFlowExportBatchMetrics(ch chan<- prometheus.Metric) {
 	if c.srv.flowExportBatchStatsFn == nil {
 		return
@@ -205,6 +204,10 @@ func (c *xpfCollector) collectFlowExportBatchMetrics(ch chan<- prometheus.Metric
 			prometheus.GaugeValue, float64(s.MaxDepth), s.Protocol, s.Instance, s.Template, s.Family)
 		ch <- prometheus.MustNewConstMetric(c.flowExportBatchDroppedTotal,
 			prometheus.CounterValue, float64(s.Dropped), s.Protocol, s.Instance, s.Template, s.Family)
+		ch <- prometheus.MustNewConstMetric(c.flowExportFlowsExportedTotal,
+			prometheus.CounterValue, float64(s.ExportedFlows), s.Protocol, s.Instance, s.Template, s.Family)
+		ch <- prometheus.MustNewConstMetric(c.flowExportPacketsExportedTotal,
+			prometheus.CounterValue, float64(s.ExportedPackets), s.Protocol, s.Instance, s.Template, s.Family)
 	}
 }
 

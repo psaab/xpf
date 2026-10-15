@@ -757,29 +757,35 @@ func (d *Daemon) FlowExportBatchStats() []flowexport.ExporterBatchStats {
 	var out []flowexport.ExporterBatchStats
 	if b := d.flowBundle.Load(); b != nil {
 		for _, g := range b.groups {
+			flows, packets := g.exp.Stats()
 			out = append(out, flowexport.ExporterBatchStats{
-				Protocol:       "netflow-v9",
-				Instance:       g.ec.InstanceName,
-				Template:       g.ec.TemplateName,
-				Family:         flowExportAddressFamily(g.ec.GroupIsV6),
-				Depth:          g.exp.BatchDepth(),
-				MaxDepth:       g.exp.BatchMaxDepth(),
-				Dropped:        g.exp.BatchDropped(),
-				HandoffDropped: g.exp.HandoffDropped(),
+				Protocol:        "netflow-v9",
+				Instance:        g.ec.InstanceName,
+				Template:        g.ec.TemplateName,
+				Family:          flowExportAddressFamily(g.ec.GroupIsV6),
+				Depth:           g.exp.BatchDepth(),
+				MaxDepth:        g.exp.BatchMaxDepth(),
+				Dropped:         g.exp.BatchDropped(),
+				ExportedFlows:   flows,
+				ExportedPackets: packets,
+				HandoffDropped:  g.exp.HandoffDropped(),
 			})
 		}
 	}
 	if b := d.ipfixBundlePtr.Load(); b != nil {
 		for _, g := range b.groups {
+			flows, packets := g.exp.Stats()
 			out = append(out, flowexport.ExporterBatchStats{
-				Protocol:       "ipfix",
-				Instance:       g.ec.InstanceName,
-				Template:       g.ec.TemplateName,
-				Family:         flowExportAddressFamily(g.ec.GroupIsV6),
-				Depth:          g.exp.BatchDepth(),
-				MaxDepth:       g.exp.BatchMaxDepth(),
-				Dropped:        g.exp.BatchDropped(),
-				HandoffDropped: g.exp.HandoffDropped(),
+				Protocol:        "ipfix",
+				Instance:        g.ec.InstanceName,
+				Template:        g.ec.TemplateName,
+				Family:          flowExportAddressFamily(g.ec.GroupIsV6),
+				Depth:           g.exp.BatchDepth(),
+				MaxDepth:        g.exp.BatchMaxDepth(),
+				Dropped:         g.exp.BatchDropped(),
+				ExportedFlows:   flows,
+				ExportedPackets: packets,
+				HandoffDropped:  g.exp.HandoffDropped(),
 			})
 		}
 	}
