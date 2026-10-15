@@ -1007,11 +1007,15 @@ impl ShardedNeighborMap {
         }
     }
 
-    /// Total entry count summed across shards. Locks all shards in
-    /// order. Used by `coordinator::dynamic_neighbor_status`.
+    /// Total entry count summed across shards, releasing each shard lock
+    /// before acquiring the next. This is an informational status gauge;
+    /// it does not require a single atomic cross-shard snapshot.
     pub(crate) fn len(&self) -> usize {
-        self.with_all_shards(|bulk| bulk.total_len())
+        (0..NUM_SHARDS)
+            .map(|i| self.lock_shard(i).len())
+            .sum()
     }
+
 
     /// True iff the map has zero entries across all shards.
     pub(crate) fn is_empty(&self) -> bool {

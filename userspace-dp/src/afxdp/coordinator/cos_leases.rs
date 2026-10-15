@@ -166,10 +166,13 @@ impl super::Coordinator {
 // it in isolation. `Coordinator::cos_statuses` reads per-worker
 // snapshots from `worker.cos_status` (built by
 // `build_worker_cos_statuses` on the worker side) and sums them here.
-pub(super) fn aggregate_cos_statuses_across_workers(
-    worker_snapshots: &[Vec<crate::protocol::CoSInterfaceStatus>],
+pub(super) fn aggregate_cos_statuses_across_workers<S>(
+    worker_snapshots: &[S],
     owner_by_queue: &BTreeMap<(i32, u8), u32>,
-) -> Vec<crate::protocol::CoSInterfaceStatus> {
+) -> Vec<crate::protocol::CoSInterfaceStatus>
+where
+    S: std::borrow::Borrow<Vec<crate::protocol::CoSInterfaceStatus>>,
+{
     let mut interfaces = BTreeMap::<i32, crate::protocol::CoSInterfaceStatus>::new();
     let mut queue_maps = BTreeMap::<i32, BTreeMap<u8, crate::protocol::CoSQueueStatus>>::new();
     // #1628: tracks, per ifindex, whether the backlog-guarded
@@ -179,7 +182,7 @@ pub(super) fn aggregate_cos_statuses_across_workers(
     // pin a `.min()` to 0 forever — the r3 finding).
     let mut min_epochs_seeded = std::collections::HashSet::<i32>::new();
     for snapshot in worker_snapshots {
-        for iface in snapshot.iter() {
+        for iface in snapshot.borrow().iter() {
             let entry = interfaces.entry(iface.ifindex).or_default();
             entry.ifindex = iface.ifindex;
             if entry.interface_name.is_empty() {
