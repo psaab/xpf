@@ -255,23 +255,26 @@ dataplane builds).
 
 ## Running it on the loss userspace cluster
 
-**Attempted 2026-09-06 and BLOCKED. Three preconditions are not satisfiable on
-the loss cluster as configured (#9053), and each was verified at source rather
-than inferred.** The steps below remain the owed procedure; what follows is why
-running them today produces refusals rather than a number.
+**Attempted 2026-09-06 and BLOCKED.** The historical attempt had three
+preconditions unsatisfied on the loss cluster. The client source-bind gap is
+fixed by `--src-bind` / harness `SRC_BIND`; the pool capacity and operator
+baseline blockers remain. The measurement is still owed.
 
 Off-cluster, everything passes: `newflow_ceiling_analyze_test` OK,
 `newflow-gen` 13/13, and the harness `--dry-run` resolves every host, the target
 and the analyzer. The blockers are all in the cluster's committed state.
 
-**1. The client cannot source from the prefix the pool rule matches.** The
-committed rule is `rule pool-snat` in rule-set `lan-to-wan`, matching
-`source-address 10.0.61.240/28`. The LAN host is `10.0.61.102` — outside that
-/28 — so its traffic takes the sibling `rule snat` (interface mode) instead, and
-the pool sees ZERO allocations, which is the harness's first named refusal
-condition. `newflow-gen` has no client source-address option: `--bind` (main.rs
-:79/:341) is the SINK's, and the client calls `TcpStream::connect_timeout`
-(:296) with no local bind. Read at source, not inferred from `--help`.
+**1. Client source binding is available; the operator must assign a pool-prefix
+address for the run.** The committed `pool-snat` rule in rule-set `lan-to-wan`
+matches `source-address 10.0.61.240/28`. The LAN host's normal address,
+`10.0.61.102`, is outside that prefix, so unbound traffic takes the sibling
+interface-mode `rule snat` instead and yields zero pool allocations. The
+generator client now supports `--src-bind <IP>` and the harness accepts
+`SRC_BIND=<IP>`; after an authorized operator temporarily assigns (for example)
+`10.0.61.241/28` to the LAN host, run the harness with `SRC_BIND=10.0.61.241`.
+Without both the temporary address and explicit bind, the pool still sees no
+traffic and the analyzer refuses the cell. The harness does not mutate host
+addresses itself.
 
 **2. The pool holds 1000 ports.** `pool-snat-pool` is `172.16.80.7/32` with
 `port range 30000 to 30999`. The documented sweep is 5000–80000 flows/sec; a
@@ -288,10 +291,8 @@ quoted here.
 be started on it. This one is surmountable: `loss:xpf-mouse-target` holds
 `172.16.80.201` on the same VLAN-80 subnet and `TARGET_IP` is overridable.
 
-Blockers 1 and 2 both require changing the SHARED cluster's committed
-configuration — a wider pool and a rule that matches the generator's source —
-which affects every other lane's smokes and is a decision for whoever owns that
-cluster, not something a measurement run should do to itself.
+The pool-capacity blocker still needs a cluster-owner decision and any
+configuration change must not be made by the measurement run itself.
 
 ### What this harness can and cannot attribute
 
