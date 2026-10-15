@@ -25,9 +25,8 @@ use super::*;
 use crate::afxdp::ipsec_inner_queue::{
     reason as ipsec_reason, IpsecInnerVerdict, IPSEC_INNER_SLAB_CAP,
 };
-use std::sync::Arc;
 use crate::slowpath::SlowPathReinjector;
-use arc_swap::ArcSwapOption;
+use std::sync::Arc;
 
 const PERMIT: u64 = 7;
 const QEPOCH: u64 = 11;
@@ -456,21 +455,23 @@ fn attest_tombstone_overflow_is_full_only_in_attest_run() {
     assert!(ordinary.admitted, "ordinary handoff must clear D11 overflow poison");
 }
 #[test]
-fn target_handoff_preserves_live_reinject_state() {
-    let core = open_core();
+fn coordinator_target_publication_preserves_live_reinject_state() {
+    let mut coordinator = crate::afxdp::Coordinator::new();
+    let core = coordinator.reinject_core.clone();
+    core.publish_epochs(PERMIT, &[(1, QEPOCH)]);
     assert!(core.admit(&frame(7, 1, 64)).admitted);
     assert_eq!(core.live_count(), 1);
 
-    let reinjector =
-        SlowPathReinjector::new_without_worker_with_core(1500, core.clone());
-    let target: Arc<ArcSwapOption<SlowPathReinjector>> =
-        Arc::new(ArcSwapOption::new(None));
-    target.store(Some(Arc::new(reinjector)));
-    let published_core = target.load_full().unwrap().reinject_core();
+    coordinator.slow_path = Some(Arc::new(
+        SlowPathReinjector::new_without_worker_with_core(1500, core.clone()),
+    ));
+    coordinator.publish_reinject_target();
+    let published = coordinator.reinject_target.load_full().unwrap();
+    let published_core = published.reinject_core();
 
     assert!(
         Arc::ptr_eq(&core, &published_core),
-        "published target must share, not copy, in-flight reinject state"
+        "Coordinator publication must expose a target backed by its socket core"
     );
     assert_eq!(published_core.live_count(), 1);
 }
