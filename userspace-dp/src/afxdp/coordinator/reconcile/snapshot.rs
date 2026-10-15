@@ -700,7 +700,7 @@ pub(super) fn apply_snapshot(
     };
     // #13196: publish the target synchronously during reconcile; no polling
     // thread needs to acquire ServerState at 1 kHz or copy state between cores.
-    coord.reinject_target.store(coord.slow_path.clone());
+    coord.publish_reinject_target();
     // #9506 S5: publish the committed snapshot's reinject authority only
     // after the slow-path object is live. Epoch zero intentionally closes the
     // authority; stale or reordered snapshots are rejected inside the core.

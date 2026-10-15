@@ -756,6 +756,10 @@ impl Coordinator {
         }
     }
 
+    pub(crate) fn publish_reinject_target(&self) {
+        self.reinject_target.store(self.slow_path.clone());
+    }
+
     pub fn stop(&mut self) {
         self.stop_inner(true);
         // #6244: an explicit stop records the terminal lifecycle stage (the
@@ -1145,8 +1149,8 @@ impl Coordinator {
             .slow_path
             .as_ref()
             .and_then(|slow| slow.reinject_status());
-        self.reinject_target.store(None);
         self.slow_path = None;
+        self.publish_reinject_target();
         // #7209: ONE store of the whole set; the previous set's fds close when
         // the last holder releases (see `BpfMaps`). With no readers this is
         // identical to the seven field assignments it replaces.
