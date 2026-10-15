@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
-
+	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/config"
+	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
 // #9154: THE CONFIGURATION REGEXES WERE NOT ENFORCED HERE AT ALL.
@@ -89,6 +89,21 @@ func configMutationLineFor(fullMethod string, req any) (string, bool) {
 			// sending them through SetFromInput. Keep the exact handler-routed
 			// line so the configuration gate adjudicates the real path(s):
 			if fields := strings.Fields(input); len(fields) > 0 && fields[0] == "annotate" {
+				// The handler passes this input through AnnotateCommentFromLine,
+				// then uses strings.Fields(pathText) and the decoded comment. Rebuild
+				// the gate line from those same values so quotes inside a comment
+				// cannot become extra path tokens in the authorization lexer.
+				line := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
+				pathText, comment, ok := cliterm.AnnotateCommentFromLine(line)
+				if ok {
+					path := strings.Fields(pathText)
+					quotedPath := make([]string, len(path))
+					for i, token := range path {
+						quotedPath[i] = `"` + cliterm.EscapeAnnotateComment(token) + `"`
+					}
+					return "annotate " + strings.Join(quotedPath, " ") +
+						` "` + cliterm.EscapeAnnotateComment(comment) + `"`, true
+				}
 				return input, true
 			}
 			// copy/rename have two endpoints, while insert and
