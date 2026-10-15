@@ -75,6 +75,7 @@ func (s *Server) showInterfacesExtensive(cfg *config.Config, filter string, buf 
 			}
 		}
 	}
+	found := false
 	for _, link := range linksList {
 		attrs := link.Attrs()
 		if attrs.Name == "lo" {
@@ -83,6 +84,7 @@ func (s *Server) showInterfacesExtensive(cfg *config.Config, filter string, buf 
 		if filter != "" && attrs.Name != filter {
 			continue
 		}
+		found = true
 		adminUp := attrs.Flags&net.FlagUp != 0
 		operUp := attrs.OperState == netlink.OperUp
 		adminStr := "Disabled"
@@ -172,7 +174,7 @@ func (s *Server) showInterfacesExtensive(cfg *config.Config, filter string, buf 
 
 	// #4328: bondless reth aggregates have no kernel netdev — append them.
 	if cfg != nil {
-		writeRethDetail(buf, cfg, rethMaps, "", false)
+		writeRethDetail(buf, cfg, rethMaps, filter, found)
 	}
 	return nil
 }
