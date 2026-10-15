@@ -594,6 +594,14 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				continue
 			}
 			if peer != nil {
+				if zoneLeafHasApplyMacroTail13112(peer) && groupPackedLeafBody(ancestorPath, s) != nil {
+					// #13112: the exact macro tail is inert. Remove it before
+					// promoting this leaf, or zone readers treat the merged
+					// group body as apply-macro payload and hide enforcement.
+					promoteZoneMacroLeaf13112(peer)
+					peer.IsLeaf = false
+				}
+
 				// #7648: a COMPACT group leaf whose key names a schema
 				// CONTAINER, matched against a container peer, is the block
 				// spelling wearing a leaf's shape. Expand it and merge, so the
@@ -728,7 +736,11 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			}
 			// Wildcard merge: apply to all matching containers in dst.
 			for _, d := range *dst {
-				if keysMatchWildcard(d.Keys, s.Keys) && (!d.IsLeaf || zoneLeafTakesWildcard9801(ancestorPath, d)) {
+				matches := keysMatchWildcard(d.Keys, s.Keys)
+				if !matches && zoneLeafHasApplyMacroTail13112(d) && len(s.Keys) == 2 {
+					matches = keysMatchWildcard(d.Keys[:2], s.Keys)
+				}
+				if matches && (!d.IsLeaf || zoneLeafTakesWildcard9801(ancestorPath, d)) {
 					// #9801: a zone written as a leaf becomes the empty container its
 					// braced spelling is, and takes the group the same way.
 					// #9862: when filtering is active the flip waits for an
@@ -736,6 +748,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					// reshape the leaf it adds nothing to. mergeNodes only
 					// appends, so growth is exactly adoption. Unconditional
 					// when filtering is off, exactly as before.
+					promoteZoneMacroLeaf13112(d)
 					leafKids := -1
 					if haveExcept {
 						leafKids = len(d.Children)
