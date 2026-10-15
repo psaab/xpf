@@ -824,3 +824,27 @@ fn replication_contention_denominator_counts_only_attempted_acquisitions() {
         "exactly one replication call"
     );
 }
+
+/// #13080 (D5-08): a forward NAT publish takes the ambiguity index lock once,
+/// rather than once to observe and again for each displaced alias.
+#[test]
+fn publish_forward_nat_takes_nat_ambiguities_once() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    let before =
+        crate::afxdp::shared_ops::NAT_AMBIGUITY_PUBLISH_LOCK_ACQUISITIONS.load(Ordering::Relaxed);
+    let mut forward = entry(43080);
+    forward.decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 80))),
+        rewrite_src_port: Some(45080),
+        ..NatDecision::default()
+    };
+    maps.publish(&forward);
+    let after =
+        crate::afxdp::shared_ops::NAT_AMBIGUITY_PUBLISH_LOCK_ACQUISITIONS.load(Ordering::Relaxed);
+    assert_eq!(
+        after - before,
+        1,
+        "forward NAT publish must acquire nat_ambiguities once"
+    );
+}

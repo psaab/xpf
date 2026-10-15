@@ -178,6 +178,17 @@ fn lock_shared_publish<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `xpf_userspace_session_nat_reverse_key_shared_displacements_total`.
 pub(crate) static NAT_REVERSE_KEY_SHARED_DISPLACEMENTS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+pub(crate) static NAT_AMBIGUITY_PUBLISH_LOCK_ACQUISITIONS: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn lock_nat_ambiguities_for_publish(
+    indexes: &SharedSessionOwnerRgIndexes,
+) -> MutexGuard<'_, SharedNatAmbiguityIndex> {
+    #[cfg(test)]
+    NAT_AMBIGUITY_PUBLISH_LOCK_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
+    lock_shared_recover(&indexes.nat_ambiguities)
+}
 /// #1760 W3' detection helper: count a shared-map displacement when the
 /// displaced entry belongs to a DIFFERENT forward session. Shared by the
 /// reverse-wire and reverse-canonical insert sites in
@@ -811,16 +822,21 @@ pub(super) fn shared_forward_nat_candidate_is_unique(
     if probe != wire_probe && probe != canonical_probe {
         return false;
     }
-    let map = lock_shared_recover(shared_nat_sessions);
-    let Some(entry) = map.get(&expected_alias) else {
-        return false;
+    let unique_alias = {
+        let map = lock_shared_recover(shared_nat_sessions);
+        let Some(entry) = map.get(&expected_alias) else {
+            return false;
+        };
+        !entry.metadata.is_reverse
+            && entry.key == *expected_forward_key
+            && entry.decision.nat == expected_nat
     };
-    if entry.metadata.is_reverse
-        || entry.key != *expected_forward_key
-        || entry.decision.nat != expected_nat
-    {
+    if !unique_alias {
         return false;
     }
+    // Do not nest the map and ambiguity locks: publish holds the ambiguity
+    // lock across alias publication so a domain-zero lookup cannot observe a
+    // new alias before its owner has been recorded.
     let ambiguities = lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities);
     ambiguities.is_unique_for(&wire_probe, expected_forward_key)
         && (probe == wire_probe
@@ -2260,20 +2276,18 @@ pub(super) fn publish_shared_session(
         // Keep translated aliases domain-stamped. The ambiguity index, not a
         // colliding domain-zero map key, carries the neutral lookup identity.
         let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
-        lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities).observe(
+        let reverse_canonical = reverse_canonical_key(&entry.key, entry.decision.nat);
+        let mut ambiguities = lock_nat_ambiguities_for_publish(shared_owner_rg_indexes);
+        ambiguities.observe(
             crate::session::reverse_match_key(&reverse_wire),
             entry.key.clone(),
         );
         let mut sessions = lock_shared_publish(shared_nat_sessions);
         let displaced = sessions.insert(reverse_wire.clone(), entry.clone());
         record_shared_nat_displacement(displaced.as_ref(), entry);
-        if displaced
+        let reverse_wire_ambiguous = displaced
             .as_ref()
-            .is_some_and(|existing| existing.key != entry.key)
-        {
-            lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
-                .mark(reverse_wire.clone());
-        }
+            .is_some_and(|existing| existing.key != entry.key);
         let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
         update_owner_rg_index(
             &shared_owner_rg_indexes.nat_sessions,
@@ -2281,17 +2295,12 @@ pub(super) fn publish_shared_session(
             previous_owner_rg,
             entry.metadata.owner_rg_id,
         );
-        let reverse_canonical = reverse_canonical_key(&entry.key, entry.decision.nat);
-        if reverse_canonical != reverse_wire {
+        let reverse_canonical_ambiguous = if reverse_canonical != reverse_wire {
             let displaced = sessions.insert(reverse_canonical.clone(), entry.clone());
             record_shared_nat_displacement(displaced.as_ref(), entry);
-            if displaced
+            let ambiguous = displaced
                 .as_ref()
-                .is_some_and(|existing| existing.key != entry.key)
-            {
-                lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
-                    .mark(reverse_canonical.clone());
-            }
+                .is_some_and(|existing| existing.key != entry.key);
             let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
             update_owner_rg_index(
                 &shared_owner_rg_indexes.nat_sessions,
@@ -2299,6 +2308,16 @@ pub(super) fn publish_shared_session(
                 previous_owner_rg,
                 entry.metadata.owner_rg_id,
             );
+            ambiguous
+        } else {
+            false
+        };
+        drop(sessions);
+        if reverse_wire_ambiguous {
+            ambiguities.mark(reverse_wire);
+        }
+        if reverse_canonical_ambiguous {
+            ambiguities.mark(reverse_canonical);
         }
     }
     if !entry.metadata.is_reverse {
