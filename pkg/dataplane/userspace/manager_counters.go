@@ -38,6 +38,11 @@ type userspaceCounterSnapshot struct {
 	// into dataplane.GlobalCtrNATAllocFail; also a term of the aggregate
 	// "Packets dropped" total pushed into dataplane.GlobalCtrDrops.
 	natAllocFail uint64
+	// #13274 (D1-02): binding-derived global counter totals.
+	flowCacheHits   uint64
+	flowCacheMisses uint64
+	localDelivery   uint64
+	fabricFwdDrops  uint64
 }
 
 // totalDrops (#4477) is the aggregate "Packets dropped" figure surfaced by
@@ -98,6 +103,10 @@ func sumBindingCounters(status *ProcessStatus) userspaceCounterSnapshot {
 		s.dnatPackets += b.DNATPackets
 		s.nat64Translations += b.Nat64Translations
 		s.natAllocFail += b.NatAllocFail
+		s.flowCacheHits += b.FlowCacheHits
+		s.flowCacheMisses += b.FlowCacheMisses
+		s.localDelivery += b.LocalDeliveryPackets
+		s.fabricFwdDrops += b.FabricRedirectUnsendableDrops
 	}
 	return s
 }
@@ -161,6 +170,14 @@ func (m *Manager) syncBPFCountersLocked(status *ProcessStatus) {
 		// per-binding; this delta-push mirrors the snat/dnat plumbing so
 		// `show security flow statistics` reflects live NAT64 translation.
 		{dataplane.GlobalCtrNAT64Xlate, safeDelta(cur.nat64Translations, prev.nat64Translations)},
+		// #13274 (D1-02): restore sourced userspace values to the legacy
+		// global counters consumed by REST, Prometheus, CLI and gRPC. Flush,
+		// invalidation, TC egress and successful fabric redirect have no
+		// userspace source and must not be inferred from other event counts.
+		{dataplane.GlobalCtrFlowCacheHit, safeDelta(cur.flowCacheHits, prev.flowCacheHits)},
+		{dataplane.GlobalCtrFlowCacheMiss, safeDelta(cur.flowCacheMisses, prev.flowCacheMisses)},
+		{dataplane.GlobalCtrHostInbound, safeDelta(cur.localDelivery, prev.localDelivery)},
+		{dataplane.GlobalCtrFabricFwdDrop, safeDelta(cur.fabricFwdDrops, prev.fabricFwdDrops)},
 	}
 
 	// #3343: push each per-screen-reason drop delta into its GlobalCtrScreen*
