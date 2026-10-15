@@ -23,6 +23,11 @@ func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 		status.SnapshotRetryDebt = true
 		status.SnapshotRetryDebtGeneration = m.lastSnapshot.Generation
 	}
+	status.RSTSuppressionDegraded = (len(m.lastRSTv4)+len(m.lastRSTv6) > 0) && !m.lastRSTInstallOK
+	status.RSTSuppressionFailures = m.mapsSyncTelemetry.rstSuppressionFailures.Load()
+	status.BindingsWatchdogRepairs = m.mapsSyncTelemetry.bindingsWatchdogRepairs.Load()
+	status.BindingsWatchdogErrors = m.mapsSyncTelemetry.bindingsWatchdogErrors.Load()
+	status.LocalAddrPruneSkipped = m.mapsSyncTelemetry.localAddrPruneSkipped.Load()
 	// #3261: stamp the manager-owned snapshot-reject diagnostic onto the status
 	// the helper round-trip cannot carry (the helper has no PolicyContentRejected
 	// field and strips it on decode). This keeps the rejected-snapshot state

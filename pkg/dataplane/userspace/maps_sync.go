@@ -1025,6 +1025,7 @@ func (m *Manager) syncLocalAddressMapsWithSetsLocked(
 	// but SKIP the stale-key prune this cycle and warn. The next reconcile
 	// with a complete enumeration removes any genuinely stale keys.
 	if !enumComplete {
+		m.mapsSyncTelemetry.localAddrPruneSkipped.Add(1)
 		slog.Warn("userspace local-address sync: netlink AddrList enumeration incomplete; " +
 			"skipping stale-key prune to avoid removing VRRP VIP/local keys from " +
 			"userspace_local_v4/v6 (will reconcile on the next complete enumeration)")
@@ -1232,6 +1233,7 @@ func (m *Manager) syncInterfaceNATAddressMapsWithExclusionsLocked(snapshot *Conf
 		if err := xpfnft.InstallRSTSuppression(rstV4, rstV6); err != nil {
 			slog.Warn("userspace: RST suppression unavailable (nftables error, non-fatal)", "err", err)
 			m.lastRSTInstallOK = false
+			m.mapsSyncTelemetry.rstSuppressionFailures.Add(1)
 		} else {
 			m.lastRSTInstallOK = true
 		}
@@ -1319,6 +1321,7 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 		}
 		var val userspaceBindingValue
 		if err := bindingsMap.Lookup(idx, &val); err != nil {
+			m.mapsSyncTelemetry.bindingsWatchdogErrors.Add(1)
 			slog.Debug("userspace: bindings watchdog lookup failed",
 				"ifindex", binding.Ifindex, "queue", binding.QueueID, "err", err)
 			continue
@@ -1336,12 +1339,14 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 			Flags: flags,
 		}
 		if err := bindingsMap.Update(idx, newVal, ebpf.UpdateAny); err != nil {
+			m.mapsSyncTelemetry.bindingsWatchdogErrors.Add(1)
 			slog.Warn("userspace: bindings watchdog failed to repair entry",
 				"ifindex", binding.Ifindex, "queue", binding.QueueID,
 				"slot", binding.Slot, "err", err)
 			continue
 		}
 		repaired++
+		m.mapsSyncTelemetry.bindingsWatchdogRepairs.Add(1)
 	}
 
 	// Also repair aliased bindings (VLAN children inheriting parent's XSK).
@@ -1357,6 +1362,7 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 				}
 				var val userspaceBindingValue
 				if err := bindingsMap.Lookup(idx, &val); err != nil {
+					m.mapsSyncTelemetry.bindingsWatchdogErrors.Add(1)
 					slog.Debug("userspace: bindings watchdog alias lookup failed",
 						"child", childIfindex, "parent", parentIfindex, "queue", binding.QueueID, "err", err)
 					continue
@@ -1369,12 +1375,14 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 					Flags: userspaceBindingReady,
 				}
 				if err := bindingsMap.Update(idx, newVal, ebpf.UpdateAny); err != nil {
+					m.mapsSyncTelemetry.bindingsWatchdogErrors.Add(1)
 					slog.Warn("userspace: bindings watchdog failed to repair alias entry",
 						"child", childIfindex, "parent", parentIfindex,
 						"queue", binding.QueueID, "slot", binding.Slot, "err", err)
 					continue
 				}
 				repaired++
+				m.mapsSyncTelemetry.bindingsWatchdogRepairs.Add(1)
 			}
 		}
 	}
