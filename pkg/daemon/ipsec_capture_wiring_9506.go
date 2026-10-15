@@ -1353,8 +1353,6 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 			Phase:          nfqueue.PipelineEnforcing,
 			HandoffCap:     16384,
 			BatchCap:       64,
-			FragmentSlots:  128,
-			FragmentPieces: 128,
 			Submitter:      submitter,
 			Attestation:    attestation,
 			DenyEvents:     denyEvents,

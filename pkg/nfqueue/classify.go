@@ -2,7 +2,6 @@ package nfqueue
 
 import (
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 )
@@ -193,8 +192,3 @@ func captureFlowKey(c CaptureClassification) string {
 	}
 	return key
 }
-
-// Keep hex imported in the source-level contract: callers that log FlowKey
-// components can use the same canonical fixed-width encoding without net.IP
-// formatting differences. This helper also avoids exposing mutable slices.
-func captureAddressHex(address [16]byte) string { return hex.EncodeToString(address[:]) }

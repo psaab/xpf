@@ -470,7 +470,7 @@ func TestCapturePipelineFragmentCompletionOneClass9506(t *testing.T) {
 	sink := new(pipelineTestSink)
 	p, err := NewCapturePipeline(CapturePipelineConfig{
 		Registry: pipelineTestRegistry(t), Phase: PipelineQuarantine, Sink: sink,
-		HandoffCap: 8, BatchCap: 8, FragmentSlots: 2,
+		HandoffCap: 8, BatchCap: 8,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -495,7 +495,7 @@ func TestCapturePipelineFragmentsAreDeniedBeforeFragPool9506(t *testing.T) {
 	var denyReasons []IpsecInnerReason
 	p, err := NewCapturePipeline(CapturePipelineConfig{
 		Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: sink,
-		HandoffCap: 8, BatchCap: 8, FragmentSlots: 2, FragmentTombstoneCap: 1,
+		HandoffCap: 8, BatchCap: 8, FragmentTombstoneCap: 1,
 		DenyEvents: DenyEventSinkFunc(func(event IpsecInnerDeny) bool {
 			denyReasons = append(denyReasons, event.Reason)
 			return true
@@ -547,9 +547,6 @@ func TestCapturePipelineFragmentsAreDeniedBeforeFragPool9506(t *testing.T) {
 		if reason != ReasonFragmentRefused {
 			t.Fatalf("fragment deny reason = %v, want FRAGMENT_REFUSED", reason)
 		}
-	}
-	if got := p.fragPool.Stats(); got.Flows != 0 || got.Fragments != 0 || got.Completed != 0 {
-		t.Fatalf("D22 fragments reached FragPool: %+v", got)
 	}
 	stats := p.Stats()
 	if stats.FragmentDrops != uint64(len(frames)) || stats.FragmentLate != 2 {

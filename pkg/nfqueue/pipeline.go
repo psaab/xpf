@@ -140,11 +140,10 @@ func (f packetVerdictSinkFunc) Verdict(packet *Packet, verdict Verdict) error {
 }
 
 type CaptureFrame struct {
-	Packet       *Packet
-	FlowKey      string
-	FragmentKey  *FragmentKey
-	Fragment     *Fragment
-	InnerOverlap bool
+	Packet      *Packet
+	FlowKey     string
+	FragmentKey *FragmentKey
+	Fragment    *Fragment
 	// SnapshotGeneration is the immutable capture authority. ConfigGeneration
 	// and FIBGeneration are the accepted packet/config authority; the separate
 	// P-MECH inventory identity is frozen from that same accepted snapshot.
@@ -185,7 +184,6 @@ type AdjudicatedFrame struct {
 // pre-gate. The enforcing phase is fail-closed when the evaluator/snapshot
 // pair is absent; no frame can silently become a permit.
 type CapturePipelineConfig struct {
-	Queues               []*Queue
 	Registry             *OriginRegistry
 	LeaseMinter          LeaseMinter
 	Submitter            ReinjectSubmitter
@@ -194,9 +192,6 @@ type CapturePipelineConfig struct {
 	HandoffCap           int
 	BatchCap             int
 	AckDeadline          time.Duration
-	FragmentSlots        int
-	FragmentPieces       int
-	FragmentDeadline     time.Duration
 	FragmentTombstoneCap int
 	OnUncertain          func(reason string)
 	ZoneEvaluator        ZoneEvaluator
@@ -222,19 +217,14 @@ type PipelineStats struct {
 	ZoneGateDrops          uint64
 	ZoneGateUnavailable    uint64
 	ZoneGateStale          uint64
-	ZoneDivergences        uint64
 	V1PermitSuppressed     uint64
 	ClassificationErrors   uint64
 	FragmentMetadataErrors uint64
 	FragmentLate           uint64
 	DenyEventUnavailable   uint64
 	VersionSkews           uint64
-	EventDecodeErrors      uint64
-	InputAcceptErrors      uint64
 	Dropped                uint64
 	Accepted               uint64
-	Submitted              uint64
-	AdmissionsRefused      uint64
 	Stale                  uint64
 	Cancelled              uint64
 	Refused                uint64
@@ -243,9 +233,7 @@ type PipelineStats struct {
 	Timeouts               uint64
 	LateCompletions        uint64
 	FlowRetires            uint64
-	Retries                uint64
 	L2Unsupported          uint64
-	OverlapRefusals        uint64
 	FragmentDrops          uint64
 	// #10478 Phase 2a witness: drained from the bounded handoff into pipeline
 	// accounting (all receive-time dispositions).
@@ -315,10 +303,6 @@ type CapturePipeline struct {
 	handoff              chan CaptureFrame
 	batchCap             int
 	ackDeadline          time.Duration
-	fragmentDeadline     time.Duration
-	fragPool             *FragPool
-	fragHolds            map[FragmentKey][]CaptureFrame
-	fragTimes            map[FragmentKey]time.Time
 	fragmentTombstones   map[fragmentDenyKey]struct{}
 	fragmentTombstoneCap int
 	flows                map[string]*flowState
@@ -356,21 +340,8 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 	if cfg.AckDeadline > reinjectMaxAckDeadline {
 		return nil, fmt.Errorf("nfqueue: ack deadline exceeds %s", reinjectMaxAckDeadline)
 	}
-	if cfg.FragmentSlots <= 0 {
-		cfg.FragmentSlots = 128
-	}
-	if cfg.FragmentPieces <= 0 {
-		cfg.FragmentPieces = 128
-	}
-	if cfg.FragmentDeadline <= 0 {
-		cfg.FragmentDeadline = 2 * time.Second
-	}
 	if cfg.FragmentTombstoneCap <= 0 {
 		cfg.FragmentTombstoneCap = 4096
-	}
-	fragPool, err := NewFragPool(cfg.FragmentPieces, cfg.FragmentSlots)
-	if err != nil {
-		return nil, fmt.Errorf("nfqueue: fragment slots: %w", err)
 	}
 	if cfg.Sink == nil {
 		cfg.Sink = packetVerdictSinkFunc(func(packet *Packet, verdict Verdict) error {
@@ -387,8 +358,7 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 		zoneEvaluator: cfg.ZoneEvaluator, zoneSnapshot: cfg.ZoneSnapshot,
 		denyEvents: cfg.DenyEvents,
 		handoff:    make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
-		ackDeadline: cfg.AckDeadline, fragmentDeadline: cfg.FragmentDeadline, fragPool: fragPool,
-		fragHolds: make(map[FragmentKey][]CaptureFrame), fragTimes: make(map[FragmentKey]time.Time),
+		ackDeadline:          cfg.AckDeadline,
 		fragmentTombstones:   make(map[fragmentDenyKey]struct{}),
 		fragmentTombstoneCap: cfg.FragmentTombstoneCap,
 		flows:                make(map[string]*flowState), pending: make(map[uint64]*pendingReinject),
@@ -679,44 +649,6 @@ func (p *CapturePipeline) enqueueFlowLocked(frame CaptureFrame) []CaptureFrame {
 	if flow.retired {
 		p.stats.FlowRetires++
 		return []CaptureFrame{frame}
-	}
-	if frame.FragmentKey != nil && frame.Fragment != nil {
-		fragKey := *frame.FragmentKey
-		p.fragHolds[fragKey] = append(p.fragHolds[fragKey], frame)
-		if _, exists := p.fragTimes[fragKey]; !exists {
-			p.fragTimes[fragKey] = time.Now()
-		}
-		before := p.fragPool.Stats().DuplicateDrops
-		complete, err := p.fragPool.insertAt(fragKey, *frame.Fragment, p.fragTimes[fragKey])
-		after := p.fragPool.Stats().DuplicateDrops
-		duplicate := after > before
-		var drops []CaptureFrame
-		if duplicate {
-			holds := p.fragHolds[fragKey]
-			holds = holds[:len(holds)-1]
-			if len(holds) == 0 {
-				delete(p.fragHolds, fragKey)
-			} else {
-				p.fragHolds[fragKey] = holds
-			}
-			drops = append(drops, frame)
-		}
-		if err != nil {
-			holds := append([]CaptureFrame(nil), p.fragHolds[fragKey]...)
-			delete(p.fragHolds, fragKey)
-			delete(p.fragTimes, fragKey)
-			p.stats.FragmentDrops++
-			drops = append(drops, holds...)
-			return drops
-		}
-		if !complete {
-			return drops
-		}
-		holds := p.fragHolds[fragKey]
-		delete(p.fragHolds, fragKey)
-		delete(p.fragTimes, fragKey)
-		flow.frames = append(flow.frames, holds...)
-		return drops
 	}
 	flow.frames = append(flow.frames, frame)
 	return nil
@@ -1092,30 +1024,6 @@ func (p *CapturePipeline) drainDeadlineCancelQueue() {
 		}
 	}
 }
-func (p *CapturePipeline) resolveRefusal(frame CaptureFrame, reason error) {
-	p.mu.Lock()
-	p.stats.Refused++
-	p.mu.Unlock()
-	p.finishFrame(frame, VerdictDrop)
-	_ = reason
-}
-
-func (p *CapturePipeline) resolveUncertain(frame CaptureFrame, requestID uint64) {
-	p.mu.Lock()
-	p.stats.Uncertain++
-	delete(p.pending, requestID)
-	p.mu.Unlock()
-	p.uncertain("uncertain reinject result")
-	p.finishFrame(frame, VerdictDrop)
-}
-
-func (p *CapturePipeline) disposeImmediate(phase PipelinePhase, frame CaptureFrame) {
-	verdict := VerdictDrop
-	if phase == PipelineShadow {
-		verdict = VerdictAccept
-	}
-	p.finishFrame(frame, verdict)
-}
 
 // finishFrame reserves terminality in the pipeline state before invoking the
 // sink. A sink error is therefore terminal/uncertain and cannot leave a
@@ -1224,37 +1132,8 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 		p.retireFlow(pending.frame.FlowKey)
 		resolved++
 	}
-	resolved += p.expireFragments(now)
-	p.dispatchEligible()
+p.dispatchEligible()
 	return resolved
-}
-func (p *CapturePipeline) expireFragments(now time.Time) int {
-	cutoff := now.Add(-p.fragmentDeadline)
-	var expired []CaptureFrame
-	p.mu.Lock()
-	if p.fragPool != nil {
-		p.fragPool.Expire(cutoff)
-	}
-	for key, started := range p.fragTimes {
-		if started.Before(cutoff) {
-			expired = append(expired, p.fragHolds[key]...)
-			delete(p.fragHolds, key)
-			delete(p.fragTimes, key)
-		}
-	}
-	p.stats.FragmentDrops += uint64(len(expired))
-	p.mu.Unlock()
-	for _, frame := range expired {
-		if frame.phase == PipelineShadow {
-			p.mu.Lock()
-			p.stats.ShadowDivergences++
-			p.mu.Unlock()
-			p.finishFrame(frame, VerdictAccept)
-		} else {
-			p.finishFrame(frame, VerdictDrop)
-		}
-	}
-	return len(expired)
 }
 
 func (p *CapturePipeline) failPending(reason string) int {
@@ -1576,11 +1455,6 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 			}
 		}
 	drained:
-		for key, holds := range p.fragHolds {
-			drops = append(drops, holds...)
-			delete(p.fragHolds, key)
-			delete(p.fragTimes, key)
-		}
 	}
 	p.mu.Unlock()
 	if scoped && queueNumber != 0 && queueEpoch != 0 {
