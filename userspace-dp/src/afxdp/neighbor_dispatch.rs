@@ -547,6 +547,7 @@ pub(super) fn retry_pending_neigh(
         // are knowable (notably blanket interface SNAT). Once the neighbor
         // resolves, recover the wire protocol and reconstruct only a concrete
         // source rewrite; never transmit a candidate with its internal source.
+        let mut retry_nat_counter = None;
         if super::poll_descriptor::frag_assoc::same_family_nat_configured(forwarding)
             && pkt.flow_key.is_none()
             && decision.nat == crate::nat::NatDecision::default()
@@ -610,9 +611,7 @@ pub(super) fn retry_pending_neigh(
                         decision: nat,
                         counter,
                     } => {
-                        if let Some(counter) = counter {
-                            counter.add(pkt.desc.len as u64);
-                        }
+                        retry_nat_counter = counter;
                         decision.nat = nat;
                     }
                     super::poll_descriptor::frag_assoc::RetryFlowlessFragmentNat::Drop => {
@@ -647,6 +646,9 @@ pub(super) fn retry_pending_neigh(
             counters.touched = true;
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
+        }
+        if let Some(counter) = retry_nat_counter {
+            counter.add(pkt.desc.len as u64);
         }
         // #10659 (residual of #9950 F-035): retry-time overlap re-check. A
         // fragment admitted via the MissingNeighbor park-and-retry path was
@@ -862,6 +864,18 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         };
+        let mut staged_mirror = stage_sampled_mirror_clone(
+            forwarding,
+            pkt.meta.ingress_ifindex as i32,
+            pkt.meta.ingress_vlan_id,
+            binding.mirror_sample_counter,
+            source_frame,
+            pkt.meta.into(),
+            pkt.flow_key.as_ref(),
+        );
+        if let Some(staged) = staged_mirror.as_mut() {
+            snapshot_staged_mirror_clone(staged, source_frame);
+        }
         // Match the immediate TX path's TCP segmentation before PMTU/PTB:
         // without this deferred path submits the oversized whole frame even
         // when the ordinary dispatcher can split it to the egress MTU.
@@ -876,14 +890,14 @@ pub(super) fn retry_pending_neigh(
             ) {
                 let target = binding_by_index_mut(left, binding_index, binding, right, target_idx)
                     .expect("target index resolved from current binding set");
-                for (segment_index, bytes) in segments.into_iter().enumerate() {
+                for bytes in segments {
                     let len = bytes.len();
                     target.tx_pipeline.pending_tx_local.push_back(TxRequest {
                         bytes,
                         expected_ports: None,
                         expected_addr_family: pkt.meta.addr_family,
                         expected_protocol: pkt.meta.protocol,
-                        flow_key: (segment_index == 0).then(|| pkt.flow_key.clone()).flatten(),
+                        flow_key: pkt.flow_key.clone(),
                         egress_ifindex: decision.resolution.egress_ifindex,
                         cos_queue_id: cos.queue_id,
                         dscp_rewrite: cos.dscp_rewrite,
@@ -897,6 +911,21 @@ pub(super) fn retry_pending_neigh(
                     dbg.enqueue_copy += 1;
                     dbg.tx_bytes_total += len as u64;
                     dbg.tx_max_frame = dbg.tx_max_frame.max(len as u32);
+                }
+                if let Some(staged) = staged_mirror {
+                    commit_staged_mirror_clone(
+                        left,
+                        binding_index,
+                        binding,
+                        right,
+                        binding_lookup,
+                        mirror_targets,
+                        forwarding,
+                        ingress_queue,
+                        staged,
+                        source_frame,
+                        now_ns,
+                    );
                 }
                 counters.touched = true;
                 binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
@@ -935,18 +964,6 @@ pub(super) fn retry_pending_neigh(
             counters.touched = true;
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
-        }
-        let mut staged_mirror = stage_sampled_mirror_clone(
-            forwarding,
-            pkt.meta.ingress_ifindex as i32,
-            pkt.meta.ingress_vlan_id,
-            binding.mirror_sample_counter,
-            source_frame,
-            pkt.meta.into(),
-            pkt.flow_key.as_ref(),
-        );
-        if let Some(staged) = staged_mirror.as_mut() {
-            snapshot_staged_mirror_clone(staged, source_frame);
         }
         let selected_tcp_mss = select_tcp_mss(forwarding, &decision, &pkt.meta.into());
         let Some(rewrite_result) = rewrite_forwarded_frame_in_place(
