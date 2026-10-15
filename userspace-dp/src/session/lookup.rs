@@ -77,7 +77,7 @@ pub(crate) enum IpsecReplyAliasLookup {
 
 impl SessionTable {
     #[inline]
-    fn resolve_lookup_handle(&self, key: &SessionKey) -> Option<(u32, bool)> {
+    pub(super) fn resolve_lookup_handle(&self, key: &SessionKey) -> Option<(u32, bool)> {
         #[cfg(test)]
         self.expiry_key_index_probes
             .fetch_add(1, AtomicOrdering::Relaxed);
@@ -90,7 +90,7 @@ impl SessionTable {
     }
 
     #[inline]
-    fn lookup_record_matches_key(
+    pub(super) fn lookup_record_matches_key(
         record: &SessionRecord,
         key: &SessionKey,
         via_alias: bool,

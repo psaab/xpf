@@ -10961,3 +10961,73 @@ fn single_probe_install_and_lookup_carry_aux_fields_13079() {
     assert_eq!(hit.aux.source_nat_static, installed.source_nat_static);
     assert_eq!(hit.aux.leak_incarnation, 73);
 }
+
+#[test]
+fn reverse_translated_alias_flow_cache_probes_resolve_13640() {
+    // #13640: a reverse entry whose wire tuple is only in
+    // reverse_translated_index must be visible to the flow-cache hit-path
+    // probes. Reverting record_by_key/record_by_key_mut to primary-only
+    // makes every assertion below fail while lookup(&alias) still hits.
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let backend = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 50));
+    let (rev_dec, mut rev_meta) = shared_backend_reverse(backend, 101);
+    rev_meta.ingress_zone = 77;
+    let reverse_key = SessionKey {
+        addr_family: 2,
+        protocol: PROTO_UDP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+        src_port: 40001,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let alias = translated_session_key(&reverse_key, rev_dec.nat);
+    assert_ne!(alias, reverse_key);
+    assert!(
+        table.lookup(&alias, now, 0).is_none(),
+        "fixture: alias must miss before install"
+    );
+    assert!(table.install_with_protocol(
+        reverse_key.clone(),
+        rev_dec,
+        rev_meta,
+        now,
+        PROTO_UDP,
+        0,
+    ));
+    assert_eq!(
+        table.revalidation_canonical_key(&alias),
+        Some(reverse_key.clone()),
+        "terminal-hit deletion must recover the same canonical entry (#13640)"
+    );
+    assert!(
+        table.lookup(&alias, now + 1, 0).is_some(),
+        "fixture: alias lookup must hit via reverse_translated_index"
+    );
+    assert!(
+        table.session_is_live_at(&alias, now + 1),
+        "alias must be live for flow-cache hit path (#13640)"
+    );
+    assert_eq!(table.live_ingress_zone_matches_at(&alias, now + 1, 77), Some(true));
+    assert_eq!(table.live_ingress_zone_matches_at(&alias, now + 1, 78), Some(false));
+    assert!(
+        table.touch_if_stale(&alias, now + 1),
+        "alias touch_if_stale must find the reverse entry (#13640)"
+    );
+    table.account_packet(&alias, 128, 0, 0);
+    let refresh_at = now + 16_000_000_000;
+    assert!(table.touch_if_stale(&alias, refresh_at));
+    assert_eq!(
+        table.lifetime_state_for(&reverse_key).unwrap().0,
+        refresh_at,
+        "an alias keepalive refreshes the canonical session and its expiry-wheel key"
+    );
+    let (no_handle, stale, mismatch) = table.lookup_miss_counts();
+    assert_eq!(
+        (no_handle, stale, mismatch),
+        (1, 0, 0),
+        "only the intentional pre-install miss may count (#13640)"
+    );
+}

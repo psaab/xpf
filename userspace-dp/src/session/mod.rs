@@ -2840,18 +2840,13 @@ impl SessionTable {
         self.key_to_handle.get(key).copied()
     }
 
-    /// Resolve to a slab record from a forward-key. Returns None if
-    /// the key is unknown, the handle is stale, OR the resolved
-    /// record's canonical key doesn't match the lookup key (defense
-    /// vs reused-slot hazard — Copilot review).
+    /// Resolve a packet key to its canonical session record, including the
+    /// reverse-translated alias index. A stale primary handle remains terminal:
+    /// the resolver does not fall through to a different session's alias.
     #[inline]
     fn record_by_key(&self, key: &SessionKey) -> Option<&SessionRecord> {
-        // #7919: count the miss HERE rather than at the call sites. The two
-        // callers (`touch_if_stale`, `account_packet`) are textually
-        // near-identical to other lookups in the same file, and instrumenting
-        // the wrong one of such a pair is a mistake this campaign has already
-        // made once. Counting inside the resolver cannot pick the wrong site.
-        let Some(handle) = self.handle_for_key(key) else {
+        // #7919: count the miss HERE rather than at the call sites.
+        let Some((handle, via_alias)) = self.resolve_lookup_handle(key) else {
             self.lookup_miss_no_handle
                 .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
@@ -2861,7 +2856,7 @@ impl SessionTable {
                 .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
         };
-        if record.key != *key {
+        if !Self::lookup_record_matches_key(record, key, via_alias) {
             self.lookup_miss_key_mismatch
                 .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
@@ -2869,26 +2864,11 @@ impl SessionTable {
         Some(record)
     }
 
-    /// Mut version of `record_by_key`. Same key-equality validation.
+    /// Mutable twin of `record_by_key`, with the identical direct/alias
+    /// resolution and stale-handle validation.
     #[inline]
     fn record_by_key_mut(&mut self, key: &SessionKey) -> Option<&mut SessionRecord> {
-        // #7919: same three causes as the shared-ref twin above, incrementing
-        // the SAME three counters.
-        //
-        // CORRECTION: an earlier version of this comment said the split was
-        // per-function — that `account_packet` resolving through here and
-        // `touch_if_stale` resolving through the twin made a
-        // frozen-counters-but-live-idle-timer split visible. It does not.
-        // There are three counters, split by CAUSE, and both functions add to
-        // all three; nothing here records WHICH resolver missed. That sentence
-        // described instrumentation that was never built, and it read as a
-        // statement of fact, so it was relayed into a work assignment as an
-        // available discriminator. It is not one.
-        //
-        // The counting is in both functions so that no miss goes UNCOUNTED,
-        // which is a weaker and true claim. If the per-function split is ever
-        // actually wanted, it needs new fields — do not infer it from these.
-        let Some(handle) = self.handle_for_key(key) else {
+        let Some((handle, via_alias)) = self.resolve_lookup_handle(key) else {
             self.lookup_miss_no_handle
                 .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
@@ -2898,7 +2878,7 @@ impl SessionTable {
                 .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
         };
-        if record.key != *key {
+        if !Self::lookup_record_matches_key(record, key, via_alias) {
             self.lookup_miss_key_mismatch
                 .fetch_add(1, AtomicOrdering::Relaxed);
             return None;
@@ -3122,14 +3102,14 @@ impl SessionTable {
     /// (HA Close delta to the peer + BPF redirect-key deletion + a stale
     /// flow-cache descriptor out-living its session). See issue #2220.
     ///
-    /// HOT PATH: a single `key_to_handle` hash probe (the same probe
-    /// `touch` performs) plus a Copy field read; the `last_seen_ns` write
-    /// and the throttled `push_to_wheel` run only when actually stale, so
-    /// the steady-state per-cache-hit cost is one lookup and an integer
-    /// compare. Allocation-free.
+    /// HOT PATH: one primary-key probe on an ordinary hit, plus the
+    /// reverse-alias index probe for a translated return hit. The throttled
+    /// timestamp write and wheel update run only when actually stale, so
+    /// steady-state per-cache-hit cost is the necessary lookup and compare.
+    /// Allocation-free.
     #[inline]
     pub fn touch_if_stale(&mut self, key: &SessionKey, now_ns: u64) -> bool {
-        let (stale, refresh_allowed) = match self.record_by_key(key) {
+        let canonical_refresh_key = match self.record_by_key(key) {
             Some(record) => {
                 let entry = &record.entry;
                 let age = now_ns.saturating_sub(entry.last_seen_ns);
@@ -3142,15 +3122,15 @@ impl SessionTable {
                 }
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
-                (
-                    age >= refresh_after,
-                    !entry.closing || (!entry.reset && !entry.fin_own),
-                )
+                let refresh_allowed = !entry.closing || (!entry.reset && !entry.fin_own);
+                (age >= refresh_after && refresh_allowed).then(|| record.key.clone())
             }
             None => return false,
         };
-        if stale && refresh_allowed {
-            self.touch(key, now_ns);
+        if let Some(canonical_key) = canonical_refresh_key {
+            // Alias hits resolve to a canonical record. Put that identity on
+            // the expiry wheel too; the wire alias is not a primary key.
+            self.touch(&canonical_key, now_ns);
         }
         true
     }
@@ -3176,15 +3156,14 @@ impl SessionTable {
     ///     recovers the forward entry's wire tuple → bump that forward
     ///     entry's `rev`.
     ///
-    /// HOT PATH: the dominant (forward) direction is a SINGLE `key_to_handle`
-    /// hash probe (`entry_by_key_mut` resolves the record once; the direction
-    /// is read and the `fwd` counters mutated under that same `&mut` borrow)
-    /// plus one `saturating_add`. The reverse direction copies the bits
-    /// needed to recover the forward tuple out of that first borrow, then pays
-    /// one extra probe to hop reverse-entry → forward-entry. Worker-owned
-    /// `&mut self`: plain stores, no atomic, no allocation, no cross-core
-    /// traffic. A miss (session reaped between resolution and accounting) is a
-    /// no-op — the same fail-open posture as `touch`.
+    /// HOT PATH: a forward primary-key hit resolves once, then mutates the
+    /// `fwd` counters under that same `&mut` borrow. Reverse translated aliases
+    /// add the reverse-alias index probe; the reverse direction then copies
+    /// the bits needed to recover the forward tuple and pays one companion
+    /// probe. Worker-owned `&mut self`: plain stores, no atomic, no heap
+    /// allocation, no cross-core traffic. A miss (session reaped between
+    /// resolution and accounting) is a no-op — the same fail-open posture as
+    /// `touch`.
     ///
     /// #2749: `tcp_flags` (the packet's TCP control-flag byte, 0 for non-TCP)
     /// and `dscp` (the packet's 6-bit DSCP) are observed alongside the volume
