@@ -208,15 +208,15 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			fw.Policers[polInst.name] = pol
 		}
 
-		ifExceeding := polInst.node.FindChild("if-exceeding")
-		if ifExceeding != nil {
-			// #9235: `if-exceeding bandwidth-limit 1m burst-size-limit 15k` is ONE
-			// flat-set command, and SetPath nests the second leaf under the first,
-			// so this loop saw bandwidth-limit and nothing else -- the policer was
-			// installed with BurstSizeLimit 0. Lenient-path only
-			// (CompileConfigLenient via Store.Load / Store.SyncApply); the schema
-			// gate refuses the spelling on the operator's commit path.
-			for _, child := range expandRunChildren9235(ifExceeding.Children, policerIfExceedingSchema9235()) {
+		ifExceedingSchema := policerIfExceedingSchema9235()
+		for _, ifExceeding := range polInst.node.FindChildren("if-exceeding") {
+			if ifExceeding == nil {
+				continue
+			}
+			// Expand chained leaves on the tolerant load/sync path.
+			for _, child := range expandRunChildren9235(
+				packedBody(ifExceeding, ifExceedingSchema).Children, ifExceedingSchema,
+			) {
 				switch child.Name() {
 				case "bandwidth-limit":
 					if v := nodeVal(child); v != "" {
@@ -384,21 +384,22 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			fw.ThreeColorPolicers[tcpInst.name] = tcp
 		}
 
+		singleRateSchema := resolveSchemaPath9235("firewall", "three-color-policer", "single-rate")
 		singleRates := tcpInst.node.FindChildren("single-rate")
 		if len(singleRates) > 0 {
 			tcp.SingleRateConfigured = true
 			tcp.TwoRate = false
 		}
 		for _, sr := range singleRates {
-			if sr.FindChild("color-blind") != nil {
-				tcp.ColorBlind = true
-				tcp.ColorBlindConfigured = true
-			}
-			if sr.FindChild("color-aware") != nil {
-				tcp.ColorAwareConfigured = true
-			}
-			for _, child := range sr.Children {
+			for _, child := range expandRunChildren9235(
+				packedBody(sr, singleRateSchema).Children, singleRateSchema,
+			) {
 				switch child.Name() {
+				case "color-blind":
+					tcp.ColorBlind = true
+					tcp.ColorBlindConfigured = true
+				case "color-aware":
+					tcp.ColorAwareConfigured = true
 				case "committed-information-rate":
 					if v := nodeVal(child); v != "" {
 						tcp.CIR = parseBandwidthLimit(v)
@@ -415,21 +416,22 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			}
 		}
 
+		twoRateSchema := resolveSchemaPath9235("firewall", "three-color-policer", "two-rate")
 		twoRates := tcpInst.node.FindChildren("two-rate")
 		if len(twoRates) > 0 {
 			tcp.TwoRateConfigured = true
 			tcp.TwoRate = true
 		}
 		for _, tr := range twoRates {
-			if tr.FindChild("color-blind") != nil {
-				tcp.ColorBlind = true
-				tcp.ColorBlindConfigured = true
-			}
-			if tr.FindChild("color-aware") != nil {
-				tcp.ColorAwareConfigured = true
-			}
-			for _, child := range tr.Children {
+			for _, child := range expandRunChildren9235(
+				packedBody(tr, twoRateSchema).Children, twoRateSchema,
+			) {
 				switch child.Name() {
+				case "color-blind":
+					tcp.ColorBlind = true
+					tcp.ColorBlindConfigured = true
+				case "color-aware":
+					tcp.ColorAwareConfigured = true
 				case "committed-information-rate":
 					if v := nodeVal(child); v != "" {
 						tcp.CIR = parseBandwidthLimit(v)
