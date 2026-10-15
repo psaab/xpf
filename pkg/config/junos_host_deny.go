@@ -913,6 +913,7 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 	byNetdev := make(map[string]*verdict, len(netdevs))
 	byVRFSlave := make(map[string]map[string]*verdict, len(vrfScopes))
 	vrfMasterByNetdev := junosHostVRFMasterNetdevs(cfg, tunNames)
+	lifelines := HostInboundLifelineSet(cfg)
 	note := func(nd, ref string) {
 		var v *verdict
 		if master, enslaved := vrfMasterByNetdev[nd]; enslaved {
@@ -966,7 +967,7 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 	}
 	zoneByIface := junosHostZoneByInterface(cfg)
 	addRow := func(name, own, parent string, vlan int) {
-		if zoneByIface[name] != zoneName {
+		if HostInboundLifelineInterface(name, lifelines) || zoneByIface[name] != zoneName {
 			return
 		}
 		note(own, name)
@@ -994,12 +995,14 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 		unit0Name := fmt.Sprintf("%s.0", ifName)
 		unit0Distinct := unit0 != nil &&
 			junosHostLinuxNameWith(cfg, ifName, unit0, tunNames) != physicalNetdev
-		if unit0Distinct && zoneByIface[unit0Name] == zoneName {
+		if unit0Distinct && zoneByIface[unit0Name] == zoneName &&
+			!HostInboundLifelineInterface(unit0Name, lifelines) {
 			// A distinct unit-0 netdev leaves the physical snapshot row
 			// as the physical ingress carrier. The zone owns that path
 			// through its unit-0 ref even though #12839 correctly stopped
-			// assigning the bare physical ref to the unit's zone.
-			note(physicalNetdev, ifName)
+			// assigning the bare physical ref to the unit's zone. Resolve
+			// the effective policy at that unit, not its bare parent.
+			note(physicalNetdev, unit0Name)
 		} else if unit0 == nil || zoneByIface[unit0Name] != zoneName {
 			// On a same-netdev collapse unit 0 is authoritative; otherwise
 			// retain an explicitly owned bare row when it belongs elsewhere.
