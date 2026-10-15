@@ -1435,6 +1435,47 @@ fn dnat_prefix_v6_matches_block() {
     );
 }
 
+// #13530: both DNAT address axes must accept the Go gate's padded prefix lengths.
+#[test]
+fn dnat_prefix_length_normalization_applies_to_both_axes_13530() {
+    let mut row = dnat_row(
+        "padded-destination",
+        "192.0.2.0",
+        "192.0.2.0/024",
+        "10.0.0.5",
+        80,
+    );
+    row.source_addresses = vec!["198.51.100.0/024".to_string()];
+    let counters = crate::nat::NatCounterStore::default();
+    let table = DnatTable::from_snapshots(&[row], &counters);
+
+    assert_eq!(
+        table
+            .lookup(
+                PROTO_TCP,
+                "198.51.100.42".parse().unwrap(),
+                "192.0.2.42".parse().unwrap(),
+                80,
+                "",
+            )
+            .and_then(|decision| decision.rewrite_dst),
+        Some("10.0.0.5".parse().unwrap()),
+        "the source /024 and destination /024 must both install and match"
+    );
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "203.0.113.1".parse().unwrap(),
+            "192.0.2.42".parse().unwrap(),
+            80,
+            "",
+        ),
+        None,
+        "normalizing the source prefix must preserve its scope"
+    );
+    assert_eq!(counters.destination_parse_errors(), 0);
+}
+
 #[test]
 fn dnat_prefix_destination_compose_with_source_scope() {
     // #3164 + #2394: a prefix DNAT that is ALSO source-scoped fires for a host
