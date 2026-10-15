@@ -495,9 +495,17 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			continue
 		}
 		if snap.Zone == "" {
+			// An unzoned unit still participates in netdev ambiguity: nft only
+			// sees iifname/sdifname, so a zoned sibling cannot safely own it.
+			if snap.IsUnit {
+				claimNetdev(snap.LinuxName, "")
+			}
 			continue
 		}
 		if _, drop := quarantined[snap.Zone]; drop {
+			if snap.IsUnit {
+				claimNetdev(snap.LinuxName, "")
+			}
 			continue
 		}
 		// #5699: a PHYSICAL (no-unit) snapshot whose unit 0 COLLAPSES onto the
