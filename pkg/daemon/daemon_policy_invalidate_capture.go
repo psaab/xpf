@@ -1003,6 +1003,36 @@ func policyInvalidationMatchID(match dpuserspace.SessionPolicyMatch) policyInval
 	}
 }
 
+type policySessionIdentityV4 struct {
+	key                 dataplane.SessionKey
+	routingDomain       uint32
+	sessionID           uint64
+	tunnelDiscriminator uint64
+}
+
+type policySessionIdentityV6 struct {
+	key                 dataplane.SessionKeyV6
+	routingDomain       uint32
+	sessionID           uint64
+	tunnelDiscriminator uint64
+}
+
+func policyEntryIdentityV4(entry dataplane.SessionEntryV4) policySessionIdentityV4 {
+	return policySessionIdentityV4{
+		key: entry.Key, routingDomain: entry.Value.RoutingDomain,
+		sessionID:           entry.Value.RTFlowSessionID,
+		tunnelDiscriminator: entry.Value.TunnelDiscriminator,
+	}
+}
+
+func policyEntryIdentityV6(entry dataplane.SessionEntryV6) policySessionIdentityV6 {
+	return policySessionIdentityV6{
+		key: entry.Key, routingDomain: entry.Value.RoutingDomain,
+		sessionID:           entry.Value.RTFlowSessionID,
+		tunnelDiscriminator: entry.Value.TunnelDiscriminator,
+	}
+}
+
 // mergePolicyInvalidationCaptures carries forward prior delete candidates that
 // the fresh scan did not rediscover. The row keys are stable even when
 // publication has restamped the row's policy id; scan failures are tracked
@@ -1024,16 +1054,16 @@ func mergePolicyInvalidationCaptures(previous, current *policyInvalidationCaptur
 		len(current.deleted.v6) + len(current.modified.v6) + len(current.deflt.v6)
 	policyCapacity := len(previous.deleted.policy) + len(previous.modified.policy) + len(previous.deflt.policy) +
 		len(current.deleted.policy) + len(current.modified.policy) + len(current.deflt.policy)
-	seenV4 := make(map[dataplane.SessionKey]struct{}, v4Capacity)
-	seenV6 := make(map[dataplane.SessionKeyV6]struct{}, v6Capacity)
+	seenV4 := make(map[policySessionIdentityV4]struct{}, v4Capacity)
+	seenV6 := make(map[policySessionIdentityV6]struct{}, v6Capacity)
 	seenPolicy := make(map[policyInvalidationMatchIdentity]struct{}, policyCapacity)
 
 	mark := func(bucket capturedSessions) {
 		for _, entry := range bucket.v4 {
-			seenV4[entry.Key] = struct{}{}
+			seenV4[policyEntryIdentityV4(entry)] = struct{}{}
 		}
 		for _, entry := range bucket.v6 {
-			seenV6[entry.Key] = struct{}{}
+			seenV6[policyEntryIdentityV6(entry)] = struct{}{}
 		}
 		for _, match := range bucket.policy {
 			seenPolicy[policyInvalidationMatchID(match)] = struct{}{}
@@ -1054,14 +1084,16 @@ func mergePolicyInvalidationCaptures(previous, current *policyInvalidationCaptur
 	// replace retained stable-rule provenance for an identical row.
 	merge := func(previous, current capturedSessions) capturedSessions {
 		for _, entry := range previous.v4 {
-			if _, ok := seenV4[entry.Key]; !ok {
-				seenV4[entry.Key] = struct{}{}
+			id := policyEntryIdentityV4(entry)
+			if _, ok := seenV4[id]; !ok {
+				seenV4[id] = struct{}{}
 				current.v4 = append(current.v4, entry)
 			}
 		}
 		for _, entry := range previous.v6 {
-			if _, ok := seenV6[entry.Key]; !ok {
-				seenV6[entry.Key] = struct{}{}
+			id := policyEntryIdentityV6(entry)
+			if _, ok := seenV6[id]; !ok {
+				seenV6[id] = struct{}{}
 				current.v6 = append(current.v6, entry)
 			}
 		}
@@ -1257,8 +1289,8 @@ func (d *Daemon) reauthorizePolicyCandidates(
 			return bucket, capturedSessions{}
 		}
 		keep = capturedSessions{targets: bucket.targets, enumFailed: bucket.enumFailed}
-		keepV4, allowV4 := map[dataplane.SessionKey]struct{}{}, map[dataplane.SessionKey]struct{}{}
-		keepV6, allowV6 := map[dataplane.SessionKeyV6]struct{}{}, map[dataplane.SessionKeyV6]struct{}{}
+		keepV4, allowV4 := map[policySessionIdentityV4]struct{}{}, map[policySessionIdentityV4]struct{}{}
+		keepV6, allowV6 := map[policySessionIdentityV6]struct{}{}, map[policySessionIdentityV6]struct{}{}
 		for _, match := range bucket.policy {
 			id := policyInvalidationMatchID(match)
 			key := capture.candidateRuleIDs[id]
@@ -1279,26 +1311,27 @@ func (d *Daemon) reauthorizePolicyCandidates(
 			}
 			switch family {
 			case 4:
-				if key, _, err := policyTupleV4(match.Tuple); err == nil {
+				if entry, _, err := policyMatchEntries(match); err == nil && entry != nil {
 					if allowed {
-						allowV4[key] = struct{}{}
+						allowV4[policyEntryIdentityV4(*entry)] = struct{}{}
 					} else {
-						keepV4[key] = struct{}{}
+						keepV4[policyEntryIdentityV4(*entry)] = struct{}{}
 					}
 				}
 			case 6:
-				if key, _, err := policyTupleV6(match.Tuple); err == nil {
+				if _, entry, err := policyMatchEntries(match); err == nil && entry != nil {
 					if allowed {
-						allowV6[key] = struct{}{}
+						allowV6[policyEntryIdentityV6(*entry)] = struct{}{}
 					} else {
-						keepV6[key] = struct{}{}
+						keepV6[policyEntryIdentityV6(*entry)] = struct{}{}
 					}
 				}
 			}
 		}
 		for _, entry := range bucket.v4 {
-			_, allowed := allowV4[entry.Key]
-			if _, owed := keepV4[entry.Key]; owed || !allowed {
+			id := policyEntryIdentityV4(entry)
+			_, allowed := allowV4[id]
+			if _, owed := keepV4[id]; owed || !allowed {
 				keep.v4 = append(keep.v4, entry)
 			}
 			if allowed {
@@ -1306,8 +1339,9 @@ func (d *Daemon) reauthorizePolicyCandidates(
 			}
 		}
 		for _, entry := range bucket.v6 {
-			_, allowed := allowV6[entry.Key]
-			if _, owed := keepV6[entry.Key]; owed || !allowed {
+			id := policyEntryIdentityV6(entry)
+			_, allowed := allowV6[id]
+			if _, owed := keepV6[id]; owed || !allowed {
 				keep.v6 = append(keep.v6, entry)
 			}
 			if allowed {

@@ -741,8 +741,8 @@ func pruneCapturedPolicyRows(c *capturedSessions, result dpuserspace.PolicyDelet
 		_, ok := settledBeyond[index]
 		return ok
 	}
-	keepV4 := make(map[dataplane.SessionKey]struct{}, len(c.policy))
-	keepV6 := make(map[dataplane.SessionKeyV6]struct{}, len(c.policy))
+	keepV4 := make(map[policySessionIdentityV4]struct{}, len(c.policy))
+	keepV6 := make(map[policySessionIdentityV6]struct{}, len(c.policy))
 	policy := c.policy[:0]
 	for i, match := range c.policy {
 		if isSettled(i) {
@@ -754,23 +754,23 @@ func pruneCapturedPolicyRows(c *capturedSessions, result dpuserspace.PolicyDelet
 			continue
 		}
 		if entry4 != nil {
-			keepV4[entry4.Key] = struct{}{}
+			keepV4[policyEntryIdentityV4(*entry4)] = struct{}{}
 		}
 		if entry6 != nil {
-			keepV6[entry6.Key] = struct{}{}
+			keepV6[policyEntryIdentityV6(*entry6)] = struct{}{}
 		}
 	}
 	c.policy = policy
 	v4 := c.v4[:0]
 	for _, entry := range c.v4 {
-		if _, ok := keepV4[entry.Key]; ok {
+		if _, ok := keepV4[policyEntryIdentityV4(entry)]; ok {
 			v4 = append(v4, entry)
 		}
 	}
 	c.v4 = v4
 	v6 := c.v6[:0]
 	for _, entry := range c.v6 {
-		if _, ok := keepV6[entry.Key]; ok {
+		if _, ok := keepV6[policyEntryIdentityV6(entry)]; ok {
 			v6 = append(v6, entry)
 		}
 	}
@@ -781,13 +781,20 @@ func pruneCapturedV4(c *capturedSessions, removed []dataplane.SessionKey) {
 	if len(removed) == 0 || len(c.v4) == 0 {
 		return
 	}
-	set := make(map[dataplane.SessionKey]struct{}, len(removed))
+	removedCount := make(map[dataplane.SessionKey]int, len(removed))
 	for _, key := range removed {
-		set[key] = struct{}{}
+		removedCount[key]++
+	}
+	removedIdentity := make(map[policySessionIdentityV4]struct{}, len(removed))
+	for _, entry := range c.v4 {
+		if removedCount[entry.Key] > 0 {
+			removedCount[entry.Key]--
+			removedIdentity[policyEntryIdentityV4(entry)] = struct{}{}
+		}
 	}
 	remaining := c.v4[:0]
 	for _, entry := range c.v4 {
-		if _, ok := set[entry.Key]; !ok {
+		if _, ok := removedIdentity[policyEntryIdentityV4(entry)]; !ok {
 			remaining = append(remaining, entry)
 		}
 	}
@@ -798,13 +805,20 @@ func pruneCapturedV6(c *capturedSessions, removed []dataplane.SessionKeyV6) {
 	if len(removed) == 0 || len(c.v6) == 0 {
 		return
 	}
-	set := make(map[dataplane.SessionKeyV6]struct{}, len(removed))
+	removedCount := make(map[dataplane.SessionKeyV6]int, len(removed))
 	for _, key := range removed {
-		set[key] = struct{}{}
+		removedCount[key]++
+	}
+	removedIdentity := make(map[policySessionIdentityV6]struct{}, len(removed))
+	for _, entry := range c.v6 {
+		if removedCount[entry.Key] > 0 {
+			removedCount[entry.Key]--
+			removedIdentity[policyEntryIdentityV6(entry)] = struct{}{}
+		}
 	}
 	remaining := c.v6[:0]
 	for _, entry := range c.v6 {
-		if _, ok := set[entry.Key]; !ok {
+		if _, ok := removedIdentity[policyEntryIdentityV6(entry)]; !ok {
 			remaining = append(remaining, entry)
 		}
 	}
