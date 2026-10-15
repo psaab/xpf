@@ -22,19 +22,23 @@ func TestCredentialMemoReusesOnlySemanticallyCurrentPolicy13241(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/config/enter", nil)
 	req.Header.Set("Authorization", "Basic YWRtaW46c2VjcmV0")
 	cfg := AuthConfig{
-		Users:       map[string]string{"admin": "secret"},
+		Users:       map[string]string{"admin": "secret", "expired-elsewhere": "other"},
 		UserClasses: map[string]string{"admin": "super-user"},
-		UserExpires: map[string]time.Time{"admin": time.Now().Add(time.Hour)},
+		UserExpires: map[string]time.Time{
+			"admin":             time.Now().Add(time.Hour),
+			"expired-elsewhere": time.Now().Add(-time.Hour),
+		},
 	}
 	calls := 0
 	ri := &requestIdentity{
 		pending: &pendingPeer{},
-		credentialResolver: func(a AuthConfig, _ *http.Request) (string, string, bool) {
+		credentialResolver: func(a AuthConfig, _ *http.Request) (string, string, time.Time, bool) {
 			calls++
-			if !credentialExpiryActive(a.UserExpires["admin"]) || a.Users["admin"] != "secret" {
-				return "", "", false
+			expiry := a.UserExpires["admin"]
+			if !credentialExpiryActive(expiry) || a.Users["admin"] != "secret" {
+				return "", "", time.Time{}, false
 			}
-			return "admin", resolvedCredentialClass(a.UserClasses["admin"]), true
+			return "admin", resolvedCredentialClass(a.UserClasses["admin"]), expiry, true
 		},
 	}
 	s := &Server{peerLocalityFn: func(net.Addr, net.Addr) bool { return false }}

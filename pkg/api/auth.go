@@ -391,6 +391,11 @@ func constantTimeAPIKeyMatch(cfg AuthConfig, presented string) bool {
 }
 
 func matchAPIKeyIdentity(cfg AuthConfig, presented string) (name, class string, matched bool) {
+	name, class, _, matched = matchAPIKeyIdentityWithExpiry(cfg, presented)
+	return
+}
+
+func matchAPIKeyIdentityWithExpiry(cfg AuthConfig, presented string) (name, class string, expiry time.Time, matched bool) {
 	matches := 0
 	for key, valid := range cfg.APIKeys {
 		if !valid || key == "" {
@@ -404,9 +409,10 @@ func matchAPIKeyIdentity(cfg AuthConfig, presented string) (name, class string, 
 		if matches == 1 {
 			name = cfg.APIKeyNames[key]
 			class = resolvedCredentialClass(cfg.APIKeyClasses[key])
+			expiry = cfg.APIKeyExpires[key]
 		}
 	}
-	return name, class, matches == 1
+	return name, class, expiry, matches == 1
 }
 
 // isLoopbackBindAddr reports whether the API listen address binds only the

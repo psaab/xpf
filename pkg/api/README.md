@@ -699,10 +699,11 @@ they superseded had already been captured:
   invalidate a principal already speaking. The live credential policy is
   re-read after enumeration and compared semantically with the policy under
   which this request verified its credential (`authz.go`, `requestIdentity`
-  memo). A matching policy and unchanged presented headers reuse the request's
-  successful verification; any credential or scope change re-verifies against
-  the live snapshot and denies revoked credentials. Snapshot pointer identity
-  is not used because the reconciler republishes on unrelated commits.
+  memo). A matching policy, unchanged presented headers, and an unexpired matched
+  credential reuse the request's successful verification; any credential or
+  scope change re-verifies against the live snapshot and denies revoked
+  credentials. Snapshot pointer identity is not used because the reconciler
+  republishes on unrelated commits.
 
 The residual is named rather than papered over: a `/etc/passwd` read still
 separates the snapshot from the verdict on the peer-UID row. Snapshot and

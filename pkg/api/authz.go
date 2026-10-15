@@ -496,7 +496,7 @@ type requestIdentity struct {
 	id                 authz.PeerIdentity
 	localityDone       bool
 	local              bool
-	credentialResolver func(AuthConfig, *http.Request) (string, string, bool)
+	credentialResolver func(AuthConfig, *http.Request) (string, string, time.Time, bool)
 	credMemo           *credentialMemo
 }
 
@@ -529,7 +529,7 @@ func sameTimes(a, b map[string]time.Time) bool {
 }
 
 func (m *credentialMemo) valid(a AuthConfig, r *http.Request) bool {
-	return m != nil && time.Now().Before(m.expires) &&
+	return m != nil && (m.expires.IsZero() || time.Now().Before(m.expires)) &&
 		m.headers == [2]string{r.Header.Get("Authorization"), r.Header.Get("X-API-Key")} &&
 		sameAuthConfig(m.policy, a)
 }
@@ -708,26 +708,12 @@ func (s *Server) memoizedCredentialPrincipalUser(a AuthConfig, r *http.Request, 
 	}
 	resolve := ri.credentialResolver
 	if resolve == nil {
-		resolve = credentialPrincipalIdentity
+		resolve = credentialPrincipalIdentityWithExpiry
 	}
-	identity, class, ok := resolve(a, r)
+	identity, class, expiry, ok := resolve(a, r)
 	if !ok {
 		ri.credMemo = nil
 		return "", false
-	}
-	expiry := time.Time{}
-	for _, candidate := range a.UserExpires {
-		if !candidate.IsZero() && (expiry.IsZero() || candidate.Before(expiry)) {
-			expiry = candidate
-		}
-	}
-	for _, candidate := range a.APIKeyExpires {
-		if !candidate.IsZero() && (expiry.IsZero() || candidate.Before(expiry)) {
-			expiry = candidate
-		}
-	}
-	if expiry.IsZero() {
-		expiry = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 	}
 	ri.credMemo = &credentialMemo{
 		headers: [2]string{r.Header.Get("Authorization"), r.Header.Get("X-API-Key")},
@@ -851,27 +837,32 @@ func (s *Server) principalFrom(r *http.Request, cfg *config.Config, ri *requestI
 // credential. Basic usernames and named API keys are stable identities;
 // unlabelled legacy API keys receive the configured least-privilege class.
 func credentialPrincipalIdentity(cfg AuthConfig, r *http.Request) (identity, class string, ok bool) {
+	identity, class, _, ok = credentialPrincipalIdentityWithExpiry(cfg, r)
+	return
+}
+
+func credentialPrincipalIdentityWithExpiry(cfg AuthConfig, r *http.Request) (identity, class string, expiry time.Time, ok bool) {
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Basic ") {
 		if !checkAuthorization(auth, cfg) {
 			goto apiKey
 		}
 		payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
 		if err != nil {
-			return "", "", false
+			return "", "", time.Time{}, false
 		}
 		user, _, _ := strings.Cut(string(payload), ":")
-		return user, resolvedCredentialClass(cfg.UserClasses[user]), true
+		return user, resolvedCredentialClass(cfg.UserClasses[user]), cfg.UserExpires[user], true
 	} else if strings.HasPrefix(auth, "Bearer ") {
-		if identity, class, matched := matchAPIKeyIdentity(cfg, strings.TrimPrefix(auth, "Bearer ")); matched {
-			return identity, class, true
+		if identity, class, expiry, matched := matchAPIKeyIdentityWithExpiry(cfg, strings.TrimPrefix(auth, "Bearer ")); matched {
+			return identity, class, expiry, true
 		}
 	}
 
 apiKey:
 	if key := r.Header.Get("X-API-Key"); key != "" {
-		return matchAPIKeyIdentity(cfg, key)
+		return matchAPIKeyIdentityWithExpiry(cfg, key)
 	}
-	return "", "", false
+	return "", "", time.Time{}, false
 }
 
 func credentialPrincipalUser(cfg AuthConfig, r *http.Request) (string, bool) {
