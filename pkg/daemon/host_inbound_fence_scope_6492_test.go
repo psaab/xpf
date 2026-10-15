@@ -149,7 +149,8 @@ func TestFenceCoversZonelessRouter6492(t *testing.T) {
 // viewsContainAddr reports whether any view scopes addr in either family.
 func viewsContainAddr(views []dpuserspace.ZoneHostInboundView, addr string) bool {
 	for _, v := range views {
-		if sliceContains(v.V4Addrs, addr) || sliceContains(v.V6Addrs, addr) {
+		if sliceContains(v.V4Addrs, addr) || sliceContains(v.V6Addrs, addr) ||
+			sliceContains(v.IngressDenyV4, addr) || sliceContains(v.IngressDenyV6, addr) {
 			return true
 		}
 	}
