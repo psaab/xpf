@@ -71,14 +71,9 @@ func agentAddrForTargetOnVRF(target, device string) [4]byte {
 	if target == "" {
 		return zero
 	}
-	host, port, err := net.SplitHostPort(target)
-	if err != nil {
-		// A bare address with no port, which is what a trap-group target
-		// usually is. sendTrap applies the default port the same way.
-		host, port = target, "162"
-	}
+	addr := normalizeTrapDialAddr(target)
 	dialer := net.Dialer{Timeout: agentAddrDialTimeout9123, Control: snmpVRFSocketControl(device)}
-	conn, err := dialer.Dial("udp4", net.JoinHostPort(host, port))
+	conn, err := dialer.Dial("udp4", addr)
 	if err != nil {
 		return zero
 	}
