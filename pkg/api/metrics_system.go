@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/psaab/xpf/pkg/flowexport"
 )
 
 func (c *xpfCollector) collectDHCPMetrics(ch chan<- prometheus.Metric) {
@@ -141,10 +142,11 @@ func (c *xpfCollector) collectSurfaceADDNSMetrics(ch chan<- prometheus.Metric) {
 // rows collide on an identical labelset, and Prometheus either rejects the
 // duplicate series (scrape error) or silently collapses the failing group.
 func (c *xpfCollector) collectFlowExportMetrics(ch chan<- prometheus.Metric) {
-	if c.srv.flowCollectorHealthFn == nil {
-		return
+	var health []flowexport.ExporterCollectorHealth
+	if c.srv.flowCollectorHealthFn != nil {
+		health = c.srv.flowCollectorHealthFn()
 	}
-	for _, h := range c.srv.flowCollectorHealthFn() {
+	for _, h := range health {
 		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteAttemptsTotal,
 			prometheus.CounterValue, float64(h.WriteAttempts), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteFailuresTotal,
@@ -171,6 +173,17 @@ func (c *xpfCollector) collectFlowExportMetrics(ch chan<- prometheus.Metric) {
 			prometheus.GaugeValue, lastFailure, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 	}
 	c.collectFlowExportBatchMetrics(ch)
+	c.collectRouteMaskCacheMetrics(ch)
+}
+
+func (c *xpfCollector) collectRouteMaskCacheMetrics(ch chan<- prometheus.Metric) {
+	s := flowexport.RouteMaskCacheStats()
+	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheHits, prometheus.CounterValue, float64(s.Hits))
+	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheMisses, prometheus.CounterValue, float64(s.Misses))
+	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheFullClears, prometheus.CounterValue, float64(s.FullClears))
+	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheInflightDrops, prometheus.CounterValue, float64(s.InflightDrops))
+	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheLookupErrors, prometheus.CounterValue, float64(s.LookupErrors))
+	ch <- prometheus.MustNewConstMetric(c.routeMaskCacheEntries, prometheus.GaugeValue, float64(s.Entries))
 }
 
 // collectFlowExportBatchMetrics emits the xpf_flow_export_batch_* family from

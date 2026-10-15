@@ -3,6 +3,7 @@ package flowexport
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -65,12 +66,19 @@ type routeMaskKey struct {
 	ip      string // 16-byte string form of the IP (net.IP.To16())
 }
 
+// RouteMaskCacheSnapshot reports process-wide route-mask cache activity.
+type RouteMaskCacheSnapshot struct {
+	Hits          uint64
+	Misses        uint64
+	FullClears    uint64
+	InflightDrops uint64
+	LookupErrors  uint64
+	Entries       uint64
+}
+
 // routeMaskCache caches FIB-match results for a short TTL so the per-flow
 // session-close export path does not issue an RTM_GETROUTE netlink syscall for
-// every record. Flows to the same destination/source prefix are common
-// (per-host or per-subnet aggregates), so a small TTL cache collapses the
-// syscall rate dramatically while keeping the mask fresh across routing
-// changes. The cache is keyed by (ifindex, 16-byte IP) and bounded at
+// every record. The cache is keyed by (ifindex, IP) and bounded at
 // routeMaskCacheMax entries.
 type routeMaskCache struct {
 	ttl     time.Duration
@@ -84,10 +92,15 @@ type routeMaskCache struct {
 	// defaultRouteMaskInflight. See scheduleLookupLocked.
 	maxInflight int
 
-	mu       sync.Mutex
-	entries  map[routeMaskKey]routeMaskEntry
-	pending  map[routeMaskKey]struct{} // keys with a background lookup in flight (dedup)
-	inflight int                       // count of background lookups currently running
+	mu            sync.Mutex
+	entries       map[routeMaskKey]routeMaskEntry
+	pending       map[routeMaskKey]struct{} // keys with a background lookup in flight (dedup)
+	inflight      int                       // count of background lookups currently running
+	hits          atomic.Uint64
+	misses        atomic.Uint64
+	fullClears    atomic.Uint64
+	inflightDrops atomic.Uint64
+	lookupErrors  atomic.Uint64
 
 	// afterPopulate, when non-nil, is invoked after each background lookup has
 	// stored its result. Test-only seam for deterministic assertions; nil in
@@ -161,6 +174,24 @@ func newRouteMaskCache(ttl time.Duration) *routeMaskCache {
 	}
 }
 
+// RouteMaskCacheStats returns a snapshot of activity for the process-wide
+// production cache. A miss counts a resolve attempt; lookup errors count failed
+// FIB queries, including an empty route response.
+func RouteMaskCacheStats() RouteMaskCacheSnapshot {
+	return routeMaskCacheFor(defaultRouteMaskTTL).Stats()
+}
+
+func (c *routeMaskCache) Stats() RouteMaskCacheSnapshot {
+	c.mu.Lock()
+	entries := uint64(len(c.entries))
+	c.mu.Unlock()
+	return RouteMaskCacheSnapshot{
+		Hits: c.hits.Load(), Misses: c.misses.Load(),
+		FullClears: c.fullClears.Load(), InflightDrops: c.inflightDrops.Load(),
+		LookupErrors: c.lookupErrors.Load(), Entries: entries,
+	}
+}
+
 // resolve implements MaskResolver with caching. It NEVER issues the netlink
 // FIB lookup on the calling goroutine (#3743): resolve() runs inside the
 // EventReader session-close callback, so a synchronous RTM_GETROUTE round-trip
@@ -186,10 +217,12 @@ func (c *routeMaskCache) resolve(ip net.IP, ifindex int) (uint8, bool) {
 
 	c.mu.Lock()
 	if e, found := c.entries[key]; found && now.Before(e.expires) {
+		c.hits.Add(1)
 		mask, ok := e.mask, e.ok
 		c.mu.Unlock()
 		return mask, ok
 	}
+	c.misses.Add(1)
 	// Cache miss (or expired): schedule the FIB lookup off this goroutine and
 	// return the default now — do NOT block the callback on netlink.
 	c.scheduleLookupLocked(key, ip16, ifindex)
@@ -218,6 +251,7 @@ func (c *routeMaskCache) scheduleLookupLocked(key routeMaskKey, ip16 net.IP, ifi
 		limit = defaultRouteMaskInflight
 	}
 	if c.inflight >= limit {
+		c.inflightDrops.Add(1)
 		return
 	}
 	c.pending[key] = struct{}{}
@@ -232,6 +266,9 @@ func (c *routeMaskCache) scheduleLookupLocked(key routeMaskKey, ip16 net.IP, ifi
 // happens here, entirely off the EventReader callback path. #3743.
 func (c *routeMaskCache) populate(key routeMaskKey, ip net.IP, ifindex int) {
 	mask, ok := c.lookup(ip, ifindex)
+	if !ok {
+		c.lookupErrors.Add(1)
+	}
 	now := time.Now()
 	c.mu.Lock()
 	c.storeLocked(key, mask, ok, now)
@@ -277,6 +314,7 @@ func (c *routeMaskCache) evictLocked(key routeMaskKey, now time.Time) {
 	}
 	if len(c.entries) >= c.maxSize {
 		clear(c.entries)
+		c.fullClears.Add(1)
 	}
 }
 
