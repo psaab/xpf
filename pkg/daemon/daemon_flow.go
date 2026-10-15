@@ -496,8 +496,8 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 	var operatorInventoryErr, controlFabricInventoryErr error
 	var controlFabricInterfaces []string
 	var controlFabricLinks map[int]string
-	if needsControlFabricInventory && d.store != nil {
-		controlFabricInterfaces = mgmtVRFControlFabricInterfaces(d.store.ActiveConfig(), mgmtSet)
+	if needsControlFabricInventory && cfg != nil {
+		controlFabricInterfaces = mgmtVRFControlFabricInterfaces(cfg, mgmtSet)
 		controlFabricLinks, controlFabricInventoryErr =
 			mgmtVRFControlFabricLinkIndexes(nlh, controlFabricInterfaces)
 		if controlFabricInventoryErr != nil {
