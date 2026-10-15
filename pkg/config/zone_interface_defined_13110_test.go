@@ -16,50 +16,22 @@ import (
 // while `known` stores the declared name "p.0" and SplitInterfaceUnitRef
 // already resolves ref.Base == "p.0" with declared-first precedence.
 
-func TestZoneInterfaceBareSt0OnlyDottedBindFailsCommit13110(t *testing.T) {
-	cases := []struct {
-		name string
-		cmds []string
-	}{
-		{
-			name: "bare st0 with bind-interface st0.0",
-			cmds: []string{
-				"set security ipsec vpn myvpn bind-interface st0.0",
-				"set security zones security-zone vpn interfaces st0",
-			},
-		},
-		{
-			name: "bare st0 with bind-interface st0.5",
-			cmds: []string{
-				"set security ipsec vpn myvpn bind-interface st0.5",
-				"set security zones security-zone vpn interfaces st0",
-			},
-		},
+func TestZoneInterfaceBareSt0UnitZeroAlias13110(t *testing.T) {
+	tree := buildTree(t, []string{"set security ipsec vpn myvpn bind-interface st0.0", "set security zones security-zone vpn interfaces st0"})
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("bare st0 must alias explicitly bound unit zero, got %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tree := buildTree(t, tc.cmds)
-			_, err := CompileConfig(tree)
-			if err == nil {
-				t.Fatalf("expected commit to reject bare st0 when only a dotted bind-interface exists, got nil error")
-			}
-			for _, want := range []string{"vpn", "st0", "not defined under"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("error %q does not contain %q", err.Error(), want)
-				}
-			}
-		})
+	tree = buildTree(t, []string{"set security ipsec vpn myvpn bind-interface st0.5", "set security zones security-zone vpn interfaces st0"})
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "not defined under") {
+		t.Fatalf("bare st0 must not alias nonzero dotted bind st0.5, got %v", err)
 	}
 }
 
 func TestZoneInterfaceBareSt0OnlyDottedBindWarnsOnLenientLoad13110(t *testing.T) {
-	tree := buildTree(t, []string{
-		"set security ipsec vpn myvpn bind-interface st0.0",
-		"set security zones security-zone vpn interfaces st0",
-	})
+	tree := buildTree(t, []string{"set security ipsec vpn myvpn bind-interface st0.5", "set security zones security-zone vpn interfaces st0"})
 	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("lenient load must warn rather than reject a bare st0 with only a dotted bind: %v", err)
+		t.Fatalf("lenient load must warn rather than reject bare st0 with only a nonzero dotted bind: %v", err)
 	}
 	found := false
 	for _, w := range cfg.Warnings {
@@ -69,7 +41,7 @@ func TestZoneInterfaceBareSt0OnlyDottedBindWarnsOnLenientLoad13110(t *testing.T)
 		}
 	}
 	if !found {
-		t.Fatalf("expected a downgraded zone-interface-defined warning, got warnings: %v", cfg.Warnings)
+		t.Fatalf("expected downgraded zone-interface-defined warning, got warnings: %v", cfg.Warnings)
 	}
 }
 
