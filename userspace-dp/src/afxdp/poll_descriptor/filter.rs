@@ -1804,7 +1804,7 @@ pub(super) fn stage11_input_filter_terminal(
         Some(flow),
         meta,
         ingress_zone_override,
-        false,
+        true,
     );
     let pending = eval.cached_log.map(|log| PendingFilterLog {
         ingress_zone_id: log.ingress_zone_id,
