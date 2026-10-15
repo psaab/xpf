@@ -208,3 +208,71 @@ func TestDHCPServerHostInboundBypassWarningsConfigScopedZoneQuarantine12843(t *t
 		t.Fatalf("runtime-quarantined zone must not be attributed by advisory, got %v", w)
 	}
 }
+func TestDHCPServerHostInboundBypassWarningsBareRef13143(t *testing.T) {
+	// (A) Bare group ref vs unit-qualified zone member: zone lists
+	// ge-0/0/0.0 omitting dhcp, group binds bare ge-0/0/0 (which binds
+	// unit 0). The advisory must fire.
+	cfgA := &Config{}
+	cfgA.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+	}
+	zA := &ZoneConfig{Interfaces: []string{"ge-0/0/0.0"}, HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}}}
+	cfgA.Security.Zones = map[string]*ZoneConfig{"trust": zA}
+	cfgA.System.DHCPServer.DHCPLocalServer = mkDHCPGroups("g1", "ge-0/0/0")
+	if w := validateDHCPServerHostInboundBypassWarnings(cfgA); !hasWarn6460(w, `serves interface "ge-0/0/0" (security zone "trust")`) {
+		t.Fatalf("(A) bare group ref against unit-qualified zone member must warn, got %v", w)
+	}
+
+	// (B) Bare group and zone member, but unit 0 override admits dhcp:
+	// the effective unit-0 set admits dhcp, so no warning.
+	cfgB := &Config{}
+	cfgB.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+	}
+	zB := &ZoneConfig{Interfaces: []string{"ge-0/0/0", "ge-0/0/0.0"}, HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}}}
+	zB.InterfaceHostInbound = map[string]*HostInboundTraffic{"ge-0/0/0.0": {SystemServices: []string{"ssh", "dhcp"}}}
+	cfgB.Security.Zones = map[string]*ZoneConfig{"trust": zB}
+	cfgB.System.DHCPServer.DHCPLocalServer = mkDHCPGroups("g1", "ge-0/0/0")
+	if w := validateDHCPServerHostInboundBypassWarnings(cfgB); len(w) != 0 {
+		t.Fatalf("(B) unit 0 override admitting dhcp must not warn for bare ref, got %v", w)
+	}
+
+	// (B2) Control: same as (B) but unit 0 override omits dhcp -> warn.
+	cfgB2 := &Config{}
+	cfgB2.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+	}
+	zB2 := &ZoneConfig{Interfaces: []string{"ge-0/0/0", "ge-0/0/0.0"}, HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}}}
+	zB2.InterfaceHostInbound = map[string]*HostInboundTraffic{"ge-0/0/0.0": {SystemServices: []string{"ssh"}}}
+	cfgB2.Security.Zones = map[string]*ZoneConfig{"trust": zB2}
+	cfgB2.System.DHCPServer.DHCPLocalServer = mkDHCPGroups("g1", "ge-0/0/0")
+	if w := validateDHCPServerHostInboundBypassWarnings(cfgB2); len(w) == 0 {
+		t.Fatalf("(B2) unit 0 override omitting dhcp must warn for bare ref")
+	}
+
+	// (C) Lifeline: fxp0 is always a lifeline; a DHCP group on fxp0 in a
+	// zone omitting dhcp must not warn (lifelines are NEVER denied).
+	cfgC := &Config{}
+	cfgC.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"fxp0": {Name: "fxp0", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+	}
+	zC := &ZoneConfig{Interfaces: []string{"fxp0.0"}, HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}}}
+	cfgC.Security.Zones = map[string]*ZoneConfig{"mgmt": zC}
+	cfgC.System.DHCPServer.DHCPLocalServer = mkDHCPGroups("g1", "fxp0")
+	if w := validateDHCPServerHostInboundBypassWarnings(cfgC); len(w) != 0 {
+		t.Fatalf("(C) lifeline fxp0 must not warn, got %v", w)
+	}
+
+	// (D) Negative: bare ref whose unit 0 is in no zone must not warn and
+	// must not be attributed to a sibling unit's zone.
+	cfgD := &Config{}
+	cfgD.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*InterfaceUnit{0: {Number: 0}, 1: {Number: 1}}},
+	}
+	zD := &ZoneConfig{Interfaces: []string{"ge-0/0/0.1"}, HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}}}
+	cfgD.Security.Zones = map[string]*ZoneConfig{"trust": zD}
+	cfgD.System.DHCPServer.DHCPLocalServer = mkDHCPGroups("g1", "ge-0/0/0")
+	if w := validateDHCPServerHostInboundBypassWarnings(cfgD); len(w) != 0 {
+		t.Fatalf("(D) bare ref binding only unzoned unit 0 must not warn via sibling unit 1, got %v", w)
+	}
+}
