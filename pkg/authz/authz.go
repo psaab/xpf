@@ -35,8 +35,9 @@
 // A configured `system services web-management api-auth` identity is the
 // second identity. Basic usernames and named API-key labels select configured
 // `system login class` scopes; the default is read-only, and no credential
-// becomes a superuser just by being valid. A peer UID that resolves to a
-// configured local login user is MORE specific and therefore wins over it.
+// becomes a superuser just by being valid. Credentials identify callers the
+// local peer-UID path cannot place; a local peer is governed only by its
+// configured login user and never falls through to api-auth.
 //
 // # Fail-closed, and what that costs
 //
@@ -114,18 +115,6 @@ type Principal struct {
 	// Detail explains an unestablished or unusable identity, for the denial
 	// message and the audit log. Never carries a secret.
 	Detail string
-}
-
-// Resolved reports whether this principal is usable for an authorization
-// decision — i.e. it is a superuser, or it carries a login class to evaluate.
-//
-// A peer UID that resolved to no configured login user is NOT resolved: the
-// RBAC model says nothing about that account. Callers use this to decide
-// whether a more specific identity should yield to a weaker one (a peer UID
-// with no class falls through to an api-auth credential) — never to skip the
-// authorization call itself.
-func (p Principal) Resolved() bool {
-	return p.Superuser || p.Class != ""
 }
 
 // String renders the principal for a log line or a denial message. It reports
@@ -213,9 +202,10 @@ func PermissionName(p config.LoginClassPermission) string {
 // would deny the operator on a box whose config has not been loaded yet.
 //
 // Every other outcome — no passwd entry, an account absent from `system login
-// user`, an account whose class is empty — produces an UNRESOLVED principal
-// carrying the reason. The caller may fall through to a weaker identity; if it
-// does not, Authorize denies with that reason.
+// user`, or an account whose class is empty — produces a principal with no
+// class and a denial reason. A peer UID with no configured class is terminal
+// and MUST NOT fall through to a weaker identity. Authorize denies with that
+// reason.
 func PrincipalForUID(cfg *config.Config, uid uint32) Principal {
 	if uid == 0 {
 		return Principal{Source: SourcePeerUID, UID: 0, Username: "root", Superuser: true}

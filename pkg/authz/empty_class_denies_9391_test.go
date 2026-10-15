@@ -48,9 +48,8 @@ func TestEmptyLoginClassIsDeniedNotDefaulted9391(t *testing.T) {
 			continue
 		}
 	}
-	if alice.Resolved() {
-		t.Errorf("a principal with an empty class must not report Resolved(); callers " +
-			"use that to decide whether to fall through to a weaker identity")
+	if alice.Class != "" {
+		t.Error("a principal with an empty class must retain the empty class")
 	}
 }
 

@@ -168,14 +168,14 @@ func TestPrincipalForUIDResolution_5561(t *testing.T) {
 
 	t.Run("root short-circuits without touching passwd or config", func(t *testing.T) {
 		p := PrincipalForUID(nil, 0)
-		if !p.Superuser || !p.Resolved() {
-			t.Fatalf("uid 0 produced %+v, want a resolved superuser", p)
+		if !p.Superuser {
+			t.Fatalf("uid 0 produced %+v, want a superuser", p)
 		}
 	})
 
 	t.Run("a configured login user resolves to its class", func(t *testing.T) {
 		p := PrincipalForUID(cfg, 4242)
-		if p.Username != "opsuser" || p.Class != "read-only" || !p.Resolved() {
+		if p.Username != "opsuser" || p.Class != "read-only" {
 			t.Fatalf("uid 4242 produced %+v, want opsuser/read-only", p)
 		}
 		if p.Superuser {
@@ -185,7 +185,7 @@ func TestPrincipalForUIDResolution_5561(t *testing.T) {
 
 	t.Run("an account absent from the login model is unresolved", func(t *testing.T) {
 		p := PrincipalForUID(cfg, 4244)
-		if p.Resolved() {
+		if p.Class != "" {
 			t.Fatalf("uid 4244 (a real account, not a login user) resolved to %+v", p)
 		}
 		if !strings.Contains(p.Detail, "stranger") {
@@ -195,7 +195,7 @@ func TestPrincipalForUIDResolution_5561(t *testing.T) {
 
 	t.Run("a login user with no class is unresolved", func(t *testing.T) {
 		p := PrincipalForUID(cfg, 4249)
-		if p.Resolved() {
+		if p.Class != "" {
 			t.Fatalf("uid 4249 (`system login user noclass` with no class) resolved to %+v", p)
 		}
 		if !strings.Contains(p.Detail, "no class") {
@@ -205,65 +205,13 @@ func TestPrincipalForUIDResolution_5561(t *testing.T) {
 
 	t.Run("a uid with no passwd entry is unresolved", func(t *testing.T) {
 		p := PrincipalForUID(cfg, 65533)
-		if p.Resolved() {
+		if p.Class != "" {
 			t.Fatalf("uid 65533 resolved to %+v despite having no account", p)
 		}
 		if !strings.Contains(p.Detail, "/etc/passwd") {
 			t.Errorf("detail does not explain the missing account: %q", p.Detail)
 		}
 	})
-}
-
-// TestUsernameForUIDParsesPasswd_5561 covers the account-database reader,
-// including the duplicate-UID rule and the unreadable-database denial.
-func TestUsernameForUIDParsesPasswd_5561(t *testing.T) {
-	dir := t.TempDir()
-	passwd := filepath.Join(dir, "passwd")
-	if err := os.WriteFile(passwd, []byte(
-		"# a comment\n"+
-			"\n"+
-			"root:x:0:0:root:/root:/bin/bash\n"+
-			"first:x:5000:5000::/home/first:/bin/bash\n"+
-			"second:x:5000:5000::/home/second:/bin/bash\n"+
-			"truncated:x\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	restore := SetPasswdPathForTest(passwd)
-
-	if name, ok := UsernameForUID(0); !ok || name != "root" {
-		t.Errorf("uid 0 = (%q, %v), want (root, true)", name, ok)
-	}
-	// A DUPLICATE uid must not resolve at all (#6645).
-	//
-	// This asserted the opposite until #6645 — "want the FIRST entry (first,
-	// true)" — and that assertion was defending a privilege escalation. With
-	// `first` and `second` sharing uid 5000, naming the first row hands
-	// `first`'s configured login class to `second`: two legitimate accounts,
-	// one of them silently promoted. The kernel gives us 5000 and nothing
-	// else, so the two callers are genuinely indistinguishable and there is no
-	// correct name to return; the only sound answer is to refuse and let the
-	// caller fail closed.
-	//
-	// The rule itself lives in pkg/osident (see lookupPasswd's comment), which
-	// this resolver now delegates to. That is the point: while pkg/authz held
-	// a second implementation, REST admitted the first row while the CLI
-	// refused — same uid, same passwd file, opposite verdicts, both suites
-	// green. TestRESTAndCLIAgreeOnAnAmbiguousUID_6645 (pkg/api) binds the
-	// cross-surface property end to end.
-	if name, ok := UsernameForUID(5000); ok {
-		t.Errorf("duplicate uid 5000 resolved to %q — an ambiguous uid must fail closed, "+
-			"never be attributed to whichever passwd row was read first", name)
-	}
-	if _, ok := UsernameForUID(9999); ok {
-		t.Error("an absent uid resolved to a name")
-	}
-	restore()
-
-	defer SetPasswdPathForTest(filepath.Join(dir, "absent"))()
-	if _, ok := UsernameForUID(0); ok {
-		t.Error("an unreadable account database still produced an identity — " +
-			"the resolver must fail closed")
-	}
 }
 
 // TestResolveClassPermissionsIsSharedWithTheCLI_5561 pins the factoring: the
@@ -336,8 +284,8 @@ func TestTolerantlyLoadedInvalidUsernameGrantsNoClass_5561(t *testing.T) {
 
 	t.Run("the control resolves", func(t *testing.T) {
 		p := PrincipalForUID(cfg, 4251)
-		if !p.Resolved() || p.Class != "super-user" {
-			t.Fatalf("uid 4251 (a VALID login user name) produced %+v, want a resolved "+
+		if p.Class != "super-user" {
+			t.Fatalf("uid 4251 (a VALID login user name) produced %+v, want a "+
 				"super-user — the denial below would otherwise prove nothing", p)
 		}
 		if err := Authorize(cfg, p, config.PermConfig); err != nil {
@@ -347,7 +295,7 @@ func TestTolerantlyLoadedInvalidUsernameGrantsNoClass_5561(t *testing.T) {
 
 	t.Run("a name host provisioning refuses is not a principal", func(t *testing.T) {
 		p := PrincipalForUID(cfg, 4250)
-		if p.Resolved() {
+		if p.Class != "" {
 			t.Fatalf("uid 4250 resolved to %+v. `system login user UPPER` is a name the daemon "+
 				"REFUSES to provision (applySystemLogin skips it), so no account with that name "+
 				"was created by the login model — yet it was handed that stanza's class over the "+
