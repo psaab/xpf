@@ -1,6 +1,7 @@
 package api
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -199,5 +200,65 @@ func TestDataplaneSilentSkipsReadTheLiveCounter9019(t *testing.T) {
 	}
 	if want := float64(userspace.LearnedRouteCapHits()); got[routeCapMetric9019] != want {
 		t.Errorf("%s = %v, accessor says %v", routeCapMetric9019, got[routeCapMetric9019], want)
+	}
+}
+
+// D1-15 (#13276): the two group-shed series must be emitted through the
+// REAL collector even before any shed, with their descriptors owned by
+// xpfCollector (not package globals), so rate()/increase() see the 0->1
+// transition. Closed label sets are seeded in
+// pkg/dataplane/userspace/learned_route_cap_8355.go.
+func TestLearnedRouteCapGroupShedsZeroBaseline13276(t *testing.T) {
+	c := newCollector(&Server{store: newDescriptorCoverageStore(t), startTime: time.Now()})
+	for _, name := range []string{"learnedRouteCapGroupShedsTotal", "learnedRouteCapGroupShedsByFamilyTotal"} {
+		field, ok := reflect.TypeOf(c).Elem().FieldByName(name)
+		if !ok || field.Type != reflect.TypeOf((*prometheus.Desc)(nil)) {
+			t.Errorf("xpfCollector must own %s as a *prometheus.Desc field", name)
+		}
+	}
+	ch := make(chan prometheus.Metric, 512)
+	gotProto := map[string]float64{}
+	gotFamily := map[string]float64{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for m := range ch {
+			d := m.Desc().String()
+			var pbm dto.Metric
+			if err := m.Write(&pbm); err != nil {
+				continue
+			}
+			labels := map[string]string{}
+			for _, l := range pbm.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			switch {
+			case strings.Contains(d, protocolRouteCapMetric10824):
+				gotProto[labels["protocol"]] = pbm.GetCounter().GetValue()
+			case strings.Contains(d, familyProtocolRouteCapMetric11441):
+				gotFamily[labels["family"]+"/"+labels["protocol"]] = pbm.GetCounter().GetValue()
+			}
+		}
+	}()
+	c.Collect(ch)
+	close(ch)
+	<-done
+	for protocol, count := range userspace.LearnedRouteCapHitsByProtocol() {
+		v, ok := gotProto[protocol]
+		if !ok {
+			t.Errorf("%s{protocol=%q} missing at scrape (accessor=%d); zero baseline required (#13276)", protocolRouteCapMetric10824, protocol, count)
+		} else if v != float64(count) {
+			t.Errorf("%s{protocol=%q}=%v, accessor %d", protocolRouteCapMetric10824, protocol, v, count)
+		}
+	}
+	for family, protocols := range userspace.LearnedRouteCapHitsByFamilyProtocol() {
+		for protocol, count := range protocols {
+			v, ok := gotFamily[family+"/"+protocol]
+			if !ok {
+				t.Errorf("%s{family=%q,protocol=%q} missing at scrape (accessor=%d); zero baseline required (#13276)", familyProtocolRouteCapMetric11441, family, protocol, count)
+			} else if v != float64(count) {
+				t.Errorf("%s{family=%q,protocol=%q}=%v, accessor %d", familyProtocolRouteCapMetric11441, family, protocol, v, count)
+			}
+		}
 	}
 }

@@ -98,4 +98,14 @@ func (c *xpfCollector) initForwardingDescriptors() {
 		"Flow cache counters by type (IPv4 + IPv6).",
 		[]string{"type"}, nil,
 	)
+	c.learnedRouteCapGroupShedsTotal = prometheus.NewDesc(
+		"xpf_learned_route_cap_group_sheds_total",
+		"Total learned-route cap group sheds, by kernel route protocol.",
+		[]string{"protocol"}, nil,
+	)
+	c.learnedRouteCapGroupShedsByFamilyTotal = prometheus.NewDesc(
+		"xpf_learned_route_cap_group_sheds_by_family_total",
+		"Total learned-route cap group sheds, by address family and kernel route protocol.",
+		[]string{"family", "protocol"}, nil,
+	)
 }

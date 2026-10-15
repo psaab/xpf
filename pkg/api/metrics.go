@@ -109,9 +109,11 @@ type xpfCollector struct {
 
 	// #9019: work the dataplane DECLINED to do. Both counters existed with no
 	// reader; see metrics_dataplane_silent_skips_9019.go.
-	napiProbeTargetSkipsTotal *prometheus.Desc
-	bindingWedgeGiveupsTotal  *prometheus.Desc
-	learnedRouteCapHitsTotal  *prometheus.Desc
+	napiProbeTargetSkipsTotal              *prometheus.Desc
+	bindingWedgeGiveupsTotal               *prometheus.Desc
+	learnedRouteCapHitsTotal               *prometheus.Desc
+	learnedRouteCapGroupShedsTotal         *prometheus.Desc
+	learnedRouteCapGroupShedsByFamilyTotal *prometheus.Desc
 	// #9654: capped NOW, from helper status; emitted only when known.
 	learnedRouteImportCapped *prometheus.Desc
 
