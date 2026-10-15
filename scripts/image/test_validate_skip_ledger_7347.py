@@ -313,6 +313,91 @@ class BootLegClassificationTests(unittest.TestCase):
                          "missing /dev/kvm as a WARNING, not a require(), so a TCG "
                          "bake host is supported and marking this fatal would fail "
                          "every bake on one (#7347)")
+        # #13205: the gate reports R/W accessibility, not mere existence.
+        # A present-but-unusable /dev/kvm must be distinguished from a usable
+        # device so operators can tell why the boot leg skipped.
+        self.assertIn("/dev/kvm", _reason)
+        self.assertIn("kvm_access=", _reason)
+
+
+class KvmAccessGate13205Tests(unittest.TestCase):
+    def test_kvm_unwritable_takes_skip_with_access_wording(self):
+        """Present but R/W-denied /dev/kvm must skip, not launch QEMU.
+
+        Master probes os.path.exists, so it proceeds past the gate and
+        QEMU dies with accel=kvm permission denied (#13205, bake.py:1276
+        already probes os.access R|W).
+        """
+        if shutil.which("qemu-img") is None or shutil.which("qemu-system-x86_64") is None:
+            self.skipTest("qemu tools not installed")
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            qcow = str(Path(d) / "probe.qcow2")
+            size = validate.BAKE_MIN_BYTES + (1 << 30)
+            subprocess.run(["qemu-img", "create", "-f", "qcow2", qcow, str(size)],
+                           check=True, capture_output=True)
+            h = _Recorder(qcow2=qcow)
+            real_access, real_popen = os.access, validate.subprocess.Popen
+            def fake_access(p, m):
+                return False if p == "/dev/kvm" else real_access(p, m)
+            def checked_popen(argv, *args, **kwargs):
+                if argv[0] == shutil.which("qemu-system-x86_64"):
+                    raise AssertionError("QEMU must not launch without /dev/kvm R/W access")
+                return real_popen(argv, *args, **kwargs)
+            validate.os.access = fake_access
+            validate.subprocess.Popen = checked_popen
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    validate.Harness.scenario_qemu(h)
+            finally:
+                validate.os.access, validate.subprocess.Popen = real_access, real_popen
+        self.assertEqual(len(h.skipped), 1, f"expected KVM skip, got {h.skipped}")
+        self.assertIn("kvm_access=False", h.skipped[0][1],
+                      "skip reason must reflect os.access R|W, not exists (#13205)")
+        self.assertFalse(h.skipped[0][2])
+
+
+class QemuOnlyIncusBypass13205Tests(unittest.TestCase):
+    def _drive(self, scenario):
+        calls = []
+        class Rec:
+            def __init__(self, *a, **k):
+                self.skipped = []
+            def __getattr__(self, n):
+                def rec(*a, **k):
+                    calls.append(n)
+                return rec
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            q, m = Path(d) / "i.qcow2", Path(d) / "m.tar.gz"
+            q.write_bytes(b""); m.write_bytes(b"")
+            oh, orx, oa = validate.Harness, validate.maybe_reexec_incus_admin, sys.argv
+            validate.Harness = Rec
+            validate.maybe_reexec_incus_admin = lambda: calls.append("maybe_reexec")
+            sys.argv = ["validate.py", "--qcow2", str(q), "--metadata", str(m), scenario]
+            try:
+                rc = validate.main()
+            finally:
+                validate.Harness, validate.maybe_reexec_incus_admin, sys.argv = oh, orx, oa
+        self.assertEqual(rc, 0)
+        return calls
+
+    def test_q_only_skips_incus_but_keeps_signature_verification(self):
+        calls = self._drive("q")
+        self.assertNotIn("ensure_network", calls, "q-only must not create Incus network (#13205)")
+        self.assertNotIn("import_image", calls, "q-only must not import multi-GB image (#13205)")
+        self.assertIn("verify_signatures", calls,
+                      "q-only must still verify signed manifest explicitly; it "
+                      "only ran inside import_image before (#13205)")
+        self.assertIn("scenario_qemu", calls)
+
+    def test_non_q_still_uses_incus(self):
+        calls = self._drive("a")
+        self.assertIn("ensure_network", calls)
+        self.assertIn("import_image", calls)
+        self.assertIn("scenario_a", calls)
 
 
 if __name__ == "__main__":

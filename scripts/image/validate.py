@@ -1859,11 +1859,12 @@ class Harness:
         # "plain-QEMU bootability is proven fine with SB off", which is true and
         # was being counted as something it is not.
         ovmf, ovmf_vars, sb_on, fw_reason = _qemu_firmware_choice()
-        if not qsys or not os.path.exists("/dev/kvm") or not ovmf or not ovmf_vars:
+        kvm_access = os.access("/dev/kvm", os.R_OK | os.W_OK)
+        if not qsys or not kvm_access or not ovmf or not ovmf_vars:
             self.skip(
                 "Q/boot-leg",
-                "need qemu-system-x86_64 + /dev/kvm + OVMF "
-                f"(qemu={bool(qsys)} kvm={os.path.exists('/dev/kvm')} "
+                "need qemu-system-x86_64 + readable/writable /dev/kvm + OVMF "
+                f"(qemu={bool(qsys)} kvm_access={kvm_access} "
                 f"firmware: {fw_reason}) — the structural probe above stands",
                 fatal=False)
             return
@@ -2036,9 +2037,14 @@ def main():
         h.assert_image_sealed()
         if a.seal_only:
             return 0
-        h.ensure_network()
-        h.import_image()
         keys = SCENARIO_ORDER if a.scenario == "all" else [a.scenario]
+        if any(k != "q" for k in keys):
+            h.ensure_network()
+            h.import_image()
+        else:
+            # Q-only performs no Incus work, but import_image() also owns
+            # signature verification; preserve that trust check explicitly.
+            h.verify_signatures()
         for k in keys:
             getattr(h, SCENARIO_METHODS[k])()
         # #7347: the scenarios used to be run purely for effect and main()
