@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
@@ -1001,61 +1000,21 @@ func (m *Manager) BatchDeletePeerSyncedSessionsScopedV6(scoped []dataplane.Scope
 }
 
 // BatchDeletePeerSyncedSessionsExactScoped is the exact peer-delete projection
-// used by SessionStore's DeleteBatchKnownExactV4/V6 path (#10598). It returns
-// mirror keys whose delete call actually succeeded and the helper-applied set;
-// already-absent mirror rows are excluded from the first set.
+// used by SessionStore's DeleteBatchKnownExactV4/V6 path (#10598). The helper
+// owns deletion or repair of bare-key BPF mirrors, so the helper-applied keys
+// are also the exact deleted set. Never delete those bare keys again in Go:
+// that can erase a surviving tenant's repaired mirror (#10512).
 func (m *Manager) BatchDeletePeerSyncedSessionsExactScoped(scoped []dataplane.ScopedSessionKey, forwardOnly bool) ([]dataplane.ScopedSessionKey, []dataplane.ScopedSessionKey, error) {
 	var refused, applied []dataplane.ScopedSessionKey
-	_ = m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
-	deleted, err := deleteAppliedMirrorRowsExact(applied, func(sk dataplane.ScopedSessionKey) error {
-		return m.bpfShim.DeleteSession(sk.Key)
-	})
-	return deleted, applied, err
+	err := m.deleteHelperSessionsScopedV4Marked(scoped, true, forwardOnly, &refused, &applied)
+	return applied, applied, err
 }
 
 // BatchDeletePeerSyncedSessionsExactScopedV6 is the IPv6 analogue.
 func (m *Manager) BatchDeletePeerSyncedSessionsExactScopedV6(scoped []dataplane.ScopedSessionKeyV6, forwardOnly bool) ([]dataplane.ScopedSessionKeyV6, []dataplane.ScopedSessionKeyV6, error) {
 	var refused, applied []dataplane.ScopedSessionKeyV6
-	_ = m.deleteHelperSessionsScopedV6Marked(scoped, true, forwardOnly, &refused, &applied)
-	deleted, err := deleteAppliedMirrorRowsExact(applied, func(sk dataplane.ScopedSessionKeyV6) error {
-		return m.bpfShim.DeleteSessionV6(sk.Key)
-	})
-	return deleted, applied, err
-}
-
-// deleteAppliedMirrorRows deletes the BPF mirror row of every key the helper
-// EXPLICITLY APPLIED (#9714 review round 2, finding 1).
-//
-// It used to be deleteUnrefusedMirrorRows and take the COMPLEMENT — every key not
-// in `refused` — which is a different set and a larger one. "Not refused" also
-// contains a request whose transport failed and a request the batch never sent at
-// all after an unreachable helper (errSessionSyncNotAttempted). Deleting on that
-// complement removed the mirror rows of sessions the helper still holds, and the
-// mirror does not heal: the refresh path writes with BPF_EXIST specifically so it
-// will not recreate a deleted entry. Silence is not assent.
-//
-// Rows go one at a time, and a row that is already gone is not an error, so one
-// missing row does not strand the rest.
-func deleteAppliedMirrorRows[K comparable](applied []K, del func(K) error) (int, error) {
-	deleted, err := deleteAppliedMirrorRowsExact(applied, del)
-	return len(deleted), err
-}
-
-// deleteAppliedMirrorRowsExact returns the keys whose mirror delete actually
-// succeeded, excluding benign already-absent rows. It preserves input order.
-func deleteAppliedMirrorRowsExact[K comparable](applied []K, del func(K) error) ([]K, error) {
-	deleted := make([]K, 0, len(applied))
-	var firstErr error
-	for _, key := range applied {
-		switch err := del(key); {
-		case err == nil:
-			deleted = append(deleted, key)
-		case errors.Is(err, ebpf.ErrKeyNotExist):
-		case firstErr == nil:
-			firstErr = err
-		}
-	}
-	return deleted, firstErr
+	err := m.deleteHelperSessionsScopedV6Marked(scoped, true, forwardOnly, &refused, &applied)
+	return applied, applied, err
 }
 
 func bareKeysV4(scoped []dataplane.ScopedSessionKey) []dataplane.SessionKey {
@@ -1160,9 +1119,9 @@ func (m *Manager) ClearAllSessions() (int, int, error) {
 // 5-tuple, so no snapshot read happens under m.mu.
 //
 // It returns the FIRST helper IPC error across all chunks (nil if all
-// succeeded, or if there is no live helper). Bare batch callers discard it
-// (#5096); scoped batch callers propagate the equivalent scoped-helper result
-// (#10513); ClearAllSessions propagates it so a failed authoritative
+// succeeded). A missing helper is errSessionHelperUnreachable, never success.
+// Bare batch callers discard the error (#5096); scoped batch callers propagate
+// it (#10513); ClearAllSessions propagates it so failed authoritative
 // revocation is reported rather than reported as success (#5881).
 func (m *Manager) deleteHelperSessionsV4(keys []dataplane.SessionKey) error {
 	// #9364: the BARE form, kept for the callers that genuinely have no value —
@@ -1199,7 +1158,7 @@ func (m *Manager) deleteHelperSessionsScopedV4Marked(keys []dataplane.ScopedSess
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.proc == nil {
-		return nil
+		return errSessionHelperUnreachable
 	}
 	var firstErr error
 	for start := 0; start < len(keys); start += sessionHelperDeleteChunk {
@@ -1284,7 +1243,7 @@ func (m *Manager) deleteHelperSessionsScopedV6Marked(keys []dataplane.ScopedSess
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.proc == nil {
-		return nil
+		return errSessionHelperUnreachable
 	}
 	var firstErr error
 	for start := 0; start < len(keys); start += sessionHelperDeleteChunk {
