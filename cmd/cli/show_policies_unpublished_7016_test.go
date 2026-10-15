@@ -64,8 +64,8 @@ func TestShowPoliciesBriefMarksUnavailableHitCounters(t *testing.T) {
 	c := &ctl{client: &fakeBpfrxClient{getPoliciesResp: unpublishedPoliciesResp()}}
 
 	out := captureStdout(t, func() {
-		if err := c.showPoliciesBrief(); err != nil {
-			t.Fatalf("showPoliciesBrief: %v", err)
+		if err := c.showPoliciesBriefFiltered("", ""); err != nil {
+			t.Fatalf("showPoliciesBriefFiltered: %v", err)
 		}
 	})
 
@@ -107,8 +107,8 @@ func TestRenderRuleHealthyCountersUnchanged(t *testing.T) {
 
 	c2 := &ctl{client: &fakeBpfrxClient{getPoliciesResp: resp}}
 	brief := captureStdout(t, func() {
-		if err := c2.showPoliciesBrief(); err != nil {
-			t.Fatalf("showPoliciesBrief: %v", err)
+		if err := c2.showPoliciesBriefFiltered("", ""); err != nil {
+			t.Fatalf("showPoliciesBriefFiltered: %v", err)
 		}
 	})
 	if !strings.Contains(brief, "12") {
