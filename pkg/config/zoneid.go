@@ -262,10 +262,51 @@ func ZoneQuarantineNamesForConfig(cfg *Config) []string {
 	return names
 }
 
-// ZoneQuarantineExclusionsForConfig returns the collision losers and reserved
-// names excluded from cfg's runtime zone-name set (ZoneQuarantineNamesForConfig).
+// ZoneQuarantineExclusionsForConfig returns the collision losers, reserved
+// names, and DroppedEnforcementChild-poisoned (#11575/#12623) zones excluded
+// from cfg's runtime zone-name set (ZoneQuarantineNamesForConfig). A poisoned
+// zone is quarantined in its own right and never claims a StableZoneID
+// against a healthy peer (#13099).
 func ZoneQuarantineExclusionsForConfig(cfg *Config) map[string]struct{} {
-	return ZoneQuarantineExclusions(ZoneQuarantineNamesForConfig(cfg))
+	return zoneQuarantineExclusionsForNames(ZoneQuarantineNamesForConfig(cfg), poisonedZoneNamesForConfig(cfg))
+}
+
+// CollisionSurvivorForConfig returns the healthy installed zone that owns
+// quarantined's StableZoneID under cfg ("" for a reserved name, a poisoned
+// zone with no healthy collider, or a non-quarantined name). Poisoned zones
+// never own an ID, so a poisoned collider's survivor is its healthy peer
+// (#13099) — unlike ZoneQuarantineSurvivorName over raw names, which would
+// name the poisoned sorted-first zone.
+func CollisionSurvivorForConfig(cfg *Config, quarantined string) string {
+	if cfg == nil || quarantined == "" {
+		return ZoneQuarantineSurvivorName(quarantined, ZoneQuarantineNamesForConfig(cfg))
+	}
+	if _, reserved := reservedZoneNames[quarantined]; reserved {
+		return ""
+	}
+	if _, excluded := ZoneQuarantineExclusionsForConfig(cfg)[quarantined]; !excluded {
+		return ""
+	}
+	id := StableZoneID(quarantined)
+	best := ""
+	for _, name := range ZoneQuarantineNamesForConfig(cfg) {
+		if name == quarantined {
+			continue
+		}
+		if _, reserved := reservedZoneNames[name]; reserved {
+			continue
+		}
+		if isPoisonedZoneForConfig(cfg, name) {
+			continue
+		}
+		if StableZoneID(name) != id {
+			continue
+		}
+		if best == "" || name < best {
+			best = name
+		}
+	}
+	return best
 }
 
 // QuarantinedZoneNames returns the set of security-zone names that MUST NOT be
@@ -293,16 +334,31 @@ func ZoneQuarantineExclusionsForConfig(cfg *Config) map[string]struct{} {
 // identical config — the same HA-symmetry guarantee StableZoneID itself carries.
 // Returns nil when no id collides (the common case).
 func QuarantinedZoneNames(names []string) map[string]struct{} {
-	if len(names) < 2 {
-		return nil
-	}
+	return quarantinedZoneNamesExcluding(names, nil)
+}
+
+// quarantinedZoneNamesExcluding is QuarantinedZoneNames with an extra set of
+// names that must never claim a StableZoneID (#13099): a zone poisoned by
+// DroppedEnforcementChild is unbound, so it is quarantined in its own right
+// and must not win the collision tournament against a healthy peer.
+func quarantinedZoneNamesExcluding(names []string, excluded map[string]struct{}) map[string]struct{} {
 	sorted := make([]string, len(names))
 	copy(sorted, names)
 	sort.Strings(sorted)
 	owner := make(map[uint16]string, len(sorted))
 	var quarantined map[string]struct{}
+	mark := func(name string) {
+		if quarantined == nil {
+			quarantined = make(map[string]struct{})
+		}
+		quarantined[name] = struct{}{}
+	}
 	for _, name := range sorted {
 		if _, reserved := reservedZoneNames[name]; reserved {
+			continue
+		}
+		if _, drop := excluded[name]; drop {
+			mark(name)
 			continue
 		}
 		id := StableZoneID(name)
@@ -312,15 +368,44 @@ func QuarantinedZoneNames(names []string) map[string]struct{} {
 				// zone, not a collision (map-keyed callers never hit this).
 				continue
 			}
-			if quarantined == nil {
-				quarantined = make(map[string]struct{})
-			}
-			quarantined[name] = struct{}{}
+			mark(name)
 			continue
 		}
 		owner[id] = name
 	}
 	return quarantined
+}
+
+// poisonedZoneNamesForConfig returns the effective zones poisoned by
+// DroppedEnforcementChild (#11575/#12623). compileZones already unbound such
+// a zone (Interfaces/InterfaceHostInbound/ScreenProfile cleared); every
+// quarantine consumer must also treat it as excluded so it cannot claim a
+// StableZoneID, host-inbound view, or classifier admit (#13099).
+func poisonedZoneNamesForConfig(cfg *Config) map[string]struct{} {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
+		return nil
+	}
+	var out map[string]struct{}
+	for name, zone := range cfg.Security.Zones {
+		if zone == nil || !zone.DroppedEnforcementChild {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]struct{})
+		}
+		out[name] = struct{}{}
+	}
+	return out
+}
+
+// isPoisonedZoneForConfig reports whether cfg's effective zone name is
+// poisoned by DroppedEnforcementChild (#13099).
+func isPoisonedZoneForConfig(cfg *Config, name string) bool {
+	if cfg == nil || name == "" {
+		return false
+	}
+	zone := cfg.Security.Zones[name]
+	return zone != nil && zone.DroppedEnforcementChild
 }
 
 // ZoneQuarantineExclusions returns every zone name that snapshot builders must
@@ -341,6 +426,23 @@ func ZoneQuarantineExclusions(names []string) map[string]struct{} {
 	return excluded
 }
 
+// zoneQuarantineExclusionsForNames is ZoneQuarantineExclusions over names
+// with poisoned zones additionally excluded and barred from claiming an ID
+// (#13099). Poisoned-only input (no collision/reserved) still excludes.
+func zoneQuarantineExclusionsForNames(names []string, poisoned map[string]struct{}) map[string]struct{} {
+	excluded := quarantinedZoneNamesExcluding(names, poisoned)
+	for _, name := range names {
+		if _, reserved := reservedZoneNames[name]; !reserved {
+			continue
+		}
+		if excluded == nil {
+			excluded = make(map[string]struct{})
+		}
+		excluded[name] = struct{}{}
+	}
+	return excluded
+}
+
 // ZoneQuarantineExcludedReason returns the operator-facing reason for a
 // quarantined zone in cfg. It returns an empty string for an ordinary or
 // survivor zone, and uses the same runtime name set as the snapshot builders
@@ -349,10 +451,14 @@ func ZoneQuarantineExcludedReason(name string, cfg *Config) string {
 	if cfg == nil || name == "" {
 		return ""
 	}
-	names := ZoneQuarantineNamesForConfig(cfg)
-	quarantined := ZoneQuarantineExclusions(names)
+	quarantined := ZoneQuarantineExclusionsForConfig(cfg)
 	if _, excluded := quarantined[name]; !excluded {
 		return ""
+	}
+	if isPoisonedZoneForConfig(cfg, name) {
+		return fmt.Sprintf(
+			"security zone %q is quarantined: an unrecognized enforcement child was dropped (DroppedEnforcementChild) so the zone is unbound and was omitted from the dataplane",
+			name)
 	}
 	if _, reserved := reservedZoneNames[name]; reserved {
 		return fmt.Sprintf(
@@ -360,7 +466,7 @@ func ZoneQuarantineExcludedReason(name string, cfg *Config) string {
 			name, name)
 	}
 	id := StableZoneID(name)
-	owner := StableZoneIDOwner(names, id)
+	owner := CollisionSurvivorForConfig(cfg, name)
 	return fmt.Sprintf(
 		"security zone %q is quarantined: stable ID %d is owned by surviving zone %q and was omitted from the dataplane",
 		name, id, owner)
@@ -417,6 +523,31 @@ func StableZoneIDOwner(names []string, id uint16) string {
 	owner := ""
 	for _, name := range names {
 		if _, reserved := reservedZoneNames[name]; reserved {
+			continue
+		}
+		if StableZoneID(name) != id {
+			continue
+		}
+		if owner == "" || name < owner {
+			owner = name
+		}
+	}
+	return owner
+}
+
+// StableZoneIDOwnerForConfig is StableZoneIDOwner over cfg's runtime name
+// set, skipping poisoned zones so a poisoned collider never resolves as the
+// installed owner of its ID (#13099).
+func StableZoneIDOwnerForConfig(cfg *Config, id uint16) string {
+	if cfg == nil {
+		return ""
+	}
+	owner := ""
+	for _, name := range ZoneQuarantineNamesForConfig(cfg) {
+		if _, reserved := reservedZoneNames[name]; reserved {
+			continue
+		}
+		if isPoisonedZoneForConfig(cfg, name) {
 			continue
 		}
 		if StableZoneID(name) != id {
