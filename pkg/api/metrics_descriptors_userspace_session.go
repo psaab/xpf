@@ -199,6 +199,17 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"forever — nonzero means a preflight/install pairing bug).",
 		nil, nil,
 	)
+	// #13281: cumulative session timer-wheel GC/HA classifications. The
+	// per-worker counters are aggregated by the runtime emitter.
+	c.userspaceSessionGCScanned = prometheus.NewDesc("xpf_userspace_session_gc_scanned_total", "Timer-wheel entries scanned by session GC.", nil, nil)
+	c.userspaceSessionGCDroppedGone = prometheus.NewDesc("xpf_userspace_session_gc_dropped_gone_total", "Timer-wheel entries dropped because their sessions were already gone.", nil, nil)
+	c.userspaceSessionGCDroppedStale = prometheus.NewDesc("xpf_userspace_session_gc_dropped_stale_total", "Stale timer-wheel entries dropped after a newer schedule superseded them.", nil, nil)
+	c.userspaceSessionGCReBucketed = prometheus.NewDesc("xpf_userspace_session_gc_re_bucketed_total", "Session entries re-bucketed by the timer-wheel GC.", nil, nil)
+	c.userspaceSessionGCHeldStandby = prometheus.NewDesc("xpf_userspace_session_gc_held_standby_total", "Peer-synced sessions held by the HA standby retention gate.", nil, nil)
+	c.userspaceSessionGCReapedStaleSynced = prometheus.NewDesc("xpf_userspace_session_gc_reaped_stale_synced_total", "Peer-synced sessions reaped after exceeding the stale-hold ceiling.", nil, nil)
+	c.userspaceSessionGCHealedOnPromote = prometheus.NewDesc("xpf_userspace_session_gc_healed_on_promote_total", "Peer-synced sessions self-healed after local RG promotion.", nil, nil)
+	c.userspaceSessionGCAgedOwnerRGZeroActiveNode = prometheus.NewDesc("xpf_userspace_session_gc_aged_owner_rg_zero_active_node_total", "Owner-RG-zero sessions aged on a node forwarding another RG.", nil, nil)
+	c.userspaceSessionGCKeptAliveByCompanion = prometheus.NewDesc("xpf_userspace_session_gc_kept_alive_by_companion_total", "Idle-crossed session entries retained by their active companion.", nil, nil)
 	// #4800: the process-global publish + replication legs of the
 	// new-flow-install contention surface. Each contended counter ships
 	// with the acquisition counter that is its denominator, because a

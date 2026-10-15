@@ -105,6 +105,24 @@ pub struct WorkerRuntimeStatus {
     /// Capacity of this worker's Rust-owned SessionTable.
     #[serde(rename = "max_sessions", default)]
     pub max_sessions: u64,
+    #[serde(rename = "session_gc_scanned", default)]
+    pub session_gc_scanned: u64,
+    #[serde(rename = "session_gc_dropped_gone", default)]
+    pub session_gc_dropped_gone: u64,
+    #[serde(rename = "session_gc_dropped_stale", default)]
+    pub session_gc_dropped_stale: u64,
+    #[serde(rename = "session_gc_re_bucketed", default)]
+    pub session_gc_re_bucketed: u64,
+    #[serde(rename = "session_gc_held_standby", default)]
+    pub session_gc_held_standby: u64,
+    #[serde(rename = "session_gc_reaped_stale_synced", default)]
+    pub session_gc_reaped_stale_synced: u64,
+    #[serde(rename = "session_gc_healed_on_promote", default)]
+    pub session_gc_healed_on_promote: u64,
+    #[serde(rename = "session_gc_aged_owner_rg_zero_active_node", default)]
+    pub session_gc_aged_owner_rg_zero_active_node: u64,
+    #[serde(rename = "session_gc_kept_alive_by_companion", default)]
+    pub session_gc_kept_alive_by_companion: u64,
     /// #1760: cumulative NAT reverse-key displacement events on this
     /// worker's SessionTable nat_reverse_index — the latent 1:N collision
     /// (#1758) made observable. A near-precise upper bound on live

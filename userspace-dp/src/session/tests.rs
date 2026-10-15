@@ -6596,6 +6596,35 @@ fn expire_holds_peer_synced_owner_rg_zero_whole_node_standby() {
 }
 
 #[test]
+fn expire_stale_entries_ha_accumulates_cumulative_wheel_pop_stats_13281() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    let then = 1_000_000_000u64;
+    install_synced_tcp(&mut table, &key, 1, then);
+    let first_now = past_tcp_timeout(then);
+    table.last_gc_ns = first_now.saturating_sub(1_000_000_000);
+
+    assert!(run_expire_ha(&mut table, first_now, &[], &|_| 0).is_empty());
+    assert_eq!(table.last_pop_stats().held_standby, 1);
+    assert_eq!(table.cumulative_pop_stats().held_standby, 1);
+
+    // A gated no-op resets only the per-call stats, not the lifetime tally.
+    assert!(run_expire_ha(&mut table, first_now + 1, &[], &|_| 0).is_empty());
+    assert_eq!(table.last_pop_stats().held_standby, 0);
+    assert_eq!(table.last_pop_stats().scanned, 0);
+    assert_eq!(table.cumulative_pop_stats().held_standby, 1);
+
+    let second_now = first_now.saturating_add(301_000_000_000);
+    assert!(run_expire_ha(&mut table, second_now, &[], &|_| 0).is_empty());
+    let cumulative = table.cumulative_pop_stats();
+    let last = table.last_pop_stats();
+    assert_eq!(cumulative.held_standby, 1 + last.held_standby);
+    assert!(cumulative.held_standby > last.held_standby);
+    assert!(cumulative.scanned > last.scanned);
+    assert!(cumulative.re_bucketed > last.re_bucketed);
+}
+
+#[test]
 fn expire_ages_owner_rg_zero_on_active_node() {
     // KNOWN residual (plan A2#4): a peer-synced owner_rg_id==0 entry on
     // a node that IS active for some RG ages -- observable via the

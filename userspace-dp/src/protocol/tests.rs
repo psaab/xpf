@@ -1211,6 +1211,47 @@ fn worker_runtime_status_cold_path_fields_roundtrip_populated() {
 // xpf_userspace_worker_cos_wheel_ticks_advanced_{total,max} and
 // xpf_userspace_worker_cos_queue_lease_undergrant_total{cause}.
 #[test]
+fn worker_runtime_status_session_gc_counters_roundtrip_13281() {
+    let status = WorkerRuntimeStatus {
+        session_gc_scanned: 1,
+        session_gc_dropped_gone: 2,
+        session_gc_dropped_stale: 3,
+        session_gc_re_bucketed: 4,
+        session_gc_held_standby: 5,
+        session_gc_reaped_stale_synced: 6,
+        session_gc_healed_on_promote: 7,
+        session_gc_aged_owner_rg_zero_active_node: 8,
+        session_gc_kept_alive_by_companion: 9,
+        ..WorkerRuntimeStatus::default()
+    };
+    let value: serde_json::Value = serde_json::to_value(&status).expect("serialize status");
+    for key in [
+        "session_gc_scanned",
+        "session_gc_dropped_gone",
+        "session_gc_dropped_stale",
+        "session_gc_re_bucketed",
+        "session_gc_held_standby",
+        "session_gc_reaped_stale_synced",
+        "session_gc_healed_on_promote",
+        "session_gc_aged_owner_rg_zero_active_node",
+        "session_gc_kept_alive_by_companion",
+    ] {
+        assert!(value.get(key).is_some(), "missing session GC key {key}");
+    }
+    let decoded: WorkerRuntimeStatus =
+        serde_json::from_value(value).expect("deserialize status");
+    assert_eq!(decoded.session_gc_scanned, 1);
+    assert_eq!(decoded.session_gc_dropped_gone, 2);
+    assert_eq!(decoded.session_gc_dropped_stale, 3);
+    assert_eq!(decoded.session_gc_re_bucketed, 4);
+    assert_eq!(decoded.session_gc_held_standby, 5);
+    assert_eq!(decoded.session_gc_reaped_stale_synced, 6);
+    assert_eq!(decoded.session_gc_healed_on_promote, 7);
+    assert_eq!(decoded.session_gc_aged_owner_rg_zero_active_node, 8);
+    assert_eq!(decoded.session_gc_kept_alive_by_companion, 9);
+}
+
+#[test]
 fn worker_runtime_status_cos_coldstart_counters_roundtrip() {
     let status = WorkerRuntimeStatus {
         cos_wheel_ticks_advanced_total: 1_000_001,

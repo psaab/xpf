@@ -1216,7 +1216,6 @@ impl super::Coordinator {
         (out, truncated)
     }
 
-
     pub fn drain_session_deltas(&self, max: usize) -> Vec<SessionDeltaInfo> {
         // #5290: fair, rotating-cursor drain instead of whole-budget-first-slot.
         // The old drain handed the entire caller budget to each live binding in
@@ -1653,6 +1652,16 @@ impl super::Coordinator {
                         .outstanding_cap,
                     session_table_entries: s.session_table_entries,
                     max_sessions: s.max_sessions,
+                    session_gc_scanned: s.session_gc_scanned,
+                    session_gc_dropped_gone: s.session_gc_dropped_gone,
+                    session_gc_dropped_stale: s.session_gc_dropped_stale,
+                    session_gc_re_bucketed: s.session_gc_re_bucketed,
+                    session_gc_held_standby: s.session_gc_held_standby,
+                    session_gc_reaped_stale_synced: s.session_gc_reaped_stale_synced,
+                    session_gc_healed_on_promote: s.session_gc_healed_on_promote,
+                    session_gc_aged_owner_rg_zero_active_node: s
+                        .session_gc_aged_owner_rg_zero_active_node,
+                    session_gc_kept_alive_by_companion: s.session_gc_kept_alive_by_companion,
                     nat_reverse_key_collisions: s.nat_reverse_key_collisions,
                     nat_reverse_key_collisions_distinct_src: s
                         .nat_reverse_key_collisions_distinct_src,

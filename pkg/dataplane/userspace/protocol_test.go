@@ -2037,6 +2037,56 @@ func TestWorkerRuntimeStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		t.Fatalf("legacy WorkerRuntimeStatus trio nonzero")
 	}
 }
+func TestWorkerRuntimeStatusSessionGCCountersRoundTrip13281(t *testing.T) {
+	in := WorkerRuntimeStatus{
+		SessionGCScanned:                   1,
+		SessionGCDroppedGone:               2,
+		SessionGCDroppedStale:              3,
+		SessionGCReBucketed:                4,
+		SessionGCHeldStandby:               5,
+		SessionGCReapedStaleSynced:         6,
+		SessionGCHealedOnPromote:           7,
+		SessionGCAgedOwnerRGZeroActiveNode: 8,
+		SessionGCKeptAliveByCompanion:      9,
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal WorkerRuntimeStatus: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal status object: %v", err)
+	}
+	keys := []string{
+		"session_gc_scanned", "session_gc_dropped_gone", "session_gc_dropped_stale",
+		"session_gc_re_bucketed", "session_gc_held_standby", "session_gc_reaped_stale_synced",
+		"session_gc_healed_on_promote", "session_gc_aged_owner_rg_zero_active_node",
+		"session_gc_kept_alive_by_companion",
+	}
+	for _, key := range keys {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from WorkerRuntimeStatus JSON: %s", key, raw)
+		}
+	}
+	var back WorkerRuntimeStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal WorkerRuntimeStatus: %v", err)
+	}
+	if back.SessionGCScanned != 1 || back.SessionGCDroppedGone != 2 ||
+		back.SessionGCDroppedStale != 3 || back.SessionGCReBucketed != 4 ||
+		back.SessionGCHeldStandby != 5 || back.SessionGCReapedStaleSynced != 6 ||
+		back.SessionGCHealedOnPromote != 7 || back.SessionGCAgedOwnerRGZeroActiveNode != 8 ||
+		back.SessionGCKeptAliveByCompanion != 9 {
+		t.Fatalf("round-trip session GC counters = %+v", back)
+	}
+	var legacy WorkerRuntimeStatus
+	if err := json.Unmarshal([]byte(`{}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy WorkerRuntimeStatus: %v", err)
+	}
+	if legacy.SessionGCScanned != 0 || legacy.SessionGCKeptAliveByCompanion != 0 {
+		t.Fatalf("legacy session GC counters should default to zero: %+v", legacy)
+	}
+}
 
 // TestProcessStatusUnsurfacedCounterTrioRoundTrip7398 covers the three
 // counters #7398 wired out of the status-wiring allowlist. Each is asserted

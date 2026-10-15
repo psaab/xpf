@@ -1050,6 +1050,15 @@ type WorkerRuntimeStatus struct {
 	CoSQueueLeaseUndergrantOutstandingCap uint64 `json:"cos_queue_lease_undergrant_outstanding_cap,omitempty"`
 	SessionTableEntries                   uint64 `json:"session_table_entries,omitempty"`
 	MaxSessions                           uint64 `json:"max_sessions,omitempty"`
+	SessionGCScanned                      uint64 `json:"session_gc_scanned,omitempty"`
+	SessionGCDroppedGone                  uint64 `json:"session_gc_dropped_gone,omitempty"`
+	SessionGCDroppedStale                 uint64 `json:"session_gc_dropped_stale,omitempty"`
+	SessionGCReBucketed                   uint64 `json:"session_gc_re_bucketed,omitempty"`
+	SessionGCHeldStandby                  uint64 `json:"session_gc_held_standby,omitempty"`
+	SessionGCReapedStaleSynced            uint64 `json:"session_gc_reaped_stale_synced,omitempty"`
+	SessionGCHealedOnPromote              uint64 `json:"session_gc_healed_on_promote,omitempty"`
+	SessionGCAgedOwnerRGZeroActiveNode    uint64 `json:"session_gc_aged_owner_rg_zero_active_node,omitempty"`
+	SessionGCKeptAliveByCompanion         uint64 `json:"session_gc_kept_alive_by_companion,omitempty"`
 	// #1760: cumulative NAT reverse-key displacement events on this
 	// worker's SessionTable nat_reverse_index (#1758). omitempty for
 	// mixed-version back-compat.
