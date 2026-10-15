@@ -58,14 +58,14 @@ type xpfCollector struct {
 	// xpf_screen_drops_total above cannot answer "which screen fired?"; this
 	// labeled series can, now that the userspace bridge populates the per-reason
 	// GlobalCtrScreen* counters.
-	screenDropsByReasonTotal        *prometheus.Desc
+	screenDropsByReasonTotal               *prometheus.Desc
 	userspaceScreenSubstitutedDefaultDrops *prometheus.Desc
-	userspaceScreenSYNFloodDstDrops *prometheus.Desc
-	userspaceScreenSYNFloodSrcDrops *prometheus.Desc
-	userspaceScreenSYNFloodAlarmEvents *prometheus.Desc
-	userspaceScreenAlarmWithoutDropEvents *prometheus.Desc
-	userspaceScreenProfileWarns *prometheus.Desc
-	userspaceScreenTrackerPressureEvents *prometheus.Desc
+	userspaceScreenSYNFloodDstDrops        *prometheus.Desc
+	userspaceScreenSYNFloodSrcDrops        *prometheus.Desc
+	userspaceScreenSYNFloodAlarmEvents     *prometheus.Desc
+	userspaceScreenAlarmWithoutDropEvents  *prometheus.Desc
+	userspaceScreenProfileWarns            *prometheus.Desc
+	userspaceScreenTrackerPressureEvents   *prometheus.Desc
 	// #5806: unresolved screen-profile references (see the descriptor).
 	screenUnresolvedProfileZones *prometheus.Desc
 	screenInertProfileZones      *prometheus.Desc
@@ -177,14 +177,21 @@ type xpfCollector struct {
 	threeColorPolicerDropBytes    *prometheus.Desc
 
 	// Session gauges (from GC)
-	sessionsActive      *prometheus.Desc
-	sessionsEstablished *prometheus.Desc
-	sessionsIPv4        *prometheus.Desc
-	sessionsIPv6        *prometheus.Desc
-	sessionsSNAT        *prometheus.Desc
-	sessionsDNAT        *prometheus.Desc
-	sessionScrapeOK     *prometheus.Desc
-	gcSweepDuration     *prometheus.Desc
+	sessionsActive              *prometheus.Desc
+	sessionsEstablished         *prometheus.Desc
+	sessionsIPv4                *prometheus.Desc
+	sessionsIPv6                *prometheus.Desc
+	sessionsSNAT                *prometheus.Desc
+	sessionsDNAT                *prometheus.Desc
+	sessionScrapeOK             *prometheus.Desc
+	gcSweepDuration             *prometheus.Desc
+	gcSweepTimestamp            *prometheus.Desc
+	gcSweepsTotal               *prometheus.Desc
+	gcExpiredDeletedTotal       *prometheus.Desc
+	gcDeadlinesSaturatedTotal   *prometheus.Desc
+	gcPersistentNATExpiredTotal *prometheus.Desc
+	gcErrorsTotal               *prometheus.Desc
+	gcAggressiveAging           *prometheus.Desc
 
 	// NAT pool utilization
 	natPoolUsedPorts                              *prometheus.Desc
@@ -1076,6 +1083,13 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.sessionsDNAT
 	ch <- c.sessionScrapeOK
 	ch <- c.gcSweepDuration
+	ch <- c.gcSweepTimestamp
+	ch <- c.gcSweepsTotal
+	ch <- c.gcExpiredDeletedTotal
+	ch <- c.gcDeadlinesSaturatedTotal
+	ch <- c.gcPersistentNATExpiredTotal
+	ch <- c.gcErrorsTotal
+	ch <- c.gcAggressiveAging
 	ch <- c.natPoolUsedPorts
 	ch <- c.natPoolTotalPorts
 	ch <- c.natPoolDeterministicInfo
@@ -2084,6 +2098,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	c.collectDDNSMetrics(ch)
 	c.collectSurfaceADDNSMetrics(ch)
 	c.collectSystemMetrics(ch)
+	c.collectConntrackGCMetrics(ch)
 
 	if dp == nil || !dp.IsLoaded() {
 		return

@@ -612,6 +612,9 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_filter_hits_total",                                            // collectFilterCounters
 		"xpf_nat_pool_total_ports",                                         // collectNATPoolMetrics
 		"xpf_sessions_active",                                              // collectSessionGauges
+		"xpf_conntrack_gc_sweeps_total",                                    // conntrack GC cumulative telemetry
+		"xpf_conntrack_gc_expired_deleted_total",                           // conntrack GC cumulative telemetry
+		"xpf_conntrack_gc_errors_total",                                    // conntrack GC operation failures
 		"xpf_daemon_uptime_seconds",                                        // collectSystemMetrics
 		"xpf_daemon_neighbor_periodic_last_success_age_seconds",            // #1780 neighbor watchdog
 		"xpf_ipmon_policy_failed",                                          // #1827 ip-monitoring

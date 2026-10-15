@@ -17,8 +17,8 @@ owns the empty-table change counters.
 - `NewGCWithDomains(sessions, telemetry, sessionCount, persistent, interval)`
   — `gc.go`. Preferred constructor for callers that already own the split
   runtime interfaces.
-- `GCStats` — `gc.go`. Last-sweep metrics surfaced to `show system
-  buffers`.
+- `GCStats` — `gc.go`. Last-sweep and cumulative GC statistics, also exported
+  to Prometheus.
 - `OnDeleteV4`, `OnDeleteV6` — per-deleted-session callbacks; HA wires
   these to the session-sync delete path.
 - `IsLocalPrimary` — when this callback returns false, expiry is skipped

@@ -1149,3 +1149,117 @@ func TestGCSweepConfigRace(t *testing.T) {
 
 	wg.Wait()
 }
+
+// #13298 (D5-09): cumulative GC totals must survive a quiet sweep, error
+// paths must be counted (not silently dropped), and persistent-NAT removals
+// must be tallied. On master GCStats has no cumulative fields, so this file
+// fails to compile / the assertions fail with zero totals.
+type gc13298Publisher struct {
+	srcErr, dstErr error
+}
+
+func (p *gc13298Publisher) UpdateSessionCountSrc(dataplane.SessionCountKey, uint32) error {
+	return p.srcErr
+}
+func (p *gc13298Publisher) UpdateSessionCountDst(dataplane.SessionCountKey, uint32) error {
+	return p.dstErr
+}
+func (p *gc13298Publisher) ClearSessionCounts() error { return nil }
+
+type gc13298Store struct {
+	runtimeDomainSessionStore
+	iterErr4 error
+	delErr4  error
+}
+
+func (s *gc13298Store) ForEachV4(fn func(dataplane.SessionKey, dataplane.SessionValue) bool) error {
+	if s.iterErr4 != nil {
+		return s.iterErr4
+	}
+	return s.runtimeDomainSessionStore.ForEachV4(fn)
+}
+func (s *gc13298Store) DeleteBatchKnownExactV4(entries []dataplane.SessionEntryV4, reason dataplane.DeleteReason, f bool) ([]dataplane.SessionKey, error) {
+	if s.delErr4 != nil {
+		return nil, s.delErr4
+	}
+	return s.runtimeDomainSessionStore.DeleteBatchKnownExactV4(entries, reason, f)
+}
+
+func TestGCStatsCumulative13298(t *testing.T) {
+	now := monotonicSeconds()
+	mk := func() (*mockGCDP, dataplane.SessionKey) {
+		k := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 1, 1}, DstIP: [4]byte{10, 0, 2, 1}, Protocol: 6, SrcPort: 1000, DstPort: 80}
+		return &mockGCDP{
+			v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{k: {State: dataplane.SessStateEstablished, LastSeen: now - 200, Timeout: 100}},
+			v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+		}, k
+	}
+	dp, _ := mk()
+	gc := NewGC(dp, time.Minute)
+	gc.sweep()
+	s1 := gc.Stats()
+	if s1.ExpiredDeleted != 1 || s1.SweepsTotal != 1 || s1.ExpiredDeletedTotal != 1 {
+		t.Fatalf("sweep1 stats=%+v want ExpiredDeleted=1 SweepsTotal=1 ExpiredDeletedTotal=1", s1)
+	}
+	liveKey := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 3, 1}, DstIP: [4]byte{10, 0, 4, 1}, Protocol: 6, SrcPort: 2000, DstPort: 80}
+	dp.v4sessions[liveKey] = dataplane.SessionValue{State: dataplane.SessStateEstablished, LastSeen: now, Timeout: 10000}
+	gc.lastTotal = 1 // force a full scan despite the test telemetry stub's fixed counters
+	gc.sweep()
+	s2 := gc.Stats()
+	if s2.ExpiredDeleted != 0 {
+		t.Fatalf("sweep2 per-sweep ExpiredDeleted=%d want 0", s2.ExpiredDeleted)
+	}
+	if s2.ExpiredDeletedTotal != 1 || s2.SweepsTotal != 2 {
+		t.Fatalf("sweep2 cumulative lost: %+v want ExpiredDeletedTotal=1 SweepsTotal=2", s2)
+	}
+	// Session-count sync errors counted.
+	dp2, _ := mk()
+	pub := &gc13298Publisher{srcErr: errors.New("src boom"), dstErr: errors.New("dst boom")}
+	gc2 := NewGCWithDomains(dp2, nil, pub, nil, time.Minute)
+	gc2.SetSessionLimitEnabled(true)
+	// Need a live (non-expired) session so counts are published.
+	countKey := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 3, 1}, DstIP: [4]byte{10, 0, 4, 1}, Protocol: 6, SrcPort: 2000, DstPort: 80}
+	dp2.v4sessions[countKey] = dataplane.SessionValue{State: dataplane.SessStateEstablished, LastSeen: now, Timeout: 10000}
+	gc2.sweep()
+	if got := gc2.Stats().SessionCountSyncErrorsTotal; got == 0 {
+		t.Fatalf("SessionCountSyncErrorsTotal=0, want >0 on publisher errors")
+	}
+	// Iterate error counted.
+	store := &gc13298Store{iterErr4: errors.New("iter boom")}
+	gc3 := NewGCWithDomains(store, nil, nil, nil, time.Minute)
+	gc3.sweep()
+	if got := gc3.Stats().SweepIterErrorsTotal; got != 1 {
+		t.Fatalf("SweepIterErrorsTotal=%d want 1", got)
+	}
+	// Delete error counted.
+	entries := gcExactEntriesV4(now)
+	gc4store := &partialDeleteSessionStore{entries: entries, deleteError: errors.New("del boom")}
+	gc4 := NewGCWithDomains(gc4store, nil, nil, nil, time.Minute)
+	gc4.sweep()
+	if got := gc4.Stats().SweepDeleteErrorsTotal; got == 0 {
+		t.Fatalf("SweepDeleteErrorsTotal=0 want >0 on delete error")
+	}
+}
+
+func TestGCDeadlineSaturationTotalCumulative13298(t *testing.T) {
+	max := ^uint64(0)
+	key := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 1, 1}, DstIP: [4]byte{10, 0, 2, 1}, Protocol: 6, SrcPort: 1000, DstPort: 80}
+	dp := &mockGCDP{
+		v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			key: {State: dataplane.SessStateEstablished, LastSeen: max - 1, Timeout: 5},
+		},
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+	}
+	gc := NewGC(dp, time.Minute)
+	gc.testNow = func() uint64 { return max - 2 }
+	gc.sweep()
+	if got := gc.Stats().DeadlinesSaturatedTotal; got != 1 {
+		t.Fatalf("DeadlinesSaturatedTotal after first sweep = %d, want 1", got)
+	}
+	delete(dp.v4sessions, key)
+	gc.sweep()
+	stats := gc.Stats()
+	if stats.DeadlinesSaturated != 0 || stats.DeadlinesSaturatedTotal != 1 || stats.SweepsTotal != 2 {
+		t.Fatalf("quiet sweep lost cumulative saturation: %+v", stats)
+	}
+}

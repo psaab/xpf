@@ -38,20 +38,45 @@ type sessionGaugeSnapshot struct {
 	dnat        int
 }
 
+func (c *xpfCollector) collectConntrackGCMetrics(ch chan<- prometheus.Metric) {
+	if c.srv == nil || c.srv.gc == nil {
+		return
+	}
+	stats := c.srv.gc.Stats()
+	ch <- prometheus.MustNewConstMetric(c.gcSweepDuration, prometheus.GaugeValue,
+		stats.LastSweepDuration.Seconds())
+	lastSweepTimestamp := 0.0
+	if !stats.LastSweepTime.IsZero() {
+		lastSweepTimestamp = float64(stats.LastSweepTime.Unix())
+	}
+	ch <- prometheus.MustNewConstMetric(c.gcSweepTimestamp, prometheus.GaugeValue,
+		lastSweepTimestamp)
+	ch <- prometheus.MustNewConstMetric(c.gcSweepsTotal, prometheus.CounterValue,
+		float64(stats.SweepsTotal))
+	ch <- prometheus.MustNewConstMetric(c.gcExpiredDeletedTotal, prometheus.CounterValue,
+		float64(stats.ExpiredDeletedTotal))
+	ch <- prometheus.MustNewConstMetric(c.gcDeadlinesSaturatedTotal, prometheus.CounterValue,
+		float64(stats.DeadlinesSaturatedTotal))
+	ch <- prometheus.MustNewConstMetric(c.gcPersistentNATExpiredTotal, prometheus.CounterValue,
+		float64(stats.PersistentNATExpiredTotal))
+	ch <- prometheus.MustNewConstMetric(c.gcErrorsTotal, prometheus.CounterValue,
+		float64(stats.SweepIterErrorsTotal), "iterate")
+	ch <- prometheus.MustNewConstMetric(c.gcErrorsTotal, prometheus.CounterValue,
+		float64(stats.SweepDeleteErrorsTotal), "delete")
+	ch <- prometheus.MustNewConstMetric(c.gcErrorsTotal, prometheus.CounterValue,
+		float64(stats.SessionCountSyncErrorsTotal), "session_count_sync")
+	active := 0.0
+	if c.srv.gc.IsAggressiveAging() {
+		active = 1
+	}
+	ch <- prometheus.MustNewConstMetric(c.gcAggressiveAging, prometheus.GaugeValue, active)
+}
+
 func (c *xpfCollector) collectSessionGauges(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
 	c.collectSessionGaugesContext(context.Background(), ch, dp)
 }
 
 func (c *xpfCollector) collectSessionGaugesContext(ctx context.Context, ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
-	// xpf_gc_sweep_duration_seconds reflects the last BPF GC sweep timing.
-	// On the userspace dataplane (the only live forwarding path) the BPF GC
-	// sweep is skipped (#333), so this is 0 — expected, and orthogonal to the
-	// session counts derived below. It is not part of the cached snapshot: it
-	// is a single field read, not a table walk.
-	if c.srv.gc != nil {
-		ch <- prometheus.MustNewConstMetric(c.gcSweepDuration, prometheus.GaugeValue,
-			c.srv.gc.Stats().LastSweepDuration.Seconds())
-	}
 
 	// #3929: derive the active/established/breakdown session gauges from the
 	// LIVE dataplane session table — the same source `show security flow
