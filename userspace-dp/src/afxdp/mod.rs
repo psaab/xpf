@@ -226,6 +226,8 @@ use self::icmp::{
 #[cfg(test)]
 use self::icmp_embed::{
     EmbeddedIcmpMatch, try_embedded_icmp_nat_match_from_frame,
+    try_embedded_icmp_nat_match_from_frame_without_ingress_zone,
+    try_embedded_icmp_nat_match_from_frame_with_ingress_zone,
     try_embedded_icmp_session_match_from_frame,
 };
 use self::icmp_embed::{
@@ -234,7 +236,6 @@ use self::icmp_embed::{
     build_snat_outbound_icmp_error_v4, build_snat_outbound_icmp_error_v6,
     finalize_embedded_icmp_resolution, finalize_embedded_icmp_resolution_parts,
     // #8271: production names the frame slice explicitly; it also supplies the
-    // shared owner index used to fail closed on ambiguous quoted NAT tuples.
     try_embedded_icmp_nat_match_from_frame_with_owner_indexes,
     try_nat64_icmp_error_match_from_frame,
 };

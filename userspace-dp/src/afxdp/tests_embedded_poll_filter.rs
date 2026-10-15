@@ -553,7 +553,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         &entry,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_without_ingress_zone(
         &frame,
         meta,
         &mut sessions,
@@ -1855,6 +1855,120 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
         PROTO_TCP,
         0x18,
     ));
+}
+
+/// #13647 (D5-02): both NAT64 ICMP-error directions must resolve the
+/// routing domain from the authenticated fabric zone stamp. Install the
+/// NAT64 forward/reverse pair in a non-default domain; the physical fab0
+/// ingress has no interface-to-domain entry, so either matcher misses if it
+/// drops the override and probes domain 0.
+#[test]
+fn nat64_embedded_icmp_error_uses_fabric_zone_routing_domain_13647() {
+    let (tenant_domain, _) = crate::session::install_table_identity("tenant-a");
+    let mut forwarding = build_forwarding_state(&nat64_snapshot(lan_to_wan_permit(
+        "8.8.8.8/32",
+        "nat64-domain-13647",
+    )));
+    forwarding.has_routing_domains = true;
+    forwarding
+        .zone_routing_domain
+        .insert(TEST_LAN_ZONE_ID, tenant_domain);
+    forwarding
+        .zone_routing_domain
+        .insert(TEST_WAN_ZONE_ID, tenant_domain);
+    assert!(!forwarding
+        .ifindex_to_routing_domain
+        .contains_key(&21), "fab0 must not independently provide this domain");
+
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes = SharedSessionOwnerRgIndexes::default();
+
+    // V4ToV6: error addressed to the pool, quoting the v4 forward wire tuple.
+    let mut sessions = SessionTable::new();
+    n6472_install_sessions_in_domain(&mut sessions, 1_000_000, tenant_domain);
+    let frame = build_icmp_te_frame_v4_with_mac(
+        Ipv4Addr::new(172, 16, 80, 1),
+        n6472_pool_v4(),
+        n6472_server_v4(),
+        N6472_XLATED_PORT,
+        N6472_SERVER_PORT,
+        PROTO_TCP,
+        TEST_WAN_MAC,
+    );
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 21,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+    let outcome = try_nat64_icmp_error_match_from_frame(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &owner_indexes,
+        &shared_forward_wire_sessions,
+        1_000_000,
+        Some(TEST_WAN_ZONE_ID),
+    );
+    assert!(
+        matches!(outcome, EmbeddedMatchOutcome::Match(Nat64IcmpErrorMatch::V4ToV6 { .. })),
+        "#13647: V4ToV6 must find the tenant reverse companion through the stamped WAN zone"
+    );
+
+    // V6ToV4: error addressed to Pref64::server, quoting the translated
+    // reply packet. The same non-default domain is carried by its forward
+    // session and must be derived from the stamped ingress zone.
+    let mut sessions = SessionTable::new();
+    n6472_install_sessions_in_domain(&mut sessions, 1_000_000, tenant_domain);
+    let frame = build_icmpv6_te_frame_with_mac(
+        "2001:db8:ffff::1".parse().unwrap(),
+        n6472_pref64_server(),
+        n6472_client_v6(),
+        N6472_SERVER_PORT,
+        N6472_CLIENT_PORT,
+        PROTO_TCP,
+        TEST_LAN_MAC,
+    );
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 21,
+        l3_offset: 14,
+        l4_offset: 54,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        ..UserspaceDpMeta::default()
+    };
+    let outcome = try_nat64_icmp_error_match_from_frame(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &owner_indexes,
+        &shared_forward_wire_sessions,
+        1_000_000,
+        Some(TEST_LAN_ZONE_ID),
+    );
+    assert!(
+        matches!(outcome, EmbeddedMatchOutcome::Match(Nat64IcmpErrorMatch::V6ToV4 { .. })),
+        "#13647: V6ToV4 must find the tenant forward session through the stamped LAN zone"
+    );
 }
 
 /// Flip the shared type-11 v4 fixture into a Packet-Too-Big-class
@@ -6709,7 +6823,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         &entry,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_without_ingress_zone(
         &frame,
         meta,
         &mut sessions,
@@ -6850,7 +6964,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     );
 
     assert!(
-        try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
+        try_embedded_icmp_nat_match_from_frame_without_ingress_zone(
             &frame,
             meta,
             &mut sessions,
@@ -7289,7 +7403,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
         12,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_without_ingress_zone(
         &frame,
         meta,
         &mut sessions,
@@ -7373,7 +7487,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
         12,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_without_ingress_zone(
         &frame,
         meta,
         &mut sessions,
@@ -7452,7 +7566,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
     );
 
     assert!(
-        try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
+        try_embedded_icmp_nat_match_from_frame_without_ingress_zone(
             &frame,
             meta,
             &mut sessions,

@@ -41,7 +41,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         ctx.forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
-        None,
+        ctx.ingress_zone_override,
     );
     // #9298: upgrade an `Unparseable` PPTP quote to the live call's handle.
     // No-op for every other quote; a miss stays `Unparseable`.

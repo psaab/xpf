@@ -189,7 +189,7 @@ fn match_v4_error(
         ctx.forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
-        None,
+        ctx.ingress_zone_override,
     );
     // The quote is the forward wire packet (pool:xlated → server:port); its
     // reply key is the installed v4 reverse companion's primary key.
@@ -301,7 +301,7 @@ fn match_v6_error(
         ctx.forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
-        None,
+        ctx.ingress_zone_override,
     );
     // The quote is the translated reply (Pref64::server:port → client:port);
     // its reply key is the installed forward session's primary key.
