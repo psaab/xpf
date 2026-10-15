@@ -1953,6 +1953,54 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
+                        // #13638: session hits that fall through the flow
+                        // cache must meet the same transit guards as cached
+                        // hits BEFORE promotion, close-state mutation, TTL
+                        // replies, or per-session revalidation side effects.
+                        // The common tail is too late: in particular a spoofed
+                        // group-MAC RST can close the hit before reaching it.
+                        if matches!(
+                            resolved.decision.resolution.disposition,
+                            ForwardingDisposition::ForwardCandidate
+                                | ForwardingDisposition::FabricRedirect
+                        ) && ForwardPacketMeta::from(meta)
+                            .l3_addrs_unfiltered()
+                            .is_some_and(|(source, destination)| {
+                                worker_ctx
+                                    .forwarding
+                                    .bindless_ipsec_selector_fence
+                                    .matches_with_nat(source, destination, resolved.decision.nat)
+                            })
+                        {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            telemetry.dbg.policy_deny += 1;
+                            telemetry.counters.touched = true;
+                            continue;
+                        }
+                        if transit_source_class_drop(
+                            worker_ctx.forwarding,
+                            resolved.decision.resolution.disposition,
+                            flow.src_ip,
+                            flow.forward_key.routing_domain,
+                            ForwardPacketMeta::from(meta),
+                            fabric_arrival_zone,
+                        ) {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            telemetry.counters.touched = true;
+                            continue;
+                        }
+                        if matches!(
+                            resolved.decision.resolution.disposition,
+                            ForwardingDisposition::ForwardCandidate
+                                | ForwardingDisposition::MissingNeighbor
+                                | ForwardingDisposition::FabricRedirect
+                        ) && l2_group_unicast_ip
+                            && owned_packet_frame.is_none()
+                        {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            telemetry.counters.touched = true;
+                            continue;
+                        }
                         if is_injected
                             && resolved.decision.resolution.disposition
                                 != ForwardingDisposition::LocalDelivery

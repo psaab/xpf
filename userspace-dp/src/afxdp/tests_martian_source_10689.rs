@@ -334,7 +334,10 @@ fn transit_martian_source_gate_drops_preexisting_session_hit_10689() {
 
     assert_eq!(debug.rx, 1, "descriptor must reach the poll path");
     assert_eq!(batch.validated_packets, 1);
-    assert_eq!(debug.session_hit, 1, "pre-existing pair must actually hit");
+    assert_eq!(
+        debug.session_hit, 0,
+        "pre-session martian gate must drop before hit accounting"
+    );
     assert_eq!(debug.tx, 0, "martian source session hit must not transmit");
     assert_eq!(debug.forward, 0);
     assert_eq!(batch.session_creates, 0);
