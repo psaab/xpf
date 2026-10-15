@@ -133,49 +133,59 @@ func sortedZoneNameSet(set map[string]struct{}) []string {
 	return out
 }
 
-// validateZoneIDCollisionAST checks the UNION of security-zone names across
-// three views of the candidate config for StableZoneID collisions (#3075),
-// mirroring validateTunnelEndpointIDCollisionAST (#1873/#1914):
+// collisionCandidateZoneName reports whether a name can own a StableZoneID.
+// Reserved context tokens are excluded by QuarantinedZoneNames, and wildcard
+// group templates are patterns rather than installed zones.
+func collisionCandidateZoneName(name string) bool {
+	if _, reserved := reservedZoneNames[name]; reserved {
+		return false
+	}
+	_, wildcard := groupKeyPattern(name)
+	return !wildcard
+}
+
+// validateZoneIDCollisionAST checks the UNION of concrete, non-reserved
+// security-zone names across three views of the candidate config for
+// StableZoneID collisions (#3075), mirroring
+// validateTunnelEndpointIDCollisionAST (#1873/#1914):
 //
-//	View 1 — the PRE-expansion presence union across the main "security"
-//	  hierarchy AND every "groups" block. It runs on the pre-expansion tree
-//	  (ExpandGroups removes the groups stanza) so the check covers the union of
-//	  zone names across all groups, keeping the accept/reject decision identical
-//	  on both chassis-cluster nodes: a collision involving a `groups node0`-scoped
-//	  zone must fail commit on node1 too, or config-sync would split (originator
-//	  accepts, peer rejects).
-//	View 2 — the zone names that survive expanding the candidate for node0.
-//	View 3 — the same for node1.
+// View 1 — the PRE-expansion presence union across the main "security"
+// hierarchy AND every "groups" block. It runs on the pre-expansion tree
+// (ExpandGroups removes the groups stanza), so collisions involving a
+// group-scoped zone fail commit on both chassis-cluster nodes.
 //
-// Zones ARE group/`${node}`-scoped (docs/ha-cluster-userspace.conf uses
-// `groups { node0 {...} node1 {...} }` + `apply-groups "${node}"`), so Views 2/3
-// are REQUIRED, not optional: a `${node}`-interpolated or wildcard-apply-group
-// zone name is only concrete post-expansion, and the verdict must be identical
-// on both nodes. All three views are pure functions of the SAME candidate
-// config, so the union stays a pure function of config (HA symmetry preserved),
-// and it is monotone over View 1 (Views 2/3 only ADD rejects).
+// View 2 — the zone names that survive expanding the candidate for node0.
+// View 3 — the same for node1.
 //
+// Zones ARE group/`${node}`-scoped. Views 2/3 are REQUIRED because a
+// `${node}`-interpolated or wildcard-apply-group zone name is only concrete
+// post-expansion; the verdict must be identical on both nodes.
+//
+// Wildcard templates and reserved context names are not ID claimants:
+// reserved names never claim in QuarantinedZoneNames, and wildcard templates
+// are patterns rather than concrete zone instances. Admitting either here
+// would make strict commits reject valid configs and lenient warnings
+// quarantine unrelated zones.
 // Strict (commit / commit-check) returns an error; lenient (load / peer-sync of
-// an already-active config) returns a warning so an upgraded node still boots —
-// the fold guarantees no reserved-sentinel id and the dataplane independently
-// fails closed on an unresolvable zone, so a leniently-loaded colliding config
-// is inert on the later-folding zone rather than mis-attributed.
-// It also returns the sorted runtime name set (zoneRuntimeNameUnionAST) that
-// tolerant compiles record as Config.ZoneQuarantineNames (#12247). The gate set
-// is that runtime set plus View 1's groups scan, so a collision inside the
-// runtime set is always one strict commit rejects. The converse does not hold:
-// a collider only a groups block declares still fails strict commit and draws
-// the lenient warning below, yet no node installs it, so runtime quarantines
-// nothing for it.
+// an already-active config) returns a warning. The function also returns the
+// sorted runtime name set for tolerant compiles to record as
+// Config.ZoneQuarantineNames (#12247).
 func validateZoneIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, []string, error) {
+
 	runtimeNames := zoneRuntimeNameUnionAST(tree)
 	names := make(map[string]struct{}, len(runtimeNames))
-	for name := range runtimeNames {
-		names[name] = struct{}{}
+	addCollisionNames := func(source map[string]struct{}) {
+		for name := range source {
+			if collisionCandidateZoneName(name) {
+				names[name] = struct{}{}
+			}
+		}
 	}
+	addCollisionNames(runtimeNames)
 	// View 1 — pre-expansion presence union. Its main `security` roots (every
 	// root, #5691) are already in runtimeNames; add every groups block so a
 	// collision with a group-scoped zone fails commit on both nodes.
+	groupNames := make(map[string]struct{})
 	for _, child := range tree.Children {
 		if child.Name() != "groups" {
 			continue
@@ -186,12 +196,16 @@ func validateZoneIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, []str
 			// nests the group name as a child node.
 			if len(child.Keys) >= 2 {
 				for _, sec := range child.FindChildren("security") {
-					collectZoneNamesAST(sec, names)
+					clear(groupNames)
+					collectZoneNamesAST(sec, groupNames)
+					addCollisionNames(groupNames)
 				}
 				break
 			}
 			for _, sec := range group.FindChildren("security") {
-				collectZoneNamesAST(sec, names)
+				clear(groupNames)
+				collectZoneNamesAST(sec, groupNames)
+				addCollisionNames(groupNames)
 			}
 		}
 	}
