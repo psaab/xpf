@@ -25,15 +25,15 @@ import (
 // cleared value would snap back within <=1s. After the IPC clear the helper
 // reports 0, so the offset stays 0.
 func (m *Manager) ClearNATRuleCounters() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	var errs []error
 	if m.bpfShim != nil {
 		if err := m.bpfShim.ClearNATRuleCounters(); err != nil {
 			errs = append(errs, err)
 		}
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err := m.clearHelperNATCountersLocked(); err != nil {
 		errs = append(errs, err)
 	}
@@ -53,6 +53,7 @@ func (m *Manager) clearHelperNATCountersLocked() error {
 			m.lastStatus.NATRuleCounters[i].Packets = 0
 			m.lastStatus.NATRuleCounters[i].Bytes = 0
 		}
+		m.republishLastStatusLocked()
 		return nil
 	}
 
