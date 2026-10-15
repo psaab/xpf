@@ -1909,6 +1909,65 @@ fn write_v4_to_v6_into_writes_caller_buffer_without_realloc() {
     );
 }
 
+#[test]
+fn build_nat64_frame_into_reuses_caller_buffer_13267() {
+    let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+    // Above the translator's 1260-byte fragmentation threshold the output
+    // uses DF=1 and ID=0, making the allocating reference deterministic.
+    let payload = vec![0x5a; 1300];
+    let pkt = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, &payload);
+    let mut frame = vec![0xaa; 12];
+    frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+    frame.extend_from_slice(&pkt);
+    let legacy = build_nat64_v6_to_v4_frame(
+        &frame,
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(198, 51, 100, 50),
+        [0x11; 6], [0x22; 6], 0, false,
+    ).expect("legacy reference");
+
+    let mut out = Vec::with_capacity(2048);
+    out.resize(2048, 0xEE);
+    let ptr = out.as_ptr();
+    let capacity = out.capacity();
+    let written = build_nat64_v6_to_v4_frame_into(
+        &mut out, &frame,
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(198, 51, 100, 50),
+        [0x11; 6], [0x22; 6], 0, false,
+    ).expect("into build");
+    out.truncate(written);
+    assert_eq!(written, legacy.len());
+    assert_eq!(&out[..], &legacy[..]);
+    assert_eq!(out.as_ptr(), ptr);
+    assert_eq!(out.capacity(), capacity);
+
+    // A second build over the same allocation must report only its written
+    // prefix; stale bytes beyond the frame length are never transmitted.
+    out.resize(capacity, 0xEE);
+    let (second_result, allocs) = crate::test_alloc::count_allocs(|| {
+        build_nat64_v6_to_v4_frame_into(
+            &mut out, &frame,
+            Ipv4Addr::new(198, 51, 100, 1),
+            Ipv4Addr::new(198, 51, 100, 50),
+            [0x11; 6], [0x22; 6], 0, false,
+        )
+    });
+    let second_written = second_result.expect("reused build");
+    assert_eq!(allocs, 0, "warmed caller-buffer translation allocates");
+    assert_eq!(second_written, written);
+    assert_eq!(&out[..second_written], &legacy[..]);
+    assert!(build_nat64_v6_to_v4_frame_into(
+        &mut out[..8], &frame,
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(198, 51, 100, 50),
+        [0x11; 6], [0x22; 6], 0, false,
+    ).is_none());
+    drop(out);
+}
+
+
 // Source guard for the streamed pseudo-header checksum (#2211): the two
 // `checksum16_*_pseudo` helpers must NOT build an intermediate `Vec` per call
 // (the old code did, allocating 12+payload / 40+payload bytes on every L4

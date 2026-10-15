@@ -19,13 +19,13 @@
 // enumerated there.
 //
 // The pool is a bounded, per-worker THREAD-LOCAL free-list of byte
-// buffers. `checkout` reuses a pooled allocation (retained capacity)
-// instead of allocating; `recycle` returns a finished buffer for reuse.
-// It is replenished by recycling committed CoS local-TX buffers at the
-// exact-Local settle sites (`settle_exact_local_fifo_submission` /
-// `settle_exact_local_scratch_submission_flow_fair`), which run on the
-// owner worker AFTER the bytes have already been copied into UMEM — so a
-// recycled buffer is always dead.
+// buffers. `checkout` copies a source frame into a reusable allocation;
+// `checkout_with_capacity` gives builders empty owned storage to fill.
+// `recycle` returns a buffer only after it is dead: forwarded NAT64
+// buffers are returned after TX copies them into UMEM, while CoS local-TX
+// and cross-worker redirect buffers are returned at their existing settle
+// points. The pool caps retained buffers and allocates on a cold/depleted
+// checkout; warmed workers reuse completed packet storage.
 //
 // Soundness of the cross-worker hand-off: the pool is thread-local, so
 // no two workers ever touch the same pool. A checked-out buffer is
@@ -58,10 +58,21 @@ thread_local! {
 /// to `src.to_vec()` and never aliases `src`.
 #[inline]
 pub(in crate::afxdp) fn checkout(src: &[u8]) -> Vec<u8> {
+    let mut buf = checkout_with_capacity(src.len());
+    buf.extend_from_slice(src);
+    buf
+}
+
+/// Check out a reusable empty buffer with at least `capacity` bytes available.
+/// It is intended for builders that write directly into owned queued storage.
+#[inline]
+pub(in crate::afxdp) fn checkout_with_capacity(capacity: usize) -> Vec<u8> {
     POOL.with(|pool| {
         let mut buf = pool.borrow_mut().pop().unwrap_or_default();
         buf.clear();
-        buf.extend_from_slice(src);
+        if buf.capacity() < capacity {
+            buf.reserve_exact(capacity);
+        }
         buf
     })
 }

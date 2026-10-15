@@ -406,6 +406,9 @@ pub(in crate::afxdp) fn transmit_batch(
                 .scratch
                 .scratch_committed_orig_idx
                 .push(staged_orig_idx[idx]);
+            // The frame bytes have been copied into UMEM and the descriptor
+            // is committed, so the owned request buffer is reusable.
+            crate::afxdp::cos::redirect_pool::recycle(req.bytes);
         } else {
             binding.tx_pipeline.free_tx_frames.push_front(offset);
             pending.push_front(req);
