@@ -2663,3 +2663,215 @@ fn zone_policy_translated_keyed_row_declines_without_stamping_12867() {
         "the decline must not stamp the public tuple fresh"
     );
 }
+
+/// #13652: reverse-hit SNAT fixture. Builds the forward/reverse pair of an
+/// imported dynamic-SNAT session (wire tuple 10.0.0.1:45000 ->
+/// 198.51.100.1:443 translated to 203.0.113.10). Returns the call
+/// arguments a reverse-direction session hit carries: the reverse row's
+/// key/metadata/decision, the forward key, and the forward decision.
+#[allow(clippy::type_complexity)]
+fn reverse_snat_case_13652() -> (
+    SessionKey,
+    SessionKey,
+    SessionDecision,
+    SessionMetadata,
+    SessionDecision,
+    SessionMetadata,
+    SessionOrigin,
+    Option<bool>,
+) {
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    let synced = crate::server::helpers::build_synced_session_entry(
+        &imported_snat_request(1, true),
+        &zones,
+        0,
+    )
+    .expect("dynamic SNAT session imports from HA wire");
+    let forward_key = synced.key.clone();
+    let forward_decision = synced.decision.clone();
+    let reverse_key = crate::session::reverse_session_key(&forward_key, forward_decision.nat);
+    let reverse_decision = SessionDecision {
+        nat: forward_decision.nat.reverse(
+            forward_key.src_ip,
+            forward_key.dst_ip,
+            forward_key.src_port,
+            forward_key.dst_port,
+        ),
+        ..forward_decision
+    };
+    let mut reverse_metadata = synced.metadata.clone();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_zone = synced.metadata.egress_zone;
+    reverse_metadata.egress_zone = synced.metadata.ingress_zone;
+    (
+        forward_key,
+        reverse_key,
+        forward_decision,
+        synced.metadata.clone(),
+        reverse_decision,
+        reverse_metadata,
+        synced.origin,
+        synced.source_nat_static,
+    )
+}
+
+fn reverse_snat_hit_13652(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    case: &(
+        SessionKey,
+        SessionKey,
+        SessionDecision,
+        SessionMetadata,
+        SessionDecision,
+        SessionMetadata,
+        SessionOrigin,
+        Option<bool>,
+    ),
+) -> Option<PolicyRevocation> {
+    let flow = SessionFlow {
+        src_ip: case.1.src_ip,
+        dst_ip: case.1.dst_ip,
+        forward_key: case.1.clone(),
+    };
+    source_nat_revocation_on_session_hit(
+        forwarding,
+        sessions,
+        &case.1,
+        &case.5,
+        case.4,
+        &flow,
+        case.6,
+        case.7,
+        None,
+    )
+}
+
+/// #13652: a keep-transient reverse hit (the reverse row is not in the
+/// worker's local table) must still revalidate its forward companion's
+/// translation when the SNAT rule has been withdrawn, exactly like the
+/// forward `NoLocalEntry` arm checks the wire tuple sessionlessly. The
+/// revocation derives from the forward entry: its canonical key, decision
+/// and origin. Pre-fix this returned `None` at the first `?` — the stale
+/// reply was reverse-translated and forwarded.
+#[test]
+fn reverse_transient_hit_revokes_when_snat_rule_withdrawn_13652() {
+    let case = reverse_snat_case_13652();
+    let mut no_rules = imported_snat_forwarding(false);
+    no_rules.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.0.clone(),
+        case.2,
+        case.3.clone(),
+        case.6,
+        1_000_000,
+        case.0.protocol,
+        0x02,
+    ));
+    sessions.mark_source_nat_revalidated(&case.0, Some(false));
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    let revocation = reverse_snat_hit_13652(&no_rules, &mut sessions, &case);
+    let revocation = revocation.expect(
+        "a transient reverse hit whose translation the live NAT config no longer expresses must revoke",
+    );
+    assert_eq!(revocation.canonical_key.as_ref(), Some(&case.0));
+    assert_eq!(revocation.decision.nat, case.2.nat);
+    assert_eq!(revocation.origin, case.6);
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+/// #13652 control: an unchanged SNAT rule keeps the transient reverse hit
+/// alive — the sessionless check must validate, not blanket-revoke.
+#[test]
+fn reverse_transient_hit_survives_unchanged_snat_13652() {
+    let case = reverse_snat_case_13652();
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.0.clone(),
+        case.2,
+        case.3.clone(),
+        case.6,
+        1_000_000,
+        case.0.protocol,
+        0x02,
+    ));
+    sessions.mark_source_nat_revalidated(&case.0, Some(false));
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    assert!(
+        reverse_snat_hit_13652(&imported_snat_forwarding(false), &mut sessions, &case).is_none(),
+        "an unchanged dynamic SNAT must survive a transient reverse hit"
+    );
+}
+
+/// #13652: a locally present reverse row without its forward companion
+/// must still run the reverse-translated tuple's sessionless source-NAT
+/// check. Missing local ownership means drop-only revocation, not permission
+/// to carry an obsolete translation.
+#[test]
+fn reverse_hit_without_local_forward_companion_revokes_sessionlessly_13652() {
+    let case = reverse_snat_case_13652();
+    let mut no_rules = imported_snat_forwarding(false);
+    no_rules.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    let revocation = reverse_snat_hit_13652(&no_rules, &mut sessions, &case)
+        .expect("a reverse hit with stale SNAT and no local forward row must drop");
+    assert!(
+        revocation.canonical_key.is_none(),
+        "sessionless revocation must not claim ownership of a peer row"
+    );
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+    assert_eq!(sessions.len(), 1, "sessionless validation does not tear down a row");
+}
+
+/// #13652 control (guarded twin): forward row installed and stale, reverse
+/// row installed — the pre-existing path revokes on a withdrawn rule.
+#[test]
+fn reverse_installed_pair_revokes_when_snat_rule_withdrawn_13652() {
+    let case = reverse_snat_case_13652();
+    let mut no_rules = imported_snat_forwarding(false);
+    no_rules.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.0.clone(),
+        case.2,
+        case.3.clone(),
+        case.6,
+        1_000_000,
+        case.0.protocol,
+        0x02,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    sessions.mark_source_nat_revalidated(&case.0, Some(false));
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    let revocation = reverse_snat_hit_13652(&no_rules, &mut sessions, &case)
+        .expect("an installed reverse hit must revoke when the SNAT rule is withdrawn");
+    assert_eq!(revocation.canonical_key.as_ref(), Some(&case.0));
+}
