@@ -768,13 +768,15 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.handleAuthUpgradeConfirm(conn, payload)
 	case syncMsgIPsecSA:
 		s.stats.IPsecSAReceived.Add(1)
-		// #5706: split off the (incarnation, seq) ordering trailer and admit
-		// only a strictly-newer full-set. A stale set reordered across the
-		// redundant fabric streams is dropped so it cannot regress the held SA
-		// set. A legacy peer sends no trailer -> (0,0) -> accept-always.
+		// #5706: split off the (incarnation, seq) ordering trailer. Check
+		// against the last-applied pair before decoding, but do not advance
+		// the high-water mark until a complete set commits. Decode is outside
+		// the apply lock; the epoch fence prevents a frame spanning a receiver
+		// reset from resurrecting a cleared guard.
 		base, incarnation, seq := stripFullSetSeq(payload)
 		s.recvSeqMu.Lock()
-		admit := s.ipsecRecvSeq.admit(incarnation, seq)
+		admit := s.ipsecRecvSeq.newer(incarnation, seq)
+		commitEpoch := s.recvEpoch
 		s.recvSeqMu.Unlock()
 		if !admit {
 			s.stats.IPsecSAStaleIgnored.Add(1)
@@ -791,18 +793,36 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			// #9061: refuse a malformed IPsec SA full set. Unlike the additive
 			// persistent-NAT lease channel, IPsec replaces the held set, so a
 			// truncated prefix must not overwrite it; the standby keeps its prior
-			// state until a complete frame arrives.
+			// state until a complete frame arrives. Crucially, this does not
+			// consume the sequence number.
 			slog.Warn("cluster sync: refusing a malformed IPsec SA full set",
 				"payload_bytes", len(payload), "incarnation", incarnation, "seq", seq)
 			return
 		}
-		s.peerIPsecSAsMu.Lock()
-		s.peerIPsecSAs = names
-		s.peerIPsecSAsMu.Unlock()
+		// Serialize high-water advance, held-set replacement, and callback so
+		// concurrent fabric receivers cannot commit/callback out of order.
+		s.ipsecApplyMu.Lock()
+		s.recvSeqMu.Lock()
+		applied := s.recvEpoch == commitEpoch &&
+			s.ipsecRecvSeq.advanceIfNewer(incarnation, seq)
+		if applied {
+			s.peerIPsecSAsMu.Lock()
+			s.peerIPsecSAs = names
+			s.peerIPsecSAsMu.Unlock()
+		}
+		s.recvSeqMu.Unlock()
+		if !applied {
+			s.ipsecApplyMu.Unlock()
+			s.stats.IPsecSAStaleIgnored.Add(1)
+			slog.Warn("cluster sync: dropping out-of-order IPsec SA set (stale sequence) — standby retains newer set",
+				"incarnation", incarnation, "seq", seq)
+			return
+		}
 		slog.Debug("cluster sync: received IPsec SA list", "count", len(names), "incarnation", incarnation, "seq", seq)
 		if s.OnIPsecSAReceived != nil {
 			s.OnIPsecSAReceived(names)
 		}
+		s.ipsecApplyMu.Unlock()
 	case syncMsgPersistentNatLease:
 		// #10018 migration fence: type 38 is the pre-scope format.
 		slog.Warn("cluster sync: ignoring legacy unscoped persistent-NAT lease set",
