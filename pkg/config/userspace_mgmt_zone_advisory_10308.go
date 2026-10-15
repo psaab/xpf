@@ -106,16 +106,23 @@ func userspaceMgmtZoneMemberIsData(cfg *Config, member string) bool {
 	if ifc.Tunnel != nil || ifc.LocalFabricMember != "" {
 		return false
 	}
-	unitNum := 0
 	if split.HasUnit {
-		parsedUnit, err := strconv.Atoi(split.UnitTok)
+		unitNum, err := strconv.Atoi(split.UnitTok)
 		if err != nil {
 			return true
 		}
-		unitNum = parsedUnit
+		if unit := ifc.Units[unitNum]; unit != nil && unit.Tunnel != nil {
+			return false
+		}
+		return true
 	}
-	if unit := ifc.Units[unitNum]; unit != nil && unit.Tunnel != nil {
-		return false
+	if len(ifc.Units) == 0 {
+		return true
 	}
-	return true
+	for _, unit := range ifc.Units {
+		if unit == nil || unit.Tunnel == nil {
+			return true
+		}
+	}
+	return false
 }
