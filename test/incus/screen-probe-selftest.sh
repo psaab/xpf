@@ -260,6 +260,64 @@ else
 	printf 'FAIL the live probe does not use screen_probe_extract_metric — a label-blind extractor made every witness sample empty (#12910)\n'
 	fails=$((fails + 1))
 fi
+# --- #13129 (D10-12): count_profile_on must count on the host ----------------
+#
+# Previously `grep -c $PROFILE` was inside the `cli -c` argument, so cliterm
+# treated `-c probe8336` as a literal grep substring. The count was empty for
+# clean and leaked configs alike. Test the extracted function from the live
+# script against a fake incus executable; host grep must produce a real count.
+if [[ -z "${XPF_COUNT_PROFILE_TEST_SOURCE_ONLY:-}" ]]; then
+	count_fixture="$(mktemp -d)"
+	mkdir -p "$count_fixture/bin"
+	cat >"$count_fixture/bin/incus" <<'COUNT_EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${@: -1}" >>"$COUNT_FIXTURE_CMD_LOG"
+if [[ "${COUNT_FIXTURE_ERROR:-0}" == 1 ]]; then
+	exit 1
+fi
+if [[ "${COUNT_FIXTURE_LEAKED:-0}" == 1 ]]; then
+	printf 'set security screen ids-option probe8336 ip tear-drop\n'
+	printf 'set security zones security-zone lan screen probe8336\n'
+fi
+COUNT_EOF
+	chmod +x "$count_fixture/bin/incus"
+	sed -n '/^count_profile_on()/,/^}/p' ./screen-probe.sh >"$count_fixture/fn.sh"
+	count_out="$(
+		export PATH="$count_fixture/bin:$PATH"
+		export PROFILE=probe8336
+		export COUNT_FIXTURE_CMD_LOG="$count_fixture/cmd.log"
+		source "$count_fixture/fn.sh"
+		COUNT_FIXTURE_LEAKED=0 count_profile_on node0
+	)"
+	check_eq "count_profile_on on a clean node counts 0" 0 "$count_out"
+	count_out="$(
+		export PATH="$count_fixture/bin:$PATH"
+		export PROFILE=probe8336
+		export COUNT_FIXTURE_CMD_LOG="$count_fixture/cmd.log"
+		source "$count_fixture/fn.sh"
+		COUNT_FIXTURE_LEAKED=1 count_profile_on node0
+	)"
+	check_eq "count_profile_on on a leaked node counts both profile lines" 2 "$count_out"
+	count_out="$(
+		export PATH="$count_fixture/bin:$PATH"
+		export PROFILE=probe8336
+		export COUNT_FIXTURE_CMD_LOG="$count_fixture/cmd.log"
+		source "$count_fixture/fn.sh"
+		COUNT_FIXTURE_ERROR=1 count_profile_on node0 || true
+	)"
+	check_eq "an unreadable node count stays empty" "" "$count_out"
+	check "a counted-clean node pair passes disarm verification" PASS \
+		"$(screen_probe_disarm_verdict 0 0)"
+	check "a counted-leaked node pair fails disarm verification" FAIL \
+		"$(screen_probe_disarm_verdict 2 0)"
+	if grep -q 'grep -c' "$count_fixture/cmd.log"; then
+		printf 'FAIL count_profile_on still passes grep -c into cli -c\n'
+		fails=$((fails + 1))
+	else
+		printf 'ok   count_profile_on does not pass grep -c into cli -c\n'
+	fi
+	rm -rf "$count_fixture"
+fi
 
 # --- totality --------------------------------------------------------------
 #
