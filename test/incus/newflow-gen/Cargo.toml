@@ -25,6 +25,7 @@ path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"
+socket2 = "0.6"
 
 [profile.release]
 opt-level = 3

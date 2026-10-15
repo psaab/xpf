@@ -60,6 +60,7 @@ RATES="${RATES:-5000,10000,20000,40000,80000}"
 DURATION="${DURATION:-30}"
 THREADS="${THREADS:-32}"
 DST_PORTS="${DST_PORTS:-5300-5363}"
+SRC_BIND="${SRC_BIND:-}"
 CLOSE_MODE="${CLOSE_MODE:-rst}"
 SETTLE_SEC="${SETTLE_SEC:-3}"
 GEN_BIN="${GEN_BIN:-/usr/local/bin/newflow-gen}"
@@ -114,6 +115,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
     echo "  env file:    $ENV_FILE"
     echo "  fw0 / fw1:   $FW0 / $FW1"
     echo "  lan host:    $HOST"
+    echo "  source bind: ${SRC_BIND:-<default>}"
     echo "  wan target:  $TARGET_IP  ports $DST_PORTS"
     echo "  pool / rule: $POOL_NAME / $RULE_NAME"
     echo "  rates:       $RATES   duration=${DURATION}s threads=$THREADS close=$CLOSE_MODE"
@@ -211,11 +213,17 @@ for rate in "${RATE_LIST[@]}"; do
     fi
     scrape "$cell/before.prom"
     t_before="$(date +%s.%N)"
+    client_args=(
+        --mode client --target "$TARGET_IP" --dst-ports "$DST_PORTS"
+        --rate "$rate" --duration "$DURATION" --threads "$THREADS"
+        --close "$CLOSE_MODE"
+    )
+    if [[ -n "$SRC_BIND" ]]; then
+        client_args+=(--src-bind "$SRC_BIND")
+    fi
 
-    incus_cmd exec "$HOST" -- "$GEN_BIN" \
-        --mode client --target "$TARGET_IP" --dst-ports "$DST_PORTS" \
-        --rate "$rate" --duration "$DURATION" --threads "$THREADS" \
-        --close "$CLOSE_MODE" > "$cell/generator.json" 2> "$cell/generator.err"
+    incus_cmd exec "$HOST" -- "$GEN_BIN" "${client_args[@]}" \
+        > "$cell/generator.json" 2> "$cell/generator.err"
     gen_rc=$?
 
     t_after="$(date +%s.%N)"

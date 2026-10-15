@@ -39,6 +39,7 @@
 // says nothing about cross-worker locks (the analyzer's RSS gate refuses
 // such a run). Source ports are kernel-assigned and already distinct.
 
+use socket2::{Domain, Protocol, Socket, Type};
 use std::io::Write;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::io::AsRawFd;
@@ -62,6 +63,7 @@ enum CloseMode {
 #[derive(Clone, Debug)]
 struct ClientConfig {
     target: IpAddr,
+    source_bind: Option<IpAddr>,
     dst_port_low: u16,
     dst_port_high: u16,
     threads: usize,
@@ -259,6 +261,29 @@ fn classify(err: &std::io::Error, c: &Counters) {
         }
     }
 }
+fn connect_tcp(
+    target: SocketAddr,
+    source: Option<IpAddr>,
+    timeout: Duration,
+) -> std::io::Result<TcpStream> {
+    let Some(source) = source else {
+        return TcpStream::connect_timeout(&target, timeout);
+    };
+    if source.is_ipv4() != target.is_ipv4() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source and target address families differ",
+        ));
+    }
+    let socket = Socket::new(
+        Domain::for_address(target),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )?;
+    socket.bind(&SocketAddr::new(source, 0).into())?;
+    socket.connect_timeout(&target.into(), timeout)?;
+    Ok(socket.into())
+}
 
 fn run_client(cfg: ClientConfig) -> i32 {
     let counters = Arc::new(Counters::default());
@@ -293,7 +318,7 @@ fn run_client(cfg: ClientConfig) -> i32 {
                 let port = dst_port_for(cfg.dst_port_low, cfg.dst_port_high, idx, n);
                 let addr = SocketAddr::new(cfg.target, port);
                 counters.attempted.fetch_add(1, Ordering::Relaxed);
-                match TcpStream::connect_timeout(&addr, cfg.connect_timeout) {
+                match connect_tcp(addr, cfg.source_bind, cfg.connect_timeout) {
                     Ok(stream) => {
                         counters.established.fetch_add(1, Ordering::Relaxed);
                         if cfg.close == CloseMode::Rst {
@@ -389,8 +414,8 @@ newflow-gen — #4800 connection-rate generator + sink
 
 CLIENT (run on the LAN-side host):
   newflow-gen --mode client --target <IP> --dst-ports <LO-HI> \\
-              [--rate N] [--duration S] [--threads T] [--close rst|fin] \\
-              [--connect-timeout-ms MS]
+              [--src-bind <IP>] [--rate N] [--duration S] [--threads T] \\
+              [--close rst|fin] [--connect-timeout-ms MS]
 
 SINK (run on the WAN-side target):
   newflow-gen --mode sink --bind <IP> --ports <LO-HI> [--close rst|fin]
@@ -477,8 +502,16 @@ fn main() {
             let duration_s: u64 = parse_or_die(&args, "--duration", DEFAULT_DURATION_SECS);
             let timeout_ms: u64 =
                 parse_or_die(&args, "--connect-timeout-ms", DEFAULT_CONNECT_TIMEOUT_MS);
+            let source_bind = match arg_value(&args, "--src-bind") {
+                Some(value) => Some(value.parse().unwrap_or_else(|_| {
+                    eprintln!("newflow-gen: bad value for --src-bind: {value:?}");
+                    std::process::exit(2);
+                })),
+                None => None,
+            };
             run_client(ClientConfig {
                 target,
+                source_bind,
                 dst_port_low: lo,
                 dst_port_high: hi,
                 threads,
@@ -620,6 +653,18 @@ mod tests {
     }
 
     #[test]
+    fn client_source_bind_connects_from_requested_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = listener.local_addr().unwrap();
+        let source: IpAddr = "127.0.0.2".parse().unwrap();
+        let accepted = thread::spawn(move || listener.accept().unwrap().0.peer_addr().unwrap());
+
+        let stream = connect_tcp(target, Some(source), Duration::from_secs(1)).unwrap();
+        assert_eq!(stream.local_addr().unwrap().ip(), source);
+        assert_eq!(accepted.join().unwrap().ip(), source);
+    }
+    #[test]
+
     fn report_survives_a_zero_length_window() {
         let c = Counters::default();
         c.attempted.store(5, Ordering::Relaxed);
