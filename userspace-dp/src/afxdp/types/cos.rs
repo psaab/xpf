@@ -722,21 +722,18 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     /// service event landed.
     pub(in crate::afxdp) waterfill_phase2_cursor: usize,
     /// #1732: persistent Phase-1 honored bitset for the current waterfill
-    /// epoch. Bit `j` set ⇔ the exact queue at ORDINAL position `j` in
-    /// `exact_queues_by_rate_ascending` was honored in Phase 1 this epoch.
-    /// Keyed by ASCENDING-VEC ORDINAL, NOT by `queue_idx` (the `queues`
-    /// index): both phases iterate this same sorted vec, so ordinal `j`
-    /// unambiguously identifies one queue.
+    /// epoch. Bit `j` set means the exact queue at ORDINAL position `j` in
+    /// `exact_queues_by_rate_ascending` was honored in Phase 1, or was
+    /// V_min-throttled in Phase 2 and must not be selected again before
+    /// the next time boundary (#13063). Keyed by the ascending ordinal,
+    /// NOT the queue index: both phases iterate this same sorted vec.
     ///
     /// The word vector is sized once when the interface runtime is built,
     /// with one `u64` per 64 exact guarantee queues. This supports every
     /// ordinal without per-selector allocation or a fixed queue-count cap.
     /// The set is CLEARED only on a genuine epoch boundary — the 200µs time
-    /// tick OR a Phase-2 WRAP (`waterfill_epoch_wrap_pending`) — NOT on every
-    /// Phase-1 budget refill (`waterfill_epochs` still bumps on every refill,
-    /// but a bare mid-walk `pass1 == 0` refill must keep the bits so an
-    /// exact-fit honor does not re-honor the same queue forever).
-    /// Single-writer owner worker.
+    /// tick OR a Phase-2 WRAP (`waterfill_epoch_wrap_pending`) with no V_min
+    /// skip — NOT on every Phase-1 budget refill. Single-writer owner worker.
     pub(in crate::afxdp) waterfill_honored_epoch_bits: Vec<u64>,
     /// #1628: completed waterfill epochs (Phase-1 budget refills) on this
     /// interface, THIS WORKER's view. Bumped at the lazy Phase-1 refill
@@ -755,14 +752,13 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     /// mid-walk. Single-writer owner worker, plain `u64`.
     pub(in crate::afxdp) waterfill_phase1_budget_breaks: u64,
     /// #1743: monotonic nanosecond timestamp of the most recent waterfill
-    /// Phase-1 epoch refill. The selector refreshes the Phase-1 budget when
-    /// `now_ns - waterfill_epoch_start_ns >= COS_GUARANTEE_VISIT_NS` (200µs)
-    /// in addition to the `pass1 == 0` budget-spent path. Without the
-    /// time-based refresh, Phase-2 selections (which do NOT decrement the
-    /// Phase-1 budget) let the budget freeze at a small non-zero value under
-    /// saturation, so small classes stop being honored after a few epochs.
-    /// Worker-local runtime; NOT HA-synced (same class as the other
-    /// waterfill_* fields above). Single-writer owner worker, plain `u64`.
+    /// time boundary or Phase-1 budget refill. The selector refreshes the
+    /// Phase-1 budget when `now_ns - waterfill_epoch_start_ns >=
+    /// COS_GUARANTEE_VISIT_NS` (200µs) in addition to the `pass1 == 0`
+    /// budget-spent path. #13063: while a V_min skip is deferred, bare
+    /// budget exhaustion must NOT update this timestamp or repeated exact-
+    /// fit honors could postpone rechecking the lagged queue indefinitely.
+    /// Worker-local runtime; NOT HA-synced. Single-writer owner worker.
     pub(in crate::afxdp) waterfill_epoch_start_ns: u64,
     /// #1743 (Codex code-r3): true when a genuine epoch boundary is pending
     /// — set ONLY by the end-of-function Phase-2 WRAP (`None`) path, which
@@ -778,6 +774,10 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     /// the honored bits intact the already-honored small queue is skipped and
     /// the walk advances / breaks to Phase 2. Single-writer owner worker.
     pub(in crate::afxdp) waterfill_epoch_wrap_pending: bool,
+    /// #13063: at least one exact queue was withheld by V_min during this
+    /// waterfill epoch. A Phase-2 wrap cannot clear its deferred bit and
+    /// retry the same lagged queue until the 200µs time boundary.
+    pub(in crate::afxdp) waterfill_v_min_skipped_epoch: bool,
     // Round-robin cursors for the two guarantee service classes. Exact and
     // non-exact guarantee queues rotate independently — the scheduler gives
     // exact queues strict priority over non-exact guarantee service (the
