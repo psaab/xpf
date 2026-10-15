@@ -111,10 +111,7 @@ func (s *Server) GetNATDestination(ctx context.Context, _ *pb.GetNATDestinationR
 
 		var zoneByID map[uint16]string
 		if cr := s.applyResult(); cr != nil {
-			zoneByID = make(map[uint16]string, len(cr.ZoneIDs))
-			for name, id := range cr.ZoneIDs {
-				zoneByID[id] = name
-			}
+			zoneByID = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 		}
 		counts := s.countDNATSessions(walkCtx, zoneByID)
 		resp.TotalActiveTranslations = clampInt32(counts.total)
@@ -189,7 +186,8 @@ func (s *Server) GetNATPoolStats(ctx context.Context, _ *pb.GetNATPoolStatsReque
 
 	// Named pools
 	grpcOverBudget := config.SourceNATAggregateOverBudgetPools(cfg)
-	for name, pool := range cfg.Security.NAT.SourcePools {
+	for _, name := range sortedMapKeys(cfg.Security.NAT.SourcePools) {
+		pool := cfg.Security.NAT.SourcePools[name]
 		portLow, portHigh := pool.PortLow, pool.PortHigh
 		if portLow == 0 {
 			portLow = 1024
@@ -293,10 +291,7 @@ func (s *Server) GetNATPoolStats(ctx context.Context, _ *pb.GetNATPoolStatsReque
 
 		var zoneByID map[uint16]string
 		if cr != nil {
-			zoneByID = make(map[uint16]string, len(cr.ZoneIDs))
-			for name, id := range cr.ZoneIDs {
-				zoneByID[id] = name
-			}
+			zoneByID = config.SurvivorZoneNames(cr.ZoneIDs, cfg)
 		}
 		counts = s.countSNATSessions(walkCtx, zoneByID)
 	}

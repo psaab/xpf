@@ -713,15 +713,7 @@ func (c *CLI) showFlowSession(args []string) error {
 					}
 					inZone = f.zoneDisplay(uint16(se.IngressZone), inZone)
 					outZone = f.zoneDisplay(uint16(se.EgressZone), outZone)
-					natFlag := "-"
-					if se.Nat != "" {
-						if strings.Contains(se.Nat, "SNAT") {
-							natFlag = "S"
-						}
-						if strings.Contains(se.Nat, "DNAT") || strings.HasPrefix(se.Nat, "dst") {
-							natFlag = "D"
-						}
-					}
+					natFlag := peerSessionNATFlag(se.Nat)
 					st := se.State
 					if len(st) > 5 {
 						st = st[:5]
@@ -1164,7 +1156,8 @@ func (c *CLI) showFlowMonitoring() error {
 		if len(v9.Templates) > 0 {
 			hasConfig = true
 			fmt.Println("Flow Monitoring Version 9 Templates:")
-			for name, tmpl := range v9.Templates {
+			for _, name := range sortedInstanceNames(v9.Templates) {
+				tmpl := v9.Templates[name]
 				activeTimeout := tmpl.FlowActiveTimeout
 				if activeTimeout == 0 {
 					activeTimeout = 60
@@ -1194,7 +1187,8 @@ func (c *CLI) showFlowMonitoring() error {
 		if len(ipfix.Templates) > 0 {
 			hasConfig = true
 			fmt.Println("Flow Monitoring IPFIX Templates:")
-			for name, tmpl := range ipfix.Templates {
+			for _, name := range sortedInstanceNames(ipfix.Templates) {
+				tmpl := ipfix.Templates[name]
 				activeTimeout := tmpl.FlowActiveTimeout
 				if activeTimeout == 0 {
 					activeTimeout = 60
@@ -1394,4 +1388,18 @@ func flowServerNotInstalledSuffix(fs *config.FlowServer) string {
 		return ""
 	}
 	return "  [NOT INSTALLED: " + reason + "]"
+}
+func peerSessionNATFlag(nat string) string {
+	hasSNAT := strings.Contains(nat, "SNAT")
+	hasDNAT := strings.Contains(nat, "DNAT") || strings.HasPrefix(nat, "dst")
+	switch {
+	case hasSNAT && hasDNAT:
+		return "B"
+	case hasSNAT:
+		return "S"
+	case hasDNAT:
+		return "D"
+	default:
+		return "-"
+	}
 }

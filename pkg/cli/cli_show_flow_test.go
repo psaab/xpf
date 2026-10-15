@@ -53,6 +53,21 @@ func TestSessionBriefWriterPreservesLongValues(t *testing.T) {
 	}
 }
 
+// TestPeerSessionBriefNATFlag13247 guards peer brief parity with local sessions:
+// simultaneous SNAT and DNAT must render "B", not the DNAT-only "D".
+func TestPeerSessionBriefNATFlag13247(t *testing.T) {
+	for nat, want := range map[string]string{
+		"":                                "-",
+		"SNAT 203.0.113.1:1234":           "S",
+		"DNAT 10.0.0.1:443":               "D",
+		"SNAT 203.0.113.1:1234; DNAT x:1": "B",
+	} {
+		if got := peerSessionNATFlag(nat); got != want {
+			t.Errorf("peerSessionNATFlag(%q) = %q, want %q", nat, got, want)
+		}
+	}
+}
+
 // TestFlowSessionDisplayIDMatchesDataplaneID is the #5213 correlation invariant:
 // the id shown by `show security flow session` must equal the STABLE dataplane
 // session id (dataplane.SessionValue.SessionID) that the userspace-dp conntrack

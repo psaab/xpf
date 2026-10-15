@@ -31,7 +31,8 @@ func (s *Server) showFlowMonitoring(cfg *config.Config, buf *strings.Builder) {
 	}
 	v9 := cfg.Services.FlowMonitoring.Version9
 	buf.WriteString("Flow monitoring (NetFlow v9):\n")
-	for name, tmpl := range v9.Templates {
+	for _, name := range sortedMapKeys(v9.Templates) {
+		tmpl := v9.Templates[name]
 		fmt.Fprintf(buf, "  Template: %s\n", name)
 		if tmpl.FlowActiveTimeout > 0 {
 			fmt.Fprintf(buf, "    Active timeout: %ds\n", tmpl.FlowActiveTimeout)
