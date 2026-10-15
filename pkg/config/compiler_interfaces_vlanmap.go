@@ -92,40 +92,33 @@ func collectVLANMapFromInterfacesNode(ifacesNode *Node, out map[string]vlanMapFi
 		if ifName == "" {
 			continue
 		}
-		for _, unit := range iface.Children {
-			if unit.Name() != "unit" {
-				continue
-			}
-			stmts := unitVLANMapStmts(unit)
+		for _, unitInst := range namedInstances(iface.FindChildren("unit")) {
+			stmts := unitVLANMapStmts(unitInst.node)
 			if len(stmts) == 0 {
 				continue
 			}
-			key := ifName + "\x00" + unitIdentity(unit)
-			if _, seen := out[key]; seen {
+			key := ifName + "\x00" + unitInst.name
+			finding, seen := out[key]
+			if !seen {
+				out[key] = vlanMapFinding{iface: ifName, unit: unitInst.name, stmts: stmts}
 				continue
 			}
-			out[key] = vlanMapFinding{iface: ifName, unit: unitIdentity(unit), stmts: stmts}
+			finding.stmts = append(finding.stmts, stmts...)
+			out[key] = finding
 		}
 	}
 }
 
 // collectVLANMapFindingsForNode expands the candidate tree for chassis-
 // cluster node nodeID and records every (interface, unit) that carries an
-// unsupported vlan-map stanza into out — the "effective view for every
-// cluster node" this gate evaluates. It mirrors collectQinQFindingsForNode
-// (compiler_interfaces_qinq.go): it clones the candidate, expands groups for
-// the node and expands interface ranges, then reads the vlan-map leaves
-// straight off the expanded AST — it NEVER calls CompileConfig* (which would
-// re-enter this gate). A per-node expansion error contributes nothing (a
-// config defining only `groups node1` + `${node}` fails to expand for node0;
-// the real per-node compile path already rejects that on the affected node,
-// and the OTHER node's view still catches a vlan-map hidden in the
-// un-expandable group). Every `interfaces` root is unioned (#5744).
-func collectVLANMapFindingsForNode(tree *ConfigTree, nodeID int, out map[string]vlanMapFinding) {
+// unsupported vlan-map stanza into out. It returns whether group expansion
+// succeeded, so callers can mirror CompileConfig's raw-tree fallback when
+// neither node context can expand (for example a literal "${node}" group).
+func collectVLANMapFindingsForNode(tree *ConfigTree, nodeID int, out map[string]vlanMapFinding) bool {
 	clone := tree.Clone()
 	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
 	if err := clone.ExpandGroupsWithVars(vars); err != nil {
-		return
+		return false
 	}
 	// expandInterfaceRanges mutates the clone in place; its warnings are
 	// emitted on the real path (runPreWalkGates) and discarded here.
@@ -135,6 +128,7 @@ func collectVLANMapFindingsForNode(tree *ConfigTree, nodeID int, out map[string]
 	for _, ifaces := range clone.FindChildren("interfaces") {
 		collectVLANMapFromInterfacesNode(ifaces, out)
 	}
+	return true
 }
 
 // validateVLANMapAST is the #6178 input-vlan-map / output-vlan-map honesty
@@ -153,8 +147,16 @@ func collectVLANMapFindingsForNode(tree *ConfigTree, nodeID int, out map[string]
 // contract).
 func validateVLANMapAST(tree *ConfigTree, lenient bool) ([]string, error) {
 	findings := make(map[string]vlanMapFinding)
-	collectVLANMapFindingsForNode(tree, 0, findings)
-	collectVLANMapFindingsForNode(tree, 1, findings)
+	expandedAny := collectVLANMapFindingsForNode(tree, 0, findings)
+	expandedAny = collectVLANMapFindingsForNode(tree, 1, findings) || expandedAny
+	if !expandedAny {
+		// CompileConfig falls back to compiling the raw tree when neither
+		// `${node}` expansion is available; inspect that same effective input
+		// rather than silently bypassing the unsupported-feature gate.
+		for _, ifaces := range tree.FindChildren("interfaces") {
+			collectVLANMapFromInterfacesNode(ifaces, findings)
+		}
+	}
 	if len(findings) == 0 {
 		return nil, nil
 	}
