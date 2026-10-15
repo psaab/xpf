@@ -178,3 +178,17 @@ func TestSetRPCAnnotateRejectsMissingComment13554(t *testing.T) {
 		t.Fatalf("malformed annotate changed candidate:\n%s", out)
 	}
 }
+
+func TestSetRPCAnnotateEmbeddedQuote13628(t *testing.T) {
+	store := newGRPCConfigStore(t)
+	s := &Server{store: store}
+	_, err := s.Set(ctxWithAuthorizedRoot(ctxWithPeerUID(0)), &pb.SetRequest{
+		Input: `annotate system host-name "say \"hi\" team"`,
+	})
+	if err != nil {
+		t.Fatalf("Set(annotate embedded quote): %v", err)
+	}
+	if out := store.ShowCandidate(); !strings.Contains(out, `/* say "hi" team */`) {
+		t.Fatalf("candidate did not preserve embedded quote:\n%s", out)
+	}
+}

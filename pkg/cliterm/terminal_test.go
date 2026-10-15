@@ -156,3 +156,22 @@ func TestReadlineHistoryDoesNotPersistSubmittedPSK_10743(t *testing.T) {
 		t.Fatalf("readline persisted a submitted PSK in the history file: %q", history)
 	}
 }
+
+func TestAnnotateCommentEscapesRoundTrip13628(t *testing.T) {
+	for _, want := range []string{
+		`say "hi" team`,
+		`a"b`,
+		`a\"b`,
+		`ends \`,
+		`C:\temp`,
+		"",
+		"plain comment",
+	} {
+		wire := `system host-name "` + EscapeAnnotateComment(want) + `"`
+		path, got, ok := AnnotateCommentFromLine(wire)
+		if !ok || path != "system host-name" || got != want {
+			t.Errorf("AnnotateCommentFromLine(%q) = (%q, %q, %v), want (%q, %q, true)",
+				wire, path, got, ok, "system host-name", want)
+		}
+	}
+}

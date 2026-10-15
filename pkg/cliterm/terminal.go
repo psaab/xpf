@@ -36,15 +36,39 @@ func StripSurroundingQuotes(s string) string {
 	return s
 }
 
+// EscapeAnnotateComment encodes a comment for the quoted Set input accepted by
+// Server.Set. Backslashes are escaped first so embedded quotes and literal
+// backslashes survive the lexer round-trip.
+func EscapeAnnotateComment(comment string) string {
+	comment = strings.ReplaceAll(comment, `\`, `\\`)
+	return strings.ReplaceAll(comment, `"`, `\"`)
+}
+
+// unescapeAnnotateComment reverses EscapeAnnotateComment while preserving
+// unrelated backslash sequences verbatim.
+func unescapeAnnotateComment(comment string) string {
+	var b strings.Builder
+	b.Grow(len(comment))
+	for i := 0; i < len(comment); i++ {
+		if comment[i] == '\\' && i+1 < len(comment) &&
+			(comment[i+1] == '\\' || comment[i+1] == '"') {
+			i++
+		}
+		b.WriteByte(comment[i])
+	}
+	return b.String()
+}
+
 // AnnotateCommentFromLine splits an `annotate <path> "comment"` line into
-// the path text and comment, peeling one layer of matching quotes from the
-// comment. ok is false when the line has no double-quoted comment.
+// path text and comment, peeling one matching quote layer and decoding escaped
+// quotes/backslashes. ok is false when the line has no double-quoted comment.
 func AnnotateCommentFromLine(line string) (pathText, comment string, ok bool) {
-	quoteIdx := strings.Index(line, "\"")
+	quoteIdx := strings.Index(line, `"`)
 	if quoteIdx < 0 {
 		return "", "", false
 	}
-	return strings.TrimSpace(line[:quoteIdx]), StripSurroundingQuotes(line[quoteIdx:]), true
+	return strings.TrimSpace(line[:quoteIdx]),
+		unescapeAnnotateComment(StripSurroundingQuotes(line[quoteIdx:])), true
 }
 
 // SecureReadlineHistory creates a history file or tightens its permissions

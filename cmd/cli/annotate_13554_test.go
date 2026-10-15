@@ -98,3 +98,21 @@ func TestDispatchConfigAnnotateVerbatimComment13554(t *testing.T) {
 		t.Fatalf("Set inputs = %v, want [%q]", fake.setInputs, want)
 	}
 }
+
+// #13628: embedded quotes in the comment survive dispatch and are escaped on
+// the wire so Server.Set and the authorization lexer see one comment token.
+func TestDispatchConfigAnnotateEmbeddedQuote13628(t *testing.T) {
+	fake := &annotateRecorder13554{}
+	c := configModeCtl(fake)
+	var dispatchErr error
+	captureStdout(t, func() {
+		dispatchErr = c.dispatchConfig(`annotate system host-name "say "hi" team"`)
+	})
+	if dispatchErr != nil {
+		t.Fatalf("dispatchConfig = %v", dispatchErr)
+	}
+	want := `annotate system host-name "say \"hi\" team"`
+	if len(fake.setInputs) != 1 || fake.setInputs[0] != want {
+		t.Fatalf("Set inputs = %v, want [%q]", fake.setInputs, want)
+	}
+}

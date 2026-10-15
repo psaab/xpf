@@ -1,12 +1,16 @@
 package grpcapi
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // #9154: this listener performed config mutations with NO `*-configuration`
@@ -136,5 +140,62 @@ func TestConfigMutationGateIsWiredIntoTheInterceptor9154(t *testing.T) {
 	// is the whole authorization story.
 	if !strings.Contains(body, "authorizeRPCCommand(") {
 		t.Fatal("the operational gate call vanished; this cell's premise no longer holds")
+	}
+}
+
+// #13628: admission and Server.Set must recognize the same whitespace-delimited
+// annotate verb. Otherwise a tab bypasses the deny path while the handler still
+// applies the annotation to the denied node.
+func TestAnnotateAdmissionMatchesHandlerWhitespace13628(t *testing.T) {
+	usePasswdFixture5278(t)
+	store := authzStore5278(t, `system {
+    login {
+        class ops {
+            permissions [ configure view ];
+            deny-configuration "^system host-name$";
+        }
+        user opuser { class ops; }
+    }
+    host-name before;
+    name-server { 9.9.9.9; }
+}`)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	s := &Server{store: store}
+	for _, sep := range []string{" ", "\t"} {
+		t.Run(map[string]string{" ": "space", "\t": "tab"}[sep], func(t *testing.T) {
+			for _, tc := range []struct {
+				name   string
+				path   string
+				denied bool
+			}{
+				{name: "denied subtree", path: "system host-name", denied: true},
+				{name: "allowed subtree", path: "system name-server 9.9.9.9"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					req := &pb.SetRequest{Input: "annotate" + sep + tc.path + ` "note"`}
+					called := false
+					_, err := s.principalUnaryInterceptor(
+						ctxWithPeerUID(authzUIDOperator), req,
+						&grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_Set_FullMethodName},
+						func(ctx context.Context, request any) (any, error) {
+							called = true
+							return s.Set(ctx, request.(*pb.SetRequest))
+						},
+					)
+					if tc.denied {
+						if status.Code(err) != codes.PermissionDenied || called {
+							t.Fatalf("denied annotate err=%v handlerCalled=%v, want PermissionDenied and no handler",
+								err, called)
+						}
+						return
+					}
+					if err != nil || !called {
+						t.Fatalf("allowed annotate err=%v handlerCalled=%v", err, called)
+					}
+				})
+			}
+		})
 	}
 }
