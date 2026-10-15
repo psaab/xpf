@@ -485,11 +485,14 @@ func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 	return errors.Join(errs...)
 }
 
-// pruneOrphanTUNLocked keeps an untracked persistent TUN but removes its
-// address-derived connected routes. On restart there is no safe way to
-// distinguish configured link-local addresses from kernel autoconf ones,
-// so pruneAppliedAddrsLocked retains that existing ownership gate.
+// pruneOrphanTUNLocked keeps an untracked persistent TUN, removes its
+// address-derived connected routes, and disables it so even an unowned
+// link-local address cannot retain an active connected route.
 func (t *tunnelManager) pruneOrphanTUNLocked(link netlink.Link, name string) {
+	if err := t.ops.LinkSetDown(link); err != nil {
+		slog.Warn("tunnel orphan reap: failed to bring TUN down",
+			"name", name, "err", err)
+	}
 	failed, retry := t.pruneAppliedAddrsLocked(link, name, t.appliedAddrs[name])
 	unbindRetry := t.unbindVRFClaimLocked(name, link)
 	if retry || unbindRetry {
@@ -1218,52 +1221,79 @@ func (t *tunnelManager) reconcileVRFClaimLocked(tc *config.TunnelConfig, link ne
 // still-configured tunnel (reconcileVRFClaimLocked step 3) or because the
 // whole tunnel was removed and its persistent link is being reconciled
 // (#5120, the WireGuard removal path — the wgN link is KEPT but must not
-// linger enslaved to a VRF it should no longer be in). It clears the
-// link's master to vrf-<claim> ONLY when the link's CURRENT master is
-// OBSERVED to be that VRF device, so it can neither strand a master we own
-// nor touch a foreign bind.
+// linger enslaved to a VRF it should no longer be in). For an unclaimed
+// persistent link (daemon restart / orphan sweep), it discovers the current
+// master by index and detaches it only when LinkList confirms a `vrf-*`
+// netlink.Vrf; foreign masters remain untouched.
 //
 // The appliedRI claim clears on a successful unbind, on master==0 (already
 // unbound), on an identity mismatch (master not ours), or when the VRF
 // device is not-found (deleting a VRF frees its slaves). It is RETAINED —
-// and the function returns retry=true — only on a TRANSIENT failure (a VRF
-// lookup error other than not-found, or a LinkSetNoMaster error) so the
-// caller re-runs the reconcile on the next Apply. Caller MUST hold mu.
+// and the function returns retry=true — on transient LinkList/VRF lookup
+// errors or LinkSetNoMaster failure so the caller re-runs the reconcile on
+// the next Apply. Caller MUST hold mu.
 func (t *tunnelManager) unbindVRFClaimLocked(name string, link netlink.Link) (retry bool) {
 	claim := t.appliedRI[name]
-	if claim == "" {
-		return false
-	}
 	master := link.Attrs().MasterIndex
 	if master == 0 {
 		// Nothing is bound — whatever we once bound is already gone.
 		delete(t.appliedRI, name)
 		return false
 	}
-	vrf, err := t.ops.LinkByName("vrf-" + claim)
-	if err != nil {
-		if isLinkNotFound(err) {
-			// The VRF device is gone; deleting a master frees its
-			// slaves, so the current master cannot be ours.
-			delete(t.appliedRI, name)
+	var vrf netlink.Link
+	if claim == "" {
+		// Claims are process-local, but persistent tunnel links survive a
+		// restart. Recover only a positively identified managed VRF master;
+		// never detach an unclaimed link from a bridge or another foreign
+		// master.
+		links, err := t.ops.LinkList()
+		if err != nil {
+			slog.Warn("tunnel VRF unbind: LinkList failed; retrying on next apply",
+				"name", name, "err", err)
+			return true
+		}
+		for _, candidate := range links {
+			if candidate == nil || candidate.Attrs() == nil ||
+				candidate.Attrs().Index != master ||
+				!strings.HasPrefix(candidate.Attrs().Name, "vrf-") {
+				continue
+			}
+			if _, ok := candidate.(*netlink.Vrf); ok {
+				vrf = candidate
+				break
+			}
+		}
+		if vrf == nil {
 			return false
 		}
-		// Transient lookup error: retain the claim, retry next apply.
-		return true
+	} else {
+		var err error
+		vrf, err = t.ops.LinkByName("vrf-" + claim)
+		if err != nil {
+			if isLinkNotFound(err) {
+				// The VRF device is gone; deleting a master frees its
+				// slaves, so the current master cannot be ours.
+				delete(t.appliedRI, name)
+				return false
+			}
+			// Transient lookup error: retain the claim, retry next apply.
+			return true
+		}
 	}
 	masterVRF, ok := vrf.(*netlink.Vrf)
 	if !ok || masterVRF == nil || masterVRF.Attrs() == nil || masterVRF.Attrs().Index != master {
-		// A same-name non-VRF link is not the claimed master either.
+		// A same-name non-VRF link or a stale claim is not the current
+		// master. An unclaimed mismatch is foreign and remains untouched.
 		delete(t.appliedRI, name)
 		return false
 	}
 	if err := t.ops.LinkSetNoMaster(link); err != nil {
 		slog.Warn("failed to unbind tunnel from VRF",
-			"name", name, "vrf", claim, "err", err)
+			"name", name, "vrf", masterVRF.Attrs().Name, "err", err)
 		return true // retain claim; retry next apply
 	}
 	slog.Info("tunnel unbound from routing-instance",
-		"name", name, "vrf", claim)
+		"name", name, "vrf", masterVRF.Attrs().Name)
 	delete(t.appliedRI, name)
 	return false
 }
