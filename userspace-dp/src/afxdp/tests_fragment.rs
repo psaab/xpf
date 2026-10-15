@@ -2598,6 +2598,16 @@ fn missing_neighbor_first_fragment_installs_frag_assoc_13526() {
         to_zone: "wan".to_string(),
         source_addresses: vec!["0.0.0.0/0".to_string()],
         interface_mode: true,
+        match_applications: vec![NatAppTermWire {
+            protocol: PROTO_UDP as u16,
+            ports: vec![NatPortRangeWire {
+                low: 443,
+                high: 443,
+            }],
+            src_ports: vec![],
+            icmp_type: None,
+            icmp_code: None,
+        }],
         ..Default::default()
     }];
     let forwarding = build_forwarding_state(&snapshot);
@@ -2732,4 +2742,55 @@ fn missing_neighbor_syn_sheds_opening_session_at_capacity_13526() {
         }
     });
     assert_eq!(seeds.len(), 1, "#13526: successful pressure admission commits one seed");
+    // An established session is not a pressure victim; at capacity the new
+    // seed must remain refused and the established entry must survive.
+    let mut established_sessions = SessionTable::new();
+    established_sessions.set_max_sessions_for_test(1);
+    assert!(established_sessions.install_with_protocol(
+        opening_key.clone(),
+        frag_test_decision(),
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 24,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        1_000_000_000,
+        PROTO_TCP,
+        crate::tcp_flags::TCP_ACK,
+    ));
+    let mut established_binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    established_binding.interface = Arc::<str>::from("reth1.0");
+    let (_batch, established_dbg) = txn_run_descriptor_checked(
+        &mut established_binding,
+        &mut established_sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    assert_eq!(established_dbg.missing_neigh, 1);
+    assert_eq!(established_sessions.len(), 1);
+    assert_eq!(established_sessions.admission_refused(), 1);
+    let mut established_present = false;
+    let mut seed_count = 0;
+    established_sessions.iter_with_origin(|key, _, _, origin| {
+        established_present |= key == &opening_key;
+        seed_count += usize::from(origin == SessionOrigin::MissingNeighborSeed);
+    });
+    assert!(established_present, "#13526: established session must survive capacity refusal");
+    assert_eq!(seed_count, 0, "#13526: refuse seed when no pressure-safe victim exists");
 }
