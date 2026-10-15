@@ -610,15 +610,38 @@ func hostInboundZoneReplacementStates10752(oldCfg, newCfg *config.Config, zone s
 // map to no scope. Kept flows can only have been stranded by transitions
 // in the returned scopes. Scope identity is preserved end to end:
 // projection intersects and names these exact keys.
-func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspace.ZoneHostInboundView, addrs []netip.Addr) map[netip.Addr][]string {
+func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspace.ZoneHostInboundView, addrs []netip.Addr, snapshots ...[]dpuserspace.InterfaceSnapshot) map[netip.Addr][]string {
 	targets := make(map[netip.Addr]bool, len(addrs))
 	for _, addr := range addrs {
 		targets[addr.Unmap()] = true
 	}
-	// Tier 1 (authoritative): stanza static + VRRP virtual addresses pin
-	// their unit. Static addresses are CIDR; VRRP virtual addresses are
-	// bare or CIDR (mirroring the view builder's hostIPFromCIDR).
+	// Tier 1 (authoritative): stanza static + VRRP virtual + sampled live
+	// addresses pin an address to its unit. Static addresses are CIDR; VRRP
+	// virtual addresses are bare or CIDR (mirroring hostIPFromCIDR).
 	addrUnits := map[netip.Addr][]string{}
+	if oldCfg != nil {
+		for _, snaps := range snapshots {
+			for _, snap := range snaps {
+				unitRef := oldCfg.SplitInterfaceUnitRef(snap.Name)
+				if !unitRef.HasUnit {
+					continue
+				}
+				for _, row := range snap.Addresses {
+					var addr netip.Addr
+					if ip, err := netip.ParseAddr(row.Address); err == nil {
+						addr = ip.Unmap()
+					} else if prefix, err := netip.ParsePrefix(row.Address); err == nil && prefix.IsValid() {
+						addr = prefix.Addr().Unmap()
+					} else {
+						continue
+					}
+					if targets[addr] {
+						addrUnits[addr] = append(addrUnits[addr], unitRef.Literal)
+					}
+				}
+			}
+		}
+	}
 	var owners map[string]string
 	var overrides map[string]*config.HostInboundTraffic
 	var lifelines map[string]bool
@@ -773,7 +796,9 @@ func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, comp
 		addrs = append(addrs, addr)
 	}
 	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
-	attr := hostInboundScopesForAddrs10752(oldActive, dpuserspace.BuildZoneHostInboundViews(oldActive), addrs)
+	oldSnaps := sampleHostInboundSnapshots(oldActive)
+	oldViews := dpuserspace.BuildZoneHostInboundViewsFromSnapshots(oldActive, oldSnaps)
+	attr := hostInboundScopesForAddrs10752(oldActive, oldViews, addrs, oldSnaps)
 	var custom uint64
 	var customSamples []string
 	var other uint64
@@ -875,7 +900,7 @@ func tightenedScopesHaveAddrs10752(scopes []string, views ...[]dpuserspace.ZoneH
 	}
 	for _, vs := range views {
 		for _, v := range vs {
-			if zones[v.Zone] && len(v.V4Addrs)+len(v.V6Addrs) > 0 {
+			if zones[v.Zone] && len(v.V4Addrs)+len(v.V6Addrs)+len(v.IngressDenyV4)+len(v.IngressDenyV6) > 0 {
 				return true
 			}
 		}

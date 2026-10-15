@@ -56,11 +56,10 @@ func TestTightenedScopeMatcherUsesBothTransitionGenerations12845(t *testing.T) {
 	if !tightenedScopesHaveAddrs10752(scopes, oldViews, newViews) {
 		t.Fatal("transition matcher must retain the old generation's address when the new deny-all view withholds it")
 	}
-	// A current-only probe is not the production call shape: the commit warning
-	// passes both old and new generations. It may therefore not establish that
-	// the transition advisory is suppressed in production.
-	if tightenedScopesHaveAddrs10752(scopes, newViews) {
-		t.Fatal("IngressDeny-only new view is not itself an address-owner record")
+	// A current-only IngressDeny address may have been added in the same
+	// generation that tightened the zone. It must still create the advisory.
+	if !tightenedScopesHaveAddrs10752(scopes, newViews) {
+		t.Fatal("IngressDeny-only new view must count as an address owner")
 	}
 	if tightenedScopesHaveAddrs10752(scopes, []dpuserspace.ZoneHostInboundView{{Zone: "untrust"}}) {
 		t.Fatal("addressless zone must not create a transition advisory")
