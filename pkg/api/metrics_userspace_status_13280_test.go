@@ -24,8 +24,15 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 		SessionDeleteDroppedReleased:       22,
 		TunnelPurgeReservationsReleased:    23,
 		SyncedReverseRederived:             24,
+		PeerDeleteRefusedLocalOwned:        25,
+		SessionDeleteReplicaDropped:        26,
+		SessionDeleteReplicaDropRepaired:   27,
 		S5Reinject: &dpuserspace.S5ReinjectStatus{
-			Reinjected: 25,
+			Reinjected:         28,
+			CompletedPermitted: 29,
+			CompletedFenced:    30,
+			CompletedDenied:    31,
+			CompletedRefused:   32,
 		},
 	}
 	ch := make(chan prometheus.Metric)
@@ -37,8 +44,8 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 	for metric := range ch {
 		got = append(got, metric)
 	}
-	if len(got) != 18 {
-		t.Fatalf("emitted %d metrics, want 18 counters / labeled series", len(got))
+	if len(got) != 22 {
+		t.Fatalf("emitted %d metrics, want 22 counters / labeled series", len(got))
 	}
 	for _, counter := range []struct {
 		desc  *prometheus.Desc
@@ -53,9 +60,21 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 		{c.userspaceSessionDeleteDroppedReleased, 22},
 		{c.userspaceTunnelPurgeReservationsReleased, 23},
 		{c.userspaceSyncedReverseRederived, 24},
-		{c.userspaceS5Reinject, 25},
+		{c.userspacePeerDeleteRefusedLocalOwned, 25},
+		{c.userspaceSessionDeleteReplicaDropped, 26},
+		{c.userspaceSessionDeleteReplicaDropRepaired, 27},
+		{c.userspaceS5Reinject, 28},
 	} {
 		assertCounterClose(t, got, counter.desc, nil, counter.value)
+	}
+	for _, counter := range []struct {
+		outcome string
+		value   float64
+	}{
+		{"permitted", 29}, {"fenced", 30}, {"denied", 31}, {"refused", 32},
+	} {
+		assertCounterClose(t, got, c.userspaceS5ReinjectCompletions,
+			map[string]string{"outcome": counter.outcome}, counter.value)
 	}
 	for _, counter := range []struct {
 		op    string

@@ -669,6 +669,7 @@ type xpfCollector struct {
 	userspaceSyncedReverseRederived           *prometheus.Desc
 	userspacePeerDeleteRefusedLocalOwned      *prometheus.Desc
 	userspaceS5Reinject                       *prometheus.Desc
+	userspaceS5ReinjectCompletions            *prometheus.Desc
 	userspaceSessionDeleteReplicaDropped      *prometheus.Desc
 	userspaceSessionDeleteReplicaDropRepaired *prometheus.Desc
 	// #9900: frame-ownership violation counters — kernel-fault and
@@ -1378,6 +1379,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspacePeerDeleteRefusedLocalOwned
 	ch <- c.userspaceSessionDeleteReplicaDropped
 	ch <- c.userspaceSessionDeleteReplicaDropRepaired
+	ch <- c.userspaceS5ReinjectCompletions
 	ch <- c.userspaceSharedSessionPoisonRecoveries
 	ch <- c.userspaceTxCompletionSkew
 	ch <- c.userspaceTxCompletionInvalid

@@ -78,4 +78,9 @@ func (c *xpfCollector) initUserspaceStatus13280Descriptors() {
 		"Helper-reported q0 S5 reinjections with terminal written outcomes.",
 		nil, nil,
 	)
+	c.userspaceS5ReinjectCompletions = prometheus.NewDesc(
+		"xpf_userspace_s5_reinject_completions_total",
+		"Helper-reported q0 S5 reinject terminal completions by outcome.",
+		[]string{"outcome"}, nil,
+	)
 }

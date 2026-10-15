@@ -1002,6 +1002,9 @@ type S5ReinjectStatus struct {
 	CompletedStale      uint64                 `json:"completed_stale"`
 	CompletedCancelled  uint64                 `json:"completed_cancelled"`
 	CompletedRefused    uint64                 `json:"completed_refused"`
+	CompletedPermitted  uint64                 `json:"completed_permitted"`
+	CompletedFenced     uint64                 `json:"completed_fenced"`
+	CompletedDenied     uint64                 `json:"completed_denied"`
 	CompletedUncertain  uint64                 `json:"completed_uncertain"`
 	AdjudicatedAdmitted uint64                 `json:"adjudicated_admitted"`
 	AdjudicatedRefused  uint64                 `json:"adjudicated_refused"`
