@@ -467,47 +467,60 @@ pub(super) const DATA_PATH_NEIGH_STATE: u16 = NUD_STALE;
 /// has admitted the update. The installed state is `NUD_STALE`, so the kernel
 /// validates reachability while #3048 MAC-change epoch handling invalidates
 /// cached forwarding descriptors.
+const NEWNEIGH_MAX_LEN: usize = 60;
+
+fn build_newneigh_request_into(
+    buf: &mut [u8],
+    ifindex: i32,
+    ip: IpAddr,
+    mac: [u8; 6],
+    state: u16,
+) -> Option<usize> {
+    let (family, ip_len) = match ip {
+        IpAddr::V4(_) => (libc::AF_INET as u8, 4),
+        IpAddr::V6(_) => (libc::AF_INET6 as u8, 16),
+    };
+    let ip_attr_len = 4 + ip_len;
+    let ip_attr_padded = (ip_attr_len + 3) & !3;
+    let mac_attr_len = 10;
+    let mac_attr_padded = 12;
+    let total_len = 16 + 12 + ip_attr_padded + mac_attr_padded;
+    if buf.len() < total_len {
+        return None;
+    }
+    buf[..total_len].fill(0);
+    buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
+    buf[4..6].copy_from_slice(&RTM_NEWNEIGH.to_ne_bytes());
+    buf[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE).to_ne_bytes());
+    buf[8..12].copy_from_slice(&1u32.to_ne_bytes());
+    buf[16] = family;
+    buf[20..24].copy_from_slice(&ifindex.to_ne_bytes());
+    buf[24..26].copy_from_slice(&state.to_ne_bytes());
+    let off = 28;
+    buf[off..off + 2].copy_from_slice(&(ip_attr_len as u16).to_ne_bytes());
+    buf[off + 2..off + 4].copy_from_slice(&NDA_DST.to_ne_bytes());
+    match ip {
+        IpAddr::V4(v4) => buf[off + 4..off + 8].copy_from_slice(&v4.octets()),
+        IpAddr::V6(v6) => buf[off + 4..off + 20].copy_from_slice(&v6.octets()),
+    }
+    let off2 = off + ip_attr_padded;
+    buf[off2..off2 + 2].copy_from_slice(&(mac_attr_len as u16).to_ne_bytes());
+    buf[off2 + 2..off2 + 4].copy_from_slice(&NDA_LLADDR.to_ne_bytes());
+    buf[off2 + 4..off2 + 10].copy_from_slice(&mac);
+    Some(total_len)
+}
+
+#[cfg(test)]
 pub(super) fn build_newneigh_request(
     ifindex: i32,
     ip: IpAddr,
     mac: [u8; 6],
     state: u16,
 ) -> Vec<u8> {
-    let (family, ip_bytes): (u8, Vec<u8>) = match ip {
-        IpAddr::V4(v4) => (libc::AF_INET as u8, v4.octets().to_vec()),
-        IpAddr::V6(v6) => (libc::AF_INET6 as u8, v6.octets().to_vec()),
-    };
-    let ip_attr_len = 4 + ip_bytes.len(); // NLA header (4) + payload
-    let ip_attr_padded = (ip_attr_len + 3) & !3;
-    let mac_attr_len = 4 + 6;
-    let mac_attr_padded = (mac_attr_len + 3) & !3;
-    // ndmsg: family(1) + pad1(1) + pad2(2) + ifindex(4) + state(2) + flags(1) + type(1) = 12
-    let ndmsg_len = 12;
-    let total_len = 16 + ndmsg_len + ip_attr_padded + mac_attr_padded; // nlmsghdr(16) + ndmsg + attrs
-    let mut buf = vec![0u8; total_len];
-    // nlmsghdr
-    buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
-    buf[4..6].copy_from_slice(&RTM_NEWNEIGH.to_ne_bytes());
-    buf[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE).to_ne_bytes());
-    buf[8..12].copy_from_slice(&1u32.to_ne_bytes()); // seq
-    buf[12..16].copy_from_slice(&0u32.to_ne_bytes()); // pid
-    // ndmsg
-    buf[16] = family;
-    buf[20..24].copy_from_slice(&ifindex.to_ne_bytes());
-    buf[24..26].copy_from_slice(&state.to_ne_bytes());
-    // NDA_DST attribute
-    let off = 16 + ndmsg_len;
-    buf[off..off + 2].copy_from_slice(&(ip_attr_len as u16).to_ne_bytes());
-    buf[off + 2..off + 4].copy_from_slice(&NDA_DST.to_ne_bytes());
-    buf[off + 4..off + 4 + ip_bytes.len()].copy_from_slice(&ip_bytes);
-    // NDA_LLADDR attribute
-    let off2 = off + ip_attr_padded;
-    buf[off2..off2 + 2].copy_from_slice(&(mac_attr_len as u16).to_ne_bytes());
-    buf[off2 + 2..off2 + 4].copy_from_slice(&NDA_LLADDR.to_ne_bytes());
-    buf[off2 + 4..off2 + 10].copy_from_slice(&mac);
-    buf
+    let mut buf = [0u8; NEWNEIGH_MAX_LEN];
+    let len = build_newneigh_request_into(&mut buf, ifindex, ip, mac, state).unwrap();
+    buf[..len].to_vec()
 }
-
 /// Add a neighbor entry to the kernel's neighbor table via raw netlink.
 /// This ensures the kernel can forward IPv6 (and IPv4) traffic to hosts
 /// whose ARP/NDP replies were captured by XSK instead of reaching the kernel.
@@ -515,7 +528,13 @@ pub(super) fn build_newneigh_request(
 /// The entry is installed `NUD_STALE`, not `NUD_REACHABLE` (#4475) — see
 /// [`DATA_PATH_NEIGH_STATE`] for the anti-poisoning rationale.
 pub(super) fn add_kernel_neighbor(ifindex: i32, ip: IpAddr, mac: [u8; 6]) {
-    let buf = build_newneigh_request(ifindex, ip, mac, DATA_PATH_NEIGH_STATE);
+    // No persistent asynchronous RTM_NEWNEIGH path exists; keep socket behavior unchanged.
+    let mut buf = [0u8; NEWNEIGH_MAX_LEN];
+    let Some(len) =
+        build_newneigh_request_into(&mut buf, ifindex, ip, mac, DATA_PATH_NEIGH_STATE)
+    else {
+        return;
+    };
     let fd = unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return;
@@ -526,7 +545,7 @@ pub(super) fn add_kernel_neighbor(ifindex: i32, ip: IpAddr, mac: [u8; 6]) {
         libc::sendto(
             fd,
             buf.as_ptr() as *const libc::c_void,
-            buf.len(),
+            len,
             libc::MSG_DONTWAIT,
             &sa as *const libc::sockaddr_nl as *const libc::sockaddr,
             core::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
@@ -538,8 +557,9 @@ pub(super) fn add_kernel_neighbor(ifindex: i32, ip: IpAddr, mac: [u8; 6]) {
 #[cfg(test)]
 mod newneigh_request_tests {
     use super::{
-        build_newneigh_request, DATA_PATH_NEIGH_STATE, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST,
-        NUD_REACHABLE, NUD_STALE, RTM_NEWNEIGH,
+        build_newneigh_request, build_newneigh_request_into, DATA_PATH_NEIGH_STATE,
+        NEWNEIGH_MAX_LEN, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST, NUD_REACHABLE, NUD_STALE,
+        RTM_NEWNEIGH,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -610,6 +630,29 @@ mod newneigh_request_tests {
             state_of(&build_newneigh_request(3, ip, [1, 2, 3, 4, 5, 6], NUD_STALE)),
             NUD_STALE
         );
+    }
+
+    #[test]
+    fn newneigh_encoder_reuses_fixed_scratch_for_ipv4_and_ipv6_13074() {
+        let mut scratch = [0u8; NEWNEIGH_MAX_LEN];
+        let v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let len4 = build_newneigh_request_into(
+            &mut scratch, 2, v4, [1, 2, 3, 4, 5, 6], DATA_PATH_NEIGH_STATE,
+        ).unwrap();
+        assert_eq!(len4, 48);
+        assert_eq!(u32::from_ne_bytes(scratch[0..4].try_into().unwrap()), len4 as u32);
+        assert_eq!(u16::from_ne_bytes([scratch[28], scratch[29]]), 8);
+        assert_eq!(&scratch[32..36], &[10, 0, 0, 1]);
+        let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let len6 = build_newneigh_request_into(
+            &mut scratch, 2, IpAddr::V6(v6), [1, 2, 3, 4, 5, 6], DATA_PATH_NEIGH_STATE,
+        ).unwrap();
+        assert_eq!(len6, NEWNEIGH_MAX_LEN);
+        assert_eq!(&scratch[32..48], &v6.octets());
+        let mut tiny = [0u8; 8];
+        assert!(build_newneigh_request_into(
+            &mut tiny, 2, v4, [1, 2, 3, 4, 5, 6], DATA_PATH_NEIGH_STATE,
+        ).is_none());
     }
 }
 
