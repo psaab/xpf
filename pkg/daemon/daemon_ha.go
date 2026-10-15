@@ -1478,7 +1478,12 @@ func (d *Daemon) reconcileRGState() {
 		// goodbye; the shared stable RETH identity is intentionally suppressed so a
 		// cold backup cannot withdraw the peer's live router. A send failure leaves
 		// the bit unset so the reconcile ticker retries (#5093).
-		if !tr.Active && d.ra != nil && d.startupGoodbyeNeeded(rgID) {
+		if tr.Active {
+			// A primary RG cannot have cold-backup state to withdraw. Record
+			// that the boot-only cleanup is inapplicable, so a later failover
+			// does not mistake this runtime demotion for a cold boot.
+			d.markStartupGoodbyeDone(rgID)
+		} else if d.ra != nil && d.startupGoodbyeNeeded(rgID) {
 			cfg := d.store.ActiveConfig()
 			if cfg != nil {
 				rgIfaces := rethInterfacesForRG(cfg, rgID)
@@ -1493,7 +1498,9 @@ func (d *Daemon) reconcileRGState() {
 						rgRA = append(rgRA, ra)
 					}
 				}
-				if len(rgRA) > 0 && d.startupGoodbyeBegin(rgID) {
+				if len(rgRA) == 0 {
+					d.markStartupGoodbyeDone(rgID)
+				} else if d.startupGoodbyeBegin(rgID) {
 					// Emit off the reconcile goroutine (bind retry can take ~2s);
 					// the sticky bit is set only after the goodbye lands so a
 					// failure is retried on the next reconcile tick (#5093).
@@ -1532,6 +1539,17 @@ func (d *Daemon) startupGoodbyeNeeded(rgID int) bool {
 	d.startupGoodbyeMu.Lock()
 	defer d.startupGoodbyeMu.Unlock()
 	return !d.startupGoodbyeRA[rgID] && !d.startupGoodbyeInflight[rgID]
+}
+
+// markStartupGoodbyeDone records that the cold-boot cleanup is either complete
+// or inapplicable for this RG. The map is shared with the async goodbye worker.
+func (d *Daemon) markStartupGoodbyeDone(rgID int) {
+	d.startupGoodbyeMu.Lock()
+	if d.startupGoodbyeRA == nil {
+		d.startupGoodbyeRA = make(map[int]bool)
+	}
+	d.startupGoodbyeRA[rgID] = true
+	d.startupGoodbyeMu.Unlock()
 }
 
 // startupGoodbyeBegin atomically claims the in-flight slot for rgID. It returns
