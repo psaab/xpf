@@ -975,8 +975,11 @@ mod status_wiring_tests {
     #[test]
     fn every_counter_accessor_is_wired_into_process_status() {
         let coord = code_only(&read("src/afxdp/coordinator/status.rs"));
-        let refresh = squeeze(&code_only(&read("src/server/helpers/status.rs")));
-
+        let helper = code_only(&read("src/server/helpers/status.rs"));
+        let refresh_end = helper
+            .find("pub(crate) fn restore_binding_arm_state")
+            .expect("status refresh boundary not found");
+        let refresh = squeeze(&helper[..refresh_end]);
         let accs = accessors(&coord);
         assert!(
             accs.len() >= 20,
@@ -1016,7 +1019,11 @@ mod status_wiring_tests {
     }
     #[test]
     fn ike_exchange_evictions_and_entries_are_surfaced_in_process_status() {
-        let refresh = squeeze(&code_only(&read("src/server/helpers/status.rs")));
+        let helper = code_only(&read("src/server/helpers/status.rs"));
+        let refresh_end = helper
+            .find("pub(crate) fn restore_binding_arm_state")
+            .expect("status refresh boundary not found");
+        let refresh = squeeze(&helper[..refresh_end]);
         assert!(
             refresh.contains(
                 "state.status.ike_exchange_evictions_total=state.afxdp.ike_exchange_evictions_total();"
