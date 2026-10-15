@@ -6,6 +6,7 @@ package userspace
 // Prometheus read surfaces already consume.
 
 import (
+	"errors"
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -100,6 +101,28 @@ func sumBindingCounters(status *ProcessStatus) userspaceCounterSnapshot {
 		s.natAllocFail += b.NatAllocFail
 	}
 	return s
+}
+
+// ReadInterfaceCounters returns the helper's per-interface traffic counters,
+// aggregating all queue bindings. Unavailable helper status must not be
+// represented as an authoritative zero.
+func (m *Manager) ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCounterValue, error) {
+	status, ok := m.CachedStatus()
+	if !ok {
+		return dataplane.InterfaceCounterValue{}, errors.New("userspace interface counters unavailable: helper status not available")
+	}
+	var total dataplane.InterfaceCounterValue
+	for i := range status.Bindings {
+		b := &status.Bindings[i]
+		if b.Ifindex != ifindex {
+			continue
+		}
+		total.RxPackets += b.RXPackets
+		total.RxBytes += b.RXBytes
+		total.TxPackets += b.TXPackets
+		total.TxBytes += b.TXBytes
+	}
+	return total, nil
 }
 
 // syncBPFCountersPreIncrementObserver is a test-only seam: it fires inside

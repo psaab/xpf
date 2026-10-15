@@ -771,6 +771,14 @@ func (a *LegacyDataPlaneAdapter) SnapshotNeighbors() []struct {
 	return m.SnapshotNeighbors()
 }
 
+func (a *LegacyDataPlaneAdapter) ReadInterfaceCounters(ifindex int) (dataplane.InterfaceCounterValue, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return dataplane.InterfaceCounterValue{}, err
+	}
+	return m.ReadInterfaceCounters(ifindex)
+}
+
 func (a *LegacyDataPlaneAdapter) Status() (ProcessStatus, error) {
 	m, err := a.managerOrErr()
 	if err != nil {
