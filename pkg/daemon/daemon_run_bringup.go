@@ -469,7 +469,7 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	// The rescue case never replaces present or recovery-marked active state.
 	nodeIDPresent := hasNodeIDFile()
 	failClosedLoad := configCompileFailed || absentActiveWithHistory || rescueFallback || firstCommitTeardownOwed
-	bootClass := computeBootClass(d.store.ActiveConfig() != nil, d.store.EverCommitted(), nodeIDPresent, failClosedLoad)
+	bootClass := computeBootClass(d.store.EverCommitted(), nodeIDPresent, failClosedLoad)
 	if bootClass == bootClassBootstrap {
 		d.bootstrapMode.Store(true)
 		detail := "management control plane (gRPC/REST/CLI) runs normally, but interface " +

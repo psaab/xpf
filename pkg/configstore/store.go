@@ -902,8 +902,7 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 		compiled, err = config.CompileConfigLenient(tree)
 	}
 	if err == nil && compiled != nil {
-		switch {
-		case config.IsTypedLeafSchemaError(schemaErr):
+		if config.IsTypedLeafSchemaError(schemaErr) {
 			// Keep the pre-compile typed-leaf error on the compiled object. The
 			// typed compiler may discard the offending token while preserving
 			// tolerant no-brick behaviour. Schema validation owns redaction for
@@ -911,36 +910,29 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 			compiled.Warnings = append(compiled.Warnings, fmt.Sprintf(
 				"%s %s (strict commit would reject this; issue #10515)",
 				config.ToleratedTypedLeafWarningPrefix, schemaErr.Error()))
-		case config.IsUnknownTopLevelStanzaSchemaError(schemaErr):
+		}
+		seenWarnings := make(map[string]struct{}, len(compiled.Warnings))
+		for _, existing := range compiled.Warnings {
+			seenWarnings[existing] = struct{}{}
+		}
+		if config.IsUnknownTopLevelStanzaSchemaError(schemaErr) {
 			// compileSections records the same warning for direct lenient callers;
 			// avoid duplicating it on Store.Load / Store.SyncApply.
 			warning := config.ToleratedUnknownTopLevelStanzaWarning(schemaErr)
-			found := false
-			for _, existing := range compiled.Warnings {
-				if existing == warning {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if _, exists := seenWarnings[warning]; !exists {
 				compiled.Warnings = append(compiled.Warnings, warning)
+				seenWarnings[warning] = struct{}{}
 			}
 		}
 		// The schema walk reports only its first closed-world violation. The
 		// compiled zone records every unknown direct child, so recover all
-		// zone+keyword warnings here (deduping the uniform compiler gate's
-		// identical warning) for Store.Load and Store.SyncApply.
+		// zone+keyword warnings, deduplicating the uniform compiler gate.
 		for _, warning := range config.ToleratedUnknownSecurityZoneChildWarnings(compiled) {
-			found := false
-			for _, existing := range compiled.Warnings {
-				if existing == warning {
-					found = true
-					break
-				}
+			if _, exists := seenWarnings[warning]; exists {
+				continue
 			}
-			if !found {
-				compiled.Warnings = append(compiled.Warnings, warning)
-			}
+			compiled.Warnings = append(compiled.Warnings, warning)
+			seenWarnings[warning] = struct{}{}
 		}
 	}
 	// #4185 (review Finding 2): the lenient Load/SyncApply path must NOT

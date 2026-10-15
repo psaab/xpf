@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -1482,36 +1483,37 @@ func (s *Store) LogSystemActionAs(action, principal string) {
 // the active and candidate configs. Must be called while in config mode.
 func (s *Store) CommitDiffSummary() string {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	if s.candidate == nil {
+		s.mu.RUnlock()
 		return ""
 	}
+	active := s.active.Clone()
+	candidate := s.candidate.Clone()
+	s.mu.RUnlock()
 
-	activeSet := s.active.FormatSet()
-	candidateSet := s.candidate.FormatSet()
-
-	activeLines := splitLines(activeSet)
-	candidateLines := splitLines(candidateSet)
-
-	activeMap := make(map[string]bool, len(activeLines))
-	for _, line := range activeLines {
-		activeMap[line] = true
-	}
-	candidateMap := make(map[string]bool, len(candidateLines))
-	for _, line := range candidateLines {
-		candidateMap[line] = true
-	}
+	activeLines := splitLines(active.FormatSet())
+	candidateLines := splitLines(candidate.FormatSet())
+	sort.Strings(activeLines)
+	sort.Strings(candidateLines)
 
 	var added, removed int
-	for _, line := range activeLines {
-		if !candidateMap[line] {
+	for i, j := 0, 0; i < len(activeLines) || j < len(candidateLines); {
+		switch {
+		case i == len(activeLines):
+			added += len(candidateLines) - j
+			j = len(candidateLines)
+		case j == len(candidateLines):
+			removed += len(activeLines) - i
+			i = len(activeLines)
+		case activeLines[i] < candidateLines[j]:
 			removed++
-		}
-	}
-	for _, line := range candidateLines {
-		if !activeMap[line] {
+			i++
+		case candidateLines[j] < activeLines[i]:
 			added++
+			j++
+		default:
+			i++
+			j++
 		}
 	}
 
@@ -1519,7 +1521,6 @@ func (s *Store) CommitDiffSummary() string {
 	if total == 0 {
 		return ""
 	}
-
 	return fmt.Sprintf("%d statement(s) changed (%d added, %d removed)", total, added, removed)
 }
 
