@@ -281,6 +281,49 @@ func TestHostInboundStaleReplyGuardsCoverIngressDenyOwnerAdmits13171(t *testing.
 	}
 }
 
+func TestHostInboundStaleReplyLifelineSharedFallbackPreservesManagement13413(t *testing.T) {
+	const address = "192.0.2.50"
+	rules := HostInboundStaleReplyGuardRules([]HostInboundZoneView{{
+		Zone: "deny", IngressDenyV4: []string{address},
+		IngressNetdevs:  []string{"ge-data"},
+		LifelineNetdevs: []string{"fxp0"},
+	}}, nil, nil, nil, false)
+
+	if !guardRuleHasIngressTuple(rules, []string{"ge-data"}, false, address, "ip", config.HostInboundProtoTCP, 22) {
+		t.Fatal("data ingress must retain the TCP/22 stale-reply guard for the lifeline-shared address")
+	}
+	if !guardRuleHasIngressTuple(rules, []string{"fxp0", "ge-data"}, true, address, "ip", config.HostInboundProtoTCP, 22) {
+		t.Fatal("uncovered-ingress fallback must exclude both covered data ingress and the management lifeline")
+	}
+	vrfRules := HostInboundStaleReplyGuardRules([]HostInboundZoneView{{
+		Zone: "deny", IngressDenyV4: []string{address},
+		IngressVRFScopes: []config.HostInboundVRFIngressScope{{
+			Master: "vrf-blue", Slaves: []string{"ge-data"},
+		}},
+		LifelineVRFScopes: []config.HostInboundVRFIngressScope{{
+			Master: "vrf-blue", Slaves: []string{"fxp0"},
+		}},
+	}}, nil, nil, nil, false)
+	foundVRFFallback := false
+	for _, rule := range vrfRules {
+		if rule.IngressVRFNegated && len(rule.IngressVRFScopes) == 1 &&
+			rule.IngressVRFScopes[0].Master == "vrf-blue" {
+			slaves := rule.IngressVRFScopes[0].Slaves
+			foundVRFFallback = len(slaves) == 2 && slaves[0] == "fxp0" && slaves[1] == "ge-data"
+		}
+	}
+	if !foundVRFFallback {
+		t.Fatal("VRF fallback must exclude both covered data and lifeline members")
+	}
+	ordinaryRules := HostInboundStaleReplyGuardRules([]HostInboundZoneView{{
+		Zone: "deny", V4Addrs: []string{address},
+		IngressNetdevs: []string{"ge-data"},
+	}}, nil, nil, nil, false)
+	if !guardRuleHasIngressTuple(ordinaryRules, []string{"ge-data"}, true, address, "ip", config.HostInboundProtoTCP, 22) {
+		t.Fatal("ordinary owner-denied addresses must retain their original fallback scope")
+	}
+}
+
 // TestHostInboundReinjectDestinationsIncludeIngressDeny13171 (#13171, D5-02).
 func TestHostInboundReinjectDestinationsIncludeIngressDeny13171(t *testing.T) {
 	views := []HostInboundZoneView{{

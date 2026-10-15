@@ -115,6 +115,8 @@ func toNftViews(views []dpuserspace.ZoneHostInboundView) []xnft.HostInboundZoneV
 			IngressNetdevs:       v.IngressNetdevs,
 			IngressVRFScopes:     v.IngressVRFScopes,
 			IngressDenyNetdevs:   v.IngressDenyNetdevs,
+			LifelineNetdevs:      v.LifelineNetdevs,
+			LifelineVRFScopes:    v.LifelineVRFScopes,
 		})
 	}
 	return out

@@ -56,6 +56,11 @@ type HostInboundZoneView struct {
 	// zone views (#10431). The renderer applies destination-owner service rights
 	// before a counted fail-closed catch-all on those netdevs.
 	IngressDenyNetdevs []string
+	// LifelineNetdevs and LifelineVRFScopes are true lifeline interfaces
+	// excluded from uncovered-ingress stale-reply fallback, preserving
+	// management replies (#13413). They are carried on the first view only.
+	LifelineNetdevs   []string
+	LifelineVRFScopes []config.HostInboundVRFIngressScope
 }
 
 // JunosHostDenyL4 mirrors config.JunosHostDenyL4.
