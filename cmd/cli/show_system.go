@@ -125,6 +125,8 @@ func (c *ctl) handleShowSystem(args []string) error {
 		return c.showSystemInfo("users")
 	case "connections":
 		return c.showSystemInfo("connections")
+	case "storage":
+		return c.showCommand("show system storage")
 	case "license":
 		fmt.Println("License: open-source (no license required)")
 		return nil

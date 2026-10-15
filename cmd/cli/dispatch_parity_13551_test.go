@@ -70,6 +70,22 @@ func TestDispatchParity13551_ProcessesSummary(t *testing.T) {
 	}
 }
 
+func TestDispatchParity13551_SystemStorage(t *testing.T) {
+	f := &fake13551{}
+	c := &ctl{client: f}
+	out := captureStdout(t, func() {
+		if err := c.handleShowSystem([]string{"storage"}); err != nil {
+			t.Fatalf("handleShowSystem storage: %v", err)
+		}
+	})
+	if len(f.showTextTopics) != 1 || f.showTextTopics[0] != "storage" {
+		t.Fatalf("ShowText topics=%v, want [storage]", f.showTextTopics)
+	}
+	if !strings.Contains(out, "text:storage") {
+		t.Fatalf("output %q missing storage text", out)
+	}
+}
+
 func TestDispatchParity13551_NATStaticRuleDetail(t *testing.T) {
 	for _, tc := range []struct {
 		args  []string
