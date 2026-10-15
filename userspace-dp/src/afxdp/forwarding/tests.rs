@@ -3711,6 +3711,8 @@ fn rx_learned_neighbor_vlan_alias_remap_bypasses_coalescing_11406() {
     state
         .ingress_logical_ifindex
         .insert((ingress_ifindex, vlan_id), old_alias);
+    let prefix = PrefixV4::from_net("10.0.61.0/24".parse().expect("connected prefix"));
+    state.connected_v4_by_ifindex.insert(old_alias, vec![prefix]);
     let mut dedup = LearnedNeighborDedup::default();
     let first_ns = 100;
     super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
@@ -3738,6 +3740,7 @@ fn rx_learned_neighbor_vlan_alias_remap_bypasses_coalescing_11406() {
     state
         .ingress_logical_ifindex
         .insert((ingress_ifindex, vlan_id), new_alias);
+    state.connected_v4_by_ifindex.insert(new_alias, vec![prefix]);
     super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
         meta,
         ip,
@@ -3797,6 +3800,65 @@ fn rx_learned_neighbor_relearns_immediately_after_delete_11406() {
         Some(NeighborEntry { mac })
     );
 }
+/// #13644: post-admission L3-frame learning must not poison neighbors.
+/// `nat_snapshot`: reth1.0 ifindex 24 owns 10.0.61.1/24 + v6 /64; WAN
+/// logical 12 owns 172.16.80.0/24.
+#[test]
+fn post_admission_neighbor_learn_rejects_off_link_and_fabric_sources_13644() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: 24,
+        ..Default::default()
+    };
+    let mut dedup = LearnedNeighborDedup::default();
+    // (1) Off-link transit source via upstream router must not be learned.
+    let off_link = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 99));
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta, off_link, LEARN_MAC_A, 100, &mut dedup, &state, &dynamic_neighbors,
+    );
+    assert_eq!(dynamic_neighbors.get(&(24, off_link)), None, "off-link transit IP must not flood dynamic_neighbors");
+    // (2) On-link sibling spoof must not overwrite an existing MAC.
+    let victim = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 20));
+    let genuine = [0x02, 0x00, 0x00, 0x00, 0x00, 0x20];
+    let attacker = [0x02, 0x00, 0x00, 0x00, 0x66, 0x66];
+    let mut d2 = LearnedNeighborDedup::default();
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta, victim, genuine, 200, &mut d2, &state, &dynamic_neighbors,
+    );
+    assert_eq!(dynamic_neighbors.get(&(24, victim)).map(|e| e.mac), Some(genuine));
+    let mut d3 = LearnedNeighborDedup::default();
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta, victim, attacker, 300, &mut d3, &state, &dynamic_neighbors,
+    );
+    assert_eq!(dynamic_neighbors.get(&(24, victim)).map(|e| e.mac), Some(genuine), "data-plane L3 frame must not overwrite an existing neighbor MAC");
+    // (3) Control: genuine on-link first learn still installs; off-link v6 rejected.
+    let host6: IpAddr = "2001:559:8585:ef00::20".parse().expect("v6");
+    let off6: IpAddr = "2001:db8::99".parse().expect("v6 off-link");
+    let mut d4 = LearnedNeighborDedup::default();
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta, host6, genuine, 400, &mut d4, &state, &dynamic_neighbors,
+    );
+    assert_eq!(dynamic_neighbors.get(&(24, host6)).map(|e| e.mac), Some(genuine));
+    let mut d5 = LearnedNeighborDedup::default();
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta, off6, attacker, 500, &mut d5, &state, &dynamic_neighbors,
+    );
+    assert_eq!(dynamic_neighbors.get(&(24, off6)), None);
+    // A fabric-link ingress is not the LAN attachment even if source IP
+    // happens to match one of its connected prefixes.
+    let fabric_meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: 99,
+        ..Default::default()
+    };
+    let fabric_src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 77));
+    let mut d6 = LearnedNeighborDedup::default();
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        fabric_meta, fabric_src, attacker, 600, &mut d6, &state, &dynamic_neighbors,
+    );
+    assert_eq!(dynamic_neighbors.get(&(99, fabric_src)), None, "fabric ingress must not seed local neighbor identity");
+}
+
 
 #[test]
 fn learned_vlan_ingress_neighbor_maps_to_logical_ifindex() {

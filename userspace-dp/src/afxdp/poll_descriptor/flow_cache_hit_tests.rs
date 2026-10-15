@@ -674,6 +674,12 @@ impl LiveCallSiteFixture {
         forwarding
             .ingress_logical_ifindex
             .insert((PHYS_INGRESS_IFINDEX, INGRESS_VLAN_ID), LOGICAL_INGRESS_IFINDEX);
+        forwarding.connected_v4_by_ifindex.insert(
+            LOGICAL_INGRESS_IFINDEX,
+            vec![crate::prefix::PrefixV4::from_net(
+                "10.0.1.0/24".parse().expect("ingress prefix"),
+            )],
+        );
         // The mirror config hangs off the LOGICAL unit. Deliberately NOT also
         // registered under the physical ifindex: `resolve_mirror_config` falls
         // back to `mirror_configs[ingress_ifindex]`, and a duplicate entry

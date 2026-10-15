@@ -1123,10 +1123,9 @@ pub(super) fn learn_dynamic_neighbor_from_packet(
     );
 }
 
-/// Learn a packet's source MAC after its packet has passed screen, zone
-/// policy, and the forwarding-request admission path. Unlike the pre-policy
-/// RX learn, this leg may replace an existing MAC so an admitted genuine host
-/// move converges without waiting for the kernel neighbor monitor.
+/// Learn only after policy admission, and only for an address in the directly
+/// connected ingress prefix. Transit packets pair remote source IPs with the
+/// upstream router MAC, poisoning neighbors and consuming bounded capacity.
 pub(super) fn learn_dynamic_neighbor_after_admission(
     meta: UserspaceDpMeta,
     src_ip: IpAddr,
@@ -1136,6 +1135,13 @@ pub(super) fn learn_dynamic_neighbor_after_admission(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
 ) {
+    if !forwarding.src_ip_on_link_for_ingress(
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        src_ip,
+    ) {
+        return;
+    }
     learn_dynamic_neighbor_with_mac(
         meta,
         src_ip,
@@ -1143,7 +1149,7 @@ pub(super) fn learn_dynamic_neighbor_after_admission(
         last_learned_neighbor,
         forwarding,
         dynamic_neighbors,
-        true,
+        false,
         now_ns,
     );
 }

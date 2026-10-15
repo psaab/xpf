@@ -9946,11 +9946,11 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
     assert_eq!(telemetry.dbg.policy_deny, 0);
     assert!(event_rx.try_recv().is_err(), "RELATED admission emits no deny");
 }
-/// #10854: a transit-source RX learn runs before screen/policy and may not
-/// overwrite a live IPv6 neighbor. A denied spoof stays unchanged; an
-/// otherwise identical permitted packet moves the MAC after admission.
+/// #10854/#13644: a transit-source RX learn and an admitted L3 packet may
+/// not overwrite an existing IPv6 neighbor. Policy still controls forwarding,
+/// while ARP/NDP control-path learns remain responsible for neighbor moves.
 #[test]
-fn rx_source_learn_cannot_pre_policy_overwrite_live_v6_neighbor() {
+fn rx_and_post_admission_source_learns_cannot_overwrite_live_v6_neighbor_13644() {
     let source: Ipv6Addr = "2001:559:8585:ef00::100".parse().expect("source");
     let destination: Ipv6Addr = "2606:4700:4700::1111".parse().expect("destination");
     let old_mac = [0x02, 0, 0, 0, 0, 1];
@@ -10080,20 +10080,18 @@ fn rx_source_learn_cannot_pre_policy_overwrite_live_v6_neighbor() {
 
         assert_eq!(
             dynamic_neighbors.get(&neighbor_key).map(|entry| entry.mac),
-            Some(if admitted { packet_mac } else { old_mac }),
-            "{policy_action} policy rule must determine whether the live IPv6 \
-             neighbor can move from the packet's source MAC",
+            Some(old_mac),
+            "{policy_action} packet must not move a live IPv6 neighbor from its source MAC",
         );
         assert_eq!(
             dynamic_neighbors.rx_learn_overwrite_refusals(),
-            1,
-            "the pre-policy source learn must refuse and count the live-MAC \
-             overwrite in both verdict cells",
+            if admitted { 2 } else { 1 },
+            "pre-policy learn always refuses; admitted post-policy learn also refuses",
         );
         assert_eq!(
             dynamic_neighbors.mac_change_epoch_for(&neighbor_key),
-            if admitted { 1 } else { 0 },
-            "only an admitted post-policy MAC move invalidates cached neighbors",
+            0,
+            "an L3 packet must not invalidate a cached neighbor MAC",
         );
         if admitted {
             assert_eq!(
