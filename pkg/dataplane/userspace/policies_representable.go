@@ -162,7 +162,8 @@ func nameRepresentability(ab *config.AddressBook, feedOverlay map[string][]strin
 		// >=1-concrete gate in nameRepresentable is what rejects a pure cycle.
 		return true, false
 	}
-	if feeds, feedBound := feedOverlay[name]; feedBound {
+	feedName := dynamicAddressLookupName(name)
+	if feeds, feedBound := feedOverlay[feedName]; feedBound {
 		// Feed-bound name. #3294 (A′): expandBookNameRecursive now merges the
 		// feed prefixes into an enclosing set's row, so a feed-bound member
 		// with >= 1 live prefix IS a concrete contribution toward the set's
@@ -177,7 +178,7 @@ func nameRepresentability(ab *config.AddressBook, feedOverlay map[string][]strin
 		// binding absent from feedOverlay still takes the unresolved branch
 		// below, preserving #5753/#5645 fail-closed behavior. Non-drop
 		// present-empty entries remain representable-but-NOT-concrete.
-		if len(feeds) > 0 || (bindings[name] != nil && bindings[name].FailMode == "drop") {
+		if len(feeds) > 0 || (bindings[feedName] != nil && bindings[feedName].FailMode == "drop") {
 			return true, true
 		}
 		// An EMPTY feed (overlay key present without the explicit drop
@@ -199,7 +200,7 @@ func nameRepresentability(ab *config.AddressBook, feedOverlay map[string][]strin
 	// preflight rejects the whole snapshot (previous-good retained / fresh-boot
 	// default-deny) — the nested-set analogue of the top-level addrRepresentable
 	// guard (#5751). Indexing a nil bindings map is safe (zero value nil).
-	if bindings[name] != nil {
+	if bindings[feedName] != nil {
 		return false, false
 	}
 	if ab == nil {
@@ -293,10 +294,11 @@ func emptyDroppedFeedReferences(cfg *config.Config, feedOverlay map[string][]str
 		visited[name] = true
 		defer delete(visited, name)
 
-		if binding := cfg.Security.DynamicAddress.AddressBindings[name]; binding != nil && binding.FailMode == "drop" {
-			if prefixes, published := feedOverlay[name]; published && len(prefixes) == 0 && !seenRefs[name] {
-				seenRefs[name] = true
-				refs = append(refs, name)
+		feedName := dynamicAddressLookupName(name)
+		if binding := cfg.Security.DynamicAddress.AddressBindings[feedName]; binding != nil && binding.FailMode == "drop" {
+			if prefixes, published := feedOverlay[feedName]; published && len(prefixes) == 0 && !seenRefs[feedName] {
+				seenRefs[feedName] = true
+				refs = append(refs, feedName)
 			}
 		}
 		if book := cfg.Security.AddressBook; book != nil {
@@ -331,8 +333,9 @@ func policyAddressSideHasConcretePrefix(cfg *config.Config, feedOverlay map[stri
 			return true
 		}
 		_, knownBook := nameToID[token]
-		_, feedBound := feedOverlay[token]
-		binding := cfg != nil && cfg.Security.DynamicAddress.AddressBindings[token] != nil
+		feedName := dynamicAddressLookupName(token)
+		_, feedBound := feedOverlay[feedName]
+		binding := cfg != nil && cfg.Security.DynamicAddress.AddressBindings[feedName] != nil
 		if knownBook || feedBound || binding {
 			v4, v6 := expandBookNameToCIDRs(cfg, feedOverlay, token)
 			if len(v4) > 0 || len(v6) > 0 {
