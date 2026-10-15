@@ -168,20 +168,37 @@ func checkConfigForDay0(content string, nodeID int) (*config.Config, error) {
 	return compiled, nil
 }
 
-// readBounded reads at most max+1 bytes from r and rejects a source that
-// exceeds max, allocating no more than max+1 bytes REGARDLESS of how much data
-// r would supply. This is the load-bearing half of the #4909 fix: the pre-fix
-// os.ReadFile materialized the WHOLE file before any cap, so a FUSE/racing file
-// that under-reported its Stat size could still stream an unbounded body and
-// balloon memory. io.LimitReader(max+1) caps the read; reaching the (max+1)-th
-// byte proves the source is over-cap.
-func readBounded(r io.Reader, max int64) ([]byte, error) {
-	return configstore.ReadBounded(r, max)
+func parseNoOperandArgs(command string, args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("%s: unexpected argument(s) %v; this command takes no positional arguments", command, args)
+	}
+	return nil
+}
+
+func writeProtocolVersions(w io.Writer, command, buildVersion string, args ...string) error {
+	if err := parseNoOperandArgs(command, args); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(w, "xpf-version=%s\n", buildVersion)
+	_, _ = fmt.Fprintf(w, "ha-protocol-version=%d\n", cluster.CurrentHAProtocolVersion)
+	_, _ = fmt.Fprintf(w, "ha-protocol-min-compat=%d\n", cluster.MinCompatHAProtocolVersion)
+	_, _ = fmt.Fprintf(w, "session-sync-protocol-version=%d\n", cluster.SessionSyncWireVersion)
+	_, _ = fmt.Fprintf(w, "configdb-envelope-version=%d\n", configstore.EnvelopeFormatVersion)
+	_, _ = fmt.Fprintf(w, "configdb-min-reader-version=%d\n", configstore.EnvelopeMinReaderVersion)
+	return nil
+}
+
+func parseVerifyDataplaneArgs(args []string) error {
+	return parseNoOperandArgs("verify-dataplane", args)
 }
 
 func main() {
 	switch classifyCommand(os.Args) {
 	case cmdVersion:
+		if err := parseNoOperandArgs("version", os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 		fmt.Printf("xpfd %s (commit %s, built %s)\n", version, commit, buildTime)
 		return
 
@@ -199,24 +216,10 @@ func main() {
 		return
 
 	case cmdProtocolVersions:
-		// `xpfd protocol-versions` emits the compile-time HA / session-sync /
-		// config-DB version constants this binary embeds, machine-parseably
-		// (key=value lines). #1930 INC-3 LANE-2: the mixed-base image-replace gate
-		// reads these from the STAGED binary (unpacked from the new image, run on
-		// the deploy host) to decide — WITHOUT booting the image — whether the new
-		// image's HA/session-sync protocol is back-compatible with the still-running
-		// peer. Pairs with the bake version manifest (a file read where the binary
-		// can't be run, e.g. cross-arch). Keep keys stable: external tooling parses
-		// them.
-		fmt.Printf("xpf-version=%s\n", version)
-		fmt.Printf("ha-protocol-version=%d\n", cluster.CurrentHAProtocolVersion)
-		fmt.Printf("ha-protocol-min-compat=%d\n", cluster.MinCompatHAProtocolVersion)
-		// The CROSS-CHASSIS session-sync wire schema (pkg/cluster/sync.go) —
-		// NOT the daemon↔helper local control socket (userspace.ProtocolVersion),
-		// which has nothing to do with whether two CHASSIS can sync sessions.
-		fmt.Printf("session-sync-protocol-version=%d\n", cluster.SessionSyncWireVersion)
-		fmt.Printf("configdb-envelope-version=%d\n", configstore.EnvelopeFormatVersion)
-		fmt.Printf("configdb-min-reader-version=%d\n", configstore.EnvelopeMinReaderVersion)
+		if err := writeProtocolVersions(os.Stdout, "protocol-versions", version, os.Args[2:]...); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 		return
 
 	case cmdTransitBarrier:
@@ -329,6 +332,10 @@ func main() {
 		// Deploy tooling pushes the NEW binary to a temp path and runs
 		// this BEFORE stopping the old daemon; a REJECT refuses the deploy
 		// instead of killing the dataplane (the 2026-06-10 incident shape).
+		if err := parseVerifyDataplaneArgs(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 		if err := dataplane.VerifyEmbeddedUserspaceShim(); err != nil {
 			if errors.Is(err, dataplane.ErrUserspaceShimVerifierReject) {
 				fmt.Printf("REJECT embedded userspace shim\n%v\n", err)

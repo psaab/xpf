@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // countingReader counts bytes consumed so a test can assert an over-cap source
@@ -35,7 +37,7 @@ func TestReadBoundedStopsAtCap(t *testing.T) {
 	const bigN = max * 64
 
 	cr := &countingReader{r: bytes.NewReader(bytes.Repeat([]byte("z"), bigN))}
-	data, err := readBounded(cr, max)
+	data, err := configstore.ReadBounded(cr, max)
 	if err == nil {
 		t.Fatalf("readBounded accepted an over-cap source (%d bytes)", len(data))
 	}
@@ -48,7 +50,7 @@ func TestReadBoundedStopsAtCap(t *testing.T) {
 
 	// Exactly max round-trips.
 	ok := &countingReader{r: bytes.NewReader(bytes.Repeat([]byte("y"), max))}
-	got, err := readBounded(ok, max)
+	got, err := configstore.ReadBounded(ok, max)
 	if err != nil || len(got) != max {
 		t.Fatalf("at-max: err=%v len=%d want %d", err, len(got), max)
 	}

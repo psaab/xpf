@@ -13,18 +13,31 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 func main() {
-	repoRoot := flag.String("repo-root", ".", "repository root the manifest paths are relative to")
-	flag.Parse()
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 
-	if err := dataplane.WriteUserspaceXDPManifest(*repoRoot); err != nil {
-		fmt.Fprintf(os.Stderr, "shim-manifest: %v\n", err)
-		os.Exit(1)
+func run(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("shim-manifest", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	repoRoot := fs.String("repo-root", ".", "repository root the manifest paths are relative to")
+	if err := fs.Parse(args); err != nil {
+		return 2
 	}
-	fmt.Printf("shim-manifest: wrote %s\n", dataplane.UserspaceXDPManifestRelPath)
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "shim-manifest: unexpected argument(s) %v\n", fs.Args())
+		return 2
+	}
+	if err := dataplane.WriteUserspaceXDPManifest(*repoRoot); err != nil {
+		fmt.Fprintf(stderr, "shim-manifest: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "shim-manifest: wrote %s\n", dataplane.UserspaceXDPManifestRelPath)
+	return 0
 }

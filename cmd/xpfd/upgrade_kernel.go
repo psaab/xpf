@@ -13,6 +13,8 @@ import (
 	"github.com/psaab/xpf/pkg/upgrade/lock"
 )
 
+const kernelUsage = "usage: xpfd upgrade kernel {arm [flags] <version>|promote [flags]|status [flags]|drain [flags]|rejoin [flags]}"
+
 // runUpgradeKernelSubcommand implements `xpfd upgrade kernel ...` — the LANE-1
 // verify-gated in-place kernel channel (#1930 INC-1). Sub-verbs:
 //
@@ -29,7 +31,7 @@ import (
 // 3 candidate REVERTED (promote path — the oneshot reboots to known-good).
 func runUpgradeKernelSubcommand(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: xpfd upgrade kernel {arm <version>|promote|status|drain|rejoin} [flags]")
+		fmt.Fprintln(os.Stderr, kernelUsage)
 		os.Exit(1)
 	}
 	verb := args[0]
@@ -103,7 +105,7 @@ func runUpgradeKernelSubcommand(args []string) {
 		defer func() { _ = h.Release() }()
 	}
 
-	cfg := newKernelConfig(*journalPath, *strictWatchdog, *beaconDeadline)
+	cfg := newKernelConfig(*journalPath, *strictWatchdog, *beaconDeadline, *unit)
 	r, err := upgrade.NewKernelRunner(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "upgrade kernel: %v\n", err)
@@ -258,7 +260,7 @@ func validateKernelVerbArgs(verb string, positionals []string) error {
 // exercised realKernelSystem.ForwardBeacon directly would stay green if this
 // site were reverted to upgrade.NewKernelSystem(). It mirrors newUpgradeConfig,
 // which the binary channel factored out for exactly the same reason (#5286).
-func newKernelConfig(journalPath string, strictWatchdog bool, beaconDeadline time.Duration) upgrade.KernelConfig {
+func newKernelConfig(journalPath string, strictWatchdog bool, beaconDeadline time.Duration, unit string) upgrade.KernelConfig {
 	return upgrade.KernelConfig{
 		JournalPath:    journalPath,
 		StrictWatchdog: strictWatchdog,
@@ -286,7 +288,7 @@ func newKernelConfig(journalPath string, strictWatchdog bool, beaconDeadline tim
 		// this is a fourth CONSUMER of one rule rather than a fourth copy of it.
 		Sys: upgrade.NewKernelSystemWithHelperStatus(
 			func(ctx context.Context) (bool, error) {
-				return upgradeUnitActive(ctx, upgrade.DefaultUnit)
+				return upgradeUnitActive(ctx, unit)
 			},
 			upgradeHelperStatus,
 			upgradeControlSock(upgrade.DefaultConfigDBDir),
