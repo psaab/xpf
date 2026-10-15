@@ -20,6 +20,10 @@ impl SessionTable {
     pub(crate) fn last_pop_stats(&self) -> WheelPopStats {
         self.last_pop_stats
     }
+    /// Cumulative GC/HA classifications since this table was created.
+    pub(crate) fn cumulative_pop_stats(&self) -> WheelPopStats {
+        self.cumulative_pop_stats
+    }
 
     /// #965: lazily initialize the wheel cursor to the first observed
     /// `now_ns`. SessionTable::new() does not have a `now_ns`, so we
@@ -473,6 +477,7 @@ impl SessionTable {
         }
         let expired = expired_entries.len() as u64;
         self.expired = self.expired.saturating_add(expired);
+        self.cumulative_pop_stats.accumulate(self.last_pop_stats);
         expired_entries
     }
 

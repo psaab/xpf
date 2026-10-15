@@ -311,6 +311,29 @@ pub(crate) struct WheelPopStats {
     pub(crate) kept_alive_by_companion: usize,
 }
 
+impl WheelPopStats {
+    pub(crate) fn accumulate(&mut self, other: Self) {
+        self.scanned = self.scanned.saturating_add(other.scanned);
+        self.dropped_gone = self.dropped_gone.saturating_add(other.dropped_gone);
+        self.dropped_stale = self.dropped_stale.saturating_add(other.dropped_stale);
+        self.expired = self.expired.saturating_add(other.expired);
+        self.re_bucketed = self.re_bucketed.saturating_add(other.re_bucketed);
+        self.held_standby = self.held_standby.saturating_add(other.held_standby);
+        self.reaped_stale_synced = self
+            .reaped_stale_synced
+            .saturating_add(other.reaped_stale_synced);
+        self.healed_on_promote = self
+            .healed_on_promote
+            .saturating_add(other.healed_on_promote);
+        self.aged_owner_rg_zero_active_node = self
+            .aged_owner_rg_zero_active_node
+            .saturating_add(other.aged_owner_rg_zero_active_node);
+        self.kept_alive_by_companion = self
+            .kept_alive_by_companion
+            .saturating_add(other.kept_alive_by_companion);
+    }
+}
+
 /// #2441: largest configured session timeout (in seconds) that survives the
 /// seconds→nanoseconds conversion without overflowing `u64`. This MUST stay in
 /// lockstep with the Go commit-time gate `config.MaxDurationSeconds`
@@ -1645,6 +1668,8 @@ pub(crate) struct SessionTable {
     /// dropped_gone / expired / re_bucketed). Accumulator overhead
     /// is 4-5 increments per popped entry — sub-µs at typical loads.
     last_pop_stats: WheelPopStats,
+    /// #13281: lifetime wheel-pop classifications, retained across GC sweeps.
+    cumulative_pop_stats: WheelPopStats,
     /// #2134/#10985/#11057: optional destination-IP count gate. The source-IP
     /// map is always maintained for the default per-source quota.
     /// Set by `set_session_limit_active`, driven from the worker's applied
@@ -1803,6 +1828,7 @@ impl SessionTable {
             nat_reverse_key_collisions_distinct_src: 0,
             wheel: SessionWheel::new(),
             last_pop_stats: WheelPopStats::default(),
+            cumulative_pop_stats: WheelPopStats::default(),
             session_limit_active: false,
             // #2364/#10985: these counters key attacker-chosen IPs plus an
             // ingress-zone ID, so use the seeded hasher.

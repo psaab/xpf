@@ -598,6 +598,17 @@ pub(crate) fn worker_loop(
                 wr_counters.session_lookup_miss_key_mismatch = miss_km;
                 wr_counters.session_install_admission_refused = sessions.admission_refused();
                 wr_counters.session_install_partial = sessions.install_partial();
+                let gc = sessions.cumulative_pop_stats();
+                wr_counters.session_gc_scanned = gc.scanned as u64;
+                wr_counters.session_gc_dropped_gone = gc.dropped_gone as u64;
+                wr_counters.session_gc_dropped_stale = gc.dropped_stale as u64;
+                wr_counters.session_gc_re_bucketed = gc.re_bucketed as u64;
+                wr_counters.session_gc_held_standby = gc.held_standby as u64;
+                wr_counters.session_gc_reaped_stale_synced = gc.reaped_stale_synced as u64;
+                wr_counters.session_gc_healed_on_promote = gc.healed_on_promote as u64;
+                wr_counters.session_gc_aged_owner_rg_zero_active_node =
+                    gc.aged_owner_rg_zero_active_node as u64;
+                wr_counters.session_gc_kept_alive_by_companion = gc.kept_alive_by_companion as u64;
                 // #1760 W1: durable artifact for the reverse-key-collision
                 // watch. The in-process counters reset on every restart
                 // and the lab has no long-term Prometheus store, so a

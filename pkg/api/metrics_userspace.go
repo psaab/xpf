@@ -55,6 +55,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 	c.emitUserspaceNptv6(ch, status)
 	c.emitCoSTelemetry(ch, &status)
 	c.emitWorkerRuntime(ch, status)
+	c.emitSessionGCMetrics(ch, status)
 	c.emitUserspaceDynamicBufferMetrics(ch, status)
 	c.emitUserspaceEventStream(ch, status)
 	c.emitBindingActiveFlowCount(ch, status)

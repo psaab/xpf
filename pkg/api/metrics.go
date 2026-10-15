@@ -554,6 +554,15 @@ type xpfCollector struct {
 	userspaceSessionInstallPartial              *prometheus.Desc
 	userspaceSessionTableEntries                *prometheus.Desc
 	userspaceSessionTableCapacity               *prometheus.Desc
+	userspaceSessionGCScanned                   *prometheus.Desc
+	userspaceSessionGCDroppedGone               *prometheus.Desc
+	userspaceSessionGCDroppedStale              *prometheus.Desc
+	userspaceSessionGCReBucketed                *prometheus.Desc
+	userspaceSessionGCHeldStandby               *prometheus.Desc
+	userspaceSessionGCReapedStaleSynced         *prometheus.Desc
+	userspaceSessionGCHealedOnPromote           *prometheus.Desc
+	userspaceSessionGCAgedOwnerRGZeroActiveNode *prometheus.Desc
+	userspaceSessionGCKeptAliveByCompanion      *prometheus.Desc
 	// #8447: source-NAT rule-match outcome quartet.
 	userspaceSourceNATMatchConsulted            *prometheus.Desc
 	userspaceSourceNATMatchMatched              *prometheus.Desc
@@ -1234,6 +1243,15 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceSessionInstallPartial
 	ch <- c.userspaceSessionTableEntries
 	ch <- c.userspaceSessionTableCapacity
+	ch <- c.userspaceSessionGCScanned
+	ch <- c.userspaceSessionGCDroppedGone
+	ch <- c.userspaceSessionGCDroppedStale
+	ch <- c.userspaceSessionGCReBucketed
+	ch <- c.userspaceSessionGCHeldStandby
+	ch <- c.userspaceSessionGCReapedStaleSynced
+	ch <- c.userspaceSessionGCHealedOnPromote
+	ch <- c.userspaceSessionGCAgedOwnerRGZeroActiveNode
+	ch <- c.userspaceSessionGCKeptAliveByCompanion
 	ch <- c.userspaceSourceNATMatchConsulted
 	ch <- c.userspaceSourceNATMatchMatched
 	ch <- c.userspaceSourceNATMatchUnavailable

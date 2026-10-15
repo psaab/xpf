@@ -142,6 +142,16 @@ pub(crate) struct WorkerRuntimeCounters {
     /// #1782 Step-1 (§5.2 mechanism (ii)): per-cause v8 queue-lease
     /// under-grant attribution. See `CoSQueueLeaseUndergrantCounters`.
     pub cos_queue_lease_undergrant: CoSQueueLeaseUndergrantCounters,
+    /// Cumulative timer-wheel GC classifications for this worker's session table.
+    pub session_gc_scanned: u64,
+    pub session_gc_dropped_gone: u64,
+    pub session_gc_dropped_stale: u64,
+    pub session_gc_re_bucketed: u64,
+    pub session_gc_held_standby: u64,
+    pub session_gc_reaped_stale_synced: u64,
+    pub session_gc_healed_on_promote: u64,
+    pub session_gc_aged_owner_rg_zero_active_node: u64,
+    pub session_gc_kept_alive_by_companion: u64,
     pub session_table_entries: u64,
     pub max_sessions: u64,
     /// #1760: cumulative NAT reverse-key displacement events from this
@@ -279,6 +289,15 @@ pub(crate) struct WorkerRuntimeAtomics {
     pub cos_queue_lease_undergrant_outstanding_cap: AtomicU64,
     pub session_table_entries: AtomicU64,
     pub max_sessions: AtomicU64,
+    pub session_gc_scanned: AtomicU64,
+    pub session_gc_dropped_gone: AtomicU64,
+    pub session_gc_dropped_stale: AtomicU64,
+    pub session_gc_re_bucketed: AtomicU64,
+    pub session_gc_held_standby: AtomicU64,
+    pub session_gc_reaped_stale_synced: AtomicU64,
+    pub session_gc_healed_on_promote: AtomicU64,
+    pub session_gc_aged_owner_rg_zero_active_node: AtomicU64,
+    pub session_gc_kept_alive_by_companion: AtomicU64,
     /// #1760: cumulative NAT reverse-key displacement events. Simple
     /// Relaxed cumulative counter (like `session_table_entries`), NOT part
     /// of the seqlock-published rolling-window tuple below.
@@ -379,6 +398,15 @@ impl WorkerRuntimeAtomics {
             cos_queue_lease_undergrant_outstanding_cap: AtomicU64::new(0),
             session_table_entries: AtomicU64::new(0),
             max_sessions: AtomicU64::new(0),
+            session_gc_scanned: AtomicU64::new(0),
+            session_gc_dropped_gone: AtomicU64::new(0),
+            session_gc_dropped_stale: AtomicU64::new(0),
+            session_gc_re_bucketed: AtomicU64::new(0),
+            session_gc_held_standby: AtomicU64::new(0),
+            session_gc_reaped_stale_synced: AtomicU64::new(0),
+            session_gc_healed_on_promote: AtomicU64::new(0),
+            session_gc_aged_owner_rg_zero_active_node: AtomicU64::new(0),
+            session_gc_kept_alive_by_companion: AtomicU64::new(0),
             nat_reverse_key_collisions: AtomicU64::new(0),
             nat_reverse_key_collisions_distinct_src: AtomicU64::new(0),
             session_create_drops: AtomicU64::new(0),
@@ -448,6 +476,26 @@ impl WorkerRuntimeAtomics {
         self.max_sessions.store(c.max_sessions, Ordering::Relaxed);
         self.session_table_entries
             .store(c.session_table_entries, Ordering::Relaxed);
+        self.session_gc_scanned
+            .store(c.session_gc_scanned, Ordering::Relaxed);
+        self.session_gc_dropped_gone
+            .store(c.session_gc_dropped_gone, Ordering::Relaxed);
+        self.session_gc_dropped_stale
+            .store(c.session_gc_dropped_stale, Ordering::Relaxed);
+        self.session_gc_re_bucketed
+            .store(c.session_gc_re_bucketed, Ordering::Relaxed);
+        self.session_gc_held_standby
+            .store(c.session_gc_held_standby, Ordering::Relaxed);
+        self.session_gc_reaped_stale_synced
+            .store(c.session_gc_reaped_stale_synced, Ordering::Relaxed);
+        self.session_gc_healed_on_promote
+            .store(c.session_gc_healed_on_promote, Ordering::Relaxed);
+        self.session_gc_aged_owner_rg_zero_active_node.store(
+            c.session_gc_aged_owner_rg_zero_active_node,
+            Ordering::Relaxed,
+        );
+        self.session_gc_kept_alive_by_companion
+            .store(c.session_gc_kept_alive_by_companion, Ordering::Relaxed);
         self.nat_reverse_key_collisions
             .store(c.nat_reverse_key_collisions, Ordering::Relaxed);
         self.nat_reverse_key_collisions_distinct_src
@@ -538,9 +586,7 @@ impl WorkerRuntimeAtomics {
             cos_wheel_ticks_advanced_total: self
                 .cos_wheel_ticks_advanced_total
                 .load(Ordering::Relaxed),
-            cos_wheel_ticks_advanced_max: self
-                .cos_wheel_ticks_advanced_max
-                .load(Ordering::Relaxed),
+            cos_wheel_ticks_advanced_max: self.cos_wheel_ticks_advanced_max.load(Ordering::Relaxed),
             cos_queue_lease_undergrant: CoSQueueLeaseUndergrantCounters {
                 seqlock_give_up: self
                     .cos_queue_lease_undergrant_seqlock_give_up
@@ -563,9 +609,7 @@ impl WorkerRuntimeAtomics {
             },
             session_table_entries: self.session_table_entries.load(Ordering::Relaxed),
             max_sessions: self.max_sessions.load(Ordering::Relaxed),
-            nat_reverse_key_collisions: self
-                .nat_reverse_key_collisions
-                .load(Ordering::Relaxed),
+            nat_reverse_key_collisions: self.nat_reverse_key_collisions.load(Ordering::Relaxed),
             nat_reverse_key_collisions_distinct_src: self
                 .nat_reverse_key_collisions_distinct_src
                 .load(Ordering::Relaxed),
@@ -583,6 +627,21 @@ impl WorkerRuntimeAtomics {
                 .session_install_admission_refused
                 .load(Ordering::Relaxed),
             session_install_partial: self.session_install_partial.load(Ordering::Relaxed),
+            session_gc_scanned: self.session_gc_scanned.load(Ordering::Relaxed),
+            session_gc_dropped_gone: self.session_gc_dropped_gone.load(Ordering::Relaxed),
+            session_gc_dropped_stale: self.session_gc_dropped_stale.load(Ordering::Relaxed),
+            session_gc_re_bucketed: self.session_gc_re_bucketed.load(Ordering::Relaxed),
+            session_gc_held_standby: self.session_gc_held_standby.load(Ordering::Relaxed),
+            session_gc_reaped_stale_synced: self
+                .session_gc_reaped_stale_synced
+                .load(Ordering::Relaxed),
+            session_gc_healed_on_promote: self.session_gc_healed_on_promote.load(Ordering::Relaxed),
+            session_gc_aged_owner_rg_zero_active_node: self
+                .session_gc_aged_owner_rg_zero_active_node
+                .load(Ordering::Relaxed),
+            session_gc_kept_alive_by_companion: self
+                .session_gc_kept_alive_by_companion
+                .load(Ordering::Relaxed),
             new_flow_installs: self.new_flow_installs.load(Ordering::Relaxed),
         }
     }

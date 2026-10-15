@@ -30,6 +30,15 @@ fn snapshot_roundtrip() {
         },
         session_table_entries: 77,
         max_sessions: 100,
+        session_gc_scanned: 1,
+        session_gc_dropped_gone: 2,
+        session_gc_dropped_stale: 3,
+        session_gc_re_bucketed: 4,
+        session_gc_held_standby: 5,
+        session_gc_reaped_stale_synced: 6,
+        session_gc_healed_on_promote: 7,
+        session_gc_aged_owner_rg_zero_active_node: 8,
+        session_gc_kept_alive_by_companion: 9,
         nat_reverse_key_collisions: 4242,
         nat_reverse_key_collisions_distinct_src: 0,
         session_create_drops: 31,
@@ -61,11 +70,38 @@ fn snapshot_roundtrip() {
     );
     // #1782 Step-1: wheel + per-cause under-grant slots survive the
     // publish -> snapshot round trip.
-    assert_eq!(s.cos_wheel_ticks_advanced_total, c.cos_wheel_ticks_advanced_total);
-    assert_eq!(s.cos_wheel_ticks_advanced_max, c.cos_wheel_ticks_advanced_max);
+    assert_eq!(
+        s.cos_wheel_ticks_advanced_total,
+        c.cos_wheel_ticks_advanced_total
+    );
+    assert_eq!(
+        s.cos_wheel_ticks_advanced_max,
+        c.cos_wheel_ticks_advanced_max
+    );
     assert_eq!(s.cos_queue_lease_undergrant, c.cos_queue_lease_undergrant);
     assert_eq!(s.session_table_entries, c.session_table_entries);
     assert_eq!(s.max_sessions, c.max_sessions);
+    assert_eq!(s.session_gc_scanned, c.session_gc_scanned);
+    assert_eq!(s.session_gc_dropped_gone, c.session_gc_dropped_gone);
+    assert_eq!(s.session_gc_dropped_stale, c.session_gc_dropped_stale);
+    assert_eq!(s.session_gc_re_bucketed, c.session_gc_re_bucketed);
+    assert_eq!(s.session_gc_held_standby, c.session_gc_held_standby);
+    assert_eq!(
+        s.session_gc_reaped_stale_synced,
+        c.session_gc_reaped_stale_synced
+    );
+    assert_eq!(
+        s.session_gc_healed_on_promote,
+        c.session_gc_healed_on_promote
+    );
+    assert_eq!(
+        s.session_gc_aged_owner_rg_zero_active_node,
+        c.session_gc_aged_owner_rg_zero_active_node
+    );
+    assert_eq!(
+        s.session_gc_kept_alive_by_companion,
+        c.session_gc_kept_alive_by_companion
+    );
     // #1760: the displacement counter survives publish -> snapshot.
     assert_eq!(s.nat_reverse_key_collisions, c.nat_reverse_key_collisions);
     // #1861: the install-refusal trio survives publish -> snapshot.
