@@ -37,13 +37,14 @@
 #     finding. Those are different results and collapsing them is how both
 #     earlier attempts produced an unreadable zero.
 #
-# THE VERDICT IS THEREFORE THREE-VALUED, NOT TWO. The witness is a companion
-# frame crafted to trip a per-reason screen, sent alongside the subject, so its
-# counter moving proves the path is live. A flat witness means THE MEASUREMENT
-# DID NOT HAPPEN, and that is VOID -- never a pass and never a failure. The
-# same shape as the counter-witness technique in docs/engineering-style.md:
-# pair the measurement with something whose movement proves the instrument is
-# connected.
+# THE VERDICT IS THEREFORE THREE-VALUED, NOT TWO. The witness is a frame
+# crafted to trip a per-reason screen and sent before the subject, so its
+# counter moving proves the path is live. The aggregate baseline is sampled
+# after that witness, preventing its drop from being attributed to the subject.
+# A flat witness means THE MEASUREMENT DID NOT HAPPEN, and that is VOID --
+# never a pass and never a failure. The same shape as the counter-witness
+# technique in docs/engineering-style.md: pair measurement with proof the
+# instrument is connected.
 #
 # And the verdict is TOTAL: every input class yields exactly one line. The
 # defect that produced #6897's sibling lib was not a wrong number, it was NO

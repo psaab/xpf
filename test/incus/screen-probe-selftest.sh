@@ -159,16 +159,16 @@ check_eq "a non-integer sample is empty, not a guess" "" \
 check_eq "an empty exposition is empty" "" \
 	"$(printf '' | screen_probe_extract_metric xpf_screen_drops_total)"
 
-# The decisive check from the issue: a labeled per-reason witness increment,
-# fed through the extractor into the verdict layer, must render the intended
-# DROP/PASS polarity. On master the same fixture produced an EMPTY witness
-# sample and therefore VOID, whatever the counters actually did.
+# The decisive check from the issue: the witness moves both its per-reason
+# counter and the aggregate. The live probe takes the aggregate subject
+# baseline after the witness, so witness-only movement is a flat subject
+# delta; one additional aggregate count means the subject was dropped.
 
-PROM_DROPPED='xpf_screen_drops_total 8
+PROM_DROPPED='xpf_screen_drops_total 9
 xpf_screen_drops_by_reason_total{reason="tear-drop"} 3
 xpf_screen_drops_by_reason_total{reason="syn-flood"} 5
 '
-PROM_PASSED='xpf_screen_drops_total 7
+PROM_PASSED='xpf_screen_drops_total 8
 xpf_screen_drops_by_reason_total{reason="tear-drop"} 3
 xpf_screen_drops_by_reason_total{reason="syn-flood"} 5
 '
@@ -180,10 +180,10 @@ _sb="$(printf '%s' "$PROM_BEFORE" | screen_probe_extract_metric xpf_screen_drops
 _sa_d="$(printf '%s' "$PROM_DROPPED" | screen_probe_extract_metric xpf_screen_drops_total)"
 _sa_p="$(printf '%s' "$PROM_PASSED" | screen_probe_extract_metric xpf_screen_drops_total)"
 
-check "a labeled witness increment with a moved aggregate is DROPPED" DROPPED \
-	"$(screen_probe_verdict armed "$_wb" "$_wa_d" "$_sb" "$_sa_d")"
-check "a labeled witness increment with a flat aggregate is PASSED" PASSED \
-	"$(screen_probe_verdict armed "$_wb" "$_wa_p" "$_sb" "$_sa_p")"
+check "a witness-only aggregate increment is PASSED" PASSED \
+	"$(screen_probe_verdict armed "$_wb" "$_wa_p" 8 8)"
+check "a subject increment after the witness is DROPPED" DROPPED \
+	"$(screen_probe_verdict armed "$_wb" "$_wa_d" 8 9)"
 check "a labeled witness family that vanishes mid-probe is VOID" VOID \
 	"$(screen_probe_verdict armed "$_wb" "" "$_sb" "$_sa_d")"
 
