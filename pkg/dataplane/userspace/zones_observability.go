@@ -485,6 +485,12 @@ func AmbiguousHostInboundAddresses(cfg *config.Config) []AmbiguousHostInboundAdd
 		for _, a := range v.V6Addrs {
 			record("inet6", a, sig, v.Zone)
 		}
+		for _, a := range v.IngressDenyV4 {
+			record("inet", a, sig, v.Zone)
+		}
+		for _, a := range v.IngressDenyV6 {
+			record("inet6", a, sig, v.Zone)
+		}
 	}
 	keys := make([]string, 0, len(byAddr))
 	for k := range byAddr {

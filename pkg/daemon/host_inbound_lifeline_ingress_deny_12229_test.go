@@ -130,10 +130,10 @@ func TestLifelineSharedDenyAllHasIngressOnlyDrop12229(t *testing.T) {
 	}
 }
 
-func TestLifelineSharedAdmittingViewKeepsDestinationPolicy12229(t *testing.T) {
+func TestLifelineSharedAdmittingViewUsesIngressPolicy12229(t *testing.T) {
 	cfg := lifelineDenyAllConfig12229()
 	cfg.Security.Zones["untrust"].HostInboundTraffic = &config.HostInboundTraffic{
-		SystemServices: []string{"ssh"},
+		SystemServices: []string{"ping"},
 	}
 	views := dpuserspace.BuildZoneHostInboundViewsFromSnapshots(cfg, lifelineDenyAllSnapshot12229())
 	var untrust *dpuserspace.ZoneHostInboundView
@@ -146,17 +146,21 @@ func TestLifelineSharedAdmittingViewKeepsDestinationPolicy12229(t *testing.T) {
 	if untrust == nil {
 		t.Fatalf("no untrust view in builder output: %+v", views)
 	}
-	if !strings.Contains("\n"+strings.Join(untrust.V4Addrs, "\n")+"\n", "\n"+lifelineSharedAddr12229+"\n") {
-		t.Fatalf("admitting view must keep shared address in its destination policy: %+v", untrust)
+	if strings.Contains(strings.Join(untrust.V4Addrs, " "), lifelineSharedAddr12229) ||
+		!strings.Contains(strings.Join(untrust.IngressDenyV4, " "), lifelineSharedAddr12229) {
+		t.Fatalf("admitting view must withhold shared lifeline address from destination-only policy: %+v", untrust)
 	}
 	payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
-	service := lifelineIngressRule12229(payload, "ge-0-0-0", "ip", lifelineSharedAddr12229, "tcp dport 22 accept")
+	service := lifelineIngressRule12229(payload, "ge-0-0-0", "ip", lifelineSharedAddr12229, "icmp type echo-request accept")
 	drop := lifelineIngressRule12229(payload, "ge-0-0-0", "ip", lifelineSharedAddr12229, "drop")
 	if service == "" || drop == "" {
-		t.Fatalf("admitting view must keep shared destination service policy:\n%s", payload)
+		t.Fatalf("admitting view must preserve service policy on data ingress:\n%s", payload)
 	}
-	if strings.Count(payload, service) != 1 || strings.Count(payload, drop) != 1 {
-		t.Fatalf("expected one ingress service rule and one counted catch-all for the admitting view, service=%q drop=%q\n%s", service, drop, payload)
+	if strings.Contains(payload, `    ip daddr `+lifelineSharedAddr12229+` counter name`) {
+		t.Fatalf("shared address must not receive destination-only service/drop rules that affect fxp0:\n%s", payload)
+	}
+	if strings.Contains(payload, `iifname "fxp0" ip daddr `+lifelineSharedAddr12229) {
+		t.Fatalf("lifeline interface must remain outside data-zone ingress policy:\n%s", payload)
 	}
 }
 
