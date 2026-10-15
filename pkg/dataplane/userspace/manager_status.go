@@ -49,6 +49,7 @@ func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 // on absence.
 func (m *Manager) setLastStatusLocked(status ProcessStatus) {
 	m.lastStatus = status
+	m.helperStatusView.Store(&status)
 	m.helperStatusObserved = true
 	// #9902 F-026: exactly one bump per publication (all callers hold m.mu).
 	m.lastStatusSeq++
@@ -61,55 +62,28 @@ func (m *Manager) setLastStatusLocked(status ProcessStatus) {
 // replaces it.
 func (m *Manager) clearLastStatusLocked() {
 	m.lastStatus = ProcessStatus{}
+	m.helperStatusView.Store(nil)
 	m.helperStatusObserved = false
 	m.publishHAWatchdogSnapshotLocked()
 }
 
 func (m *Manager) Status() (ProcessStatus, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.proc == nil {
-		if m.lastStatus.PID != 0 {
-			return m.lastStatus, nil
-		}
-		return ProcessStatus{}, errors.New("userspace dataplane helper not running")
+	view := m.helperStatusView.Load()
+	if view == nil || view.PID == 0 {
+		return ProcessStatus{}, errors.New("userspace dataplane helper not running or has not reported status")
 	}
-
-	var status ProcessStatus
-	if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err != nil {
-		if m.lastStatus.PID != 0 {
-			return m.lastStatus, err
-		}
-		return ProcessStatus{}, err
-	}
-	if err := m.applyHelperStatusLocked(&status); err != nil {
-		return status, err
-	}
-	return status, nil
+	return *view, nil
 }
 
-// CachedStatus returns the most recent ProcessStatus captured by a
-// control-socket round-trip (primarily the 1 Hz statusLoop, which
-// refreshes m.lastStatus every second via applyHelperStatusLocked),
-// WITHOUT issuing a new control-socket request. The bool is false
-// when no status has been captured yet (helper not started or never
-// polled), in which case the caller should hold its previous values.
-//
-// This exists so low-priority periodic consumers -- specifically the
-// fwdstatus CPU sampler -- can read worker telemetry off the shared
-// status poll instead of issuing their own redundant 1 Hz "status"
-// request, which would double the control-socket status rate and
-// starve session installs during bulk sync (#3970; CLAUDE.md
-// "Control socket contention"). Unlike Status(), this MUST NOT touch
-// the control socket.
+// CachedStatus returns the most recent status published by the status poll.
+// It is an atomic read so metrics and sampler callers do not contend with
+// status reconciliation or control-socket I/O (#13093).
 func (m *Manager) CachedStatus() (ProcessStatus, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.lastStatus.PID == 0 {
+	view := m.helperStatusView.Load()
+	if view == nil || view.PID == 0 {
 		return ProcessStatus{}, false
 	}
-	return m.lastStatus, true
+	return *view, true
 }
 
 // errLinkCycleInFlight refuses an operator worker-affecting verb while a RETH

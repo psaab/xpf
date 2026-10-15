@@ -153,7 +153,7 @@ func TestStatusLoopWiresTheLivenessCount9651(t *testing.T) {
 		}
 		found := false
 		ast.Inspect(s.Init, func(x ast.Node) bool {
-			if sel, ok := x.(*ast.SelectorExpr); ok && sel.Sel.Name == "requestLocked" {
+			if id, ok := x.(*ast.Ident); ok && id.Name == "pollErr" {
 				found = true
 			}
 			return true

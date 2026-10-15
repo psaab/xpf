@@ -175,6 +175,8 @@ func (m *Manager) requestDetailedLocked(req ControlRequest) (ControlResponse, er
 // so paged exports can release m.mu while waiting on a helper response and
 // revalidate the helper/config generation before applying the response.
 func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket string) (ControlResponse, error) {
+	m.controlReqMu.Lock()
+	defer m.controlReqMu.Unlock()
 	if controlSocket == "" {
 		return ControlResponse{}, &knownUnsentError{msg: errControlSocketNotConfigured.Error(), cause: errControlSocketNotConfigured}
 	}
