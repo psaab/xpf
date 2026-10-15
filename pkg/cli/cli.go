@@ -69,6 +69,7 @@ type CLI struct {
 	// clockSkewAlarmsFn returns daemon-resident pre-break fabric-auth clock
 	// alarms for `show system alarms` (#10025). Nil when no monitor is wired.
 	clockSkewAlarmsFn           func() []clockskew.ActiveAlarm
+	fabricAuthUnarmedAlarmFn    func() string
 	peerSnapshotProtocolAlarmFn func() string
 	feedsFn                     func() map[string]feeds.FeedInfo
 	feedsAckFn                  func(feed string, candidateID uint64, candidateHash, baselineHash string, oldCount, newCount int, actor, reason string) error
@@ -290,6 +291,12 @@ func (c *CLI) SetClockSkewAlarmsFn(fn func() []clockskew.ActiveAlarm) {
 // deferral alarm into `show system alarms`.
 func (c *CLI) SetPeerSnapshotProtocolAlarmFn(fn func() string) {
 	c.peerSnapshotProtocolAlarmFn = fn
+}
+
+// SetFabricAuthUnarmedAlarmFn wires the daemon-resident fabric-auth downgrade
+// alarm into `show system alarms`.
+func (c *CLI) SetFabricAuthUnarmedAlarmFn(fn func() string) {
+	c.fabricAuthUnarmedAlarmFn = fn
 }
 
 // SetFeedsFn sets a callback for retrieving live dynamic address feed status.

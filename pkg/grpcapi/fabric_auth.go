@@ -491,6 +491,12 @@ func (s *Server) fabricAuthUnarmedAlarm() string {
 		remaining.Round(time.Second).String() + " remaining)"
 }
 
+// FabricAuthUnarmedAlarm reports the fabric-auth posture for the local CLI.
+// The remote ShowText renderer calls the same implementation internally.
+func (s *Server) FabricAuthUnarmedAlarm() string {
+	return s.fabricAuthUnarmedAlarm()
+}
+
 // checkFabricAuth authenticates an empty-request or stream RPC by its metadata
 // token. Unary production calls use checkFabricAuthRequest to verify the actual
 // protobuf arguments.

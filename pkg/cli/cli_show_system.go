@@ -383,11 +383,12 @@ func (c *CLI) showSystemServices() error {
 		fmt.Println(line)
 	}
 
-	// SSH
 	if cfg.System.Services != nil && cfg.System.Services.SSH != nil {
-		if cfg.System.Services.SSH.RootLogin == "allow" {
-			fmt.Println("  SSH root login: enabled")
+		rootLogin := cfg.System.Services.SSH.RootLogin
+		if rootLogin == "" {
+			rootLogin = "deny"
 		}
+		fmt.Printf("  SSH:            enabled (root-login: %s)\n", rootLogin)
 	}
 
 	// SNMP
@@ -429,6 +430,33 @@ func (c *CLI) showSystemServices() error {
 			}
 		}
 	}
+	if cfg.System.Services != nil && cfg.System.Services.WebManagement != nil {
+		wm := cfg.System.Services.WebManagement
+		if wm.HTTP {
+			iface := "all"
+			if wm.HTTPInterface != "" {
+				iface = wm.HTTPInterface
+			}
+			fmt.Printf("  Web HTTP:       enabled (interface: %s)\n", iface)
+		}
+		if wm.HTTPS {
+			iface := "all"
+			if wm.HTTPSInterface != "" {
+				iface = wm.HTTPSInterface
+			}
+			cert := ""
+			if wm.SystemGeneratedCert {
+				cert = ", system-generated-certificate"
+			}
+			fmt.Printf("  Web HTTPS:      enabled (interface: %s%s)\n", iface, cert)
+		}
+	}
+	if cfg.System.Services != nil && cfg.System.Services.DNSEnabled {
+		fmt.Println("  DNS:            enabled")
+	}
+	if cfg.Security.Log.Mode != "" {
+		fmt.Printf("  Security log:   mode %s\n", cfg.Security.Log.Mode)
+	}
 
 	// DHCP server
 	if cfg.System.DHCPServer.DHCPLocalServer != nil && len(cfg.System.DHCPServer.DHCPLocalServer.Groups) > 0 {
@@ -454,7 +482,13 @@ func (c *CLI) showSystemServices() error {
 	// Syslog
 	if len(cfg.Security.Log.Streams) > 0 {
 		fmt.Printf("  Syslog:         %d stream(s)\n", len(cfg.Security.Log.Streams))
-		for _, stream := range cfg.Security.Log.Streams {
+		streamNames := make([]string, 0, len(cfg.Security.Log.Streams))
+		for name := range cfg.Security.Log.Streams {
+			streamNames = append(streamNames, name)
+		}
+		sort.Strings(streamNames)
+		for _, name := range streamNames {
+			stream := cfg.Security.Log.Streams[name]
 			sev := "all"
 			if stream.Severity != "" {
 				sev = stream.Severity + "+"
@@ -1136,11 +1170,18 @@ func (c *CLI) handleShowSystem(args []string) error {
 		if c.peerSnapshotProtocolAlarmFn != nil {
 			peerSnapshotAlarm = c.peerSnapshotProtocolAlarmFn()
 		}
+		var fabricAuthAlarm string
+		if c.fabricAuthUnarmedAlarmFn != nil {
+			fabricAuthAlarm = c.fabricAuthUnarmedAlarmFn()
+		}
 		n := len(warnings) + len(clockAlarms)
 		if divergence != "" {
 			n++
 		}
 		if peerSnapshotAlarm != "" {
+			n++
+		}
+		if fabricAuthAlarm != "" {
 			n++
 		}
 		if n == 0 {
@@ -1156,6 +1197,9 @@ func (c *CLI) handleShowSystem(args []string) error {
 			}
 			if peerSnapshotAlarm != "" {
 				fmt.Printf("  CRITICAL: %s\n", peerSnapshotAlarm)
+			}
+			if fabricAuthAlarm != "" {
+				fmt.Printf("  %s\n", fabricAuthAlarm)
 			}
 			for _, w := range warnings {
 				fmt.Printf("  WARNING: %s\n", w)
