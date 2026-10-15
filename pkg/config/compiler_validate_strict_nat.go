@@ -655,6 +655,110 @@ func validateSourceNATPoolStrict(cfg *Config) error {
 	return nil
 }
 
+// validateSourceNATDeterministicStrict validates deterministic source-pool
+// invariants after compilation. Keeping this in the uniform gates lets
+// CompileConfigLenient warn and preserve a configured-but-incomplete pool.
+func validateSourceNATDeterministicStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	pools := cfg.Security.NAT.SourcePools
+	names := make([]string, 0, len(pools))
+	for name := range pools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		pool := pools[name]
+		if pool == nil || pool.Deterministic == nil {
+			continue
+		}
+		det := pool.Deterministic
+		if det.BlockSize <= 0 {
+			return fmt.Errorf("pool %q: deterministic block-size must be > 0", pool.Name)
+		}
+		if det.HostAddress == "" {
+			return fmt.Errorf("pool %q: deterministic host address required", pool.Name)
+		}
+		_, hostNet, err := net.ParseCIDR(det.HostAddress)
+		if err != nil {
+			return fmt.Errorf("pool %q: invalid host address %q: %w", pool.Name, det.HostAddress, err)
+		}
+		ones, bits := hostNet.Mask.Size()
+		portLow, portHigh := pool.PortLow, pool.PortHigh
+		if portLow == 0 {
+			portLow = 1024
+		}
+		if portHigh == 0 {
+			portHigh = 65535
+		}
+		portRange := portHigh - portLow + 1
+		if det.BlockSize > portRange {
+			return fmt.Errorf("pool %q: block-size %d exceeds port range %d", pool.Name, det.BlockSize, portRange)
+		}
+		blocksPerIP := portRange / det.BlockSize
+		var poolHosts uint64
+		if pool.Address != "" {
+			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(pool.Address))
+		}
+		for _, address := range pool.Addresses {
+			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(address))
+		}
+		totalBlocks := uint64(math.MaxUint64)
+		if poolHosts <= math.MaxUint64/uint64(blocksPerIP) {
+			totalBlocks = poolHosts * uint64(blocksPerIP)
+		}
+
+		if bits == 128 {
+			if ones != 32 && ones != 64 {
+				return fmt.Errorf("pool %q: IPv6 host prefix must be /32 or /64, got /%d", pool.Name, ones)
+			}
+			if totalBlocks == 0 {
+				return fmt.Errorf("pool %q: insufficient capacity (0 blocks) for IPv6 deterministic NAT", pool.Name)
+			}
+		} else {
+			hostCount := uint64(1) << uint(bits-ones)
+			if totalBlocks < hostCount {
+				return fmt.Errorf("pool %q: insufficient capacity (%d blocks) for %d subscribers", pool.Name, totalBlocks, hostCount)
+			}
+		}
+		if pool.PersistentNAT != nil {
+			return fmt.Errorf("pool %q: deterministic and persistent-nat are mutually exclusive", pool.Name)
+		}
+		if cfg.Security.NAT.AddressPersistent {
+			return fmt.Errorf("pool %q: deterministic and address-persistent are mutually exclusive", pool.Name)
+		}
+	}
+	return nil
+}
+
+// validateDestinationNATPoolUnknownLeavesStrict (#13538) mirrors the
+// source-pool closed-world gate. Destination pool leaves were previously
+// discarded without recording them, bypassing strict validation.
+func validateDestinationNATPoolUnknownLeavesStrict(cfg *Config) error {
+	if cfg == nil || cfg.Security.NAT.Destination == nil {
+		return nil
+	}
+	pools := cfg.Security.NAT.Destination.Pools
+	names := make([]string, 0, len(pools))
+	for name := range pools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pool := pools[name]
+		if pool == nil || len(pool.UnknownLeaves) == 0 {
+			continue
+		}
+		return fmt.Errorf(
+			"destination-nat pool %q: unsupported pool leaf %q is not implemented "+
+				"and would be silently dropped (#13538)",
+			name, pool.UnknownLeaves[0])
+	}
+	return nil
+}
+
 // validateSourceNATPoolUnknownLeavesStrict (#10291) hard-rejects a source-NAT
 // pool child that the compiler does not model. Without this gate, a valid
 // Junos knob or a misspelling commits cleanly and has no effect at runtime.

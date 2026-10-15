@@ -168,6 +168,18 @@ func runUniformGatesNAT(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		}
 	}
 
+	// #13538: destination pools use the same closed-world behavior as source
+	// pools. Strict commits reject unsupported leaves; tolerant loads warn so
+	// persisted configs still boot.
+	if err := validateDestinationNATPoolUnknownLeavesStrict(cfg); err != nil {
+		if opts.lenientDestNATAddresses {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("destination-nat pool unsupported leaf (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #10291 source-NAT pool closed-world gate. The source-pool compiler
 	// supports only its modeled leaves; every other child used to be ignored,
 	// so a valid-but-unimplemented Junos knob or a typo committed cleanly and
@@ -180,6 +192,18 @@ func runUniformGatesNAT(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		if opts.lenientDestNATAddresses {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("source-nat pool unsupported leaf (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
+	// #13538: deterministic validation used to run while compiling pools,
+	// before CompileConfigLenient could downgrade the error. Keep strict
+	// behavior, but warn and retain the pool on tolerant loads.
+	if err := validateSourceNATDeterministicStrict(cfg); err != nil {
+		if opts.lenientDestNATAddresses {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("source-nat deterministic pool (downgraded to warning on tolerant path): %v", err))
 		} else {
 			return err
 		}
