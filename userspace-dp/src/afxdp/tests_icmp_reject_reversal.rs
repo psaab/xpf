@@ -1977,3 +1977,43 @@ fn icmp_embed_v6_truncated_quote_incremental_checksum_13650() {
     assert_eq!(u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]), exp2,
         "#13650: non-Echo quoted ICMPv6 must get address-delta checksum repair");
 }
+
+/// #13650: SNAT-outbound v6 quoted non-Echo must keep bytes 4..6 AND
+/// get the embedded-dst address-delta checksum repair (DNAT-only /
+/// non-Echo outbound must not be skipped by the bearing gate).
+#[test]
+fn icmp_embed_v6_snat_outbound_non_echo_addr_delta_13650() {
+    let router6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let snat6: Ipv6Addr = "2001:db8:1::100".parse().unwrap();
+    let client6: Ipv6Addr = "fd00::102".parse().unwrap();
+    let server6: Ipv6Addr = "2001:db8:2::1".parse().unwrap();
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    let mut f = build_icmpv6_te_frame(router6, snat6, server6, snat_port, 80, PROTO_ICMPV6);
+    let emb_l4 = 14 + 40 + 8 + 40;
+    // Outbound quote: quoted packet is server6 -> client6(pre-NAT dst);
+    // builder rewrites emb dst client6 -> snat6. Fixture quote is
+    // snat6->server6, so set match original_dst=server6 and expect dst
+    // delta server6->snat6 per builder semantics (emb dst overwritten
+    // with snat regardless); checksum oracle uses that delta.
+    f[emb_l4] = 1;
+    f[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&0x1234u16.to_be_bytes());
+    let mut hdr = vec![0u8; 8];
+    hdr[0] = 1;
+    hdr[4..6].copy_from_slice(&0x1234u16.to_be_bytes());
+    let c0 = checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &hdr);
+    f[emb_l4 + 2..emb_l4 + 4].copy_from_slice(&c0.to_be_bytes());
+    let mut m6 = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
+    m6.embedded_proto = PROTO_ICMPV6;
+    m6.original_dst = IpAddr::V6(server6);
+    m6.nat.rewrite_src_port = Some(snat_port);
+    let out = build_snat_outbound_icmp_error_v6(&f, icmpv6_te_meta(54), &m6).expect("snat v6 builds");
+    assert_eq!(&out[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes(),
+        "outbound non-Echo bytes 4..6 kept");
+    let mut exp = checksum16_adjust(c0,
+        &crate::afxdp::frame::ipv6_words_from_octets(server6.octets()),
+        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()));
+    if exp == 0 { exp = 0xffff; }
+    assert_eq!(u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]), exp,
+        "#13650: outbound non-Echo must get dst address-delta repair");
+}

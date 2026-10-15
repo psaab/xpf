@@ -585,24 +585,25 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
         if matches!(emb_proto, PROTO_TCP | PROTO_UDP) && pkt.len() >= emb_l4_offset + 4 {
             pkt.get_mut(emb_l4_offset + 2..emb_l4_offset + 4)?
                 .copy_from_slice(&xlated.to_be_bytes());
-        } else if emb_proto == PROTO_ICMPV6 && pkt.len() >= emb_l4_offset + 8
-            && crate::afxdp::frame::icmp_identifier_bearing(PROTO_ICMPV6, pkt[emb_l4_offset]) {
-            // #13650: incremental RFC 1624 repair (quote is truncated;
-            // never full-recompute). Deltas: embedded dst -> snat_bytes
-            // (done above) and the identifier.
+        } else if emb_proto == PROTO_ICMPV6 && pkt.len() >= emb_l4_offset + 8 {
+            // #13650: incremental RFC 1624 repair (truncated quote; never
+            // full-recompute): embedded dst -> snat_bytes delta always,
+            // identifier delta only for identifier-bearing types.
             let cur_csum = u16::from_be_bytes([pkt[emb_l4_offset+2], pkt[emb_l4_offset+3]]);
             let old_id = u16::from_be_bytes([pkt[emb_l4_offset+4], pkt[emb_l4_offset+5]]);
-            pkt.get_mut(emb_l4_offset + 4..emb_l4_offset + 6)?
-                .copy_from_slice(&xlated.to_be_bytes());
-            if cur_csum != 0 {
-                // old embedded dst = quote dst before rewrite: the
-                // session server is original_dst in this builder's match
-                let old_dst_words = match icmp_match.original_dst {
-                    IpAddr::V6(v) => crate::afxdp::frame::ipv6_words_from_octets(v.octets()),
-                    _ => [0;8],
-                };
-                let mut wo: Vec<u16> = old_dst_words.to_vec(); wo.push(old_id);
-                let mut wn: Vec<u16> = crate::afxdp::frame::ipv6_words_from_octets(snat_bytes).to_vec(); wn.push(xlated);
+            let bearing = crate::afxdp::frame::icmp_identifier_bearing(PROTO_ICMPV6, pkt[emb_l4_offset]);
+            let mut wo: Vec<u16> = Vec::new();
+            let mut wn: Vec<u16> = Vec::new();
+            if let IpAddr::V6(old_dst) = icmp_match.original_dst {
+                wo.extend(crate::afxdp::frame::ipv6_words_from_octets(old_dst.octets()));
+                wn.extend(crate::afxdp::frame::ipv6_words_from_octets(snat_bytes));
+            }
+            if bearing && old_id != xlated {
+                pkt.get_mut(emb_l4_offset + 4..emb_l4_offset + 6)?
+                    .copy_from_slice(&xlated.to_be_bytes());
+                wo.push(old_id); wn.push(xlated);
+            }
+            if !wo.is_empty() && cur_csum != 0 {
                 let mut nc = checksum16_adjust(cur_csum, &wo, &wn);
                 if nc == 0 { nc = 0xffff; }
                 pkt.get_mut(emb_l4_offset+2..emb_l4_offset+4)?.copy_from_slice(&nc.to_be_bytes());
