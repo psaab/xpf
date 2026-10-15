@@ -7,15 +7,15 @@
 use crate::slowpath::SlowPathReinjector;
 use crate::slowpath_reinject_9506::{
     decode_announce, decode_cancel, decode_submit_batch, encode_admit, encode_complete, encode_message,
-    read_message, AdmitDecision, ReinjectCore, MSG_ADMIT, MSG_ANNOUNCE, MSG_CANCEL, MSG_COMPLETE,
-    MSG_SUBMIT_BATCH, ADMIT_SHUTDOWN, SUBMIT_FLAG_DRY_RUN,
+    AdmitDecision, ReinjectCore, MSG_ADMIT, MSG_ANNOUNCE, MSG_CANCEL, MSG_COMPLETE,
+    MSG_SUBMIT_BATCH, SUBMIT_FLAG_DRY_RUN,
 };
 use arc_swap::ArcSwapOption;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -115,14 +115,7 @@ pub(crate) fn serve_submit_conn(
     target: &Arc<ArcSwapOption<SlowPathReinjector>>,
 ) {
     let running = Arc::new(AtomicBool::new(true));
-    let authority_handoff = Arc::new(Mutex::new(()));
-    serve_submit_conn_with_running(
-        stream,
-        fallback_core,
-        target,
-        &running,
-        &authority_handoff,
-    );
+    serve_submit_conn_with_running(stream, fallback_core, target, &running);
 }
 
 fn serve_submit_conn_with_running(
@@ -130,7 +123,6 @@ fn serve_submit_conn_with_running(
     fallback_core: &Arc<ReinjectCore>,
     target: &Arc<ArcSwapOption<SlowPathReinjector>>,
     running: &Arc<AtomicBool>,
-    authority_handoff: &Arc<Mutex<()>>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
@@ -146,12 +138,8 @@ fn serve_submit_conn_with_running(
             }
             Ok(FrameRead::Closed) | Err(_) => break,
         };
-        // Serialize authority selection with target installation. The
-        // lifecycle handoff copies state and swaps the ArcSwap under this
-        // same mutex, so an ANNOUNCE cannot land in the old/new gap.
-        let _handoff_guard = authority_handoff
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Both the fallback and every published target share the same core,
+        // so target replacement requires no cross-core authority handoff.
         // The Go client keeps one connection for the daemon lifetime. Resolve
         // the target for every message so a client that connects during
         // startup (before the first snapshot creates the slow path) does not
@@ -278,7 +266,6 @@ pub(crate) fn spawn_reinject_socket_servers(
     core: Arc<ReinjectCore>,
     target: Arc<ArcSwapOption<SlowPathReinjector>>,
     running: Arc<AtomicBool>,
-    authority_handoff: Arc<Mutex<()>>,
 ) -> Result<ReinjectSocketServers, String> {
     let submit_path = derive_reinject_submit_path(control_socket);
     let complete_path = derive_reinject_complete_path(control_socket);
@@ -310,7 +297,6 @@ pub(crate) fn spawn_reinject_socket_servers(
     let submit_running = running.clone();
     let submit_core = core.clone();
     let submit_target = target.clone();
-    let submit_handoff = authority_handoff.clone();
     let submit_thread = thread::Builder::new()
         .name("xpf-reinject-submit".to_string())
         .spawn(move || {
@@ -328,7 +314,6 @@ pub(crate) fn spawn_reinject_socket_servers(
                             &submit_core,
                             &submit_target,
                             &submit_running,
-                            &submit_handoff,
                         );
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {

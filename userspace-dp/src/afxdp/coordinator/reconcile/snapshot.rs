@@ -673,7 +673,11 @@ pub(super) fn apply_snapshot(
         // #2408: size the slow-path TUN to the largest configured
         // data-interface MTU so reinjected jumbo frames are not dropped on
         // the TUN egress (default kernel TUN MTU is 1500).
-        match SlowPathReinjector::new(DEFAULT_SLOW_PATH_TUN, snapshot.slow_path_mtu()) {
+        match SlowPathReinjector::new_with_reinject_core(
+            DEFAULT_SLOW_PATH_TUN,
+            snapshot.slow_path_mtu(),
+            coord.reinject_core.clone(),
+        ) {
             Ok(reinjector) => {
                 coord.last_slow_path_status = reinjector.status();
                 coord.last_slow_path_delegated_status = reinjector.delegated_status();
@@ -694,6 +698,9 @@ pub(super) fn apply_snapshot(
             }
         }
     };
+    // #13196: publish the target synchronously during reconcile; no polling
+    // thread needs to acquire ServerState at 1 kHz or copy state between cores.
+    coord.reinject_target.store(coord.slow_path.clone());
     // #9506 S5: publish the committed snapshot's reinject authority only
     // after the slow-path object is live. Epoch zero intentionally closes the
     // authority; stale or reordered snapshots are rejected inside the core.

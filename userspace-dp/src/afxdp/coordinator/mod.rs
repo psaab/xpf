@@ -378,6 +378,8 @@ pub struct Coordinator {
     /// makes is visible to a reader that took its handle before the store —
     /// which a cloned `ArcSwap` would not give.
     pub(crate) bpf_maps: Arc<ArcSwap<BpfMaps>>,
+    pub(crate) reinject_core: Arc<crate::slowpath_reinject_9506::ReinjectCore>,
+    pub(crate) reinject_target: Arc<arc_swap::ArcSwapOption<SlowPathReinjector>>,
     pub(crate) slow_path: Option<Arc<SlowPathReinjector>>,
     pub(crate) local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
     /// #10597: control-thread-decapped uncovered WG records are routed to
@@ -679,10 +681,14 @@ impl Coordinator {
             #[cfg(test)]
             &synced_import_cap_override,
         );
+        let reinject_core = crate::slowpath_reinject_9506::ReinjectCore::new_shared();
+        let reinject_target = Arc::new(arc_swap::ArcSwapOption::new(None));
         Self {
             session_domain,
             steering_owners,
             bpf_maps,
+            reinject_core,
+            reinject_target,
             slow_path: None,
             local_tunnel_deliveries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
             wg_uncovered_queues: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
@@ -1139,6 +1145,7 @@ impl Coordinator {
             .slow_path
             .as_ref()
             .and_then(|slow| slow.reinject_status());
+        self.reinject_target.store(None);
         self.slow_path = None;
         // #7209: ONE store of the whole set; the previous set's fds close when
         // the last holder releases (see `BpfMaps`). With no readers this is

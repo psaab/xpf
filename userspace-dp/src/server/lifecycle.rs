@@ -18,8 +18,6 @@ use crate::server::reinject_9506::{
     ReinjectSocketServers, derive_reinject_complete_path, derive_reinject_submit_path,
     spawn_reinject_socket_servers,
 };
-use crate::slowpath::SlowPathReinjector;
-use arc_swap::ArcSwapOption;
 use std::time::Instant;
 
 // Target for the kernel socket-buffer sysctls, in bytes. MUST match the Go
@@ -339,6 +337,9 @@ pub(crate) fn run() -> Result<(), String> {
 
     let state_writer = Arc::new(StateWriter::new());
     let running = Arc::new(AtomicBool::new(true));
+    let coordinator = afxdp::Coordinator::new();
+    let reinject_core = coordinator.reinject_core.clone();
+    let reinject_target = coordinator.reinject_target.clone();
     let state = Arc::new(Mutex::new(ServerState {
         status: ProcessStatus {
             pid: std::process::id() as i32,
@@ -620,7 +621,7 @@ pub(crate) fn run() -> Result<(), String> {
         },
         snapshot: None,
         afxdp: {
-            let mut c = afxdp::Coordinator::new();
+            let mut c = coordinator;
             c.poll_mode = args.poll_mode;
             c
         },
@@ -647,60 +648,13 @@ pub(crate) fn run() -> Result<(), String> {
     };
     let main_session_domain = session_domain.clone();
 
-    let reinject_core = crate::slowpath_reinject_9506::ReinjectCore::new_shared();
     let reinject_fallback = reinject_core.clone();
-    let reinject_handoff = Arc::new(std::sync::Mutex::new(()));
-    let reinject_target: Arc<ArcSwapOption<SlowPathReinjector>> =
-        Arc::new(ArcSwapOption::new(None));
     let reinject_servers: ReinjectSocketServers = spawn_reinject_socket_servers(
         &args.control_socket,
-        reinject_core,
+        reinject_core.clone(),
         reinject_target.clone(),
         running.clone(),
-        reinject_handoff.clone(),
     )?;
-    eprintln!(
-        "xpf-userspace-dp: reinject sockets at {} and {}",
-        reinject_servers.submit_path, reinject_servers.complete_path
-    );
-    let target_sync_state = state.clone();
-    let target_sync = reinject_target.clone();
-    let target_sync_fallback = reinject_fallback.clone();
-    let target_sync_handoff = reinject_handoff.clone();
-    let target_sync_running = running.clone();
-    let target_sync_thread = thread::Builder::new()
-        .name("xpf-reinject-target".to_string())
-        .spawn(move || {
-            let mut installed_target: Option<Arc<SlowPathReinjector>> = None;
-            while target_sync_running.load(Ordering::Acquire) {
-                let slow_path = target_sync_state
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.afxdp.slow_path.clone());
-                let changed = match (&installed_target, &slow_path) {
-                    (None, None) => false,
-                    (Some(previous), Some(current)) => !Arc::ptr_eq(previous, current),
-                    _ => true,
-                };
-                if changed {
-                    let _handoff_guard = target_sync_handoff
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let source_core = installed_target
-                        .as_ref()
-                        .map(|previous| previous.reinject_core())
-                        .unwrap_or_else(|| target_sync_fallback.clone());
-                    match slow_path.as_ref() {
-                        Some(current) => current.reinject_core().copy_authority_from(&source_core),
-                        None => target_sync_fallback.copy_authority_from(&source_core),
-                    }
-                    target_sync.store(slow_path.clone());
-                    installed_target = slow_path;
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
-        })
-        .map_err(|e| format!("spawn reinject target sync: {e}"))?;
     // Start the event stream sender (connects to daemon's event listener socket).
     {
         let event_socket_path = derive_event_socket_path(&args.control_socket);
@@ -843,9 +797,6 @@ pub(crate) fn run() -> Result<(), String> {
     // Wait for the session thread to finish.
     if let Err(panic) = session_thread.join() {
         eprintln!("xpf-userspace-dp: session thread panicked: {panic:?}");
-    }
-    if let Err(panic) = target_sync_thread.join() {
-        eprintln!("xpf-userspace-dp: reinject target sync panicked: {panic:?}");
     }
     if let Err(panic) = reinject_servers.submit_thread.join() {
         eprintln!("xpf-userspace-dp: reinject submit thread panicked: {panic:?}");
