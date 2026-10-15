@@ -62,38 +62,36 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 				break
 			}
 		}
-		// #9570 / #12249: reserved-zone poison uses the application sentinel
-		// only as its wire carrier. Its cause is reported by the zone arm
-		// (collectPolicyZoneRejections); reporting it here as well would tell
-		// the operator that `application any` is unrepresentable. An
-		// application that is independently bad still records its own offending
-		// tokens, so it is still reported.
-		if appBad && (rule.zonePairGlobalSentinelSide != "" || rule.zonePairDefinedAnySide != "") &&
-			len(rule.rejectedApplications) == 0 {
+		schedulerBad := rule.rejectedScheduler != ""
+		genericCarrier := len(rule.rejectedApplications) == 1 &&
+			rule.rejectedApplications[0] == lenientDroppedConstraintToken
+		// #9570 / #12249 / #12244 / #12288 / #12234: these causes use the
+		// unsupported-application term as a wire carrier. Do not misreport the
+		// carrier token as an actual application when its compile-time metadata
+		// identifies the cause.
+		hasCarrierCause := schedulerBad || len(rule.malformedZonePairShapes) > 0 ||
+			len(rule.unknownSecurityPoliciesChildren) > 0 ||
+			rule.zonePairGlobalSentinelSide != "" || rule.zonePairDefinedAnySide != ""
+		if appBad && genericCarrier && hasCarrierCause {
 			appBad = false
 		}
 		srcBad := addressListHasSentinel(rule.SourceLiterals) || addressListHasSentinel(rule.SourceAddresses)
 		dstBad := addressListHasSentinel(rule.DestinationLiterals) || addressListHasSentinel(rule.DestinationAddresses)
-		// #12288: the synthetic malformed-zone-pair carrier has no compiled
-		// authored policy, so its generic application token is only the wire
-		// poison. Render the compile-time shape metadata as the actual cause.
-		if appBad && len(rule.malformedZonePairShapes) > 0 &&
-			len(rule.rejectedApplications) == 1 &&
-			rule.rejectedApplications[0] == lenientDroppedConstraintToken &&
-			!srcBad && !dstBad {
+		// #12288/#12234 can co-occur with address causes and with each other;
+		// each compile-time carrier cause must be reported independently.
+		if len(rule.malformedZonePairShapes) > 0 {
 			reasons = append(reasons, fmt.Sprintf("names content the userspace matcher cannot represent: %s was skipped; the userspace helper rejects the whole policy snapshot (synthetic carrier %s)",
 				rejectionCause("malformed zone-pair context", rule.malformedZonePairShapes), policyRejectionScope(rule)))
-			continue
 		}
-		if appBad && len(rule.unknownSecurityPoliciesChildren) > 0 &&
-			len(rule.rejectedApplications) == 1 &&
-			rule.rejectedApplications[0] == lenientDroppedConstraintToken &&
-			!srcBad && !dstBad {
+		if len(rule.unknownSecurityPoliciesChildren) > 0 {
 			reasons = append(reasons, fmt.Sprintf("%s was skipped; the userspace helper rejects the whole policy snapshot (synthetic carrier %s)",
 				rejectionCause("unknown security policies child", rule.unknownSecurityPoliciesChildren), policyRejectionScope(rule)))
-			continue
 		}
-		schedulerBad := rule.rejectedScheduler != ""
+		// #9570 / #12249: the zone arm reports these sentinel causes.
+		if appBad && (rule.zonePairGlobalSentinelSide != "" || rule.zonePairDefinedAnySide != "") &&
+			len(rule.rejectedApplications) == 0 {
+			appBad = false
+		}
 		if !appBad && !srcBad && !dstBad && !schedulerBad {
 			continue
 		}
@@ -367,4 +365,3 @@ func collectPolicyCIDRMaskRejections(policies []PolicyRuleSnapshot) []string {
 	}
 	return reasons
 }
-
