@@ -693,7 +693,8 @@ func (s *sender) rsReceiver(ch chan<- netip.Addr) {
 			continue
 		}
 
-		if _, ok := msg.(*ndp.RouterSolicitation); !ok {
+		rs, ok := msg.(*ndp.RouterSolicitation)
+		if !ok {
 			continue
 		}
 
@@ -701,9 +702,9 @@ func (s *sender) rsReceiver(ch chan<- netip.Addr) {
 		// discard an RS that fails the on-link / source-scope checks so an
 		// off-link or spoofed solicitation cannot trigger a multicast RA
 		// (RA-injection / DoS surface, #5095). Fail closed.
-		if !validRSReceive(cm, src) {
+		if !validRSReceive(cm, src, rs) {
 			slog.Debug("ra: discarding Router Solicitation failing RFC 4861 §6.1.1 "+
-				"receive validation (hop-limit != 255 or off-link source)",
+				"receive validation (hop-limit, source scope, or unspecified-source option)",
 				"interface", s.cfg.Interface, "src", src)
 			continue
 		}
@@ -716,22 +717,32 @@ func (s *sender) rsReceiver(ch chan<- netip.Addr) {
 }
 
 // validRSReceive applies the RFC 4861 §6.1.1 Router Solicitation receive checks
-// that guard the RA-trigger path (#5095):
+// that guard the RA-trigger path (#5095, #13126):
 //
 //   - the IP Hop Limit MUST be 255 — a value that IP forwarding would have
-//     decremented, so 255 proves the RS provably originated on-link; and
+//     decremented, so 255 proves the RS provably originated on-link;
 //   - the IP source address MUST be the unspecified address (::) or a
-//     link-local unicast (fe80::/10) — the only sources a conformant solicitor
-//     uses. Any global/ULA/multicast source is rejected.
+//     link-local unicast (fe80::/10); and
+//   - an unspecified source MUST NOT carry a Source Link-Layer Address option.
 //
-// A nil control message means the received hop limit is unavailable, so it
-// fails closed. This blocks an off-link or spoofed RS from triggering an RA.
-func validRSReceive(cm *ipv6.ControlMessage, src netip.Addr) bool {
-	if cm == nil || cm.HopLimit != 255 {
+// A nil control message or solicitation means required receive information is
+// unavailable, so it fails closed. This blocks invalid RS from triggering an RA.
+func validRSReceive(cm *ipv6.ControlMessage, src netip.Addr, rs *ndp.RouterSolicitation) bool {
+	if cm == nil || cm.HopLimit != 255 || rs == nil {
 		return false
 	}
 	src = src.Unmap()
-	return src.IsUnspecified() || src.IsLinkLocalUnicast()
+	if !src.IsUnspecified() && !src.IsLinkLocalUnicast() {
+		return false
+	}
+	if src.IsUnspecified() {
+		for _, option := range rs.Options {
+			if linkLayer, ok := option.(*ndp.LinkLayerAddress); ok && linkLayer.Direction == ndp.Source {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // isTimeout reports whether err is an i/o deadline timeout (the expected
