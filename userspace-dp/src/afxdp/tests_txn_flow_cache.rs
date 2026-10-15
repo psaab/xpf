@@ -5257,3 +5257,93 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
         [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
     );
 }
+
+/// #13641: a static ingress `then count` must be charged on EVERY
+/// session-hit packet, not only on cacheable ones. The ACK below is the
+/// cacheable seed (charged by `stage_flow_cache_seed` when it builds the
+/// entry); the FIN is a non-cacheable session hit — `should_cache`
+/// declines it, `from_forward_decision` returns None, and before the fix
+/// its count was silently dropped even though the packet forwarded.
+#[test]
+fn txn_static_input_count_charged_on_non_cacheable_session_hit_13641() {
+    use std::sync::atomic::Ordering;
+
+    let mut snapshot = nat_snapshot();
+    snapshot.interfaces[0].filter_input_v4 = "count-in".to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "count-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "count-all".to_string(),
+            action: "accept".to_string(),
+            count: "c-all".to_string(),
+            ..Default::default()
+        }],
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let input_counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&24)
+        .expect("input filter compiled for ifindex 24")
+        .terms
+        .first()
+        .expect("one term")
+        .counter
+        .clone();
+
+    let run = |binding: &mut BindingWorker, sessions: &mut SessionTable, flags: u8| {
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(8, 8, 8, 8),
+            12345,
+            443,
+            flags,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        let meta = txn_meta_v4(24, flags, (frame.len() - 14) as u16);
+        txn_run_descriptor_checked(
+            binding, sessions, &forwarding, &ha_state, &frame, meta, true,
+        )
+    };
+
+    // SYN: session miss, counted by the miss evaluator.
+    run(&mut binding, &mut sessions, TCP_FLAG_SYN);
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        1,
+        "SYN session-miss count must establish the one-packet base"
+    );
+
+    // ACK: cacheable session hit; the flow-cache seed charges it.
+    run(&mut binding, &mut sessions, TCP_FLAG_ACK);
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        2,
+        "cacheable ACK seed must charge the static INPUT then-count once"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        1,
+        "the ACK must seed the flow cache"
+    );
+
+    // FIN: non-cacheable session hit (TCP control segment). It must be
+    // charged exactly once even though no cache entry is built for it.
+    let (_, fin_dbg) = run(
+        &mut binding,
+        &mut sessions,
+        crate::tcp_flags::TCP_FIN | TCP_FLAG_ACK,
+    );
+    assert!(fin_dbg.tx >= 1, "the FIN session hit must still forward");
+    assert_eq!(
+        input_counter.packets.load(Ordering::Relaxed),
+        3,
+        "#13641: non-cacheable FIN session hit must charge the static \
+         INPUT then-count exactly once"
+    );
+}
