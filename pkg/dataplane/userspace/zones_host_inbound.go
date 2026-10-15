@@ -71,6 +71,15 @@ type ZoneHostInboundView struct {
 	// rules. They are attached to one view only so each ambiguous rule set is
 	// emitted once.
 	IngressDenyNetdevs []string
+	// LifelineNetdevs (#13413) are the linux netdevs of true lifelines
+	// (HostInboundLifelineIngressNetdevs) whose arrivals the stale-reply
+	// uncovered-ingress fallback must never drop for withheld lifeline-
+	// shared addresses. Attached to the first view only, like
+	// IngressDenyNetdevs.
+	LifelineNetdevs []string
+	// LifelineVRFScopes identify enslaved lifeline members excluded from
+	// VRF-scoped stale-reply fallback guards (#13413).
+	LifelineVRFScopes []config.HostInboundVRFIngressScope
 }
 
 // stableRethLinkLocalTarget identifies one logical interface on which the
@@ -732,7 +741,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			AlarmWithoutDrop:     screenProfilesByZone[g.zone].AlarmWithoutDrop,
 		}
 		if len(out) == 0 {
+			view.LifelineNetdevs = HostInboundLifelineIngressNetdevs(cfg)
 			view.IngressDenyNetdevs = ambiguousIngressNetdevs
+			view.LifelineVRFScopes = hostInboundLifelineVRFIngressScopes(lifelineNetdevs, vrfEnslaved, vrfMasters)
 		}
 		out = append(out, view)
 	}
@@ -1535,6 +1546,29 @@ func HostInboundLifelineIngressNetdevs(cfg *config.Config) []string {
 		out = append(out, n)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func hostInboundLifelineVRFIngressScopes(lifelines, vrfEnslaved map[string]bool, vrfMasters map[string]string) []config.HostInboundVRFIngressScope {
+	byMaster := map[string][]string{}
+	for slave := range lifelines {
+		master := vrfMasters[slave]
+		if !vrfEnslaved[slave] || master == "" {
+			continue
+		}
+		byMaster[master] = append(byMaster[master], slave)
+	}
+	masters := make([]string, 0, len(byMaster))
+	for master := range byMaster {
+		masters = append(masters, master)
+	}
+	sort.Strings(masters)
+	out := make([]config.HostInboundVRFIngressScope, 0, len(masters))
+	for _, master := range masters {
+		slaves := byMaster[master]
+		sort.Strings(slaves)
+		out = append(out, config.HostInboundVRFIngressScope{Master: master, Slaves: slaves})
+	}
 	return out
 }
 

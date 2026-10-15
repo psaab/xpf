@@ -249,8 +249,25 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 		addrs = append(addrs, ip)
 	}
 	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
-	appendOwnerGuards := func(ingress []string, ingressNegated bool, vrf []config.HostInboundVRFIngressScope, vrfNegated bool) {
+	lifelineSharedAddrs := make(map[netip.Addr]bool)
+	for _, v := range views {
+		for _, raw := range append(append([]string(nil), v.IngressDenyV4...), v.IngressDenyV6...) {
+			if ip, err := netip.ParseAddr(raw); err == nil {
+				lifelineSharedAddrs[ip.Unmap()] = true
+			}
+		}
+	}
+	otherOwnerAddrs := make(map[netip.Addr]bool, len(addrs))
+	for _, ip := range addrs {
+		if !lifelineSharedAddrs[ip] {
+			otherOwnerAddrs[ip] = true
+		}
+	}
+	appendOwnerGuards := func(ingress []string, ingressNegated bool, vrf []config.HostInboundVRFIngressScope, vrfNegated bool, selected map[netip.Addr]bool) {
 		for _, ip := range addrs {
+			if selected != nil && !selected[ip] {
+				continue
+			}
 			a := admit[ip]
 			family := "ip"
 			if ip.Is6() {
@@ -277,18 +294,20 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 		}
 	}
 	if deny := staleReplySortedUniqueStrings(collectIngressDenyNetdevs(views)); len(deny) > 0 {
-		appendOwnerGuards(deny, false, nil, false)
+		appendOwnerGuards(deny, false, nil, false, nil)
 	}
-	// Direct fallback excludes covered direct netdevs, VRF masters and the
-	// trusted reinject device. VRF-scoped fallback separately guards uncovered
-	// slaves, so excluding the master here does not exempt the whole VRF.
-	var coveredDirect []string
+	// Direct fallback excludes covered direct netdevs and VRF masters, while
+	// lifelines are excluded only for addresses withheld as lifeline-shared.
+	// VRF-scoped fallback separately guards uncovered slaves.
+	var coveredDirect, lifelineNetdevs []string
 	vrfMembers := map[string]map[string]struct{}{}
+	lifelineVRFMembers := map[string]map[string]struct{}{}
 	hasScopedIngress := false
 	for _, v := range views {
 		direct := hostInboundDirectIngressNetdevs(v)
 		coveredDirect = append(coveredDirect, direct...)
 		coveredDirect = append(coveredDirect, v.IngressDenyNetdevs...)
+		lifelineNetdevs = append(lifelineNetdevs, v.LifelineNetdevs...)
 		hasScopedIngress = hasScopedIngress || len(direct) > 0 || len(v.IngressDenyNetdevs) > 0
 		for _, scope := range v.IngressVRFScopes {
 			if scope.Master == "" || len(scope.Slaves) == 0 {
@@ -308,16 +327,42 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 				}
 			}
 		}
+		for _, scope := range v.LifelineVRFScopes {
+			if scope.Master == "" || len(scope.Slaves) == 0 {
+				continue
+			}
+			if lifelineVRFMembers[scope.Master] == nil {
+				lifelineVRFMembers[scope.Master] = map[string]struct{}{}
+			}
+			for _, slave := range scope.Slaves {
+				if slave != "" {
+					lifelineVRFMembers[scope.Master][slave] = struct{}{}
+				}
+			}
+		}
 	}
 	fallbackDirect := staleReplySortedUniqueStrings(coveredDirect)
 	if trustedReinject {
 		fallbackDirect = staleReplySortedUniqueStrings(append(fallbackDirect, HostInboundReinjectIfname))
 	}
+	sharedFallbackDirect := staleReplySortedUniqueStrings(append(append([]string(nil), fallbackDirect...), lifelineNetdevs...))
 	if len(fallbackDirect) > 0 || !hasScopedIngress {
-		appendOwnerGuards(fallbackDirect, true, nil, false)
+		if len(otherOwnerAddrs) > 0 {
+			appendOwnerGuards(fallbackDirect, true, nil, false, otherOwnerAddrs)
+		}
+		if len(lifelineSharedAddrs) > 0 {
+			appendOwnerGuards(sharedFallbackDirect, true, nil, false, lifelineSharedAddrs)
+		}
 	}
-	masters := make([]string, 0, len(vrfMembers))
+	mastersSet := make(map[string]bool, len(vrfMembers)+len(lifelineVRFMembers))
 	for master := range vrfMembers {
+		mastersSet[master] = true
+	}
+	for master := range lifelineVRFMembers {
+		mastersSet[master] = true
+	}
+	masters := make([]string, 0, len(mastersSet))
+	for master := range mastersSet {
 		masters = append(masters, master)
 	}
 	sort.Strings(masters)
@@ -328,7 +373,25 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 			slaves = append(slaves, slave)
 		}
 		sort.Strings(slaves)
-		appendOwnerGuards(nil, false, []config.HostInboundVRFIngressScope{{Master: master, Slaves: slaves}}, true)
+		scope := []config.HostInboundVRFIngressScope{{Master: master, Slaves: slaves}}
+		if len(otherOwnerAddrs) > 0 {
+			appendOwnerGuards(nil, false, scope, true, otherOwnerAddrs)
+		}
+		sharedMembers := make(map[string]bool, len(members)+len(lifelineVRFMembers[master]))
+		for slave := range members {
+			sharedMembers[slave] = true
+		}
+		for slave := range lifelineVRFMembers[master] {
+			sharedMembers[slave] = true
+		}
+		sharedSlaves := make([]string, 0, len(sharedMembers))
+		for slave := range sharedMembers {
+			sharedSlaves = append(sharedSlaves, slave)
+		}
+		sort.Strings(sharedSlaves)
+		if len(lifelineSharedAddrs) > 0 {
+			appendOwnerGuards(nil, false, []config.HostInboundVRFIngressScope{{Master: master, Slaves: sharedSlaves}}, true, lifelineSharedAddrs)
+		}
 	}
 	return out
 }

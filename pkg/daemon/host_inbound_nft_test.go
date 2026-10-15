@@ -353,8 +353,9 @@ func TestHostInboundFilterNoStanzaDefaultDeny(t *testing.T) {
 }
 
 // TestHostInboundFilterLifelineNeverDenied verifies the management (fxp0) and
-// cluster-control (em0) lifeline interfaces never get a host-inbound deny, even
-// when their zone declares a host-inbound stanza.
+// cluster-control (em0) lifeline interfaces never get a positive host-inbound
+// deny scope, even when their zone declares a host-inbound stanza. The stale-
+// reply fallback may name lifelines only in its negated ingress exclusion.
 func TestHostInboundFilterLifelineNeverDenied(t *testing.T) {
 	cfg := hostInboundTestConfig()
 	views := buildAndCheckViews(t, cfg)
@@ -365,10 +366,12 @@ func TestHostInboundFilterLifelineNeverDenied(t *testing.T) {
 	if strings.Contains(payload, "10.99.0.1") {
 		t.Errorf("control/em0 lifeline address must never appear in host-inbound payload:\n%s", payload)
 	}
-	// fxp0 (management) has no static address and is a lifeline — it must not
-	// be scoped either (there is no address to scope, and it is excluded).
-	if strings.Contains(payload, "fxp0") {
-		t.Errorf("management fxp0 must never appear in host-inbound payload:\n%s", payload)
+	// fxp0 has no static address. A stale-reply fallback may mention it only
+	// as a negated ingress exclusion, so replies on management are preserved.
+	for _, line := range strings.Split(payload, "\n") {
+		if strings.Contains(line, "fxp0") && !strings.Contains(line, "iifname != ") {
+			t.Errorf("management fxp0 must not appear in a positive host-inbound scope: %q", line)
+		}
 	}
 }
 

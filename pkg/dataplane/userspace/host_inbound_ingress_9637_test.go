@@ -248,6 +248,7 @@ func TestZoneHostInboundViewLifelineSharedVRFMasterIsNotScoped10431(t *testing.T
 	cfg := ingressCfg9637()
 	cfg.RoutingInstances[0].Interfaces = append(cfg.RoutingInstances[0].Interfaces, "fxp0.0")
 	views := BuildZoneHostInboundViews(cfg)
+	foundLifelineScope := false
 	foundSfmix := false
 	for _, view := range views {
 		if view.Zone == "sfmix" {
@@ -263,9 +264,17 @@ func TestZoneHostInboundViewLifelineSharedVRFMasterIsNotScoped10431(t *testing.T
 				t.Fatalf("view %s has shared lifeline VRF master in deny scope: %+v", view.Zone, view)
 			}
 		}
+		for _, scope := range view.LifelineVRFScopes {
+			if scope.Master == "vrf-sfmix" && len(scope.Slaves) == 1 && scope.Slaves[0] == "fxp0" {
+				foundLifelineScope = true
+			}
+		}
 	}
 	if !foundSfmix {
 		t.Fatal("no sfmix view; views missing")
+	}
+	if !foundLifelineScope {
+		t.Fatal("host-inbound views omit the enslaved fxp0 member from lifeline VRF scopes")
 	}
 }
 
