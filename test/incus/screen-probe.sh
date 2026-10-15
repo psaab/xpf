@@ -14,16 +14,12 @@
 #      `has_screen_state()` and the loss userspace cluster carries no
 #      `security screen` config, so without this the whole stage
 #      short-circuits and the run is green for reasons unrelated to the change.
-#   2. SAMPLE the AGGREGATE `xpf_screen_drops_total`, not the per-reason
-#      series. A parse-failure drop is reason `ip-malformed`, which -- with
-#      `syn-cookie` and `icmp-fragment` -- appears ONLY in the aggregate. There
-#      is no label to sample in the per-reason metric, so a fail-closed drop is
-#      invisible there by construction.
-#   3. Send a WITNESS frame alongside the subject: something crafted to trip a
-#      per-reason screen, whose counter moving proves the path is live. Without
-#      it a flat aggregate cannot distinguish "arrived and was permitted" from
-#      "never arrived", and that ambiguity is what made both earlier attempts
-#      unreadable.
+#   2. Send a WITNESS frame before the subject: something crafted to trip a
+#      per-reason screen, whose counter moving proves the path is live.
+#   3. Take the aggregate subject baseline after the witness, because the
+#      aggregate includes its drop. Without a witness, a flat aggregate cannot
+#      distinguish "arrived and was permitted" from "never arrived", and that
+#      ambiguity is what made both earlier attempts unreadable.
 #   4. DISARM, and verify on BOTH nodes. The cluster is shared and config syncs
 #      to the peer, so a profile left bound changes the environment for every
 #      other lane.
@@ -156,15 +152,20 @@ if arm; then
 fi
 
 witness_before="$(metrics xpf_screen_drops_by_reason_total || true)"
-subject_before="$(metrics xpf_screen_drops_total || true)"
 
 printf 'sending witness frame\n' >&2
 eval "$WITNESS_CMD" || true
+
+# Let the witness reach and update the dataplane counters before sampling.
+sleep 2
+
+witness_after="$(metrics xpf_screen_drops_by_reason_total || true)"
+subject_before="$(metrics xpf_screen_drops_total || true)"
+
 printf 'sending subject frame\n' >&2
 eval "$SUBJECT_CMD" || true
 sleep 2
 
-witness_after="$(metrics xpf_screen_drops_by_reason_total || true)"
 subject_after="$(metrics xpf_screen_drops_total || true)"
 
 verdict="$(screen_probe_verdict "$armed_state" \
