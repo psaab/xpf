@@ -956,6 +956,7 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		}
 		item := &pendingReinject{frame: frame, lease: lease, admissionPending: true, ledger: p.attestation.Ledger, ledgerKey: key}
 		flow.pending = item
+		flow.dispatching = false
 		p.pending[lease.RequestID] = item
 		p.stats.Adjudicated++
 		p.mu.Unlock()

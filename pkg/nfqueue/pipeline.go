@@ -265,9 +265,10 @@ type pendingReinject struct {
 }
 
 type flowState struct {
-	frames  []CaptureFrame
-	pending *pendingReinject
-	retired bool
+	frames      []CaptureFrame
+	pending     *pendingReinject
+	dispatching bool
+	retired     bool
 }
 
 // fragmentDenyKey is deliberately narrower than the legacy FragPool key. It
@@ -657,7 +658,7 @@ func (p *CapturePipeline) enqueueFlowLocked(frame CaptureFrame) []CaptureFrame {
 func (p *CapturePipeline) eligibleLocked() []CaptureFrame {
 	owners := make(map[string][]CaptureFrame)
 	for _, flow := range p.flows {
-		if flow.retired || flow.pending != nil || len(flow.frames) == 0 {
+		if flow.retired || flow.pending != nil || flow.dispatching || len(flow.frames) == 0 {
 			continue
 		}
 		frame := flow.frames[0]
@@ -668,7 +669,10 @@ func (p *CapturePipeline) eligibleLocked() []CaptureFrame {
 		if len(batch) > p.batchCap {
 			batch = batch[:p.batchCap]
 		}
-		frames = append(frames, batch...)
+		for _, frame := range batch {
+			p.flows[frame.FlowKey].dispatching = true
+			frames = append(frames, frame)
+		}
 	}
 	return frames
 }
@@ -878,6 +882,7 @@ func (p *CapturePipeline) submitEligible(frames []CaptureFrame) {
 			}
 			item := &pendingReinject{frame: frame, lease: lease, admissionPending: true}
 			flow.pending = item
+			flow.dispatching = false
 			p.pending[lease.RequestID] = item
 			p.stats.Adjudicated++
 			p.mu.Unlock()
@@ -1035,6 +1040,7 @@ func (p *CapturePipeline) finishFrame(frame CaptureFrame, verdict Verdict) {
 	p.mu.Lock()
 	flowKey := frame.FlowKey
 	if flow := p.flows[flowKey]; flow != nil && len(flow.frames) > 0 && flow.frames[0].Packet == frame.Packet {
+		flow.dispatching = false
 		flow.frames = flow.frames[1:]
 		if len(flow.frames) == 0 && flow.pending == nil {
 			delete(p.flows, flowKey)
