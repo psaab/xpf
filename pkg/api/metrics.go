@@ -639,6 +639,11 @@ type xpfCollector struct {
 	// worker that stopped draining rather than at a fast producer.
 	userspaceWorkerCommandQueueDrops       *prometheus.Desc
 	userspaceSharedSessionPoisonRecoveries *prometheus.Desc
+	// #13292: io_uring status, including silent fallback and kernel-pinned
+	// buffers deliberately retained at teardown.
+	userspaceIoUringActive          *prometheus.Desc
+	userspaceIoUringRetainedBuffers *prometheus.Desc
+	userspaceIoUringRetainedBytes   *prometheus.Desc
 	// #13280: Rust ProcessStatus operational and HA counters.
 	userspaceCosNoOwnerBindingDrops          *prometheus.Desc
 	userspaceIoUringWriteRefused             *prometheus.Desc
@@ -1319,6 +1324,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceInterfaceSNATRegistryCap
 	ch <- c.userspaceWorkerCommandQueuePoisonRecoveries
 	ch <- c.userspaceWorkerCommandQueueDrops
+	ch <- c.userspaceIoUringActive
+	ch <- c.userspaceIoUringRetainedBuffers
+	ch <- c.userspaceIoUringRetainedBytes
 	ch <- c.userspaceCosNoOwnerBindingDrops
 	ch <- c.userspaceIoUringWriteRefused
 	ch <- c.userspaceIoUringWriteRefusedBytes
