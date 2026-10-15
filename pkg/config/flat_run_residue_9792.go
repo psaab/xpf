@@ -183,8 +183,17 @@ func packedOrNestedLeafRun9792(c *Node, container *schemaNode) bool {
 		return false
 	}
 	if len(c.Children) == 0 {
-		// Packed on one node's Keys: the token after the head's value must
-		// itself be a declared leaf, or these are values, not statements.
+		// Packed continuations may be split only at leaf keywords. A container
+		// token owns a body, so splitting there promotes later body tokens into
+		// the enclosing scope (#13108).
+		for i := 1 + head.args; i < len(c.Keys); i++ {
+			if child := container.children[c.Keys[i]]; child != nil {
+				if len(child.children) > 0 || child.wildcard != nil {
+					return false
+				}
+				i += child.args
+			}
+		}
 		return len(c.Keys) > 2 && container.children[c.Keys[2]] != nil
 	}
 	return allDescendantsDeclared9792(c, container)
