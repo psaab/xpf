@@ -346,6 +346,10 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 		fallbackDirect = staleReplySortedUniqueStrings(append(fallbackDirect, HostInboundReinjectIfname))
 	}
 	sharedFallbackDirect := staleReplySortedUniqueStrings(append(append([]string(nil), fallbackDirect...), lifelineNetdevs...))
+	for master := range lifelineVRFMembers {
+		sharedFallbackDirect = append(sharedFallbackDirect, master)
+	}
+	sharedFallbackDirect = staleReplySortedUniqueStrings(sharedFallbackDirect)
 	if len(fallbackDirect) > 0 || !hasScopedIngress {
 		if len(otherOwnerAddrs) > 0 {
 			appendOwnerGuards(fallbackDirect, true, nil, false, otherOwnerAddrs)
@@ -374,7 +378,7 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 		}
 		sort.Strings(slaves)
 		scope := []config.HostInboundVRFIngressScope{{Master: master, Slaves: slaves}}
-		if len(otherOwnerAddrs) > 0 {
+		if len(slaves) > 0 && len(otherOwnerAddrs) > 0 {
 			appendOwnerGuards(nil, false, scope, true, otherOwnerAddrs)
 		}
 		sharedMembers := make(map[string]bool, len(members)+len(lifelineVRFMembers[master]))
@@ -389,7 +393,7 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 			sharedSlaves = append(sharedSlaves, slave)
 		}
 		sort.Strings(sharedSlaves)
-		if len(lifelineSharedAddrs) > 0 {
+		if len(sharedSlaves) > 0 && len(lifelineSharedAddrs) > 0 {
 			appendOwnerGuards(nil, false, []config.HostInboundVRFIngressScope{{Master: master, Slaves: sharedSlaves}}, true, lifelineSharedAddrs)
 		}
 	}
