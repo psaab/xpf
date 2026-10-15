@@ -202,6 +202,19 @@ pub(super) fn stage_flow_cache_hit(
             cached_decision.resolution.disposition,
             ForwardingDisposition::PolicyDenied | ForwardingDisposition::DiscardRoute
         ) {
+            // #13635: a deny can be cached before its opposite-direction
+            // session exists. Once that session is installed, the deny slot
+            // must no longer shadow the live flow (or synthesize a stale RST).
+            // Use alias-aware session resolution: reverse NAT companions can
+            // be found by their translated wire tuple rather than their
+            // canonical table key.
+            if sessions.has_session_hit_at(&flow.forward_key, now_ns) {
+                flow_state
+                    .flow_cache
+                    .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
+                flow_state.flow_cache.reclassify_hit_as_miss();
+                return FlowCacheOutcome::FallThrough;
+            }
             if cached_decision.resolution.disposition == ForwardingDisposition::PolicyDenied
                 && cached.policy_deny.is_none()
             {

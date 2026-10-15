@@ -4932,3 +4932,129 @@ fn expired_scheduler_lease_revalidates_cached_unscheduled_permit12273() {
         cache_consumed, run.flow_cache_tallies
     );
 }
+
+/// #13635 (D3-01): a cached PolicyDenied entry seeded by a pre-session
+/// unsolicited B->A packet must not execute once a live session backs
+/// B->A. Pre-fix the deny arm returned Consumed (dropping the packet and,
+/// for Reject, emitting a forged RST) before the liveness check.
+/// The fix checks liveness inside the deny arm, evicts the stale deny
+/// slot, reclassifies the hit as a miss, and falls through.
+#[test]
+fn policy_deny_cache_hit_falls_through_when_live_session_backs_flow_13635() {
+    let fixture =
+        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let frame = tcp_v4_ack_frame();
+    let entry = cached_deny_entry(
+        ForwardingDisposition::PolicyDenied,
+        Some(CachedPolicyDeny {
+            action: crate::policy::PolicyAction::Reject,
+            policy_id: 13635,
+            application_id: 19,
+            reply_allowed: true,
+        }),
+    );
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed::default(),
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#13635: cached deny must fall through when a live session backs the flow, \
+         not consume/drop it or emit a reject RST"
+    );
+    assert_eq!(
+        run.flow_cache_tallies,
+        (0, 1, 1),
+        "#13635: the stale deny hit must be reclassified as miss+eviction"
+    );
+    assert_eq!(run.dbg_policy_deny, 0);
+    assert_eq!(run.counters.policy_denied_packets, 0);
+    assert!(run.cached_observed_bytes.is_none());
+    assert!(run.scratch.scratch_recycle.is_empty());
+    assert!(run.tx_pipeline.pending_tx_local.is_empty());
+}
+
+/// #13635: same guard for DiscardRoute deny entries.
+#[test]
+fn discard_route_cache_hit_falls_through_when_live_session_backs_flow_13635() {
+    let fixture =
+        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let frame = tcp_v4_ack_frame();
+    let entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed::default(),
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#13635: cached DiscardRoute must fall through when a live session backs the flow"
+    );
+    assert_eq!(run.flow_cache_tallies, (0, 1, 1));
+    assert_eq!(run.dbg_disposition_other, 0);
+    assert!(run.cached_observed_bytes.is_none());
+    assert!(run.scratch.scratch_recycle.is_empty());
+}
+
+/// #13635: reverse-NAT cached denies use the translated wire tuple, while
+/// the worker's backing reverse session remains stored under its canonical
+/// key. The liveness guard must resolve that alias before replaying Reject.
+#[test]
+fn policy_deny_cache_hit_falls_through_for_live_reverse_nat_alias_13635() {
+    use crate::afxdp::NatDecision;
+
+    let fixture =
+        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let frame = tcp_v4_ack_frame();
+    let canonical = test_key();
+    let mut nat = NatDecision::default();
+    nat.rewrite_dst = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 55)));
+    let alias = crate::session::translated_session_key(&canonical, nat);
+    assert_ne!(alias, canonical, "fixture must use a translated alias");
+
+    let mut entry = cached_deny_entry(
+        ForwardingDisposition::PolicyDenied,
+        Some(CachedPolicyDeny {
+            action: crate::policy::PolicyAction::Reject,
+            policy_id: 13635,
+            application_id: 19,
+            reply_allowed: true,
+        }),
+    );
+    entry.key = alias.clone();
+    entry.decision.nat = nat;
+    entry.metadata.is_reverse = true;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            install_key: Some(canonical),
+            flow: Some(SessionFlow {
+                src_ip: alias.src_ip,
+                dst_ip: alias.dst_ip,
+                forward_key: alias,
+            }),
+            ..StageSeed::default()
+        },
+    );
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#13635: a live reverse-NAT companion found by wire alias must defeat \
+         the stale cached reject"
+    );
+    assert_eq!(run.flow_cache_tallies, (0, 1, 1));
+    assert_eq!(run.dbg_policy_deny, 0);
+    assert_eq!(run.counters.policy_denied_packets, 0);
+    assert!(run.tx_pipeline.pending_tx_local.is_empty());
+    assert!(run.cached_observed_bytes.is_none());
+}
