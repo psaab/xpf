@@ -402,7 +402,8 @@ func (r *CompileResult) recordUnarmedSurface(u UnarmedSurface) {
 // carrying an old numeric id (#3075). Both HA nodes and a cold-booting node
 // compute identical ids by construction with zero synced/persisted state, and
 // pkg/daemon/daemon_ha_userspace.go:buildZoneIDs MUST stay byte-identical to
-// this (enforced by an HA-symmetry test).
+// this (enforced by an HA-symmetry test). Special policy-context names are
+// resolved by compilePolicies, not installed as configured zones here.
 func assignZoneIDs(result *CompileResult, cfg *config.Config) {
 	for name := range cfg.Security.Zones {
 		result.ZoneIDs[name] = config.StableZoneID(name)
@@ -1080,11 +1081,27 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 	policySetID := uint32(0)
 
 	for _, zpp := range cfg.Security.Policies {
+		// Zone-pair policies may use Junos' reserved host context and wildcard
+		// context. Keep a defined legacy `any` zone bound to its configured ID;
+		// only treat `any` as a wildcard when it is not a zone definition.
 		fromZone, ok := result.ZoneIDs[zpp.FromZone]
+		if !ok && zpp.FromZone == config.ReservedWildcardZoneName {
+			if _, defined := cfg.Security.Zones[config.ReservedWildcardZoneName]; !defined {
+				fromZone, ok = 0, true
+			}
+		}
 		if !ok {
 			return fmt.Errorf("policy from-zone %q not found", zpp.FromZone)
 		}
 		toZone, ok := result.ZoneIDs[zpp.ToZone]
+		if !ok && zpp.ToZone == config.ReservedWildcardZoneName {
+			if _, defined := cfg.Security.Zones[config.ReservedWildcardZoneName]; !defined {
+				toZone, ok = 0, true
+			}
+		}
+		if !ok && zpp.ToZone == "junos-host" {
+			toZone, ok = config.ZoneIDReservedMin, true
+		}
 		if !ok {
 			return fmt.Errorf("policy to-zone %q not found", zpp.ToZone)
 		}
