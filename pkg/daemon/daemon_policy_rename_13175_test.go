@@ -38,24 +38,37 @@ func TestExpandPolicyRenameAncestryMultiZone13175(t *testing.T) {
 	if !ok {
 		t.Fatal("simultaneous zone renames rejected")
 	}
-	if len(wire) != 3 {
-		t.Fatalf("want two zone-pair and one scoped-global ancestry rows, got %d: %+v", len(wire), wire)
+	if len(wire) != 6 {
+		t.Fatalf("want two zone-pair and four scoped-global ancestry rows, got %d: %+v", len(wire), wire)
 	}
-	foundPair, foundGlobal := false, false
+	foundPair := false
+	globalPairs := make(map[[4]string]bool)
 	for _, row := range wire {
 		switch row.SourceRuleID {
 		case "lan->wan/p":
 			foundPair = row.DestinationFromZone == "lan2" && row.DestinationToZone == "wan2"
 		case "junos-global->junos-global/g":
-			foundGlobal = true
-			if row.SourceFromZone != "lan" || row.SourceToZone != "lan" ||
-				row.DestinationFromZone != "lan2" || row.DestinationToZone != "lan2" {
-				t.Fatalf("unexpected scoped-global ancestry: %+v", row)
-			}
+			globalPairs[[4]string{
+				row.SourceFromZone, row.SourceToZone,
+				row.DestinationFromZone, row.DestinationToZone,
+			}] = true
 		}
 	}
-	if !foundPair || !foundGlobal {
-		t.Fatalf("missing composed ancestry (pair=%v global=%v): %+v", foundPair, foundGlobal, wire)
+	wantGlobalPairs := [][4]string{
+		{"lan", "lan", "lan2", "lan2"},
+		{"lan", "wan", "lan2", "wan2"},
+		{"wan", "lan", "wan2", "lan2"},
+		{"wan", "wan", "wan2", "wan2"},
+	}
+	for _, pair := range wantGlobalPairs {
+		if !globalPairs[pair] {
+			t.Errorf("missing scoped-global ancestry %q->%q => %q->%q: %+v",
+				pair[0], pair[1], pair[2], pair[3], wire)
+		}
+	}
+	if !foundPair || len(globalPairs) != 4 {
+		t.Fatalf("missing composed ancestry (zonePair=%v globalRows=%d): %+v",
+			foundPair, len(globalPairs), wire)
 	}
 	if len(bindings) != 2 {
 		t.Fatalf("want two nonzero zone-pair bindings; got %d", len(bindings))

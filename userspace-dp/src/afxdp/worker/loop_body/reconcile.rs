@@ -217,8 +217,27 @@ pub(super) fn rematch_bound_first_policy_sessions(
         let mut declined = false;
         let local_delivery =
             decision.resolution.disposition == crate::afxdp::ForwardingDisposition::LocalDelivery;
-        if ancestry.len() == 1 {
-            let descriptor = ancestry[0];
+        if let Some(descriptor) = ancestry.iter().copied().find(|descriptor| {
+            ancestry_source_zone_matches(
+                old_forwarding,
+                &descriptor.source_from_zone,
+                descriptor.source_from_zone_id,
+                descriptor.source_from_zone_any,
+                metadata.ingress_zone,
+            ) && if local_delivery {
+                descriptor.source_to_zone == "junos-host"
+                    && descriptor.source_to_zone_id == crate::policy::ZONE_ID_RESERVED_MIN
+                    && metadata.egress_zone != 0
+            } else {
+                ancestry_source_zone_matches(
+                    old_forwarding,
+                    &descriptor.source_to_zone,
+                    descriptor.source_to_zone_id,
+                    descriptor.source_to_zone_any,
+                    metadata.egress_zone,
+                )
+            }
+        }) {
             if ancestry_source_zone_matches(
                 old_forwarding,
                 &descriptor.source_from_zone,
