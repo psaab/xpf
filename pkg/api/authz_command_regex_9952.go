@@ -220,7 +220,6 @@ func (s *Server) authorizeRESTCommand(r *http.Request, cfg *config.Config, p aut
 	if class == "" || p.Superuser {
 		return nil
 	}
-	actionVerb := restActionVerb9952(r)
 	rules, ok, err := config.OperationalLoginRegexesFor(cfg, class)
 	if err != nil {
 		return fmt.Errorf("permission denied: login class %q has an invalid command regex: %w", class, err)
@@ -229,8 +228,10 @@ func (s *Server) authorizeRESTCommand(r *http.Request, cfg *config.Config, p aut
 		return nil
 	}
 
+	actionVerb := restActionVerb9952(r)
+
 	route := r.Method + " " + r.URL.Path
-	if reason, declared := restRoutesNoCommand[route]; declared {
+	if _, declared := restRoutesNoCommand[route]; declared {
 		cmd, resolved := restRequestCommand9952(route, r, actionVerb)
 		if !resolved {
 			// A DECLARED route with no per-request command is exempt only when
@@ -244,7 +245,6 @@ func (s *Server) authorizeRESTCommand(r *http.Request, cfg *config.Config, p aut
 					"request has no canonical command to evaluate, so the restriction cannot be "+
 					"applied to it", class)
 			}
-			_ = reason
 			return nil
 		}
 		return evaluateCommand9952(rules, class, cmd)
