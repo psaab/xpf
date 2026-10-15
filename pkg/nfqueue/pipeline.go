@@ -930,16 +930,19 @@ func (p *CapturePipeline) submitAdmitted(admitted []AdjudicatedFrame, pending []
 		pending[i].deadlineArmed = true
 	}
 	p.mu.Unlock()
-	responses, submitErr := p.submitter.SubmitAdjudicated(admitted)
 	var cancelItems []*pendingReinject
-	if submitErr != nil {
-		for _, item := range pending {
-			if p.admissionFailedState(item, "TRANSPORT", submitErr) {
-				cancelItems = append(cancelItems, item)
+	for start := 0; start < len(admitted); start += reinjectMaxFrames {
+		end := min(start+reinjectMaxFrames, len(admitted))
+		responses, submitErr := p.submitter.SubmitAdjudicated(admitted[start:end])
+		if submitErr != nil {
+			for _, item := range pending[start:end] {
+				if p.admissionFailedState(item, "TRANSPORT", submitErr) {
+					cancelItems = append(cancelItems, item)
+				}
 			}
+			continue
 		}
-	} else {
-		for i, item := range pending {
+		for i, item := range pending[start:end] {
 			if i >= len(responses) {
 				if p.admissionFailedState(item, "TRANSPORT", errors.New("missing admission response")) {
 					cancelItems = append(cancelItems, item)
