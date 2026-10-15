@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net"
 	"net/http"
 	"sort"
@@ -73,17 +74,35 @@ func (s *Server) globalStatsHandler(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	// #3345: surface a global-counter read failure instead of silently
-	// reporting 0. A degraded userspace shim / counter bridge must not be
-	// indistinguishable from "no events" — for a security appliance,
-	// "counter unavailable" and "zero attacks" cannot look identical.
+	// #3345: real read failures remain fatal; an explicitly unsupported
+	// counter is reported as unavailable while the other stats stay useful.
 	var readErr error
 	readCounter := func(idx uint32) uint64 {
 		v, err := s.dp.ReadGlobalCounter(idx)
-		if err != nil && readErr == nil {
+		if err == nil {
+			return v
+		}
+		if errors.Is(err, dataplane.ErrCounterNotPopulated) {
+			switch idx {
+			case dataplane.GlobalCtrFlowCacheFlush:
+				stats.UnavailableCounters = append(stats.UnavailableCounters, "flow_cache_flushes")
+			case dataplane.GlobalCtrFlowCacheInvalidate:
+				stats.UnavailableCounters = append(stats.UnavailableCounters, "flow_cache_invalidations")
+			case dataplane.GlobalCtrTCEgressPackets:
+				stats.UnavailableCounters = append(stats.UnavailableCounters, "tc_egress_packets")
+			case dataplane.GlobalCtrFabricRedirect:
+				stats.UnavailableCounters = append(stats.UnavailableCounters, "fabric_redirects")
+			default:
+				if readErr == nil {
+					readErr = err
+				}
+			}
+			return 0
+		}
+		if readErr == nil {
 			readErr = err
 		}
-		return v
+		return 0
 	}
 
 	stats.RxPackets = readCounter(dataplane.GlobalCtrRxPackets)
