@@ -344,10 +344,8 @@ func hasNodeIDFile() bool {
 // stable across restarts given the same on-disk state.
 //
 // Inputs (all already resolved by the caller in daemon_run.go):
-//   - hasActiveConfig: store.ActiveConfig() != nil — a compiled config is
-//     loaded (case 2 import-clean or case 3 valid-active.json).
 //   - everCommitted: store.EverCommitted() — the #1922 step-0 marker.
-//   - nodeID: /etc/xpf/node-id presence (the HA-node guard, C2/C8).
+//   - nodeIDPresent: /etc/xpf/node-id presence (the HA-node guard, C2/C8).
 //   - failClosedLoad: boot resolution found a state that must not drive takeover:
 //     either a PRESENT active.json that no longer compiles (#1960,
 //     ErrConfigCompile), an ABSENT active.json with surviving rollback markers
@@ -356,7 +354,7 @@ func hasNodeIDFile() bool {
 //
 // Case 4 (corrupt/too-new) is handled by #1917 D1 fatal-on-parse in Run
 // BEFORE this is called, so it never reaches here.
-func computeBootClass(hasActiveConfig, everCommitted, nodeIDPresent, failClosedLoad bool) bootClass {
+func computeBootClass(everCommitted, nodeIDPresent, failClosedLoad bool) bootClass {
 	// #1960/#10297/#11802 fail-closed (checked FIRST, before the HA-node guard):
 	// an unavailable previously-committed state OR a selected rescue fallback
 	// in a never-committed empty state must NEVER drive a full takeover.
@@ -384,29 +382,12 @@ func computeBootClass(hasActiveConfig, everCommitted, nodeIDPresent, failClosedL
 		return bootClassNormal
 	}
 
-	// The step-0 marker (everCommitted) is checked BEFORE hasActiveConfig.
-	// This is load-bearing (AGY r1 CRITICAL): after an Item-1b first-commit
-	// rollback the DB holds an EMPTY tree with committed=0. On the next
-	// restart Store.Load compiles that empty tree into a NON-nil
-	// *config.Config, so hasActiveConfig is TRUE even though the box was
-	// never successfully committed. Checking hasActiveConfig first would
-	// then misclassify the rolled-back box as normal and take over
-	// interfaces on an empty config — exactly the lockout this issue closes.
-	//
-	//   - everCommitted == false → fresh/no-config (case 1) OR
-	//     never-committed incl. post-first-commit-rollback (case 5) →
-	//     bootstrap.
-	//   - everCommitted == true  → a real commit/sync happened, OR a
-	//     legacy/older-build DB (migration rule C3 defaults committed=true),
-	//     OR operator-committed-empty (case 5 committed-empty) → normal
-	//     (cases 2/3, and the operator-meant-it empty case; the protected
-	//     set still shields mgmt). hasActiveConfig is implied here for
-	//     cases 2/3 and not required for the decision, but is retained in
-	//     the signature for the call-site log/HA-guard diagnostics.
+	// The step-0 marker (everCommitted) determines whether the system has ever
+	// completed a successful commit. A compiled empty tree after first-commit
+	// rollback is not evidence of a commit and must remain in bootstrap mode.
 	if !everCommitted {
 		return bootClassBootstrap
 	}
-	_ = hasActiveConfig
 	return bootClassNormal
 }
 
@@ -1267,10 +1248,7 @@ func (d *Daemon) applianceFactoryBoot() bool {
 // Returns the current kernel name of the lifeline NIC and ok=false when no
 // default route exists.
 func detectLifelineInterface() (name string, ok bool, err error) {
-	var (
-		sawDefaultRoute bool
-		firstErr        error
-	)
+	var firstErr error
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
 		routes, rerr := lifelineRouteList(nil, family)
 		if rerr != nil {
@@ -1291,7 +1269,6 @@ func detectLifelineInterface() (name string, ok bool, err error) {
 			if r.LinkIndex <= 0 {
 				continue
 			}
-			sawDefaultRoute = true
 			link, lerr := lifelineLinkByIndex(r.LinkIndex)
 			if lerr != nil {
 				if firstErr == nil {
@@ -1311,7 +1288,6 @@ func detectLifelineInterface() (name string, ok bool, err error) {
 		// which NIC" UNKNOWN — never report that as a confident "none".
 		return "", false, firstErr
 	}
-	_ = sawDefaultRoute
 	return "", false, nil
 }
 

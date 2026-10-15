@@ -82,7 +82,7 @@ func TestExpiredFirstCommitRecoveryBootClass12204(t *testing.T) {
 		t.Fatal("ActiveConfig non-nil after first-commit recovery; rollback target is the empty bootstrap tree")
 	}
 
-	got := computeBootClass(recovered.ActiveConfig() != nil, recovered.EverCommitted(), false, false)
+	got := computeBootClass(recovered.EverCommitted(), false, false)
 	if got != bootClassBootstrap {
 		t.Fatalf("computeBootClass after expired first-commit recovery = %v; want bootClassBootstrap", got)
 	}

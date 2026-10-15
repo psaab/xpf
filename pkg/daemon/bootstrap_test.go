@@ -47,8 +47,8 @@ func TestClassifyLoadError(t *testing.T) {
 // configCompileFailed=true) MUST resolve to bootClassBootstrap — i.e. the
 // daemon enters the lifeline safe state and does NOT run the positional
 // claim-all interface rename. This mirrors the exact inputs daemon_run.go
-// computes after an ErrConfigCompile Load: ActiveConfig()==nil
-// (hasActive=false), EverCommitted()==true, and the compile-failed flag set.
+// computes after an ErrConfigCompile Load: EverCommitted()==true and the
+// compile-failed flag set.
 // It is checked for both standalone and HA-node (node-id present) boxes,
 // since the compile-failure override must beat the HA-node guard.
 func TestCompileFailureForcesBootstrapNotClaimAll(t *testing.T) {
@@ -59,9 +59,8 @@ func TestCompileFailureForcesBootstrapNotClaimAll(t *testing.T) {
 
 	for _, nodeID := range []bool{false, true} {
 		t.Run(fmt.Sprintf("nodeID=%v", nodeID), func(t *testing.T) {
-			// hasActive=false (compile failed → compiled stayed nil),
 			// everCommitted=true (committed DB), configCompileFailed=true.
-			got := computeBootClass(false, true, nodeID, true)
+			got := computeBootClass(true, nodeID, true)
 			if got != bootClassBootstrap {
 				t.Fatalf("compile-failed committed config (nodeID=%v) classified %v; "+
 					"want bootClassBootstrap (no positional claim-all)", nodeID, got)
@@ -79,7 +78,7 @@ func TestAbsentActiveHistoryForcesBootstrapNotClaimAll_10297(t *testing.T) {
 	if got := classifyLoadError(err); got != loadAbsentWithHistory {
 		t.Fatalf("classifyLoadError(%v) = %v; want loadAbsentWithHistory", err, got)
 	}
-	if got := computeBootClass(false, true, false, true); got != bootClassBootstrap {
+	if got := computeBootClass(true, false, true); got != bootClassBootstrap {
 		t.Fatalf("absent active with history classified %v; want bootClassBootstrap", got)
 	}
 	if shouldBootstrapFromFile(false, true, true) {
@@ -124,54 +123,31 @@ func TestShouldBootstrapFromFile(t *testing.T) {
 func TestComputeBootClass(t *testing.T) {
 	tests := []struct {
 		name          string
-		hasActive     bool
 		everCommitted bool
 		nodeID        bool
 		compileFailed bool
 		want          bootClass
 	}{
-		// Case 1: fresh / no config, no node-id => bootstrap.
-		{"fresh-no-config", false, false, false, false, bootClassBootstrap},
-		// Case 2/3: a valid active config is loaded => normal.
-		{"valid-active", true, true, false, false, bootClassNormal},
-		// Case 2: day-0 import-clean (compiled present, committed via Commit).
-		{"day0-import", true, true, false, false, bootClassNormal},
-		// Case 5 committed-empty: no active config, but everCommitted => normal.
-		{"committed-empty", false, true, false, false, bootClassNormal},
-		// Case 5 never-committed: no active config, never committed => bootstrap.
-		{"never-committed", false, false, false, false, bootClassBootstrap},
-		// AGY r1 CRITICAL: post-first-commit-rollback restart. The empty tree
-		// on disk (committed=0) compiles to a NON-nil config, so
-		// hasActiveConfig is TRUE — but everCommitted is FALSE, so the box
-		// must stay in bootstrap, NOT misclassify as normal.
-		{"post-rollback-restart-empty-compiled", true, false, false, false, bootClassBootstrap},
-		// HA-node guard (C2/C8): node-id present always resolves NOT-bootstrap,
-		// even with no active config and never committed.
-		{"ha-node-no-config", false, false, true, false, bootClassNormal},
-		{"ha-node-with-config", true, true, true, false, bootClassNormal},
-		// node-id present + never committed still NOT bootstrap (loud-error
-		// handled at call site, but predicate must not enter bootstrap).
-		{"ha-node-never-committed", false, false, true, false, bootClassNormal},
-
-		// #1960 fail-closed: a previously-committed config that no longer
-		// compiles must enter bootstrap, NOT positional claim-all. Store.Load
-		// sets everCommitted=true but leaves compiled nil (hasActive=false),
-		// which without the override resolves to NORMAL.
-		{"compile-failed-committed", false, true, false, true, bootClassBootstrap},
-		// The compile-failure override beats EVEN the HA-node guard: claiming
-		// all NICs on a broken config is the exact lockout this fixes.
-		{"compile-failed-ha-node", false, true, true, true, bootClassBootstrap},
-		// Compile failure also overrides a (defensively) non-nil active config
-		// — the daemon only sets this flag when compiled stayed nil, but the
-		// predicate must be safe regardless.
-		{"compile-failed-has-active", true, true, false, true, bootClassBootstrap},
+		{"fresh-no-config", false, false, false, bootClassBootstrap},
+		{"valid-active", true, false, false, bootClassNormal},
+		{"committed-empty", true, false, false, bootClassNormal},
+		{"never-committed", false, false, false, bootClassBootstrap},
+		// A compiled empty tree after first-commit rollback still has
+		// everCommitted=false and must remain in bootstrap.
+		{"post-rollback-restart-empty-compiled", false, false, false, bootClassBootstrap},
+		{"ha-node-no-config", false, true, false, bootClassNormal},
+		{"ha-node-with-config", true, true, false, bootClassNormal},
+		{"ha-node-never-committed", false, true, false, bootClassNormal},
+		{"compile-failed-committed", true, false, true, bootClassBootstrap},
+		{"compile-failed-ha-node", true, true, true, bootClassBootstrap},
+		{"compile-failed", true, false, true, bootClassBootstrap},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computeBootClass(tt.hasActive, tt.everCommitted, tt.nodeID, tt.compileFailed)
+			got := computeBootClass(tt.everCommitted, tt.nodeID, tt.compileFailed)
 			if got != tt.want {
-				t.Fatalf("computeBootClass(active=%v, committed=%v, nodeID=%v, compileFailed=%v) = %v; want %v",
-					tt.hasActive, tt.everCommitted, tt.nodeID, tt.compileFailed, got, tt.want)
+				t.Fatalf("computeBootClass(committed=%v, nodeID=%v, compileFailed=%v) = %v; want %v",
+					tt.everCommitted, tt.nodeID, tt.compileFailed, got, tt.want)
 			}
 		})
 	}
