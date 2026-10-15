@@ -61,9 +61,23 @@ type fairnessQueueKey struct {
 	queueID uint8
 }
 
+// fairnessFlowThroughputKey identifies one ObservedBytes counter, not
+// one wire tuple. #13091: the coordinator concatenates per-binding
+// flow cache snapshots without deduplicating (egress_ifindex,
+// cos_queue_id, forward_wire_key), so the same tuple can be reported by
+// several bindings (RSS re-steer, multi-queue ingress, hairpin). Each
+// such row is an independent counter: keying on (queue, tuple) alone
+// made the rows overwrite w.prev in place within a single Update, so
+// every scrape after the first re-derived a bogus "reset" delta and
+// fabricated phantom throughput from completely static counters.
+// worker + slot pin the key to the owning binding, restoring the
+// invariant that a counter's delta is measured against its own prior
+// scrape value.
 type fairnessFlowThroughputKey struct {
-	queue fairnessQueueKey
-	tuple FlowTupleStatus
+	queue  fairnessQueueKey
+	tuple  FlowTupleStatus
+	worker uint32
+	slot   uint32
 }
 
 type fairnessThroughputSample struct {
@@ -143,8 +157,10 @@ func (w *FairnessThroughputWindow) Update(now time.Time, status ProcessStatus) [
 			continue
 		}
 		key := fairnessFlowThroughputKey{
-			queue: fairnessQueueKey{ifindex: row.EgressIfindex, queueID: *row.CoSQueueID},
-			tuple: row.ForwardWireKey,
+			queue:  fairnessQueueKey{ifindex: row.EgressIfindex, queueID: *row.CoSQueueID},
+			tuple:  row.ForwardWireKey,
+			worker: row.WorkerID,
+			slot:   row.Slot,
 		}
 		if key.tuple == (FlowTupleStatus{}) {
 			key.tuple = row.SessionKey
