@@ -650,13 +650,13 @@ func TestChildMTUResetTargetUnresolvedRecords9841(t *testing.T) {
 	}
 }
 
-// The same child referenced by two zones, failing once then succeeding,
-// ends the apply with NO record: the success clears the pending failure.
-// Zone order is randomized; the fail-first script keys on attempt count,
-// so this holds under both orders.
+// The same child referenced twice within one zone, failing once then
+// succeeding, ends the apply with NO record: the success clears the pending
+// failure. Duplicate references within a zone are harmless; cross-zone
+// duplicates are quarantined and intentionally do not run this path.
 func TestChildMTUFailureThenSuccessClears9841(t *testing.T) {
 	cfg := taggedOnlyConfig9761()
-	cfg.Security.Zones["dmz"] = &config.ZoneConfig{Name: "dmz", Interfaces: []string{taggedParent9761 + ".80"}}
+	cfg.Security.Zones["untrust"].Interfaces = append(cfg.Security.Zones["untrust"].Interfaces, taggedParent9761+".80")
 	parent, sub50, sub80 := taggedParent9761, taggedParent9761+".50", taggedParent9761+".80"
 	var d *mtuDrive9841
 	attempts := 0
@@ -703,10 +703,11 @@ func TestChildMTUFailureThenSuccessClears9841(t *testing.T) {
 // clears the earlier record: the first attempt recorded divergence, a
 // concurrent writer converged the device, and the second attempt's fresh
 // observation proves it. Without the clear the stale record publishes.
-// (Same-composite-key repeats reach here when two zones name one ref.)
+// Repeating the same reference within one zone is valid; cross-zone duplicates
+// are quarantined before mapping.
 func TestChildMTUFailedRepeatConvergedClears9841(t *testing.T) {
 	cfg := taggedOnlyConfig9761()
-	cfg.Security.Zones["dmz"] = &config.ZoneConfig{Name: "dmz", Interfaces: []string{taggedParent9761 + ".80"}}
+	cfg.Security.Zones["untrust"].Interfaces = append(cfg.Security.Zones["untrust"].Interfaces, taggedParent9761+".80")
 	parent, sub50, sub80 := taggedParent9761, taggedParent9761+".50", taggedParent9761+".80"
 	var d *mtuDrive9841
 	attempts := 0

@@ -703,6 +703,17 @@ func buildZoneConfig(zone *config.ZoneConfig, name string, zid uint16, result *C
 	return zc, nil
 }
 
+// zoneInterfaceQuarantined13164 reports whether any logical key expanded by
+// the config's declared-first interface resolver is quarantined.
+func zoneInterfaceQuarantined13164(cfg *config.Config, raw string, quarantined map[string]struct{}) bool {
+	for _, key := range config.InterfaceUnitRefKeys(cfg, raw) {
+		if _, excluded := quarantined[key]; excluded {
+			return true
+		}
+	}
+	return false
+}
+
 // programZoneMaps walks the security zones and programs every zone/interface
 // dataplane map, returning the accumulated map-programming state so the caller
 // can publish the deferred XDP/tunnel ifindex sets and delete stale entries.
@@ -715,6 +726,8 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 	// Interface -> routing table ID map from the routing instances.
 	ifaceTableID := buildIfaceTableIDMap(cfg)
 
+	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+	quarantinedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
 	for name, zone := range cfg.Security.Zones {
 		// A nil zone value is reachable on the tolerant/programmatic and
 		// HA-peer-sync config paths (the nil-slot invariant the dataplane
@@ -751,6 +764,13 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 			})
 			continue
 		}
+		if _, excluded := excludedZones[name]; excluded {
+			result.recordUnarmedSurface(UnarmedSurface{
+				Name:   "zone:" + name,
+				Reason: "zone excluded by quarantine policy; no zone map or interface bindings were installed",
+			})
+			continue
+		}
 		zid := result.ZoneIDs[name]
 
 		zc, err := buildZoneConfig(zone, name, zid, result)
@@ -761,8 +781,21 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 			return nil, fmt.Errorf("set zone config %s: %w", name, err)
 		}
 
-		// Map interfaces to zone
 		for _, ifaceRef := range zone.Interfaces {
+			if zoneInterfaceQuarantined13164(cfg, ifaceRef, quarantinedInterfaces) {
+				physName, _, _, vlanID := resolveInterfaceRef(ifaceRef, cfg)
+				if vlanID > 0 {
+					physName = fmt.Sprintf("%s.%d", physName, vlanID)
+				}
+				if physName == "" {
+					physName = ifaceRef
+				}
+				result.recordUnarmedSurface(UnarmedSurface{
+					Name:   physName,
+					Reason: fmt.Sprintf("zone interface %s in zone %s quarantined by duplicate membership", ifaceRef, name),
+				})
+				continue
+			}
 			if err := st.mapZoneInterface(dp, cfg, result, name, zone, zid, ifaceRef, ifaceTableID); err != nil {
 				return nil, err
 			}
@@ -1895,6 +1928,8 @@ func stripUnmanagedInterfaces(
 // and zone.HostInboundTraffic derefs panic the apply-path reconcile.
 func applyTunnelHostInbound(dp DataPlane, cfg *config.Config, result *CompileResult) {
 	autoFlags := make(map[string]uint32) // zone name → extra flags
+	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+	quarantinedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
 	for _, ifCfg := range cfg.Interfaces.Interfaces {
 		if ifCfg == nil {
 			continue
@@ -1925,10 +1960,16 @@ func applyTunnelHostInbound(dp DataPlane, cfg *config.Config, result *CompileRes
 			}
 			// Find which zone's interface carries this tunnel source IP.
 			for zoneName, zone := range cfg.Security.Zones {
+				if _, excluded := excludedZones[zoneName]; excluded {
+					continue
+				}
 				if zone == nil {
 					continue
 				}
 				for _, ifRef := range zone.Interfaces {
+					if zoneInterfaceQuarantined13164(cfg, ifRef, quarantinedInterfaces) {
+						continue
+					}
 					_, cn, un, _ := resolveInterfaceRef(ifRef, cfg)
 					ic, ok := cfg.Interfaces.Interfaces[cn]
 					if !ok || ic == nil {
