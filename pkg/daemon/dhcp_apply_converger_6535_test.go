@@ -234,7 +234,7 @@ func TestClaimApplyRetryOnlyAfterAFailedApply(t *testing.T) {
 		t.Fatal("a manager that has never applied anything must not claim a retry")
 	}
 
-	desired := d.desiredClusterDHCPConfig(d.store.ActiveConfig())
+	desired := d.desiredClusterDHCPConfigWithMasters(d.store.ActiveConfig(), d.snapshotRethMasterState())
 	if desired == nil {
 		t.Fatal("fixture: the master-RG filter dropped everything, so no apply can fail")
 	}

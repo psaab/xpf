@@ -1263,7 +1263,7 @@ severed —
 
 ```go
 desired := cfg.System.DHCPServer      // instead of desiredStandaloneDHCPConfig(cfg)
-dhcpCfg := &cfg.System.DHCPServer     // instead of d.desiredClusterDHCPConfig(cfg)
+dhcpCfg := &cfg.System.DHCPServer     // instead of d.desiredClusterDHCPConfigWithMasters(cfg, d.snapshotRethMasterState())
 ```
 
 — and the ENTIRE Go suite stayed green. Neither is subtle. **Standalone**, Kea is

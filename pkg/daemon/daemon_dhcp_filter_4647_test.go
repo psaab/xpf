@@ -50,7 +50,7 @@ func TestFilterDHCPConfigForMasterRGs_UntaggedRethUnitMatches(t *testing.T) {
 	cfg := dhcpClusterTestConfig("reth1.0", 0)
 	d.getOrCreateRGState(1).SetVRRP("reth1", true)
 
-	got := d.filterDHCPConfigForMasterRGs(cfg)
+	got := d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState())
 	if got == nil || got.DHCPLocalServer == nil {
 		t.Fatal("reth1.0 group on a MASTER RG must survive the filter (Kea config generated); got nil (BUG-A RED)")
 	}
@@ -71,7 +71,7 @@ func TestFilterDHCPConfigForMasterRGs_TaggedRethUnitMatches(t *testing.T) {
 	cfg := dhcpClusterTestConfig("reth1.100", 100)
 	d.getOrCreateRGState(1).SetVRRP("reth1.100", true)
 
-	got := d.filterDHCPConfigForMasterRGs(cfg)
+	got := d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState())
 	if got == nil || got.DHCPLocalServer == nil {
 		t.Fatal("reth1.100 group on a MASTER RG must survive the filter; got nil")
 	}
@@ -93,7 +93,7 @@ func TestFilterDHCPConfigForMasterRGs_NonMasterRGFiltered(t *testing.T) {
 	// RG1 is BACKUP (not master): no VRRP instance marked master.
 	d.getOrCreateRGState(1).SetVRRP("reth1", false)
 
-	if got := d.filterDHCPConfigForMasterRGs(cfg); got != nil {
+	if got := d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState()); got != nil {
 		t.Fatalf("reth1.0 group on a BACKUP RG must be filtered to nil (Kea cleared), got %+v", got)
 	}
 }

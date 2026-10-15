@@ -65,7 +65,7 @@ func keaScalarCfg9348(t *testing.T) *config.Config {
 
 func TestClusterFilterKeepsFamilyKeaScalars9348(t *testing.T) {
 	cfg := keaScalarCfg9348(t)
-	out := (&Daemon{}).filterDHCPConfigForMasterRGs(cfg)
+	out := (&Daemon{}).filterDHCPConfigForMasterRGsWithMasters(cfg, map[int]bool{})
 	if out == nil {
 		t.Fatal("filtered result is nil; nothing below is measured")
 	}
@@ -108,7 +108,7 @@ func TestClusterFilterKeepsFamilyKeaScalars9348(t *testing.T) {
 func TestClusterFilterCarriesEveryFieldItDoesNotNarrow9348(t *testing.T) {
 	cfg := keaScalarCfg9348(t)
 	src := cfg.System.DHCPServer
-	out := (&Daemon{}).filterDHCPConfigForMasterRGs(cfg)
+	out := (&Daemon{}).filterDHCPConfigForMasterRGsWithMasters(cfg, map[int]bool{})
 	if out == nil {
 		t.Fatal("filtered result is nil")
 	}
@@ -158,7 +158,7 @@ func TestClusterFilterCarriesEveryFieldItDoesNotNarrow9348(t *testing.T) {
 func TestClusterFilterStillDoesNotMutateTheSource9348(t *testing.T) {
 	cfg := keaScalarCfg9348(t)
 	before := cfg.System.DHCPServer.DHCPLocalServer.Groups["g1"].Interfaces[0]
-	_ = (&Daemon{}).filterDHCPConfigForMasterRGs(cfg)
+	_ = (&Daemon{}).filterDHCPConfigForMasterRGsWithMasters(cfg, map[int]bool{})
 	if got := cfg.System.DHCPServer.DHCPLocalServer.Groups["g1"].Interfaces[0]; got != before {
 		t.Fatalf("the active config was mutated: %q -> %q", before, got)
 	}
@@ -179,7 +179,7 @@ func TestDesiredClusterDHCPConfigDelegatesToTheFilter9348(t *testing.T) {
 	cfg := keaScalarCfg9348(t)
 	d := &Daemon{}
 
-	got := d.desiredClusterDHCPConfig(cfg)
+	got := d.desiredClusterDHCPConfigWithMasters(cfg, map[int]bool{})
 	if got == nil {
 		t.Fatal("desiredClusterDHCPConfig returned nil for a config with configured groups")
 	}
@@ -213,7 +213,7 @@ func TestDesiredClusterDHCPConfigDelegatesToTheFilter9348(t *testing.T) {
 	// assertions above are about delegation and not about always returning
 	// something.
 	empty := &config.Config{}
-	if out := d.desiredClusterDHCPConfig(empty); out != nil {
+	if out := d.desiredClusterDHCPConfigWithMasters(empty, map[int]bool{}); out != nil {
 		t.Errorf("a config with no dhcp-server produced %+v, want nil", out)
 	}
 }

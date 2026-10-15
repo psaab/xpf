@@ -101,7 +101,7 @@ func TestStandaloneAndClusterAgreeOnKeaDevice9407(t *testing.T) {
 	// Master both RGs so the cluster filter keeps everything and the comparison
 	// is about NAMES, not about mastership narrowing.
 	d := masteringRG9407(1)
-	cluster := d.desiredClusterDHCPConfig(cfg)
+	cluster := d.desiredClusterDHCPConfigWithMasters(cfg, d.snapshotRethMasterState())
 	if cluster == nil {
 		t.Fatal("cluster desired config is nil while RG 1 is mastered")
 	}
@@ -134,7 +134,7 @@ func TestTaggedRethGroupIsRGScoped9407(t *testing.T) {
 	cfg := keaCfg9407(t)
 
 	// No RG mastered: an RG-scoped group must be dropped.
-	backup := (&Daemon{}).filterDHCPConfigForMasterRGs(cfg)
+	backup := (&Daemon{}).filterDHCPConfigForMasterRGsWithMasters(cfg, map[int]bool{})
 	if backup != nil && backup.DHCPLocalServer != nil {
 		if g := backup.DHCPLocalServer.Groups["tagged"]; g != nil {
 			t.Errorf("the tagged RETH group survived on a node mastering no RG, as %v. "+
@@ -145,7 +145,7 @@ func TestTaggedRethGroupIsRGScoped9407(t *testing.T) {
 
 	// Positive control in the same shape: mastering the RG keeps it, so the
 	// drop above is mastership narrowing and not the group vanishing outright.
-	master := masteringRG9407(1).desiredClusterDHCPConfig(cfg)
+	master := masteringRG9407(1).desiredClusterDHCPConfigWithMasters(cfg, masteringRG9407(1).snapshotRethMasterState())
 	if master == nil || master.DHCPLocalServer == nil ||
 		master.DHCPLocalServer.Groups["tagged"] == nil {
 		t.Fatalf("the tagged group vanished while RG 1 is MASTER: %+v", master)

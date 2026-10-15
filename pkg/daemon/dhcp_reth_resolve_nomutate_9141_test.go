@@ -114,7 +114,7 @@ func TestDDNSRGAttributionSurvivesApply9141(t *testing.T) {
 
 	// Drive the REAL wiring, not the helper directly: this is the cluster
 	// applier's entry point and it is what performed the mutation in production.
-	_ = d.filterDHCPConfigForMasterRGs(cfg)
+	_ = d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState())
 
 	after := rgForInterfaces(cfg, cfg.System.DHCPServer.DHCPLocalServer.Groups["g1"].Interfaces)
 	if after != 1 {
@@ -137,7 +137,7 @@ func TestRepeatedApplyLeavesConfigStable9141(t *testing.T) {
 	cfg := rethDHCPCfg9141(t)
 	d := &Daemon{}
 	for i := 0; i < 3; i++ {
-		_ = d.filterDHCPConfigForMasterRGs(cfg)
+		_ = d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState())
 		if got := cfg.System.DHCPServer.DHCPLocalServer.Groups["g1"].Interfaces[0]; got != "reth1.0" {
 			t.Fatalf("apply %d rewrote the operator-visible config to %q; `show dhcp server` "+
 				"would render a kernel name where the operator configured reth1.0", i, got)
