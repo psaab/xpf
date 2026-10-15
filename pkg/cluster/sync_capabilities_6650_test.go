@@ -16,11 +16,13 @@ package cluster
 
 import (
 	"encoding/binary"
+	"fmt"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -309,6 +311,32 @@ func liveSyncMessageTypesExcept(under int) []syncMessageType {
 // is looking for. The floor on the scan count is there because a regex that
 // matched nothing would sweep zero declarations and report a complete census —
 // a check that fails to a value indistinguishable from healthy.
+func retiredWireIDCollisions(live map[string]int, retired map[string]int) []string {
+	var collisions []string
+	for liveName, liveValue := range live {
+		for retiredName, retiredValue := range retired {
+			if liveValue == retiredValue {
+				collisions = append(collisions, fmt.Sprintf("%s=%d collides with retired %s=%d",
+					liveName, liveValue, retiredName, retiredValue))
+			}
+		}
+	}
+	sort.Strings(collisions)
+	return collisions
+}
+
+func TestRetiredWireIDCollisionGuard7163(t *testing.T) {
+	t.Parallel()
+
+	got := retiredWireIDCollisions(
+		map[string]int{"syncMsgNewMessage": 19},
+		map[string]int{"syncMsgPrepareActivation": 19},
+	)
+	if len(got) != 1 {
+		t.Fatalf("simulated collision was not detected: %v", got)
+	}
+}
+
 func TestLiveSyncMessageCensusIsComplete7163(t *testing.T) {
 	t.Parallel()
 
@@ -319,6 +347,9 @@ func TestLiveSyncMessageCensusIsComplete7163(t *testing.T) {
 		census["syncMsg"+m.name] = m.v
 	}
 	retired := map[string]int{"syncMsgPrepareActivation": 19}
+	if collisions := retiredWireIDCollisions(census, retired); len(collisions) != 0 {
+		t.Errorf("live sync message reuses a retired wire ID: %s", strings.Join(collisions, "; "))
+	}
 
 	files, err := filepath.Glob("*.go")
 	if err != nil {
