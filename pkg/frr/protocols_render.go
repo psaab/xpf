@@ -1073,7 +1073,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 	// block carries the matching `vrf <name>` suffix (#2489). Emission is
 	// deferred to bfdSection.render() — either here (local fallback) or by
 	// the manager for the consolidated global block (#2550).
-	if bgp != nil {
+	if bgp != nil && bgp.LocalAS > 0 {
 		// Accumulate BFD peers only for renderable (declared) neighbors
 		// (#5518). A remote-as-0 neighbor skipped by the declaration loop must
 		// not emit a `bfd` peer either — validNeighbors is the shared
