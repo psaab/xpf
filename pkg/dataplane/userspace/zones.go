@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -168,6 +169,7 @@ func hostInboundUnzonedFanUpBaseRows(cfg *config.Config, snaps []InterfaceSnapsh
 			untaggedNetdevs[snap.LinuxName] = true
 		}
 	}
+	nativeUnits := nativeVLANUnitRefs(cfg)
 	rows := make(map[string]bool)
 	for _, snap := range snaps {
 		if snap.IsUnit || !fanUp[snap.Name] {
@@ -179,9 +181,40 @@ func hostInboundUnzonedFanUpBaseRows(cfg *config.Config, snaps []InterfaceSnapsh
 		if ifc := cfg.Interfaces.Interfaces[snap.Name]; ifc != nil && ifc.Units[0] != nil {
 			continue
 		}
+		if nativeUnits[snap.Name] != "" {
+			continue
+		}
 		if !untaggedNetdevs[snap.LinuxName] {
 			rows[snap.Name] = true
 		}
 	}
 	return rows
+}
+
+// nativeVLANUnitRefs returns base-interface refs whose configured native VLAN
+// resolves to exactly one valid unit. Unresolved and ambiguous native VLANs
+// deliberately have no entry: their untagged parent traffic remains unzoned.
+func nativeVLANUnitRefs(cfg *config.Config) map[string]string {
+	if cfg == nil {
+		return nil
+	}
+	refs := make(map[string]string)
+	for name, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil || iface.NativeVlanID <= 0 || iface.NativeVlanID > 4094 {
+			continue
+		}
+		matches := 0
+		var unitRef string
+		for unitNum, unit := range iface.Units {
+			if unit == nil || unit.VlanID != iface.NativeVlanID {
+				continue
+			}
+			matches++
+			unitRef = fmt.Sprintf("%s.%d", name, unitNum)
+		}
+		if matches == 1 {
+			refs[name] = unitRef
+		}
+	}
+	return refs
 }
