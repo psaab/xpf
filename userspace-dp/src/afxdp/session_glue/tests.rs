@@ -11530,7 +11530,9 @@ fn refresh_owner_rgs_active_owner_local_delivery_publishes_kernel_local_4805() {
 // turns the companion + `used_ports` assertions RED.
 #[test]
 fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
-    for hit_reverse in [false, true] {
+    for (hit_reverse, alias_hit) in [(false, false), (true, false), (true, true)] {
+        // The reverse-translated alias resolves to the reverse entry but is
+        // not the canonical table key used to derive its companion.
         // A single-address pool source-NAT rule so the translated flow holds a
         // real pool port that the teardown must return.
         let mut forwarding = ForwardingState::default();
@@ -11635,6 +11637,14 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
         } else {
             (fwd_key.clone(), fwd_decision, fwd_metadata.clone())
         };
+        let hit_key = if alias_hit {
+            crate::session::translated_session_key(&hit_key, rev_nat)
+        } else {
+            hit_key
+        };
+        if alias_hit {
+            assert_eq!(sessions.revalidation_canonical_key(&hit_key), Some(rev_key.clone()));
+        }
         delete_terminal_filtered_session(
             &mut sessions,
             SteeringMap::unshared_for_test(-1),

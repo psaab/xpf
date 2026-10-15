@@ -473,6 +473,12 @@ now_ns: u64,
 // in the worker loop. A peer-synced reservation is held by every worker, so
 // a release must drop THIS worker's bit rather than free the port outright.
 worker_id: u32,) {
+    // Session-hit resolution may identify a reverse-translated wire alias,
+    // while removal and companion derivation require the table's canonical
+    // primary key. The lookup is read-only and returns None for shared-only
+    // entries, which retain the existing wire-key behavior.
+    let canonical_key = sessions.revalidation_canonical_key(key);
+    let key = canonical_key.as_ref().unwrap_or(key);
     // #5622: a translated LocalDelivery terminal hit (host-inbound deny, lo0
     // input-filter deny, or `to-zone junos-host` deny on the session-HIT path)
     // can fire on EITHER the forward or the reverse companion entry. The
