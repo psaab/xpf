@@ -818,13 +818,17 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 					// above stops before it; without this the modifier is dropped.
 					// For an IPv6 link-local next-hop the egress interface is
 					// REQUIRED (a link-local gateway is unresolvable without it).
-					// Consume the modifier ONLY after ≥1 gateway is parsed, so a
-					// bare-first `interface` token stays a gateway value, not the
-					// modifier.
+					// `interface <if>` applies to the preceding gateways, or
+					// creates an interface-only next-hop when there are none.
+					// A lone `interface` without a value remains a gateway.
 					iface := ""
-					if len(addrs) > 0 && i+2 < len(routeInst.node.Keys) && routeInst.node.Keys[i+1] == "interface" {
+
+					if i+2 < len(routeInst.node.Keys) && routeInst.node.Keys[i+1] == "interface" {
 						iface = routeInst.node.Keys[i+2]
 						i += 2
+					}
+					if len(addrs) == 0 && iface != "" {
+						route.NextHops = append(route.NextHops, NextHopEntry{Interface: iface})
 					}
 					for _, a := range addrs {
 						route.NextHops = append(route.NextHops, staticNextHopEntry(a, iface))
@@ -910,15 +914,12 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 						route.NoInstall = true
 						continue
 					}
-					// Treat `interface` as the egress modifier only after ≥1
-					// gateway has been parsed (#3881). A next-hop value literally
-					// named "interface" as the FIRST token is a gateway, not the
-					// modifier keyword.
-					if prop.Keys[j] == "interface" && len(addrs) > 0 {
-						if j+1 < len(prop.Keys) {
-							iface = prop.Keys[j+1]
-							j++
-						}
+					// `interface <if>` is a modifier even without an address:
+					// that is the interface-only next-hop form. Preserve a
+					// bare `interface` as a gateway value.
+					if prop.Keys[j] == "interface" && j+1 < len(prop.Keys) {
+						iface = prop.Keys[j+1]
+						j++
 						continue
 					}
 					addrs = append(addrs, prop.Keys[j])
