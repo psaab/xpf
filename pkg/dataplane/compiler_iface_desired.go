@@ -169,12 +169,20 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 		return pd
 	}
 
+	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+	quarantinedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
 	for _, zoneName := range zoneNames {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {
 			continue
 		}
 		for _, ifaceRef := range zone.Interfaces {
+			if zoneInterfaceQuarantined13164(cfg, ifaceRef, quarantinedInterfaces) {
+				continue
+			}
 			physName, cfgName, unitNum, vlanID := resolveInterfaceRef(ifaceRef, cfg)
 			if physName == "" {
 				continue

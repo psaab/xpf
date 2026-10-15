@@ -37,11 +37,12 @@ func TestEveryDiscardingDataPlaneEmbedderDeclaresItsPass7754(t *testing.T) {
 	// discardingDataPlane FAILS here until it is added, which is the point: the
 	// author has to decide, and the reviewer can see the decision.
 	declared := map[string]string{
-		"recordingDP":        "real",    // asserts host mutation; must not be the pre-pass
-		"failOneDP":          "prepass", // probes the pre-pass's own phase bodies
-		"notAValidationDP":   "real",    // exists to be REJECTED by the marker check
-		"natWriteTripwireDP": "either",  // parameterised by a field, both directions used
-		"censusDP6903":       "real",    // #6903 record census needs the real pass
+		"recordingDP":                "real",    // asserts host mutation; must not be the pre-pass
+		"failOneDP":                  "prepass", // probes the pre-pass's own phase bodies
+		"notAValidationDP":           "real",    // exists to be REJECTED by the marker check
+		"natWriteTripwireDP":         "either",  // parameterised by a field, both directions used
+		"censusDP6903":               "real",    // #6903 record census needs the real pass
+		"quarantineRecordingDP13164": "real",    // captures actual compile-pass behavior
 	}
 
 	files, err := filepath.Glob("*.go")
