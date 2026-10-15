@@ -883,7 +883,7 @@ func TestNonWGRemovalTransientLookupRetained(t *testing.T) {
 // failed LinkDel. Otherwise a LATER Apply would LinkDel the active WG link
 // (WG is excluded from `desired`), violating the persistent-WG invariant.
 func TestNonWGToWireguardSameNameNoOwnedRetention(t *testing.T) {
-	run := func(t *testing.T, inject func(ops *fakeLinkOps)) {
+	run := func(t *testing.T, inject func(ops *fakeLinkOps), expectTransientLookup bool) {
 		ops := newFakeLinkOps()
 		tm, _ := newReconcileManager(ops)
 		// Start as a non-WG anchor with a CONFIGURED fe80 (tracked in both
@@ -901,9 +901,19 @@ func TestNonWGToWireguardSameNameNoOwnedRetention(t *testing.T) {
 			t.Fatal("anchor not tracked in ownedNames")
 		}
 		inject(ops)
-		// Transition the SAME name to WireGuard (new addr, old fe80 dropped).
-		if err := tm.Apply([]*config.TunnelConfig{wgTC("172.16.0.1/30")}); err != nil {
-			t.Fatalf("Apply 2 (transition to WG): %v", err)
+		applyErr := tm.Apply([]*config.TunnelConfig{wgTC("172.16.0.1/30")})
+		if expectTransientLookup {
+			if applyErr == nil {
+				t.Fatal("Apply 2 (transient LinkByName): expected fail-closed error")
+			}
+			// The failed lookup must not create or mutate a link. Retry after
+			// the lookup recovers so the handoff's address reconcile completes.
+			delete(ops.byNameHardErr, "wg0")
+			if err := tm.Apply([]*config.TunnelConfig{wgTC("172.16.0.1/30")}); err != nil {
+				t.Fatalf("Apply 2 retry after transient lookup: %v", err)
+			}
+		} else if applyErr != nil {
+			t.Fatalf("Apply 2 (transition to WG): %v", applyErr)
 		}
 		// The configured anchor fe80 must be pruned by the WG reconcile — its
 		// applied-ownership must survive the handoff (Codex r4); the kernel
@@ -940,12 +950,12 @@ func TestNonWGToWireguardSameNameNoOwnedRetention(t *testing.T) {
 	t.Run("transient-lookup", func(t *testing.T) {
 		run(t, func(ops *fakeLinkOps) {
 			ops.byNameHardErr["wg0"] = errors.New("EBUSY: transient netlink error")
-		})
+		}, true)
 	})
 	t.Run("failed-linkdel", func(t *testing.T) {
 		run(t, func(ops *fakeLinkOps) {
 			ops.delFail["wg0"] = errors.New("EBUSY")
-		})
+		}, false)
 	})
 }
 

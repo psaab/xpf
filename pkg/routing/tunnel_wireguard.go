@@ -143,31 +143,21 @@ func wgTunMTUForEndpoint(tc *config.TunnelConfig) int {
 func (t *tunnelManager) applyWireguardTunLocked(tc *config.TunnelConfig) error {
 	mtu := wgTunMTUForEndpoint(tc)
 	link, err := t.ops.LinkByName(tc.Name)
-	// Copilot C3: only reuse an existing link if it is actually a TUN/TAP.
-	// A name collision with some other interface type (e.g. a leftover
-	// dummy) must be deleted and recreated, not mutated — otherwise we'd
-	// bring up + address + VRF-bind the wrong device, and the Rust side's
-	// open_tun on the same name would then fail.
-	mustCreate := err != nil
-	if err == nil {
-		tt, isTuntap := link.(*netlink.Tuntap)
-		if !isTuntap || tt.Mode != netlink.TUNTAP_MODE_TUN {
-			// Not a TUN (a TAP, or some other type entirely). The Rust
-			// side opens it with IFF_TUN, so a TAP would fail there;
-			// delete + recreate as a TUN rather than mutate the wrong
-			// device (Codex r3 MINOR).
-			slog.Info("replacing non-TUN link before wireguard tun create",
-				"name", tc.Name, "type", link.Type())
-			if delErr := t.ops.LinkDel(link); delErr != nil {
-				// A stale NON-WG link remains under this name. Wrap with the
-				// sentinel so Apply re-retains ownedNames for non-WG cleanup
-				// retry (#1919 r5/r6) — distinct from a create failure that
-				// may leave a healthy WG link.
-				return fmt.Errorf("replace non-tun wireguard link %s: %w: %w",
-					tc.Name, delErr, errWGIncompatibleLinkRetained)
-			}
-			mustCreate = true
+	if err != nil && !isLinkNotFound(err) {
+		return fmt.Errorf("lookup wireguard tun %s: %w", tc.Name, err)
+	}
+	// WG userspace attaches with IFF_TUN|IFF_NO_PI and requires a persistent
+	// anchor. Recreate any existing link that does not satisfy that contract.
+	mustCreate := isLinkNotFound(err)
+	if err == nil && !anchorReusable(link) {
+		slog.Info("replacing incompatible wireguard tun",
+			"name", tc.Name, "type", link.Type())
+		if delErr := t.ops.LinkDel(link); delErr != nil {
+			// Retain a stale incompatible link for cleanup retry (#1919).
+			return fmt.Errorf("replace incompatible wireguard tun %s: %w: %w",
+				tc.Name, delErr, errWGIncompatibleLinkRetained)
 		}
+		mustCreate = true
 	}
 	if mustCreate {
 		// Create a persistent TUN. NonPersist:false keeps the netdev
