@@ -701,6 +701,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		d.hostInboundLastApplyFailed.Store(false)
 		d.hostInboundLastFailureUnixNano.Store(0)
 		d.hostInboundCoveredAddrs = nil
+		d.hostInboundDHCPRetainedAddrs = nil
 		// Serialized under applySem with the Store(true) sites and every later apply,
 		// so this cannot race a subsequent install.
 		if d.inBootstrap() {
@@ -870,7 +871,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// successful real install. A gap install failure joins the commit error so
 			// the newly reachable address is never silently left fail-open.
 			uncoveredV4, uncoveredV6 := hostInboundUncoveredDropAddrs(views, unzonedV4, unzonedV6, d.hostInboundCoveredAddrs)
-			retainedV4, retainedV6 := hostInboundCoveredFamilyAddrs(d.hostInboundCoveredAddrs)
+			retainedV4, retainedV6 := hostInboundCoveredFamilyAddrs(d.hostInboundDHCPRetainedAddrs)
 			// #10751 M1: ingress-aware gap scope (supersedes the R7-C
 			// global withhold for the install — withholding shared values
 			// outright left them fail-open post-handoff, when no barrier
@@ -1098,6 +1099,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// fresh success alongside a failing commit result.
 		d.hostInboundEnforced.Store(true)
 		d.hostInboundCoveredAddrs = desiredDrop
+		d.hostInboundDHCPRetainedAddrs = hostInboundDestinationWideDropAddrs(views, unzonedV4, unzonedV6)
 		d.hostInboundGapFenceActive.Store(false)
 		d.noteHostInboundApplyFailed(time.Now())
 		return barrierHandoffErr
@@ -1116,6 +1118,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// Record it so a later failed rerender can tell which destinations a
 	// subsequently-appeared address left uncovered.
 	d.hostInboundCoveredAddrs = desiredDrop
+	d.hostInboundDHCPRetainedAddrs = hostInboundDestinationWideDropAddrs(views, unzonedV4, unzonedV6)
 	// B1/F3-A: a retained barrier is not a handoff — the next successful
 	// apply removes it. The host-inbound scope itself installed cleanly,
 	// so applied-success is still recorded.
@@ -1126,6 +1129,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// but-STALE, and the next apply retries the marker.
 			d.hostInboundEnforced.Store(true)
 			d.hostInboundCoveredAddrs = desiredDrop
+			d.hostInboundDHCPRetainedAddrs = hostInboundDestinationWideDropAddrs(views, unzonedV4, unzonedV6)
 			d.hostInboundGapFenceActive.Store(false)
 			d.noteHostInboundApplyFailed(time.Now())
 			return fmt.Errorf("record early-input handoff after host-inbound install: %w", err)
@@ -1187,10 +1191,11 @@ func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 //     `applyHostInboundFilter` — the REAL-ruleset functions — and the result is
 //     passed in as `sets dpuserspace.FenceAddrSets`. The divergence is visible
 //     precisely because the choice sits next to the scope it diverges from.
-//   - the two surfaces SHARE their address-set helpers.
-//     `hostInboundDesiredDropAddrs` is called by both `applyHostInboundFilter`
-//     and `installHostInboundColdBootFence`; `hostInboundDropAddrKey` and
-//     `hostInboundUncoveredDropAddrs` likewise straddle them.
+//   - the two surfaces share address-set helpers with distinct scopes.
+//     `hostInboundDestinationWideDropAddrs` records the cold-boot fence's
+//     destination-only coverage and the retained DHCP-backstop exclusions;
+//     `hostInboundDesiredDropAddrs` / `hostInboundUncoveredDropAddrs` describe
+//     the real table, including ingress-scoped deny destinations.
 //
 // So moving the fences out would separate the receivers from the choosers and
 // from the helpers they share with the real path — making the relationship this
@@ -1239,7 +1244,7 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 	// The two now differ in BOTH directions (lifeline-shared addresses withheld,
 	// zone-less / unzoned-VIP addresses added), and hostInboundCoveredAddrs must
 	// describe what the RETAINED enforcement — this fence — actually drops.
-	fenceCovered := hostInboundFenceCoveredAddrs(views, unzonedV4, unzonedV6)
+	destinationWide := hostInboundDestinationWideDropAddrs(views, unzonedV4, unzonedV6)
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundFencePayload oracle).
 	spec := xnft.FenceSpec{
@@ -1271,7 +1276,8 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 		d.hostInboundEnforced.Store(true)
 		// #5789: the fence retains its address and ingress scopes; record its
 		// destination coverage separately for the day-2 address handoff check.
-		d.hostInboundCoveredAddrs = fenceCovered
+		d.hostInboundCoveredAddrs = destinationWide
+		d.hostInboundDHCPRetainedAddrs = destinationWide
 		slog.Warn("host-inbound real install failed; fallback succeeded with address- and ingress-scoped DROPs for its rendered snapshot",
 			"fenced_zones", len(views), "fenced_unzoned_v4", len(unzonedV4),
 			"fenced_unzoned_v6", len(unzonedV6))
@@ -1469,9 +1475,9 @@ func hostInboundDropAddrKey(fam byte, addr string) string {
 	return string(fam) + "|" + addr
 }
 
-// hostInboundCoveredFamilyAddrs returns only syntactically valid, family-matched
-// addresses from the installed-generation coverage keys. Invalid keys cannot
-// exempt traffic from the additive gap backstop.
+// hostInboundCoveredFamilyAddrs returns syntactically valid, family-matched
+// destination-wide addresses allowed to exempt the DHCP backstop from its
+// additive local-address drop. Invalid keys cannot exempt traffic.
 func hostInboundCoveredFamilyAddrs(covered map[string]struct{}) (v4, v6 []string) {
 	seenV4, seenV6 := map[string]struct{}{}, map[string]struct{}{}
 	for key := range covered {
@@ -1536,10 +1542,10 @@ func hostInboundDesiredDropAddrs(views []dpuserspace.ZoneHostInboundView, unzone
 	return set
 }
 
-// hostInboundFenceCoveredAddrs returns the unicast destinations actually denied
-// by the cold-boot fence. Unlike the real ruleset, the fence omits ingress-only
-// lifeline-shared addresses, so IngressDenyV4/V6 are deliberately excluded.
-func hostInboundFenceCoveredAddrs(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string) map[string]struct{} {
+// hostInboundDestinationWideDropAddrs returns only unicast addresses protected
+// by destination-wide rules. IngressDeny addresses are ingress-netdev scoped and
+// must not exempt a different DHCP backstop interface from its local-address drop.
+func hostInboundDestinationWideDropAddrs(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string) map[string]struct{} {
 	set := map[string]struct{}{}
 	for _, view := range views {
 		for _, addr := range view.V4Addrs {

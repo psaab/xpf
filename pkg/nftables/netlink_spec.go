@@ -359,9 +359,10 @@ type GapFenceSpec struct {
 	DHCPv6Admit []string
 	// DHCPv6AdmitVRFSlaves are the configured members matched through sdifname.
 	DHCPv6AdmitVRFSlaves []string
-	// RetainedV4/V6 are destinations still covered by the installed main table.
-	// The gap table's DHCP backstop must exclude them so it cannot override a
-	// retained service permit in this later base chain.
+	// RetainedV4/V6 are destination-wide addresses still covered by the installed
+	// main table, excluding ingress-only deny scopes. The gap table's DHCP backstop
+	// excludes them so it cannot override an address-level retained service permit
+	// in this later base chain; ingress-scoped drops must not exempt new interfaces.
 	RetainedV4 []string
 	RetainedV6 []string
 	// SharedV4/V6 are the Uncovered subset shared with a lifeline,
