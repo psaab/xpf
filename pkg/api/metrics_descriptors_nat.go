@@ -112,4 +112,14 @@ func (c *xpfCollector) initNATDescriptors() {
 			"#2852 Phase-2 sharding decision is gated on (#4800).",
 		[]string{"pool", "rule"}, nil,
 	)
+	c.userspaceSNATPoolRecycleScanPopsTotal = prometheus.NewDesc(
+		"xpf_userspace_source_nat_pool_recycle_scan_pops_total",
+		"Total recycled-phase port-allocation tokens popped across pool addresses.",
+		[]string{"pool", "rule"}, nil,
+	)
+	c.userspaceSNATPoolRecycleScanWalksTotal = prometheus.NewDesc(
+		"xpf_userspace_source_nat_pool_recycle_scan_walks_total",
+		"Total recycled-phase port-allocation walks across pool addresses.",
+		[]string{"pool", "rule"}, nil,
+	)
 }

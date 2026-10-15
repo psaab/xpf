@@ -402,85 +402,52 @@ func (c *xpfCollector) emitThreeColorPolicerCounters(ch chan<- prometheus.Metric
 }
 
 func (c *xpfCollector) emitUserspaceSourceNATPoolMetrics(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
-	for _, pool := range status.SourceNATPools {
+	occupancy := dpuserspace.SourceNATPoolOccupancy(status)
+	emitted := make(map[string]struct{}, len(occupancy))
+	for _, candidate := range status.SourceNATPools {
+		if candidate.PoolName == "" {
+			continue
+		}
+		if _, ok := emitted[candidate.PoolName]; ok {
+			continue
+		}
+		pool, ok := occupancy[candidate.PoolName]
+		if !ok {
+			continue
+		}
+		emitted[candidate.PoolName] = struct{}{}
 		labels := []string{pool.PoolName, pool.RuleName}
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolLiveFlows,
-			prometheus.GaugeValue,
-			float64(pool.LiveFlows),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolMaxTrackedFlows,
-			prometheus.GaugeValue,
-			float64(pool.MaxTrackedFlows),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolUsedPorts,
-			prometheus.GaugeValue,
-			float64(pool.UsedPorts),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolPersistentLeases,
-			prometheus.GaugeValue,
-			float64(pool.PersistentLeases),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolAllocationsTotal,
-			prometheus.CounterValue,
-			float64(pool.AllocationsTotal),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolReusesTotal,
-			prometheus.CounterValue,
-			float64(pool.ReusesTotal),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolPersistentAdmittedTotal,
-			prometheus.CounterValue,
-			float64(pool.PersistentAdmittedTotal),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolPersistentDeclinedTotal,
-			prometheus.CounterValue,
-			float64(pool.PersistentDeclinedTotal),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolExhaustionsTotal,
-			prometheus.CounterValue,
-			float64(pool.ExhaustionTotal),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolIdleLeaseImportCapacityTotal,
-			prometheus.CounterValue,
-			float64(pool.IdleLeaseImportCapacityTotal),
-			labels...,
-		)
-		// #4800: the (denominator, contended) pair for this pool's residual
-		// live-state mutex. Emitted unconditionally so the connection-rate
-		// harness sees an explicit 0 from a pool that never contended,
-		// rather than a missing series it would have to disambiguate from a
-		// scrape failure.
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolLiveLockAcquisitionsTotal,
-			prometheus.CounterValue,
-			float64(pool.LiveLockAcquisitionsTotal),
-			labels...,
-		)
-		ch <- prometheus.MustNewConstMetric(
-			c.userspaceSNATPoolLiveLockContendedTotal,
-			prometheus.CounterValue,
-			float64(pool.LiveLockContendedTotal),
-			labels...,
-		)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolLiveFlows,
+			prometheus.GaugeValue, float64(pool.LiveFlows), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolMaxTrackedFlows,
+			prometheus.GaugeValue, float64(pool.MaxTrackedFlows), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolUsedPorts,
+			prometheus.GaugeValue, float64(pool.UsedPorts), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolPersistentLeases,
+			prometheus.GaugeValue, float64(pool.PersistentLeases), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolAllocationsTotal,
+			prometheus.CounterValue, float64(pool.AllocationsTotal), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolReusesTotal,
+			prometheus.CounterValue, float64(pool.ReusesTotal), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolPersistentAdmittedTotal,
+			prometheus.CounterValue, float64(pool.PersistentAdmittedTotal), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolPersistentDeclinedTotal,
+			prometheus.CounterValue, float64(pool.PersistentDeclinedTotal), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolExhaustionsTotal,
+			prometheus.CounterValue, float64(pool.ExhaustionTotal), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolIdleLeaseImportCapacityTotal,
+			prometheus.CounterValue, float64(pool.IdleLeaseImportCapacityTotal), labels...)
+		// #4800: always emit the denominator and contended subset together.
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolLiveLockAcquisitionsTotal,
+			prometheus.CounterValue, float64(pool.LiveLockAcquisitionsTotal), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolLiveLockContendedTotal,
+			prometheus.CounterValue, float64(pool.LiveLockContendedTotal), labels...)
+		// #9392: paired production measures distinguish a healthy recycled
+		// walk from the allocator cliff approaching pool exhaustion.
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolRecycleScanPopsTotal,
+			prometheus.CounterValue, float64(pool.RecycleScanPopsTotal), labels...)
+		ch <- prometheus.MustNewConstMetric(c.userspaceSNATPoolRecycleScanWalksTotal,
+			prometheus.CounterValue, float64(pool.RecycleScanWalksTotal), labels...)
 	}
 }
 

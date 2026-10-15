@@ -180,27 +180,25 @@ type xpfCollector struct {
 	gcSweepDuration     *prometheus.Desc
 
 	// NAT pool utilization
-	natPoolUsedPorts                  *prometheus.Desc
-	natPoolTotalPorts                 *prometheus.Desc
-	natPoolDeterministicInfo          *prometheus.Desc
-	natPoolDetBlocksTotal             *prometheus.Desc
-	natPoolDetBlocksAllocated         *prometheus.Desc
-	userspaceSNATPoolLiveFlows        *prometheus.Desc
-	userspaceSNATPoolMaxTrackedFlows  *prometheus.Desc
-	userspaceSNATPoolUsedPorts        *prometheus.Desc
-	userspaceSNATPoolPersistentLeases *prometheus.Desc
-	userspaceSNATPoolAllocationsTotal *prometheus.Desc
-	userspaceSNATPoolReusesTotal      *prometheus.Desc
-	// #8447: persistent-NAT admission pair.
+	natPoolUsedPorts                              *prometheus.Desc
+	natPoolTotalPorts                             *prometheus.Desc
+	natPoolDeterministicInfo                      *prometheus.Desc
+	natPoolDetBlocksTotal                         *prometheus.Desc
+	natPoolDetBlocksAllocated                     *prometheus.Desc
+	userspaceSNATPoolLiveFlows                    *prometheus.Desc
+	userspaceSNATPoolMaxTrackedFlows              *prometheus.Desc
+	userspaceSNATPoolUsedPorts                    *prometheus.Desc
+	userspaceSNATPoolPersistentLeases             *prometheus.Desc
+	userspaceSNATPoolAllocationsTotal             *prometheus.Desc
+	userspaceSNATPoolReusesTotal                  *prometheus.Desc
 	userspaceSNATPoolPersistentAdmittedTotal      *prometheus.Desc
 	userspaceSNATPoolPersistentDeclinedTotal      *prometheus.Desc
 	userspaceSNATPoolExhaustionsTotal             *prometheus.Desc
 	userspaceSNATPoolIdleLeaseImportCapacityTotal *prometheus.Desc
-	// #4800: the per-pool NAT-allocator leg of the new-flow-install
-	// contention surface. Always emitted as a pair — a contention count
-	// without its denominator is not interpretable.
-	userspaceSNATPoolLiveLockAcquisitionsTotal *prometheus.Desc
-	userspaceSNATPoolLiveLockContendedTotal    *prometheus.Desc
+	userspaceSNATPoolLiveLockAcquisitionsTotal    *prometheus.Desc
+	userspaceSNATPoolLiveLockContendedTotal       *prometheus.Desc
+	userspaceSNATPoolRecycleScanPopsTotal         *prometheus.Desc
+	userspaceSNATPoolRecycleScanWalksTotal        *prometheus.Desc
 
 	// DHCP lease gauge
 	dhcpLeasesActive *prometheus.Desc
@@ -1049,6 +1047,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceSNATPoolIdleLeaseImportCapacityTotal
 	ch <- c.userspaceSNATPoolLiveLockAcquisitionsTotal
 	ch <- c.userspaceSNATPoolLiveLockContendedTotal
+	ch <- c.userspaceSNATPoolRecycleScanPopsTotal
+	ch <- c.userspaceSNATPoolRecycleScanWalksTotal
 	ch <- c.dhcpLeasesActive
 	ch <- c.dhcpDDNSUpsertsTotal
 	ch <- c.dhcpDDNSDeletesTotal
