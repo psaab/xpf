@@ -58,6 +58,13 @@ type physDesired struct {
 	skipAddrs bool
 }
 
+// unitHasDHCPv6 reports either representation of a DHCPv6-managed unit.
+// DHCPv6Client carries the structured Junos options; do not rely on a
+// separately-populated DHCPv6 flag at dataplane compiler boundaries.
+func unitHasDHCPv6(unit *config.InterfaceUnit) bool {
+	return unit != nil && (unit.DHCPv6 || unit.DHCPv6Client != nil)
+}
+
 const defaultPhysicalMTU9985 = 1500
 
 // mtuOwnedNetdevs returns resolved Linux netdev names whose MTU is reconciled
@@ -226,7 +233,7 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 			if !ok || unit == nil {
 				continue
 			}
-			if unit.DHCP || unit.DHCPv6 {
+			if unit.DHCP || unitHasDHCPv6(unit) {
 				pd.skipAddrs = true
 			}
 			for _, a := range unit.Addresses {
