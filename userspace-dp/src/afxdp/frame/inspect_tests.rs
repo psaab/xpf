@@ -154,6 +154,39 @@ fn v6_well_formed_udp_parses_ports_normally() {
     assert_eq!(flow.forward_key.dst_port, 0x7788);
 }
 
+/// #13529: a bad L3 stamp must invalidate the entire offset pair. The
+/// previous frame parser corrected L3 from the wire but still applied the
+/// stale L4-relative displacement, reading payload bytes as session ports.
+#[test]
+fn v6_distrusted_l3_stamp_does_not_reuse_stale_relative_l4() {
+    // Real TCP ports start at l3+40; attacker-controlled payload at the stale
+    // l3+48 position spells a different tuple.
+    let mut frame = v6_frame(PROTO_TCP, 52, &[0; 52]);
+    // Use an ordinary packet payload with false ports exactly eight bytes
+    // after the real L4 header.
+    frame[14 + 40..14 + 44].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    frame[14 + 48..14 + 52].copy_from_slice(&[0xab, 0xcd, 0xef, 0x01]);
+    let meta = UserspaceDpMeta {
+        l3_offset: 18, // wrong VLAN-like stamp; wire L3 is at 14
+        l4_offset: 18 + 48,
+        ..v6_meta(PROTO_TCP)
+    };
+
+    let flow = parse_session_flow_from_frame(&frame, meta)
+        .expect("wire-derived IPv6 TCP ports must still parse");
+    assert_eq!(flow.forward_key.src_port, 0x1234);
+    assert_eq!(flow.forward_key.dst_port, 0x5678);
+    let trusted_meta = UserspaceDpMeta {
+        l3_offset: 14,
+        l4_offset: 14 + 40,
+        ..v6_meta(PROTO_TCP)
+    };
+    let trusted = parse_session_flow_from_frame(&frame, trusted_meta)
+        .expect("verified IPv6 offset stamps must still parse");
+    assert_eq!(trusted.forward_key.src_port, 0x1234);
+    assert_eq!(trusted.forward_key.dst_port, 0x5678);
+}
+
 // ---- meta-offset fallback (parse_session_flow_from_bytes) ----
 
 #[test]
