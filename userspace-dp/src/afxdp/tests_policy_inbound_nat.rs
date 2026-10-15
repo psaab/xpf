@@ -1274,14 +1274,17 @@ fn injected_mapped_ipv6_packet_hits_ingress_identity_gate_10686() {
 }
 
 #[test]
-fn pending_pmech_reverse_holds_and_replays_on_arrival_binding() {
+fn pending_pmech_reverse_holds_and_replays_on_arrival_binding_13642() {
     let forwarding = build_forwarding_state(&v4_source_deny_then_any_snapshot_10686());
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     let mut sessions = SessionTable::new();
     let src: Ipv6Addr = "2001:559:8585:ef00::100".parse().unwrap();
     let dst: Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
-    let (frame, meta) = udp_v6_ingress_frame_10686(src, dst, TEST_WAN_MAC);
+    let (frame, mut meta) = udp_v6_ingress_frame_10686(src, dst, TEST_WAN_MAC);
+    // This regression uses a native RX descriptor, so stamp the configured
+    // VLAN identity to pass the native ingress VLAN guard before PMech.
+    meta.ingress_vlan_id = 80;
     let packet_key = SessionKey {
         addr_family: libc::AF_INET6 as u8,
         protocol: PROTO_UDP,
@@ -1311,15 +1314,17 @@ fn pending_pmech_reverse_holds_and_replays_on_arrival_binding() {
         >,
     > = Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::BTreeMap::new()));
 
-    let (batch, dbg) = txn_run_descriptor_with_injected(
+    let (batch, dbg) = txn_run_descriptor(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
-        (frame.clone(), meta),
-        &deliveries,
+        &frame,
+        meta,
     );
     assert_eq!(batch.validated_packets, 1);
+    assert_eq!(dbg.rx, 1, "the native descriptor is counted on arrival");
+    assert_eq!(dbg.rx_bytes_total, frame.len() as u64);
     assert_eq!(dbg.tx, 0);
     assert_eq!(sessions.len(), 0);
     assert_eq!(binding.pending_pmech_reverse.len(), 1);
@@ -1331,7 +1336,7 @@ fn pending_pmech_reverse_holds_and_replays_on_arrival_binding() {
     let waiters = directory.take_waiters(token, owner_generation);
     assert_eq!(waiters.len(), 1);
     assert_eq!(waiters[0], binding.pending_pmech_reverse[0].waiter);
-    let _ = txn_run_descriptor_with_injected(
+    let (_, replay_dbg) = txn_run_descriptor_with_injected(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -1339,6 +1344,8 @@ fn pending_pmech_reverse_holds_and_replays_on_arrival_binding() {
         (frame, meta),
         &deliveries,
     );
+    assert_eq!(replay_dbg.rx, 0, "replaying a native descriptor is not a new RX");
+    assert_eq!(replay_dbg.rx_bytes_total, 0);
     assert!(binding.pending_pmech_reverse.is_empty());
     assert!(directory.remove_token(token, owner_generation));
 }

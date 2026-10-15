@@ -480,6 +480,11 @@ pub(super) fn is_pressure_shed_shared_opening(
         && matches!(current.tcp_handshake_state, 1..=3)
 }
 
+#[inline]
+fn should_record_rx_descriptor_telemetry(is_injected: bool, was_replay: bool) -> bool {
+    !is_injected && !was_replay
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
@@ -585,7 +590,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
         &mut binding.tx_pipeline.free_tx_frames,
     );
     loop {
-        let (desc, injected_meta, is_injected) =
+        let (desc, injected_meta, is_injected, was_replay) =
             if let Some(held) = binding.pending_pmech_replay.pop_front() {
                 if held.is_injected {
                     binding
@@ -593,15 +598,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         .pmech_injected_replay_addrs
                         .push(held.desc.addr);
                 }
-                (held.desc, Some(held.meta), held.is_injected)
+                (held.desc, Some(held.meta), held.is_injected, true)
             } else if let Some((desc, meta)) = injected_desc.take() {
-                (desc, Some(meta), true)
+                (desc, Some(meta), true, false)
             } else if let Some(desc) = received.read() {
-                (desc, None, false)
+                (desc, None, false, false)
             } else {
                 break;
             };
-        if !is_injected {
+        if should_record_rx_descriptor_telemetry(is_injected, was_replay) {
             record_rx_descriptor_telemetry(desc, area, telemetry, worker_ctx);
         }
         let mut recycle_now = true;
