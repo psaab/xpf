@@ -43,6 +43,11 @@ func (c *xpfCollector) collectNATPoolMetrics(ch chan<- prometheus.Metric, dp api
 		poolOccupancy = dpuserspace.SourceNATPoolOccupancy(*userspaceStatus)
 	}
 	for name, pool := range cfg.Security.NAT.SourcePools {
+		if pool == nil {
+			// Tolerant restore and HA peer-sync may preserve nil map values.
+			// A missing pool has no capacity or usage metrics to report.
+			continue
+		}
 		portLow, portHigh := pool.PortLow, pool.PortHigh
 		if portLow == 0 {
 			portLow = 1024
