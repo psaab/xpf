@@ -1610,12 +1610,15 @@ func (s *Store) saveRollbackFiles() {
 			Generation: generation,
 		}
 	}
-	s.cleanupRollbackFiles(len(entries) + 1)
+	removedAny, cleanupFailed := s.cleanupRollbackFiles(len(entries) + 1)
+	if cleanupFailed {
+		degraded = true
+	}
 	if err := s.writeRollbackMetadataGeneration(generation, metadata); err != nil {
 		slog.Warn("failed to write rollback metadata", "path", s.rollbackMetadataPath(), "err", err)
 		degraded = true
 	}
-	if len(entries) > 0 {
+	if len(entries) > 0 || removedAny {
 		if err := rbSyncDir(filepath.Dir(s.filePath)); err != nil {
 			slog.Warn("failed to sync rollback directory", "err", err)
 			degraded = true
@@ -1646,7 +1649,9 @@ func (s *Store) saveRollbackFiles() {
 // error (e.g. EACCES, EBUSY) used to break the loop and leave higher slots
 // behind, which then violated that invariant on the next boot; log and keep
 // going so every reachable stale slot is cleared.
-func (s *Store) cleanupRollbackFiles(startN int) {
+// Returns whether any directory entry was removed and whether any unlink
+// failed, allowing saveRollbackFiles to sync and report incomplete cleanup.
+func (s *Store) cleanupRollbackFiles(startN int) (removedAny bool, failed bool) {
 	for i := startN; i <= s.history.MaxSize()+1; i++ {
 		path := s.rollbackPath(i)
 		if err := rbRemove(path); err != nil {
@@ -1654,9 +1659,12 @@ func (s *Store) cleanupRollbackFiles(startN int) {
 				break // genuinely absent: contiguous sequence ends here
 			}
 			slog.Warn("failed to remove stale rollback file, continuing", "path", path, "err", err)
+			failed = true
 			continue
 		}
+		removedAny = true
 	}
+	return removedAny, failed
 }
 
 // loadRollbackHistory reads numbered rollback files and populates the history.
@@ -1690,9 +1698,21 @@ func (s *Store) loadRollbackHistory() {
 			if os.IsNotExist(err) {
 				break
 			}
-			// #4810: do not collapse later positions after an unreadable slot.
+			// #13225: bounded reads reject oversized slots before their bytes
+			// can be hashed. Recover saved audit metadata only after validating
+			// the full file hash, identity, and active manifest generation.
 			slog.Warn("error reading rollback file, continuing", "path", path, "err", err)
-			entries = append(entries, &HistoryEntry{Timestamp: time.Now()})
+			slotTimestamp := time.Now()
+			slotComment := ""
+			slotGenerationValid := generation == 0 ||
+				(i-1 < len(metadata) && metadata[i-1].Generation == generation)
+			if !generationMismatch && slotGenerationValid {
+				if ts, comment, ok := rollbackMetadataForOversizedSlot(metadata, i-1, path); ok {
+					slotTimestamp = ts
+					slotComment = comment
+				}
+			}
+			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
 			continue
 		}
 
@@ -1736,14 +1756,6 @@ func (s *Store) loadRollbackHistory() {
 			slotTimestamp = identity.ModTime
 		}
 
-		// #5557: bound a rollback slot the same way every other parse entry
-		// point is bounded. Keep an oversized slot position but tombstone it.
-		if len(data) > MaxConfigSize {
-			slog.Warn("rollback file exceeds max config size, skipping",
-				"path", path, "bytes", len(data), "max", MaxConfigSize)
-			entries = append(entries, &HistoryEntry{Timestamp: slotTimestamp, Comment: slotComment})
-			continue
-		}
 		// #10296: empty files and whitespace-only files are not valid rollback
 		// targets; keeping their position prevents a later slot from shifting.
 		if len(bytes.TrimSpace(data)) == 0 {
