@@ -23,8 +23,8 @@ func TestUserspaceHASplitBrainCountersEmit13291(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	if len(got) != 17 {
-		t.Fatalf("emitted %d metrics, want 17 (including three HA split-brain counters)", len(got))
+	if len(got) != 25 {
+		t.Fatalf("emitted %d metrics, want 25 (including WG uncovered and three HA split-brain counters)", len(got))
 	}
 	for _, tc := range []struct {
 		desc  *prometheus.Desc

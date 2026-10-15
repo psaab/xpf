@@ -83,4 +83,14 @@ func (c *xpfCollector) initUserspaceStatus13280Descriptors() {
 		"Helper-reported q0 S5 reinject terminal completions by outcome.",
 		[]string{"outcome"}, nil,
 	)
+	c.userspaceWGUncoveredPacketsTotal = prometheus.NewDesc(
+		"xpf_wg_uncovered_packets_total",
+		"Cross-worker WireGuard uncovered-forward queue packets by outcome (#10597).",
+		[]string{"outcome"}, nil,
+	)
+	c.userspaceWGUncoveredQueuePoison = prometheus.NewDesc(
+		"xpf_wg_uncovered_queue_poison_recoveries_total",
+		"WireGuard uncovered-forward queue lock poison recoveries (#10597).",
+		nil, nil,
+	)
 }

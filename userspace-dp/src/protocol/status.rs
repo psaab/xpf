@@ -582,6 +582,24 @@ pub(crate) struct ProcessStatus {
     pub session_delete_replica_dropped: u64,
     #[serde(rename = "session_delete_replica_drop_repaired", default)]
     pub session_delete_replica_drop_repaired: u64,
+    /// #13289: process-wide #10597 WireGuard uncovered forwarding outcomes.
+    /// Additive and defaulted for compatibility with older helpers.
+    #[serde(rename = "wg_uncovered_enqueued_total", default)]
+    pub wg_uncovered_enqueued_total: u64,
+    #[serde(rename = "wg_uncovered_stale_total", default)]
+    pub wg_uncovered_stale_total: u64,
+    #[serde(rename = "wg_uncovered_malformed_total", default)]
+    pub wg_uncovered_malformed_total: u64,
+    #[serde(rename = "wg_uncovered_nonlocal_total", default)]
+    pub wg_uncovered_nonlocal_total: u64,
+    #[serde(rename = "wg_uncovered_queue_full_total", default)]
+    pub wg_uncovered_queue_full_total: u64,
+    #[serde(rename = "wg_uncovered_queue_shed_total", default)]
+    pub wg_uncovered_queue_shed_total: u64,
+    #[serde(rename = "wg_uncovered_queue_orphan_total", default)]
+    pub wg_uncovered_queue_orphan_total: u64,
+    #[serde(rename = "wg_uncovered_queue_poison_recoveries", default)]
+    pub wg_uncovered_queue_poison_recoveries: u64,
     /// #9506 counter slice: IPsec-inner (D11/D13/D14) deny-cause + queue
     /// counters, projected from one
     /// `crate::afxdp::ipsec_inner::ipsec_inner_counters_snapshot()` call.

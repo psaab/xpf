@@ -13,6 +13,48 @@ use crate::afxdp::disposition::{
 /// (worker spawn / shutdown / reconcile) and HA reconciliation state
 /// stay in mod.rs and ha.rs.
 impl super::Coordinator {
+    /// #13289: process-wide #10597 WireGuard uncovered-queue telemetry.
+    /// These atomics are shared across workers, so read directly rather than
+    /// summing per-worker state.
+    pub fn wg_uncovered_enqueued_total(&self) -> u64 {
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_ENQUEUED_TOTAL
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn wg_uncovered_stale_total(&self) -> u64 {
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_STALE_TOTAL.load(Ordering::Relaxed)
+    }
+
+    pub fn wg_uncovered_malformed_total(&self) -> u64 {
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_MALFORMED_TOTAL
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn wg_uncovered_nonlocal_total(&self) -> u64 {
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn wg_uncovered_queue_full_total(&self) -> u64 {
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_FULL_TOTAL
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn wg_uncovered_queue_shed_total(&self) -> u64 {
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_SHED_TOTAL
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn wg_uncovered_queue_orphan_total(&self) -> u64 {
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_ORPHAN_TOTAL
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn wg_uncovered_queue_poison_recoveries(&self) -> u64 {
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_QUEUE_POISON_RECOVERIES
+            .load(Ordering::Relaxed)
+    }
+
     pub fn dynamic_neighbor_status(&self) -> (usize, u64) {
         let entries = self.neighbors.dynamic.len();
         let generation = self.neighbors.generation.load(Ordering::Relaxed);

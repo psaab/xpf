@@ -829,6 +829,16 @@ type ProcessStatus struct {
 	ZoneGateAmbiguousTotal    uint64 `json:"zone_gate_ambiguous_total,omitempty"`
 	ZoneGateStaleTotal        uint64 `json:"zone_gate_stale_total,omitempty"`
 	ZoneGateNoGenerationTotal uint64 `json:"zone_gate_no_generation_total,omitempty"`
+	// #13289: #10597 cross-worker WireGuard uncovered-forward outcomes.
+	// These additive counters default to zero with older helpers.
+	WgUncoveredEnqueuedTotal         uint64 `json:"wg_uncovered_enqueued_total,omitempty"`
+	WgUncoveredStaleTotal            uint64 `json:"wg_uncovered_stale_total,omitempty"`
+	WgUncoveredMalformedTotal        uint64 `json:"wg_uncovered_malformed_total,omitempty"`
+	WgUncoveredNonlocalTotal         uint64 `json:"wg_uncovered_nonlocal_total,omitempty"`
+	WgUncoveredQueueFullTotal        uint64 `json:"wg_uncovered_queue_full_total,omitempty"`
+	WgUncoveredQueueShedTotal        uint64 `json:"wg_uncovered_queue_shed_total,omitempty"`
+	WgUncoveredQueueOrphanTotal      uint64 `json:"wg_uncovered_queue_orphan_total,omitempty"`
+	WgUncoveredQueuePoisonRecoveries uint64 `json:"wg_uncovered_queue_poison_recoveries,omitempty"`
 	// #10695 (#9506 counter slice): D13/D11 logical-frame build failures
 	// (including ECN-combine refusals), and D13 RFC 6040 §4.2 illegal
 	// inner-ECN refusals. Surfaced as
