@@ -249,6 +249,8 @@ func newIfaceNATStatsAPIStore(t *testing.T) *configstore.Store {
 set security nat source rule-set trust-to-wan to zone wan
 set security nat source rule-set trust-to-wan rule r1 match source-address 0.0.0.0/0
 set security nat source rule-set trust-to-wan rule r1 then source-nat interface
+set security nat source rule-set trust-to-wan rule r2 match source-address 10.0.0.0/8
+set security nat source rule-set trust-to-wan rule r2 then source-nat interface
 set security nat source rule-set guest-to-wan from zone guest
 set security nat source rule-set guest-to-wan to zone wan
 set security nat source rule-set guest-to-wan rule r1 match source-address 0.0.0.0/0
