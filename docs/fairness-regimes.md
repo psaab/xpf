@@ -1664,16 +1664,24 @@ unit policy:
 
   All exact-queue ordinals are tracked, including ordinals beyond 63, so
   each class receives at most one progressing Phase-1 honor per epoch. A
-  zero-TX honor is refunded and may retry in that epoch, as described below.
+  zero-TX interface-resource failure is refunded and may retry in that
+  epoch. A queue-local cross-worker `V_min` throttle is different: its
+  ordinal is deferred until the 200 µs time boundary (also in Phase 2),
+  the scheduler tries other exact queues in the same pass, and if none
+  can transmit it falls through to non-exact service. A skipped epoch
+  cannot end early through an empty Phase-2 wrap: doing so would select
+  the same lagged queue repeatedly and prematurely arm the V_min hard
+  cap. The deferred selection is not counted as a TX admission.
 
   **Zero-TX honor refund (hb166 T-2):** the selector debits the
   Phase-1 budget and sets the honored-epoch bit at SELECTION, but the
   service wrapper REFUNDS both (adds the debit back, clears the bit) if
-  the selected queue transmits zero bytes — a transient TX failure (TX
-  ring full, no free UMEM frame, frame-build Drop) must not burn the
-  small class's 200 µs epoch guarantee. The failure is interface-wide
-  (all CoS queues share one TX ring / UMEM pool), so a refund + retry
-  does not differentially starve other queues; the worker reaps
+  the selected queue transmits zero bytes for a reason other than a
+  `V_min` skip — a transient TX failure (TX ring full, no free UMEM
+  frame, frame-build Drop) must not burn the small class's 200 µs epoch
+  guarantee. The failure is interface-wide (all CoS queues share one
+  TX ring / UMEM pool), so a refund and retry do not differentially
+  starve other queues; the worker reaps
   completions between drain passes. `phase1_admissions` therefore counts
   only visits that made TX progress; `phase1_selected_no_progress`
   counts the refunded no-progress visits (climbing there with flat
