@@ -1664,10 +1664,7 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 		}
 	}
 	if scoped && cancelErr == nil {
-		p.mu.Lock()
-		eligible := p.eligibleLocked()
-		p.mu.Unlock()
-		p.submitEligible(eligible)
+		p.dispatchEligible()
 	}
 	return cancelErr
 }
