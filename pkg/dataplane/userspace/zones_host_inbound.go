@@ -1279,6 +1279,7 @@ func BuildDHCPHostInboundBackstopNetdevs(cfg *config.Config, snaps []InterfaceSn
 	backstops.VRFSlavesV4 = append(backstops.VRFSlavesV4, zoned.VRFSlavesV4...)
 	backstops.VRFSlavesV6 = append(backstops.VRFSlavesV6, zoned.VRFSlavesV6...)
 	backstops.AdmitVRFSlavesV6 = append(backstops.AdmitVRFSlavesV6, zoned.AdmitVRFSlavesV6...)
+	backstops.AdmitVRFSlavesV6 = filterDHCPAdmits(backstops.AdmitVRFSlavesV6, deniedV6)
 	sort.Strings(backstops.VRFSlavesV4)
 	sort.Strings(backstops.VRFSlavesV6)
 	sort.Strings(backstops.AdmitVRFSlavesV6)
