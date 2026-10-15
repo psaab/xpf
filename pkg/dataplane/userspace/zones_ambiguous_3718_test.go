@@ -96,6 +96,37 @@ func TestAmbiguousHostInboundAddressesVRRPVIP(t *testing.T) {
 	}
 }
 
+// #13159 (D3-13): a lifeline-shared address withheld into IngressDenyV4 by an
+// empty-admit zone (wan) must still count in ambiguity detection when another
+// zone (dmz) also owns it with a differing token set. The address also
+// vanishes from wan's destination-only catch-all (fxp0's bare drop precedes
+// lifelines); without recording IngressDeny both gaps stay invisible.
+func TestAmbiguousLifelineSharedWithheldAddressReported13159(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"fxp0": {Name: "fxp0", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"10.0.0.1/24"}}}},
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"10.0.0.1/24"}}}},
+		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"10.0.0.1/24"}}}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"wan": {Name: "wan", Interfaces: []string{"ge-0/0/0.0"}},
+		"dmz": {Name: "dmz", Interfaces: []string{"ge-0/0/1.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"https"}}},
+	}
+	views := BuildZoneHostInboundViews(cfg)
+	wan := viewByZone(t, views, "wan")
+	if hasAddr(wan.V4Addrs, "10.0.0.1") || !hasAddr(wan.IngressDenyV4, "10.0.0.1") {
+		t.Fatalf("wan must withhold the shared address for ingress-only deny: %+v", wan)
+	}
+	got := AmbiguousHostInboundAddresses(cfg)
+	if len(got) != 1 || got[0].Address != "10.0.0.1" || len(got[0].Zones) != 2 {
+		t.Fatalf("AmbiguousHostInboundAddresses = %+v, want 10.0.0.1 with [dmz wan]", got)
+	}
+}
+
 // TestAmbiguousHostInboundAddressesEmpty guards the nil / no-zone fast paths.
 func TestAmbiguousHostInboundAddressesEmpty(t *testing.T) {
 	if got := AmbiguousHostInboundAddresses(nil); got != nil {

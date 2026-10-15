@@ -112,21 +112,21 @@ func TestUnzonedSetWithholdsLifelineSharedAddr(t *testing.T) {
 	}
 }
 
-// TestAdmittingZoneKeepsLifelineSharedAddr pins case (a) UNCHANGED, which the
-// issue requires. A view that admits something emits `accept ssh` before its
-// catch-all drop, so management already survives there and the drop still
-// expresses policy for every other service on that address. Withholding it
-// would delete the accept and the deny together — a wider hole than the
-// lockout being fixed.
-func TestAdmittingZoneKeepsLifelineSharedAddr(t *testing.T) {
+// TestAdmittingZoneWithholdsLifelineSharedAddr pins address-value partitioning
+// for an admitting view too: destination-only accepts/drops are not safe when
+// the address is on a lifeline; the data-zone's policy is carried by the
+// ingress-scoped rules instead.
+func TestAdmittingZoneWithholdsLifelineSharedAddr(t *testing.T) {
 	cfg := cfg7284NoStanzaZone()
 	cfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{
 		SystemServices: []string{"ssh"},
 	}
 	v := viewByZone(t, BuildZoneHostInboundViews(cfg), "lan")
-	if !hasAddr(v.V4Addrs, mgmtAddr7284) {
-		t.Errorf("a zone that ADMITS ssh must keep the shared management address "+
-			"so its accept is still emitted; got %v", v.V4Addrs)
+	if hasAddr(v.V4Addrs, mgmtAddr7284) || !hasAddr(v.IngressDenyV4, mgmtAddr7284) {
+		t.Fatalf("an admitting zone must keep shared lifeline address only in ingress-deny destinations: %+v", v)
+	}
+	if !hasAddr(v.V4Addrs, plainAddr) {
+		t.Fatalf("negative control: non-lifeline address must remain in destination policy: %+v", v)
 	}
 }
 

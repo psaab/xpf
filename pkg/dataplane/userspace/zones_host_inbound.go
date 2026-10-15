@@ -42,10 +42,9 @@ type ZoneHostInboundView struct {
 	MulticastRules []config.HostInboundMulticastRule
 	V4Addrs        []string // bare host IPv4 addresses (no prefix)
 	V6Addrs        []string // bare host IPv6 addresses (no prefix)
-	// IngressDenyV4/V6 hold lifeline-shared values split from empty-admit
-	// destination-only sets (#7284). #12229 includes them in every zone's
-	// judged-destination set so each ingress scope applies its own policy;
-	// lifeline interfaces remain outside those scopes and keep management.
+	// IngressDenyV4/V6 hold lifeline-shared values removed from destination-only
+	// rules (#7284). #12229 includes them in every zone's judged-destination set
+	// so data-zone policy stays scoped to its ingress and cannot deny lifelines.
 	IngressDenyV4 []string
 	IngressDenyV6 []string
 	// Screen flood limits are mirrored into the kernel input backstop because
@@ -696,23 +695,11 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		// #7284: the destination-only catch-all DROP carries no iifname, so an
 		// address also present on a lifeline must be withheld from that set or
 		// the lifeline's NEW management connection and ESTABLISHED conntrack are
-		// lost. For an empty-admit data-zone view, retain the withheld value in
-		// IngressDenyV4/V6. #12229 includes it in every ingress-zone judgment so
-		// each data-zone policy applies without matching the lifeline interface.
-		//
-		// Scoped to the empty-admit case ON PURPOSE. A view that DOES admit
-		// something (the #6492 Finding A topology: a management address shared
-		// onto a zone that permits ssh) emits `accept ssh` before the catch-all
-		// drop, so management already survives there and the drop still
-		// expresses a real policy for every OTHER service on that address.
-		// Withholding it from that view would delete the accept and the deny
-		// together, leaving every host service reachable on it — a far wider
-		// hole than the lockout being fixed.
-		var ingressDenyV4, ingressDenyV6 []string
-		if len(g.svc) == 0 && len(g.proto) == 0 {
-			v4, ingressDenyV4 = splitLifelineShared(v4, lifelineShared)
-			v6, ingressDenyV6 = splitLifelineShared(v6, lifelineShared)
-		}
+		// lost. Retain withheld values in IngressDenyV4/V6. #12229 includes them
+		// in every ingress-zone judgment so each data-zone policy applies without
+		// matching the lifeline interface.
+		v4, ingressDenyV4 := splitLifelineShared(v4, lifelineShared)
+		v6, ingressDenyV6 := splitLifelineShared(v6, lifelineShared)
 		view := ZoneHostInboundView{
 			Zone:                 g.zone,
 			Interfaces:           ifaces,
