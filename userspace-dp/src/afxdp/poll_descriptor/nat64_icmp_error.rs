@@ -167,6 +167,7 @@ pub(super) fn try_translate_nat64_icmp_error(
                         related_admit: fwd_egress_zone != 0
                             && arrival_zone == fwd_egress_zone
                             && outer_is_pmtud_error(packet_frame, meta),
+                        policy_src_ip: None,
                         budget_key,
                     }
                 }
@@ -244,6 +245,7 @@ pub(super) fn try_translate_nat64_icmp_error(
                         related_admit: fwd_ingress_zone != 0
                             && arrival_zone == fwd_ingress_zone
                             && outer_is_pmtud_error(packet_frame, meta),
+                        policy_src_ip: None,
                         budget_key,
                     }
                 }

@@ -6776,6 +6776,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             EmbeddedIcmpReversal::Queued {
                                 related_admit,
                                 budget_key,
+                                policy_src_ip,
                             } => {
                                 let policy_allowed = binding
                                     .scratch
@@ -6792,6 +6793,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 now_ns,
                                                 now_secs,
                                                 related_admit,
+                                                policy_src_ip,
                                             ))
                                         }
                                         _ => None,
@@ -6876,6 +6878,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             EmbeddedIcmpReversal::Queued {
                                 related_admit,
                                 budget_key,
+                                policy_src_ip,
                             } => {
                                 // Reversed error queued as a prebuilt forward;
                                 // authorize the actual rewritten wire identity
@@ -6895,6 +6898,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 now_ns,
                                                 now_secs,
                                                 related_admit,
+                                                policy_src_ip,
                                             ))
                                         }
                                         _ => None,

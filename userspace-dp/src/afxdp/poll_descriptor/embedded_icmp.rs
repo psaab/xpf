@@ -39,6 +39,9 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
     /// prebuilt against zone policy.
     Queued {
         related_admit: bool,
+        /// #13649: outbound SNAT builders rewrite the outer source before the
+        /// queued policy gate; retain the actual ingress source for policy.
+        policy_src_ip: Option<IpAddr>,
         /// #10667: the F-077 gating key the matcher charged — the caller
         /// refunds it via `SessionTable::refund_icmp_error_not_delivered`
         /// when the queued prebuilt is policy-refused.
@@ -226,6 +229,17 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         }
         return EmbeddedIcmpReversal::NotHandled;
     };
+    let pre_snat_policy_src = if icmp_match.outbound_snat {
+        let Some((policy_flow, _)) = queued_embedded_icmp_identity(packet_frame) else {
+            // A matched outbound SNAT frame must never fall back to judging
+            // the rewritten source if its original identity cannot be read.
+            sessions.refund_icmp_error_not_delivered(&icmp_match.budget_key, now_ns);
+            return EmbeddedIcmpReversal::Dropped;
+        };
+        Some(policy_flow.src_ip)
+    } else {
+        None
+    };
     let queued = queue_prebuilt_embedded_icmp_error(
         desc,
         meta,
@@ -241,8 +255,13 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         icmpv6_trace,
     );
     match queued {
-        EmbeddedIcmpReversal::Queued { budget_key, .. } => EmbeddedIcmpReversal::Queued {
+        EmbeddedIcmpReversal::Queued {
+            budget_key,
+            policy_src_ip: _,
+            ..
+        } => EmbeddedIcmpReversal::Queued {
             related_admit,
+            policy_src_ip: pre_snat_policy_src,
             budget_key,
         },
         other => other,
@@ -349,6 +368,7 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
     });
     EmbeddedIcmpReversal::Queued {
         related_admit: false,
+        policy_src_ip: None,
         budget_key: budget_key.clone(),
     }
 }
@@ -374,6 +394,7 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     now_ns: u64,
     now_secs: u64,
     related_admit: bool,
+    policy_src_ip: Option<IpAddr>,
 ) -> bool {
     // A queued prebuilt never reaches the later flowless disposition arms:
     // both callers continue after this adjudicator and TX dispatch sends a
@@ -399,13 +420,17 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     if resolution.disposition != ForwardingDisposition::ForwardCandidate {
         return false;
     }
-    let Some((policy_flow, mut policy_meta)) = queued_embedded_icmp_identity(queued_frame)
+    let Some((mut policy_flow, mut policy_meta)) = queued_embedded_icmp_identity(queued_frame)
     else {
         // A prebuilt frame that cannot expose an L3 policy identity is not
         // safe to deliver. Builders normally make this unreachable; keeping
         // the gate fail-closed protects the queue if a new builder regresses.
         return false;
     };
+    if let Some(src_ip) = policy_src_ip {
+        policy_flow.src_ip = src_ip;
+        policy_flow.forward_key.src_ip = src_ip;
+    }
     policy_meta.ingress_ifindex = ingress_meta.ingress_ifindex;
     policy_meta.ingress_vlan_id = ingress_meta.ingress_vlan_id;
     let ingress_logical = super::resolve_ingress_logical_ifindex(
