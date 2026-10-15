@@ -65,6 +65,39 @@ func neighState(state int) string {
 	}
 }
 
+func neighDisplayable(n netlink.Neigh) bool {
+	return n.IP != nil && (n.HardwareAddr != nil ||
+		n.State&(netlink.NUD_INCOMPLETE|netlink.NUD_FAILED) != 0)
+}
+
+func neighMACDisplay(n netlink.Neigh) string {
+	if len(n.HardwareAddr) != 0 {
+		return n.HardwareAddr.String()
+	}
+	if n.State&netlink.NUD_INCOMPLETE != 0 {
+		return "(incomplete)"
+	}
+	if n.State&netlink.NUD_FAILED != 0 {
+		return "(failed)"
+	}
+	return "-"
+}
+
+func neighborLinkNames(neighbors []netlink.Neigh, linkByIndex func(int) (netlink.Link, error)) map[int]string {
+	names := make(map[int]string)
+	resolved := make(map[int]bool)
+	for _, n := range neighbors {
+		if !neighDisplayable(n) || resolved[n.LinkIndex] {
+			continue
+		}
+		resolved[n.LinkIndex] = true
+		if link, err := linkByIndex(n.LinkIndex); err == nil {
+			names[n.LinkIndex] = link.Attrs().Name
+		}
+	}
+	return names
+}
+
 func (c *CLI) buildInterfacesInput() cluster.InterfacesInput {
 	var input cluster.InterfacesInput
 	cfg := c.store.ActiveConfig()

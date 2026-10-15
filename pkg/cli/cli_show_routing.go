@@ -614,23 +614,20 @@ func (c *CLI) showARP(args []string) error {
 	}
 
 	// Junos format: MAC Address, Address, Name, Interface, Flags
+	linkNames := neighborLinkNames(neighbors, netlink.LinkByIndex)
 	fmt.Printf("%-18s%-16s%-25s%s\n", "MAC Address", "Address", "Interface", "Flags")
 	var total int
 	for _, n := range neighbors {
-		if n.IP == nil || n.HardwareAddr == nil {
+		if !neighDisplayable(n) {
 			continue
 		}
 		total++
-		ifName := ""
-		if link, err := netlink.LinkByIndex(n.LinkIndex); err == nil {
-			ifName = link.Attrs().Name
-		}
 		flags := "none"
 		if n.State == netlink.NUD_PERMANENT {
 			flags = "permanent"
 		}
 		fmt.Printf("%-18s%-16s%-25s%s\n",
-			n.HardwareAddr, n.IP, ifName, flags)
+			neighMACDisplay(n), n.IP, linkNames[n.LinkIndex], flags)
 	}
 	fmt.Printf("Total entries: %d\n", total)
 	return nil
@@ -644,26 +641,25 @@ func (c *CLI) showIPv6Neighbors() error {
 		return fmt.Errorf("listing IPv6 neighbors: %w", err)
 	}
 
-	// Count entries by state and interface
+	linkNames := neighborLinkNames(neighbors, netlink.LinkByIndex)
 	var total int
 	stateCounts := make(map[string]int)
 	ifaceCounts := make(map[string]int)
 	for _, n := range neighbors {
-		if n.IP == nil || n.HardwareAddr == nil {
+		if !neighDisplayable(n) {
 			continue
 		}
 		total++
 		stateCounts[neighState(n.State)]++
-		if link, err := netlink.LinkByIndex(n.LinkIndex); err == nil {
-			ifaceCounts[link.Attrs().Name]++
+		if name := linkNames[n.LinkIndex]; name != "" {
+			ifaceCounts[name]++
 		}
 	}
 
-	// Summary
 	fmt.Printf("Total entries: %d", total)
 	if total > 0 {
 		var parts []string
-		for _, s := range []string{"reachable", "stale", "permanent", "delay", "probe", "failed", "incomplete"} {
+		for _, s := range []string{"reachable", "stale", "permanent", "delay", "probe", "failed", "incomplete", "noarp", "unknown"} {
 			if cnt := stateCounts[s]; cnt > 0 {
 				parts = append(parts, fmt.Sprintf("%s: %d", s, cnt))
 			}
@@ -687,20 +683,11 @@ func (c *CLI) showIPv6Neighbors() error {
 
 	fmt.Printf("%-18s %-40s %-12s %-10s\n", "MAC Address", "IPv6 Address", "Interface", "State")
 	for _, n := range neighbors {
-		if n.IP == nil {
+		if !neighDisplayable(n) {
 			continue
 		}
-		// Skip link-local multicast and unresolved entries without MACs
-		if n.HardwareAddr == nil {
-			continue
-		}
-		ifName := ""
-		if link, err := netlink.LinkByIndex(n.LinkIndex); err == nil {
-			ifName = link.Attrs().Name
-		}
-		state := neighState(n.State)
 		fmt.Printf("%-18s %-40s %-12s %-10s\n",
-			n.HardwareAddr, n.IP, ifName, state)
+			neighMACDisplay(n), n.IP, linkNames[n.LinkIndex], neighState(n.State))
 	}
 	return nil
 }

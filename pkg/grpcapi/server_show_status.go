@@ -230,18 +230,15 @@ func (s *Server) GetSystemInfo(ctx context.Context, req *pb.GetSystemInfoRequest
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "listing ARP entries: %v", err)
 		}
-		writeNeighSummary(&buf, neighbors, neighStateStr)
+		linkNames := neighborLinkNames(neighbors, netlink.LinkByIndex)
+		writeNeighSummary(&buf, neighbors, neighStateStr, linkNames)
 		fmt.Fprintf(&buf, "%-18s %-20s %-12s %-10s\n", "MAC Address", "Address", "Interface", "State")
 		for _, n := range neighbors {
-			if n.IP == nil || n.HardwareAddr == nil {
+			if !neighDisplayable(n) {
 				continue
 			}
-			ifName := ""
-			if link, err := netlink.LinkByIndex(n.LinkIndex); err == nil {
-				ifName = link.Attrs().Name
-			}
 			fmt.Fprintf(&buf, "%-18s %-20s %-12s %-10s\n",
-				n.HardwareAddr, n.IP, ifName, neighStateStr(n.State))
+				neighMACDisplay(n), n.IP, linkNames[n.LinkIndex], neighStateStr(n.State))
 		}
 
 	case "ipv6-neighbors":
@@ -249,18 +246,15 @@ func (s *Server) GetSystemInfo(ctx context.Context, req *pb.GetSystemInfoRequest
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "listing IPv6 neighbors: %v", err)
 		}
-		writeNeighSummary(&buf, neighbors, neighStateStr)
+		linkNames := neighborLinkNames(neighbors, netlink.LinkByIndex)
+		writeNeighSummary(&buf, neighbors, neighStateStr, linkNames)
 		fmt.Fprintf(&buf, "%-18s %-40s %-12s %-10s\n", "MAC Address", "IPv6 Address", "Interface", "State")
 		for _, n := range neighbors {
-			if n.IP == nil || n.HardwareAddr == nil {
+			if !neighDisplayable(n) {
 				continue
 			}
-			ifName := ""
-			if link, err := netlink.LinkByIndex(n.LinkIndex); err == nil {
-				ifName = link.Attrs().Name
-			}
 			fmt.Fprintf(&buf, "%-18s %-40s %-12s %-10s\n",
-				n.HardwareAddr, n.IP, ifName, neighStateStr(n.State))
+				neighMACDisplay(n), n.IP, linkNames[n.LinkIndex], neighStateStr(n.State))
 		}
 
 	case "boot-messages":

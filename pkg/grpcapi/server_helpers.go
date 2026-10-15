@@ -390,25 +390,61 @@ func neighStateStr(state int) string {
 	}
 }
 
+// neighDisplayable reports whether a neighbor has enough information to
+// render. Linux omits NDA_LLADDR for unresolved entries in these states.
+func neighDisplayable(n netlink.Neigh) bool {
+	return n.IP != nil && (n.HardwareAddr != nil ||
+		n.State&(netlink.NUD_INCOMPLETE|netlink.NUD_FAILED) != 0)
+}
+
+func neighMACDisplay(n netlink.Neigh) string {
+	if len(n.HardwareAddr) != 0 {
+		return n.HardwareAddr.String()
+	}
+	if n.State&netlink.NUD_INCOMPLETE != 0 {
+		return "(incomplete)"
+	}
+	if n.State&netlink.NUD_FAILED != 0 {
+		return "(failed)"
+	}
+	return "-"
+}
+
+// neighborLinkNames resolves each interface index at most once per dump.
+func neighborLinkNames(neighbors []netlink.Neigh, linkByIndex func(int) (netlink.Link, error)) map[int]string {
+	names := make(map[int]string)
+	resolved := make(map[int]bool)
+	for _, n := range neighbors {
+		if !neighDisplayable(n) || resolved[n.LinkIndex] {
+			continue
+		}
+		resolved[n.LinkIndex] = true
+		if link, err := linkByIndex(n.LinkIndex); err == nil {
+			names[n.LinkIndex] = link.Attrs().Name
+		}
+	}
+	return names
+}
+
 // writeNeighSummary writes a neighbor table summary (total + per-state + per-interface counts).
-func writeNeighSummary(buf *strings.Builder, neighbors []netlink.Neigh, stateFn func(int) string) {
+func writeNeighSummary(buf *strings.Builder, neighbors []netlink.Neigh, stateFn func(int) string, linkNames map[int]string) {
 	var total int
 	stateCounts := make(map[string]int)
 	ifaceCounts := make(map[string]int)
 	for _, n := range neighbors {
-		if n.IP == nil || n.HardwareAddr == nil {
+		if !neighDisplayable(n) {
 			continue
 		}
 		total++
 		stateCounts[stateFn(n.State)]++
-		if link, err := netlink.LinkByIndex(n.LinkIndex); err == nil {
-			ifaceCounts[link.Attrs().Name]++
+		if name := linkNames[n.LinkIndex]; name != "" {
+			ifaceCounts[name]++
 		}
 	}
 	fmt.Fprintf(buf, "Total entries: %d", total)
 	if total > 0 {
 		var parts []string
-		for _, s := range []string{"reachable", "stale", "permanent", "delay", "probe", "failed", "incomplete"} {
+		for _, s := range []string{"reachable", "stale", "permanent", "delay", "probe", "failed", "incomplete", "noarp", "unknown"} {
 			if cnt := stateCounts[s]; cnt > 0 {
 				parts = append(parts, fmt.Sprintf("%s: %d", s, cnt))
 			}
