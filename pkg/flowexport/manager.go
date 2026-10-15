@@ -106,15 +106,36 @@ type ExportConfig struct {
 	// V9TemplateOpts.IncludeFlowDir (the v9 template builder reads the latter);
 	// the IPFIX exporter, which has no V9TemplateOptions, reads this field.
 	IncludeFlowDir bool
-	// sampleCounter is the monotonic 1-in-N counter. It is a POINTER so all
-	// ExportConfig template groups of one INSTANCE share a single counter
-	// (the sampling rate is a per-instance property; #2462). Two different
-	// instances each get their own counter. A nil pointer is lazily
-	// allocated on first use so a hand-built ExportConfig (tests, the
-	// singular Build* helpers) still samples correctly. json.Marshal skips
-	// the unexported field, so the reconcile config-hash is unaffected.
+	// sampleCounter is the monotonic 1-in-N counter. It is shared by all
+	// template groups of one instance. Two instances get separate counters.
 	sampleCounter *atomic.Uint64
 	counterOnce   sync.Once
+	samplingStats *SamplingStats
+	statsOnce     sync.Once
+}
+
+// SamplingStats is the per-instance outcome snapshot for flow sampling.
+// Template groups of an instance share one instance of this type.
+type SamplingStats struct {
+	evaluated    atomic.Uint64
+	selected     atomic.Uint64
+	zoneFiltered atomic.Uint64
+}
+
+// SamplingStats returns cumulative eligible evaluations, exported selections,
+// and zone-filtered sessions for this instance.
+func (ec *ExportConfig) SamplingStats() (evaluated, selected, zoneFiltered uint64) {
+	stats := ec.stats()
+	return stats.evaluated.Load(), stats.selected.Load(), stats.zoneFiltered.Load()
+}
+
+func (ec *ExportConfig) stats() *SamplingStats {
+	ec.statsOnce.Do(func() {
+		if ec.samplingStats == nil {
+			ec.samplingStats = &SamplingStats{}
+		}
+	})
+	return ec.samplingStats
 }
 
 // CollectorConfig defines a single NetFlow collector destination.
@@ -186,6 +207,39 @@ func resolveFlowServerVersion(fs *config.FlowServer, hasV9, hasIPFIX bool) strin
 	}
 }
 
+// CountExcludedFlowServers reports excluded flow-server stanzas in the active
+// sampling configuration for one resolved export protocol. It is independent
+// of surviving exporter groups, so an instance whose every server is excluded
+// remains observable.
+func CountExcludedFlowServers(svc *config.ServicesConfig, fo *config.ForwardingOptionsConfig, version string) int {
+	if fo == nil || fo.Sampling == nil {
+		return 0
+	}
+	hasV9, hasIPFIX := false, false
+	if svc != nil && svc.FlowMonitoring != nil {
+		hasV9 = svc.FlowMonitoring.Version9 != nil
+		hasIPFIX = svc.FlowMonitoring.VersionIPFIX != nil
+	}
+	count := 0
+	for _, inst := range fo.Sampling.Instances {
+		if inst == nil {
+			continue
+		}
+		for _, fam := range []*config.SamplingFamily{inst.FamilyInet, inst.FamilyInet6} {
+			if fam == nil {
+				continue
+			}
+			for _, fs := range fam.FlowServers {
+				if fs != nil && resolveFlowServerVersion(fs, hasV9, hasIPFIX) == version &&
+					config.FlowServerExcludedReason(fs) != "" {
+					count++
+				}
+			}
+		}
+	}
+	return count
+}
+
 // collectInstanceVersionCollectors walks ONE sampling instance's
 // flow-servers and returns the deduplicated collector set for the requested
 // export version, skipping flow-servers resolved to the other version. It
@@ -199,6 +253,7 @@ func resolveFlowServerVersion(fs *config.FlowServer, hasV9, hasIPFIX bool) strin
 //
 // #2462: this is now per-INSTANCE (was a global walk over every instance,
 // which merged distinct instances into one collector set — the defect).
+
 func collectInstanceVersionCollectors(inst *config.SamplingInstance, version string, hasV9, hasIPFIX bool) (collectors []CollectorConfig, servesInet, servesInet6 bool) {
 	families := []struct {
 		fam  *config.SamplingFamily
@@ -578,6 +633,7 @@ func ResolveV9TemplateGroups(svc *config.ServicesConfig, fo *config.ForwardingOp
 		}
 		// #2136 per-flow-server version binding: collect only THIS instance's
 		// flow-servers bound to NetFlow v9.
+		instanceStats := &SamplingStats{}
 		collectors, servesInet, servesInet6 := collectInstanceVersionCollectors(inst, config.FlowServerVersion9, true, hasIPFIX)
 		if len(collectors) == 0 {
 			continue
@@ -613,6 +669,7 @@ func ResolveV9TemplateGroups(svc *config.ServicesConfig, fo *config.ForwardingOp
 				ServesInet:          servesInet,
 				ServesInet6:         servesInet6,
 				sampleCounter:       shared,
+				samplingStats:       instanceStats,
 			})
 		}
 	}
@@ -645,6 +702,7 @@ func ResolveIPFIXTemplateGroups(svc *config.ServicesConfig, fo *config.Forwardin
 		if inst == nil {
 			continue
 		}
+		instanceStats := &SamplingStats{}
 		collectors, servesInet, servesInet6 := collectInstanceVersionCollectors(inst, config.FlowServerVersionIPFIX, hasV9, true)
 		if len(collectors) == 0 {
 			continue
@@ -677,6 +735,7 @@ func ResolveIPFIXTemplateGroups(svc *config.ServicesConfig, fo *config.Forwardin
 				ServesInet:          servesInet,
 				ServesInet6:         servesInet6,
 				sampleCounter:       shared,
+				samplingStats:       instanceStats,
 			})
 		}
 	}
@@ -804,15 +863,22 @@ func (ec *ExportConfig) ShouldExport(inZone, outZone uint16) bool {
 			eligible = true
 		}
 		if !eligible {
+			ec.stats().zoneFiltered.Add(1)
 			return false
 		}
 	}
+	stats := ec.stats()
+	stats.evaluated.Add(1)
 	// Apply 1-in-N sampling rate
+	selected := true
 	if ec.SamplingRate > 1 {
 		n := ec.counter().Add(1)
-		return n%uint64(ec.SamplingRate) == 0
+		selected = n%uint64(ec.SamplingRate) == 0
 	}
-	return true
+	if selected {
+		stats.selected.Add(1)
+	}
+	return selected
 }
 
 // FlowDirection derives the NetFlow/IPFIX flowDirection (IE 61) for a flow

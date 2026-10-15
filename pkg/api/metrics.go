@@ -1065,8 +1065,9 @@ type xpfCollector struct {
 	flowExportCollectorLastFailureSeconds *prometheus.Desc
 	// #9166: build health. Without these, a failed exporter build and an
 	// unconfigured box are the same observation on every surface.
-	flowExportConfiguredGroups *prometheus.Desc
-	flowExportBuildFailed      *prometheus.Desc
+	flowExportConfiguredGroups    *prometheus.Desc
+	flowExportBuildFailed         *prometheus.Desc
+	flowExportExcludedFlowServers *prometheus.Desc
 
 	// #3747: per-exporter pending-batch queue depth / high-water / drop count.
 	// The export batch was unbounded; a stalled or overrun drain grew memory
@@ -1087,6 +1088,9 @@ type xpfCollector struct {
 	flowExportRouteMaskUnresolvedTotal *prometheus.Desc
 	flowExportMissingStartTimeTotal    *prometheus.Desc
 	flowExportClockSkewClampedTotal    *prometheus.Desc
+	flowExportSamplingEvaluatedTotal   *prometheus.Desc
+	flowExportSamplingSelectedTotal    *prometheus.Desc
+	flowExportZoneFilteredTotal        *prometheus.Desc
 }
 
 func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -1684,6 +1688,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.flowExportCollectorLastFailureSeconds
 	ch <- c.flowExportConfiguredGroups
 	ch <- c.flowExportBuildFailed
+	ch <- c.flowExportExcludedFlowServers
 	ch <- c.flowExportBatchDepth
 	ch <- c.flowExportBatchMaxDepth
 	ch <- c.flowExportBatchDroppedTotal
@@ -1698,6 +1703,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.flowExportRouteMaskUnresolvedTotal
 	ch <- c.flowExportMissingStartTimeTotal
 	ch <- c.flowExportClockSkewClampedTotal
+	ch <- c.flowExportSamplingEvaluatedTotal
+	ch <- c.flowExportSamplingSelectedTotal
+	ch <- c.flowExportZoneFilteredTotal
 	c.describeDataplaneSafety(ch)
 	c.describeSNMPServeBudget(ch)
 }
@@ -2100,6 +2108,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// BEFORE the dataplane gate. A collector that has gone unreachable must
 	// stay visible even when the dataplane is not loaded.
 	c.collectFlowExportMetrics(ch)
+	c.collectFlowExportSamplingMetrics(ch)
 	// #9166: flow-export BUILD health, beside the write health above. The
 	// write-health family is omitted when the health slice is empty, which is
 	// exactly what a failed build produces — so on its own it cannot tell a

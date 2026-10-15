@@ -570,8 +570,10 @@ type Daemon struct {
 	// and "configured but the build failed" are the same observation on every
 	// surface — the health family is omitted in both cases, and `show` renders
 	// the config as present in both. Read lock-free by the metrics collector.
-	flowConfiguredGroups  atomic.Int64
-	ipfixConfiguredGroups atomic.Int64
+	flowConfiguredGroups     atomic.Int64
+	ipfixConfiguredGroups    atomic.Int64
+	flowExcludedFlowServers  atomic.Int64
+	ipfixExcludedFlowServers atomic.Int64
 	// #9166: single-flight lifecycle of the autonomous flow-exporter build
 	// retry. reconcileFlowExporters runs only from the apply tail and the boot
 	// block, so before this the retry cadence was "the next commit" — which on
