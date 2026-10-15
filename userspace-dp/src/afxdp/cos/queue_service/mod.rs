@@ -133,8 +133,35 @@ struct Phase1HonorRefund {
 
 pub(in crate::afxdp) enum ExactCoSScratchBuild {
     Ready,
-    Drop { error: String, dropped_bytes: u64 },
-    MirrorTxFrameReserve { dropped_bytes: u64 },
+    Drop {
+        error: String,
+        dropped_bytes: u64,
+    },
+    /// The first pop was withheld by the queue-local cross-worker brake;
+    /// unlike `Ready` with empty scratch, another queue may still send.
+    VMinSkipped,
+    MirrorTxFrameReserve {
+        dropped_bytes: u64,
+    },
+}
+
+/// A queue-local V_min brake is not an interface-wide TX failure.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExactServiceOutcome {
+    Sent,
+    VMinSkipped,
+    NoProgress,
+}
+
+impl From<bool> for ExactServiceOutcome {
+    #[inline]
+    fn from(progress: bool) -> Self {
+        if progress {
+            Self::Sent
+        } else {
+            Self::NoProgress
+        }
+    }
 }
 
 /// #751: one drain pass through the binding's CoS interfaces. Returns
@@ -432,13 +459,11 @@ fn service_exact_guarantee_queue_direct(
 
 /// #751: variant that additionally reports which queue was actually
 /// serviced so the caller can attribute per-queue drain latency.
-/// Returns:
-///   * `Some(Some(ref))` — exact-guarantee selection fired, batch
-///     service progressed on `ref`.
-///   * `Some(None)` — exact-guarantee selection fired but the service
-///     call made no progress (batch build declined / TX ring refused).
-///   * `None` — no exact-guarantee selection; caller falls through
-///     to the non-exact path.
+///   * `Some(Some(ref))` — exact-guarantee selection made TX progress.
+///   * `Some(None)` — an exact service attempt made no TX progress for a
+///     reason other than V_min (preserving the Phase-1 honor refund).
+///   * `None` — no exact selection, or all selected queues were V_min
+///     throttled; caller falls through to non-exact service.
 #[inline]
 fn service_exact_guarantee_queue_direct_with_info(
     binding: &mut BindingWorker,
@@ -447,77 +472,127 @@ fn service_exact_guarantee_queue_direct_with_info(
     shared_recycles: &mut Vec<(u32, u64)>,
     lease_telemetry: &mut CoSQueueLeaseAcquireTelemetry,
 ) -> Option<Option<DrainedQueueRef>> {
-    let queue_fast_path = binding
-        .cos
-        .cos_fast_interfaces
-        .get(&root_ifindex)?
-        .queue_fast_path
-        .as_slice();
-    let selection = {
-        let root = binding.cos.cos_interfaces.get_mut(&root_ifindex)?;
-        select_exact_cos_guarantee_queue_with_lease_telemetry(
-            root,
-            queue_fast_path,
-            now_ns,
-            lease_telemetry,
-        )?
-    };
+    // A V_min skip affects only the selected queue. Try at most one visit
+    // per queue, then allow non-exact queues (and other interfaces) to run.
+    for _ in 0..binding.cos.cos_interfaces.get(&root_ifindex)?.queues.len() {
+        let selection = {
+            let queue_fast_path = binding
+                .cos
+                .cos_fast_interfaces
+                .get(&root_ifindex)?
+                .queue_fast_path
+                .as_slice();
+            let root = binding.cos.cos_interfaces.get_mut(&root_ifindex)?;
+            select_exact_cos_guarantee_queue_with_lease_telemetry(
+                root,
+                queue_fast_path,
+                now_ns,
+                lease_telemetry,
+            )?
+        };
+        let queue_id = binding
+            .cos
+            .cos_interfaces
+            .get(&root_ifindex)
+            .and_then(|root| root.queues.get(selection.queue_idx))
+            .map(|queue| queue.queue_id());
 
-    let queue_id = binding
-        .cos
-        .cos_interfaces
-        .get(&root_ifindex)
-        .and_then(|root| root.queues.get(selection.queue_idx))
-        .map(|queue| queue.queue_id());
-
-    let progress = match selection.kind {
-        ExactCoSQueueKind::Local => service_exact_local_queue_direct(
-            binding,
-            root_ifindex,
-            selection.queue_idx,
-            selection.secondary_budget,
-            now_ns,
-            shared_recycles,
-        ),
-        ExactCoSQueueKind::Prepared => service_exact_prepared_queue_direct(
-            binding,
-            root_ifindex,
-            selection.queue_idx,
-            selection.secondary_budget,
-            now_ns,
-            shared_recycles,
-        ),
-    };
-
-    if !progress {
-        if let Some(refund) = selection.phase1_honor {
-            refund_phase1_waterfill_honor(binding, root_ifindex, selection.queue_idx, refund);
+        let outcome = match selection.kind {
+            ExactCoSQueueKind::Local => service_exact_local_queue_direct(
+                binding,
+                root_ifindex,
+                selection.queue_idx,
+                selection.secondary_budget,
+                now_ns,
+                shared_recycles,
+            ),
+            ExactCoSQueueKind::Prepared => service_exact_prepared_queue_direct(
+                binding,
+                root_ifindex,
+                selection.queue_idx,
+                selection.secondary_budget,
+                now_ns,
+                shared_recycles,
+            ),
+        };
+        match outcome {
+            ExactServiceOutcome::Sent => {
+                return Some(queue_id.map(|queue_id| DrainedQueueRef {
+                    root_ifindex,
+                    queue_idx: selection.queue_idx,
+                    queue_id,
+                }));
+            }
+            ExactServiceOutcome::NoProgress => {
+                if let Some(refund) = selection.phase1_honor {
+                    refund_phase1_waterfill_honor(
+                        binding,
+                        root_ifindex,
+                        selection.queue_idx,
+                        refund,
+                    );
+                }
+                return Some(None);
+            }
+            ExactServiceOutcome::VMinSkipped => {
+                if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
+                    defer_v_min_skipped_waterfill_queue(root, &selection);
+                }
+            }
         }
     }
+    None
+}
 
-    Some(if progress {
-        queue_id.map(|queue_id| DrainedQueueRef {
-            root_ifindex,
-            queue_idx: selection.queue_idx,
-            queue_id,
-        })
-    } else {
-        None
-    })
+/// A queue ahead of its peer V_min must be bypassed for this waterfill
+/// epoch, not refunded and immediately reselected. Phase-1 already set
+/// the ordinal bit; Phase-2 did not, so mark it for the same epoch here.
+/// Do not count either as a TX admission; the V_min throttle has its
+/// own telemetry. Neither path allocates or scans on a successful TX.
+#[inline]
+fn defer_v_min_skipped_waterfill_queue(
+    root: &mut CoSInterfaceRuntime,
+    selection: &ExactCoSQueueSelection,
+) {
+    if !matches!(
+        root.oversubscription_policy,
+        CoSOversubscriptionPolicy::GuaranteeRate
+    ) || root.oversubscription_guarantee_fraction <= 0.0
+    {
+        return;
+    }
+    root.waterfill_v_min_skipped_epoch = true;
+    if selection.phase1_honor.is_some() {
+        let counters = &mut root.queues[selection.queue_idx]
+            .telemetry
+            .waterfill_counters;
+        counters.phase1_admissions = counters.phase1_admissions.saturating_sub(1);
+    } else if let Some(ordinal) = root
+        .exact_queues_by_rate_ascending
+        .iter()
+        .position(|&idx| idx == selection.queue_idx)
+    {
+        root.waterfill_honored_epoch_bits[ordinal / u64::BITS as usize] |=
+            1u64 << (ordinal % u64::BITS as usize);
+        let counters = &mut root.queues[selection.queue_idx]
+            .telemetry
+            .waterfill_counters;
+        counters.phase2_admissions = counters.phase2_admissions.saturating_sub(1);
+    }
 }
 
 /// hb166 T-2: undo the Phase-1 waterfill honor for a queue that was
 /// SELECTED via the Phase-1 honored walk but transmitted zero bytes (TX
-/// ring full / no free UMEM frame / frame-build Drop → service returned
-/// `progress == false`).
+/// ring full / no free UMEM frame / frame-build Drop →
+/// `ExactServiceOutcome::NoProgress`).
 ///
 /// The waterfill selector commits the honor at SELECTION: it debits
 /// `waterfill_pass1_remaining_bytes` by the queue's stable `phase1_cost`
 /// and sets the queue's ascending-ordinal bit in
 /// `waterfill_honored_epoch_bits`, marking it "already took its guarantee
 /// this epoch" so BOTH phases skip it until the epoch refills (~200 us).
-/// A zero-byte TX must NOT burn that guarantee — the small class should
-/// keep its honor and retry once the interface-wide TX-ring / free-frame
+/// An interface-wide no-progress TX must NOT burn that guarantee: the
+/// small class must remain eligible to retry when TX-ring / free-frame
 /// pressure clears. This refund restores the debit and clears the bit so
 /// the queue is re-selectable this same epoch.
 ///
@@ -526,7 +601,7 @@ fn service_exact_guarantee_queue_direct_with_info(
 /// between selection and this refund on the single-threaded owner (so the
 /// `saturating_add` cannot exceed the pre-selection budget → no honor
 /// leak). A queue that DID transmit keeps its honor consumed (this runs
-/// only on `progress == false` → no double-consume). Telemetry:
+/// only on `ExactServiceOutcome::NoProgress` → no double-consume). Telemetry:
 /// `phase1_admissions` was bumped at selection, so decrement it (it must
 /// count only progressing services) and record the no-progress in
 /// `phase1_selected_no_progress`.
@@ -897,12 +972,15 @@ fn select_exact_cos_guarantee_queue_with_lease_telemetry(
 //     Reset to 0 ONLY on a genuine Phase-2 WRAP (the end-of-function
 //     `None` path); NEITHER refill path touches it, so the descending
 //     walk advances continuously across epochs (#1743 Hunk C / r2).
-//   - `waterfill_epoch_start_ns`: timestamp of the last refill,
-//     drives the time-based refresh (#1743).
-//   - `waterfill_epoch_wrap_pending`: set by the Phase-2 wrap (`None`)
-//     path; gates the honored-bitset clear so a bare mid-walk
-//     `pass1 == 0` refill does NOT re-honor an exact-fit queue
-//     (#1743 r3 livelock fix).
+//   - `waterfill_epoch_start_ns`: last time boundary; a bare budget
+//     refill while a V_min skip is pending does not postpone it.
+//   - `waterfill_epoch_wrap_pending`: set by a Phase-2 wrap only when
+//     no V_min skip is pending; gates the honored-bitset clear so a
+//     bare mid-walk `pass1 == 0` refill does not re-honor an exact-fit
+//     queue (#1743 r3 livelock fix).
+//   - `waterfill_v_min_skipped_epoch`: defers queue-local skips until
+//     the time boundary, instead of treating an empty Phase-2 walk
+//     as a TX-progress epoch.
 //
 // Each call returns ONE queue selection. The selector first tries
 // Phase 1 (ascending walk; each Phase-1 honor decrements
@@ -911,8 +989,8 @@ fn select_exact_cos_guarantee_queue_with_lease_telemetry(
 // send budget). When Phase 1 has insufficient budget for the next
 // ascending queue, the selector enters Phase 2 (descending walk
 // through queues NOT honored in Phase 1; Phase 2 does NOT debit
-// `pass1`). When Phase 2 exhausts, the epoch resets and Phase 1
-// budget is refilled.
+// `pass1`). When Phase 2 exhausts, it ends the epoch unless a
+// V_min skip is pending; in that case only the 200 µs tick ends it.
 //
 // AGY r2 #1's equal-rate starvation concern is bounded by
 // stable sort (queues with identical rates retain queue_id
@@ -955,9 +1033,9 @@ fn select_exact_cos_guarantee_queue_waterfill(
     ) {
         return Some(selection);
     }
-    // Phase 2: descending-rate residual walk (#4408 Increment 3b). `None`
-    // means the descending cycle serviced nothing, which is the genuine
-    // Phase-2 WRAP handled by the tail below.
+    // Phase 2: descending-rate residual walk (#4408 Increment 3b).
+    // `None` means nothing eligible; it is a genuine wrap only if
+    // no V_min-throttled queue is deferred this epoch.
     if let Some(selection) = waterfill_phase2_select(
         root,
         queue_fast_path,
@@ -968,13 +1046,13 @@ fn select_exact_cos_guarantee_queue_waterfill(
     ) {
         return Some(selection);
     }
-    // Genuine Phase-2 WRAP: a full descending cycle serviced nothing, so the
-    // epoch is fully consumed. Reset the Phase-1 budget and the cursor for
-    // the next call, and arm `epoch_wrap_pending` so the refill above clears
-    // the honored bitset (a true epoch boundary). #1743 (Codex r3): this is
-    // the ONLY place that arms the honored-bits clear besides the time tick —
-    // a bare mid-walk `pass1 == 0` does not, which avoids the all-min-quantum
-    // re-honor livelock.
+    // A V_min-throttled queue is deferred until the time boundary. An
+    // empty Phase-2 walk is not a completed service epoch in that case:
+    // clearing its bit here would retry the same lagged queue on every
+    // drain call and trip the hard-cap while other classes are runnable.
+    if root.waterfill_v_min_skipped_epoch {
+        return None;
+    }
     root.waterfill_pass1_remaining_bytes = 0;
     root.waterfill_phase2_cursor = 0;
     root.waterfill_epoch_wrap_pending = true;
@@ -1346,9 +1424,10 @@ fn waterfill_phase2_select(
 //
 // The honored BITSET, however, is cleared (allowing re-honoring) ONLY on
 // a genuine epoch boundary: the time tick OR a Phase-2 WRAP
-// (`waterfill_epoch_wrap_pending`). #1743 r3: a bare mid-walk `pass1 == 0`
-// refills the budget but must NOT clear the bits, else an all-min-quantum
-// exact-fit config livelocks Phase 1 on q0 and never reaches Phase 2.
+// (`waterfill_epoch_wrap_pending`, suppressed while a V_min skip is
+// pending). #1743 r3: a bare mid-walk `pass1 == 0` refills the budget
+// but must NOT clear the bits, else an all-min-quantum exact-fit config
+// livelocks Phase 1 on q0 and never reaches Phase 2.
 //
 // CRITICAL: NEITHER refill path resets `waterfill_phase2_cursor`
 // (#1743 r2 — only the genuine Phase-2 wrap at the end-of-function `None`
@@ -1414,7 +1493,12 @@ fn refill_waterfill_epoch(root: &mut CoSInterfaceRuntime, now_ns: u64) {
         // exceeds the smallest quantum.)
         let pass1 = raw_pass1.max(COS_GUARANTEE_QUANTUM_MIN_BYTES);
         root.waterfill_pass1_remaining_bytes = pass1;
-        root.waterfill_epoch_start_ns = now_ns;
+        // Bare budget exhaustion while a V_min skip is pending must not
+        // postpone the time boundary that makes the lagged queue eligible
+        // again; otherwise repeated exact-fit honors can defer it forever.
+        if time_refresh || !root.waterfill_v_min_skipped_epoch {
+            root.waterfill_epoch_start_ns = now_ns;
+        }
         // #1743 (Codex code-r3): clear the persistent honored bitset ONLY on
         // a genuine epoch boundary — the time tick OR a Phase-2 WRAP
         // (`waterfill_epoch_wrap_pending`, set by the end-of-function `None`
@@ -1431,6 +1515,7 @@ fn refill_waterfill_epoch(root: &mut CoSInterfaceRuntime, now_ns: u64) {
         let epoch_boundary = time_refresh || root.waterfill_epoch_wrap_pending;
         if epoch_boundary {
             root.waterfill_honored_epoch_bits.fill(0);
+            root.waterfill_v_min_skipped_epoch = false;
         }
         root.waterfill_epoch_wrap_pending = false;
         // #1743 (Codex code-r2): the refill never resets the Phase-2 cursor.
