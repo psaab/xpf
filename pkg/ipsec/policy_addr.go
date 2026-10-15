@@ -117,22 +117,51 @@ func HasDHCPBoundGateway(cfg *config.Config) bool {
 // DHCPv6. A bare reference (no unit) matches if ANY of the interface's
 // units is DHCP-managed. Mirrors resolveConfiguredInterfaceAddress's
 // base/unit parsing so the two derivations cannot drift.
+func interfaceRefUnit(cfg *config.Config, ifaceRef string) (*config.InterfaceConfig, int, bool) {
+	if cfg == nil {
+		return nil, 0, false
+	}
+	ref := cfg.SplitInterfaceUnitRef(ifaceRef)
+	ifc := cfg.Interfaces.Interfaces[ref.Base]
+	if ifc == nil {
+		return nil, 0, false
+	}
+	if !ref.HasUnit {
+		return ifc, 0, true
+	}
+	unitNum, err := strconv.Atoi(ref.UnitTok)
+	if err != nil {
+		return nil, 0, false
+	}
+	return ifc, unitNum, true
+}
+
 func interfaceRefIsDHCP(cfg *config.Config, ifaceRef string) bool {
-	parts := strings.SplitN(ifaceRef, ".", 2)
-	ifc, ok := cfg.Interfaces.Interfaces[parts[0]]
-	if !ok || ifc == nil {
-		return false
-	}
-	if len(parts) == 2 {
-		if n, err := strconv.Atoi(parts[1]); err == nil {
-			unit, ok := ifc.Units[n]
-			return ok && unit != nil && (unit.DHCP || unit.DHCPv6)
+	// RETH gateway references resolve to a physical member on bondless
+	// clusters; check both the logical RETH unit and its active member.
+	refs := []string{ifaceRef}
+	if cfg != nil {
+		if resolved := cfg.ResolveReth(ifaceRef); resolved != ifaceRef {
+			refs = append(refs, resolved)
 		}
-		return false
 	}
-	for _, unit := range ifc.Units {
-		if unit != nil && (unit.DHCP || unit.DHCPv6) {
-			return true
+	for _, ref := range refs {
+		ifc, unitNum, ok := interfaceRefUnit(cfg, ref)
+		if !ok {
+			continue
+		}
+		split := cfg.SplitInterfaceUnitRef(ref)
+		if split.HasUnit {
+			unit := ifc.Units[unitNum]
+			if unit != nil && (unit.DHCP || unit.DHCPv6) {
+				return true
+			}
+			continue
+		}
+		for _, unit := range ifc.Units {
+			if unit != nil && (unit.DHCP || unit.DHCPv6) {
+				return true
+			}
 		}
 	}
 	return false
@@ -374,17 +403,17 @@ func configuredGatewayFamilyHint(gw *config.IPsecGateway) (family int, ok bool) 
 }
 
 func resolveConfiguredInterfaceAddress(cfg *config.Config, ifaceRef string, family int) string {
-	parts := strings.SplitN(ifaceRef, ".", 2)
-	base := parts[0]
+	ref := cfg.SplitInterfaceUnitRef(ifaceRef)
+	base := ref.Base
 	unitNum := 0
-	if len(parts) == 2 {
-		if n, err := strconv.Atoi(parts[1]); err == nil {
+	if ref.HasUnit {
+		if n, err := strconv.Atoi(ref.UnitTok); err == nil {
 			unitNum = n
 		}
 	}
 
-	ifc, ok := cfg.Interfaces.Interfaces[base]
-	if !ok {
+	ifc := cfg.Interfaces.Interfaces[base]
+	if ifc == nil {
 		return ""
 	}
 
@@ -420,7 +449,7 @@ func resolveConfiguredInterfaceAddress(cfg *config.Config, ifaceRef string, fami
 		}
 	}
 
-	if len(parts) == 1 && len(ifc.Units) > 0 {
+	if !ref.HasUnit && len(ifc.Units) > 0 {
 		unitIDs := make([]int, 0, len(ifc.Units))
 		for id := range ifc.Units {
 			unitIDs = append(unitIDs, id)
@@ -444,6 +473,16 @@ func selectUnitAddress(unit *config.InterfaceUnit, family int) string {
 	candidates := make([]string, 0, 2+len(unit.Addresses))
 	candidates = append(candidates, unit.PrimaryAddress, unit.PreferredAddress)
 	candidates = append(candidates, unit.Addresses...)
+	groupIDs := make([]string, 0, len(unit.VRRPGroups))
+	for id := range unit.VRRPGroups {
+		groupIDs = append(groupIDs, id)
+	}
+	sort.Strings(groupIDs)
+	for _, id := range groupIDs {
+		if group := unit.VRRPGroups[id]; group != nil {
+			candidates = append(candidates, group.VirtualAddresses...)
+		}
+	}
 	// Global-wins is order-independent (#2885): selectFamilyAddress scans
 	// family-6 candidates for a global address before admitting link-local.
 	return selectFamilyAddress(candidates, family)
