@@ -93,6 +93,36 @@ func policyIdentities(cfg *config.Config) []policyIdentity {
 	return out
 }
 
+func findGlobalPolicy(cfg *config.Config, name string) *config.Policy {
+	if cfg == nil {
+		return nil
+	}
+	for _, policy := range cfg.Security.GlobalPolicies {
+		if policy != nil && policy.Name == name {
+			return policy
+		}
+	}
+	return nil
+}
+
+func sortedZones(zones []string) []string {
+	out := append([]string(nil), zones...)
+	sort.Strings(out)
+	return out
+}
+
+func sameRenamedScope(oldZones, newZones []string, renames map[string]string) bool {
+	mapped := make([]string, len(oldZones))
+	for i, zone := range oldZones {
+		mapped[i] = zone
+		if renamed, ok := renames[zone]; ok {
+			mapped[i] = renamed
+		}
+	}
+	sort.Strings(mapped)
+	return slices.Equal(mapped, sortedZones(newZones))
+}
+
 func policyRuleIDs(cfg *config.Config) map[string]uint32 {
 	if cfg == nil {
 		return nil
@@ -166,6 +196,28 @@ func expandPolicyRenameAncestryWithFeeds(
 			renamedTo[destinationZone] = sourceZone
 		}
 	}
+	mapZone := func(zone string) string {
+		if renamed, ok := zoneRenames[zone]; ok {
+			return renamed
+		}
+		return zone
+	}
+	mapZones := func(zones []string) []string {
+		out := make([]string, len(zones))
+		for i, zone := range zones {
+			out[i] = mapZone(zone)
+		}
+		sort.Strings(out)
+		return out
+	}
+	zoneTouched := func(zones []string) bool {
+		for _, zone := range zones {
+			if _, ok := zoneRenames[zone]; ok {
+				return true
+			}
+		}
+		return false
+	}
 	for _, descriptor := range descriptors {
 		sf, st, sn, sok := policyRulePathKey(descriptor.SourcePath)
 		df, dt, dn, dok := policyRulePathKey(descriptor.DestinationPath)
@@ -173,85 +225,92 @@ func expandPolicyRenameAncestryWithFeeds(
 			if !sok || !dok {
 				return nil, nil, false
 			}
-			pairs = append(pairs, ancestryPair{sf: sf, st: st, sn: sn, df: df, dt: dt, dn: dn})
+			if sf == config.JunosGlobalZoneName && st == config.JunosGlobalZoneName {
+				oldPolicy, newPolicy := findGlobalPolicy(oldCfg, sn), findGlobalPolicy(newCfg, dn)
+				if oldPolicy == nil || newPolicy == nil ||
+					!sameRenamedScope(oldPolicy.Match.FromZones, newPolicy.Match.FromZones, zoneRenames) ||
+					!sameRenamedScope(oldPolicy.Match.ToZones, newPolicy.Match.ToZones, zoneRenames) {
+					return nil, nil, false
+				}
+				pairs = append(pairs, ancestryPair{
+					sf: sf, st: st, sn: sn, df: df, dt: dt, dn: dn,
+					globalScope: true,
+					srcRuleID:   dpuserspace.StablePolicyRuleID(sf, st, sn),
+					dstRuleID:   dpuserspace.StablePolicyRuleID(df, dt, dn),
+				})
+			} else {
+				pairs = append(pairs, ancestryPair{
+					sf: sf, st: st, sn: sn,
+					df: mapZone(df), dt: mapZone(dt), dn: dn,
+				})
+			}
 			continue
 		}
-		sourceZone, sourceOK := zoneRenamePath(descriptor.SourcePath)
-		destinationZone, destinationOK := zoneRenamePath(descriptor.DestinationPath)
-		if !sourceOK || !destinationOK {
+		if _, ok := zoneRenamePath(descriptor.SourcePath); !ok {
 			return nil, nil, false
 		}
-		for _, identity := range policyIdentities(oldCfg) {
-			if identity.from != sourceZone && identity.to != sourceZone {
-				continue
-			}
-			df, dt := identity.from, identity.to
-			if df == sourceZone {
-				df = destinationZone
-			}
-			if dt == sourceZone {
-				dt = destinationZone
-			}
-			pairs = append(pairs, ancestryPair{
-				sf: identity.from, st: identity.to, sn: identity.name,
-				df: df, dt: dt, dn: identity.name, globalScope: false,
-			})
+		if _, ok := zoneRenamePath(descriptor.DestinationPath); !ok {
+			return nil, nil, false
 		}
-		// #12857: a scoped global policy's rule ID does not change when a
-		// zone in its Match scope is renamed, but its sessions still need
-		// continuity validation against the renamed scope.
-		for _, policy := range oldCfg.Security.GlobalPolicies {
-			if policy == nil {
-				continue
-			}
-			// The new generation's same-named global must carry exactly
-			// the renamed scope; a scope that moved elsewhere is a content
-			// change, not rename continuity.
-			renamedScope := func(zones []string) []string {
-				out := append([]string{}, zones...)
-				for i, zone := range out {
-					if zone == sourceZone {
-						out[i] = destinationZone
-					}
-				}
-				sort.Strings(out)
-				return out
-			}
-			scopeOK := false
-			for _, np := range newCfg.Security.GlobalPolicies {
-				if np == nil || np.Name != policy.Name {
-					continue
-				}
-				gotFrom := append([]string{}, np.Match.FromZones...)
-				sort.Strings(gotFrom)
-				gotTo := append([]string{}, np.Match.ToZones...)
-				sort.Strings(gotTo)
-				scopeOK = slices.Equal(renamedScope(policy.Match.FromZones), gotFrom) &&
-					slices.Equal(renamedScope(policy.Match.ToZones), gotTo)
-			}
-			if !scopeOK {
-				continue
-			}
-			inScope := func(zones []string) bool { return slices.Contains(zones, sourceZone) }
-			if !inScope(policy.Match.FromZones) && !inScope(policy.Match.ToZones) {
-				continue
-			}
-			sf, df := config.JunosGlobalZoneName, config.JunosGlobalZoneName
-			if inScope(policy.Match.FromZones) {
-				sf, df = sourceZone, destinationZone
-			}
-			st, dt := config.JunosGlobalZoneName, config.JunosGlobalZoneName
-			if inScope(policy.Match.ToZones) {
-				st, dt = sourceZone, destinationZone
-			}
-			globalID := dpuserspace.StablePolicyRuleID(
-				config.JunosGlobalZoneName, config.JunosGlobalZoneName, policy.Name)
-			pairs = append(pairs, ancestryPair{
-				sf: sf, st: st, sn: policy.Name,
-				df: df, dt: dt, dn: policy.Name,
-				globalScope: true, srcRuleID: globalID, dstRuleID: globalID,
-			})
+	}
+	for _, identity := range policyIdentities(oldCfg) {
+		if identity.from == config.JunosGlobalZoneName && identity.to == config.JunosGlobalZoneName {
+			continue
 		}
+		df, dt := mapZone(identity.from), mapZone(identity.to)
+		if df == identity.from && dt == identity.to {
+			continue
+		}
+		pairs = append(pairs, ancestryPair{
+			sf: identity.from, st: identity.to, sn: identity.name,
+			df: df, dt: dt, dn: identity.name,
+		})
+	}
+	for _, policy := range oldCfg.Security.GlobalPolicies {
+		if policy == nil || (!zoneTouched(policy.Match.FromZones) && !zoneTouched(policy.Match.ToZones)) {
+			continue
+		}
+		newName := policy.Name
+		for _, descriptor := range descriptors {
+			_, _, sourceName, sourceOK := policyRulePathKey(descriptor.SourcePath)
+			_, _, destinationName, destinationOK := policyRulePathKey(descriptor.DestinationPath)
+			if sourceOK && destinationOK && sourceName == policy.Name {
+				newName = destinationName
+				break
+			}
+		}
+		if newName != policy.Name {
+			continue
+		}
+		newPolicy := findGlobalPolicy(newCfg, newName)
+		if newPolicy == nil ||
+			!slices.Equal(mapZones(policy.Match.FromZones), sortedZones(newPolicy.Match.FromZones)) ||
+			!slices.Equal(mapZones(policy.Match.ToZones), sortedZones(newPolicy.Match.ToZones)) {
+			continue
+		}
+		sourceID := dpuserspace.StablePolicyRuleID(
+			config.JunosGlobalZoneName, config.JunosGlobalZoneName, policy.Name)
+		destinationID := dpuserspace.StablePolicyRuleID(
+			config.JunosGlobalZoneName, config.JunosGlobalZoneName, newName)
+		sf, df := config.JunosGlobalZoneName, config.JunosGlobalZoneName
+		for _, zone := range policy.Match.FromZones {
+			if renamed, ok := zoneRenames[zone]; ok {
+				sf, df = zone, renamed
+				break
+			}
+		}
+		st, dt := config.JunosGlobalZoneName, config.JunosGlobalZoneName
+		for _, zone := range policy.Match.ToZones {
+			if renamed, ok := zoneRenames[zone]; ok {
+				st, dt = zone, renamed
+				break
+			}
+		}
+		pairs = append(pairs, ancestryPair{
+			sf: sf, st: st, sn: policy.Name,
+			df: df, dt: dt, dn: newName,
+			globalScope: true, srcRuleID: sourceID, dstRuleID: destinationID,
+		})
 	}
 	if len(pairs) == 0 {
 		return nil, nil, false
