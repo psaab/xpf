@@ -5449,6 +5449,30 @@ fn classify_generated_reply_drops_icmp_on_terminal_discard() {
 }
 
 #[test]
+fn classify_generated_reply_honors_tcp_flags_output_filter() {
+    // #13633: generated TCP replies must populate meta.tcp_flags from the
+    // reply header; otherwise this output discard silently misses the RST.
+    let forwarding = forwarding_with_v4_output_filter(
+        "drop-rst",
+        FirewallTermSnapshot {
+            name: "drop-rst".into(),
+            action: "discard".into(),
+            protocols: vec!["tcp".into()],
+            tcp_flags: Some(crate::tcp_flags::TCP_RST),
+            ..Default::default()
+        },
+    );
+    let mut frame = generated_v4_frame(PROTO_TCP, 0x00, 80, 49152);
+    frame[14 + 20 + 13] = crate::tcp_flags::TCP_RST;
+    let verdict = classify_generated_reply(&forwarding, 202, &frame, 0);
+    assert!(
+        verdict.drop,
+        "a generated TCP RST must match an egress tcp-flags RST discard"
+    );
+    assert!(!verdict.parse_error);
+}
+
+#[test]
 fn classify_generated_reply_uses_logical_egress_ifindex_3026() {
     // #3026 fail-on-revert. A generated ICMP error leaving a VLAN
     // sub-interface must be classified (CoS / output filter) on the LOGICAL
