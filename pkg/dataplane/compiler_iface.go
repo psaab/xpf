@@ -347,6 +347,9 @@ func ensureVLANSubInterface(parentName string, vlanID int) (int, bool, error) {
 }
 
 func isConfiguredVLANSubInterface(name string, cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
 	idx := strings.IndexByte(name, '.')
 	if idx < 0 {
 		return false
@@ -361,11 +364,19 @@ func isConfiguredVLANSubInterface(name string, cfg *config.Config) bool {
 		if ifCfg == nil {
 			continue
 		}
-		if !ifCfg.VlanTagging || config.LinuxIfName(ifName) != base {
+		// Physical RETH members inherit their parent's VLAN settings and
+		// units when buildInterfaceNetworkdModels emits subinterfaces.
+		effective := ifCfg
+		if effective.RedundantParent != "" {
+			if parent, ok := cfg.Interfaces.Interfaces[effective.RedundantParent]; ok && parent != nil {
+				effective = parent
+			}
+		}
+		if !effective.VlanTagging || config.LinuxIfName(ifName) != base {
 			continue
 		}
-		for _, unit := range ifCfg.Units {
-			if unit.VlanID == vid {
+		for _, unit := range effective.Units {
+			if unit != nil && unit.VlanID == vid {
 				return true
 			}
 		}
@@ -1679,6 +1690,7 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 			}
 		}
 	}
+	rethToPhysical := cfg.RethToPhysical()
 	memberToBridge := make(map[string]string)
 	for _, bd := range cfg.BridgeDomains {
 		if bd == nil {
@@ -1695,10 +1707,24 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 				continue
 			}
 			ifc := cfg.Interfaces.Interfaces[ref.Base]
-			if ifc == nil || !ifc.VlanTagging {
+			if ifc == nil {
 				continue
 			}
-			unit := ifc.Units[unitNumber]
+			effective := ifc
+			memberBase := ref.Base
+			if ifc.RedundantParent != "" {
+				if parent := cfg.Interfaces.Interfaces[ifc.RedundantParent]; parent != nil {
+					effective = parent
+				}
+			} else if physical, ok := rethToPhysical[ref.Base]; ok {
+				// Networkd emits RETH VLAN subinterfaces under the local
+				// physical member's Linux name.
+				memberBase = physical
+			}
+			if !effective.VlanTagging {
+				continue
+			}
+			unit := effective.Units[unitNumber]
 			if unit == nil {
 				continue
 			}
@@ -1706,7 +1732,7 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 			if vid < 1 || vid > 4094 || ambiguousVID[vid] || vidDomain[vid] != bd.Name {
 				continue
 			}
-			memberName := fmt.Sprintf("%s.%d", config.LinuxIfName(ref.Base), vid)
+			memberName := fmt.Sprintf("%s.%d", config.LinuxIfName(memberBase), vid)
 			memberToBridge[memberName] = bridgeName
 		}
 	}

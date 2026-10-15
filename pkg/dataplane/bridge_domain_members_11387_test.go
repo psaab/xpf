@@ -56,3 +56,28 @@ func TestBridgeDomainDuplicateVIDQuarantinesBridgePortsOnTolerantInput11387(t *t
 		}
 	}
 }
+
+func TestBridgeDomainBridgeMasterResolvesRethVLANMemberToPhysicalInterface(t *testing.T) {
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/0": {Name: "ge-0/0/0", RedundantParent: "reth0"},
+			"reth0": {Name: "reth0", VlanTagging: true, Units: map[int]*config.InterfaceUnit{
+				100: {Number: 100, VlanID: 100},
+			}},
+		}},
+		BridgeDomains: []*config.BridgeDomainConfig{{
+			Name: "bd-reth", VlanIDs: []int{100}, Members: []string{"reth0.100"},
+		}},
+	}
+	result := &CompileResult{ManagedInterfaces: []networkd.InterfaceConfig{
+		{Name: "ge-0-0-0.100"},
+	}}
+
+	buildBridgeDomainModels(cfg, result, map[string]bool{})
+	if got := result.ManagedInterfaces[0].BridgeMaster; got != "br-bd-reth" {
+		t.Fatalf("RETH VLAN member BridgeMaster = %q, want br-bd-reth", got)
+	}
+	if !isConfiguredVLANSubInterface("ge-0-0-0.100", cfg) {
+		t.Fatal("RETH member VLAN subinterface was not recognized as configured")
+	}
+}
