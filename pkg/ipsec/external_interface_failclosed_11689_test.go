@@ -88,6 +88,75 @@ func TestRenderConfigFailsClosedOnUnresolvableExternalInterface_11689(t *testing
 	}
 }
 
+// #13124 (D10-07): the bindless selector fence must fence exactly the VPNs the
+// production render loads. An unresolved external-interface is skipped by
+// renderConfig (fail-closed, #11689), so its selectors must not be fenced; the
+// healthy single-stack-mismatch gateway (v6 peer, v4-only interface) resolves
+// through the family fallback and must stay fenced. Config-only replay must
+// also make that fallback, avoiding a spurious ErrGenerationUnvalidatable.
+func TestRenderedVPNSetMatchesProductionRenderAndReplayFallback_13124(t *testing.T) {
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"wan0": {Name: "wan0", Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0, Addresses: []string{"192.0.2.10/24"}},
+			}},
+			"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0},
+			}},
+		}},
+		Security: config.SecurityConfig{IPsec: config.IPsecConfig{
+			Gateways: map[string]*config.IPsecGateway{
+				"unres-gw":    {Name: "unres-gw", Address: "203.0.113.1", ExternalIface: "ge-0/0/0.0"},
+				"fallback-gw": {Name: "fallback-gw", Address: "2001:db8::1", ExternalIface: "wan0.0"},
+			},
+			VPNs: map[string]*config.IPsecVPN{
+				"vpn-unres":    {Gateway: "unres-gw", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
+				"vpn-fallback": {Gateway: "fallback-gw", LocalID: "10.0.3.0/24", RemoteID: "10.0.4.0/24"},
+			},
+		}},
+	}
+	prepared := PrepareConfig(cfg)
+	_, runtimeRendered, err := (&Manager{}).renderConfig(prepared)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	if runtimeRendered["vpn-unres"] {
+		t.Fatal("FIXTURE: production render must skip vpn-unres (#11689)")
+	}
+	if !runtimeRendered["vpn-fallback"] {
+		t.Fatal("FIXTURE: production render must load vpn-fallback via single-stack fallback")
+	}
+	if got := prepared.Gateways["fallback-gw"].LocalAddress; got != "192.0.2.10" {
+		t.Fatalf("FIXTURE: PrepareConfig fallback LocalAddress = %q, want 192.0.2.10", got)
+	}
+
+	renderedSet := RenderedVPNSet(cfg)
+	if renderedSet["vpn-unres"] {
+		t.Error("RenderedVPNSet fences vpn-unres, which the production render skips — its bindless selector fence would blackhole cleartext for an SA that never establishes")
+	}
+	if !renderedSet["vpn-fallback"] {
+		t.Error("RenderedVPNSet drops vpn-fallback, which the production render loads — its selectors would be unfenced")
+	}
+
+	replay, runtime := prepareConfigFromConfig(cfg)
+	if got := replay.Gateways["fallback-gw"].LocalAddress; got != "192.0.2.10" {
+		t.Errorf("prepareConfigFromConfig fallback LocalAddress = %q, want 192.0.2.10 (single-stack family fallback)", got)
+	}
+	if runtime["fallback-gw"] {
+		t.Errorf("prepareConfigFromConfig marks fallback-gw runtime-dependent, so ExpectedLoadedConns would spuriously fail with ErrGenerationUnvalidatable")
+	}
+	replayCfg := *cfg
+	security := cfg.Security
+	ipsecCfg := security.IPsec
+	ipsecCfg.Gateways = map[string]*config.IPsecGateway{"fallback-gw": cfg.Security.IPsec.Gateways["fallback-gw"]}
+	ipsecCfg.VPNs = map[string]*config.IPsecVPN{"vpn-fallback": cfg.Security.IPsec.VPNs["vpn-fallback"]}
+	security.IPsec = ipsecCfg
+	replayCfg.Security = security
+	if _, err := ExpectedLoadedConns(&replayCfg); err != nil {
+		t.Errorf("ExpectedLoadedConns must validate the single-stack fallback generation from config alone: %v", err)
+	}
+}
+
 // A resolvable external-interface remains an explicit local bind in swanctl;
 // the fail-closed render belt is only for a genuine resolution miss.
 func TestRenderConfigKeepsResolvedExternalInterfaceLocalBind_11689(t *testing.T) {

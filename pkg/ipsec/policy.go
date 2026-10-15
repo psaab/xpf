@@ -608,19 +608,17 @@ func resolveRemoteAddr(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) (
 	return "", localAddr, nil, false
 }
 
-// RenderedVPNSet returns the configured VPN names eligible for selector-fence
-// rows. It uses the config-only render projection: a local address that depends
-// on live external-interface resolution is unknown here, so the fence remains
-// conservative rather than disappearing before the runtime render decides.
-// Returns nil when the render errors; callers must treat nil as UNKNOWN and
+// RenderedVPNSet returns the VPN names that the production swanctl render
+// loads. It prepares external-interface addresses from the full config and
+// uses the production fail-closed render, so selector fences exclude VPNs
+// whose local address cannot be resolved just as strongSwan does.
+// Returns nil when config/render fails; callers must treat nil as UNKNOWN and
 // keep the current fail-closed behavior (emit for shape-valid VPNs).
-func RenderedVPNSet(ipsecCfg *config.IPsecConfig) map[string]bool {
-	if ipsecCfg == nil {
+func RenderedVPNSet(cfg *config.Config) map[string]bool {
+	if cfg == nil {
 		return nil
 	}
-	// renderConfig uses no Manager state (pure over ipsecCfg); a zero
-	// Manager suffices.
-	_, rendered, err := (&Manager{}).renderConfigForConfigOnly(ipsecCfg)
+	_, rendered, err := (&Manager{}).renderConfig(PrepareConfig(cfg))
 	if err != nil {
 		return nil
 	}

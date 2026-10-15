@@ -383,6 +383,12 @@ func prepareConfigFromConfig(cfg *config.Config) (*config.IPsecConfig, map[strin
 			return ""
 		}
 		addr := resolveConfiguredInterfaceAddress(cfg, gw.ExternalIface, family)
+		if addr == "" && family != 0 {
+			// Match resolveInterfaceAddress's single-stack fallback. The
+			// preferred family may be absent while the interface still has
+			// a usable configured address from the other family.
+			addr = resolveConfiguredInterfaceAddress(cfg, gw.ExternalIface, 0)
+		}
 		if addr == "" {
 			runtime[name] = true
 		}

@@ -379,7 +379,7 @@ func forEachBindlessSelectorRow(cfg *config.Config, skipped func(vpn string),
 	// gets no rows — fencing it would drop its selectors' cleartext for
 	// SAs that will never establish. Nil set (render error) keeps the
 	// previous fail-closed behavior: emit for shape-valid VPNs.
-	rendered := ipsec.RenderedVPNSet(&cfg.Security.IPsec)
+	rendered := ipsec.RenderedVPNSet(cfg)
 	names := make([]string, 0, len(cfg.Security.IPsec.VPNs))
 	for name := range cfg.Security.IPsec.VPNs {
 		names = append(names, name)
