@@ -109,8 +109,8 @@ func TestShowPoliciesBriefRendersScopedGlobalScope(t *testing.T) {
 	c := &ctl{client: fake}
 
 	out := captureStdout(t, func() {
-		if err := c.showPoliciesBrief(); err != nil {
-			t.Fatalf("showPoliciesBrief: %v", err)
+		if err := c.showPoliciesBriefFiltered("", ""); err != nil {
+			t.Fatalf("showPoliciesBriefFiltered: %v", err)
 		}
 	})
 

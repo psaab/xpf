@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
-	"strings"
-
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/policymatch"
 	"github.com/psaab/xpf/pkg/zonecounters"
+	"sort"
+	"strings"
 )
 
 // policyShowQuery is the parsed tail of a `show security policies` command:
@@ -77,22 +77,6 @@ func parsePolicyShowQuery(args []string) (q policyShowQuery, err error) {
 	}
 	q.filterText = strings.Join(filterParts, " ")
 	return q, nil
-}
-
-// validatePolicyZoneSelectors rejects BOTH a from-zone/to-zone selector
-// missing its zone value (e.g. "... from-zone trust to-zone") AND an
-// unrecognized filter token (e.g. a typo'd `from-zonee`, or a stray word).
-// Before #4908/#5557 the remote wrappers built the forwarded filter by
-// copying ONLY from-zone/to-zone pairs and silently DROPping everything
-// else, so a mistyped selector key (`from-zonee trust`) left that filter
-// dimension empty and WIDENED the view to every zone. Rejecting the
-// unknown key here makes that failure reach the operator surface, mirroring
-// the daemon-side gRPC parseZoneFilter's default-error rule
-// (pkg/grpcapi/server_show_policies_text.go). Since #12902 the grammar
-// lives in parsePolicyShowQuery; this predicate is its error face.
-func validatePolicyZoneSelectors(args []string) error {
-	_, err := parsePolicyShowQuery(args)
-	return err
 }
 
 func (c *ctl) handleShowSecurity(args []string) error {
@@ -891,8 +875,13 @@ func (c *ctl) showStatistics(detail bool) error {
 
 	if resp.ScreenDrops > 0 {
 		fmt.Printf("\nScreen drop details:\n")
-		for name, count := range resp.ScreenDropDetails {
-			fmt.Printf("  %-25s %d\n", name+":", count)
+		names := make([]string, 0, len(resp.ScreenDropDetails))
+		for name := range resp.ScreenDropDetails {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			fmt.Printf("  %-25s %d\n", name+":", resp.ScreenDropDetails[name])
 		}
 	}
 
@@ -941,10 +930,6 @@ func (c *ctl) showIPsec(args []string) error {
 	}
 	printRemoteTreeHelp("show security ipsec:", "show", "security", "ipsec")
 	return nil
-}
-
-func (c *ctl) showPoliciesBrief() error {
-	return c.showPoliciesBriefFiltered("", "")
 }
 
 func (c *ctl) showPoliciesBriefFiltered(fromZone, toZone string) error {

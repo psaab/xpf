@@ -394,39 +394,6 @@ func printSessionSummaryBlock(resp *pb.GetSessionSummaryResponse) {
 	}
 }
 
-func (c *ctl) showFlowStatistics() error {
-	resp, err := c.client.GetGlobalStats(c.ctx(), &pb.GetGlobalStatsRequest{})
-	if err != nil {
-		return fmt.Errorf("%v", err)
-	}
-
-	fmt.Println("Flow statistics:")
-	fmt.Printf("  %-30s %d\n", "Current sessions:", resp.SessionsCreated-resp.SessionsClosed)
-	fmt.Printf("  %-30s %d\n", "Sessions created:", resp.SessionsCreated)
-	fmt.Printf("  %-30s %d\n", "Sessions closed:", resp.SessionsClosed)
-	fmt.Println()
-	fmt.Printf("  %-30s %d\n", "Packets received:", resp.RxPackets)
-	fmt.Printf("  %-30s %d\n", "Packets transmitted:", resp.TxPackets)
-	fmt.Printf("  %-30s %d\n", "Packets dropped:", resp.Drops)
-	fmt.Printf("  %-30s %d\n", "TC egress packets:", resp.TcEgressPackets)
-	fmt.Println()
-	fmt.Printf("  %-30s %d\n", "Policy deny:", resp.PolicyDenies)
-	fmt.Printf("  %-30s %d\n", "NAT allocation failures:", resp.NatAllocFailures)
-	fmt.Printf("  %-30s %d\n", "NAT64 translations:", resp.Nat64Translations)
-	fmt.Println()
-	fmt.Printf("  %-30s %d\n", "Host-inbound allowed:", resp.HostInboundAllowed)
-	fmt.Printf("  %-30s %d\n", "Host-inbound denied:", resp.HostInboundDenies)
-
-	if resp.ScreenDrops > 0 {
-		fmt.Println()
-		fmt.Printf("  %-30s %d\n", "Screen drops (total):", resp.ScreenDrops)
-		for name, count := range resp.ScreenDropDetails {
-			fmt.Printf("    %-28s %d\n", name+":", count)
-		}
-	}
-
-	return nil
-}
 
 // resolveSessionZone binds `show security flow session zone <name>` to the zone
 // id GetSessions filters on (#9065).

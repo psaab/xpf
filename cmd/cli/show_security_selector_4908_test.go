@@ -16,8 +16,9 @@ func TestValidatePolicyZoneSelectors(t *testing.T) {
 		{"hit-count", "from-zone", "trust"},
 	}
 	for _, args := range good {
-		if err := validatePolicyZoneSelectors(args); err != nil {
-			t.Errorf("validatePolicyZoneSelectors(%v) = %v, want nil", args, err)
+		_, err := parsePolicyShowQuery(args)
+		if err != nil {
+			t.Errorf("parsePolicyShowQuery(%v) = %v, want nil", args, err)
 		}
 	}
 	bad := [][]string{
@@ -27,8 +28,8 @@ func TestValidatePolicyZoneSelectors(t *testing.T) {
 		{"from-zone", "to-zone", "untrust"},
 	}
 	for _, args := range bad {
-		if err := validatePolicyZoneSelectors(args); err == nil {
-			t.Errorf("validatePolicyZoneSelectors(%v) = nil, want an error (malformed selector)", args)
+		if _, err := parsePolicyShowQuery(args); err == nil {
+			t.Errorf("parsePolicyShowQuery(%v) = nil, want an error (malformed selector)", args)
 		}
 	}
 }
