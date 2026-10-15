@@ -95,8 +95,9 @@ type Manager struct {
 	// snapshot validation and apply_snapshot publication.
 	compileUserspaceShimHook func(*config.Config, func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error)
 
-	mu        sync.Mutex
-	sessionMu sync.Mutex // separate lock for session sync requests (Phase 3)
+	mu           sync.Mutex
+	sessionMu    sync.Mutex // separate lock for session sync requests (Phase 3)
+	controlReqMu sync.Mutex // serializes control-socket requests while statusLoop releases mu for its poll
 	// ctrlIOMu guards ctrlIOConns and ctrlShutdown, the #8526 stop bound on
 	// control-socket round trips. It is a LEAF: nothing holding it acquires
 	// m.mu, and the only legal order is m.mu -> ctrlIOMu. That is what lets
@@ -260,11 +261,15 @@ type Manager struct {
 	// Guarded by m.mu like syncCancel; production stop paths deliberately do
 	// NOT wait on it (joining under m.mu would deadlock against the tick body
 	// that needs the same lock) — only test harnesses join.
-	syncDone   chan struct{}
+	syncDone chan struct{}
 	lastStatus ProcessStatus
+	// helperStatusView is the immutable, atomically published read-only view
+	// of lastStatus. Status and metrics readers must not wait behind the
+	// status poll's BPF reconciliation or control-socket work (#13093).
+	helperStatusView atomic.Pointer[ProcessStatus]
 	// helperStatusObserved records that a helper status has been decoded at
-	// least once in this Manager's life — i.e. that lastStatus describes a
-	// helper we actually heard from rather than a zero value (#6691 round 10).
+	// least once in this Manager's life — i.e. lastStatus describes a helper
+	// we actually heard from rather than a zero value (#6691 round 10).
 	//
 	// It exists because a required-protocol gate must arm on an OBSERVED
 	// too-old version and never on the ABSENCE of one, and
@@ -830,9 +835,8 @@ func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*datapla
 // not forwarding. Distinguishing an intentional standby from a disarmed box is
 // what the reasons list is for, and it is on `show chassis forwarding`.
 func (m *Manager) ForwardingSupported() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.lastStatus.Capabilities.ForwardingSupported
+	view := m.helperStatusView.Load()
+	return view != nil && view.Capabilities.ForwardingSupported
 }
 
 func (m *Manager) LastApplyResult() *dataplane.ApplyResult {

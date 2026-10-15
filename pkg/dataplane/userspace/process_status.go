@@ -467,7 +467,33 @@ func (m *Manager) statusLoop(ctx context.Context) {
 			// and use it to avoid a second retry after an HA RPC failure.
 			haReplayAttemptedThisTick := false
 			var status ProcessStatus
-			if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
+			pollProc, pollProcGen := m.proc, m.procGen
+			controlSocket, requestHook := m.cfg.ControlSocket, m.controlRequestHook
+			m.mu.Unlock()
+			var pollErr error
+			if requestHook != nil {
+				m.controlReqMu.Lock()
+				pollErr = requestHook(ControlRequest{Type: "status"}, &status)
+				m.controlReqMu.Unlock()
+			} else {
+				var response ControlResponse
+				response, pollErr = m.requestDetailedAtSocket(ControlRequest{Type: "status"}, controlSocket)
+				if pollErr == nil {
+					pollErr = validateRequiredStatusReply("status", response.Status)
+					if pollErr == nil && response.Status != nil {
+						status = *response.Status
+					}
+				}
+			}
+			m.mu.Lock()
+			// A helper restart or replacement may have happened while the poll
+			// was off-lock. Its response belongs to the old process and must not
+			// mutate the new generation's maps or cached state.
+			if m.proc != pollProc || m.procGen != pollProcGen {
+				m.mu.Unlock()
+				continue
+			}
+			if err := pollErr; err == nil {
 				// #9651: an answered poll resets the wedge count.
 				m.noteStatusPollResultLocked(nil, time.Now())
 				// #6034: the helper's replace-generation fence can outlive this
