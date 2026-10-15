@@ -435,7 +435,7 @@ impl Coordinator {
         // visible rows to [100]). The additive get-or-create stays at build
         // time — see `forwarding_build::commit_zone_counter_prune`.
         if bringup_result.is_ok() {
-            crate::afxdp::forwarding_build::commit_zone_counter_prune(&self.forwarding, snapshot);
+            crate::afxdp::forwarding_build::commit_zone_counter_prune(&self.forwarding);
             // #7010: the policy / NAT hit-counter prune shares this commit
             // point, for the reason on `commit_rule_counter_prune`.
             crate::afxdp::forwarding_build::commit_rule_counter_prune(
