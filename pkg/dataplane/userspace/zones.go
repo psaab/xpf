@@ -152,3 +152,36 @@ func wgFanUpBaseRows(cfg *config.Config) map[string]bool {
 	}
 	return rows
 }
+
+// hostInboundUnzonedFanUpBaseRows identifies physical snapshot rows whose
+// zone is derived solely from tagged unit membership and whose netdev is not
+// also owned by an untagged unit. Such a row describes untagged parent traffic,
+// not the tagged unit's zone.
+func hostInboundUnzonedFanUpBaseRows(cfg *config.Config, snaps []InterfaceSnapshot) map[string]bool {
+	fanUp := wgFanUpBaseRows(cfg)
+	if len(fanUp) == 0 {
+		return nil
+	}
+	untaggedNetdevs := make(map[string]bool)
+	for _, snap := range snaps {
+		if snap.IsUnit && snap.VLANID == 0 && snap.LinuxName != "" {
+			untaggedNetdevs[snap.LinuxName] = true
+		}
+	}
+	rows := make(map[string]bool)
+	for _, snap := range snaps {
+		if snap.IsUnit || !fanUp[snap.Name] {
+			continue
+		}
+		// An explicitly configured unit 0 can intentionally own the parent
+		// identity even when VLAN-tagged. Preserve that established address
+		// attribution; this predicate is for fan-up caused by nonzero units.
+		if ifc := cfg.Interfaces.Interfaces[snap.Name]; ifc != nil && ifc.Units[0] != nil {
+			continue
+		}
+		if !untaggedNetdevs[snap.LinuxName] {
+			rows[snap.Name] = true
+		}
+	}
+	return rows
+}

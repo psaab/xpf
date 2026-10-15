@@ -18,6 +18,7 @@ func BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg *config.Config, snap
 	}
 	lifelines := hostInboundLifelineSet(cfg)
 	quarantined := quarantinedZoneNames(cfg)
+	unzonedFanUpBaseRows := hostInboundUnzonedFanUpBaseRows(cfg, snaps)
 	claimed := make(map[string]bool)
 	// An ambiguous zoned netdev may not appear in an ingress scope because its
 	// view intentionally declines to claim the shared iifname/VRF master. Keep
@@ -63,7 +64,7 @@ func BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg *config.Config, snap
 		if netdev == "" || protected[netdev] {
 			continue
 		}
-		if snap.Zone != "" {
+		if snap.Zone != "" && !unzonedFanUpBaseRows[snap.Name] {
 			if _, drop := quarantined[snap.Zone]; !drop {
 				continue
 			}

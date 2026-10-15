@@ -340,6 +340,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	// management / cluster-control traffic is never denied (#3277).
 	lifelines := hostInboundLifelineSet(cfg)
 	lifelineShared := hostInboundLifelineSharedAddrsFromSnaps(cfg, snaps)
+	unzonedFanUpBaseRows := hostInboundUnzonedFanUpBaseRows(cfg, snaps)
 	// #9637: netdevs that can never be an ingress scope.
 	vrfEnslaved := config.HostInboundVRFEnslavedNetdevs(cfg)
 	vrfMasters := hostInboundVRFMasterNetdevs(cfg, ifaceSnaps)
@@ -505,6 +506,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			if snap.IsUnit {
 				claimNetdev(snap.LinuxName, "")
 			}
+			continue
+		}
+		if unzonedFanUpBaseRows[snap.Name] {
 			continue
 		}
 		// #5699: a PHYSICAL (no-unit) snapshot whose unit 0 COLLAPSES onto the
@@ -964,6 +968,7 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 	lifelines := hostInboundLifelineSet(cfg)
 	lifelineShared := hostInboundLifelineSharedAddrsFromSnaps(cfg, snaps)
 	quarantined := quarantinedZoneNames(cfg)
+	unzonedFanUpBaseRows := hostInboundUnzonedFanUpBaseRows(cfg, snaps)
 	// Addresses already covered by a zone deny — exclude so the unzoned catch-all
 	// never duplicates or conflicts with a zone rule for the same daddr.
 	zoned := map[string]bool{}
@@ -998,7 +1003,7 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 		if snap.AdminDisabled {
 			continue
 		}
-		if snap.Zone != "" {
+		if snap.Zone != "" && !unzonedFanUpBaseRows[snap.Name] {
 			if _, drop := quarantined[snap.Zone]; !drop {
 				continue
 			}
