@@ -597,7 +597,6 @@ func (p *CapturePipeline) consumeFrames(frames []CaptureFrame) int {
 		}
 		drops = append(drops, p.enqueueFlowLocked(frame)...)
 	}
-	eligible := p.eligibleLocked()
 	p.mu.Unlock()
 	for _, frame := range malformedFragments {
 		if !p.emitDeny(frame, ReasonFragmentRefused) {
@@ -628,7 +627,25 @@ func (p *CapturePipeline) consumeFrames(frames []CaptureFrame) int {
 			p.finishFrame(frame, VerdictDrop)
 		}
 	}
-	for len(eligible) != 0 {
+	p.dispatchEligible()
+	return len(frames)
+}
+
+// dispatchEligible runs the same phase- and attestation-aware dispatch used
+// after receive-time enqueue. Terminal completion can promote a flow follower
+// without adding anything to handoff, so Poll must also re-run this loop.
+func (p *CapturePipeline) dispatchEligible() {
+	for {
+		p.mu.Lock()
+		if p.closed || p.revoked {
+			p.mu.Unlock()
+			return
+		}
+		eligible := p.eligibleLocked()
+		p.mu.Unlock()
+		if len(eligible) == 0 {
+			return
+		}
 		var shadow, enforcing []CaptureFrame
 		for _, frame := range eligible {
 			switch frame.phase {
@@ -645,11 +662,7 @@ func (p *CapturePipeline) consumeFrames(frames []CaptureFrame) int {
 		if len(enforcing) != 0 {
 			p.dispatchAttestEligible(enforcing)
 		}
-		p.mu.Lock()
-		eligible = p.eligibleLocked()
-		p.mu.Unlock()
 	}
-	return len(frames)
 }
 
 func (p *CapturePipeline) enqueueFlowLocked(frame CaptureFrame) []CaptureFrame {
@@ -1212,6 +1225,7 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 		resolved++
 	}
 	resolved += p.expireFragments(now)
+	p.dispatchEligible()
 	return resolved
 }
 func (p *CapturePipeline) expireFragments(now time.Time) int {
