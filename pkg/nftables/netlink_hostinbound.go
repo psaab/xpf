@@ -151,9 +151,7 @@ func emitHostInboundStaleReplyGuards(p *nlPlan, guards []StaleReplyGuardRule) {
 		if guard.Proto == config.HostInboundProtoUDP {
 			proto = protoUDP
 		}
-		rule := p.rule().
-			ctEstablishedRelated().
-			ctDirectionReply()
+		rule := p.rule().ctEstablishedRelated().ctDirectionReply()
 		if len(guard.Ingress) > 0 {
 			if guard.IngressNegated {
 				rule.iifnameExcept(guard.Ingress)
@@ -161,8 +159,15 @@ func emitHostInboundStaleReplyGuards(p *nlPlan, guards []StaleReplyGuardRule) {
 				rule.iifname(guard.Ingress)
 			}
 		}
-		rule.
-			daddr(family, guard.Addresses, false).
+		for _, scope := range guard.IngressVRFScopes {
+			rule.iifname([]string{scope.Master})
+			if guard.IngressVRFNegated {
+				rule.sdifnameExcept(scope.Slaves)
+			} else {
+				rule.sdifname(scope.Slaves)
+			}
+		}
+		rule.daddr(family, guard.Addresses, false).
 			l4Port(proto, "dport", portsFromUint16(guard.Ports), false).
 			emit(verdictDrop()...)
 	}

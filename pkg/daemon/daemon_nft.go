@@ -1443,6 +1443,14 @@ func hostInboundStaleReplyGuardText(guards []xnft.StaleReplyGuardRule) []string 
 				scope = "iifname " + nftIifnameSet(guard.Ingress) + " "
 			}
 		}
+		for _, vrf := range guard.IngressVRFScopes {
+			scope += "iifname " + nftIifnameSet([]string{vrf.Master}) + " "
+			if guard.IngressVRFNegated {
+				scope += "meta sdifname != " + nftIifnameSet(vrf.Slaves) + " "
+			} else {
+				scope += "meta sdifname " + nftIifnameSet(vrf.Slaves) + " "
+			}
+		}
 		out = append(out, fmt.Sprintf(
 			"    ct state established,related ct direction reply %s%s daddr %s %s dport %s drop",
 			scope, guard.Family, nftAddrSet(guard.Addresses), proto, renderHostInboundPortSpec(ports),

@@ -130,12 +130,14 @@ func HostInboundStaleReplyCatalog(family string) StaleReplyGuardPorts {
 // the trusted reinject TUN so userspace-adjudicated reinjects keep their
 // exemption). Ingress is sorted for deterministic rendering.
 type StaleReplyGuardRule struct {
-	Family         string
-	Proto          uint8
-	Ports          []uint16
-	Addresses      []string
-	Ingress        []string
-	IngressNegated bool
+	Family            string
+	Proto             uint8
+	Ports             []uint16
+	Addresses         []string
+	Ingress           []string
+	IngressNegated    bool
+	IngressVRFScopes  []config.HostInboundVRFIngressScope
+	IngressVRFNegated bool
 }
 
 type staleReplyAdmit struct {
@@ -189,38 +191,47 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 	var out []StaleReplyGuardRule
 	// Per-ingress-view guards.
 	for _, v := range views {
-		if len(v.IngressNetdevs) == 0 || hostInboundAllowsAll(v) {
+		if hostInboundAllowsAll(v) {
 			continue
 		}
-		ingress := append([]string(nil), v.IngressNetdevs...)
-		sort.Strings(ingress)
-		for _, fam := range []struct {
-			name  string
-			dests []string
-		}{
-			{"ip", sortedV4},
-			{"ip6", sortedV6},
-		} {
-			if len(fam.dests) == 0 {
-				continue
+		type ingressPath struct {
+			netdevs []string
+			vrf     []config.HostInboundVRFIngressScope
+		}
+		var paths []ingressPath
+		if direct := staleReplySortedUniqueStrings(hostInboundDirectIngressNetdevs(v)); len(direct) > 0 {
+			paths = append(paths, ingressPath{netdevs: direct})
+		}
+		for _, scope := range v.IngressVRFScopes {
+			if scope.Master != "" && len(scope.Slaves) > 0 {
+				slaves := staleReplySortedUniqueStrings(scope.Slaves)
+				paths = append(paths, ingressPath{vrf: []config.HostInboundVRFIngressScope{{Master: scope.Master, Slaves: slaves}}})
 			}
-			admit := staleReplyViewAdmit(v, fam.name)
-			catalog := HostInboundStaleReplyCatalog(fam.name)
-			for _, pair := range []struct {
-				proto uint8
-				ports []uint16
-				allow []config.PortRange
-			}{
-				{config.HostInboundProtoTCP, catalog.TCP, admit.tcp},
-				{config.HostInboundProtoUDP, catalog.UDP, admit.udp},
-			} {
-				denied := staleReplyDeniedPorts(pair.ports, pair.allow, pair.proto, wg)
-				if len(denied) > 0 {
-					out = append(out, StaleReplyGuardRule{
-						Family: fam.name, Proto: pair.proto, Ports: denied,
-						Addresses: append([]string(nil), fam.dests...),
-						Ingress:   append([]string(nil), ingress...),
-					})
+		}
+		for _, path := range paths {
+			for _, fam := range []struct {
+				name  string
+				dests []string
+			}{{"ip", sortedV4}, {"ip6", sortedV6}} {
+				if len(fam.dests) == 0 {
+					continue
+				}
+				admit := staleReplyViewAdmit(v, fam.name)
+				catalog := HostInboundStaleReplyCatalog(fam.name)
+				for _, pair := range []struct {
+					proto uint8
+					ports []uint16
+					allow []config.PortRange
+				}{{config.HostInboundProtoTCP, catalog.TCP, admit.tcp}, {config.HostInboundProtoUDP, catalog.UDP, admit.udp}} {
+					denied := staleReplyDeniedPorts(pair.ports, pair.allow, pair.proto, wg)
+					if len(denied) > 0 {
+						out = append(out, StaleReplyGuardRule{
+							Family: fam.name, Proto: pair.proto, Ports: denied,
+							Addresses:        append([]string(nil), fam.dests...),
+							Ingress:          append([]string(nil), path.netdevs...),
+							IngressVRFScopes: path.vrf,
+						})
+					}
 				}
 			}
 		}
@@ -238,7 +249,7 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 		addrs = append(addrs, ip)
 	}
 	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
-	appendOwnerGuards := func(ingress []string, ingressNegated bool) {
+	appendOwnerGuards := func(ingress []string, ingressNegated bool, vrf []config.HostInboundVRFIngressScope, vrfNegated bool) {
 		for _, ip := range addrs {
 			a := admit[ip]
 			family := "ip"
@@ -259,22 +270,62 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 					out = append(out, StaleReplyGuardRule{
 						Family: family, Proto: pair.proto, Ports: denied, Addresses: []string{ip.String()},
 						Ingress: append([]string(nil), ingress...), IngressNegated: ingressNegated,
+						IngressVRFScopes: vrf, IngressVRFNegated: vrfNegated,
 					})
 				}
 			}
 		}
 	}
 	if deny := staleReplySortedUniqueStrings(collectIngressDenyNetdevs(views)); len(deny) > 0 {
-		appendOwnerGuards(deny, false)
+		appendOwnerGuards(deny, false, nil, false)
 	}
-	// Uncovered-ingress fallback (destination-owner policy).
-	covered := staleReplySortedUniqueStrings(collectIngressNetdevs(views))
-	fallbackIngress := append([]string(nil), covered...)
+	// Direct fallback excludes only direct netdevs and the trusted reinject
+	// device. VRF masters are handled separately so excluding a master cannot
+	// accidentally exempt every slave, including unzoned slaves.
+	var coveredDirect []string
+	vrfMembers := map[string]map[string]struct{}{}
+	hasScopedIngress := false
+	for _, v := range views {
+		direct := hostInboundDirectIngressNetdevs(v)
+		coveredDirect = append(coveredDirect, direct...)
+		coveredDirect = append(coveredDirect, v.IngressDenyNetdevs...)
+		hasScopedIngress = hasScopedIngress || len(direct) > 0 || len(v.IngressDenyNetdevs) > 0
+		for _, scope := range v.IngressVRFScopes {
+			if scope.Master == "" || len(scope.Slaves) == 0 {
+				continue
+			}
+			hasScopedIngress = true
+			if vrfMembers[scope.Master] == nil {
+				vrfMembers[scope.Master] = map[string]struct{}{}
+			}
+			for _, slave := range scope.Slaves {
+				if slave != "" {
+					vrfMembers[scope.Master][slave] = struct{}{}
+				}
+			}
+		}
+	}
+	fallbackDirect := staleReplySortedUniqueStrings(coveredDirect)
 	if trustedReinject {
-		fallbackIngress = append(fallbackIngress, HostInboundReinjectIfname)
+		fallbackDirect = staleReplySortedUniqueStrings(append(fallbackDirect, HostInboundReinjectIfname))
 	}
-	fallbackIngress = staleReplySortedUniqueStrings(fallbackIngress)
-	appendOwnerGuards(fallbackIngress, true)
+	if len(fallbackDirect) > 0 || !hasScopedIngress {
+		appendOwnerGuards(fallbackDirect, true, nil, false)
+	}
+	masters := make([]string, 0, len(vrfMembers))
+	for master := range vrfMembers {
+		masters = append(masters, master)
+	}
+	sort.Strings(masters)
+	for _, master := range masters {
+		members := vrfMembers[master]
+		slaves := make([]string, 0, len(members))
+		for slave := range members {
+			slaves = append(slaves, slave)
+		}
+		sort.Strings(slaves)
+		appendOwnerGuards(nil, false, []config.HostInboundVRFIngressScope{{Master: master, Slaves: slaves}}, true)
+	}
 	return out
 }
 
