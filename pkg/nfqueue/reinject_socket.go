@@ -117,8 +117,9 @@ type SocketReinjectSubmitter struct {
 	announceSet     bool
 	announcePayload []byte
 
-	completeMu sync.Mutex
-	complete   net.Conn
+	completeMu         sync.Mutex
+	complete           net.Conn
+	pendingCompletions []ReinjectCompletion
 }
 
 // NewSocketReinjectSubmitter constructs a lazy two-socket client. Dialing is
@@ -207,6 +208,12 @@ func (s *SocketReinjectSubmitter) DrainReinjectCompletions(max uint32) ([]Reinje
 	}
 	s.completeMu.Lock()
 	defer s.completeMu.Unlock()
+	if len(s.pendingCompletions) > 0 {
+		n := min(int(max), len(s.pendingCompletions))
+		completions := s.pendingCompletions[:n]
+		s.pendingCompletions = s.pendingCompletions[n:]
+		return completions, nil
+	}
 	if s.complete == nil {
 		conn, err := s.dial(s.completePath)
 		if err != nil {
@@ -241,7 +248,8 @@ func (s *SocketReinjectSubmitter) DrainReinjectCompletions(max uint32) ([]Reinje
 		return nil, err
 	}
 	if len(completions) > int(max) {
-		return completions[:max], nil
+		s.pendingCompletions = append([]ReinjectCompletion(nil), completions[max:]...)
+		completions = completions[:max:max]
 	}
 	return completions, nil
 }
@@ -351,6 +359,7 @@ func (s *SocketReinjectSubmitter) Close() error {
 		}
 		s.complete = nil
 	}
+	s.pendingCompletions = nil
 	s.completeMu.Unlock()
 	return firstErr
 }
