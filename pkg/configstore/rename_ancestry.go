@@ -1,5 +1,7 @@
 package configstore
 
+import "sort"
+
 // RenameDescriptor records one candidate-tree Rename operation. Paths are
 // copied at capture time so callers may reuse their input slices after the
 // store mutation returns.
@@ -36,8 +38,13 @@ func (s *Store) PendingRenameAncestry() []RenameDescriptor {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []RenameDescriptor
-	for _, descriptors := range s.pendingRenameAncestry {
-		out = append(out, cloneRenameDescriptors(descriptors)...)
+	generations := make([]uint64, 0, len(s.pendingRenameAncestry))
+	for generation := range s.pendingRenameAncestry {
+		generations = append(generations, generation)
+	}
+	sort.Slice(generations, func(i, j int) bool { return generations[i] < generations[j] })
+	for _, generation := range generations {
+		out = append(out, cloneRenameDescriptors(s.pendingRenameAncestry[generation])...)
 	}
 	return out
 }
