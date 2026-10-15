@@ -1525,15 +1525,19 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					if !seen[subName] {
 						seen[subName] = true
 						addrs := unit.Addresses
+						primaryAddr := unit.PrimaryAddress
+						preferredAddr := unit.PreferredAddress
 						if isVRRPReth {
 							// Replace VIP addresses with a link-local base for VRRP.
 							addrs = []string{fmt.Sprintf("169.254.%d.%d/32", effectiveCfg.RedundancyGroup, clusterNodeID+1)}
+							primaryAddr = ""
+							preferredAddr = ""
 						}
 						result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
 							Name:             subName,
 							Addresses:        addrs,
-							PrimaryAddress:   unit.PrimaryAddress,
-							PreferredAddress: unit.PreferredAddress,
+							PrimaryAddress:   primaryAddr,
+							PreferredAddress: preferredAddr,
 							DHCPv4:           unit.DHCP,
 							DHCPv6:           unitHasDHCPv6(unit),
 							DADDisable:       unit.DADDisable,
