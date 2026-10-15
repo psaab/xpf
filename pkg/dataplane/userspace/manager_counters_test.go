@@ -809,3 +809,54 @@ func TestBindingStatusDecodesNamedPreL3Keys10498(t *testing.T) {
 		)
 	}
 }
+
+// TestSyncBPFCountersBridgesGlobalStats13274 is the #13274 (D1-02)
+// fail-on-revert guard: bindings report FlowCacheHits/Misses,
+// LocalDeliveryPackets and FabricRedirectUnsendableDrops, and
+// syncBPFCountersLocked must push their deltas into the GlobalCtr*
+// indices consumed by Prometheus and REST. Unsupported counters must not
+// be inferred from other event counts.
+func TestSyncBPFCountersBridgesGlobalStats13274(t *testing.T) {
+	m := New()
+	status := &ProcessStatus{Bindings: []BindingStatus{
+		{Slot: 0, FlowCacheHits: 10, FlowCacheMisses: 3, LocalDeliveryPackets: 5, FabricRedirectUnsendableDrops: 4},
+		{Slot: 1, FlowCacheHits: 30, FlowCacheMisses: 7, LocalDeliveryPackets: 15, FabricRedirectUnsendableDrops: 8},
+	}}
+	m.mu.Lock()
+	m.syncBPFCountersLocked(status)
+	m.mu.Unlock()
+
+	for idx, want := range map[uint32]uint64{
+		dataplane.GlobalCtrFlowCacheHit:  40,
+		dataplane.GlobalCtrFlowCacheMiss: 10,
+		dataplane.GlobalCtrHostInbound:   20,
+		dataplane.GlobalCtrFabricFwdDrop: 12,
+	} {
+		if got := m.bpfShim.ReadUserspaceCounterOffset(idx); got != want {
+			t.Errorf("counter idx %d = %d, want %d", idx, got, want)
+		}
+	}
+
+	// Second identical poll: deltas are idempotent rather than double-counted.
+	m.mu.Lock()
+	m.syncBPFCountersLocked(status)
+	m.mu.Unlock()
+	if got := m.bpfShim.ReadUserspaceCounterOffset(dataplane.GlobalCtrFlowCacheHit); got != 40 {
+		t.Fatalf("FlowCacheHit after re-poll = %d, want 40", got)
+	}
+}
+
+func TestLegacyAdapterMarksUnsupportedGlobalCounters13274(t *testing.T) {
+	m := New()
+	a := NewLegacyDataPlaneAdapter(m)
+	for _, idx := range []uint32{
+		dataplane.GlobalCtrFlowCacheFlush,
+		dataplane.GlobalCtrFlowCacheInvalidate,
+		dataplane.GlobalCtrTCEgressPackets,
+		dataplane.GlobalCtrFabricRedirect,
+	} {
+		if got, err := a.ReadGlobalCounter(idx); got != 0 || err != dataplane.ErrCounterNotPopulated {
+			t.Errorf("unsupported global counter %d read = %d, %v; want unavailable", idx, got, err)
+		}
+	}
+}

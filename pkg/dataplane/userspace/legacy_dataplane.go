@@ -779,6 +779,26 @@ func (a *LegacyDataPlaneAdapter) Status() (ProcessStatus, error) {
 	return m.Status()
 }
 
+// ReadGlobalCounter marks legacy counters with no userspace producer as
+// unavailable instead of exposing the shim's untouched zero-valued slots.
+// The userspace status bridge populates the counters that have real helper
+// equivalents; flush, invalidation, TC egress and successful fabric redirects
+// have no equivalent in the status protocol.
+func (a *LegacyDataPlaneAdapter) ReadGlobalCounter(index uint32) (uint64, error) {
+	switch index {
+	case dataplane.GlobalCtrFlowCacheFlush,
+		dataplane.GlobalCtrFlowCacheInvalidate,
+		dataplane.GlobalCtrTCEgressPackets,
+		dataplane.GlobalCtrFabricRedirect:
+		return 0, dataplane.ErrCounterNotPopulated
+	default:
+		if a == nil || a.DataPlane == nil {
+			return 0, dataplane.ErrDataplaneNotArmed
+		}
+		return a.DataPlane.ReadGlobalCounter(index)
+	}
+}
+
 // HelperCrashState returns the manager's helper crash record (#7250).
 //
 // Returns ok=false when there is no manager to ask, deliberately rather than
