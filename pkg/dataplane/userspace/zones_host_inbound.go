@@ -185,7 +185,7 @@ func stableRethUnitHasIPv6(unit *config.InterfaceUnit) bool {
 			return true
 		}
 	}
-	return unit.DHCPv6
+	return unit.DHCPv6 || unit.DHCPv6Client != nil
 }
 
 // hostInboundScopeLinkAddr reports whether a snapshot address row is kernel

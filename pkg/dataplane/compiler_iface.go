@@ -879,7 +879,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		if ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]; ok && ifCfg != nil {
 			if unit, ok := ifCfg.Units[unitNum]; ok {
 				addrs = unit.Addresses
-				isDHCPSub = unit.DHCP || unit.DHCPv6
+				isDHCPSub = unit.DHCP || unitHasDHCPv6(unit)
 			}
 			if ifCfg.RedundancyGroup > 0 {
 				isReth = true
@@ -1279,7 +1279,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					PrimaryAddress:   unit.PrimaryAddress,
 					PreferredAddress: unit.PreferredAddress,
 					DHCPv4:           unit.DHCP,
-					DHCPv6:           unit.DHCPv6,
+					DHCPv6:           unitHasDHCPv6(unit),
 					DADDisable:       unit.DADDisable,
 					MTU:              unitMTU,
 					Description:      desc,
@@ -1491,7 +1491,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 							PrimaryAddress:   unit.PrimaryAddress,
 							PreferredAddress: unit.PreferredAddress,
 							DHCPv4:           unit.DHCP,
-							DHCPv6:           unit.DHCPv6,
+							DHCPv6:           unitHasDHCPv6(unit),
 							DADDisable:       unit.DADDisable,
 							MTU:              unit.MTU,
 							Description:      unit.Description,
@@ -1515,7 +1515,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					if unit.DHCP {
 						dhcpv4 = true
 					}
-					if unit.DHCPv6 {
+					if unitHasDHCPv6(unit) {
 						dhcpv6 = true
 					}
 					if unit.DADDisable {
