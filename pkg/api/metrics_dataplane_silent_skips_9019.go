@@ -8,18 +8,6 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-var learnedRouteCapGroupShedsTotalDesc = prometheus.NewDesc(
-	"xpf_learned_route_cap_group_sheds_total",
-	"Total learned-route cap group sheds, by kernel route protocol.",
-	[]string{"protocol"}, nil,
-)
-
-var learnedRouteCapGroupShedsByFamilyTotalDesc = prometheus.NewDesc(
-	"xpf_learned_route_cap_group_sheds_by_family_total",
-	"Total learned-route cap group sheds, by address family and kernel route protocol.",
-	[]string{"family", "protocol"}, nil,
-)
-
 // #9019: export the two userspace-dataplane counters that record work the box
 // DECLINED to do.
 //
@@ -90,8 +78,8 @@ func (c *xpfCollector) describeDataplaneSilentSkips(ch chan<- *prometheus.Desc) 
 	ch <- c.napiProbeTargetSkipsTotal
 	ch <- c.bindingWedgeGiveupsTotal
 	ch <- c.learnedRouteCapHitsTotal
-	ch <- learnedRouteCapGroupShedsTotalDesc
-	ch <- learnedRouteCapGroupShedsByFamilyTotalDesc
+	ch <- c.learnedRouteCapGroupShedsTotal
+	ch <- c.learnedRouteCapGroupShedsByFamilyTotal
 }
 
 func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
@@ -108,7 +96,7 @@ func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
 	}
 	sort.Strings(protocols)
 	for _, protocol := range protocols {
-		ch <- prometheus.MustNewConstMetric(learnedRouteCapGroupShedsTotalDesc,
+		ch <- prometheus.MustNewConstMetric(c.learnedRouteCapGroupShedsTotal,
 			prometheus.CounterValue, float64(protocolHits[protocol]), protocol)
 	}
 	familyHits := userspace.LearnedRouteCapHitsByFamilyProtocol()
@@ -124,7 +112,7 @@ func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
 		}
 		sort.Strings(protocols)
 		for _, protocol := range protocols {
-			ch <- prometheus.MustNewConstMetric(learnedRouteCapGroupShedsByFamilyTotalDesc,
+			ch <- prometheus.MustNewConstMetric(c.learnedRouteCapGroupShedsByFamilyTotal,
 				prometheus.CounterValue, float64(familyHits[family][protocol]), family, protocol)
 		}
 	}
