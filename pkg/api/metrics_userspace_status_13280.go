@@ -28,6 +28,12 @@ func (c *xpfCollector) emitUserspaceStatus13280(ch chan<- prometheus.Metric, sta
 	ch <- prometheus.MustNewConstMetric(c.userspaceSyncedReverseRederived,
 		prometheus.CounterValue, float64(status.SyncedReverseRederived))
 
+	ch <- prometheus.MustNewConstMetric(c.userspacePeerDeleteRefusedLocalOwned,
+		prometheus.CounterValue, float64(status.PeerDeleteRefusedLocalOwned))
+	ch <- prometheus.MustNewConstMetric(c.userspaceSessionDeleteReplicaDropped,
+		prometheus.CounterValue, float64(status.SessionDeleteReplicaDropped))
+	ch <- prometheus.MustNewConstMetric(c.userspaceSessionDeleteReplicaDropRepaired,
+		prometheus.CounterValue, float64(status.SessionDeleteReplicaDropRepaired))
 	ch <- prometheus.MustNewConstMetric(c.userspaceHATransitionDropped,
 		prometheus.CounterValue, float64(status.HATransitionDemoteDropped), "demote")
 	ch <- prometheus.MustNewConstMetric(c.userspaceHATransitionDropped,

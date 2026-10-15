@@ -37,8 +37,8 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 	for metric := range ch {
 		got = append(got, metric)
 	}
-	if len(got) != 15 {
-		t.Fatalf("emitted %d metrics, want 15 counters / labeled series", len(got))
+	if len(got) != 18 {
+		t.Fatalf("emitted %d metrics, want 18 counters / labeled series", len(got))
 	}
 	for _, counter := range []struct {
 		desc  *prometheus.Desc
