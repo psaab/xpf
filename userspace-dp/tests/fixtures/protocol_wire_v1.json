@@ -184,6 +184,10 @@
       0,
       0,
       0,
+      0,
+      0,
+      0,
+      0,
       0
     ],
     "screen_scan_sweep_evicted_pressure": 0,
@@ -223,6 +227,7 @@
     "syn_cookie_ack_invalid": 0,
     "syn_cookie_ack_rst_sent": 0,
     "syn_cookie_ack_valid": 0,
+    "syn_cookie_active_budget_drops": 0,
     "syn_cookie_bypass": 0,
     "syn_cookie_challenges": 0,
     "syn_cookie_output_filter_drops": 0,

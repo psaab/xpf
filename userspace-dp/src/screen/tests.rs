@@ -4634,6 +4634,9 @@ fn syn_cookie_invalid_ack_flood_does_not_grow_validated_cache() {
         ack.tcp_flags = TCP_ACK;
         ack.src_port = 30000 + offset;
         ack.tcp_ack = 0xdead_0000u32.wrapping_add(offset as u32);
+        // #13286: these ACKs fail the epoch prefilter ahead of the budget
+        // limiter, so they remain Invalid; in-window ACKs over budget are
+        // ActiveBudgetExceeded (see syn_cookie_active_ack_validation_is_rate_limited_9902).
         assert_eq!(
             state.validate_syn_cookie_ack_on_session_miss("trust", 7, &ack, 128 * NS, 128),
             SynCookieAckVerdict::Invalid
@@ -8535,7 +8538,7 @@ fn syn_cookie_active_ack_validation_is_rate_limited_9902() {
     assert_eq!(state.syn_cookie_active_ack_available("trust"), 0);
     assert_eq!(
         state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
-        SynCookieAckVerdict::Invalid,
+        SynCookieAckVerdict::ActiveBudgetExceeded,
         "over-budget active-path ACKs must refuse fail-closed, not validate"
     );
     // Same source, so the validated-client cache holds one entry: the 64
@@ -9053,4 +9056,72 @@ fn syn_cookie_validated_still_skips_per_source_9945() {
         "control: same source unvalidated must still trip per-source"
     );
     assert_eq!(state.syn_flood_src_drops(), 1);
+}
+
+// #13286 (D3-12): every active ScreenVerdict::Drop reason must have a
+// published per-reason ordinal, and active SYN-cookie ACK budget
+// exhaustion must not be conflated with an invalid cookie.
+#[test]
+fn screen_reason_drop_index_covers_all_active_reasons_13286() {
+    assert_eq!(SCREEN_REASON_DROP_COUNT, 19);
+    for reason in [
+        "icmp-fragment",
+        "ip-malformed",
+        "syn-cookie-unavailable",
+        "syn-cookie-invalid",
+    ] {
+        assert!(
+            screen_reason_drop_index(reason).is_some(),
+            "active screen drop reason {reason:?} has no per-reason ordinal"
+        );
+    }
+    // Existing ordinals must not shift (Go/wire lockstep).
+    assert_eq!(screen_reason_drop_index("syn-flood"), Some(0));
+    assert_eq!(screen_reason_drop_index("session-limit-src"), Some(14));
+    assert_eq!(screen_reason_drop_index("session-limit-dst"), Some(14));
+}
+
+#[test]
+fn syn_cookie_active_budget_exhaustion_is_not_invalid_13286() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    state.force_syn_cookie_active_for_test("trust", 200);
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    let valid_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
+    let mut valid_ack = syn.clone();
+    valid_ack.tcp_flags = TCP_ACK;
+    valid_ack.tcp_seq = 3;
+    valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+    let base_ns = 128 * NS;
+    for _ in 0..SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
+        assert_eq!(
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
+            SynCookieAckVerdict::Validated
+        );
+    }
+    assert_eq!(state.syn_cookie_active_ack_available("trust"), 0);
+    let throttled =
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128);
+    assert_ne!(
+        throttled,
+        SynCookieAckVerdict::Invalid,
+        "budget-throttled legitimate ACK must not be counted as invalid cookie"
+    );
+    assert_ne!(throttled, SynCookieAckVerdict::Validated);
+    assert_ne!(throttled, SynCookieAckVerdict::NotApplicable);
 }

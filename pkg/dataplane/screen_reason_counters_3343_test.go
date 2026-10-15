@@ -14,8 +14,8 @@ package dataplane
 import "testing"
 
 func TestScreenReasonCountersCanonicalContract(t *testing.T) {
-	if ScreenReasonDropCount != 15 {
-		t.Fatalf("ScreenReasonDropCount = %d, want 15 (must match Rust screen::SCREEN_REASON_DROP_COUNT and the protocol_wire_v1.json array length)", ScreenReasonDropCount)
+	if ScreenReasonDropCount != 19 {
+		t.Fatalf("ScreenReasonDropCount = %d, want 19 (must match Rust screen::SCREEN_REASON_DROP_COUNT and the protocol_wire_v1.json array length)", ScreenReasonDropCount)
 	}
 	if len(ScreenReasonCounters) != ScreenReasonDropCount {
 		t.Fatalf("len(ScreenReasonCounters) = %d, want %d", len(ScreenReasonCounters), ScreenReasonDropCount)
@@ -45,6 +45,10 @@ func TestScreenReasonCountersCanonicalContract(t *testing.T) {
 		{GlobalCtrScreenIPSrcRoute, "ip-source-route", "IP source-route"},
 		{GlobalCtrScreenSynFrag, "syn-frag", "SYN fragment"},
 		{GlobalCtrScreenSessionLimit, "session-limit", "session limit"},
+		{GlobalCtrScreenICMPFragment, "icmp-fragment", "ICMP fragment"},
+		{GlobalCtrScreenIPMalformed, "ip-malformed", "IP malformed"},
+		{GlobalCtrScreenSynCookieUnavail, "syn-cookie-unavailable", "SYN-cookie unavailable"},
+		{GlobalCtrScreenSynCookieInvalid, "syn-cookie-invalid", "SYN-cookie invalid"},
 	}
 	if len(want) != len(ScreenReasonCounters) {
 		t.Fatalf("test want table length %d != ScreenReasonCounters length %d", len(want), len(ScreenReasonCounters))

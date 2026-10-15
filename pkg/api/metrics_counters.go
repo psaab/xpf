@@ -474,6 +474,7 @@ func (c *xpfCollector) collectGlobalCounters(ch chan<- prometheus.Metric, dp api
 	emit(c.syncookieTotal, dataplane.GlobalCtrSyncookieValid, "valid")
 	emit(c.syncookieTotal, dataplane.GlobalCtrSyncookieInvalid, "invalid")
 	emit(c.syncookieTotal, dataplane.GlobalCtrSyncookieBypass, "bypass")
+	emit(c.syncookieTotal, dataplane.GlobalCtrSyncookieActiveBudget, "active_budget")
 
 	// Flow cache counters (IPv4 + IPv6)
 	emit(c.flowCacheTotal, dataplane.GlobalCtrFlowCacheHit, "hit")

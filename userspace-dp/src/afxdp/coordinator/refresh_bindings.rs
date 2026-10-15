@@ -176,6 +176,7 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.syn_cookie_reply_budget_drops = snap.syn_cookie_reply_budget_drops;
     binding.syn_cookie_ack_valid = snap.syn_cookie_ack_valid;
     binding.syn_cookie_ack_invalid = snap.syn_cookie_ack_invalid;
+    binding.syn_cookie_active_budget_drops = snap.syn_cookie_active_budget_drops;
     binding.syn_cookie_bypass = snap.syn_cookie_bypass;
     binding.policy_reject_sent = snap.policy_reject_sent;
     binding.filter_reject_sent = snap.filter_reject_sent;
@@ -434,6 +435,7 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.syn_cookie_reply_budget_drops = 0;
     binding.syn_cookie_ack_valid = 0;
     binding.syn_cookie_ack_invalid = 0;
+    binding.syn_cookie_active_budget_drops = 0;
     binding.syn_cookie_bypass = 0;
     binding.policy_reject_sent = 0;
     binding.filter_reject_sent = 0;

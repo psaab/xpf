@@ -993,8 +993,7 @@ pub(in crate::afxdp) struct BatchCounters {
     // `screen::screen_reason_drop_index`. Batched alongside the aggregate
     // `screen_drops` (same MESI-thrash rationale) and flushed element-wise into
     // `BindingLiveState.screen_reason_drops`. Reasons without a published
-    // ordinal (SYN-cookie / icmp-fragment / ip-malformed) bump only the
-    // aggregate above.
+    // ordinal (e.g. "syn-cookie") bump only the aggregate above.
     screen_reason_drops: [u64; crate::screen::SCREEN_REASON_DROP_COUNT],
     syn_cookie_challenges: u64,
     syn_cookie_secret_unavailable: u64,
@@ -1003,6 +1002,7 @@ pub(in crate::afxdp) struct BatchCounters {
     syn_cookie_reply_budget_drops: u64,
     syn_cookie_ack_valid: u64,
     syn_cookie_ack_invalid: u64,
+    syn_cookie_active_budget_drops: u64,
     syn_cookie_bypass: u64,
     // #2089: policy `reject` reply synthesis. policy_reject_sent counts
     // RST/ICMP-unreachable replies enqueued; policy_reject_reply_budget_drops
@@ -1095,7 +1095,7 @@ impl BatchCounters {
     /// #3343: record one screen/IDS DROP. Bumps the aggregate `screen_drops`
     /// and, when `reason` maps to a published per-reason ordinal, the matching
     /// `screen_reason_drops` slot. Reasons without an ordinal (e.g.
-    /// "syn-cookie", "icmp-fragment", "ip-malformed") are surfaced only through
+    /// "syn-cookie") are surfaced only through
     /// the aggregate. Centralizing here keeps the aggregate and per-reason
     /// tallies from drifting at the many drop sites.
     ///
@@ -1567,6 +1567,11 @@ impl BatchCounters {
             live.syn_cookie_ack_invalid
                 .fetch_add(self.syn_cookie_ack_invalid, Ordering::Relaxed);
             self.syn_cookie_ack_invalid = 0;
+        }
+        if self.syn_cookie_active_budget_drops != 0 {
+            live.syn_cookie_active_budget_drops
+                .fetch_add(self.syn_cookie_active_budget_drops, Ordering::Relaxed);
+            self.syn_cookie_active_budget_drops = 0;
         }
         if self.syn_cookie_bypass != 0 {
             live.syn_cookie_bypass
