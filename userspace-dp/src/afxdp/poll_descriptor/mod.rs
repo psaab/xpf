@@ -1837,6 +1837,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     .map(|candidate| candidate.key)
                 });
                 let owner_syn_reuse = owner_syn_reuse_key.is_some();
+                // A flowless fragment-association hit carries a session-live,
+                // authority-scoped translation decision; preserve that provenance
+                // through the missing-neighbor fail-closed fence below.
+                let mut fragment_association_hit = false;
                 let mut decision = if let Some(flow) = flow.as_ref() {
                     if !owner_syn_reuse
                         && let Some(mut resolved) = resolve_flow_session_decision_with_conntrack(
@@ -6388,6 +6392,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         })
                     })
                 {
+                    fragment_association_hit = true;
                     // #5798 (required-fix #4): an association HIT may inherit the
                     // first fragment's STATEFUL zone-policy permit + NAT
                     // translation + egress route — but it must NOT inherit
@@ -8790,6 +8795,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // a zone-encoded fabric stamp is honored here
                                 // only when the decision's owner RG is
                                 // forwarding-active locally.
+                                // Preserve the un-gated arrival stamp for the
+                                // fragment-cache key, matching the ordinary
+                                // session-install path.
+                                let frag_authority_zone_override = ingress_zone_override;
+                                let frag_authority_nat_scope_ifindex = ingress_nat_scope_ifindex;
                                 let ingress_zone_override = gate_fabric_zone_override_on_owner_rg(
                                     worker_ctx.forwarding,
                                     worker_ctx.ha_state,
@@ -9244,7 +9254,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             break 'missing_neighbor
                                                 StageOutcome::RecycleAndContinue;
                                         }
-                                        let nat_translation_required = if decision
+                                        let nat_translation_required = if fragment_association_hit {
+                                            false
+                                        } else if decision
                                             .nat
                                             .rewrite_dst
                                             .is_some()
@@ -9981,8 +9993,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             frag_ingress_authority_with_nat_scope(
                                                 worker_ctx.forwarding,
                                                 meta,
-                                                ingress_zone_override,
-                                                ingress_nat_scope_ifindex,
+                                                frag_authority_zone_override,
+                                                frag_authority_nat_scope_ifindex,
                                             );
                                         if frag_assoc::missing_neighbor_install_fragment_assoc(
                                             worker_ctx.forwarding,
