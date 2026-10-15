@@ -2459,6 +2459,106 @@ fn empty_zone_addressed_interface_denies_host_inbound() {
         "configured trust zone (ssh only) still denies bgp (tcp/179)"
     );
 }
+// #13180 (D6-06): an unzoned tunnel base row sharing an ifindex with a zoned
+// unit row must not leave its #5659 empty-zone sentinel behind once the unit
+// establishes a valid zone on that ifindex. Host-bound traffic must follow
+// the retained zone's host-inbound set, not the deny-all sentinel.
+#[test]
+fn unzoned_tunnel_base_row_must_not_clobber_zoned_unit_zone_host_inbound_13180() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+    use crate::protocol::snapshot::InterfaceAddressSnapshot;
+    use crate::ZoneSnapshot;
+
+    const SHARED_IFINDEX: i32 = 55;
+    const VPN_ZONE: u16 = 1;
+    const PROTO_TCP: u8 = 6;
+    const PROTO_ICMP: u8 = 1;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "vpn".into(),
+            id: VPN_ZONE,
+            host_inbound_configured: true,
+            host_inbound_system_services: vec!["ping".into()],
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "st0".into(),
+                ifindex: SHARED_IFINDEX,
+                tunnel: true,
+                zone: String::new(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "st0.0".into(),
+                ifindex: SHARED_IFINDEX,
+                tunnel: true,
+                zone: "vpn".into(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.10.10.1/30".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let state = build_forwarding_state(&snapshot);
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&SHARED_IFINDEX).copied(),
+        Some(VPN_ZONE),
+        "zoned unit row must establish vpn on the shared ifindex"
+    );
+    assert!(
+        !state.ifindex_host_inbound.contains_key(&SHARED_IFINDEX),
+        "unzoned base row sentinel must not survive a retained zone on the ifindex"
+    );
+    assert!(
+        host_inbound_admits_iface(&state, SHARED_IFINDEX, VPN_ZONE, PROTO_ICMP, 0, false, 8),
+        "zone-level ping on st0.0 (zone vpn) must not be blocked by unzoned base row st0"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, SHARED_IFINDEX, VPN_ZONE, PROTO_TCP, 22, false, 0),
+        "zone vpn (ping only) still denies ssh"
+    );
+}
+
+// #13180 (D6-06) control: a purely unzoned tunnel (no zoned sibling) keeps its
+// #5659 deny-all sentinel.
+#[test]
+fn unzoned_tunnel_without_zoned_sibling_keeps_host_inbound_sentinel_13180() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const UNZONED_IFINDEX: i32 = 56;
+    const PROTO_TCP: u8 = 6;
+
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "st0".into(),
+            ifindex: UNZONED_IFINDEX,
+            tunnel: true,
+            zone: String::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        !state.ifindex_to_zone_id.contains_key(&UNZONED_IFINDEX),
+        "purely unzoned tunnel must stay zone 0"
+    );
+    assert!(
+        state.ifindex_host_inbound.contains_key(&UNZONED_IFINDEX),
+        "purely unzoned tunnel must keep the #5659 deny sentinel"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, UNZONED_IFINDEX, 0, PROTO_TCP, 22, false, 0),
+        "purely unzoned tunnel must deny host-bound ssh"
+    );
+}
 
 // #10503: a contested trunk PARENT is address-less and therefore misses the
 // #5659 `registered_local` sentinel. The fan-UP path removes its
