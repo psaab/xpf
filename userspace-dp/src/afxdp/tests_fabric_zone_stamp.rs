@@ -1222,7 +1222,9 @@ fn frag_stamp_snapshot() -> ConfigSnapshot {
             ..Default::default()
         });
     }
-    snapshot
+    // Model the Go builder's egress-zone ledger for rows appended after the
+    // base fixture was normalized.
+    v5(snapshot)
 }
 
 fn reject_fabric_snapshot(dmz_tcp_rst: bool) -> ConfigSnapshot {
