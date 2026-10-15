@@ -1968,4 +1968,3 @@ pass). Logged once per worker.",
     )));
     heartbeat.store(monotonic_nanos(), Ordering::Relaxed);
 }
->>>>>>> origin/master
