@@ -11,6 +11,7 @@ import (
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/dataplane"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/sysinfo"
 	"github.com/vishvananda/netlink"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -206,12 +207,27 @@ func (s *Server) GetSystemInfo(ctx context.Context, req *pb.GetSystemInfoRequest
 		if err != nil {
 			return nil, diagExecError("running ps", err)
 		}
-		// #6584: guarded even though this text is root-controlled rather than
-		// device-originated. GetSystemInfo forks FOUR binaries from one
-		// function, so leaving three raw would let the guarded one vouch for
-		// them under any function-granularity check — the half-applied-sweep
-		// shape #6579 shipped.
 		buf.WriteString(termsafe.SanitizeBlockForDisplay(string(out)))
+
+	case "processes-summary":
+		psOutput, err := outputTimeout(ctx, "ps", "-eo", "pid,user,pri,ni,vsz,rss,stat,time,pcpu,comm", "--sort=-pcpu")
+		if err != nil {
+			return nil, diagExecError("running process summary", err)
+		}
+		var output strings.Builder
+		sysinfo.WriteProcessesSummary(&output, psOutput)
+		buf.WriteString(termsafe.SanitizeBlockForDisplay(output.String()))
+
+	case "rescue-configuration":
+		content, err := s.store.LoadRescueConfigRedacted()
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "loading rescue configuration: %v", err)
+		}
+		if content == "" {
+			buf.WriteString("No rescue configuration saved\n")
+		} else {
+			buf.WriteString(content)
+		}
 
 	case "storage":
 		out, err := outputTimeout(ctx, "df", "-h")

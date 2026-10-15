@@ -107,10 +107,18 @@ func (c *ctl) handleShowSystem(args []string) error {
 		return c.showSystemInfo("uptime")
 	case "memory":
 		return c.showSystemInfo("memory")
-	case "storage":
-		return c.showCommand("show system storage")
 	case "processes":
+		summary := len(args) >= 2 && args[1] == "summary"
+		if summary {
+			return c.showSystemInfo("processes-summary")
+		}
 		return c.showSystemInfo("processes")
+	case "configuration":
+		if len(args) >= 2 && args[1] == "rescue" {
+			return c.showSystemInfo("rescue-configuration")
+		}
+		printRemoteTreeHelp("show system configuration:", "show", "system", "configuration")
+		return nil
 	case "alarms":
 		return c.showCommand("show system alarms")
 	case "users":

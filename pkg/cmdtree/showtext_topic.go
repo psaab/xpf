@@ -107,6 +107,8 @@ var showTextTopicCommand = map[string]string{
 
 	// `show security nat ...`
 	"nat-static":             "show security nat static",
+	"nat-static-rule":        "show security nat static rule",
+	"nat-static-rule-detail": "show security nat static rule detail",
 	"nat-nptv6":              "show security nat nptv6",
 	"nat64":                  "show security nat nat64",
 	"nat-source-rule-detail": "show security nat source rule detail",

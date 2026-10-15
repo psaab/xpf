@@ -265,9 +265,11 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 		s.showFlowTraceoptions(cfg, &buf)
 
 	case "nat-static":
-		// #1043 Phase 3: case body extracted to server_show_nat.go
 		s.showNATStatic(cfg, &buf)
-
+	case "nat-static-rule":
+		s.showNATStaticRule(cfg, &buf, false)
+	case "nat-static-rule-detail":
+		s.showNATStaticRule(cfg, &buf, true)
 	case "nat-nptv6":
 		// #1043 Phase 3: case body extracted to server_show_nat.go
 		s.showNATNPTv6(cfg, &buf)
