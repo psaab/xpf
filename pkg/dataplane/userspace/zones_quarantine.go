@@ -17,10 +17,23 @@ type ZoneIDCollision struct {
 	ID          uint16
 	Survivor    string
 	Quarantined string
+	// Poisoned marks a DroppedEnforcementChild quarantine (#13099): the zone
+	// is unbound in its own right, not merely a StableZoneID collision loser.
+	Poisoned bool
 }
 
 // String renders a zone quarantine for the operator alarm and status output.
 func (c ZoneIDCollision) String() string {
+	if c.Poisoned {
+		if c.Survivor == "" {
+			return fmt.Sprintf(
+				"zone %q QUARANTINED: unrecognized enforcement child was dropped so the zone is unbound — fix the zone stanza (#13099)",
+				c.Quarantined)
+		}
+		return fmt.Sprintf(
+			"zone %q QUARANTINED: unrecognized enforcement child was dropped so the zone is unbound; StableZoneID %d is owned by surviving zone %q — fix the zone stanza (#13099)",
+			c.Quarantined, c.ID, c.Survivor)
+	}
 	if c.Survivor == "" {
 		return fmt.Sprintf(
 			"zone %q QUARANTINED: reserved dataplane/Junos context name — rename the zone",
@@ -74,7 +87,11 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 			names = append(names, z.Name)
 		}
 	}
-	quarantined := config.ZoneQuarantineExclusions(names)
+	quarantined := config.ZoneQuarantineExclusionsForConfig(snap.Config)
+	if len(quarantined) == 0 {
+		// No config (hand-built snapshot): fall back to the name-only verdict.
+		quarantined = config.ZoneQuarantineExclusions(names)
+	}
 	if len(quarantined) == 0 {
 		return nil
 	}
@@ -93,10 +110,16 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 			definedAny = true
 		}
 		if _, drop := quarantined[z.Name]; drop {
+			poisoned := snap.Config != nil && snap.Config.Security.Zones[z.Name] != nil && snap.Config.Security.Zones[z.Name].DroppedEnforcementChild
+			survivor := config.ZoneQuarantineSurvivorName(z.Name, names)
+			if snap.Config != nil {
+				survivor = config.CollisionSurvivorForConfig(snap.Config, z.Name)
+			}
 			collisions = append(collisions, ZoneIDCollision{
 				ID:          z.ID,
-				Survivor:    config.ZoneQuarantineSurvivorName(z.Name, names),
+				Survivor:    survivor,
 				Quarantined: z.Name,
+				Poisoned:    poisoned,
 			})
 			continue
 		}
@@ -147,7 +170,24 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 	// token, and global policies keep their structural `junos-global` sentinels.
 	// This collision scrub is shared with scheduler-only / route-overlay
 	// republish paths (#6480).
+	// Policy scrub keeps its historical collision-only set: reserved-name
+	// sentinels (junos-host / defined-any) are handled by their own poison
+	// paths below, and a poisoned zone's Interfaces were already cleared by
+	// compileZones so it authors no zone-pair endpoint that lowering would
+	// emit. Scrubbing on the broader set would drop junos-host context rules.
 	policyQuarantined := config.QuarantinedZoneNames(names)
+	if snap.Config != nil {
+		// #13099: add poisoned zones — a poisoned zone is equally absent from
+		// the published snapshot, so its (hand-built / synced) policies dangle.
+		for name := range config.ZoneQuarantineExclusionsForConfig(snap.Config) {
+			if z := snap.Config.Security.Zones[name]; z != nil && z.DroppedEnforcementChild {
+				if policyQuarantined == nil {
+					policyQuarantined = make(map[string]struct{})
+				}
+				policyQuarantined[name] = struct{}{}
+			}
+		}
+	}
 	snap.Policies = scrubPoliciesForQuarantinedZones(snap.Policies, policyQuarantined)
 	poisonDefinedAnyZonePairPolicies(snap.Policies, definedAny)
 	sort.Slice(collisions, func(i, j int) bool {
@@ -256,7 +296,17 @@ func scrubPoliciesForQuarantinedZones(policies []PolicyRuleSnapshot, quarantined
 // re-scrub policies against collisions contributed by peer-only node views as
 // well as the effective config's local zones.
 func quarantinedZoneNamesForConfig(cfg *config.Config) map[string]struct{} {
-	return config.QuarantinedZoneNames(config.ZoneQuarantineNamesForConfig(cfg))
+	out := config.QuarantinedZoneNames(config.ZoneQuarantineNamesForConfig(cfg))
+	// #13099: partial republish must also scrub poisoned-zone policies.
+	for name := range config.ZoneQuarantineExclusionsForConfig(cfg) {
+		if z := cfg.Security.Zones[name]; z != nil && z.DroppedEnforcementChild {
+			if out == nil {
+				out = make(map[string]struct{})
+			}
+			out[name] = struct{}{}
+		}
+	}
+	return out
 }
 
 // policySnapshotAfterZoneQuarantine returns the policy and zone views the
