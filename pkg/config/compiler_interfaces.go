@@ -1271,7 +1271,12 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 			siblingTrackCost    int
 			siblingTrackCostSet bool
 		)
-		for _, prop := range vrrpInst.node.Children {
+		// A flat `set ... vrrp-group <id> priority <n> virtual-address <vip>`
+		// run is represented as a chain of child nodes. Expand it against the
+		// group schema before reading properties so every property is visible
+		// to this loop, just as it is in the braced spelling.
+		props := expandFlatRun(vrrpInst.node.Children, vrrpGroupSchemaNode(false))
+		for _, prop := range props {
 			switch prop.Name() {
 			case "virtual-address":
 				// Multi-value spellings (#1813):
