@@ -54,16 +54,13 @@ func TestPoisonedZoneBareHostInboundDoesNotDisplaceHealthyOwner12834(t *testing.
 		t.Fatalf("fixture: poisoned alpha must be unbound, got %v", alpha.Interfaces)
 	}
 	got := ResolveInterfaceHostInbound(cfg)
-	// Bare key must not carry the poisoned zone's full-admit override.
-	if hib := got["ge-0/0/0"]; hib != nil && hasHostInboundToken12834(hib.SystemServices, "all") {
-		t.Fatalf("poisoned zone bare override displaced healthy owner on ge-0/0/0: %v (all resolved: %v)", hib.SystemServices, got)
+	if _, quarantined := QuarantinedZoneInterfaceKeys(cfg)["ge-0/0/0.0"]; !quarantined {
+		t.Fatal("poisoned zone's contested unit-0 claim must quarantine ge-0/0/0.0")
 	}
-	unit := got["ge-0/0/0.0"]
-	if unit == nil {
-		t.Fatalf("healthy zulu unit override missing: %v", got)
-	}
-	if hasHostInboundToken12834(unit.SystemServices, "all") || !hostInboundAdmitsSystemService(unit.SystemServices, "ssh") {
-		t.Fatalf("healthy zulu unit override = %v, want ssh without all", unit.SystemServices)
+	for _, key := range []string{"ge-0/0/0", "ge-0/0/0.0"} {
+		if hib := got[key]; hib != nil {
+			t.Fatalf("contested interface %q must not resolve host-inbound admission, got %v", key, hib.SystemServices)
+		}
 	}
 	for key, hib := range got {
 		if hib != nil && hasHostInboundToken12834(hib.SystemServices, "all") {

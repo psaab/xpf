@@ -1252,6 +1252,10 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if quarantinedRI {
 		refreshVRFOverlapWarningsAfterQuarantine(cfg, opts.lenientVRFOverlapPBR)
 	}
+	// Poisoned zones keep authored memberships through all validation so
+	// contested interfaces are rejected/quarantined, but must not expose
+	// partially compiled enforcement state to callers.
+	clearDroppedEnforcementZoneBindings11575(cfg)
 
 	// #1539: the structural invariant `cfg.System.DPDKDataplane = nil`
 	// was added on master (PR #1553) as a runtime safeguard against
