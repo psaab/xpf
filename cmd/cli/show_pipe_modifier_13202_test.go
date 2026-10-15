@@ -12,7 +12,7 @@
 //     was silently ignored on every surface.
 //
 // The fix parses modifiers token-exactly (shared splitShowPipe and
-// parseShowDisplay helpers): only `| display <json|set|xml>` on rollback,
+// parseShowDisplay helpers): only `| display set` on rollback,
 // `| display <json|set|xml|inheritance>` on configuration show, and
 // `| compare [rollback <N>]` in config mode are accepted. Unsupported
 // combinations and trailing tokens error BEFORE any RPC is issued.
@@ -84,6 +84,9 @@ func TestShowPipeModifierRejectsGarbage_13202(t *testing.T) {
 	}{
 		{"rollback display json unsupported", func(c *ctl) error {
 			return c.handleShowSystem([]string{"rollback", "1", "|", "display", "json"})
+		}},
+		{"rollback display xml unsupported", func(c *ctl) error {
+			return c.handleShowSystem([]string{"rollback", "1", "|", "display", "xml"})
 		}},
 		{"rollback substring compare token", func(c *ctl) error {
 			return c.handleShowSystem([]string{"rollback", "1", "bogus_compare_token"})
@@ -161,7 +164,6 @@ func TestShowPipeModifierAcceptsExact_13202(t *testing.T) {
 		fmt  pb.ConfigFormat
 	}{
 		"set": {[]string{"rollback", "1", "|", "display", "set"}, pb.ConfigFormat_SET},
-		"xml": {[]string{"rollback", "1", "|", "display", "xml"}, pb.ConfigFormat_XML},
 	} {
 		t.Run("rollback display "+name, func(t *testing.T) {
 			fake := &showPipeRecorderClient{}

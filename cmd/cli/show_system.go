@@ -75,7 +75,7 @@ func (c *ctl) handleShowSystem(args []string) error {
 				}
 				return nil
 			}
-			format, err := parseShowDisplay(pipe, false, false)
+			format, err := parseShowDisplay(pipe, false, false, false)
 			if err != nil {
 				return err
 			}

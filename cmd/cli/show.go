@@ -84,7 +84,7 @@ func (c *ctl) handleShow(args []string) error {
 		if err != nil {
 			return err
 		}
-		format, err := parseShowDisplay(pipe, true, true)
+		format, err := parseShowDisplay(pipe, true, true, true)
 		if err != nil {
 			return err
 		}
@@ -360,6 +360,8 @@ func (c *ctl) handleConfigShow(args []string) error {
 		if len(path) > 0 {
 			return fmt.Errorf("usage: show | compare [rollback <N>] (cannot combine compare with a configuration path)")
 		}
+		// ShowCompare has no path field, so a bare compare is global even
+		// from a nested edit context; explicit paths above are rejected.
 		var n int32
 		switch {
 		case len(pipe) == 1:
@@ -382,7 +384,7 @@ func (c *ctl) handleConfigShow(args []string) error {
 		fmt.Print(resp.Output)
 		return nil
 	}
-	format, err := parseShowDisplay(pipe, true, true)
+	format, err := parseShowDisplay(pipe, true, true, true)
 	if err != nil {
 		return err
 	}
@@ -427,7 +429,7 @@ func splitShowPipe(args []string) (path, pipe []string, err error) {
 
 // parseShowDisplay accepts an exact display modifier (or no modifier) and
 // rejects unknown formats and trailing tokens before any RPC is issued.
-func parseShowDisplay(pipe []string, allowJSON, allowInheritance bool) (pb.ConfigFormat, error) {
+func parseShowDisplay(pipe []string, allowJSON, allowXML, allowInheritance bool) (pb.ConfigFormat, error) {
 	if len(pipe) == 0 {
 		return pb.ConfigFormat_HIERARCHICAL, nil
 	}
@@ -442,7 +444,9 @@ func parseShowDisplay(pipe []string, allowJSON, allowInheritance bool) (pb.Confi
 	case "set":
 		return pb.ConfigFormat_SET, nil
 	case "xml":
-		return pb.ConfigFormat_XML, nil
+		if allowXML {
+			return pb.ConfigFormat_XML, nil
+		}
 	case "inheritance":
 		if allowInheritance {
 			return pb.ConfigFormat_INHERITANCE, nil
