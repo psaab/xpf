@@ -454,10 +454,10 @@ type AmbiguousHostInboundAddress struct {
 // A duplicated address with IDENTICAL host-inbound service sets across its zones
 // is NOT reported — it renders the same accept+drop block twice (order-
 // independent, both paths agree), so it is a deliberate-duplicate false-positive
-// the low-noise contract avoids. Management / cluster-control lifeline
-// interfaces (fxp0 plus explicitly configured control/fabric links) contribute
-// no address (they are excluded from deny scoping), so a shared management
-// address never surfaces here either.
+// the low-noise contract avoids. Management / cluster-control lifeline interfaces
+// (fxp0 plus explicitly configured control/fabric links) contribute no ingress
+// scope. Their shared addresses can still be reported when data-zone views have
+// differing policy.
 func AmbiguousHostInboundAddresses(cfg *config.Config) []AmbiguousHostInboundAddress {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
