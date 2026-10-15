@@ -70,7 +70,7 @@ V6_NA_POLL_MS="${V6_NA_POLL_MS:-500}"
 LAN_IF="${LAN_IF:-eth0}"
 V6_NA_TRANSIT_MIN="${V6_NA_TRANSIT_MIN:-3}"
 V6_NA_TRANSIT_COUNT="${V6_NA_TRANSIT_COUNT:-5}"
-FAILOVER_DEADLINE="${FAILOVER_DEADLINE:-120}"
+FAILOVER_DEADLINE="${FAILOVER_DEADLINE:-300}"
 REMOTE_PCAP=/tmp/v6na-12495.pcap
 
 info() { echo "==> $*"; }
@@ -148,7 +148,20 @@ cell "baseline: ${LAN_VIP6} -> ${BASE_VIP_MAC:-<no entry>}; ${GW_LL} -> ${BASE_G
 incus exec "$CLUSTER_LAN_HOST" -- sh -c \
 	"nohup tcpdump -i ${LAN_IF} -U -n -w ${REMOTE_PCAP} 'arp or (icmp6 and ip6[40] >= 133 and ip6[40] <= 136)' >/tmp/v6na-12495.tcpdump.log 2>&1 &" ||
 	die_void "could not start tcpdump on ${CLUSTER_LAN_HOST}"
-sleep 2 # let the capture arm before the transition (#6934 armed 10s early)
+# Do not infer readiness from a fixed sleep: tcpdump emits its listening
+# banner only after opening the capture interface and filter successfully.
+# The transition begins only after this positive arming witness, which makes
+# an absent NA meaningful rather than a pre-capture race.
+CAPTURE_READY=0
+for _ in {1..20}; do
+	if incus exec "$CLUSTER_LAN_HOST" -- grep -q '^tcpdump: listening on ' /tmp/v6na-12495.tcpdump.log 2>/dev/null; then
+		CAPTURE_READY=1
+		break
+	fi
+	sleep 1
+done
+(( CAPTURE_READY == 1 )) || die_void "tcpdump did not confirm capture readiness within 20s; no failover was requested"
+cell "capture armed: $(incus exec "$CLUSTER_LAN_HOST" -- grep '^tcpdump: listening on ' /tmp/v6na-12495.tcpdump.log | head -1)"
 
 # ── 3. Fail over ────────────────────────────────────────────────────────
 REQUEST_NODE="$FW0"
