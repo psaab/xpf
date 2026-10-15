@@ -1896,12 +1896,10 @@ func TestCoverageNewcomerFindsLifelineWithheld10751(t *testing.T) {
 	}
 	s2covered := false
 	for _, v := range dpuserspace.BuildZoneHostInboundViewsFromSnapshots(cfg, s2) {
-		for _, a := range v.V4Addrs {
-			s2covered = s2covered || a == "10.0.0.5"
-		}
+		s2covered = s2covered || sliceContains(v.V4Addrs, "10.0.0.5") || sliceContains(v.IngressDenyV4, "10.0.0.5")
 	}
 	if !s2covered {
-		t.Fatal("S2 rendered scope must cover 10.0.0.5 (non-empty view keeps the shared address)")
+		t.Fatal("S2 rendered deny scope must cover 10.0.0.5 (admitting or ingress-deny view)")
 	}
 	scriptSnapshotTransition10751(t, s1, s2)
 	d := &Daemon{}
@@ -2135,12 +2133,10 @@ func TestFallbackRefusesStableSharedNotCoveredByFence10751(t *testing.T) {
 	}
 	kept := false
 	for _, v := range realSpecs[0].Views {
-		for _, a := range v.V4Addrs {
-			kept = kept || a == "10.0.0.5"
-		}
+		kept = kept || sliceContains(v.V4Addrs, "10.0.0.5") || sliceContains(v.IngressDenyV4, "10.0.0.5")
 	}
 	if !kept {
-		t.Fatalf("real spec must keep 10.0.0.5 (admitting view); got %+v", realSpecs[0].Views)
+		t.Fatalf("real spec must keep 10.0.0.5 in a destination deny scope; got %+v", realSpecs[0].Views)
 	}
 	if err := d.applyHostInboundFilter(cfg); err != nil {
 		t.Fatalf("healed apply err = %v, want nil", err)

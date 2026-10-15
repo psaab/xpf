@@ -693,15 +693,16 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// cold-boot/fresh-install fence, leaving newly reachable local addresses
 		// unprotected. Clearing the coverage set keeps the two in agreement (a stale
 		// covered set would falsely report the torn-down addresses as still covered).
-		// Serialized under applySem with the Store(true) sites and every later apply,
-		// so this cannot race a subsequent install.
 		d.hostInboundEnforced.Store(false)
 		// #7181: both tables are gone, so no gap fence stands and the last
 		// attempt succeeded. Leaving staleness set would render teardown as failure.
 		d.hostInboundGapFenceActive.Store(false)
+		d.noteHostInboundGapApplyResult(nil)
 		d.hostInboundLastApplyFailed.Store(false)
 		d.hostInboundLastFailureUnixNano.Store(0)
 		d.hostInboundCoveredAddrs = nil
+		// Serialized under applySem with the Store(true) sites and every later apply,
+		// so this cannot race a subsequent install.
 		if d.inBootstrap() {
 			// The xpf host-inbound tables are retired, but bootstrap remains
 			// pre-handoff. Keep the lifeline-admitting guard installed until a
@@ -884,7 +885,8 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				sharedV4 = intersectHostInboundAddresses(uncoveredV4, withheld.WithheldV4)
 				sharedV6 = intersectHostInboundAddresses(uncoveredV6, withheld.WithheldV6)
 			}
-			if len(uncoveredV4) > 0 || len(uncoveredV6) > 0 {
+			hasDHCPBackstop := len(unleasedV4)+len(unleasedV6)+len(dhcpBackstops.VRFSlavesV4)+len(dhcpBackstops.VRFSlavesV6) > 0
+			if len(uncoveredV4) > 0 || len(uncoveredV6) > 0 || hasDHCPBackstop {
 				spec := xnft.GapFenceSpec{
 					Views:                toNftViews(views),
 					UncoveredV4:          uncoveredV4,
@@ -1142,10 +1144,11 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 // it denies only the newly-appeared destinations the retained generation does not
 // cover WITHOUT replacing that generation — the retained table's per-service
 // accepts for already-covered addresses stay intact. It is attempted on a failed
-// day-2 rerender when hostInboundCoveredAddrs is missing >=1 desired destination.
-// A load failure returns the error (joined into the commit result by the caller)
-// so a newly reachable local address is never silently left without a host-inbound
-// deny. Caller guarantees >=1 uncovered address (the payload has >=1 DROP).
+// day-2 rerender when hostInboundCoveredAddrs is missing a desired destination
+// or a new DHCP backstop target appeared. A load failure returns the error (joined
+// into the commit result by the caller) so new targets are never silently left
+// without host-inbound protection. Caller guarantees an uncovered address or
+// DHCP backstop target.
 func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundGapFencePayload oracle).
@@ -1236,7 +1239,7 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 	// The two now differ in BOTH directions (lifeline-shared addresses withheld,
 	// zone-less / unzoned-VIP addresses added), and hostInboundCoveredAddrs must
 	// describe what the RETAINED enforcement — this fence — actually drops.
-	fenceCovered := hostInboundDesiredDropAddrs(views, unzonedV4, unzonedV6)
+	fenceCovered := hostInboundFenceCoveredAddrs(views, unzonedV4, unzonedV6)
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundFencePayload oracle).
 	spec := xnft.FenceSpec{
@@ -1502,6 +1505,8 @@ func hostInboundCoveredFamilyAddrs(covered map[string]struct{}) (v4, v6 []string
 // addressed-but-unzoned sets, keyed by hostInboundDropAddrKey. This is the exact
 // destination-coverage set compared against the retained generation's covered set
 // to find an address that appeared AFTER the retained table was installed.
+// IngressDenyV4/V6 are included: although withheld from destination-only policy,
+// the real ruleset renders them as fail-closed ingress-scoped destination drops.
 // junos-host PROGRAM (iifname) scopes are deliberately excluded: a program is
 // address-independent, so a new ADDRESS on a program-covered interface surfaces
 // here as a new destination key — precisely the #5789 path-2 gap.
@@ -1515,9 +1520,33 @@ func hostInboundDesiredDropAddrs(views []dpuserspace.ZoneHostInboundView, unzone
 	for _, v := range views {
 		add('4', v.V4Addrs)
 		add('6', v.V6Addrs)
+		add('4', v.IngressDenyV4)
+		add('6', v.IngressDenyV6)
 	}
 	add('4', unzonedV4)
 	add('6', unzonedV6)
+	return set
+}
+
+// hostInboundFenceCoveredAddrs returns the unicast destinations actually denied
+// by the cold-boot fence. Unlike the real ruleset, the fence omits ingress-only
+// lifeline-shared addresses, so IngressDenyV4/V6 are deliberately excluded.
+func hostInboundFenceCoveredAddrs(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string) map[string]struct{} {
+	set := map[string]struct{}{}
+	for _, view := range views {
+		for _, addr := range view.V4Addrs {
+			set[hostInboundDropAddrKey('4', addr)] = struct{}{}
+		}
+		for _, addr := range view.V6Addrs {
+			set[hostInboundDropAddrKey('6', addr)] = struct{}{}
+		}
+	}
+	for _, addr := range unzonedV4 {
+		set[hostInboundDropAddrKey('4', addr)] = struct{}{}
+	}
+	for _, addr := range unzonedV6 {
+		set[hostInboundDropAddrKey('6', addr)] = struct{}{}
+	}
 	return set
 }
 
@@ -1543,6 +1572,8 @@ func hostInboundUncoveredDropAddrs(views []dpuserspace.ZoneHostInboundView, unzo
 	for _, view := range views {
 		consider('4', view.V4Addrs, seen4, &v4)
 		consider('6', view.V6Addrs, seen6, &v6)
+		consider('4', view.IngressDenyV4, seen4, &v4)
+		consider('6', view.IngressDenyV6, seen6, &v6)
 	}
 	consider('4', unzonedV4, seen4, &v4)
 	consider('6', unzonedV6, seen6, &v6)
