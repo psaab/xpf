@@ -121,7 +121,9 @@ func (s *Sampler) sample(now time.Time) {
 	// preserving series monotonicity exactly as the old Status()
 	// error path did. #2114: the provider IS a CachedStatusProvider
 	// now — the per-tick type assertion is gone.
+	s.mu.Lock()
 	workerThread, workerWall := s.lastWorkerThread, s.lastWorkerWall
+	s.mu.Unlock()
 	workerHeld := false
 	if s.dp != nil {
 		if st, ok := s.dp.CachedStatus(); ok {
@@ -223,24 +225,39 @@ func computeCPUWindows(snap SamplerSnapshot) (
 		if wallDelta <= 0 {
 			continue
 		}
-		// Guard against non-monotonic counters. A userspace-dp
-		// restart can reset the cumulative series; an unchecked
-		// subtract on uint64 would underflow and report a bogus rate.
+		// Any decrease inside the window means the cumulative counters
+		// span multiple daemon/helper lifetimes. Do not derive a rate
+		// across that discontinuity, even if endpoints are monotonic.
+		daemonMonotonic := true
+		for j := idx + 1; j < len(snap.Samples); j++ {
+			if snap.Samples[j].daemonCPUNs < snap.Samples[j-1].daemonCPUNs {
+				daemonMonotonic = false
+				break
+			}
+		}
 		wallNs := uint64(wallDelta.Nanoseconds())
-		if newest.daemonCPUNs >= then.daemonCPUNs {
+		if daemonMonotonic && newest.daemonCPUNs >= then.daemonCPUNs {
 			daemonDelta := newest.daemonCPUNs - then.daemonCPUNs
 			daemonPct[i] = float64(daemonDelta) * 100.0 / float64(wallNs)
 			daemonValid[i] = true
 		}
 
-		workerHeld := false
+		workerHeld, workerMonotonic := false, true
 		for j := idx; j < len(snap.Samples); j++ {
-			if snap.Samples[j].workerHeld {
+			sample := snap.Samples[j]
+			if sample.workerHeld {
 				workerHeld = true
-				break
+			}
+			if j > idx {
+				prev := snap.Samples[j-1]
+				if sample.workerWallNs < prev.workerWallNs ||
+					sample.workerThreadNs < prev.workerThreadNs {
+					workerMonotonic = false
+				}
 			}
 		}
-		if !workerHeld && newest.workerWallNs > then.workerWallNs &&
+		if !workerHeld && workerMonotonic &&
+			newest.workerWallNs > then.workerWallNs &&
 			newest.workerThreadNs >= then.workerThreadNs {
 			workerWallDelta := newest.workerWallNs - then.workerWallNs
 			workerThreadDelta := newest.workerThreadNs - then.workerThreadNs

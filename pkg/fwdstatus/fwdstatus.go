@@ -175,7 +175,7 @@ func Format(fs *ForwardingStatus) string {
 	// is per-core and can exceed 100%; worker usage is OS thread CPU.
 	// Busy-poll mode may show ~100% worker CPU with no traffic, so that
 	// row is not itself evidence of throughput.
-	daemonCPU := formatWindowRow(fs.DaemonCPUWindows, fs.DaemonCPUWindowValid)
+	daemonCPU := formatWindowRow(fs.DaemonCPUWindows, fs.DaemonCPUWindowValid, false)
 	if fs.UserHZApprox {
 		daemonCPU += " (approx: assumes USER_HZ=100)"
 	}
@@ -188,7 +188,7 @@ func Format(fs *ForwardingStatus) string {
 		writeRow(&b, "Worker threads CPU utilization",
 			"N/A — eBPF path has no worker threads")
 	} else {
-		workerCPU := formatWindowRow(fs.WorkerCPUWindows, fs.WorkerCPUWindowValid)
+		workerCPU := formatWindowRow(fs.WorkerCPUWindows, fs.WorkerCPUWindowValid, true)
 		workerCPU += " (busy-poll can show ~100% idle)"
 		if fs.CPUDataStale {
 			workerCPU += " (stale sample)"
@@ -360,10 +360,8 @@ func writeRow(b *strings.Builder, label, value string) {
 	fmt.Fprintf(b, "  %-34s %s\n", label, value)
 }
 
-// clampPercent clamps a percentage to [0, 100].  Used for Heap and
-// Buffer (ratios that are bounded by construction — RSS/limit,
-// used/max).  CPU rows use floorZero instead because multi-core
-// daemons legitimately exceed 100%.
+// clampPercent clamps bounded percentages to [0, 100]. Used for heap,
+// buffer, and per-worker CPU ratios; per-core daemon CPU is unbounded.
 func clampPercent(p float64) float64 {
 	if p < 0 {
 		return 0
@@ -384,12 +382,17 @@ func floorZero(p float64) float64 {
 }
 
 // formatWindowRow renders three windows as
-// `NN% / NN% / NN%   (5s / 1m / 5m)`.  Invalid columns render `-`.
-func formatWindowRow(pct [numCPUWindows]float64, valid [numCPUWindows]bool) string {
+// `NN% / NN% / NN%   (5s / 1m / 5m)`. Invalid columns render `-`.
+// Worker percentages are bounded; per-core daemon percentages are not.
+func formatWindowRow(pct [numCPUWindows]float64, valid [numCPUWindows]bool, clamp bool) string {
 	cols := [numCPUWindows]string{}
-	for i := 0; i < numCPUWindows; i++ {
+	for i := range numCPUWindows {
 		if valid[i] {
-			cols[i] = fmt.Sprintf("%.0f%%", floorZero(pct[i]))
+			value := floorZero(pct[i])
+			if clamp {
+				value = clampPercent(value)
+			}
+			cols[i] = fmt.Sprintf("%.0f%%", value)
 		} else {
 			cols[i] = "-"
 		}
