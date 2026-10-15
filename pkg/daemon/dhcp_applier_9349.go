@@ -17,7 +17,7 @@ import (
 // derivation calls in applyServicesReconcile could be severed —
 //
 //	desired := cfg.System.DHCPServer          // instead of desiredStandaloneDHCPConfig(cfg)
-//	dhcpCfg := &cfg.System.DHCPServer         // instead of d.desiredClusterDHCPConfig(cfg)
+//	dhcpCfg := &cfg.System.DHCPServer         // instead of d.desiredClusterDHCPConfigWithMasters(cfg, d.snapshotRethMasterState())
 //
 // — and the ENTIRE Go suite stayed green. Neither is a subtle regression:
 // standalone, Kea is handed RETH LOGICAL names (`reth1.0`), which are not kernel

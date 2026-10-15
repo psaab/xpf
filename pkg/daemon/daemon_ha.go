@@ -567,13 +567,6 @@ func (d *Daemon) isRethMasterState(rgID int) bool {
 	return d.getOrCreateRGState(rgID).AllVRRPMaster()
 }
 
-// isAnyRethInstanceMaster returns true if ANY VRRP instance for rgID is
-// MASTER. Used by the cluster event handler to defer rg_active deactivation
-// until all VRRP instances have transitioned to BACKUP.
-func (d *Daemon) isAnyRethInstanceMaster(rgID int) bool {
-	return d.getOrCreateRGState(rgID).AnyVRRPMaster()
-}
-
 // snapshotRethMasterState returns per-RG master state derived from all
 // per-instance entries. An RG is MASTER only when ALL its instances are MASTER.
 func (d *Daemon) snapshotRethMasterState() map[int]bool {
@@ -2065,22 +2058,18 @@ func stripUntaggedUnitSuffix(iface string) string {
 	return strings.TrimSuffix(iface, ".0")
 }
 
-// desiredClusterDHCPConfig is the single source of truth for the Kea desired
-// state in cluster mode: the master-RG-filtered DHCP config, or nil when this
-// node should serve nothing. Every driver — the commit path
+// desiredClusterDHCPConfigWithMasters is the single source of truth for the
+// Kea desired state in cluster mode: the master-RG-filtered DHCP config, or nil
+// when this node should serve nothing. Every driver — the commit path
 // (daemon_apply_routing.go), the RG-transition edge (applyRethServicesForRG /
 // clearRethServicesForRG), and the #6535 reconcile converger — derives its
-// desired state from here.
+// desired state from here using one mastership snapshot.
 //
 // It is single-sourced rather than duplicated because a divergence between the
 // converger and the edge is ALWAYS a bug: the converger runs every 2s and
 // would fight the edge forever, restarting Kea on every tick. Binding two
 // copies with a test would not be enough — there is no legitimate reason for
 // them to differ.
-func (d *Daemon) desiredClusterDHCPConfig(cfg *config.Config) *config.DHCPServerConfig {
-	return d.desiredClusterDHCPConfigWithMasters(cfg, d.snapshotRethMasterState())
-}
-
 func (d *Daemon) desiredClusterDHCPConfigWithMasters(cfg *config.Config, masters map[int]bool) *config.DHCPServerConfig {
 	if cfg == nil {
 		return nil
@@ -2088,7 +2077,7 @@ func (d *Daemon) desiredClusterDHCPConfigWithMasters(cfg *config.Config, masters
 	if cfg.System.DHCPServer.DHCPLocalServer == nil && cfg.System.DHCPServer.DHCPv6LocalServer == nil {
 		return nil
 	}
-	// filterDHCPConfigForMasterRGs resolves RETH interface names into a COPY
+	// filterDHCPConfigForMasterRGsWithMasters resolves RETH interface names into a COPY
 	// (resolveDHCPRethInterfaces returns one; the shared active config is never
 	// written) and filters the groups into freshly-allocated ones. It returns
 	// nil when no group's interfaces belong to a currently-MASTER RG.
@@ -2133,10 +2122,10 @@ func (d *Daemon) reconcileClusterDHCPServices(reason string) {
 	d.enqueueDHCPApplyWithAuthorityState(desired, "reconcile: "+reason, cfg, masters)
 }
 
-// filterDHCPConfigForMasterRGs returns the DHCP config this node should serve
-// in cluster mode: every group member that is either NODE-LOCAL or belongs to a
-// redundancy group this node currently masters. Returns nil if nothing
-// survives.
+// filterDHCPConfigForMasterRGsWithMasters returns the DHCP config this node
+// should serve in cluster mode: every group member that is either NODE-LOCAL
+// or belongs to a redundancy group this node currently masters. Returns nil
+// if nothing survives.
 //
 // #6520 (a) — mastership scoping applies ONLY to RG-scoped members. Before this
 // fix the keep-set was built exclusively from `rethInterfacesForRG` over the
@@ -2154,9 +2143,6 @@ func (d *Daemon) reconcileClusterDHCPServices(reason string) {
 //
 // The two sets are derived from ONE walker (rethInterfacesMatchingRG) so
 // "RG-scoped" and "mastered" cannot resolve a RETH member differently.
-func (d *Daemon) filterDHCPConfigForMasterRGs(cfg *config.Config) *config.DHCPServerConfig {
-	return d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState())
-}
 
 func (d *Daemon) filterDHCPConfigForMasterRGsWithMasters(cfg *config.Config, masters map[int]bool) *config.DHCPServerConfig {
 	// Collect all interfaces belonging to master RGs. Normalize the untagged
@@ -2275,48 +2261,6 @@ func (d *Daemon) filterDHCPConfigForMasterRGsWithMasters(cfg *config.Config, mas
 		return nil
 	}
 	return &result
-}
-
-// applyRethServices starts RA senders and Kea DHCP server. Called on VRRP
-// MASTER transition — these services bind to RETH member interfaces
-// and must only run on the primary node to avoid dual-RA / dual-DHCP.
-// Deprecated: use applyRethServicesForRG for per-RG management.
-func (d *Daemon) applyRethServices() {
-	cfg := d.store.ActiveConfig()
-	if cfg == nil {
-		return
-	}
-	if d.ra != nil {
-		raConfigs := d.buildRAConfigs(cfg)
-		if len(raConfigs) > 0 {
-			if err := d.ra.Apply(raConfigs); err != nil {
-				slog.Warn("vrrp: failed to apply RA on MASTER", "err", err)
-			} else {
-				slog.Info("vrrp: RA senders started (MASTER)")
-			}
-		}
-	}
-	if d.dhcpServer != nil && (cfg.System.DHCPServer.DHCPLocalServer != nil || cfg.System.DHCPServer.DHCPv6LocalServer != nil) {
-		dhcpCfg := resolveDHCPRethInterfaces(cfg.System.DHCPServer, cfg)
-		// ApplyAsync (#1835 F2): see applyRethServicesForRG.
-		d.enqueueDHCPApply(&dhcpCfg, "vrrp MASTER (legacy all-RG)")
-		slog.Info("vrrp: DHCP server apply enqueued (MASTER)")
-	}
-}
-
-// clearRethServices is the legacy all-RG BACKUP hook. RA state remains
-// centralized in ownership reconciliation, which silently stops shared
-// identities and preserves senders for groups that remain active. DHCP is
-// cleared here as before.
-// Deprecated: use clearRethServicesForRG for per-RG management.
-func (d *Daemon) clearRethServices() {
-	d.reconcileClusterRAServices("legacy-vrrp-backup")
-	if d.dhcpServer != nil {
-		// ApplyAsync(nil) == authoritative clear (#1835 F2): see
-		// clearRethServicesForRG.
-		d.enqueueDHCPApply(nil, "vrrp BACKUP (legacy all-RG)")
-		slog.Info("vrrp: DHCP server stop enqueued (BACKUP)")
-	}
 }
 
 // neighborWarmProbeTimeout bounds each warmup send. A UDP send to an
@@ -2766,9 +2710,9 @@ func (d *Daemon) ipsecInitiate(name string) error {
 // desiredStandaloneDHCPConfig returns the DHCP server config the STANDALONE
 // (non-cluster) Kea applier should install: the committed stanza with RETH
 // logical interface names resolved to their physical member Linux names, in a
-// COPY. It is the sibling of desiredClusterDHCPConfig, which does the same for
-// the clustered path and additionally filters the groups to the RGs this node
-// masters.
+// COPY. It is the sibling of desiredClusterDHCPConfigWithMasters, which does
+// the same for the clustered path using its single mastership snapshot and
+// additionally filters the groups to the RGs this node masters.
 //
 // It exists as a named function for the reason #9141 exists: the standalone
 // site used to inline `resolveDHCPRethInterfaces(&cfg.System.DHCPServer, cfg)`,
@@ -2800,7 +2744,7 @@ func desiredStandaloneDHCPConfig(cfg *config.Config) config.DHCPServerConfig {
 // either topology; it is the #5107 class RA already fixed.
 //
 // The vlan-id gap did more than misname a device: it silently defeated the
-// master-RG filter. filterDHCPConfigForMasterRGs compares the group's resolved
+// master-RG filter compares the group's resolved
 // interface against rethInterfacesMatchingRG, which ALREADY derives
 // `<member>.<vlan-id>` — so a tagged group resolved to `<member>.<unit>`
 // matched neither masterIfaces nor rgScoped, and the filter's "not RG-scoped

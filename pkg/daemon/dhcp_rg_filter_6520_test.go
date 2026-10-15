@@ -62,7 +62,7 @@ func TestFilterDHCPConfigForMasterRGs_NodeLocalMemberKeptOnMaster_6520(t *testin
 	cfg := dhcpClusterMixedConfig("fxp0.0", "reth1.0")
 	d.getOrCreateRGState(1).SetVRRP("reth1", true)
 
-	got := d.filterDHCPConfigForMasterRGs(cfg)
+	got := d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState())
 	if got == nil || got.DHCPLocalServer == nil {
 		t.Fatal("group with a mastered RETH member must survive the filter; got nil")
 	}
@@ -86,7 +86,7 @@ func TestFilterDHCPConfigForMasterRGs_NodeLocalOnlyGroupSurvivesOnBackup_6520(t 
 	d.getOrCreateRGState(1).SetVRRP("reth1", false)
 	d.getOrCreateRGState(2).SetVRRP("reth2", false)
 
-	got := d.filterDHCPConfigForMasterRGs(cfg)
+	got := d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState())
 	if got == nil || got.DHCPLocalServer == nil {
 		t.Fatal("#6520(a) RED: a node-local-only DHCP group must survive on a node that masters no RG; the whole config was filtered to nil")
 	}
@@ -107,7 +107,7 @@ func TestFilterDHCPConfigForMasterRGs_RGScopedMemberStillGated_6520(t *testing.T
 	d.getOrCreateRGState(1).SetVRRP("reth1", true)
 	d.getOrCreateRGState(2).SetVRRP("reth2", false)
 
-	got := d.filterDHCPConfigForMasterRGs(cfg)
+	got := d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState())
 	if got == nil || got.DHCPLocalServer == nil {
 		t.Fatal("group with a mastered RETH member must survive the filter; got nil")
 	}
@@ -128,7 +128,7 @@ func TestFilterDHCPConfigForMasterRGs_MarksShrunkGroup_6520(t *testing.T) {
 	d.getOrCreateRGState(1).SetVRRP("reth1", true)
 	d.getOrCreateRGState(2).SetVRRP("reth2", false)
 
-	g := d.filterDHCPConfigForMasterRGs(cfg).DHCPLocalServer.Groups["g1"]
+	g := d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState()).DHCPLocalServer.Groups["g1"]
 	if !g.MembersFiltered {
 		t.Fatal("#6520(b) RED (producer side): the filter narrowed g1 from 2 members to 1 but did not set MembersFiltered, so dhcpserver.subnetInterface will cross-bind the removed member's pool onto the survivor")
 	}
@@ -142,7 +142,7 @@ func TestFilterDHCPConfigForMasterRGs_UnshrunkGroupNotMarked_6520(t *testing.T) 
 	cfg := dhcpClusterMixedConfig("reth1.0")
 	d.getOrCreateRGState(1).SetVRRP("reth1", true)
 
-	g := d.filterDHCPConfigForMasterRGs(cfg).DHCPLocalServer.Groups["g1"]
+	g := d.filterDHCPConfigForMasterRGsWithMasters(cfg, d.snapshotRethMasterState()).DHCPLocalServer.Groups["g1"]
 	if g.MembersFiltered {
 		t.Fatal("#6520(b) RED (producer side): an unnarrowed group must not be marked MembersFiltered — marking it would strip the #1778 per-subnet selector from every authored singleton group")
 	}

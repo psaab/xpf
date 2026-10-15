@@ -23,7 +23,7 @@ func TestRethMasterState_SingleInstance(t *testing.T) {
 	if d.isRethMasterState(1) {
 		t.Error("empty map should not be master")
 	}
-	if d.isAnyRethInstanceMaster(1) {
+	if d.getOrCreateRGState(1).AnyVRRPMaster() {
 		t.Error("empty map should not have any master")
 	}
 
@@ -32,7 +32,7 @@ func TestRethMasterState_SingleInstance(t *testing.T) {
 	if !d.isRethMasterState(1) {
 		t.Error("single MASTER instance should be master")
 	}
-	if !d.isAnyRethInstanceMaster(1) {
+	if !d.getOrCreateRGState(1).AnyVRRPMaster() {
 		t.Error("single MASTER instance should have any master")
 	}
 
@@ -41,7 +41,7 @@ func TestRethMasterState_SingleInstance(t *testing.T) {
 	if d.isRethMasterState(1) {
 		t.Error("single BACKUP instance should not be master")
 	}
-	if d.isAnyRethInstanceMaster(1) {
+	if d.getOrCreateRGState(1).AnyVRRPMaster() {
 		t.Error("single BACKUP instance should not have any master")
 	}
 }
@@ -56,7 +56,7 @@ func TestRethMasterState_MultiInstance(t *testing.T) {
 	if d.isRethMasterState(1) {
 		t.Error("all BACKUP should not be master")
 	}
-	if d.isAnyRethInstanceMaster(1) {
+	if d.getOrCreateRGState(1).AnyVRRPMaster() {
 		t.Error("all BACKUP should not have any master")
 	}
 
@@ -65,7 +65,7 @@ func TestRethMasterState_MultiInstance(t *testing.T) {
 	if d.isRethMasterState(1) {
 		t.Error("partial MASTER should not be all-master")
 	}
-	if !d.isAnyRethInstanceMaster(1) {
+	if !d.getOrCreateRGState(1).AnyVRRPMaster() {
 		t.Error("partial MASTER should have any master")
 	}
 
@@ -74,7 +74,7 @@ func TestRethMasterState_MultiInstance(t *testing.T) {
 	if !d.isRethMasterState(1) {
 		t.Error("all MASTER should be master")
 	}
-	if !d.isAnyRethInstanceMaster(1) {
+	if !d.getOrCreateRGState(1).AnyVRRPMaster() {
 		t.Error("all MASTER should have any master")
 	}
 
@@ -83,7 +83,7 @@ func TestRethMasterState_MultiInstance(t *testing.T) {
 	if d.isRethMasterState(1) {
 		t.Error("partial BACKUP should not be all-master")
 	}
-	if !d.isAnyRethInstanceMaster(1) {
+	if !d.getOrCreateRGState(1).AnyVRRPMaster() {
 		t.Error("partial BACKUP should still have any master")
 	}
 }
@@ -103,7 +103,7 @@ func TestRethMasterState_MultiRG(t *testing.T) {
 	if d.isRethMasterState(1) {
 		t.Error("RG 1 should not be all-master (reth1.50 is BACKUP)")
 	}
-	if !d.isAnyRethInstanceMaster(1) {
+	if !d.getOrCreateRGState(1).AnyVRRPMaster() {
 		t.Error("RG 1 should have any master (reth1 is MASTER)")
 	}
 }
@@ -194,7 +194,7 @@ func TestRethMasterState_LastEventWinsBug(t *testing.T) {
 
 	// Old code: rethMasterState[1] = false (last event wins = BUG).
 	// New code: reth1 is still MASTER.
-	if !d.isAnyRethInstanceMaster(1) {
+	if !d.getOrCreateRGState(1).AnyVRRPMaster() {
 		t.Error("reth1 should still be MASTER despite reth1.50 going BACKUP")
 	}
 }

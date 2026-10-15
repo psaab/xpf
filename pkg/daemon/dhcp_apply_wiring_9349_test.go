@@ -15,7 +15,7 @@ import (
 // could be severed and the entire Go suite stayed green:
 //
 //	desired := cfg.System.DHCPServer     // instead of desiredStandaloneDHCPConfig(cfg)
-//	dhcpCfg := &cfg.System.DHCPServer    // instead of d.desiredClusterDHCPConfig(cfg)
+//	dhcpCfg := &cfg.System.DHCPServer    // instead of d.desiredClusterDHCPConfigWithMasters(cfg, d.snapshotRethMasterState())
 //
 // Neither is subtle. STANDALONE, Kea is handed RETH LOGICAL names (`reth1.0`),
 // which are not kernel devices, so DHCP fails on every RETH-backed segment.
