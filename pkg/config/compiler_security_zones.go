@@ -669,7 +669,17 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 				// instances too, since zone is now find-or-create.
 				zone.HostInboundTraffic = mergeHostInbound(zone.HostInboundTraffic, parseHostInboundNode(prop))
 			case "tcp-rst":
-				zone.TCPRst = true
+				// #13097 (D1-15): tcp-rst is an args:0 flag leaf. A
+				// trailing token (`tcp-rst disable;`) or a body is
+				// ambiguous intent — silently honoring it as `true`
+				// inverts the operator's meaning. Poison the zone
+				// (fail-closed, same channel as unknown children)
+				// and do not set the flag.
+				if len(prop.Keys) > 1 || len(prop.Children) > 0 {
+					zone.DroppedEnforcementChild = true
+				} else {
+					zone.TCPRst = true
+				}
 			case "description":
 				zone.Description = nodeVal(prop)
 			case "address-book":
