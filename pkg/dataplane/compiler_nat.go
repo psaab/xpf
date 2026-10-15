@@ -608,7 +608,15 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 				}
 			}
 			for _, rule := range rs.Rules {
-				if rule.Then.PoolName == "" {
+				if rule.Then.PoolName == "" && !rule.Then.Off {
+					continue
+				}
+
+				// Exemptions have no pool but are installed by the userspace
+				// snapshot builder; allocate their translation-hit counter too
+				// so the snapshot lookup does not stamp counter 0 (#13548).
+				assignNATCounterID(result, NATCounterTypeDest, rs.Name, rule.Name)
+				if rule.Then.Off {
 					continue
 				}
 
@@ -617,12 +625,6 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 					return fmt.Errorf("DNAT pool %q not found (rule %q)",
 						rule.Then.PoolName, rule.Name)
 				}
-
-				// Assign the per-rule translation hit counter ID (#2218). The
-				// legacy BPF DNAT table did not carry a counter ID, so DNAT
-				// "Translation hits" never displayed at all; the userspace
-				// dataplane attributes hits via the snapshot-stamped ID.
-				_ = assignNATCounterID(result, NATCounterTypeDest, rs.Name, rule.Name)
 
 				// Validate source-address-name if present (config compatibility)
 				if rule.Match.SourceAddressName != "" {
@@ -647,7 +649,7 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 					continue
 				}
 
-				matchIP, matchNet, err := net.ParseCIDR(rule.Match.DestinationAddress)
+				matchIP, _, err := net.ParseCIDR(rule.Match.DestinationAddress)
 				if err != nil {
 					// Try as plain IP
 					matchIP = net.ParseIP(rule.Match.DestinationAddress)
@@ -655,13 +657,6 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 						compileWarn(dp, "invalid DNAT match address",
 							"addr", rule.Match.DestinationAddress)
 						continue
-					}
-				} else {
-					// DNAT requires exact host match — reject non-host CIDRs.
-					ones, bits := matchNet.Mask.Size()
-					if (bits == 32 && ones != 32) || (bits == 128 && ones != 128) {
-						return fmt.Errorf("DNAT rule %q match destination-address %q is a network prefix, not a host address (use /%d for DNAT)",
-							rule.Name, rule.Match.DestinationAddress, bits)
 					}
 				}
 
