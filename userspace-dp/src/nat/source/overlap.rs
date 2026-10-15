@@ -613,6 +613,27 @@ pub(crate) fn wire_nat64_overlap_peers(
     rules: &mut [SourceNatRule],
     prefixes: &mut [crate::nat64::Nat64Prefix],
 ) {
+    // The overlap relation is static for this published config; only each
+    // allocator's live-flow count changes while sessions drain. Precompute the
+    // relevant allocators once so NAT64 mints do not rescan either address pool.
+    for prefix in prefixes.iter_mut() {
+        for rule in rules.iter().filter(|rule| rule.is_draining_pool()) {
+            if rule
+                .pool_addresses_v4
+                .iter()
+                .any(|address| prefix.pool_index_v4.contains_key(address))
+                && !prefix
+                    .draining_pool_allocators
+                    .iter()
+                    .any(|allocator| allocator.same_allocator(&rule.pool_allocator))
+            {
+                prefix
+                    .draining_pool_allocators
+                    .push(rule.pool_allocator.clone());
+            }
+        }
+    }
+
     let mut distinct_n64: Vec<usize> = Vec::new();
     for (idx, prefix) in prefixes.iter().enumerate() {
         if prefix.pool_v4.is_empty() || prefix.port_allocator.address_slots() == 0 {
