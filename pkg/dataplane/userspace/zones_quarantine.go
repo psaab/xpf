@@ -159,6 +159,14 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 		// keeps a second, weaker copy of the rule from going quietly vacuous.
 		// Pinned by TestQuarantinedMemberZoneLetsTheRethZoneResolve_6722.
 	}
+	// Tunnel endpoint rows carry their own policy zone and are consumed
+	// independently from interface rows by userspace decapsulation. Apply the
+	// same quarantine so the tunnel cannot retain a dangling zone reference.
+	for i := range snap.TunnelEndpoints {
+		if _, drop := quarantined[snap.TunnelEndpoints[i].Zone]; drop {
+			snap.TunnelEndpoints[i].Zone = ""
+		}
+	}
 	// Scrub collision-loser zone references so the snapshot carries no dangling
 	// policy->zone reference (which the Rust UnresolvableZoneReference preflight
 	// would reject wholesale — a whole-snapshot brick on a fresh boot).

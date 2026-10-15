@@ -105,7 +105,7 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 			return
 		}
 		iface, ok := ifaceByName[ifName]
-		if !ok {
+		if !ok || iface.AdminDisabled {
 			return
 		}
 		outerFamily := "inet"
