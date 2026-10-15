@@ -1130,7 +1130,7 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 				seen := make(map[uint32]bool)
 				for _, appName := range pol.Match.Applications {
 					// Expand application-sets
-					if _, isSet := cfg.Applications.ApplicationSets[appName]; isSet {
+					if _, isSet := config.ResolveApplicationSet(appName, cfg.Applications.ApplicationSets); isSet {
 						expanded, err := config.ExpandApplicationSet(appName, &cfg.Applications)
 						if err != nil {
 							return fmt.Errorf("policy %s expand app-set %q: %w", pol.Name, appName, err)
@@ -1266,7 +1266,7 @@ func compilePolicies(dp DataPlane, cfg *config.Config, result *CompileResult) er
 			} else {
 				seen := make(map[uint32]bool)
 				for _, appName := range pol.Match.Applications {
-					if _, isSet := cfg.Applications.ApplicationSets[appName]; isSet {
+					if _, isSet := config.ResolveApplicationSet(appName, cfg.Applications.ApplicationSets); isSet {
 						exp, err := config.ExpandApplicationSet(appName, &cfg.Applications)
 						if err != nil {
 							return fmt.Errorf("global policy expand app-set %q: %w", appName, err)
