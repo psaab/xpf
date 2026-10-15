@@ -140,48 +140,65 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	}
 
 	var warnings []string
+	lifelines := HostInboundLifelineSet(cfg)
+	check := func(rp managedRP, ifn string) {
+		if HostInboundLifelineInterface(ifn, lifelines) {
+			return
+		}
+		zname, ok := ifZone[ifn]
+		if !ok {
+			return
+		}
+		z := cfg.Security.Zones[zname]
+		if z == nil {
+			return
+		}
+		// Match the dataplane's effective view: a per-interface override
+		// replaces the zone set, with #3720 parent inheritance for units.
+		effSvc, effProto, _ := z.InterfaceHostInboundEffective(ifn)
+		admitted := false
+		for _, svc := range effSvc {
+			if HostInboundFullAdmitService(svc) {
+				admitted = true
+				break
+			}
+		}
+		if admitted || hostInboundAdmitsRoutingProtocol(effProto, rp.token) {
+			return
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"protocols %s is enabled on interface %q (security zone %q), but its "+
+				"effective host-inbound-traffic protocols set omits %q; host-bound "+
+				"multicast for %s is denied until that protocol is admitted. Add "+
+				"`host-inbound-traffic protocols %s` to zone %q (or the interface "+
+				"override) to allow it.",
+			rp.proto, ifn, zname, rp.token, rp.proto, rp.token, zname))
+	}
 	for _, rp := range all {
-		for _, ifn := range rp.ifaces {
-			// The zone map and InterfaceHostInboundEffective both use the
-			// canonical logical unit identity. Routing refs are retained as
-			// authored, so normalize aliases (for example .00 -> .0) before
-			// lookup rather than silently skipping an in-zone managed protocol.
-			ifRef := cfg.SplitInterfaceUnitRef(ifn).Literal
-			zname, ok := ifZone[ifRef]
-			if !ok {
+		for _, rawIface := range rp.ifaces {
+			if rawIface == "all" {
+				// Check each resolved zone member. This preserves quarantine,
+				// conflict and effective override semantics for wildcard refs.
+				ifaces := make([]string, 0, len(ifZone))
+				for iface := range ifZone {
+					ifaces = append(ifaces, iface)
+				}
+				sort.Strings(ifaces)
+				for _, iface := range ifaces {
+					check(rp, iface)
+				}
 				continue
 			}
-			z := cfg.Security.Zones[zname]
-			if z == nil {
-				continue
-			}
-			// Effective host-inbound protocols for this interface: the
-			// per-interface override where declared (it REPLACES the zone-level
-			// set, #6515) with #3720 physical-parent inheritance for a logical
-			// unit. Reuse InterfaceHostInboundEffective so the strict gate matches
-			// the dataplane's admission resolution (a parent `reth0` override
-			// admitting ospf also covers unit `reth0.10`).
-			effSvc, effProto, _ := z.InterfaceHostInboundEffective(ifRef)
-			// any-service is a packet-wide host-inbound full-admit, including
-			// managed routing multicast protocols. Unlike system-services all,
-			// it is not a bounded named-service union (#3226).
-			admitted := false
-			for _, svc := range effSvc {
-				if HostInboundFullAdmitService(svc) {
-					admitted = true
-					break
+			split := cfg.SplitInterfaceUnitRef(rawIface)
+			ifRef := split.Literal
+			if !split.HasUnit {
+				// Routing daemons interpret a bare interface as unit 0;
+				// zone membership may name only ge-0/0/1.0.
+				if _, ok := ifZone[ifRef+".0"]; ok {
+					ifRef += ".0"
 				}
 			}
-			if admitted || hostInboundAdmitsRoutingProtocol(effProto, rp.token) {
-				continue
-			}
-			warnings = append(warnings, fmt.Sprintf(
-				"protocols %s is enabled on interface %q (security zone %q), but its "+
-					"effective host-inbound-traffic protocols set omits %q; host-bound "+
-					"multicast for %s is denied until that protocol is admitted. Add "+
-					"`host-inbound-traffic protocols %s` to zone %q (or the interface "+
-					"override) to allow it.",
-				rp.proto, ifn, zname, rp.token, rp.proto, rp.token, zname))
+			check(rp, ifRef)
 		}
 	}
 	sort.Strings(warnings)
