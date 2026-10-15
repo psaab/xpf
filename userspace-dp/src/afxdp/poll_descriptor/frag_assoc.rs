@@ -275,7 +275,7 @@ pub(super) fn same_family_or_plain_install_forward_fragment_assoc(
 /// fragment reorder (non-first before first), TTL straddle (> the ~2s
 /// `FragAssoc` TTL between first and non-first), shard-cap eviction under a
 /// first-fragment flood, a config-generation bump between first and non-first, or
-/// a first fragment that never forwarded (MissingNeighbor/NoRoute → no install) —
+/// a first fragment that never forwarded (NoRoute → no install) —
 /// the caller does NOT blindly forward the fragment untranslated. Instead the
 /// flowless arm runs [`flowless_requires_nat_translation`], a read-only
 /// NAT'd-miss vs no-NAT-miss discriminator: if a SNAT / static-NAT / DNAT /
@@ -328,7 +328,7 @@ pub(super) fn same_family_or_plain_consult_forward_fragment_assoc(
     Some(decision)
 }
 
-/// publish the same-family association now; retry only changes its L2
+/// #13526: a committed first fragment parked for a missing neighbor must
 /// resolution and does not revisit the session-install commit site.
 #[inline]
 pub(super) fn missing_neighbor_install_fragment_assoc(

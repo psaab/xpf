@@ -2627,6 +2627,28 @@ fn missing_neighbor_first_fragment_installs_frag_assoc_13526() {
         forwarding.nat64.frag_assoc.len(), 1,
         "#13526: a committed first-fragment MissingNeighborSeed must publish its fragment association"
     );
+    // A session-live association must let the tail carry the committed SNAT
+    // decision into the same pending-neighbor path, rather than failing the
+    // generic translation-required fence.
+    let mut tail_binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    tail_binding.interface = Arc::<str>::from("reth1.0");
+    let tail = udp_frag_frame_5689(0x0001, 0xbeef);
+    let (tail_batch, tail_dbg) = txn_run_descriptor_checked(
+        &mut tail_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &tail,
+        udp_native_frag_meta_5689(),
+        true,
+    );
+    assert_eq!(tail_dbg.missing_neigh, 1);
+    assert_eq!(tail_batch.nat_frag_untranslated_dropped, 0);
+    assert_eq!(tail_binding.pending_neigh.len(), 1);
+    assert!(
+        tail_binding.pending_neigh.values().next().unwrap().decision.nat.rewrite_src.is_some(),
+        "#13526: the associated source rewrite must remain attached to the parked tail"
+    );
 }
 #[test]
 fn missing_neighbor_syn_sheds_opening_session_at_capacity_13526() {
