@@ -113,31 +113,6 @@ func TestZeroizeConfigDirWipesSSOTAndSecrets(t *testing.T) {
 	}
 }
 
-// TestIsTextRollbackFile pins the numbered text-rollback-slot recognizer so it
-// removes the canonical rollback history (<base>.N) without eating unrelated
-// files.
-func TestIsTextRollbackFile(t *testing.T) {
-	base := "xpf.conf"
-	cases := []struct {
-		name string
-		want bool
-	}{
-		{"xpf.conf.1", true},
-		{"xpf.conf.42", true},
-		{"xpf.conf", false},      // the live config (caught by the .conf rule)
-		{"xpf.conf.bak", false},  // not all-digits
-		{"xpf.conf.", false},     // empty slot number
-		{"xpf.conf.1a", false},   // trailing non-digit
-		{"rescue.conf.1", false}, // different base
-		{"node-id", false},
-	}
-	for _, tc := range cases {
-		if got := isTextRollbackFile(tc.name, base); got != tc.want {
-			t.Errorf("isTextRollbackFile(%q, %q) = %v, want %v", tc.name, base, got, tc.want)
-		}
-	}
-}
-
 // TestZeroizeSurfacesWipeError pins #4576 requirement 3: a wipe that fails to
 // fully erase config state must surface an error at the RPC boundary, not
 // report a clean factory reset.

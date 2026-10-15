@@ -26,11 +26,9 @@ func forbidRoot9897(t *testing.T, dir string) {
 	t.Cleanup(func() { configstore.FactoryResetForbiddenRoots = old })
 }
 
-// #9897 F-040, production copy: zeroizeConfigDir is the wipe production runs
-// (FactoryResetConfigDir has no non-test caller), and it carries the identical
-// lexical-Validate + ReadDir-through-link mechanism — a symlinked root into a
-// forbidden directory passes the guard and xpf-named files under the unowned
-// tree are deleted with success reported.
+// #9897 F-040: the production config-root leg shares ResolveFactoryResetRoot
+// through configstore.FactoryResetConfigDir, so the same lexical and resolved
+// root guards apply to CLI and gRPC callers.
 func TestZeroizeConfigDirRefusesSymlinkToForbidden9897(t *testing.T) {
 	root := t.TempDir()
 	real := filepath.Join(root, "real")
