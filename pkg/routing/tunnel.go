@@ -237,7 +237,8 @@ func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 	// remain untouched. Existing ownership state still drives the tracked
 	// retry paths below, so this pass handles only previously-untracked
 	// candidates.
-	if links, err := t.ops.LinkList(); err != nil {
+	links, err := t.ops.LinkList()
+	if err != nil {
 		slog.Warn("tunnel orphan reap: LinkList failed; retrying on next apply", "err", err)
 	} else {
 		for _, link := range links {
@@ -261,7 +262,9 @@ func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 			// restart while still removing connected routes from the FIB.
 			if tun, ok := link.(*netlink.Tuntap); ok {
 				if tun.Mode == netlink.TUNTAP_MODE_TUN {
-					t.pruneOrphanTUNLocked(link, name)
+					if err := t.pruneOrphanTUNLocked(link, name); err != nil {
+						errs = append(errs, err)
+					}
 				}
 				continue
 			}
@@ -488,19 +491,24 @@ func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 // pruneOrphanTUNLocked keeps an untracked persistent TUN, removes its
 // address-derived connected routes, and disables it so even an unowned
 // link-local address cannot retain an active connected route.
-func (t *tunnelManager) pruneOrphanTUNLocked(link netlink.Link, name string) {
+func (t *tunnelManager) pruneOrphanTUNLocked(link netlink.Link, name string) error {
+	var errs []error
 	if err := t.ops.LinkSetDown(link); err != nil {
 		slog.Warn("tunnel orphan reap: failed to bring TUN down",
 			"name", name, "err", err)
+		errs = append(errs, fmt.Errorf("bring orphan tunnel %s down: %w", name, err))
 	}
 	failed, retry := t.pruneAppliedAddrsLocked(link, name, t.appliedAddrs[name])
 	unbindRetry := t.unbindVRFClaimLocked(name, link)
 	if retry || unbindRetry {
 		t.appliedAddrs[name] = failed
-		return
+		errs = append(errs, fmt.Errorf("orphan tunnel %s cleanup incomplete (address retry=%t, VRF unbind retry=%t)",
+			name, retry, unbindRetry))
+		return errors.Join(errs...)
 	}
 	delete(t.appliedAddrs, name)
 	delete(t.appliedRI, name)
+	return errors.Join(errs...)
 }
 
 // anchorReusable reports whether an existing link can serve as the

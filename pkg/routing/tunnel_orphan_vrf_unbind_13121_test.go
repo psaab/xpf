@@ -1,11 +1,11 @@
 package routing
 
 import (
-	"net"
-	"testing"
-
+	"errors"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
+	"net"
+	"testing"
 )
 
 // #13121 (D10-03): orphaned / restarted persistent TUNs retain a stale VRF
@@ -46,6 +46,38 @@ func TestOrphanTUNUnboundFromObservedVRFAndSetDown13121(t *testing.T) {
 	}
 	if after.Flags&net.FlagUp != 0 {
 		t.Fatalf("orphan wg9 still up: Flags = %v, want down so fe80::/64 route is withdrawn", after.Flags)
+	}
+}
+
+func TestOrphanTUNCleanupFailuresFailApply13121(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		failDown   bool
+		failUnbind bool
+	}{
+		{name: "LinkSetDown", failDown: true},
+		{name: "VRF unbind", failUnbind: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newFakeLinkOps()
+			ops := &linkListFakeOps11443{fakeLinkOps: base}
+			seedVRF(base, "x", 99)
+			base.links["wg9"] = &netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: "wg9", Index: 94, Flags: net.FlagUp, MasterIndex: 99},
+				Mode:      netlink.TUNTAP_MODE_TUN,
+				Flags:     netlink.TUNTAP_NO_PI,
+			}
+			if tc.failDown {
+				ops.downErr = errors.New("injected LinkSetDown failure")
+			}
+			if tc.failUnbind {
+				base.noMasterErr = errors.New("injected LinkSetNoMaster failure")
+			}
+			tm := &tunnelManager{ops: ops, vrfBinder: &fakeVRFBinder{ops: base, fail: map[string]error{}}}
+			if err := tm.Apply(nil); err == nil {
+				t.Fatal("Apply succeeded despite incomplete orphan TUN cleanup")
+			}
+		})
 	}
 }
 

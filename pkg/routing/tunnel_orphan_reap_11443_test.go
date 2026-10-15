@@ -30,6 +30,7 @@ import (
 type linkListFakeOps11443 struct {
 	*fakeLinkOps
 	listErr error
+	downErr error
 }
 
 func (f *linkListFakeOps11443) LinkList() ([]netlink.Link, error) {
@@ -45,6 +46,9 @@ func (f *linkListFakeOps11443) LinkList() ([]netlink.Link, error) {
 }
 
 func (f *linkListFakeOps11443) LinkSetDown(link netlink.Link) error {
+	if f.downErr != nil {
+		return f.downErr
+	}
 	link.Attrs().Flags &^= net.FlagUp
 	return nil
 }
