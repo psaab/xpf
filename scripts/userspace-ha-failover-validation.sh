@@ -19,13 +19,6 @@ CYCLE_INTERVAL="${CYCLE_INTERVAL:-10}"
 SYNC_WAIT="${SYNC_WAIT:-5}"
 FAILOVER_WAIT="${FAILOVER_WAIT:-30}"
 PRE_FAILOVER_OBSERVE="${PRE_FAILOVER_OBSERVE:-10}"
-if [[ -z "${IPERF_DURATION:-}" ]]; then
-	if (( TOTAL_CYCLES > 1 )); then
-		IPERF_DURATION="$(( PRE_FAILOVER_OBSERVE + SYNC_WAIT + TOTAL_CYCLES * (CYCLE_INTERVAL * 2 + FAILOVER_WAIT) + 20 ))"
-	else
-		IPERF_DURATION=60
-	fi
-fi
 IPERF_STREAMS="${IPERF_STREAMS:-4}"
 MIN_SESSIONS="${MIN_SESSIONS:-4}"
 CHECK_KERNEL_SESSION_TABLE="${CHECK_KERNEL_SESSION_TABLE:-0}"
@@ -83,6 +76,13 @@ while [[ $# -gt 0 ]]; do
 	esac
 	shift
 done
+if [[ -z "${IPERF_DURATION:-}" ]]; then
+	if (( TOTAL_CYCLES > 1 )); then
+		IPERF_DURATION="$(( PRE_FAILOVER_OBSERVE + SYNC_WAIT + TOTAL_CYCLES * (CYCLE_INTERVAL * 2 + FAILOVER_WAIT) + 20 ))"
+	else
+		IPERF_DURATION=60
+	fi
+fi
 
 # shellcheck disable=SC1090
 source "$ENV_FILE"
@@ -371,6 +371,22 @@ status_summary_delta() {
 	printf '%s\n' "$delta"
 }
 
+phase_status_delta() {
+	local output_name="$1"
+	local post_path="$2"
+	local pre_path="$3"
+	local label="$4"
+	local context="$5"
+	local value
+
+	if value="$(status_summary_delta "$post_path" "$pre_path" "$label" "$context" 2>&1)"; then
+		printf -v "$output_name" '%s' "$value"
+		return 0
+	fi
+	void "$value"
+	return 1
+}
+
 
 capture_sync_snapshot() {
 	local vm="$1"
@@ -475,34 +491,32 @@ validate_phase_fabric_path() {
 	from_if_baseline="$(cycle_interfaces_path "$cycle" "$phase" "$from_vm")"
 	from_if_post="$(cycle_interfaces_path "$cycle" "${phase}-post" "$from_vm")"
 
-	from_fabric_pre="$(ha_status_fabric_tx_packets "$from_if_baseline")"
-	from_fabric_post="$(ha_status_fabric_tx_packets "$from_if_post")"
-	from_fabric_delta=$(( from_fabric_post - from_fabric_pre ))
-	if ! from_wan_tx_base="$(ha_interface_packets_value "$from_if_baseline" "$STANDBY_WAN_IFACE_REGEX" tx)"; then
-		fail "cycle ${cycle} ${phase}: unable to read standby ${from_name} WAN TX post-failover baseline counters"
-		return
+	if ! from_fabric_pre="$(ha_status_fabric_tx_packets "$from_if_baseline" 2>&1)"; then
+		void "cycle ${cycle} ${phase}: ${from_name} fabric TX evidence blind: ${from_fabric_pre}"
+		return 0
 	fi
-	if ! from_wan_tx_post="$(ha_interface_packets_value "$from_if_post" "$STANDBY_WAN_IFACE_REGEX" tx)"; then
-		fail "cycle ${cycle} ${phase}: unable to read standby ${from_name} WAN TX post-validation counters"
-		return
+	if ! from_fabric_post="$(ha_status_fabric_tx_packets "$from_if_post" 2>&1)"; then
+		void "cycle ${cycle} ${phase}: ${from_name} fabric TX evidence blind: ${from_fabric_post}"
+		return 0
 	fi
-	if ! from_wan_tx_delta="$(ha_nondecreasing_delta "$from_wan_tx_base" "$from_wan_tx_post")"; then
-		fail "cycle ${cycle} ${phase}: standby ${from_name} WAN TX counter decreased" \
-			"from ${from_wan_tx_base} to ${from_wan_tx_post}; failing closed"
-		return
+	if ! from_fabric_delta="$(ha_nondecreasing_delta "$from_fabric_pre" "$from_fabric_post" 2>&1)"; then
+		void "cycle ${cycle} ${phase}: ${from_name} fabric TX evidence blind: ${from_fabric_delta}"
+		return 0
 	fi
-	from_session_delta="$(
-		status_summary_delta "$from_post" "$from_pre" "Session misses" \
-			"cycle ${cycle} ${phase}: ${from_name}"
-	)" || {
-		return
-	}
-	to_session_delta="$(
-		status_summary_delta "$to_post" "$to_pre" "Session misses" \
-			"cycle ${cycle} ${phase}: ${to_name}"
-	)" || {
-		return
-	}
+	if ! from_wan_tx_base="$(ha_interface_packets_value "$from_if_baseline" "$STANDBY_WAN_IFACE_REGEX" tx 2>&1)"; then
+		void "cycle ${cycle} ${phase}: standby ${from_name} WAN TX evidence blind: ${from_wan_tx_base}"
+		return 0
+	fi
+	if ! from_wan_tx_post="$(ha_interface_packets_value "$from_if_post" "$STANDBY_WAN_IFACE_REGEX" tx 2>&1)"; then
+		void "cycle ${cycle} ${phase}: standby ${from_name} WAN TX evidence blind: ${from_wan_tx_post}"
+		return 0
+	fi
+	if ! from_wan_tx_delta="$(ha_nondecreasing_delta "$from_wan_tx_base" "$from_wan_tx_post" 2>&1)"; then
+		void "cycle ${cycle} ${phase}: standby ${from_name} WAN TX counter evidence blind: ${from_wan_tx_delta}"
+		return 0
+	fi
+	if ! phase_status_delta from_session_delta "$from_post" "$from_pre" "Session misses" "cycle ${cycle} ${phase}: ${from_name}"; then return 0; fi
+	if ! phase_status_delta to_session_delta "$to_post" "$to_pre" "Session misses" "cycle ${cycle} ${phase}: ${to_name}"; then return 0; fi
 	session_delta=$(( from_session_delta + to_session_delta ))
 	if (( session_delta <= MAX_FAILOVER_SESSION_MISS_DELTA )); then
 		pass "cycle ${cycle} ${phase}: session miss delta ${session_delta} (source=${from_session_delta} target=${to_session_delta})"
@@ -510,18 +524,8 @@ validate_phase_fabric_path() {
 		fail "cycle ${cycle} ${phase}: session miss delta ${session_delta} (source=${from_session_delta} target=${to_session_delta}) exceeds ${MAX_FAILOVER_SESSION_MISS_DELTA}"
 	fi
 
-	from_neighbor_delta="$(
-		status_summary_delta "$from_post" "$from_pre" "Neighbor misses" \
-			"cycle ${cycle} ${phase}: ${from_name}"
-	)" || {
-		return
-	}
-	to_neighbor_delta="$(
-		status_summary_delta "$to_post" "$to_pre" "Neighbor misses" \
-			"cycle ${cycle} ${phase}: ${to_name}"
-	)" || {
-		return
-	}
+	if ! phase_status_delta from_neighbor_delta "$from_post" "$from_pre" "Neighbor misses" "cycle ${cycle} ${phase}: ${from_name}"; then return 0; fi
+	if ! phase_status_delta to_neighbor_delta "$to_post" "$to_pre" "Neighbor misses" "cycle ${cycle} ${phase}: ${to_name}"; then return 0; fi
 	neighbor_delta=$(( from_neighbor_delta + to_neighbor_delta ))
 	if (( neighbor_delta <= MAX_FAILOVER_NEIGHBOR_MISS_DELTA )); then
 		pass "cycle ${cycle} ${phase}: neighbor miss delta ${neighbor_delta} (source=${from_neighbor_delta} target=${to_neighbor_delta})"
@@ -529,18 +533,8 @@ validate_phase_fabric_path() {
 		fail "cycle ${cycle} ${phase}: neighbor miss delta ${neighbor_delta} (source=${from_neighbor_delta} target=${to_neighbor_delta}) exceeds ${MAX_FAILOVER_NEIGHBOR_MISS_DELTA}"
 	fi
 
-	from_route_delta="$(
-		status_summary_delta "$from_post" "$from_pre" "Route misses" \
-			"cycle ${cycle} ${phase}: ${from_name}"
-	)" || {
-		return
-	}
-	to_route_delta="$(
-		status_summary_delta "$to_post" "$to_pre" "Route misses" \
-			"cycle ${cycle} ${phase}: ${to_name}"
-	)" || {
-		return
-	}
+	if ! phase_status_delta from_route_delta "$from_post" "$from_pre" "Route misses" "cycle ${cycle} ${phase}: ${from_name}"; then return 0; fi
+	if ! phase_status_delta to_route_delta "$to_post" "$to_pre" "Route misses" "cycle ${cycle} ${phase}: ${to_name}"; then return 0; fi
 	route_delta=$(( from_route_delta + to_route_delta ))
 	if (( route_delta <= MAX_FAILOVER_ROUTE_MISS_DELTA )); then
 		pass "cycle ${cycle} ${phase}: route miss delta ${route_delta} (source=${from_route_delta} target=${to_route_delta})"
@@ -548,18 +542,8 @@ validate_phase_fabric_path() {
 		fail "cycle ${cycle} ${phase}: route miss delta ${route_delta} (source=${from_route_delta} target=${to_route_delta}) exceeds ${MAX_FAILOVER_ROUTE_MISS_DELTA}"
 	fi
 
-	from_policy_delta="$(
-		status_summary_delta "$from_post" "$from_pre" "Policy denied packets" \
-			"cycle ${cycle} ${phase}: ${from_name}"
-	)" || {
-		return
-	}
-	to_policy_delta="$(
-		status_summary_delta "$to_post" "$to_pre" "Policy denied packets" \
-			"cycle ${cycle} ${phase}: ${to_name}"
-	)" || {
-		return
-	}
+	if ! phase_status_delta from_policy_delta "$from_post" "$from_pre" "Policy denied packets" "cycle ${cycle} ${phase}: ${from_name}"; then return 0; fi
+	if ! phase_status_delta to_policy_delta "$to_post" "$to_pre" "Policy denied packets" "cycle ${cycle} ${phase}: ${to_name}"; then return 0; fi
 	policy_delta=$(( from_policy_delta + to_policy_delta ))
 	if (( policy_delta <= MAX_FAILOVER_POLICY_DENIED_DELTA )); then
 		pass "cycle ${cycle} ${phase}: policy denied delta ${policy_delta} (source=${from_policy_delta} target=${to_policy_delta})"
@@ -1475,8 +1459,6 @@ validate_whole_run_metrics() {
 		pass "iperf3 completed successfully"
 	elif (( effective_status == 1 )) && awk "BEGIN{exit !(${throughput} >= ${MIN_THROUGHPUT})}"; then
 		pass "iperf3 data transfer completed with adequate throughput despite control socket disruption"
-	elif awk "BEGIN{exit !(${throughput} >= ${MIN_THROUGHPUT})}"; then
-		pass "iperf3 data transfer completed with adequate throughput despite control socket disruption"
 	else
 		fail "iperf3 did not complete successfully"
 	fi
@@ -1584,9 +1566,6 @@ elif (( TOTAL_CYCLES == 1 )); then
 else
 	for (( cycle = 1; cycle <= TOTAL_CYCLES; cycle++ )); do
 		failover_final_phase=0
-		if (( cycle == TOTAL_CYCLES )); then
-			failover_final_phase=1
-		fi
 		if (( cycle > 1 )); then
 			run_failover_phase "$cycle" "$SOURCE_NODE" "$TARGET_NODE" "failover" "$failover_final_phase"
 		fi

@@ -19,6 +19,7 @@ export ARTIFACT_DIR BPFRX_CLUSTER_ENV HA_ASSURANCE_SOURCE_ONLY
 # shellcheck disable=SC1091
 source "${ROOT}/scripts/userspace-ha-failover-validation.sh"
 unset HA_ASSURANCE_SOURCE_ONLY
+
 SAMPLED_WRAPPERS="${TMP_DIR}/sampled-wrappers.sh"
 python3 - "${ROOT}/test/incus/test-failover.sh" "$SAMPLED_WRAPPERS" <<'PY'
 import pathlib
@@ -58,6 +59,11 @@ assert_eq() {
 	local context="$3"
 	[[ "$actual" == "$expected" ]] || fail_test "${context}: expected '${expected}', got '${actual}'"
 }
+
+PARSED_DURATION="$(TOTAL_CYCLES=1 IPERF_DURATION= BPFRX_CLUSTER_ENV="${ROOT}/test/incus/loss-userspace-cluster.env" \
+	HA_ASSURANCE_SOURCE_ONLY=1 bash -c 'source "$1" --cycles 3; printf "%s" "$IPERF_DURATION"' _ \
+	"${ROOT}/scripts/userspace-ha-failover-validation.sh")"
+assert_eq "$PARSED_DURATION" 185 'default duration uses parsed cycle count'
 
 assert_contains() {
 	local text="$1"
@@ -177,6 +183,10 @@ run_gate_reject() {
 
 run_whole_run_consumer() {
 	validate_whole_run_metrics >"${OUT}" 2>"${ERR}"
+}
+
+run_fabric_path_consumer() {
+	validate_phase_fabric_path 1 failover "$FW0" node0 "$FW1" node1 >"${OUT}" 2>"${ERR}"
 }
 
 assert_void_consumer() {
@@ -316,6 +326,7 @@ check_boundary 1 'FAIL  iperf3 interval collapse detected' 'collapse_detected=tr
 check_boundary 0 'PASS  iperf3 interval collapse not detected' 'collapse_detected=false'
 check_boundary 0 'PASS  iperf3 completed successfully' 'completed=true'
 check_boundary 0 'PASS  iperf3 data transfer completed with adequate throughput' 'completed=false' 'observed_end_sec=58' 'avg_gbps=1.0'
+check_boundary 1 'FAIL  iperf3 did not complete successfully' 'completed=false' 'observed_end_sec=2' 'avg_gbps=5.0'
 
 write_metrics 'completed=false' 'observed_end_sec=58'
 if iperf_effectively_completed_local; then
@@ -646,9 +657,12 @@ import sys
 path, phase, node, rg, iface, rx, tx = sys.argv[1:]
 row = ["0"] * 20
 row[10], row[11], row[19] = rx, tx, iface
+fabric_row = ["0"] * 20
+fabric_row[10], fabric_row[11], fabric_row[19] = rx, tx, "ge-0-0-0"
 pathlib.Path(path).write_text(
     f"HA capture identity: slice=manual-rg1-failback phase={phase} node={node} rg={rg}\n"
-    "Userspace bindings:\nSlot Queue Header\n" + " ".join(row) + "\n",
+    "Userspace fabric links:\nSlot Parent State\n0 ge-0-0-0 up\n\n"
+    "Userspace bindings:\nSlot Queue Header\n" + " ".join(row) + "\n" + " ".join(fabric_row) + "\n",
     encoding="utf-8",
 )
 PY
@@ -1030,3 +1044,28 @@ assert_eq "$OWNER_OUT" 'RC=2 PASS=0 FAIL=0 VOID=1' 'RG1 owner wrapper VOID statu
 printf 'RG1 owner cell wrapper preserves PASS/FAIL/VOID status under set -e\n'
 
 printf 'PASS ha-assurance-selftest: M2.4, RG1 Groups 1-8, N6/N12 pins, sticky FAIL, blind markers, gate dominance, set-e VOID guard\n'
+
+printf 'Fabric-path blind counters produce VOID under set -e\n'
+PHASE_DIR="${TMP_DIR}/phase-fabric-void"
+mkdir -p "$PHASE_DIR"
+ARTIFACT_DIR="$PHASE_DIR"
+write_ha_status_snapshot "$(cycle_stats_path 1 failover-pre "$FW0")" failover-pre node0 1 10 20 30 0
+write_ha_status_snapshot "$(cycle_stats_path 1 failover-post "$FW0")" failover-post node0 1 10 20 30 0
+write_ha_status_snapshot "$(cycle_stats_path 1 failover-pre "$FW1")" failover-pre node1 1 10 20 30 0
+write_ha_status_snapshot "$(cycle_stats_path 1 failover-post "$FW1")" failover-post node1 1 10 20 30 0
+write_ha_interface_snapshot "$(cycle_interfaces_path 1 failover "$FW0")" failover node0 1 ge-0-0-2 10 10
+write_ha_interface_snapshot "$(cycle_interfaces_path 1 failover-post "$FW0")" failover-post node0 1 ge-0-0-2 10 10
+write_ha_interface_snapshot "$(cycle_interfaces_path 1 failover "$FW1")" failover node1 1 ge-0-0-2 10 10
+write_ha_interface_snapshot "$(cycle_interfaces_path 1 failover-post "$FW1")" failover-post node1 1 ge-0-0-2 10 10
+sed -i '/^Session misses:/d' "$(cycle_stats_path 1 failover-post "$FW0")"
+reset_verdict
+if run_fabric_path_consumer; then
+	fabric_path_status=0
+else
+	fabric_path_status=$?
+fi
+assert_eq "$fabric_path_status" 0 'blind fabric-path counters return normally'
+assert_eq "$FAILED" 0 'blind fabric-path counters are not FAIL'
+assert_eq "$VOIDS" 1 'blind fabric-path counters increment VOID'
+assert_contains "$(<"${ERR}")" 'VOID status summary' 'fabric-path VOID diagnostic'
+assert_contains "$(<"${ERR}")" 'cycle 1 failover: node0: unable to read post Session misses' 'fabric-path VOID context'
