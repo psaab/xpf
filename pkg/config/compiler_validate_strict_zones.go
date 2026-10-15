@@ -465,7 +465,12 @@ func validateFabricZoneRoutingInstanceAmbiguityStrict(cfg *Config) error {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
+	quarantinedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zoneName := range zoneNames {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {
 			continue
@@ -480,6 +485,9 @@ func validateFabricZoneRoutingInstanceAmbiguityStrict(cfg *Config) error {
 				continue
 			}
 			for _, key := range zoneIfaceLogicalKeys(cfg, iface) {
+				if _, quarantined := quarantinedInterfaces[key]; quarantined {
+					continue
+				}
 				if zoneKeys[key] == nil {
 					zoneKeys[key] = make(map[string]struct{})
 				}
