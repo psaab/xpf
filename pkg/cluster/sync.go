@@ -621,45 +621,47 @@ type SyncStatsSnapshot struct {
 	// nacks are not tells the operator the recovery path itself is broken (a
 	// pre-#7328 peer, or a nack that never matched lastSentConfigGen). Both are
 	// rendered only when nonzero.
-	ConfigsQueueFullDropped          uint64
-	ConfigApplyNacksReceived         uint64
-	IPsecSASent                      uint64
-	IPsecSAReceived                  uint64
-	IPsecSAStaleIgnored              uint64
-	DHCPLeasesSent                   uint64
-	DHCPLeasesReceived               uint64
-	DHCPLeasesStaleIgnored           uint64
-	DHCPLeasesSeeded                 uint64
-	DHCPLeasesDroppedNoIdentity      uint64 // #9915 F-117
-	GenGuardSessionCap               uint64 // #9915 F-044 wired helper capacity (0 = unwired)
-	FencesSent                       uint64
-	FencesReceived                   uint64
-	FenceAcksSent                    uint64
-	FenceAcksReceived                uint64
-	FenceAcksTimedOut                uint64
-	Errors                           uint64
-	DeletesDropped                   uint64
-	PreKeyAuthEvictions              uint64
-	DeletesSuppressedPeerIncapable   uint64
-	DeletesSuppressedPurgeRetirement uint64
-	DeletesStaleIgnored              uint64
-	InstallsStaleIgnored             uint64
-	SessionsStaleConfigIgnored       uint64
-	GenMapOverflow                   uint64
-	GenTombstonesEvicted             uint64 // #9719
-	GenCapGrown                      uint64 // #9915 F-044
-	GenCapShrunk                     uint64 // #9915 F-044 review
-	AuthUpgradeIdentityErrors        uint64 // #9915 F-043 review
-	PreAuthRejected                  uint64
-	Connected                        bool
-	ActiveFabric                     int
-	BulkSyncStartTime                int64
-	BulkSyncEndTime                  int64
-	BulkSyncSessions                 uint64
-	LastConfigSyncTime               int64
-	LastConfigSyncSize               uint64
-	LastFenceSeq                     uint64
-	LastFenceAckAt                   int64
+	ConfigsQueueFullDropped              uint64
+	ConfigApplyNacksReceived             uint64
+	IPsecSASent                          uint64
+	IPsecSAReceived                      uint64
+	IPsecSAStaleIgnored                  uint64
+	DHCPLeasesSent                       uint64
+	DHCPLeasesReceived                   uint64
+	DHCPLeasesStaleIgnored               uint64
+	DHCPLeasesSeeded                     uint64
+	DHCPLeasesDroppedNoIdentity          uint64 // #9915 F-117
+	GenGuardSessionCap                   uint64 // #9915 F-044 wired helper capacity (0 = unwired)
+	FencesSent                           uint64
+	FencesReceived                       uint64
+	FenceAcksSent                        uint64
+	FenceAcksReceived                    uint64
+	FenceAcksTimedOut                    uint64
+	Errors                               uint64
+	DeletesDropped                       uint64
+	PreKeyAuthEvictions                  uint64
+	DeletesSuppressedPeerIncapable       uint64
+	DeletesSuppressedPurgeRetirement     uint64
+	DeletesSuppressedScopedPolicy        uint64
+	InstallsSuppressedNoPeerInstallTable uint64
+	DeletesStaleIgnored                  uint64
+	InstallsStaleIgnored                 uint64
+	SessionsStaleConfigIgnored           uint64
+	GenMapOverflow                       uint64
+	GenTombstonesEvicted                 uint64 // #9719
+	GenCapGrown                          uint64 // #9915 F-044
+	GenCapShrunk                         uint64 // #9915 F-044 review
+	AuthUpgradeIdentityErrors            uint64 // #9915 F-043 review
+	PreAuthRejected                      uint64
+	Connected                            bool
+	ActiveFabric                         int
+	BulkSyncStartTime                    int64
+	BulkSyncEndTime                      int64
+	BulkSyncSessions                     uint64
+	LastConfigSyncTime                   int64
+	LastConfigSyncSize                   uint64
+	LastFenceSeq                         uint64
+	LastFenceAckAt                       int64
 }
 
 // TransferReadinessSnapshot captures session-sync state that determines whether
@@ -2308,14 +2310,16 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		FencesSent:             s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(),
 		FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(),
 		FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(),
-		DeletesDropped:                   s.stats.DeletesDropped.Load(),
-		PreKeyAuthEvictions:              s.stats.PreKeyAuthEvictions.Load(),
-		DeletesSuppressedPeerIncapable:   s.stats.DeletesSuppressedPeerIncapable.Load(),
-		DeletesSuppressedPurgeRetirement: s.stats.DeletesSuppressedPurgeRetirement.Load(),
-		DeletesStaleIgnored:              s.stats.DeletesStaleIgnored.Load(),
-		InstallsStaleIgnored:             s.stats.InstallsStaleIgnored.Load(),
-		SessionsStaleConfigIgnored:       s.stats.SessionsStaleConfigIgnored.Load(),
-		GenMapOverflow:                   s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(),
+		DeletesDropped:                       s.stats.DeletesDropped.Load(),
+		PreKeyAuthEvictions:                  s.stats.PreKeyAuthEvictions.Load(),
+		DeletesSuppressedPeerIncapable:       s.stats.DeletesSuppressedPeerIncapable.Load(),
+		DeletesSuppressedPurgeRetirement:     s.stats.DeletesSuppressedPurgeRetirement.Load(),
+		DeletesSuppressedScopedPolicy:        s.stats.DeletesSuppressedScopedPolicy.Load(),
+		InstallsSuppressedNoPeerInstallTable: s.stats.InstallsSuppressedNoPeerInstallTable.Load(),
+		DeletesStaleIgnored:                  s.stats.DeletesStaleIgnored.Load(),
+		InstallsStaleIgnored:                 s.stats.InstallsStaleIgnored.Load(),
+		SessionsStaleConfigIgnored:           s.stats.SessionsStaleConfigIgnored.Load(),
+		GenMapOverflow:                       s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(),
 		PreAuthRejected: s.stats.PreAuthRejected.Load(), Connected: s.stats.Connected.Load(),
 		ActiveFabric:      activeFabric,
 		BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(),

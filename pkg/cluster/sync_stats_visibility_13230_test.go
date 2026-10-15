@@ -10,6 +10,8 @@ func TestSyncStatsSnapshotIncludesSuppressionAndAuthEvictionCounts13230(t *testi
 	ss.stats.PreKeyAuthEvictions.Add(2)
 	ss.stats.DeletesSuppressedPeerIncapable.Add(3)
 	ss.stats.DeletesSuppressedPurgeRetirement.Add(4)
+	ss.stats.DeletesSuppressedScopedPolicy.Add(5)
+	ss.stats.InstallsSuppressedNoPeerInstallTable.Add(6)
 
 	got := ss.Stats()
 	if got.PreKeyAuthEvictions != 2 {
@@ -20,6 +22,49 @@ func TestSyncStatsSnapshotIncludesSuppressionAndAuthEvictionCounts13230(t *testi
 	}
 	if got.DeletesSuppressedPurgeRetirement != 4 {
 		t.Errorf("DeletesSuppressedPurgeRetirement = %d, want 4", got.DeletesSuppressedPurgeRetirement)
+	}
+	if got.DeletesSuppressedScopedPolicy != 5 {
+		t.Errorf("DeletesSuppressedScopedPolicy = %d, want 5", got.DeletesSuppressedScopedPolicy)
+	}
+	if got.InstallsSuppressedNoPeerInstallTable != 6 {
+		t.Errorf("InstallsSuppressedNoPeerInstallTable = %d, want 6", got.InstallsSuppressedNoPeerInstallTable)
+	}
+}
+
+func TestSyncSuppressionCountersVisibleInStatistics13230(t *testing.T) {
+	ss := &SessionSync{}
+	ss.stats.PreKeyAuthEvictions.Add(2)
+	ss.stats.DeletesSuppressedPeerIncapable.Add(3)
+	ss.stats.DeletesSuppressedPurgeRetirement.Add(4)
+	ss.stats.DeletesSuppressedScopedPolicy.Add(5)
+	ss.stats.InstallsSuppressedNoPeerInstallTable.Add(6)
+
+	m := NewManager(0, 1)
+	m.SetSyncStats(ss)
+	information := m.FormatInformation()
+	for _, want := range []string{
+		"Pre-key authentication evictions: 2",
+		"Deletes suppressed for incapable peer: 3",
+		"Purge-retirement deletes suppressed: 4",
+		"Scoped-policy deletes suppressed: 5",
+		"Installs suppressed (peer lacks install-table support): 6",
+	} {
+		if !strings.Contains(information, want) {
+			t.Errorf("FormatInformation does not expose %q:\n%s", want, information)
+		}
+	}
+
+	statistics := m.FormatStatistics()
+	for _, want := range []string{
+		"Pre-key auth evictions",
+		"Deletes suppressed (peer incapable)",
+		"Deletes suppressed (purge retirement)",
+		"Deletes suppressed (scoped policy)",
+		"Installs suppressed (no peer install table)",
+	} {
+		if !strings.Contains(statistics, want) {
+			t.Errorf("FormatStatistics does not expose %q:\n%s", want, statistics)
+		}
 	}
 }
 

@@ -502,6 +502,13 @@ func (m *Manager) FormatInformation() string {
 		if syncStats.DeletesSuppressedPurgeRetirement > 0 {
 			fmt.Fprintf(&b, "  Purge-retirement deletes suppressed: %d\n", syncStats.DeletesSuppressedPurgeRetirement)
 		}
+		if syncStats.DeletesSuppressedScopedPolicy > 0 {
+			fmt.Fprintf(&b, "  Scoped-policy deletes suppressed: %d\n", syncStats.DeletesSuppressedScopedPolicy)
+		}
+		if syncStats.InstallsSuppressedNoPeerInstallTable > 0 {
+			fmt.Fprintf(&b, "  Installs suppressed (peer lacks install-table support): %d\n",
+				syncStats.InstallsSuppressedNoPeerInstallTable)
+		}
 	} else {
 		fmt.Fprintln(&b, "  Not configured")
 	}
@@ -855,6 +862,14 @@ func (m *Manager) FormatStatistics() string {
 		if syncStats.DeletesSuppressedPurgeRetirement > 0 {
 			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Deletes suppressed (purge retirement)",
 				syncStats.DeletesSuppressedPurgeRetirement, "")
+		}
+		if syncStats.DeletesSuppressedScopedPolicy > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Deletes suppressed (scoped policy)",
+				syncStats.DeletesSuppressedScopedPolicy, "")
+		}
+		if syncStats.InstallsSuppressedNoPeerInstallTable > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Installs suppressed (no peer install table)",
+				syncStats.InstallsSuppressedNoPeerInstallTable, "")
 		}
 		if syncStats.LastFenceSeq > 0 {
 			fmt.Fprintf(&b, "    %-32s %-12d %s\n", "Install fence seq",
