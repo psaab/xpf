@@ -8,11 +8,9 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// #13299: frames stranded in DebugPendingFillFrames / DebugPendingTXPrepared /
-// DebugPendingTXLocal are unavailable UMEM frames even while
-// UmemInflightFrames and OutstandingTX are both zero, so they must contribute
-// to Buffer% (which otherwise reports a confident 0% with BufferKnown=true).
-func TestBuildBufferPercentIncludesPendingQueues(t *testing.T) {
+// #13299: fill-ring inventory is idle by design. It must remain separately
+// observable without being mistaken for UMEM in-flight saturation.
+func TestBuildBufferPercentPreservesIdlePendingFill(t *testing.T) {
 	now := time.Now()
 	dp := &fakeUserspaceDP{
 		fakeDP: fakeDP{loaded: true},
@@ -31,9 +29,8 @@ func TestBuildBufferPercentIncludesPendingQueues(t *testing.T) {
 	if !fs.BufferKnown {
 		t.Fatal("BufferKnown must be true when a binding publishes capacities")
 	}
-	want := 100.0 * 3800.0 / 4096.0
-	if fs.BufferPercent != want {
-		t.Errorf("BufferPercent=%v, want %v (DebugPendingFillFrames holds 3800/4096 frames)", fs.BufferPercent, want)
+	if fs.BufferPercent != 0 {
+		t.Errorf("BufferPercent=%v, want 0: idle pending-fill inventory is not in-flight utilization", fs.BufferPercent)
 	}
 }
 

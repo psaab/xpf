@@ -126,3 +126,26 @@ func (c *xpfCollector) emitBindingFragmentOverlapCounters(ch chan<- prometheus.M
 		)
 	}
 }
+
+// #13299: publish the frame inventory components independently from the
+// in-flight utilization ratio. The fill queue is idle capacity, not saturation.
+func (c *xpfCollector) emitBindingUMEMFrames(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	for _, b := range status.Bindings {
+		slot := strconv.FormatUint(uint64(b.Slot), 10)
+		queueID := strconv.FormatUint(uint64(b.QueueID), 10)
+		workerID := strconv.FormatUint(uint64(b.WorkerID), 10)
+		labels := []string{slot, queueID, workerID, b.Interface}
+		ch <- prometheus.MustNewConstMetric(c.bindingUMEMTotalFrames,
+			prometheus.GaugeValue, float64(b.UmemTotalFrames), labels...)
+		ch <- prometheus.MustNewConstMetric(c.bindingUMEMInflightFrames,
+			prometheus.GaugeValue, float64(b.UmemInflightFrames), labels...)
+		ch <- prometheus.MustNewConstMetric(c.bindingPendingFillFrames,
+			prometheus.GaugeValue, float64(b.DebugPendingFillFrames), labels...)
+		ch <- prometheus.MustNewConstMetric(c.bindingPendingTXPreparedFrames,
+			prometheus.GaugeValue, float64(b.DebugPendingTXPrepared), labels...)
+		ch <- prometheus.MustNewConstMetric(c.bindingPendingTXLocalFrames,
+			prometheus.GaugeValue, float64(b.DebugPendingTXLocal), labels...)
+		ch <- prometheus.MustNewConstMetric(c.bindingPendingRecycleFrames,
+			prometheus.GaugeValue, float64(b.DebugInFlightRecycles), labels...)
+	}
+}

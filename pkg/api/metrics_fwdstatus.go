@@ -1,9 +1,11 @@
 package api
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/fwdstatus"
 )
@@ -32,31 +34,38 @@ func (d forwardingMetricsDP) GetMapStats() []fwdstatus.MapStats {
 
 type forwardingMetricsUserspaceDP struct {
 	forwardingMetricsDP
-	status interface {
-		Status() (userspace.ProcessStatus, error)
-	}
+	status *userspace.ProcessStatus
 }
 
 func (d forwardingMetricsUserspaceDP) Status() (userspace.ProcessStatus, error) {
-	return d.status.Status()
+	if d.status == nil {
+		return userspace.ProcessStatus{}, errors.New("userspace status unavailable")
+	}
+	return *d.status, nil
 }
 
-func (c *xpfCollector) collectFwdStatus(ch chan<- prometheus.Metric) {
+func (c *xpfCollector) collectFwdStatus(
+	ch chan<- prometheus.Metric,
+	dp apiRuntimeDataPlane,
+	userspaceStatus *userspace.ProcessStatus,
+) {
 	if c.srv == nil || c.srv.fwdSampler == nil {
 		return
 	}
-	var dp fwdstatus.DataPlaneAccessor
-	if c.srv.dp != nil {
-		base := forwardingMetricsDP{dp: c.srv.dp}
-		dp = base
-		if status, ok := c.srv.dp.(interface {
+	var buildDP fwdstatus.DataPlaneAccessor
+	if dp != nil && dp.IsLoaded() {
+		base := forwardingMetricsDP{dp: dp}
+		buildDP = base
+		if _, ok := dataplane.Unwrap(dp).(interface {
 			Status() (userspace.ProcessStatus, error)
 		}); ok {
-			dp = forwardingMetricsUserspaceDP{forwardingMetricsDP: base, status: status}
+			// Supply the same status already fetched for all userspace
+			// metric families. Do not issue another status RPC here.
+			buildDP = forwardingMetricsUserspaceDP{forwardingMetricsDP: base, status: userspaceStatus}
 		}
 	}
 	snap := c.srv.fwdSampler.Snapshot()
-	fs, err := fwdstatus.Build(dp, fwdstatus.OSProcReader{}, c.srv.startTime, snap)
+	fs, err := fwdstatus.Build(buildDP, fwdstatus.OSProcReader{}, c.srv.startTime, snap)
 	if err != nil {
 		return
 	}
