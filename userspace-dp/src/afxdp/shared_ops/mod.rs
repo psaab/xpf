@@ -17,3 +17,5 @@ mod store;
 pub(super) use lookup::*;
 pub(super) use reverse_synth::*;
 pub(super) use store::*;
+#[cfg(test)]
+pub(in crate::afxdp) use store::{nat_ambiguity_lock_stats, reset_nat_ambiguity_lock_stats};
