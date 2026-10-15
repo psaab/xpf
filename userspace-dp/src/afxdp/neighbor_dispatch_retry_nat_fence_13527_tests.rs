@@ -47,7 +47,12 @@ fn egress_entry(mtu: usize) -> EgressInterface {
 }
 
 /// Park `frame` on bindings[0], run one retry sweep, return the bindings.
-fn flush(forwarding: &ForwardingState, frame: &[u8], meta: UserspaceDpMeta) -> Vec<BindingWorker> {
+fn flush(
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    flow_key: Option<SessionKey>,
+) -> Vec<BindingWorker> {
     let mut bindings = vec![
         BindingWorker::new_for_mirror_test(0, 0, 11, 0),
         BindingWorker::new_for_mirror_test(1, 0, 22, 0),
@@ -74,7 +79,7 @@ fn flush(forwarding: &ForwardingState, frame: &[u8], meta: UserspaceDpMeta) -> V
             meta,
             fabric_ingress_zone: None,
             decision: decision(),
-            flow_key: None,
+            flow_key,
             queued_ns,
             probe_attempts: 0,
         },
@@ -234,7 +239,7 @@ fn retry_flowless_nat_populates_decision_before_ipsec_fence_13527() {
 
     let frame = non_first_udp_fragment(src, dst);
     let meta = meta_for(src, dst, PROTO_UDP, frame.len());
-    let bindings = flush(&forwarding, &frame, meta);
+    let bindings = flush(&forwarding, &frame, meta, None);
 
     assert!(
         bindings[0].pending_neigh.is_empty(),
@@ -268,10 +273,20 @@ fn retry_pending_neighbor_segments_oversized_tcp_13527() {
     let dst = Ipv4Addr::new(10, 0, 0, 2);
     let mut forwarding = ForwardingState::default();
     forwarding.egress.insert(EGRESS, egress_entry(1400));
-
     let frame = oversized_tcp(src, dst);
     let meta = meta_for(src, dst, PROTO_TCP, frame.len());
-    let bindings = flush(&forwarding, &frame, meta);
+
+    let flow_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(src),
+        dst_ip: IpAddr::V4(dst),
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let bindings = flush(&forwarding, &frame, meta, Some(flow_key.clone()));
 
     assert!(
         bindings[0].pending_neigh.is_empty(),
@@ -282,6 +297,12 @@ fn retry_pending_neighbor_segments_oversized_tcp_13527() {
         locals.len(),
         2,
         "oversized replay must emit two MSS-sized segments, not the whole frame"
+    );
+    assert!(
+        locals
+            .iter()
+            .all(|req| req.flow_key.as_ref() == Some(&flow_key)),
+        "every TCP segment retains the flow key for session accounting"
     );
     for req in locals {
         assert!(
