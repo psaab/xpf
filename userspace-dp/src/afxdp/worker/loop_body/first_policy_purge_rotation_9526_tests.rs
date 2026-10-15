@@ -63,6 +63,8 @@ fn policy(rules: &[crate::PolicyRuleSnapshot]) -> PolicyState {
         ("lan".to_string(), 1u16),
         ("wan".to_string(), 2u16),
         ("dmz".to_string(), 3u16),
+        ("lan-v2".to_string(), 4u16),
+        ("wan-v2".to_string(), 5u16),
     ]
     .into_iter()
     .collect();
@@ -2207,6 +2209,89 @@ fn extensive_rematch_still_purges_icmp_without_ancestry_12859() {
         !shared.contains_key(&forward_key) && !shared.contains_key(&reverse_key),
         "without validated ancestry, type-dependent ICMP must retain the fail-closed purge"
     );
+    drop(shared);
+    harness.shutdown();
+}
+#[test]
+fn extensive_rematch_declined_icmp_rebinds_renamed_zones_13655() {
+    let forward_key = SessionKey {
+        protocol: crate::ip_proto::PROTO_ICMP,
+        ..key(40205)
+    };
+    let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
+    let counter = policy(&[rule("p-first", 0), rule("p-web", 1)])
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose p-first's counter");
+    let mut forward = entry(forward_key.clone(), false, Some(counter.clone()));
+    forward.protocol = crate::ip_proto::PROTO_ICMP;
+    let mut reverse = entry(reverse_key.clone(), true, Some(counter));
+    reverse.protocol = crate::ip_proto::PROTO_ICMP;
+    let harness = RotationHarness::start_with_extra(&[forward, reverse]);
+
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->wan/p-first".to_string(),
+        destination_rule_id: "lan-v2->wan-v2/p-ping".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "wan".to_string(),
+        destination_from_zone: "lan-v2".to_string(),
+        destination_to_zone: "wan-v2".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: 2,
+        destination_from_zone_id: 4,
+        destination_to_zone_id: 5,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    let mut ping = rule_with_zones("p-ping", 0, "lan-v2", "wan-v2");
+    ping.applications = vec!["junos-icmp-ping".to_string()];
+    ping.application_terms = vec![crate::PolicyApplicationSnapshot {
+        name: "junos-icmp-ping".to_string(),
+        protocol: "icmp".to_string(),
+        source_port: String::new(),
+        destination_port: String::new(),
+        icmp_type: Some(8),
+        icmp_code: None,
+        inactivity_timeout: None,
+    }];
+    let (base_view, base_forwarding) =
+        view_with_policy_metadata(2, &[ping, rule("p-web", 1)], true, vec![ancestry]);
+    let mut forwarding = (*base_forwarding).clone();
+    forwarding.zone_name_to_id.remove("lan");
+    forwarding.zone_name_to_id.remove("wan");
+    forwarding.zone_id_to_name.remove(&1);
+    forwarding.zone_id_to_name.remove(&2);
+    forwarding.zone_name_to_id.insert("lan-v2".to_string(), 4);
+    forwarding.zone_name_to_id.insert("wan-v2".to_string(), 5);
+    forwarding.zone_id_to_name.insert(4, "lan-v2".to_string());
+    forwarding.zone_id_to_name.insert(5, "wan-v2".to_string());
+    forwarding.ifindex_to_zone_id.insert(11, 4);
+    forwarding.ifindex_to_zone_id.insert(12, 5);
+    harness.channel.publish(Arc::new(RuntimeView::new(
+        base_view.validation(),
+        Arc::new(forwarding),
+    )));
+    wait_for_iterations(&harness.heartbeat, 3);
+
+    let shared = harness.synced.lock().expect("shared synced map");
+    for (pair_key, ingress, egress) in [(&forward_key, 4, 5), (&reverse_key, 5, 4)] {
+        let stored = shared.get(pair_key).expect(
+            "#13655: declined ICMP pair must survive a simultaneous policy and zone rename",
+        );
+        assert_eq!(stored.metadata.ingress_zone, ingress);
+        assert_eq!(stored.metadata.egress_zone, egress);
+        assert_eq!(
+            stored
+                .metadata
+                .policy_counter
+                .as_ref()
+                .expect("old admission identity must remain for packet-scoped adjudication")
+                .rule_id(),
+            "lan->wan/p-first",
+        );
+    }
     drop(shared);
     harness.shutdown();
 }
