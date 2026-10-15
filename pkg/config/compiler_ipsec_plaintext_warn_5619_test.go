@@ -438,19 +438,14 @@ func TestPlaintextWarningOmitsTheUnzonedCaveatWhenAllZoned(t *testing.T) {
 	}
 }
 
-// TestPlaintextWarningMatchesZoneAcrossSpellings is the bare-`st0` check.
-//
-// `bind-interface st0` and a zone on `st0.0` describe the SAME xfrmi — both
-// if_id 1 (pkg/routing/xfrm.go) — but they are different strings. Matching the
-// zone literally would report a ZONED tunnel as unzoned, dropping the
-// escalation in exactly the case that earns it: where the operator HAS been
-// told something specific and untrue. Same spelling-mismatch class as the
-// #5619 netdev-name bug, so it is joined the same way: on if_id.
+// TestPlaintextWarningMatchesZoneAcrossSpellings is the secure-tunnel spelling
+// check. A bare bind and an explicit unit zone ref describe the same xfrmi,
+// while a dotted bind does not create a distinct bare device; that invalid
+// dotted-bind/bare-zone combination is covered by #13110's strict-gate test.
 func TestPlaintextWarningMatchesZoneAcrossSpellings(t *testing.T) {
 	for _, tc := range []struct{ bind, zoneRef string }{
 		{"st0.0", "st0.0"},
 		{"st0", "st0.0"},   // bare bind, dotted zone ref
-		{"st0.0", "st0"},   // dotted bind, bare zone ref
 		{"st0", "st0"},     // both bare
 		{"st1.7", "st1.7"}, // non-zero unit
 	} {

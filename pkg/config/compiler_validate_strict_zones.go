@@ -636,12 +636,9 @@ func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 				continue
 			}
 			ref := cfg.SplitInterfaceUnitRef(ifName)
-			// Preserve the zone-defined gate's first-dot base identity. The
-			// splitter below is used for unit existence, where declared dotted
-			// interface names must outrank suffix parsing (#9821).
-			base := ifName
-			if idx := strings.Index(ifName, "."); idx > 0 {
-				base = ifName[:idx]
+			base := ref.Base
+			if base == "" {
+				base = ifName
 			}
 			if !known[base] {
 				return fmt.Errorf(
@@ -653,6 +650,24 @@ func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 						"unconfigured interface DOWN, so the zone member silently "+
 						"carries no traffic)",
 					zoneName, ifName)
+			}
+			// A dotted bind materializes only its authored netdev (for
+			// example, bind-interface st0.0 creates st0.0, not bare st0).
+			// Do not let the base admitted above make that distinct bare
+			// reference appear configured. Bare binds own bare refs, and lo0
+			// is always present even without an authored interfaces stanza.
+			if !ref.HasUnit && base != "lo0" && cfg.Interfaces.Interfaces[base] == nil {
+				if _, bound := cfg.SecureTunnelNetdevForRef(ifName); !bound {
+					return fmt.Errorf(
+						"security zone %q references interface %q, which is not "+
+							"defined under `interfaces` (nor materialized as the lo0 "+
+							"loopback or an IPsec secure-tunnel bind-interface); Junos "+
+							"rejects a zone member that names no configured interface — "+
+							"define the interface or fix the typo (the daemon brings an "+
+							"unconfigured interface DOWN, so the zone member silently "+
+							"carries no traffic)",
+						zoneName, ifName)
+				}
 			}
 			if ref.HasUnit && ref.UnitTok != "" {
 				unitNum, _, err := CanonicalLogicalUnit(ref.UnitTok)
