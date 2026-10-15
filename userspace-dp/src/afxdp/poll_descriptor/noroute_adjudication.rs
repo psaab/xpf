@@ -47,6 +47,21 @@ pub(super) struct NoRoutePolicyAdjudication {
     pub(super) denial: Option<crate::policy::PolicyEvaluationResult>,
 }
 
+/// Protocol identity passed to the NoRoute policy gate. Flow-backed
+/// sessions retain their established tuple; flowless packets must derive
+/// protocol from the actual L3 frame, not shim `meta.protocol`.
+pub(super) fn noroute_policy_protocol(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    flow_backed: bool,
+) -> u8 {
+    if flow_backed {
+        meta.protocol
+    } else {
+        crate::afxdp::frame::flowless_effective_protocol(frame, meta)
+    }
+}
+
 /// #12906: adjudicate a `NoRoute` frame's zone-pair policy on the
 /// owner-RG-gated zone pair and the #2345 post-translation destination
 /// tuple.

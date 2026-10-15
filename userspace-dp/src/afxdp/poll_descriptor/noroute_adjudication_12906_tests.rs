@@ -579,3 +579,183 @@ fn flowless_ports_stay_fail_closed_through_the_adjudication_12906() {
         5150
     );
 }
+
+// #13645 (D4-10): the NoRoute arm passes the frame-derived effective
+// protocol, not raw `meta.protocol`. The arm itself needs a live binding,
+// so this pins the wiring the same way the #11338 PBR cells pin theirs:
+// flowless_effective_protocol(frame, meta) under the AH and fragment
+// shapes, then the pure adjudication must deny on an effective-protocol
+// term. Pre-fix the arm passed meta.protocol (inner TCP stamped 6, or
+// sentinel 255), so an `ah`/`udp`-only deny never fired and the frame
+// was delegated to the kernel FIB.
+fn ah_deny_snapshot_13645() -> crate::ConfigSnapshot {
+    let mut snap = nat_snapshot();
+    snap.default_policy = "permit".to_string();
+    snap.policies = vec![crate::PolicyRuleSnapshot {
+        name: "deny-ah".to_string(),
+        policy_id: 6464,
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["ah".to_string()],
+        application_terms: vec![crate::PolicyApplicationSnapshot {
+            name: "ah".to_string(),
+            protocol: "ah".to_string(),
+            ..Default::default()
+        }],
+        action: "deny".to_string(),
+        ..Default::default()
+    }];
+    snap
+}
+
+/// Minimal v6+AH+TCP frame (as v6_ah_tcp_frame_10729): eth(14) +
+/// IPv6(40, nexthdr=51) + AH(12: next=6) with real src/dst so the
+/// frame-derived identity matches the lan->wan pair.
+fn v6_ah_frame_13645() -> Vec<u8> {
+    let mut frame = vec![0u8; 14 + 40 + 12 + 20];
+    frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+    frame[14] = 0x60;
+    frame[14 + 4..14 + 6].copy_from_slice(&((12u16 + 20u16).to_be_bytes()));
+    frame[14 + 6] = 51;
+    frame[14 + 7] = 64;
+    frame[14 + 8..14 + 24].copy_from_slice(
+        &"2001:db8:61::100"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
+    frame[14 + 24..14 + 40].copy_from_slice(
+        &"2001:db8:82::50"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
+    frame[14 + 40] = 6;
+    frame[14 + 41] = 1;
+    frame
+}
+
+fn v6_flow_13645(src: &str, dst: &str) -> SessionFlow {
+    let src_ip = src.parse::<IpAddr>().expect("src");
+    let dst_ip = dst.parse::<IpAddr>().expect("dst");
+    SessionFlow {
+        src_ip,
+        dst_ip,
+        forward_key: crate::session::SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: 51,
+            src_ip,
+            dst_ip,
+            src_port: 40000,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    }
+}
+
+#[test]
+fn noroute_uses_flowless_effective_protocol_not_raw_meta_13645() {
+    // (a) AH shape: raw stamped protocol is the inner TCP (6); the
+    // frame-derived effective protocol is AH (51). The NoRoute arm must
+    // adjudicate on 51 so an `ah` deny fires exactly as on the
+    // ForwardCandidate / MissingNeighbor flowless twins (mod.rs flowless
+    // arms pass flowless_effective_protocol).
+    let ah_frame = v6_ah_frame_13645();
+    let ah_meta = crate::afxdp::types::UserspaceDpMeta {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        l3_offset: 14,
+        l4_offset: 14 + 40 + 12,
+        ..crate::afxdp::types::UserspaceDpMeta::default()
+    };
+    let eff_ah = noroute_policy_protocol(&ah_frame, ah_meta, false);
+    assert_eq!(
+        eff_ah,
+        crate::ip_proto::PROTO_AH,
+        "v6+AH must evaluate as proto 51, not the stamped inner protocol"
+    );
+    assert_eq!(
+        noroute_policy_protocol(&ah_frame, ah_meta, true),
+        ah_meta.protocol,
+        "flow-backed adjudication must retain its established protocol identity"
+    );
+
+    // (b) Native non-first fragment shape: raw stamped protocol is the
+    // no-L4 sentinel (255); the effective protocol is the Fragment
+    // header's Next Header (UDP, as pinned by the #11338 cell).
+    let mut frag_frame = crate::afxdp::tests_support::eth_ipv6_frag_frame(0x0001, &[0; 8]);
+    frag_frame[54] = crate::ip_proto::PROTO_UDP;
+    let frag_meta = crate::afxdp::types::UserspaceDpMeta {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        l3_offset: 14,
+        l4_offset: 62,
+        ..crate::afxdp::types::UserspaceDpMeta::default()
+    };
+    let eff_frag = noroute_policy_protocol(&frag_frame, frag_meta, false);
+    assert_eq!(
+        eff_frag,
+        crate::ip_proto::PROTO_UDP,
+        "a non-first fragment must evaluate as its Fragment.Next Header, not the sentinel"
+    );
+
+    // The verdict half under the effective identity: an `ah`-only
+    // protocol deny on a default-permit box fires when the adjudication
+    // is fed the EFFECTIVE protocol. Fed the raw stamp (6) it would miss
+    // and delegate — that raw feed is exactly what the #13645 arm fix
+    // removes. The pure protocol selector is called by the actual NoRoute
+    // arm and pinned above for both shim mismatch classes.
+    let state = build_forwarding_state(&ah_deny_snapshot_13645());
+    let now_ns = crate::afxdp::monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let flow = v6_flow_13645("2001:db8:61::100", "2001:db8:82::50");
+    let adj = noroute_policy_adjudication(
+        &state,
+        &BTreeMap::new(),
+        now_secs,
+        24,
+        None,
+        no_route_retaining_wan_egress(),
+        crate::nat::NatDecision::default(),
+        false,
+        &flow,
+        eff_ah,
+        false,
+        None,
+        86,
+        now_ns,
+    );
+    assert_eq!(
+        adj.denial
+            .expect("the AH deny must fire for a v6+AH NoRoute frame under the effective proto")
+            .policy_id,
+        6464
+    );
+    // Refutation half: the RAW stamp (6) misses the ah term and the
+    // default permits — proving the verdict is protocol-identity
+    // dependent, i.e. passing raw meta.protocol is a real bypass.
+    let raw = noroute_policy_adjudication(
+        &state,
+        &BTreeMap::new(),
+        now_secs,
+        24,
+        None,
+        no_route_retaining_wan_egress(),
+        crate::nat::NatDecision::default(),
+        false,
+        &flow,
+        6,
+        false,
+        None,
+        86,
+        now_ns,
+    );
+    assert!(
+        raw.denial.is_none(),
+        "fixture premise: the raw inner-TCP stamp misses the ah deny, so the \
+         effective-protocol feed is load-bearing"
+    );
+}

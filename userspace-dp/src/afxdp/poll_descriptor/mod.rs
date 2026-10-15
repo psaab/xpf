@@ -95,7 +95,7 @@ use host_inbound_policy::{
     session_host_bound_policy_dst,
 };
 use nat64_icmp_error::try_translate_nat64_icmp_error;
-use noroute_adjudication::noroute_policy_adjudication;
+use noroute_adjudication::{noroute_policy_adjudication, noroute_policy_protocol};
 use rx_telemetry::record_rx_descriptor_telemetry;
 use session_admission::{new_flow_session_limit_drop, strict_syn_check_drops_new_flow};
 use session_hit_authority::{
@@ -8556,7 +8556,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     decision.nat,
                                     flow.is_some(),
                                     adj_flow,
-                                    meta.protocol,
+                                    noroute_policy_protocol(
+                                        packet_frame,
+                                        meta,
+                                        flow.is_some(),
+                                    ),
                                     l4_present,
                                     policy_icmp,
                                     desc.len as u64,
