@@ -616,6 +616,16 @@ func (es *EventStream) readLoop(ctx context.Context) {
 		length := binary.LittleEndian.Uint32(hdr[0:4])
 		typ := hdr[4]
 		seq := binary.LittleEndian.Uint64(hdr[8:16])
+		// Session frames establish correctness-critical state. Detect a gap
+		// from the header before refusing an oversized or undecodable frame:
+		// those refusal paths may advance the watermark to seq, which would
+		// otherwise hide the missing session events and bypass the unconditional
+		// resync required for a session-sync gap.
+		if (typ == EventTypeSessionOpen || typ == EventTypeSessionClose || typ == EventTypeSessionUpdate) &&
+			seq > prevSeq+1 && prevSeq > 0 {
+			es.handleSessionSyncGap(prevSeq+1, seq)
+			return
+		}
 
 		// Sanity check payload length (hard cap: 1024 bytes). An oversized
 		// declared length is a corrupt / framing-desynced frame. Do NOT
@@ -666,16 +676,6 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			} else {
 				delta.Event = "open" // updates treated as opens for sync
 			}
-			// #2874: a gap on a correctness-critical session-sync frame is a
-			// HARD sync break — the helper's lossy producer dropped a session
-			// open/close (or the replay window was trimmed), so the peer's
-			// session view may have silently diverged. Force a full bulk
-			// re-export and reconnect from the last CONTIGUOUS ack instead of
-			// dispatching this frame and cumulatively ACKing past the hole.
-			if seq > prevSeq+1 && prevSeq > 0 {
-				es.handleSessionSyncGap(prevSeq+1, seq)
-				return
-			}
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			if !es.dispatchOrQueueSessionFrame(typ, seq, delta) {
@@ -696,12 +696,6 @@ func (es *EventStream) readLoop(ctx context.Context) {
 				continue
 			}
 			delta.Event = "close"
-			// #2874: see the SessionOpen/Update case — a session-sync gap forces
-			// a resync rather than ACKing past the missing close.
-			if seq > prevSeq+1 && prevSeq > 0 {
-				es.handleSessionSyncGap(prevSeq+1, seq)
-				return
-			}
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			if !es.dispatchOrQueueSessionFrame(typ, seq, delta) {
