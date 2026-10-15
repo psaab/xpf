@@ -781,6 +781,12 @@ supply {"action":"reboot"}
 
 So the body is drained **inside the gate**, between two adjudications:
 
+Before the drain, pass 1 also checks operational command regexes for mutations
+whose canonical command does not depend on the request body. A matching denial
+therefore cannot make the gate buffer input first. Request-decoded commands
+such as `POST /api/v1/system/action` remain in pass 2 and are checked against
+the buffered bytes the handler receives.
+
 | step | why it is where it is |
 |---|---|
 | **pass 1** | Fail-fast, and it comes first for *availability*, not authorization. Buffering before deciding would let any caller that can open a socket park daemon memory behind a 30s read timeout. With the check first, only a principal already authorized for **this** route can make the daemon hold a buffer. That is a necessary bound and not a sufficient one — the cheapest permission on the surface is `PermView`, held by a `read-only` shell account — so the drain is bounded again below. |

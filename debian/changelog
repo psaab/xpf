@@ -1,4 +1,6 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Resolve REST operational command regexes before reading request bodies and
+    reject body-independent command denials before buffering (#13249).
 
   * Preserve `to-zone junos-host` application's configured inactivity-timeout
     on LocalDelivery sessions. Matched host-local permit sessions now age on

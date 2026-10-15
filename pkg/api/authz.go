@@ -1152,6 +1152,16 @@ func (s *Server) mutationAuthzGuard(next http.Handler) http.Handler {
 			return
 		}
 
+		// #13249: evaluate body-independent operational commands before
+		// buffering. Request-decoded commands (notably system/action) must
+		// wait until their body has been buffered.
+		if !isRequestDecodedRoute9952(route) {
+			if err := s.authorizeRESTCommand(r, cfg, p); err != nil {
+				deny(p, err)
+				return
+			}
+		}
+
 		// The drain is bounded in every dimension a caller controls: this
 		// route's own ceiling, the aggregate across every request in flight,
 		// and — because an aggregate is a shared resource and a shared resource
