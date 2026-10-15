@@ -397,29 +397,6 @@ func (s *SessionSync) SendFence() error {
 	return nil
 }
 
-// SendPrepareActivation tells the peer to pre-install neighbor entries and
-// warm its ARP/NDP cache for the given redundancy group.
-func (s *SessionSync) SendPrepareActivation(rgID int) {
-	if rgID < 0 || rgID > 255 {
-		slog.Warn("cluster sync: prepare_activation rgID out of range", "rg", rgID)
-		return
-	}
-	conn := s.getActiveConn()
-	if conn == nil {
-		return
-	}
-	payload := []byte{byte(rgID)}
-	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgPrepareActivation, payload)
-	s.writeMu.Unlock()
-	if err != nil {
-		slog.Debug("cluster sync: prepare_activation send error", "rg", rgID, "err", err)
-		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
-		return
-	}
-	slog.Info("cluster sync: prepare_activation sent to peer", "rg", rgID)
-}
 func (s *SessionSync) handleRemoteFailover(conn net.Conn, rgID int, reqID uint64) {
 	if s.OnRemoteFailover == nil {
 		s.sendFailoverResult(conn, syncMsgFailoverAck, rgID, reqID, failoverAckFailed, "no remote failover handler")
