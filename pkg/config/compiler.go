@@ -482,6 +482,10 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if zoneIDErr != nil {
 		return nil, zoneIDErr
 	}
+	// #13095: thread the runtime zone-name union into compileExpanded so it
+	// stamps cfg.ZoneQuarantineNames BEFORE the zone gates read the
+	// quarantine set (see the stamp site in compileExpanded).
+	opts.zoneQuarantineNames = zoneQuarantineNames
 
 	// #3855: stable routing-instance table-id collision gate. Like the zone gate
 	// above it runs on the PRE-expansion tree and unions the instance names each
@@ -681,7 +685,6 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if err != nil {
 		return nil, err
 	}
-	cfg.ZoneQuarantineNames = zoneQuarantineNames
 	if usedNodeFallback {
 		cfg.Warnings = append(cfg.Warnings, `apply-groups "${node}" resolved using default node0 context during generic compile`)
 	}
@@ -848,6 +851,10 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	if zoneIDErr != nil {
 		return nil, zoneIDErr
 	}
+	// #13095: thread the runtime zone-name union into compileExpanded so it
+	// stamps cfg.ZoneQuarantineNames BEFORE the zone gates read the
+	// quarantine set (see the stamp site in compileExpanded).
+	opts.zoneQuarantineNames = zoneQuarantineNames
 
 	// #3855: stable routing-instance table-id collision gate — see
 	// compileConfigWithOpts. Union of the names each compile path's group
@@ -1017,7 +1024,6 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	if err != nil {
 		return nil, err
 	}
-	cfg.ZoneQuarantineNames = zoneQuarantineNames
 
 	// Mark source-action conflicts and widening folds after compilation, when
 	// the LenientContentDropped flag lives on the compiled policy.
@@ -1111,6 +1117,18 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 		cfg.Applications.CollidingNames = applicationNameCollisions
 	}
 	cfg.Warnings = append(cfg.Warnings, preWalkWarnings...)
+	// #13095: stamp the pre-expansion three-view runtime zone-name union
+	// (#10248, validateZoneIDCollisionAST via opts) BEFORE any gate reads the
+	// quarantine set. zoneInterfaceMembershipConflicts,
+	// ZoneAuthoredBoundSecureTunnelUnitRefs, the mgmt-zone advisory and the
+	// host-inbound warn builders all derive exclusions from
+	// ZoneQuarantineExclusionsForConfig(cfg); stamping only AFTER
+	// compileExpanded returned (the pre-#13095 order) left every in-compile
+	// consumer on the local-zone fallback, so a zone quarantined cluster-wide
+	// by a peer-node StableZoneID collision still contested interfaces
+	// against healthy zones and cascaded QuarantinedZoneInterfaceKeys onto
+	// them. The wrappers no longer re-stamp after the return.
+	cfg.ZoneQuarantineNames = opts.zoneQuarantineNames
 
 	// P4 (#4406 step 2): section-compile dispatch. Extracted into
 	// compileSections (compiler_dispatch.go) — the ordered per-section

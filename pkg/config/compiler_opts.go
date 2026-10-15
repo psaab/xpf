@@ -3147,6 +3147,15 @@ type compileOpts struct {
 	// for the full rationale and guards.
 	nodeAware   bool
 	stampNodeID int
+	// zoneQuarantineNames (#13095) carries the pre-expansion three-view
+	// runtime zone-name union validateZoneIDCollisionAST computed, so
+	// compileExpanded can stamp it onto cfg.ZoneQuarantineNames BEFORE the
+	// zone-membership / secure-tunnel / advisory gates read the quarantine
+	// set. Both compile wrappers set it right after the collision gate; a
+	// direct compileExpanded caller that leaves it nil stamps the empty set
+	// and ZoneQuarantineNamesForConfig falls back to cfg's own zone keys,
+	// which is the pre-#13095 behavior.
+	zoneQuarantineNames []string
 }
 
 // lenientCompileOpts returns a compileOpts with every tolerant-path

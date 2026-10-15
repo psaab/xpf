@@ -266,7 +266,13 @@ func zoneInterfaceMembershipConflicts(cfg *Config) []zoneInterfaceMembershipConf
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
-	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	// #13095: exclusions come from the recorded runtime zone-name union
+	// (ZoneQuarantineNamesForConfig), not the local zone map alone — a zone
+	// quarantined cluster-wide by a peer-node StableZoneID collision (#10248)
+	// must not keep contesting its interfaces against healthy zones here, or
+	// QuarantinedZoneInterfaceKeys strips them from the healthy zone too.
+	// With no recorded union this is byte-identical to the local-zone set.
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 	for _, zoneName := range zoneNames {
 		if _, excluded := excludedZones[zoneName]; excluded {
 			continue
@@ -332,7 +338,10 @@ func ZoneAuthoredBoundSecureTunnelUnitRefs(cfg *Config) map[string]struct{} {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
-	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	// #13095: same union-derived exclusion set as
+	// zoneInterfaceMembershipConflicts above — the authorefs view must not
+	// credit a cluster-quarantined zone with bound secure-tunnel units.
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 	quarantinedRefs := QuarantinedZoneInterfaceKeys(cfg)
 	refs := make(map[string]struct{})
 	for _, zoneName := range zoneNames {

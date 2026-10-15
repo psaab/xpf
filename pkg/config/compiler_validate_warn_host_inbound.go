@@ -58,7 +58,10 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 		znames = append(znames, name)
 	}
 	sort.Strings(znames)
-	excludedZones := ZoneQuarantineExclusions(znames)
+	// #13095: union-derived exclusion set (ZoneQuarantineNamesForConfig) so
+	// this resolved view matches the dataplane's, which already uses the
+	// recorded runtime zone-name set.
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zname := range znames {
 		if _, excluded := excludedZones[zname]; excluded {
