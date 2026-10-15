@@ -303,18 +303,6 @@ func (s *SocketReinjectSubmitter) AnnounceReinject(runID string, generation, per
 	if s == nil {
 		return errors.New("nfqueue: nil reinject socket client")
 	}
-	if len(epochs) > reinjectMaxQueues {
-		return fmt.Errorf("nfqueue: reinject authority has %d queues, cap %d", len(epochs), reinjectMaxQueues)
-	}
-	if !utf8.ValidString(runID) || len(runID) == 0 || len(runID) > reinjectMaxRunID {
-		return errors.New("nfqueue: reinject authority requires a bounded UTF-8 run id")
-	}
-	if generation == 0 {
-		return errors.New("nfqueue: reinject authority requires generation")
-	}
-	if permitOpen && permitEpoch == 0 {
-		return errors.New("nfqueue: open reinject authority requires permit epoch")
-	}
 	payload, err := encodeAnnounce(runID, generation, permitEpoch, permitOpen, epochs)
 	if err != nil {
 		return err
