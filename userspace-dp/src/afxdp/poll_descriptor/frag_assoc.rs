@@ -328,6 +328,45 @@ pub(super) fn same_family_or_plain_consult_forward_fragment_assoc(
     Some(decision)
 }
 
+/// publish the same-family association now; retry only changes its L2
+/// resolution and does not revisit the session-install commit site.
+#[inline]
+pub(super) fn missing_neighbor_install_fragment_assoc(
+    forwarding: &ForwardingState,
+    l3_packet: &[u8],
+    addr_family: i32,
+    authority: crate::fragment_assoc::FragAuthority,
+    decision: &SessionDecision,
+    admitting_session: &crate::session::SessionKey,
+    admitting_session_id: u64,
+    now_ns: u64,
+) -> bool {
+    let plain = decision.nat == crate::nat::NatDecision::default();
+    let same_family_address_rewrite =
+        decision.nat.rewrite_src.is_some() || decision.nat.rewrite_dst.is_some();
+    if decision.nat.nat64
+        || (!plain && !same_family_address_rewrite)
+        || decision.resolution.disposition != ForwardingDisposition::MissingNeighbor
+        || decision.resolution.neighbor_mac.is_some()
+    {
+        return false;
+    }
+    let Some(key) = crate::fragment_assoc::first_fragment_key(l3_packet, addr_family, authority)
+    else {
+        return false;
+    };
+    forwarding.nat64.frag_assoc.install_with_session(
+        key,
+        *decision,
+        None,
+        admitting_session.clone(),
+        admitting_session_id,
+        now_ns,
+        forwarding.nat64.build_generation,
+        crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, decision.resolution),
+    )
+}
+
 #[inline]
 pub(in crate::afxdp) fn same_family_nat_configured(forwarding: &ForwardingState) -> bool {
     !forwarding.source_nat_rules.is_empty()
