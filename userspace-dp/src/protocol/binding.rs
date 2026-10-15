@@ -54,7 +54,7 @@ pub struct WorkerRuntimeStatus {
     #[serde(
         rename = "session_volume_high_water",
         default,
-        skip_serializing_if = "is_zero_u64"
+        skip_serializing_if = "crate::protocol::u64_is_zero"
     )]
     pub session_volume_high_water: u64,
     #[serde(rename = "idle_loops", default)]
@@ -1584,11 +1584,4 @@ pub(crate) struct SessionDeltaInfo {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
     #[serde(rename = "purge_retirement", default)]
     pub purge_retirement: bool,
-}
-
-/// #7919: `skip_serializing_if` predicate — keeps a never-observed
-/// high-water off the wire rather than emitting a 0 a reader could mistake for
-/// a measurement.
-fn is_zero_u64(v: &u64) -> bool {
-    *v == 0
 }

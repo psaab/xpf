@@ -477,6 +477,14 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         .iter()
         .map(|w| w.nat_reverse_key_collisions)
         .sum();
+    // #13198: preserve the cross-source subset separately; collapsing it
+    // into the total makes the metric unable to identify the leak shape.
+    state.status.nat_reverse_key_collisions_distinct_src = state
+        .status
+        .worker_runtime
+        .iter()
+        .map(|w| w.nat_reverse_key_collisions_distinct_src)
+        .sum();
     // #1861: aggregate the per-worker install-refusal trio.
     state.status.session_create_drops = state
         .status
@@ -903,6 +911,24 @@ mod status_wiring_tests {
         out.sort();
         out.dedup();
         out
+    }
+
+    #[test]
+    fn distinct_source_nat_collisions_are_aggregated() {
+        let source = code_only(&read("src/server/helpers/status.rs"));
+        let refresh_end = source
+            .find("pub(crate) fn restore_binding_arm_state")
+            .expect("status refresh boundary not found");
+        let refresh = squeeze(&source[..refresh_end]);
+        assert!(
+            refresh.contains(
+                "state.status.nat_reverse_key_collisions_distinct_src=state.status.worker_runtime.iter().map(|w|w.nat_reverse_key_collisions_distinct_src).sum();"
+            ),
+            "#13198: WorkerRuntimeStatus.nat_reverse_key_collisions_distinct_src \
+             is published per worker but never aggregated into ProcessStatus; \
+             xpf_userspace_session_nat_reverse_key_collisions_distinct_src_total \
+             therefore stays zero even when distinct-source collisions occur"
+        );
     }
 
     #[test]
