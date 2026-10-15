@@ -181,6 +181,43 @@ func TestParentHasVlanSubinterface_5268(t *testing.T) {
 	}
 }
 
+// ---- #13166 (D4-08): RETH member must follow RedundantParent ---------------
+
+func cfgRethMemberVlanSubif(memberVlan, rethVlan bool) *config.Config {
+	memberUnits := map[int]*config.InterfaceUnit{0: {Number: 0, VlanID: 0}}
+	if memberVlan {
+		memberUnits[50] = &config.InterfaceUnit{Number: 50, VlanID: 50}
+	}
+	rethUnits := map[int]*config.InterfaceUnit{0: {Number: 0, VlanID: 0}}
+	if rethVlan {
+		rethUnits[100] = &config.InterfaceUnit{Number: 100, VlanID: 100}
+	}
+	return &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", RedundantParent: "reth0", Units: memberUnits},
+		"reth0":    {Name: "reth0", VlanTagging: true, RedundancyGroup: 1, Units: rethUnits},
+	}}}
+}
+
+func TestParentHasVlanSubinterfaceRethMember_13166(t *testing.T) {
+	cfg := cfgRethMemberVlanSubif(false, true)
+	if !parentHasVlanSubinterface(cfg, "ge-0/0/0") {
+		t.Fatal("#13166: RETH member must inherit reth0 VLAN subinterfaces via RedundantParent")
+	}
+	if !parentHasVlanSubinterface(cfg, "reth0") {
+		t.Fatal("positive control: reth0 itself carries a VLAN subinterface")
+	}
+	if err := rxVlanOffloadActivationError(cfg, "ge-0/0/0", "ge-0-0-0", errors.New("ethtool failed")); err == nil {
+		t.Fatal("#13166: RETH member with reth VLAN subinterface and undisableable rxvlan MUST fail activation closed")
+	}
+	plain := cfgRethMemberVlanSubif(false, false)
+	if parentHasVlanSubinterface(plain, "ge-0/0/0") {
+		t.Fatal("#13166: plain RETH member with no VLAN units anywhere must NOT report a VLAN subinterface")
+	}
+	if err := rxVlanOffloadActivationError(plain, "ge-0/0/0", "ge-0-0-0", errors.New("ethtool failed")); err != nil {
+		t.Fatalf("#13166: plain RETH member must NOT fail activation, got %v", err)
+	}
+}
+
 // ---- THE FAIL-ON-REVERT: activation gate (#5268) --------------------------
 
 // FAIL-ON-REVERT: a parent that carries a configured VLAN subinterface whose
