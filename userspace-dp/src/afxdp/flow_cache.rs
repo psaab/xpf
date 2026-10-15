@@ -1150,10 +1150,10 @@ impl FlowCache {
         )
     }
 
-    /// #11285/#12273: an expired lease can change DENY/REJECT eligibility
-    /// independently of a cached verdict's admitting rule. Clear old-phase
-    /// entries once when scheduled DENY/REJECT rules may become eligible;
-    /// retain the existing targeted eviction otherwise.
+    /// Lease phase changes can alter eligibility independently of the entry's
+    /// admitting rule: expiry can enable scheduled DENY/REJECTs or suppress
+    /// scheduled PERMITs, while recovery can re-enable those permits and
+    /// invalidate fail-closed DENYs admitted during the outage.
     #[inline]
     pub(super) fn lookup_counted_with_scheduler_expiry(
         &mut self,
@@ -1166,15 +1166,35 @@ impl FlowCache {
         scheduler_expired: bool,
     ) -> Option<&FlowCacheEntry> {
         if scheduler_expired != self.scheduler_expired {
-            if scheduler_expired && policy.has_scheduled_deny_or_reject() {
-                // Lease expiry changes DENY/REJECT eligibility independently
-                // of the entry's admitting rule: a cached unscheduled PERMIT
-                // can sit below one of those rules. Evict the old-phase cache
-                // once so the session-hit path revalidates each flow; doing
-                // this only at the transition preserves the fast path for
-                // subsequent entries and avoids repeated misses while stale.
+            let phase_can_change_verdict = if scheduler_expired {
+                // Preserve the original expiry behavior: a scheduled
+                // DENY/REJECT becomes eligible independently of the
+                // admitting rule. Scheduled permits themselves are handled
+                // by the per-entry scheduler fence below.
+                policy.has_scheduled_deny_or_reject()
+            } else {
+                // On recovery, a scheduled PERMIT becomes eligible again;
+                // scheduled DENY/REJECT eligibility can also change back to
+                // its published window disposition. Cached fail-closed
+                // PolicyDenied results may therefore be stale.
+                policy.has_scheduled_permit() || policy.has_scheduled_deny_or_reject()
+            };
+            if phase_can_change_verdict {
                 for entry in &mut self.entries {
-                    if entry.take().is_some() {
+                    let invalid = if scheduler_expired {
+                        // Expiry can invalidate an old-phase forward verdict
+                        // below a newly eligible scheduled deny.
+                        entry.is_some()
+                    } else {
+                        // Recovery only needs to evict cached fail-closed
+                        // denials; unrelated forward cache entries are still
+                        // valid and should retain the ordinary fast path.
+                        entry.as_ref().is_some_and(|entry| {
+                            entry.decision.resolution.disposition
+                                == ForwardingDisposition::PolicyDenied
+                        })
+                    };
+                    if invalid && entry.take().is_some() {
                         self.evictions += 1;
                     }
                 }

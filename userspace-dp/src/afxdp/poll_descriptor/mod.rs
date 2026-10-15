@@ -6153,6 +6153,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     )
                                     .to_static(),
                                     ingress_zone_override,
+                                    now_ns,
                                     now_secs,
                                     worker_ctx,
                                 );
@@ -8375,6 +8376,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     )
                                     .to_static(),
                                     ingress_zone_override,
+                                    now_ns,
                                     now_secs,
                                     worker_ctx,
                                 );
@@ -8638,6 +8640,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             )
                                             .to_static(),
                                             ingress_zone_override,
+                                            now_ns,
                                             now_secs,
                                             worker_ctx,
                                         );
@@ -9078,6 +9081,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             )
                                             .to_static(),
                                             ingress_zone_override,
+                                            now_ns,
                                             now_secs,
                                             worker_ctx,
                                         );

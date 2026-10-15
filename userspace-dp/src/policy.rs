@@ -1865,6 +1865,16 @@ impl PolicyState {
                 && matches!(rule.action, PolicyAction::Deny | PolicyAction::Reject)
         })
     }
+
+    /// Whether an expired lease can make a scheduled permit eligible again.
+    /// Recovery must invalidate fail-closed cached denies produced while that
+    /// permit was suppressed.
+    #[inline]
+    pub(crate) fn has_scheduled_permit(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            !rule.scheduler_name.is_empty() && rule.action == PolicyAction::Permit
+        })
+    }
     /// #8618: may an ICMP-family zone-policy verdict for `protocol` depend on
     /// the PACKET's icmp type/code, rather than on the flow alone?
     ///

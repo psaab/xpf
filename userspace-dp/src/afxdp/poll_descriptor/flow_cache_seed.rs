@@ -267,9 +267,18 @@ pub(super) fn stage_flow_cache_deny_seed(
     policy_deny: Option<CachedPolicyDeny>,
     filter_match_extra: TermMatchExtra<'static>,
     ingress_zone_override: Option<u16>,
+    now_ns: u64,
     now_secs: u64,
     worker_ctx: &WorkerContext,
 ) {
+    // A scheduled DENY/REJECT is already enforced by the slow path while its
+    // lease is expired. Do not seed an entry that lookup will immediately
+    // evict on every packet (#13639 seed-then-evict cache thrash).
+    if worker_ctx.forwarding.policy.is_scheduler_policy_counter_idx(policy_counter_idx)
+        && worker_ctx.forwarding.policy.scheduler_rules_expired_at(now_ns)
+    {
+        return;
+    }
     let Some(flow) = flow else {
         return;
     };
