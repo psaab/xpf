@@ -566,6 +566,10 @@ func natOffAppReferenceBroken(cfg *config.Config, names []string) bool {
 		if _, ok := config.ResolveApplicationSet(name, cfg.Applications.ApplicationSets); !ok {
 			return true
 		}
+		expanded, err := config.ExpandApplicationSet(name, &cfg.Applications)
+		if err != nil || len(expanded) == 0 {
+			return true
+		}
 	}
 	return false
 }
