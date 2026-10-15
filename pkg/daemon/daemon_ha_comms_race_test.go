@@ -2,7 +2,7 @@ package daemon
 
 import (
 	"context"
-	"errors"
+	"net"
 	"sync"
 	"testing"
 
@@ -163,44 +163,28 @@ func TestClusterCommsPublishConcurrentIsRaceFree(t *testing.T) {
 	}
 }
 
-// TestSessionSyncStartExhaustionUnpublishesFailedObject13545 fault-injects
-// every bounded Start attempt failing and verifies the constructor's
-// exhaustion action leaves no published-but-unstarted sync object.
+// TestSessionSyncStartExhaustionUnpublishesFailedObject13545 drives the real
+// comms constructor with the session-sync bind port occupied. The production
+// Start calls must all fail, the constructor must finish its bounded retries,
+// and the failed object must no longer be published.
 func TestSessionSyncStartExhaustionUnpublishesFailedObject13545(t *testing.T) {
+	occupier, err := net.Listen("tcp4", "127.0.0.1:4785")
+	if err != nil {
+		t.Fatalf("reserve session-sync listener: %v", err)
+	}
+	t.Cleanup(func() { _ = occupier.Close() })
+
 	oldAttempts, oldDelay := sessionSyncStartAttempts, sessionSyncStartRetryDelay
 	sessionSyncStartAttempts, sessionSyncStartRetryDelay = 30, 0
 	t.Cleanup(func() {
 		sessionSyncStartAttempts, sessionSyncStartRetryDelay = oldAttempts, oldDelay
 	})
 
-	d := &Daemon{}
-	_, gen, _ := d.beginClusterCommsEpoch(context.Background())
-	ss := &cluster.SessionSync{}
-	if !d.publishSessionSyncIfCurrent(gen, ss) {
-		t.Fatal("failed to publish test session-sync")
-	}
+	d := newVRFBindingRetryDaemon12168(t, vrfBindingControlConfig12168, true)
+	d.startClusterComms(d.daemonCtx)
+	waitVRFCommsConstructor12168(t, d)
 
-	startCalls := 0
-	started := false
-	start := func() error {
-		startCalls++
-		return errors.New("injected bind failure")
-	}
-	for i := 0; i < sessionSyncStartAttempts; i++ {
-		if err := start(); err == nil {
-			started = true
-			break
-		}
-	}
-	if startCalls != 30 || started {
-		t.Fatalf("fault injection made %d attempts, started=%t; want 30 failures", startCalls, started)
-	}
-
-	// This is the exhaustion path in startClusterComms.
-	if !started {
-		d.retireUnstartedSessionSync(gen, ss)
-	}
 	if got := d.getSessionSync(); got != nil {
-		t.Fatalf("exhausted, unstarted session-sync remains published: %p", got)
+		t.Fatalf("session-sync remains published after all Start attempts failed: %p", got)
 	}
 }
