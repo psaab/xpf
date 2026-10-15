@@ -473,7 +473,7 @@ pub(super) fn validate_forwarding_buildable(
 ///
 /// `programmer` is the `SIOCSIFMTU` seam (`set_if_mtu` in production; injectable
 /// in tests). Returns true when a reprogram was attempted this call.
-pub(super) fn reconcile_preserved_slow_path_mtu(
+pub(in crate::afxdp) fn reconcile_preserved_slow_path_mtu(
     slow_path: &SlowPathReinjector,
     desired_mtu: i32,
     last_acted: &mut i32,
