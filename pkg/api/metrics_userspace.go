@@ -456,11 +456,28 @@ func (c *xpfCollector) emitUserspaceSourceNATPoolMetrics(ch chan<- prometheus.Me
 	}
 }
 
+func eventStreamBoolGauge(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+		prometheus.GaugeValue, eventStreamBoolGauge(status.EventStreamConnected), "connected")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+		prometheus.GaugeValue, float64(status.EventStreamSeq), "sequence")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+		prometheus.GaugeValue, float64(status.EventStreamAcked), "acked_sequence")
 	if status.EventStream == nil {
 		return
 	}
 	es := status.EventStream
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+		prometheus.GaugeValue, eventStreamBoolGauge(es.Paused), "paused")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+		prometheus.GaugeValue, float64(es.EventsSinceAck), "events_since_ack")
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
 		prometheus.CounterValue, float64(es.FramesRead), "read")
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
@@ -529,6 +546,27 @@ func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, sta
 		prometheus.CounterValue, float64(es.DecodeErrors))
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamSequenceGapsTotal,
 		prometheus.CounterValue, float64(es.SeqGaps))
+	for _, item := range []struct {
+		reason string
+		count  uint64
+	}{
+		{"session_sync_gap", es.SessionSyncResyncs},
+		{"decode_suppressed", es.DecodeResyncSuppressed},
+		{"telemetry_gap", es.TelemetryGapResyncs},
+	} {
+		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamResyncsTotal,
+			prometheus.CounterValue, float64(item.count), item.reason)
+	}
+	for _, item := range []struct {
+		reason string
+		count  uint64
+	}{
+		{"pending_callback_overflow", es.PendingOverflowDisconnects},
+		{"peer_cred_rejection", es.PeerCredRejections},
+	} {
+		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDisconnectsTotal,
+			prometheus.CounterValue, float64(item.count), item.reason)
+	}
 
 	for _, item := range []struct {
 		label string

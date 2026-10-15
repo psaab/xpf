@@ -1431,6 +1431,37 @@ func TestEventStreamSessionCloseDropSurfacedInStatus(t *testing.T) {
 	}
 }
 
+// TestEventStreamStatusExportsResyncAndDisconnectCounters proves #13295
+// (D5-01): telemetry-gap resyncs, pending-queue overflow disconnects, and
+// peer-credential rejections counted on EventStream must be visible through
+// the public Status() DTO. On master Status() omitted all three, so the
+// counters were invisible to CLI/REST/gRPC and Prometheus.
+func TestEventStreamStatusExportsResyncAndDisconnectCounters(t *testing.T) {
+	es := NewEventStream("")
+	es.triggerTelemetryGapResync(5)
+	if got := es.telemetryGapResyncs.Load(); got != 1 {
+		t.Fatalf("telemetryGapResyncs = %d, want 1", got)
+	}
+	if got := es.Status().TelemetryGapResyncs; got != 1 {
+		t.Fatalf("Status().TelemetryGapResyncs = %d, want 1", got)
+	}
+
+	full := NewEventStream("")
+	full.pendingCallbackFrames = make([]pendingCallbackFrame, pendingCallbackFramesLimit)
+	if full.enqueuePendingCallbackFrame(pendingCallbackFrame{typ: EventTypeSessionOpen, seq: 1}) {
+		t.Fatal("enqueuePendingCallbackFrame succeeded on a full queue, want false")
+	}
+	if got := full.Status().PendingOverflowDisconnects; got != 1 {
+		t.Fatalf("Status().PendingOverflowDisconnects = %d, want 1 after overflow", got)
+	}
+
+	creds := NewEventStream("")
+	creds.peerCredRejections.Add(1)
+	if got := creds.Status().PeerCredRejections; got != 1 {
+		t.Fatalf("Status().PeerCredRejections = %d, want 1", got)
+	}
+}
+
 func TestEventStreamRawDataplaneEventsFeedSyslogFanout(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {

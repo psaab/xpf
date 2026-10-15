@@ -1,26 +1,29 @@
 package userspace
 
 type EventStreamStatus struct {
-	FramesRead             uint64 `json:"frames_read,omitempty"`
-	FramesWritten          uint64 `json:"frames_written,omitempty"`
-	DecodeErrors           uint64 `json:"decode_errors,omitempty"`
-	SeqGaps                uint64 `json:"seq_gaps,omitempty"`
-	SessionSyncResyncs     uint64 `json:"session_sync_resyncs,omitempty"`     // #2874/#5483
-	DecodeResyncSuppressed uint64 `json:"decode_resync_suppressed,omitempty"` // #6130
-	PolicyDenyEvents       uint64 `json:"policy_deny_events,omitempty"`
-	ScreenDropEvents       uint64 `json:"screen_drop_events,omitempty"`
-	ScreenAlarmEvents      uint64 `json:"screen_alarm_events,omitempty"`
-	FilterLogEvents        uint64 `json:"filter_log_events,omitempty"`
-	SessionCloseEvents     uint64 `json:"session_close_events,omitempty"`  // #2460/#2510
-	SessionCreateEvents    uint64 `json:"session_create_events,omitempty"` // #2508/#2510
-	PolicyDenyDrops        uint64 `json:"policy_deny_drops,omitempty"`
-	ScreenDropDrops        uint64 `json:"screen_drop_drops,omitempty"`
-	FilterLogDrops         uint64 `json:"filter_log_drops,omitempty"`
-	SessionCloseDrops      uint64 `json:"session_close_drops,omitempty"`  // #2460/#2510
-	SessionCreateDrops     uint64 `json:"session_create_drops,omitempty"` // #2508/#2510
-	UnknownFrameDrops      uint64 `json:"unknown_frame_drops,omitempty"`
-	Paused                 bool   `json:"paused,omitempty"`           // #9915 F-125: last Pause/Resume request state
-	EventsSinceAck         uint64 `json:"events_since_ack,omitempty"` // #9915 F-125: applied events since last ACK flush; resets ~100ms (sawtooth, not a gauge)
+	FramesRead                 uint64 `json:"frames_read,omitempty"`
+	FramesWritten              uint64 `json:"frames_written,omitempty"`
+	DecodeErrors               uint64 `json:"decode_errors,omitempty"`
+	SeqGaps                    uint64 `json:"seq_gaps,omitempty"`
+	SessionSyncResyncs         uint64 `json:"session_sync_resyncs,omitempty"`         // #2874/#5483
+	DecodeResyncSuppressed     uint64 `json:"decode_resync_suppressed,omitempty"`     // #6130
+	TelemetryGapResyncs        uint64 `json:"telemetry_gap_resyncs,omitempty"`        // #13295
+	PendingOverflowDisconnects uint64 `json:"pending_overflow_disconnects,omitempty"` // #13295
+	PeerCredRejections         uint64 `json:"peer_cred_rejections,omitempty"`         // #13295
+	PolicyDenyEvents           uint64 `json:"policy_deny_events,omitempty"`
+	ScreenDropEvents           uint64 `json:"screen_drop_events,omitempty"`
+	ScreenAlarmEvents          uint64 `json:"screen_alarm_events,omitempty"`
+	FilterLogEvents            uint64 `json:"filter_log_events,omitempty"`
+	SessionCloseEvents         uint64 `json:"session_close_events,omitempty"`  // #2460/#2510
+	SessionCreateEvents        uint64 `json:"session_create_events,omitempty"` // #2508/#2510
+	PolicyDenyDrops            uint64 `json:"policy_deny_drops,omitempty"`
+	ScreenDropDrops            uint64 `json:"screen_drop_drops,omitempty"`
+	FilterLogDrops             uint64 `json:"filter_log_drops,omitempty"`
+	SessionCloseDrops          uint64 `json:"session_close_drops,omitempty"`  // #2460/#2510
+	SessionCreateDrops         uint64 `json:"session_create_drops,omitempty"` // #2508/#2510
+	UnknownFrameDrops          uint64 `json:"unknown_frame_drops,omitempty"`
+	Paused                     bool   `json:"paused,omitempty"`           // #9915 F-125: last Pause/Resume request state
+	EventsSinceAck             uint64 `json:"events_since_ack,omitempty"` // #9915 F-125: applied events since last ACK flush; resets ~100ms (sawtooth, not a gauge)
 }
 
 // ---------------------------------------------------------------------------

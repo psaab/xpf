@@ -103,6 +103,8 @@ type EventStream struct {
 	// never the shared session-decode budget — and count separately, so
 	// SessionSyncResyncs stays session-only.
 	telemetryGapResyncs         atomic.Uint64
+	pendingOverflowDisconnects  atomic.Uint64
+	peerCredRejections          atomic.Uint64
 	lastTelemetryGapResyncNanos atomic.Int64
 	// Callbacks are invoked on the reader goroutine and may be updated
 	// dynamically by control-plane code.
@@ -486,26 +488,29 @@ func (es *EventStream) LastAckedSequence() uint64 {
 
 func (es *EventStream) Status() EventStreamStatus {
 	return EventStreamStatus{
-		FramesRead:             es.FramesRead.Load(),
-		FramesWritten:          es.FramesWritten.Load(),
-		DecodeErrors:           es.DecodeErrors.Load(),
-		SeqGaps:                es.SeqGaps.Load(),
-		SessionSyncResyncs:     es.SessionSyncResyncs.Load(),
-		DecodeResyncSuppressed: es.DecodeResyncSuppressed.Load(),
-		PolicyDenyEvents:       es.PolicyDenyEvents.Load(),
-		ScreenDropEvents:       es.ScreenDropEvents.Load(),
-		ScreenAlarmEvents:      es.ScreenAlarmEvents.Load(),
-		FilterLogEvents:        es.FilterLogEvents.Load(),
-		SessionCloseEvents:     es.SessionCloseEvents.Load(),
-		SessionCreateEvents:    es.SessionCreateEvents.Load(),
-		PolicyDenyDrops:        es.PolicyDenyDrops.Load(),
-		ScreenDropDrops:        es.ScreenDropDrops.Load(),
-		FilterLogDrops:         es.FilterLogDrops.Load(),
-		SessionCloseDrops:      es.SessionCloseDrops.Load(),
-		SessionCreateDrops:     es.SessionCreateDrops.Load(),
-		UnknownFrameDrops:      es.UnknownFrameDrops.Load(),
-		Paused:                 es.paused.Load(),
-		EventsSinceAck:         es.ackBatch.Load(),
+		FramesRead:                 es.FramesRead.Load(),
+		FramesWritten:              es.FramesWritten.Load(),
+		DecodeErrors:               es.DecodeErrors.Load(),
+		SeqGaps:                    es.SeqGaps.Load(),
+		SessionSyncResyncs:         es.SessionSyncResyncs.Load(),
+		DecodeResyncSuppressed:     es.DecodeResyncSuppressed.Load(),
+		TelemetryGapResyncs:        es.telemetryGapResyncs.Load(),
+		PendingOverflowDisconnects: es.pendingOverflowDisconnects.Load(),
+		PeerCredRejections:         es.peerCredRejections.Load(),
+		PolicyDenyEvents:           es.PolicyDenyEvents.Load(),
+		ScreenDropEvents:           es.ScreenDropEvents.Load(),
+		ScreenAlarmEvents:          es.ScreenAlarmEvents.Load(),
+		FilterLogEvents:            es.FilterLogEvents.Load(),
+		SessionCloseEvents:         es.SessionCloseEvents.Load(),
+		SessionCreateEvents:        es.SessionCreateEvents.Load(),
+		PolicyDenyDrops:            es.PolicyDenyDrops.Load(),
+		ScreenDropDrops:            es.ScreenDropDrops.Load(),
+		FilterLogDrops:             es.FilterLogDrops.Load(),
+		SessionCloseDrops:          es.SessionCloseDrops.Load(),
+		SessionCreateDrops:         es.SessionCreateDrops.Load(),
+		UnknownFrameDrops:          es.UnknownFrameDrops.Load(),
+		Paused:                     es.paused.Load(),
+		EventsSinceAck:             es.ackBatch.Load(),
 	}
 }
 
@@ -531,6 +536,7 @@ func (es *EventStream) acceptLoop(ctx context.Context, listener net.Listener) {
 		// events into the control plane. Refuse and keep serving the old
 		// connection.
 		if err := verifyUnixPeerIsPrivileged("event stream socket", es.socketPath, conn); err != nil {
+			es.peerCredRejections.Add(1)
 			slog.Error("event stream: refusing connection from an unprivileged peer",
 				"path", es.socketPath, "err", err)
 			_ = conn.Close()
@@ -1264,6 +1270,7 @@ func (es *EventStream) enqueueFullResyncFrame(seq uint64) bool {
 	if len(es.pendingCallbackFrames) >= pendingCallbackFramesLimit {
 		es.pendingMu.Unlock()
 		es.resyncMu.Unlock()
+		es.pendingOverflowDisconnects.Add(1)
 		slog.Error("event stream: pending callback queue full; closing helper stream to force replay",
 			"limit", pendingCallbackFramesLimit, "type", EventTypeFullResync, "seq", seq)
 		return false
@@ -1406,6 +1413,7 @@ func (es *EventStream) enqueuePendingCallbackFrame(frame pendingCallbackFrame) b
 	es.pendingMu.Lock()
 	defer es.pendingMu.Unlock()
 	if len(es.pendingCallbackFrames) >= pendingCallbackFramesLimit {
+		es.pendingOverflowDisconnects.Add(1)
 		slog.Error("event stream: pending callback queue full; closing helper stream to force replay",
 			"limit", pendingCallbackFramesLimit, "type", frame.typ, "seq", frame.seq)
 		return false
