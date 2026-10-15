@@ -68,24 +68,24 @@ var syncMagic = [4]byte{'B', 'P', 'S', 'Y'}
 const SessionSyncWireVersion = uint16(2)
 
 const (
-	syncMsgSessionV4              = 1
-	syncMsgSessionV6              = 2
-	syncMsgDeleteV4               = 3
-	syncMsgDeleteV6               = 4
-	syncMsgBulkStart              = 5
-	syncMsgBulkEnd                = 6
-	syncMsgHeartbeat              = 7
-	syncMsgConfig                 = 8
-	syncMsgIPsecSA                = 9
-	syncMsgFailover               = 10
-	syncMsgFence                  = 11
-	syncMsgClockSync              = 12
-	syncMsgBarrier                = 13
-	syncMsgBarrierAck             = 14
-	syncMsgBulkAck                = 15
-	syncMsgFailoverAck            = 16
-	syncMsgFailoverCommit         = 17
-	syncMsgFailoverCommitAck      = 18
+	syncMsgSessionV4         = 1
+	syncMsgSessionV6         = 2
+	syncMsgDeleteV4          = 3
+	syncMsgDeleteV6          = 4
+	syncMsgBulkStart         = 5
+	syncMsgBulkEnd           = 6
+	syncMsgHeartbeat         = 7
+	syncMsgConfig            = 8
+	syncMsgIPsecSA           = 9
+	syncMsgFailover          = 10
+	syncMsgFence             = 11
+	syncMsgClockSync         = 12
+	syncMsgBarrier           = 13
+	syncMsgBarrierAck        = 14
+	syncMsgBulkAck           = 15
+	syncMsgFailoverAck       = 16
+	syncMsgFailoverCommit    = 17
+	syncMsgFailoverCommitAck = 18
 	// Wire value 19 was the unused prepare-activation message. Keep it retired
 	// so older peers' frames remain unknown and the value cannot be reused.
 	syncMsgPrepareActivation      = 19 // retired; do not reuse
@@ -1800,15 +1800,14 @@ type SessionSync struct {
 	// carries a trailing (incarnation, seq): syncEpoch is this process's
 	// incarnation (the construction seed, constant for the process lifetime;
 	// see initGenState) and the per-type counters give a strictly-monotonic
-	// sequence PER stream. The receiver tracks the last-applied (incarnation,
-	// seq) per stream (ipsecRecvSeq / dhcpV4RecvSeq / dhcpV6RecvSeq /
+	// sequence per stream. The receiver tracks the last-applied pair per stream
+	// (ipsecRecvSeq / dhcpV4RecvSeq / dhcpV6RecvSeq /
 	// persistentNatLeaseRecvSeq, guarded by recvSeqMu because both receiveLoops
-	// touch them; resetRecvGen resets every one of them through
-	// fullSetGuardsLocked, #9634) and admits only a
-	// strictly-newer pair (fullSetSeqGuard.admit); a stale reorder is dropped
-	// and counted. A legacy peer sends no trailer -> (0,0) -> accept-always
-	// (mixed-version compat). The receiver guards are reset on a peer bulk
-	// re-prime (resetRecvGen) so an OS-rebooted peer whose monotonic epoch
+	// touch them; resetRecvGen resets every one through fullSetGuardsLocked,
+	// #9634) and commits only a strictly-newer pair after successful decode.
+	// A stale reorder is dropped and counted. A legacy peer sends no trailer ->
+	// (0,0) -> accept-always (mixed-version compat). The receiver guards reset
+	// on a peer bulk re-prime (resetRecvGen) so an OS-rebooted peer whose
 	// restarts LOWER is re-accepted instead of stranded (the #2198 F2 reasoning
 	// applied to full-set sync). IPsec/DHCP-v4/DHCP-v6 have INDEPENDENT counters
 	// and high-water marks (per-type, per-family), so a v4 push never gates a v6
@@ -1833,6 +1832,9 @@ type SessionSync struct {
 	// invokes the callback while serialized so an older decoded frame cannot
 	// regress the imported lease set after a newer frame.
 	persistentNatLeaseApplyMu sync.Mutex
+	// IPsec commits are serialized with the sequence advance and callback so
+	// the held set follows the same order as its last-applied high-water.
+	ipsecApplyMu sync.Mutex
 	// dhcpApplyMu serializes each DHCP arm's commit (high-water advance +
 	// held-set store) with its callback (#9915 F-117 review), so commit order
 	// == callback order across the two fabric receive loops. It nests recvSeqMu

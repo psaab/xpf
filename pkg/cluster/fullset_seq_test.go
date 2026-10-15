@@ -160,6 +160,50 @@ func TestIPsecSAOutOfOrderRejected(t *testing.T) {
 	}
 }
 
+// TestIPsecSAMalformedFrameDoesNotPoisonSeq13541 is the #13541 regression:
+// a malformed frame must not advance the high-water mark. The dual-fabric
+// twin carrying the same (incarnation, seq) well-formed must still apply;
+// a well-formed replay of that pair must still drop as duplicate.
+func TestIPsecSAMalformedFrameDoesNotPoisonSeq13541(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	var applied [][]string
+	ss.OnIPsecSAReceived = func(names []string) {
+		applied = append(applied, append([]string(nil), names...))
+	}
+	const epoch = uint64(3000)
+	recv := func(seq uint64, payload []byte) {
+		ss.handleMessage(nil, syncMsgIPsecSA, appendFullSetSeq(payload, epoch, seq))
+	}
+	recv(1, encodeIPsecSAPayload([]string{"vpn-a"}))
+	if got := ss.PeerIPsecSAs(); len(got) != 1 || got[0] != "vpn-a" {
+		t.Fatalf("setup seq=1 must apply: got %v", got)
+	}
+	huge := make([]byte, 0, 2*(maxIPsecSANames+1))
+	for i := 0; i <= maxIPsecSANames; i++ {
+		huge = append(huge, 'a', '\n')
+	}
+	recv(2, huge)
+	if got := ss.PeerIPsecSAs(); len(got) != 1 || got[0] != "vpn-a" {
+		t.Fatalf("malformed seq=2 must retain held set: got %v", got)
+	}
+	// The well-formed dual-fabric twin at the SAME seq must apply.
+	recv(2, encodeIPsecSAPayload([]string{"vpn-b", "vpn-c"}))
+	if got := ss.PeerIPsecSAs(); len(got) != 2 || got[0] != "vpn-b" || got[1] != "vpn-c" {
+		t.Fatalf("well-formed seq=2 twin must apply after malformed frame poisoned the guard: got %v", got)
+	}
+	if len(applied) != 2 {
+		t.Fatalf("callback must fire only for the two good sets, got %v", applied)
+	}
+	// A well-formed replay at seq=2 is a duplicate and must drop.
+	recv(2, encodeIPsecSAPayload([]string{"vpn-b", "vpn-c"}))
+	if n := ss.Stats().IPsecSAStaleIgnored; n != 1 {
+		t.Fatalf("well-formed replay must count as stale: IPsecSAStaleIgnored=%d want 1", n)
+	}
+	if len(applied) != 2 {
+		t.Fatalf("replay must not fire callback: got %v", applied)
+	}
+}
+
 // TestDHCPLeaseOutOfOrderRejected is the DHCP FAIL-ON-REVERT plus PER-TYPE /
 // PER-FAMILY independence: a reordered older v4 set is rejected, while an
 // independent v6 stream and the IPsec stream are NOT gated by the v4 high-water.
