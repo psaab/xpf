@@ -2408,7 +2408,7 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 
 	sys.SNMP = snmp
 	if cfg != nil {
-		cfg.Warnings = append(cfg.Warnings, snmpInertKnobWarnings(node)...)
+		cfg.Warnings = append(cfg.Warnings, snmpInertKnobWarnings(snmpChildren)...)
 	}
 	return nil
 }
@@ -2422,8 +2422,17 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 // particular is NOT bound, so traps leave from the default egress IP. Messages are built
 // from the node IDENTITY (keywords) only — never the community NAME (an SNMP
 // community string is a secret). Deterministic, deduplicated output.
-func snmpInertKnobWarnings(node *Node) []string {
-	if node == nil {
+//
+// #13089: the walk takes the SAME packed-body children compileSNMP walks
+// (snmpChildren from packedBodyChildren), and a community's subtree is
+// searched RECURSIVELY, so a knob spelled as a two-level container
+// (`snmp { community { <name> { view v; } } }`) or a flat-set chain
+// (`set snmp community <c> authorization ro view v` nests `view` under
+// `authorization`, #8778) warns exactly like the direct-child spelling.
+// Before, only the direct-child spelling warned and the other shapes — all
+// accepted and compiled by compileSNMP — committed silently.
+func snmpInertKnobWarnings(snmpChildren []*Node) []string {
+	if len(snmpChildren) == 0 {
 		return nil
 	}
 	seen := map[string]bool{}
@@ -2434,21 +2443,7 @@ func snmpInertKnobWarnings(node *Node) []string {
 			warnings = append(warnings, msg)
 		}
 	}
-	nodeHasSub := func(n *Node, keyword string) bool {
-		if n == nil {
-			return false
-		}
-		if n.FindChild(keyword) != nil {
-			return true
-		}
-		for _, k := range n.Keys[1:] {
-			if k == keyword {
-				return true
-			}
-		}
-		return false
-	}
-	for _, child := range node.Children {
+	for _, child := range snmpChildren {
 		switch child.Name() {
 		case "view":
 			add("snmp view: MIB view scoping is accepted but NOT enforced by the SNMP agent (the full ifTable MIB is exposed regardless)")
@@ -2466,7 +2461,7 @@ func snmpInertKnobWarnings(node *Node) []string {
 		case "community":
 			// The community NAME is a secret — never echo it. Name only the
 			// keyword. A view-scoped community answers the full ifTable.
-			if nodeHasSub(child, "view") {
+			if communityHasInertStatement13089(child, "view") {
 				add("snmp community view: per-community MIB view scoping is accepted but NOT enforced (the community answers the full ifTable)")
 			}
 			// #9416: the SIXTH spelling of the source restriction. Its
@@ -2479,13 +2474,13 @@ func snmpInertKnobWarnings(node *Node) []string {
 			// query rather than only to queries arriving via <ri>. Say which
 			// half landed, because "accepted but not enforced" would be false
 			// about the half that is.
-			if nodeHasSub(child, "routing-instance") {
+			if communityHasInertStatement13089(child, "routing-instance") {
 				add("snmp community routing-instance: the routing-instance SCOPING is accepted but NOT enforced (the agent answers in the default instance only) — any `clients` / `client-list-name` inside the block IS applied to the community, so the source restriction holds even though the scoping does not")
 			}
 			// xpf has no logical systems at all, so a logical-system-scoped
 			// community is not merely unscoped — its whole body, including any
 			// source restriction nested under it, is invisible to the compiler.
-			if nodeHasSub(child, "logical-system") {
+			if communityHasInertStatement13089(child, "logical-system") {
 				add("snmp community logical-system: accepted but NOT implemented (xpf has no logical systems) — any `clients` / `client-list-name` nested inside the logical-system block is NOT applied, so the community is answerable from every source unless it also carries a restriction at community level")
 			}
 		case "interface", "filter-interfaces":
@@ -2523,12 +2518,80 @@ func snmpInertKnobWarnings(node *Node) []string {
 	return warnings
 }
 
+// communityHasInertStatement13089 reports whether the community block carries
+// a statement named keyword in any of the AST shapes compileSNMP accepts: the
+// named body (`community <c> { view v; }`, and the brace-elided tail packed
+// on the community line), the two-level container (`community { <c> { ... } }`,
+// which adds a name level compileSNMP unwraps), and the flat-set CHAIN
+// (#8778/#8939), where `set snmp community <c> authorization ro view v` nests
+// `view` under the `authorization` leaf. The advisory fires on what the
+// operator AUTHORED, so every statement in the community subtree is searched —
+// a view nested three keywords deep is as inert as a direct one (#13089).
+func communityHasInertStatement13089(community *Node, keyword string) bool {
+	if community == nil {
+		return false
+	}
+	// Brace-elided tail packed on the community line: the statement keywords
+	// ride on Keys after the community name. (Firing on a value token that
+	// happens to equal a keyword needs an operator to name a community after
+	// one — the same pathological edge the previous Keys scan accepted.)
+	for _, k := range community.Keys[1:] {
+		if k == keyword {
+			return true
+		}
+	}
+	body := community.Children
+	if len(community.Keys) < 2 && len(body) > 0 {
+		// Two-level container. compileSNMP reads the first name block's body;
+		// the advisory searches every name block — a view under ANY community
+		// name in the container is equally inert.
+		var inner []*Node
+		for _, nameBlock := range body {
+			inner = append(inner, nameBlock.Children...)
+		}
+		body = inner
+	}
+	return subtreeHasStatement13089(body, keyword)
+}
+
+// subtreeHasStatement13089 reports whether any node in the subtree is named
+// keyword. Statement values live on a node's own Keys, never as child nodes,
+// so a child named keyword is an authored statement (#13089).
+func subtreeHasStatement13089(nodes []*Node, keyword string) bool {
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		if n.Name() == keyword {
+			return true
+		}
+		if subtreeHasStatement13089(n.Children, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
 // systemInertKnobWarnings emits accept-with-advisory notes for the grouped
 // `system` knobs that commit clean but do nothing (#4306 S-5): login banners /
 // retry-options, NTP boot-server / authentication-key / source-address and
 // per-server routing-instance, `internet-options` leaves beyond the one xpf
 // models, and ssh rate-limit. Messages name the keyword only — never a leaf
 // value (the NTP authentication-key is a secret).
+//
+// #13089: the walk spans every sibling block and every AST spelling
+// compileSystem accepts. Three shapes were blind here, each silently
+// suppressing a security-relevant advisory on a config that commits clean:
+//
+//   - a SECOND sibling block (`system { login {...} login {...} }`) —
+//     FindChild saw only the first block, while compileSystem's own child
+//     walk reads them all (#6957 sibling blocks);
+//   - the flat-set CHAIN (`set system services ssh root-login deny
+//     rate-limit 5` nests rate-limit under root-login, #8778) —
+//     expandRun9235 hoists it back to the sibling position this walk reads;
+//   - the brace-elided body packed on the block's own Keys
+//     (`system { ntp authentication-key 1 type md5 value ...; }`) and on the
+//     `system` line itself (`system services ssh rate-limit 5;`, #2419).
 func systemInertKnobWarnings(sysNode *Node, system *SystemConfig) []string {
 	if sysNode == nil {
 		return nil
@@ -2541,26 +2604,62 @@ func systemInertKnobWarnings(sysNode *Node, system *SystemConfig) []string {
 			warnings = append(warnings, msg)
 		}
 	}
-	if login := sysNode.FindChild("login"); login != nil {
-		if login.FindChild("message") != nil {
+	// #13089: read the system body the way compileSystem does — and when the
+	// whole body was packed brace-elided onto the `system` line, synthesize
+	// the braced shape first (packedBodyChildren, schema-resolved like
+	// compileSNMP's own reader). Guarded on EMPTY Children because a node can
+	// carry BOTH a packed tail and a braced body (`system host-name fw1
+	// { ... }` parses to exactly that), and the synthesis would drop the body.
+	sysChildren := sysNode.Children
+	if len(sysChildren) == 0 {
+		sysChildren = packedBodyChildren(sysNode, systemSchema9792())
+	}
+	// blockHas reports whether a block carries a statement, either as a child
+	// node or packed on the block's own Keys (the brace-elided one-liner
+	// inside braces, e.g. `ntp authentication-key 1 type md5 value s;`). A
+	// value token colliding with a keyword needs an operator to use an
+	// advisory keyword as a leaf value — the same pathological edge the
+	// community Keys scan in snmpInertKnobWarnings has always accepted.
+	blockHas := func(n *Node, keyword string) bool {
+		if n == nil {
+			return false
+		}
+		if n.FindChild(keyword) != nil {
+			return true
+		}
+		for _, k := range n.Keys[1:] {
+			if k == keyword {
+				return true
+			}
+		}
+		return false
+	}
+	for _, login := range sysChildren {
+		if login.Name() != "login" {
+			continue
+		}
+		if blockHas(login, "message") {
 			add("system login message: pre-login banner accepted but NOT applied")
 		}
-		if login.FindChild("announcement") != nil {
+		if blockHas(login, "announcement") {
 			add("system login announcement: post-login announcement accepted but NOT applied")
 		}
-		if login.FindChild("retry-options") != nil {
+		if blockHas(login, "retry-options") {
 			add("system login retry-options: login retry/lockout policy accepted but NOT enforced")
 		}
 	}
-	if ntp := sysNode.FindChild("ntp"); ntp != nil {
-		if ntp.FindChild("boot-server") != nil {
+	for _, ntp := range sysChildren {
+		if ntp.Name() != "ntp" {
+			continue
+		}
+		if blockHas(ntp, "boot-server") {
 			add("system ntp boot-server: accepted but NOT enforced (no one-shot boot-time sync)")
 		}
-		if ntp.FindChild("authentication-key") != nil {
+		if blockHas(ntp, "authentication-key") {
 			// The key VALUE is a secret — name the keyword only.
 			add("system ntp authentication-key: NTP authentication accepted but NOT enforced")
 		}
-		if ntp.FindChild("source-address") != nil {
+		if blockHas(ntp, "source-address") {
 			add("system ntp source-address: accepted but NOT bound (NTP uses the default source IP)")
 		}
 	}
@@ -2572,26 +2671,56 @@ func systemInertKnobWarnings(sysNode *Node, system *SystemConfig) []string {
 			}
 		}
 	}
-	if io := sysNode.FindChild("internet-options"); io != nil {
-		var extra []string
-		for _, c := range io.Children {
-			if c.Name() != "no-ipv6-reject-zero-hop-limit" {
-				extra = append(extra, c.Name())
-			}
+	for _, io := range sysChildren {
+		if io.Name() != "internet-options" {
+			continue
 		}
+		var extra []string
+		collectInternetOptionsExtras13089(io, &extra)
 		if len(extra) > 0 {
 			sort.Strings(extra)
 			add(fmt.Sprintf("system internet-options [%s]: accepted but NOT implemented (xpf models only no-ipv6-reject-zero-hop-limit)", strings.Join(extra, " ")))
 		}
 	}
-	if svc := sysNode.FindChild("services"); svc != nil {
-		if ssh := svc.FindChild("ssh"); ssh != nil {
-			if ssh.FindChild("rate-limit") != nil {
+	for _, svc := range sysChildren {
+		if svc.Name() != "services" {
+			continue
+		}
+		for _, ssh := range svc.Children {
+			if ssh.Name() != "ssh" {
+				continue
+			}
+			// #8778/#8939: hoist a chained rate-limit back beside root-login;
+			// the packed one-liner is caught by blockHas's Keys scan.
+			if blockHas(expandRun9235(ssh, systemServicesSSHSchema13089()), "rate-limit") {
 				add("system services ssh rate-limit: accepted but NOT enforced (sshd has no per-minute connection-rate limiter)")
 			}
 		}
 	}
 	return warnings
+}
+
+// systemServicesSSHSchema13089 resolves the `system services ssh` container
+// for systemInertKnobWarnings, so expandRun9235 can hoist a flat-set chain
+// (`set system services ssh root-login deny rate-limit 5` nests rate-limit
+// under root-login) back to the sibling position the advisory walks (#13089).
+func systemServicesSSHSchema13089() *schemaNode {
+	return resolveSchemaPath9235("system", "services", "ssh")
+}
+
+// collectInternetOptionsExtras13089 appends the name of every statement in an
+// `internet-options` block that is not the one modelled leaf, descending
+// through the subtree: a flat-set chain (`set system internet-options
+// no-ipv6-reject-zero-hop-limit tcp-mss 1400`) nests the extra statement under
+// the modelled leaf instead of beside it, and the direct-children walk this
+// advisory had reported the block as fully modelled (#13089).
+func collectInternetOptionsExtras13089(n *Node, extra *[]string) {
+	for _, c := range n.Children {
+		if c.Name() != "no-ipv6-reject-zero-hop-limit" {
+			*extra = append(*extra, c.Name())
+		}
+		collectInternetOptionsExtras13089(c, extra)
+	}
 }
 
 // compileSNMPv3 parses the v3 { usm { local-engine { user <name> { ... } } } } hierarchy.
