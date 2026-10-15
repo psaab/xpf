@@ -64,7 +64,11 @@ func TestD13246NATShowEvilTwins(t *testing.T) {
 		Match: config.NATMatch{DestinationAddress: "203.0.113.20/32"},
 		Then:  config.NATThen{Off: true},
 	}
-	cfg := dnatCfg13246(actionless, plural, offRule)
+	wildcard := &config.NATRule{
+		Name:  "wildcard",
+		Match: config.NATMatch{DestinationAddress: "0.0.0.0/0"},
+	}
+	cfg := dnatCfg13246(actionless, plural, offRule, wildcard)
 	out = captureStdout(t, func() {
 		if err := (&CLI{}).showNATDestination(cfg, nil); err != nil {
 			t.Fatalf("showNATDestination: %v", err)
@@ -72,6 +76,7 @@ func TestD13246NATShowEvilTwins(t *testing.T) {
 	})
 	for _, want := range []string{
 		"Match destination-address: 203.0.113.10/32 203.0.113.11/32 web-net",
+		"Match destination-address: 0.0.0.0/0",
 		"Then pool: dp1",
 		"Action: none",
 		"Action: off",
