@@ -1,5 +1,7 @@
 package cluster
 
+import "sort"
+
 // Adapter predicates for the #1930 INC-2 kernel-channel bounded local
 // self-recovery (pkg/upgrade.KernelSelfRecovery). They are read-only views over
 // the RG/peer state plus a reset-all wrapper; the recovery POLICY (lease,
@@ -62,9 +64,17 @@ func (m *Manager) SetKernelUpgradeHold(reason string) {
 	// promotions — it must also DEMOTE any group that is already primary, so the
 	// hold is correct regardless of call ordering (r2 AGY Finding 1). Idempotent:
 	// a no-op when nothing is primary (the common candidate-boot case).
-	for _, rg := range m.groups {
+	ids := make([]int, 0, len(m.groups))
+	for id := range m.groups {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		rg := m.groups[id]
 		if rg.State == StatePrimary {
 			rg.State = StateSecondary
+			rg.FailoverCount++
+			rg.transferCommitRolePinned = false
 			m.sendEvent(rg.GroupID, StatePrimary, StateSecondary, "kernel-upgrade hold armed")
 		}
 	}
@@ -162,13 +172,17 @@ func (m *Manager) ClearKernelUpgradeHold() {
 // kernel self-recovery when an orchestrator crash left this node orphaned-drained.
 // It also clears any kernel-upgrade election hold (the rejoin path).
 func (m *Manager) ResetAllFailover() error {
-	m.ClearKernelUpgradeHold()
 	m.mu.RLock()
 	ids := make([]int, 0, len(m.groups))
 	for id := range m.groups {
 		ids = append(ids, id)
 	}
 	m.mu.RUnlock()
+	sort.Ints(ids)
+	if len(ids) == 0 {
+		m.ClearKernelUpgradeHold()
+		return nil
+	}
 	for _, id := range ids {
 		if err := m.ResetFailover(id); err != nil {
 			return err
