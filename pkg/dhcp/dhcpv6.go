@@ -357,13 +357,10 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				// generic error and the keep-and-wait-T2 path below (#4874).
 				slog.Info("DHCPv6: server invalidated held address (valid-lifetime 0), deconfiguring and re-acquiring",
 					"interface", ifaceName, "address", committed.Address)
-				if committed.Address.IsValid() {
-					m.removeAddress(ifaceName, committed)
-				}
-				m.mu.Lock()
-				delete(m.leases, key)
-				delete(m.delegatedPDs, ifaceName)
-				m.mu.Unlock()
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				leaseExpiryPending = false
 				cancelLease()
 				break renewalLoop
 			}
@@ -453,13 +450,10 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				// re-acquire, which is correct only for a transient failure).
 				slog.Info("DHCPv6: server invalidated held address on rebind (valid-lifetime 0), deconfiguring and re-acquiring",
 					"interface", ifaceName, "address", committed.Address)
-				if committed.Address.IsValid() {
-					m.removeAddress(ifaceName, committed)
-				}
-				m.mu.Lock()
-				delete(m.leases, key)
-				delete(m.delegatedPDs, ifaceName)
-				m.mu.Unlock()
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				leaseExpiryPending = false
 				cancelLease()
 				break renewalLoop
 			}
