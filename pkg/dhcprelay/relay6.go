@@ -261,6 +261,29 @@ type dhcpV6Relay struct {
 	warnedNoRequest          atomic.Bool
 }
 
+// adoptCountersFrom preserves cumulative per-interface counters across a
+// configuration restart. The old relay has been joined before this is called.
+func (r *dhcpV6Relay) adoptCountersFrom(old *dhcpV6Relay) {
+	if r == nil || old == nil {
+		return
+	}
+	r.requestsRelayed.Store(old.requestsRelayed.Load())
+	r.repliesForwarded.Store(old.repliesForwarded.Load())
+	r.requestsDroppedBackup.Store(old.requestsDroppedBackup.Load())
+	r.requestsDroppedRateLimit.Store(old.requestsDroppedRateLimit.Load())
+	r.requestsDroppedNested.Store(old.requestsDroppedNested.Load())
+	r.requestsDroppedParse.Store(old.requestsDroppedParse.Load())
+	r.requestsDroppedPort.Store(old.requestsDroppedPort.Load())
+	r.requestsDroppedPeer.Store(old.requestsDroppedPeer.Load())
+	r.requestsDroppedBuild.Store(old.requestsDroppedBuild.Load())
+	r.repliesDroppedUnknownSrv.Store(old.repliesDroppedUnknownSrv.Load())
+	r.repliesDroppedIID.Store(old.repliesDroppedIID.Load())
+	r.repliesDroppedParse.Store(old.repliesDroppedParse.Load())
+	r.repliesDroppedInvalid.Store(old.repliesDroppedInvalid.Load())
+	r.repliesDroppedNested.Store(old.repliesDroppedNested.Load())
+	r.repliesDroppedNoRequest.Store(old.repliesDroppedNoRequest.Load())
+}
+
 type dhcpV6DesiredRelay struct {
 	ifaceName  string
 	kernelName string
@@ -360,8 +383,10 @@ func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config
 	// already-forwarded requests can still arrive on the replacement socket.
 	for _, s := range start {
 		if old := replaced[s.relay.ifaceName]; old != nil {
+			s.relay.adoptCountersFrom(old)
 			carried := old.pending.snapshot()
 			s.relay.pending.adopt(carried)
+			s.relay.pending.addEvictions(old.pending.evictions())
 		}
 	}
 	for _, s := range start {

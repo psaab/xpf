@@ -520,6 +520,31 @@ type interfaceRelay struct {
 	repliesBroadcastNak        atomic.Uint64
 }
 
+// adoptCountersFrom carries cumulative per-interface counters across a
+// configuration restart. Apply calls this only after joining the old relay,
+// so its counters are quiescent while they are copied.
+func (ir *interfaceRelay) adoptCountersFrom(old *interfaceRelay) {
+	if ir == nil || old == nil {
+		return
+	}
+	ir.requestsRelayed.Store(old.requestsRelayed.Load())
+	ir.repliesForwarded.Store(old.repliesForwarded.Load())
+	ir.requestsDroppedBackup.Store(old.requestsDroppedBackup.Load())
+	ir.repliesDroppedUnknownServer.Store(old.repliesDroppedUnknownServer.Load())
+	ir.repliesDroppedNoRequest.Store(old.repliesDroppedNoRequest.Load())
+	ir.repliesDroppedForceRenew.Store(old.repliesDroppedForceRenew.Load())
+	ir.requestsDroppedMaxHops.Store(old.requestsDroppedMaxHops.Load())
+	ir.requestsUntrustedGiaddrReset.Store(old.requestsUntrustedGiaddrReset.Load())
+	ir.requestsDroppedRateLimit.Store(old.requestsDroppedRateLimit.Load())
+	ir.repliesL2Unicast.Store(old.repliesL2Unicast.Load())
+	ir.repliesUnicastCiaddr.Store(old.repliesUnicastCiaddr.Load())
+	ir.repliesBroadcastFlag1.Store(old.repliesBroadcastFlag1.Load())
+	ir.repliesBroadcastForced.Store(old.repliesBroadcastForced.Load())
+	ir.repliesBroadcastNoTarget.Store(old.repliesBroadcastNoTarget.Load())
+	ir.repliesBroadcastL2Fallback.Store(old.repliesBroadcastL2Fallback.Load())
+	ir.repliesBroadcastNak.Store(old.repliesBroadcastNak.Load())
+}
+
 // packetConnFactory creates a UDP packet connection with the relay's required
 // socket options applied before bind(2). It is a seam so lifecycle tests can
 // inject fake connections (no root, no real NICs).
@@ -1100,8 +1125,10 @@ func (m *Manager) Apply(ctx context.Context, cfg *config.DHCPRelayConfig) {
 		if !ok {
 			continue
 		}
+		s.ir.adoptCountersFrom(old)
 		carried := old.pending.snapshot()
 		s.ir.pending.adopt(carried)
+		s.ir.pending.addEvictions(old.pending.evictions())
 		if len(carried) > 0 {
 			slog.Info("dhcp-relay: carried outstanding request bindings across restart",
 				"interface", s.ir.ifaceName,
