@@ -98,9 +98,9 @@ func TestAmbiguousHostInboundAddressesVRRPVIP(t *testing.T) {
 
 // #13159 (D3-13): a lifeline-shared address withheld into IngressDenyV4 by an
 // empty-admit zone (wan) must still count in ambiguity detection when another
-// zone (dmz) also owns it with a differing token set. The address also
-// vanishes from wan's destination-only catch-all (fxp0's bare drop precedes
-// lifelines); without recording IngressDeny both gaps stay invisible.
+// zone (dmz) also owns it with a differing token set. It is no longer in wan's
+// destination-only policy, which would also apply to lifeline traffic; without
+// recording IngressDeny the conflict goes unreported.
 func TestAmbiguousLifelineSharedWithheldAddressReported13159(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
