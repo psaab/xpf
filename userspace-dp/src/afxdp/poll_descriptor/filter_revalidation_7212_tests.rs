@@ -3399,8 +3399,16 @@ fn pbr_deny_after_per_packet_fixture(
         action: "accept".into(),
         ..Default::default()
     };
+    let count_fallthrough = FirewallTermSnapshot {
+        name: "count-before-pbr".into(),
+        protocols: vec!["tcp".into()],
+        next_term: true,
+        count: "before-pbr-counter".into(),
+        ..Default::default()
+    };
     let pbr = pbr_term("pbr-drop", "5201", deny_action);
-    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, v6, vec![dscp, pbr]);
+    let forwarding =
+        forwarding_with_input_filter(LAN_IFINDEX, v6, vec![dscp, count_fallthrough, pbr]);
     (forwarding, if v6 { v6_flow(5201) } else { v4_flow(5201) })
 }
 
@@ -3428,12 +3436,20 @@ fn per_packet_shape_preserves_pbr_discard_on_hit_13648() {
         assert_eq!(hit.log_source, crate::afxdp::event_emit::FilterLogSource::Pbr);
         assert!(already_counted, "PBR deny replay must be counted");
         assert_eq!(
-            filter.terms[1]
+            filter.terms[2]
                 .counter
                 .packets
                 .load(std::sync::atomic::Ordering::Relaxed),
             1,
             "the PBR deny counter must be charged once"
+        );
+        assert_eq!(
+            filter.terms[1]
+                .counter
+                .packets
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a preceding fall-through counter must be charged exactly once"
         );
     }
 }
