@@ -261,7 +261,7 @@ type Manager struct {
 	// Guarded by m.mu like syncCancel; production stop paths deliberately do
 	// NOT wait on it (joining under m.mu would deadlock against the tick body
 	// that needs the same lock) — only test harnesses join.
-	syncDone chan struct{}
+	syncDone   chan struct{}
 	lastStatus ProcessStatus
 	// helperStatusView is the immutable, atomically published read-only view
 	// of lastStatus. Status and metrics readers must not wait behind the
@@ -527,9 +527,12 @@ type Manager struct {
 	// snapshot generation). It is the generation-coherent source for
 	// the #2079 NAT pool-utilization-alarm monitor: AppliedNATView
 	// pairs this Config with the same-generation pool counters.
-	appliedSnapshot     appliedSnapshot
-	sessionMirrorFailed bool
-	sessionMirrorErr    string
+	appliedSnapshot       appliedSnapshot
+	sessionMirrorFailed   bool
+	sessionMirrorErr      string
+	sessionSocketRequests atomic.Uint64
+	sessionSocketErrors   atomic.Uint64
+	sessionSocketTimeouts atomic.Uint64
 	// sessionRepairOverflowErr is unrecoverable per-key convergence debt:
 	// the helper committed authority but could not reserve a bounded worker
 	// repair slot. Unlike a pending repair, one successful socket round-trip

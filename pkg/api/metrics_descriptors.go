@@ -34,5 +34,6 @@ func newCollector(srv *Server) *xpfCollector {
 	c.initWireGuardDescriptors()
 	c.initFlowExportDescriptors()
 	c.initFwdStatusDescriptors()
+	c.initHATakeoverDescriptors13301()
 	return c
 }
