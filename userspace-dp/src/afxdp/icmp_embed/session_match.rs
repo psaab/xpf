@@ -163,6 +163,7 @@ fn lookup_embedded_session(
                     decision: m.decision,
                     metadata: m.metadata,
                     forwarding_generation: m.forwarding_generation,
+                aux: SessionLookupAux::default(),
                 })
         })
 }

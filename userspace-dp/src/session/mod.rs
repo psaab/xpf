@@ -2942,6 +2942,35 @@ impl SessionTable {
     pub(crate) fn session_id_for(&self, key: &SessionKey) -> u64 {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
     }
+
+    /// Read install-time fields together after a successful install.
+    /// Callers that need the conntrack mirror and replication payload should
+    /// perform this one primary-key probe rather than re-hashing per field.
+    #[inline]
+    pub(crate) fn installed_session_info(
+        &self,
+        key: &SessionKey,
+    ) -> Option<SessionInstallInfo> {
+        self.entry_by_key(key).map(|entry| SessionInstallInfo {
+            session_id: entry.session_id,
+            source_nat_static: entry.source_nat_static,
+            timeout_secs: (entry.expires_after_ns / 1_000_000_000) as u32,
+            handshake_state_wire: entry.tcp_handshake_state_wire(key.protocol),
+        })
+    }
+
+    /// Read local-hit attributes from one already-known canonical key.
+    #[inline]
+    pub(crate) fn lookup_aux_info(&self, key: &SessionKey) -> SessionLookupAux {
+        let Some(entry) = self.entry_by_key(key) else {
+            return SessionLookupAux::default();
+        };
+        SessionLookupAux {
+            session_id: entry.session_id,
+            source_nat_static: entry.source_nat_static,
+            leak_incarnation: self.leak_incarnations.get(key).copied().unwrap_or(0),
+        }
+    }
     /// Return the session identity for the lowest live slab handle sharing
     /// this bare five-tuple, or None when no scoped incarnation is present.
     /// The ordered collision bucket preserves the previous slab-iteration

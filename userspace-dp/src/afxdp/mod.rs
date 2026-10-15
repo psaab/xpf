@@ -23,7 +23,8 @@ use crate::prefix::{PrefixV4, PrefixV6};
 use crate::screen::{InertProfileRef, ScreenProfile, ScreenState, ScreenVerdict, extract_screen_info};
 use crate::session::{
     ForwardSessionMatch, SessionCounters, SessionDecision, SessionDelta, SessionDeltaKind,
-    SessionInstall, SessionKey, SessionLookup, SessionMetadata, SessionOrigin, SessionTable,
+    SessionInstall, SessionKey, SessionLookup, SessionLookupAux,
+    SessionMetadata, SessionOrigin, SessionTable,
     SessionUpdate, forward_wire_key, reverse_canonical_key, reverse_session_key,
 };
 use crate::slowpath::{EnqueueOutcome, SlowPathReinjector, SlowPathStatus, open_tun};
