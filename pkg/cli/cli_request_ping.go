@@ -18,28 +18,18 @@ func (c *CLI) handlePing(args []string) error {
 		return nil
 	}
 
-	target := args[0]
-	count := "5"
-	source := ""
-	size := ""
-	vrfName := ""
-
-	for i := 1; i < len(args)-1; i++ {
-		switch args[i] {
-		case "count":
-			count = args[i+1]
-			i++
-		case "source":
-			source = args[i+1]
-			i++
-		case "size":
-			size = args[i+1]
-			i++
-		case "routing-instance":
-			vrfName = args[i+1]
-			i++
-		}
+	parsed, err := diagcmd.ParsePingOptions(args)
+	if err != nil {
+		return err
 	}
+	target := parsed.Target
+	count := strconv.Itoa(parsed.Count)
+	source := parsed.Source
+	size := ""
+	if parsed.SizeSet {
+		size = strconv.Itoa(parsed.Size)
+	}
+	vrfName := parsed.RoutingInstance
 
 	// #10727 A10-F5: the local path must enforce the same field bounds as
 	// REST/gRPC (diagcmd.CheckArgs) instead of handing raw tokens to exec.
@@ -64,7 +54,7 @@ func (c *CLI) handlePing(args []string) error {
 	// terminal. See wireSanitizedOutput for why both streams go through one
 	// call.
 	defer wireSanitizedOutput(cmd)()
-	err := cmd.Run()
+	err = cmd.Run()
 	if ctx.Err() != nil {
 		return nil // cancelled by Ctrl-C or timeout
 	}
@@ -132,20 +122,13 @@ func (c *CLI) handleTraceroute(args []string) error {
 		return nil
 	}
 
-	target := args[0]
-	source := ""
-	vrfName := ""
-
-	for i := 1; i < len(args)-1; i++ {
-		switch args[i] {
-		case "source":
-			source = args[i+1]
-			i++
-		case "routing-instance":
-			vrfName = args[i+1]
-			i++
-		}
+	parsed, err := diagcmd.ParseTracerouteOptions(args)
+	if err != nil {
+		return err
 	}
+	target := parsed.Target
+	source := parsed.Source
+	vrfName := parsed.RoutingInstance
 
 	// #10727 A10-F5: same shared field bounds as ping (see handlePing).
 	if err := diagcmd.CheckArgs(target, source, vrfName); err != nil {
@@ -169,7 +152,7 @@ func (c *CLI) handleTraceroute(args []string) error {
 	// terminal. See wireSanitizedOutput for why both streams go through one
 	// call.
 	defer wireSanitizedOutput(cmd)()
-	err := cmd.Run()
+	err = cmd.Run()
 	if ctx.Err() != nil {
 		return nil // cancelled by Ctrl-C or timeout
 	}

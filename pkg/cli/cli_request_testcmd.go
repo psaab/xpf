@@ -9,6 +9,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/diagcmd"
 	"github.com/psaab/xpf/pkg/policymatch"
 	"github.com/psaab/xpf/pkg/routing"
 )
@@ -431,15 +432,15 @@ func (c *CLI) testSecurityZone(args []string) error {
 		return nil
 	}
 
-	var ifName string
-	for i := 0; i < len(args); i++ {
-		if args[i] == "interface" && i+1 < len(args) {
-			i++
-			ifName = args[i]
-		}
+	if len(args) == 0 {
+		fmt.Println("usage: test security-zone interface <name>")
+		return nil
 	}
-
-	if ifName == "" {
+	ifName, present, err := diagcmd.ParseTestInterface(args)
+	if err != nil {
+		return err
+	}
+	if !present {
 		fmt.Println("usage: test security-zone interface <name>")
 		return nil
 	}
