@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -61,6 +62,9 @@ func compileNAT(node *Node, sec *SecurityConfig) error {
 		}
 		return nil
 	}); err != nil {
+		return err
+	}
+	if err := finalizeSourceNATPools(sec); err != nil {
 		return err
 	}
 
@@ -523,6 +527,96 @@ func parseSourcePoolPortRange(toks []string) (low, high int, ok bool) {
 	return 0, 0, false
 }
 
+// finalizeSourceNATPools runs once after every `security nat source` block
+// has been merged. Per-block defaulting or deterministic validation can
+// observe a partial pool when its fields are split across sibling blocks.
+func finalizeSourceNATPools(sec *SecurityConfig) error {
+	names := make([]string, 0, len(sec.NAT.SourcePools))
+	for name := range sec.NAT.SourcePools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		pool := sec.NAT.SourcePools[name]
+		if pool == nil {
+			continue
+		}
+		if !pool.PortNoTranslation {
+			if pool.PortLow == 0 {
+				pool.PortLow = 1024
+			}
+			if pool.PortHigh == 0 {
+				pool.PortHigh = 65535
+			}
+		}
+	}
+
+	for _, name := range names {
+		pool := sec.NAT.SourcePools[name]
+		if pool == nil || pool.Deterministic == nil {
+			continue
+		}
+		det := pool.Deterministic
+		if det.BlockSize <= 0 {
+			return fmt.Errorf("pool %q: deterministic block-size must be > 0", pool.Name)
+		}
+		if det.HostAddress == "" {
+			return fmt.Errorf("pool %q: deterministic host address required", pool.Name)
+		}
+		_, hostNet, err := net.ParseCIDR(det.HostAddress)
+		if err != nil {
+			return fmt.Errorf("pool %q: invalid host address %q: %w", pool.Name, det.HostAddress, err)
+		}
+		ones, bits := hostNet.Mask.Size()
+		portLow := pool.PortLow
+		if portLow == 0 {
+			portLow = 1024
+		}
+		portHigh := pool.PortHigh
+		if portHigh == 0 {
+			portHigh = 65535
+		}
+		portRange := portHigh - portLow + 1
+		if det.BlockSize > portRange {
+			return fmt.Errorf("pool %q: block-size %d exceeds port range %d", pool.Name, det.BlockSize, portRange)
+		}
+		blocksPerIP := portRange / det.BlockSize
+		var poolHosts uint64
+		if pool.Address != "" {
+			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(pool.Address))
+		}
+		for _, a := range pool.Addresses {
+			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(a))
+		}
+		totalBlocks := uint64(math.MaxUint64)
+		if poolHosts <= math.MaxUint64/uint64(blocksPerIP) {
+			totalBlocks = poolHosts * uint64(blocksPerIP)
+		}
+
+		if bits == 128 {
+			if ones != 32 && ones != 64 {
+				return fmt.Errorf("pool %q: IPv6 host prefix must be /32 or /64, got /%d", pool.Name, ones)
+			}
+			if totalBlocks == 0 {
+				return fmt.Errorf("pool %q: insufficient capacity (0 blocks) for IPv6 deterministic NAT", pool.Name)
+			}
+		} else {
+			hostCount := uint64(1) << uint(bits-ones)
+			if totalBlocks < hostCount {
+				return fmt.Errorf("pool %q: insufficient capacity (%d blocks) for %d subscribers", pool.Name, totalBlocks, hostCount)
+			}
+		}
+		if pool.PersistentNAT != nil {
+			return fmt.Errorf("pool %q: deterministic and persistent-nat are mutually exclusive", pool.Name)
+		}
+		if sec.NAT.AddressPersistent {
+			return fmt.Errorf("pool %q: deterministic and address-persistent are mutually exclusive", pool.Name)
+		}
+	}
+	return nil
+}
+
 func compileNATSource(node *Node, sec *SecurityConfig) error {
 	// Global flags
 	if node.FindChild("address-persistent") != nil {
@@ -670,7 +764,12 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 					if lo, hi, ok := parseSourcePoolPortRange(toks); ok {
 						pool.PortLow = lo
 						pool.PortHigh = hi
+						pool.PortNoTranslation = false
+						pool.PortRangeInvalidSpec = ""
 					} else {
+						pool.PortLow = 0
+						pool.PortHigh = 0
+						pool.PortNoTranslation = false
 						pool.PortRangeInvalidSpec = strings.Join(toks, " ")
 					}
 				}
@@ -694,6 +793,9 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 				for _, k := range prop.Keys[1:] {
 					if k == "no-translation" {
 						pool.PortNoTranslation = true
+						pool.PortLow = 0
+						pool.PortHigh = 0
+						pool.PortRangeInvalidSpec = ""
 					}
 				}
 
@@ -712,6 +814,9 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 						setPortRange(pc.Keys[1:])
 					case "no-translation":
 						pool.PortNoTranslation = true
+						pool.PortLow = 0
+						pool.PortHigh = 0
+						pool.PortRangeInvalidSpec = ""
 					case "deterministic":
 						applyDeterministicChildren(ensureDet(), pc)
 					default:
@@ -803,27 +908,6 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 				pool.UnknownLeaves = append(pool.UnknownLeaves, prop.Name())
 			}
 		}
-		// #7173: do NOT invent a port range for a pool that does not translate
-		// ports. `port no-translation` takes the address-only path, so 1024-65535
-		// here was a value the compiler made up for a field nothing in that mode
-		// consumes — and a future reader would reasonably assume it meant
-		// something.
-		//
-		// Safe to skip because this defaulting is not load-bearing: BOTH readers
-		// apply the same default independently. config.SourceNATPoolPortRange
-		// substitutes 1024/65535 for a zero low/high, and that accessor is what
-		// builds the dataplane snapshot (which the pool-utilization alarm then
-		// reads, so its capacity computation is unaffected). This was the third
-		// copy of one default, and the one that mutated the stored config so it
-		// no longer said what the operator wrote.
-		if !pool.PortNoTranslation {
-			if pool.PortLow == 0 {
-				pool.PortLow = 1024
-			}
-			if pool.PortHigh == 0 {
-				pool.PortHigh = 65535
-			}
-		}
 		sec.NAT.SourcePools[pool.Name] = pool
 	}
 
@@ -885,78 +969,6 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 			alarm.ClearThreshold = defaultPoolAlarmClearThreshold(alarm.RaiseThreshold)
 		}
 		sec.NAT.PoolUtilizationAlarm = alarm
-	}
-
-	// Validate deterministic NAT pools
-	for _, pool := range sec.NAT.SourcePools {
-		if pool.Deterministic == nil {
-			continue
-		}
-		det := pool.Deterministic
-		if det.BlockSize <= 0 {
-			return fmt.Errorf("pool %q: deterministic block-size must be > 0", pool.Name)
-		}
-		if det.HostAddress == "" {
-			return fmt.Errorf("pool %q: deterministic host address required", pool.Name)
-		}
-		_, hostNet, err := net.ParseCIDR(det.HostAddress)
-		if err != nil {
-			return fmt.Errorf("pool %q: invalid host address %q: %w", pool.Name, det.HostAddress, err)
-		}
-		ones, bits := hostNet.Mask.Size()
-		portLow := pool.PortLow
-		if portLow == 0 {
-			portLow = 1024
-		}
-		portHigh := pool.PortHigh
-		if portHigh == 0 {
-			portHigh = 65535
-		}
-		portRange := portHigh - portLow + 1
-		if det.BlockSize > portRange {
-			return fmt.Errorf("pool %q: block-size %d exceeds port range %d", pool.Name, det.BlockSize, portRange)
-		}
-		blocksPerIP := portRange / det.BlockSize
-		// #9498: capacity is EXPANDED pool hosts x blocks-per-address -- the unit
-		// the allocator and the reverse lookup index by. It counted address
-		// STATEMENTS, so a CIDR member counted once and a pool whose hosts really
-		// had the capacity was rejected (an over-refusal), and the singular
-		// `pool.Address` was not counted at all. Saturating, like the #5877
-		// aggregate gate that shares `sourceNATPoolMemberHostCount`.
-		var poolHosts uint64
-		if pool.Address != "" {
-			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(pool.Address))
-		}
-		for _, a := range pool.Addresses {
-			poolHosts = checkedAddU64(poolHosts, sourceNATPoolMemberHostCount(a))
-		}
-		totalBlocks := uint64(math.MaxUint64)
-		if poolHosts <= math.MaxUint64/uint64(blocksPerIP) {
-			totalBlocks = poolHosts * uint64(blocksPerIP)
-		}
-
-		if bits == 128 {
-			// IPv6 host address — validate word-aligned prefix
-			if ones != 32 && ones != 64 {
-				return fmt.Errorf("pool %q: IPv6 host prefix must be /32 or /64, got /%d", pool.Name, ones)
-			}
-			// For IPv6, subscriber count is capped by pool capacity
-			if totalBlocks == 0 {
-				return fmt.Errorf("pool %q: insufficient capacity (0 blocks) for IPv6 deterministic NAT", pool.Name)
-			}
-		} else {
-			// IPv4 host address
-			hostCount := uint64(1) << uint(bits-ones)
-			if totalBlocks < hostCount {
-				return fmt.Errorf("pool %q: insufficient capacity (%d blocks) for %d subscribers", pool.Name, totalBlocks, hostCount)
-			}
-		}
-		if pool.PersistentNAT != nil {
-			return fmt.Errorf("pool %q: deterministic and persistent-nat are mutually exclusive", pool.Name)
-		}
-		if sec.NAT.AddressPersistent {
-			return fmt.Errorf("pool %q: deterministic and address-persistent are mutually exclusive", pool.Name)
-		}
 	}
 
 	// #2079: pool-utilization-alarm threshold validation is NOT performed
