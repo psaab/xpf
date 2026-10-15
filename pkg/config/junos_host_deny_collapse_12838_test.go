@@ -100,8 +100,9 @@ func TestJunosHostCollapse12838BaseFullAdmitDoesNotSuppress(t *testing.T) {
 	}
 }
 
-// Countercase (must keep passing): a DISTINCT VLAN unit-0 netdev must not be
-// suppressed — the base row is the physical netdev's only carrier there.
+// Countercase: the distinct VLAN unit-0 physical carrier remains in the zone's
+// ingress scope, but its exemptions follow unit 0's effective override rather
+// than leaking the broader zone-level set.
 func TestJunosHostCollapse12838VlanUnit0BaseRowKept(t *testing.T) {
 	cfg := jh12838Cfg(nil, &HostInboundTraffic{SystemServices: []string{"ssh"}})
 	cfg.Security.Zones["untrust"].HostInboundTraffic.SystemServices = []string{"ike", "ident-reset"}
@@ -113,8 +114,9 @@ func TestJunosHostCollapse12838VlanUnit0BaseRowKept(t *testing.T) {
 	}
 	ike, ident, _, _ := junosHostZoneExemptNetdevs(cfg, "untrust",
 		cfg.Security.Zones["untrust"], nd["untrust"], nil)
-	if !has12838(ike, "ge-0-0-1") || !has12838(ident, "ge-0-0-1") {
-		t.Errorf("distinct VLAN netdev: ike=%v ident=%v, want both [ge-0-0-1] (base row kept)", ike, ident)
+	if has12838(ike, "ge-0-0-1") || has12838(ident, "ge-0-0-1") {
+		t.Errorf("distinct VLAN physical carrier: ike=%v ident=%v, want neither: unit-0 override is ssh-only",
+			ike, ident)
 	}
 }
 
