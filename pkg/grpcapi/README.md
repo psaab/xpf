@@ -335,18 +335,20 @@ RPCs was rejected: it would be CLIENT-supplied, and an authorization
 decision derived from attacker-controlled input is not an authorization
 decision.
 
-**Three tables, because the two multiplexed methods are multiplexed here
-too.** `methodCanonicalCommand` keys on the short method name;
+**Three command lookup shapes, including the two multiplexed text/action
+methods.** `methodCanonicalCommand` keys on the short method name;
 `showTextTopicCommand` and `systemActionVerbCommand` key on the decoded
-request's topic and verb, exactly as `showTextTopicPermission` and
-`systemActionPermission` do. `showTextTopicCommand`'s DATA moved to
-`pkg/cmdtree/showtext_topic.go` in #8058 and this package holds a view onto
-it — the remote CLI reads the same table to decide what topic to send, so
-the two surfaces can no longer disagree about which command a topic means.
-Add or rename a topic there; the checks below are unchanged and still run
-here, because they are properties of this package's dispatcher. A method with no command entry must be NAMED
-in `methodsWithoutCanonicalCommand` with a reason, so an intended absence
-is distinguishable from a forgotten one.
+request's topic and verb. `GetSystemInfo` is also request-decoded for
+deny-command attribution: `systemInfoCanonicalCommand` maps its bounded type
+selector to a fixed canonical command. Its coarse permission remains
+`PermView`. The ShowText topic map's data moved to
+`pkg/cmdtree/showtext_topic.go` in #8058 and this package holds a view onto it —
+the remote CLI reads the same table to decide what topic to send, so the two
+surfaces cannot disagree about a topic's command. Add or rename a ShowText topic
+there; the checks below still run here, because they are properties of this
+package's dispatcher. A method with no method-table command entry must be named
+in `methodsWithoutCanonicalCommand` with a reason, so an intended dynamic
+mapping or absence is distinguishable from an oversight.
 
 | Guard | Enumerates |
 |---|---|

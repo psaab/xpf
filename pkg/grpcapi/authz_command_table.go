@@ -77,7 +77,6 @@ var methodCanonicalCommand = map[string]string{
 	"GetNATRuleStats":          "show security nat source rule",
 	"GetNATDeterministic":      "show security nat source deterministic-nat",
 	"MatchPolicies":            "show security match-policies",
-	"GetSystemInfo":            "show version",
 	"GetConfigModeStatus":      "show version",
 	"ShowConfig":               "show configuration",
 	"ShowCompare":              "show configuration",
@@ -141,6 +140,7 @@ var methodsWithoutCanonicalCommand = map[string]string{
 	"GetRIPStatus":            "no `show rip` node exists in the operational tree",
 	"GetVRRPStatus":           "no `show vrrp` node exists in the operational tree",
 	"ShowText":                "priced from the decoded request; the topic selects the command (showTextTopicCommand)",
+	"GetSystemInfo":           "command selected by request type via systemInfoCanonicalCommand in rpcCanonicalCommand",
 	"SystemAction":            "priced from the decoded request; the verb selects the command (systemActionVerbCommand)",
 	"GetD11AttestationLedger": "privileged bounded D11 evidence has no operator command; handler requires local root or configured super-user",
 }
