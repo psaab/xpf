@@ -218,10 +218,11 @@ type EnvelopeCompatibility struct {
 	MinReader     int
 }
 
-// InspectEnvelopeHeader parses an envelope header without applying this
-// package's current-reader gate. Callers that need to compare a snapshot
-// against a different target reader (for example, an older rollback binary)
-// must inspect first and apply that target-specific policy themselves.
+// InspectEnvelopeHeader parses the envelope's supported format metadata
+// without applying this package's envelope-grammar or min-reader gates.
+// Callers that need to compare a snapshot against a different target reader
+// (for example, an older rollback binary) apply those target-specific gates
+// themselves.
 //
 // A legacy, pre-envelope body returns (zero, false, nil). A body beginning
 // with the envelope magic is parsed strictly; malformed headers return an
