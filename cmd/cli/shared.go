@@ -372,7 +372,7 @@ func (c *ctl) dispatchConfig(line string) error {
 			return nil
 		}
 		fullPath := append(append([]string{}, c.editPath...), strings.Fields(pathText)...)
-		input := "annotate " + strings.Join(fullPath, " ") + " \"" + comment + "\""
+		input := "annotate " + strings.Join(fullPath, " ") + " \"" + cliterm.EscapeAnnotateComment(comment) + "\""
 		_, err := c.client.Set(c.ctx(), &pb.SetRequest{Input: input})
 		if err != nil {
 			return fmt.Errorf("%v", err)

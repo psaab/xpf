@@ -88,18 +88,13 @@ func configMutationLineFor(fullMethod string, req any) (string, bool) {
 			// Server.Set routes these inputs by their leading verb instead of
 			// sending them through SetFromInput. Keep the exact handler-routed
 			// line so the configuration gate adjudicates the real path(s):
-			// Set also routes annotate directly, with its path and quoted
-			// comment intact for the shared configuration mutation parser.
-			if strings.HasPrefix(input, "annotate ") {
+			if fields := strings.Fields(input); len(fields) > 0 && fields[0] == "annotate" {
 				return input, true
 			}
-			// copy/rename have two endpoints, while insert,
-			// annotate and activate/deactivate have one. Prepending "set "
+			// copy/rename have two endpoints, while insert and
+			// activate/deactivate have one. Prepending "set "
 			// here turns, for example, "copy <src> to <dst>" into one unrelated
 			// path and lets an anchored deny bypass the gate (#10304, #9938 F-029).
-			if strings.HasPrefix(input, "annotate ") {
-				return input, true
-			}
 			if strings.HasPrefix(input, "copy ") ||
 				strings.HasPrefix(input, "rename ") ||
 				strings.HasPrefix(input, "insert ") {
