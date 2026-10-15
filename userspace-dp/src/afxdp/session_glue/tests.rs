@@ -18931,7 +18931,7 @@ fn across_scopes_absent_exact_key_uses_one_primary_index_probe_13078() {
         1,
         "#13078: the mutable exact lookup already distinguishes absent from stale"
     );
-
+}
 
 /// D5-07 source-level probe budget: the caller paths must consume the resolved
 /// lookup/install snapshot rather than querying the same flow key by field.
