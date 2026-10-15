@@ -468,14 +468,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		if m.eventStreamCancel != nil {
-			m.eventStreamCancel()
-		}
-		if m.eventStream != nil {
-			m.eventStream.Close()
-		}
-		m.eventStream = nil
-		m.eventStreamCancel = nil
+		m.stopEventStreamLocked()
 		return fmt.Errorf("start userspace dataplane helper: %w", err)
 	}
 	m.cfg = cfg
@@ -671,14 +664,7 @@ func (m *Manager) stopLocked() {
 	// Do not wait on sessionMu here: explicit fail-closed disarm must happen
 	// before any potentially slow session drain.
 	m.haWatchdogProcessGen.Add(1)
-	if m.eventStreamCancel != nil {
-		m.eventStreamCancel()
-		m.eventStreamCancel = nil
-	}
-	if m.eventStream != nil {
-		m.eventStream.Close()
-		m.eventStream = nil
-	}
+	m.stopEventStreamLocked()
 	if m.syncCancel != nil {
 		m.syncCancel()
 		m.syncCancel = nil
@@ -766,14 +752,7 @@ func (m *Manager) helperExitedChanLocked() chan struct{} {
 // stop would leave exactly the stale readiness the issue is about; before this
 // existed the crash path cleared nothing at all.
 func (m *Manager) resetAfterHelperGoneLocked() {
-	if m.eventStreamCancel != nil {
-		m.eventStreamCancel()
-		m.eventStreamCancel = nil
-	}
-	if m.eventStream != nil {
-		m.eventStream.Close()
-		m.eventStream = nil
-	}
+	m.stopEventStreamLocked()
 	if m.syncCancel != nil {
 		m.syncCancel()
 		m.syncCancel = nil

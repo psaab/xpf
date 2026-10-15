@@ -739,6 +739,9 @@ type Manager struct {
 
 	eventStream       *EventStream
 	eventStreamCancel context.CancelFunc
+	// eventStreamBase retains daemon-owned event-stream counters across helper
+	// incarnations. Guarded by m.mu, like eventStream.
+	eventStreamBase EventStreamStatus
 
 	// OnXSKBound is called once when all XSK bindings are bound.
 	// Used by the daemon to defer IPVLAN creation until after XSK

@@ -39,6 +39,20 @@ func fetchUserspaceStatus(dp apiRuntimeDataPlane) *dpuserspace.ProcessStatus {
 	return &status
 }
 
+// fetchUserspaceEventStreamStatus reads daemon-owned event-stream counters
+// separately from helper status, so their series remain available while the
+// helper is down.
+func fetchUserspaceEventStreamStatus(dp apiRuntimeDataPlane) *dpuserspace.EventStreamStatus {
+	provider, ok := dataplane.Unwrap(dp).(interface {
+		UserspaceEventStreamStatus() dpuserspace.EventStreamStatus
+	})
+	if !ok {
+		return nil
+	}
+	status := provider.UserspaceEventStreamStatus()
+	return &status
+}
+
 // #709 + #869: single Status() call per scrape, then dispatch to
 // CoS owner profile + worker runtime collectors.  Both features need
 // the same ProcessStatus; calling Status() twice per scrape is
@@ -475,14 +489,7 @@ func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, sta
 		return
 	}
 	es := status.EventStream
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
-		prometheus.GaugeValue, eventStreamBoolGauge(es.Paused), "paused")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
-		prometheus.GaugeValue, float64(es.EventsSinceAck), "events_since_ack")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
-		prometheus.CounterValue, float64(es.FramesRead), "read")
-	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
-		prometheus.CounterValue, float64(es.FramesWritten), "written")
+	c.emitUserspaceEventStreamStatus(ch, *es)
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
 		prometheus.CounterValue, float64(status.EventStreamSent), "sent")
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
@@ -543,6 +550,17 @@ func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, sta
 		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamProducerFramesTotal,
 			prometheus.CounterValue, float64(item.count), item.outcome)
 	}
+}
+
+func (c *xpfCollector) emitUserspaceEventStreamStatus(ch chan<- prometheus.Metric, es dpuserspace.EventStreamStatus) {
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+		prometheus.GaugeValue, eventStreamBoolGauge(es.Paused), "paused")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamState,
+		prometheus.GaugeValue, float64(es.EventsSinceAck), "events_since_ack")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
+		prometheus.CounterValue, float64(es.FramesRead), "read")
+	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamFramesTotal,
+		prometheus.CounterValue, float64(es.FramesWritten), "written")
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDecodeErrorsTotal,
 		prometheus.CounterValue, float64(es.DecodeErrors))
 	ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamSequenceGapsTotal,
@@ -568,7 +586,6 @@ func (c *xpfCollector) emitUserspaceEventStream(ch chan<- prometheus.Metric, sta
 		ch <- prometheus.MustNewConstMetric(c.userspaceEventStreamDisconnectsTotal,
 			prometheus.CounterValue, float64(item.count), item.reason)
 	}
-
 	for _, item := range []struct {
 		label string
 		count uint64
