@@ -230,6 +230,14 @@ func junosHostResolveApplications(cfg *Config, tokens []string) (l4 []JunosHostD
 		// shadowed user application to the set's members, so the kernel
 		// direct-host DENY projected the wrong ports.
 		_, isApp := ResolveApplication(tok, cfg.Applications.Applications)
+
+		// A mixed direct+term application is not represented by its generated
+		// term members: compileApplications drops the direct body. Reject the
+		// original token before expanding its implicit application-set.
+		if !isApp && junosHostMixedDirectTermReference(cfg, tok, make(map[string]bool)) {
+			ok = false
+			continue
+		}
 		if _, isSet := ResolveApplicationSet(tok, cfg.Applications.ApplicationSets); !isApp && isSet {
 			members, err := ExpandApplicationSet(tok, &cfg.Applications)
 			if err != nil {
@@ -259,6 +267,42 @@ func junosHostResolveApplications(cfg *Config, tokens []string) (l4 []JunosHostD
 	return l4, false, ok
 }
 
+// junosHostMixedDirectTermReference reports whether a token names a mixed
+// direct+term app directly or through any nested application-set. Such an app's
+// direct match body was dropped during compilation, so projecting only its
+// synthesized term members would under-match the authored deny.
+func junosHostMixedDirectTermReference(cfg *Config, name string, visiting map[string]bool) bool {
+	for _, mixed := range cfg.Applications.MixedDirectTermApps {
+		if mixed == name {
+			return true
+		}
+	}
+	if visiting[name] {
+		return false
+	}
+	visiting[name] = true
+	defer delete(visiting, name)
+	set, found := ResolveApplicationSet(name, cfg.Applications.ApplicationSets)
+	if !found || set == nil {
+		return false
+	}
+	for _, member := range set.Applications {
+		for _, mixed := range cfg.Applications.MixedDirectTermApps {
+			if member == mixed {
+				return true
+			}
+		}
+		if _, isApp := ResolveApplication(member, cfg.Applications.Applications); isApp {
+			continue
+		}
+		if _, nested := ResolveApplicationSet(member, cfg.Applications.ApplicationSets); nested &&
+			junosHostMixedDirectTermReference(cfg, member, visiting) {
+			return true
+		}
+	}
+	return false
+}
+
 // junosHostReduceApp reduces a single application to L4 fragments. Rejects
 // multi-term apps (MixedDirectTermApps), ALG-bearing apps, protocol-less apps,
 // non-numeric ports, and apps scoped to an IPsec/ident exempt tuple.
@@ -280,17 +324,41 @@ func junosHostReduceApp(cfg *Config, name string) ([]JunosHostDenyL4, bool) {
 		return nil, false
 	}
 	var frag JunosHostDenyL4
+
+	// small protocol-number mapping aligned with appid.ProtocolNumber.
 	switch proto {
-	case "tcp":
+	case "tcp", "junos-tcp-any":
 		frag.Proto = HostInboundProtoTCP
-	case "udp":
+	case "udp", "junos-udp-any":
 		frag.Proto = HostInboundProtoUDP
-	case "icmp":
+	case "icmp", "junos-icmp-all", "junos-ping":
 		frag.Proto = HostInboundProtoICMP
 		frag.ICMPType, frag.ICMPCode = app.ICMPType, app.ICMPCode
-	case "icmp6", "icmpv6", "icmp-v6":
+	case "icmp6", "icmpv6", "icmp-v6", "junos-icmp6-all", "junos-pingv6":
 		frag.Proto = HostInboundProtoICMPv6
 		frag.ICMPType, frag.ICMPCode = app.ICMPType, app.ICMPCode
+	case "gre", "junos-gre":
+		frag.Proto = 47
+	case "ipip", "junos-ipip", "junos-ip-in-ip":
+		frag.Proto = 4
+	case "ospf", "junos-ospf":
+		frag.Proto = 89
+	case "igmp":
+		frag.Proto = 2
+	case "pim":
+		frag.Proto = 103
+	case "sctp":
+		frag.Proto = 132
+	case "vrrp":
+		frag.Proto = 112
+	case "egp":
+		frag.Proto = 8
+	case "ipv6":
+		frag.Proto = 41
+	case "ah":
+		frag.Proto = 51
+	case "esp":
+		frag.Proto = 50
 	default:
 		n, err := ParseCanonicalUint(app.Protocol)
 		if err != nil || n < 0 || n > 255 {
