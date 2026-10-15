@@ -272,22 +272,21 @@ func collectSchemaRefs(tree *ConfigTree) *schemaRefs {
 	}
 	// collectLoginClasses records custom `login class <name>` names under a
 	// `system` node (#4304 S-2). Mirrors the compiler's namedInstances over
-	// `system login class`: the class name is the leading Keys arg.
+	// every sibling `system login` block: each class name is the leading Keys
+	// arg.
 	collectLoginClasses := func(sysNode *Node) {
-		loginNode := sysNode.FindChild("login")
-		if loginNode == nil {
-			return
-		}
-		for _, classNode := range loginNode.FindChildren("class") {
-			if len(classNode.Keys) >= 2 && classNode.Keys[1] != "" {
-				refs.loginClasses[classNode.Keys[1]] = struct{}{}
-				continue
-			}
-			// Hierarchical shape: `class { noc-admin { ... } }` — the name
-			// is a child of the bare `class` node.
-			for _, c := range classNode.Children {
-				if len(c.Keys) > 0 && c.Keys[0] != "" {
-					refs.loginClasses[c.Keys[0]] = struct{}{}
+		for _, loginNode := range sysNode.FindChildren("login") {
+			for _, classNode := range loginNode.FindChildren("class") {
+				if len(classNode.Keys) >= 2 && classNode.Keys[1] != "" {
+					refs.loginClasses[classNode.Keys[1]] = struct{}{}
+					continue
+				}
+				// Hierarchical shape: `class { noc-admin { ... } }` — the name
+				// is a child of the bare `class` node.
+				for _, c := range classNode.Children {
+					if len(c.Keys) > 0 && c.Keys[0] != "" {
+						refs.loginClasses[c.Keys[0]] = struct{}{}
+					}
 				}
 			}
 		}
