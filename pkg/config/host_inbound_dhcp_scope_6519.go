@@ -323,6 +323,8 @@ func validateHostInboundZoneLevelDHCPWarnings(cfg *Config) []string {
 	}
 	lifelines := HostInboundLifelineSet(cfg)
 	serverRefs := hostInboundDHCPServerRefs(cfg)
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
+	quarantinedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	names := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
@@ -338,37 +340,73 @@ func validateHostInboundZoneLevelDHCPWarnings(cfg *Config) []string {
 		if len(toks) == 0 {
 			continue
 		}
+		// Report the same unit scope that stampZoneDHCPScopeWithheld stamps.
+		// A bare zone member reaches each configured unit independently; using
+		// only the bare spelling can call a mixed server/client interface
+		// "retained" even while unit 0 is withheld.
 		refs := make([]string, 0, len(zone.Interfaces))
 		seen := make(map[string]bool, len(zone.Interfaces))
 		for _, ref := range zone.Interfaces {
-			if ref == "" || seen[ref] {
+			if ref == "" {
 				continue
 			}
-			seen[ref] = true
-			refs = append(refs, ref)
+			s := cfg.SplitInterfaceUnitRef(ref)
+			add := func(unitRef string) {
+				if !seen[unitRef] {
+					seen[unitRef] = true
+					refs = append(refs, unitRef)
+				}
+			}
+			if s.HasUnit && s.UnitTok != "" {
+				add(s.Literal)
+				continue
+			}
+			if ifc := cfg.Interfaces.Interfaces[s.Base]; ifc != nil && len(ifc.Units) > 0 {
+				unitNums := make([]int, 0, len(ifc.Units))
+				for unitNum := range ifc.Units {
+					unitNums = append(unitNums, unitNum)
+				}
+				sort.Ints(unitNums)
+				for _, unitNum := range unitNums {
+					add(fmt.Sprintf("%s.%d", s.Base, unitNum))
+				}
+				continue
+			}
+			add(s.Literal)
 		}
 		sort.Strings(refs)
-		// #7490: ask the UNFILTERED question — "does the ZONE-LEVEL stanza name
-		// this token for this interface" — and then split the answer by whether
-		// the flip still lets it authorize.
-		//
-		// Reading the EFFECTIVE set here, as stages 1 and 1.5 did, would make
-		// this advisory go SILENT on exactly the interfaces the flip just
-		// narrowed: their effective set no longer admits the token, so the
-		// operator whose DHCP server stopped receiving DISCOVER would be told
-		// nothing. The advisory has to keep firing on those and say something
-		// DIFFERENT, which is the whole upgrade path for this change.
-		//
-		// The predicate is now "the interface declares no stanza of its own AND
-		// the zone-level list names the token". That asserts #6515's replace
-		// rule, which stages 1/1.5 deliberately avoided asserting while the
-		// combination rule was still in flight — it has landed, and
-		// EffectiveHostInboundTokens implements replace unconditionally, so the
-		// two forms are now equivalent and this one survives the filter.
+		if _, excluded := excludedZones[name]; excluded {
+			continue
+		}
 		zoneSvc := zone.HostInboundTraffic.SystemServices
 		var withheldRefs, retainedRefs []string
 		var anyClient, anyIdle bool
 		for _, ref := range refs {
+			s := cfg.SplitInterfaceUnitRef(ref)
+			if _, contested := quarantinedInterfaces[s.Literal]; contested {
+				continue
+			}
+			if _, contested := quarantinedInterfaces[s.Base]; contested {
+				continue
+			}
+			// #7490: ask the UNFILTERED question — "does the ZONE-LEVEL stanza name
+			// this token for this interface" — and then split the answer by whether
+			// the flip still lets it authorize.
+			//
+			// Reading the EFFECTIVE set here, as stages 1 and 1.5 did, would make
+			// this advisory go SILENT on exactly the interfaces the flip just
+			// narrowed: their effective set no longer admits the token, so the
+			// operator whose DHCP server stopped receiving DISCOVER would be told
+			// nothing. The advisory has to keep firing on those and say something
+			// DIFFERENT, which is the whole upgrade path for this change.
+			//
+			// The predicate is now "the interface declares no stanza of its own AND
+			// the zone-level list names the token". That asserts #6515's replace
+			// rule, which stages 1/1.5 deliberately avoided asserting while the
+			// combination rule was still in flight — it has landed, and
+			// EffectiveHostInboundTokens implements replace unconditionally, so the
+			// two forms are now equivalent and this one survives the filter.
+
 			if HostInboundLifelineInterface(ref, lifelines) {
 				continue
 			}
@@ -504,23 +542,23 @@ func pluralIsAre(n int) string {
 // firewall's own client), and picking a winner would invent a precedence the
 // config does not state.
 type hostInboundDHCPRoles struct {
-	server bool // dhcp-local-server / dhcpv6-local-server / dhcp-relay member
+	server bool // dhcp-local-server / dhcp-relay member (DHCPv4)
 	client bool // family inet { dhcp; } — the firewall's OWN DHCP client
 }
 
 // hostInboundSameInterface reports whether two interface refs name the same
-// interface for DHCP-role purposes. A bare physical ref and a unit ref under it
-// are the same interface (`reth1` vs `reth1.0`) — the #3720 physical/unit
-// relationship — but two DIFFERENT units are not (`reth1.0` vs `reth1.50`).
-// Basing both sides on the physical would collapse those two, over-matching a
-// sibling unit's DHCP role onto an interface that has none.
+// interface for DHCP-role purposes. A bare ordinary physical ref denotes unit
+// 0, not every sibling VLAN unit (`reth1` matches `reth1.0`, not `reth1.50`).
+// A declared dotted interface name (such as `p.0`) remains a parent interface
+// and matches its own units.
 //
 // #9821: identity resolves through the split (declared-first), not first-dot
 // cuts. Same iff string-equal, or resolved owners equal with bare/bare or
-// bare/unit status, or two unit refs with equal canonical unit numbers.
-// Both-declared independence OUTRANKS textual nesting (`p.0` vs `p.0.2` with
-// both declared are distinct interfaces even though one nests in the other).
-// Canonical aliases of one unit (`p.0.01` vs `p.0.1`) ARE the same interface.
+// bare/unit-0 status (or a declared dotted bare parent), or two unit refs with
+// equal canonical unit numbers. Both-declared independence OUTRANKS textual
+// nesting (`p.0` vs `p.0.2` with both declared are distinct interfaces even
+// though one nests in the other). Canonical aliases of one unit (`p.0.01` vs
+// `p.0.1`) ARE the same interface.
 func hostInboundSameInterface(cfg *Config, a, b string) bool {
 	if a == b {
 		return true
@@ -533,56 +571,62 @@ func hostInboundSameInterface(cfg *Config, a, b string) bool {
 		return false
 	}
 	if !sa.HasUnit || !sb.HasUnit {
-		// Bare/bare (same base) or bare/unit: the #3720 relationship — but
-		// only when the bare side's base is actually that interface (split
-		// bases already encode declared-ness, so no extra check is needed).
-		return true
+		if !sa.HasUnit && !sb.HasUnit {
+			return true
+		}
+		bare, unit := sa, sb
+		if sa.HasUnit {
+			bare, unit = sb, sa
+		}
+		if strings.Contains(bare.Base, ".") && cfg.Interfaces.Interfaces[bare.Base] != nil {
+			return true
+		}
+		n, _, err := CanonicalLogicalUnit(unit.UnitTok)
+		return err == nil && n == 0
 	}
-	// Two unit refs: same only when their canonical unit numbers agree.
-	// Sibling exclusion preserved: distinct units are distinct interfaces.
 	na, _, errA := CanonicalLogicalUnit(sa.UnitTok)
 	nb, _, errB := CanonicalLogicalUnit(sb.UnitTok)
-	if errA != nil || errB != nil {
-		return false
-	}
-	return na == nb
+	return errA == nil && errB == nil && na == nb
 }
 
 // hostInboundSameInterfaceLegacy is the pre-#9821 first-dot comparison,
-// kept for nil-config callers. NOTE the bool-tuple subtlety the rewrite
-// preserves: strings.Cut's third return is `found`, not the suffix, so
-// `aUnit != bUnit` below means "exactly one side is bare".
+// retained for nil-config callers. A bare ref means unit 0; a sibling VLAN is
+// a distinct interface.
 func hostInboundSameInterfaceLegacy(a, b string) bool {
 	if a == b {
 		return true
 	}
-	aBase, _, aUnit := strings.Cut(a, ".")
-	bBase, _, bUnit := strings.Cut(b, ".")
+	aBase, aUnit, aHasUnit := strings.Cut(a, ".")
+	bBase, bUnit, bHasUnit := strings.Cut(b, ".")
 	if aBase != bBase {
 		return false
 	}
-	// Equal bases: same interface only when exactly one side is the bare
-	// physical. Two distinct units are distinct interfaces.
-	return aUnit != bUnit
+	if !aHasUnit || !bHasUnit {
+		if !aHasUnit && !bHasUnit {
+			return true
+		}
+		unit := aUnit
+		if !aHasUnit {
+			unit = bUnit
+		}
+		n, _, err := CanonicalLogicalUnit(unit)
+		return err == nil && n == 0
+	}
+	na, _, errA := CanonicalLogicalUnit(aUnit)
+	nb, _, errB := CanonicalLogicalUnit(bUnit)
+	return errA == nil && errB == nil && na == nb
 }
 
-// hostInboundDHCPServerRefs collects every interface ref that receives DHCP on
-// the firewall's behalf as a SERVER: dhcp-local-server and dhcpv6-local-server
-// group members, and dhcp-relay group members. A relay counts because it too
-// receives client DISCOVER on udp/67 and is the case the vendor rationale
-// describes — the incoming interface must be known to send the reply back.
+// hostInboundDHCPServerRefs collects every interface ref that receives IPv4 DHCP
+// on the firewall's behalf as a dhcp-local-server or dhcp-relay member. DHCPv6
+// local-server is deliberately excluded: the #7490 gate only withholds the
+// IPv4 `dhcp` / `bootp` tokens and its role must not affect that decision.
 func hostInboundDHCPServerRefs(cfg *Config) []string {
 	if cfg == nil {
 		return nil
 	}
 	var refs []string
-	for _, srv := range []*DHCPLocalServerConfig{
-		cfg.System.DHCPServer.DHCPLocalServer,
-		cfg.System.DHCPServer.DHCPv6LocalServer,
-	} {
-		if srv == nil {
-			continue
-		}
+	if srv := cfg.System.DHCPServer.DHCPLocalServer; srv != nil {
 		for _, g := range srv.Groups {
 			if g != nil {
 				refs = append(refs, g.Interfaces...)

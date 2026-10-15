@@ -453,8 +453,9 @@ func TestDupHostOverrideMapDeclaredDotted9821(t *testing.T) {
 }
 
 // TestHostInboundRolesDeclaredDotted9821: role classification across the
-// dotted shapes incl. sibling exclusion and both-role retention. DHCP
-// clienthood is per-case: the classifier reads the unit's actual flag.
+// dotted shapes incl. sibling exclusion and both-role retention. A bare
+// ordinary physical server ref denotes unit 0 (#13141); DHCP clienthood is
+// per-case and reads the unit's actual flag.
 func TestHostInboundRolesDeclaredDotted9821(t *testing.T) {
 	newCfg := func(dhcpUnits ...int) *Config {
 		units := map[int]*InterfaceUnit{0: {Number: 0}, 1: {Number: 1}}
@@ -478,7 +479,7 @@ func TestHostInboundRolesDeclaredDotted9821(t *testing.T) {
 		{"clientOnly", []int{1}, nil, "p.0.1", false, true},
 		{"bothRoles", []int{1}, []string{"p.0.1"}, "p.0.1", true, true},
 		{"siblingExcluded", nil, []string{"p.0.0"}, "p.0.1", false, false},
-		{"undottedControl", nil, []string{"ge-0/0/6"}, "ge-0/0/6.1", true, false},
+		{"undottedControl", nil, []string{"ge-0/0/6"}, "ge-0/0/6.1", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

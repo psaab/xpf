@@ -142,10 +142,8 @@ func TestAdvisoryRemedyAccountsForReplaceSemantics6519(t *testing.T) {
 	}
 }
 
-// TestSameInterfaceDoesNotCollapseSiblingUnits6519 pins the matcher boundary. A
-// bare physical ref and a unit under it are the same interface (#3720), but two
-// DIFFERENT units are not — basing both sides on the physical would let a
-// sibling unit's DHCP role leak onto an interface that has none.
+// TestSameInterfaceDoesNotCollapseSiblingUnits6519 pins the matcher boundary.
+// Bare refs mean unit 0; they must not match a sibling VLAN unit.
 func TestSameInterfaceDoesNotCollapseSiblingUnits6519(t *testing.T) {
 	for _, tc := range []struct {
 		a, b string
@@ -154,24 +152,23 @@ func TestSameInterfaceDoesNotCollapseSiblingUnits6519(t *testing.T) {
 		{"reth1", "reth1", true},
 		{"reth1", "reth1.0", true},
 		{"reth1.0", "reth1", true},
+		{"reth1", "reth1.50", false},
 		{"reth1.0", "reth1.0", true},
 		{"reth1.0", "reth1.50", false},
 		{"reth1.0", "reth2.0", false},
 		{"reth1", "reth2", false},
 	} {
-		// Nil config pins the legacy first-dot comparison, byte-identical.
 		if got := hostInboundSameInterface(nil, tc.a, tc.b); got != tc.want {
 			t.Errorf("hostInboundSameInterface(nil,%q,%q)=%v want %v", tc.a, tc.b, got, tc.want)
 		}
 	}
-	// Declared-aware path (#9821): same dot-free answers through the split,
-	// plus canonical-alias positives and both-declared independence that the
-	// first-dot comparison cannot express.
+	// Declared-aware path (#9821): aliases and declared dotted parents use the
+	// same unit-0 rule without first-dot identity errors.
 	dottedCfg := &Config{Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
 		"reth1": {Name: "reth1", Units: map[int]*InterfaceUnit{0: {Number: 0}, 50: {Number: 50}}},
 		"reth2": {Name: "reth2", Units: map[int]*InterfaceUnit{0: {Number: 0}}},
 		"p":     {Name: "p"},
-		"p.0":   {Name: "p.0", Units: map[int]*InterfaceUnit{1: {Number: 1}}},
+		"p.0":   {Name: "p.0", Units: map[int]*InterfaceUnit{0: {Number: 0}, 1: {Number: 1}}},
 		"p.0.2": {Name: "p.0.2"},
 	}}}
 	for _, tc := range []struct {
@@ -179,8 +176,10 @@ func TestSameInterfaceDoesNotCollapseSiblingUnits6519(t *testing.T) {
 		want bool
 	}{
 		{"reth1", "reth1.0", true},
+		{"reth1", "reth1.50", false},
 		{"reth1.0", "reth1.50", false},
 		{"reth1.0", "reth2.0", false},
+		{"p.0", "p.0.0", true},
 		{"p.0", "p.0.1", true},
 		{"p.0.01", "p.0.1", true},
 		{"p.0.1", "p.0.2", false},
