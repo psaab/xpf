@@ -1194,13 +1194,32 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 	}
 
 	// #9793: refuse a toggle addressed to one member of a grouped or packed
-	// node before the walk below prefix-matches the whole node.
+	// node before the elided-node match below prefix-matches the whole node.
 	if schema != nil {
 		if err := refusePackedMemberToggle(*current, path, i, schema, inactive); err != nil {
 			return err
 		}
 	}
 
+	if handled, err := editInterfaceFamily12661(current, path, grouped, schema, i, true, inactive); handled {
+		return err
+	}
+
+	// Match DeletePath's bounded elided-node handling (#8992/#8997). A fully
+	// elided statement is stored as one node carrying the complete key path,
+	// not as the container nodes the schema walk expects. Only toggle a node
+	// proven to encode exactly one statement, and preserve repeated-sibling
+	// semantics handled by the specialized editor below.
+	if schema != nil {
+		childSchema := schemaChildFor(schema, path[i])
+		if !editorRepeatedSiblingSchema12714(childSchema) {
+			if idx := findElidedNodeForPath(*current, path[i:], schema); idx >= 0 &&
+				len((*current)[idx].Keys) == len(path)-i {
+				(*current)[idx].Inactive = inactive
+				return nil
+			}
+		}
+	}
 	keyword := path[i]
 
 	childSchema := schemaChildFor(schema, keyword) // #9685
@@ -1219,9 +1238,6 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 		}
 		// No schema match: remaining tokens form leaf keys.
 		return markMatchingNodeInactive(current, path[i:], inactive)
-	}
-	if handled, err := editInterfaceFamily12661(current, path, grouped, schema, i, true, inactive); handled {
-		return err
 	}
 	if editorRepeatedSiblingSchema12714(childSchema) {
 		if handled, err := setInterfaceFilterSamplingInactive12508(
