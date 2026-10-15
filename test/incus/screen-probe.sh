@@ -140,9 +140,11 @@ disarm() {
 }
 
 count_profile_on() {
-	incus exec "$1" -- /usr/local/bin/cli -c \
-		"show configuration | display set | grep -c $PROFILE" 2>/dev/null \
-		| tr -dc '0-9' | head -c 8
+	local config
+	config="$(incus exec "$1" -- /usr/local/bin/cli -c \
+		"show configuration | display set" 2>/dev/null)" || return 1
+	printf '%s\n' "$config" \
+		| { grep -Fc -- "$PROFILE" || true; } | tr -dc '0-9' | head -c 8
 }
 
 # Disarm on ANY exit, including a failure mid-probe. A shared cluster left
