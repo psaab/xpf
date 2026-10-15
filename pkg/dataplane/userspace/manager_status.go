@@ -33,11 +33,73 @@ func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 	// cannot carry it — the colliding zone was dropped before the wire) so the
 	// degraded zone-isolation state is observable in `show`/metrics.
 	status.ZoneIDCollisions = append([]string(nil), m.lastZoneIDCollisions...)
+	es := m.eventStreamBase
 	if m.eventStream != nil {
-		es := m.eventStream.Status()
-		status.EventStream = &es
+		es = addEventStreamStatus(es, m.eventStream.Status())
 	}
+	// Always publish this daemon-owned counter family, including while the
+	// helper is stopped, so its series do not disappear during a restart.
+	status.EventStream = &es
 	m.setLastStatusLocked(*status)
+}
+
+// addEventStreamStatus combines the monotonic counters from a retired helper
+// incarnation with the current stream. Paused and EventsSinceAck are
+// incarnation-local transient state and therefore come only from current.
+func addEventStreamStatus(base, current EventStreamStatus) EventStreamStatus {
+	return EventStreamStatus{
+		FramesRead:                 base.FramesRead + current.FramesRead,
+		FramesWritten:              base.FramesWritten + current.FramesWritten,
+		DecodeErrors:               base.DecodeErrors + current.DecodeErrors,
+		SeqGaps:                    base.SeqGaps + current.SeqGaps,
+		SessionSyncResyncs:         base.SessionSyncResyncs + current.SessionSyncResyncs,
+		DecodeResyncSuppressed:     base.DecodeResyncSuppressed + current.DecodeResyncSuppressed,
+		TelemetryGapResyncs:        base.TelemetryGapResyncs + current.TelemetryGapResyncs,
+		PendingOverflowDisconnects: base.PendingOverflowDisconnects + current.PendingOverflowDisconnects,
+		PeerCredRejections:         base.PeerCredRejections + current.PeerCredRejections,
+		PolicyDenyEvents:           base.PolicyDenyEvents + current.PolicyDenyEvents,
+		ScreenDropEvents:           base.ScreenDropEvents + current.ScreenDropEvents,
+		ScreenAlarmEvents:          base.ScreenAlarmEvents + current.ScreenAlarmEvents,
+		FilterLogEvents:            base.FilterLogEvents + current.FilterLogEvents,
+		SessionCloseEvents:         base.SessionCloseEvents + current.SessionCloseEvents,
+		SessionCreateEvents:        base.SessionCreateEvents + current.SessionCreateEvents,
+		PolicyDenyDrops:            base.PolicyDenyDrops + current.PolicyDenyDrops,
+		ScreenDropDrops:            base.ScreenDropDrops + current.ScreenDropDrops,
+		FilterLogDrops:             base.FilterLogDrops + current.FilterLogDrops,
+		SessionCloseDrops:          base.SessionCloseDrops + current.SessionCloseDrops,
+		SessionCreateDrops:         base.SessionCreateDrops + current.SessionCreateDrops,
+		UnknownFrameDrops:          base.UnknownFrameDrops + current.UnknownFrameDrops,
+		Paused:                     current.Paused,
+		EventsSinceAck:             current.EventsSinceAck,
+	}
+}
+
+// stopEventStreamLocked retires the current event stream after preserving its
+// daemon-owned cumulative counters. All callers hold m.mu.
+func (m *Manager) stopEventStreamLocked() {
+	if m.eventStreamCancel != nil {
+		m.eventStreamCancel()
+		m.eventStreamCancel = nil
+	}
+	if m.eventStream == nil {
+		return
+	}
+	m.eventStream.Close()
+	m.eventStreamBase = addEventStreamStatus(m.eventStreamBase, m.eventStream.Status())
+	m.eventStream = nil
+}
+
+// UserspaceEventStreamStatus returns daemon-owned event-stream counters
+// independently of helper status. Unlike Status(), this remains available
+// while the helper is down.
+func (m *Manager) UserspaceEventStreamStatus() EventStreamStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	status := m.eventStreamBase
+	if m.eventStream != nil {
+		status = addEventStreamStatus(status, m.eventStream.Status())
+	}
+	return status
 }
 
 // setLastStatusLocked stores a helper status AND the fact that one has been

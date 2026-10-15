@@ -2203,6 +2203,11 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	c.collectNATPoolMetrics(ch, dp, userspaceStatus)
 	c.collectSessionGaugesContext(ctx, ch, dp)
 	c.collectUserspaceStatus(ch, userspaceStatus)
+	if userspaceStatus == nil {
+		if eventStream := fetchUserspaceEventStreamStatus(dp); eventStream != nil {
+			c.emitUserspaceEventStreamStatus(ch, *eventStream)
+		}
+	}
 	// #6845: a top-level status-derived signal, emitted only when a status was
 	// actually read — see emitZoneCounterOverflow for why its absence and its 0
 	// mean different things.
