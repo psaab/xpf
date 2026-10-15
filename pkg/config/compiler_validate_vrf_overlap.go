@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 )
 
 // vrfOverlapPrefix records one L3 prefix carried by a routing-instance together
@@ -123,10 +124,16 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 
 	// riPrefixes[riName] = de-duplicated, origin-tagged prefix set.
 	riPrefixes := map[string][]vrfOverlapPrefix{}
-	// seen[riName][maskedPrefixString] dedupes a prefix that appears from more
-	// than one origin (e.g. a native interface AND a PBR term). The first origin
-	// encountered wins; native interfaces are processed before PBR terms and both
-	// in deterministic order, so the retained origin is stable.
+	// seen[riName] dedupes only claims with the SAME steering identity
+	// (#13098): a native member prefix (steered=false) and a PBR-steered
+	// prefix (steered=true, filter=f) for the same masked prefix are
+	// DIFFERENT claims for the #9809 pairing rules — the steeredAll guard
+	// pairs match-all steered space only with steered space from another
+	// filter, so collapsing the steered claim into the native one blinded
+	// that check. The first origin with a given identity wins; native
+	// interfaces are processed before PBR terms and both in deterministic
+	// order, so the retained origin is stable. Family-agnostic filters
+	// duplicated into Inet+Inet6 still collapse (same steered+filter key).
 	seen := map[string]map[string]bool{}
 	addPrefix := func(riName, cidr, origin, filter string, steered, steeredAll bool) {
 		if riName == "" || cidr == "" {
@@ -138,6 +145,11 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 		}
 		p = p.Masked()
 		key := p.String()
+		if steered {
+			key += "|steered|" + filter
+		} else {
+			key += "|native"
+		}
 		if steeredAll {
 			key += "|all"
 		}
@@ -154,6 +166,14 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 	// Source 1: native routing-instance membership -> member interface unit
 	// addresses. cfg.RoutingInstances is a slice (deterministic order); each
 	// ri.Interfaces entry is a Junos interface name, optionally `.unit`.
+	// #13098: tolerant quarantines (run AFTER this gate in compileExpanded)
+	// rewrite ri.Interfaces and record the surviving primary fanout of a
+	// partially-quarantined bare member in QuarantinedRIMemberPrimaryClaims.
+	// Including those claims here keeps the detector reading the SAME
+	// effective membership the compiled config will carry, so the warnings
+	// appended at compile time and TolerantVRFOverlapAdmissions (re-run on
+	// the post-quarantine config by the metrics collector) cannot diverge
+	// on the retained primary's address space.
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.Name == "" {
 			continue
@@ -161,6 +181,17 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 		for _, member := range ri.Interfaces {
 			// #9809: a bare member is every configured unit, not unit 0.
 			for _, mu := range RoutingInstanceMemberUnits(cfg, member) {
+				origin := fmt.Sprintf("interface %q", mu.Ref)
+				for _, addr := range mu.Addresses {
+					addPrefix(ri.Name, addr, origin, "", false, false)
+				}
+			}
+		}
+		for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
+			if claim.Instance != ri.Name || claim.InterfaceKey == "" {
+				continue
+			}
+			for _, mu := range RoutingInstanceMemberUnits(cfg, claim.InterfaceKey) {
 				origin := fmt.Sprintf("interface %q", mu.Ref)
 				for _, addr := range mu.Addresses {
 					addPrefix(ri.Name, addr, origin, "", false, false)
@@ -182,19 +213,21 @@ func validateVRFOverlap(cfg *Config, lenientPBR bool) ([]string, []VRFOverlapAdm
 			if term == nil || term.RoutingInstance == "" {
 				continue
 			}
-			// #7924: a `then routing-instance` term exists. Recorded even when the
-			// term carries no source/destination prefixes and so contributes
-			// nothing to the overlap sets — it still installs the table override
-			// the fast path skips, which is the mechanism, so gating on "the term
-			// contributed a prefix" would miss a match-all steering term.
-			sawPBRRoutingInstance = true
 			origin := fmt.Sprintf("filter %q term %q", filterName, term.Name)
 			// #9809: the space the builder steers, not only literals that parse.
 			srcs, srcAll, srcNone := PBRDirectionSteers(term.SourceAddresses, term.SourcePrefixLists, pls)
 			dsts, dstAll, dstNone := PBRDirectionSteers(term.DestAddresses, term.DestPrefixLists, pls)
 			if srcNone || dstNone {
-				continue // the builder installs no rule for this term
+				continue // the builder installs no rule for this term (#13098: a dead term must not set sawPBRRoutingInstance)
 			}
+			// #7924: a LIVE `then routing-instance` term exists. Recorded
+			// only for terms the builder actually installs — including a
+			// match-all term carrying no prefixes, which still installs
+			// the table override the fast path skips. A term the builder
+			// drops (empty prefix-list, pure except) steers nothing, so
+			// it must not promote a plain native overlap to a #7924
+			// rejection or a tolerant admission (#13098).
+			sawPBRRoutingInstance = true
 			for _, addr := range srcs {
 				addPrefix(term.RoutingInstance, addr, origin, filterName, true, false)
 			}
@@ -405,4 +438,52 @@ func TolerantVRFOverlapAdmissions(cfg *Config) []VRFOverlapAdmission {
 	}
 	_, admissions, _ := validateVRFOverlap(cfg, true)
 	return admissions
+}
+
+// refreshVRFOverlapWarningsAfterQuarantine replaces the overlap warnings
+// validateVRFOverlap appended during runTailGates with a fresh lenient scan
+// of the post-quarantine config (#13098). The overlap detector is the only
+// tail gate whose input (RoutingInstances membership) the tolerant RI
+// quarantines rewrite after it runs; without this refresh cfg.Warnings
+// keeps describing quarantined memberships that the returned config no
+// longer carries, while TolerantVRFOverlapAdmissions describes the
+// quarantined ones — the exact split the #7991 reporter exists to prevent.
+// Replacement is in place (same slice position) so warning order relative
+// to the other tail gates is preserved; the truncation notice, which
+// carries no "NOT session-isolated" marker, is dropped and regenerated by
+// the fresh scan when still warranted. The fresh scan is lenient: on the
+// tolerant path an overlap that survives quarantine is an admission, not
+// a rejection (the strict path never reaches here).
+func refreshVRFOverlapWarningsAfterQuarantine(cfg *Config, lenientPBR bool) {
+	if cfg == nil {
+		return
+	}
+	fresh, _, _ := validateVRFOverlap(cfg, true)
+	kept := cfg.Warnings[:0]
+	insertAt := -1
+	for _, w := range cfg.Warnings {
+		if isVRFOverlapWarning(w) {
+			if insertAt < 0 {
+				insertAt = len(kept)
+			}
+			continue
+		}
+		kept = append(kept, w)
+	}
+	if insertAt < 0 {
+		cfg.Warnings = append(kept, fresh...)
+		return
+	}
+	out := make([]string, 0, len(kept)+len(fresh))
+	out = append(out, kept[:insertAt]...)
+	out = append(out, fresh...)
+	out = append(out, kept[insertAt:]...)
+	cfg.Warnings = out
+}
+
+// isVRFOverlapWarning reports whether w was produced by validateVRFOverlap
+// (an overlap advisory or its truncation notice).
+func isVRFOverlapWarning(w string) bool {
+	return strings.Contains(w, "NOT session-isolated") ||
+		strings.HasPrefix(w, "cross-routing-instance overlap validation was truncated")
 }

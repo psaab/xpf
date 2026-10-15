@@ -1227,14 +1227,30 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// memberships are removed only now, after legacy tail validators have seen
 	// the authored refs. No compiled-config consumer observes the ambiguous
 	// memberships because this runs before CompileConfig returns.
+	quarantinedRI := false
 	if len(cfg.QuarantinedRIMemberDeviceConflicts) > 0 {
 		quarantineRIDualClaimDevices(cfg, cfg.TunnelNameMap())
+		quarantinedRI = true
 	}
 	// #11392/#11364: tolerant membership warnings remain intact, but compiled
 	// consumers must not put management-class devices or configured host-inbound
 	// lifelines into a tenant routing domain. Quarantine after legacy tail gates.
 	if opts.lenientRIMgmtMember11392 {
 		quarantineRIRoleMembers(cfg, cfg.TunnelNameMap())
+		quarantinedRI = true
+	}
+	// #13098: validateVRFOverlap ran inside runTailGates BEFORE the two
+	// quarantines above rewrote RoutingInstances. If either quarantine
+	// changed effective membership, the warnings it appended describe the
+	// pre-quarantine config while TolerantVRFOverlapAdmissions (re-run by
+	// the metrics collector on the returned config) describes the
+	// post-quarantine one. Re-run the detector leniently and replace the
+	// stale overlap warnings in place so cfg.Warnings and the admissions
+	// reporter always describe the same effective config. Strict compiles
+	// never quarantine (both passes are tolerant-only), so the strict
+	// #7924 rejection in runTailGates is unaffected.
+	if quarantinedRI {
+		refreshVRFOverlapWarningsAfterQuarantine(cfg, opts.lenientVRFOverlapPBR)
 	}
 
 	// #1539: the structural invariant `cfg.System.DPDKDataplane = nil`
