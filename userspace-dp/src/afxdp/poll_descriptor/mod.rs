@@ -64,6 +64,10 @@ mod resolver_enqueue;
 mod rx_telemetry;
 mod session_admission;
 mod session_hit_authority;
+mod pmech_replay;
+#[cfg(test)]
+#[path = "poll_descriptor_structure_13081_tests.rs"]
+mod poll_descriptor_structure_13081_tests;
 
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
 pub(in crate::afxdp) use embedded_icmp::{
@@ -572,39 +576,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     binding.pending_pmech_replay.clear();
     binding.scratch.pmech_injected_replay_addrs.clear();
     let pmech_directory = crate::session::PMechSessionDirectory::global();
-    let pmech_scan_len = binding.pending_pmech_reverse.len();
-    for _ in 0..pmech_scan_len {
-        let Some(held) = binding.pending_pmech_reverse.pop_front() else {
-            break;
-        };
-        match pmech_directory.probe_token(held.token) {
-            crate::session::PMechTokenProbe::Pending { owner_generation }
-                if owner_generation == held.owner_generation =>
-            {
-                binding.pending_pmech_reverse.push_back(held);
-            }
-            crate::session::PMechTokenProbe::Live {
-                owner_generation, ..
-            } if owner_generation == held.owner_generation => {
-                let _ = pmech_directory.remove_waiter(
-                    held.token,
-                    held.owner_generation,
-                    held.waiter.arrival_worker_id,
-                    held.waiter.defer_id,
-                );
-                binding.pending_pmech_replay.push_back(held);
-            }
-            _ => {
-                let _ = pmech_directory.remove_waiter(
-                    held.token,
-                    held.owner_generation,
-                    held.waiter.arrival_worker_id,
-                    held.waiter.defer_id,
-                );
-                binding.scratch.scratch_recycle.push(held.desc.addr);
-            }
-        }
-    }
+    pmech_replay::drain_pending_pmech_replays(
+        &pmech_directory,
+        &mut binding.pending_pmech_reverse,
+        &mut binding.pending_pmech_replay,
+        &mut binding.scratch.scratch_recycle,
+    );
     loop {
         let (desc, injected_meta, is_injected) =
             if let Some(held) = binding.pending_pmech_replay.pop_front() {
