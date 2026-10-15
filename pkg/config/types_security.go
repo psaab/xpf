@@ -556,6 +556,8 @@ type HostInboundTraffic struct {
 	// cloneHostInbound or MergeHostInboundTraffic.
 	systemServicesExcept []string
 	protocolsExcept      []string
+	systemServicesHasAll bool
+	protocolsHasAll      bool
 	// Preserve wrong-case spellings that a case-insensitive exclusion may
 	// remove before the strict token gate can reject them.
 	nonCanonicalSystemServices []string

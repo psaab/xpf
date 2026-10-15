@@ -74,6 +74,8 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 	hib.Protocols = hostInboundFilterExcept(protocols, protocolsExcept, true)
 	hib.systemServicesExcept = servicesExcept
 	hib.protocolsExcept = protocolsExcept
+	hib.systemServicesHasAll = hostInboundHasAllToken(services)
+	hib.protocolsHasAll = hostInboundHasAllToken(protocols)
 	hib.nonCanonicalSystemServices = hostInboundNonCanonicalTokens(services, KnownHostInboundSystemServices)
 	hib.nonCanonicalProtocols = hostInboundNonCanonicalTokens(protocols, KnownHostInboundProtocols)
 	hib.UnknownChildren = dedupHostInboundTokens(hib.UnknownChildren)
@@ -151,6 +153,15 @@ func hostInboundExceptParts(n *Node) (values, excluded, malformed []string) {
 		walkValue(child)
 	}
 	return values, excluded, malformed
+}
+
+func hostInboundHasAllToken(tokens []string) bool {
+	for _, token := range tokens {
+		if strings.EqualFold(token, "all") {
+			return true
+		}
+	}
+	return false
 }
 
 func hostInboundNonCanonicalTokens(tokens []string, known map[string]bool) []string {
@@ -315,6 +326,8 @@ func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
 	dst.Protocols = dedupHostInboundTokens(append(dst.Protocols, src.Protocols...))
 	dst.systemServicesExcept = append(dst.systemServicesExcept, src.systemServicesExcept...)
 	dst.protocolsExcept = append(dst.protocolsExcept, src.protocolsExcept...)
+	dst.systemServicesHasAll = dst.systemServicesHasAll || src.systemServicesHasAll
+	dst.protocolsHasAll = dst.protocolsHasAll || src.protocolsHasAll
 	dst.nonCanonicalSystemServices = append(dst.nonCanonicalSystemServices, src.nonCanonicalSystemServices...)
 	dst.nonCanonicalProtocols = append(dst.nonCanonicalProtocols, src.nonCanonicalProtocols...)
 	dst.UnknownChildren = dedupHostInboundTokens(append(dst.UnknownChildren, src.UnknownChildren...))
@@ -353,6 +366,8 @@ func cloneHostInbound(src *HostInboundTraffic) *HostInboundTraffic {
 		UnknownChildren:            append([]string(nil), src.UnknownChildren...),
 		systemServicesExcept:       append([]string(nil), src.systemServicesExcept...),
 		protocolsExcept:            append([]string(nil), src.protocolsExcept...),
+		systemServicesHasAll:       src.systemServicesHasAll,
+		protocolsHasAll:            src.protocolsHasAll,
 		nonCanonicalSystemServices: append([]string(nil), src.nonCanonicalSystemServices...),
 		nonCanonicalProtocols:      append([]string(nil), src.nonCanonicalProtocols...),
 	}
