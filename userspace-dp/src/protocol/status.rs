@@ -156,6 +156,17 @@ pub(crate) struct ProcessStatus {
     /// `default`ed (#1961), so an older helper that does not emit it decodes 0.
     #[serde(rename = "nat64_frag_cross_domain_misses_total", default)]
     pub nat64_frag_cross_domain_misses_total: u64,
+    /// #13284 (D3-09): cumulative NAT64 prefixes refused by the aggregate
+    /// allocator budget. Additive and defaulted for mixed-version helpers.
+    #[serde(rename = "nat64_over_budget_total", default)]
+    pub nat64_over_budget_total: u64,
+    /// #13284 (D3-09): currently installed NAT64 prefixes refused by budget.
+    #[serde(rename = "nat64_over_budget_prefixes", default)]
+    pub nat64_over_budget_prefixes: usize,
+    /// #13284 (D3-09): deterministic subscriber mappings downgraded to
+    /// dynamic PAT after deterministic configuration could not be built.
+    #[serde(rename = "nat64_deterministic_v6_downgrades_total", default)]
+    pub nat64_deterministic_v6_downgrades_total: u64,
     /// #10729 X2-F6: v6 chains declined to flowless for sighting AH.
     /// Additive + `default`ed (#1961).
     #[serde(rename = "ipv6_ah_flowless_total", default)]

@@ -169,6 +169,12 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // cross-domain probe from a TCP/UDP ident collision.
     state.status.nat64_frag_cross_domain_misses_total =
         state.afxdp.nat64_frag_cross_domain_misses_total();
+    // #13284 (D3-09): NAT64 configuration/capacity outcomes. The two totals
+    // are process-global counters; prefix count is the installed live census.
+    state.status.nat64_over_budget_total = state.afxdp.nat64_over_budget_total();
+    state.status.nat64_over_budget_prefixes = state.afxdp.nat64_over_budget_prefixes();
+    state.status.nat64_deterministic_v6_downgrades_total =
+        state.afxdp.nat64_deterministic_v6_downgrades_total();
     // #10729 X2-F6: v6 chains declined to flowless for sighting AH.
     state.status.ipv6_ah_flowless_total = state.afxdp.ipv6_ah_flowless_total();
     state.status.nat64_frag_protocol_alias_misses_total =

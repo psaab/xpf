@@ -218,6 +218,21 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.NAT64FragCrossDomainMissesTotal),
 	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceNAT64OverBudgetTotal,
+		prometheus.CounterValue,
+		float64(status.NAT64OverBudgetTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceNAT64OverBudgetPrefixes,
+		prometheus.GaugeValue,
+		float64(status.NAT64OverBudgetPrefixes),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceNAT64DeterministicDowngrades,
+		prometheus.CounterValue,
+		float64(status.NAT64DeterministicV6DowngradesTotal),
+	)
 	// #10729 X2-F6: emitted unconditionally like the #7056 siblings — a
 	// published 0 means no v6 chain has been declined for AH yet.
 	ch <- prometheus.MustNewConstMetric(

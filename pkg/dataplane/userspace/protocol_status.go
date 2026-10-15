@@ -500,6 +500,12 @@ type ProcessStatus struct {
 	// the TRAFFIC rather than cache pressure.
 	NAT64FragCrossDomainMissesTotal uint64 `json:"nat64_frag_cross_domain_misses_total,omitempty"`
 
+	// #13284 (D3-09): NAT64 aggregate-budget refusals, current installed
+	// refused-prefix census, and deterministic NAPT64-to-PAT downgrades.
+	NAT64OverBudgetTotal                uint64 `json:"nat64_over_budget_total,omitempty"`
+	NAT64OverBudgetPrefixes             uint64 `json:"nat64_over_budget_prefixes,omitempty"`
+	NAT64DeterministicV6DowngradesTotal uint64 `json:"nat64_deterministic_v6_downgrades_total,omitempty"`
+
 	// IPv6AHFlowlessTotal is #10729 X2-F6: v6 chains declined to flowless
 	// for sighting AH (classified as AH, not the inner protocol).
 	IPv6AHFlowlessTotal uint64 `json:"ipv6_ah_flowless_total,omitempty"`

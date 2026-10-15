@@ -671,6 +671,63 @@ fn refresh_status_publishes_policy_revoked_sessions_total_10021() {
     );
 }
 
+/// #13284 (D3-09): the process-global NAT64 budget-refusal and
+/// deterministic-v6 downgrade counters, plus the live over-budget prefix
+/// census, must cross the real refresh_status boundary into ProcessStatus
+/// and its serialized wire form. Globals are process-wide, so assert deltas.
+#[test]
+fn process_status_exports_nat64_over_budget_and_deterministic_downgrade_counters_13284() {
+    let before_over = crate::nat64::NAT64_OVER_BUDGET_COUNT.load(Ordering::Relaxed);
+    let before_down = crate::nat64::DETERMINISTIC_V6_DOWNGRADE_COUNT.load(Ordering::Relaxed);
+    crate::nat64::NAT64_OVER_BUDGET_COUNT.fetch_add(3, Ordering::Relaxed);
+    crate::nat64::DETERMINISTIC_V6_DOWNGRADE_COUNT.fetch_add(5, Ordering::Relaxed);
+
+    let mut coordinator = Coordinator::new();
+    let mut prefix = crate::nat64::Nat64Prefix::for_test(
+        [0u8; 12],
+        Vec::new(),
+        crate::nat::PortAllocator::new(0, 1024, 65535),
+    );
+    prefix.over_budget = true;
+    coordinator.forwarding.nat64.prefixes.push(prefix);
+    coordinator
+        .forwarding
+        .nat64
+        .prefixes
+        .push(crate::nat64::Nat64Prefix::for_test(
+            [1u8; 12],
+            Vec::new(),
+            crate::nat::PortAllocator::new(0, 1024, 65535),
+        ));
+
+    let mut state = crate::server::state::ServerState {
+        status: Default::default(),
+        snapshot: None,
+        afxdp: coordinator,
+        state_writer: Arc::new(crate::state_writer::StateWriter::new()),
+        quarantined_after_panic: false,
+    };
+    crate::server::helpers::status::refresh_status(&mut state);
+
+    let json = serde_json::to_value(&state.status).expect("status serializes");
+    assert!(
+        json["nat64_over_budget_total"].as_u64().unwrap_or(0) >= before_over + 3,
+        "NAT64 budget refusals must reach ProcessStatus and its wire form"
+    );
+    assert!(
+        json["nat64_deterministic_v6_downgrades_total"]
+            .as_u64()
+            .unwrap_or(0)
+            >= before_down + 5,
+        "deterministic NAPT64 downgrades must reach ProcessStatus and its wire form"
+    );
+    assert_eq!(
+        json["nat64_over_budget_prefixes"].as_u64(),
+        Some(1),
+        "live over-budget NAT64 prefix count must be surfaced"
+    );
+}
+
 /// #11503: exercise both counted unzoned-denial directions and the real
 /// refresh_status ProcessStatus/snapshot projection. The existing #9385 policy
 /// test pins that side-effect-free re-derivation counts neither direction.

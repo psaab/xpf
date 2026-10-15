@@ -1041,6 +1041,15 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceNAT64OverBudgetTotal: prometheus.NewDesc(
+			"xpf_userspace_nat64_over_budget_total", "nat64 budget refusal total", nil, nil,
+		),
+		userspaceNAT64OverBudgetPrefixes: prometheus.NewDesc(
+			"xpf_userspace_nat64_over_budget_prefixes", "nat64 refused prefix census", nil, nil,
+		),
+		userspaceNAT64DeterministicDowngrades: prometheus.NewDesc(
+			"xpf_userspace_nat64_deterministic_v6_downgrades_total", "nat64 deterministic downgrades", nil, nil,
+		),
 		userspaceIPv6AHFlowlessTotal: prometheus.NewDesc(
 			"xpf_userspace_ipv6_ah_flowless_total",
 			"v6 chains declined to flowless for AH",
@@ -1665,6 +1674,11 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #10729 X2-F6: DISTINCT value (unused prime above).
 		IPv6AHFlowlessTotal:               31,
 		NAT64FragProtocolAliasMissesTotal: 29,
+		// #13284 (D3-09): separate budget refusal, live refused-prefix census,
+		// and deterministic mapping downgrade values.
+		NAT64OverBudgetTotal:                41,
+		NAT64OverBudgetPrefixes:             43,
+		NAT64DeterministicV6DowngradesTotal: 47,
 		// #9901: DISTINCT fixture values, so an emit wired to the wrong
 		// field swaps two numbers that differ.
 		FragMaxLifetimeEvictionsTotal:               37,
@@ -1800,8 +1814,8 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 98 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 98 metrics, got %d", len(got))
+	if len(got) != 101 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 101 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1828,6 +1842,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceNAT64FragCrossDomainMisses, nil, 23)
 	assertCounterClose(t, got, c.userspaceIPv6AHFlowlessTotal, nil, 31)
 	assertCounterClose(t, got, c.userspaceNAT64FragProtocolAliasMisses, nil, 29)
+	assertCounterClose(t, got, c.userspaceNAT64OverBudgetTotal, nil, 41)
+	assertGaugeClose(t, got, c.userspaceNAT64OverBudgetPrefixes, nil, 43)
+	assertCounterClose(t, got, c.userspaceNAT64DeterministicDowngrades, nil, 47)
 	// #9901: assert the VALUES, not merely the census — a census bump
 	// alone would pass against emits wired to the wrong field.
 	assertCounterClose(t, got, c.userspaceFragMaxLifetimeEvictions, nil, 37)
