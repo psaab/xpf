@@ -775,16 +775,18 @@ type xpfCollector struct {
 	userspaceSlowPathWriteErrors       *prometheus.Desc
 	userspaceSlowPathMTUDroppedPackets *prometheus.Desc
 	// #1379: daemon-side userspace event-stream transport counters.
-	userspaceEventStreamFramesTotal          *prometheus.Desc
-	userspaceEventStreamProducerFramesTotal  *prometheus.Desc
-	userspaceEventStreamDecodeErrorsTotal    *prometheus.Desc
-	userspaceEventStreamSequenceGapsTotal    *prometheus.Desc
-	userspaceEventStreamDataplaneEventsTotal *prometheus.Desc
-	userspaceEventStreamDataplaneDropsTotal  *prometheus.Desc
-	userspaceEventStreamUnknownDropsTotal    *prometheus.Desc
-	userspaceEventStreamResyncsTotal         *prometheus.Desc
-	userspaceEventStreamDisconnectsTotal     *prometheus.Desc
-	userspaceEventStreamState                *prometheus.Desc
+	userspaceEventStreamFramesTotal             *prometheus.Desc
+	userspaceEventStreamProducerFramesTotal     *prometheus.Desc
+	userspaceEventStreamDecodeErrorsTotal       *prometheus.Desc
+	userspaceEventStreamSequenceGapsTotal       *prometheus.Desc
+	userspaceEventStreamDataplaneEventsTotal    *prometheus.Desc
+	userspaceEventStreamDataplaneDropsTotal     *prometheus.Desc
+	userspaceEventStreamUnknownDropsTotal       *prometheus.Desc
+	userspaceEventStreamResyncsTotal            *prometheus.Desc
+	userspaceEventStreamResyncSuppressedTotal   *prometheus.Desc
+	userspaceEventStreamDisconnectsTotal        *prometheus.Desc
+	userspaceEventStreamPeerCredRejectionsTotal *prometheus.Desc
+	userspaceEventStreamState                   *prometheus.Desc
 	// #925 Phase 2: liveness gauge for the supervisor's catch_unwind
 	// state. 1 = worker has panicked and the supervisor has caught it;
 	// 0 = healthy. Set-only in Phase 1 (cleared by daemon restart).
@@ -1415,7 +1417,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceEventStreamDataplaneDropsTotal
 	ch <- c.userspaceEventStreamUnknownDropsTotal
 	ch <- c.userspaceEventStreamResyncsTotal
+	ch <- c.userspaceEventStreamResyncSuppressedTotal
 	ch <- c.userspaceEventStreamDisconnectsTotal
+	ch <- c.userspaceEventStreamPeerCredRejectionsTotal
 	ch <- c.userspaceEventStreamState
 	ch <- c.workerDead
 	// #1635: cold-path histogram descriptors. xpfCollector is a CHECKED

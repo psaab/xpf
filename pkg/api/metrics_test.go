@@ -472,16 +472,18 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 		return prometheus.NewDesc(name, name, []string{label}, nil)
 	}
 	c := &xpfCollector{
-		userspaceEventStreamFramesTotal:          mkOneLabel("xpf_userspace_event_stream_frames_total", "direction"),
-		userspaceEventStreamProducerFramesTotal:  mkOneLabel("xpf_userspace_event_stream_producer_frames_total", "outcome"),
-		userspaceEventStreamDecodeErrorsTotal:    mkNoLabel("xpf_userspace_event_stream_decode_errors_total"),
-		userspaceEventStreamSequenceGapsTotal:    mkNoLabel("xpf_userspace_event_stream_sequence_gaps_total"),
-		userspaceEventStreamDataplaneEventsTotal: mkOneLabel("xpf_userspace_event_stream_dataplane_events_total", "type"),
-		userspaceEventStreamDataplaneDropsTotal:  mkOneLabel("xpf_userspace_event_stream_dataplane_event_drops_total", "type"),
-		userspaceEventStreamUnknownDropsTotal:    mkNoLabel("xpf_userspace_event_stream_unknown_frame_drops_total"),
-		userspaceEventStreamResyncsTotal:         mkOneLabel("xpf_userspace_event_stream_resyncs_total", "reason"),
-		userspaceEventStreamDisconnectsTotal:     mkOneLabel("xpf_userspace_event_stream_disconnects_total", "reason"),
-		userspaceEventStreamState:                mkOneLabel("xpf_userspace_event_stream_state", "state"),
+		userspaceEventStreamFramesTotal:             mkOneLabel("xpf_userspace_event_stream_frames_total", "direction"),
+		userspaceEventStreamProducerFramesTotal:     mkOneLabel("xpf_userspace_event_stream_producer_frames_total", "outcome"),
+		userspaceEventStreamDecodeErrorsTotal:       mkNoLabel("xpf_userspace_event_stream_decode_errors_total"),
+		userspaceEventStreamSequenceGapsTotal:       mkNoLabel("xpf_userspace_event_stream_sequence_gaps_total"),
+		userspaceEventStreamDataplaneEventsTotal:    mkOneLabel("xpf_userspace_event_stream_dataplane_events_total", "type"),
+		userspaceEventStreamDataplaneDropsTotal:     mkOneLabel("xpf_userspace_event_stream_dataplane_event_drops_total", "type"),
+		userspaceEventStreamUnknownDropsTotal:       mkNoLabel("xpf_userspace_event_stream_unknown_frame_drops_total"),
+		userspaceEventStreamResyncsTotal:            mkOneLabel("xpf_userspace_event_stream_resyncs_total", "reason"),
+		userspaceEventStreamDisconnectsTotal:        mkOneLabel("xpf_userspace_event_stream_disconnects_total", "reason"),
+		userspaceEventStreamState:                   mkOneLabel("xpf_userspace_event_stream_state", "state"),
+		userspaceEventStreamResyncSuppressedTotal:   mkNoLabel("xpf_userspace_event_stream_resync_suppressed_total"),
+		userspaceEventStreamPeerCredRejectionsTotal: mkNoLabel("xpf_userspace_event_stream_peer_cred_rejections_total"),
 	}
 	status := dpuserspace.ProcessStatus{
 		EventStreamSent:                      101,
@@ -611,13 +613,11 @@ func TestEmitUserspaceEventStreamMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceEventStreamResyncsTotal,
 		map[string]string{"reason": "session_sync_gap"}, 4)
 	assertCounterClose(t, got, c.userspaceEventStreamResyncsTotal,
-		map[string]string{"reason": "decode_suppressed"}, 5)
-	assertCounterClose(t, got, c.userspaceEventStreamResyncsTotal,
 		map[string]string{"reason": "telemetry_gap"}, 6)
+	assertCounterClose(t, got, c.userspaceEventStreamResyncSuppressedTotal, nil, 5)
 	assertCounterClose(t, got, c.userspaceEventStreamDisconnectsTotal,
 		map[string]string{"reason": "pending_callback_overflow"}, 7)
-	assertCounterClose(t, got, c.userspaceEventStreamDisconnectsTotal,
-		map[string]string{"reason": "peer_cred_rejection"}, 8)
+	assertCounterClose(t, got, c.userspaceEventStreamPeerCredRejectionsTotal, nil, 8)
 	assertGaugeClose(t, got, c.userspaceEventStreamState,
 		map[string]string{"state": "connected"}, 1)
 	assertGaugeClose(t, got, c.userspaceEventStreamState,

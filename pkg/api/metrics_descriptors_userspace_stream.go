@@ -58,6 +58,16 @@ func (c *xpfCollector) initUserspaceStreamDescriptors() {
 		"Daemon-side userspace event-stream disconnect triggers by reason.",
 		[]string{"reason"}, nil,
 	)
+	c.userspaceEventStreamResyncSuppressedTotal = prometheus.NewDesc(
+		"xpf_userspace_event_stream_resync_suppressed_total",
+		"Daemon-side event-stream resync attempts suppressed by rate limiting.",
+		nil, nil,
+	)
+	c.userspaceEventStreamPeerCredRejectionsTotal = prometheus.NewDesc(
+		"xpf_userspace_event_stream_peer_cred_rejections_total",
+		"Rejected event-stream connections from peers without privileged credentials.",
+		nil, nil,
+	)
 	c.userspaceEventStreamState = prometheus.NewDesc(
 		"xpf_userspace_event_stream_state",
 		"Current userspace event-stream state values: connected, paused, events_since_ack, sequence, and acked sequence.",
