@@ -226,7 +226,7 @@ func testEnv(t *testing.T, fs *fakeSystem) (*Runner, Config) {
 		writeFakeBin(t, filepath.Join(staged, b), "binary-"+b+"-"+fs.stagedVersion)
 	}
 	cfgdb := filepath.Join(root, "etc", ".configdb")
-	mkfile(t, filepath.Join(cfgdb, "active.json"), "#xpf-config-envelope v=1\n{}")
+	mkfile(t, filepath.Join(cfgdb, "active.json"), "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{}")
 
 	cfg := Config{
 		StagedDir:    staged,
@@ -620,7 +620,7 @@ func TestRun_RollbackRestoresDBBeforeReflip(t *testing.T) {
 
 	// Record the pre-upgrade DB content (what PREFLIGHT will snapshot).
 	dbFile := filepath.Join(cfg.ConfigDBDir, "active.json")
-	preContent := "#xpf-config-envelope v=1\n{}"
+	preContent := "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{}"
 	mkfile(t, dbFile, preContent)
 
 	// Stage 2.0.0, unhealthy. The cut's PREFLIGHT snapshots preContent.
@@ -638,7 +638,7 @@ func TestRun_RollbackRestoresDBBeforeReflip(t *testing.T) {
 	// the DB. We can't inject into the fake easily, so overwrite here is
 	// done via a custom health probe that writes the new-format DB then
 	// fails.
-	newFormatContent := "#xpf-config-envelope v=1 min-reader=99\n{}"
+	newFormatContent := "#xpf-config-envelope v=1 writer=test ast=1 min-reader=99 rollback-fmt=1\n{}"
 	fs.healthHook = func() {
 		mkfile(t, dbFile, newFormatContent)
 	}

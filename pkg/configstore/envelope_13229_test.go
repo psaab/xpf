@@ -7,9 +7,9 @@ import (
 )
 
 // TestEnvelopeHeaderRejectsMismatchedASTAndRollbackFormat_13229 pins the
-// fail-closed gate for envelope ast=/rollback-fmt= values. All eight rows
-// carry v=1 min-reader=1 so pre-fix they strip cleanly (RED); post-fix the
-// mismatched rows error while exact/missing rows still load.
+// fail-closed gate for envelope ast=/rollback-fmt= values. All cases carry
+// v=1 min-reader=1; pre-fix the parser accepted missing or unsupported format
+// metadata without error.
 func TestEnvelopeHeaderRejectsMismatchedASTAndRollbackFormat_13229(t *testing.T) {
 	body := []byte(`{"Children":null}`)
 	cases := []struct {
@@ -18,7 +18,9 @@ func TestEnvelopeHeaderRejectsMismatchedASTAndRollbackFormat_13229(t *testing.T)
 		wantErr bool
 	}{
 		{"exact", envelopeMagic + " v=1 writer=w ast=1 min-reader=1 rollback-fmt=1\n", false},
-		{"missing ast and rollback-fmt", envelopeMagic + " v=1 writer=w min-reader=1\n", false},
+		{"missing ast and rollback-fmt", envelopeMagic + " v=1 writer=w min-reader=1\n", true},
+		{"missing ast", envelopeMagic + " v=1 writer=w min-reader=1 rollback-fmt=1\n", true},
+		{"missing rollback-fmt", envelopeMagic + " v=1 writer=w ast=1 min-reader=1\n", true},
 		{"future ast", envelopeMagic + " v=1 writer=w ast=999 min-reader=1 rollback-fmt=1\n", true},
 		{"unsupported rollback-fmt", envelopeMagic + " v=1 writer=w ast=1 min-reader=1 rollback-fmt=99\n", true},
 		{"zero ast", envelopeMagic + " v=1 writer=w ast=0 min-reader=1 rollback-fmt=1\n", true},
@@ -43,7 +45,7 @@ func TestEnvelopeHeaderRejectsMismatchedASTAndRollbackFormat_13229(t *testing.T)
 				t.Fatalf("header %q read without error; want fail-closed rejection", tc.header)
 			}
 			if !tc.wantErr && err != nil {
-				t.Fatalf("header %q errored: %v; want legacy/exact envelope to load", tc.header, err)
+				t.Fatalf("header %q errored: %v; want exact or legacy envelope to load", tc.header, err)
 			}
 			_, enveloped, inspectErr := InspectEnvelopeHeader(data)
 			if !enveloped {

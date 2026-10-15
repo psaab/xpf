@@ -28,9 +28,9 @@ func TestRun_CutBoundarySnapshotPreservesPendingConfirm10395(t *testing.T) {
 
 	dbFile := filepath.Join(cfg.ConfigDBDir, "active.json")
 	confirmPath := filepath.Join(cfg.ConfigDBDir, "confirm.json")
-	const committedDuringVerify = "#xpf-config-envelope v=1\n{\"gen\":\"committed-during-verify\"}"
+	const committedDuringVerify = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"committed-during-verify\"}"
 	const pendingConfirm = `{"pending":"mid-verify","rollbackTarget":"pre-upgrade"}`
-	mkfile(t, dbFile, "#xpf-config-envelope v=1\n{\"gen\":\"pre-upgrade\"}")
+	mkfile(t, dbFile, "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"pre-upgrade\"}")
 	_ = os.Remove(confirmPath)
 	stageSecondCut(t, r, cfg, fs)
 	if _, err := os.Stat(confirmPath); !os.IsNotExist(err) {
@@ -81,7 +81,7 @@ func TestRun_CutBoundarySnapshotFailurePreservesLiveDB10395(t *testing.T) {
 
 	dbFile := filepath.Join(cfg.ConfigDBDir, "active.json")
 	confirmPath := filepath.Join(cfg.ConfigDBDir, "confirm.json")
-	const liveActive = "#xpf-config-envelope v=1\n{\"gen\":\"live-before-cut\"}"
+	const liveActive = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"live-before-cut\"}"
 	const liveConfirm = `{"pending":"live-before-cut"}`
 	mkfile(t, dbFile, liveActive)
 	mkfile(t, confirmPath, liveConfirm)

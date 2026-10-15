@@ -218,10 +218,11 @@ type EnvelopeCompatibility struct {
 	MinReader     int
 }
 
-// InspectEnvelopeHeader parses an envelope header without applying this
-// package's current-reader gate. Callers that need to compare a snapshot
-// against a different target reader (for example, an older rollback binary)
-// must inspect first and apply that target-specific policy themselves.
+// InspectEnvelopeHeader parses the envelope's supported format metadata
+// without applying this package's envelope-grammar or min-reader gates.
+// Callers that need to compare a snapshot against a different target reader
+// (for example, an older rollback binary) apply those target-specific gates
+// themselves.
 //
 // A legacy, pre-envelope body returns (zero, false, nil). A body beginning
 // with the envelope magic is parsed strictly; malformed headers return an
@@ -415,16 +416,22 @@ func parseEnvelopeHeader(line string) (*envelopeHeader, error) {
 			// v=/min-reader gate is what governs readability.
 		}
 	}
-	if hdr.hasASTVersion && hdr.ASTVersion != EnvelopeASTVersion {
+	if !seenVersion {
+		return nil, fmt.Errorf("config envelope: header missing required v= field: %q", line)
+	}
+	if !hdr.hasASTVersion {
+		return nil, fmt.Errorf("config envelope: header missing required ast= field: %q", line)
+	}
+	if !hdr.hasRollbackFormat {
+		return nil, fmt.Errorf("config envelope: header missing required rollback-fmt= field: %q", line)
+	}
+	if hdr.ASTVersion != EnvelopeASTVersion {
 		return nil, fmt.Errorf("config envelope AST version %d is unsupported (this build supports %d); refusing to load",
 			hdr.ASTVersion, EnvelopeASTVersion)
 	}
-	if hdr.hasRollbackFormat && hdr.RollbackFormat != EnvelopeRollbackFormatVersion {
+	if hdr.RollbackFormat != EnvelopeRollbackFormatVersion {
 		return nil, fmt.Errorf("config envelope rollback format %d is unsupported (this build supports %d); refusing to load",
 			hdr.RollbackFormat, EnvelopeRollbackFormatVersion)
-	}
-	if !seenVersion {
-		return nil, fmt.Errorf("config envelope: header missing required v= field: %q", line)
 	}
 	return hdr, nil
 }

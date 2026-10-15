@@ -56,7 +56,7 @@ func TestRun_ResumedCutRetakesDBSnapshot6556(t *testing.T) {
 			}
 
 			dbFile := filepath.Join(cfg.ConfigDBDir, "active.json")
-			const preContent = "#xpf-config-envelope v=1\n{\"gen\":\"pre-interruption\"}"
+			const preContent = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"pre-interruption\"}"
 			mkfile(t, dbFile, preContent)
 
 			stageUnhealthy2_0_0(t, fs, cfg)
@@ -67,7 +67,7 @@ func TestRun_ResumedCutRetakesDBSnapshot6556(t *testing.T) {
 
 			// THE INTERRUPTION WINDOW. The daemon is still up (nothing before
 			// STOPPED touches live state), so the operator commits.
-			const windowContent = "#xpf-config-envelope v=1\n{\"gen\":\"committed-during-interruption\"}"
+			const windowContent = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"committed-during-interruption\"}"
 			mkfile(t, dbFile, windowContent)
 
 			// Resume. The cut completes, the health check fails, and the
@@ -120,7 +120,7 @@ func TestRun_ResumedCutPastStoppedKeepsOriginalSnapshot6556(t *testing.T) {
 	}
 
 	dbFile := filepath.Join(cfg.ConfigDBDir, "active.json")
-	const preContent = "#xpf-config-envelope v=1\n{\"gen\":\"pre-upgrade\"}"
+	const preContent = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"pre-upgrade\"}"
 	mkfile(t, dbFile, preContent)
 
 	stageUnhealthy2_0_0(t, fs, cfg)
@@ -129,7 +129,7 @@ func TestRun_ResumedCutPastStoppedKeepsOriginalSnapshot6556(t *testing.T) {
 	// Stand in for the N+1 daemon having already written a too-new envelope.
 	// This is post-STOP state, NOT an operator commit, and must NOT be
 	// captured as the pre-upgrade snapshot.
-	const postFlipContent = "#xpf-config-envelope v=1 min-reader=99\n{}"
+	const postFlipContent = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=99 rollback-fmt=1\n{}"
 	mkfile(t, dbFile, postFlipContent)
 
 	_ = r.Run(Options{})

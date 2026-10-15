@@ -71,7 +71,7 @@ func seedStoppedSameVersionCut(t *testing.T, fs *fakeSystem, boundaryContent str
 // resumed to the same version.
 func TestRun_StoppedResumeLiveOldUnitPreservesCommits12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundaryContent = "#xpf-config-envelope v=1\n{\"gen\":\"cut-boundary-before-restart\"}"
+	const boundaryContent = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"cut-boundary-before-restart\"}"
 	r, cfg, dbFile := seedStoppedSameVersionCut(t, fs, boundaryContent)
 
 	// THE INTERRUPTION WINDOW. The cut stopped the unit and journaled STOPPED
@@ -79,7 +79,7 @@ func TestRun_StoppedResumeLiveOldUnitPreservesCommits12174(t *testing.T) {
 	// postinst restart of an inactive unit / operator action) and the operator
 	// committed a distinguishable config against the live old daemon.
 	must(t, fs.StartUnit(cfg.Unit))
-	const windowContent = "#xpf-config-envelope v=1\n{\"gen\":\"committed-after-old-unit-restart\"}"
+	const windowContent = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"committed-after-old-unit-restart\"}"
 	mkfile(t, dbFile, windowContent)
 
 	// StartUnit returns success with unitRunning already true, matching
@@ -89,7 +89,7 @@ func TestRun_StoppedResumeLiveOldUnitPreservesCommits12174(t *testing.T) {
 	// test observes auto-rollback restoring the FRESH snapshot (not merely a
 	// successful cut leaving the live DB untouched).
 	resumeStopped := false
-	const committedAtStop = "#xpf-config-envelope v=1\n{\"gen\":\"committed-at-resume-stop-boundary\"}"
+	const committedAtStop = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"committed-at-resume-stop-boundary\"}"
 	fs.stopHook = func() {
 		resumeStopped = true
 		mkfile(t, dbFile, committedAtStop)
@@ -154,7 +154,7 @@ func TestRun_StoppedResumeLiveOldUnitPreservesCommits12174(t *testing.T) {
 // the already-correct path).
 func TestRun_StoppedResumeUnitStillDownProceeds12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundaryContent = "#xpf-config-envelope v=1\n{\"gen\":\"cut-boundary-unit-down\"}"
+	const boundaryContent = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"cut-boundary-unit-down\"}"
 	r, cfg, dbFile := seedStoppedSameVersionCut(t, fs, boundaryContent)
 
 	// Control: the unit stays stopped across the interruption. No commit can
@@ -181,11 +181,11 @@ func TestRun_StoppedResumeUnitStillDownProceeds12174(t *testing.T) {
 
 func TestRun_Stopped6aOnlyResumePreservesCommits12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, cfg, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	must(t, r.repointSymlink(r.currentPath(), "2.0.0"))
 	must(t, fs.StartUnit(cfg.Unit))
-	const committed = "#xpf-config-envelope v=1\n{\"gen\":\"old-unit-commit-after-6a\"}"
+	const committed = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"old-unit-commit-after-6a\"}"
 	mkfile(t, dbFile, committed)
 	fs.healthFailVersions["2.0.0"] = true
 
@@ -206,7 +206,7 @@ func TestRun_Stopped6aOnlyResumePreservesCommits12174(t *testing.T) {
 
 func TestRun_Stopped6cWrittenBeforeReloadUsesLoadedExecStart12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, cfg, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	must(t, r.repointSymlink(r.currentPath(), "2.0.0"))
 	oldExe := filepath.Join(r.versionDir("1.0.0"), "xpfd")
@@ -219,7 +219,7 @@ func TestRun_Stopped6cWrittenBeforeReloadUsesLoadedExecStart12174(t *testing.T) 
 	if fs.runningUnitExe != oldExe {
 		t.Fatalf("old daemon executable = %q, want %q", fs.runningUnitExe, oldExe)
 	}
-	const committed = "#xpf-config-envelope v=1\n{\"gen\":\"old-unit-commit-before-reload\"}"
+	const committed = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"old-unit-commit-before-reload\"}"
 	mkfile(t, dbFile, committed)
 	must(t, fs.StopUnit(cfg.Unit)) // old daemon stopped before resume
 	if fs.unitRunning || fs.runningUnitExe != "" {
@@ -244,7 +244,7 @@ func TestRun_Stopped6cWrittenBeforeReloadUsesLoadedExecStart12174(t *testing.T) 
 
 func TestRun_StoppedResumeOldProcessSurvivesSuccessfulReload12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, cfg, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	must(t, r.repointSymlink(r.currentPath(), "2.0.0"))
 	must(t, fs.StartUnit(cfg.Unit))
@@ -258,7 +258,7 @@ func TestRun_StoppedResumeOldProcessSurvivesSuccessfulReload12174(t *testing.T) 
 		t.Fatalf("daemon-reload replaced the running process: got %q want %q",
 			fs.runningUnitExe, oldExe)
 	}
-	const committed = "#xpf-config-envelope v=1\n{\"gen\":\"old-process-after-reload\"}"
+	const committed = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"old-process-after-reload\"}"
 	mkfile(t, dbFile, committed)
 	originalStat := statConfigDBDir
 	statConfigDBDir = func(string) (os.FileInfo, error) {
@@ -285,11 +285,11 @@ func TestRun_StoppedResumeOldProcessSurvivesSuccessfulReload12174(t *testing.T) 
 
 func TestRun_Stopped6aOnlyHealthyTargetPreservesCommits12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, cfg, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	must(t, r.repointSymlink(r.currentPath(), "2.0.0"))
 	must(t, fs.StartUnit(cfg.Unit))
-	const committed = "#xpf-config-envelope v=1\n{\"gen\":\"healthy-old-unit-commit\"}"
+	const committed = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"healthy-old-unit-commit\"}"
 	mkfile(t, dbFile, committed)
 	oldStopped := false
 	fs.stopHook = func() { oldStopped = true }
@@ -314,11 +314,11 @@ func TestRun_Stopped6aOnlyHealthyTargetPreservesCommits12174(t *testing.T) {
 
 func TestRun_StoppedFullFlipKeepsOriginalSnapshot12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"pre-upgrade-boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"pre-upgrade-boundary\"}"
 	r, cfg, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	must(t, r.flip("2.0.0"))
 	must(t, fs.StartUnit(cfg.Unit))
-	const migrated = "#xpf-config-envelope v=1 min-reader=99\n{}"
+	const migrated = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=99 rollback-fmt=1\n{}"
 	mkfile(t, dbFile, migrated)
 	fs.healthFailVersions["2.0.0"] = true
 
@@ -340,7 +340,7 @@ func TestRun_StoppedFullFlipKeepsOriginalSnapshot12174(t *testing.T) {
 
 func TestRun_StoppedNeitherVersionRefusesWithRecoveryHint12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	wantSnapshotPath, wantSnapshot := captureStoppedJournalSnapshot12174(t, r)
 	dbBefore, err := os.ReadFile(dbFile)
@@ -376,10 +376,10 @@ func TestRun_StoppedNeitherVersionRefusesWithRecoveryHint12174(t *testing.T) {
 
 func TestRun_StoppedRefusesCurrentPreviousWithTargetExecStart12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	wantSnapshotPath, wantSnapshot := captureStoppedJournalSnapshot12174(t, r)
-	const migrated = "#xpf-config-envelope v=1 min-reader=99\n{}"
+	const migrated = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=99 rollback-fmt=1\n{}"
 	mkfile(t, dbFile, migrated)
 	fs.healthFailVersions["2.0.0"] = true
 	must(t, r.writeUnitDropin("2.0.0"))
@@ -402,11 +402,11 @@ func TestRun_StoppedRefusesCurrentPreviousWithTargetExecStart12174(t *testing.T)
 
 func TestRun_StoppedRefusesCurrentTargetWithTargetMainPIDAndPreviousExecStart12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	wantSnapshotPath, wantSnapshot := captureStoppedJournalSnapshot12174(t, r)
 	must(t, r.repointSymlink(r.currentPath(), "2.0.0"))
-	const migrated = "#xpf-config-envelope v=1 min-reader=99\n{}"
+	const migrated = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=99 rollback-fmt=1\n{}"
 	mkfile(t, dbFile, migrated)
 	fs.healthFailVersions["2.0.0"] = true
 	previousExe := filepath.Join(r.versionDir("1.0.0"), "xpfd")
@@ -431,7 +431,7 @@ func TestRun_StoppedRefusesCurrentTargetWithTargetMainPIDAndPreviousExecStart121
 
 func TestRun_StoppedRefusesUnknownLoadedExecStart12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	wantSnapshotPath, wantSnapshot := captureStoppedJournalSnapshot12174(t, r)
 	dbBefore, err := os.ReadFile(dbFile)
@@ -457,7 +457,7 @@ func TestRun_StoppedRefusesUnknownLoadedExecStart12174(t *testing.T) {
 
 func TestRun_StoppedRefusesUnknownRunningExecutable12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, dbFile := seedStoppedSameVersionCut(t, fs, boundary)
 	wantSnapshotPath, wantSnapshot := captureStoppedJournalSnapshot12174(t, r)
 	dbBefore, err := os.ReadFile(dbFile)
@@ -484,7 +484,7 @@ func TestRun_StoppedRefusesUnknownRunningExecutable12174(t *testing.T) {
 
 func TestRun_StoppedResumeAlreadyStoppedRefusesLiveMainPID12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, cfg, _ := seedStoppedSameVersionCut(t, fs, boundary)
 	wantSnapshotPath, wantSnapshot := captureStoppedJournalSnapshot12174(t, r)
 	must(t, fs.StartUnit(cfg.Unit))
@@ -500,7 +500,7 @@ func TestRun_StoppedResumeAlreadyStoppedRefusesLiveMainPID12174(t *testing.T) {
 
 func TestRun_StoppedResumeRejectsEmptyLoadedExecStart12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, _ := seedStoppedSameVersionCut(t, fs, boundary)
 	wantSnapshotPath, wantSnapshot := captureStoppedJournalSnapshot12174(t, r)
 	fs.loadedExecStart = ""
@@ -517,7 +517,7 @@ func TestRun_StoppedResumeRejectsEmptyLoadedExecStart12174(t *testing.T) {
 
 func TestRun_StoppedResumeRejectsAmbiguousLoadedExecStart12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, _ := seedStoppedSameVersionCut(t, fs, boundary)
 	wantSnapshotPath, wantSnapshot := captureStoppedJournalSnapshot12174(t, r)
 	previousExe := filepath.Join(r.versionDir("1.0.0"), "xpfd")
@@ -546,7 +546,7 @@ func assertNoStoppedResumeMutation12174(t *testing.T, calls []string) {
 
 func TestRun_StoppedResumeSnapshotPersistFailureRestartsDaemon12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, _ := seedStoppedSameVersionCut(t, fs, boundary)
 	previousWriter := writeUpgradeJournal
 	writeUpgradeJournal = func(string, []byte, os.FileMode) error {
@@ -574,7 +574,7 @@ func TestRun_StoppedResumeSnapshotPersistFailureRestartsDaemon12174(t *testing.T
 
 func TestRun_StoppedResumeSnapshotFailureRestartsDaemon12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, _ := seedStoppedSameVersionCut(t, fs, boundary)
 	originalStat := statConfigDBDir
 	statConfigDBDir = func(string) (os.FileInfo, error) {
@@ -602,7 +602,7 @@ func TestRun_StoppedResumeSnapshotFailureRestartsDaemon12174(t *testing.T) {
 
 func TestRun_StoppedResumeCallerOwnedStoppedUnitRemainsDown12174(t *testing.T) {
 	fs := newFakeSystem(t, "1.0.0")
-	const boundary = "#xpf-config-envelope v=1\n{\"gen\":\"boundary\"}"
+	const boundary = "#xpf-config-envelope v=1 writer=test ast=1 min-reader=1 rollback-fmt=1\n{\"gen\":\"boundary\"}"
 	r, _, _ := seedStoppedSameVersionCut(t, fs, boundary)
 	originalStat := statConfigDBDir
 	statConfigDBDir = func(string) (os.FileInfo, error) {
