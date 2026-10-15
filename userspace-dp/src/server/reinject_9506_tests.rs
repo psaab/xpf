@@ -428,23 +428,20 @@ fn tempdir_sockets_bind_and_accept() {
 
 
 #[test]
-fn announce_before_target_install_is_handed_off_before_submit() {
+fn announce_before_target_install_uses_shared_core_for_submit() {
     let fallback = ReinjectCore::new_shared();
     let target: Arc<ArcSwapOption<SlowPathReinjector>> = Arc::new(ArcSwapOption::new(None));
-    let handoff = Arc::new(std::sync::Mutex::new(()));
     let running = Arc::new(AtomicBool::new(true));
     let (mut client, server) = UnixStream::pair().unwrap();
     let worker_fallback = fallback.clone();
     let worker_target = target.clone();
     let worker_running = running.clone();
-    let worker_handoff = handoff.clone();
     let handle = std::thread::spawn(move || {
         serve_submit_conn_with_running(
             server,
             &worker_fallback,
             &worker_target,
             &worker_running,
-            &worker_handoff,
         );
     });
 
@@ -473,16 +470,12 @@ fn announce_before_target_install_is_handed_off_before_submit() {
         "ANNOUNCE must apply while no target is installed"
     );
 
-    let target_core = ReinjectCore::new_shared();
+    let target_core = fallback.clone();
     let target_reinjector = Arc::new(SlowPathReinjector::new_without_worker_with_core(
         1500,
         target_core.clone(),
     ));
-    {
-        let _guard = handoff.lock().unwrap();
-        target_core.copy_authority_from(&fallback);
-        target.store(Some(target_reinjector));
-    }
+    target.store(Some(target_reinjector));
 
     let mut admitted = frame(1, 1);
     admitted.flags = 0;

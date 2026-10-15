@@ -812,7 +812,18 @@ impl SlowPathReinjector {
     /// are not dropped on the TUN egress (#2408). The caller sources it from
     /// the config snapshot (`ConfigSnapshot::slow_path_mtu`), never hardcoded.
     pub fn new(name: &str, mtu: i32) -> Result<Self, String> {
-        let reinject_core = ReinjectCore::new_shared();
+        Self::new_with_reinject_core(name, mtu, ReinjectCore::new_shared())
+    }
+
+    /// Construct the slow-path reinjector around the server-owned completion
+    /// core. #13196: the socket and target must retain the same in-flight state
+    /// across target publication; copying authority between distinct cores
+    /// strands queued entries and counters.
+    pub(crate) fn new_with_reinject_core(
+        name: &str,
+        mtu: i32,
+        reinject_core: Arc<ReinjectCore>,
+    ) -> Result<Self, String> {
         let status = Arc::new(SharedStatus::new());
         let (tx, rx) = mpsc::sync_channel(DEFAULT_QUEUE_DEPTH);
         let thread_status = status.clone();

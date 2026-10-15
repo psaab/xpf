@@ -774,12 +774,9 @@ impl ReinjectCore {
         )
     }
 
-    /// Transfer the fallback authority into a newly installed target core.
-    ///
-    /// ANNOUNCE can arrive while the slow-path target is absent, so the
-    /// submit listener applies it to the fallback core. Target installation
-    /// must copy that state before swapping the target into service; otherwise
-    /// the target starts closed and immediately rejects unchanged leases.
+    /// Test-only compatibility seam for authority-copy semantics. Production
+    /// target publication shares the server-owned `ReinjectCore` (#13196).
+    #[cfg(test)]
     pub(crate) fn copy_authority_from(&self, source: &Self) {
         if std::ptr::eq(self, source) {
             return;
