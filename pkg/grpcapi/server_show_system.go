@@ -41,6 +41,11 @@ import (
 	"github.com/psaab/xpf/pkg/termsafe"
 )
 
+var (
+	coreDumpDirs    = []string{"/var/crash", "/var/lib/systemd/coredump"}
+	thermalZoneGlob = "/sys/class/thermal/thermal_zone*/temp"
+)
+
 // showVersion renders daemon version, hostname, kernel, and uptime.
 func (s *Server) showVersion(buf *strings.Builder) {
 	ver := s.version
@@ -171,7 +176,7 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 // showChassisEnvironment renders thermal-zone temperatures and the
 // system uptime + load average.
 func (s *Server) showChassisEnvironment(buf *strings.Builder) {
-	thermalZones, _ := filepath.Glob("/sys/class/thermal/thermal_zone*/temp")
+	thermalZones, _ := filepath.Glob(thermalZoneGlob)
 	if len(thermalZones) > 0 {
 		fmt.Fprintln(buf, "Temperature:")
 		for _, tz := range thermalZones {
@@ -188,7 +193,7 @@ func (s *Server) showChassisEnvironment(buf *strings.Builder) {
 			if typeData, err := os.ReadFile(typeFile); err == nil {
 				name = strings.TrimSpace(string(typeData))
 			}
-			fmt.Fprintf(buf, "  %-30s %d.%d C\n", name, millideg/1000, (millideg%1000)/100)
+			fmt.Fprintf(buf, "  %-30s %s C\n", termsafe.SanitizeForDisplay(name), formatMilliCelsius(millideg))
 		}
 		fmt.Fprintln(buf)
 	}
@@ -203,6 +208,21 @@ func (s *Server) showChassisEnvironment(buf *strings.Builder) {
 			float64(sysinfo.Loads[1])/65536.0,
 			float64(sysinfo.Loads[2])/65536.0)
 	}
+}
+
+// formatMilliCelsius renders signed millidegree readings without introducing a
+// second minus sign on the fractional part.
+func formatMilliCelsius(millideg int64) string {
+	whole := millideg / 1000
+	frac := millideg % 1000
+	if frac < 0 {
+		frac = -frac
+	}
+	sign := ""
+	if millideg < 0 && whole == 0 {
+		sign = "-"
+	}
+	return fmt.Sprintf("%s%d.%d", sign, whole, frac/100)
 }
 
 // showSystemServices renders gRPC/HTTP/SSH/WebManagement/DNS/NTP and
@@ -281,6 +301,28 @@ func (s *Server) showSystemServices(buf *strings.Builder) {
 			fmt.Fprintln(buf, "  DNS:            enabled")
 		}
 	}
+	if cfg.System.SNMP != nil {
+		fmt.Fprintln(buf, "  SNMP:           enabled")
+		if cfg.System.SNMP.Description != "" {
+			fmt.Fprintf(buf, "    Description:  %s\n", cfg.System.SNMP.Description)
+		}
+		if cfg.System.SNMP.Location != "" {
+			fmt.Fprintf(buf, "    Location:     %s\n", cfg.System.SNMP.Location)
+		}
+		for _, name := range sortedMapKeys(cfg.System.SNMP.Communities) {
+			comm := cfg.System.SNMP.Communities[name]
+			fmt.Fprintf(buf, "    Community:    %s (%s)\n",
+				config.SNMPCommunityDisplayName(name, true), comm.Authorization)
+		}
+	}
+	if cfg.System.DHCPServer.DHCPLocalServer != nil &&
+		len(cfg.System.DHCPServer.DHCPLocalServer.Groups) > 0 {
+		fmt.Fprintf(buf, "  DHCP server:    %d group(s)\n", len(cfg.System.DHCPServer.DHCPLocalServer.Groups))
+	}
+	if cfg.System.DHCPServer.DHCPv6LocalServer != nil &&
+		len(cfg.System.DHCPServer.DHCPv6LocalServer.Groups) > 0 {
+		fmt.Fprintf(buf, "  DHCPv6 server:  %d group(s)\n", len(cfg.System.DHCPServer.DHCPv6LocalServer.Groups))
+	}
 	if len(cfg.System.NameServers) > 0 {
 		fmt.Fprintf(buf, "  DNS servers:    %s\n", strings.Join(cfg.System.NameServers, ", "))
 	}
@@ -295,6 +337,19 @@ func (s *Server) showSystemServices(buf *strings.Builder) {
 	}
 	if len(cfg.Security.Log.Streams) > 0 {
 		fmt.Fprintf(buf, "  Syslog:         %d stream(s)\n", len(cfg.Security.Log.Streams))
+		for _, name := range sortedMapKeys(cfg.Security.Log.Streams) {
+			stream := cfg.Security.Log.Streams[name]
+			sev := "all"
+			if stream.Severity != "" {
+				sev = stream.Severity + "+"
+			}
+			cat := "all"
+			if stream.Category != "" && stream.Category != "all" {
+				cat = stream.Category
+			}
+			fmt.Fprintf(buf, "    %-16s %s:%d (severity=%s, category=%s)\n",
+				stream.Name, stream.Host, stream.Port, sev, cat)
+		}
 	}
 	if cfg.Services.FlowMonitoring != nil && cfg.Services.FlowMonitoring.Version9 != nil {
 		fmt.Fprintf(buf, "  NetFlow v9:     %d template(s)\n", len(cfg.Services.FlowMonitoring.Version9.Templates))
@@ -460,7 +515,7 @@ func (s *Server) showRootAuthentication(cfg *config.Config, buf *strings.Builder
 }
 
 func (s *Server) showCoreDumps(cfg *config.Config, buf *strings.Builder) {
-	dirs := []string{"/var/crash", "/var/lib/systemd/coredump"}
+	dirs := coreDumpDirs
 	var found bool
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
@@ -476,7 +531,7 @@ func (s *Server) showCoreDumps(cfg *config.Config, buf *strings.Builder) {
 				fmt.Fprintf(buf, "%-40s %-20s %10s\n", "Name", "Date", "Size")
 				found = true
 			}
-			fmt.Fprintf(buf, "%-40s %-20s %10d\n", e.Name(), info.ModTime().Format("2006-01-02 15:04:05"), info.Size())
+			fmt.Fprintf(buf, "%-40s %-20s %10d\n", termsafe.SanitizeForDisplay(e.Name()), info.ModTime().Format("2006-01-02 15:04:05"), info.Size())
 		}
 	}
 	if !found {
