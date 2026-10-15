@@ -120,7 +120,14 @@ pub(super) fn try_translate_nat64_icmp_error(
             else {
                 return EmbeddedIcmpReversal::NotHandled;
             };
-            let Some(rewritten_frame) = crate::nat64::build_nat64_v4_to_v6_icmp_error_frame(
+            let Some(capacity) = packet_frame.len().checked_add(44) else {
+                return EmbeddedIcmpReversal::NotHandled;
+            };
+            let mut rewritten_frame =
+                crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
+            rewritten_frame.resize(capacity, 0);
+            let Some(written) = crate::nat64::build_nat64_v4_to_v6_icmp_error_frame_into(
+                &mut rewritten_frame,
                 packet_frame,
                 src_v6,
                 orig_src_v6,
@@ -129,8 +136,10 @@ pub(super) fn try_translate_nat64_icmp_error(
                 src_mac,
                 icmp_resolution.tx_vlan_id,
             ) else {
+                crate::afxdp::cos::redirect_pool::recycle(rewritten_frame);
                 return EmbeddedIcmpReversal::NotHandled;
             };
+            rewritten_frame.truncate(written);
             let queued = queue_prebuilt_embedded_icmp_error(
                 desc,
                 meta,
@@ -189,7 +198,14 @@ pub(super) fn try_translate_nat64_icmp_error(
             else {
                 return EmbeddedIcmpReversal::NotHandled;
             };
-            let Some(rewritten_frame) = crate::nat64::build_nat64_v6_to_v4_icmp_error_frame(
+            let Some(capacity) = packet_frame.len().checked_add(4) else {
+                return EmbeddedIcmpReversal::NotHandled;
+            };
+            let mut rewritten_frame =
+                crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
+            rewritten_frame.resize(capacity, 0);
+            let Some(written) = crate::nat64::build_nat64_v6_to_v4_icmp_error_frame_into(
+                &mut rewritten_frame,
                 packet_frame,
                 pool_v4,
                 server_v4,
@@ -199,8 +215,10 @@ pub(super) fn try_translate_nat64_icmp_error(
                 icmp_resolution.tx_vlan_id,
                 worker_ctx.forwarding.nat64.no_v6_frag_header,
             ) else {
+                crate::afxdp::cos::redirect_pool::recycle(rewritten_frame);
                 return EmbeddedIcmpReversal::NotHandled;
             };
+            rewritten_frame.truncate(written);
             let queued = queue_prebuilt_embedded_icmp_error(
                 desc,
                 meta,

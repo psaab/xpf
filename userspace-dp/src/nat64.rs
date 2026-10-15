@@ -4173,6 +4173,23 @@ pub(crate) fn write_v4_to_v6_nonfirst_into(
 /// Mirrors [`build_nat64_v6_to_v4_frame`] but calls the L3-only non-first
 /// translator (no L4 header, no `no_v6_frag_header` policy — the fragmentation
 /// fields come from the packet's Fragment Header).
+/// Write a non-first IPv6 fragment's translated Ethernet frame into a caller
+/// buffer. `out` must hold the input frame length (the translation shrinks).
+pub(crate) fn build_nat64_v6_to_v4_nonfirst_frame_into(
+    out: &mut [u8], frame: &[u8], snat_v4: Ipv4Addr, dst_v4: Ipv4Addr,
+    eth_dst: [u8; 6], eth_src: [u8; 6], vlan_id: u16,
+) -> Option<usize> {
+    let l3 = frame_l3_offset(frame)?;
+    let ipv6_packet = frame.get(l3..)?;
+    let eth_len: usize = if vlan_id > 0 { 18 } else { 14 };
+    let out = out.get_mut(..eth_len.checked_add(ipv6_packet.len())?)?;
+    write_eth_header_slice(out, eth_dst, eth_src, vlan_id, 0x0800)?;
+    let written = write_v6_to_v4_nonfirst_into(&mut out[eth_len..], ipv6_packet, snat_v4, dst_v4)?;
+    Some(eth_len + written)
+}
+
+#[cfg(test)]
+
 pub(crate) fn build_nat64_v6_to_v4_nonfirst_frame(
     frame: &[u8],
     snat_v4: Ipv4Addr,
@@ -4197,6 +4214,22 @@ pub(crate) fn build_nat64_v6_to_v4_nonfirst_frame(
 /// header vs 20 IPv4 header); the `2 * NAT64_HEADER_DELTA` over-allocation is a
 /// safe upper bound (there is no ICMP-error embedded-packet growth on a
 /// TCP/UDP fragment) and the result is truncated to the exact length.
+pub(crate) fn build_nat64_v4_to_v6_nonfirst_frame_into(
+    out: &mut [u8], frame: &[u8], src_v6: Ipv6Addr, dst_v6: Ipv6Addr,
+    eth_dst: [u8; 6], eth_src: [u8; 6], vlan_id: u16,
+) -> Option<usize> {
+    let l3 = frame_l3_offset(frame)?;
+    let packet = frame.get(l3..)?;
+    let eth_len: usize = if vlan_id > 0 { 18 } else { 14 };
+    let l3_capacity = packet.len().checked_add(2 * NAT64_HEADER_DELTA as usize)?;
+    let out = out.get_mut(..eth_len.checked_add(l3_capacity)?)?;
+    write_eth_header_slice(out, eth_dst, eth_src, vlan_id, 0x86dd)?;
+    let written = write_v4_to_v6_nonfirst_into(&mut out[eth_len..], packet, src_v6, dst_v6)?;
+    Some(eth_len + written)
+}
+
+#[cfg(test)]
+
 pub(crate) fn build_nat64_v4_to_v6_nonfirst_frame(
     frame: &[u8],
     src_v6: Ipv6Addr,
@@ -4221,6 +4254,23 @@ pub(crate) fn build_nat64_v4_to_v6_nonfirst_frame(
 ///
 /// `eth_dst`, `eth_src` are the new L2 addresses for the forwarded frame.
 /// `vlan_id` is inserted if > 0.
+pub(crate) fn build_nat64_v6_to_v4_frame_into(
+    out: &mut [u8], frame: &[u8], snat_v4: Ipv4Addr, dst_v4: Ipv4Addr,
+    eth_dst: [u8; 6], eth_src: [u8; 6], vlan_id: u16, no_v6_frag_header: bool,
+) -> Option<usize> {
+    let l3 = frame_l3_offset(frame)?;
+    let packet = frame.get(l3..)?;
+    let eth_len: usize = if vlan_id > 0 { 18 } else { 14 };
+    let out = out.get_mut(..eth_len.checked_add(packet.len())?)?;
+    write_eth_header_slice(out, eth_dst, eth_src, vlan_id, 0x0800)?;
+    let written = write_v6_to_v4_into(
+        &mut out[eth_len..], packet, snat_v4, dst_v4, no_v6_frag_header,
+    )?;
+    Some(eth_len + written)
+}
+
+#[cfg(test)]
+
 pub(crate) fn build_nat64_v6_to_v4_frame(
     frame: &[u8],
     snat_v4: Ipv4Addr,
@@ -4255,6 +4305,22 @@ pub(crate) fn build_nat64_v6_to_v4_frame(
 /// Used for reverse NAT64 (IPv4→IPv6): frame grows by 20 bytes.
 ///
 /// `src_v6` and `dst_v6` are the restored IPv6 addresses.
+pub(crate) fn build_nat64_v4_to_v6_frame_into(
+    out: &mut [u8], frame: &[u8], src_v6: Ipv6Addr, dst_v6: Ipv6Addr,
+    eth_dst: [u8; 6], eth_src: [u8; 6], vlan_id: u16,
+) -> Option<usize> {
+    let l3 = frame_l3_offset(frame)?;
+    let packet = frame.get(l3..)?;
+    let eth_len: usize = if vlan_id > 0 { 18 } else { 14 };
+    let capacity = packet.len().checked_add(2 * NAT64_HEADER_DELTA as usize)?;
+    let out = out.get_mut(..eth_len.checked_add(capacity)?)?;
+    write_eth_header_slice(out, eth_dst, eth_src, vlan_id, 0x86dd)?;
+    let written = write_v4_to_v6_into(&mut out[eth_len..], packet, src_v6, dst_v6)?;
+    Some(eth_len + written)
+}
+
+#[cfg(test)]
+
 pub(crate) fn build_nat64_v4_to_v6_frame(
     frame: &[u8],
     src_v6: Ipv6Addr,
@@ -4288,6 +4354,24 @@ pub(crate) fn build_nat64_v4_to_v6_frame(
 /// [`write_v6_to_v4_icmp_error_into`] so the embedded quote's L4 destination
 /// port / echo id is restored to the session's translated (pool) value —
 /// the tuple the v4 server associates the error with.
+pub(crate) fn build_nat64_v6_to_v4_icmp_error_frame_into(
+    out: &mut [u8], frame: &[u8], snat_v4: Ipv4Addr, dst_v4: Ipv4Addr,
+    embedded_dst_port: Option<u16>, eth_dst: [u8; 6], eth_src: [u8; 6],
+    vlan_id: u16, no_v6_frag_header: bool,
+) -> Option<usize> {
+    let l3 = frame_l3_offset(frame)?;
+    let packet = frame.get(l3..)?;
+    let eth_len: usize = if vlan_id > 0 { 18 } else { 14 };
+    let out = out.get_mut(..eth_len.checked_add(packet.len())?)?;
+    write_eth_header_slice(out, eth_dst, eth_src, vlan_id, 0x0800)?;
+    let written = write_v6_to_v4_icmp_error_into(
+        &mut out[eth_len..], packet, snat_v4, dst_v4, no_v6_frag_header, embedded_dst_port,
+    )?;
+    Some(eth_len + written)
+}
+
+#[cfg(test)]
+
 pub(crate) fn build_nat64_v6_to_v4_icmp_error_frame(
     frame: &[u8],
     snat_v4: Ipv4Addr,
@@ -4323,6 +4407,24 @@ pub(crate) fn build_nat64_v6_to_v4_icmp_error_frame(
 /// [`write_v4_to_v6_icmp_error_into`] so the embedded quote's L4 source
 /// port / echo id is restored to the ORIGINAL v6 client value — the tuple
 /// the client associates the error with.
+pub(crate) fn build_nat64_v4_to_v6_icmp_error_frame_into(
+    out: &mut [u8], frame: &[u8], src_v6: Ipv6Addr, dst_v6: Ipv6Addr,
+    embedded_src_port: Option<u16>, eth_dst: [u8; 6], eth_src: [u8; 6], vlan_id: u16,
+) -> Option<usize> {
+    let l3 = frame_l3_offset(frame)?;
+    let packet = frame.get(l3..)?;
+    let eth_len: usize = if vlan_id > 0 { 18 } else { 14 };
+    let capacity = packet.len().checked_add(2 * NAT64_HEADER_DELTA as usize)?;
+    let out = out.get_mut(..eth_len.checked_add(capacity)?)?;
+    write_eth_header_slice(out, eth_dst, eth_src, vlan_id, 0x86dd)?;
+    let written = write_v4_to_v6_icmp_error_into(
+        &mut out[eth_len..], packet, src_v6, dst_v6, embedded_src_port,
+    )?;
+    Some(eth_len + written)
+}
+
+#[cfg(test)]
+
 pub(crate) fn build_nat64_v4_to_v6_icmp_error_frame(
     frame: &[u8],
     src_v6: Ipv6Addr,

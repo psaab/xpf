@@ -32,7 +32,8 @@ pub(in crate::afxdp) fn pending_tx_capacity(ring_entries: u32) -> usize {
 
 pub(in crate::afxdp) fn bound_pending_tx_local(binding: &mut BindingWorker) {
     while binding.tx_pipeline.pending_tx_local.len() > binding.tx_pipeline.max_pending_tx {
-        if binding.tx_pipeline.pending_tx_local.pop_front().is_some() {
+        if let Some(req) = binding.tx_pipeline.pending_tx_local.pop_front() {
+            crate::afxdp::cos::redirect_pool::recycle(req.bytes);
             // #804: bound-pending FIFO overflow — distinct from the CoS
             // queue admission overflow counter. Keep this attribution
             // precise so operators can tell which path is dropping.

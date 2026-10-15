@@ -362,14 +362,17 @@ pub(super) fn build_nat64_forwarded_frames(
         .map(|e| tunnel_mode_kind(&e.mode));
     let mut frames = SmallVec::new();
     for inner in inner_frames {
-        let frame = match kind {
-            Some(TunnelKind::WireGuard) => wg::wg_encap_frame(&inner, inner_meta, decision, forwarding)?,
-            Some(TunnelKind::Gre) => {
-                encapsulate_native_gre_frame(&inner, inner_meta, decision, forwarding)?
+        let encapsulated = match kind {
+            Some(TunnelKind::WireGuard) => {
+                wg::wg_encap_frame(&inner, inner_meta, decision, forwarding)
             }
-            Some(TunnelKind::Unknown) | None => return None,
+            Some(TunnelKind::Gre) => {
+                encapsulate_native_gre_frame(&inner, inner_meta, decision, forwarding)
+            }
+            Some(TunnelKind::Unknown) | None => None,
         };
-        frames.push(frame);
+        crate::afxdp::cos::redirect_pool::recycle(inner);
+        frames.push(encapsulated?);
     }
     Some(frames)
 }
@@ -432,6 +435,7 @@ fn fragment_nat64_ipv4_frame(
         frames.push(fragment);
         offset += payload_len;
     }
+    crate::afxdp::cos::redirect_pool::recycle(frame);
     (!frames.is_empty()).then_some(frames)
 }
 
@@ -565,28 +569,41 @@ fn build_nat64_inner_frame(
             if let Some(l3) = frame_l3_offset(frame)
                 && is_non_first_fragment(frame.get(l3..)?, libc::AF_INET6 as u8)
             {
-                return crate::nat64::build_nat64_v6_to_v4_nonfirst_frame(
-                    frame, snat_v4, dst_v4, dst_mac, src_mac, vlan_id,
-                );
+                let capacity = frame.len().checked_add(4)?;
+                let mut out = crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
+                out.resize(capacity, 0);
+                let Some(written) = crate::nat64::build_nat64_v6_to_v4_nonfirst_frame_into(
+                    &mut out, frame, snat_v4, dst_v4, dst_mac, src_mac, vlan_id,
+                ) else {
+                    crate::afxdp::cos::redirect_pool::recycle(out);
+                    return None;
+                };
+                out.truncate(written);
+                return Some(out);
             }
-            let mut out = crate::nat64::build_nat64_v6_to_v4_frame(
-                frame,
-                snat_v4,
-                dst_v4,
-                dst_mac,
-                src_mac,
-                vlan_id,
+            let capacity = frame.len().checked_add(4)?;
+            let mut out = crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
+            out.resize(capacity, 0);
+            let Some(written) = crate::nat64::build_nat64_v6_to_v4_frame_into(
+                &mut out, frame, snat_v4, dst_v4, dst_mac, src_mac, vlan_id,
                 no_v6_frag_header,
-            )?;
-            // #4381: rewrite the L4 SOURCE port / ICMP identifier to the unique
-            // translated value the forward decision carries in `rewrite_src_port`
-            // (RFC 6146 BIB). The output is IPv4; ICMPv6 mapped to ICMPv4.
+            ) else {
+                crate::afxdp::cos::redirect_pool::recycle(out);
+                return None;
+            };
+            out.truncate(written);
             let out_protocol = if meta.protocol == PROTO_ICMPV6 {
                 PROTO_ICMP
             } else {
                 meta.protocol
             };
-            apply_nat64_port_translation(&mut out, libc::AF_INET as u8, out_protocol, decision.nat)?;
+            // #4381: rewrite the L4 SOURCE port / ICMP identifier to the unique
+            // translated value the forward decision carries in `rewrite_src_port`
+            // (RFC 6146 BIB). The output is IPv4; ICMPv6 mapped to ICMPv4.
+            if apply_nat64_port_translation(&mut out, libc::AF_INET as u8, out_protocol, decision.nat).is_none() {
+                crate::afxdp::cos::redirect_pool::recycle(out);
+                return None;
+            }
             Some(out)
         }
         libc::AF_INET => {
@@ -597,27 +614,27 @@ fn build_nat64_inner_frame(
             // endpoints from the AF_INET fragment association. The v4-side
             // association is installed only after an admitted reverse first
             // fragment reaches the session-hit record site.
-            if let Some(l3) = frame_l3_offset(frame)
+            let capacity = frame.len().checked_add(44)?;
+            let mut out = crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
+            out.resize(capacity, 0);
+            let written = if let Some(l3) = frame_l3_offset(frame)
                 && is_non_first_fragment(frame.get(l3..)?, libc::AF_INET as u8)
             {
-                return crate::nat64::build_nat64_v4_to_v6_nonfirst_frame(
-                    frame,
-                    info.orig_dst_v6,
-                    info.orig_src_v6,
-                    dst_mac,
-                    src_mac,
-                    vlan_id,
-                );
-            }
-            // Reply: src_v6 = original dst (NAT64 prefix + server), dst_v6 = original client
-            let mut out = crate::nat64::build_nat64_v4_to_v6_frame(
-                frame,
-                info.orig_dst_v6,
-                info.orig_src_v6,
-                dst_mac,
-                src_mac,
-                vlan_id,
-            )?;
+                crate::nat64::build_nat64_v4_to_v6_nonfirst_frame_into(
+                    &mut out, frame, info.orig_dst_v6, info.orig_src_v6,
+                    dst_mac, src_mac, vlan_id,
+                )
+            } else {
+                crate::nat64::build_nat64_v4_to_v6_frame_into(
+                    &mut out, frame, info.orig_dst_v6, info.orig_src_v6,
+                    dst_mac, src_mac, vlan_id,
+                )
+            };
+            let Some(written) = written else {
+                crate::afxdp::cos::redirect_pool::recycle(out);
+                return None;
+            };
+            out.truncate(written);
             // #4381: restore the ORIGINAL client L4 field. The reply arrived with
             // the translated source port/id as its DESTINATION (that is what the
             // server replied to), so the reverse session's decision — produced by
@@ -629,7 +646,10 @@ fn build_nat64_inner_frame(
             } else {
                 meta.protocol
             };
-            apply_nat64_port_translation(&mut out, libc::AF_INET6 as u8, out_protocol, decision.nat)?;
+            if apply_nat64_port_translation(&mut out, libc::AF_INET6 as u8, out_protocol, decision.nat).is_none() {
+                crate::afxdp::cos::redirect_pool::recycle(out);
+                return None;
+            }
             Some(out)
         }
         _ => None,

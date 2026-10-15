@@ -650,6 +650,7 @@ fn enqueue_copy_fallback_frame(
                     // leaked it. Drop-and-recycle, no slow-path
                     // reinject (the frame is already oversized).
                     build_failed = true;
+                    crate::afxdp::cos::redirect_pool::recycle(frame);
                     break;
                 } else {
                     let req = TxRequest {
@@ -673,7 +674,8 @@ fn enqueue_copy_fallback_frame(
                         },
                         enqueue_ns: 0,
                     };
-                    if enqueue_local_request_to_target_or_owner(target_binding, req).is_err() {
+                    if let Err(rejected) = enqueue_local_request_to_target_or_owner(target_binding, req) {
+                        crate::afxdp::cos::redirect_pool::recycle(rejected.bytes);
                         // #2208: cross-binding CoS-owner queue
                         // full (TX congestion). Set the
                         // build-failure flags and FALL THROUGH
