@@ -1182,3 +1182,125 @@ func TestFormatSojournNS(t *testing.T) {
 		}
 	}
 }
+
+// #13088 (D7-09, first half): two forwarding classes mapped to the SAME
+// queue id is a committable shape (the strict validator rejects duplicate
+// class names, not shared queue ids). buildCoSQueueViews ranged the
+// scheduler-map Entries map directly, so whichever of the two classes Go
+// visited last owned the rendered row — the Class, Priority, Transmit rate
+// and Buffer of the shared queue flipped non-deterministically across
+// consecutive `show class-of-service interface` invocations. The fix sorts
+// the entries (ascending class name, matching the snapshot emitter in
+// userspace/cos.go), so the collapse is stable and the lexicographically
+// LAST class sharing a queue owns the row. 100 renders must be
+// byte-identical and show exactly that winner; pre-fix this reds within a
+// few runs as both map orders appear.
+func TestFormatCoSInterfaceSummarySharedQueueRowIsDeterministic_13088(t *testing.T) {
+	cfg := &config.Config{
+		ClassOfService: &config.ClassOfServiceConfig{
+			ForwardingClasses: map[string]*config.CoSForwardingClass{
+				"fc-alpha": {Name: "fc-alpha", Queue: 1},
+				"fc-beta":  {Name: "fc-beta", Queue: 1},
+			},
+			Schedulers: map[string]*config.CoSScheduler{
+				"sched-alpha": {Name: "sched-alpha", TransmitRateBytes: 100_000_000, Priority: "high"},
+				"sched-beta":  {Name: "sched-beta", TransmitRateBytes: 10_000_000, Priority: "low"},
+			},
+			SchedulerMaps: map[string]*config.CoSSchedulerMap{
+				"sm": {Name: "sm", Entries: map[string]*config.CoSSchedulerMapEntry{
+					"fc-alpha": {ForwardingClass: "fc-alpha", Scheduler: "sched-alpha"},
+					"fc-beta":  {ForwardingClass: "fc-beta", Scheduler: "sched-beta"},
+				}},
+			},
+			Interfaces: map[string]*config.CoSInterface{
+				"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.CoSInterfaceUnit{
+					1: {Unit: 1, SchedulerMap: "sm"},
+				}},
+			},
+		},
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{
+				1: {Number: 1},
+			}},
+		}},
+	}
+
+	var first string
+	for i := range 100 {
+		out := FormatCoSInterfaceSummary(cfg, nil, "ge-0/0/0.1")
+		if i == 0 {
+			first = out
+			continue
+		}
+		if out != first {
+			t.Fatalf("render %d diverged from render 0 — the shared-queue row "+
+				"is still map-order dependent:\n--- render 0 ---\n%s\n--- render %d ---\n%s",
+				i, first, i, out)
+		}
+	}
+	// Pin the deterministic winner too: with entries visited in ascending
+	// class order, fc-beta is written last and owns the queue 1 row. An
+	// implementation that "stabilizes" by sorting but lets fc-alpha win, or
+	// one that renders BOTH classes onto queue 1, fails here.
+	if !strings.Contains(first, "fc-beta") {
+		t.Fatalf("queue 1 row must be owned by the lexicographically last "+
+			"class sharing it (fc-beta):\n%s", first)
+	}
+	if strings.Contains(first, "fc-alpha") {
+		t.Fatalf("fc-alpha lost its queue to fc-beta but still renders — the "+
+			"shared queue must show exactly one row:\n%s", first)
+	}
+	// The synthetic best-effort fallback (second half of #13088) takes the
+	// lowest UNUSED queue id, so it must not clobber the shared queue 1.
+	if !strings.Contains(first, "best-effort") {
+		t.Fatalf("admitted unit must render the synthetic best-effort queue "+
+			"on queue 0 (the lowest unused id):\n%s", first)
+	}
+}
+
+// #13088 (D7-09, second half): the dataplane admits any unit with a
+// shaping rate and ALWAYS materializes a synthetic best-effort queue for
+// unclassified traffic (build_cos_iface_config, cos.rs: lowest unused
+// queue id, priority low, guaranteed at the interface shaping rate,
+// buffered from the interface burst pool). The formatter modeled none of
+// that, so a shaped unit without a scheduler-map rendered "Queues: none"
+// whenever runtime status was unavailable — denying that a shaped queue
+// exists at all. The config-only view must mirror the dataplane fallback.
+func TestFormatCoSInterfaceSummarySynthesizesBestEffortWithoutRuntime_13088(t *testing.T) {
+	cfg := &config.Config{
+		ClassOfService: &config.ClassOfServiceConfig{
+			Interfaces: map[string]*config.CoSInterface{
+				"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.CoSInterfaceUnit{
+					1: {Unit: 1, ShapingRateBytes: 125_000_000, BurstSizeBytes: 65_536},
+				}},
+			},
+		},
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{
+				1: {Number: 1},
+			}},
+		}},
+	}
+
+	out := FormatCoSInterfaceSummary(cfg, nil, "ge-0/0/0.1")
+	if strings.Contains(out, "Queues:                   none") {
+		t.Fatalf("shaped unit with runtime unavailable must still render the "+
+			"dataplane's synthetic best-effort queue, not \"Queues: none\":\n%s", out)
+	}
+	for _, want := range []string{
+		"Queues:",
+		"best-effort",
+		"1.00 Gb/s",
+		"64.00 KiB",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in synthetic best-effort queue row:\n%s", want, out)
+		}
+	}
+	// Exactly one queue row: the synthetic best-effort on queue 0 (detail
+	// rows like Drops: are gated on interface runtime, which is nil here).
+	if got := strings.Count(out, "best-effort"); got != 1 {
+		t.Fatalf("expected exactly one synthetic best-effort queue row, got %d "+
+			"occurrences of the class name:\n%s", got, out)
+	}
+}
