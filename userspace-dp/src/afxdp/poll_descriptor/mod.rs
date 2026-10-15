@@ -2394,6 +2394,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ),
                             };
                         seed_packet_already_counted = input_already_counted;
+                        // #13641: cache seeding is not an accounting
+                        // chokepoint. It is skipped for non-cacheable
+                        // session hits, failed installs, local delivery, and
+                        // fragments. Charge the static INPUT `then count`
+                        // handles here for every hit the ordinary evaluator
+                        // did not already count; the seed then sees the
+                        // updated flag and cannot double-charge cacheable
+                        // forwarding hits.
+                        if !ordinary_input_already_counted {
+                            evaluate_non_pbr_input_filter_counters_cached(
+                                worker_ctx.forwarding,
+                                Some(flow),
+                                meta,
+                            )
+                            .for_each(|counter| {
+                                crate::filter::record_filter_counter(
+                                    counter,
+                                    meta.pkt_len as u64,
+                                );
+                            });
+                        }
+                        // The cache seed must not be responsible for charging
+                        // any session-hit packet: counted evaluators and this
+                        // static-handle walk have both already paid it. Use
+                        // the ordinary evaluator's result above because a
+                        // synthesized PBR verdict can reset the final
+                        // `input_already_counted` flag despite an ordinary
+                        // per-packet filter having counted.
+                        seed_packet_already_counted = true;
                         if let Some(input_filter_hit) = input_filter_hit {
                             let input_filter_eval = input_filter_hit.eval;
                             let input_filter_revoked_key = input_filter_hit.revoked_key;
