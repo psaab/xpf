@@ -130,13 +130,12 @@ func (z *ZoneConfig) InterfaceHostInboundOverride(ref string) (svc, proto []stri
 // UNIT keys union (parent∪child accumulates across identities on both
 // sides). Every authored ref is stored under its RAW spelling (exact
 // diagnostic queries keep working) AND its canonical Literal (alias queries
-// and canonical consumers land together — Literal keys regardless of dot
-// count, GLM-F1: multi-dot-only is retired FOR THE STAMP while the D3 gate
-// keeps it); every bare ref fans its merged hib down onto each CONFIGURED
-// unit (present-but-nil slots included, as the runtime does). Values are
-// merged clones, never config aliases. No M01/#5489 guards here: the stamp
-// preserves method semantics exactly and quarantine stays runtime-only
-// (changing lenient quarantine is a separate behavior change, out of scope).
+// and canonical consumers land together). Every bare ref fans its merged hib
+// down onto each configured or secure-tunnel-materialized unit, as the runtime
+// does. Values are merged clones, never config aliases. M01/#5489 quarantine
+// and ZoneQuarantineExclusionsForConfig are applied here as in the runtime
+// resolver; without those guards diagnostics can report an override the
+// dataplane deliberately discards.
 //
 // D19 union completeness: each raw alias key carries what its canonical
 // Literal resolved to — `p.0.01` and `p.0.1` BOTH map to union(parent-`p.0`,
@@ -148,13 +147,16 @@ func (z *ZoneConfig) InterfaceHostInboundOverride(ref string) (svc, proto []stri
 // the first two and inherit-unions on the units.
 //
 // Construction invariant (F-D19): stampKeys ⊇ runtimeKeys per zone — authored
-// raws + Literals + bare fan-down over the SAME configured-unit set #18 fans
-// — so a miss under a present stamp proves no governing override in EITHER
-// map and the method returns authoritative ABSENT with no legacy walk.
+// raws + Literals + bare fan-down through the shared InterfaceUnitRefKeys
+// expansion — so a miss under a present stamp proves no governing override in
+// EITHER map and the method returns authoritative ABSENT with no legacy walk.
 func stampResolvedInterfaceOverrides(cfg *Config) {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return
 	}
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
+	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
+	zoneByIface := InterfaceZoneMap(cfg)
 	declared := make(map[string]bool, len(cfg.Interfaces.Interfaces))
 	for name, ifc := range cfg.Interfaces.Interfaces {
 		if ifc != nil {
@@ -162,7 +164,10 @@ func stampResolvedInterfaceOverrides(cfg *Config) {
 		}
 	}
 	isDeclared := func(s string) bool { return declared[s] }
-	for _, zone := range cfg.Security.Zones {
+	for zoneName, zone := range cfg.Security.Zones {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
 		if zone == nil {
 			continue
 		}
@@ -196,17 +201,29 @@ func stampResolvedInterfaceOverrides(cfg *Config) {
 				}
 			}
 			if !s.HasUnit {
-				mergeFirstWins(ref)
-				if s.Literal != ref {
-					mergeFirstWins(s.Literal)
-					aliases = append(aliases, aliasKey{ref, s.Literal})
-				}
-				if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
-					for unitNum := range ifCfg.Units {
-						merge(fmt.Sprintf("%s.%d", s.Base, unitNum))
+				if _, conflicted := conflictedInterfaces[s.Literal]; !conflicted {
+					mergeFirstWins(ref)
+					if s.Literal != ref {
+						mergeFirstWins(s.Literal)
+						aliases = append(aliases, aliasKey{ref, s.Literal})
 					}
 				}
+				for _, unitKey := range InterfaceUnitRefKeys(cfg, ref)[1:] {
+					if _, conflicted := conflictedInterfaces[unitKey]; conflicted {
+						continue
+					}
+					if owner := zoneByIface[unitKey]; owner != "" && owner != zoneName {
+						continue
+					}
+					merge(unitKey)
+				}
 			} else {
+				if _, conflicted := conflictedInterfaces[s.Literal]; conflicted {
+					continue
+				}
+				if owner := zoneByIface[s.Literal]; owner != "" && owner != zoneName {
+					continue
+				}
 				merge(ref)
 				if s.Literal != ref {
 					merge(s.Literal)
