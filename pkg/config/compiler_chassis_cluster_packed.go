@@ -245,15 +245,37 @@ func splitClusterKeys(keys []string, skip, line, column int) []*Node {
 // The container spelling is returned UNTOUCHED — same pointer, no clone — so
 // the overwhelmingly common path allocates nothing and cannot be perturbed by
 // this code at all.
+//
+// #13090: sibling `cluster` blocks are DISTINCT AST nodes (brace syntax,
+// `load merge`, a second `set chassis cluster` stanza), and the singular
+// FindChild returned only the first — silently dropping the later block's
+// reth-count, heartbeat and redundancy-group definitions at compile. Fold
+// every block's statements into one body in source order; the replay is
+// leaf-level last-wins, the same semantics the #6543 redundancy-group fold
+// established for merged instances.
 func normalizedClusterNode(chassisNode *Node) *Node {
 	if chassisNode == nil {
 		return nil
 	}
-	if cn := chassisNode.FindChild(clusterKeyword); cn != nil {
-		if !clusterBodyNeedsSplit(cn, 1) {
-			return cn // `cluster { ... }` — already one node per statement.
+	clusters := chassisNode.FindChildren(clusterKeyword)
+	switch len(clusters) {
+	case 0:
+	case 1:
+		if !clusterBodyNeedsSplit(clusters[0], 1) {
+			return clusters[0] // `cluster { ... }` — already one node per statement.
 		}
-		return synthesizedClusterNode(cn, 1)
+		return synthesizedClusterNode(clusters[0], 1)
+	default:
+		body := make([]*Node, 0, len(clusters))
+		for _, cn := range clusters {
+			body = append(body, clusterBodyStatements(cn, 1)...)
+		}
+		return &Node{
+			Keys:     []string{clusterKeyword},
+			Children: body,
+			Line:     clusters[0].Line,
+			Column:   clusters[0].Column,
+		}
 	}
 	// `chassis cluster ...` — the keyword is packed onto the chassis node's own
 	// Keys, so FindChild sees nothing and the pre-#6672 compiler returned early
@@ -281,8 +303,15 @@ func chassisClusterIsPacked(chassisNode *Node) bool {
 	if chassisNode == nil {
 		return false
 	}
-	if cn := chassisNode.FindChild(clusterKeyword); cn != nil {
-		return clusterBodyNeedsSplit(cn, 1)
+	// #13090: a LATER sibling `cluster` block may be the packed one. The
+	// singular FindChild missed it, so normalizePackedChassisCluster left
+	// the tree alone and the schema walker saw statements the compiler's
+	// normalizedClusterNode fold did split — the two readers this file
+	// exists to keep in agreement. Check every block.
+	for _, cn := range chassisNode.FindChildren(clusterKeyword) {
+		if clusterBodyNeedsSplit(cn, 1) {
+			return true
+		}
 	}
 	return len(chassisNode.Keys) > 1 && chassisNode.Keys[1] == clusterKeyword
 }
