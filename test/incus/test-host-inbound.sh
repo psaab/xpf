@@ -13,8 +13,10 @@
 #   ./test/incus/test-host-inbound.sh --with-failover  # + HA-failover leg
 #
 # Env:
-#   HI_PROBE_TIMEOUT=3   seconds a TCP cell waits before scoring TIMEOUT
-#   HI_SETTLE=8          seconds to let VRRP settle after a manual failover
+#   HI_PROBE_TIMEOUT=3          seconds a TCP cell waits before scoring TIMEOUT
+#   HI_SETTLE=8                 seconds to let VRRP settle after a manual failover
+#   CLUSTER_WAN_VLAN50_HOST=... WAN-side prober (default xpf-zone-matrix-dmz)
+#   CLUSTER_WAN_VLAN80_HOST=... WAN-side prober (default xpf-mouse-target)
 
 set -euo pipefail
 
@@ -45,16 +47,12 @@ xpf_enter_destructive_cluster_cell "test-host-inbound $*" "$0" "$@"
 # the two on-wire legs that were never covered:
 #
 #   VLAN            — tagged sub-unit addresses (reth0.50 / reth0.80) are
-#                     host-inbound targets, not just the untagged interface.
-#                     Every probe ARRIVES on lan (the prober is the LAN host),
-#                     and lan admits ssh. The cells are ssh ADMIT at lan's
-#                     addresses and, since the #9637 residual fix, ssh ADMIT
-#                     at the wan sub-units too: a LAN SYN to a wan address is
-#                     reinjected through xpf-usp0 after userspace adjudication,
-#                     and the reinject exemption admits it to view addresses
-#                     (see score_matrix). Telnet stays DENY everywhere (no zone
-#                     admits it), and ping stays ADMIT as the same-address
-#                     control.
+#                     tested from their corresponding WAN-side endpoints
+#                     (xpf-zone-matrix-dmz / xpf-mouse-target), so packets
+#                     actually enter on the WAN zone. LAN addresses are
+#                     tested from CLUSTER_LAN_HOST and must admit ssh; WAN
+#                     addresses must deny it. Telnet is denied everywhere,
+#                     and ping is the same-address positive control.
 #   HA failover     — admission is UNCHANGED after the redundancy groups move
 #                     to the peer node. The failure mode is silent: an
 #                     admission that quietly stops working after a failover
@@ -91,6 +89,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/cluster-env.sh"
 # shellcheck source=test/incus/host-inbound-lib.sh
 source "${SCRIPT_DIR}/host-inbound-lib.sh"
+CLUSTER_WAN_VLAN50_HOST="$(_xpf_cluster_ref "${CLUSTER_WAN_VLAN50_HOST:-xpf-zone-matrix-dmz}")"
+CLUSTER_WAN_VLAN80_HOST="$(_xpf_cluster_ref "${CLUSTER_WAN_VLAN80_HOST:-xpf-mouse-target}")"
 
 WITH_FAILOVER=0
 for arg in "$@"; do
@@ -133,7 +133,13 @@ pfail() {
 	ERRORS+=("$*")
 }
 die() {
+	local gate="test-host-inbound"
+	[[ "${WITH_FAILOVER:-0}" -eq 1 ]] && gate="test-host-inbound-failover"
 	echo "FATAL: $*" >&2
+	# Match the ledger envelope emitted on the normal path; otherwise a
+	# precondition abort disappears from the structured run result.
+	printf 'WIRE_GATE %s VOID reason=harness-void cells_passed=%s cells_failed=%s posture_passed=%s posture_failed=%s\n' \
+		"$gate" "${PASS:-0}" "${FAIL:-0}" "${POSTURE_PASS:-0}" "${POSTURE_FAIL:-0}"
 	exit 2
 }
 
@@ -231,11 +237,11 @@ cleanup_ssh_probe_listener() {
 # `set -o pipefail` the pipeline then reports the WRITER's failure and a
 # RUNNING instance reads as down. Consume the whole stream (the same shape
 # test-active-active.sh uses) so the check measures the status, not the pipe.
-for inst in "$FW0" "$FW1" "$CLUSTER_LAN_HOST"; do
+for inst in "$FW0" "$FW1" "$CLUSTER_LAN_HOST" "$CLUSTER_WAN_VLAN50_HOST" "$CLUSTER_WAN_VLAN80_HOST"; do
 	[[ "$(incus info "$inst" 2>/dev/null | grep -o "RUNNING" | head -1)" == "RUNNING" ]] \
 		|| die "$inst is not RUNNING — bring the cluster up first (make cluster-deploy)"
 done
-info "cluster instances up: $FW0, $FW1, $CLUSTER_LAN_HOST"
+info "firewalls and LAN/VLAN-50/VLAN-80 probe hosts are running"
 
 # Read the ACTIVE config in flat-set form. `display set` gives whole-line
 # tokens, so the posture questions below are exact-line matches rather than
@@ -258,6 +264,8 @@ pscore "posture lan/ssh" "$(hi_zone_service_verdict "$ZONE_SETS" lan ssh PRESENT
 pscore "posture lan/ping" "$(hi_zone_service_verdict "$ZONE_SETS" lan ping PRESENT)"
 pscore "posture wan/ping" "$(hi_zone_service_verdict "$ZONE_SETS" wan ping PRESENT)"
 pscore "posture wan/ssh" "$(hi_zone_service_verdict "$ZONE_SETS" wan ssh ABSENT)"
+pscore "posture wan/reth0.50 ssh" "$(hi_zone_service_verdict "$ZONE_SETS" wan ssh ABSENT reth0.50)"
+pscore "posture wan/reth0.80 ssh" "$(hi_zone_service_verdict "$ZONE_SETS" wan ssh ABSENT reth0.80)"
 pscore "posture lan/telnet" "$(hi_zone_service_verdict "$ZONE_SETS" lan telnet ABSENT)"
 pscore "posture wan/telnet" "$(hi_zone_service_verdict "$ZONE_SETS" wan telnet ABSENT)"
 # #9637: every probe arrives on the LAN host's segment, reth1. The ssh cells
@@ -284,39 +292,43 @@ start_ssh_probe_listener
 
 # ── Phase 1: derive probe targets from the box's own config ──────────
 
-declare -A TARGET_ADDR TARGET_FAMILY TARGET_ZONE
+declare -A TARGET_ADDR TARGET_FAMILY TARGET_ZONE TARGET_PROBER
 add_target() {
-	local name="$1" iface="$2" unit="$3" family="$4" zone="$5" addr
-	addr="$(hi_iface_address "$IFACE_SETS" "$iface" "$unit" "$family")"
+	local name="$1" iface="$2" unit="$3" family="$4" zone="$5" addr="$6" prober="$7"
+	if [[ -z "$addr" ]]; then
+		addr="$(hi_iface_address "$IFACE_SETS" "$iface" "$unit" "$family")"
+	fi
 	[[ -n "$addr" ]] \
 		|| die "no ${family} address configured on ${iface} unit ${unit} — cannot derive the ${name} probe target (refusing to fall back to a hard-coded lab address, which would silently probe something else)"
 	TARGET_ADDR[$name]="$addr"
 	TARGET_FAMILY[$name]="$family"
 	TARGET_ZONE[$name]="$zone"
+	TARGET_PROBER[$name]="$prober"
 }
 
-# reth1 is UNTAGGED and in the lan zone (admits ssh + ping): the positive
-# controls and the per-service discrimination cells.
-add_target lan-v4 reth1 0 inet lan
-add_target lan-v6 reth1 0 inet6 lan
-# reth0.50 / reth0.80 are TAGGED sub-units in the wan zone (admits ping, not
-# ssh): the VLAN leg, both tags, both families.
-add_target wan-vlan50-v4 reth0 50 inet wan
-add_target wan-vlan50-v6 reth0 50 inet6 wan
-add_target wan-vlan80-v4 reth0 80 inet wan
-add_target wan-vlan80-v6 reth0 80 inet6 wan
+# Probe each target from the interface whose host-inbound policy it is meant
+# to exercise. Sending to a WAN VIP from the LAN host only exercises LAN
+# ingress; destination ownership does not change the ingress zone.
+add_target lan-v4 reth1 0 inet lan "" "$CLUSTER_LAN_HOST"
+add_target lan-v6 reth1 0 inet6 lan "" "$CLUSTER_LAN_HOST"
+add_target wan-vlan50-v4 reth0 50 inet wan "" "$CLUSTER_WAN_VLAN50_HOST"
+add_target wan-vlan50-v6 reth0 50 inet6 wan "" "$CLUSTER_WAN_VLAN50_HOST"
+add_target wan-vlan80-v4 reth0 80 inet wan "" "$CLUSTER_WAN_VLAN80_HOST"
+add_target wan-vlan80-v6 reth0 80 inet6 wan "" "$CLUSTER_WAN_VLAN80_HOST"
 
 TARGET_ORDER=(lan-v4 lan-v6 wan-vlan50-v4 wan-vlan50-v6 wan-vlan80-v4 wan-vlan80-v6)
 for t in "${TARGET_ORDER[@]}"; do
-	info "target ${t} = ${TARGET_ADDR[$t]} (zone ${TARGET_ZONE[$t]}, ${TARGET_FAMILY[$t]})"
+	info "target ${t} = ${TARGET_ADDR[$t]} (zone ${TARGET_ZONE[$t]}, ${TARGET_FAMILY[$t]}, prober ${TARGET_PROBER[$t]})"
 done
 
-# Remove first: an existing 0755 file from a previous run makes the push fail
-# with "permission denied" (the same shape test-fbf-steering.sh guards with an
-# `rm -f` before its own push).
-incus exec "$CLUSTER_LAN_HOST" -- rm -f "$REMOTE_PROBE" >/dev/null 2>&1 || true
-incus file push --mode 0755 "$PROBE_SRC" "${CLUSTER_LAN_HOST}${REMOTE_PROBE}" >/dev/null \
-	|| die "could not push the prober to $CLUSTER_LAN_HOST"
+# Install the prober on every origin. Removing stale mode files first keeps a
+# prior root-owned copy from making a push fail.
+PROBE_HOSTS=("$CLUSTER_LAN_HOST" "$CLUSTER_WAN_VLAN50_HOST" "$CLUSTER_WAN_VLAN80_HOST")
+for host in "${PROBE_HOSTS[@]}"; do
+	incus exec "$host" -- rm -f "$REMOTE_PROBE" >/dev/null 2>&1 || true
+	incus file push --mode 0755 "$PROBE_SRC" "${host}${REMOTE_PROBE}" >/dev/null \
+		|| die "could not push the prober to $host"
+done
 
 # ── Phase 2: the matrix ──────────────────────────────────────────────
 
@@ -325,25 +337,20 @@ incus file push --mode 0755 "$PROBE_SRC" "${CLUSTER_LAN_HOST}${REMOTE_PROBE}" >/
 #   Diagnostics go to stderr so the caller can capture the observations
 #   cleanly for hi_matrix_stable_verdict.
 run_matrix() {
-	local label="$1" t addr specs=() probe_out ping_out obs
+	local label="$1" t addr prober probe_out ping_out obs
+	echo "==> [${label}] TCP cells: $((2 * ${#TARGET_ORDER[@]}))" >&2
 	for t in "${TARGET_ORDER[@]}"; do
 		addr="${TARGET_ADDR[$t]}"
-		specs+=("${addr}|22" "${addr}|23")
-	done
-	echo "==> [${label}] TCP cells: ${#specs[@]}" >&2
-	probe_out="$(incus exec "$CLUSTER_LAN_HOST" --env "HI_PROBE_TIMEOUT=${HI_PROBE_TIMEOUT}" \
-		-- python3 "$REMOTE_PROBE" "${specs[@]}" 2>&1 || true)"
-	echo "$probe_out" | sed 's/^/    /' >&2
-
-	for t in "${TARGET_ORDER[@]}"; do
-		addr="${TARGET_ADDR[$t]}"
-		# ICMP: the per-target positive control. -n so a broken resolver
-		# cannot stall the cell; 3 packets so a single loss is not the
-		# whole reading.
+		prober="${TARGET_PROBER[$t]}"
+		probe_out="$(incus exec "$prober" --env "HI_PROBE_TIMEOUT=${HI_PROBE_TIMEOUT}" \
+			-- python3 "$REMOTE_PROBE" "${addr}|22" "${addr}|23" 2>&1 || true)"
+		echo "$probe_out" | sed 's/^/    /' >&2
+		# ICMP is the same-origin, same-address positive control for both TCP
+		# expectations. A failed route cannot make a TCP deny appear healthy.
 		if [[ "${TARGET_FAMILY[$t]}" == inet6 ]]; then
-			ping_out="$(incus exec "$CLUSTER_LAN_HOST" -- ping -6 -n -c 3 -W 2 "$addr" 2>&1 || true)"
+			ping_out="$(incus exec "$prober" -- ping -6 -n -c 3 -W 2 "$addr" 2>&1 || true)"
 		else
-			ping_out="$(incus exec "$CLUSTER_LAN_HOST" -- ping -4 -n -c 3 -W 2 "$addr" 2>&1 || true)"
+			ping_out="$(incus exec "$prober" -- ping -4 -n -c 3 -W 2 "$addr" 2>&1 || true)"
 		fi
 		obs="$(hi_classify_ping "$ping_out")"
 		printf '%s %s\n' "${t}-ping" "$obs"
@@ -367,17 +374,15 @@ score_matrix() {
 		# this address.
 		score "[${label}] ${t}-ping (control)" \
 			"$(hi_cell_verdict ADMIT "$control" "$control")"
-	# ssh is admitted at lan's own addresses AND at the wan-owned sub-units:
-	# every probe arrives on ${PROBER_ZONE}, which admits ssh, and the #9637
-	# residual fix exempts the userspace-adjudicated reinject through xpf-usp0
-	# to view addresses. The run holds a TCP/22 accept-and-close listener on
-	# both firewalls (start_ssh_probe_listener): without it the pre-existing
-	# xpf_dp_rst OUTPUT chain drops the no-listener RST from these
-	# interface-NAT addresses and the wire still shows TIMEOUT. Every
-	# TARGET_ORDER address is zoned; unzoned-dst reinjects still meet the
-	# #4420 catch-all DROP (unit-pinned), so no unzoned cell moves.
-	ssh_expect=ADMIT
-		score "[${label}] ${t}-ssh (arrives on ${PROBER_ZONE}, owned by ${TARGET_ZONE[$t]} -> ${ssh_expect})" \
+		# LAN admits ssh; wan explicitly denies it. Each target is probed
+		# from an endpoint on its own ingress leg, not merely addressed by its
+		# destination VIP.
+		if [[ "${TARGET_ZONE[$t]}" == lan ]]; then
+			ssh_expect=ADMIT
+		else
+			ssh_expect=DENY
+		fi
+		score "[${label}] ${t}-ssh (ingress ${TARGET_ZONE[$t]} via ${TARGET_PROBER[$t]} -> ${ssh_expect})" \
 			"$(hi_cell_verdict "$ssh_expect" "$(awk -v c="${t}-ssh" '$1 == c { print $2; exit }' <<<"$obs_lines")" "$control")"
 		# telnet is admitted by NO zone here. On the lan address this is
 		# the strongest cell in the file: same address, same prober, one

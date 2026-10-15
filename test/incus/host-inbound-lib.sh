@@ -152,42 +152,68 @@ hi_config_readable() {
 	grep -q '^set security zones security-zone ' <<<"$lines"
 }
 
-# hi_zone_service_verdict <display-set-lines> <zone> <service> <want PRESENT|ABSENT>
+# hi_zone_scope_admits <display-set-lines> <scope-prefix> <service>
 #
-#   Print exactly one line: "PASS <why>" or "FAIL <why>". TOTAL.
+#   Echo yes (admitted), no (explicitly denied or the replacement scope
+#   omits the service), all (admitted by all/any-service), or absent (scope
+#   has no host-inbound override). <scope-prefix> ends immediately before
+#   `host-inbound-traffic`.
+hi_zone_scope_admits() {
+	local lines="$1" prefix="$2" svc="$3" base
+	base="${prefix} host-inbound-traffic system-services"
+	# Service-specific exclusions subtract even from `all`.
+	if grep -qxF "${base} ${svc} except" <<<"$lines"; then
+		printf 'no\n'; return 0
+	fi
+	if grep -qxF "${base} ${svc}" <<<"$lines"; then
+		printf 'yes\n'; return 0
+	fi
+	# `all except` removes the named-service blanket. `any-service` is a
+	# distinct full admit (#12054); its except form is rejected by config.
+	if grep -qxF "${base} all except" <<<"$lines" \
+		&& ! grep -qxF "${base} any-service" <<<"$lines"; then
+		printf 'no\n'; return 0
+	fi
+	if grep -qxF "${base} all" <<<"$lines" \
+		|| grep -qxF "${base} any-service" <<<"$lines"; then
+		printf 'all\n'; return 0
+	fi
+	# Any host-inbound declaration makes this scope a replacement scope
+	# (#6515), even if it only declares protocols or excludes all services.
+	if grep -qF "${base} " <<<"$lines" \
+		|| grep -qF "${prefix} host-inbound-traffic protocols " <<<"$lines"; then
+		printf 'no\n'; return 0
+	fi
+	printf 'absent\n'
+}
+
+# hi_zone_service_verdict <display-set-lines> <zone> <service> <want PRESENT|ABSENT> [<iface>]
 #
-#   The smoke's expectation table is only correct for a particular zone
-#   posture. Rather than hard-coding that posture and silently asserting the
-#   wrong matrix if the shared cluster's config changes, the smoke checks the
-#   posture it depends on FIRST and refuses to run otherwise.
-#
-#   Exact whole-line match, so `system-services ssh` is not satisfied by a
-#   hypothetical `system-services ssh-something`, and an ABSENT question is
-#   never answered from an unreadable config.
+#   Print exactly one line: "PASS <why>" or "FAIL <why>". TOTAL. With <iface>,
+#   an interface-level host-inbound override replaces the zone posture.
 hi_zone_service_verdict() {
-	local lines="$1" zone="$2" svc="$3" want="$4" needle found=no
+	local lines="$1" zone="$2" svc="$3" want="$4" iface="${5:-}" found scope ifound
 	if ! hi_config_readable "$lines"; then
 		printf 'FAIL %s\n' "zone posture check (${zone}/${svc}): 'show configuration security zones | display set' returned nothing usable — the precondition is unread, so neither PRESENT nor ABSENT can be concluded"
 		return 0
 	fi
-	needle="set security zones security-zone ${zone} host-inbound-traffic system-services ${svc}"
-	if grep -qxF "$needle" <<<"$lines"; then
-		found=yes
-	fi
-	# `system-services all` subsumes every named service, so an ABSENT
-	# expectation must fail on it too — otherwise a zone opened wide would
-	# still satisfy "ssh is not listed".
-	if grep -qxF "set security zones security-zone ${zone} host-inbound-traffic system-services all" <<<"$lines"; then
-		found=all
+	scope="zone ${zone}"
+	found="$(hi_zone_scope_admits "$lines" "set security zones security-zone ${zone}" "$svc")"
+	if [[ -n "$iface" ]]; then
+		ifound="$(hi_zone_scope_admits "$lines" "set security zones security-zone ${zone} interfaces ${iface}" "$svc")"
+		if [[ "$ifound" != absent ]]; then
+			found="$ifound"
+			scope="interface ${iface} in zone ${zone}"
+		fi
 	fi
 	case "$want:$found" in
-	PRESENT:yes) printf 'PASS %s\n' "zone ${zone} admits ${svc}" ;;
-	PRESENT:all) printf 'PASS %s\n' "zone ${zone} admits ${svc} (via system-services all)" ;;
-	PRESENT:no) printf 'FAIL %s\n' "zone ${zone} no longer admits ${svc}; the matrix's ADMIT cells for this zone are stale — update the expectation table, do not weaken the cell" ;;
-	ABSENT:no) printf 'PASS %s\n' "zone ${zone} does not admit ${svc}" ;;
-	ABSENT:yes) printf 'FAIL %s\n' "zone ${zone} now admits ${svc}; the matrix's DENY cells for this zone are stale — update the expectation table, do not weaken the cell" ;;
-	ABSENT:all) printf 'FAIL %s\n' "zone ${zone} carries 'system-services all', which subsumes ${svc}; the matrix's DENY cells for this zone are stale" ;;
-	*) printf 'FAIL %s\n' "zone posture check (${zone}/${svc}): unknown expectation ${want:-<empty>}" ;;
+	PRESENT:yes) printf 'PASS %s admits %s\n' "$scope" "$svc" ;;
+	PRESENT:all) printf 'PASS %s admits %s (via system-services all/any-service)\n' "$scope" "$svc" ;;
+	PRESENT:no) printf 'FAIL %s no longer admits %s; the matrix ADMIT cells are stale — update the expectation table, do not weaken the cell\n' "$scope" "$svc" ;;
+	ABSENT:no) printf 'PASS %s does not admit %s\n' "$scope" "$svc" ;;
+	ABSENT:yes) printf 'FAIL %s now admits %s; the matrix DENY cells are stale — update the expectation table, do not weaken the cell\n' "$scope" "$svc" ;;
+	ABSENT:all) printf 'FAIL %s carries system-services all/any-service, which subsumes %s; the matrix DENY cells are stale\n' "$scope" "$svc" ;;
+	*) printf 'FAIL %s\n' "zone posture check (${zone}/${svc}): unknown expectation ${want:-<empty>} or unreadable scope verdict ${found:-<empty>}" ;;
 	esac
 }
 
