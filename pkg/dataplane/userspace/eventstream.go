@@ -616,6 +616,16 @@ func (es *EventStream) readLoop(ctx context.Context) {
 		length := binary.LittleEndian.Uint32(hdr[0:4])
 		typ := hdr[4]
 		seq := binary.LittleEndian.Uint64(hdr[8:16])
+		// Oversized frames are checked for a session gap only after a trusted
+		// drain in handleOversizedFrame; an over-ceiling header may be desync
+		// garbage. Ordinary session frames must be checked before decoding so
+		// refusal cannot hide missing session events or use the decode cooldown.
+		if length <= 1024 &&
+			(typ == EventTypeSessionOpen || typ == EventTypeSessionClose || typ == EventTypeSessionUpdate) &&
+			seq > prevSeq+1 && prevSeq > 0 {
+			es.handleSessionSyncGap(prevSeq+1, seq)
+			return
+		}
 
 		// Sanity check payload length (hard cap: 1024 bytes). An oversized
 		// declared length is a corrupt / framing-desynced frame. Do NOT
@@ -666,16 +676,6 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			} else {
 				delta.Event = "open" // updates treated as opens for sync
 			}
-			// #2874: a gap on a correctness-critical session-sync frame is a
-			// HARD sync break — the helper's lossy producer dropped a session
-			// open/close (or the replay window was trimmed), so the peer's
-			// session view may have silently diverged. Force a full bulk
-			// re-export and reconnect from the last CONTIGUOUS ack instead of
-			// dispatching this frame and cumulatively ACKing past the hole.
-			if seq > prevSeq+1 && prevSeq > 0 {
-				es.handleSessionSyncGap(prevSeq+1, seq)
-				return
-			}
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			if !es.dispatchOrQueueSessionFrame(typ, seq, delta) {
@@ -696,12 +696,6 @@ func (es *EventStream) readLoop(ctx context.Context) {
 				continue
 			}
 			delta.Event = "close"
-			// #2874: see the SessionOpen/Update case — a session-sync gap forces
-			// a resync rather than ACKing past the missing close.
-			if seq > prevSeq+1 && prevSeq > 0 {
-				es.handleSessionSyncGap(prevSeq+1, seq)
-				return
-			}
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			if !es.dispatchOrQueueSessionFrame(typ, seq, delta) {
@@ -1105,20 +1099,19 @@ const maxDiscardableOversizedFrameBytes = 64 * 1024
 // produced a deterministic drop -> reconnect -> replay -> drop storm that
 // hammered the shared control socket and flooded the log.
 //
-// The helper writes whole `[header|payload]` frames and the reader consumes
-// exactly `length` payload bytes per frame, so the header (and thus this frame's
-// `seq`/`typ`) stays aligned frame-to-frame and is trustworthy; only the payload
-// SIZE is anomalous. Recovery mirrors #6130 and preserves the security posture —
-// the corrupt frame is NEVER decoded or applied, it is REFUSED and superseded by
-// a resync:
-//   - Trigger a rate-limited full resync so the peer is re-baselined from table
-//     truth (onFullResync -> ExportOwnerRGSessions, an unbounded ground-truth
-//     snapshot), superseding whatever the refused frame carried.
-//   - Advance the sequence watermark PAST this frame on the trusted path
-//     (within-ceiling drain success) or a strictly contiguous desync seq, so
-//     the helper's cumulative ACK trims it and it is NOT re-sent verbatim —
-//     the loop-break. A noncontiguous desync seq is refused (no advance, no
-//     poisoned ACK) and drops instead.
+// A successful within-ceiling drain re-aligns the stream, making this header
+// trustworthy; over-ceiling lengths and failed drains may leave the stream
+// desynced, so their apparent sequence is not trusted. The corrupt frame is
+// NEVER decoded or applied:
+//   - The ordinary oversized-refusal path triggers a rate-limited resync so
+//     the peer is re-baselined from table truth (onFullResync ->
+//     ExportOwnerRGSessions, an unbounded ground-truth snapshot).
+//   - If a trusted, successfully-drained session frame also reveals a sequence
+//     gap, use the unconditional session-gap resync and drop without advancing
+//     the ACK past the hole.
+//   - Otherwise, advance past the refused frame only on the trusted path or a
+//     strictly contiguous untrusted seq. This loop-breaks replay without
+//     ACKing past a gap; noncontiguous untrusted seqs are refused and dropped.
 //
 // The byte-stream re-alignment differs by trust in the LENGTH:
 //   - length <= maxDiscardableOversizedFrameBytes: the frame boundary is trusted;
@@ -1133,7 +1126,6 @@ const maxDiscardableOversizedFrameBytes = 64 * 1024
 func (es *EventStream) handleOversizedFrame(conn net.Conn, length uint32, typ uint8, seq uint64, prevSeq *uint64) bool {
 	slog.Warn("event stream: oversized frame", "length", length, "type", typ, "seq", seq)
 	es.DecodeErrors.Add(1)
-	es.triggerRateLimitedResync("oversized/framing-desync frame", seq)
 
 	// LOOP-BREAK, split by trust (#6160, #9915 F-123): advancing the watermark
 	// past this frame is what keeps the helper from re-sending it verbatim on
@@ -1148,8 +1140,9 @@ func (es *EventStream) handleOversizedFrame(conn net.Conn, length uint32, typ ui
 	//     its seq is arbitrary. Advance ONLY on strict contiguity
 	//     (seq == prevSeq+1, which cannot poison — it lands exactly on the
 	//     honest baseline); otherwise skip the advance, warn, and drop
-	//     WITHOUT flushing a poisoned ACK. The rate-limited resync fired
-	//     above still re-baselines truth.
+	//     WITHOUT flushing a poisoned ACK. Apply only the bounded, rate-limited
+	//     oversized-frame resync; this seq is untrusted and cannot classify a
+	//     session gap.
 	//
 	// Honest residual (adjudicated): a garbage seq equal to exactly prevSeq+1
 	// trims one real frame — negligible, resync-healed. A real (aligned) frame
@@ -1162,7 +1155,14 @@ func (es *EventStream) handleOversizedFrame(conn net.Conn, length uint32, typ ui
 	// helper-ACK-validation; F-123 closes the in-window garbage case instead.)
 	if length <= maxDiscardableOversizedFrameBytes {
 		if _, err := io.CopyN(io.Discard, conn, int64(length)); err == nil {
-			// Trusted path: aligned header, drained cleanly — advance and keep.
+			// Trusted path: aligned header, drained cleanly. Detect a session
+			// gap before advancing the watermark past the missing events.
+			if (typ == EventTypeSessionOpen || typ == EventTypeSessionClose || typ == EventTypeSessionUpdate) &&
+				seq > *prevSeq+1 && *prevSeq > 0 {
+				es.handleSessionSyncGap(*prevSeq+1, seq)
+				return false
+			}
+			es.triggerRateLimitedResync("oversized/framing-desync frame", seq)
 			*prevSeq = seq
 			es.lastRecvSeq.Store(seq)
 			// #6558: the advance goes behind anything still queued unapplied.
@@ -1178,6 +1178,8 @@ func (es *EventStream) handleOversizedFrame(conn net.Conn, length uint32, typ ui
 	// Untrusted path (over-ceiling length, or failed drain): drop the
 	// connection to re-establish framing. Advance the watermark only on
 	// strict contiguity; anything else is desync garbage.
+	es.triggerRateLimitedResync("oversized/framing-desync frame", seq)
+
 	if seq == *prevSeq+1 {
 		*prevSeq = seq
 		es.lastRecvSeq.Store(seq)
