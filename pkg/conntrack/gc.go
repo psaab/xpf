@@ -286,9 +286,12 @@ func (gc *GC) sweep() time.Duration {
 			newCtr == gc.lastSessionCounter && closedCtr == gc.lastClosedCounter {
 			return gc.nextSweepDelay(0, false, false, 0, agingActive, earlyAgeout)
 		}
-		// Counters changed — fall through to full sweep.
-		gc.lastSessionCounter = newCtr
-		gc.lastClosedCounter = closedCtr
+		// Counters changed — fall through to full sweep. Only retain a
+		// comparable snapshot when both counter reads succeeded.
+		if err1 == nil && err2 == nil {
+			gc.lastSessionCounter = newCtr
+			gc.lastClosedCounter = closedCtr
+		}
 	}
 
 	sweepStart := time.Now()
@@ -359,16 +362,22 @@ func (gc *GC) sweep() time.Duration {
 		return gc.interval
 	}
 
-	if exact, err := gc.sessions.DeleteBatchKnownExactV4(toDelete, dataplane.DeleteReasonGCExpired, false); err != nil {
-		slog.Debug("conntrack GC v4 delete failed", "err", err)
-		expired += len(exact)
-		if gc.OnDeleteV4 != nil {
-			for _, key := range exact {
-				gc.OnDeleteV4(key)
+	removedV4, establishedRemovedV4 := 0, 0
+	if len(toDelete) > 0 {
+		reverseKeys := make(map[dataplane.SessionKey]struct{}, len(toDelete))
+		for _, entry := range toDelete {
+			if entry.Value.ReverseKey.Protocol != 0 {
+				if _, err := gc.sessions.GetV4(entry.Value.ReverseKey); err == nil {
+					reverseKeys[entry.Value.ReverseKey] = struct{}{}
+				}
 			}
 		}
-	} else {
+		exact, err := gc.sessions.DeleteBatchKnownExactV4(toDelete, dataplane.DeleteReasonGCExpired, false)
+		if err != nil {
+			slog.Debug("conntrack GC v4 delete failed", "err", err)
+		}
 		expired += len(exact)
+		removedV4, establishedRemovedV4 = deletedCountsV4(toDelete, exact, reverseKeys)
 		if gc.OnDeleteV4 != nil {
 			for _, key := range exact {
 				gc.OnDeleteV4(key)
@@ -443,17 +452,22 @@ func (gc *GC) sweep() time.Duration {
 		}
 		gc.lastV6Count = v6Count
 	}
-
-	if exact, err := gc.sessions.DeleteBatchKnownExactV6(toDeleteV6, dataplane.DeleteReasonGCExpired, false); err != nil {
-		slog.Debug("conntrack GC v6 delete failed", "err", err)
-		expired += len(exact)
-		if gc.OnDeleteV6 != nil {
-			for _, key := range exact {
-				gc.OnDeleteV6(key)
+	removedV6, establishedRemovedV6 := 0, 0
+	if len(toDeleteV6) > 0 {
+		reverseKeys := make(map[dataplane.SessionKeyV6]struct{}, len(toDeleteV6))
+		for _, entry := range toDeleteV6 {
+			if entry.Value.ReverseKey.Protocol != 0 {
+				if _, err := gc.sessions.GetV6(entry.Value.ReverseKey); err == nil {
+					reverseKeys[entry.Value.ReverseKey] = struct{}{}
+				}
 			}
 		}
-	} else {
+		exact, err := gc.sessions.DeleteBatchKnownExactV6(toDeleteV6, dataplane.DeleteReasonGCExpired, false)
+		if err != nil {
+			slog.Debug("conntrack GC v6 delete failed", "err", err)
+		}
 		expired += len(exact)
+		removedV6, establishedRemovedV6 = deletedCountsV6(toDeleteV6, exact, reverseKeys)
 		if gc.OnDeleteV6 != nil {
 			for _, key := range exact {
 				gc.OnDeleteV6(key)
@@ -475,6 +489,11 @@ func (gc *GC) sweep() time.Duration {
 		}
 	}
 
+	// Exact-delete APIs report removed forward rows. Count a reverse companion
+	// only when it was part of this sweep's deletion candidates, so partial
+	// deletion failures remain reflected in post-sweep occupancy.
+	total -= removedV4 + removedV6
+	established -= establishedRemovedV4 + establishedRemovedV6
 	if expired > 0 || saturated > 0 {
 		slog.Info("conntrack GC sweep",
 			"total_entries", total,
@@ -482,7 +501,6 @@ func (gc *GC) sweep() time.Duration {
 			"expired_deleted", expired,
 			"deadlines_saturated", saturated)
 	}
-
 	gc.lastTotal = total
 
 	// Push per-IP session counts to BPF maps for xdp_screen limiting.
@@ -582,4 +600,49 @@ func monotonicSeconds() uint64 {
 	var ts unix.Timespec
 	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
 	return uint64(ts.Sec)
+}
+func deletedCountsV4(entries []dataplane.SessionEntryV4, exact []dataplane.SessionKey, reverseKeys map[dataplane.SessionKey]struct{}) (int, int) {
+	values := make(map[dataplane.SessionKey]dataplane.SessionValue, len(entries))
+	for _, entry := range entries {
+		values[entry.Key] = entry.Value
+	}
+	removed := make(map[dataplane.SessionKey]struct{}, len(exact)*2)
+	for _, key := range exact {
+		removed[key] = struct{}{}
+		if value, ok := values[key]; ok {
+			if _, present := reverseKeys[value.ReverseKey]; present {
+				removed[value.ReverseKey] = struct{}{}
+			}
+		}
+	}
+	established := 0
+	for key := range removed {
+		if value, ok := values[key]; ok && value.IsReverse == 0 && value.State == dataplane.SessStateEstablished {
+			established++
+		}
+	}
+	return len(removed), established
+}
+
+func deletedCountsV6(entries []dataplane.SessionEntryV6, exact []dataplane.SessionKeyV6, reverseKeys map[dataplane.SessionKeyV6]struct{}) (int, int) {
+	values := make(map[dataplane.SessionKeyV6]dataplane.SessionValueV6, len(entries))
+	for _, entry := range entries {
+		values[entry.Key] = entry.Value
+	}
+	removed := make(map[dataplane.SessionKeyV6]struct{}, len(exact)*2)
+	for _, key := range exact {
+		removed[key] = struct{}{}
+		if value, ok := values[key]; ok {
+			if _, present := reverseKeys[value.ReverseKey]; present {
+				removed[value.ReverseKey] = struct{}{}
+			}
+		}
+	}
+	established := 0
+	for key := range removed {
+		if value, ok := values[key]; ok && value.IsReverse == 0 && value.State == dataplane.SessStateEstablished {
+			established++
+		}
+	}
+	return len(removed), established
 }
