@@ -883,10 +883,13 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 		sort.Strings(names)
 		for _, name := range names {
 			filter := filters[name]
-			if filter != nil {
-				if source, _ := filter.SuppressedMemberFBF11321(); source != "" {
-					continue
-				}
+			if filter == nil {
+				// Lenient restore and HA peer-sync may preserve nil map
+				// values. A missing filter has no counters to report.
+				continue
+			}
+			if source, _ := filter.SuppressedMemberFBF11321(); source != "" {
+				continue
 			}
 
 			// Resolve the map-counter span for this filter, if the compile
@@ -907,6 +910,11 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 			}
 
 			for _, term := range filter.Terms {
+				if term == nil || term.Name == "" {
+					// Tolerant config paths can retain nil term slots. They
+					// have no counter series and must not abort a scrape.
+					continue
+				}
 				// #3459: the per-term counter-slot stride is the shared SSOT
 				// config.FilterTermExpansionCount (full src×dst×dstPort×
 				// srcPort cross-product, with prefix-list prefixes folded into
