@@ -2,6 +2,7 @@ package ipsec
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sort"
 	"strconv"
@@ -170,7 +171,13 @@ func resolveInterfaceAddressFamily(cfg *config.Config, ifaceRef string, family i
 	}
 
 	resolvedRef := cfg.ResolveReth(ifaceRef)
+	// ResolveKernelIfName maps Junos unit refs to the netdev actually
+	// created by the kernel (unit-0 collapse, VLAN ID, IRB bridge, and
+	// tunnel mapping). LinuxIfName only rewrites slashes and therefore
+	// leaves unit suffixes that net.InterfaceByName cannot resolve.
 	for _, name := range []string{
+		cfg.ResolveKernelIfName(ifaceRef),
+		cfg.ResolveKernelIfName(resolvedRef),
 		config.LinuxIfName(resolvedRef),
 		config.LinuxIfName(ifaceRef),
 	} {
@@ -388,35 +395,25 @@ func resolveConfiguredInterfaceAddress(cfg *config.Config, ifaceRef string, fami
 		return ""
 	}
 
-	// Zone identifier for a link-local result is the KERNEL interface name of
-	// the configured ifaceRef base (#2885) — the vSRX name xpfd renames to.
-	//
-	// #9137: resolve reth first. `reth<N>` is not a kernel netdev under
-	// bondless RETH, which is the shipped HA model: xpfd programs the VRRP VIP
-	// and virtual MAC on the PHYSICAL member and creates no reth device (the
-	// dataplane's compiler_iface.go skips reth for the same reason). An
-	// `external-interface reth0.0` therefore produced `fe80::1%reth0`, charon
-	// could not if_nametoindex("reth0"), and the IKE SA never bound — from a
-	// config that commits clean. This also makes the function agree with its
-	// own sibling: the kernel-lookup fallback in resolveInterfaceAddressFamily
-	// has resolved reth since it was written, so the asymmetry lived inside one
-	// function pair. Both the unit branch and the bare-ref fallback below read
-	// this variable, so one assignment covers both.
-	//
-	// ResolveReth returns the ref unchanged when the name is not a reth, so a
-	// non-reth base is byte-identical to before. The empty guard covers the
-	// degenerate binding where a member carries RedundantParent but no Name:
-	// RethToPhysical then maps reth0 to "", and an EMPTY zone is strictly
-	// WORSE than the wrong one — zoneQualify returns the address unqualified,
-	// losing the #2885 disambiguation that is the whole point of the zone.
-	zone := config.LinuxIfName(base)
-	if resolved := config.LinuxIfName(cfg.ResolveReth(base)); resolved != "" {
-		zone = resolved
+	// A link-local result needs the kernel device of the selected unit,
+	// not merely the configured base. ResolveKernelIfName handles VLAN
+	// IDs, IRB bridge devices, unit-0 collapse and RETH mapping.
+	kernelZone := func(ref string) string {
+		if resolved := cfg.ResolveKernelIfName(ref); resolved != "" {
+			return resolved
+		}
+		if resolved := config.LinuxIfName(cfg.ResolveReth(base)); resolved != "" {
+			return resolved
+		}
+		// Keep the prior non-empty zone when RETH resolution is
+		// degenerate: an unqualified link-local address loses the
+		// interface disambiguation entirely.
+		return config.LinuxIfName(base)
 	}
 
 	if unit, ok := ifc.Units[unitNum]; ok {
 		if addr := selectUnitAddress(unit, family); addr != "" {
-			return zoneQualify(addr, zone)
+			return zoneQualify(addr, kernelZone(ifaceRef))
 		}
 	}
 
@@ -428,7 +425,7 @@ func resolveConfiguredInterfaceAddress(cfg *config.Config, ifaceRef string, fami
 		sort.Ints(unitIDs)
 		for _, id := range unitIDs {
 			if addr := selectUnitAddress(ifc.Units[id], family); addr != "" {
-				return zoneQualify(addr, zone)
+				return zoneQualify(addr, kernelZone(fmt.Sprintf("%s.%d", base, id)))
 			}
 		}
 	}
