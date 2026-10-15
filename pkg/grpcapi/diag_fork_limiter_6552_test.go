@@ -94,7 +94,7 @@ func TestGetSystemInfoIsDiagnosticConcurrencyBounded6552(t *testing.T) {
 	// Every forking type, so a future edit that bounds one arm and not another
 	// is caught. "users" is deliberately excluded — it reads config, forks
 	// nothing, and must NOT be gated.
-	for _, typ := range []string{"processes", "storage", "boot-messages", "connections"} {
+	for _, typ := range []string{"processes", "processes-summary", "storage", "boot-messages", "connections"} {
 		t.Run(typ, func(t *testing.T) {
 			release := withSaturatedDiagLimiter(t)
 			s := newDiagForkServer(t)

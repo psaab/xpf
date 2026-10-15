@@ -153,9 +153,48 @@ func rpcCanonicalCommand(fullMethod string, req any) (string, bool) {
 		}
 		cmd, mapped := systemActionVerbCommand[sa.GetAction()]
 		return cmd, mapped
+	case getSystemInfoMethodName:
+		info, isInfo := req.(*pb.GetSystemInfoRequest)
+		if !isInfo || info == nil {
+			return "", false
+		}
+		return systemInfoCanonicalCommand(info.GetType())
 	}
 	cmd, mapped := methodCanonicalCommand[method]
 	return cmd, mapped
+}
+
+// systemInfoCanonicalCommand attributes each multiplexed system-info request
+// to the operational command that dispatched it. The RPC type is server input,
+// not caller-supplied command text, so restricted login classes cannot use a
+// different GetSystemInfo type to evade deny-commands.
+func systemInfoCanonicalCommand(infoType string) (string, bool) {
+	switch infoType {
+	case "uptime":
+		return "show system uptime", true
+	case "memory":
+		return "show system memory", true
+	case "processes":
+		return "show system processes", true
+	case "processes-summary":
+		return "show system processes summary", true
+	case "rescue-configuration":
+		return "show system configuration rescue", true
+	case "storage":
+		return "show system storage", true
+	case "users":
+		return "show system users", true
+	case "connections":
+		return "show system connections", true
+	case "boot-messages":
+		return "show system boot-messages", true
+	case "arp":
+		return "show arp", true
+	case "ipv6-neighbors":
+		return "show ipv6 neighbors", true
+	default:
+		return "", false
+	}
 }
 
 // showTextTopicCanonicalCommand resolves one ShowText topic, using the SAME

@@ -15,6 +15,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
+	"github.com/psaab/xpf/pkg/sysinfo"
 	"github.com/psaab/xpf/pkg/sysservices"
 	"github.com/psaab/xpf/pkg/upgrade"
 	"golang.org/x/sys/unix"
@@ -672,180 +673,20 @@ func (c *CLI) showSystemMemory() error {
 // When summary=true, shows a top-like summary (Junos "show system processes summary" format).
 
 func (c *CLI) showSystemProcesses(summary bool) error {
-	if !summary {
-		cmd := exec.Command("ps", "aux", "--sort=-rss")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
-	}
-
-	// Read load average
-	loadAvg := "0.00, 0.00, 0.00"
-	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
-		fields := strings.Fields(string(data))
-		if len(fields) >= 3 {
-			loadAvg = fmt.Sprintf("%s, %s, %s", fields[0], fields[1], fields[2])
+	if summary {
+		out, err := exec.Command("ps", "-eo", "pid,user,pri,ni,vsz,rss,stat,time,pcpu,comm", "--sort=-pcpu").Output()
+		if err != nil {
+			return err
 		}
+		var output strings.Builder
+		sysinfo.WriteProcessesSummary(&output, out)
+		fmt.Print(output.String())
+		return nil
 	}
-
-	// Read uptime
-	uptimeStr := ""
-	if data, err := os.ReadFile("/proc/uptime"); err == nil {
-		fields := strings.Fields(string(data))
-		if len(fields) >= 1 {
-			if secs, err := strconv.ParseFloat(fields[0], 64); err == nil {
-				days := int(secs) / 86400
-				hours := (int(secs) % 86400) / 3600
-				mins := (int(secs) % 3600) / 60
-				if days > 0 {
-					uptimeStr = fmt.Sprintf("up %d+%02d:%02d", days, hours, mins)
-				} else {
-					uptimeStr = fmt.Sprintf("up %02d:%02d", hours, mins)
-				}
-			}
-		}
-	}
-
-	// Read meminfo
-	var memTotal, memFree, memAvailable, memBuffers, memCached, swapTotal, swapFree uint64
-	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				continue
-			}
-			val, _ := strconv.ParseUint(fields[1], 10, 64)
-			val *= 1024 // convert kB to bytes
-			switch strings.TrimSuffix(fields[0], ":") {
-			case "MemTotal":
-				memTotal = val
-			case "MemFree":
-				memFree = val
-			case "MemAvailable":
-				memAvailable = val
-			case "Buffers":
-				memBuffers = val
-			case "Cached":
-				memCached = val
-			case "SwapTotal":
-				swapTotal = val
-			case "SwapFree":
-				swapFree = val
-			}
-		}
-	}
-	memUsed := memTotal - memFree - memBuffers - memCached
-	if memTotal < memFree+memBuffers+memCached {
-		memUsed = memTotal - memAvailable
-	}
-
-	// Read CPU stats from /proc/stat
-	var userPct, sysPct, idlePct float64
-	if data, err := os.ReadFile("/proc/stat"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, "cpu ") {
-				fields := strings.Fields(line)
-				if len(fields) >= 5 {
-					user, _ := strconv.ParseFloat(fields[1], 64)
-					nice, _ := strconv.ParseFloat(fields[2], 64)
-					system, _ := strconv.ParseFloat(fields[3], 64)
-					idle, _ := strconv.ParseFloat(fields[4], 64)
-					total := user + nice + system + idle
-					if len(fields) >= 8 {
-						iowait, _ := strconv.ParseFloat(fields[5], 64)
-						irq, _ := strconv.ParseFloat(fields[6], 64)
-						softirq, _ := strconv.ParseFloat(fields[7], 64)
-						total += iowait + irq + softirq
-					}
-					if total > 0 {
-						userPct = (user + nice) / total * 100
-						sysPct = system / total * 100
-						idlePct = idle / total * 100
-					}
-				}
-				break
-			}
-		}
-	}
-
-	// Count threads by state
-	var running, sleeping, stopped, zombie int
-	if entries, err := os.ReadDir("/proc"); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			if _, err := strconv.Atoi(e.Name()); err != nil {
-				continue
-			}
-			statPath := "/proc/" + e.Name() + "/stat"
-			if data, err := os.ReadFile(statPath); err == nil {
-				// state is after the comm field (in parens)
-				line := string(data)
-				idx := strings.LastIndex(line, ") ")
-				if idx >= 0 && idx+2 < len(line) {
-					state := line[idx+2 : idx+3]
-					switch state {
-					case "R":
-						running++
-					case "S", "D", "I":
-						sleeping++
-					case "T", "t":
-						stopped++
-					case "Z":
-						zombie++
-					}
-				}
-			}
-		}
-	}
-	totalTasks := running + sleeping + stopped + zombie
-
-	now := time.Now().Format("15:04:05")
-	fmt.Printf("load averages: %s  %s    %s\n", loadAvg, uptimeStr, now)
-	fmt.Printf("%d processes: %d running, %d sleeping, %d stopped, %d zombie\n",
-		totalTasks, running, sleeping, stopped, zombie)
-	fmt.Printf("CPU: %.1f%% user, %.1f%% system, %.1f%% idle\n",
-		userPct, sysPct, idlePct)
-	fmt.Printf("Mem: %s Active, %s Buf, %s Cached, %s Free\n",
-		fmtBytes(memUsed), fmtBytes(memBuffers), fmtBytes(memCached), fmtBytes(memFree))
-	fmt.Printf("Swap: %s Total, %s Free\n",
-		fmtBytes(swapTotal), fmtBytes(swapFree))
-	fmt.Println()
-
-	// Top processes by CPU/RSS
-	cmd := exec.Command("ps", "-eo", "pid,user,pri,ni,vsz,rss,stat,time,pcpu,comm", "--sort=-pcpu")
-	out, err := cmd.Output()
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	fmt.Printf("  PID USERNAME    PRI NICE   SIZE    RES STATE   TIME    WCPU COMMAND\n")
-	limit := 20
-	if len(lines)-1 < limit {
-		limit = len(lines) - 1
-	}
-	for i := 1; i <= limit; i++ {
-		fields := strings.Fields(lines[i])
-		if len(fields) < 10 {
-			continue
-		}
-		pid := fields[0]
-		user := fields[1]
-		pri := fields[2]
-		nice := fields[3]
-		vsz, _ := strconv.ParseUint(fields[4], 10, 64)
-		rss, _ := strconv.ParseUint(fields[5], 10, 64)
-		state := fields[6]
-		timeStr := fields[7]
-		cpu := fields[8]
-		comm := fields[9]
-		fmt.Printf("%5s %-11s %4s %4s %7s %7s %-7s %8s %6s%% %s\n",
-			pid, user, pri, nice,
-			fmtBytes(vsz*1024), fmtBytes(rss*1024),
-			state, timeStr, cpu, comm)
-	}
-	return nil
+	cmd := exec.Command("ps", "aux", "--sort=-rss")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // showSystemStorage shows filesystem usage (like Junos "show system storage").

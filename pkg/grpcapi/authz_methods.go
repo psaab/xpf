@@ -287,6 +287,8 @@ func methodPermission(fullMethod string, req any) (config.LoginClassPermission, 
 // it (methodPermission and the verb-table completeness test) cannot drift.
 const systemActionMethodName = "SystemAction"
 
+const getSystemInfoMethodName = "GetSystemInfo"
+
 // ShowText is the SECOND multiplexed method on this service, and the first
 // revision of this file got it wrong: it was priced flat at PermView with the
 // comment "every topic is a `show ...`". That is false. Three topics are
@@ -419,6 +421,8 @@ var showTextViewTopics = map[string]bool{
 	"nat-nptv6":                                true,
 	"nat-source-rule-detail":                   true,
 	"nat-static":                               true,
+	"nat-static-rule":                          true,
+	"nat-static-rule-detail":                   true,
 	"nat64":                                    true,
 	"ntp":                                      true,
 	"persistent-nat":                           true,

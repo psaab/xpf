@@ -32,6 +32,9 @@ import (
 func (s *Server) showNATStatic(cfg *config.Config, buf *strings.Builder) {
 	natshow.RenderStatic(buf, cfg)
 }
+func (s *Server) showNATStaticRule(cfg *config.Config, buf *strings.Builder, detail bool) {
+	natshow.RenderStaticRule(buf, cfg, detail)
+}
 
 // showNATNPTv6 renders `cli show security nat nptv6` — only the NPTv6
 // rules within the static rule-sets.

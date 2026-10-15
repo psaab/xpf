@@ -17,6 +17,13 @@ func (c *ctl) handleShowNAT(args []string) error {
 	}
 	switch args[0] {
 	case "static":
+		if len(args) >= 2 && args[1] == "rule" {
+			detail := len(args) >= 3 && args[2] == "detail"
+			if detail {
+				return c.showCommand("show security nat static rule detail")
+			}
+			return c.showCommand("show security nat static rule")
+		}
 		return c.showCommand("show security nat static")
 	case "nptv6":
 		return c.showCommand("show security nat nptv6")

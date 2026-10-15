@@ -32,13 +32,12 @@ package grpcapi
 //
 // ── SCOPE OF THIS FILE ───────────────────────────────────────────────────
 //
-// Methods only. `ShowText`'s topics and `SystemAction`'s verbs are priced from
-// the DECODED REQUEST rather than the method name (see methodPermission), so
-// they get their own tables in authz_command_table_topics.go (cut 5a-2), which
-// also records the ATTRIBUTION limit both files share: canonicality and
-// completeness are machine-checked, but "is this the RIGHT command" is a review
-// responsibility on both. Both tables are inert: nothing reads either until 5b
-// wires them into authorizeRPC.
+// `ShowText`'s topics and `SystemAction`'s verbs are priced from the decoded
+// request rather than the method name (see `methodPermission`), so they get
+// their own tables in `authz_command_table_topics.go` (cut 5a-2).
+// `GetSystemInfo` is also request-decoded for deny-command attribution: its type
+// selects a fixed server-side command in `rpcCanonicalCommand`. These mappings
+// are inert until 5b wires them into `authorizeRPC`.
 
 // methodCanonicalCommand maps a short gRPC method name to the canonical
 // operational command it performs, for fine-grained deny-commands matching.
@@ -52,7 +51,8 @@ package grpcapi
 //     deny-COMMANDS would apply the wrong leaf's regex.
 //   - REQUEST-DECODED methods (ShowText, SystemAction). One method serves many
 //     commands, so a single string would be a lie. They get per-topic and
-//     per-verb tables in 5a-2.
+//     per-verb tables in 5a-2. GetSystemInfo has its own type-to-command mapping
+//     in rpcCanonicalCommand because all variants retain the same view permission.
 var methodCanonicalCommand = map[string]string{
 	// Operational reads.
 	"GetStatus":                "show version",
