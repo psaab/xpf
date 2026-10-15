@@ -182,9 +182,21 @@ func ClassifyHostInbound(cfg *config.Config, fromZone string, proto uint8, hasPr
 		return HostInboundAdmission{Status: HostInboundNotComputed}
 	}
 
+	if zone := cfg.Security.Zones[fromZone]; zone != nil && len(zone.Interfaces) > 0 {
+		lifelines := hostInboundLifelineSet(cfg)
+		allLifeline := true
+		for _, ref := range zone.Interfaces {
+			if !hostInboundLifelineInterface(ref, lifelines) {
+				allLifeline = false
+				break
+			}
+		}
+		if allLifeline {
+			return HostInboundAdmission{Status: HostInboundNotComputed}
+		}
+	}
 	views := viewsForZone(cfg, fromZone)
 	if len(views) == 0 {
-		// An undefined / unconfigured ingress zone has no effective view; classify
 		// against an empty view so an isolated global-accept (ESP/AH, ICMP error,
 		// IPv6 ND) or an indeterminate/denied verdict is reported exactly as
 		// before the #5579 per-view refactor.
@@ -239,6 +251,24 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 	if cfg == nil || fromZone == "" || ifaceRef == "" {
 		return HostInboundAdmission{Status: HostInboundNotComputed}
 	}
+	split := cfg.SplitInterfaceUnitRef(ifaceRef)
+	if !split.HasUnit {
+		for ref := range buildInterfaceZoneMap(cfg) {
+			refSplit := cfg.SplitInterfaceUnitRef(ref)
+			if refSplit.HasUnit && refSplit.Base == split.Base {
+				return HostInboundAdmission{Status: HostInboundNotComputed}
+			}
+		}
+		if iface := cfg.Interfaces.Interfaces[split.Base]; iface != nil && len(iface.Units) > 0 {
+			return HostInboundAdmission{Status: HostInboundNotComputed}
+		}
+	}
+	if hostInboundLifelineInterface(split.Literal, hostInboundLifelineSet(cfg)) {
+		return HostInboundAdmission{Status: HostInboundNotComputed}
+	}
+	if _, quarantined := config.QuarantinedZoneInterfaceKeys(cfg)[split.Literal]; quarantined {
+		return classifyOneView(ZoneHostInboundView{Zone: fromZone, Interfaces: []string{ifaceRef}}, proto, hasProto, dstPort, icmpType, family)
+	}
 	zone := cfg.Security.Zones[fromZone]
 	if zone == nil {
 		return HostInboundAdmission{Status: HostInboundNotComputed}
@@ -258,7 +288,6 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 	// authored as `p.0.1` — the cfg-free canonicalization first-cut onto
 	// `p` and missed. Undotted refs are byte-identical (step-4 Literal ≡
 	// legacy canon).
-	split := cfg.SplitInterfaceUnitRef(ifaceRef)
 	svc, prot := effectiveHostInboundTokens(zone, split.Literal, buildInterfaceHostInboundMap(cfg)[split.Literal])
 	v := ZoneHostInboundView{Zone: fromZone, Interfaces: []string{ifaceRef}, SystemServices: svc, Protocols: prot}
 	return classifyOneView(v, proto, hasProto, dstPort, icmpType, family)
@@ -355,9 +384,22 @@ func ResolveHostInboundIngressInterface(cfg *config.Config, fromZone, ifaceRef s
 	// smallest unit. The zone probe follows on the split Literal, so
 	// `p.0.01` validates against the zone its canonical unit binds.
 	split := cfg.SplitInterfaceUnitRef(ifaceRef)
+	if _, quarantined := config.QuarantinedZoneInterfaceKeys(cfg)[split.Literal]; quarantined {
+		return fmt.Errorf("ingress-interface %q is quarantined because it is claimed by multiple security zones", ifaceRef)
+	}
 	if !split.HasUnit {
 		if ic := cfg.Interfaces.Interfaces[split.Base]; ic != nil && len(ic.Units) > 0 {
 			return fmt.Errorf("ingress-interface %q is a physical interface; specify the logical unit, e.g. %s.%d", ifaceRef, split.Base, smallestUnitNumber(ic.Units))
+		}
+		var unitRef string
+		for ref := range buildInterfaceZoneMap(cfg) {
+			refSplit := cfg.SplitInterfaceUnitRef(ref)
+			if refSplit.HasUnit && refSplit.Base == split.Base && (unitRef == "" || refSplit.Literal < unitRef) {
+				unitRef = refSplit.Literal
+			}
+		}
+		if unitRef != "" {
+			return fmt.Errorf("ingress-interface %q is a physical interface; specify the logical unit, e.g. %s", ifaceRef, unitRef)
 		}
 	}
 	zone := buildInterfaceZoneMap(cfg)[split.Literal]
