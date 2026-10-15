@@ -12,7 +12,7 @@ func (c *xpfCollector) initDataplaneSafetyDescriptors() {
 		c.dataplaneHostDivergenceMutations = prometheus.NewDesc("xpf_dataplane_host_divergence_mutations", "Sticky host mutation classes retained after an aborted dataplane apply.", nil, nil)
 		c.dataplaneArmUncoveredSurfaces = prometheus.NewDesc("xpf_dataplane_arm_uncovered_surfaces", "Surfaces not covered by the most recent arm proof; emitted only after a completed proof.", nil, nil)
 		c.dataplaneArmTotalSurfaces = prometheus.NewDesc("xpf_dataplane_arm_total_surfaces", "Surfaces enumerated by the most recent arm proof; emitted only after a completed proof.", nil, nil)
-		c.dataplaneXDPAttachModeSurfaces = prometheus.NewDesc("xpf_dataplane_xdp_attach_mode_surfaces", "Surfaces by XDP attach mode in the most recent completed arm proof.", []string{"mode"}, nil)
+		c.dataplaneXDPAttachModeSurfaces = prometheus.NewDesc("xpf_dataplane_xdp_attach_mode_surfaces", "Surfaces by XDP attach mode (driver, generic, or skipped) in the most recent completed arm proof.", []string{"mode"}, nil)
 	})
 }
 
@@ -32,8 +32,7 @@ func (c *xpfCollector) emitDataplaneSafety(ch chan<- prometheus.Metric) {
 		ObsoleteRegistryAccesses() uint64
 		DetachDebt() []int
 		HostDivergence() []string
-		ArmCoverageSummary() (int, int, bool, bool)
-		SurfaceCoverage() ([]dataplane.SurfaceCoverage, bool, bool)
+		ArmCoverageSnapshot() (dataplane.ArmCoverageReport, bool)
 	})
 	if !ok {
 		return
@@ -41,18 +40,14 @@ func (c *xpfCollector) emitDataplaneSafety(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.dataplaneObsoleteRegistryAccesses, prometheus.CounterValue, float64(m.ObsoleteRegistryAccesses()))
 	ch <- prometheus.MustNewConstMetric(c.dataplaneXDPDetachDebtInterfaces, prometheus.GaugeValue, float64(len(m.DetachDebt())))
 	ch <- prometheus.MustNewConstMetric(c.dataplaneHostDivergenceMutations, prometheus.GaugeValue, float64(len(m.HostDivergence())))
-	uncovered, total, ran, seen := m.ArmCoverageSummary()
-	if !seen || !ran {
+	report, seen := m.ArmCoverageSnapshot()
+	if !seen || !report.Ran {
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(c.dataplaneArmUncoveredSurfaces, prometheus.GaugeValue, float64(uncovered))
-	ch <- prometheus.MustNewConstMetric(c.dataplaneArmTotalSurfaces, prometheus.GaugeValue, float64(total))
-	surfaces, surfaceRan, surfaceSeen := m.SurfaceCoverage()
-	if !surfaceSeen || !surfaceRan {
-		return
-	}
-	var driver, generic, skipped, uncoveredMode float64
-	for _, surface := range surfaces {
+	ch <- prometheus.MustNewConstMetric(c.dataplaneArmUncoveredSurfaces, prometheus.GaugeValue, float64(report.Uncovered))
+	ch <- prometheus.MustNewConstMetric(c.dataplaneArmTotalSurfaces, prometheus.GaugeValue, float64(len(report.Surfaces)))
+	var driver, generic, skipped float64
+	for _, surface := range report.Surfaces {
 		switch surface.Kind {
 		case dataplane.CoverageSkipped:
 			skipped++
@@ -62,14 +57,12 @@ func (c *xpfCollector) emitDataplaneSafety(ch chan<- prometheus.Metric) {
 			} else {
 				driver++
 			}
-		default:
-			uncoveredMode++
 		}
 	}
 	for _, sample := range []struct {
 		mode  string
 		value float64
-	}{{"driver", driver}, {"generic", generic}, {"skipped", skipped}, {"uncovered", uncoveredMode}} {
+	}{{"driver", driver}, {"generic", generic}, {"skipped", skipped}} {
 		ch <- prometheus.MustNewConstMetric(c.dataplaneXDPAttachModeSurfaces, prometheus.GaugeValue, sample.value, sample.mode)
 	}
 }

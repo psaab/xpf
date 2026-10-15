@@ -20,9 +20,9 @@ func (a *LegacyDataPlaneAdapter) HostDivergence() []string {
 	}
 	return a.manager.bpfShim.HostDivergence()
 }
-func (a *LegacyDataPlaneAdapter) SurfaceCoverage() ([]dataplane.SurfaceCoverage, bool, bool) {
+func (a *LegacyDataPlaneAdapter) ArmCoverageSnapshot() (dataplane.ArmCoverageReport, bool) {
 	if a == nil || a.manager == nil || a.manager.bpfShim == nil {
-		return nil, false, false
+		return dataplane.ArmCoverageReport{}, false
 	}
-	return a.manager.bpfShim.SurfaceCoverage()
+	return a.manager.bpfShim.ArmCoverageSnapshot()
 }

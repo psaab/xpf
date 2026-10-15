@@ -19,11 +19,25 @@ func TestSafetyTelemetrySnapshots13302(t *testing.T) {
 	if got := m.HostDivergence(); len(got) != 2 || got[0] != "LinkSetMTU" || got[1] != "RouteReplace" {
 		t.Fatalf("host divergence snapshot = %v, want sorted mutation classes", got)
 	}
-	if _, ran, seen := m.SurfaceCoverage(); seen || ran {
-		t.Fatalf("unknown coverage snapshot ran=%v seen=%v, want both false", ran, seen)
+	report, seen := m.ArmCoverageSnapshot()
+	if seen || report.Ran {
+		t.Fatalf("unknown coverage snapshot ran=%v seen=%v, want both false", report.Ran, seen)
 	}
-	m.ProveArmCoverage(&CompileResult{})
-	if surfaces, ran, seen := m.SurfaceCoverage(); !seen || !ran || len(surfaces) != 0 {
-		t.Fatalf("completed empty proof surfaces=%v ran=%v seen=%v", surfaces, ran, seen)
+	m.armCoverage.mu.Lock()
+	m.armCoverage.report = ArmCoverageReport{
+		Surfaces:  []SurfaceCoverage{{Kind: CoverageUncovered}},
+		Uncovered: 1,
+		Ran:       true,
+	}
+	m.armCoverage.seen = true
+	m.armCoverage.mu.Unlock()
+	report, seen = m.ArmCoverageSnapshot()
+	if !seen || !report.Ran || report.Uncovered != 1 || len(report.Surfaces) != 1 {
+		t.Fatalf("snapshot=%+v seen=%v, want one uncovered surface", report, seen)
+	}
+	report.Surfaces[0].Kind = CoverageDirect
+	next, _ := m.ArmCoverageSnapshot()
+	if next.Surfaces[0].Kind != CoverageUncovered {
+		t.Fatalf("mutating snapshot changed published proof: %+v", next.Surfaces[0])
 	}
 }

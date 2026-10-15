@@ -32,8 +32,16 @@ func (m *Manager) HostDivergence() []string {
 	return out
 }
 
-// SurfaceCoverage returns the last arm-proof surface snapshot without mutation.
-func (m *Manager) SurfaceCoverage() ([]SurfaceCoverage, bool, bool) {
-	report, seen := m.lastArmCoverage()
-	return append([]SurfaceCoverage(nil), report.Surfaces...), report.Ran, seen
+// ArmCoverageSnapshot returns one consistent, read-only copy of the last
+// published proof and whether any proof has been published.
+func (m *Manager) ArmCoverageSnapshot() (ArmCoverageReport, bool) {
+	if m == nil {
+		return ArmCoverageReport{}, false
+	}
+	m.armCoverage.mu.RLock()
+	report := m.armCoverage.report
+	report.Surfaces = append([]SurfaceCoverage(nil), report.Surfaces...)
+	seen := m.armCoverage.seen
+	m.armCoverage.mu.RUnlock()
+	return report, seen
 }

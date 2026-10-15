@@ -19,6 +19,7 @@ func TestMetricsDataplaneSafetyAndDivergenceSeries13302(t *testing.T) {
 	ch := make(chan prometheus.Metric, 512)
 	go func() { c.Collect(ch); close(ch) }()
 	got := map[string]float64{}
+	modes := map[string]bool{}
 	for metric := range ch {
 		var wire dto.Metric
 		if err := metric.Write(&wire); err != nil {
@@ -42,6 +43,13 @@ func TestMetricsDataplaneSafetyAndDivergenceSeries13302(t *testing.T) {
 					value = wire.GetCounter().GetValue()
 				}
 				got[expected] = value
+				if expected == "xpf_dataplane_xdp_attach_mode_surfaces" {
+					for _, label := range wire.GetLabel() {
+						if label.GetName() == "mode" {
+							modes[label.GetValue()] = true
+						}
+					}
+				}
 			}
 		}
 	}
@@ -53,6 +61,14 @@ func TestMetricsDataplaneSafetyAndDivergenceSeries13302(t *testing.T) {
 	}
 	if _, ok := got["xpf_dataplane_xdp_attach_mode_surfaces"]; !ok {
 		t.Error("attach mode series absent after a completed proof")
+	}
+	for _, mode := range []string{"driver", "generic", "skipped"} {
+		if !modes[mode] {
+			t.Errorf("attach-mode sample %q absent", mode)
+		}
+	}
+	if modes["uncovered"] {
+		t.Error("uncovered proof is not an XDP attach mode")
 	}
 	for _, name := range []string{"xpf_dataplane_obsolete_registry_accesses_total", "xpf_dataplane_xdp_detach_debt_interfaces", "xpf_dataplane_host_divergence_mutations", "xpf_dataplane_arm_uncovered_surfaces", "xpf_dataplane_arm_total_surfaces", "xpf_dataplane_xdp_attach_mode_surfaces"} {
 		if _, ok := got[name]; !ok {
