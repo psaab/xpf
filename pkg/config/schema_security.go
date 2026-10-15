@@ -1,5 +1,7 @@
 package config
 
+import "fmt"
+
 // schema_security.go carries the `security` and `applications` subtrees
 // of the config-mode grammar SSOT (#1891 domain split). The root
 // composition, the schemaNode type, and the split rationale live in
@@ -103,18 +105,41 @@ func sessionLogModeLeaf(desc string) *schemaNode {
 // child set used at BOTH the zone level and the per-interface override (#3362,
 // #3703). system-services / protocols are multi-value value-tail leaves: a
 // bracket / single-line / repeated list collapses ALL tokens onto the leaf's
-// Keys (the #2419 contract) instead of dropping the tail, and
-// validateHostInboundTokensStrict rejects an unrecognized token at commit
-// against the host_inbound_tokens.go SSOT (strict on commit, warn on the
-// tolerant load path). children MUST stay nil so the SetPath collapse fires;
-// the leaves are intentionally UNTYPED (no schema validator) because the token
-// allowlist lives in the shared host_inbound_tokens.go SSOT the compiled-slice
-// validator reads, not in the schema.
+// Keys (the #2419 contract) instead of dropping the tail. Their tokens remain
+// untyped because the shared host_inbound_tokens.go SSOT validates compiled
+// values; a node validator separately rejects unsupported nested value blocks.
 func hostInboundSchemaChildren() map[string]*schemaNode {
 	return map[string]*schemaNode{
-		"system-services": {desc: "System services", args: 1, multi: true, placeholder: "<service>", children: nil},
-		"protocols":       {desc: "Protocols", args: 1, multi: true, placeholder: "<protocol>", children: nil},
+		"system-services": {
+			desc: "System services", args: 1, multi: true, placeholder: "<service>",
+			children: nil, nodeValidator: validateHostInboundNestedValueChildren13106,
+		},
+		"protocols": {
+			desc: "Protocols", args: 1, multi: true, placeholder: "<protocol>",
+			children: nil, nodeValidator: validateHostInboundNestedValueChildren13106,
+		},
 	}
+}
+
+// validateHostInboundNestedValueChildren13106 rejects nested values below an
+// already-valued service/protocol node. `X { except; }` remains the supported
+// hierarchical exclusion form; `all { ssh except; }` and arbitrary nested
+// payloads are unsupported and must not disappear under an untyped value leaf.
+func validateHostInboundNestedValueChildren13106(node *Node, _ *schemaNode) error {
+	for _, value := range node.Children {
+		for _, child := range value.Children {
+			if len(child.Keys) == 0 {
+				continue
+			}
+			if child.Keys[0] == "except" && !child.KeyQuoted(0) &&
+				len(child.Keys) == 1 && len(child.Children) == 0 &&
+				len(value.Children) == 1 {
+				continue
+			}
+			return fmt.Errorf("nested child %q is unsupported under a host-inbound value", child.Keys[0])
+		}
+	}
+	return nil
 }
 
 // policyThenSchemaChildren builds the `then` action subtree shared by

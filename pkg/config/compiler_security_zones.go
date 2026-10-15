@@ -2,6 +2,8 @@ package config
 
 import "strings"
 
+const nestedHostInboundChildMarker13106 = "nested-host-inbound-child:"
+
 // parseHostInboundNode parses a `host-inbound-traffic { system-services ...;
 // protocols ...; }` subtree into a HostInboundTraffic. It is the SSOT for both
 // the zone-level stanza and the per-interface override (#3362).
@@ -26,6 +28,7 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 
 	var services, protocols []string
 	var servicesExcept, protocolsExcept []string
+	var servicesMalformed, protocolsMalformed bool
 	for _, hit := range n.Children {
 		switch hit.Name() {
 		case "system-services":
@@ -34,11 +37,23 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 			// leaf's Keys[1:] AND/OR one-per-child; read BOTH via the
 			// recursive except-aware walker so every token reaches the
 			// compiled slice (the #2419 collapse bug).
-			values, excluded := hostInboundExceptParts(hit)
+			values, excluded, malformed := hostInboundExceptParts(hit)
+			if len(malformed) > 0 {
+				servicesMalformed = true
+				for _, token := range malformed {
+					hib.UnknownChildren = append(hib.UnknownChildren, nestedHostInboundChildMarker13106+token)
+				}
+			}
 			services = append(services, values...)
 			servicesExcept = append(servicesExcept, excluded...)
 		case "protocols":
-			values, excluded := hostInboundExceptParts(hit)
+			values, excluded, malformed := hostInboundExceptParts(hit)
+			if len(malformed) > 0 {
+				protocolsMalformed = true
+				for _, token := range malformed {
+					hib.UnknownChildren = append(hib.UnknownChildren, nestedHostInboundChildMarker13106+token)
+				}
+			}
 			protocols = append(protocols, values...)
 			protocolsExcept = append(protocolsExcept, excluded...)
 		default:
@@ -46,6 +61,14 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 				hib.UnknownChildren = append(hib.UnknownChildren, keyword)
 			}
 		}
+	}
+	// A malformed descendant poisons its whole admission dimension on tolerant
+	// load, so a dropped nested exclusion can never leave its parent `all` open.
+	if servicesMalformed {
+		services, servicesExcept = nil, nil
+	}
+	if protocolsMalformed {
+		protocols, protocolsExcept = nil, nil
 	}
 	hib.SystemServices = hostInboundFilterExcept(services, servicesExcept, false)
 	hib.Protocols = hostInboundFilterExcept(protocols, protocolsExcept, true)
@@ -57,18 +80,14 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 	return hib
 }
 
-// hostInboundExceptParts reads one system-services / protocols subtree into
-// positive values and exclusions. The parser's AST has two relevant shapes:
-//
-//   - `X except` (the modifier is in the value node's Keys tail), and
-//   - `X { except; }` (the modifier is a child node below X).
-//
-// Each value node is processed with its own key sequence. A bare `except`
-// sibling is not paired with a previous sibling: it remains in values for the
-// existing strict token gate to reject.
-func hostInboundExceptParts(n *Node) (values, excluded []string) {
+// hostInboundExceptParts reads one system-services / protocols subtree,
+// returning positive values, exclusions, and unsupported nested children.
+// Supported exclusion shapes are `X except` and `X { except; }`; nested values
+// (for example `all { ssh except; }`) are unsupported and poison their
+// admission dimension on tolerant ingestion.
+func hostInboundExceptParts(n *Node) (values, excluded, malformed []string) {
 	if n == nil || len(n.Keys) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// appendKeys preserves the boundary of one AST value node while recognizing
@@ -115,14 +134,13 @@ func hostInboundExceptParts(n *Node) (values, excluded []string) {
 					excluded = append(excluded, parent)
 					continue
 				}
-				// Preserve malformed except syntax for strict validation,
-				// but never descend into its nested payload.
-				appendKeys(child, 0)
+				malformed = append(malformed, child.Keys[0])
 				continue
 			}
-			// Non-except children are not host-inbound values. The old
-			// immediate-child parser ignored them; retaining that boundary
-			// avoids admitting malformed nested tokens.
+			// A nested value block such as all { ssh except; } is unsupported.
+			// Preserve its authored value in the diagnostic; the caller clears
+			// this dimension to fail closed on tolerant ingestion.
+			malformed = append(malformed, child.Keys[0])
 		}
 	}
 
@@ -132,7 +150,7 @@ func hostInboundExceptParts(n *Node) (values, excluded []string) {
 	for _, child := range n.Children {
 		walkValue(child)
 	}
-	return values, excluded
+	return values, excluded, malformed
 }
 
 func hostInboundNonCanonicalTokens(tokens []string, known map[string]bool) []string {
@@ -330,9 +348,9 @@ func cloneHostInbound(src *HostInboundTraffic) *HostInboundTraffic {
 		return nil
 	}
 	return &HostInboundTraffic{
-		SystemServices:       append([]string(nil), src.SystemServices...),
-		Protocols:            append([]string(nil), src.Protocols...),
-		UnknownChildren:      append([]string(nil), src.UnknownChildren...),
+		SystemServices:             append([]string(nil), src.SystemServices...),
+		Protocols:                  append([]string(nil), src.Protocols...),
+		UnknownChildren:            append([]string(nil), src.UnknownChildren...),
 		systemServicesExcept:       append([]string(nil), src.systemServicesExcept...),
 		protocolsExcept:            append([]string(nil), src.protocolsExcept...),
 		nonCanonicalSystemServices: append([]string(nil), src.nonCanonicalSystemServices...),

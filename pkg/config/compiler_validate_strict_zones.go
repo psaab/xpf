@@ -971,8 +971,14 @@ func unknownHostInboundChildWarnings(zone *ZoneConfig, zoneName, ifName string, 
 		if keyword == "" {
 			continue
 		}
+		nested := strings.HasPrefix(keyword, nestedHostInboundChildMarker13106)
+		if nested {
+			keyword = hostInboundUnknownChildName13106(keyword)
+		}
 		warning := fmt.Sprintf("%s: unknown child keyword %q was discarded (tolerant path)", scope, keyword)
-		if emptyOverride {
+		if nested {
+			warning = fmt.Sprintf("%s: unsupported nested child %q was discarded and this admission dimension was denied (tolerant path)", scope, keyword)
+		} else if emptyOverride {
 			warning = fmt.Sprintf("%s: unknown child keyword %q was discarded; no recognized admission remains, so this stanza replaces zone admission with deny-all (tolerant path)", scope, keyword)
 		}
 		warnings = append(warnings, warning)
@@ -1000,12 +1006,28 @@ func validateHostInboundUnknownChildrenStrict(cfg *Config) error {
 		if zone == nil {
 			continue
 		}
-		hib := zone.HostInboundTraffic
-		if hib != nil && len(hib.UnknownChildren) > 0 {
-			return fmt.Errorf("security zone %q host-inbound-traffic has unknown child keyword %q, which would be discarded", zoneName, hib.UnknownChildren[0])
+		if hib := zone.HostInboundTraffic; hib != nil && len(hib.UnknownChildren) > 0 {
+			return fmt.Errorf("security zone %q host-inbound-traffic has unknown child keyword %q, which would be discarded",
+				zoneName, hostInboundUnknownChildName13106(hib.UnknownChildren[0]))
+		}
+		for _, ifName := range zone.SortedInterfaceHostInboundRefs() {
+			hib := zone.InterfaceHostInbound[ifName]
+			if hib == nil {
+				continue
+			}
+			for _, child := range hib.UnknownChildren {
+				if strings.HasPrefix(child, nestedHostInboundChildMarker13106) {
+					return fmt.Errorf("security zone %q interfaces %q host-inbound-traffic has unsupported nested child %q",
+						zoneName, ifName, hostInboundUnknownChildName13106(child))
+				}
+			}
 		}
 	}
 	return nil
+}
+
+func hostInboundUnknownChildName13106(child string) string {
+	return strings.TrimPrefix(child, nestedHostInboundChildMarker13106)
 }
 
 // knownHostInboundExceptTokens returns distinct, recognized exclusions in
