@@ -93,7 +93,7 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 		if iface.Ifindex > 0 {
 			if _, managed := ingressIfindexes[uint32(iface.Ifindex)]; managed {
 				if !(iface.ParentIfindex == 0 && iface.NativeVLANID > 0) &&
-					!snapshot.wgFanUpBaseRows[iface.Name] && iface.Zone != "" {
+					!snapshot.wgFanUpBaseRows[iface.Name] {
 					addUserspaceWGIngressZone(plan.ingress, userspaceWGIngressZoneKey{
 						Ifindex: uint32(iface.Ifindex), VLANID: userspaceWGUnTaggedVLANID,
 					}, zoneID(iface.Zone))
@@ -102,7 +102,7 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 		}
 		if iface.ParentIfindex > 0 && iface.VLANID > 0 {
 			parent := uint32(iface.ParentIfindex)
-			if _, managed := ingressIfindexes[parent]; managed && iface.Zone != "" {
+			if _, managed := ingressIfindexes[parent]; managed {
 				addUserspaceWGIngressZone(plan.ingress, userspaceWGIngressZoneKey{
 					Ifindex: parent, VLANID: uint16(iface.VLANID),
 				}, zoneID(iface.Zone))
@@ -122,7 +122,7 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 		matches := 0
 		var nativeZone uint16
 		for _, unit := range snapshot.Interfaces {
-			if unit.ParentIfindex == base.Ifindex && unit.VLANID == base.NativeVLANID && unit.Zone != "" {
+			if unit.ParentIfindex == base.Ifindex && unit.VLANID == base.NativeVLANID {
 				matches++
 				nativeZone = zoneID(unit.Zone)
 			}
