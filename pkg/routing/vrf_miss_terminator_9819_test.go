@@ -220,21 +220,24 @@ func TestVRFReconcileRemovesMissTerminatorOnlyWhenNothingIsOwned9819(t *testing.
 	})
 }
 
-// TestVRFReconcileMissTerminatorFailureSurfaces9819 pins both halves of the
-// failure contract. The error reaches the commit, the #5700 vrfErr path, so the
-// next apply retries it. The VRF is still created, because skipping the link
-// reconcile would turn one missing rule into a missing routing instance.
+// TestVRFReconcileMissTerminatorFailureSurfaces9819 pins fail-closed behavior:
+// the error reaches the commit and no VRF link is materialized without the
+// miss terminator.
 func TestVRFReconcileMissTerminatorFailureSurfaces9819(t *testing.T) {
 	var events []string
 	term := newFakeTerm9819(&events)
 	term.addErr = unix.EPERM
-	v := &vrfManager{ops: newFakeVRFLinks9819(&events), term: term}
+	ops := newFakeVRFLinks9819(&events)
+	v := &vrfManager{ops: ops, term: term}
 	err := v.Reconcile([]VRFSpec{{Name: "a", TableID: 100}})
 	if err == nil || !errors.Is(err, unix.EPERM) || !strings.Contains(err.Error(), "VRF miss terminator") {
 		t.Fatalf("Reconcile error = %v, want the terminator's EPERM", err)
 	}
-	if !v.IsManaged("a") {
-		t.Fatal("a terminator failure must not skip creating the VRF")
+	if ops.links["vrf-a"] != nil || v.IsManaged("a") {
+		t.Fatal("Reconcile materialized or tracked a VRF without its miss terminator")
+	}
+	if indexOf9819(events, "link-add") >= 0 {
+		t.Fatalf("Reconcile attempted link mutation after terminator failure: %v", events)
 	}
 }
 
