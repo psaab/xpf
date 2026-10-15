@@ -1078,6 +1078,9 @@ func (p *CapturePipeline) applyAdmission(item *pendingReinject, admission Reinje
 		item.earlyCompletion = nil
 		item.admissionPending = false
 		p.stats.Refused++
+		if early != nil {
+			p.stats.Uncertain++
+		}
 		p.mu.Unlock()
 		code, contract := d11AdmissionReason(admission.ReasonCode)
 		if item.ledger != nil {
@@ -1092,6 +1095,9 @@ func (p *CapturePipeline) applyAdmission(item *pendingReinject, admission Reinje
 			}
 		}
 		p.finishFrame(item.frame, VerdictDrop)
+		if early != nil {
+			p.retireFlow(item.frame.FlowKey)
+		}
 		return nil
 	}
 	p.mu.Lock()
