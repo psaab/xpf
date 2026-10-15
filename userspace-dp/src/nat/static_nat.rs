@@ -41,6 +41,9 @@ impl SourceConstraint {
         let mut v4: Vec<PrefixV4> = Vec::new();
         let mut v6: Vec<PrefixV6> = Vec::new();
         for prefix in list {
+            // #13530: normalize prefix-length spelling before `ipnet` parsing.
+            let normalized_prefix = super::normalize_nat_prefix_len(prefix);
+            let prefix: &str = &normalized_prefix;
             match prefix.parse::<IpNet>() {
                 Ok(IpNet::V4(net)) => v4.push(PrefixV4::from_net(net)),
                 Ok(IpNet::V6(net)) => v6.push(PrefixV6::from_net(net)),

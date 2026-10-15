@@ -58,6 +58,17 @@ accept	"10.0.0.0/0024"
 accept	"2001:db8::/064"
 accept	"2001:db8::/0064"
 
+# Prefix lengths whose leading zeroes expose the ipnet family asymmetry.
+accept	"10.0.0.0/00"
+accept	"10.0.0.0/08"
+accept	"10.0.0.0/09"
+accept	"10.0.0.0/032"
+accept	"2001:db8::/0128"
+reject	"10.0.0.0/00033"
+reject	"2001:db8::/00129"
+accept	"10.0.0.0/32"
+accept	"2001:db8::1/128"
+
 # A normalized length is still range-checked.
 reject	"10.0.0.0/+33"
 reject	"10.0.0.0/033"

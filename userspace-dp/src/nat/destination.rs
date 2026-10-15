@@ -519,7 +519,10 @@ impl DnatTable {
             // it empty and we key the exact `destination_address`. A /32 or /128
             // prefix is itself a host and collapses back to the exact map.
             let dest: DnatDest = if !snap.destination_prefix.is_empty() {
-                match snap.destination_prefix.parse::<IpNet>() {
+                // #13530: normalize prefix-length spelling before `ipnet` parsing.
+                let normalized_prefix =
+                    crate::nat::normalize_nat_prefix_len(&snap.destination_prefix);
+                match normalized_prefix.parse::<IpNet>() {
                     Ok(IpNet::V4(net)) => {
                         if net.prefix_len() == 32 {
                             DnatDest::Host(IpAddr::V4(net.addr()))
@@ -724,6 +727,9 @@ impl DnatTable {
             let mut source_v4: Vec<PrefixV4> = Vec::new();
             let mut source_v6: Vec<PrefixV6> = Vec::new();
             for prefix in &snap.source_addresses {
+                // #13530: normalize prefix-length spelling before `ipnet` parsing.
+                let normalized_prefix = crate::nat::normalize_nat_prefix_len(prefix);
+                let prefix: &str = &normalized_prefix;
                 match prefix.parse::<IpNet>() {
                     Ok(IpNet::V4(net)) => source_v4.push(PrefixV4::from_net(net)),
                     Ok(IpNet::V6(net)) => source_v6.push(PrefixV6::from_net(net)),

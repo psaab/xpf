@@ -60,6 +60,41 @@ fn source_parser_accepts(s: &str) -> bool {
     n.parse::<IpNet>().is_ok() || n.parse::<IpAddr>().is_ok()
 }
 
+/// DNAT destination and source axes use this same normalized IP/CIDR grammar.
+fn dnat_parser_accepts(s: &str) -> bool {
+    let normalized = super::normalize_nat_prefix_len(s);
+    normalized.parse::<IpNet>().is_ok() || normalized.parse::<IpAddr>().is_ok()
+}
+
+#[test]
+fn dnat_address_axes_match_shared_prefix_corpus_13530() {
+    for (literal, want, line) in corpus() {
+        assert_eq!(
+            dnat_parser_accepts(&literal),
+            want,
+            "corpus line {line}: DNAT destination axis disagrees on {literal:?}"
+        );
+        assert_eq!(
+            dnat_parser_accepts(&literal),
+            want,
+            "corpus line {line}: DNAT source axis disagrees on {literal:?}"
+        );
+        if want {
+            let normalized = super::normalize_nat_prefix_len(&literal);
+            if let Some((_, length)) = normalized.rsplit_once('/') {
+                let parsed: u8 = length
+                    .parse()
+                    .expect("accepted IPv4/IPv6 prefix length must fit in u8");
+                assert_eq!(
+                    length,
+                    parsed.to_string(),
+                    "corpus line {line}: prefix length was not normalized to plain decimal: {normalized:?}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn nat_match_prefix_corpus_7481() {
     let cases = corpus();
