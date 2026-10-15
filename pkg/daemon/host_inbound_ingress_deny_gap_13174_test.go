@@ -101,6 +101,7 @@ func TestHostInboundNoScopeTeardownClearsGapDebt13174(t *testing.T) {
 	sampleHostInboundSnapshots = func(*config.Config) []dpuserspace.InterfaceSnapshot { return nil }
 	nftInstaller = &fakeNftInstaller{}
 	d := &Daemon{}
+	d.hostInboundDHCPRetainedAddrs = map[string]struct{}{hostInboundDropAddrKey('4', "192.0.2.2"): {}}
 	d.noteHostInboundGapApplyResult(errors.New("old gap failure"))
 	if owed, _, _ := d.HostInboundGapDebt(); !owed {
 		t.Fatal("precondition: gap debt must be owed")
@@ -110,5 +111,8 @@ func TestHostInboundNoScopeTeardownClearsGapDebt13174(t *testing.T) {
 	}
 	if owed, _, lastErr := d.HostInboundGapDebt(); owed || lastErr != "" {
 		t.Fatalf("successful no-scope teardown left gap debt: owed=%v err=%q", owed, lastErr)
+	}
+	if d.hostInboundDHCPRetainedAddrs != nil {
+		t.Errorf("successful no-scope teardown left DHCP retained set: %v", d.hostInboundDHCPRetainedAddrs)
 	}
 }
