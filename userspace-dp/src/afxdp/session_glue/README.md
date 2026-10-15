@@ -14,7 +14,12 @@ sees the same sessions the userspace path is processing.
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | Cache-validation helpers (`cached_session_resolution`, `resolution_target_for_session`), `resolve_flow_session_decision`, `delete_terminal_filtered_session`, plus the BPF session-map mirror writers. |
+| `mod.rs` | Small module root preserving the existing `session_glue` API surface and test wiring. |
+| `resolution.rs` | Cached FIB/table resolution and the helpers that compare/rebuild it. |
+| `resolve.rs` | Per-packet flow/session resolution (`resolve_flow_session_decision*`). |
+| `worker_commands.rs` | Worker-command dispatch, replication enqueueing, and delete-drop repair. |
+| `revalidation.rs` | Policy/zone/SNAT session revalidation, purge sweeps, and BPF session-map mirror writers. |
+| `tx_cancel.rs` | TCP-RST queue cancellation and pending-frame recycling. |
 | `promote.rs` | Synced-session hit handling: `maybe_promote_synced_session` (promote a peer-synced hit to locally-owned) and `purge_translated_synced_hit` (drop + NAT-release a transient alias-owned hit). |
 | `commands/` | Worker-command handlers (`handle_upsert_synced`, `handle_delete_synced`, owner-RG refresh/demote/export). |
 | `tests.rs` | Co-located unit tests for cache validation + mirror semantics. |

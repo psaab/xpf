@@ -148,7 +148,6 @@ pub(crate) use session_glue::{
 // (the production paths use the chunked drain-as-you-export in worker::loop_body).
 #[cfg(test)]
 pub(crate) use session_glue::export_forward_sessions_for_owner_rgs;
-#[path = "shared_ops.rs"]
 mod shared_ops;
 #[path = "shared_umem.rs"]
 mod shared_umem;
