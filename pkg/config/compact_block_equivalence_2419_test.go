@@ -633,6 +633,12 @@ var filedFixed = map[string]string{
 	// now preserves the compiled value, and this fixed anchor keeps that repair
 	// checked in both directions.
 	"routing-options router-id": "#11314",
+	// #13214: rate-container packed children are now expanded by the firewall
+	// compiler, so these valueless color flags survive the compact spelling.
+	"firewall three-color-policer xpfarg single-rate color-aware": "#13214",
+	"firewall three-color-policer xpfarg single-rate color-blind": "#13214",
+	"firewall three-color-policer xpfarg two-rate color-aware":    "#13214",
+	"firewall three-color-policer xpfarg two-rate color-blind":    "#13214",
 }
 
 // filedByDesign is the category the inventory did not previously distinguish:
