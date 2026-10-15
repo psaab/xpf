@@ -512,3 +512,181 @@ func TestNATTerminalActionLenientWarns_5628(t *testing.T) {
 			"downgrade warning; warnings=%v", cfg.Warnings)
 	}
 }
+
+// TestNATSourceAndDestSupersededThenBlockResetsMetadata13211 pins #3850
+// last-wins for diagnostic records as well as rule.Then. Malformed metadata in
+// a superseded block must not poison a clean winning block, while defects in
+// the winning block must still be rejected.
+func TestNATSourceAndDestSupersededThenBlockResetsMetadata13211(t *testing.T) {
+	t.Run("source packed contradiction superseded", func(t *testing.T) {
+		cfg, err := compileHier5628(t, `
+security {
+    nat {
+        source {
+            pool p1 { address 5.6.7.8; }
+            rule-set RS {
+                from zone trust;
+                to zone untrust;
+                rule R1 {
+                    match { source-address 10.0.0.0/24; }
+                    then { source-nat pool p1 off; }
+                    then { source-nat pool p1; }
+                }
+            }
+        }
+    }
+}`)
+		if err != nil {
+			t.Fatalf("superseded packed-contradiction then block FALSE-REJECTED (#13211): %v", err)
+		}
+		r := cfg.Security.NAT.Source[0].Rules[0]
+		if r.Then.PoolName != "p1" || r.Then.Off {
+			t.Fatalf("winning Then = %+v, want pool p1 only", r.Then)
+		}
+	})
+	t.Run("source unknown leaf superseded", func(t *testing.T) {
+		cfgText := `
+security {
+    nat {
+        source {
+            pool p1 { address 5.6.7.8; }
+            rule-set RS {
+                from zone trust;
+                to zone untrust;
+                rule R1 {
+                    match { source-address 10.0.0.0/24; }
+                    then { source-nat typo; }
+                    then { source-nat pool p1; }
+                }
+            }
+        }
+    }
+}`
+		cfg, err := compileHier5628(t, cfgText)
+		if err != nil {
+			t.Fatalf("superseded unknown-leaf then block FALSE-REJECTED (#13211): %v", err)
+		}
+		if got := cfg.Security.NAT.Source[0].Rules[0].unknownThenLeaves; len(got) != 0 {
+			t.Fatalf("unknownThenLeaves = %v, want none from superseded block", got)
+		}
+		tree, perrs := NewParser(cfgText).Parse()
+		if len(perrs) != 0 {
+			t.Fatalf("parse for tolerant compile: %v", perrs)
+		}
+		lenient, err := CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("tolerant compile: %v", err)
+		}
+		for _, warning := range lenient.Warnings {
+			if strings.Contains(warning, "#10294") {
+				t.Fatalf("superseded unknown leaf produced false tolerant warning: %s", warning)
+			}
+		}
+	})
+	t.Run("destination multi-pool superseded", func(t *testing.T) {
+		cfg, err := compileHier5628(t, `
+security {
+    nat {
+        destination {
+            pool p1 { address 10.0.30.100; }
+            pool p2 { address 10.0.30.101; }
+            rule-set RD {
+                from zone untrust;
+                rule R1 {
+                    match { destination-address 198.51.100.1/32; }
+                    then { destination-nat pool p1 pool p2; }
+                    then { destination-nat pool p1; }
+                }
+            }
+        }
+    }
+}`)
+		if err != nil {
+			t.Fatalf("superseded multi-pool then block FALSE-REJECTED (#13211): %v", err)
+		}
+		if got := cfg.Security.NAT.Destination.RuleSets[0].Rules[0].Then.PoolName; got != "p1" {
+			t.Fatalf("winning PoolName = %q, want p1", got)
+		}
+	})
+	t.Run("destination packed contradiction superseded", func(t *testing.T) {
+		_, err := compileHier5628(t, `
+security {
+    nat {
+        destination {
+            pool p1 { address 10.0.30.100; }
+            rule-set RD {
+                from zone untrust;
+                rule R1 {
+                    match { destination-address 198.51.100.1/32; }
+                    then { destination-nat pool p1 off; }
+                    then { destination-nat pool p1; }
+                }
+            }
+        }
+    }
+}`)
+		if err != nil {
+			t.Fatalf("superseded packed-contradiction then block FALSE-REJECTED (#13211): %v", err)
+		}
+	})
+	t.Run("winning contradiction still rejects", func(t *testing.T) {
+		for _, cfgText := range []string{`
+security {
+    nat {
+        source {
+            pool p1 { address 5.6.7.8; }
+            rule-set RS {
+                from zone trust;
+                to zone untrust;
+                rule R1 {
+                    match { source-address 10.0.0.0/24; }
+                    then { source-nat pool p1; }
+                    then { source-nat pool p1 off; }
+                }
+            }
+        }
+    }
+}`, `
+security {
+    nat {
+        destination {
+            pool p1 { address 10.0.30.100; }
+            rule-set RD {
+                from zone untrust;
+                rule R1 {
+                    match { destination-address 198.51.100.1/32; }
+                    then { destination-nat pool p1; }
+                    then { destination-nat pool p1 off; }
+                }
+            }
+        }
+    }
+}`} {
+			if _, err := compileHier5628(t, cfgText); err == nil {
+				t.Fatal("winning packed-contradiction block was ACCEPTED; gate must still fire")
+			}
+		}
+	})
+	t.Run("winning unknown leaf still rejects", func(t *testing.T) {
+		_, err := compileHier5628(t, `
+security {
+    nat {
+        source {
+            pool p1 { address 5.6.7.8; }
+            rule-set RS {
+                from zone trust;
+                to zone untrust;
+                rule R1 {
+                    match { source-address 10.0.0.0/24; }
+                    then { source-nat pool p1; }
+                    then { source-nat { pool p1; typo; } }
+                }
+            }
+        }
+    }
+}`)
+		if err == nil || !strings.Contains(err.Error(), "typo") {
+			t.Fatalf("winning unknown-leaf block: err = %v, want rejection naming typo", err)
+		}
+	})
+}

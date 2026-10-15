@@ -249,6 +249,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			// translation-mode fields (#3850 review).
 			for _, thenNode := range ruleInst.node.FindChildren("then") {
 				rule.Then = NATThen{}
+				rule.thenAuthored = natThenAuthoredOccurrences(thenNode, "destination-nat")
 				// #7014: the fully-compact `then destination-nat off;` packs
 				// every token onto the `then` node itself, leaving no
 				// `destination-nat` CHILD for the loop below and an EMPTY action
@@ -295,17 +296,8 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 				}
 			}
 
-			// #7013: record what ONE `then` container authored, so a block that
-			// named the same pool twice is still visible after NATThen's scalar
-			// collapsed it. Kept PER CONTAINER, not summed: duplicate `then`
-			// containers are #3850's accepted last-wins, and summing across them
-			// false-rejects a config the suite already pins as legal. The worst
-			// single container is the one worth reporting.
-			for _, thenNode := range ruleInst.node.FindChildren("then") {
-				if c := natThenAuthoredOccurrences(thenNode, "destination-nat"); c.worseThan(rule.thenAuthored) {
-					rule.thenAuthored = c
-				}
-			}
+			// thenAuthored and Then are both scoped to the winning `then`
+			// container (#3850 last-wins).
 			// #9874: poison a rule whose authored `match` constrains nothing, as
 			// in compileNATSource. The destination builder already publishes no
 			// entry for such a rule, so this half only makes the skip loud (and
