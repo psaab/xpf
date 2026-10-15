@@ -12532,9 +12532,10 @@ fn a_synthesized_reverse_records_no_ingress_ifindex_7169() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("afxdp")
-            .join("shared_ops.rs"),
+            .join("shared_ops")
+            .join("reverse_synth.rs"),
     )
-    .expect("shared_ops.rs must be readable");
+    .expect("shared_ops/reverse_synth.rs must be readable");
     let code: String = src
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
@@ -12588,9 +12589,9 @@ fn the_main_path_passes_a_resolved_arrival_zone_7169() {
             .join("src")
             .join("afxdp")
             .join("session_glue")
-            .join("mod.rs"),
+            .join("resolve.rs"),
     )
-    .expect("session_glue/mod.rs must be readable");
+    .expect("session_glue/resolve.rs must be readable");
     let code: String = src
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
@@ -12601,7 +12602,7 @@ fn the_main_path_passes_a_resolved_arrival_zone_7169() {
     // passes for free.
     assert!(
         code.contains("lookup_forward_nat_across_scopes_at("),
-        "session_glue/mod.rs no longer calls lookup_forward_nat_across_scopes_at — \
+        "session_glue/resolve.rs no longer calls lookup_forward_nat_across_scopes_at — \
          this guard is scanning for something that no longer exists"
     );
     // #9383: this used to assert the literal substring
