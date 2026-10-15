@@ -1966,6 +1966,7 @@ impl Coordinator {
     /// Returns `true` when the bump was applied, `false` when it was refused
 
     /// as a rollback.
+    #[cfg(test)]
     #[must_use]
     pub fn bump_fib_generation(&mut self, fib_generation: u32) -> bool {
         if fib_generation < self.validation.fib_generation {

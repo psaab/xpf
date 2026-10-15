@@ -538,13 +538,19 @@ pub(super) fn bump_fib(
         );
         return;
     }
-    // #3767 H5: refuse a generation ROLLBACK. Flow-cache validation is
-    // equality based, so publishing a strictly-lower fib_generation would
-    // revive cache entries a prior bump already invalidated (see
-    // Coordinator::bump_fib_generation). The coordinator owns the
-    // monotonicity invariant and leaves its validation state untouched on
-    // refusal; fail closed here too — do NOT advance the reported status /
-    // stored snapshot and do NOT persist.
+    // #13197: the published status remains authoritative when the coordinator
+    // is disarmed or workers are deferred/stopped and its validation state
+    // therefore lags (or resets to zero). Refuse a rollback against either
+    // baseline before allowing the coordinator to publish.
+    let current_fib = guard.status.last_fib_generation.max(guard.afxdp.fib_generation());
+    if snapshot.fib_generation < current_fib {
+        response.ok = false;
+        response.error = format!(
+            "fib generation rollback rejected: {} < current {}",
+            snapshot.fib_generation, current_fib
+        );
+        return;
+    }
     if !guard.afxdp.bump_fib_generation_with_snapshot(snapshot) {
         response.ok = false;
         response.error = format!(
@@ -560,6 +566,10 @@ pub(super) fn bump_fib(
         snap.ipsec_tunnel_snapshot_generation = snapshot.ipsec_tunnel_snapshot_generation;
         snap.ipsec_tunnel_rows = snapshot.ipsec_tunnel_rows.clone();
         snap.pmech_inventory = snapshot.pmech_inventory.clone();
+        // #9520: the bump changes the content represented by this snapshot;
+        // it can no longer attest to a same-generation retry of its former
+        // contents.
+        snap.content_digest.clear();
     }
     refresh_status(guard);
     // #3767 M2: persist the accepted bump. Previously bump_fib mutated
