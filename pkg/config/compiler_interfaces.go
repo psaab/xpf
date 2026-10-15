@@ -1647,7 +1647,24 @@ func pruneUnsafeIdentityMembers9886(n *Node, lenient bool) ([]string, error) {
 // namedInstances exactly: Keys[1:] fan-out with children, Keys[1] alone, or
 // named children — so the gate prunes exactly what the compiler would read.
 func pruneUnsafeDeviceMapEntries9886(chassis *Node, lenient bool) ([]string, error) {
-	dmNode := chassis.FindChild("device-map")
+	// #13090: sibling `device-map` blocks are all live — compileChassis
+	// folds every block — so pruning only the first FindChild hit would
+	// leave the second block's poisoned names in the AST for the .link
+	// writer (fail-open). Gate every block.
+	var warnings []string
+	for _, dmNode := range chassis.FindChildren("device-map") {
+		w, err := pruneUnsafeDeviceMapBlockEntries9886(dmNode, lenient)
+		if err != nil {
+			return nil, err
+		}
+		warnings = append(warnings, w...)
+	}
+	return warnings, nil
+}
+
+// pruneUnsafeDeviceMapBlockEntries9886 is pruneUnsafeDeviceMapEntries9886 for
+// ONE device-map block.
+func pruneUnsafeDeviceMapBlockEntries9886(dmNode *Node, lenient bool) ([]string, error) {
 	if dmNode == nil {
 		return nil, nil
 	}

@@ -3022,10 +3022,15 @@ func compileChassis(node *Node, ch *ChassisConfig) error {
 	// #1956 R-7/V-7: the device-map subtree compiles INDEPENDENTLY of
 	// cluster — a sibling `device-map` must not be dropped on a standalone
 	// (no-cluster) box. Compile it first, then fall through to cluster.
-	if dmNode := node.FindChild("device-map"); dmNode != nil {
-		if dm := compileDeviceMap(dmNode); dm != nil {
-			ch.DeviceMap = dm
-		}
+	//
+	// #13090: the AST keeps sibling `device-map` blocks DISTINCT (brace
+	// syntax, `load merge`), and the singular FindChild compiled only the
+	// first — silently dropping every interface binding authored in a later
+	// block, so a NIC fell back to the positional/unmapped policy. Fold
+	// every block; cross-block duplicate logical names stay fatal through
+	// the #6546 gate once both entries reach the compiled map.
+	for _, dmNode := range node.FindChildren("device-map") {
+		ch.DeviceMap = mergeDeviceMapConfigs13090(ch.DeviceMap, compileDeviceMap(dmNode))
 	}
 
 	// #6672: resolve the cluster body across all four spellings. A body packed
@@ -3769,8 +3774,21 @@ func compileRGInterfaceMonitors(rg *RedundancyGroup, child *Node) {
 // compileRGIPMonitoring compiles a `ip-monitoring` statement of a redundancy-group body.
 // Registered in redundancyGroupStatements; body moved VERBATIM from the
 // switch arm it replaced (#6588).
+//
+// #13090: statements ACCUMULATE. #6543 folds every `redundancy-group <id>`
+// instance into one record and replays each body through this table, and a
+// single body may carry more than one `ip-monitoring` statement. A fresh
+// struct here (stored unconditionally below) wiped GlobalWeight,
+// GlobalThreshold and every earlier Target, so a second block whose lone
+// statement was `family inet <addr>` left the election running with
+// GlobalWeight 0 — failover fail-open. Reuse the record so globals replay
+// last-wins and Targets append, exactly like NodePriorities and
+// InterfaceMonitors already fold.
 func compileRGIPMonitoring(rg *RedundancyGroup, child *Node) {
-	ipm := &IPMonitoring{}
+	ipm := rg.IPMonitoring
+	if ipm == nil {
+		ipm = &IPMonitoring{}
+	}
 	// #6588: ip-monitoring installs redundancy-group demotion debt
 	// through the same election path as interface-monitor, and it
 	// packs the same way — `ip-monitoring global-weight 255;` and

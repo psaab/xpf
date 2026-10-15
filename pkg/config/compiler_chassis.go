@@ -56,6 +56,31 @@ func compileDeviceMap(node *Node) *DeviceMapConfig {
 	return dm
 }
 
+// mergeDeviceMapConfigs13090 folds a later sibling `device-map` block's
+// compiled content into dst (#13090): entries accumulate — the strict
+// duplicate-logical-name gate (#6546) then sees cross-block duplicates and
+// keeps them fatal — and a later block's unmapped-interface-policy
+// supersedes an earlier one's, the leaf-level last-wins the #6543 fold uses.
+// A block that compiles to nil (truly empty, R-7) contributes nothing. The
+// merged entry list is re-sorted so archive diffs stay deterministic
+// regardless of how the authoring split the blocks.
+func mergeDeviceMapConfigs13090(dst, later *DeviceMapConfig) *DeviceMapConfig {
+	if later == nil {
+		return dst
+	}
+	if dst == nil {
+		return later
+	}
+	dst.Entries = append(dst.Entries, later.Entries...)
+	if later.UnmappedPolicy != "" {
+		dst.UnmappedPolicy = later.UnmappedPolicy
+	}
+	sort.SliceStable(dst.Entries, func(i, j int) bool {
+		return dst.Entries[i].LogicalName < dst.Entries[j].LogicalName
+	})
+	return dst
+}
+
 // collectDeviceMapProps walks a device-map `interface` instance subtree and
 // records the pci/mac/key properties into props. It handles every AST shape
 // the parser/SetPath produce:
