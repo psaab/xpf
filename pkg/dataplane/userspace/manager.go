@@ -554,6 +554,7 @@ type Manager struct {
 	// oversubscribed look unfit to take over. Atomic because it is read by the
 	// status path without m.mu.
 	syncedImportRefusals atomic.Uint64
+	mapsSyncTelemetry    mapsSyncTelemetryCounters
 	deferWorkers         bool // skip worker spawn until NotifyLinkCycle
 	xskBoundNotified     bool // OnXSKBound fired at most once
 	// pendingWorkerArm records "generation debt" from a deferred-MAC

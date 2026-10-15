@@ -9,6 +9,12 @@ type ProcessStatus struct {
 	PID                              int `json:"pid"`
 	ConfigSnapshotProtocolVersion    int `json:"config_snapshot_protocol_version,omitempty"`
 	InjectPacketTupleProtocolVersion int `json:"inject_packet_tuple_protocol_version,omitempty"`
+	// Manager-owned userspace map synchronization telemetry (#13300).
+	RSTSuppressionDegraded  bool   `json:"rst_suppression_degraded,omitempty"`
+	RSTSuppressionFailures  uint64 `json:"rst_suppression_failures_total,omitempty"`
+	BindingsWatchdogRepairs uint64 `json:"bindings_watchdog_repairs_total,omitempty"`
+	BindingsWatchdogErrors  uint64 `json:"bindings_watchdog_errors_total,omitempty"`
+	LocalAddrPruneSkipped   uint64 `json:"local_address_prune_skipped_total,omitempty"`
 	// SessionExportPagingProtocolVersion is the owner-RG session export PAGING
 	// contract the helper implements (#9344). 0 (or absent) means no paging.
 	//

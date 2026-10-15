@@ -98,6 +98,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 	c.emitDropClassCounters(ch, status)
 	c.emitUserspaceScreenStateMetrics(ch, status)
 	c.emitFabricTrustBoundaryCounters(ch, status)
+	c.emitUserspaceMapsSyncTelemetry(ch, status)
 }
 
 // emitDropClassCounters exposes per-binding drop-class counters as aggregate
