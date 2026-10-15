@@ -280,32 +280,35 @@ func (s *sender) openConn() bool {
 	s.setSrcAddr(srcAddr)
 
 	// Request the received IP Hop Limit on each packet so rsReceiver can enforce
-	// the RFC 4861 §6.1.1 Router Solicitation check (Hop Limit MUST be 255 — a
-	// value forwarding would have decremented, so 255 proves the RS originated
-	// on-link). If the socket cannot report the hop limit, rsReceiver fails
-	// closed (rejects all RS): solicited RAs pause until the next periodic RA
-	// rather than answering a possibly off-link/spoofed solicitation (#5095).
-	if err := s.conn.SetControlMessage(ipv6.FlagHopLimit, true); err != nil {
-		slog.Warn("ra: failed to request RS hop-limit control message; "+
-			"solicited RAs will be held (periodic RAs continue)",
-			"interface", s.cfg.Interface, "err", err)
+	// the RFC 4861 §6.1.1 Router Solicitation check.
+	if err := conn.SetControlMessage(ipv6.FlagHopLimit, true); err != nil {
+		return s.failSocketSetup(conn, "enable RS hop-limit control message", err)
 	}
 
 	// Join all-routers multicast to receive Router Solicitations.
 	allRouters := netip.MustParseAddr("ff02::2")
-	if err := s.conn.JoinGroup(allRouters); err != nil {
-		slog.Warn("ra: failed to join all-routers group",
-			"interface", s.cfg.Interface, "err", err)
+	if err := conn.JoinGroup(allRouters); err != nil {
+		return s.failSocketSetup(conn, "join all-routers group", err)
 	}
 
 	// Set ICMPv6 filter to accept only Router Solicitations (type 133).
 	var f ipv6Filter
 	f.setAllowRS()
-	if err := s.conn.SetICMPFilter(f.filter()); err != nil {
-		slog.Warn("ra: failed to set ICMPv6 filter",
-			"interface", s.cfg.Interface, "err", err)
+	if err := conn.SetICMPFilter(f.filter()); err != nil {
+		return s.failSocketSetup(conn, "set ICMPv6 filter", err)
 	}
 	return true
+}
+
+// failSocketSetup closes a partially configured connection and fails the
+// sender open. The owner will then take the normal failed-open shutdown path;
+// periodic and solicited RAs must not run with incomplete receive setup.
+func (s *sender) failSocketSetup(conn ndpConn, operation string, err error) bool {
+	slog.Warn("ra: failed to configure NDP connection",
+		"interface", s.cfg.Interface, "operation", operation, "err", err)
+	_ = conn.Close()
+	s.conn = nil
+	return false
 }
 
 // errGoodbyeWrite is returned by the standalone goodbye path when the bind
