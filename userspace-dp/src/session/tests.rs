@@ -10984,7 +10984,6 @@ fn reverse_translated_alias_flow_cache_probes_resolve_13640() {
         routing_domain: 0,
     };
     let alias = translated_session_key(&reverse_key, rev_dec.nat);
-    assert_ne!(alias, reverse_key);
     assert!(
         table.lookup(&alias, now, 0).is_none(),
         "fixture: alias must miss before install"
@@ -11018,6 +11017,11 @@ fn reverse_translated_alias_flow_cache_probes_resolve_13640() {
     );
     table.account_packet(&alias, 128, 0, 0);
     let refresh_at = now + 16_000_000_000;
+    let counters = table
+        .session_counters(&reverse_key)
+        .expect("the alias packet must account against the resolved reverse entry");
+    assert_eq!(counters.rev_packets, 1);
+    assert_eq!(counters.rev_bytes, 128);
     assert!(table.touch_if_stale(&alias, refresh_at));
     assert_eq!(
         table.lifetime_state_for(&reverse_key).unwrap().0,
