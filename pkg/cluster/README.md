@@ -3669,15 +3669,10 @@ the group itself.
 `LinkAttrsUp` is exported because the same carrier-aware read is needed
 outside the monitor loop:
 
-- `RethController.FormatStatus` (`reth.go`) and the reth-status displays
-  for `show chassis cluster interfaces` — both the gRPC/remote-CLI path
-  (`pkg/grpcapi`) and the local interactive CLI path (`pkg/cli`) — so a
-  cable-pulled-but-admin-up RETH member shows `down`/`Down`, not
-  `up`/`Up`, and the two display paths stay in agreement.
-- The daemon no-reth-vrrp / private-rg-election VIP-readiness gate
-  (`pkg/daemon.checkVIPReadinessForConfig`, #2090) — so a node is not
-  judged ready to take over VIPs on an interface whose carrier is down
-  (the #2070 hazard, surfacing on the VIP-takeover path).
+The daemon no-reth-vrrp / private-rg-election VIP-readiness gate
+(`pkg/daemon.checkVIPReadinessForConfig`, #2090) uses `LinkAttrsUp` so a
+node is not judged ready to take over VIPs on an interface whose carrier is
+down (the #2070 hazard, surfacing on the VIP-takeover path).
 
 ## Callers
 

@@ -1029,7 +1029,6 @@ node never terminally publishes a workerless snapshot while reporting success.
 | `pkg/cluster/reth.go` | `RethMAC(clusterID, rgID, rethIndex, nodeID)` -- returns the per-node/per-RETH MAC (`config.RethVirtualMAC`) |
 | `pkg/config/types.go` | `RethIndex(name)` parses canonical `rethN` names; `Config.RethMACIndexes()` also assigns unique, stable indexes to structurally valid noncanonical RETH owners |
 | `pkg/config/reth_virtual_mac_8340.go` | `RethVirtualMAC` -- packs RETH index and node ID into the final MAC octet |
-| `pkg/cluster/reth.go` | `IsVirtualRethMAC(mac)` -- detects virtual RETH pattern |
 | `pkg/daemon/daemon_reth.go` | `renameRethMember()` -- recovers by indexed MAC or unique legacy MAC, excludes configured siblings, and refuses ambiguous matches (down → rename → **up**); takes the same `beforeCycle` AF_XDP worker-join hook as `programRethMAC` |
 | `pkg/daemon/daemon_reth.go` | `programRethMAC()` -- sets MAC via netlink (step 2.6 in applyConfig); takes the mandatory `beforeCycle` AF_XDP worker-join hook (#5103) |
 | `pkg/dataplane/compiler_iface.go` | Searches for a lost `.link` rename using the indexed RETH key and an unambiguous legacy-MAC fallback |

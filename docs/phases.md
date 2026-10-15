@@ -786,11 +786,7 @@ Gap audit: `docs/archived/userspace-forwarding-and-failover-gap-audit.md` (PR #3
   - `encodeSessionV6Payload()` — same layout with 16-byte IP fields (512-byte buffer)
   - `encodeDeleteV4()`/`encodeDeleteV6()` — header+key only
 - **Tests (pkg/cluster/sync_test.go):** 6 tests — header encoding, v4 session encode, v6 delete encode, v6 session encode, stats init, queue-without-connection
-- **RETH failover controller (pkg/cluster/reth.go):** `RethController` manages bond member activation
-  - `HandleStateChange(event)` — primary → activate (bond + members UP), secondary/lost → deactivate (members DOWN)
-  - `RethIPs()` — queries netlink for IPv4 addresses on RETH bond (for GARP)
-  - `FormatStatus()` — tabular display of RETH interfaces with RG, status, members
-  - `SetMappings()` — updates RETH→RG mappings at runtime
+- **RETH identity helpers (`pkg/cluster/reth.go`):** deterministic virtual MAC and stable link-local address construction. MAC programming and VIP ownership are implemented in `pkg/daemon` and `pkg/vrrp`; the unused `RethController` scaffold was removed (#13226).
 
 ### Key Design Decisions
 - **Heartbeat protocol:** Custom binary (not gRPC/protobuf) for minimal overhead and fast parsing in hot path
