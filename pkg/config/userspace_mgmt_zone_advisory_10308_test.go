@@ -163,10 +163,9 @@ func TestMgmtControlZoneBareUnit0TunnelsAndQuarantinedMembersStayQuiet12830(t *t
 	}
 }
 
-// #12830 mutants: an absent unknown interface and a bare non-zero or
-// non-tunnel unit must still warn; interpreting every bare reference as unit
-// 0 without tunnel evidence, or any st-looking name as secure tunnel, fails.
-func TestMgmtControlZoneBareUnknownAndNonZeroUnitsStillWarn12830(t *testing.T) {
+// #12830: unknown interfaces remain conservative, while #13115 suppresses a
+// bare member whose only configured unit is a tunnel, even if it is nonzero.
+func TestMgmtControlZoneBareUnknownAndNonZeroTunnel12830(t *testing.T) {
 	cfg := &Config{
 		Security: SecurityConfig{Zones: map[string]*ZoneConfig{
 			"mgmt": {Interfaces: []string{"ge-9/0/0", "gr-0/0/0"}},
@@ -176,15 +175,18 @@ func TestMgmtControlZoneBareUnknownAndNonZeroUnitsStillWarn12830(t *testing.T) {
 		}},
 	}
 	appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
-	for _, member := range []string{"ge-9/0/0", "gr-0/0/0"} {
+	for member, wantWarning := range map[string]bool{
+		"ge-9/0/0": true,
+		"gr-0/0/0": false,
+	} {
 		found := false
 		for _, w := range cfg.Warnings {
 			if strings.Contains(w, "(#10308)") && strings.Contains(w, member) {
 				found = true
 			}
 		}
-		if !found {
-			t.Errorf("member %q must retain (#10308) advisory; warnings=%v", member, cfg.Warnings)
+		if found != wantWarning {
+			t.Errorf("member %q warning=%t, want %t; warnings=%v", member, found, wantWarning, cfg.Warnings)
 		}
 	}
 }
@@ -231,6 +233,7 @@ func TestMgmtControlZoneQuarantinedByIDCollisionStaysQuiet12830(t *testing.T) {
 			break
 		}
 	}
+
 	if collision == "" {
 		t.Fatal("could not find deterministic zone-id collision fixture")
 	}
@@ -243,5 +246,42 @@ func TestMgmtControlZoneQuarantinedByIDCollisionStaysQuiet12830(t *testing.T) {
 		if strings.Contains(w, "(#10308)") {
 			t.Fatalf("quarantined mgmt zone must not warn: %q", w)
 		}
+	}
+}
+
+// #13115: a bare interface token in mgmt/control fans out to every
+// configured unit (zoneIfaceLogicalKeys), so the advisory must inspect
+// all units — not only unit 0.
+func TestMgmtControlZoneBareInterfaceMultiUnitTunnel13115(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		units    map[int]*InterfaceUnit
+		wantWarn bool
+	}{
+		{name: "unit0 tunnel plus unit1 data warns", units: map[int]*InterfaceUnit{0: {Tunnel: &TunnelConfig{}}, 1: {}}, wantWarn: true},
+		{name: "only unit1 tunnel stays quiet", units: map[int]*InterfaceUnit{1: {Tunnel: &TunnelConfig{}}}, wantWarn: false},
+		{name: "all units tunnel stays quiet", units: map[int]*InterfaceUnit{0: {Tunnel: &TunnelConfig{}}, 1: {Tunnel: &TunnelConfig{}}}, wantWarn: false},
+		{name: "nil unit among tunnels warns", units: map[int]*InterfaceUnit{0: {Tunnel: &TunnelConfig{}}, 1: nil}, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				Security: SecurityConfig{Zones: map[string]*ZoneConfig{
+					"mgmt": {Interfaces: []string{"ge-0/0/0"}},
+				}},
+				Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+					"ge-0/0/0": {Name: "ge-0/0/0", Units: tc.units},
+				}},
+			}
+			appendUserspaceMgmtZoneAdvisoryLocked(cfg, compileOpts{})
+			found := false
+			for _, w := range cfg.Warnings {
+				if strings.Contains(w, "(#10308)") && strings.Contains(w, "ge-0/0/0") {
+					found = true
+				}
+			}
+			if found != tc.wantWarn {
+				t.Errorf("warning = %t, want %t (warnings=%v)", found, tc.wantWarn, cfg.Warnings)
+			}
+		})
 	}
 }
