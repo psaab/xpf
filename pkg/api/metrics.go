@@ -141,6 +141,9 @@ type xpfCollector struct {
 	dataplaneArmTotalSurfaces            *prometheus.Desc
 	dataplaneXDPAttachModeSurfaces       *prometheus.Desc
 	dataplaneSafetyOnce                  sync.Once
+	snmpRequestsShedTotal                *prometheus.Desc
+	snmpSourceBucketEvictionsTotal       *prometheus.Desc
+	snmpTrackedSources                   *prometheus.Desc
 
 	// Interface counters
 	ifacePacketsTotal *prometheus.Desc
@@ -669,21 +672,21 @@ type xpfCollector struct {
 	userspaceIoUringRetainedBuffers *prometheus.Desc
 	userspaceIoUringRetainedBytes   *prometheus.Desc
 	// #13280: Rust ProcessStatus operational and HA counters.
-	userspaceCosNoOwnerBindingDrops          *prometheus.Desc
-	userspaceIoUringWriteRefused             *prometheus.Desc
-	userspaceIoUringWriteRefusedBytes        *prometheus.Desc
-	userspaceRouteChangeUnrejudgedSessions   *prometheus.Desc
-	userspaceOwnerRGFilingsDeclined          *prometheus.Desc
-	userspaceHATransitionDropped             *prometheus.Desc
-	userspaceHATransitionStaleSkipped        *prometheus.Desc
-	userspaceSessionDeleteRefusedIdentity    *prometheus.Desc
-	userspaceSessionDeleteDroppedReleased    *prometheus.Desc
-	userspaceTunnelPurgeReservationsReleased *prometheus.Desc
-	userspaceSyncedReverseRederived          *prometheus.Desc
-	userspacePeerDeleteRefusedLocalOwned     *prometheus.Desc
-	userspaceS5Reinject                      *prometheus.Desc
-	userspaceS5ReinjectCompletions           *prometheus.Desc
-	userspaceSessionDeleteReplicaDropped     *prometheus.Desc
+	userspaceCosNoOwnerBindingDrops           *prometheus.Desc
+	userspaceIoUringWriteRefused              *prometheus.Desc
+	userspaceIoUringWriteRefusedBytes         *prometheus.Desc
+	userspaceRouteChangeUnrejudgedSessions    *prometheus.Desc
+	userspaceOwnerRGFilingsDeclined           *prometheus.Desc
+	userspaceHATransitionDropped              *prometheus.Desc
+	userspaceHATransitionStaleSkipped         *prometheus.Desc
+	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc
+	userspaceSessionDeleteDroppedReleased     *prometheus.Desc
+	userspaceTunnelPurgeReservationsReleased  *prometheus.Desc
+	userspaceSyncedReverseRederived           *prometheus.Desc
+	userspacePeerDeleteRefusedLocalOwned      *prometheus.Desc
+	userspaceS5Reinject                       *prometheus.Desc
+	userspaceS5ReinjectCompletions            *prometheus.Desc
+	userspaceSessionDeleteReplicaDropped      *prometheus.Desc
 	userspaceSessionDeleteReplicaDropRepaired *prometheus.Desc
 	// #13289: process-wide #10597 WireGuard uncovered forwarding counters.
 	userspaceWGUncoveredPacketsTotal *prometheus.Desc
@@ -1668,6 +1671,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.flowExportBatchMaxDepth
 	ch <- c.flowExportBatchDroppedTotal
 	c.describeDataplaneSafety(ch)
+	c.describeSNMPServeBudget(ch)
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -1712,6 +1716,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// them in precisely the case they exist for.
 	defer c.emitDataplaneSilentSkips(ch)
 	defer c.emitDataplaneSafety(ch)
+	defer c.emitSNMPServeBudget(ch)
 
 	// #1799: config-persist health is a control-plane signal — emit it
 	// BEFORE the dataplane gate below so the degraded state stays

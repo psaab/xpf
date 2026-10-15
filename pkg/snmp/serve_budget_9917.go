@@ -104,7 +104,20 @@ type snmpServeBudget struct {
 	// globally exhausted, or -- unreachable while displacement holds -- table
 	// pressure). Tests observe enforcement through it instead of inferring
 	// drops from missing UDP datagrams.
-	shed atomic.Uint64
+	shed      atomic.Uint64
+	evictions atomic.Uint64
+}
+
+// stats returns the budget's cumulative shed and source-table eviction counts
+// plus the current number of tracked source buckets.
+func (b *snmpServeBudget) stats() (shed, evictions uint64, trackedSources uint64) {
+	if b == nil {
+		return 0, 0, 0
+	}
+	b.mu.Lock()
+	trackedSources = uint64(len(b.perSource))
+	b.mu.Unlock()
+	return b.shed.Load(), b.evictions.Load(), trackedSources
 }
 
 func newSNMPServeBudget() *snmpServeBudget {
@@ -184,6 +197,7 @@ func (b *snmpServeBudget) allow(srcIP net.IP) bool {
 					b.pendingSources--
 				}
 				delete(b.perSource, victim)
+				b.evictions.Add(1)
 				break
 			}
 		}
