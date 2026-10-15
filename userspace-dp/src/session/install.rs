@@ -313,6 +313,17 @@ impl SessionTable {
             shed = true;
         }
     }
+    /// Move tuple-gated cleanup intents out for an admission retry.
+    pub(crate) fn take_deferred_pressure_shed(&mut self) -> PressureShedSessions {
+        std::mem::take(&mut self.deferred_pressure_shed)
+    }
+
+    /// Preserve removed entries when tuple-gated teardown cannot acquire all
+    /// victim keys. The worker retries these intents on its next admission.
+    pub(crate) fn defer_pressure_shed(&mut self, mut shed: PressureShedSessions) {
+        self.deferred_pressure_shed.append(&mut shed);
+    }
+
 
     /// Remove one indexed local opening flow (both halves when the matching
     /// reverse companion is present). Returns false when no safe victim remains.

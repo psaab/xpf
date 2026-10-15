@@ -328,3 +328,122 @@ pub(super) fn count_local_session_expiries(
         })
         .count() as u64
 }
+
+/// Retry teardown for locally removed pressure victims whose all-key tuple
+/// lease was contended. These records are outside the session table and would
+/// otherwise never reach ordinary expiry cleanup.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
+    sessions: &mut crate::session::SessionTable,
+    bindings: &mut [BindingWorker],
+    forwarding: &ForwardingState,
+    session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    dnat_fds: &crate::afxdp::checksum::DnatTableFds,
+    worker_id: u32,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &crate::afxdp::types::WorkerCommandQueues,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    now_ns: u64,
+) {
+    let shed_sessions = sessions.take_deferred_pressure_shed();
+    if shed_sessions.is_empty() {
+        return;
+    }
+    let shed_keys: Vec<_> = shed_sessions.iter().map(|shed| shed.key.clone()).collect();
+    let Ok(_lease) = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease(shed_keys) else {
+        sessions.defer_pressure_shed(shed_sessions);
+        return;
+    };
+    for shed in shed_sessions {
+        let shared_removal = crate::afxdp::shared_ops::remove_shared_session_if(
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            &shed.key,
+            |current| {
+                crate::afxdp::poll_descriptor::is_pressure_shed_shared_opening(current, &shed)
+            },
+        );
+        if matches!(
+            shared_removal,
+            crate::afxdp::shared_ops::SharedRemoval::Declined
+        ) {
+            if sessions.probe_with_origin(&shed.key).is_none() {
+                crate::nat::release_source_nat_allocation_for_worker(
+                    &forwarding.iface_nat_allocators,
+                    &forwarding.source_nat_rules,
+                    &shed.key,
+                    shed.decision.nat,
+                    shed.is_reverse,
+                    now_ns,
+                    worker_id,
+                );
+                crate::nat64::release_nat64_allocation_for_worker(
+                    &forwarding.nat64,
+                    &shed.key,
+                    shed.decision.nat,
+                    shed.is_reverse,
+                    now_ns,
+                    worker_id,
+                );
+            }
+            continue;
+        }
+        let session_map = bindings
+            .first()
+            .map_or(session_map, |binding| binding.bpf_maps.session_map.handle());
+        crate::afxdp::bpf_map::release_coordinator_session_rows(session_map, &shed.key);
+        let _ = crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            &shed.key,
+        );
+        if !shed.is_reverse {
+            crate::afxdp::checksum::delete_dnat_table_entry(dnat_fds, &shed.key, shed.decision.nat);
+        }
+        crate::afxdp::bpf_map::delete_live_session_entry(
+            session_map,
+            &shed.key,
+            shed.decision.nat,
+            shed.is_reverse,
+        );
+        for binding in bindings.iter_mut() {
+            binding
+                .flow
+                .flow_cache
+                .invalidate_slot(&shed.key, binding.ifindex);
+        }
+        crate::nat::release_source_nat_allocation_for_worker(
+            &forwarding.iface_nat_allocators,
+            &forwarding.source_nat_rules,
+            &shed.key,
+            shed.decision.nat,
+            shed.is_reverse,
+            now_ns,
+            worker_id,
+        );
+        crate::nat64::release_nat64_allocation_for_worker(
+            &forwarding.nat64,
+            &shed.key,
+            shed.decision.nat,
+            shed.is_reverse,
+            now_ns,
+            worker_id,
+        );
+        crate::afxdp::session_glue::replicate_session_delete_repairing(
+            peer_worker_commands,
+            worker_commands_by_id,
+            forwarding,
+            &shed.key,
+            shed.decision.nat,
+            shed.is_reverse,
+            now_ns,
+        );
+    }
+}

@@ -548,9 +548,41 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
     );
     if gate_blocks_cleanup {
         let pool_held = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
+        assert_eq!(pool_held[0].used_ports, 2);
+        drop(_held_lease);
+        let session_map = crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1);
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        crate::afxdp::worker::retry_deferred_pressure_sheds(
+            &mut sessions,
+            std::slice::from_mut(&mut binding),
+            &forwarding,
+            session_map,
+            -1,
+            -1,
+            &crate::afxdp::checksum::DnatTableFds::default(),
+            0,
+            &[],
+            crate::afxdp::empty_worker_commands_by_id(),
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            123_004_000_000,
+        );
+        assert!(
+            !shared_sessions
+                .lock()
+                .expect("shared sessions")
+                .contains_key(&victim_key),
+            "retry must remove the stale shared session row"
+        );
+        let pool_after_retry =
+            crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
         assert_eq!(
-            pool_held[0].used_ports, 2,
-            "gate-blocked cleanup must retain the victim NAT hold"
+            pool_after_retry[0].used_ports, 1,
+            "#13643: gate-contended shed cleanup must release the worker SNAT hold on retry"
         );
         return;
     }
