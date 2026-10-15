@@ -113,8 +113,8 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 			tailValidator: ValidateCoSTransmitRateTail,
 			children: map[string]*schemaNode{
 				"exact":     {desc: "Cap the queue at the configured rate (no surplus borrowing unless surplus-sharing is set)", children: nil},
-				"percent":   {desc: "Transmit rate as a percent of the bound interface's rate (accepted for Junos compatibility; NOT yet resolved to an absolute rate by the dataplane)", args: 1, placeholder: "<percent>", children: nil},
-				"remainder": {desc: "Share of the leftover bandwidth (accepted for Junos compatibility; NOT yet resolved to an absolute rate by the dataplane)", children: nil},
+				"percent":   {desc: "Transmit rate as a percent of the bound interface's rate (resolved to an absolute rate at commit)", args: 1, placeholder: "<percent>", children: nil},
+				"remainder": {desc: "Share of the leftover bandwidth (resolved to an absolute rate at commit)", children: nil},
 			},
 		},
 		"priority": {
@@ -147,7 +147,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 			valueExamples: []string{"16m", "256k", "10%", "temporal"},
 			tailValidator: ValidateCoSBufferSizeTail,
 			children: map[string]*schemaNode{
-				"temporal": {desc: "Size the buffer by target queue delay in microseconds (accepted for Junos compatibility; NOT yet resolved to bytes by the dataplane)", args: 1, placeholder: "<microseconds>", children: nil},
+				"temporal": {desc: "Size the buffer by target queue delay in microseconds (resolved to bytes at commit)", args: 1, placeholder: "<microseconds>", children: nil},
 			},
 		},
 		// `surplus-sharing` (#915) and `equal-flow-enforcement` are
@@ -211,7 +211,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 		// appending, and the `percent 90` container groups its value as a
 		// child that gatherLeafTailTokens flattens.
 		"shaping-rate": {
-			desc:          "Peak shaping rate: a bandwidth (k/m/g) or `percent <n>` — enforced as the root shaper on the bound unit (percent accepted-but-inert)",
+			desc:          "Peak shaping rate: a bandwidth (k/m/g) or `percent <n>` — enforced as the root shaper on the bound unit (percent resolved to an absolute rate at commit)",
 			args:          1,
 			placeholder:   "<rate|percent>",
 			valueType:     ValueRateOrPercent,
