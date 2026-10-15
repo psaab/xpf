@@ -127,11 +127,11 @@ pub(crate) fn adjust_zero_checksum_illegal(
     }
 }
 
-pub(in crate::afxdp) fn checksum16(bytes: &[u8]) -> u16 {
+pub(crate) fn checksum16(bytes: &[u8]) -> u16 {
     checksum16_finish(checksum16_add_bytes(0, bytes))
 }
 
-pub(in crate::afxdp) fn checksum16_add_bytes(sum: u32, bytes: &[u8]) -> u32 {
+pub(crate) fn checksum16_add_bytes(sum: u32, bytes: &[u8]) -> u32 {
     // #1440: short-circuit for sub-chunk inputs. The AVX2 path
     // below uses `chunks_exact(32)`; for slices < 32 bytes (e.g.
     // 20-byte IPv4 headers, 8-byte UDP headers, 8-byte TCP option
@@ -259,7 +259,7 @@ mod x86_avx2 {
     }
 }
 
-pub(in crate::afxdp) fn checksum16_finish(mut sum: u32) -> u16 {
+pub(crate) fn checksum16_finish(mut sum: u32) -> u16 {
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }

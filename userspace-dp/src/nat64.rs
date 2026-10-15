@@ -3860,49 +3860,21 @@ fn recompute_l4_checksum_after_nat64_v4_to_v6(packet: &mut [u8], next_header: u8
 // Checksum helpers
 // ---------------------------------------------------------------------------
 
+// #13086 (D6-13): the scalar duplicates of afxdp::frame::checksum are
+// gone — delegate to the shared (vectorized) implementation. Bit-
+// identical by the frame module's own differential tests.
 fn checksum16(data: &[u8]) -> u16 {
-    let mut sum = 0u32;
-    let mut chunks = data.chunks_exact(2);
-    for chunk in &mut chunks {
-        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-    }
-    if let Some(&last) = chunks.remainder().first() {
-        sum += (last as u32) << 8;
-    }
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
+    crate::afxdp::frame::checksum::checksum16(data)
 }
 
-/// Add `bytes` into a running one's-complement 16-bit partial sum. Mirrors
-/// the scalar reference in `afxdp/frame/checksum.rs::checksum16_add_bytes`
-/// so the pseudo-header checksum can be accumulated by streaming the
-/// pseudo-header fields and the L4 payload directly, with NO intermediate
-/// `Vec` allocation per packet (#2211). The fold result is bit-identical to
-/// building a contiguous buffer and running `checksum16` over it because
-/// 16-bit one's-complement addition is associative across the concatenation.
 #[inline]
-fn checksum16_add(mut sum: u32, bytes: &[u8]) -> u32 {
-    let mut chunks = bytes.chunks_exact(2);
-    for chunk in &mut chunks {
-        sum = sum.wrapping_add(u16::from_be_bytes([chunk[0], chunk[1]]) as u32);
-    }
-    if let Some(&last) = chunks.remainder().first() {
-        sum = sum.wrapping_add((last as u32) << 8);
-    }
-    sum
+fn checksum16_add(sum: u32, bytes: &[u8]) -> u32 {
+    crate::afxdp::frame::checksum::checksum16_add_bytes(sum, bytes)
 }
 
-/// Fold a running partial sum into the final one's-complement 16-bit value.
-/// Identical fold to `checksum16`'s tail so streaming and buffer-building
-/// produce the same checksum.
 #[inline]
-fn checksum16_fold(mut sum: u32) -> u16 {
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
+fn checksum16_fold(sum: u32) -> u16 {
+    crate::afxdp::frame::checksum::checksum16_finish(sum)
 }
 
 /// IPv4 pseudo-header + L4 checksum, streamed (no per-packet `Vec`, #2211).

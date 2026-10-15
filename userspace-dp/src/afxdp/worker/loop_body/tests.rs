@@ -122,6 +122,7 @@ mod flow_cache_invalidation_tests {
             ingress_ifindex,
             logical_ingress_ifindex: ingress_ifindex,
             descriptor: RewriteDescriptor {
+                last_queue_id: None,
                 dst_mac: [0; 6],
                 src_mac: [0; 6],
                 fabric_redirect: false,
