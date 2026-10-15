@@ -1172,6 +1172,7 @@ fn apply_descriptor_nat64_falls_back() {
         nat64: true,
         nptv6: false,
         apply_nat_on_fabric: false,
+        last_queue_id: None,
     };
     let area = MmapArea::new(4096).expect("mmap");
     let meta = UserspaceDpMeta::default();

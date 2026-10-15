@@ -572,6 +572,27 @@ pub(super) fn stage_flow_cache_hit(
                     cached_descriptor.tx_selection.dscp_rewrite
                 }
             });
+        // #13077: this packet is now being served on `cached_queue_id`
+        // (BA-reclassified or the pinned seed queue). Stamp it on the
+        // cached entry — through the borrow this function already holds,
+        // so no second cache scan on the hit path — so the debug scan
+        // attributes the flow to the queue that actually served its
+        // latest packet instead of the frozen seed selection. Only the
+        // mutable tail is touched; `cached_descriptor`'s shared borrow
+        // above has ended (NLL) and the later descriptor reads re-borrow.
+        if cached_queue_id.is_some() {
+            // SAFETY: `cached` is the `&FlowCacheEntry` handed out by
+            // `lookup_counted_with_scheduler_expiry`; the cache is
+            // worker-owned and single-threaded on this path, and no other
+            // borrow of the entry is live at this point. The raw-pointer
+            // store mirrors the entry-mutation the lookup itself already
+            // performed (`last_used_epoch`/`observed_bytes`) before handing
+            // out the shared borrow.
+            unsafe {
+                let entry_ptr = cached as *const FlowCacheEntry as *mut FlowCacheEntry;
+                (*entry_ptr).descriptor.last_queue_id = cached_queue_id;
+            }
+        }
         // #2501: account this forwarded packet against the session. The packet
         // is keyed by its OWN tuple (`flow.forward_key`); `account_packet`
         // derives the direction from the resolved entry and folds both
