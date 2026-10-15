@@ -470,6 +470,46 @@ fn static_discard_revokes_the_established_session_end_to_end_7212() {
     );
 }
 
+/// #13651: a static deny in a filter that also varies per packet must still
+/// revoke the established session pair. The dynamic DSCP accept makes the
+/// filter-wide per-packet gate true; placing the flow-invariant deny first
+/// makes it the selected terminal action for this tuple.
+#[test]
+fn mixed_filter_static_discard_revokes_the_established_pair_13651() {
+    let mut dscp_accept = term("ef-accept", "5201", "accept");
+    dscp_accept.dscp_values = vec![46];
+    let out = drive_one_packet(vec![
+        term("blocked-5201", "5201", "discard"),
+        dscp_accept,
+    ]);
+
+    let mut sessions = out.sessions;
+    let forward_key = flow_key(FLOW_DST_PORT);
+    let reverse_key =
+        crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    assert!(
+        sessions
+            .lookup(&forward_key, 124_000_000_000, 0)
+            .is_none(),
+        "the flow-invariant deny must tear down the forward session"
+    );
+    assert!(
+        sessions
+            .lookup(&reverse_key, 124_000_000_000, 0)
+            .is_none(),
+        "the flow-invariant deny must tear down the reverse companion too"
+    );
+    assert_eq!(
+        out.revoked_count, 1,
+        "the mixed-filter revocation must be accounted exactly once"
+    );
+    assert!(out.revoked_scratch.contains(&forward_key));
+    assert!(
+        out.revoked_scratch.contains(&reverse_key),
+        "the pair's reverse flow-cache key must reach eviction"
+    );
+}
+
 /// #10467 end-to-end bind: an established MAIN session that becomes subject
 /// to a PBR steer into an empty VRF is dropped and revoked on the hit. The next
 /// packet will take the session-miss path; this packet must never use MAIN.

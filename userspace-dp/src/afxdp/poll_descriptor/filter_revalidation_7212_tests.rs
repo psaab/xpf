@@ -680,6 +680,151 @@ fn a_per_packet_filter_drops_the_packet_without_revoking_the_session_7212() {
         "the per-packet arm must not consume the static revalidation stamp"
     );
 }
+/// #13651 (D5-17): a MIXED filter — a flow-invariant `then discard` term plus
+/// a term that makes the FILTER vary per packet (here a DSCP term) — must not
+/// hide the static deny behind the per-packet arm. The filter-wide
+/// `varies_per_packet_within_flow()` flag used to route every hit to the
+/// per-packet arm with `revoked_key: None`, so a newly committed static
+/// 5-tuple deny dropped packets one by one while the session pair, its
+/// reverse companion and its flow-cache slots stayed alive. When the static
+/// (flow-level) deny is the winning terminal term, it revokes, naming the
+/// canonical key, exactly like the pure-static #7212 arm.
+#[test]
+fn mixed_filter_static_discard_revokes_the_session_13651() {
+    let mut dscp_accept = accept_term("ef-accept", "5201");
+    dscp_accept.dscp_values = vec![46];
+    let forwarding = forwarding_with_input_filter(
+        LAN_IFINDEX,
+        false,
+        vec![deny_term("blocked-5201", "5201"), dscp_accept],
+    );
+    let flow = v4_flow(5201);
+    let mut sessions = table_with_session(&flow, 7, None);
+
+    let (hit, already_counted) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+    );
+    let hit = hit.expect("the static deny must produce a verdict");
+    assert!(already_counted, "the counted per-packet evaluator ran");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert_eq!(
+        hit.revoked_key.as_ref(),
+        Some(&flow.forward_key),
+        "a flow-invariant deny inside a mixed (per-packet-varying) filter \
+         must revoke the session pair, not merely drop this packet"
+    );
+    assert!(
+        sessions.filter_revalidation_stale(&flow.forward_key, LAN_IFINDEX),
+        "a DENY must leave the stamp stale: if the teardown does not take, \
+         the next packet re-derives the deny instead of forwarding"
+    );
+}
+
+/// #13651: mixed-filter per-packet denies remain packet-scoped. The flow's
+/// DSCP discard is the first matching terminal term; the later static deny
+/// must not cause revocation merely because it matches the same 5-tuple.
+#[test]
+fn mixed_filter_dscp_discard_does_not_revoke_the_session_13651() {
+    let mut dscp_deny = deny_term("ef-discard", "5201");
+    dscp_deny.dscp_values = vec![0];
+    let forwarding = forwarding_with_input_filter(
+        LAN_IFINDEX,
+        false,
+        vec![dscp_deny, deny_term("blocked-5201", "5201")],
+    );
+    let flow = v4_flow(5201);
+    let mut sessions = table_with_session(&flow, 7, None);
+
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+    );
+    let hit = hit.expect("the per-packet DSCP discard drops this packet");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert!(
+        hit.revoked_key.is_none(),
+        "a DSCP-dependent deny must not revoke the session pair"
+    );
+}
+
+/// #13651 guard: the mixed-filter revocation is gated on the same stamp as
+/// the pure-static arm. A session already judged FRESH under the live
+/// (generation, ingress) pair is dropped per-packet only — the revocation
+/// fires once per session per generation, on the stale packet.
+#[test]
+fn mixed_filter_static_discard_does_not_revoke_a_fresh_session_13651() {
+    let mut dscp_accept = accept_term("ef-accept", "5201");
+    dscp_accept.dscp_values = vec![46];
+    let forwarding = forwarding_with_input_filter(
+        LAN_IFINDEX,
+        false,
+        vec![deny_term("blocked-5201", "5201"), dscp_accept],
+    );
+    let flow = v4_flow(5201);
+    let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
+
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+    );
+    let hit = hit.expect("the per-packet deny still drops this packet");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert!(
+        hit.revoked_key.is_none(),
+        "a fresh-stamped session is not re-revoked on every dropped packet"
+    );
+}
+
+/// #13651 guard: with NO local entry (the #8114 sessionless shape) there is
+/// nothing to tear down, so the mixed-filter deny drops only this packet and
+/// names no key — revoking on a resolved-but-unstored tuple would hand the
+/// caller a key that names nothing, or worse, another session's.
+#[test]
+fn mixed_filter_static_discard_without_local_entry_revokes_nothing_13651() {
+    let mut dscp_accept = accept_term("ef-accept", "5201");
+    dscp_accept.dscp_values = vec![46];
+    let forwarding = forwarding_with_input_filter(
+        LAN_IFINDEX,
+        false,
+        vec![deny_term("blocked-5201", "5201"), dscp_accept],
+    );
+    let flow = v4_flow(5201);
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+    );
+    let hit = hit.expect("the per-packet deny still drops this packet");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert_eq!(
+        hit.revoked_key, None,
+        "there is no entry to revoke; naming one would hand the caller a \
+         key that names nothing"
+    );
+}
 
 /// The REPLY direction of a source-NAT'd flow, reached through the NAT
 /// reverse-translated ALIAS index, must revalidate too — and the verdict must

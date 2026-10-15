@@ -24,7 +24,8 @@ pub(crate) use eval::{
     evaluate_interface_filter, evaluate_interface_filter_counted,
     evaluate_interface_filter_log_match, evaluate_interface_filter_non_routing_counted,
     evaluate_interface_output_filter, evaluate_interface_output_filter_counted, evaluate_lo0_filter,
-    evaluate_lo0_filter_counted, evaluate_lo0_filter_log_match, filter_ref_static_verdict,
+    evaluate_lo0_filter_counted, evaluate_lo0_filter_log_match,
+    filter_ref_deny_is_flow_invariant, filter_ref_static_verdict,
     interface_filter_affects_route_lookup, interface_filter_route_lookup_affecting,
     interface_input_filter, NonRoutingCountPolicy,
 };
