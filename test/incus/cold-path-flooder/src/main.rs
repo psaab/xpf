@@ -775,6 +775,18 @@ fn format_progress_json(
         err_other_delta
     )
 }
+/// Convert cumulative counters to run-phase counters using a shared
+/// warmup snapshot. This keeps every progress field in the same window.
+fn progress_stats_since_warmup(stats: &RunStats, baseline: &RunStats) -> RunStats {
+    RunStats {
+        tx_packets: stats.tx_packets.saturating_sub(baseline.tx_packets),
+        tx_batches: stats.tx_batches.saturating_sub(baseline.tx_batches),
+        err_eagain: stats.err_eagain.saturating_sub(baseline.err_eagain),
+        err_partial: stats.err_partial.saturating_sub(baseline.err_partial),
+        err_other: stats.err_other.saturating_sub(baseline.err_other),
+        first_other_errno: stats.first_other_errno,
+    }
+}
 
 #[cfg(test)]
 fn select_smoke_test_iface() -> Result<Option<String>, String> {
@@ -974,6 +986,23 @@ impl PaddedStats {
         }
     }
 }
+fn publish_warmup_baseline_if_due(
+    now: Instant,
+    warmup_end: Instant,
+    published: &mut bool,
+    stats: &PaddedStats,
+    packet_baseline: &AtomicU64,
+    batch_baseline: &AtomicU64,
+    ready: &AtomicBool,
+) {
+    if *published || now < warmup_end {
+        return;
+    }
+    packet_baseline.store(stats.tx_packets.load(Ordering::Relaxed), Ordering::Relaxed);
+    batch_baseline.store(stats.tx_batches.load(Ordering::Relaxed), Ordering::Relaxed);
+    ready.store(true, Ordering::Release);
+    *published = true;
+}
 
 // PaddedStats must be exactly one cache line so adjacent slots in a
 // Vec do not share a cache line with neighbouring workers' atomics.
@@ -1020,10 +1049,7 @@ fn pin_self_to_cpu(cpu: i32) -> Result<(), String> {
 /// Per-thread context passed into a worker closure. Owns its WorkerFd
 /// (RAII close on drop), its PaddedStats publish slot, its seed, and
 /// a clone of the shared shutdown_flag + first_fatal_error slot.
-/// `start_at` and `total_deadline` are computed once in main so every
-/// worker uses the SAME run window. Without this, late-scheduled
-/// workers would extend the run past the requested duration (CODEX
-/// code-r1 finding 3).
+/// `start_at` and `total_deadline` define the shared worker run window.
 struct WorkerCtx {
     thread_id: u32,
     fd: WorkerFd,
@@ -1033,12 +1059,8 @@ struct WorkerCtx {
     shutdown_flag: Arc<AtomicBool>,
     first_fatal: Arc<Mutex<Option<String>>>,
     pin_cpu: Option<i32>,
-    /// All workers share these deadlines (computed once in main) so
-    /// late-scheduled workers cannot extend the run past
-    /// `total_deadline`. `start_at` is kept for diagnostic logging
-    /// even though the hot loop only references `warmup_end` +
-    /// `total_deadline`. (CODEX code-r1 finding 3.)
-    #[allow(dead_code)]
+    /// All workers wait for the shared start time so their warmup
+    /// interval is identical and no packets are sent before it begins.
     start_at: Instant,
     warmup_end: Instant,
     total_deadline: Instant,
@@ -1051,6 +1073,7 @@ struct WorkerCtx {
     // cumulative-since-start IN THE SAME RECORD, so packets-per-batch derived
     // from that record was wrong and nothing in it said so.
     warmup_baseline_batches: Arc<AtomicU64>,
+    warmup_baseline_ready: Arc<AtomicBool>,
 }
 
 /// Total number of unique 5-tuples a run can generate, given the span
@@ -1136,29 +1159,29 @@ fn worker_loop(args: &Args, mut ctx: WorkerCtx) {
         worker_slice(ctx.thread_id, args.threads, tuple_space(args));
     let mut seq_idx = slice_base;
 
+    while Instant::now() < ctx.start_at {
+        if ctx.shutdown_flag.load(Ordering::Relaxed) { return; }
+        std::thread::sleep(ctx.start_at.saturating_duration_since(Instant::now()));
+    }
     loop {
-        // Shutdown check at top of each batch (#1615 plan-v4 §3.9).
+        let now = Instant::now();
+        // Publish the baseline before either shutdown or deadline exits:
+        // zero-duration runs and workers awakened at the deadline still
+        // need to exclude all warmup traffic from the final summary.
+        publish_warmup_baseline_if_due(
+            now,
+            ctx.warmup_end,
+            &mut warmup_baseline_published,
+            &ctx.stats,
+            &ctx.warmup_baseline,
+            &ctx.warmup_baseline_batches,
+            &ctx.warmup_baseline_ready,
+        );
         if ctx.shutdown_flag.load(Ordering::Relaxed) {
             return;
         }
-        let now = Instant::now();
-        // Shared deadline: all workers exit at the same `total_deadline`
-        // computed once in main. Prevents late-scheduled workers from
-        // extending the run. (CODEX code-r1 finding 3.)
-        if now >= ctx.total_deadline { return; }
-        // At warmup-end, publish baseline tx_packets so main can
-        // subtract warmup work from the final summary. (CODEX code-r1
-        // finding 2.) One store per worker.
-        if !warmup_baseline_published && now >= ctx.warmup_end {
-            // #7174 C15: both baselines at ONE instant. Reading them at
-            // different times would reintroduce the mismatch this fixes, in a
-            // smaller and harder-to-see form.
-            let baseline = ctx.stats.tx_packets.load(Ordering::Relaxed);
-            let baseline_batches = ctx.stats.tx_batches.load(Ordering::Relaxed);
-            ctx.warmup_baseline.store(baseline, Ordering::Relaxed);
-            ctx.warmup_baseline_batches
-                .store(baseline_batches, Ordering::Relaxed);
-            warmup_baseline_published = true;
+        if now >= ctx.total_deadline {
+            return;
         }
 
         // Refill all batch slots with fresh tuples.
@@ -1356,6 +1379,8 @@ fn run_multi_threaded(
         (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect();
     let warmup_baselines_batches: Vec<Arc<AtomicU64>> =
         (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect();
+    let warmup_baseline_ready: Vec<Arc<AtomicBool>> =
+        (0..n).map(|_| Arc::new(AtomicBool::new(false))).collect();
     // Shared deadlines so every worker uses the same window.
     let start_at = Instant::now() + Duration::from_millis(50);
     let warmup_end = start_at + args.warmup;
@@ -1404,6 +1429,7 @@ fn run_multi_threaded(
             total_deadline,
             warmup_baseline: warmup_baselines[tid].clone(),
             warmup_baseline_batches: warmup_baselines_batches[tid].clone(),
+            warmup_baseline_ready: warmup_baseline_ready[tid].clone(),
         };
         let args_owned = args.clone();
         // std::thread::Builder is mandatory (#1615 plan-v4 §3.9 +
@@ -1445,6 +1471,8 @@ fn run_multi_threaded(
     let mut next_emit_at = warmup_end + Duration::from_secs(1);
     let mut prev_agg = RunStats::default();
     let mut prev_emit_at = warmup_end;
+    let mut progress_baseline_ready = false;
+    let mut progress_warmup_baseline = RunStats::default();
     while Instant::now() < total_deadline {
         if shutdown_flag.load(Ordering::Relaxed) {
             // Worker reported fatal; break out and join below.
@@ -1452,15 +1480,38 @@ fn run_multi_threaded(
         }
         let now = Instant::now();
         if now >= next_emit_at {
-            let agg = sum_slots(&stats_slots);
-            let elapsed = now - start_at;
-            eprintln!(
-                "{}",
-                format_progress_json(elapsed, &agg, &prev_agg, now - prev_emit_at)
-            );
-            prev_agg = agg;
-            prev_emit_at = now;
-            next_emit_at = now + Duration::from_secs(1);
+            if !progress_baseline_ready
+                && warmup_baseline_ready
+                    .iter()
+                    .all(|ready| ready.load(Ordering::Acquire))
+            {
+                progress_warmup_baseline.tx_packets = warmup_baselines
+                    .iter()
+                    .map(|baseline| baseline.load(Ordering::Relaxed))
+                    .sum();
+                progress_warmup_baseline.tx_batches = warmup_baselines_batches
+                    .iter()
+                    .map(|baseline| baseline.load(Ordering::Relaxed))
+                    .sum();
+                progress_baseline_ready = true;
+            }
+            if !progress_baseline_ready {
+                next_emit_at = now + Duration::from_millis(100);
+            }
+            if progress_baseline_ready {
+                let agg = progress_stats_since_warmup(
+                    &sum_slots(&stats_slots),
+                    &progress_warmup_baseline,
+                );
+                let elapsed = now - start_at;
+                eprintln!(
+                    "{}",
+                    format_progress_json(elapsed, &agg, &prev_agg, now - prev_emit_at)
+                );
+                prev_agg = agg;
+                prev_emit_at = now;
+                next_emit_at = now + Duration::from_secs(1);
+            }
         }
         // Sleep up to 100 ms or until next emit, whichever sooner.
         let sleep_until = next_emit_at.min(now + Duration::from_millis(100));
@@ -2093,6 +2144,57 @@ mod tests {
         assert!(line.contains("\"err_eagain_delta\":3"));
         assert!(line.contains("\"err_partial_delta\":1"));
         assert!(line.contains("\"err_other_delta\":3"));
+    }
+    #[test]
+    fn first_progress_interval_excludes_warmup_traffic() {
+        // At the first progress tick after a 2-second warmup, the slots
+        // contain 2 seconds of warmup plus 1 second of measured traffic.
+        let after_one_second = RunStats {
+            tx_packets: 300_000,
+            tx_batches: 9_375,
+            ..RunStats::default()
+        };
+        let warmup = RunStats {
+            tx_packets: 200_000,
+            tx_batches: 6_250,
+            ..RunStats::default()
+        };
+        let run_stats = progress_stats_since_warmup(&after_one_second, &warmup);
+        let line = format_progress_json(
+            Duration::from_secs(3),
+            &run_stats,
+            &RunStats::default(),
+            Duration::from_secs(1),
+        );
+        assert!(line.contains("\"pps\":100000"));
+        assert!(line.contains("\"tx_packets_delta\":100000"));
+    }
+
+    #[test]
+    fn warmup_baseline_is_published_at_deadline() {
+        let stats = PaddedStats::new();
+        stats.tx_packets.store(1_234, Ordering::Relaxed);
+        stats.tx_batches.store(38, Ordering::Relaxed);
+        let packet_baseline = AtomicU64::new(0);
+        let batch_baseline = AtomicU64::new(0);
+        let ready = AtomicBool::new(false);
+        let deadline = Instant::now();
+        let mut published = false;
+
+        publish_warmup_baseline_if_due(
+            deadline,
+            deadline,
+            &mut published,
+            &stats,
+            &packet_baseline,
+            &batch_baseline,
+            &ready,
+        );
+
+        assert!(published);
+        assert!(ready.load(Ordering::Acquire));
+        assert_eq!(packet_baseline.load(Ordering::Relaxed), 1_234);
+        assert_eq!(batch_baseline.load(Ordering::Relaxed), 38);
     }
 
     #[test]
