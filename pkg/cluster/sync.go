@@ -2271,14 +2271,7 @@ func (s *SessionSync) SetRuntimeDomains(sessions dataplane.SessionStore, telemet
 // Stats returns a point-in-time snapshot of sync statistics.
 func (s *SessionSync) Stats() SyncStatsSnapshot {
 	s.mu.Lock()
-	var activeFabric int
-	if s.conn0 != nil {
-		activeFabric = 0
-	} else if s.conn1 != nil {
-		activeFabric = 1
-	} else {
-		activeFabric = -1
-	}
+	activeFabric := s.preferredFabricLocked()
 	s.mu.Unlock()
 	return SyncStatsSnapshot{
 		SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(),
@@ -2349,13 +2342,7 @@ func (s *SessionSync) BulkEverCompleted() bool {
 func (s *SessionSync) ActiveFabric() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn0 != nil {
-		return 0
-	}
-	if s.conn1 != nil {
-		return 1
-	}
-	return -1
+	return s.preferredFabricLocked()
 }
 
 // LastPeerReceiveAge reports how long it has been since the last inbound sync
