@@ -179,11 +179,7 @@ mod tests {
     #[test]
     fn readable_wins_over_a_sibling_fault() {
         assert_eq!(
-            classify(
-                2,
-                0,
-                &[pfd(libc::POLLNVAL), pfd(libc::POLLIN)]
-            ),
+            classify(2, 0, &[pfd(libc::POLLNVAL), pfd(libc::POLLIN)]),
             IdlePoll::Waited,
             "one bad binding must not make the worker sleep past another \
              binding's pending RX"

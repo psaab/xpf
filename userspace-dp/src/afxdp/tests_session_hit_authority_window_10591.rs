@@ -1044,21 +1044,16 @@ fn c6_expire_ha_context_covers_hold_and_self_heal_10591() {
 
 #[test]
 fn c6_worker_loop_wiring_orders_expire_before_reap_10591() {
-    // Bounded to `worker_loop`'s body: from its definition through the next
-    // top-level `fn` (`retire_expired_missing_neighbor_seeds`). Excludes the
-    // `fn reap_expired_sessions` definition and the
-    // `production_sweep_for_test` seam below, so only the production call
-    // pair inside the loop can satisfy this guard.
-    let source = include_str!("worker/loop_body/mod.rs");
-    let body_start = source
-        .find("pub(crate) fn worker_loop(")
-        .expect("worker loop definition must exist");
-    let body_end = source[body_start..]
-        .find("\nfn retire_expired_missing_neighbor_seeds(")
-        .map(|offset| body_start + offset)
-        .expect("worker loop body must end at the next fn");
-    let body = &source[body_start..body_end];
-    let expire_matches: Vec<_> = body
+    // #13075: the production expire/reap pair moved verbatim into
+    // `run_session_housekeeping` (loop_body/housekeeping.rs), which
+    // `worker_loop` calls once per tick before `poll_binding`. The pair
+    // is counted and ordered in the file that now holds it, and the loop
+    // is pinned to call it before the poll — the same production-order
+    // claim as when the pair was inline, one module boundary over. The
+    // `production_sweep_for_test` seam (gc_teardown.rs) is excluded by
+    // construction: it lives in a different file.
+    let source = include_str!("worker/loop_body/housekeeping.rs");
+    let expire_matches: Vec<_> = source
         .match_indices("sessions.expire_stale_entries_ha(loop_now_ns")
         .collect();
     assert_eq!(
@@ -1066,7 +1061,9 @@ fn c6_worker_loop_wiring_orders_expire_before_reap_10591() {
         1,
         "worker loop body must contain exactly one production expiry call"
     );
-    let reap_matches: Vec<_> = body.match_indices("reap_expired_sessions(").collect();
+    let reap_matches: Vec<_> = source.match_indices("reap_expired_sessions(").collect();
+    // The definition site also matches; count only the call (the def is
+    // `pub(super) fn reap_expired_sessions(` in gc_teardown.rs, not here).
     assert_eq!(
         reap_matches.len(),
         1,
@@ -1076,11 +1073,20 @@ fn c6_worker_loop_wiring_orders_expire_before_reap_10591() {
         reap_matches[0].0 > expire_matches[0].0,
         "production sweep order must be expire then reap"
     );
+    // The loop must actually call the housekeeping fn, before polling.
+    let loop_source = include_str!("worker/loop_body/mod.rs");
+    let hk = loop_source
+        .find("if run_session_housekeeping(")
+        .expect("worker loop must call session housekeeping");
+    let poll = loop_source
+        .find("if poll_binding(")
+        .expect("worker loop must poll bindings");
+    assert!(
+        hk < poll,
+        "session housekeeping (expire+reap) must run before poll_binding"
+    );
 }
 
-// C7's Rust-side cadence citation is a compile-time/test-time invariant: the
-// loose ceiling is an integral number of real wheel ticks, never a fake
-// sub-tick delay. The Go test owns the arm→apply→sweep ordering boundary.
 #[test]
 fn c7_window_delay_is_an_integral_gc_wheel_bound_10591() {
     assert_eq!(GC_TICK_NS, SESSION_GC_INTERVAL_NS_FOR_TEST);

@@ -8375,9 +8375,16 @@ fn pptp_drain_guard_does_not_accept_a_mention_7699() {
 /// passed for a body whose only occurrence was `// crate::afxdp::…`.
 #[test]
 fn worker_loop_drains_the_pptp_control_inbox_7699() {
-    let src = include_str!("../afxdp/worker/loop_body/mod.rs");
+    // #13075: the drain moved into loop_body/pptp_drain.rs and the expiry
+    // walk into loop_body/housekeeping.rs; the loop calls both, in that
+    // order, before the binding poll. Read all three sources: positions
+    // are compared within the file that holds each needle, and mod.rs
+    // pins the call order.
+    let src = include_str!("../afxdp/worker/loop_body/pptp_drain.rs");
+    let housekeeping_src = include_str!("../afxdp/worker/loop_body/housekeeping.rs");
+    let loop_src = include_str!("../afxdp/worker/loop_body/mod.rs");
 
-    let expiry_at = pptp_drain_line(src, PPTP_EXPIRY_NEEDLE).unwrap_or_else(|| {
+    let expiry_at = pptp_drain_line(housekeeping_src, PPTP_EXPIRY_NEEDLE).unwrap_or_else(|| {
         panic!(
             "the worker loop's session-expiry call is gone — this guard's \
              position claim is anchored to a line that no longer exists (#7699)"
@@ -8392,14 +8399,24 @@ fn worker_loop_drains_the_pptp_control_inbox_7699() {
              (#7699)"
         )
     });
+    // The drain and the expiry now live in sibling modules; the order
+    // claim is the loop's: housekeeping (expiry) is called before the
+    // PPTP drain, both before the binding poll.
+    let hk_call = pptp_drain_line(loop_src, "if run_session_housekeeping(")
+        .expect("worker loop must call session housekeeping (#13075)");
+    let drain_call = pptp_drain_line(loop_src, "run_pptp_control_drain(")
+        .expect("worker loop must call the PPTP control drain (#13075)");
+    let poll_call = pptp_drain_line(loop_src, "if poll_binding(")
+        .expect("worker loop must poll bindings (#13075)");
     assert!(
-        drain_at > expiry_at,
-        "the PPTP control drain (line {drain_at}) is not in the periodic region \
-         beside the association expiry (line {expiry_at}) it is the counterpart \
-         of (#7699)"
+        hk_call < drain_call && drain_call < poll_call,
+        "the PPTP control drain is not in the periodic region beside the \
+         association expiry it is the counterpart of: housekeeping must \
+         run first, then the drain, then the poll (#7699/#13075)"
     );
     assert!(
-        !src.contains("CONTROL_DRAIN_INTERVAL_NS"),
+        !src.contains("CONTROL_DRAIN_INTERVAL_NS")
+            && !loop_src.contains("CONTROL_DRAIN_INTERVAL_NS"),
         "the drain's interval gate has been written at the CALL SITE. It \
          belongs inside PptpControlInbox::take_pending: this loop runs at \
          packet rate, so a call-site gate is one edit from per-poll work — the \

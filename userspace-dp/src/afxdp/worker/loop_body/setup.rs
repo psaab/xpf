@@ -94,16 +94,11 @@ pub(super) fn worker_loop_setup(
     // Per plan v4 §4.6: probe_clock_source runs once; calibration is
     // skipped (returning 0) when the clock source is not TSC, avoiding
     // redundant /proc/cpuinfo + /sys probes inside the calibrators.
-    let cp_clock_source =
-        crate::afxdp::cold_path_hist::probe_clock_source();
+    let cp_clock_source = crate::afxdp::cold_path_hist::probe_clock_source();
     let (cp_ns_per_tsc_q32, cp_wrapper_baseline) =
         if cp_clock_source == crate::afxdp::cold_path_hist::ClockSource::Tsc {
-            let q32 =
-                crate::afxdp::cold_path_hist::calibrate_ns_per_tsc_q32();
-            let baseline =
-                crate::afxdp::cold_path_hist::calibrate_wrapper_baseline_ns(
-                    q32,
-                );
+            let q32 = crate::afxdp::cold_path_hist::calibrate_ns_per_tsc_q32();
+            let baseline = crate::afxdp::cold_path_hist::calibrate_wrapper_baseline_ns(q32);
             (q32, baseline)
         } else {
             (0, 0)
@@ -228,11 +223,7 @@ pub(super) fn worker_loop_setup(
     // before the first publish-tick fires. install_calibration writes
     // outside the cold_window_gen seqlock (calibration is set-once;
     // readers always observe a consistent value).
-    cold_path_atomics.install_calibration(
-        cp_ns_per_tsc_q32,
-        cp_wrapper_baseline,
-        cp_clock_source,
-    );
+    cold_path_atomics.install_calibration(cp_ns_per_tsc_q32, cp_wrapper_baseline, cp_clock_source);
     let binding_lookup = WorkerBindingLookup::from_bindings(&bindings);
     let cos_owner_live_by_tx_ifindex = build_worker_cos_owner_live_by_tx_ifindex(
         bindings
@@ -273,9 +264,7 @@ pub(super) fn worker_loop_setup(
     let session_map = bindings
         .first()
         .map(|binding| binding.bpf_maps.session_map.clone())
-        .unwrap_or_else(|| {
-            crate::afxdp::bpf_map::SteeringMapRef::unbound()
-        });
+        .unwrap_or_else(|| crate::afxdp::bpf_map::SteeringMapRef::unbound());
     let conntrack_v4_fd = bindings
         .first()
         .map(|binding| binding.bpf_maps.conntrack_v4_fd)
