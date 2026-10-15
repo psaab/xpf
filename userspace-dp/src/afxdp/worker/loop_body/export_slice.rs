@@ -238,6 +238,15 @@ pub(super) fn run_export_slice(
             Some(&mut *sessions),
         );
         if handled < deltas.len() {
+            // Match drain_and_flush_all_impl: successful tuple-gate
+            // handling is not complete until its delta prefix is flushed.
+            // Only the blocked suffix remains queued for the next tick.
+            flush_deltas(
+                sessions,
+                bindings,
+                worker_lossless_wedged,
+                &deltas[..handled],
+            );
             sessions.requeue_deltas_front(&deltas[handled..]);
             return (true, did_work);
         }

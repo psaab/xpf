@@ -71,6 +71,10 @@ mod bpf_ok_teardown_10590_tests;
 #[cfg(test)]
 #[path = "p2_deadline_9506_tests.rs"]
 mod p2_deadline_9506_tests;
+#[cfg(test)]
+#[path = "export_slice_delta_drain_13653_tests.rs"]
+mod export_slice_delta_drain_13653_tests;
+
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,
 // ancestry matchers, rematch/rebind walkers, the #6291/#6592 refresh seam,
