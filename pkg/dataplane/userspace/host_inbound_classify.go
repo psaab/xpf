@@ -469,7 +469,10 @@ func hostInboundGlobalAccept(proto uint8, icmpType *uint8, family string) bool {
 	if icmpType == nil {
 		return false
 	}
-	if (proto == config.HostInboundProtoICMP && family != "ip") || (proto == config.HostInboundProtoICMPv6 && family != "ip6") {
+	// An absent destination address leaves the family unknown, not mismatched.
+	// Reject only an explicit cross-family query.
+	if (proto == config.HostInboundProtoICMP && family == "ip6") ||
+		(proto == config.HostInboundProtoICMPv6 && family == "ip") {
 		return false
 	}
 	t := *icmpType

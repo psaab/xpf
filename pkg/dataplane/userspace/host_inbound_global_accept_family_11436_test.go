@@ -15,6 +15,12 @@ func TestClassifyHostInboundGlobalAcceptFamilyPairing11436(t *testing.T) {
 		{"icmpv6 on IPv6 remains global", 58, 135, "ip6", HostInboundGlobalAccept},
 		{"icmpv4 on IPv6 is zone-gated", 1, 3, "ip6", HostInboundDenied},
 		{"icmpv6 on IPv4 is zone-gated", 58, 135, "ip", HostInboundDenied},
+		{"icmpv4 error addressless is global", 1, 3, "", HostInboundGlobalAccept},
+		{"icmpv4 time-exceeded addressless is global", 1, 11, "", HostInboundGlobalAccept},
+		{"icmpv4 param-problem addressless is global", 1, 12, "", HostInboundGlobalAccept},
+		{"icmpv6 ND addressless is global", 58, 135, "", HostInboundGlobalAccept},
+		{"icmpv6 error addressless is global", 58, 1, "", HostInboundGlobalAccept},
+		{"icmpv4 echo remains token-gated", 1, 8, "", HostInboundTokenAdmit},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
