@@ -118,6 +118,58 @@ func TestFairnessThroughputWindowPrunesBoundarySampleWithoutCapping(t *testing.T
 	}
 }
 
+// TestFairnessThroughputWindowDuplicateTupleAcrossBindingsAddsNoPhantomBytes
+// pins the #13091 contract: two bindings reporting the same (egress
+// ifindex, CoS queue, forward wire key) are two independent ObservedBytes
+// counters. Completely static counters must add zero bytes on every
+// scrape, and real progress must contribute each counter's own delta
+// exactly once. Pre-fix, the (queue, tuple)-only key let the duplicate
+// rows overwrite w.prev in place, so each scrape after the first
+// fabricated min(a, b) + |a - b| phantom bytes via the counter-reset
+// branch (1_000 per scrape for the values below).
+func TestFairnessThroughputWindowDuplicateTupleAcrossBindingsAddsNoPhantomBytes(t *testing.T) {
+	window := NewFairnessThroughputWindow(30 * time.Second)
+	now := time.Unix(100, 0)
+	queueID := uint8(4)
+	dupTuple := FlowTupleStatus{
+		AddrFamily: 2,
+		Protocol:   6,
+		SrcIP:      "10.0.0.9",
+		DstIP:      "198.51.100.1",
+		SrcPort:    10009,
+		DstPort:    5201,
+	}
+	status := throughputStatus(queueID, 1_000, 500)
+	status.FlowWorkerMap[1].ForwardWireKey = dupTuple
+	status.FlowWorkerMap[0].ForwardWireKey = dupTuple
+	status.FlowWorkerMap[0].Slot = 0
+	status.FlowWorkerMap[1].Slot = 1
+
+	if got := window.Update(now, status); len(got) != 0 {
+		t.Fatalf("first update produced %d summaries, want 0", len(got))
+	}
+	// Zero packet progress on every row: no summary may carry new bytes.
+	for step := 1; step <= 2; step++ {
+		if got := window.Update(now.Add(time.Duration(step)*10*time.Second), status); len(got) != 0 {
+			t.Fatalf("static scrape %d produced %d summaries, want 0: %+v", step, len(got), got)
+		}
+	}
+	// Real progress: each counter adds its own delta once (1_000 + 1_000),
+	// with no reset-branch inflation and no lost bytes.
+	status.FlowWorkerMap[0].ObservedBytes = 2_000
+	status.FlowWorkerMap[1].ObservedBytes = 1_500
+	got := window.Update(now.Add(30*time.Second), status)
+	if len(got) != 1 {
+		t.Fatalf("progress scrape produced %d summaries, want 1", len(got))
+	}
+	if got[0].ObservedBytes != 2_000 {
+		t.Fatalf("ObservedBytes = %d, want 2000", got[0].ObservedBytes)
+	}
+	if got[0].FlowCount != 2 {
+		t.Fatalf("FlowCount = %d, want 2 (one flow per binding counter)", got[0].FlowCount)
+	}
+}
+
 func TestFairnessThroughputWindowTruncationResetsWindow(t *testing.T) {
 	window := NewFairnessThroughputWindow(30 * time.Second)
 	now := time.Unix(100, 0)
