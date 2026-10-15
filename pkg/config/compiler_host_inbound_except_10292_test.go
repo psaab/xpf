@@ -188,20 +188,12 @@ func hostInboundAdmissionTupleSet12053(tokens []string, family string) map[hostI
 }
 
 func TestHostInboundExceptAllMetaTokenPreservesExplicitServices12053(t *testing.T) {
-	cfg, err := CompileConfig(parse10292(t,
+	_, err := CompileConfig(parse10292(t,
 		`security { zones { security-zone trust { host-inbound-traffic { system-services { ssh; ping; all { except; } } } } } }`))
-	if err != nil {
-		t.Fatalf("strict CompileConfig: %v", err)
-	}
-	got := cfg.Security.Zones["trust"].HostInboundTraffic
-	if !reflect.DeepEqual(got.SystemServices, []string{"ssh", "ping"}) {
-		t.Fatalf("strict compile system-services = %v, want [ssh ping]", got.SystemServices)
-	}
-	if len(cfg.Warnings) != 0 {
-		t.Fatalf("strict compile unexpectedly warned: %v", cfg.Warnings)
+	if err == nil || !strings.Contains(err.Error(), "all") {
+		t.Fatalf("strict CompileConfig error = %v, want rejection of all except", err)
 	}
 }
-
 func hostInboundTupleOverlap12053(a, b L4Match) bool {
 	if a.Proto != b.Proto {
 		return false
@@ -515,40 +507,19 @@ func TestHostInboundExcept10292StandaloneShapesCompileEmpty(t *testing.T) {
 		name string
 		tree *ConfigTree
 	}{
-		{
-			name: "services-hierarchical",
-			tree: parse10292(t, prefix+`system-services { ssh { except; } }`+suffix),
-		},
-		{
-			name: "services-flat",
-			tree: flat10292(t,
-				"set security zones security-zone trust host-inbound-traffic system-services ssh except"),
-		},
-		{
-			name: "protocols-hierarchical",
-			tree: parse10292(t, prefix+`protocols { ospf { except; } }`+suffix),
-		},
-		{
-			name: "protocols-flat",
-			tree: flat10292(t,
-				"set security zones security-zone trust host-inbound-traffic protocols ospf except"),
-		},
+		{name: "services-hierarchical", tree: parse10292(t, prefix+`system-services { ssh { except; } }`+suffix)},
+		{name: "services-flat", tree: flat10292(t, "set security zones security-zone trust host-inbound-traffic system-services ssh except")},
+		{name: "protocols-hierarchical", tree: parse10292(t, prefix+`protocols { ospf { except; } }`+suffix)},
+		{name: "protocols-flat", tree: flat10292(t, "set security zones security-zone trust host-inbound-traffic protocols ospf except")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := hostInbound10292(t, tc.tree)
-			if !reflect.DeepEqual(got.SystemServices, []string{}) &&
-				(tc.name == "services-hierarchical" || tc.name == "services-flat") {
-				t.Fatalf("effective system-services = %v, want empty", got.SystemServices)
-			}
-			if !reflect.DeepEqual(got.Protocols, []string{}) &&
-				(tc.name == "protocols-hierarchical" || tc.name == "protocols-flat") {
-				t.Fatalf("effective protocols = %v, want empty", got.Protocols)
+			if _, err := CompileConfig(tc.tree); err == nil || !strings.Contains(err.Error(), "except") {
+				t.Fatalf("CompileConfig error = %v, want except-without-all rejection", err)
 			}
 		})
 	}
 }
-
 func TestHostInboundExcept10292DoubleModifierFails(t *testing.T) {
 	const config = `security { zones { security-zone trust { host-inbound-traffic {
 		system-services { ssh except except; }
@@ -579,48 +550,32 @@ func hostInboundInterface10292(t *testing.T, tree *ConfigTree) *HostInboundTraff
 func TestHostInboundExcept10292PerInterfaceShapes(t *testing.T) {
 	const hierarchical = `interfaces {
 		ge-0/0/0 {
-			unit 0 {
-				family inet { address 10.0.0.1/24; }
-			}
+			unit 0 { family inet { address 10.0.0.1/24; } }
 		}
 	}
 	security { zones { security-zone trust {
 		interfaces { ge-0/0/0.0 {
-			host-inbound-traffic {
-				system-services { ssh { except; } }
-				protocols { ospf { except; } }
-			}
+			host-inbound-traffic { system-services { ssh { except; } } protocols { ospf { except; } } }
 		} }
 	} } }`
 	cases := []struct {
 		name string
 		tree *ConfigTree
 	}{
-		{
-			name: "hierarchical",
-			tree: parse10292(t, hierarchical),
-		},
-		{
-			name: "flat",
-			tree: flat10292(t,
-				"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
-				"set security zones security-zone trust interfaces ge-0/0/0.0 host-inbound-traffic system-services ssh except",
-				"set security zones security-zone trust interfaces ge-0/0/0.0 host-inbound-traffic protocols ospf except"),
-		},
+		{name: "hierarchical", tree: parse10292(t, hierarchical)},
+		{name: "flat", tree: flat10292(t,
+			"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
+			"set security zones security-zone trust interfaces ge-0/0/0.0 host-inbound-traffic system-services ssh except",
+			"set security zones security-zone trust interfaces ge-0/0/0.0 host-inbound-traffic protocols ospf except")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := hostInboundInterface10292(t, tc.tree)
-			if len(got.SystemServices) != 0 {
-				t.Fatalf("effective interface system-services = %v, want empty", got.SystemServices)
-			}
-			if len(got.Protocols) != 0 {
-				t.Fatalf("effective interface protocols = %v, want empty", got.Protocols)
+			if _, err := CompileConfig(tc.tree); err == nil || !strings.Contains(err.Error(), "except") {
+				t.Fatalf("CompileConfig error = %v, want per-interface except-without-all rejection", err)
 			}
 		})
 	}
 }
-
 func without10292(tokens []string, excluded ...string) []string {
 	set := make(map[string]bool, len(excluded))
 	for _, token := range excluded {

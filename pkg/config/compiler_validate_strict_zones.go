@@ -764,22 +764,154 @@ func validateHostInboundFullAdmitExceptStrict(cfg *Config) []error {
 		if zone == nil {
 			continue
 		}
+		if err := validateHostInboundExceptWithoutBase(name, "", zone.HostInboundTraffic); err != nil {
+			diagnostics = append(diagnostics, err)
+		}
 		if err := validateHostInboundFullAdmitExceptStanza(name, "", zone.HostInboundTraffic); err != nil {
 			diagnostics = append(diagnostics, err)
 		}
-
-		ifNames := make([]string, 0, len(zone.InterfaceHostInbound))
-		for ifName := range zone.InterfaceHostInbound {
-			ifNames = append(ifNames, ifName)
-		}
-		sort.Strings(ifNames)
-		for _, ifName := range ifNames {
+		for _, ifName := range zone.SortedInterfaceHostInboundRefs() {
 			if err := validateHostInboundFullAdmitExceptStanza(name, ifName, zone.InterfaceHostInbound[ifName]); err != nil {
 				diagnostics = append(diagnostics, err)
 			}
 		}
 	}
+	diagnostics = append(diagnostics, validateHostInboundExceptWithoutBaseRuntimeUnions(cfg)...)
+	// Existing #12054/#12313 guard for inert exclusions beneath any-service.
 	diagnostics = append(diagnostics, validateHostInboundFullAdmitExceptRuntimeUnions(cfg)...)
+	return diagnostics
+}
+
+// validateHostInboundExceptWithoutBase rejects an exclusion that leaves the
+// stanza with no admitted service/protocol tokens. That shape is an empty
+// deny-all override, not a meaningful subtraction. A non-empty exclusion over
+// a peer contribution is evaluated only after the runtime interface union.
+func validateHostInboundExceptWithoutBase(zone, ifName string, hib *HostInboundTraffic) error {
+	if hib == nil {
+		return nil
+	}
+	scope := hostInboundFullAdmitExceptScope(ifName)
+	if token := hostInboundExceptMetaToken(hib.systemServicesExcept); token != "" {
+		return fmt.Errorf("security zone %q %s cannot exclude system-services %q; all and any-service are not subtractable except tokens", zone, scope, token)
+	}
+	knownServicesExcept := knownHostInboundExceptTokens(hib.systemServicesExcept, KnownHostInboundSystemServices)
+	if len(knownServicesExcept) > 0 && !hib.systemServicesHasAll &&
+		!hostInboundHasToken(hib.SystemServices, "any-service") {
+		return fmt.Errorf("security zone %q %s has system-services except exclusion(s) %q without a positive all token", zone, scope, strings.Join(knownServicesExcept, ", "))
+	}
+	if token := hostInboundExceptMetaToken(hib.protocolsExcept); token != "" {
+		return fmt.Errorf("security zone %q %s cannot exclude protocols %q; all and any-service are not subtractable except tokens", zone, scope, token)
+	}
+	knownProtocolsExcept := knownHostInboundExceptTokens(hib.protocolsExcept, KnownHostInboundProtocols)
+	if len(knownProtocolsExcept) > 0 {
+		if !hib.protocolsHasAll {
+			return fmt.Errorf("security zone %q %s has protocols except exclusion(s) %q without a positive all token", zone, scope, strings.Join(knownProtocolsExcept, ", "))
+		}
+	}
+	return nil
+}
+
+func hostInboundHasToken(tokens []string, want string) bool {
+	for _, token := range tokens {
+		if strings.EqualFold(token, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func hostInboundExceptMetaToken(tokens []string) string {
+	for _, token := range tokens {
+		switch strings.ToLower(token) {
+		case "all", "any-service":
+			return token
+		}
+	}
+	return ""
+}
+
+func validateHostInboundExceptWithoutBaseRuntimeUnions(cfg *Config) []error {
+	if cfg == nil {
+		return nil
+	}
+	hasExcept := false
+	for _, zone := range cfg.Security.Zones {
+		if zone == nil {
+			continue
+		}
+		if zone.HostInboundTraffic != nil &&
+			(len(zone.HostInboundTraffic.systemServicesExcept) > 0 || len(zone.HostInboundTraffic.protocolsExcept) > 0) {
+			hasExcept = true
+			break
+		}
+		for _, hib := range zone.InterfaceHostInbound {
+			if hib != nil && (len(hib.systemServicesExcept) > 0 || len(hib.protocolsExcept) > 0) {
+				hasExcept = true
+				break
+			}
+		}
+		if hasExcept {
+			break
+		}
+	}
+	if !hasExcept {
+		return nil
+	}
+	// Validate every effective unit the resolver emits, not just unit 0:
+	// a physical `ssh except` may be rescued on unit 0 by that unit's own
+	// `all`, while unit 1 inheriting only the physical stanza still
+	// collapses to an empty deny-all. Zone ownership comes from the
+	// resolver's contributor walk (InterfaceZoneMap for zoned units, the
+	// contributing zone otherwise), mirroring
+	// validateHostInboundFullAdmitExceptRuntimeUnions.
+	contributorZone := make(map[string]string)
+	effective := resolveInterfaceHostInbound(cfg, func(key, zone, _ string, prev, hib *HostInboundTraffic) *HostInboundTraffic {
+		if _, ok := contributorZone[key]; !ok {
+			contributorZone[key] = zone
+		}
+		return MergeHostInboundTraffic(prev, hib)
+	})
+	// Bare physical keys are installed by the resolver without the merge
+	// callback (first sorted zone wins); record their owners the same way.
+	for _, zoneName := range sortedZoneNames(cfg) {
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		for _, ref := range zone.SortedInterfaceHostInboundRefs() {
+			if s := cfg.SplitInterfaceUnitRef(ref); !s.HasUnit {
+				if _, ok := contributorZone[s.Literal]; !ok {
+					contributorZone[s.Literal] = zoneName
+				}
+			}
+		}
+	}
+	zoneByIface := InterfaceZoneMap(cfg)
+	keys := make([]string, 0, len(effective))
+	for key := range effective {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var diagnostics []error
+	for _, key := range keys {
+		// A bare physical ref is only the source stanza when the interface
+		// has units; validate the expanded effective units instead. This
+		// allows a unit-specific `all` to rescue one unit while still
+		// rejecting another unit that inherits only the physical exclusion.
+		if !cfg.SplitInterfaceUnitRef(key).HasUnit && len(InterfaceUnitRefKeys(cfg, key)) > 1 {
+			continue
+		}
+		zoneName := zoneByIface[key]
+		if zoneName == "" {
+			zoneName = contributorZone[key]
+		}
+		if zoneName == "" {
+			continue
+		}
+		if err := validateHostInboundExceptWithoutBase(zoneName, key, effective[key]); err != nil {
+			diagnostics = append(diagnostics, err)
+		}
+	}
 	return diagnostics
 }
 
