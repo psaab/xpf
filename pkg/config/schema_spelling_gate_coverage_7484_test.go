@@ -406,7 +406,9 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // gateTunnelRITargetPairs probes them with defined VRFs, restoring 788. The
 // base already measured 788 against 787, so tighten 787 -> 788: one floor
 // unit of slack would let either restored leaf go blind again unnoticed.
-const gateCoverageFloor = 788
+// #13112 makes the wildcard-inherited zone `tcp-rst` leaf observable to the
+// differential, moving it from flag to compared; tighten both ratchets.
+const gateCoverageFloor = 789
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent
@@ -725,7 +727,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// named in the members registry diff, not just counted.
 	// #10078's four modeled ALG `disable` leaves are value-less flags, raising
 	// the measured ceiling 239 -> 243; their kind roots leave `unreachable`.
-	gateBlindFlag: 195, // #12937: 194 -> 195; daily exclude moved here (#12822).
+	gateBlindFlag: 194, // #12937: 194 -> 195; daily exclude moved here (#12822). #13112 moves zone tcp-rst out.
 	// #9882 raises it 43 -> 44. The three-color twin,
 	// `firewall three-color-policer <*> then forwarding-class`, lands here
 	// because the differential's three-color parent stanza does not compile

@@ -956,7 +956,7 @@ COMPARED	security zones security-zone <*> host-inbound-traffic system-services
 COMPARED	security zones security-zone <*> interfaces <*> host-inbound-traffic protocols
 COMPARED	security zones security-zone <*> interfaces <*> host-inbound-traffic system-services
 COMPARED	security zones security-zone <*> screen
-flag (read, but value-less)	security zones security-zone <*> tcp-rst
+COMPARED	security zones security-zone <*> tcp-rst
 flag (read, but value-less)	services application-identification
 COMPARED	services flow-monitoring version-ipfix template <*> flow-active-timeout
 COMPARED	services flow-monitoring version-ipfix template <*> flow-inactive-timeout

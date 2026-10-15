@@ -108,6 +108,62 @@ func TestWildcardGroupTurnsLeafZoneIntoContainer9801(t *testing.T) {
 	}
 }
 
+// #13112: a zone leaf carrying an exact apply-macro tail
+// (`security-zone trust apply-macro M;`, valid per #12828/#9656) is the same
+// zone as `security-zone trust;`, so a `<*>` group must reach it. Before the
+// fix zoneLeafTakesWildcard9801 required exactly two keys, so the group was
+// silently skipped and the zone lost its screen/tcp-rst.
+func TestWildcardGroupAppliesToApplyMacroLeafZone13112(t *testing.T) {
+	group := func(stmt string) string {
+		return `groups { G { security { zones { security-zone <*> { ` + stmt + ` } } } } } apply-groups G; `
+	}
+	for _, c := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{"macro leaf, tcp-rst", group(`tcp-rst;`) + `security { zones { security-zone trust apply-macro M; } }`, `tcp-rst=true screen=""`},
+		{"plain leaf, tcp-rst (control)", group(`tcp-rst;`) + `security { zones { security-zone trust; } }`, `tcp-rst=true screen=""`},
+		{"macro leaf, screen", group(`screen edge;`) + `security { ` + screenBody9801 + `zones { security-zone trust apply-macro M; } }`, `tcp-rst=false screen="edge"`},
+		{"macro leaf, ungrouped (no phantom)", `security { zones { security-zone trust apply-macro M; } }`, `tcp-rst=false screen=""`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			zones := zones9801(t, c.text)
+			if got := zoneNames9801(zones); got != "trust" {
+				t.Errorf("compiled zones [%s], want [trust] (#13112)", got)
+			}
+			if got := zones["trust"]; got != c.want {
+				t.Errorf("zone trust compiled %s, want %s: the group must reach the apply-macro leaf zone (#13112)", got, c.want)
+			}
+		})
+	}
+}
+
+// #13112 (exact-name side): a group's zone statement must not be dropped
+// against an inline apply-macro leaf of the same zone. A two-key group leaf
+// overridden by the inline leaf is redundant; a packed group statement merges
+// its expanded body into the (promoted) inline leaf, mirroring the plain
+// `security-zone trust;` spelling.
+func TestGroupZoneLeafKeepsIdentityAgainstMacroLeaf13112(t *testing.T) {
+	t.Run("packed group statement merges into macro leaf", func(t *testing.T) {
+		text := `groups { G { security { zones { security-zone trust screen edge; } } } } apply-groups G; security { ` + screenBody9801 + `zones { security-zone trust apply-macro M; } }`
+		zones := zones9801(t, text)
+		if got := zoneNames9801(zones); got != "trust" {
+			t.Fatalf("compiled zones [%s], want [trust] (#13112)", got)
+		}
+		if got, want := zones["trust"], `tcp-rst=false screen="edge"`; got != want {
+			t.Errorf("zone trust compiled %s, want %s: the group's packed statement must reach the apply-macro leaf zone (#13112)", got, want)
+		}
+	})
+	t.Run("different-zone group leaf is adopted beside macro leaf", func(t *testing.T) {
+		text := `groups { G { security { zones { security-zone other; } } } } apply-groups G; security { zones { security-zone trust apply-macro M; } }`
+		zones := zones9801(t, text)
+		if got := zoneNames9801(zones); got != "other trust" {
+			t.Errorf("compiled zones [%s], want [other trust]: the group's zone must not be swallowed by the apply-macro leaf (#13112)", got)
+		}
+	})
+}
+
 // The leaf-destination merge is scoped to zones. An interface written as a leaf
 // compiles no interface at all (#9838), so a wildcard group must not turn it
 // into one. This cell pins the scope, so widening it is a deliberate change

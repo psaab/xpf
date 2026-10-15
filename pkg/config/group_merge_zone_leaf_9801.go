@@ -49,6 +49,8 @@ func zoneGroupLeafPeer9831(ancestorPath [][]string, dst []*Node, s *Node) *Node 
 			return d
 		case !d.IsLeaf && groupPackedLeafBody(ancestorPath, s) != nil:
 			return d
+		case zoneLeafHasApplyMacroTail13112(d) && groupPackedLeafBody(ancestorPath, s) != nil:
+			return d
 		default:
 			return nil
 		}
@@ -56,19 +58,48 @@ func zoneGroupLeafPeer9831(ancestorPath [][]string, dst []*Node, s *Node) *Node 
 	return nil
 }
 
+// zoneLeafHasApplyMacroTail13112 recognizes the complete, inert apply-macro
+// tail accepted by validateZoneStatementTails9656. It is not a zone name.
+func zoneLeafHasApplyMacroTail13112(d *Node) bool {
+	return d != nil && d.IsLeaf && len(d.Keys) == 4 &&
+		d.Keys[0] == "security-zone" && d.Keys[2] == "apply-macro" &&
+		!d.KeyBracketed(2) && !d.KeyBracketed(3)
+}
+
+// promoteZoneMacroLeaf13112 removes the inert macro tail before turning the
+// zone leaf into a container. Otherwise bracketedGroupInstances8794 treats the
+// newly-added group children as the macro body and hides them from readers.
+func promoteZoneMacroLeaf13112(d *Node) {
+	if !zoneLeafHasApplyMacroTail13112(d) {
+		return
+	}
+	d.Keys = d.Keys[:2]
+	if len(d.KeysQuoted) == 4 {
+		d.setKeysQuoted(d.KeysQuoted[:2])
+	} else {
+		d.setKeysQuoted(nil)
+	}
+	if len(d.KeysBracketed) == 4 {
+		d.setKeysBracketed(d.KeysBracketed[:2])
+	} else {
+		d.setKeysBracketed(nil)
+	}
+}
+
 // zoneLeafTakesWildcard9801 reports whether a wildcard group source may merge
 // into the leaf destination d. It may when d is a `security-zone <name>`
-// statement with no body, directly under `security zones`.
+// statement with no body, directly under `security zones`, including the
+// exact inert apply-macro form.
 //
 // #9801: a zone written as a leaf compiles as the same zone as its braced
 // spelling, but the wildcard merge visited only non-leaf destinations, so the
-// leaf lost the group's statements. Measured at 36dfa8e5a with
-// `security-zone <*> { screen edge; }` applied: `security-zone trust;`
-// compiled ScreenProfile="", and `security-zone trust { }` compiled "edge".
+// leaf lost the group's statements. #13112 extends that parity to the valid
+// `security-zone <name> apply-macro <macro>;` spelling.
 //
 // The scope is zones on purpose. An interface or a routing instance written as
 // a leaf compiles no instance at all (#9838). Letting a wildcard group turn it
 // into a container would create the instance only when a group applies.
 func zoneLeafTakesWildcard9801(ancestorPath [][]string, d *Node) bool {
-	return len(d.Keys) == 2 && d.Keys[0] == "security-zone" && underZones9801(ancestorPath)
+	return d != nil && d.IsLeaf && underZones9801(ancestorPath) &&
+		((len(d.Keys) == 2 && d.Keys[0] == "security-zone") || zoneLeafHasApplyMacroTail13112(d))
 }
