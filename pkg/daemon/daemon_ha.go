@@ -543,8 +543,18 @@ func (d *Daemon) awaitRethVIPRelease(rgID int, barrier vipReleaseBarrier) {
 // waitFailoverActuatedBatch blocks until every RG in the batch transfer-out
 // reqID has been fenced, or returns the first RG's failure verdict (#5640).
 func (d *Daemon) waitFailoverActuatedBatch(rgIDs []int, reqID uint64) error {
-	for _, rgID := range rgIDs {
+	for i, rgID := range rgIDs {
 		if err := d.waitFailoverActuated(rgID, reqID); err != nil {
+			// A failure makes the batch unacknowledgeable. Do not wait for
+			// siblings after that point, but release their barriers so a
+			// partially failed batch cannot strand entries in the map.
+			for _, siblingRGID := range rgIDs[i+1:] {
+				key := failoverActuationKey{rgID: siblingRGID, reqID: reqID}
+				d.failoverActuateMu.Lock()
+				b := d.failoverActuateWait[key]
+				d.failoverActuateMu.Unlock()
+				d.disarmFailoverActuation(siblingRGID, reqID, b)
+			}
 			return err
 		}
 	}
