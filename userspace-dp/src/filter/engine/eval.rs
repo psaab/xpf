@@ -968,6 +968,43 @@ pub(crate) fn filter_ref_static_verdict(
     .action
 }
 
+
+/// Whether the current packet's terminal deny came from a flow-invariant term.
+///
+/// Mixed filters must keep per-packet deny semantics for DSCP/L4 terms, but a
+/// static deny that actually wins the ordered walk still revokes the session
+/// pair. Walk with the real packet fields so an earlier per-packet terminal
+/// action retains precedence; only return true when the selected denying term
+/// itself has no per-packet constraints. No counters/logging or allocations.
+pub(crate) fn filter_ref_deny_is_flow_invariant(
+    filter: &Filter,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+) -> bool {
+    for term in &filter.terms {
+        if !term_matches(
+            term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
+        ) {
+            continue;
+        }
+        // The ordinary non-routing evaluation defers this case to the PBR
+        // evaluator; it is not an input-filter terminal decision here.
+        if !term.routing_instance.is_empty() {
+            return false;
+        }
+        if !term.continue_term {
+            return term.action != FilterAction::Accept
+                && !term.dscp_match_enabled
+                && !term.has_per_packet_l4_match();
+        }
+    }
+    false
+}
 pub(crate) fn evaluate_interface_filter_log_match(
     state: &FilterState,
     ifindex: i32,

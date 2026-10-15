@@ -644,8 +644,10 @@ tracked in #8114.
 
 On an established-session HIT, `evaluate_input_filter_on_session_hit`
 (`afxdp/poll_descriptor/filter.rs`) does ONE `iface_filter_v{4,6}_fast` lookup
-and branches: a per-packet-varying filter keeps its existing per-packet
-re-evaluation; a static filter is re-derived only when the stamp is stale. The
+and branches: a per-packet-varying filter keeps its per-packet re-evaluation;
+if its current packet is denied by a flow-invariant terminal term and the
+session is stale, the pair is revoked. A purely static filter is re-derived
+only when the stamp is stale. The
 re-derivation is side-effect free (`NonRoutingCountPolicy::Never` — no
 `then count`, no `then log`, no policer meter), and only the ACCEPT exit
 re-stamps. A DENY deliberately leaves the stamp stale: the caller revokes the

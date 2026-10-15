@@ -557,12 +557,12 @@ pub(super) struct SessionHitInputFilterEval {
     /// not change what is dropped; it mislabels the record an operator
     /// correlates against, which is worse than not logging.
     pub(super) log_source: FilterLogSource,
-    /// #7212: `Some(canonical key)` when this verdict came from a STATIC-filter
-    /// REVALIDATION rather than a per-packet re-evaluation, so a non-`Accept`
-    /// action REVOKES the session — both directions, plus its flow-cache slots
-    /// — instead of only dropping this packet. `None` on the #1430/#2362
-    /// per-packet path, whose verdict is about THIS packet and says nothing
-    /// about the flow.
+    /// #7212/#13651: `Some(canonical key)` when the verdict is a flow-level
+    /// deny for a STALE local session — from either the static-filter arm or
+    /// the flow-invariant deny within a mixed per-packet filter. The caller
+    /// revokes the pair and its flow-cache slots instead of only dropping this
+    /// packet. `None` for a per-packet-only deny, a fresh stamp, or no local
+    /// entry: those verdicts say nothing about revoking an established pair.
     ///
     /// It carries the KEY rather than a bool because the caller's `resolved.key`
     /// is a WIRE tuple (`ResolvedSessionKey::QueryKey` on a local hit), and an
@@ -1189,18 +1189,54 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                 true,
             );
         }
+        // #2620: the session-HIT re-eval is the SOLE counter for this packet —
+        // it never calls `ingress_route_table_override`/the routing evaluator.
+        // Pass `routing_eval_follows = false` so it counts on every exit
+        // (per-packet, pre-#2620 behavior), even when the filter is
+        // route-lookup-affecting.
+        // #10566: the counted evaluator ran — the seed must not charge again.
+        let mut eval = evaluate_non_pbr_input_filter(
+            forwarding,
+            extra,
+            Some(flow),
+            meta,
+            ingress_zone_override,
+            false,
+        );
+        let mut log_source = FilterLogSource::Input;
+        // A mixed filter still has packet-varying decisions; revoke only when
+        // the winning terminal deny itself is flow-invariant and this entry's
+        // verdict is stale. `filter_ref_deny_is_flow_invariant` walks the same
+        // ordered term predicates with the actual packet fields, so dynamic
+        // denies and earlier PBR actions retain their own semantics.
+        let revoked_key = if eval.action == crate::filter::FilterAction::Accept {
+            None
+        } else {
+            match sessions.filter_revalidation_target(session_key, ingress_ifindex) {
+                crate::session::FilterRevalidationTarget::Stale(canonical_key)
+                    if crate::filter::filter_ref_deny_is_flow_invariant(
+                        filter,
+                        flow.src_ip,
+                        flow.dst_ip,
+                        flow.forward_key.protocol,
+                        flow.forward_key.src_port,
+                        flow.forward_key.dst_port,
+                        meta.dscp,
+                        extra,
+                    ) =>
+                {
+                    Some(canonical_key)
+                }
+                crate::session::FilterRevalidationTarget::Fresh
+                | crate::session::FilterRevalidationTarget::Stale(_)
+                | crate::session::FilterRevalidationTarget::NoLocalEntry => None,
+            }
+        };
         return (
             Some(SessionHitInputFilterEval {
-                eval: evaluate_non_pbr_input_filter(
-                    forwarding,
-                    extra,
-                    Some(flow),
-                    meta,
-                    ingress_zone_override,
-                    false,
-                ),
-                revoked_key: None,
-                log_source: FilterLogSource::Input,
+                eval,
+                revoked_key,
+                log_source,
             }),
             true,
         );
