@@ -146,29 +146,29 @@ func (c *xpfCollector) collectFlowExportMetrics(ch chan<- prometheus.Metric) {
 	}
 	for _, h := range c.srv.flowCollectorHealthFn() {
 		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteAttemptsTotal,
-			prometheus.CounterValue, float64(h.WriteAttempts), h.Protocol, h.Instance, h.Template, h.Address, h.SourceAddress)
+			prometheus.CounterValue, float64(h.WriteAttempts), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteFailuresTotal,
-			prometheus.CounterValue, float64(h.WriteFailures), h.Protocol, h.Instance, h.Template, h.Address, h.SourceAddress)
+			prometheus.CounterValue, float64(h.WriteFailures), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorWriteSkippedTotal,
-			prometheus.CounterValue, float64(h.WriteSkipped), h.Protocol, h.Instance, h.Template, h.Address, h.SourceAddress)
+			prometheus.CounterValue, float64(h.WriteSkipped), h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 		healthy := 0.0
 		if h.Healthy {
 			healthy = 1
 		}
 		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorHealthy,
-			prometheus.GaugeValue, healthy, h.Protocol, h.Instance, h.Template, h.Address, h.SourceAddress)
+			prometheus.GaugeValue, healthy, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 		var lastSuccess float64
 		if !h.LastSuccessTime.IsZero() {
 			lastSuccess = float64(h.LastSuccessTime.Unix())
 		}
 		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorLastSuccessSeconds,
-			prometheus.GaugeValue, lastSuccess, h.Protocol, h.Instance, h.Template, h.Address, h.SourceAddress)
+			prometheus.GaugeValue, lastSuccess, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 		var lastFailure float64
 		if !h.LastFailureTime.IsZero() {
 			lastFailure = float64(h.LastFailureTime.Unix())
 		}
 		ch <- prometheus.MustNewConstMetric(c.flowExportCollectorLastFailureSeconds,
-			prometheus.GaugeValue, lastFailure, h.Protocol, h.Instance, h.Template, h.Address, h.SourceAddress)
+			prometheus.GaugeValue, lastFailure, h.Protocol, h.Instance, h.Template, h.Family, h.Address, h.SourceAddress)
 	}
 	c.collectFlowExportBatchMetrics(ch)
 }
@@ -187,11 +187,11 @@ func (c *xpfCollector) collectFlowExportBatchMetrics(ch chan<- prometheus.Metric
 	}
 	for _, s := range c.srv.flowExportBatchStatsFn() {
 		ch <- prometheus.MustNewConstMetric(c.flowExportBatchDepth,
-			prometheus.GaugeValue, float64(s.Depth), s.Protocol, s.Instance, s.Template)
+			prometheus.GaugeValue, float64(s.Depth), s.Protocol, s.Instance, s.Template, s.Family)
 		ch <- prometheus.MustNewConstMetric(c.flowExportBatchMaxDepth,
-			prometheus.GaugeValue, float64(s.MaxDepth), s.Protocol, s.Instance, s.Template)
+			prometheus.GaugeValue, float64(s.MaxDepth), s.Protocol, s.Instance, s.Template, s.Family)
 		ch <- prometheus.MustNewConstMetric(c.flowExportBatchDroppedTotal,
-			prometheus.CounterValue, float64(s.Dropped), s.Protocol, s.Instance, s.Template)
+			prometheus.CounterValue, float64(s.Dropped), s.Protocol, s.Instance, s.Template, s.Family)
 	}
 }
 
