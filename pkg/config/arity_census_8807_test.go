@@ -346,7 +346,7 @@ type arityVerdict8807 struct {
 // reliable output this census produced. Order candidates by what a measurement
 // finds, not by how convincing their evidence reads.
 var arityAdjudicated8807 = map[string]arityVerdict8807{
-	// The four remaining false pairings are ALL sites whose container could not
+	// The three remaining false pairings are ALL sites whose container could not
 	// be recovered lexically, so they are still name-keyed. That is the residual
 	// blindness of the CONTAINER-keyed predicate and it belongs next to the
 	// ratchet, not in someone's notes.
@@ -364,9 +364,6 @@ var arityAdjudicated8807 = map[string]arityVerdict8807{
 	//
 	// Recovering those needs the call path, not a lexical walk -- which is
 	// exactly the positional predicate this issue exists to build, and the
-	// reason it is a separate piece of work rather than a bigger regex.
-	"count": {"false-pairing", "compiler_firewall.go reads Keys[1] on a firewall term `then count`, where the " +
-		"schema declares args:1 and is correct; the args:0 leaf matched is `security policies ... then count`."},
 	"from-zone": {"false-pairing", "the site is the top-level `security policies from-zone <z> to-zone <z>` " +
 		"container reading Keys[3]; the matched leaf is `global/policy/match/from-zone` args:1, correct there."},
 	"interface": {"false-pairing", "compiler_protocols.go reads Keys[1] on a protocols interface; the args:0 leaf " +

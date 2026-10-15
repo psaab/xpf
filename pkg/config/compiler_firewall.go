@@ -60,7 +60,7 @@ func policerThenSawDiscard9882(actions []string) bool {
 	return false
 }
 
-// shieldPolicerThenValues9882 folds block-form values back into their head's
+// shieldThenActionValues9882 folds block-form values back into their head's
 // Keys before hoistAndSplitRun8939 runs. A leaf whose declared arity is
 // UNSATISFIED by its own Keys carries its values as children — the nodeVal
 // contract (`loss-priority { high; }` reads "high" from Children[0]) — and
@@ -82,12 +82,11 @@ func policerThenSawDiscard9882(actions []string) bool {
 // with the input tree. Idempotent: a second pass finds every arity satisfied
 // and returns the list unchanged.
 //
-// Policer-local by design. The shared hoister still strips block-form values
-// at its other call sites; none of them has a measured block-value reader
-// today, and widening the shared helper would need fleet-wide census
-// re-adjudication. If another site grows one, promote this there — do not
-// re-derive it.
-func shieldPolicerThenValues9882(children []*Node, container *schemaNode) []*Node {
+// Applied to filter, policer, and three-color-policer `then` blocks, whose
+// value readers all use nodeVal and declare the corresponding action arities.
+// Other hoister call sites deliberately remain unchanged unless they gain an
+// explicit reader for those block-form values.
+func shieldThenActionValues9882(children []*Node, container *schemaNode) []*Node {
 	if container == nil || len(children) == 0 {
 		return children
 	}
@@ -301,7 +300,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			// Shield block-form values BEFORE the hoist lifts nested runs:
 			// `loss-priority { high; }` carries its value as a child and
 			// the hoist would otherwise promote it to a sibling unknown.
-			children := shieldPolicerThenValues9882(thenNode.Children, thenSchema)
+			children := shieldThenActionValues9882(thenNode.Children, thenSchema)
 			for _, child := range hoistAndSplitRun8939(children, thenSchema) {
 				// #8445: record what was AUTHORED before applying last-wins.
 				// The gate's question is which actions were written, not which
@@ -495,7 +494,7 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 			}
 			// #9882: expand a one-line run — see the policer loop above.
 			thenSchema := threeColorPolicerThenSchema9882()
-			children := shieldPolicerThenValues9882(thenNode.Children, thenSchema)
+			children := shieldThenActionValues9882(thenNode.Children, thenSchema)
 			for _, child := range hoistAndSplitRun8939(children, thenSchema) {
 				// #8445: see the policer loop above — identical last-wins switch,
 				// identical authored set. #9882: identical UnknownActions channel
@@ -2103,7 +2102,7 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 	// also carry an argument-bearing modifier, e.g. "then forwarding-class be"
 	// → Keys=["then","forwarding-class","be"], so the keyword consumes its
 	// following token rather than treating it as a separate action.
-	if node.IsLeaf && len(node.Keys) >= 2 {
+	if len(node.Keys) >= 2 {
 		keys := node.Keys[1:]
 		for i := 0; i < len(keys); i++ {
 			k := keys[i]
@@ -2153,26 +2152,38 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 				if v := arg(); v != "" {
 					term.RoutingInstance = v
 					recordFilterRoutingInstanceTarget(term, v)
+				} else {
+					term.UnknownActions = append(term.UnknownActions, "routing-instance (missing value)")
 				}
 			case "count":
 				if v := arg(); v != "" {
 					term.Count = v
+				} else {
+					term.UnknownActions = append(term.UnknownActions, "count (missing value)")
 				}
 			case "forwarding-class":
 				if v := arg(); v != "" {
 					term.ForwardingClass = v
+				} else {
+					term.UnknownActions = append(term.UnknownActions, "forwarding-class (missing value)")
 				}
 			case "loss-priority":
 				if v := arg(); v != "" {
 					term.LossPriority = v
+				} else {
+					term.UnknownActions = append(term.UnknownActions, "loss-priority (missing value)")
 				}
 			case "dscp", "traffic-class":
 				if v := arg(); v != "" {
 					term.DSCPRewrite = v
+				} else {
+					term.UnknownActions = append(term.UnknownActions, k+" (missing value)")
 				}
 			case "policer":
 				if v := arg(); v != "" {
 					term.Policer = v
+				} else {
+					term.UnknownActions = append(term.UnknownActions, "policer (missing value)")
 				}
 			default:
 				// Record unknown tokens for the strict gate. compileFirewall keeps
@@ -2182,7 +2193,8 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 				term.UnknownActions = append(term.UnknownActions, k)
 			}
 		}
-		return
+		// Continue into the children walk too: a parser node can carry both a
+		// packed action tail and a braced body.
 	}
 
 	// issue 8939: FLATTEN A CHAIN BEFORE WALKING. The flat-set spelling
@@ -2202,7 +2214,9 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 	// to walk it rather than the schema learning to reject it -- a reject would
 	// leave the LENIENT path (boot load, HA SyncApply) untouched, which is
 	// exactly where already-stored configs are.
-	for _, child := range flattenThenChain8939(node.Children) {
+	thenSchema := filterThenSchema8971()
+	children := shieldThenActionValues9882(node.Children, thenSchema)
+	for _, child := range flattenThenChain8939(children) {
 		// #8971: A TRAILING TOKEN ON A `then` ACTION WAS SILENTLY DISCARDED.
 		//
 		//	then { count c1 c2; }      count="c1"       c2 DISCARDED, warnings=0
@@ -2266,28 +2280,41 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 			term.Log = true
 			term.Syslog = true
 		case "routing-instance":
-			if len(child.Keys) >= 2 {
-				target := child.Keys[1]
+			if target := nodeVal(child); target != "" {
 				term.RoutingInstance = target
 				recordFilterRoutingInstanceTarget(term, target)
+			} else {
+				term.UnknownActions = append(term.UnknownActions, "routing-instance (missing value)")
 			}
 		case "count":
-			if len(child.Keys) >= 2 {
-				term.Count = child.Keys[1]
+			if value := nodeVal(child); value != "" {
+				term.Count = value
+			} else {
+				term.UnknownActions = append(term.UnknownActions, "count (missing value)")
 			}
 		case "forwarding-class":
-			if len(child.Keys) >= 2 {
-				term.ForwardingClass = child.Keys[1]
+			if value := nodeVal(child); value != "" {
+				term.ForwardingClass = value
+			} else {
+				term.UnknownActions = append(term.UnknownActions, "forwarding-class (missing value)")
 			}
 		case "loss-priority":
-			if len(child.Keys) >= 2 {
-				term.LossPriority = child.Keys[1]
+			if value := nodeVal(child); value != "" {
+				term.LossPriority = value
+			} else {
+				term.UnknownActions = append(term.UnknownActions, "loss-priority (missing value)")
 			}
 		case "dscp", "traffic-class":
-			term.DSCPRewrite = nodeVal(child)
+			if value := nodeVal(child); value != "" {
+				term.DSCPRewrite = value
+			} else {
+				term.UnknownActions = append(term.UnknownActions, child.Name()+" (missing value)")
+			}
 		case "policer":
-			if len(child.Keys) >= 2 {
-				term.Policer = child.Keys[1]
+			if value := nodeVal(child); value != "" {
+				term.Policer = value
+			} else {
+				term.UnknownActions = append(term.UnknownActions, "policer (missing value)")
 			}
 		default:
 			// #2399 (032-16): see leaf-form note above — record the unknown
