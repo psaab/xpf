@@ -21,6 +21,7 @@ func newCollector(srv *Server) *xpfCollector {
 	c.initWorkerDescriptors()
 	c.initUserspaceSessionDescriptors()
 	c.initUserspaceStatus13280Descriptors()
+	c.initUserspaceIoUring13292Descriptors()
 	c.initUserspaceDropsDescriptors()
 	c.initUserspaceNptv6Descriptors()
 	c.initSlowPathDescriptors()
