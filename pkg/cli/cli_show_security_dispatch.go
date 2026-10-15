@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -281,19 +282,21 @@ func (c *CLI) handleShowSecurity(args []string) error {
 		return c.showSecurityWireguard(len(args) >= 2 && args[1] == "detail")
 
 	case "zones":
-		detail := false
-		filterZone := ""
-		if len(args) >= 2 {
-			if args[1] == "detail" {
-				detail = true
-			} else {
-				filterZone = args[1]
-				if len(args) >= 3 && args[2] == "detail" {
-					detail = true
-				}
-			}
+		// #13552: split zone selectors from modifiers by the command tree,
+		// irrespective of their order. The positional args[1] ladder silently
+		// turned `detail trust` into an unfiltered detail dump.
+		zsplit := cmdtree.SplitModifiers(
+			operationalTree["show"].Children["security"].Children["zones"].Children,
+			args[1:])
+		if len(zsplit.Ambiguous) > 0 {
+			return fmt.Errorf("ambiguous keyword %q after `show security zones`",
+				zsplit.Ambiguous[0])
 		}
-		return c.showZonesDisplay(cfg, detail, filterZone)
+		if len(zsplit.Extra) > 0 {
+			return fmt.Errorf("unexpected argument %q: `show security zones` takes at "+
+				"most one zone name", zsplit.Extra[0])
+		}
+		return c.showZonesDisplay(cfg, zsplit.Has("detail"), zsplit.Selector)
 
 	case "policies":
 		// #12902: ONE position-independent parse owns admission AND
