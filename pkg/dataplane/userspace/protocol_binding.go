@@ -183,7 +183,9 @@ type BindingStatus struct {
 	SYNCookieReplyBudgetDrops  uint64   `json:"syn_cookie_reply_budget_drops,omitempty"`
 	SYNCookieAckValid          uint64   `json:"syn_cookie_ack_valid,omitempty"`
 	SYNCookieAckInvalid        uint64   `json:"syn_cookie_ack_invalid,omitempty"`
-	SYNCookieBypass            uint64   `json:"syn_cookie_bypass,omitempty"`
+	// #13286: flood-active SYN-cookie ACKs dropped by SipHash budget.
+	SYNCookieActiveBudgetDrops uint64 `json:"syn_cookie_active_budget_drops,omitempty"`
+	SYNCookieBypass            uint64 `json:"syn_cookie_bypass,omitempty"`
 	// #2089: policy `reject` action — RST/ICMP-unreachable replies sent,
 	// and replies suppressed due to TX-frame budget exhaustion.
 	PolicyRejectSent uint64 `json:"policy_reject_sent,omitempty"`

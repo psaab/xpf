@@ -1515,6 +1515,7 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) syn_cookie_reply_budget_drops: u64,
     pub(crate) syn_cookie_ack_valid: u64,
     pub(crate) syn_cookie_ack_invalid: u64,
+    pub(crate) syn_cookie_active_budget_drops: u64,
     pub(crate) syn_cookie_bypass: u64,
     /// #2089: policy-`reject` RST/ICMP-unreachable replies enqueued.
     pub(crate) policy_reject_sent: u64,

@@ -160,37 +160,39 @@ func TestSumBindingCounters(t *testing.T) {
 				ScreenDrops:              2,
 				// #3343: per-reason screen drops, one element per
 				// dataplane.ScreenReasonCounters ordinal.
-				ScreenReasonDrops:   []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
-				SYNCookieSynAckSent: 7,
-				SYNCookieAckValid:   11,
-				SYNCookieAckInvalid: 13,
-				SYNCookieBypass:     17,
-				SNATPackets:         20,
-				DNATPackets:         15,
-				Nat64Translations:   9,
-				NatAllocFail:        8,
+				ScreenReasonDrops:          []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19},
+				SYNCookieSynAckSent:        7,
+				SYNCookieAckValid:          11,
+				SYNCookieAckInvalid:        13,
+				SYNCookieActiveBudgetDrops: 5,
+				SYNCookieBypass:            17,
+				SNATPackets:                20,
+				DNATPackets:                15,
+				Nat64Translations:          9,
+				NatAllocFail:               8,
 			},
 			{
-				RXPackets:                200,
-				TXPackets:                160,
-				ForwardCandidatePkts:     140,
-				SessionCreates:           20,
-				SessionExpires:           10,
-				PolicyDeniedPackets:      7,
-				HostInboundDeniedPackets: 14,
-				UMEMSliceDropped:         5,
-				UnknownVLANDropped:       7,
-				DstMACDropped:            11,
-				ScreenDrops:              4,
-				ScreenReasonDrops:        []uint64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150},
-				SYNCookieSynAckSent:      17,
-				SYNCookieAckValid:        19,
-				SYNCookieAckInvalid:      23,
-				SYNCookieBypass:          29,
-				SNATPackets:              40,
-				DNATPackets:              30,
-				Nat64Translations:        21,
-				NatAllocFail:             16,
+				RXPackets:                  200,
+				TXPackets:                  160,
+				ForwardCandidatePkts:       140,
+				SessionCreates:             20,
+				SessionExpires:             10,
+				PolicyDeniedPackets:        7,
+				HostInboundDeniedPackets:   14,
+				UMEMSliceDropped:           5,
+				UnknownVLANDropped:         7,
+				DstMACDropped:              11,
+				ScreenDrops:                4,
+				ScreenReasonDrops:          []uint64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190},
+				SYNCookieSynAckSent:        17,
+				SYNCookieAckValid:          19,
+				SYNCookieAckInvalid:        23,
+				SYNCookieActiveBudgetDrops: 7,
+				SYNCookieBypass:            29,
+				SNATPackets:                40,
+				DNATPackets:                30,
+				Nat64Translations:          21,
+				NatAllocFail:               16,
 			},
 		},
 	}
@@ -236,6 +238,9 @@ func TestSumBindingCounters(t *testing.T) {
 	}
 	if s.synCookieInvalid != 36 {
 		t.Fatalf("synCookieInvalid = %d, want 36", s.synCookieInvalid)
+	}
+	if s.synCookieActiveBudgetDrops != 12 {
+		t.Fatalf("synCookieActiveBudgetDrops = %d, want 12", s.synCookieActiveBudgetDrops)
 	}
 	if s.synCookieBypass != 46 {
 		t.Fatalf("synCookieBypass = %d, want 46", s.synCookieBypass)

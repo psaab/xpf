@@ -224,12 +224,11 @@ pub(crate) use syncookie::{
 /// carries one u64 per ordinal; the committed `tests/fixtures/protocol_wire_v1.json`
 /// fixture pins the length so a divergence between the two sides fails the
 /// `wire_invariant_default_specimens` test.
-pub(crate) const SCREEN_REASON_DROP_COUNT: usize = 15;
+pub(crate) const SCREEN_REASON_DROP_COUNT: usize = 19;
 
 /// Map a screen DROP reason string to its published per-reason counter ordinal
 /// (#3343), or `None` for reasons that are surfaced only through the aggregate
-/// `screen_drops` counter (SYN-cookie challenge/validation drops,
-/// ICMP-fragment, IP-malformed parse-error). The ordinal order MUST stay in
+/// `screen_drops` counter (the aggregate "syn-cookie" challenge drop). The ordinal order MUST stay in
 /// lockstep with `pkg/dataplane.ScreenReasonCounters`. The two `session-limit-*`
 /// reasons fold onto the single `session-limit` ordinal because the Go side
 /// exposes one combined `GlobalCtrScreenSessionLimit` counter.
@@ -251,6 +250,11 @@ pub(crate) fn screen_reason_drop_index(reason: &str) -> Option<usize> {
         "ip-source-route" => 12,
         "syn-frag" => 13,
         "session-limit-src" | "session-limit-dst" => 14,
+        // #13286: active reasons previously aggregate-only.
+        "icmp-fragment" => 15,
+        "ip-malformed" => 16,
+        "syn-cookie-unavailable" => 17,
+        "syn-cookie-invalid" => 18,
         _ => return None,
     })
 }
@@ -1504,28 +1508,21 @@ impl ScreenState {
             // #9902 F-023: the flood-active arm used to validate EVERY session-
             // miss ACK unthrottled — a spoofed-ACK flood bought unbounded SipHash
             // work per ACK. Throttle it fail-closed like every other active arm
-            // (closing flags, no codec, bad MAC all refuse as Invalid):
+            // (closing flags, no codec, bad MAC all refuse):
             // out-of-window ACKs refuse BEFORE spending budget (this moves the
             // `cookie_full_epoch is None` check below ahead of budget charging —
             // verdict-preserving, since a failed MAC validation is Invalid here
-            // too), and over-budget ACKs refuse as Invalid without MAC work.
-            // The 24-bit MAC is KEPT (widening it is a wire-incompatible ISN
-            // layout change shared with HA peers); the throttle is the bounded
-            // hardening. Limitation, stated: `syn_cookie_ack_invalid` cannot
-            // distinguish throttled ACKs from bad-MAC ones — one counter, three
-            // Invalid origins. MEASUREMENT GAP, stated honestly: there is no
-            // throttle-engagement signal, so the provisional 65536/s rate
-            // cannot be validated or tuned from production telemetry today —
-            // a sustained throttle episode reads exactly like a bad-MAC flood.
-            // Tuning it needs either measured validation-cost data or a
-            // dedicated `syn_cookie_ack_throttled` counter (named follow-up,
-            // deliberately not folded in: the counter would ride the full
-            // worker→binding→status→wire chain).
+            // too), and over-budget ACKs refuse as `ActiveBudgetExceeded`
+            // without MAC work. The 24-bit MAC is KEPT (widening it is a
+            // wire-incompatible ISN layout change shared with HA peers); the
+            // throttle is bounded hardening. #13286: the dedicated
+            // `syn_cookie_active_budget_drops` counter makes throttle episodes
+            // distinguishable from bad-MAC floods in `syn_cookie_ack_invalid`.
             if !SynCookieCodec::wire_epoch_matches_validation_window(current_epoch, cookie_isn) {
                 return SynCookieAckVerdict::Invalid;
             }
             if self.active_syn_cookie_ack_validation_limited(zone, now_ns) {
-                return SynCookieAckVerdict::Invalid;
+                return SynCookieAckVerdict::ActiveBudgetExceeded;
             }
         }
         // The cookie MAC binds the full 4-tuple (that is what makes the

@@ -374,6 +374,12 @@ fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
     );
     assert_eq!(invalid_counters.screen_drops, 1);
     assert_eq!(invalid_counters.syn_cookie_ack_invalid, 1);
+    assert_eq!(
+        invalid_counters.screen_reason_drops
+            [crate::screen::screen_reason_drop_index("syn-cookie-invalid").unwrap()],
+        1,
+        "bad-MAC drops have their own indexed reason"
+    );
     let screen_event = event_rx
         .try_recv()
         .expect("screen-drop event")

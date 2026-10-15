@@ -136,6 +136,7 @@ impl BindingLiveState {
                 .load(Ordering::Relaxed),
             syn_cookie_ack_valid: self.syn_cookie_ack_valid.load(Ordering::Relaxed),
             syn_cookie_ack_invalid: self.syn_cookie_ack_invalid.load(Ordering::Relaxed),
+            syn_cookie_active_budget_drops: self.syn_cookie_active_budget_drops.load(Ordering::Relaxed),
             syn_cookie_bypass: self.syn_cookie_bypass.load(Ordering::Relaxed),
             policy_reject_sent: self.policy_reject_sent.load(Ordering::Relaxed),
             filter_reject_sent: self.filter_reject_sent.load(Ordering::Relaxed),

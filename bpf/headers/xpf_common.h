@@ -310,7 +310,13 @@ struct icmp6hdr {
 #define GLOBAL_CTR_VLAN_PUSH_FAIL        40
 #define GLOBAL_CTR_UNKNOWN_VLAN_DROPS    41
 #define GLOBAL_CTR_DST_MAC_DROPS         42
-#define GLOBAL_CTR_MAX                   43
+/* #13286: userspace-only screen reasons / SYN-cookie budget (43..47). */
+#define GLOBAL_CTR_SCREEN_ICMP_FRAGMENT        43
+#define GLOBAL_CTR_SCREEN_IP_MALFORMED         44
+#define GLOBAL_CTR_SCREEN_SYN_COOKIE_UNAVAIL   45
+#define GLOBAL_CTR_SCREEN_SYN_COOKIE_INVALID   46
+#define GLOBAL_CTR_SYNCOOKIE_ACTIVE_BUDGET     47
+#define GLOBAL_CTR_MAX                   48
 
 /* Flow timeout indices for flow_timeouts ARRAY map */
 #define FLOW_TIMEOUT_TCP_ESTABLISHED   0

@@ -190,6 +190,9 @@ pub(crate) enum SynCookieAckVerdict {
     NotApplicable,
     Validated,
     Invalid,
+    /// #13286: flood-active SipHash validation budget exhausted; fail-closed
+    /// drop distinct from a bad-MAC `Invalid`.
+    ActiveBudgetExceeded,
 }
 
 #[derive(Debug, Clone, Copy)]

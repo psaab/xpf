@@ -286,6 +286,8 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) syn_cookie_ack_valid: AtomicU64,
     /// #1374: session-miss ACKs rejected while SYN-cookie mode was active.
     pub(super) syn_cookie_ack_invalid: AtomicU64,
+    /// #13286: flood-active SYN-cookie ACKs dropped by SipHash budget.
+    pub(super) syn_cookie_active_budget_drops: AtomicU64,
     /// #1374: retransmitted SYNs admitted by the single-use validated-client
     /// cache after a valid cookie ACK.
     pub(super) syn_cookie_bypass: AtomicU64,
@@ -1034,9 +1036,11 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #13285 adds nine worker-local screen counter atomics. Their cache-line and
 // layout cost is intentional: the worker publishes one cumulative sample per
 // second, and the size/offset assertions below pin the resulting footprint.
+// #13286 extends the reason array by four u64 slots and adds one u64
+// syn-cookie active-budget counter (+40 bytes).
 const _: [(); 2624] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2432] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2561] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2472] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2601] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1121,6 +1125,7 @@ impl BindingLiveState {
             syn_cookie_reply_budget_drops: AtomicU64::new(0),
             syn_cookie_ack_valid: AtomicU64::new(0),
             syn_cookie_ack_invalid: AtomicU64::new(0),
+            syn_cookie_active_budget_drops: AtomicU64::new(0),
             syn_cookie_bypass: AtomicU64::new(0),
             policy_reject_sent: AtomicU64::new(0),
             filter_reject_sent: AtomicU64::new(0),

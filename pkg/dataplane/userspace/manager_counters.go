@@ -27,14 +27,15 @@ type userspaceCounterSnapshot struct {
 	// dataplane.ScreenReasonCounters ordinal. Summed across bindings and pushed
 	// into each reason's GlobalCtrScreen* counter so the per-reason
 	// screen-statistics surfaces are no longer stuck at 0.
-	screenReasonDrops [dataplane.ScreenReasonDropCount]uint64
-	synCookieSent     uint64
-	synCookieValid    uint64
-	synCookieInvalid  uint64
-	synCookieBypass   uint64
-	snatPackets       uint64
-	dnatPackets       uint64
-	nat64Translations uint64
+	screenReasonDrops          [dataplane.ScreenReasonDropCount]uint64
+	synCookieSent              uint64
+	synCookieValid             uint64
+	synCookieInvalid           uint64
+	synCookieActiveBudgetDrops uint64
+	synCookieBypass            uint64
+	snatPackets                uint64
+	dnatPackets                uint64
+	nat64Translations          uint64
 	// #4477: source-NAT allocation failures, summed across bindings. Pushed
 	// into dataplane.GlobalCtrNATAllocFail; also a term of the aggregate
 	// "Packets dropped" total pushed into dataplane.GlobalCtrDrops.
@@ -99,6 +100,7 @@ func sumBindingCounters(status *ProcessStatus) userspaceCounterSnapshot {
 		s.synCookieSent += b.SYNCookieSynAckSent
 		s.synCookieValid += b.SYNCookieAckValid
 		s.synCookieInvalid += b.SYNCookieAckInvalid
+		s.synCookieActiveBudgetDrops += b.SYNCookieActiveBudgetDrops
 		s.synCookieBypass += b.SYNCookieBypass
 		s.snatPackets += b.SNATPackets
 		s.dnatPackets += b.DNATPackets
@@ -186,6 +188,7 @@ func (m *Manager) syncBPFCountersLocked(status *ProcessStatus) {
 		{dataplane.GlobalCtrSyncookieSent, safeDelta(cur.synCookieSent, prev.synCookieSent)},
 		{dataplane.GlobalCtrSyncookieValid, safeDelta(cur.synCookieValid, prev.synCookieValid)},
 		{dataplane.GlobalCtrSyncookieInvalid, safeDelta(cur.synCookieInvalid, prev.synCookieInvalid)},
+		{dataplane.GlobalCtrSyncookieActiveBudget, safeDelta(cur.synCookieActiveBudgetDrops, prev.synCookieActiveBudgetDrops)},
 		{dataplane.GlobalCtrSyncookieBypass, safeDelta(cur.synCookieBypass, prev.synCookieBypass)},
 		// #2161: surface NAT64 translations into the global counter the CLI,
 		// gRPC status, and Prometheus collector already read

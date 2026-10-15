@@ -1215,11 +1215,30 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
                 event_now_ns_from_secs(now_secs),
             );
             counters.record_screen_drop(
-                "syn-cookie",
+                "syn-cookie-invalid",
                 zone_id,
                 &worker_ctx.forwarding.flood_counter_slot_map,
             );
             counters.syn_cookie_ack_invalid += 1;
+            StageOutcome::RecycleAndContinue
+        }
+        SynCookieAckVerdict::ActiveBudgetExceeded => {
+            emit_screen_drop_event(
+                worker_ctx.event_stream,
+                &screen_pkt,
+                meta,
+                zone_id,
+                "syn-cookie",
+                event_now_ns_from_secs(now_secs),
+            );
+            // Keep the aggregate drop, but don't attribute a throttle as an
+            // invalid cookie: its dedicated counter below distinguishes it.
+            counters.record_screen_drop(
+                "syn-cookie",
+                zone_id,
+                &worker_ctx.forwarding.flood_counter_slot_map,
+            );
+            counters.syn_cookie_active_budget_drops += 1;
             StageOutcome::RecycleAndContinue
         }
     }

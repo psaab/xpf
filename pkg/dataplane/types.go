@@ -1050,7 +1050,13 @@ const (
 	GlobalCtrVlanPushFail        = 40
 	GlobalCtrUnknownVLANDrops    = 41
 	GlobalCtrDstMACDrops         = 42
-	GlobalCtrMax                 = 43
+	// #13286: userspace-only screen reasons / SYN-cookie budget (43..47).
+	GlobalCtrScreenICMPFragment     = 43
+	GlobalCtrScreenIPMalformed      = 44
+	GlobalCtrScreenSynCookieUnavail = 45
+	GlobalCtrScreenSynCookieInvalid = 46
+	GlobalCtrSyncookieActiveBudget  = 47
+	GlobalCtrMax                    = 48
 )
 
 // CurrentSessions returns the live local-forwarding session count derived
@@ -1602,7 +1608,7 @@ var ScreenFlagNames = map[uint32]string{
 // `BindingStatus.screen_reason_drops` wire array; the committed wire fixture
 // (`userspace-dp/tests/fixtures/protocol_wire_v1.json`) pins that array length,
 // so a drift between the two sides fails the Rust wire-invariant test.
-const ScreenReasonDropCount = 15
+const ScreenReasonDropCount = 19
 
 // ScreenReasonCounter describes one published per-screen-reason DROP counter
 // (#3343). Before #3343 the userspace counter bridge surfaced only the
@@ -1639,6 +1645,10 @@ var ScreenReasonCounters = [ScreenReasonDropCount]ScreenReasonCounter{
 	{GlobalCtrScreenIPSrcRoute, "ip-source-route", "IP source-route"},
 	{GlobalCtrScreenSynFrag, "syn-frag", "SYN fragment"},
 	{GlobalCtrScreenSessionLimit, "session-limit", "session limit"},
+	{GlobalCtrScreenICMPFragment, "icmp-fragment", "ICMP fragment"},
+	{GlobalCtrScreenIPMalformed, "ip-malformed", "IP malformed"},
+	{GlobalCtrScreenSynCookieUnavail, "syn-cookie-unavailable", "SYN-cookie unavailable"},
+	{GlobalCtrScreenSynCookieInvalid, "syn-cookie-invalid", "SYN-cookie invalid"},
 }
 
 // SessionCountKey mirrors the C struct session_count_key.

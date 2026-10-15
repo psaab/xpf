@@ -201,9 +201,6 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
     assert_eq!(
         std::mem::size_of::<BindingLiveState>(),
         2624,
-        "#6304: the cfg(test) admission-attempt instrument must not change \
-         BindingLiveState's SIZE — the same literal is asserted at compile \
-         time in binding_state/mod.rs"
     );
     assert_eq!(
         std::mem::align_of::<BindingLiveState>(),
@@ -212,12 +209,12 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2432,
-        "#13285 must keep pinned admission-counter layout consistent"
+2472,
+        "#13285/#13286 must keep pinned admission-counter layout consistent"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2561,
-        "#13285 must keep pinned final-field offset consistent"
+        2601,
+        "#13285/#13286 must keep pinned final-field offset consistent"
     );
 }

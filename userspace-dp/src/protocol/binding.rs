@@ -649,6 +649,8 @@ pub(crate) struct BindingStatus {
     pub syn_cookie_ack_valid: u64,
     #[serde(rename = "syn_cookie_ack_invalid", default)]
     pub syn_cookie_ack_invalid: u64,
+    #[serde(rename = "syn_cookie_active_budget_drops", default)]
+    pub syn_cookie_active_budget_drops: u64,
     #[serde(rename = "syn_cookie_bypass", default)]
     pub syn_cookie_bypass: u64,
     #[serde(rename = "policy_reject_sent", default)]
