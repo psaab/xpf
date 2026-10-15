@@ -143,12 +143,6 @@ type Monitor struct {
 	// configs and is set by tests to force the overrun path.
 	IPMonitorCycleTimeout time.Duration
 
-	// IPMonitorCycleOverruns counts IP-probe sweeps whose overall deadline
-	// fired before every target finished — a degraded/pathological probe path.
-	// Reachability decisions are unaffected: unfinished probes are deferred to
-	// the next cycle rather than counted as failures.
-	IPMonitorCycleOverruns atomic.Uint64
-
 	// nowFunc can be overridden for testing time-dependent behavior.
 	nowFunc func() time.Time
 
@@ -608,12 +602,9 @@ func (mon *Monitor) probe(ctx context.Context, addr string) (reachable, complete
 	return mon.probeICMP(ctx, addr)
 }
 
-// probeIPTargets probes addrs concurrently through a bounded worker pool under
-// an overall cycle deadline, returning a result per input index in the SAME
-// order (#5301). A probe that does not finish before the cycle deadline (or a
-// parent Stop) is left completed=false so the caller skips it this cycle,
-// keeping the sweep failover-neutral. A cycle whose own deadline fires (as
-// opposed to a parent Stop) records IPMonitorCycleOverruns.
+// probeIPTargets bounds concurrent probes under one cycle deadline. Probes
+// incomplete at the deadline are deferred to the next cycle, keeping the sweep
+// failover-neutral.
 func (mon *Monitor) probeIPTargets(ctx context.Context, addrs []string) []ipProbeResult {
 	results := make([]ipProbeResult, len(addrs))
 	if len(addrs) == 0 {
@@ -649,12 +640,6 @@ launch:
 	}
 	wg.Wait()
 
-	// Record an overrun only when this sweep's OWN deadline fired — not when a
-	// parent Stop cancelled the cycle (that is an orderly shutdown, not a
-	// degraded probe path).
-	if ctx.Err() == nil && cycleCtx.Err() == context.DeadlineExceeded {
-		mon.IPMonitorCycleOverruns.Add(1)
-	}
 	return results
 }
 

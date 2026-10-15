@@ -169,14 +169,13 @@ func (d *Daemon) runOneRouteSubscription(ctx context.Context, loop *coalesce.Loo
 
 // routeListenerCatchUp marks the coalescer for a post-gap refresh.
 //
-// Named rather than inlined for the same reason as routeListenerErrorCallback:
-// a cell must drive the function PRODUCTION calls, not a re-implementation of
-// it (#8915). The counter is what a caller can observe.
+// Named rather than inlined so cells drive the function production installs.
+// A missing loop is a no-op, and a present loop receives exactly one catch-up
+// mark for the subscription gap.
 func (d *Daemon) routeListenerCatchUp(loop *coalesce.Loop) {
 	if loop == nil {
 		return
 	}
-	d.routeListenerCatchUps.Add(1)
 	loop.Mark()
 }
 

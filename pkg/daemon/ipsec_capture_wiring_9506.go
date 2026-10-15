@@ -1184,7 +1184,7 @@ func (d *Daemon) stageIpsecCapture(cfg *config.Config) (old, staged *ipsecCaptur
 	if d.ipsecS4 == nil {
 		d.ipsecS4 = newIpsecSupervisor()
 	}
-	generation := d.ipsecCaptureGeneration.Add(1)
+	generation := d.ipsecCaptureStageGeneration + 1
 	d.ipsecCaptureStageGeneration = generation
 	d.ipsecCaptureSnapshotLandedGeneration = 0
 	plan, err := buildIpsecCaptureQueuePlan(cfg, generation)

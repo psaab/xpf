@@ -304,9 +304,8 @@ the userspace dataplane admission boundary is in
   delaying failover detection). The failover decision + weight accumulation is
   byte-identical to the old serial path; only the probe I/O is parallelized.
   `Stop()` cancels in-flight probe sockets so shutdown does not wait out a
-  sweep, and a cycle that exceeds its deadline records
-  `IPMonitorCycleOverruns` and defers (never fails) its unfinished targets
-  (#5301). `pkg/cluster/monitor.go`.
+  sweep, and a cycle that exceeds its deadline defers (never fails) its
+  unfinished targets (#5301). `pkg/cluster/monitor.go`.
 - Monitors poll every 1s, require 3 consecutive failures to mark down (and
   3 successes to recover), and use a default 5s hold-down after a state
   change. Probe-cycle budget is `ceil(targets/16) × 800ms + 500ms` slack;

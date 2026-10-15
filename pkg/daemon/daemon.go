@@ -176,7 +176,6 @@ type Daemon struct {
 	ipsecCaptureStaged                   *ipsecCaptureRuntime
 	ipsecCaptureStagePending             bool
 	ipsecCaptureRemovalPending           atomic.Bool
-	ipsecCaptureGeneration               atomic.Uint64
 	ipsecCaptureAuthorityRevision        atomic.Uint64
 	ipsecCaptureStageGeneration          uint64
 	ipsecCaptureSnapshotLandedGeneration uint64
@@ -229,13 +228,7 @@ type Daemon struct {
 	// forces a coalescer mark, because the bounded update channel means an
 	// overflow drops the only refresh edge the daemon has.
 	routeListenerErrors atomic.Uint64
-	// routeListenerCatchUps counts catch-up marks issued when a route
-	// subscription is (re-)established (#9010). A gap between subscriptions is
-	// invisible to the update stream -- the new subscription uses
-	// ListExisting:false and replays nothing -- so re-establishment is itself
-	// a refresh edge.
-	routeListenerCatchUps atomic.Uint64
-	routeListenerLoop     atomic.Pointer[coalesce.Loop]
+	routeListenerLoop   atomic.Pointer[coalesce.Loop]
 	// routeListenerPending preserves urgent refresh requests that arrive before
 	// the route listener loop is installed during startup.
 	routeListenerPending atomic.Bool
@@ -1588,12 +1581,6 @@ type Daemon struct {
 	// owes nothing.
 	configDebt configApplyDebt
 
-	// startupActiveAnnounce tracks whether the one-shot active-side
-	// neighbor refresh has been sent for each RG on this daemon run.
-	// This covers restart/redeploy of an already-active direct-mode RG,
-	// where VIP ownership does not transition and the normal failover
-	// GARP/NA path would not fire.
-	startupActiveAnnounce map[int]bool
 	// directAnnounceSeq cancels and supersedes scheduled direct-mode
 	// post-failover re-announcement bursts per RG. A new schedule bumps
 	// the sequence; in-flight goroutines exit when their generation is
@@ -1682,11 +1669,6 @@ type Daemon struct {
 	// fabric peer-MAC resolution can be driven against a synthetic
 	// neighbour table.
 	neighListFn func(int, int) ([]netlink.Neigh, error)
-
-	// userspaceSessionIDs allocates synthetic session IDs for sessions
-	// learned from the userspace dataplane helper before they enter the
-	// existing HA/session-sync transport.
-	userspaceSessionIDs atomic.Uint64
 
 	// eventStreamConnected is set when the helper's binary event stream
 	// is live. The polling fallback loop uses this to decide its cadence:

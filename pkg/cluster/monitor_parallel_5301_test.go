@@ -164,9 +164,6 @@ func TestMonitor_IPProbeCycleOverrun_5301(t *testing.T) {
 	if elapsed > time.Second {
 		t.Fatalf("poll() took %v; the cycle deadline (50ms) should have curtailed the sweep", elapsed)
 	}
-	if got := mon.IPMonitorCycleOverruns.Load(); got != 1 {
-		t.Fatalf("IPMonitorCycleOverruns = %d, want 1 (the cycle deadline fired)", got)
-	}
 	// No probe completed, so no dampening state was created / advanced and the
 	// RG weight is untouched (full health).
 	if len(mon.ipState) != 0 {
