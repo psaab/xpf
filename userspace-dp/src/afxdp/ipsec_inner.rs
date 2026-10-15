@@ -193,12 +193,14 @@ pub(crate) struct IpsecInnerInput<'a> {
 pub(crate) enum IpsecInnerDecision {
     Deny {
         request_id: u64,
+        connection_id: u64,
         stage: &'static str,
         reason: u8,
         policy_id: u32,
     },
     WouldPermit {
         request_id: u64,
+        connection_id: u64,
         runtime_view_publication_generation: u64,
     },
 }
@@ -207,6 +209,14 @@ impl IpsecInnerDecision {
     pub(crate) fn request_id(&self) -> u64 {
         match self {
             Self::Deny { request_id, .. } | Self::WouldPermit { request_id, .. } => *request_id,
+        }
+    }
+
+    pub(crate) fn connection_id(&self) -> u64 {
+        match self {
+            Self::Deny { connection_id, .. } | Self::WouldPermit { connection_id, .. } => {
+                *connection_id
+            }
         }
     }
 
@@ -238,6 +248,10 @@ fn deny(input: &IpsecInnerInput<'_>, stage: &'static str, reason_byte: u8) -> Ip
         request_id: input
             .descriptor
             .map(|d| d.request_id)
+            .unwrap_or_default(),
+        connection_id: input
+            .descriptor
+            .map(|descriptor| descriptor.connection_id)
             .unwrap_or_default(),
         stage,
         reason: reason_byte,
@@ -447,6 +461,10 @@ pub(crate) fn adjudicate_ipsec_inner(
             .descriptor
             .map(|d| d.request_id)
             .unwrap_or_default(),
+        connection_id: input
+            .descriptor
+            .map(|descriptor| descriptor.connection_id)
+            .unwrap_or_default(),
         runtime_view_publication_generation,
     }
 }
@@ -455,20 +473,25 @@ pub(crate) fn verdict_from_decision(decision: &IpsecInnerDecision) -> IpsecInner
     match decision {
         IpsecInnerDecision::Deny {
             request_id,
+            connection_id,
             stage,
             reason,
             policy_id,
         } => IpsecInnerVerdict::Deny {
             request_id: *request_id,
+            connection_id: *connection_id,
             stage,
             reason: *reason,
             policy_id: *policy_id,
         },
-        IpsecInnerDecision::WouldPermit { request_id, .. } => {
-            IpsecInnerVerdict::WouldPermit {
-                request_id: *request_id,
-            }
-        }
+        IpsecInnerDecision::WouldPermit {
+            request_id,
+            connection_id,
+            ..
+        } => IpsecInnerVerdict::WouldPermit {
+            request_id: *request_id,
+            connection_id: *connection_id,
+        },
     }
 }
 
@@ -481,6 +504,7 @@ pub(crate) fn post_ipsec_inner_verdict(
     queue.try_post(verdict_from_decision(decision)).map_err(|_| {
         IpsecInnerDecision::Deny {
             request_id: decision.request_id(),
+            connection_id: decision.connection_id(),
             stage: "d11_verdict_queue_full",
             reason: reason::VERDICT_UNCERTAIN,
             policy_id: 0,
@@ -1071,6 +1095,7 @@ mod tests {
             decision,
             IpsecInnerDecision::Deny {
                 request_id: 0,
+                connection_id: 0,
                 stage,
                 reason: reason_byte,
                 policy_id: 0,

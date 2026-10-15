@@ -496,3 +496,30 @@ fn announce_before_target_install_uses_shared_core_for_submit() {
     handle.join().unwrap();
 }
 use std::io::Write;
+
+#[test]
+fn submit_disconnect_purges_owned_inflight_entries_13195() {
+    let core = open_core();
+    core.announce_epochs("run-a", 1, PERMIT, true, &[(1, QEPOCH)]);
+    let target = live_target(&core);
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let worker_core = core.clone();
+    let worker_target = target.clone();
+    let handle = std::thread::spawn(move || {
+        serve_submit_conn(server, &worker_core, &worker_target);
+    });
+    let mut f = frame(501, 7);
+    f.flags = 0;
+    client
+        .write_all(&encode_message(MSG_SUBMIT_BATCH, &encode_submit_batch(&[f])))
+        .unwrap();
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_ADMIT);
+    let decisions = crate::slowpath_reinject_9506::decode_admit(&payload).unwrap();
+    assert!(decisions[0].admitted);
+    assert_eq!(core.live_count(), 1);
+    drop(client);
+    handle.join().unwrap();
+    assert_eq!(core.live_count(), 0, "disconnect must purge owned entries");
+    assert_eq!(core.stats_snapshot().purged_queued, 1);
+}
