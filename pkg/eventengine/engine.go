@@ -900,6 +900,7 @@ func (e *Engine) runAction(a plannedAction) {
 		if errors.Is(err, configstore.ErrConfigLocked) {
 			if e.now().After(deadline) {
 				e.counters.droppedLockHeld.Add(1)
+				e.releaseEdgeLatch(a.policyName, a.event, a.semRev)
 				slog.Warn("event-options: remediation dropped (config lock held past deadline)",
 					"policy", a.policyName, "err", err)
 				return
