@@ -3121,6 +3121,41 @@ fn gre_tun_origin_vrf_reverse_resolves_local_10038() {
         gre_forward.key.routing_domain, 7,
         "the GRE builder must stamp the VRF domain"
     );
+    let (cust_domain, cust_check) = crate::session::install_table_identity("cust");
+    let cust_table = forwarding
+        .install_tables
+        .get(&cust_domain)
+        .expect("the fixture must contain the cust install-table row");
+    assert_eq!(cust_table.h2, cust_check);
+    assert_eq!(cust_table.v4.as_deref(), Some("cust.inet.0"));
+    let mut without_cust = forwarding.clone();
+    without_cust.install_tables.remove(&cust_domain);
+    let resolved = crate::afxdp::session_glue::lookup_forwarding_resolution_for_session(
+        &without_cust,
+        &neighbors,
+        &crate::afxdp::SessionFlow {
+            forward_key: gre_forward.key.clone(),
+            src_ip: IpAddr::V4(FW.into()),
+            dst_ip: IpAddr::V4(PEER.into()),
+        },
+        gre_forward.decision,
+    )
+    .resolution;
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "missing the inner cust install table must not suppress endpoint-pinned GRE resolution"
+    );
+    assert_eq!(resolved.tunnel_endpoint_id, GRE_TUN_ID);
+    assert_eq!(resolved.egress_ifindex, TUNNEL_LOGICAL_IFINDEX);
+    assert_eq!(
+        (
+            gre_forward.decision.install_table_domain,
+            gre_forward.decision.install_table_check,
+        ),
+        (0, 0),
+        "the forward remains endpoint-pinned and table-free"
+    );
     let gre_reverse = plan.reverse_session_entry.clone().expect("GRE reverse");
     assert_eq!(
         (
@@ -3671,109 +3706,3 @@ fn wg_tun_origin_domain_vrf_hit_delivers_10038() {
     );
 }
 
-/// #13182 (D6-08): the GRE forward TunOrigin session must carry the same
-/// VRF install-table identity as its reverse. #12503 stamped only the
-/// reverse, so a forward stamped (0,0) re-resolves in inet.0 on a stale
-/// generation instead of staying in the tunnel's instance.
-#[test]
-fn gre_tun_origin_forward_stamps_vrf_install_table_13182() {
-    const FW: [u8; 4] = [10, 123, 0, 1];
-    const PEER: [u8; 4] = [10, 123, 0, 5];
-    const IDENT: u16 = 0x1318;
-    const GRE_TUN_ID: u16 = 2;
-    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
-    let (_init, resp, _init_pub, _rpub) = established_pair(allowed.clone(), allowed);
-    let mut snap = wg_outer_mtu_snapshot();
-    snap.interfaces
-        .iter_mut()
-        .find(|i| i.ifindex == TUNNEL_LOGICAL_IFINDEX)
-        .expect("wg0.0 row")
-        .routing_instance = "cust".to_string();
-    snap.interfaces
-        .iter_mut()
-        .find(|i| i.ifindex == TUNNEL_LOGICAL_IFINDEX)
-        .expect("wg0.0 row")
-        .routing_domain = 7;
-    snap.neighbors.push(crate::NeighborSnapshot {
-        interface: "reth0.80".to_string(),
-        ifindex: 12,
-        family: "inet".to_string(),
-        ip: "172.16.80.1".to_string(),
-        mac: "00:11:22:33:44:55".to_string(),
-        state: "reachable".to_string(),
-        router: true,
-        ..Default::default()
-    });
-    let mut forwarding = build_forwarding_state(&snap);
-    let wg_id = *forwarding.wg_engines.keys().next().expect("wg tunnel");
-    forwarding
-        .wg_engines
-        .insert(wg_id, std::sync::Arc::new(resp));
-    let mut gre_row = forwarding
-        .tunnel_endpoints
-        .get(&wg_id)
-        .expect("wg row")
-        .clone();
-    gre_row.id = GRE_TUN_ID;
-    gre_row.mode = "gre".to_string();
-    gre_row.source = "172.16.80.8".parse().unwrap();
-    gre_row.destination = "203.0.113.7".parse().unwrap();
-    forwarding.tunnel_endpoints.insert(GRE_TUN_ID, gre_row);
-    let request = icmp_echo_inner_v4(8, FW, PEER, IDENT, 1);
-    let neighbors = Arc::new(ShardedNeighborMap::new());
-    let now_secs = monotonic_nanos() / 1_000_000_000;
-    let ha = BTreeMap::from([(
-        1,
-        HAGroupRuntime {
-            active: true,
-            watchdog_timestamp: now_secs,
-            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
-        },
-    )]);
-    let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
-    let plan = crate::afxdp::tunnel::build_local_origin_tunnel_tx_request(
-        &request,
-        GRE_TUN_ID,
-        &forwarding,
-        &ha,
-        &neighbors,
-        &ike,
-    )
-    .expect("GRE builder must succeed");
-    let fwd = plan.session_entry.as_ref().expect("owned GRE source must publish");
-    let rev = plan.reverse_session_entry.as_ref().expect("GRE reverse");
-    let expected = crate::session::install_table_identity("cust");
-    assert_ne!(expected, (0, 0), "fixture premise: cust identity is nonzero");
-    assert_eq!(
-        (fwd.decision.install_table_domain, fwd.decision.install_table_check),
-        expected,
-        "forward TunOrigin session must carry the tunnel VRF install-table identity (#13182)"
-    );
-    assert_eq!(
-        (rev.decision.install_table_domain, rev.decision.install_table_check),
-        expected,
-        "reverse TunOrigin session must carry the same VRF identity"
-    );
-    // Removing the cust install-table row must make the stamped forward
-    // fail closed (terminal), never fall through to the default table.
-    let mut without_table = forwarding.clone();
-    without_table
-        .install_tables
-        .retain(|domain, _| *domain != expected.0);
-    let resolved = crate::afxdp::session_glue::lookup_forwarding_resolution_for_session(
-        &without_table,
-        &neighbors,
-        &crate::afxdp::SessionFlow {
-            forward_key: fwd.key.clone(),
-            src_ip: std::net::IpAddr::V4(FW.into()),
-            dst_ip: std::net::IpAddr::V4(PEER.into()),
-        },
-        fwd.decision,
-    )
-    .resolution;
-    assert_ne!(
-        resolved.disposition,
-        crate::afxdp::ForwardingDisposition::ForwardCandidate,
-        "stamped forward must not re-resolve via the default table once cust is gone"
-    );
-}
