@@ -621,45 +621,56 @@ pub(super) fn build_local_origin_tunnel_tx_request(
         0,
         None,
     );
-    // #10518: TUN ingress is not proof of firewall origination. A packet
-    // looped onto this device can be peer/transit sourced; only a source IP
-    // owned by this firewall may mint the privileged TunOrigin marker. Such a
-    // packet remains encap-only, matching the WG TUN publisher: transport
-    // behavior is preserved while both exemption consumers see no session.
-    let firewall_self_originated = forwarding.owns_configured_ip(flow.forward_key.src_ip);
-    if firewall_self_originated {
-        // #6471: a firewall-INITIATED IKE exchange routed via this tunnel sees
-        // its replies arrive on the Stage-11 secondary path (GRE-inner local
-        // destination) with the Responder SPI set and NO inbound seed —
-        // without this outbound seed the reply would fail the live-exchange
-        // lookup and face the host-inbound `ike` gate as a forgery, breaking
-        // firewall-initiated tunnels on zones that omit `ike` (the primary
-        // path admits such replies via kernel conntrack-established). Only a
-        // genuine initiation (all-zero Responder SPI) seeds; the firewall's own
-        // later packets in the exchange are ignored here (they already match
-        // the seed direction-wise on the return lookup).
-        crate::afxdp::forwarding::maybe_seed_local_origin_ike(
-            ike_exchanges,
-            &inner_frame,
-            meta.l4_offset as usize,
-            &flow,
-            monotonic_nanos(),
-        );
-    }
-    // #921: zone_id is now a u16 field on EgressInterface — direct
-    // load, no name round-trip.
-    // #6713/#6722: route through the shared resolver rather than open-coding
-    // the `egress`-only read, so this site cannot drift from the zone the
-    // policy plane adjudicated. `resolve_tunnel_forwarding_resolution` sets
-    // `egress_ifindex` to the tunnel's OWN logical ifindex, so this really is
-    // asking "what zone is this tunnel in". No behavior change today: the ONLY
-    // endpoint types reaching this loop are `gre` and `ip6gre` —
-    // `endpoint_attachment_valid` parks the thread for any other mode — and
-    // both carry a Junos `tunnel { source destination }` stanza and therefore
-    // always have an `egress` row, so the fallback cannot fire. It is the next
-    // MAC-less endpoint type admitted to this loop that would otherwise
-    // reintroduce #6713 here.
+    // #13179: this transmitter has no policy/screen adjudication for
+    // non-local TUN input. Only an address owned by this firewall in the
+    // tunnel's routing table may be emitted or receive a TunOrigin exemption.
     let zone_id = forwarding.egress_zone_id(decision.resolution.egress_ifindex);
+    if zone_id == 0 {
+        return Err("local_tunnel_unzoned_egress".to_string());
+    }
+    let (table, table_identity) =
+        tun_origin_reverse_route_table(forwarding, decision.resolution.egress_ifindex);
+    let ipv6_table = forwarding
+        .ifindex_to_routing_instance
+        .get(&decision.resolution.egress_ifindex)
+        .map(|instance| crate::afxdp::forwarding_build::connected_route_tables(instance).1)
+        .unwrap_or_else(|| "inet6.0".to_string());
+    let firewall_self_originated = match flow.forward_key.src_ip {
+        IpAddr::V4(ip) => {
+            forwarding.configured_iface_v4.contains(&ip)
+                && (forwarding
+                    .local_tables_v4
+                    .get(&ip)
+                    .is_some_and(|tables| tables.contains(&table))
+                    || forwarding
+                        .interface_nat_tables_v4
+                        .get(&ip)
+                        .is_some_and(|tables| tables.contains(&table)))
+        }
+        IpAddr::V6(ip) => {
+            forwarding.configured_iface_v6.contains(&ip)
+                && (forwarding
+                    .local_tables_v6
+                    .get(&ip)
+                    .is_some_and(|tables| tables.contains(&ipv6_table))
+                    || forwarding
+                        .interface_nat_tables_v6
+                        .get(&ip)
+                        .is_some_and(|tables| tables.contains(&ipv6_table)))
+        }
+    };
+    if !firewall_self_originated {
+        return Err("local_tunnel_source_not_owned_in_routing_instance".to_string());
+    }
+    // #6471: seed only after the zone and source-ownership gates above, so an
+    // unzoned or cross-VRF packet cannot create the host-inbound IKE exemption.
+    crate::afxdp::forwarding::maybe_seed_local_origin_ike(
+        ike_exchanges,
+        &inner_frame,
+        meta.l4_offset as usize,
+        &flow,
+        monotonic_nanos(),
+    );
     let bytes = encapsulate_native_gre_frame(&inner_frame, meta, &decision, forwarding)
         .ok_or_else(|| "encapsulate_native_gre_frame_failed".to_string())?;
     let session_entry = if firewall_self_originated {
@@ -736,11 +747,10 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     // Table-scoped synthesis (#10038 item 6, the WG twin): VRF reverses
     // resolve against the tunnel's instance table instead of NoRoute-ing
     // against inet.0, and carry that table's installing identity so a stale
-    // re-resolve stays there (#12503). Only proven firewall-local traffic may
-    // create the reverse companion; an unproven packet remains encap-only.
+    // re-resolve stays there (#12503). The zone and source-ownership gates
+    // above ensure only authorized local traffic reaches this point.
     let reverse_session_entry = session_entry.as_ref().and_then(|entry| {
-        let (table, (install_table_domain, install_table_check)) =
-            tun_origin_reverse_route_table(forwarding, decision.resolution.egress_ifindex);
+        let (install_table_domain, install_table_check) = table_identity;
         let mut reverse =
             crate::afxdp::shared_ops::synthesized_synced_reverse_entry_in_table(
                 forwarding,
