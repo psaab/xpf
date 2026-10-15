@@ -109,7 +109,8 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 	// `case "login"` arm.
 	var loginUserByName map[string]*LoginUser
 
-	for _, child := range expandResolvingRuns9792(node.Children, systemSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
+	systemChildren := expandResolvingRuns9792(node.Children, systemSchema9792()) // #9792: expand a lenient-path packed run (#9235).
+	for _, child := range systemChildren {                                       // #9792: expand a lenient-path packed run (#9235).
 		switch child.Name() {
 		case "host-name":
 			if len(child.Keys) >= 2 {
@@ -616,9 +617,11 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				// ErrDPDKDataplaneRetired, so the no-op here is inconsequential.
 			}
 		case "syslog":
-			sys.Syslog = &SystemSyslogConfig{}
+			if sys.Syslog == nil {
+				sys.Syslog = &SystemSyslogConfig{}
+			}
 			// #9414: every modifier the destination arms below recognize and
-			// SKIP is recorded at the skip and reported once the walk is done.
+			// skip is recorded here and reported once after this walk.
 			skipped := syslogSkippedModifiers9414{}
 			// #9854: FIND-OR-CREATE on the host address, not one struct per
 			// AST node. Two `host <addr>` statements naming one address —
@@ -677,7 +680,19 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			// ordinal provenance, which InheritedFrom does not carry;
 			// until then the outcome is defined but positional.
 			// Deliberately unpinned: no test enshrines it.
-			hostByAddr := map[string]*syslogHostCoalesce9854{}
+			hostByAddr := make(map[string]*syslogHostCoalesce9854, len(sys.Syslog.Hosts))
+			for _, host := range sys.Syslog.Hosts {
+				rec := &syslogHostCoalesce9854{
+					host:    host,
+					srcSet:  host.SourceAddress != "",
+					portSet: host.Port != 0,
+					seenFac: make(map[SyslogFacility]struct{}, len(host.Facilities)),
+				}
+				for _, facility := range host.Facilities {
+					rec.seenFac[facility] = struct{}{}
+				}
+				hostByAddr[host.Address] = rec
+			}
 			for _, slInst := range namedInstances(child.FindChildren("host")) {
 				rec := hostByAddr[slInst.name]
 				if rec == nil {
@@ -840,7 +855,50 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 		}
 	}
 
-	svcNode := node.FindChild("services")
+	var svcNode *Node
+	var sshNode *Node
+	var serviceChildren []*Node
+	for _, child := range systemChildren {
+		if child.Name() != "services" {
+			continue
+		}
+		serviceChildren = append(serviceChildren,
+			packedBodyChildren(child, schemaForPath("system", "services"))...)
+	}
+	if len(serviceChildren) == 0 && len(node.Keys) > 1 && node.Keys[1] == "services" {
+		for _, services := range packedBodyChildren(node, systemSchema9792()) {
+			if services.Name() == "services" {
+				serviceChildren = append(serviceChildren,
+					packedBodyChildren(services, schemaForPath("system", "services"))...)
+			}
+		}
+	}
+	if len(serviceChildren) > 0 {
+		svcNode = &Node{Keys: []string{"services"}}
+		var sshNodes []*Node
+		for _, child := range serviceChildren {
+			if child.Name() == "ssh" {
+				sshNodes = append(sshNodes, child)
+				continue
+			}
+			svcNode.Children = append(svcNode.Children, child)
+		}
+		switch len(sshNodes) {
+		case 1:
+			// Preserve the existing normalizer path for a single SSH block.
+			sshNode = sshNodes[0]
+		case 0:
+		default:
+			sshNode = &Node{Keys: []string{"ssh"}}
+			for _, child := range sshNodes {
+				sshNode.Children = append(sshNode.Children,
+					packedBodyChildren(child, schemaForPath("system", "services", "ssh"))...)
+			}
+		}
+		if sshNode != nil {
+			svcNode.Children = append(svcNode.Children, sshNode)
+		}
+	}
 	if svcNode != nil {
 		dhcpNode := svcNode.FindChild("dhcp-local-server")
 		if dhcpNode != nil {
@@ -859,7 +917,9 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			if sys.Services == nil {
 				sys.Services = &SystemServicesConfig{}
 			}
-			sys.Services.SSH = &SSHServiceConfig{}
+			if sys.Services.SSH == nil {
+				sys.Services.SSH = &SSHServiceConfig{}
+			}
 			// #9235: `ssh client-alive-interval 30 client-alive-count-max 3
 			// connection-limit 10` is ONE command nested into a chain, so the
 			// FindChild reads below saw the first knob and missed the rest --
@@ -1028,8 +1088,16 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 		}
 	}
 
-	snmpNode := node.FindChild("snmp")
-	if snmpNode != nil {
+	var snmpNodes []*Node
+	for _, child := range systemChildren {
+		if child.Name() == "snmp" {
+			snmpNodes = append(snmpNodes, child)
+		}
+	}
+	if len(node.Keys) > 1 && node.Keys[1] == "snmp" {
+		snmpNodes = []*Node{{Keys: node.Keys[1:]}}
+	}
+	for _, snmpNode := range snmpNodes {
 		if err := compileSNMP(snmpNode, sys, cfg, opts.lenientSNMPTrapGroup); err != nil {
 			return err
 		}
@@ -1979,11 +2047,21 @@ func normalizeSharedUMEMArtifactInterfaceMap(artifact map[string]interface{}, ke
 }
 
 func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error {
-	snmp := &SNMPConfig{
-		Communities: make(map[string]*SNMPCommunity),
-		TrapGroups:  make(map[string]*SNMPTrapGroup),
-		V3Users:     make(map[string]*SNMPv3User),
-		ClientLists: make(map[string][]SNMPClient),
+	snmp := sys.SNMP
+	if snmp == nil {
+		snmp = &SNMPConfig{}
+	}
+	if snmp.Communities == nil {
+		snmp.Communities = make(map[string]*SNMPCommunity)
+	}
+	if snmp.TrapGroups == nil {
+		snmp.TrapGroups = make(map[string]*SNMPTrapGroup)
+	}
+	if snmp.V3Users == nil {
+		snmp.V3Users = make(map[string]*SNMPv3User)
+	}
+	if snmp.ClientLists == nil {
+		snmp.ClientLists = make(map[string][]SNMPClient)
 	}
 
 	// #9416: read the `snmp` stanza's own PACKED body, not `node.Children`.
@@ -2001,6 +2079,19 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 	// node.Children unchanged when there is no tail, so the ordinary braced
 	// spelling is bit-identical.
 	snmpChildren := packedBodyChildren(node, resolveSchemaChild(setSchema, "snmp"))
+	// A brace-elided `system snmp <scalar> <value>` line is stored on the
+	// system node's Keys. Its scalar keywords are intentionally outside the
+	// shared top-level SNMP schema, so preserve those directly here.
+	if len(node.Keys) >= 3 {
+		switch node.Keys[1] {
+		case "location":
+			snmp.Location = node.Keys[2]
+		case "contact":
+			snmp.Contact = node.Keys[2]
+		case "description":
+			snmp.Description = node.Keys[2]
+		}
+	}
 
 	// #9416 PRE-PASS: collect every `snmp client-list <name>` definition BEFORE
 	// the community loop. A community may reference a list that is written
@@ -2051,7 +2142,10 @@ func compileSNMP(node *Node, sys *SystemConfig, cfg *Config, lenient bool) error
 	// LATER well-formed block must NOT un-quarantine it (its policy is no longer
 	// trustworthy). Empty on the strict path (a malformed token hard-rejects
 	// before it can be recorded here).
-	quarantinedComms := map[string]bool{}
+	if snmp.quarantinedComms == nil {
+		snmp.quarantinedComms = make(map[string]bool)
+	}
+	quarantinedComms := snmp.quarantinedComms
 
 	for _, child := range snmpChildren {
 		switch child.Name() {

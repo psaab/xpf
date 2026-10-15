@@ -333,6 +333,5 @@ system login user xpfarg authentication ssh-rsa	empty
 system login user xpfarg class	empty
 system login user xpfarg uid	empty
 system no-redirects	empty
-system services dns	empty
 system services web-management api-auth class	empty
 system services web-management api-auth expires	empty

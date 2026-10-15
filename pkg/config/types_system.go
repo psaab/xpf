@@ -663,6 +663,9 @@ type SNMPConfig struct {
 	// `show configuration` and the API render what the operator wrote, and so a
 	// list that no community references is still visible rather than dropped.
 	ClientLists map[string][]SNMPClient
+	// quarantinedComms is compilation-only sticky state: a malformed source
+	// restriction in any merged block must keep the community deny-all.
+	quarantinedComms map[string]bool
 }
 
 // MarshalJSON redacts the SNMPv1/v2c community strings on the JSON surface
