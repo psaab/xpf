@@ -86,6 +86,8 @@ func (m *Manager) stopEventStreamLocked() {
 	}
 	m.eventStream.Close()
 	m.eventStreamBase = addEventStreamStatus(m.eventStreamBase, m.eventStream.Status())
+	m.eventStreamBase.Paused = false
+	m.eventStreamBase.EventsSinceAck = 0
 	m.eventStream = nil
 }
 

@@ -787,6 +787,16 @@ func (a *LegacyDataPlaneAdapter) Status() (ProcessStatus, error) {
 	return m.Status()
 }
 
+// UserspaceEventStreamStatus returns daemon-owned counters even if the helper
+// is stopped and Status() cannot obtain a helper snapshot.
+func (a *LegacyDataPlaneAdapter) UserspaceEventStreamStatus() EventStreamStatus {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return EventStreamStatus{}
+	}
+	return m.UserspaceEventStreamStatus()
+}
+
 // ReadGlobalCounter marks legacy counters with no userspace producer as
 // unavailable instead of exposing the shim's untouched zero-valued slots.
 // The userspace status bridge populates the counters that have real helper

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -13,49 +12,31 @@ import (
 )
 
 type helperDownEventStreamDP13296 struct {
-	*dataplane.Manager
-	status dpuserspace.EventStreamStatus
+	*dpuserspace.LegacyDataPlaneAdapter
 }
 
 func (*helperDownEventStreamDP13296) IsLoaded() bool { return true }
-
-func (*helperDownEventStreamDP13296) Status() (dpuserspace.ProcessStatus, error) {
-	return dpuserspace.ProcessStatus{}, errors.New("helper is down")
-}
-
-func (d *helperDownEventStreamDP13296) UserspaceEventStreamStatus() dpuserspace.EventStreamStatus {
-	return d.status
-}
 
 // This drives the real Prometheus Collect path with a dataplane whose helper
 // Status() fails. Daemon-owned event-stream counters must remain scrapeable
 // without publishing stale helper status or zero-valued helper producer data.
 func TestEventStreamCountersScrapeWhileHelperDown13296(t *testing.T) {
-	dp := &helperDownEventStreamDP13296{
-		Manager: dataplane.New(),
-		status: dpuserspace.EventStreamStatus{
-			FramesRead:        42,
-			FramesWritten:     7,
-			DecodeErrors:      3,
-			SeqGaps:           2,
-			PolicyDenyEvents:  17,
-			UnknownFrameDrops: 1,
-		},
-	}
+	adapter := dpuserspace.NewLegacyDataPlaneAdapter(&dpuserspace.Manager{})
+	adapter.DataPlane = dataplane.New()
+	dp := &helperDownEventStreamDP13296{LegacyDataPlaneAdapter: adapter}
 	c := newCollector(&Server{
 		dp:        dp,
 		store:     newDescriptorCoverageStore(t),
 		startTime: time.Now(),
 	})
 	ch := make(chan prometheus.Metric, 8192)
-	done := make(chan struct{})
 	go func() {
 		c.Collect(ch)
 		close(ch)
-		close(done)
 	}()
 
 	frames := map[string]float64{}
+	seen := map[string]bool{}
 	var decodeErrors, sequenceGaps, unknownDrops, policyDeny float64
 	var helperProducerMetrics bool
 	for metric := range ch {
@@ -80,14 +61,18 @@ func TestEventStreamCountersScrapeWhileHelperDown13296(t *testing.T) {
 				}
 			}
 		case "xpf_userspace_event_stream_decode_errors_total":
+			seen[name] = true
 			decodeErrors = value
 		case "xpf_userspace_event_stream_sequence_gaps_total":
+			seen[name] = true
 			sequenceGaps = value
 		case "xpf_userspace_event_stream_unknown_frame_drops_total":
+			seen[name] = true
 			unknownDrops = value
 		case "xpf_userspace_event_stream_dataplane_events_total":
 			for _, label := range pb.GetLabel() {
 				if label.GetName() == "type" && label.GetValue() == "policy_deny" {
+					seen["policy_deny"] = true
 					policyDeny = value
 				}
 			}
@@ -96,11 +81,17 @@ func TestEventStreamCountersScrapeWhileHelperDown13296(t *testing.T) {
 		}
 	}
 
-	if frames["read"] != 42 || frames["written"] != 7 {
-		t.Errorf("event-stream frame counters = %v, want read=42 written=7", frames)
+	if len(frames) != 2 || frames["read"] != 0 || frames["written"] != 0 {
+		t.Errorf("event-stream frame counters = %v, want zero-valued read and written series", frames)
 	}
-	if decodeErrors != 3 || sequenceGaps != 2 || unknownDrops != 1 || policyDeny != 17 {
-		t.Errorf("event-stream status counters decode=%v gaps=%v unknown_drops=%v policy_deny=%v; want 3,2,1,17",
+	if !seen["xpf_userspace_event_stream_decode_errors_total"] ||
+		!seen["xpf_userspace_event_stream_sequence_gaps_total"] ||
+		!seen["xpf_userspace_event_stream_unknown_frame_drops_total"] ||
+		!seen["policy_deny"] {
+		t.Errorf("daemon-owned event-stream series missing while helper is down: %v", seen)
+	}
+	if decodeErrors != 0 || sequenceGaps != 0 || unknownDrops != 0 || policyDeny != 0 {
+		t.Errorf("event-stream status counters decode=%v gaps=%v unknown_drops=%v policy_deny=%v; want zero",
 			decodeErrors, sequenceGaps, unknownDrops, policyDeny)
 	}
 	if helperProducerMetrics {

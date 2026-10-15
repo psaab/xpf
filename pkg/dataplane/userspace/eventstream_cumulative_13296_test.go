@@ -12,6 +12,8 @@ func TestEventStreamCountersSurviveHelperRestart13296(t *testing.T) {
 	m := &Manager{}
 
 	es1 := NewEventStream("")
+	es1.paused.Store(true)
+	es1.ackBatch.Store(13)
 	es1.FramesRead.Store(42)
 	es1.FramesWritten.Store(7)
 	es1.TelemetryGapResyncs.Store(6)
@@ -53,11 +55,11 @@ func TestEventStreamCountersSurviveHelperRestart13296(t *testing.T) {
 
 	// Replacement helper stream: cumulative = base + new incarnation.
 	es2 := NewEventStream("")
+	es2.paused.Store(true)
+	es2.ackBatch.Store(4)
 	es2.FramesRead.Store(10)
 	es2.PolicyDenyEvents.Store(1)
 	es2.TelemetryGapResyncs.Store(1)
-	es2.paused.Store(true)
-	es2.ackBatch.Store(4)
 	m.eventStream = es2
 
 	st2 := ProcessStatus{}
