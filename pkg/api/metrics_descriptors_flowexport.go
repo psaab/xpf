@@ -51,6 +51,16 @@ func (c *xpfCollector) initFlowExportDescriptors() {
 		"Total flow records dropped because the pending export batch was at capacity, labeled by protocol, instance, template and address family.",
 		[]string{"protocol", "instance", "template", "family"}, nil,
 	)
+	c.flowExportFlowsExportedTotal = prometheus.NewDesc(
+		"xpf_flow_export_flows_exported_total",
+		"Total successfully exported flow records, excluding template refreshes, labeled by protocol, instance, template and address family (#13304).",
+		[]string{"protocol", "instance", "template", "family"}, nil,
+	)
+	c.flowExportPacketsExportedTotal = prometheus.NewDesc(
+		"xpf_flow_export_data_packets_exported_total",
+		"Total successfully exported data packets, excluding template refreshes, labeled by protocol, instance, template and address family (#13304).",
+		[]string{"protocol", "instance", "template", "family"}, nil,
+	)
 
 	// #13306: process-wide FIB mask cache pressure and lookup failures.
 	c.routeMaskCacheHits = prometheus.NewDesc(

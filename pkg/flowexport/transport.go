@@ -672,6 +672,10 @@ type ExporterBatchStats struct {
 	MaxDepth uint64 `json:"max_depth"`
 	// Dropped is the cumulative count of records dropped at capacity.
 	Dropped uint64 `json:"dropped"`
+	// ExportedFlows and ExportedPackets count successfully written flow records
+	// and data datagrams, excluding template refreshes (#13304).
+	ExportedFlows   uint64 `json:"exported_flows"`
+	ExportedPackets uint64 `json:"exported_packets"`
 	// HandoffDropped is the cumulative count of session-close records this
 	// exporter rejected because they arrived after it was retired during a
 	// reconcile (#4963) — records that would otherwise have been silently

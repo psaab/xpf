@@ -215,6 +215,37 @@ func TestSessionCloseRawEventDrivesFlowExport(t *testing.T) {
 		t.Fatalf("IPFIX exporter exported %d flows after the SESSION_CLOSE, want >= 1", got)
 	}
 
+	// The daemon snapshot used by Prometheus must carry the same live
+	// successful-write counts from both exporters.
+	netflowFlows, netflowPackets := d.flowBundle.Load().firstExp().Stats()
+	ipfixFlows, ipfixPackets := d.ipfixBundlePtr.Load().firstExp().Stats()
+	if netflowFlows == 0 || netflowPackets == 0 {
+		t.Fatalf("NetFlow v9 exporter counts = %d/%d, want nonzero flows and packets", netflowFlows, netflowPackets)
+	}
+	if ipfixFlows == 0 || ipfixPackets == 0 {
+		t.Fatalf("IPFIX exporter counts = %d/%d, want nonzero flows and packets", ipfixFlows, ipfixPackets)
+	}
+	wantCounts := map[string][2]uint64{
+		"netflow-v9": {netflowFlows, netflowPackets},
+		"ipfix":      {ipfixFlows, ipfixPackets},
+	}
+	for protocol, want := range wantCounts {
+		found := false
+		for _, stats := range d.FlowExportBatchStats() {
+			if stats.Protocol != protocol {
+				continue
+			}
+			found = true
+			if stats.ExportedFlows != want[0] || stats.ExportedPackets != want[1] {
+				t.Errorf("%s batch stats exported flows/packets = %d/%d, want %d/%d",
+					protocol, stats.ExportedFlows, stats.ExportedPackets, want[0], want[1])
+			}
+		}
+		if !found {
+			t.Errorf("%s missing from FlowExportBatchStats", protocol)
+		}
+	}
+
 	// Record content (the deterministic boundary assertion).
 	rec := seen
 	if rec.Type != "SESSION_CLOSE" {

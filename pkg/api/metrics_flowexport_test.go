@@ -116,6 +116,60 @@ func TestFlowExportCollectorMetrics(t *testing.T) {
 	}
 }
 
+// TestFlowExportExportedStatsInPrometheus pins #13304 (D6-02): the
+// per-exporter exportedFlows/exportedPkts counters maintained by
+// Exporter.Stats()/IPFIXExporter.Stats() were never wired into
+// ExporterBatchStats or Prometheus, so operators had zero visibility
+// into how many flow records / data datagrams were actually exported
+// while write_attempts_total also counted template refreshes.
+//
+// FAIL-ON-REVERT: without ExportedFlows/ExportedPackets on
+// ExporterBatchStats and the two new descriptors/emissions, both
+// lookups below miss and this test fails.
+func TestFlowExportExportedStatsInPrometheus(t *testing.T) {
+	s := &Server{
+		flowExportBatchStatsFn: func() []flowexport.ExporterBatchStats {
+			return []flowexport.ExporterBatchStats{
+				{Protocol: "netflow-v9", Instance: "s1", Template: "t1", Family: "inet", ExportedFlows: 42, ExportedPackets: 7},
+				{Protocol: "ipfix", Instance: "s1", Template: "t1", Family: "inet6", ExportedFlows: 13, ExportedPackets: 3},
+			}
+		},
+	}
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(newCollector(s))
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	lookup := func(name, proto string) (float64, bool) {
+		for _, mf := range mfs {
+			if mf.GetName() != name {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				for _, lp := range m.GetLabel() {
+					if lp.GetName() == "protocol" && lp.GetValue() == proto {
+						return m.GetCounter().GetValue(), true
+					}
+				}
+			}
+		}
+		return 0, false
+	}
+	if v, ok := lookup("xpf_flow_export_flows_exported_total", "netflow-v9"); !ok || v != 42 {
+		t.Errorf("netflow-v9 flows_exported = %v (ok=%v), want 42", v, ok)
+	}
+	if v, ok := lookup("xpf_flow_export_data_packets_exported_total", "netflow-v9"); !ok || v != 7 {
+		t.Errorf("netflow-v9 data_packets_exported = %v (ok=%v), want 7", v, ok)
+	}
+	if v, ok := lookup("xpf_flow_export_flows_exported_total", "ipfix"); !ok || v != 13 {
+		t.Errorf("ipfix flows_exported = %v (ok=%v), want 13", v, ok)
+	}
+	if v, ok := lookup("xpf_flow_export_data_packets_exported_total", "ipfix"); !ok || v != 3 {
+		t.Errorf("ipfix data_packets_exported = %v (ok=%v), want 3", v, ok)
+	}
+}
+
 // TestFlowExportCollectorMetricsOmittedWhenUnwired proves the family is
 // omitted entirely (no spurious zero series) when no FlowCollectorHealthFn
 // is wired — matching the DDNS / feeds families.

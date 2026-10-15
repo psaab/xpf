@@ -846,14 +846,18 @@ high-water mark records the worst-case backlog so a transient stall is visible
 after a later drain empties the queue.
 
 The counters are surfaced through `Exporter`/`IPFIXExporter`
-`BatchDepth()` / `BatchMaxDepth()` / `BatchDropped()` →
+`BatchDepth()` / `BatchMaxDepth()` / `BatchDropped()` / `Stats()` →
 `Daemon.FlowExportBatchStats()` (annotated with protocol / instance / template
-via `ExporterBatchStats`) as the Prometheus family
-`xpf_flow_export_batch_{depth,max_depth,dropped_total}`, labeled
-`{protocol,instance,template}` (one bounded series per configured flow-server
-group; emitted before the dataplane gate — exporters are control-plane). A
-climbing `dropped_total`, or a sustained nonzero `depth`, is the operator
-signal that the export drain cannot keep up.
+and address family via `ExporterBatchStats`) as the Prometheus families
+`xpf_flow_export_batch_{depth,max_depth,dropped_total}`, plus
+`xpf_flow_export_flows_exported_total` and
+`xpf_flow_export_data_packets_exported_total`, all labeled
+`{protocol,instance,template,family}` (one bounded series per configured
+flow-server group and address family; emitted before the dataplane gate —
+exporters are control-plane). Exported counts include only successful data
+datagram writes and exclude periodic template refreshes. A climbing
+`dropped_total`, or a sustained nonzero `depth`, signals that the export drain
+cannot keep up.
 
 ## Retirement handoff admission lease (#4963)
 
