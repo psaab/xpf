@@ -118,6 +118,10 @@ type ProcessStatus struct {
 	SessionCreateDrops             uint64 `json:"session_create_drops,omitempty"`
 	SessionInstallAdmissionRefused uint64 `json:"session_install_admission_refused,omitempty"`
 	SessionInstallPartial          uint64 `json:"session_install_partial,omitempty"`
+	PptpUnassociatedPackets        uint64 `json:"pptp_unassociated_packets,omitempty"`
+	PptpExpiredIdle                uint64 `json:"pptp_expired_idle,omitempty"`
+	PptpHandleCollisions           uint64 `json:"pptp_handle_collisions,omitempty"`
+	PptpAllocatorCollisions        uint64 `json:"pptp_allocator_collisions,omitempty"`
 	FlowCacheCapacity              uint64 `json:"flow_cache_capacity,omitempty"`
 	NeighborCacheCapacity          uint64 `json:"neighbor_cache_capacity,omitempty"`
 	NeighborGeneration             uint64 `json:"neighbor_generation,omitempty"`
@@ -1172,6 +1176,10 @@ type WorkerRuntimeStatus struct {
 	SessionCreateDrops             uint64 `json:"session_create_drops,omitempty"`
 	SessionInstallAdmissionRefused uint64 `json:"session_install_admission_refused,omitempty"`
 	SessionInstallPartial          uint64 `json:"session_install_partial,omitempty"`
+	PptpUnassociatedPackets        uint64 `json:"pptp_unassociated_packets,omitempty"`
+	PptpExpiredIdle                uint64 `json:"pptp_expired_idle,omitempty"`
+	PptpHandleCollisions           uint64 `json:"pptp_handle_collisions,omitempty"`
+	PptpAllocatorCollisions        uint64 `json:"pptp_allocator_collisions,omitempty"`
 	// #4800: cumulative locally-learned transit forward-flow installs on
 	// this worker — its share of the SNAT-allocate / publish_shared_session
 	// / replicate_session_upsert path. Divided by the run window this is

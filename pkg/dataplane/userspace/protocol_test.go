@@ -1936,6 +1936,35 @@ func TestCoSQueueStatusLeaseClaimFlowWire(t *testing.T) {
 	}
 }
 
+// #13282: raw old-binary-compatible payloads expose missing status fields as
+// a runtime wire regression on the pre-fix branch (rather than a compile error).
+func TestPptpStatusCounterWireKeys13282(t *testing.T) {
+	const raw = `{"pptp_unassociated_packets":11,"pptp_expired_idle":13,"pptp_handle_collisions":17,"pptp_allocator_collisions":19}`
+	for _, status := range []any{&ProcessStatus{}, &WorkerRuntimeStatus{}} {
+		if err := json.Unmarshal([]byte(raw), status); err != nil {
+			t.Fatalf("unmarshal %T: %v", status, err)
+		}
+		encoded, err := json.Marshal(status)
+		if err != nil {
+			t.Fatalf("marshal %T: %v", status, err)
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &obj); err != nil {
+			t.Fatalf("unmarshal %T object: %v", status, err)
+		}
+		for _, key := range []string{
+			"pptp_unassociated_packets",
+			"pptp_expired_idle",
+			"pptp_handle_collisions",
+			"pptp_allocator_collisions",
+		} {
+			if _, ok := obj[key]; !ok {
+				t.Errorf("%T lost PPTP status wire key %q: %s", status, key, string(encoded))
+			}
+		}
+	}
+}
+
 // #1861: wire pin for the install-refusal trio (transactional session
 // install). The Rust helper serializes ProcessStatus.session_create_drops /
 // session_install_admission_refused / session_install_partial plus the
@@ -1948,6 +1977,10 @@ func TestProcessStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		SessionCreateDrops:             7,
 		SessionInstallAdmissionRefused: 5,
 		SessionInstallPartial:          1,
+		PptpUnassociatedPackets:        11,
+		PptpExpiredIdle:                13,
+		PptpHandleCollisions:           17,
+		PptpAllocatorCollisions:        19,
 	}
 	raw, err := json.Marshal(&in)
 	if err != nil {
@@ -1961,6 +1994,10 @@ func TestProcessStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		"session_create_drops",
 		"session_install_admission_refused",
 		"session_install_partial",
+		"pptp_unassociated_packets",
+		"pptp_expired_idle",
+		"pptp_handle_collisions",
+		"pptp_allocator_collisions",
 	} {
 		if _, ok := obj[key]; !ok {
 			t.Fatalf("wire key %q missing from ProcessStatus JSON: %s", key, string(raw))
@@ -1973,11 +2010,12 @@ func TestProcessStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 	}
 	if back.SessionCreateDrops != in.SessionCreateDrops ||
 		back.SessionInstallAdmissionRefused != in.SessionInstallAdmissionRefused ||
-		back.SessionInstallPartial != in.SessionInstallPartial {
-		t.Fatalf("round trip mismatch: got (%d,%d,%d), want (%d,%d,%d)",
-			back.SessionCreateDrops, back.SessionInstallAdmissionRefused,
-			back.SessionInstallPartial, in.SessionCreateDrops,
-			in.SessionInstallAdmissionRefused, in.SessionInstallPartial)
+		back.SessionInstallPartial != in.SessionInstallPartial ||
+		back.PptpUnassociatedPackets != in.PptpUnassociatedPackets ||
+		back.PptpExpiredIdle != in.PptpExpiredIdle ||
+		back.PptpHandleCollisions != in.PptpHandleCollisions ||
+		back.PptpAllocatorCollisions != in.PptpAllocatorCollisions {
+		t.Fatalf("ProcessStatus round trip mismatch: got %+v want %+v", back, in)
 	}
 
 	// Pre-#1861 helper payload (keys absent) must decode to zero.
@@ -2000,6 +2038,10 @@ func TestWorkerRuntimeStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		SessionCreateDrops:             3,
 		SessionInstallAdmissionRefused: 2,
 		SessionInstallPartial:          1,
+		PptpUnassociatedPackets:        41,
+		PptpExpiredIdle:                43,
+		PptpHandleCollisions:           47,
+		PptpAllocatorCollisions:        53,
 	}
 	raw, err := json.Marshal(&in)
 	if err != nil {
@@ -2013,6 +2055,10 @@ func TestWorkerRuntimeStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		"session_create_drops",
 		"session_install_admission_refused",
 		"session_install_partial",
+		"pptp_unassociated_packets",
+		"pptp_expired_idle",
+		"pptp_handle_collisions",
+		"pptp_allocator_collisions",
 	} {
 		if _, ok := obj[key]; !ok {
 			t.Fatalf("wire key %q missing from WorkerRuntimeStatus JSON: %s", key, string(raw))
@@ -2023,10 +2069,10 @@ func TestWorkerRuntimeStatusInstallRefusalTrioRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal WorkerRuntimeStatus: %v", err)
 	}
 	if back.SessionCreateDrops != 3 || back.SessionInstallAdmissionRefused != 2 ||
-		back.SessionInstallPartial != 1 {
-		t.Fatalf("round trip mismatch: got (%d,%d,%d)",
-			back.SessionCreateDrops, back.SessionInstallAdmissionRefused,
-			back.SessionInstallPartial)
+		back.SessionInstallPartial != 1 ||
+		back.PptpUnassociatedPackets != 41 || back.PptpExpiredIdle != 43 ||
+		back.PptpHandleCollisions != 47 || back.PptpAllocatorCollisions != 53 {
+		t.Fatalf("WorkerRuntimeStatus round trip mismatch: got %+v want %+v", back, in)
 	}
 	var legacy WorkerRuntimeStatus
 	if err := json.Unmarshal([]byte(`{}`), &legacy); err != nil {

@@ -166,7 +166,11 @@ pub(crate) struct WorkerRuntimeCounters {
     /// SessionTable (`SessionTable::create_drops` — previously
     /// write-only/invisible).
     pub session_create_drops: u64,
-    /// #7919: by-key session-lookup misses on this worker, split by cause —
+    /// #13282: PPTP association lifecycle and fail-closed error counters.
+    pub pptp_unassociated_packets: u64,
+    pub pptp_expired_idle: u64,
+    pub pptp_handle_collisions: u64,
+    pub pptp_allocator_collisions: u64,
     /// (no handle in the index, stale handle past the slab, handle resolving to
     /// a record whose key differs). Both `touch_if_stale` and `account_packet`
     /// bail SILENTLY on a miss, so a frozen `Pkts: 0` row was previously
@@ -305,6 +309,10 @@ pub(crate) struct WorkerRuntimeAtomics {
     pub nat_reverse_key_collisions_distinct_src: AtomicU64,
     /// #1861: install-refusal trio (same Relaxed cumulative pattern).
     pub session_create_drops: AtomicU64,
+    pub pptp_unassociated_packets: AtomicU64,
+    pub pptp_expired_idle: AtomicU64,
+    pub pptp_handle_collisions: AtomicU64,
+    pub pptp_allocator_collisions: AtomicU64,
     pub session_lookup_miss_no_handle: AtomicU64,
     pub session_lookup_miss_stale_handle: AtomicU64,
     pub session_lookup_miss_key_mismatch: AtomicU64,
@@ -410,6 +418,10 @@ impl WorkerRuntimeAtomics {
             nat_reverse_key_collisions: AtomicU64::new(0),
             nat_reverse_key_collisions_distinct_src: AtomicU64::new(0),
             session_create_drops: AtomicU64::new(0),
+            pptp_unassociated_packets: AtomicU64::new(0),
+            pptp_expired_idle: AtomicU64::new(0),
+            pptp_handle_collisions: AtomicU64::new(0),
+            pptp_allocator_collisions: AtomicU64::new(0),
             session_lookup_miss_no_handle: AtomicU64::new(0),
             session_lookup_miss_stale_handle: AtomicU64::new(0),
             session_lookup_miss_key_mismatch: AtomicU64::new(0),
@@ -503,6 +515,10 @@ impl WorkerRuntimeAtomics {
         // #1861: install-refusal trio, same Relaxed cumulative cadence.
         self.session_create_drops
             .store(c.session_create_drops, Ordering::Relaxed);
+        self.pptp_unassociated_packets.store(c.pptp_unassociated_packets, Ordering::Relaxed);
+        self.pptp_expired_idle.store(c.pptp_expired_idle, Ordering::Relaxed);
+        self.pptp_handle_collisions.store(c.pptp_handle_collisions, Ordering::Relaxed);
+        self.pptp_allocator_collisions.store(c.pptp_allocator_collisions, Ordering::Relaxed);
         self.session_lookup_miss_no_handle
             .store(c.session_lookup_miss_no_handle, Ordering::Relaxed);
         self.session_lookup_miss_stale_handle
@@ -614,6 +630,10 @@ impl WorkerRuntimeAtomics {
                 .nat_reverse_key_collisions_distinct_src
                 .load(Ordering::Relaxed),
             session_create_drops: self.session_create_drops.load(Ordering::Relaxed),
+            pptp_unassociated_packets: self.pptp_unassociated_packets.load(Ordering::Relaxed),
+            pptp_expired_idle: self.pptp_expired_idle.load(Ordering::Relaxed),
+            pptp_handle_collisions: self.pptp_handle_collisions.load(Ordering::Relaxed),
+            pptp_allocator_collisions: self.pptp_allocator_collisions.load(Ordering::Relaxed),
             session_lookup_miss_no_handle: self
                 .session_lookup_miss_no_handle
                 .load(Ordering::Relaxed),

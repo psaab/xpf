@@ -85,6 +85,14 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.SessionInstallPartial),
 	)
+	ch <- prometheus.MustNewConstMetric(c.userspacePptpUnassociatedPackets, prometheus.CounterValue,
+		float64(status.PptpUnassociatedPackets))
+	ch <- prometheus.MustNewConstMetric(c.userspacePptpExpiredIdle, prometheus.CounterValue,
+		float64(status.PptpExpiredIdle))
+	ch <- prometheus.MustNewConstMetric(c.userspacePptpHandleCollisions, prometheus.CounterValue,
+		float64(status.PptpHandleCollisions))
+	ch <- prometheus.MustNewConstMetric(c.userspacePptpAllocatorCollisions, prometheus.CounterValue,
+		float64(status.PptpAllocatorCollisions))
 
 	// #1789: failed USERSPACE_SESSIONS BPF-map publishes. Also emitted
 	// unconditionally so a 0 is a real "no publish failures" signal

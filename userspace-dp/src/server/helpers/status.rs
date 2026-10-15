@@ -510,6 +510,14 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         .iter()
         .map(|w| w.session_install_partial)
         .sum();
+    state.status.pptp_unassociated_packets = state.status.worker_runtime.iter()
+        .map(|w| w.pptp_unassociated_packets).sum();
+    state.status.pptp_expired_idle = state.status.worker_runtime.iter()
+        .map(|w| w.pptp_expired_idle).sum();
+    state.status.pptp_handle_collisions = state.status.worker_runtime.iter()
+        .map(|w| w.pptp_handle_collisions).sum();
+    state.status.pptp_allocator_collisions = state.status.worker_runtime.iter()
+        .map(|w| w.pptp_allocator_collisions).sum();
     state.status.max_sessions = state
         .status
         .worker_runtime

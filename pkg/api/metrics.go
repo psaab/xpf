@@ -560,6 +560,10 @@ type xpfCollector struct {
 	userspaceSessionInstallAdmissionRefused     *prometheus.Desc
 	userspaceSessionInstallPartial              *prometheus.Desc
 	userspaceSessionTableEntries                *prometheus.Desc
+	userspacePptpUnassociatedPackets            *prometheus.Desc
+	userspacePptpExpiredIdle                    *prometheus.Desc
+	userspacePptpHandleCollisions               *prometheus.Desc
+	userspacePptpAllocatorCollisions            *prometheus.Desc
 	userspaceSessionTableCapacity               *prometheus.Desc
 	userspaceSessionGCScanned                   *prometheus.Desc
 	userspaceSessionGCDroppedGone               *prometheus.Desc
@@ -1269,6 +1273,10 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceSessionCreateDrops
 	ch <- c.userspaceSessionInstallAdmissionRefused
 	ch <- c.userspaceSessionInstallPartial
+	ch <- c.userspacePptpUnassociatedPackets
+	ch <- c.userspacePptpExpiredIdle
+	ch <- c.userspacePptpHandleCollisions
+	ch <- c.userspacePptpAllocatorCollisions
 	ch <- c.userspaceSessionTableEntries
 	ch <- c.userspaceSessionTableCapacity
 	ch <- c.userspaceSessionGCScanned

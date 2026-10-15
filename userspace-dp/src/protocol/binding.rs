@@ -139,6 +139,15 @@ pub struct WorkerRuntimeStatus {
     /// for wire-additive compatibility with older daemons.
     #[serde(rename = "session_create_drops", default)]
     pub session_create_drops: u64,
+    /// #13282: PPTP association lifecycle and fail-closed outcomes.
+    #[serde(rename = "pptp_unassociated_packets", default)]
+    pub pptp_unassociated_packets: u64,
+    #[serde(rename = "pptp_expired_idle", default)]
+    pub pptp_expired_idle: u64,
+    #[serde(rename = "pptp_handle_collisions", default)]
+    pub pptp_handle_collisions: u64,
+    #[serde(rename = "pptp_allocator_collisions", default)]
+    pub pptp_allocator_collisions: u64,
     /// #7919: PER-WORKER by-key session-lookup misses, split by cause.
     ///
     /// Per-worker rather than only aggregated because the defect is
