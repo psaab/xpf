@@ -39,6 +39,7 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 	}
 	type ruleSetKey struct{ from, to string }
 	rsSessions := make(map[ruleSetKey]int)
+	fromZoneSessions := make(map[string]int)
 	var scanErr error
 	// #7423 rows 3+4: ONE armed predicate. The session scan already had this
 	// test; the translation-hits read did not, and the session count rendered a
@@ -84,12 +85,16 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 		scanErr = walkSessionValues(ctx, dp,
 			func(val dataplane.SessionValue) {
 				if val.IsReverse == 0 && val.Flags&dataplane.SessFlagDNAT != 0 {
-					rsSessions[ruleSetKey{zoneByID[val.IngressZone], zoneByID[val.EgressZone]}]++
+					fromZone := zoneByID[val.IngressZone]
+					rsSessions[ruleSetKey{fromZone, zoneByID[val.EgressZone]}]++
+					fromZoneSessions[fromZone]++
 				}
 			},
 			func(val dataplane.SessionValueV6) {
 				if val.IsReverse == 0 && val.Flags&dataplane.SessFlagDNAT != 0 {
-					rsSessions[ruleSetKey{zoneByID[val.IngressZone], zoneByID[val.EgressZone]}]++
+					fromZone := zoneByID[val.IngressZone]
+					rsSessions[ruleSetKey{fromZone, zoneByID[val.EgressZone]}]++
+					fromZoneSessions[fromZone]++
 				}
 			})
 	}
@@ -232,8 +237,12 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %s\n\n",
 				rs.Name, config.ZoneQuarantineLiveCountersUnavailable)
 		} else if armed {
+			count := rsSessions[ruleSetKey{rs.FromZone, rs.ToZone}]
+			if rs.ToZone == "" {
+				count = fromZoneSessions[rs.FromZone]
+			}
 			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %d\n\n",
-				rs.Name, rsSessions[ruleSetKey{rs.FromZone, rs.ToZone}])
+				rs.Name, count)
 		} else if dp != nil {
 			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %s\n\n",
 				rs.Name, natCounterUnarmed)

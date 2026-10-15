@@ -829,6 +829,7 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 	totalDNAT := 0
 	type ruleSetKey struct{ from, to string }
 	rsSessions := make(map[ruleSetKey]int)
+	fromZoneSessions := make(map[string]int)
 
 	var cr *dataplane.ApplyResult
 	if c.dp != nil && c.dp.IsLoaded() {
@@ -881,14 +882,18 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 		errV4 := c.dp.IterateSessions(func(_ dataplane.SessionKey, val dataplane.SessionValue) bool {
 			if val.IsReverse == 0 && val.Flags&dataplane.SessFlagDNAT != 0 {
 				totalDNAT++
-				rsSessions[ruleSetKey{zoneByID[val.IngressZone], zoneByID[val.EgressZone]}]++
+				fromZone := zoneByID[val.IngressZone]
+				rsSessions[ruleSetKey{fromZone, zoneByID[val.EgressZone]}]++
+				fromZoneSessions[fromZone]++
 			}
 			return true
 		})
 		errV6 := c.dp.IterateSessionsV6(func(_ dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 			if val.IsReverse == 0 && val.Flags&dataplane.SessFlagDNAT != 0 {
 				totalDNAT++
-				rsSessions[ruleSetKey{zoneByID[val.IngressZone], zoneByID[val.EgressZone]}]++
+				fromZone := zoneByID[val.IngressZone]
+				rsSessions[ruleSetKey{fromZone, zoneByID[val.EgressZone]}]++
+				fromZoneSessions[fromZone]++
 			}
 			return true
 		})
@@ -937,6 +942,13 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 				fmt.Printf("%-30s %-12s\n",
 					fmt.Sprintf("%s -> %s", zoneLabel(rs.FromZone), zoneLabel(rs.ToZone)),
 					config.ZoneQuarantineLiveCountersUnavailable)
+				continue
+			}
+			if rs.ToZone == "" {
+				if cnt := fromZoneSessions[rs.FromZone]; cnt > 0 {
+					fmt.Printf("%-30s %-12d\n",
+						fmt.Sprintf("%s -> %s", zoneLabel(rs.FromZone), zoneLabel(rs.ToZone)), cnt)
+				}
 				continue
 			}
 			if cnt, ok := rsSessions[key]; ok {
