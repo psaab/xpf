@@ -44,6 +44,23 @@ func (c *xpfCollector) emitUserspaceStatus13280(ch chan<- prometheus.Metric, sta
 		prometheus.CounterValue, float64(status.HATransitionDemoteStaleSkipped), "demote")
 	ch <- prometheus.MustNewConstMetric(c.userspaceHATransitionStaleSkipped,
 		prometheus.CounterValue, float64(status.HATransitionRefreshStaleSkipped), "refresh")
+	for _, outcome := range []struct {
+		name  string
+		value uint64
+	}{
+		{"enqueued", status.WgUncoveredEnqueuedTotal},
+		{"stale", status.WgUncoveredStaleTotal},
+		{"malformed", status.WgUncoveredMalformedTotal},
+		{"nonlocal", status.WgUncoveredNonlocalTotal},
+		{"queue_full", status.WgUncoveredQueueFullTotal},
+		{"queue_shed", status.WgUncoveredQueueShedTotal},
+		{"queue_orphan", status.WgUncoveredQueueOrphanTotal},
+	} {
+		ch <- prometheus.MustNewConstMetric(c.userspaceWGUncoveredPacketsTotal,
+			prometheus.CounterValue, float64(outcome.value), outcome.name)
+	}
+	ch <- prometheus.MustNewConstMetric(c.userspaceWGUncoveredQueuePoison,
+		prometheus.CounterValue, float64(status.WgUncoveredQueuePoisonRecoveries))
 	if status.S5Reinject != nil {
 		ch <- prometheus.MustNewConstMetric(c.userspaceS5Reinject, prometheus.CounterValue,
 			float64(status.S5Reinject.Reinjected))

@@ -219,6 +219,16 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.session_delete_replica_dropped_total();
     state.status.session_delete_replica_drop_repaired =
         state.afxdp.session_delete_replica_drop_repaired_total();
+    // #13289: process-global #10597 WireGuard uncovered forwarding counters.
+    state.status.wg_uncovered_enqueued_total = state.afxdp.wg_uncovered_enqueued_total();
+    state.status.wg_uncovered_stale_total = state.afxdp.wg_uncovered_stale_total();
+    state.status.wg_uncovered_malformed_total = state.afxdp.wg_uncovered_malformed_total();
+    state.status.wg_uncovered_nonlocal_total = state.afxdp.wg_uncovered_nonlocal_total();
+    state.status.wg_uncovered_queue_full_total = state.afxdp.wg_uncovered_queue_full_total();
+    state.status.wg_uncovered_queue_shed_total = state.afxdp.wg_uncovered_queue_shed_total();
+    state.status.wg_uncovered_queue_orphan_total = state.afxdp.wg_uncovered_queue_orphan_total();
+    state.status.wg_uncovered_queue_poison_recoveries =
+        state.afxdp.wg_uncovered_queue_poison_recoveries();
     // #9506 counter slice: IPsec-inner deny-cause + queue counters. ONE
     // snapshot call for all twelve fields — the projection below is a pure
     // member copy, so a field can only disagree with its counter if the
@@ -952,6 +962,69 @@ mod status_wiring_tests {
         out.sort();
         out.dedup();
         out
+    }
+
+    #[test]
+    fn wg_uncovered_counters_are_wired_into_process_status() {
+        // #13289 (D4-06): the 8 #10597 wg_uncovered_* atomics live in
+        // wg_uncovered_forward.rs as process-global statics, not as
+        // Coordinator fields, so the coordinator-accessor scan above
+        // structurally cannot see them. This gate pins each static to a
+        // Coordinator accessor, a refresh_status assignment, and a
+        // ProcessStatus field.
+        let forward = code_only(&read("src/afxdp/wg_uncovered_forward.rs"));
+        let coord = code_only(&read("src/afxdp/coordinator/status.rs"));
+        let refresh = squeeze(&code_only(&read("src/server/helpers/status.rs")));
+        let protocol = code_only(&read("src/protocol/status.rs"));
+
+        let mut statics = Vec::new();
+        for line in forward.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("pub(in crate::afxdp) static WG_UNCOVERED_") {
+                if let Some(name) = rest.split(':').next() {
+                    let static_name = format!("WG_UNCOVERED_{}", name.trim());
+                    let accessor = format!("wg_uncovered_{}", name.trim().to_ascii_lowercase());
+                    statics.push((accessor, static_name));
+                }
+            }
+        }
+        statics.sort();
+        statics.dedup();
+        assert_eq!(
+            statics.len(),
+            8,
+            "#13289: expected the 8 #10597 WG_UNCOVERED_* statics, found {statics:?} — \
+             the scan pattern has rotted and this gate would pass vacuously"
+        );
+
+        let mut missing = Vec::new();
+        for (accessor, static_name) in &statics {
+            let signature = format!("pub fn {accessor}(&self) -> u64");
+            if let Some(start) = coord.find(&signature) {
+                let body = coord[start..]
+                    .split_once('{')
+                    .and_then(|(_, body)| body.split_once('}').map(|(body, _)| squeeze(body)))
+                    .unwrap_or_default();
+                if !body.contains(static_name) {
+                    missing.push(format!("{accessor} does not load {static_name}"));
+                }
+            } else {
+                missing.push(format!("Coordinator accessor {accessor}"));
+            }
+            if !refresh.contains(&format!("state.status.{accessor}=state.afxdp.{accessor}()")) {
+                missing.push(format!(
+                    "refresh_status does not assign ProcessStatus.{accessor} from {accessor}"
+                ));
+            }
+            if !protocol.contains(&format!("pub {accessor}:")) {
+                missing.push(format!("ProcessStatus field {accessor}"));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "#13289: wg_uncovered counters are tracked but never surfaced:\n  {}",
+            missing.join("\n  ")
+        );
     }
 
     #[test]

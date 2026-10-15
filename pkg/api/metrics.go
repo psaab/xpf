@@ -672,6 +672,9 @@ type xpfCollector struct {
 	userspaceS5ReinjectCompletions            *prometheus.Desc
 	userspaceSessionDeleteReplicaDropped      *prometheus.Desc
 	userspaceSessionDeleteReplicaDropRepaired *prometheus.Desc
+	// #13289: process-wide #10597 WireGuard uncovered forwarding counters.
+	userspaceWGUncoveredPacketsTotal *prometheus.Desc
+	userspaceWGUncoveredQueuePoison  *prometheus.Desc
 	// #9900: frame-ownership violation counters — kernel-fault and
 	// request-path fault signals, zero on a healthy dataplane.
 	userspaceTxCompletionSkew            *prometheus.Desc
@@ -1375,6 +1378,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceSessionDeleteDroppedReleased
 	ch <- c.userspaceTunnelPurgeReservationsReleased
 	ch <- c.userspaceSyncedReverseRederived
+	ch <- c.userspaceWGUncoveredPacketsTotal
+	ch <- c.userspaceWGUncoveredQueuePoison
 	ch <- c.userspaceS5Reinject
 	ch <- c.userspacePeerDeleteRefusedLocalOwned
 	ch <- c.userspaceSessionDeleteReplicaDropped
