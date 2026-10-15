@@ -1275,25 +1275,21 @@ pub(super) fn lookup_session_across_scopes_with_shared(
     // #10636: defer TCP close-state until the #9519 authority verdict names
     // the owner (applied by `apply_deferred_owner_close` after an Owner
     // verdict). A foreign RST/FIN must not drive close state it is dropped for.
-    if let Some((lookup, origin)) =
-        sessions.lookup_with_origin_deferring_close(key, now_ns, tcp_flags)
-    {
-        if is_fabric_wire_placeholder(
-            lookup.metadata.fabric_ingress,
-            lookup.metadata.is_reverse,
-            lookup.decision,
-        ) && let Some(shared) =
-            lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
-        {
-            return Some(ResolvedSessionLookup::shared(shared));
+    match sessions.lookup_with_origin_deferring_close_expiry(key, now_ns, tcp_flags) {
+        crate::session::SessionExpiryProbe::Live((lookup, origin)) => {
+            if is_fabric_wire_placeholder(
+                lookup.metadata.fabric_ingress,
+                lookup.metadata.is_reverse,
+                lookup.decision,
+            ) && let Some(shared) =
+                lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+            {
+                return Some(ResolvedSessionLookup::shared(shared));
+            }
+            return Some(ResolvedSessionLookup::local_query(lookup, origin));
         }
-        return Some(ResolvedSessionLookup::local_query(lookup, origin));
-    }
-    if matches!(
-        probe_local_exact_at(sessions, key, now_ns),
-        LocalExpiryProbe::Stale
-    ) {
-        return None;
+        crate::session::SessionExpiryProbe::IdleCrossed => return None,
+        crate::session::SessionExpiryProbe::Absent => {}
     }
     match probe_local_wire_at(sessions, key, now_ns) {
         LocalExpiryProbe::Live((matched, origin)) => {

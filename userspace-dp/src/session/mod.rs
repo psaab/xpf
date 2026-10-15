@@ -1509,6 +1509,8 @@ pub(crate) struct SessionTable {
     ///
     /// No handle in the key index at all — the session was never installed
     /// under this key, or was removed.
+    #[cfg(test)]
+    expiry_key_index_probes: AtomicU64,
     lookup_miss_no_handle: AtomicU64,
     /// A handle resolved but pointed outside the slab — a stale handle
     /// surviving its record.
@@ -1786,6 +1788,8 @@ impl SessionTable {
             epoch_counter: 0,
             expired: 0,
             create_drops: 0,
+            #[cfg(test)]
+            expiry_key_index_probes: AtomicU64::new(0),
             lookup_miss_no_handle: AtomicU64::new(0),
             lookup_miss_stale_handle: AtomicU64::new(0),
             lookup_miss_key_mismatch: AtomicU64::new(0),
@@ -2909,6 +2913,12 @@ impl SessionTable {
             self.lookup_miss_key_mismatch.load(AtomicOrdering::Relaxed),
         )
     }
+    #[cfg(test)]
+    pub(crate) fn expiry_key_index_probe_count_for_test(&self) -> u64 {
+        self.expiry_key_index_probes
+            .load(AtomicOrdering::Relaxed)
+    }
+
 
     /// Convenience: borrow the entry only (skipping the canonical
     /// key field). Used by call sites that don't need the key.

@@ -78,6 +78,9 @@ pub(crate) enum IpsecReplyAliasLookup {
 impl SessionTable {
     #[inline]
     fn resolve_lookup_handle(&self, key: &SessionKey) -> Option<(u32, bool)> {
+        #[cfg(test)]
+        self.expiry_key_index_probes
+            .fetch_add(1, AtomicOrdering::Relaxed);
         match self.key_to_handle.get(key) {
             Some(handle) => Some((*handle, false)),
             None => self
@@ -263,7 +266,10 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
     ) -> Option<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_inner(key, now_ns, tcp_flags, false)
+        match self.lookup_with_origin_inner(key, now_ns, tcp_flags, false) {
+            SessionExpiryProbe::Live(hit) => Some(hit),
+            SessionExpiryProbe::IdleCrossed | SessionExpiryProbe::Absent => None,
+        }
     }
 
     /// #10636: [`Self::lookup_with_origin`] WITHOUT the TCP close-state
@@ -279,13 +285,14 @@ impl SessionTable {
     /// re-bucket, the companion close propagation, and the HA close emit.
     /// The poll site applies the skipped close after an Owner verdict via
     /// [`Self::apply_deferred_owner_close`]; a foreign arrival drops it with
-    /// the packet.
-    pub fn lookup_with_origin_deferring_close(
+    /// the packet. The result preserves stale-vs-absent classification from
+    /// the same primary-index probe.
+    pub fn lookup_with_origin_deferring_close_expiry(
         &mut self,
         key: &SessionKey,
         now_ns: u64,
         tcp_flags: u8,
-    ) -> Option<(SessionLookup, SessionOrigin)> {
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
         self.lookup_with_origin_inner(key, now_ns, tcp_flags, true)
     }
 
@@ -295,7 +302,7 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
         defer_close: bool,
-    ) -> Option<(SessionLookup, SessionOrigin)> {
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
         // #964 Step 1: resolve handle from key. Direct-primary path
         // looks up via key_to_handle; alias path (NAT-translated
         // reverse key) goes via reverse_translated_index.
@@ -304,7 +311,9 @@ impl SessionTable {
         // (validate-on-lookup) so a translated-key collision no longer resolves
         // to a displaced/wrong session. The in-borrow alias check below
         // re-validates the same predicate as a stale-index guard.
-        let (handle, via_alias) = self.resolve_lookup_handle(key)?;
+        let Some((handle, via_alias)) = self.resolve_lookup_handle(key) else {
+            return SessionExpiryProbe::Absent;
+        };
         // Pre-compute the timeout before borrowing &mut self.entries
         // so the inner block doesn't need to access self.timeouts.
         let timeouts = self.timeouts;
@@ -325,21 +334,23 @@ impl SessionTable {
         // captured inside the borrow below so a TRANSITION can be announced to
         // the peer once the borrow has ended.
         let (result, actual_key, propagate, close_class_before, handshake_state_before) = {
-            let record = self.entries.get_mut(handle as usize)?;
+            let Some(record) = self.entries.get_mut(handle as usize) else {
+                return SessionExpiryProbe::Absent;
+            };
             // #964 Step 1: path-specific validation defends against
             // a stale secondary index pointing at a slab slot that
             // was reused by a different session (release-mode guard,
             // not just debug). Direct-primary checks record.key ==
             // *key; alias path verifies the NAT-translation roundtrip.
             if !Self::lookup_record_matches_key(record, key, via_alias) {
-                return None;
+                return SessionExpiryProbe::Absent;
             }
             // A hit is usable only before its strict idle deadline. The wheel
             // remains the owner of physical removal (and HA HOLD/SELF-HEAL
             // retention), but an idle-crossed entry cannot be re-admitted by
             // traffic before that sweep runs.
             if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
-                return None;
+                return SessionExpiryProbe::IdleCrossed;
             }
             let is_tcp = matches!(key.protocol, PROTO_TCP);
             let entry = &mut record.entry;
@@ -492,7 +503,7 @@ impl SessionTable {
         // the throttled target_tick — that matches the model in the
         // plan (~100 ns per FxHashMap lookup on the slow path).
         self.push_to_wheel(&actual_key, now_ns);
-        Some(result)
+        SessionExpiryProbe::Live(result)
     }
 
     /// #10636: stamp the sticky close bits shared by inline and deferred close.
