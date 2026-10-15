@@ -117,7 +117,7 @@ func TestAdmissionRefusalsMetricTracksTheRealLimiter8312(t *testing.T) {
 // MUTATION: remove `c.describeAdmissionRefusals(ch)` from Describe -> reds.
 func TestAdmissionRefusalsDescriptorIsDeclared8312(t *testing.T) {
 	c := newCollector(nil)
-	ch := make(chan *prometheus.Desc, 512)
+	ch := make(chan *prometheus.Desc, 1024)
 	c.Describe(ch)
 	close(ch)
 	for d := range ch {

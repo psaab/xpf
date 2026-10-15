@@ -959,6 +959,70 @@ type ProcessStatus struct {
 	// predates the field never sends it, yet still enforces capped forwarding.
 	// A plain bool would report both as "not capped".
 	LearnedRouteImportCapped *bool `json:"learned_route_import_capped,omitempty"`
+	// #13280: operational, HA, and reservation counters serialized by Rust's
+	// ProcessStatus. Keep the names identical to their serde wire keys; absent
+	// values from older helpers naturally decode to zero.
+	CosNoOwnerBindingDropsTotal        uint64            `json:"cos_no_owner_binding_drops_total,omitempty"`
+	IoUringWriteRefusedTotal           uint64            `json:"io_uring_write_refused_total,omitempty"`
+	IoUringWriteRefusedBytesTotal      uint64            `json:"io_uring_write_refused_bytes_total,omitempty"`
+	RouteChangeUnrejudgedSessionsTotal uint64            `json:"route_change_unrejudged_sessions_total,omitempty"`
+	OwnerRGFilingsDeclinedTotal        uint64            `json:"owner_rg_filings_declined_total,omitempty"`
+	HATransitionDemoteDropped          uint64            `json:"ha_transition_demote_dropped,omitempty"`
+	HATransitionRefreshDropped         uint64            `json:"ha_transition_refresh_dropped,omitempty"`
+	HATransitionVacateDropped          uint64            `json:"ha_transition_vacate_dropped,omitempty"`
+	HATransitionDemoteStaleSkipped     uint64            `json:"ha_transition_demote_stale_skipped,omitempty"`
+	HATransitionRefreshStaleSkipped    uint64            `json:"ha_transition_refresh_stale_skipped,omitempty"`
+	SessionDeleteRefusedIdentity       uint64            `json:"session_delete_refused_identity,omitempty"`
+	SessionDeleteDroppedReleased       uint64            `json:"session_delete_dropped_released,omitempty"`
+	TunnelPurgeReservationsReleased    uint64            `json:"tunnel_purge_reservations_released,omitempty"`
+	SyncedReverseRederived             uint64            `json:"synced_reverse_rederived,omitempty"`
+	S5Reinject                         *S5ReinjectStatus `json:"s5_reinject,omitempty"`
+}
+
+type S5ReinjectStatus struct {
+	RunID               string                 `json:"run_id"`
+	Generation          uint64                 `json:"generation"`
+	PermitEpoch         uint64                 `json:"permit_epoch"`
+	PermitState         string                 `json:"permit_state"`
+	LiveDescriptors     uint64                 `json:"live_descriptors"`
+	OldestUnackedMS     uint64                 `json:"oldest_unacked_ms"`
+	CompletedWritten    uint64                 `json:"completed_written"`
+	Reinjected          uint64                 `json:"reinjected"`
+	CompletedStale      uint64                 `json:"completed_stale"`
+	CompletedCancelled  uint64                 `json:"completed_cancelled"`
+	CompletedRefused    uint64                 `json:"completed_refused"`
+	CompletedUncertain  uint64                 `json:"completed_uncertain"`
+	AdjudicatedAdmitted uint64                 `json:"adjudicated_admitted"`
+	AdjudicatedRefused  uint64                 `json:"adjudicated_refused"`
+	DelegatedAdmitted   uint64                 `json:"delegated_admitted"`
+	DelegatedRefused    uint64                 `json:"delegated_refused"`
+	PurgedQueued        uint64                 `json:"purged_queued"`
+	PurgedUnacked       uint64                 `json:"purged_unacked"`
+	EpochRejects        uint64                 `json:"epoch_rejects"`
+	DryRunAdmitted      uint64                 `json:"dry_run_admitted"`
+	DryRunRefused       uint64                 `json:"dry_run_refused"`
+	NonDryRunRefused    uint64                 `json:"non_dry_run_refused"`
+	Provenance          []S5ReinjectProvenance `json:"provenance,omitempty"`
+	DeliveredAvailable  bool                   `json:"delivered_available"`
+	Delivered           uint64                 `json:"delivered"`
+}
+
+type S5ReinjectProvenance struct {
+	RequestID    uint64 `json:"request_id"`
+	PermitEpoch  uint64 `json:"permit_epoch"`
+	QueueEpoch   uint64 `json:"queue_epoch"`
+	QueueNumber  uint16 `json:"queue_number"`
+	Family       uint8  `json:"family"`
+	Hook         uint8  `json:"hook"`
+	OwnedIfindex uint32 `json:"owned_ifindex"`
+	Owner        string `json:"owner"`
+	STN          string `json:"stn"`
+	Outcome      string `json:"outcome"`
+	BytesWritten uint32 `json:"bytes_written"`
+	// Rust serde emits Vec<u8> as a JSON number array. Go's special []byte
+	// decoder expects base64 strings, so preserve the wire array with uint16.
+	FrameDigest []uint16 `json:"frame_digest,omitempty"`
+	Reason      uint8    `json:"reason"`
 }
 
 // MarshalJSON intentionally uses a value receiver so both ProcessStatus values
