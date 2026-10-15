@@ -134,6 +134,13 @@ type xpfCollector struct {
 	// status-dependent; see metrics_degraded_path_9040.go.
 	degradedPathTotal                    *prometheus.Desc
 	managementTLSCertificateInvalidTotal *prometheus.Desc
+	dataplaneObsoleteRegistryAccesses    *prometheus.Desc
+	dataplaneXDPDetachDebtInterfaces     *prometheus.Desc
+	dataplaneHostDivergenceMutations     *prometheus.Desc
+	dataplaneArmUncoveredSurfaces        *prometheus.Desc
+	dataplaneArmTotalSurfaces            *prometheus.Desc
+	dataplaneXDPAttachModeSurfaces       *prometheus.Desc
+	dataplaneSafetyOnce                  sync.Once
 
 	// Interface counters
 	ifacePacketsTotal *prometheus.Desc
@@ -1660,6 +1667,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.flowExportBatchDepth
 	ch <- c.flowExportBatchMaxDepth
 	ch <- c.flowExportBatchDroppedTotal
+	c.describeDataplaneSafety(ch)
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
@@ -1703,6 +1711,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// came up incompletely, so gating them on a healthy dataplane would hide
 	// them in precisely the case they exist for.
 	defer c.emitDataplaneSilentSkips(ch)
+	defer c.emitDataplaneSafety(ch)
 
 	// #1799: config-persist health is a control-plane signal — emit it
 	// BEFORE the dataplane gate below so the degraded state stays
