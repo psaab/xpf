@@ -243,12 +243,12 @@ type ProcessStatus struct {
 	// bpfShim nat_rule_counters offset map so Manager.ReadNATRuleCounter (and
 	// thus `show security nat source/destination/static rule`) reports the
 	// live translation count instead of a perpetual 0.
-	NATRuleCounters    []NATRuleCounterStatus            `json:"nat_rule_counters,omitempty"`
+	NATRuleCounters []NATRuleCounterStatus `json:"nat_rule_counters,omitempty"`
 	// NAT parse/validation errors are cumulative by snapshot builder (#13283).
-	SourceNATParseErrors      uint64 `json:"source_nat_parse_errors,omitempty"`
-	DestinationNATParseErrors uint64 `json:"destination_nat_parse_errors,omitempty"`
-	StaticNATParseErrors      uint64 `json:"static_nat_parse_errors,omitempty"`
-	FilterTermCounters []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
+	SourceNATParseErrors      uint64                            `json:"source_nat_parse_errors,omitempty"`
+	DestinationNATParseErrors uint64                            `json:"destination_nat_parse_errors,omitempty"`
+	StaticNATParseErrors      uint64                            `json:"static_nat_parse_errors,omitempty"`
+	FilterTermCounters        []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
 	// #3651: per-zone ingress/egress traffic (packet + byte) volume, summed
 	// across every worker/binding by the helper (ProcessStatus-level
 	// pre-summed sparse block, one row per zone with nonzero traffic keyed by
@@ -938,6 +938,9 @@ type ProcessStatus struct {
 	IpsecSANetlinkEnobufsTotal        uint64 `json:"ipsec_sa_netlink_enobufs_total,omitempty"`
 	IpsecSANetlinkRedumpsTotal        uint64 `json:"ipsec_sa_netlink_redumps_total,omitempty"`
 	IpsecSANetlinkRedumpUpsertsTotal  uint64 `json:"ipsec_sa_netlink_redump_upserts_total,omitempty"`
+	// #13290: IKE exchange admission table pressure and occupancy.
+	IkeExchangeEvictionsTotal uint64 `json:"ike_exchange_evictions_total,omitempty"`
+	IkeExchangeEntries        uint64 `json:"ike_exchange_entries,omitempty"`
 	// WgTunnels carries the #1865 per-WG-tunnel telemetry rows. Keyed
 	// by tunnel NAME (Tunnel) — TunnelEndpointID is informational only
 	// (#1873: positional ids renumber across commits). Absent/empty for

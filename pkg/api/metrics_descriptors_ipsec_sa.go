@@ -56,6 +56,16 @@ func (c *xpfCollector) initIpsecSaDescriptors() {
 		"Inbound XFRM-SA records evicted by the snapshot capacity cap.",
 		nil, nil,
 	)
+	c.ikeExchangeEvictionsTotal = prometheus.NewDesc(
+		"xpf_userspace_ike_exchange_evictions_total",
+		"Live IKE exchange seed entries evicted because the bounded table was full.",
+		nil, nil,
+	)
+	c.ikeExchangeEntries = prometheus.NewDesc(
+		"xpf_userspace_ike_exchange_entries",
+		"Current number of live IKE exchange seed entries retained by the userspace dataplane.",
+		nil, nil,
+	)
 	c.ipsecSAMultiSourceCollisionsTotal = prometheus.NewDesc(
 		"xpf_userspace_ipsec_sa_multi_source_collisions_total",
 		"Multi-source collision observations for one destination and SPI from full dumps and incremental upserts.",

@@ -60,6 +60,16 @@ func (c *xpfCollector) emitIpsecSaCounters(ch chan<- prometheus.Metric, status d
 		float64(status.IpsecSAEvictionsTotal),
 	)
 	ch <- prometheus.MustNewConstMetric(
+		c.ikeExchangeEvictionsTotal,
+		prometheus.CounterValue,
+		float64(status.IkeExchangeEvictionsTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.ikeExchangeEntries,
+		prometheus.GaugeValue,
+		float64(status.IkeExchangeEntries),
+	)
+	ch <- prometheus.MustNewConstMetric(
 		c.ipsecSAMultiSourceCollisionsTotal,
 		prometheus.CounterValue,
 		float64(status.IpsecSAMultiSourceCollisionsTotal),

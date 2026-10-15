@@ -971,6 +971,8 @@ type xpfCollector struct {
 	ipsecSANetlinkEnobufsTotal        *prometheus.Desc
 	ipsecSANetlinkRedumpsTotal        *prometheus.Desc
 	ipsecSANetlinkRedumpUpsertsTotal  *prometheus.Desc
+	ikeExchangeEvictionsTotal         *prometheus.Desc
+	ikeExchangeEntries                *prometheus.Desc
 	// #3773 (M13): fabric-link skip diagnostics — malformed value vs
 	// unresolved (empty) peer/local MAC.
 	fabricLinkSkippedMalformedTotal   *prometheus.Desc
@@ -1546,6 +1548,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.ipsecSANetlinkEnobufsTotal
 	ch <- c.ipsecSANetlinkRedumpsTotal
 	ch <- c.ipsecSANetlinkRedumpUpsertsTotal
+	ch <- c.ikeExchangeEvictionsTotal
+	ch <- c.ikeExchangeEntries
 	ch <- c.neighborResolverGetAttemptsTotal
 	ch <- c.neighborResolverGetResolvedTotal
 	ch <- c.neighborResolverProbeOnStaleTotal

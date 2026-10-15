@@ -26,6 +26,8 @@ func TestProcessStatusIpsecSaWireFields(t *testing.T) {
 		IpsecSANetlinkEnobufsTotal:        12,
 		IpsecSANetlinkRedumpsTotal:        13,
 		IpsecSANetlinkRedumpUpsertsTotal:  14,
+		IkeExchangeEvictionsTotal:         15,
+		IkeExchangeEntries:                16,
 	}
 	payload, err := json.Marshal(status)
 	if err != nil {
@@ -50,6 +52,8 @@ func TestProcessStatusIpsecSaWireFields(t *testing.T) {
 		"ipsec_sa_netlink_enobufs_total":         12,
 		"ipsec_sa_netlink_redumps_total":         13,
 		"ipsec_sa_netlink_redump_upserts_total":  14,
+		"ike_exchange_evictions_total":           15,
+		"ike_exchange_entries":                   16,
 	}
 	for name, value := range want {
 		var got uint64
@@ -102,6 +106,8 @@ func TestProcessStatusIpsecSaRustWireDecode(t *testing.T) {
 		"ipsec_sa_netlink_enobufs_total",
 		"ipsec_sa_netlink_redumps_total",
 		"ipsec_sa_netlink_redump_upserts_total",
+		"ike_exchange_evictions_total",
+		"ike_exchange_entries",
 	} {
 		if _, ok := fields[name]; !ok {
 			t.Errorf("Rust fixture process_status is missing %q", name)
@@ -124,6 +130,8 @@ func TestProcessStatusIpsecSaRustWireDecode(t *testing.T) {
 		fixtureStatus.IpsecSAMultiSourceCollisionsTotal != 0 ||
 		fixtureStatus.IpsecSANetlinkEnobufsTotal != 0 ||
 		fixtureStatus.IpsecSANetlinkRedumpsTotal != 0 ||
+		fixtureStatus.IkeExchangeEvictionsTotal != 0 ||
+		fixtureStatus.IkeExchangeEntries != 0 ||
 		fixtureStatus.IpsecSANetlinkRedumpUpsertsTotal != 0 {
 		t.Fatalf("zero-valued Rust fixture counters decoded nonzero: %+v", fixtureStatus)
 	}
@@ -209,6 +217,8 @@ func TestEmitIpsecSaCounters(t *testing.T) {
 			"xpf_userspace_ipsec_sa_netlink_redumps_total"),
 		ipsecSANetlinkRedumpUpsertsTotal: newDesc(
 			"xpf_userspace_ipsec_sa_netlink_redump_upserts_total"),
+		ikeExchangeEvictionsTotal: newDesc("xpf_userspace_ike_exchange_evictions_total"),
+		ikeExchangeEntries:        newDesc("xpf_userspace_ike_exchange_entries"),
 	}
 	status := dpuserspace.ProcessStatus{
 		IpsecSAMissDroppedPacketsTotal:    1,
@@ -225,6 +235,8 @@ func TestEmitIpsecSaCounters(t *testing.T) {
 		IpsecSANetlinkEnobufsTotal:        12,
 		IpsecSANetlinkRedumpsTotal:        13,
 		IpsecSANetlinkRedumpUpsertsTotal:  14,
+		IkeExchangeEvictionsTotal:         15,
+		IkeExchangeEntries:                16,
 	}
 
 	ch := make(chan prometheus.Metric, 16)
@@ -249,4 +261,6 @@ func TestEmitIpsecSaCounters(t *testing.T) {
 	assertCounterClose(t, got, c.ipsecSANetlinkEnobufsTotal, nil, 12)
 	assertCounterClose(t, got, c.ipsecSANetlinkRedumpsTotal, nil, 13)
 	assertCounterClose(t, got, c.ipsecSANetlinkRedumpUpsertsTotal, nil, 14)
+	assertCounterClose(t, got, c.ikeExchangeEvictionsTotal, nil, 15)
+	assertGaugeClose(t, got, c.ikeExchangeEntries, nil, 16)
 }
