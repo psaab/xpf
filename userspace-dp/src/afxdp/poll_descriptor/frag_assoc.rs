@@ -599,6 +599,7 @@ pub(super) fn flowless_pre_routing_destination_nat(
             .translate_inbound_result(&mut dst_v6, scope.zone_name)
         {
             crate::nptv6::Nptv6Translation::Translated => {
+                forwarding.nptv6.record_translation(true);
                 return flowless_pre_routing_translation(
                     NatDecision {
                         rewrite_dst: Some(IpAddr::V6(dst_v6)),
@@ -611,6 +612,7 @@ pub(super) fn flowless_pre_routing_destination_nat(
             }
             crate::nptv6::Nptv6Translation::NoMatch => {}
             crate::nptv6::Nptv6Translation::Untranslatable => {
+                forwarding.nptv6.record_untranslatable_drop();
                 return FlowlessPreRoutingNat::Untranslatable;
             }
         }
@@ -1407,6 +1409,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
             .translate_outbound_result(&mut src_v6, to_zone)
         {
             crate::nptv6::Nptv6Translation::Translated => {
+                forwarding.nptv6.record_translation(false);
                 return RetryFlowlessFragmentNat::Translate {
                     decision: crate::nat::NatDecision {
                         rewrite_src: Some(IpAddr::V6(src_v6)),
@@ -1417,6 +1420,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
                 };
             }
             crate::nptv6::Nptv6Translation::Untranslatable => {
+                forwarding.nptv6.record_untranslatable_drop();
                 return RetryFlowlessFragmentNat::Drop;
             }
             crate::nptv6::Nptv6Translation::NoMatch => {}

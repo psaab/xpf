@@ -144,6 +144,13 @@ pub(crate) struct ProcessStatus {
     /// rather than failing the status parse (#1961 additive-counter rule).
     #[serde(rename = "nat_reverse_key_collisions_distinct_src", default)]
     pub nat_reverse_key_collisions_distinct_src: u64,
+    /// Additive / defaulted for older helpers.
+    #[serde(rename = "nptv6_inbound_translations", default)]
+    pub nptv6_inbound_translations: u64,
+    #[serde(rename = "nptv6_outbound_translations", default)]
+    pub nptv6_outbound_translations: u64,
+    #[serde(rename = "nptv6_untranslatable_drops", default)]
+    pub nptv6_untranslatable_drops: u64,
     /// #6751 PR 2/3: interface-mode SNAT identity-mint conflicts that took the
     /// PAT probe — how often two flows actually contend for one translated
     /// reverse identity. Additive + `default`ed (#1961).

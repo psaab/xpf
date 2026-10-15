@@ -490,6 +490,11 @@ type ProcessStatus struct {
 	// compat with older helpers.
 	InterfaceSNATPATCollisionsTotal uint64 `json:"interface_snat_pat_collisions_total,omitempty"`
 
+	// NPTv6 translations and fail-closed untranslatable packet drops.
+	Nptv6InboundTranslations  uint64 `json:"nptv6_inbound_translations,omitempty"`
+	Nptv6OutboundTranslations uint64 `json:"nptv6_outbound_translations,omitempty"`
+	Nptv6UntranslatableDrops  uint64 `json:"nptv6_untranslatable_drops,omitempty"`
+
 	// NAT64FragCrossDomainMissesTotal is #7056 (#5798 required-fix #5):
 	// fragment-association misses where a same-datagram entry existed under a
 	// DIFFERENT ingress security domain. The fail-closed refusal is #6835's;

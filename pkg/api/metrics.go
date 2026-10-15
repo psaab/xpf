@@ -715,11 +715,13 @@ type xpfCollector struct {
 	userspaceFabricUnstampedIngressDrops *prometheus.Desc
 	userspaceFabricAmbiguousZoneDrops    *prometheus.Desc
 	// #10498: pre-L3 admission counters, summed across bindings.
-	userspaceUMEMSliceDropped     *prometheus.Desc
-	userspaceUnknownVLANDropped   *prometheus.Desc
-	userspaceDstMACDropped        *prometheus.Desc
-	userspaceFlowCacheActiveFlows *prometheus.Desc
-	userspaceFlowCacheCapacity    *prometheus.Desc
+	userspaceUMEMSliceDropped         *prometheus.Desc
+	userspaceUnknownVLANDropped       *prometheus.Desc
+	userspaceDstMACDropped            *prometheus.Desc
+	userspaceFlowCacheActiveFlows     *prometheus.Desc
+	userspaceFlowCacheCapacity        *prometheus.Desc
+	userspaceNptv6TranslationsTotal   *prometheus.Desc
+	userspaceNptv6UntranslatableDrops *prometheus.Desc
 	// #10069: dual slow-path outlet health/counters, labelled by outlet
 	// (`trusted` or `delegated`) so the delegated TUN does not disappear from
 	// Prometheus when its MTU or reinject counters diverge.
@@ -1325,6 +1327,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceDstMACDropped
 	ch <- c.userspaceFlowCacheActiveFlows
 	ch <- c.userspaceFlowCacheCapacity
+	ch <- c.userspaceNptv6TranslationsTotal
+	ch <- c.userspaceNptv6UntranslatableDrops
 	ch <- c.userspaceEventStreamFramesTotal
 	ch <- c.userspaceEventStreamProducerFramesTotal
 	ch <- c.userspaceEventStreamDecodeErrorsTotal

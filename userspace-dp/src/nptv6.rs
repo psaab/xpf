@@ -133,6 +133,22 @@ impl Nptv6Translation {
     }
 }
 
+/// Aggregated NPTv6 translation counters shared by published forwarding-state
+/// clones.
+#[derive(Debug, Default)]
+pub(crate) struct Nptv6Counters {
+    inbound_translations: std::sync::atomic::AtomicU64,
+    outbound_translations: std::sync::atomic::AtomicU64,
+    untranslatable_drops: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Nptv6CounterSnapshot {
+    pub(crate) inbound_translations: u64,
+    pub(crate) outbound_translations: u64,
+    pub(crate) untranslatable_drops: u64,
+}
+
 /// Aggregated NPTv6 state built from config snapshots.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Nptv6State {
@@ -142,6 +158,38 @@ pub(crate) struct Nptv6State {
     /// Rules for outbound translation (internal src -> external src).
     /// Indexed by internal prefix.
     outbound: Vec<Nptv6Rule>,
+    counters: std::sync::Arc<Nptv6Counters>,
+}
+
+impl Nptv6State {
+    pub(crate) fn record_translation(&self, inbound: bool) {
+        use std::sync::atomic::Ordering;
+        let counter = if inbound {
+            &self.counters.inbound_translations
+        } else {
+            &self.counters.outbound_translations
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_untranslatable_drop(&self) {
+        self.counters
+            .untranslatable_drops
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn counters(&self) -> Nptv6CounterSnapshot {
+        use std::sync::atomic::Ordering;
+        Nptv6CounterSnapshot {
+            inbound_translations: self.counters.inbound_translations.load(Ordering::Relaxed),
+            outbound_translations: self.counters.outbound_translations.load(Ordering::Relaxed),
+            untranslatable_drops: self.counters.untranslatable_drops.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn retain_counters_from(&mut self, previous: &Self) {
+        self.counters = std::sync::Arc::clone(&previous.counters);
+    }
 }
 
 /// Compute the RFC 6296 adjustment value.

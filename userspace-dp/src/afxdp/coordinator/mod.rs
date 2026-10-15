@@ -1626,6 +1626,11 @@ impl Coordinator {
         self.nat_counters.snapshots()
     }
 
+    /// Aggregate NPTv6 translation counters published with helper status.
+    pub fn nptv6_counters(&self) -> crate::nptv6::Nptv6CounterSnapshot {
+        self.forwarding.nptv6.counters()
+    }
+
     /// #2218: operator clear of NAT translation hit counters (the Go side
     /// also clears the corresponding offset entries; this resets the
     /// helper-side atomics).

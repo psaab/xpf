@@ -52,6 +52,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 		return
 	}
 	status := *statusPtr
+	c.emitUserspaceNptv6(ch, status)
 	c.emitCoSTelemetry(ch, &status)
 	c.emitWorkerRuntime(ch, status)
 	c.emitUserspaceDynamicBufferMetrics(ch, status)

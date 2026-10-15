@@ -3296,9 +3296,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     .nptv6
                                     .translate_inbound_result(&mut dst_v6, ingress_zone_name)
                                 {
-                                    crate::nptv6::Nptv6Translation::Translated => Some(dst_v6),
+                                    crate::nptv6::Nptv6Translation::Translated => {
+                                        worker_ctx.forwarding.nptv6.record_translation(true);
+                                        Some(dst_v6)
+                                    }
                                     crate::nptv6::Nptv6Translation::NoMatch => None,
                                     crate::nptv6::Nptv6Translation::Untranslatable => {
+                                        worker_ctx.forwarding.nptv6.record_untranslatable_drop();
                                         // Untranslatable is terminal: RFC
                                         // §3.7's all-zero IID is an explicit
                                         // MUST-drop; §3.2 directs discard of
@@ -4848,6 +4852,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .translate_outbound_result(&mut src_v6, to_zone)
                                             {
                                                 crate::nptv6::Nptv6Translation::Translated => {
+                                                    worker_ctx.forwarding.nptv6.record_translation(false);
                                                     Some(NatDecision {
                                                         rewrite_src: Some(IpAddr::V6(src_v6)),
                                                         rewrite_dst: None,
@@ -4858,6 +4863,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 }
                                                 crate::nptv6::Nptv6Translation::NoMatch => None,
                                                 crate::nptv6::Nptv6Translation::Untranslatable => {
+                                                    worker_ctx.forwarding.nptv6.record_untranslatable_drop();
                                                     // Untranslatable is terminal:
                                                     // §3.7's all-zero IID is
                                                     // an explicit MUST-drop;
@@ -9673,6 +9679,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .translate_outbound_result(&mut src_v6, to_zone)
                                             {
                                                 crate::nptv6::Nptv6Translation::Translated => {
+                                                    worker_ctx.forwarding.nptv6.record_translation(false);
                                                     Some(NatDecision {
                                                         rewrite_src: Some(IpAddr::V6(src_v6)),
                                                         rewrite_dst: None,
@@ -9683,6 +9690,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 }
                                                 crate::nptv6::Nptv6Translation::NoMatch => None,
                                                 crate::nptv6::Nptv6Translation::Untranslatable => {
+                                                    worker_ctx.forwarding.nptv6.record_untranslatable_drop();
                                                     // Untranslatable is
                                                     // terminal: §3.7's
                                                     // all-zero IID is an
