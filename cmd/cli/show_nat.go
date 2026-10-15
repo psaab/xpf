@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -69,7 +70,14 @@ func (c *ctl) handleShowNAT(args []string) error {
 			return c.showNATDestinationSummary()
 		}
 		if len(args) >= 2 && args[1] == "pool" {
-			return c.showNATDestinationPool()
+			poolName := ""
+			if len(args) >= 3 {
+				poolName = args[2]
+			}
+			if len(args) > 3 {
+				return fmt.Errorf("usage: show security nat destination pool [<name>]")
+			}
+			return c.showNATDestinationPool(poolName)
 		}
 		if len(args) >= 3 && args[1] == "rule" && args[2] == "detail" {
 			return c.showCommand("show security nat destination rule detail")
@@ -321,31 +329,42 @@ func (c *ctl) showNATDestinationSummary() error {
 	}
 	pools := make(map[string]poolInfo)
 	for _, r := range resp.Rules {
-		if _, ok := pools[r.TranslateIp]; !ok {
-			pools[r.TranslateIp] = poolInfo{addr: r.TranslateIp, port: r.TranslatePort}
+		name := r.PoolName
+		if name == "" {
+			name = r.TranslateIp // compatibility with daemons predating #13199
+		}
+		if _, ok := pools[name]; !ok {
+			pools[name] = poolInfo{addr: r.TranslateIp, port: r.TranslatePort}
 		}
 	}
 
 	statsResp, err := c.client.GetNATRuleStats(c.ctx(), &pb.GetNATRuleStatsRequest{
 		NatType: "destination",
 	})
+	if err != nil {
+		return fmt.Errorf("get destination NAT rule stats: %w", err)
+	}
 	poolHits := make(map[string]uint64)
-	if err == nil {
-		for _, r := range statsResp.Rules {
-			poolHits[r.Action] += r.HitPackets
-		}
+	for _, r := range statsResp.Rules {
+		poolHits[r.Action] += r.HitPackets
 	}
 
 	fmt.Printf("Total active translations: %d\n", resp.TotalActiveTranslations)
 	fmt.Printf("Total pools: %d\n", len(pools))
 	fmt.Println()
 	fmt.Printf("%-20s %-20s %-8s %-12s\n", "Pool", "Address", "Port", "Hits")
-	for addr, p := range pools {
+	names := make([]string, 0, len(pools))
+	for name := range pools {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		p := pools[name]
 		portStr := "-"
 		if p.port > 0 {
 			portStr = fmt.Sprintf("%d", p.port)
 		}
-		fmt.Printf("%-20s %-20s %-8s %-12d\n", addr, addr, portStr, poolHits["pool "+addr])
+		fmt.Printf("%-20s %-20s %-8s %-12d\n", name, p.addr, portStr, poolHits["pool "+name])
 	}
 	if len(resp.RuleSetSessions) > 0 {
 		fmt.Println()
@@ -358,26 +377,47 @@ func (c *ctl) showNATDestinationSummary() error {
 	return nil
 }
 
-func (c *ctl) showNATDestinationPool() error {
+func (c *ctl) showNATDestinationPool(poolName string) error {
 	resp, err := c.client.GetNATDestination(c.ctx(), &pb.GetNATDestinationRequest{})
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
-	if len(resp.Rules) == 0 {
+	poolRules := make(map[string][]*pb.NATDestInfo)
+	for _, r := range resp.Rules {
+		name := r.PoolName
+		if name == "" {
+			name = r.TranslateIp // compatibility with daemons predating #13199
+		}
+		if poolName != "" && poolName != "all" && name != poolName {
+			continue
+		}
+		poolRules[name] = append(poolRules[name], r)
+	}
+	if len(poolRules) == 0 {
+		if poolName != "" && poolName != "all" {
+			return fmt.Errorf("destination NAT pool %q not found", poolName)
+		}
 		fmt.Println("No destination NAT pools configured")
 		return nil
 	}
-	for _, r := range resp.Rules {
-		fmt.Printf("Pool: %s\n", r.TranslateIp)
-		fmt.Printf("  Address: %s\n", r.TranslateIp)
-		if r.TranslatePort > 0 {
-			fmt.Printf("  Port: %d\n", r.TranslatePort)
+	names := make([]string, 0, len(poolRules))
+	for name := range poolRules {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		fmt.Printf("Pool name: %s\n", name)
+		for _, r := range poolRules[name] {
+			fmt.Printf("  Address: %s\n", r.TranslateIp)
+			if r.TranslatePort > 0 {
+				fmt.Printf("  Port: %d\n", r.TranslatePort)
+			}
+			fmt.Printf("  Rule: %s (dst %s", r.Name, r.DstAddr)
+			if r.DstPort > 0 {
+				fmt.Printf(":%d", r.DstPort)
+			}
+			fmt.Println(")")
 		}
-		fmt.Printf("  Rule: %s (dst %s", r.Name, r.DstAddr)
-		if r.DstPort > 0 {
-			fmt.Printf(":%d", r.DstPort)
-		}
-		fmt.Println(")")
 		fmt.Println()
 	}
 	return nil
