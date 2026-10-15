@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"net"
 	"sort"
 	"testing"
 
@@ -41,6 +42,11 @@ func (f *linkListFakeOps11443) LinkList() ([]netlink.Link, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Attrs().Name < out[j].Attrs().Name })
 	return out, nil
+}
+
+func (f *linkListFakeOps11443) LinkSetDown(link netlink.Link) error {
+	link.Attrs().Flags &^= net.FlagUp
+	return nil
 }
 
 func seedGretun11443(ops *fakeLinkOps, name string, index int) {
