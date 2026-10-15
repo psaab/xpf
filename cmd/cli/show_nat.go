@@ -134,7 +134,11 @@ func (c *ctl) showNATDeterministic(args []string) error {
 		}
 		req.Direction = pb.NATDeterministicDirection_NAT_DETERMINISTIC_DIRECTION_FORWARD
 		req.InternalHost = args[1]
-		req.Pool = natPoolArg(args[2:])
+		var err error
+		req.Pool, err = natPoolArg(args[2:])
+		if err != nil {
+			return fmt.Errorf("%s", usage)
+		}
 	case "nat-ip":
 		if len(args) < 4 || args[2] != "nat-port" {
 			return fmt.Errorf("%s", usage)
@@ -147,7 +151,10 @@ func (c *ctl) showNATDeterministic(args []string) error {
 		req.Direction = pb.NATDeterministicDirection_NAT_DETERMINISTIC_DIRECTION_REVERSE
 		req.NatIp = args[1]
 		req.NatPort = uint32(port)
-		req.Pool = natPoolArg(args[4:])
+		req.Pool, err = natPoolArg(args[4:])
+		if err != nil {
+			return fmt.Errorf("%s", usage)
+		}
 	default:
 		return fmt.Errorf("unknown deterministic-nat query %q (want internal-host or nat-ip)", args[0])
 	}
@@ -168,12 +175,15 @@ func (c *ctl) showNATDeterministic(args []string) error {
 	return nil
 }
 
-// natPoolArg extracts an optional trailing `pool <name>` filter.
-func natPoolArg(rest []string) string {
-	if len(rest) >= 2 && rest[0] == "pool" {
-		return rest[1]
+// natPoolArg parses the optional trailing `pool <name>` selector.
+func natPoolArg(rest []string) (string, error) {
+	if len(rest) == 0 {
+		return "", nil
 	}
-	return ""
+	if len(rest) != 2 || rest[0] != "pool" || rest[1] == "" {
+		return "", fmt.Errorf("expected optional pool <name>")
+	}
+	return rest[1], nil
 }
 
 func forwardResultFromPB(resp *pb.GetNATDeterministicResponse) *nat.ForwardResult {
@@ -333,9 +343,16 @@ func (c *ctl) showNATDestinationSummary() error {
 		if name == "" {
 			name = r.TranslateIp // compatibility with daemons predating #13199
 		}
+		if name == "" {
+			continue // `destination-nat off` rules do not reference pools.
+		}
 		if _, ok := pools[name]; !ok {
 			pools[name] = poolInfo{addr: r.TranslateIp, port: r.TranslatePort}
 		}
+	}
+	if len(pools) == 0 {
+		fmt.Println("No destination NAT pools configured")
+		return nil
 	}
 
 	statsResp, err := c.client.GetNATRuleStats(c.ctx(), &pb.GetNATRuleStatsRequest{
@@ -387,6 +404,9 @@ func (c *ctl) showNATDestinationPool(poolName string) error {
 		name := r.PoolName
 		if name == "" {
 			name = r.TranslateIp // compatibility with daemons predating #13199
+		}
+		if name == "" {
+			continue // `destination-nat off` rules do not reference pools.
 		}
 		if poolName != "" && poolName != "all" && name != poolName {
 			continue
