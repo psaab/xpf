@@ -87,6 +87,42 @@ func (s *reverseOnlyDeleteFailureStore) DeleteBatchKnownExactV4(entries []datapl
 	}
 	return nil, errors.New("forward delete failed after reverse delete")
 }
+func (s *reverseOnlyDeleteFailureStore) DeleteBatchKnownExactV6(entries []dataplane.SessionEntryV6, _ dataplane.DeleteReason, _ bool) ([]dataplane.SessionKeyV6, error) {
+	for _, entry := range entries {
+		if entry.Value.ReverseKey.Protocol != 0 {
+			if err := s.DeleteSessionV6(entry.Value.ReverseKey); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return nil, errors.New("forward delete failed after reverse delete")
+}
+
+func TestGCSweepCountsReverseRemovedBeforeForwardErrorV613236(t *testing.T) {
+	now := uint64(100)
+	forward := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 1000}
+	reverse := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 2000}
+	dp := &mockGCDP{
+		v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue),
+		v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+			forward: {State: dataplane.SessStateEstablished, LastSeen: 1, Timeout: 1, ReverseKey: reverse},
+			reverse: {State: dataplane.SessStateEstablished, IsReverse: 1, LastSeen: 1, Timeout: 1, ReverseKey: forward},
+		},
+	}
+	store := &reverseOnlyDeleteFailureStore{mockGCDP: dp}
+	gc := NewGCWithDomains(store, mockGCTelemetry{}, nil, nil, time.Second)
+	gc.testNow = func() uint64 { return now }
+
+	gc.sweep()
+	stats := gc.Stats()
+	if len(dp.v6sessions) != 1 {
+		t.Fatalf("remaining v6 entries=%d want 1 after reverse-only delete", len(dp.v6sessions))
+	}
+	if stats.TotalEntries != 1 || stats.EstablishedSessions != 1 || gc.lastTotal != 1 {
+		t.Fatalf("partial v6-delete counts = total:%d established:%d lastTotal:%d; want 1/1/1",
+			stats.TotalEntries, stats.EstablishedSessions, gc.lastTotal)
+	}
+}
 
 func TestGCSweepCountsReverseRemovedBeforeForwardError13236(t *testing.T) {
 	now := uint64(100)

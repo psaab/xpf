@@ -379,7 +379,7 @@ func (gc *GC) sweep() time.Duration {
 			slog.Debug("conntrack GC v4 delete failed", "err", err)
 		}
 		expired += len(exact)
-		removedV4, establishedRemovedV4 = deletedCountsV4(gc.sessions, toDelete, exact, reverseKeys)
+		removedV4, establishedRemovedV4 = deletedCountsV4(gc.sessions, toDelete, exact, reverseKeys, err)
 		if gc.OnDeleteV4 != nil {
 			for _, key := range exact {
 				gc.OnDeleteV4(key)
@@ -469,7 +469,7 @@ func (gc *GC) sweep() time.Duration {
 			slog.Debug("conntrack GC v6 delete failed", "err", err)
 		}
 		expired += len(exact)
-		removedV6, establishedRemovedV6 = deletedCountsV6(gc.sessions, toDeleteV6, exact, reverseKeys)
+		removedV6, establishedRemovedV6 = deletedCountsV6(gc.sessions, toDeleteV6, exact, reverseKeys, err)
 		if gc.OnDeleteV6 != nil {
 			for _, key := range exact {
 				gc.OnDeleteV6(key)
@@ -603,7 +603,7 @@ func monotonicSeconds() uint64 {
 	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
 	return uint64(ts.Sec)
 }
-func deletedCountsV4(store dataplane.SessionStore, entries []dataplane.SessionEntryV4, exact []dataplane.SessionKey, reverseKeys map[dataplane.SessionKey]struct{}) (int, int) {
+func deletedCountsV4(store dataplane.SessionStore, entries []dataplane.SessionEntryV4, exact []dataplane.SessionKey, reverseKeys map[dataplane.SessionKey]struct{}, deleteErr error) (int, int) {
 	exactKeys := make(map[dataplane.SessionKey]struct{}, len(exact))
 	for _, key := range exact {
 		exactKeys[key] = struct{}{}
@@ -615,14 +615,16 @@ func deletedCountsV4(store dataplane.SessionStore, entries []dataplane.SessionEn
 		}
 	}
 	for key := range reverseKeys {
-		if _, err := store.GetV4(key); errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, unix.ENOENT) {
+		if deleteErr == nil {
+			removed++
+		} else if _, err := store.GetV4(key); errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, unix.ENOENT) {
 			removed++
 		}
 	}
 	return removed, established
 }
 
-func deletedCountsV6(store dataplane.SessionStore, entries []dataplane.SessionEntryV6, exact []dataplane.SessionKeyV6, reverseKeys map[dataplane.SessionKeyV6]struct{}) (int, int) {
+func deletedCountsV6(store dataplane.SessionStore, entries []dataplane.SessionEntryV6, exact []dataplane.SessionKeyV6, reverseKeys map[dataplane.SessionKeyV6]struct{}, deleteErr error) (int, int) {
 	exactKeys := make(map[dataplane.SessionKeyV6]struct{}, len(exact))
 	for _, key := range exact {
 		exactKeys[key] = struct{}{}
@@ -634,7 +636,9 @@ func deletedCountsV6(store dataplane.SessionStore, entries []dataplane.SessionEn
 		}
 	}
 	for key := range reverseKeys {
-		if _, err := store.GetV6(key); errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, unix.ENOENT) {
+		if deleteErr == nil {
+			removed++
+		} else if _, err := store.GetV6(key); errors.Is(err, ebpf.ErrKeyNotExist) || errors.Is(err, unix.ENOENT) {
 			removed++
 		}
 	}
