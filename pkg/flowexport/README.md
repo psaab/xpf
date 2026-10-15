@@ -807,6 +807,18 @@ The snapshot is surfaced through `Exporter.CollectorHealth()` /
   the in-daemon interactive CLI) — the collector line prints
   `... source <src>` for a source-bound collector (#3745).
 
+## Route-mask cache telemetry (#13306)
+
+The process-wide `routeMaskCache` exposes `RouteMaskCacheStats()` snapshots
+for cache hits, misses, full clears, in-flight lookup drops, lookup errors, and
+current entries. Prometheus emits the fixed-cardinality families
+`xpf_flowexport_routemask_cache_{hits_total,misses_total,clears_total,
+inflight_drops_total,lookup_errors_total}` and
+`xpf_flowexport_routemask_cache_entries` on every scrape, even when no flow
+exporter is configured. `lookup_errors_total` includes both netlink errors and
+empty route results; the latter remain cached as unresolved entries under the
+existing behavior.
+
 ## Bounded export batch + drop visibility (#3747)
 
 `ExportSessionClose` does not write to the collector inline — it queues the

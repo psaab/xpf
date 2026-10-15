@@ -669,21 +669,21 @@ type xpfCollector struct {
 	userspaceIoUringRetainedBuffers *prometheus.Desc
 	userspaceIoUringRetainedBytes   *prometheus.Desc
 	// #13280: Rust ProcessStatus operational and HA counters.
-	userspaceCosNoOwnerBindingDrops          *prometheus.Desc
-	userspaceIoUringWriteRefused             *prometheus.Desc
-	userspaceIoUringWriteRefusedBytes        *prometheus.Desc
-	userspaceRouteChangeUnrejudgedSessions   *prometheus.Desc
-	userspaceOwnerRGFilingsDeclined          *prometheus.Desc
-	userspaceHATransitionDropped             *prometheus.Desc
-	userspaceHATransitionStaleSkipped        *prometheus.Desc
-	userspaceSessionDeleteRefusedIdentity    *prometheus.Desc
-	userspaceSessionDeleteDroppedReleased    *prometheus.Desc
-	userspaceTunnelPurgeReservationsReleased *prometheus.Desc
-	userspaceSyncedReverseRederived          *prometheus.Desc
-	userspacePeerDeleteRefusedLocalOwned     *prometheus.Desc
-	userspaceS5Reinject                      *prometheus.Desc
-	userspaceS5ReinjectCompletions           *prometheus.Desc
-	userspaceSessionDeleteReplicaDropped     *prometheus.Desc
+	userspaceCosNoOwnerBindingDrops           *prometheus.Desc
+	userspaceIoUringWriteRefused              *prometheus.Desc
+	userspaceIoUringWriteRefusedBytes         *prometheus.Desc
+	userspaceRouteChangeUnrejudgedSessions    *prometheus.Desc
+	userspaceOwnerRGFilingsDeclined           *prometheus.Desc
+	userspaceHATransitionDropped              *prometheus.Desc
+	userspaceHATransitionStaleSkipped         *prometheus.Desc
+	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc
+	userspaceSessionDeleteDroppedReleased     *prometheus.Desc
+	userspaceTunnelPurgeReservationsReleased  *prometheus.Desc
+	userspaceSyncedReverseRederived           *prometheus.Desc
+	userspacePeerDeleteRefusedLocalOwned      *prometheus.Desc
+	userspaceS5Reinject                       *prometheus.Desc
+	userspaceS5ReinjectCompletions            *prometheus.Desc
+	userspaceSessionDeleteReplicaDropped      *prometheus.Desc
 	userspaceSessionDeleteReplicaDropRepaired *prometheus.Desc
 	// #13289: process-wide #10597 WireGuard uncovered forwarding counters.
 	userspaceWGUncoveredPacketsTotal *prometheus.Desc
@@ -1070,6 +1070,12 @@ type xpfCollector struct {
 	flowExportBatchDepth        *prometheus.Desc
 	flowExportBatchMaxDepth     *prometheus.Desc
 	flowExportBatchDroppedTotal *prometheus.Desc
+	routeMaskCacheHits          *prometheus.Desc
+	routeMaskCacheMisses        *prometheus.Desc
+	routeMaskCacheFullClears    *prometheus.Desc
+	routeMaskCacheInflightDrops *prometheus.Desc
+	routeMaskCacheLookupErrors  *prometheus.Desc
+	routeMaskCacheEntries       *prometheus.Desc
 }
 
 func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -1667,6 +1673,12 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.flowExportBatchDepth
 	ch <- c.flowExportBatchMaxDepth
 	ch <- c.flowExportBatchDroppedTotal
+	ch <- c.routeMaskCacheHits
+	ch <- c.routeMaskCacheMisses
+	ch <- c.routeMaskCacheFullClears
+	ch <- c.routeMaskCacheInflightDrops
+	ch <- c.routeMaskCacheLookupErrors
+	ch <- c.routeMaskCacheEntries
 	c.describeDataplaneSafety(ch)
 }
 

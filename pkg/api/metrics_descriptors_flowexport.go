@@ -51,4 +51,30 @@ func (c *xpfCollector) initFlowExportDescriptors() {
 		"Total flow records dropped because the pending export batch was at capacity, labeled by protocol, instance, template and address family.",
 		[]string{"protocol", "instance", "template", "family"}, nil,
 	)
+
+	// #13306: process-wide FIB mask cache pressure and lookup failures.
+	c.routeMaskCacheHits = prometheus.NewDesc(
+		"xpf_flowexport_routemask_cache_hits_total",
+		"Successful route-mask FIB cache lookups served from cache.", nil, nil,
+	)
+	c.routeMaskCacheMisses = prometheus.NewDesc(
+		"xpf_flowexport_routemask_cache_misses_total",
+		"Route-mask cache misses, including cold and expired keys.", nil, nil,
+	)
+	c.routeMaskCacheFullClears = prometheus.NewDesc(
+		"xpf_flowexport_routemask_cache_clears_total",
+		"Full route-mask cache clears after expiry purging failed to make room.", nil, nil,
+	)
+	c.routeMaskCacheInflightDrops = prometheus.NewDesc(
+		"xpf_flowexport_routemask_cache_inflight_drops_total",
+		"Route-mask FIB lookups not scheduled because the concurrent lookup cap was reached.", nil, nil,
+	)
+	c.routeMaskCacheLookupErrors = prometheus.NewDesc(
+		"xpf_flowexport_routemask_cache_lookup_errors_total",
+		"Route-mask FIB lookups that returned no route or an error.", nil, nil,
+	)
+	c.routeMaskCacheEntries = prometheus.NewDesc(
+		"xpf_flowexport_routemask_cache_entries",
+		"Current number of cached route-mask entries.", nil, nil,
+	)
 }
