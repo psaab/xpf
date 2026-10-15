@@ -2215,19 +2215,26 @@ pub(in crate::afxdp) fn parse_session_flow_from_frame(
     match meta.addr_family as i32 {
         libc::AF_INET => parse_ipv4_session_flow_from_frame(frame, meta),
         libc::AF_INET6 => {
-            let l3 = match meta.l3_offset {
-                14 | 18
-                    if frame
-                        .get(meta.l3_offset as usize)
-                        .is_some_and(|byte| (byte >> 4) == 6) =>
-                {
-                    meta.l3_offset as usize
+            // #13529: resolve L3 through the #9900 CheckedL3 gate and only
+            // trust the relative L4 offset when the stamp verified. When
+            // `stamp_trusted` is false the shim's whole offset pair is
+            // suspect (both stamps come from one parse) — pairing the
+            // wire-corrected L3 with the stale `meta_rel` would read ports
+            // at a wrong-but-plausible offset and key a session on payload
+            // bytes. Fall back to the wire ext-chain walk instead, exactly
+            // as `live_frame_ports_from_meta_bytes` and the #9900
+            // meta-offset fallback do. `meta_rel` is only meaningful when
+            // both offsets share the same (verified) base, so it is
+            // computed only in the trusted arm.
+            let checked = nibble_checked_l3(frame, meta.l3_offset, meta.addr_family)?;
+            let l3 = checked.l3;
+            let l4 = if checked.stamp_trusted {
+                let meta_rel = meta.l4_offset.wrapping_sub(meta.l3_offset) as usize;
+                if meta_rel >= 40 && meta.l4_offset > meta.l3_offset {
+                    l3.checked_add(meta_rel)?
+                } else {
+                    frame_l4_offset(frame, meta.addr_family)?
                 }
-                _ => frame_l3_offset(frame)?,
-            };
-            let meta_rel = meta.l4_offset.wrapping_sub(meta.l3_offset) as usize;
-            let l4 = if meta_rel >= 40 && meta.l4_offset > meta.l3_offset {
-                l3.checked_add(meta_rel)?
             } else {
                 frame_l4_offset(frame, meta.addr_family)?
             };
