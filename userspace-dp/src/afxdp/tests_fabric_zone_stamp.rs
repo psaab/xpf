@@ -3930,3 +3930,269 @@ fn fabric_punt_seed_adjudication_records_no_policy_hit_12212() {
          for the punted packet (#12212)"
     );
 }
+
+/// #13647 (D5-02): a fabric-stamped ICMPv4 error quoting a tenant session
+/// must resolve that session through the stamped zone's routing domain. The
+/// session lives in `tenant-a`; the error arrives on fab0 (ifindex 21, no
+/// ifindex domain) carrying the LAN zone stamp. Before the fix, the matcher
+/// passed `None` to `ingress_routing_domain`, resolved domain 0, and missed
+/// the tenant session. The direct matcher result is the regression assertion.
+#[test]
+fn fabric_stamped_icmp_error_resolves_tenant_session_13647() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let wire_src_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let src_port: u16 = 40000;
+
+    let mut snapshot = routing_instance_fabric_snapshot_11061(false);
+    snapshot.flow.allow_embedded_icmp = true;
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    let (tenant_domain, _) = crate::session::install_table_identity("tenant-a");
+    assert_eq!(
+        forwarding.zone_routing_domain.get(&TEST_LAN_ZONE_ID).copied(),
+        Some(tenant_domain),
+        "precondition: the LAN stamp must resolve to the tenant domain"
+    );
+
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(wire_src_ip),
+            dst_ip: IpAddr::V4(server_ip),
+            src_port,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: tenant_domain,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: tenant_domain,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+
+    // Fabric-stamped TE quoting an as-is tenant session (wire_src_ip:src_port
+    // -> server:80), dst MAC = fabric link, src MAC = LAN zone stamp.
+    let mut frame = build_icmp_te_frame_v4_with_mac(
+        router_ip, wire_src_ip, server_ip, src_port, 80, PROTO_TCP,
+        [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+    );
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 21,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        config_generation: 7,
+        fib_generation: 9,
+        flow_src_addr: {
+            let mut a = [0u8; 16];
+            a[..4].copy_from_slice(&router_ip.octets());
+            a
+        },
+        flow_dst_addr: {
+            let mut a = [0u8; 16];
+            a[..4].copy_from_slice(&wire_src_ip.octets());
+            a
+        },
+        ..UserspaceDpMeta::default()
+    };
+    // The validated source-MAC stamp is the ingress authority. Passing it
+    // through the matcher must select tenant-a; the physical fab0 ifindex
+    // intentionally has no routing-domain mapping.
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let outcome = try_embedded_icmp_nat_match_from_frame_with_ingress_zone(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
+        &shared_forward_wire_sessions,
+        1_000_000,
+        Some(TEST_LAN_ZONE_ID),
+    );
+    assert!(
+        matches!(outcome, EmbeddedMatchOutcome::Match(_)),
+        "#13647: the embedded ICMP quote must resolve the tenant session via \\
+         the stamped zone's routing domain (RED on revert: matcher probes \\
+         domain 0 and misses)"
+    );
+}
+
+/// #13647 (D5-02) NPTv6 arm: an ICMPv6 error arriving on fab0 carrying a
+/// zone stamp must gate the zone-scoped NPTv6 reverse translation on the
+/// STAMPED zone, not on fab0's (absent) ifindex zone. Direct matcher-level
+/// cell mirroring
+/// `icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_parent`:
+/// the session carries NO NAT decision, so the only path to it is the
+/// zone-gated `translate_inbound_result` feeding `embedded_key`. The
+/// physical ingress (fab0, ifindex 21) has NO zone entry; only the stamp
+/// (zone-b) can satisfy the `from_zone: "zone-b"` rule. Pre-fix
+/// `match_outer_v6` resolved `ingress_zone = ""` and the lookup missed.
+#[test]
+fn fabric_stamped_icmpv6_error_gates_nptv6_on_stamped_zone_13647() {
+    let router_ip: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let internal_client: Ipv6Addr = "fd35:1940:27:100::102".parse().unwrap();
+    let server_ip: Ipv6Addr = "2607:f8b0:4005:814::200e".parse().unwrap();
+    let echo_id: u16 = 0x8236;
+    const ZONE_B_ID: u16 = 42;
+
+    let nptv6 = Nptv6State::from_snapshots(&[crate::Nptv6RuleSnapshot {
+        name: "nptv6-zone-b".to_string(),
+        from_zone: "zone-b".to_string(),
+        internal_prefix: "fd35:1940:0027::/48".to_string(),
+        external_prefix: "2602:fd41:0070::/48".to_string(),
+    }]);
+    let mut external_client = internal_client;
+    assert!(
+        nptv6.translate_outbound(&mut external_client, "zone-b"),
+        "test setup: internal_client must translate outbound under zone-b"
+    );
+
+    let frame = build_icmpv6_te_frame(
+        router_ip, external_client, server_ip, echo_id, 0, PROTO_ICMPV6,
+    );
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 54,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        ingress_ifindex: 21,
+        ..UserspaceDpMeta::default()
+    };
+
+    let mut forwarding = ForwardingState::default();
+    // fab0 (21) deliberately has NO ifindex zone: only the stamp names one.
+    forwarding
+        .zone_id_to_name
+        .insert(ZONE_B_ID, "zone-b".to_string());
+    forwarding.nptv6 = nptv6;
+
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 24,
+        tx_ifindex: 24,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V6(internal_client)),
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let metadata = SessionMetadata {
+        ingress_zone: ZONE_B_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_ICMPV6,
+            src_ip: IpAddr::V6(internal_client),
+            dst_ip: IpAddr::V6(server_ip),
+            src_port: echo_id,
+            dst_port: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        decision,
+        metadata,
+        1_000_000,
+        PROTO_ICMPV6,
+        0,
+    ));
+
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_ingress_zone(
+        &frame,
+        meta,
+        &mut sessions,
+        &forwarding,
+        &neighbors,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
+        &shared_forward_wire_sessions,
+        1_000_000,
+        Some(ZONE_B_ID),
+    ).into_option()
+    .expect(
+        "#13647: the fabric-stamped ICMPv6 error must gate NPTv6 on the \
+         stamped zone (zone-b); fab0 has no ifindex zone, so a lookup keyed \
+         on the physical ingress resolves \"\" and misses",
+    );
+    assert_eq!(icmp_match.original_src, IpAddr::V6(internal_client));
+    assert_eq!(icmp_match.original_src_port, echo_id);
+}

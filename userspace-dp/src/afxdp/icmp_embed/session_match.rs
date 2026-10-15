@@ -7,12 +7,13 @@ use super::outer_error_atomic;
 /// path does not extract NAT reversal info — it only confirms a match
 /// exists. Used by callers that need plain session presence.
 ///
-/// `routing_domain` is the domain of the interface the ICMP error arrived on
-/// — `crate::afxdp::forwarding::ingress_routing_domain(forwarding,
-/// meta.ingress_ifindex as i32, meta.ingress_vlan_id, None)`, exactly as
-/// `nat_match_v4` / `nat_match_v6` / `nat64_match` derive it. The accompanying
-/// `ForwardingState` supplies the egress-interface domain map used by the
-/// reverse-NAT candidate check. This helper currently has only test callers.
+/// `routing_domain` is the domain of the interface the ICMP error arrived on.
+/// Production NAT matchers derive it through
+/// `crate::afxdp::forwarding::ingress_routing_domain`, including a fabric
+/// ingress-zone override when one is present. This helper currently has only
+/// test callers and receives the already-resolved domain directly. The
+/// accompanying `ForwardingState` supplies the egress-interface domain map
+/// used by the reverse-NAT candidate check.
 ///
 /// #9162: the arriving domain is not a hardcoded 0. Exact session lookups use
 /// it as part of their key; reverse-NAT lookup compares it with the forward

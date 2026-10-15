@@ -74,10 +74,15 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     )
     .unwrap_or(meta.ingress_ifindex as i32);
     let ingress_zone = ctx
-        .forwarding
-        .ifindex_to_zone_id
-        .get(&logical_ingress_ifindex)
-        .and_then(|id| ctx.forwarding.zone_id_to_name.get(id))
+        .ingress_zone_override
+        .filter(|id| ctx.forwarding.zone_id_to_name.contains_key(id))
+        .or_else(|| {
+            ctx.forwarding
+                .ifindex_to_zone_id
+                .get(&logical_ingress_ifindex)
+                .copied()
+        })
+        .and_then(|id| ctx.forwarding.zone_id_to_name.get(&id))
         .map(|s| s.as_str())
         .unwrap_or("");
     let mut emb_src_lookup_v6 = hdr.src_wire;
@@ -101,7 +106,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         ctx.forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
-        None,
+        ctx.ingress_zone_override,
     );
     // #9298: upgrade an `Unparseable` PPTP quote to the live call's handle.
     // No-op for every other quote; a miss stays `Unparseable`.

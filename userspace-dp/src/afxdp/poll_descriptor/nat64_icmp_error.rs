@@ -62,6 +62,7 @@ pub(super) fn try_translate_nat64_icmp_error(
         worker_ctx.shared_owner_rg_indexes,
         worker_ctx.shared_forward_wire_sessions,
         now_ns,
+        ingress_zone_override,
     ) {
         EmbeddedMatchOutcome::Match(m) => m,
         // #9901 (F-077): twin of the same-family arm — a matched-but-

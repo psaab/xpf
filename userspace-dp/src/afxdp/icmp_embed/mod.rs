@@ -102,6 +102,7 @@ pub(in crate::afxdp::icmp_embed) struct NatMatchCtx<'a> {
     pub shared_nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub shared_owner_rg_indexes: Option<&'a crate::afxdp::types::SharedSessionOwnerRgIndexes>,
     pub shared_forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    pub ingress_zone_override: Option<u16>,
 }
 
 /// Outcome of an embedded-ICMP match attempt. THREE states, not two: a
@@ -293,6 +294,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
     shared_owner_rg_indexes: &crate::afxdp::types::SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
+    ingress_zone_override: Option<u16>,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     try_embedded_icmp_nat_match_from_frame_inner(
         frame,
@@ -305,6 +307,36 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         Some(shared_owner_rg_indexes),
         shared_forward_wire_sessions,
         now_ns,
+        ingress_zone_override,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_embedded_icmp_nat_match_from_frame_without_ingress_zone(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &crate::afxdp::types::SharedSessionOwnerRgIndexes,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    now_ns: u64,
+) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
+    try_embedded_icmp_nat_match_from_frame_inner(
+        frame,
+        meta,
+        sessions,
+        forwarding,
+        dynamic_neighbors,
+        shared_sessions,
+        shared_nat_sessions,
+        Some(shared_owner_rg_indexes),
+        shared_forward_wire_sessions,
+        now_ns,
+        None,
     )
 }
 
@@ -323,16 +355,29 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame(
     now_ns: u64,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     try_embedded_icmp_nat_match_from_frame_inner(
-        frame,
-        meta,
-        sessions,
-        forwarding,
-        dynamic_neighbors,
-        shared_sessions,
-        shared_nat_sessions,
-        None,
-        shared_forward_wire_sessions,
-        now_ns,
+        frame, meta, sessions, forwarding, dynamic_neighbors, shared_sessions,
+        shared_nat_sessions, None, shared_forward_wire_sessions, now_ns, None,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn try_embedded_icmp_nat_match_from_frame_with_ingress_zone(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    now_ns: u64,
+    ingress_zone_override: Option<u16>,
+) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
+    try_embedded_icmp_nat_match_from_frame_inner(
+        frame, meta, sessions, forwarding, dynamic_neighbors, shared_sessions,
+        shared_nat_sessions, None, shared_forward_wire_sessions, now_ns,
+        ingress_zone_override,
     )
 }
 
@@ -348,6 +393,7 @@ fn try_embedded_icmp_nat_match_from_frame_inner(
     shared_owner_rg_indexes: Option<&crate::afxdp::types::SharedSessionOwnerRgIndexes>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
+    ingress_zone_override: Option<u16>,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     let l4 = meta.l4_offset as usize;
     let Some(icmp_type) = frame.get(l4).copied() else {
@@ -364,6 +410,7 @@ fn try_embedded_icmp_nat_match_from_frame_inner(
         shared_nat_sessions,
         shared_owner_rg_indexes,
         shared_forward_wire_sessions,
+        ingress_zone_override,
     };
     match meta.protocol {
         PROTO_ICMP => nat_match_v4::match_outer_v4(frame, meta, &mut ctx, now_ns),
@@ -394,6 +441,7 @@ pub(super) fn try_nat64_icmp_error_match_from_frame(
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
+    ingress_zone_override: Option<u16>,
 ) -> EmbeddedMatchOutcome<Nat64IcmpErrorMatch> {
     let mut ctx = NatMatchCtx {
         sessions,
@@ -403,6 +451,7 @@ pub(super) fn try_nat64_icmp_error_match_from_frame(
         shared_nat_sessions,
         shared_owner_rg_indexes: None,
         shared_forward_wire_sessions,
+        ingress_zone_override,
     };
     nat64_match::try_nat64_icmp_error_match(frame, meta, &mut ctx, now_ns)
 }
