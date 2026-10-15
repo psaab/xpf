@@ -208,11 +208,36 @@ func (d *Daemon) wireSessionSyncTransportRefs(ss *cluster.SessionSync, cc *confi
 
 	d.cluster.SetSyncTransport(syncTransport)
 
-	// Store sync peer addresses for gRPC peer dialing (session queries etc).
+	// Publish the complete pair atomically. fabricMu also protects the
+	// fallback fabric IPs read by fabricPeerAddrs.
+	d.fabricMu.Lock()
 	d.syncPeerAddr = syncPeerAddr
-	if syncLocal1 != "" {
+	d.syncPeerAddr1 = ""
+	d.syncPeerAddr1Disabled = syncLocal1 == ""
+	if !d.syncPeerAddr1Disabled {
 		d.syncPeerAddr1 = cc.Fabric1PeerAddress
 	}
+	d.fabricMu.Unlock()
+}
+
+// fabricPeerAddrs returns a consistent snapshot of configured sync peer
+// addresses, falling back to the discovered fabric peer IPs.
+func (d *Daemon) fabricPeerAddrs() []string {
+	d.fabricMu.RLock()
+	defer d.fabricMu.RUnlock()
+
+	var addrs []string
+	if d.syncPeerAddr != "" {
+		addrs = append(addrs, d.syncPeerAddr)
+	} else if d.fabricPeerIP != nil {
+		addrs = append(addrs, d.fabricPeerIP.String())
+	}
+	if d.syncPeerAddr1 != "" {
+		addrs = append(addrs, d.syncPeerAddr1)
+	} else if !d.syncPeerAddr1Disabled && d.fabricPeerIP1 != nil {
+		addrs = append(addrs, d.fabricPeerIP1.String())
+	}
+	return addrs
 }
 
 // startFabricGRPCListeners spawns the poller that starts the gRPC fabric

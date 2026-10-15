@@ -264,32 +264,11 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 		// commit/sync and enters a terminal reset generation so no concurrent
 		// or later config writer re-creates the erased state before the daemon
 		// stops. The grpcapi handler passes its performZeroizeWipe primitive.
-		ZeroizeFn: d.factoryReset,
-		VRRPMgr:   d.vrrpMgr,
-		RAMgr:     d.ra,
-		Version:   d.opts.Version,
-		FabricPeerAddrFn: func() []string {
-			var addrs []string
-			if d.syncPeerAddr != "" {
-				addrs = append(addrs, d.syncPeerAddr)
-			} else {
-				d.fabricMu.RLock()
-				if d.fabricPeerIP != nil {
-					addrs = append(addrs, d.fabricPeerIP.String())
-				}
-				d.fabricMu.RUnlock()
-			}
-			if d.syncPeerAddr1 != "" {
-				addrs = append(addrs, d.syncPeerAddr1)
-			} else {
-				d.fabricMu.RLock()
-				if d.fabricPeerIP1 != nil {
-					addrs = append(addrs, d.fabricPeerIP1.String())
-				}
-				d.fabricMu.RUnlock()
-			}
-			return addrs
-		},
+		ZeroizeFn:         d.factoryReset,
+		VRRPMgr:           d.vrrpMgr,
+		RAMgr:             d.ra,
+		Version:           d.opts.Version,
+		FabricPeerAddrFn:  d.fabricPeerAddrs,
 		FabricVRFDeviceFn: d.clusterPeerVRFDevice,
 		FwdSampler:        fwdSampler,
 		// #6385: the remote gRPC `show system services` renderer reports the

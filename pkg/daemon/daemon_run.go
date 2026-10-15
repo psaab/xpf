@@ -950,28 +950,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		// local and remote never disagree.
 		shell.SetListenersFn(d.effectiveListeners)
 		shell.SetVRRPManager(d.vrrpMgr)
-		shell.SetFabricPeer(func() []string {
-			var addrs []string
-			if d.syncPeerAddr != "" {
-				addrs = append(addrs, d.syncPeerAddr)
-			} else {
-				d.fabricMu.RLock()
-				if d.fabricPeerIP != nil {
-					addrs = append(addrs, d.fabricPeerIP.String())
-				}
-				d.fabricMu.RUnlock()
-			}
-			if d.syncPeerAddr1 != "" {
-				addrs = append(addrs, d.syncPeerAddr1)
-			} else {
-				d.fabricMu.RLock()
-				if d.fabricPeerIP1 != nil {
-					addrs = append(addrs, d.fabricPeerIP1.String())
-				}
-				d.fabricMu.RUnlock()
-			}
-			return addrs
-		}, d.clusterPeerVRFDevice)
+		shell.SetFabricPeer(d.fabricPeerAddrs, d.clusterPeerVRFDevice)
 
 		// Set the RBAC login class for the in-process console shell (#6701).
 		// See applyCLILoginClass (cli_rbac.go) for why identity comes from the

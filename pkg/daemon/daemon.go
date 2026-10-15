@@ -1406,8 +1406,9 @@ type Daemon struct {
 	// peer depending on sync transport mode.
 	syncPeerAddr string
 	// syncPeerAddr1 is the secondary fabric peer address (fab1) for
-	// gRPC peer dialing failover. Empty if no dual-fabric is configured.
-	syncPeerAddr1 string
+	// gRPC peer dialing failover.
+	syncPeerAddr1         string
+	syncPeerAddr1Disabled bool
 
 	// gRPC server reference for starting fabric listener in cluster mode.
 	grpcSrv *grpcapi.Server
