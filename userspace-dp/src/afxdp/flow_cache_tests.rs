@@ -3547,3 +3547,146 @@ fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
         "expiry must not evict a flow not admitted by a scheduler-bound rule"
     );
 }
+
+// #13639 (D3-07): the inverse phase edge. While the scheduler lease is
+// expired, a scheduled PERMIT is ineligible (fail-closed), so traffic falls
+// through to an unscheduled DENY and is cached as a PolicyDenied entry whose
+// admitting counter idx is NOT a scheduler rule. The pre-fix transition arm
+// flushed only on the false->true edge (when a scheduled DENY/REJECT existed
+// via has_scheduled_deny_or_reject); on true->false recovery it merely
+// re-stamped the phase, leaving the fail-closed deny live until its TTL. The
+// recovered lease re-admits the scheduled PERMIT, so the stale unscheduled
+// deny must be evicted at the recovery transition, while a second deny
+// lookup under recovery hits normally. RED-ON-REVERT: reverting the
+// recovery arm makes the recovered lookup return Some(..).
+#[test]
+fn scheduler_lease_recovery_evicts_fail_closed_unscheduled_deny() {
+    let mut zones = rustc_hash::FxHashMap::default();
+    zones.insert("trust".to_string(), TEST_TRUST_ZONE_ID);
+    zones.insert("untrust".to_string(), TEST_UNTRUST_ZONE_ID);
+    let mut policy = crate::policy::parse_policy_state(
+        "deny",
+        &[
+            crate::PolicyRuleSnapshot {
+                name: "scheduled-allow".to_string(),
+                from_zone: "trust".to_string(),
+                to_zone: "untrust".to_string(),
+                scheduler_name: "workhours".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                policy_id: 1,
+                ..Default::default()
+            },
+            crate::PolicyRuleSnapshot {
+                name: "unscheduled-deny".to_string(),
+                from_zone: "trust".to_string(),
+                to_zone: "untrust".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "deny".to_string(),
+                policy_id: 2,
+                ..Default::default()
+            },
+        ],
+        &zones,
+    );
+    assert!(
+        !policy.has_scheduled_deny_or_reject(),
+        "fixture pins the missing twin: no scheduled DENY/REJECT exists"
+    );
+    assert!(policy.scheduler_lease.apply(1, 100));
+    let expired_at = 100 + crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 1;
+    assert!(policy.scheduler_rules_expired_at(expired_at));
+    let cold = crate::policy::evaluate_policy_result_l3_aware_at(
+        &policy,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        make_key().src_ip,
+        make_key().dst_ip,
+        PROTO_TCP,
+        make_key().src_port,
+        make_key().dst_port,
+        None,
+        64,
+        true,
+        expired_at,
+    );
+    assert_eq!(cold.action, crate::policy::PolicyAction::Deny);
+    assert_eq!(cold.policy_id, 2);
+    let rg_epochs = default_rg_epochs();
+    let stamp = FlowCacheStamp {
+        config_generation: 5,
+        fib_generation: 3,
+        owner_rg_id: 1,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let deny_key = make_key();
+    let mut deny_entry = make_entry(deny_key.clone(), stamp, 1);
+    deny_entry.decision = make_decision(ForwardingDisposition::PolicyDenied);
+    deny_entry.policy_deny = Some(CachedPolicyDeny {
+        action: crate::policy::PolicyAction::Deny,
+        policy_id: 2,
+        application_id: 0,
+        reply_allowed: true,
+    });
+    deny_entry.deny_expires_at_secs = u64::MAX;
+    // The admitting rule is the unscheduled DENY (one-based idx 2).
+    deny_entry.metadata.policy_counter_idx = 2;
+    let mut cache = FlowCache::new();
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 5,
+        fib_generation: 3,
+    };
+    // Establish the expired phase before an outage-deny entry is seeded.
+    assert!(
+        cache
+            .lookup_counted_with_scheduler_expiry(
+                &deny_key, lookup, 0, &rg_epochs, 64, &policy, true
+            )
+            .is_none()
+    );
+    cache.insert(deny_entry);
+    // Phase 1 (expired): the fail-closed deny is live.
+    assert!(
+        cache
+            .lookup_counted_with_scheduler_expiry(
+                &deny_key, lookup, 0, &rg_epochs, 64, &policy, true
+            )
+            .is_some(),
+        "the fail-closed deny must hit while the lease is expired"
+    );
+    // Recovery: a fresh heartbeat makes the scheduled permit eligible again.
+    assert!(policy.scheduler_lease.apply(2, expired_at));
+    assert!(!policy.scheduler_rules_expired_at(expired_at));
+    let recovered = crate::policy::evaluate_policy_result_l3_aware_at(
+        &policy,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        make_key().src_ip,
+        make_key().dst_ip,
+        PROTO_TCP,
+        make_key().src_port,
+        make_key().dst_port,
+        None,
+        64,
+        true,
+        expired_at,
+    );
+    assert_eq!(recovered.action, crate::policy::PolicyAction::Permit);
+    assert_eq!(recovered.policy_id, 1);
+    // Phase 2 (recovered): the stale deny must be evicted.
+    assert!(
+        cache
+            .lookup_counted_with_scheduler_expiry(
+                &deny_key, lookup, 0, &rg_epochs, 64, &policy, false
+            )
+            .is_none(),
+        "lease recovery must evict the fail-closed deny so the recovered scheduled permit can win (#13639)"
+    );
+}
