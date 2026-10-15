@@ -1448,15 +1448,15 @@ func (d *Daemon) reconcileRGState() {
 			d.reconcileDirectVIPOwnership(rgID, "reconcile")
 		}
 
-		// RA/DHCP service reconciliation (#93): safety net for dropped
-		// VRRP events that should have started or stopped per-RG services.
-		// Services (RA/DHCP) only start/stop on actual state change to
-		// avoid thrashing restarts every reconcile tick.
+		// RA/DHCP service reconciliation (#93): VRRP transitions drive services
+		// here. Direct-VIP mode already drove the same ownership edge above.
 		if tr.Changed {
-			if tr.Active {
-				d.applyRethServicesForRG(rgID)
-			} else {
-				d.clearRethServicesForRG(rgID)
+			if !noRethVRRP {
+				if tr.Active {
+					d.applyRethServicesForRG(rgID)
+				} else {
+					d.clearRethServicesForRG(rgID)
+				}
 			}
 			anyRGChanged = true
 		}
@@ -1969,17 +1969,9 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 		return
 	}
 
-	// Check if any other RG is still master — if so, reapply services for
-	// those RGs only; otherwise clear everything. Reuse this ownership
-	// snapshot for both filtered config and lease-authority proof.
+	// Reuse this ownership snapshot for both filtered config and lease-authority
+	// proof. Node-local DHCP groups must survive even when no RG remains master.
 	masters := d.snapshotRethMasterState()
-	anyOtherMaster := false
-	for otherRG, isMaster := range masters {
-		if otherRG != rgID && isMaster {
-			anyOtherMaster = true
-			break
-		}
-	}
 
 	// Stop only senders bound to the shared stable source without a lifetime-0
 	// RA; that would withdraw the router identity the new owner still advertises.
@@ -2000,21 +1992,13 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// per-node sources are removed by Apply's normal graceful-withdraw path.
 	d.reconcileClusterRAServices(fmt.Sprintf("vrrp-backup-rg%d", rgID))
 	if d.dhcpServer != nil {
-		// ApplyAsync on both branches (#1835 F2): keeps this VRRP
-		// event loop off the 15s-bounded systemctl path AND funnels
-		// every Kea desired state through the same latest-wins
-		// mailbox, preserving ordering with the MASTER-side applies.
-		// ApplyAsync(nil) is the authoritative clear (Apply(nil)).
-		if anyOtherMaster {
-			// Reapply DHCP with only the remaining master RGs'
-			// interfaces (nil when none match → clear).
-			dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
-			d.enqueueDHCPApplyWithAuthorityState(dhcpCfg,
-				fmt.Sprintf("vrrp BACKUP rg%d (other RG still MASTER)", rgID), cfg, masters)
-		} else {
-			d.enqueueDHCPApplyWithAuthorityState(nil, fmt.Sprintf("vrrp BACKUP rg%d", rgID), nil, masters)
-			slog.Info("vrrp: DHCP server stop enqueued (BACKUP)", "rg", rgID)
-		}
+		// ApplyAsync keeps this VRRP event loop off the 15s-bounded systemctl
+		// path and funnels every desired state through the latest-wins mailbox.
+		// Derive the desired config from the SSOT even when no RG remains master:
+		// it preserves node-local DHCP groups while filtering all inactive RETHs.
+		dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
+		d.enqueueDHCPApplyWithAuthorityState(dhcpCfg,
+			fmt.Sprintf("vrrp BACKUP rg%d", rgID), cfg, masters)
 	}
 	// #2691 P1b / #2664: nudge the DDNS reconcile loop after a (partial)
 	// demotion. This closes the documented "no DDNS nudge on partial demotion"
