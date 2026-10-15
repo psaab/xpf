@@ -1740,6 +1740,41 @@ pub(super) fn apply_lo0_filter_action(
     (action, pending)
 }
 
+/// #13637: Stage 11 claims ESP/AH/IKE packets BEFORE the ordinary
+/// session-miss input-filter enforcement site, so an ingress interface
+/// `filter input` verdict otherwise never reaches it. Run the same counted
+/// non-PBR evaluator as that path and return its verdict/log in the shape the
+/// shared terminal handler consumes.
+#[cold]
+#[inline(never)]
+pub(super) fn stage11_input_filter_terminal(
+    forwarding: &ForwardingState,
+    extra: TermMatchExtra<'_>,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+) -> Option<(crate::filter::FilterAction, Option<PendingFilterLog>)> {
+    let flow = flow?;
+    let eval = evaluate_non_pbr_input_filter(
+        forwarding,
+        extra,
+        Some(flow),
+        meta,
+        ingress_zone_override,
+        false,
+    );
+    let pending = eval.cached_log.map(|log| PendingFilterLog {
+        ingress_zone_id: log.ingress_zone_id,
+        egress_zone_id: 0,
+        filter_id: log.log_match.filter_id,
+        term_id: log.log_match.term_id,
+        action: log.log_match.action,
+        source: FilterLogSource::Input,
+        app_id: resolve_flow_app_id(&forwarding.app_catalog, flow),
+    });
+    Some((eval.action, pending))
+}
+
 /// #3485: host-inbound zone admission MUST gate the lo0 (host-bound) firewall
 /// filter on the local-delivery path. `host-inbound-traffic` is the first-line
 /// zone control for router self-traffic; a packet it denies is a SILENT drop
@@ -1924,6 +1959,139 @@ mod lo0_gate_tests {
             .counter
             .packets
             .load(Ordering::Relaxed)
+    }
+
+    /// #13637: Stage 11's early IPsec/IKE claim must run the counted
+    /// interface input filter before reinjection. A filter denying one IKE
+    /// source returns a terminal discard, while a sibling source remains
+    /// accepted through the identical Stage-11 evaluator.
+    #[test]
+    fn stage11_input_filter_denies_only_matching_ike_source() {
+        use crate::ip_proto::PROTO_UDP;
+
+        let mut fw = ForwardingState::default();
+        fw.filter_state = crate::filter::parse_filter_state(
+            &[
+                crate::FirewallFilterSnapshot {
+                    name: "block-ike-source-v4".into(),
+                    family: "inet".into(),
+                    terms: vec![crate::FirewallTermSnapshot {
+                        name: "bad-ike-source-v4".into(),
+                        source_addresses: vec!["198.51.100.99/32".into()],
+                        protocols: vec!["udp".into()],
+                        destination_ports: vec!["500".into()],
+                        action: "discard".into(),
+                        ..Default::default()
+                    }],
+                },
+                crate::FirewallFilterSnapshot {
+                    name: "block-ike-source-v6".into(),
+                    family: "inet6".into(),
+                    terms: vec![crate::FirewallTermSnapshot {
+                        name: "bad-ike-source-v6".into(),
+                        source_addresses: vec!["2001:db8::99/128".into()],
+                        protocols: vec!["udp".into()],
+                        destination_ports: vec!["500".into()],
+                        action: "discard".into(),
+                        ..Default::default()
+                    }],
+                },
+            ],
+            &[],
+            &[crate::InterfaceSnapshot {
+                name: "ge-0/0/0.0".into(),
+                ifindex: 5,
+                filter_input_v4: "block-ike-source-v4".into(),
+                filter_input_v6: "block-ike-source-v6".into(),
+                ..Default::default()
+            }],
+            "",
+            "",
+        )
+        .expect("interface input filter compiles");
+
+        let flow_for = |src: Ipv4Addr| {
+            let src_ip = IpAddr::V4(src);
+            let dst_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+            SessionFlow {
+                src_ip,
+                dst_ip,
+                forward_key: SessionKey {
+                    addr_family: libc::AF_INET as u8,
+                    protocol: PROTO_UDP,
+                    src_ip,
+                    dst_ip,
+                    src_port: 500,
+                    dst_port: 500,
+                    discriminator: Default::default(),
+                    routing_domain: 0,
+                },
+            }
+        };
+        let meta = UserspaceDpMeta {
+            ingress_ifindex: 5,
+            l3_offset: 14,
+            l4_offset: 34,
+            protocol: PROTO_UDP,
+            addr_family: libc::AF_INET as u8,
+            pkt_len: 42,
+            ..UserspaceDpMeta::default()
+        };
+        let extra = TermMatchExtra {
+            l4_present: true,
+            ..Default::default()
+        };
+
+        let denied = flow_for(Ipv4Addr::new(198, 51, 100, 99));
+        let (action, _) = stage11_input_filter_terminal(&fw, extra, Some(&denied), meta, None)
+            .expect("flow-backed IKE candidate is evaluated");
+        assert_eq!(
+            action,
+            crate::filter::FilterAction::Discard,
+            "Stage 11 must not reinject traffic denied by the ingress input filter",
+        );
+
+        let allowed = flow_for(Ipv4Addr::new(198, 51, 100, 100));
+        let (action, _) = stage11_input_filter_terminal(&fw, extra, Some(&allowed), meta, None)
+            .expect("flow-backed IKE candidate is evaluated");
+        assert_eq!(
+            action,
+            crate::filter::FilterAction::Accept,
+            "the input-filter deny must not block an unrelated IKE source",
+        );
+        let src_ip = IpAddr::V6("2001:db8::99".parse().expect("IPv6 source"));
+        let dst_ip = IpAddr::V6("2001:db8::1".parse().expect("IPv6 destination"));
+        let denied_v6 = SessionFlow {
+            src_ip,
+            dst_ip,
+            forward_key: SessionKey {
+                addr_family: libc::AF_INET6 as u8,
+                protocol: PROTO_UDP,
+                src_ip,
+                dst_ip,
+                src_port: 500,
+                dst_port: 500,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+        };
+        let meta_v6 = UserspaceDpMeta {
+            ingress_ifindex: 5,
+            l3_offset: 14,
+            l4_offset: 54,
+            protocol: PROTO_UDP,
+            addr_family: libc::AF_INET6 as u8,
+            pkt_len: 62,
+            ..UserspaceDpMeta::default()
+        };
+        let (action, _) =
+            stage11_input_filter_terminal(&fw, extra, Some(&denied_v6), meta_v6, None)
+                .expect("flow-backed IPv6 IKE candidate is evaluated");
+        assert_eq!(
+            action,
+            crate::filter::FilterAction::Discard,
+            "Stage 11 must enforce the IPv6 ingress input-filter twin",
+        );
     }
 
     fn tcp_443_flow_and_meta() -> (SessionFlow, UserspaceDpMeta) {

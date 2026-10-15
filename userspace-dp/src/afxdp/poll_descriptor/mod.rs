@@ -358,6 +358,7 @@ use filter::{
     evaluate_non_pbr_input_filter_counters_cached, evaluate_non_pbr_input_filter_log_only,
     filter_terminal, host_inbound_gated_lo0_action, input_filter_would_deny_before_screen,
     lo0_action_for_solicited_reply, revalidate_static_pbr_route_on_session_hit,
+    stage11_input_filter_terminal,
 };
 use policy_revalidation::{
     revalidate_zone_policy_on_session_hit, source_nat_revocation_on_session_hit,
@@ -1190,6 +1191,38 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 ) {
                     IpsecPassthroughOutcome::NotClaimed => {}
                     IpsecPassthroughOutcome::Passthrough => {
+                        if let Some(flow) = flow.as_ref() {
+                            let (action, log) = stage11_input_filter_terminal(
+                                worker_ctx.forwarding,
+                                crate::afxdp::frame::term_match_extra_from_frame(
+                                    stage11_packet_frame,
+                                    meta,
+                                ),
+                                Some(flow),
+                                meta,
+                                ingress_zone_override,
+                            )
+                            .expect("Stage 11 input filter flow");
+                            if filter_terminal(
+                                &mut binding.tx_pipeline,
+                                worker_ctx.forwarding,
+                                worker_ctx.event_stream,
+                                binding.ifindex,
+                                stage11_packet_frame,
+                                meta,
+                                flow,
+                                telemetry.counters,
+                                action,
+                                log,
+                                now_ns,
+                            ) {
+                                telemetry.dbg.local += 1;
+                                telemetry.dbg.policy_deny += 1;
+                                telemetry.counters.touched = true;
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                        }
                         // Reserve and settle fragment ownership before handing
                         // the frame to XFRM. A terminal fragment must never be
                         // reinjected before the late overlap check can reject it.

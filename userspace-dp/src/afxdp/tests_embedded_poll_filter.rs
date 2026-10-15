@@ -10505,6 +10505,96 @@ fn filtered_cookie_ack_cannot_reflect_rst_before_input_filter_11332() {
         "the normal input-filter evaluator must count the denied ACK",
     );
 }
+/// #13637 fail-on-revert: local IKE passthrough must honor the ingress input
+/// filter before handing the packet to the host.
+#[test]
+fn stage11_local_ike_passthrough_honors_ingress_input_filter_13637() {
+    let client = Ipv4Addr::new(198, 51, 100, 99);
+    let local = Ipv4Addr::new(172, 16, 80, 8);
+    let mut snapshot = nat_snapshot();
+    snapshot.interfaces[1].filter_input_v4 = "block-ike-source".to_string();
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "block-ike-source".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "deny-ike-source".to_string(),
+            source_addresses: vec![client.to_string()],
+            protocols: vec!["udp".to_string()],
+            destination_ports: vec!["500".to_string()],
+            action: "discard".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+
+    // Ethernet + IPv4 + UDP + valid IKEv2 initiation to the interface address.
+    let mut frame = vec![0u8; 14 + 20 + 8 + 28];
+    frame[..6].copy_from_slice(&TEST_WAN_MAC);
+    frame[6..12].copy_from_slice(&[0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+    frame[14] = 0x45;
+    frame[16..18].copy_from_slice(&56u16.to_be_bytes());
+    frame[18..20].copy_from_slice(&0x4000u16.to_be_bytes());
+    frame[22] = 64;
+    frame[23] = PROTO_UDP;
+    frame[26..30].copy_from_slice(&client.octets());
+    frame[30..34].copy_from_slice(&local.octets());
+    let ip_checksum = checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&ip_checksum.to_be_bytes());
+    frame[34..36].copy_from_slice(&40000u16.to_be_bytes());
+    frame[36..38].copy_from_slice(&500u16.to_be_bytes());
+    frame[38..40].copy_from_slice(&36u16.to_be_bytes());
+    frame[42..50].copy_from_slice(&0x1122_3344_5566_7788u64.to_be_bytes());
+    frame[50..58].copy_from_slice(&0u64.to_be_bytes());
+    frame[58..62].copy_from_slice(&[0x00, 0x20, 0x22, 0x08]);
+    frame[62..66].copy_from_slice(&0u32.to_be_bytes());
+    frame[66..70].copy_from_slice(&28u32.to_be_bytes());
+
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 12,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        flow_src_port: 40000,
+        flow_dst_port: 500,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    let (_, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &txn_ha_state(),
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(
+        dbg.policy_deny, 1,
+        "the real Stage 11 local-IKE path must apply the ingress input filter"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "a filter-discarded IKE packet must not be forwarded"
+    );
+    assert_eq!(
+        sessions.len(),
+        0,
+        "a filter-discarded IKE packet must not create a session"
+    );
+}
 #[test]
 fn poll_descriptor_transit_dnat_ike_forwards_and_installs_session_11439() {
     let client = Ipv4Addr::new(198, 51, 100, 20);
