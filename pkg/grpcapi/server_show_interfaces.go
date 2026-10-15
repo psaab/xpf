@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -121,7 +122,13 @@ func (s *Server) ShowInterfacesDetail(_ context.Context, req *pb.ShowInterfacesD
 		physName := parts[0]
 		unitNum := 0
 		if len(parts) == 2 {
-			fmt.Sscanf(parts[1], "%d", &unitNum)
+			// Invalid logical-unit suffixes cannot identify unit 0 or borrow
+			// its configured metadata.
+			if n, err := strconv.Atoi(parts[1]); err == nil {
+				unitNum = n
+			} else {
+				unitNum = -1
+			}
 		}
 		vlanID := 0
 		if ifCfg, ok := config.LookupInterface(cfg, physName); ok {
@@ -312,9 +319,9 @@ func (s *Server) ShowInterfacesDetail(_ context.Context, req *pb.ShowInterfacesD
 
 		// Show each logical unit
 		for _, li := range group {
-			lookupName := physName
+			lookupName := config.LinuxIfName(physName)
 			if li.vlanID > 0 {
-				lookupName = fmt.Sprintf("%s.%d", physName, li.vlanID)
+				lookupName = fmt.Sprintf("%s.%d", lookupName, li.vlanID)
 			}
 
 			fmt.Fprintf(&buf, "\n  Logical interface %s.%d", physName, li.unitNum)
@@ -378,7 +385,7 @@ func (s *Server) ShowInterfacesDetail(_ context.Context, req *pb.ShowInterfacesD
 			// Both now route through the same resolver, which is what
 			// host_inbound_surface_agreement_8183_test.go pins.
 			if li.zone != nil {
-				ref := fmt.Sprintf("%s.%d", physName, li.unitNum)
+				ref := li.ifaceRef
 				svc, proto, overridden := li.zone.InterfaceHostInboundEffective(ref)
 				// #3682: a management / cluster-control lifeline interface is
 				// EXCLUDED from host-inbound deny scoping; flag it explicitly so
@@ -571,7 +578,11 @@ func (s *Server) showInterfacesTerse(cfg *config.Config, filterName string) (*pb
 			seen[physName] = true
 			unitNum := 0
 			if len(parts) == 2 {
-				fmt.Sscanf(parts[1], "%d", &unitNum)
+				if n, err := strconv.Atoi(parts[1]); err == nil {
+					unitNum = n
+				} else {
+					unitNum = -1
+				}
 			}
 			units = append(units, ifUnit{physName: physName, unitNum: unitNum})
 		}
