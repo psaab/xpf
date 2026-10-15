@@ -623,9 +623,9 @@ fn build_fallible_forwarding_state(
         &excluded_local_v6,
     )?;
     interfaces::populate_egress(snapshot, &mut state, &iface_ctx)?;
-    // #6458: zone -> RG-bound-member map for the fabric-ingress zone-stamp
-    // validation; needs both ifindex_to_zone_id and egress final.
-    interfaces::populate_zone_to_rgs(&mut state);
+    // #6458/#13181: include each admitted member row's RG, not inherited
+    // parent ingress aliases.
+    interfaces::populate_zone_to_rgs(snapshot, &mut state);
     // #11337: carry a stable peer-resolvable NAT ingress identity in the
     // synthetic fabric source MAC; interface indexes are node-local.
     interfaces::populate_fabric_nat_scope_ids(&mut state);

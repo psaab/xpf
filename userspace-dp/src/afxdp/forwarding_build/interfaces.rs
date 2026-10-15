@@ -1593,6 +1593,37 @@ pub(super) fn populate_egress(
             .get(&iface.ifindex)
             .copied()
             .unwrap_or(0);
+        let primary_v4 = pick_interface_v4(iface);
+        let primary_v6 = pick_interface_v6(iface);
+        if let Some(existing) = state.egress.get_mut(&iface.ifindex) {
+            if existing.redundancy_group != 0
+                && iface.redundancy_group != 0
+                && existing.redundancy_group != iface.redundancy_group
+            {
+                return Err(
+                    crate::policy::SnapshotIntegrityError::InterfaceSharedIfindexRedundancyGroup {
+                        ifindex: iface.ifindex,
+                        first_group: existing.redundancy_group,
+                        second_group: iface.redundancy_group,
+                        interface: iface.name.clone(),
+                    },
+                );
+            }
+            // Shared ifindex aliases contribute separate address families. Keep
+            // the first available address in each family; a missing family on
+            // a later row must not erase an earlier row's source address.
+            existing.primary_v4 = existing.primary_v4.or(primary_v4);
+            existing.primary_v6 = existing.primary_v6.or(primary_v6);
+            if existing.redundancy_group == 0 {
+                existing.redundancy_group = iface.redundancy_group;
+            }
+            existing.bind_ifindex = bind_ifindex;
+            existing.vlan_id = vlan_id;
+            existing.mtu = mtu;
+            existing.src_mac = src_mac;
+            existing.zone_id = zone_id;
+            continue;
+        }
         state.egress.insert(
             iface.ifindex,
             EgressInterface {
@@ -1602,8 +1633,8 @@ pub(super) fn populate_egress(
                 src_mac,
                 zone_id,
                 redundancy_group: iface.redundancy_group,
-                primary_v4: pick_interface_v4(iface),
-                primary_v6: pick_interface_v6(iface),
+                primary_v4,
+                primary_v6,
             },
         );
     }
@@ -1659,31 +1690,52 @@ pub(super) fn populate_egress(
     Ok(())
 }
 
-/// #6458: build `state.zone_to_rgs` — zone ID → deduplicated
-/// redundancy-group IDs (> 0) of the zone's member interfaces. Runs after
-/// [`populate_egress`] so both inputs (`ifindex_to_zone_id` and
-/// `EgressInterface.redundancy_group`) are final. A zone whose members are
-/// all RG-unbound (mgmt/fxp0, control/em0+fab, node-specific physical
-/// interfaces) or that has no members is ABSENT from the map; the
-/// fabric-ingress zone-stamp validation
-/// (`forwarding::fabric::zone_encoded_fabric_stamp_valid`) treats an absent
-/// zone as "can never be legitimately stamped" — a zone-encoded stamp
-/// claims the packet ingressed the PEER in that zone, which is only
-/// possible when the zone participates in RG ownership.
-pub(super) fn populate_zone_to_rgs(state: &mut ForwardingState) {
-    for (ifindex, zone_id) in state.ifindex_to_zone_id.iter() {
-        if *zone_id == 0 {
+/// #6458/#13181: build `state.zone_to_rgs` from admitted interface rows,
+/// not ingress `ifindex_to_zone_id`, which also contains inherited parent
+/// aliases. Shared-ifindex logical units each contribute their own RG.
+pub(super) fn populate_zone_to_rgs(snapshot: &ConfigSnapshot, state: &mut ForwardingState) {
+    let mut row_zone_by_ifindex = BTreeMap::<i32, Option<u16>>::new();
+    for iface in &snapshot.interfaces {
+        if iface.ifindex <= 0 || iface.zone.is_empty() {
             continue;
         }
-        let rg = state
-            .egress
-            .get(ifindex)
-            .map(|iface| iface.redundancy_group)
-            .unwrap_or(0);
+        let Some(zone_id) = state.zone_name_to_id.get(&iface.zone).copied() else {
+            continue;
+        };
+        match row_zone_by_ifindex.entry(iface.ifindex) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some(zone_id));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry)
+                if *entry.get() != Some(zone_id) =>
+            {
+                entry.insert(None);
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {}
+        }
+    }
+
+    for iface in &snapshot.interfaces {
+        if iface.ifindex <= 0 {
+            continue;
+        }
+        let Some(zone_id) = state.zone_name_to_id.get(&iface.zone).copied() else {
+            continue;
+        };
+        if zone_id == 0
+            || row_zone_by_ifindex.get(&iface.ifindex) != Some(&Some(zone_id))
+            || state
+                .ifindex_unambiguous_zone_id
+                .get(&iface.ifindex)
+                .is_some_and(|egress_zone| *egress_zone != zone_id)
+        {
+            continue;
+        }
+        let rg = iface.redundancy_group;
         if rg <= 0 {
             continue;
         }
-        let rgs = state.zone_to_rgs.entry(*zone_id).or_default();
+        let rgs = state.zone_to_rgs.entry(zone_id).or_default();
         if !rgs.contains(&rg) {
             rgs.push(rg);
         }
