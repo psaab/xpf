@@ -534,6 +534,9 @@ pub(crate) struct ReinjectStats {
     pub completed_stale: u64,
     pub completed_cancelled: u64,
     pub completed_refused: u64,
+    pub completed_permitted: u64,
+    pub completed_fenced: u64,
+    pub completed_denied: u64,
     pub completed_uncertain: u64,
     pub adjudicated_admitted: u64,
     pub adjudicated_refused: u64,
@@ -1585,12 +1588,12 @@ impl ReinjectCore {
             ReinjectOutcome::Written => inner.stats.completed_written += 1,
             ReinjectOutcome::Stale => inner.stats.completed_stale += 1,
             ReinjectOutcome::Cancelled => inner.stats.completed_cancelled += 1,
-            ReinjectOutcome::Refused
-            | ReinjectOutcome::Fenced
-            | ReinjectOutcome::Denied
-            | ReinjectOutcome::Accepted
+            ReinjectOutcome::Refused => inner.stats.completed_refused += 1,
+            ReinjectOutcome::Fenced => inner.stats.completed_fenced += 1,
+            ReinjectOutcome::Denied => inner.stats.completed_denied += 1,
+            ReinjectOutcome::Accepted
             | ReinjectOutcome::WouldReinject
-            | ReinjectOutcome::WouldPermit => inner.stats.completed_refused += 1,
+            | ReinjectOutcome::WouldPermit => inner.stats.completed_permitted += 1,
             ReinjectOutcome::Uncertain => inner.stats.completed_uncertain += 1,
         }
         true

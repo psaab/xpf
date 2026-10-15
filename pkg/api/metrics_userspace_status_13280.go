@@ -47,5 +47,17 @@ func (c *xpfCollector) emitUserspaceStatus13280(ch chan<- prometheus.Metric, sta
 	if status.S5Reinject != nil {
 		ch <- prometheus.MustNewConstMetric(c.userspaceS5Reinject, prometheus.CounterValue,
 			float64(status.S5Reinject.Reinjected))
+		for _, outcome := range []struct {
+			name  string
+			value uint64
+		}{
+			{"permitted", status.S5Reinject.CompletedPermitted},
+			{"fenced", status.S5Reinject.CompletedFenced},
+			{"denied", status.S5Reinject.CompletedDenied},
+			{"refused", status.S5Reinject.CompletedRefused},
+		} {
+			ch <- prometheus.MustNewConstMetric(c.userspaceS5ReinjectCompletions,
+				prometheus.CounterValue, float64(outcome.value), outcome.name)
+		}
 	}
 }

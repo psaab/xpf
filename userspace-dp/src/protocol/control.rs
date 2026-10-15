@@ -599,6 +599,12 @@ pub(crate) struct S5ReinjectStatus {
     #[serde(default)]
     pub completed_refused: u64,
     #[serde(default)]
+    pub completed_permitted: u64,
+    #[serde(default)]
+    pub completed_fenced: u64,
+    #[serde(default)]
+    pub completed_denied: u64,
+    #[serde(default)]
     pub completed_uncertain: u64,
     #[serde(default)]
     pub adjudicated_admitted: u64,
@@ -645,6 +651,9 @@ impl From<crate::slowpath_reinject_9506::ReinjectStatusSnapshot> for S5ReinjectS
             completed_stale: stats.completed_stale,
             completed_cancelled: stats.completed_cancelled,
             completed_refused: stats.completed_refused,
+            completed_permitted: stats.completed_permitted,
+            completed_fenced: stats.completed_fenced,
+            completed_denied: stats.completed_denied,
             completed_uncertain: stats.completed_uncertain,
             adjudicated_admitted: stats.adjudicated_admitted,
             adjudicated_refused: stats.adjudicated_refused,

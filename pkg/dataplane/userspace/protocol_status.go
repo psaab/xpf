@@ -243,12 +243,12 @@ type ProcessStatus struct {
 	// bpfShim nat_rule_counters offset map so Manager.ReadNATRuleCounter (and
 	// thus `show security nat source/destination/static rule`) reports the
 	// live translation count instead of a perpetual 0.
-	NATRuleCounters    []NATRuleCounterStatus            `json:"nat_rule_counters,omitempty"`
+	NATRuleCounters []NATRuleCounterStatus `json:"nat_rule_counters,omitempty"`
 	// NAT parse/validation errors are cumulative by snapshot builder (#13283).
-	SourceNATParseErrors      uint64 `json:"source_nat_parse_errors,omitempty"`
-	DestinationNATParseErrors uint64 `json:"destination_nat_parse_errors,omitempty"`
-	StaticNATParseErrors      uint64 `json:"static_nat_parse_errors,omitempty"`
-	FilterTermCounters []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
+	SourceNATParseErrors      uint64                            `json:"source_nat_parse_errors,omitempty"`
+	DestinationNATParseErrors uint64                            `json:"destination_nat_parse_errors,omitempty"`
+	StaticNATParseErrors      uint64                            `json:"static_nat_parse_errors,omitempty"`
+	FilterTermCounters        []FirewallFilterTermCounterStatus `json:"filter_term_counters,omitempty"`
 	// #3651: per-zone ingress/egress traffic (packet + byte) volume, summed
 	// across every worker/binding by the helper (ProcessStatus-level
 	// pre-summed sparse block, one row per zone with nonzero traffic keyed by
@@ -999,6 +999,9 @@ type S5ReinjectStatus struct {
 	CompletedStale      uint64                 `json:"completed_stale"`
 	CompletedCancelled  uint64                 `json:"completed_cancelled"`
 	CompletedRefused    uint64                 `json:"completed_refused"`
+	CompletedPermitted  uint64                 `json:"completed_permitted"`
+	CompletedFenced     uint64                 `json:"completed_fenced"`
+	CompletedDenied     uint64                 `json:"completed_denied"`
 	CompletedUncertain  uint64                 `json:"completed_uncertain"`
 	AdjudicatedAdmitted uint64                 `json:"adjudicated_admitted"`
 	AdjudicatedRefused  uint64                 `json:"adjudicated_refused"`

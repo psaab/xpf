@@ -3844,6 +3844,10 @@ fn process_status_s5_reinject_absent_vs_zero_and_written_not_delivered_10478() {
         permit_open: true,
         stats: ReinjectStats {
             completed_written: 3,
+            completed_permitted: 4,
+            completed_fenced: 5,
+            completed_denied: 6,
+            completed_refused: 7,
             ..Default::default()
         },
         provenance: Vec::new(),
@@ -3858,6 +3862,10 @@ fn process_status_s5_reinject_absent_vs_zero_and_written_not_delivered_10478() {
     let value = serde_json::to_value(&status).expect("serialize S5 witness");
     assert_eq!(value["s5_reinject"]["run_id"], "run-1");
     assert_eq!(value["s5_reinject"]["completed_written"], 3);
+    assert_eq!(value["s5_reinject"]["completed_permitted"], 4);
+    assert_eq!(value["s5_reinject"]["completed_fenced"], 5);
+    assert_eq!(value["s5_reinject"]["completed_denied"], 6);
+    assert_eq!(value["s5_reinject"]["completed_refused"], 7);
     assert_eq!(value["s5_reinject"]["reinjected"], 3);
     assert_eq!(value["s5_reinject"]["delivered_available"], false);
     assert_eq!(value["s5_reinject"]["delivered"], 0);

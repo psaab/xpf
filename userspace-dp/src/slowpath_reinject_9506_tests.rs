@@ -583,6 +583,47 @@ fn refused_is_terminal() {
 }
 
 #[test]
+fn terminalize_with_reason_separates_permitted_fenced_denied_and_refused_stats() {
+    let core = open_core();
+    // Permitted without a raw TUN write.
+    for (id, verdict) in [
+        (1, TransferVerdict::Accepted),
+        (2, TransferVerdict::WouldReinject),
+        (3, TransferVerdict::WouldPermit),
+    ] {
+        assert!(core.admit(&frame(id, id, 64)).admitted);
+        assert_eq!(core.pre_write_check(&lease(id)), PreWrite::Proceed);
+        assert!(core.resolve_write(&lease(id), verdict));
+    }
+    // Epoch-fenced via permit rotation.
+    assert!(core.admit(&frame(4, 4, 64)).admitted);
+    core.publish_epochs(PERMIT + 1, &[(1, QEPOCH)]);
+    assert_eq!(core.pre_write_check(&lease(4)), PreWrite::Fenced);
+    // Policy-denied and refused.
+    let core2 = open_core();
+    assert!(core2.admit(&frame(5, 5, 64)).admitted);
+    assert!(core2.resolve_ipsec_inner_verdict(IpsecInnerVerdict::Deny {
+        request_id: 5,
+        connection_id: 0,
+        stage: "d14",
+        reason: 32,
+        policy_id: 0,
+    }));
+    assert!(core2.admit(&frame(6, 6, 64)).admitted);
+    assert_eq!(core2.pre_write_check(&lease(6)), PreWrite::Proceed);
+    assert!(core2.resolve_write(&lease(6), refused()));
+
+    let stats = core.stats_snapshot();
+    assert_eq!(stats.completed_permitted, 3);
+    assert_eq!(stats.completed_fenced, 1);
+    assert_eq!(stats.completed_refused, 0);
+    let stats2 = core2.stats_snapshot();
+    assert_eq!(stats2.completed_denied, 1);
+    assert_eq!(stats2.completed_refused, 1);
+    assert_eq!(stats2.completed_permitted, 0);
+}
+
+#[test]
 fn resolve_unknown_id_is_noop() {
     let core = open_core();
     assert!(!core.resolve_write(&lease(999), written(64)));
