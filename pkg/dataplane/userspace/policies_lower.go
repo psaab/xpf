@@ -82,10 +82,13 @@ func buildPolicySnapshotsWithAddressBookAndFailClosed(cfg *config.Config, active
 		if isUserspaceLiteralAddress(tok) {
 			return true
 		}
-		if _, feedBound := feedOverlay[tok]; feedBound {
+		// Zone-local names are synthetic address-book keys, but dynamic
+		// address bindings remain keyed by their authored global name.
+		feedName := dynamicAddressLookupName(tok)
+		if _, feedBound := feedOverlay[feedName]; feedBound {
 			return true
 		}
-		if cfg.Security.DynamicAddress.AddressBindings[tok] != nil {
+		if cfg.Security.DynamicAddress.AddressBindings[feedName] != nil {
 			return false
 		}
 		if _, known := nameToID[tok]; known {

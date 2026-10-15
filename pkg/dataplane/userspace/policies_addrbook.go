@@ -348,6 +348,15 @@ type addressBookExpansionResolver struct {
 	parsedPrefixes map[string]parsedAddressBookCIDR
 }
 
+// dynamicAddressLookupName maps synthetic zone-local book names back to the
+// authored name used by dynamic-address bindings and feed overlays.
+func dynamicAddressLookupName(name string) string {
+	if _, authored, ok := config.ZoneLocalUnqualify(name); ok {
+		return authored
+	}
+	return name
+}
+
 func newAddressBookExpansionResolver(book *config.AddressBook, feeds map[string][]string, bindings map[string]*config.AddressBinding) *addressBookExpansionResolver {
 	return &addressBookExpansionResolver{
 		book: book, feeds: feeds, bindings: bindings, cache: make(map[string]addressBookParsedExpansion),
@@ -370,7 +379,8 @@ func (r *addressBookExpansionResolver) expand(name string, visiting map[string]b
 	visiting[name] = true
 	defer delete(visiting, name)
 	var out addressBookParsedExpansion
-	feedValues, feedBound := r.feeds[name]
+	feedName := dynamicAddressLookupName(name)
+	feedValues, feedBound := r.feeds[feedName]
 	if feedBound {
 		for _, value := range feedValues {
 			r.appendValue(&out, value)
@@ -379,7 +389,7 @@ func (r *addressBookExpansionResolver) expand(name string, visiting map[string]b
 	// An empty row for an explicit fail-mode drop is the binding's match-none
 	// intent. Do not resurrect a same-named static alias after the feed drops.
 	droppedBinding := feedBound && len(feedValues) == 0 &&
-		r.bindings[name] != nil && r.bindings[name].FailMode == "drop"
+		r.bindings[feedName] != nil && r.bindings[feedName].FailMode == "drop"
 	var cycle bool
 	if !droppedBinding && r.book != nil {
 		if addr, ok := r.book.Addresses[name]; ok {
@@ -483,9 +493,10 @@ func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]st
 	visited[name] = true
 	defer func() { delete(visited, name) }()
 
-	feeds, feedBound := feedOverlay[name]
+	feedName := dynamicAddressLookupName(name)
+	feeds, feedBound := feedOverlay[feedName]
 	out := append([]string(nil), feeds...)
-	if !feedBound && bindings[name] != nil {
+	if !feedBound && bindings[feedName] != nil {
 		return nil, true
 	}
 	if ab == nil {
@@ -498,7 +509,7 @@ func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]st
 	// is the binding's match-none intent — the same-named static closure must
 	// not resurrect after the feed drops (parity with the #12961 policy
 	// resolver gate in addressBookExpansionResolver.expand).
-	if feedBound && len(feeds) == 0 && bindings[name] != nil && bindings[name].FailMode == "drop" {
+	if feedBound && len(feeds) == 0 && bindings[feedName] != nil && bindings[feedName].FailMode == "drop" {
 		return out, false
 	}
 	if addr, ok := ab.Addresses[name]; ok {
