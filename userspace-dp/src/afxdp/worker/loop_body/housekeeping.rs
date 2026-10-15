@@ -37,7 +37,9 @@ pub(super) fn run_session_housekeeping(
     session_map: crate::afxdp::bpf_map::SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
+    dnat_fds: &crate::afxdp::checksum::DnatTableFds,
     worker_id: u32,
+    worker_command_queues: &crate::afxdp::types::WorkerCommandQueues,
     pptp_control: &crate::session::pptp_control::PptpControlInbox,
     worker_commands_by_id: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
@@ -125,6 +127,23 @@ pub(super) fn run_session_housekeeping(
             )
         };
     }
+    retry_deferred_pressure_sheds(
+        &mut sessions,
+        &mut bindings,
+        forwarding,
+        session_map,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        dnat_fds,
+        worker_id,
+        &peer_worker_commands,
+        worker_command_queues,
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        loop_now_ns,
+    );
     let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns, Some(&ha_ctx));
     // #11053: if the control TCP session idles out, forget its PPTP calls
     // and replicate the exact control tuple to peer workers. The delete

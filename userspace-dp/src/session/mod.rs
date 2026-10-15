@@ -1337,6 +1337,7 @@ pub(crate) enum RemovalKind {
 }
 
 /// One removed entry returned to the worker for per-session NAT teardown.
+#[derive(Clone)]
 pub(crate) struct PressureShedSession {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
@@ -1421,6 +1422,10 @@ pub(crate) struct SessionTable {
     /// Seeded and maintained with insert, promotion, and removal so pressure
     /// arbitration does not scan the session table.
     pressure_shed_openings: SeededKeyMap<()>,
+    /// #13643: locally removed sessions awaiting tuple-gated teardown after
+    /// contention. Replayed at the next admission point to avoid orphaning
+    /// allocator holds and kernel/shared rows indefinitely.
+    deferred_pressure_shed: PressureShedSessions,
     /// #9951: per-session inter-VRF leak incarnation, kept outside
     /// `SessionDecision` so the WAN-pinning decision and its wire shape remain
     /// unchanged. Only sessions created on this worker are stamped; peer
@@ -1784,6 +1789,7 @@ impl SessionTable {
             key_to_handle: HashMap::with_hasher(state.clone()),
             bare_tuple_index: HashMap::with_hasher(state.clone()),
             pressure_shed_openings: HashMap::with_hasher(state.clone()),
+            deferred_pressure_shed: PressureShedSessions::new(),
             nat_reverse_index: HashMap::with_hasher(state.clone()),
             forward_wire_index: HashMap::with_hasher(state.clone()),
             reverse_translated_index: HashMap::with_hasher(state.clone()),
