@@ -46,11 +46,9 @@ type Sampler struct {
 	dp   CachedStatusProvider
 	proc ProcReader
 
-	// Snapshot of the last successfully-read worker telemetry.
-	// On a failed CachedStatus() probe the sampler reuses these values
-	// so the counter series stays monotonic (see plan §Error handling).
 	lastWorkerThread uint64
 	lastWorkerWall   uint64
+	readErrors       uint64
 }
 
 // CachedStatusProvider is the narrowed dataplane surface the sampler
@@ -104,6 +102,9 @@ func (s *Sampler) loop(ctx context.Context) {
 func (s *Sampler) sample(now time.Time) {
 	selfStat, statErr := s.proc.ReadSelfStat()
 	if statErr != nil {
+		s.mu.Lock()
+		s.readErrors++
+		s.mu.Unlock()
 		return
 	}
 	daemonNs := ticksToNanos(selfStat.UtimeTicks + selfStat.StimeTicks)
@@ -162,8 +163,9 @@ func (s *Sampler) sample(now time.Time) {
 // Build().  Samples is ordered oldest-first, newest-last.  Empty
 // snapshot renders as all-windows-invalid in Build().
 type SamplerSnapshot struct {
-	Samples []cpuSample
-	Now     time.Time
+	Samples    []cpuSample
+	Now        time.Time
+	ReadErrors uint64
 }
 
 // Snapshot copies the ring under lock and returns it.  Always
@@ -185,8 +187,9 @@ func (s *Sampler) Snapshot() SamplerSnapshot {
 		copy(out[:tail], s.ring[s.head:])
 		copy(out[tail:], s.ring[:s.head])
 	}
+	readErrors := s.readErrors
 	s.mu.Unlock()
-	return SamplerSnapshot{Samples: out, Now: time.Now()}
+	return SamplerSnapshot{Samples: out, Now: time.Now(), ReadErrors: readErrors}
 }
 
 // computeCPUWindows returns per-core Daemon CPU% and per-worker-average

@@ -821,17 +821,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.startReconcileRGStateLoop(ctx, &wg)
 	}
 
-	// Start HTTP API server if configured.
-	if d.opts.APIAddr != "" {
-		d.startHTTPServer(ctx, &wg, eventBuf)
-	}
-
 	// #881: forwarding-daemon CPU sampler (5s/1m/5m windows for
-	// `show chassis forwarding`).  Shared between the gRPC server
-	// and the local CLI; both paths call Snapshot() at query time.
-	// Started here so the ring is populated before the first CLI.
+	// `show chassis forwarding` and Prometheus health metrics). Shared
+	// between the REST/gRPC servers and local CLI.
 	fwdSampler := fwdstatus.NewSampler(d.forwardingStatusDataplane(), fwdstatus.OSProcReader{})
 	fwdSampler.Start(ctx)
+
+	// Start HTTP API server if configured.
+	if d.opts.APIAddr != "" {
+		d.startHTTPServer(ctx, &wg, eventBuf, fwdSampler)
+	}
 
 	// Start gRPC API server.
 	d.startGRPCServer(ctx, &wg, eventBuf, fwdSampler)

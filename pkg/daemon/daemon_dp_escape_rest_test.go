@@ -73,7 +73,7 @@ func startEscapeTestREST(t *testing.T, d *Daemon) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	d.opts.APIAddr = "127.0.0.1:0"
-	d.startHTTPServer(ctx, &wg, nil)
+	d.startHTTPServer(ctx, &wg, nil, nil)
 	t.Cleanup(func() {
 		cancel()
 		wg.Wait()

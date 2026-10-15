@@ -322,8 +322,9 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 // verbatim from Run()'s PHASE 5 (#4662 Increment 3); a leaf startup block with
 // no ordering dependency (same code, same call point, still guarded by the
 // d.opts.APIAddr check in Run).
-func (d *Daemon) startHTTPServer(ctx context.Context, wg *sync.WaitGroup, eventBuf *logging.EventBuffer) {
+func (d *Daemon) startHTTPServer(ctx context.Context, wg *sync.WaitGroup, eventBuf *logging.EventBuffer, fwdSampler *fwdstatus.Sampler) {
 	apiCfg := d.apiServerConfig(eventBuf)
+	apiCfg.FwdSampler = fwdSampler
 	// #5866: the management HTTP/HTTPS listener is owned by
 	// managementReconciler. apiCfg here carries only the runtime deps; the
 	// reconciler re-derives the bind/port/TLS/auth from each ACTIVE config

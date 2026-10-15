@@ -669,7 +669,7 @@ func TestDeferredDeliveryIsWiredAtItsRetryPoints_6827(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		var wg sync.WaitGroup
 		t.Cleanup(func() { cancel(); wg.Wait() })
-		captureDaemonWarn(t, func() { d.startHTTPServer(ctx, &wg, nil) })
+		captureDaemonWarn(t, func() { d.startHTTPServer(ctx, &wg, nil, nil) })
 
 		if reads == 0 {
 			t.Fatal("the boot management start did not attempt the parked diagnosis: the kernel " +

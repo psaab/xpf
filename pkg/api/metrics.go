@@ -58,14 +58,14 @@ type xpfCollector struct {
 	// xpf_screen_drops_total above cannot answer "which screen fired?"; this
 	// labeled series can, now that the userspace bridge populates the per-reason
 	// GlobalCtrScreen* counters.
-	screenDropsByReasonTotal        *prometheus.Desc
+	screenDropsByReasonTotal               *prometheus.Desc
 	userspaceScreenSubstitutedDefaultDrops *prometheus.Desc
-	userspaceScreenSYNFloodDstDrops *prometheus.Desc
-	userspaceScreenSYNFloodSrcDrops *prometheus.Desc
-	userspaceScreenSYNFloodAlarmEvents *prometheus.Desc
-	userspaceScreenAlarmWithoutDropEvents *prometheus.Desc
-	userspaceScreenProfileWarns *prometheus.Desc
-	userspaceScreenTrackerPressureEvents *prometheus.Desc
+	userspaceScreenSYNFloodDstDrops        *prometheus.Desc
+	userspaceScreenSYNFloodSrcDrops        *prometheus.Desc
+	userspaceScreenSYNFloodAlarmEvents     *prometheus.Desc
+	userspaceScreenAlarmWithoutDropEvents  *prometheus.Desc
+	userspaceScreenProfileWarns            *prometheus.Desc
+	userspaceScreenTrackerPressureEvents   *prometheus.Desc
 	// #5806: unresolved screen-profile references (see the descriptor).
 	screenUnresolvedProfileZones *prometheus.Desc
 	screenInertProfileZones      *prometheus.Desc
@@ -860,14 +860,22 @@ type xpfCollector struct {
 	// #1247: production RSS/workload health gauges derived from the
 	// same per-CoS {a_i} snapshot. These expose the structural ceiling
 	// without adding packet-path state or global atomics.
-	fairnessCstruct                           *prometheus.Desc
-	fairnessActiveWorkers                     *prometheus.Desc
-	fairnessActiveFlows                       *prometheus.Desc
-	fairnessMaxWorkerFlowShare                *prometheus.Desc
-	fairnessCoSCountsTruncated                *prometheus.Desc
-	fairnessRSSExpectation                    *prometheus.Desc
-	fairnessRSSExpectationValue               *prometheus.Desc
-	fairnessRSSSkewViolation                  *prometheus.Desc
+	fairnessCstruct             *prometheus.Desc
+	fairnessActiveWorkers       *prometheus.Desc
+	fairnessActiveFlows         *prometheus.Desc
+	fairnessMaxWorkerFlowShare  *prometheus.Desc
+	fairnessCoSCountsTruncated  *prometheus.Desc
+	fairnessRSSExpectation      *prometheus.Desc
+	fairnessRSSExpectationValue *prometheus.Desc
+	fairnessRSSSkewViolation    *prometheus.Desc
+	// #13299: the canonical forwarding-health view and CPU sampler errors.
+	forwardingState                           *prometheus.Desc
+	forwardingHeapUtilization                 *prometheus.Desc
+	forwardingBufferUtilization               *prometheus.Desc
+	forwardingDaemonCPU                       *prometheus.Desc
+	forwardingWorkerCPU                       *prometheus.Desc
+	forwardingCPUDataStale                    *prometheus.Desc
+	forwardingSamplerErrors                   *prometheus.Desc
 	fairnessRSSIndeterminate                  *prometheus.Desc
 	fairnessSaturated                         *prometheus.Desc
 	fairnessObservedCoV                       *prometheus.Desc
@@ -1473,6 +1481,13 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.fairnessEqualFlowTargetPerFlowBPS
 	ch <- c.fairnessEqualFlowObservedBPS
 	ch <- c.fairnessEqualFlowCappedBPS
+	ch <- c.forwardingState
+	ch <- c.forwardingHeapUtilization
+	ch <- c.forwardingBufferUtilization
+	ch <- c.forwardingDaemonCPU
+	ch <- c.forwardingWorkerCPU
+	ch <- c.forwardingCPUDataStale
+	ch <- c.forwardingSamplerErrors
 	ch <- c.fairnessEqualFlowSuppressedBPS
 	ch <- c.fairnessEqualFlowThroughputLossRatio
 	ch <- c.fairnessEqualFlowWorkerObservedBPS
@@ -2063,6 +2078,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	c.collectZoneCounters(ch, c.srv.dp)
 
 	dp := c.srv.dp
+	c.collectFwdStatus(ch)
 	// #8321 finding 14: the CONTROL-PLANE collectors run BEFORE the dataplane
 	// gate below, because none of them reads dataplane state and all of them
 	// matter most when the dataplane is absent.
