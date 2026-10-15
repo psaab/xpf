@@ -42,6 +42,7 @@ use crate::slowpath_reinject_9506::{ReinjectLease, SUBMIT_FLAG_FORWARD};
 // initial ArcSwap load_fulls, binding construction, BPF-map-FD
 // cache, initial cos_status publish) lives in loop_body/setup.rs.
 mod setup;
+mod screen_status;
 
 // #1776: the cfg(debug-log) verbose per-second report + stall dump +
 // per-interval DbgCounters live in loop_body/debug_report.rs. The
@@ -1774,53 +1775,7 @@ pub(crate) fn worker_loop(
                     &bindings,
                     &sessions,
                 );
-                // #13285: ScreenState is worker-local, not binding-local.
-                // Publish one cumulative sample on the first live binding as a
-                // transport slot; Go sums binding samples and emits process-
-                // wide counters. Selecting a live binding avoids a retired
-                // first slot zeroing the telemetry while other queues run.
-                // `store` avoids multiplying totals by status-poll frequency.
-                if let Some(b) = bindings
-                    .iter()
-                    .find(|b| b.live.bound.load(Ordering::Relaxed))
-                {
-                    b.live.screen_substituted_default_drops.store(
-                        screen_state.substituted_default_drops(),
-                        Ordering::Relaxed,
-                    );
-                    b.live.screen_syn_flood_dst_drops.store(
-                        screen_state.syn_flood_dst_drops(),
-                        Ordering::Relaxed,
-                    );
-                    b.live.screen_syn_flood_src_drops.store(
-                        screen_state.syn_flood_src_drops(),
-                        Ordering::Relaxed,
-                    );
-                    b.live.screen_syn_flood_alarm_events.store(
-                        screen_state.syn_flood_alarm_events(),
-                        Ordering::Relaxed,
-                    );
-                    b.live.screen_alarm_without_drop_events.store(
-                        screen_state.alarm_without_drop_events(),
-                        Ordering::Relaxed,
-                    );
-                    b.live.screen_missing_profile_warns.store(
-                        screen_state.missing_profile_warn_count(),
-                        Ordering::Relaxed,
-                    );
-                    b.live.screen_inert_profile_warns.store(
-                        screen_state.inert_profile_warn_count(),
-                        Ordering::Relaxed,
-                    );
-                    b.live.screen_scan_sweep_skipped_pressure.store(
-                        screen_state.scan_sweep_skipped_pressure(),
-                        Ordering::Relaxed,
-                    );
-                    b.live.screen_scan_sweep_evicted_pressure.store(
-                        screen_state.scan_sweep_evicted_pressure(),
-                        Ordering::Relaxed,
-                    );
-                }
+                screen_status::publish_screen_state_status(&screen_state, &bindings);
                 for b in bindings.iter_mut() {
                     // #802: publish ring-pressure counters into BindingLiveState
                     // BEFORE resetting the worker-local window. The worker-local
