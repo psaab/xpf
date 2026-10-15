@@ -1156,7 +1156,7 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 	sort.Strings(ifNames)
 	for _, ifName := range ifNames {
 		iface := cfg.Interfaces.Interfaces[ifName]
-		if iface == nil {
+		if iface == nil || iface.Disable {
 			continue
 		}
 		unitNums := make([]int, 0, len(iface.Units))
@@ -1226,7 +1226,17 @@ func BuildDHCPHostInboundBackstopNetdevs(cfg *config.Config, snaps []InterfaceSn
 	backstops := HostInboundDHCPBackstops{}
 	backstops.V4, backstops.V6 = BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
 	backstops.AdmitV6 = append(backstops.AdmitV6, backstops.V6...)
-	zoned := buildZonedDHCPHostInboundBackstopNetdevs(cfg)
+	unzonedVRF := buildUnzonedVRFDHCPBackstops(cfg, snaps)
+	backstops.VRFSlavesV4 = unzonedVRF.VRFSlavesV4
+	backstops.VRFSlavesV6 = unzonedVRF.VRFSlavesV6
+	backstops.AdmitVRFSlavesV6 = unzonedVRF.AdmitVRFSlavesV6
+	zoned, deniedDevices := buildZonedDHCPHostInboundBackstopNetdevs(cfg)
+	deniedV6 := make(map[string]bool, len(deniedDevices))
+	for _, dev := range deniedDevices {
+		deniedV6[dev] = true
+	}
+	backstops.AdmitV6 = filterDHCPAdmits(backstops.AdmitV6, deniedV6)
+	backstops.AdmitVRFSlavesV6 = filterDHCPAdmits(backstops.AdmitVRFSlavesV6, deniedV6)
 	seenV4, seenV6 := make(map[string]bool, len(backstops.V4)+len(zoned.V4)), make(map[string]bool, len(backstops.V6)+len(zoned.V6))
 	seenAdmitV6 := make(map[string]bool, len(backstops.AdmitV6)+len(zoned.AdmitV6))
 	for _, dev := range backstops.V4 {
@@ -1256,16 +1266,106 @@ func BuildDHCPHostInboundBackstopNetdevs(cfg *config.Config, snaps []InterfaceSn
 			backstops.AdmitV6 = append(backstops.AdmitV6, dev)
 		}
 	}
+	backstops.AdmitV6 = filterDHCPAdmits(backstops.AdmitV6, deniedV6)
+	backstops.AdmitVRFSlavesV6 = filterDHCPAdmits(backstops.AdmitVRFSlavesV6, deniedV6)
 	sort.Strings(backstops.V4)
 	sort.Strings(backstops.V6)
 	sort.Strings(backstops.AdmitV6)
-	backstops.VRFSlavesV4 = zoned.VRFSlavesV4
-	backstops.VRFSlavesV6 = zoned.VRFSlavesV6
-	backstops.AdmitVRFSlavesV6 = zoned.AdmitVRFSlavesV6
+	backstops.VRFSlavesV4 = append(backstops.VRFSlavesV4, zoned.VRFSlavesV4...)
+	backstops.VRFSlavesV6 = append(backstops.VRFSlavesV6, zoned.VRFSlavesV6...)
+	backstops.AdmitVRFSlavesV6 = append(backstops.AdmitVRFSlavesV6, zoned.AdmitVRFSlavesV6...)
+	sort.Strings(backstops.VRFSlavesV4)
+	sort.Strings(backstops.VRFSlavesV6)
+	sort.Strings(backstops.AdmitVRFSlavesV6)
+	backstops.VRFSlavesV4 = compactDHCPNetdevs(backstops.VRFSlavesV4)
+	backstops.VRFSlavesV6 = compactDHCPNetdevs(backstops.VRFSlavesV6)
+	backstops.AdmitVRFSlavesV6 = compactDHCPNetdevs(backstops.AdmitVRFSlavesV6)
 	return backstops
 }
+func compactDHCPNetdevs(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:1]
+	for _, value := range values[1:] {
+		if value != out[len(out)-1] {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+func filterDHCPAdmits(values []string, denied map[string]bool) []string {
+	out := values[:0]
+	for _, value := range values {
+		if !denied[value] {
+			out = append(out, value)
+		}
+	}
+	return out
+}
 
-func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHCPBackstops {
+// buildUnzonedVRFDHCPBackstops covers unzoned and quarantined VRF members,
+// whose LOCAL_IN identity is the master and therefore requires sdifname.
+func buildUnzonedVRFDHCPBackstops(cfg *config.Config, snaps []InterfaceSnapshot) HostInboundDHCPBackstops {
+	out := HostInboundDHCPBackstops{}
+	if cfg == nil {
+		return out
+	}
+	enslaved := config.HostInboundDHCPVRFEnslavedNetdevs(cfg)
+	zoneByIface := buildInterfaceZoneMap(cfg)
+	lifelines := hostInboundLifelineSet(cfg)
+	configuredAddrs := configuredHostInboundAddrKeys(cfg)
+	hasFam := make(map[string]map[string]bool)
+	for _, snap := range snaps {
+		for _, addr := range snap.Addresses {
+			if hostInboundScopeLinkUnresolved(snap.Name, addr, configuredAddrs) || hostIPFromCIDR(addr.Address) == "" {
+				continue
+			}
+			if hasFam[snap.Name] == nil {
+				hasFam[snap.Name] = map[string]bool{}
+			}
+			hasFam[snap.Name][addr.Family] = true
+		}
+	}
+	seenV4, seenV6 := map[string]bool{}, map[string]bool{}
+	for ifName, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil || iface.Disable {
+			continue
+		}
+		for number, unit := range iface.Units {
+			if unit == nil {
+				continue
+			}
+			unitRef := fmt.Sprintf("%s.%d", ifName, number)
+			if zoneByIface[unitRef] != "" || hostInboundLifelineInterface(unitRef, lifelines) {
+				continue
+			}
+			linuxName := snapshotLinuxName(cfg, ifName, iface, unit)
+			if linuxName == "" || !enslaved[linuxName] {
+				continue
+			}
+			families := hasFam[unitRef]
+			if unit.DHCP && !families["inet"] && !seenV4[linuxName] {
+				seenV4[linuxName] = true
+				out.VRFSlavesV4 = append(out.VRFSlavesV4, linuxName)
+			}
+			if (unit.DHCPv6 || unit.DHCPv6Client != nil) && !families["inet6"] {
+				if !seenV6[linuxName] {
+					seenV6[linuxName] = true
+					out.VRFSlavesV6 = append(out.VRFSlavesV6, linuxName)
+				}
+				out.AdmitVRFSlavesV6 = append(out.AdmitVRFSlavesV6, linuxName)
+			}
+		}
+	}
+	sort.Strings(out.VRFSlavesV4)
+	sort.Strings(out.VRFSlavesV6)
+	sort.Strings(out.AdmitVRFSlavesV6)
+	out.AdmitVRFSlavesV6 = compactDHCPNetdevs(out.AdmitVRFSlavesV6)
+	return out
+}
+
+func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) (HostInboundDHCPBackstops, []string) {
 	backstops := HostInboundDHCPBackstops{}
 	vrfEnslaved := config.HostInboundDHCPVRFEnslavedNetdevs(cfg)
 	lifelines := hostInboundLifelineSet(cfg)
@@ -1274,6 +1374,7 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 	quarantined := quarantinedZoneNames(cfg)
 	seenV4, seenV6, seenVRFV4, seenVRFV6 := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	seenAdmitV6, seenVRFAdmitV6 := map[string]bool{}, map[string]bool{}
+	deniedDevices := map[string]bool{}
 	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
 	for name := range cfg.Interfaces.Interfaces {
 		ifNames = append(ifNames, name)
@@ -1281,7 +1382,7 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 	sort.Strings(ifNames)
 	for _, ifName := range ifNames {
 		iface := cfg.Interfaces.Interfaces[ifName]
-		if iface == nil {
+		if iface == nil || iface.Disable {
 			continue
 		}
 		unitNums := make([]int, 0, len(iface.Units))
@@ -1332,6 +1433,9 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 				seenV6[linuxName] = true
 				backstops.V6 = append(backstops.V6, linuxName)
 			}
+			if dhcpv6 && !dhcpv6Admit {
+				deniedDevices[linuxName] = true
+			}
 			if dhcpv6 && dhcpv6Admit && !seenAdmitV6[linuxName] {
 				seenAdmitV6[linuxName] = true
 				backstops.AdmitV6 = append(backstops.AdmitV6, linuxName)
@@ -1359,7 +1463,12 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 	sort.Strings(backstops.VRFSlavesV6)
 	sort.Strings(backstops.AdmitV6)
 	sort.Strings(backstops.AdmitVRFSlavesV6)
-	return backstops
+	deniedV6 := make([]string, 0, len(deniedDevices))
+	for dev := range deniedDevices {
+		deniedV6 = append(deniedV6, dev)
+	}
+	sort.Strings(deniedV6)
+	return backstops, deniedV6
 }
 
 // HostInboundLifelineIngressNetdevs returns the sorted linux netdev names
