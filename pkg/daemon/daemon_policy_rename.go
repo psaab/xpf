@@ -292,25 +292,28 @@ func expandPolicyRenameAncestryWithFeeds(
 			config.JunosGlobalZoneName, config.JunosGlobalZoneName, policy.Name)
 		destinationID := dpuserspace.StablePolicyRuleID(
 			config.JunosGlobalZoneName, config.JunosGlobalZoneName, newName)
-		sf, df := config.JunosGlobalZoneName, config.JunosGlobalZoneName
-		for _, zone := range policy.Match.FromZones {
-			if renamed, ok := zoneRenames[zone]; ok {
-				sf, df = zone, renamed
-				break
+		// A scoped global rule can match every Cartesian pair in its
+		// from/to zone sets. Emit each old pair with renamed endpoints mapped
+		// forward; selecting only the first renamed zone loses sessions for
+		// other directions during Rust's per-session ancestry selection.
+		globalZonePairs := func(zones []string) []string {
+			if len(zones) == 0 {
+				return []string{config.JunosGlobalZoneName}
+			}
+			return slices.Clone(zones)
+		}
+		fromZones := globalZonePairs(policy.Match.FromZones)
+		toZones := globalZonePairs(policy.Match.ToZones)
+		for _, sf := range fromZones {
+			for _, st := range toZones {
+				df, dt := mapZone(sf), mapZone(st)
+				pairs = append(pairs, ancestryPair{
+					sf: sf, st: st, sn: policy.Name,
+					df: df, dt: dt, dn: newName,
+					globalScope: true, srcRuleID: sourceID, dstRuleID: destinationID,
+				})
 			}
 		}
-		st, dt := config.JunosGlobalZoneName, config.JunosGlobalZoneName
-		for _, zone := range policy.Match.ToZones {
-			if renamed, ok := zoneRenames[zone]; ok {
-				st, dt = zone, renamed
-				break
-			}
-		}
-		pairs = append(pairs, ancestryPair{
-			sf: sf, st: st, sn: policy.Name,
-			df: df, dt: dt, dn: newName,
-			globalScope: true, srcRuleID: sourceID, dstRuleID: destinationID,
-		})
 	}
 	if len(pairs) == 0 {
 		return nil, nil, false
@@ -347,14 +350,16 @@ func expandPolicyRenameAncestryWithFeeds(
 		if oldFingerprints[sourceID] == "" || oldFingerprints[sourceID] != newFingerprints[destinationID] {
 			return nil, nil, false
 		}
-		if _, duplicate := seenSource[sourceID]; duplicate {
-			return nil, nil, false
+		if !pair.globalScope {
+			if _, duplicate := seenSource[sourceID]; duplicate {
+				return nil, nil, false
+			}
+			if _, duplicate := seenDestination[destinationID]; duplicate {
+				return nil, nil, false
+			}
+			seenSource[sourceID] = struct{}{}
+			seenDestination[destinationID] = struct{}{}
 		}
-		if _, duplicate := seenDestination[destinationID]; duplicate {
-			return nil, nil, false
-		}
-		seenSource[sourceID] = struct{}{}
-		seenDestination[destinationID] = struct{}{}
 		// A global-only first policy yields ID 0 here (PolicySetID 0 with no
 		// zone-pair sets; with N sets globals bind at N*256+idx like zone-pair
 		// rules), so its renames expand wire-only. INTENDED per #10621: policy_id 0

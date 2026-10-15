@@ -106,6 +106,7 @@ fn view_with_policy_metadata(
         .next()
         .unwrap_or(0);
     forwarding.ifindex_to_zone_id.insert(11, ingress_zone);
+    forwarding.ifindex_to_zone_id.insert(12, 2);
     let forwarding = Arc::new(forwarding);
     let view = Arc::new(RuntimeView::new(
         // runtime-view-canary: test-local
@@ -750,6 +751,93 @@ fn extensive_rotation_rebinds_global_first_policy_via_junos_global_ancestry_1062
     assert_eq!(forward.metadata.egress_zone, 2);
     assert_eq!(reverse.metadata.ingress_zone, 2);
     assert_eq!(reverse.metadata.egress_zone, 1);
+}
+
+/// #13415: multiple zone-pair ancestry rows for one ID-zero global rule are
+/// selected by each session's stamped zones. Both directions must survive a
+/// real worker rotation; rejecting all ancestry when its length exceeds one
+/// purges both otherwise-permitted flows.
+#[test]
+fn extensive_rotation_retains_both_zone_directions_for_global_id_zero_13415() {
+    let ancestry = [("lan", "wan", 1, 2), ("wan", "lan", 2, 1)]
+        .into_iter()
+        .map(
+            |(from, to, from_id, to_id)| crate::protocol::PolicyRenameAncestry {
+                source_rule_id: "junos-global->junos-global/g-web".to_string(),
+                destination_rule_id: "junos-global->junos-global/g-web".to_string(),
+                source_from_zone: from.to_string(),
+                source_to_zone: to.to_string(),
+                destination_from_zone: from.to_string(),
+                destination_to_zone: to.to_string(),
+                source_from_zone_id: from_id,
+                source_to_zone_id: to_id,
+                destination_from_zone_id: from_id,
+                destination_to_zone_id: to_id,
+                source_from_zone_any: false,
+                source_to_zone_any: false,
+                destination_from_zone_any: false,
+                destination_to_zone_any: false,
+            },
+        )
+        .collect::<Vec<_>>();
+    let old_rules = [
+        rule_with_zones("g-web", 0, "junos-global", "junos-global"),
+        rule_with_zones("p-web", 1, "lan", "dmz"),
+    ];
+    let mut other_forward = entry(key(40011), false, None);
+    let mut other_reverse = entry(
+        reverse_session_key(&other_forward.key, NatDecision::default()),
+        true,
+        None,
+    );
+    let first_counter = policy(&old_rules)
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("fixture policy must expose the global first-rule counter");
+    other_forward.metadata.policy_counter = Some(first_counter.clone());
+    other_reverse.metadata.policy_counter = Some(first_counter);
+    other_forward.metadata.ingress_zone = 2;
+    other_forward.metadata.ingress_ifindex = 12;
+    other_forward.metadata.egress_zone = 1;
+    other_reverse.metadata.ingress_zone = 1;
+    other_reverse.metadata.egress_zone = 2;
+    let other_pair = [other_forward, other_reverse];
+    let harness = RotationHarness::start_with_extra_origin_old_rules(
+        &other_pair,
+        SessionOrigin::SharedPromote,
+        &old_rules,
+        "junos-global->junos-global/g-web",
+    );
+    harness.publish(
+        2,
+        &[
+            rule_with_zones("g-web", 0, "junos-global", "junos-global"),
+            rule_with_zones("p-web", 1, "lan", "dmz"),
+        ],
+        true,
+        &ancestry,
+        None,
+    );
+    let presence = harness.presence();
+    let other_forward_key = other_pair[0].key.clone();
+    let other_reverse_key = other_pair[1].key.clone();
+    let map = harness.synced.lock().expect("shared synced map");
+    let other_forward_present = map.contains_key(&other_forward_key);
+    let other_reverse_present = map.contains_key(&other_reverse_key);
+    drop(map);
+    harness.shutdown();
+    assert!(
+        presence.first_forward && presence.first_reverse,
+        "lan->wan global session pair did not survive rotation \
+         (forward={}, reverse={})",
+        presence.first_forward,
+        presence.first_reverse
+    );
+    assert!(
+        other_forward_present && other_reverse_present,
+        "wan->lan global session pair did not survive rotation \
+         (forward={other_forward_present}, reverse={other_reverse_present})"
+    );
 }
 
 #[test]

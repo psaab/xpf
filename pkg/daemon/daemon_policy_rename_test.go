@@ -1413,3 +1413,65 @@ func TestExpandZoneRenameScopedGlobal12857(t *testing.T) {
 		}
 	}
 }
+
+func TestExpandZoneRenameScopedGlobalBothDirections13415(t *testing.T) {
+	build := func(renamed bool) *config.Config {
+		cfg := policyRenameEvaluatorConfig("p", config.PolicyPermit)
+		cfg.Security.Policies = nil
+		cfg.Security.GlobalPolicies = []*config.Policy{{
+			Name: "g-web", Action: config.PolicyPermit,
+			Match: config.PolicyMatch{
+				FromZones: []string{"lan", "wan"},
+				ToZones:   []string{"lan", "wan"},
+			},
+		}}
+		if renamed {
+			cfg.Security.Zones = map[string]*config.ZoneConfig{
+				"lan2": {Name: "lan2"}, "other": {Name: "other"}, "wan2": {Name: "wan2"},
+			}
+			for _, pair := range cfg.Security.Policies {
+				if pair.FromZone == "lan" {
+					pair.FromZone = "lan2"
+				}
+				if pair.ToZone == "wan" {
+					pair.ToZone = "wan2"
+				}
+			}
+			cfg.Security.GlobalPolicies[0].Match.FromZones = []string{"lan2", "wan2"}
+			cfg.Security.GlobalPolicies[0].Match.ToZones = []string{"lan2", "wan2"}
+		}
+		return cfg
+	}
+	oldCfg, newCfg := build(false), build(true)
+	_, wire, ok := expandPolicyRenameAncestry(oldCfg, newCfg, []configstore.RenameDescriptor{
+		policyZoneDescriptor("lan", "lan2"),
+		policyZoneDescriptor("wan", "wan2"),
+	})
+	if !ok {
+		t.Fatal("simultaneous scoped-global zone renames were rejected")
+	}
+	want := map[[4]string]bool{
+		{"lan", "lan", "lan2", "lan2"}: true,
+		{"lan", "wan", "lan2", "wan2"}: true,
+		{"wan", "lan", "wan2", "lan2"}: true,
+		{"wan", "wan", "wan2", "wan2"}: true,
+	}
+	got := make(map[[4]string]bool)
+	for _, row := range wire {
+		if row.SourceRuleID == "junos-global->junos-global/g-web" {
+			got[[4]string{row.SourceFromZone, row.SourceToZone, row.DestinationFromZone, row.DestinationToZone}] = true
+		}
+	}
+	for pair := range want {
+		if !got[pair] {
+			t.Errorf("missing global ancestry %q->%q => %q->%q; got %+v", pair[0], pair[1], pair[2], pair[3], got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d unique global ancestry rows, want %d: %+v", len(got), len(want), got)
+	}
+	oldID := dpuserspace.PolicyIDsByStableKey(oldCfg)["junos-global->junos-global/g-web"]
+	if oldID != 0 {
+		t.Errorf("global-only first policy ID = %d, want ID zero", oldID)
+	}
+}
