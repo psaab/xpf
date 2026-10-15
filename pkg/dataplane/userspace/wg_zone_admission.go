@@ -189,7 +189,7 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 	// uniquely owned by the same underlay zone.
 	portsByZone := make(map[uint16]map[uint16]struct{})
 	for _, endpoint := range snapshot.TunnelEndpoints {
-		if endpoint.Mode != "wireguard" || endpoint.WgListenPort == 0 {
+		if endpoint.Mode != "wireguard" || endpoint.WgListenPort == 0 || zoneID(endpoint.Zone) == 0 {
 			continue
 		}
 		if _, selected := selectedPorts[endpoint.WgListenPort]; !selected {
