@@ -599,8 +599,7 @@ pub(super) fn flowless_pre_routing_destination_nat(
             .translate_inbound_result(&mut dst_v6, scope.zone_name)
         {
             crate::nptv6::Nptv6Translation::Translated => {
-                forwarding.nptv6.record_translation(true);
-                return flowless_pre_routing_translation(
+                let result = flowless_pre_routing_translation(
                     NatDecision {
                         rewrite_dst: Some(IpAddr::V6(dst_v6)),
                         nptv6: true,
@@ -609,10 +608,13 @@ pub(super) fn flowless_pre_routing_destination_nat(
                     None,
                     wire,
                 );
+                if matches!(&result, FlowlessPreRoutingNat::Translated { .. }) {
+                    forwarding.nptv6.record_translation(true);
+                }
+                return result;
             }
             crate::nptv6::Nptv6Translation::NoMatch => {}
             crate::nptv6::Nptv6Translation::Untranslatable => {
-                forwarding.nptv6.record_untranslatable_drop();
                 return FlowlessPreRoutingNat::Untranslatable;
             }
         }
