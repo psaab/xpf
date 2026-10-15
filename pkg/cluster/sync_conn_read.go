@@ -1291,16 +1291,6 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			return
 		}
 		slog.Info("cluster sync: clock synced with peer", "peer_mono", peerMono, "local_mono", localMono, "offset", offset)
-	case syncMsgPrepareActivation:
-		if len(payload) < 1 {
-			slog.Warn("cluster sync: prepare_activation message too short")
-			return
-		}
-		rgID := int(payload[0])
-		slog.Info("cluster sync: prepare_activation received from demoting peer", "rg", rgID)
-		if s.OnPrepareActivation != nil {
-			go s.OnPrepareActivation(rgID)
-		}
 	case syncMsgBarrier:
 		if len(payload) < 8 {
 			slog.Warn("cluster sync: barrier message too short")

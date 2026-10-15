@@ -86,7 +86,9 @@ const (
 	syncMsgFailoverAck            = 16
 	syncMsgFailoverCommit         = 17
 	syncMsgFailoverCommitAck      = 18
-	syncMsgPrepareActivation      = 19
+	// Wire value 19 was the unused prepare-activation message. Keep it retired
+	// so older peers' frames remain unknown and the value cannot be reused.
+	syncMsgPrepareActivation      = 19 // retired; do not reuse
 	syncMsgFailoverBatch          = 20
 	syncMsgFailoverBatchAck       = 21
 	syncMsgFailoverBatchCommit    = 22
@@ -1005,8 +1007,6 @@ type SessionSync struct {
 	// after it returns. That ordering is the whole guarantee: an ack sent
 	// before the fence had been applied would confirm nothing.
 	OnFenceReceived func() FenceResult
-	// OnPrepareActivation asks the peer to pre-warm neighbors for the given RG.
-	OnPrepareActivation func(rgID int)
 	// OnForwardSessionInstalled fires when a forward synced session is installed locally.
 	OnForwardSessionInstalled func()
 	// OnBulkSyncReceived fires when an inbound bulk sync completes.

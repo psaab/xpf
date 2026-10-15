@@ -257,7 +257,7 @@ func liveSyncMessageTypesExcept(under int) []syncMessageType {
 		{syncMsgBarrier, "Barrier"}, {syncMsgBarrierAck, "BarrierAck"},
 		{syncMsgBulkAck, "BulkAck"}, {syncMsgFailoverAck, "FailoverAck"},
 		{syncMsgFailoverCommit, "FailoverCommit"}, {syncMsgFailoverCommitAck, "FailoverCommitAck"},
-		{syncMsgPrepareActivation, "PrepareActivation"}, {syncMsgFailoverBatch, "FailoverBatch"},
+		{syncMsgFailoverBatch, "FailoverBatch"},
 		{syncMsgFailoverBatchAck, "FailoverBatchAck"}, {syncMsgFailoverBatchCommit, "FailoverBatchCommit"},
 		{syncMsgFailoverBatchCommitAck, "FailoverBatchCommitAck"}, {syncMsgHeartbeatAck, "HeartbeatAck"},
 		{syncMsgDHCPLeaseV4, "DHCPLeaseV4"}, {syncMsgDHCPLeaseV6, "DHCPLeaseV6"},
@@ -312,11 +312,13 @@ func liveSyncMessageTypesExcept(under int) []syncMessageType {
 func TestLiveSyncMessageCensusIsComplete7163(t *testing.T) {
 	t.Parallel()
 
-	// -1 matches no live constant, so nothing is excluded.
+	// -1 matches no live constant, so nothing is excluded. Retired wire IDs
+	// are deliberately absent from the live uniqueness census.
 	census := map[string]int{}
 	for _, m := range liveSyncMessageTypesExcept(-1) {
 		census["syncMsg"+m.name] = m.v
 	}
+	retired := map[string]int{"syncMsgPrepareActivation": 19}
 
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -360,9 +362,14 @@ func TestLiveSyncMessageCensusIsComplete7163(t *testing.T) {
 	for name, v := range found {
 		got, ok := census[name]
 		if !ok {
+			if retiredValue, isRetired := retired[name]; isRetired {
+				if retiredValue != v {
+					t.Errorf("%s = %d in source but retired census records %d", name, v, retiredValue)
+				}
+				continue
+			}
 			t.Errorf("%s = %d is declared in the package but MISSING from "+
-				"liveSyncMessageTypesExcept. Every uniqueness test here is blind to a "+
-				"collision with it.", name, v)
+				"liveSyncMessageTypesExcept or the retired wire-ID census. Every uniqueness test here is blind to a collision with it.", name, v)
 			continue
 		}
 		if got != v {
