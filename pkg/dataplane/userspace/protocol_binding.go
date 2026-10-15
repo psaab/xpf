@@ -157,7 +157,17 @@ type BindingStatus struct {
 	// (xpf_host_inbound_denies_total), and `show security flow statistics`
 	// reflect the drop. Before #3326 these denies were never counted.
 	HostInboundDeniedPackets uint64 `json:"host_inbound_denied_packets,omitempty"`
-	ScreenDrops              uint64 `json:"screen_drops,omitempty"`
+	ScreenDrops uint64 `json:"screen_drops,omitempty"`
+	// #13285: per-worker ScreenState security and detector-saturation counters.
+	ScreenSubstitutedDefaultDrops uint64 `json:"screen_substituted_default_drops,omitempty"`
+	ScreenSYNFloodDstDrops        uint64 `json:"screen_syn_flood_dst_drops,omitempty"`
+	ScreenSYNFloodSrcDrops        uint64 `json:"screen_syn_flood_src_drops,omitempty"`
+	ScreenSYNFloodAlarmEvents     uint64 `json:"screen_syn_flood_alarm_events,omitempty"`
+	ScreenAlarmWithoutDropEvents  uint64 `json:"screen_alarm_without_drop_events,omitempty"`
+	ScreenMissingProfileWarns     uint64 `json:"screen_missing_profile_warns,omitempty"`
+	ScreenInertProfileWarns       uint64 `json:"screen_inert_profile_warns,omitempty"`
+	ScreenScanSweepSkippedPressure uint64 `json:"screen_scan_sweep_skipped_pressure,omitempty"`
+	ScreenScanSweepEvictedPressure uint64 `json:"screen_scan_sweep_evicted_pressure,omitempty"`
 	// ScreenReasonDrops (#3343): per-screen-reason DROP counters, one element per
 	// dataplane.ScreenReasonCounters ordinal (the userspace-dp wire array). The
 	// manager sums these across bindings and pushes each ordinal's delta into its

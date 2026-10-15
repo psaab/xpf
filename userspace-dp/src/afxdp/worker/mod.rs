@@ -1497,6 +1497,15 @@ pub(crate) struct BindingLiveSnapshot {
     /// `screen::screen_reason_drop_index`), threaded from `BindingLiveState`
     /// to `BindingStatus` so the Go control plane can attribute screen drops.
     pub(crate) screen_reason_drops: [u64; crate::screen::SCREEN_REASON_DROP_COUNT],
+    pub(crate) screen_substituted_default_drops: u64,
+    pub(crate) screen_syn_flood_dst_drops: u64,
+    pub(crate) screen_syn_flood_src_drops: u64,
+    pub(crate) screen_syn_flood_alarm_events: u64,
+    pub(crate) screen_alarm_without_drop_events: u64,
+    pub(crate) screen_missing_profile_warns: u64,
+    pub(crate) screen_inert_profile_warns: u64,
+    pub(crate) screen_scan_sweep_skipped_pressure: u64,
+    pub(crate) screen_scan_sweep_evicted_pressure: u64,
     /// #1374: SYN-cookie challenge decisions selected by userspace screen
     /// runtime.
     pub(crate) syn_cookie_challenges: u64,

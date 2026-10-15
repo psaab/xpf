@@ -58,7 +58,14 @@ type xpfCollector struct {
 	// xpf_screen_drops_total above cannot answer "which screen fired?"; this
 	// labeled series can, now that the userspace bridge populates the per-reason
 	// GlobalCtrScreen* counters.
-	screenDropsByReasonTotal *prometheus.Desc
+	screenDropsByReasonTotal        *prometheus.Desc
+	userspaceScreenSubstitutedDefaultDrops *prometheus.Desc
+	userspaceScreenSYNFloodDstDrops *prometheus.Desc
+	userspaceScreenSYNFloodSrcDrops *prometheus.Desc
+	userspaceScreenSYNFloodAlarmEvents *prometheus.Desc
+	userspaceScreenAlarmWithoutDropEvents *prometheus.Desc
+	userspaceScreenProfileWarns *prometheus.Desc
+	userspaceScreenTrackerPressureEvents *prometheus.Desc
 	// #5806: unresolved screen-profile references (see the descriptor).
 	screenUnresolvedProfileZones *prometheus.Desc
 	screenInertProfileZones      *prometheus.Desc
@@ -991,6 +998,13 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.sessionsClosedTotal
 	ch <- c.screenDropsTotal
 	ch <- c.screenDropsByReasonTotal
+	ch <- c.userspaceScreenSubstitutedDefaultDrops
+	ch <- c.userspaceScreenSYNFloodDstDrops
+	ch <- c.userspaceScreenSYNFloodSrcDrops
+	ch <- c.userspaceScreenSYNFloodAlarmEvents
+	ch <- c.userspaceScreenAlarmWithoutDropEvents
+	ch <- c.userspaceScreenProfileWarns
+	ch <- c.userspaceScreenTrackerPressureEvents
 	ch <- c.screenUnresolvedProfileZones
 	ch <- c.screenInertProfileZones
 	ch <- c.policyDeniesTotal

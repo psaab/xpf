@@ -1774,6 +1774,22 @@ pub(crate) fn worker_loop(
                     &bindings,
                     &sessions,
                 );
+                // #13285: ScreenState is worker-local, not binding-local.
+                // Publish one cumulative sample on this worker's first binding
+                // as a transport slot; Go sums binding samples and emits
+                // process-wide counters. `store` avoids multiplying totals by
+                // the interval between helper status polls.
+                if let Some(b) = bindings.first() {
+                    b.live.screen_substituted_default_drops.store(screen_state.substituted_default_drops(), Ordering::Relaxed);
+                    b.live.screen_syn_flood_dst_drops.store(screen_state.syn_flood_dst_drops(), Ordering::Relaxed);
+                    b.live.screen_syn_flood_src_drops.store(screen_state.syn_flood_src_drops(), Ordering::Relaxed);
+                    b.live.screen_syn_flood_alarm_events.store(screen_state.syn_flood_alarm_events(), Ordering::Relaxed);
+                    b.live.screen_alarm_without_drop_events.store(screen_state.alarm_without_drop_events(), Ordering::Relaxed);
+                    b.live.screen_missing_profile_warns.store(screen_state.missing_profile_warn_count(), Ordering::Relaxed);
+                    b.live.screen_inert_profile_warns.store(screen_state.inert_profile_warn_count(), Ordering::Relaxed);
+                    b.live.screen_scan_sweep_skipped_pressure.store(screen_state.scan_sweep_skipped_pressure(), Ordering::Relaxed);
+                    b.live.screen_scan_sweep_evicted_pressure.store(screen_state.scan_sweep_evicted_pressure(), Ordering::Relaxed);
+                }
                 for b in bindings.iter_mut() {
                     // #802: publish ring-pressure counters into BindingLiveState
                     // BEFORE resetting the worker-local window. The worker-local

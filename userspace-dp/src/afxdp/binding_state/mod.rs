@@ -259,6 +259,17 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// each ordinal into its `GlobalCtrScreen*` global counter so the
     /// per-reason screen-statistics rows stop reading a permanent 0.
     pub(super) screen_reason_drops: [AtomicU64; crate::screen::SCREEN_REASON_DROP_COUNT],
+    // #13285: cumulative worker-local ScreenState counters, stored on the
+    // worker's first binding as a transport slot and summed by the control plane.
+    pub(super) screen_substituted_default_drops: AtomicU64,
+    pub(super) screen_syn_flood_dst_drops: AtomicU64,
+    pub(super) screen_syn_flood_src_drops: AtomicU64,
+    pub(super) screen_syn_flood_alarm_events: AtomicU64,
+    pub(super) screen_alarm_without_drop_events: AtomicU64,
+    pub(super) screen_missing_profile_warns: AtomicU64,
+    pub(super) screen_inert_profile_warns: AtomicU64,
+    pub(super) screen_scan_sweep_skipped_pressure: AtomicU64,
+    pub(super) screen_scan_sweep_evicted_pressure: AtomicU64,
     /// #1374: SYN-cookie challenge decisions selected by the screen runtime.
     pub(super) syn_cookie_challenges: AtomicU64,
     /// #1374: SYN-cookie mode crossed the threshold but no HA-safe master key
@@ -1097,6 +1108,15 @@ impl BindingLiveState {
             screen_drops: AtomicU64::new(0),
             // #3343: one atomic per published screen-reason drop ordinal.
             screen_reason_drops: std::array::from_fn(|_| AtomicU64::new(0)),
+            screen_substituted_default_drops: AtomicU64::new(0),
+            screen_syn_flood_dst_drops: AtomicU64::new(0),
+            screen_syn_flood_src_drops: AtomicU64::new(0),
+            screen_syn_flood_alarm_events: AtomicU64::new(0),
+            screen_alarm_without_drop_events: AtomicU64::new(0),
+            screen_missing_profile_warns: AtomicU64::new(0),
+            screen_inert_profile_warns: AtomicU64::new(0),
+            screen_scan_sweep_skipped_pressure: AtomicU64::new(0),
+            screen_scan_sweep_evicted_pressure: AtomicU64::new(0),
             syn_cookie_challenges: AtomicU64::new(0),
             syn_cookie_secret_unavailable: AtomicU64::new(0),
             syn_cookie_syn_ack_sent: AtomicU64::new(0),
