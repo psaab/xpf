@@ -14435,6 +14435,9 @@ fn attach_zone_counters_ignores_skipped_zone_rows_13183() {
             .zone_counter_slot_map
             .slot_of(crate::policy::ZONE_ID_RESERVED_MIN),
         0
+    );
+}
+
 // #13181 (D6-07): logical units sharing one ifindex in the same zone merge
 // their per-family primary addresses instead of last-write-wins clobbering.
 #[test]
