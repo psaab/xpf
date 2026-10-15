@@ -80,31 +80,13 @@ func (c *ctl) handleShow(args []string) error {
 		return c.showCommand("show chassis")
 
 	case "configuration":
-		format := pb.ConfigFormat_HIERARCHICAL
-		rest := strings.Join(args[1:], " ")
-		if strings.Contains(rest, "| display json") {
-			format = pb.ConfigFormat_JSON
-		} else if strings.Contains(rest, "| display set") {
-			format = pb.ConfigFormat_SET
-		} else if strings.Contains(rest, "| display xml") {
-			format = pb.ConfigFormat_XML
-		} else if strings.Contains(rest, "| display inheritance") {
-			format = pb.ConfigFormat_INHERITANCE
-		} else if idx := strings.Index(rest, "| "); idx >= 0 {
-			pipeParts := strings.Fields(strings.TrimSpace(rest[idx+2:]))
-			if len(pipeParts) >= 2 && pipeParts[0] == "display" {
-				fmt.Printf("syntax error: unknown display option '%s'\n", pipeParts[1])
-			} else if len(pipeParts) > 0 {
-				fmt.Printf("syntax error: unknown pipe command '%s'\n", pipeParts[0])
-			}
-			return nil
+		path, pipe, err := splitShowPipe(args[1:])
+		if err != nil {
+			return err
 		}
-		var path []string
-		for _, a := range args[1:] {
-			if a == "|" {
-				break
-			}
-			path = append(path, a)
+		format, err := parseShowDisplay(pipe, true, true)
+		if err != nil {
+			return err
 		}
 		resp, err := c.client.ShowConfig(c.ctx(), &pb.ShowConfigRequest{
 			Format: format,
@@ -370,61 +352,42 @@ func (c *ctl) showRoutes() error {
 }
 
 func (c *ctl) handleConfigShow(args []string) error {
-	line := strings.Join(args, " ")
-
-	if strings.Contains(line, "| compare") {
-		if idx := strings.Index(line, "| compare rollback"); idx >= 0 {
-			rest := strings.TrimSpace(line[idx+len("| compare rollback"):])
+	path, pipe, err := splitShowPipe(args)
+	if err != nil {
+		return err
+	}
+	if len(pipe) > 0 && pipe[0] == "compare" {
+		if len(path) > 0 {
+			return fmt.Errorf("usage: show | compare [rollback <N>] (cannot combine compare with a configuration path)")
+		}
+		var n int32
+		switch {
+		case len(pipe) == 1:
+		case len(pipe) == 3 && pipe[1] == "rollback":
 			// #5052: parse into the RPC's int32 via the shared selector
 			// parser. strconv.Atoi + int32() wrapped an out-of-range
 			// value (e.g. 4294967297 -> 1) and silently compared the
 			// wrong slot with a success exit.
-			n, err := parseRollbackSelector(rest, "usage: show | compare rollback <N>", 1)
+			n, err = parseRollbackSelector(pipe[2], "usage: show | compare rollback <N>", 1)
 			if err != nil {
 				return err
 			}
-			resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{RollbackN: n})
-			if err != nil {
-				return fmt.Errorf("%v", err)
-			}
-			fmt.Print(resp.Output)
-			return nil
+		default:
+			return fmt.Errorf("usage: show | compare [rollback <N>]")
 		}
-		resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{})
+		resp, err := c.client.ShowCompare(c.ctx(), &pb.ShowCompareRequest{RollbackN: n})
 		if err != nil {
 			return fmt.Errorf("%v", err)
 		}
 		fmt.Print(resp.Output)
 		return nil
 	}
-
-	format := pb.ConfigFormat_HIERARCHICAL
-	if strings.Contains(line, "| display json") {
-		format = pb.ConfigFormat_JSON
-	} else if strings.Contains(line, "| display set") {
-		format = pb.ConfigFormat_SET
-	} else if strings.Contains(line, "| display xml") {
-		format = pb.ConfigFormat_XML
-	} else if strings.Contains(line, "| display inheritance") {
-		format = pb.ConfigFormat_INHERITANCE
-	} else if idx := strings.Index(line, "| "); idx >= 0 {
-		pipeParts := strings.Fields(strings.TrimSpace(line[idx+2:]))
-		if len(pipeParts) >= 2 && pipeParts[0] == "display" {
-			fmt.Printf("syntax error: unknown display option '%s'\n", pipeParts[1])
-		} else if len(pipeParts) > 0 {
-			fmt.Printf("syntax error: unknown pipe command '%s'\n", pipeParts[0])
-		}
-		return nil
+	format, err := parseShowDisplay(pipe, true, true)
+	if err != nil {
+		return err
 	}
-	var path []string
 	if len(c.editPath) > 0 {
-		path = append(path, c.editPath...)
-	}
-	for _, a := range args {
-		if a == "|" {
-			break
-		}
-		path = append(path, a)
+		path = append(append([]string(nil), c.editPath...), path...)
 	}
 	resp, err := c.client.ShowConfig(c.ctx(), &pb.ShowConfigRequest{
 		Format: format,
@@ -436,6 +399,56 @@ func (c *ctl) handleConfigShow(args []string) error {
 	}
 	fmt.Print(resp.Output)
 	return nil
+}
+
+// splitShowPipe separates a show command's path from its single pipe modifier.
+// Unlike substring matching, it never interprets a path/token containing
+// "compare" or "display" as a modifier, and it rejects malformed pipe syntax.
+func splitShowPipe(args []string) (path, pipe []string, err error) {
+	pipeIndex := -1
+	for i, arg := range args {
+		if arg == "|" {
+			if pipeIndex >= 0 {
+				return nil, nil, fmt.Errorf("syntax error: only one pipe modifier is allowed")
+			}
+			pipeIndex = i
+		} else if strings.Contains(arg, "|") {
+			return nil, nil, fmt.Errorf("syntax error: pipe modifier must be separated by spaces")
+		}
+	}
+	if pipeIndex < 0 {
+		return args, nil, nil
+	}
+	if pipeIndex == len(args)-1 {
+		return nil, nil, fmt.Errorf("syntax error: missing pipe modifier")
+	}
+	return args[:pipeIndex], args[pipeIndex+1:], nil
+}
+
+// parseShowDisplay accepts an exact display modifier (or no modifier) and
+// rejects unknown formats and trailing tokens before any RPC is issued.
+func parseShowDisplay(pipe []string, allowJSON, allowInheritance bool) (pb.ConfigFormat, error) {
+	if len(pipe) == 0 {
+		return pb.ConfigFormat_HIERARCHICAL, nil
+	}
+	if len(pipe) != 2 || pipe[0] != "display" {
+		return 0, fmt.Errorf("usage: | display <supported-format>")
+	}
+	switch pipe[1] {
+	case "json":
+		if allowJSON {
+			return pb.ConfigFormat_JSON, nil
+		}
+	case "set":
+		return pb.ConfigFormat_SET, nil
+	case "xml":
+		return pb.ConfigFormat_XML, nil
+	case "inheritance":
+		if allowInheritance {
+			return pb.ConfigFormat_INHERITANCE, nil
+		}
+	}
+	return 0, fmt.Errorf("unknown display format %q", pipe[1])
 }
 
 // clusterSubsystemView maps a `show chassis cluster <sub> [arg ...]` request to
