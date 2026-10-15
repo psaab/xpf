@@ -391,7 +391,23 @@ func (c *xpfCollector) collectVRFOverlapPBRAdmitted(ch chan<- prometheus.Metric)
 	if cfg == nil {
 		return
 	}
+	// #13498: the detector records one admission per overlapping prefix
+	// PAIR, and one logical overlap can arise from more than one claim of
+	// the same prefix — e.g. a prefix carried natively by tenant-a and
+	// ALSO steered into tenant-a by a PBR term, against the same prefix
+	// in tenant-b. Both pairs project onto the same
+	// (instance_a, instance_b, prefix) series. A Prometheus registry
+	// rejects a second sample with identical name+labels, so collapse
+	// admissions to one sample per label set here. The detector keeps
+	// both findings: its warnings name each side's origin, so deduping
+	// there would renumber pinned advisory counts.
+	seen := map[[3]string]bool{}
 	for _, o := range config.TolerantVRFOverlapAdmissions(cfg) {
+		key := [3]string{o.InstanceA, o.InstanceB, o.PrefixA}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		ch <- prometheus.MustNewConstMetric(c.vrfOverlapPBRAdmitted,
 			prometheus.GaugeValue, 1, o.InstanceA, o.InstanceB, o.PrefixA)
 	}
