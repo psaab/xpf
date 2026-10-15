@@ -615,6 +615,19 @@ type xpfCollector struct {
 	// worker that stopped draining rather than at a fast producer.
 	userspaceWorkerCommandQueueDrops       *prometheus.Desc
 	userspaceSharedSessionPoisonRecoveries *prometheus.Desc
+	// #13280: Rust ProcessStatus operational and HA counters.
+	userspaceCosNoOwnerBindingDrops          *prometheus.Desc
+	userspaceIoUringWriteRefused             *prometheus.Desc
+	userspaceIoUringWriteRefusedBytes        *prometheus.Desc
+	userspaceRouteChangeUnrejudgedSessions   *prometheus.Desc
+	userspaceOwnerRGFilingsDeclined          *prometheus.Desc
+	userspaceHATransitionDropped             *prometheus.Desc
+	userspaceHATransitionStaleSkipped        *prometheus.Desc
+	userspaceSessionDeleteRefusedIdentity    *prometheus.Desc
+	userspaceSessionDeleteDroppedReleased    *prometheus.Desc
+	userspaceTunnelPurgeReservationsReleased *prometheus.Desc
+	userspaceSyncedReverseRederived          *prometheus.Desc
+	userspaceS5Reinject                      *prometheus.Desc
 	// #9900: frame-ownership violation counters — kernel-fault and
 	// request-path fault signals, zero on a healthy dataplane.
 	userspaceTxCompletionSkew            *prometheus.Desc
@@ -1254,6 +1267,18 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceInterfaceSNATRegistryCap
 	ch <- c.userspaceWorkerCommandQueuePoisonRecoveries
 	ch <- c.userspaceWorkerCommandQueueDrops
+	ch <- c.userspaceCosNoOwnerBindingDrops
+	ch <- c.userspaceIoUringWriteRefused
+	ch <- c.userspaceIoUringWriteRefusedBytes
+	ch <- c.userspaceRouteChangeUnrejudgedSessions
+	ch <- c.userspaceOwnerRGFilingsDeclined
+	ch <- c.userspaceHATransitionDropped
+	ch <- c.userspaceHATransitionStaleSkipped
+	ch <- c.userspaceSessionDeleteRefusedIdentity
+	ch <- c.userspaceSessionDeleteDroppedReleased
+	ch <- c.userspaceTunnelPurgeReservationsReleased
+	ch <- c.userspaceSyncedReverseRederived
+	ch <- c.userspaceS5Reinject
 	ch <- c.userspaceSharedSessionPoisonRecoveries
 	ch <- c.userspaceTxCompletionSkew
 	ch <- c.userspaceTxCompletionInvalid

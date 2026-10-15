@@ -544,7 +544,7 @@ func TestColdPathDescriptorsAreDescribed(t *testing.T) {
 	// Buffer must hold the FULL Describe() set (Describe sends synchronously
 	// before the drain below); size comfortably above the descriptor count
 	// so adding a descriptor does not silently deadlock this capture.
-	descCh := make(chan *prometheus.Desc, 512)
+	descCh := make(chan *prometheus.Desc, 1024)
 	c.Describe(descCh)
 	close(descCh)
 	declared := map[*prometheus.Desc]struct{}{}
