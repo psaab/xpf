@@ -9,6 +9,10 @@ import (
 func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 	status.DataplaneMode = m.mode.String()
 	status.ConfiguredMode = m.configuredMode.String()
+	// #13294: the retained XDP shim counters live in a manager-owned pinned
+	// map, not the helper status payload. Refresh them on every publication so
+	// status and the existing Prometheus collector see actual degraded drops.
+	status.DegradedPathCounters = m.readDegradedPathStatsLocked()
 	// #9642: stamp retry-debt health beside the mode classification (never
 	// remapping it — parent review round 2: a mode flip would install kernel
 	// blackhole routes that survive recovery). Assigned unconditionally so a
