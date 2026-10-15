@@ -1,7 +1,9 @@
 use super::*;
 
-pub(in crate::afxdp) fn lookup_shared_session(shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-key: &SessionKey,) -> Option<SyncedSessionEntry> {
+pub(in crate::afxdp) fn lookup_shared_session(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+) -> Option<SyncedSessionEntry> {
     // #2402: recover poison so a prior worker panic does not turn every
     // shared-session lookup into a spurious miss.
     lock_shared_recover(shared_sessions).get(key).cloned()
@@ -13,10 +15,12 @@ enum ReverseDomainAdmission {
     QuotedTupleOnly,
 }
 
-pub(in crate::afxdp) fn lookup_shared_forward_nat_match(forwarding: &ForwardingState,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-reply_key: &SessionKey,) -> Option<SyncedSessionEntry> {
+pub(in crate::afxdp) fn lookup_shared_forward_nat_match(
+    forwarding: &ForwardingState,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    reply_key: &SessionKey,
+) -> Option<SyncedSessionEntry> {
     lookup_shared_forward_nat_match_with_admission(
         forwarding,
         shared_nat_sessions,
@@ -137,11 +141,13 @@ fn lookup_shared_forward_nat_match_with_admission(
 /// and its domain-neutral translated tuple has only ever named that owner.
 /// A canonical alias also fails closed on displacement or a different wire
 /// owner for the same tuple. Saturation or any collision fails closed.
-pub(in crate::afxdp) fn shared_forward_nat_candidate_is_unique(shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-reply_key: &SessionKey,
-expected_forward_key: &SessionKey,
-expected_nat: crate::nat::NatDecision,) -> bool {
+pub(in crate::afxdp) fn shared_forward_nat_candidate_is_unique(
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    reply_key: &SessionKey,
+    expected_forward_key: &SessionKey,
+    expected_nat: crate::nat::NatDecision,
+) -> bool {
     if reply_key.routing_domain != 0 {
         return false;
     }
@@ -153,16 +159,21 @@ expected_nat: crate::nat::NatDecision,) -> bool {
     if probe != wire_probe && probe != canonical_probe {
         return false;
     }
-    let map = lock_shared_recover(shared_nat_sessions);
-    let Some(entry) = map.get(&expected_alias) else {
-        return false;
+    let unique_alias = {
+        let map = lock_shared_recover(shared_nat_sessions);
+        let Some(entry) = map.get(&expected_alias) else {
+            return false;
+        };
+        !entry.metadata.is_reverse
+            && entry.key == *expected_forward_key
+            && entry.decision.nat == expected_nat
     };
-    if entry.metadata.is_reverse
-        || entry.key != *expected_forward_key
-        || entry.decision.nat != expected_nat
-    {
+    if !unique_alias {
         return false;
     }
+    // Keep map and ambiguity locks unnested: publishers hold the ambiguity
+    // lock while they publish aliases so readers cannot observe an alias
+    // before its owner has been recorded.
     let ambiguities = lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities);
     ambiguities.is_unique_for(&wire_probe, expected_forward_key)
         && (probe == wire_probe
@@ -172,8 +183,10 @@ expected_nat: crate::nat::NatDecision,) -> bool {
                     .map_or(true, |owner| owner == expected_forward_key)))
 }
 
-pub(in crate::afxdp) fn lookup_shared_forward_wire_match(shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-wire_key: &SessionKey,) -> Option<SyncedSessionEntry> {
+pub(in crate::afxdp) fn lookup_shared_forward_wire_match(
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    wire_key: &SessionKey,
+) -> Option<SyncedSessionEntry> {
     // #2402: recover poison (see lookup_shared_session).
     lock_shared_recover(shared_forward_wire_sessions)
         .get(wire_key)
@@ -185,14 +198,16 @@ wire_key: &SessionKey,) -> Option<SyncedSessionEntry> {
 /// The index stores one candidate per wire key, so a wire-tuple collision must
 /// not borrow another flow's original source selectors.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::afxdp) fn shared_source_nat_original_key(shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-wire_key: &SessionKey,
-alias_key: &SessionKey,
-decision: SessionDecision,
-metadata: &SessionMetadata,
-origin: SessionOrigin,
-source_nat_static: Option<bool>,
-session_id: u64,) -> Option<SessionKey> {
+pub(in crate::afxdp) fn shared_source_nat_original_key(
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    wire_key: &SessionKey,
+    alias_key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    origin: SessionOrigin,
+    source_nat_static: Option<bool>,
+    session_id: u64,
+) -> Option<SessionKey> {
     if !origin.is_peer_synced()
         || metadata.is_reverse
         || (wire_key != alias_key && forward_wire_key(alias_key, decision.nat) != *wire_key)
@@ -265,7 +280,11 @@ impl ResolvedSessionLookup {
         }
     }
 
-    pub(in crate::afxdp) fn local(key: SessionKey, lookup: SessionLookup, origin: SessionOrigin) -> Self {
+    pub(in crate::afxdp) fn local(
+        key: SessionKey,
+        lookup: SessionLookup,
+        origin: SessionOrigin,
+    ) -> Self {
         Self {
             key: ResolvedSessionKey::Canonical(key),
             lookup,
@@ -392,9 +411,11 @@ pub(in crate::afxdp) struct DeferredSyncedPromotion {
 // Fabric-ingress SNAT-only forward entries are standby-side wire placeholders
 // in the split-RG topology: they should not win lookups over the real shared
 // session and should not synthesize a competing local reverse session.
-pub(in crate::afxdp) fn is_fabric_wire_placeholder(fabric_ingress: bool,
-is_reverse: bool,
-decision: SessionDecision,) -> bool {
+pub(in crate::afxdp) fn is_fabric_wire_placeholder(
+    fabric_ingress: bool,
+    is_reverse: bool,
+    decision: SessionDecision,
+) -> bool {
     fabric_ingress
         && !is_reverse
         && decision.nat.rewrite_src.is_some()
@@ -493,12 +514,14 @@ fn shared_closing_tcp_entry_for_syn(
 /// miss gate handles a miss; a live local or shared hit is dropped here so it
 /// cannot refresh, complete a handshake, or proceed as a miss and replace the
 /// established state.
-pub(in crate::afxdp) fn should_drop_tcp_session_hit_for_flags(sessions: &SessionTable,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-key: &SessionKey,
-now_ns: u64,
-tcp_flags: u8,) -> bool {
+pub(in crate::afxdp) fn should_drop_tcp_session_hit_for_flags(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+) -> bool {
     if !matches!(key.protocol, PROTO_TCP)
         || crate::tcp_flags::has_syn(tcp_flags)
         || crate::tcp_flags::has_ack(tcp_flags)
@@ -522,12 +545,14 @@ pub(in crate::afxdp) struct ClosingSynCandidate {
     pub(in crate::afxdp) origin: SessionOrigin,
 }
 
-pub(in crate::afxdp) fn probe_closing_syn_candidate(sessions: &SessionTable,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-key: &SessionKey,
-now_ns: u64,
-tcp_flags: u8,) -> Option<ClosingSynCandidate> {
+pub(in crate::afxdp) fn probe_closing_syn_candidate(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+) -> Option<ClosingSynCandidate> {
     if !matches!(key.protocol, crate::ip_proto::PROTO_TCP)
         || !crate::tcp_flags::is_initial_syn(tcp_flags)
         || crate::tcp_flags::is_closing(tcp_flags)
@@ -559,13 +584,15 @@ tcp_flags: u8,) -> Option<ClosingSynCandidate> {
 /// applicable capacity/tuple admission gates accept its SYN. A foreign SYN
 /// never calls this; ordinary lookups remain read/refresh-only and cannot
 /// evict either local or shared copies.
-pub(in crate::afxdp) fn evict_owner_closing_tcp_pair_for_syn(sessions: &mut SessionTable,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-key: &SessionKey,
-tcp_flags: u8,) -> bool {
+pub(in crate::afxdp) fn evict_owner_closing_tcp_pair_for_syn(
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
+    tcp_flags: u8,
+) -> bool {
     let pair = sessions
         .evict_closing_tcp_pair_for_syn(key, tcp_flags)
         .or_else(|| {
@@ -590,14 +617,16 @@ tcp_flags: u8,) -> bool {
     true
 }
 
-pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared(sessions: &mut SessionTable,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-_shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-_shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-key: &SessionKey,
-now_ns: u64,
-tcp_flags: u8,) -> Option<ResolvedSessionLookup> {
+pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared(
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    _shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    _shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+) -> Option<ResolvedSessionLookup> {
     if !crate::session::PMechSessionDirectory::global()
         .probe_packet_key(key)
         .is_fallthrough()
@@ -657,12 +686,14 @@ tcp_flags: u8,) -> Option<ResolvedSessionLookup> {
 }
 
 #[cfg(test)]
-pub(in crate::afxdp) fn lookup_session_across_scopes_for_test(sessions: &mut SessionTable,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-key: &SessionKey,
-now_ns: u64,
-tcp_flags: u8,) -> Option<ResolvedSessionLookup> {
+pub(in crate::afxdp) fn lookup_session_across_scopes_for_test(
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+) -> Option<ResolvedSessionLookup> {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     lookup_session_across_scopes_with_shared(
@@ -686,11 +717,13 @@ tcp_flags: u8,) -> Option<ResolvedSessionLookup> {
 /// probes still honor the session's strict idle deadline; shared HA entries
 /// retain their existing map-owned lifetime and are intentionally not aged by
 /// this worker-local check.
-pub(in crate::afxdp) fn probe_session_across_scopes(sessions: &SessionTable,
-shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-key: &SessionKey,
-now_ns: u64,) -> Option<ResolvedSessionLookup> {
+pub(in crate::afxdp) fn probe_session_across_scopes(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    now_ns: u64,
+) -> Option<ResolvedSessionLookup> {
     match probe_local_exact_at(sessions, key, now_ns) {
         LocalExpiryProbe::Live((lookup, origin)) => {
             if is_fabric_wire_placeholder(
@@ -791,12 +824,14 @@ fn revalidate_reverse_ingress(
     }
 }
 
-pub(in crate::afxdp) fn lookup_forward_nat_across_scopes(sessions: &SessionTable,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-forwarding: &ForwardingState,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-reply_key: &SessionKey,
-ingress: ReverseIngress,) -> Option<ForwardSessionMatch> {
+pub(in crate::afxdp) fn lookup_forward_nat_across_scopes(
+    sessions: &SessionTable,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forwarding: &ForwardingState,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    reply_key: &SessionKey,
+    ingress: ReverseIngress,
+) -> Option<ForwardSessionMatch> {
     let m = lookup_forward_nat_across_scopes_inner(
         sessions,
         shared_nat_sessions,
@@ -809,13 +844,15 @@ ingress: ReverseIngress,) -> Option<ForwardSessionMatch> {
     revalidate_reverse_ingress(m, ingress)
 }
 
-pub(in crate::afxdp) fn lookup_forward_nat_across_scopes_at(sessions: &SessionTable,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-forwarding: &ForwardingState,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-reply_key: &SessionKey,
-ingress: ReverseIngress,
-now_ns: u64,) -> Option<ForwardSessionMatch> {
+pub(in crate::afxdp) fn lookup_forward_nat_across_scopes_at(
+    sessions: &SessionTable,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forwarding: &ForwardingState,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    reply_key: &SessionKey,
+    ingress: ReverseIngress,
+    now_ns: u64,
+) -> Option<ForwardSessionMatch> {
     let m = lookup_forward_nat_across_scopes_inner(
         sessions,
         shared_nat_sessions,
@@ -833,12 +870,14 @@ now_ns: u64,) -> Option<ForwardSessionMatch> {
 /// this path validates tuple identity (and the quarantine fence) without
 /// applying reverse-session admission. Local and shared candidates fail closed
 /// when multiple routing domains own the same translated tuple.
-pub(in crate::afxdp) fn lookup_forward_nat_for_icmp_quote_at(sessions: &SessionTable,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: Option<&SharedSessionOwnerRgIndexes>,
-forwarding: &ForwardingState,
-reply_key: &SessionKey,
-now_ns: u64,) -> Option<ForwardSessionMatch> {
+pub(in crate::afxdp) fn lookup_forward_nat_for_icmp_quote_at(
+    sessions: &SessionTable,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: Option<&SharedSessionOwnerRgIndexes>,
+    forwarding: &ForwardingState,
+    reply_key: &SessionKey,
+    now_ns: u64,
+) -> Option<ForwardSessionMatch> {
     if !crate::session::PMechSessionDirectory::global()
         .probe_packet_key(reply_key)
         .is_fallthrough()
@@ -943,11 +982,7 @@ fn lookup_forward_nat_across_scopes_inner(
         ReverseDomainAdmission::QuotedTupleOnly => reply_key.routing_domain,
     };
     let local_match = match now_ns {
-        Some(now) => match sessions.find_forward_nat_match_expiry(
-            reply_key,
-            now,
-            &egress_domain,
-        ) {
+        Some(now) => match sessions.find_forward_nat_match_expiry(reply_key, now, &egress_domain) {
             crate::session::ForwardNatExpiryProbe::Live(hit) => Some(hit),
             crate::session::ForwardNatExpiryProbe::IdleCrossed => {
                 // Do not resurrect an expired local entry from its shared clone.
@@ -1003,4 +1038,3 @@ fn lookup_forward_nat_across_scopes_inner(
         },
     })
 }
-

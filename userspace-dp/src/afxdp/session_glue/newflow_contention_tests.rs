@@ -61,8 +61,8 @@ fn key(src_port: u16) -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -202,6 +202,78 @@ fn replication_counters() -> ReplicationCounters {
         depth_sum: SESSION_REPLICATION_QUEUE_DEPTH_SUM.load(Ordering::Relaxed),
         depth_max: SESSION_REPLICATION_QUEUE_DEPTH_MAX.load(Ordering::Relaxed),
     }
+}
+
+fn nat_entry(routing_domain: u32, translated_src: Ipv4Addr) -> SyncedSessionEntry {
+    let mut e = entry(41001);
+    e.key.routing_domain = routing_domain;
+    e.decision.nat.rewrite_src = Some(IpAddr::V4(translated_src));
+    e
+}
+
+/// #13080 D5-08 residual: a forward NAT publish that displaces a different
+/// owner on its domain-neutral canonical alias must update ambiguity state
+/// under ONE acquisition of the nat_ambiguities lock. The pre-fix code
+/// acquired it once for observe and again for the displacement mark.
+///
+/// Behaviour pinned alongside the count: the displaced domain-neutral alias
+/// refuses both tenants, and the shared NAT map names the last publisher.
+#[test]
+fn publish_shared_session_fuses_nat_ambiguity_updates_under_one_lock() {
+    let _g = counter_reader_guard();
+    let maps = SharedMaps::new();
+    let translated = Ipv4Addr::new(203, 0, 113, 7);
+
+    // Seed the domain-stamped alias under the first owner.
+    maps.publish(&nat_entry(1, translated));
+    crate::afxdp::shared_ops::reset_nat_ambiguity_lock_stats();
+    // A different routing domain shares the domain-neutral canonical alias.
+    maps.publish(&nat_entry(2, translated));
+
+    let stats = crate::afxdp::shared_ops::nat_ambiguity_lock_stats();
+    assert_eq!(
+        stats.acquisitions, 1,
+        "one displacement publish must acquire nat_ambiguities exactly once; \
+         saw {} acquisitions",
+        stats.acquisitions
+    );
+
+    let second = nat_entry(2, translated);
+    let wire = crate::session::reverse_session_key(&second.key, second.decision.nat);
+    let canonical = crate::session::reverse_canonical_key(&second.key, second.decision.nat);
+    {
+        let nat = maps.nat_sessions.lock().expect("nat map");
+        assert_eq!(
+            nat.get(&wire).map(|stored| stored.key.routing_domain),
+            Some(2),
+            "wire alias must name the surviving publisher"
+        );
+        assert_eq!(
+            nat.get(&canonical).map(|stored| stored.key.routing_domain),
+            Some(2),
+            "canonical alias must name the surviving publisher"
+        );
+    }
+    let ambiguities = maps
+        .indexes
+        .nat_ambiguities
+        .lock()
+        .expect("ambiguity index");
+    let probe = crate::session::reverse_match_key(&canonical);
+    assert!(
+        ambiguities.contains(&probe),
+        "displaced canonical alias must be ambiguous (fail-closed)"
+    );
+    let first_owner = nat_entry(1, translated).key;
+    let second_owner = nat_entry(2, translated).key;
+    assert!(
+        !ambiguities.is_unique_for(&probe, &first_owner),
+        "displaced owner must not remain the unique owner"
+    );
+    assert!(
+        !ambiguities.is_unique_for(&probe, &second_owner),
+        "survivor of a displaced alias must not claim uniqueness either"
+    );
 }
 
 /// The publish leg reports a call count and a lock-acquisition count. The
@@ -438,7 +510,9 @@ fn replicate_session_upsert_counts_a_blocked_enqueue() {
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
     drop(guard);
-    replicator.join().expect("replicating thread must not panic");
+    replicator
+        .join()
+        .expect("replicating thread must not panic");
 
     let after = replication_counters();
     assert!(
@@ -807,7 +881,9 @@ fn replication_contention_denominator_counts_only_attempted_acquisitions() {
     );
 
     drop(held);
-    replicator.join().expect("replicating thread must not panic");
+    replicator
+        .join()
+        .expect("replicating thread must not panic");
 
     // At rest the total is unchanged by this reordering. All three queues in
     // this fixture are live, so each attempt is counted and the ratio remains

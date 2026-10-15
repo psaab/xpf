@@ -9,6 +9,43 @@ use super::*;
 /// with `SHARED_SESSION_PUBLISH_LOCK_CONTENDED` it says whether the publish
 /// mutexes are where new flows queue up.
 pub(crate) static SHARED_SESSION_PUBLISHES: AtomicU64 = AtomicU64::new(0);
+// Isolate the probe from other tests' `CounterExempt` publishers.
+#[cfg(test)]
+std::thread_local! {
+    static NAT_AMBIGUITY_LOCK_ACQUISITIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) struct NatAmbiguityLockStats {
+    pub(crate) acquisitions: u64,
+}
+
+#[cfg(test)]
+pub(crate) fn reset_nat_ambiguity_lock_stats() {
+    NAT_AMBIGUITY_LOCK_ACQUISITIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn nat_ambiguity_lock_stats() -> NatAmbiguityLockStats {
+    NatAmbiguityLockStats {
+        acquisitions: NAT_AMBIGUITY_LOCK_ACQUISITIONS.with(std::cell::Cell::get),
+    }
+}
+
+#[cfg(test)]
+fn lock_nat_ambiguities_for_publish(
+    indexes: &SharedSessionOwnerRgIndexes,
+) -> MutexGuard<'_, SharedNatAmbiguityIndex> {
+    NAT_AMBIGUITY_LOCK_ACQUISITIONS.with(|count| count.set(count.get() + 1));
+    lock_shared_recover(&indexes.nat_ambiguities)
+}
+
+#[cfg(not(test))]
+fn lock_nat_ambiguities_for_publish(
+    indexes: &SharedSessionOwnerRgIndexes,
+) -> MutexGuard<'_, SharedNatAmbiguityIndex> {
+    lock_shared_recover(&indexes.nat_ambiguities)
+}
 
 /// #8486: the largest `owner_rg_id` this helper will FILE into the owner-RG
 /// indexes.
@@ -270,13 +307,15 @@ pub(crate) fn try_claim_nat_reverse_key_warn(now_ns: u64) -> bool {
         .is_ok()
 }
 
-pub(in crate::afxdp) fn demote_shared_owner_rgs(shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-forwarding: &ForwardingState,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-owner_rgs: &[i32],) {
+pub(in crate::afxdp) fn demote_shared_owner_rgs(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    owner_rgs: &[i32],
+) {
     if owner_rgs.is_empty() {
         return;
     }
@@ -350,8 +389,10 @@ pub(in crate::afxdp) fn synced_replica_entry(entry: &SyncedSessionEntry) -> Sync
 /// slowed how quickly a newly-primary node fully forwarded. The result set
 /// (and its order) is identical to the old dedup — only the membership data
 /// structure changed.
-pub(in crate::afxdp) fn merge_owner_rg_candidate_keys(mut forward: Vec<SessionKey>,
-reverse: Vec<SessionKey>,) -> Vec<SessionKey> {
+pub(in crate::afxdp) fn merge_owner_rg_candidate_keys(
+    mut forward: Vec<SessionKey>,
+    reverse: Vec<SessionKey>,
+) -> Vec<SessionKey> {
     // Seed the membership set with the forward keys (O(M)), then probe each
     // reverse key in O(1). `insert` returns true only for a not-yet-seen
     // key, which is exactly the old `!forward.contains(&key)` predicate and
@@ -394,17 +435,19 @@ reverse: Vec<SessionKey>,) -> Vec<SessionKey> {
 /// different. Both cases need their forward entries restored to worker
 /// SessionTables and, when applicable, their reverse companions synthesized
 /// again on activation.
-pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-session_map: SteeringMap<'_>,
-forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-owner_rgs: &[i32],
-now_secs: u64,) {
+pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    owner_rgs: &[i32],
+    now_secs: u64,
+) {
     if owner_rgs.is_empty() {
         return;
     }
@@ -574,15 +617,17 @@ now_secs: u64,) {
 /// originated sessions that were demoted then re-synced may not appear
 /// there. This function uses the comprehensive `sessions` owner-RG index
 /// to ensure no session is missed.
-pub(in crate::afxdp) fn republish_bpf_session_entries_for_owner_rgs(shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-session_map: SteeringMap<'_>,
-owner_rgs: &[i32],
-// #9517: this republishes peer-synced sessions on RG activation, which is
-// exactly where PASS_TO_KERNEL rows come from.
-// #10612 (N1): takes forwarding (not just the domains bool) to fence
-// stale-zone rows: a shared-transient stale row must not be BPF-resurrected.
-forwarding: &ForwardingState,) -> u32 {
+pub(in crate::afxdp) fn republish_bpf_session_entries_for_owner_rgs(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    session_map: SteeringMap<'_>,
+    owner_rgs: &[i32],
+    // #9517: this republishes peer-synced sessions on RG activation, which is
+    // exactly where PASS_TO_KERNEL rows come from.
+    // #10612 (N1): takes forwarding (not just the domains bool) to fence
+    // stale-zone rows: a shared-transient stale row must not be BPF-resurrected.
+    forwarding: &ForwardingState,
+) -> u32 {
     if owner_rgs.is_empty() {
         return 0;
     }
@@ -641,11 +686,13 @@ forwarding: &ForwardingState,) -> u32 {
     published
 }
 
-pub(in crate::afxdp) fn publish_shared_session(shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-entry: &SyncedSessionEntry,) {
+pub(in crate::afxdp) fn publish_shared_session(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    entry: &SyncedSessionEntry,
+) {
     // #4800: in test builds only, hold the shared side of the counter lock for
     // the whole publish, so a reading test excludes this mover without the
     // caller having to opt in — no caller can be forgotten the way a
@@ -676,23 +723,23 @@ entry: &SyncedSessionEntry,) {
         );
     }
     if !entry.metadata.is_reverse {
-        // Keep translated aliases domain-stamped. The ambiguity index, not a
-        // colliding domain-zero map key, carries the neutral lookup identity.
+        // Record the lookup identity before publishing aliases, then keep this
+        // lock across the NAT-map writes so readers cannot see an unindexed
+        // alias. Read-side checks drop the map lock before acquiring this one,
+        // avoiding an inverse nested lock order.
         let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
-        lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities).observe(
+        let reverse_canonical = reverse_canonical_key(&entry.key, entry.decision.nat);
+        let mut ambiguities = lock_nat_ambiguities_for_publish(shared_owner_rg_indexes);
+        ambiguities.observe(
             crate::session::reverse_match_key(&reverse_wire),
             entry.key.clone(),
         );
         let mut sessions = lock_shared_publish(shared_nat_sessions);
         let displaced = sessions.insert(reverse_wire.clone(), entry.clone());
         record_shared_nat_displacement(displaced.as_ref(), entry);
-        if displaced
+        let wire_displaced = displaced
             .as_ref()
-            .is_some_and(|existing| existing.key != entry.key)
-        {
-            lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
-                .mark(reverse_wire.clone());
-        }
+            .is_some_and(|existing| existing.key != entry.key);
         let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
         update_owner_rg_index(
             &shared_owner_rg_indexes.nat_sessions,
@@ -700,17 +747,12 @@ entry: &SyncedSessionEntry,) {
             previous_owner_rg,
             entry.metadata.owner_rg_id,
         );
-        let reverse_canonical = reverse_canonical_key(&entry.key, entry.decision.nat);
-        if reverse_canonical != reverse_wire {
+        let canonical_displaced = if reverse_canonical != reverse_wire {
             let displaced = sessions.insert(reverse_canonical.clone(), entry.clone());
             record_shared_nat_displacement(displaced.as_ref(), entry);
-            if displaced
+            let ambiguous = displaced
                 .as_ref()
-                .is_some_and(|existing| existing.key != entry.key)
-            {
-                lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
-                    .mark(reverse_canonical.clone());
-            }
+                .is_some_and(|existing| existing.key != entry.key);
             let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
             update_owner_rg_index(
                 &shared_owner_rg_indexes.nat_sessions,
@@ -718,6 +760,16 @@ entry: &SyncedSessionEntry,) {
                 previous_owner_rg,
                 entry.metadata.owner_rg_id,
             );
+            ambiguous
+        } else {
+            false
+        };
+        drop(sessions);
+        if wire_displaced {
+            ambiguities.mark(crate::session::reverse_match_key(&reverse_wire));
+        }
+        if canonical_displaced {
+            ambiguities.mark(reverse_canonical);
         }
     }
     if !entry.metadata.is_reverse {
@@ -739,10 +791,12 @@ entry: &SyncedSessionEntry,) {
 
 /// Update policy identity in every shared alias without replacing the entry.
 /// A policy rename must not reset HA generation, counters, or liveness.
-pub(in crate::afxdp) fn restamp_shared_policy_entries(shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-entries: &[crate::session::PolicyRebindEntry],) {
+pub(in crate::afxdp) fn restamp_shared_policy_entries(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    entries: &[crate::session::PolicyRebindEntry],
+) {
     fn apply(stored: &mut SyncedSessionEntry, entry: &crate::session::PolicyRebindEntry) {
         stored.metadata.policy_id = entry.metadata.policy_id;
         stored.metadata.policy_counter_idx = entry.metadata.policy_counter_idx;
@@ -839,11 +893,13 @@ pub(in crate::afxdp) enum SharedRemoval {
     Absent,
 }
 
-pub(in crate::afxdp) fn remove_shared_session(shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-key: &SessionKey,) {
+pub(in crate::afxdp) fn remove_shared_session(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
+) {
     let _ = remove_shared_session_if(
         shared_sessions,
         shared_nat_sessions,
@@ -869,12 +925,14 @@ key: &SessionKey,) {
 /// local-origin publishes, and local entries are exactly the population this guard
 /// protects. So the goal is reached by the route that exists rather than the one
 /// prescribed.
-pub(in crate::afxdp) fn remove_shared_session_if(shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
-key: &SessionKey,
-accept: impl FnOnce(&SyncedSessionEntry) -> bool,) -> SharedRemoval {
+pub(in crate::afxdp) fn remove_shared_session_if(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
+    accept: impl FnOnce(&SyncedSessionEntry) -> bool,
+) -> SharedRemoval {
     // #7209: un-file this key from the reverse-prewarm index HERE, so that
     // EVERY removal path is covered rather than only the coordinator's delete
     // verb. `purge_translated_synced_hit` (session_glue/promote.rs) and the
@@ -984,8 +1042,10 @@ accept: impl FnOnce(&SyncedSessionEntry) -> bool,) -> SharedRemoval {
     }
 }
 
-pub(in crate::afxdp) fn owner_rg_session_keys(index: &Arc<Mutex<OwnerRgSessionIndex>>,
-owner_rgs: &[i32],) -> Vec<SessionKey> {
+pub(in crate::afxdp) fn owner_rg_session_keys(
+    index: &Arc<Mutex<OwnerRgSessionIndex>>,
+    owner_rgs: &[i32],
+) -> Vec<SessionKey> {
     let mut keys = FastSet::default();
     {
         // #2402: recover poison so the owner-RG index is not silently
@@ -1000,9 +1060,11 @@ owner_rgs: &[i32],) -> Vec<SessionKey> {
     keys.into_iter().collect()
 }
 
-pub(in crate::afxdp) fn owner_rg_session_keys_serialized(sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-index: &Arc<Mutex<OwnerRgSessionIndex>>,
-owner_rgs: &[i32],) -> Vec<SessionKey> {
+pub(in crate::afxdp) fn owner_rg_session_keys_serialized(
+    sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    index: &Arc<Mutex<OwnerRgSessionIndex>>,
+    owner_rgs: &[i32],
+) -> Vec<SessionKey> {
     // #2402: hold the shared-session lock (recovering poison) to serialize
     // against concurrent insert/remove while the index is read.
     let _sessions = lock_shared_recover(sessions);
@@ -1054,11 +1116,13 @@ owner_rgs: &[i32],) -> Vec<SessionKey> {
 /// Splitting the two — add-only here, authoritative un-file at removal — is
 /// what gets both, and it is why the un-file no longer needs `forwarding` at
 /// all and could therefore move to the one place every removal goes through.
-pub(in crate::afxdp) fn refresh_reverse_prewarm_owner_rg_indexes(index: &Arc<Mutex<OwnerRgSessionIndex>>,
-forwarding: &ForwardingState,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-previous_entry: Option<&SyncedSessionEntry>,
-next_entry: Option<&SyncedSessionEntry>,) {
+pub(in crate::afxdp) fn refresh_reverse_prewarm_owner_rg_indexes(
+    index: &Arc<Mutex<OwnerRgSessionIndex>>,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    previous_entry: Option<&SyncedSessionEntry>,
+    next_entry: Option<&SyncedSessionEntry>,
+) {
     let Some(next_entry) = next_entry else {
         // A removal. Un-file authoritatively — the entry is gone, so no bucket
         // it holds can still be wanted, and no FIB lookup is needed to know
@@ -1121,9 +1185,11 @@ fn remove_owner_rg_index_key_from_every_bucket_locked(
 /// #7209: test-only view of the candidate set, so a cell can assert which
 /// arrangement its fixture is actually in rather than assuming it.
 #[cfg(test)]
-pub(in crate::afxdp) fn reverse_prewarm_owner_rg_candidates_for_test(forwarding: &ForwardingState,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-entry: &SyncedSessionEntry,) -> FastSet<i32> {
+pub(in crate::afxdp) fn reverse_prewarm_owner_rg_candidates_for_test(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    entry: &SyncedSessionEntry,
+) -> FastSet<i32> {
     reverse_prewarm_owner_rg_candidates(forwarding, dynamic_neighbors, entry)
 }
 
