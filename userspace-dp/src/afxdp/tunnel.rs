@@ -630,6 +630,11 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     }
     let (table, table_identity) =
         tun_origin_reverse_route_table(forwarding, decision.resolution.egress_ifindex);
+    let ipv6_table = forwarding
+        .ifindex_to_routing_instance
+        .get(&decision.resolution.egress_ifindex)
+        .map(|instance| crate::afxdp::forwarding_build::connected_route_tables(instance).1)
+        .unwrap_or_else(|| "inet6.0".to_string());
     let firewall_self_originated = match flow.forward_key.src_ip {
         IpAddr::V4(ip) => {
             forwarding.configured_iface_v4.contains(&ip)
@@ -647,11 +652,11 @@ pub(super) fn build_local_origin_tunnel_tx_request(
                 && (forwarding
                     .local_tables_v6
                     .get(&ip)
-                    .is_some_and(|tables| tables.contains(&table))
+                    .is_some_and(|tables| tables.contains(&ipv6_table))
                     || forwarding
                         .interface_nat_tables_v6
                         .get(&ip)
-                        .is_some_and(|tables| tables.contains(&table)))
+                        .is_some_and(|tables| tables.contains(&ipv6_table)))
         }
     };
     if !firewall_self_originated {

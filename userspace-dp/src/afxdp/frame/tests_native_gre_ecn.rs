@@ -290,6 +290,64 @@ fn local_origin_tunnel_tx_request_encapsulates_raw_ip_for_active_owner() {
         PROTO_ICMP
     );
 }
+
+#[test]
+fn local_origin_tunnel_tx_request_accepts_owned_ipv6_in_tunnel_instance() {
+    let mut snapshot = native_gre_snapshot(true);
+    let gre = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.name == "gr-0/0/0.0")
+        .expect("GRE interface");
+    gre.addresses.push(crate::InterfaceAddressSnapshot {
+        family: "inet6".to_string(),
+        address: "2001:db8:255:192::42/64".to_string(),
+        scope: 0,
+    });
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "sfmix.inet6.0".to_string(),
+        family: "inet6".to_string(),
+        destination: "::/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["2001:db8:255:192::41".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let state = build_forwarding_state(&snapshot);
+    let src = "2001:db8:255:192::42".parse::<Ipv6Addr>().unwrap();
+    assert!(
+        state.local_tables_v6.get(&src).is_some_and(|tables| {
+            tables.contains("sfmix.inet6.0")
+        }),
+        "precondition: GRE interface IPv6 is owned in sfmix.inet6.0"
+    );
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let packet = build_icmpv6_echo_frame(
+        src,
+        "2001:db8:255:192::41".parse().unwrap(),
+        64,
+        128,
+        0x3179,
+    );
+    let ike_exchanges = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let plan = build_local_origin_tunnel_tx_request(
+        &packet[14..],
+        1,
+        &state,
+        &ha_state,
+        &dynamic_neighbors,
+        &ike_exchanges,
+    )
+    .expect("owned IPv6 source in tunnel instance must transmit");
+    assert!(
+        plan.session_entry.is_some(),
+        "owned IPv6 source must receive a TunOrigin session"
+    );
+}
 /// #13179: nonlocal TUN input has no policy/screen decision at this path and
 /// therefore must be rejected rather than transported as unadjudicated GRE.
 #[test]
