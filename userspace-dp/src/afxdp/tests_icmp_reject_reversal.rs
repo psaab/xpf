@@ -2017,3 +2017,74 @@ fn icmp_embed_v6_snat_outbound_non_echo_addr_delta_13650() {
     assert_eq!(u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]), exp,
         "#13650: outbound non-Echo must get dst address-delta repair");
 }
+
+/// #13650: address-delta quoted-checksum repair must NOT be gated on a
+/// port rewrite. (a) Reverse DNAT-only: rewrite_src=None,
+/// rewrite_dst=Some(translated dst) -- emb dst is rewritten to
+/// original_dst, emb src restored to original_src; both deltas repair
+/// the quoted checksum even with no rewrite_src/port. (b) Outbound
+/// SNAT without port rewrite: rewrite_src=Some, rewrite_src_port=None
+/// -- emb dst still rewritten to snat, dst delta repairs checksum.
+#[test]
+fn icmp_embed_v6_addr_delta_without_port_rewrite_13650() {
+    let router6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let snat6: Ipv6Addr = "2001:db8:1::100".parse().unwrap();
+    let client6: Ipv6Addr = "fd00::102".parse().unwrap();
+    let server6: Ipv6Addr = "2001:db8:2::1".parse().unwrap();
+    let public6: Ipv6Addr = "2001:db8:9::9".parse().unwrap();
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    let emb_l4 = 14 + 40 + 8 + 40;
+    // (a) DNAT-only reverse, quoted Echo (bearing, id must NOT change
+    // because original_src_port == quoted id here: set quoted id =
+    // client_port=original so only address deltas apply).
+    let mut f = build_icmpv6_te_frame(router6, snat6, server6, snat_port, 80, PROTO_ICMPV6);
+    f[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&client_port.to_be_bytes());
+    let mut hdr = vec![0u8; 8];
+    hdr[0] = 128;
+    hdr[4..6].copy_from_slice(&client_port.to_be_bytes());
+    hdr[6..8].copy_from_slice(&1u16.to_be_bytes());
+    // quoted packet on wire: src=snat6 (session addr), dst=server6 is
+    // translated dst in this synthetic match (rewrite_dst=server6)
+    let c0 = checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &hdr);
+    f[emb_l4 + 2..emb_l4 + 4].copy_from_slice(&c0.to_be_bytes());
+    let mut m = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
+    m.embedded_proto = PROTO_ICMPV6;
+    m.nat.rewrite_src = None;
+    m.nat.rewrite_src_port = None;
+    m.nat.rewrite_dst = Some(IpAddr::V6(server6));
+    m.original_dst = IpAddr::V6(public6);
+    let out = build_nat_reversed_icmp_error_v6(&f, icmpv6_te_meta(54), &m).expect("dnat-only builds");
+    // emb dst now public6, emb src client6
+    let mut wo = crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()).to_vec();
+    wo.extend(crate::afxdp::frame::ipv6_words_from_octets(server6.octets()));
+    let mut wn = crate::afxdp::frame::ipv6_words_from_octets(client6.octets()).to_vec();
+    wn.extend(crate::afxdp::frame::ipv6_words_from_octets(public6.octets()));
+    let mut exp = checksum16_adjust(c0, &wo, &wn);
+    if exp == 0 { exp = 0xffff; }
+    assert_eq!(u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]), exp,
+        "#13650: DNAT-only (no src/port rewrite) must still repair quoted checksum for address deltas");
+    assert_eq!(&out[emb_l4 + 4..emb_l4 + 6], &client_port.to_be_bytes());
+
+    // (b) Outbound, rewrite_src_port=None
+    let mut f2 = build_icmpv6_te_frame(router6, snat6, server6, snat_port, 80, PROTO_ICMPV6);
+    let mut hdr2 = vec![0u8; 8];
+    hdr2[0] = 1;
+    hdr2[4..6].copy_from_slice(&0x1234u16.to_be_bytes());
+    let c1 = checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &hdr2);
+    f2[emb_l4] = 1;
+    f2[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&0x1234u16.to_be_bytes());
+    f2[emb_l4 + 2..emb_l4 + 4].copy_from_slice(&c1.to_be_bytes());
+    let mut m2 = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
+    m2.embedded_proto = PROTO_ICMPV6;
+    m2.original_dst = IpAddr::V6(server6);
+    m2.nat.rewrite_src_port = None;
+    let out2 = build_snat_outbound_icmp_error_v6(&f2, icmpv6_te_meta(54), &m2).expect("outbound no-port builds");
+    let mut exp2 = checksum16_adjust(c1,
+        &crate::afxdp::frame::ipv6_words_from_octets(server6.octets()),
+        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()));
+    if exp2 == 0 { exp2 = 0xffff; }
+    assert_eq!(u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]), exp2,
+        "#13650: outbound SNAT without port rewrite must still repair quoted checksum for dst delta");
+    assert_eq!(&out2[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes());
+}
