@@ -446,33 +446,24 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 // and it bounds the unadjudicated-forward window to the intra-apply
 // transient plus one pinhole reassert lag instead of leaving it open.
 //
-// #8279: the first half of that sentence WAS NOT TRUE when it was written, and
-// this note stays because the claim is load-bearing and its failure was not
-// visible from here. "An ifindex absent from userspace_ingress_ifaces takes
-// cpumap_or_pass" was true of three of the shim's four arms; the fourth, an L3
-// PARSE FAILURE, took drop_degraded_transit — and it sat ABOVE the ingress-map
-// test, so it applied to interfaces this dataplane does not adjudicate. That
-// mattered because the attach set here is strictly LARGER than the ingress set
-// (compiler_iface.go puts every zoned netdev in st.xdpIfindexes, tunnels
-// included) and a tunnel netdev is raw L3 with no Ethernet header, so the
-// shim's Ethernet-only parse read its IP SOURCE octets as an ethertype. The
-// ordering is fixed in userspace-xdp/src/lib.rs and pinned by
-// shim_ingress_test_precedes_the_l3_parse_8279, so the sentence above is now
-// true of every arm.
+// #8279: "An ifindex absent from userspace_ingress_ifaces takes
+// cpumap_or_pass" is true of the ENABLED parse path after the gate was moved
+// ahead of parsing. A disabled ctrl intentionally has a different disposition:
+// #13632 adds the same authority check before parsing but drops an unadjudicated
+// packet, because passing attached transit to the kernel while the helper is
+// disabled would bypass policy. The early check makes that DROP independent of
+// the raw-L3 packet's source octets; they are never parsed or used to grant the
+// local/control exemption on an ifindex this shim does not adjudicate.
 //
-// The ordering fix alone did NOT cover the ctrl-DISABLED path
-// (degraded_ctrl_disabled_action), which never consults the ingress map at all
-// by design — a disabled ctrl must fail closed on every attached interface — so
-// on a raw-L3 netdev its local/control exemption was evaluated against the
-// misparse, which is fail-OPEN. Nor did it cover a raw-L3 netdev that IS in the
-// ingress set. Both are closed at the source instead: compileZones now refuses
-// to put a netdev into pendingXDP unless its link-layer type is Ethernet
+// Nor does the gate solve a raw-L3 netdev that IS in the ingress set. Both
+// attach cases are closed at the source instead: compileZones refuses to put a
+// netdev into pendingXDP unless its link-layer type is Ethernet
 // (netdevCarriesEthernetFraming, pkg/dataplane/netdev_framing_8279.go), so the
-// shim is never attached to one and neither path can be reached. The refusal is
-// recorded as an UnarmedSurface with StillForwarding set — the netdev is UP,
-// zoned and unshimmed, a blackholed zone member under the armed fence (the
-// fence drops transit from never-pinholed links), and that gap is reported
-// rather than traded away silently.
+// shim is never attached to one and neither raw-L3 path can be reached. The
+// refusal is recorded as an UnarmedSurface with StillForwarding set — the
+// netdev is UP, zoned and unshimmed, a blackholed zone member under the armed
+// fence (the fence drops transit from never-pinholed links), and that gap is
+// reported rather than traded away silently.
 //
 // The ATTACH half stays before the publish deliberately: the helper cannot bind
 // an AF_XDP socket to an interface with no shim, so staging it later is not
