@@ -483,25 +483,68 @@ pub(super) fn source_nat_revocation_on_session_hit(
         forward_origin,
         canonical_key,
         stored_static,
-    ) = if metadata.is_reverse {
-        let reverse_key = sessions.revalidation_canonical_key(session_key)?;
-        let (reverse_decision, _, _) = sessions.entry_with_origin(&reverse_key)?;
-        let forward_query = crate::session::reverse_session_key(&reverse_key, reverse_decision.nat);
-        let canonical_key = match sessions.source_nat_revalidation_target(&forward_query) {
-            SourceNatRevalidationTarget::Fresh | SourceNatRevalidationTarget::NoLocalEntry => {
-                return None;
-            }
+) = if metadata.is_reverse {
+        let reverse_key = sessions
+            .revalidation_canonical_key(session_key)
+            .unwrap_or_else(|| session_key.clone());
+        let reverse_decision = sessions
+            .entry_with_origin(&reverse_key)
+            .map(|(decision, _, _)| decision)
+            .unwrap_or(decision);
+        let forward_query =
+            crate::session::reverse_session_key(&reverse_key, reverse_decision.nat);
+        let (forward_key, static_nat) = match sessions.source_nat_revalidation_target(&forward_query)
+        {
+            SourceNatRevalidationTarget::Fresh => return None,
             SourceNatRevalidationTarget::Stale { key, static_nat } => (key, static_nat),
+            SourceNatRevalidationTarget::NoLocalEntry => {
+                // Reverse hits do not own the forward translation. When the
+                // companion is not materialized locally, reconstruct its
+                // decision and tuple from the reverse row and run the same
+                // sessionless validation as a forward peer-synced hit. A
+                // failed check drops this packet but claims no session to
+                // tear down; absent NAT provenance deliberately fails closed
+                // for translated source-NAT state.
+                let forward_decision = SessionDecision {
+                    nat: reverse_decision.nat.reverse(
+                        reverse_key.src_ip,
+                        reverse_key.dst_ip,
+                        reverse_key.src_port,
+                        reverse_key.dst_port,
+                    ),
+                    ..reverse_decision
+                };
+                let mut forward_metadata = metadata.clone();
+                forward_metadata.is_reverse = false;
+                std::mem::swap(
+                    &mut forward_metadata.ingress_zone,
+                    &mut forward_metadata.egress_zone,
+                );
+                let (valid, _) = source_nat_translation_still_valid(
+                    forwarding,
+                    &forward_decision,
+                    &forward_metadata,
+                    &forward_query,
+                    source_nat_static,
+                );
+                return (!valid).then_some(PolicyRevocation {
+                    canonical_key: None,
+                    decision: forward_decision,
+                    metadata: forward_metadata,
+                    origin,
+                    reason: PolicyRevocationReason::StaleSourceNat,
+                });
+            }
         };
         let (forward_decision, forward_metadata, forward_origin) =
-            sessions.entry_with_origin(&canonical_key.0)?;
+            sessions.entry_with_origin(&forward_key)?;
         (
-            canonical_key.0.clone(),
+            forward_key.clone(),
             forward_decision,
             forward_metadata,
             forward_origin,
-            Some(canonical_key.0),
-            canonical_key.1,
+            Some(forward_key),
+            static_nat,
         )
     } else {
         match sessions.source_nat_revalidation_target(session_key) {
