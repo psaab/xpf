@@ -2104,7 +2104,7 @@ func TestEmitCoSEqualFlowEnforcement_LabelsAndValues(t *testing.T) {
 
 	ch := make(chan prometheus.Metric)
 	go func() {
-		c.emitCoSEqualFlowEnforcement(ch, status)
+		c.emitCoSEqualFlowEnforcement(ch, &status)
 		close(ch)
 	}()
 	var got []prometheus.Metric
@@ -2198,7 +2198,7 @@ func TestEmitCoSDrainPhaseTelemetry_EmitsNonExactExactBacklogCounter(t *testing.
 
 	ch := make(chan prometheus.Metric)
 	go func() {
-		c.emitCoSDrainPhaseTelemetry(ch, status)
+		c.emitCoSDrainPhaseTelemetry(ch, &status)
 		close(ch)
 	}()
 	values := map[*prometheus.Desc]float64{}
@@ -2276,7 +2276,7 @@ func TestEmitCoSParkReasonTelemetry_DistinctValuesAndCounterType(t *testing.T) {
 
 	ch := make(chan prometheus.Metric)
 	go func() {
-		c.emitCoSParkReasonTelemetry(ch, status)
+		c.emitCoSParkReasonTelemetry(ch, &status)
 		close(ch)
 	}()
 	values := map[*prometheus.Desc]float64{}
@@ -2343,7 +2343,7 @@ func TestEmitCoSFlowFairOccupancy_LabelsValuesAndGaugeType(t *testing.T) {
 
 	ch := make(chan prometheus.Metric)
 	go func() {
-		c.emitCoSFlowFairOccupancy(ch, status)
+		c.emitCoSFlowFairOccupancy(ch, &status)
 		close(ch)
 	}()
 	type series struct {
@@ -2425,7 +2425,7 @@ func TestEmitCoSWaterfillTelemetry_EmitsQueueAndInterfaceMetrics(t *testing.T) {
 
 	ch := make(chan prometheus.Metric)
 	go func() {
-		c.emitCoSWaterfillTelemetry(ch, status)
+		c.emitCoSWaterfillTelemetry(ch, &status)
 		close(ch)
 	}()
 	counters := map[*prometheus.Desc]float64{}
@@ -2497,7 +2497,7 @@ func TestEmitCoSWaterfillTelemetry_SuppressesMaxSentinelButEmitsZeroLockin(t *te
 	}
 	ch := make(chan prometheus.Metric)
 	go func() {
-		c.emitCoSWaterfillTelemetry(ch, status)
+		c.emitCoSWaterfillTelemetry(ch, &status)
 		close(ch)
 	}()
 	minByIfindex := map[string]float64{}
@@ -2800,7 +2800,7 @@ func TestEmitCoSActiveFlowCount_LabelsAndValue(t *testing.T) {
 
 	ch := make(chan prometheus.Metric)
 	go func() {
-		c.emitCoSActiveFlowCount(ch, status)
+		c.emitCoSActiveFlowCount(ch, &status)
 		close(ch)
 	}()
 	var got []prometheus.Metric
@@ -3392,7 +3392,7 @@ func TestEmitCoSSojourn_LabelsValuesAndGaugeType(t *testing.T) {
 
 	ch := make(chan prometheus.Metric)
 	go func() {
-		c.emitCoSSojourn(ch, status)
+		c.emitCoSSojourn(ch, &status)
 		close(ch)
 	}()
 	type series struct {

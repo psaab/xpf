@@ -100,6 +100,41 @@ fn len_sums_across_shards() {
     assert_eq!(map.len(), 200);
 }
 
+// #13092 (D8-14): status `len()` must not hold lower-index shard locks
+// while blocked on a later shard; that convoy stalls unrelated RX learns.
+#[test]
+fn len_releases_each_shard_before_waiting_for_the_next() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let map = std::sync::Arc::new(ShardedNeighborMap::new());
+    let last_shard = map.lock_shard(NUM_SHARDS - 1);
+    let worker_map = std::sync::Arc::clone(&map);
+    let (started_tx, started_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        worker_map.len()
+    });
+    started_rx.recv().unwrap();
+
+    // The new `len()` blocks on the held final shard only after releasing
+    // every previous one. The old all-shard lock kept shard 0 held here.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let released_early = loop {
+        if let Ok(guard) = map.shards[0].0.try_lock() {
+            drop(guard);
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::yield_now();
+    };
+    drop(last_shard);
+    let _ = worker.join().unwrap();
+    assert!(released_early, "len held shard 0 while waiting for shard 63");
+}
+
 #[test]
 fn with_all_shards_clear_via_each_shard_mut() {
     let map = ShardedNeighborMap::new();

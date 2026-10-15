@@ -1337,6 +1337,12 @@ impl BindingLiveState {
         self.cos_active_flow_counts.store(Arc::new(rows));
     }
 
+    pub(in crate::afxdp) fn cos_active_flow_counts_arc(
+        &self,
+    ) -> Arc<Vec<crate::protocol::CoSActiveFlowCountStatus>> {
+        self.cos_active_flow_counts.load_full()
+    }
+
     pub(in crate::afxdp) fn cos_active_flow_counts_snapshot(
         &self,
     ) -> Vec<crate::protocol::CoSActiveFlowCountStatus> {

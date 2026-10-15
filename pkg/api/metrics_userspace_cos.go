@@ -18,7 +18,7 @@ import (
 // `(ifindex, queue_id, worker_id)` tuple. This is intentionally a
 // gauge snapshot from userspace-dp's debug cadence, not a line-rate
 // packet counter.
-func (c *xpfCollector) emitCoSActiveFlowCount(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+func (c *xpfCollector) emitCoSActiveFlowCount(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, row := range status.CoSActiveFlowCounts {
 		ch <- prometheus.MustNewConstMetric(
 			c.cosActiveFlowCount,
@@ -36,7 +36,7 @@ func (c *xpfCollector) emitCoSActiveFlowCount(ch chan<- prometheus.Metric, statu
 // shape (it has no CoS scheduler), so we type-assert on the optional
 // `Status() (dpuserspace.ProcessStatus, error)` interface — if the
 // assertion fails we skip silently (not an error).
-func (c *xpfCollector) emitCoSOwnerProfile(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+func (c *xpfCollector) emitCoSOwnerProfile(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, iface := range status.CoSInterfaces {
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
 		for _, queue := range iface.Queues {
@@ -69,7 +69,7 @@ func (c *xpfCollector) emitCoSOwnerProfile(ch chan<- prometheus.Metric, status d
 // OwnerWorkerID: non-exact queues are the critical source for
 // `*_while_exact_backlogged`, and shared-exact queues still produce a
 // truthful guarantee/surplus phase split.
-func (c *xpfCollector) emitCoSDrainPhaseTelemetry(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+func (c *xpfCollector) emitCoSDrainPhaseTelemetry(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, iface := range status.CoSInterfaces {
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
 		for _, queue := range iface.Queues {
@@ -107,7 +107,7 @@ func (c *xpfCollector) emitCoSDrainPhaseTelemetry(ch chan<- prometheus.Metric, s
 // own per-queue cap or worker scheduling. Not gated on OwnerWorkerID:
 // the queue row is already owner-attributed, and a parked best-effort
 // queue is precisely the row an operator needs to see.
-func (c *xpfCollector) emitCoSParkReasonTelemetry(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+func (c *xpfCollector) emitCoSParkReasonTelemetry(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, iface := range status.CoSInterfaces {
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
 		for _, queue := range iface.Queues {
@@ -148,7 +148,7 @@ func (c *xpfCollector) emitCoSParkReasonTelemetry(ch chan<- prometheus.Metric, s
 // empirically visible. Zero on the Proportional (legacy RR) selector
 // path. Not gated on OwnerWorkerID: a queue's row is owner-attributed
 // already, and the per-interface MIN is computed coordinator-side.
-func (c *xpfCollector) emitCoSWaterfillTelemetry(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+func (c *xpfCollector) emitCoSWaterfillTelemetry(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, iface := range status.CoSInterfaces {
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
 		ch <- prometheus.MustNewConstMetric(
@@ -217,7 +217,7 @@ func (c *xpfCollector) emitCoSWaterfillTelemetry(ch chan<- prometheus.Metric, st
 // bounded by exact-queue count x worker count. Admission counters are
 // emitted per queue row unconditionally (they already exist on the
 // wire; this surfaces them to Prometheus for drop-site attribution).
-func (c *xpfCollector) emitCoSLeaseClaimFlow(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+func (c *xpfCollector) emitCoSLeaseClaimFlow(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, iface := range status.CoSInterfaces {
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
 		for _, queue := range iface.Queues {
@@ -267,7 +267,7 @@ func (c *xpfCollector) emitCoSLeaseClaimFlow(ch chan<- prometheus.Metric, status
 // strongest negative result (queues never stand) invisible. All three
 // are MAX-merged across worker instances and workers upstream (worst
 // instance); see the AGGREGATION contract on the Rust CoSQueueStatus.
-func (c *xpfCollector) emitCoSSojourn(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+func (c *xpfCollector) emitCoSSojourn(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, iface := range status.CoSInterfaces {
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
 		for _, queue := range iface.Queues {
@@ -302,7 +302,7 @@ func (c *xpfCollector) emitCoSSojourn(ch chan<- prometheus.Metric, status dpuser
 // FlowFairFlowsActive equals the sum over workers of the existing
 // per-worker xpf_userspace_cos_active_flow_count (#1248), pre-aggregated
 // to exactly match the buckets gauge's (ifindex, queue_id) grain.
-func (c *xpfCollector) emitCoSFlowFairOccupancy(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+func (c *xpfCollector) emitCoSFlowFairOccupancy(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, iface := range status.CoSInterfaces {
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
 		for _, queue := range iface.Queues {
@@ -323,7 +323,7 @@ func (c *xpfCollector) emitCoSFlowFairOccupancy(ch chan<- prometheus.Metric, sta
 	}
 }
 
-func (c *xpfCollector) emitCoSEqualFlowEnforcement(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
+func (c *xpfCollector) emitCoSEqualFlowEnforcement(ch chan<- prometheus.Metric, status *dpuserspace.ProcessStatus) {
 	for _, iface := range status.CoSInterfaces {
 		ifindexLabel := strconv.Itoa(iface.Ifindex)
 		for _, queue := range iface.Queues {

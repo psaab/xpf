@@ -1051,32 +1051,55 @@ impl super::Coordinator {
             .or_else(|| self.last_s5_reinject_status.clone())
     }
 
-    pub fn cos_statuses(&self) -> Vec<crate::protocol::CoSInterfaceStatus> {
-        let snapshots: Vec<Vec<_>> = self
+    pub fn cos_statuses_and_active_flow_counts(
+        &self,
+    ) -> (
+        Vec<crate::protocol::CoSInterfaceStatus>,
+        Vec<crate::protocol::CoSActiveFlowCountStatus>,
+        bool,
+    ) {
+        const COS_ACTIVE_FLOW_COUNT_MAX_ROWS: usize = 4096;
+        let snapshots: Vec<_> = self
             .workers
             .records()
             .values()
-            .map(|rec| rec.handle.cos_status.load().iter().cloned().collect())
+            .map(|rec| rec.handle.cos_status.load_full())
             .collect();
         let mut statuses =
             aggregate_cos_statuses_across_workers(&snapshots, &self.cos_owner_worker_by_queue);
         let queue_leases = self.cos.queue_leases.load();
         overlay_shared_cos_queue_lease_statuses(&mut statuses, queue_leases.as_ref());
-        // #1830 (g): overlay the flow-cache active-flow counts onto the
-        // queue rows so each row carries BOTH halves of the
-        // collision-vs-demand ratio (flow_fair_flows_active alongside
-        // the worker-snapshot-summed flow_fair_buckets_occupied). Same
-        // per-binding source as `cos_active_flow_counts`, re-keyed per
-        // (ifindex, queue_id) by summing across workers.
+
+        // Load each binding's shared vector once, then derive both the
+        // per-worker API rows and per-queue aggregate from that snapshot.
         let mut flow_counts = BTreeMap::<(i32, u8), u64>::new();
+        let mut counts = BTreeMap::<(i32, u8, u32), u32>::new();
         for live in self.workers.live.values() {
-            for row in live.cos_active_flow_counts_snapshot() {
+            let rows = live.cos_active_flow_counts_arc();
+            for row in rows.iter() {
                 let count = flow_counts.entry((row.ifindex, row.queue_id)).or_insert(0);
                 *count = count.saturating_add(u64::from(row.active_flow_count));
+                let count = counts
+                    .entry((row.ifindex, row.queue_id, row.worker_id))
+                    .or_insert(0);
+                *count = count.saturating_add(row.active_flow_count);
             }
         }
         overlay_cos_flow_fair_flow_counts(&mut statuses, &flow_counts);
-        statuses
+        let truncated = counts.len() > COS_ACTIVE_FLOW_COUNT_MAX_ROWS;
+        let active_counts = counts
+            .into_iter()
+            .take(COS_ACTIVE_FLOW_COUNT_MAX_ROWS)
+            .map(|((ifindex, queue_id, worker_id), active_flow_count)| {
+                crate::protocol::CoSActiveFlowCountStatus {
+                    ifindex,
+                    queue_id,
+                    worker_id,
+                    active_flow_count,
+                }
+            })
+            .collect();
+        (statuses, active_counts, truncated)
     }
 
     pub fn filter_term_counters(&self) -> Vec<crate::protocol::FirewallFilterTermCounterStatus> {
@@ -1193,31 +1216,6 @@ impl super::Coordinator {
         (out, truncated)
     }
 
-    pub fn cos_active_flow_counts(&self) -> (Vec<crate::protocol::CoSActiveFlowCountStatus>, bool) {
-        const COS_ACTIVE_FLOW_COUNT_MAX_ROWS: usize = 4096;
-        let mut counts = std::collections::BTreeMap::<(i32, u8, u32), u32>::new();
-        for live in self.workers.live.values() {
-            for row in live.cos_active_flow_counts_snapshot() {
-                let key = (row.ifindex, row.queue_id, row.worker_id);
-                let count = counts.entry(key).or_insert(0);
-                *count = count.saturating_add(row.active_flow_count);
-            }
-        }
-        let truncated = counts.len() > COS_ACTIVE_FLOW_COUNT_MAX_ROWS;
-        let out = counts
-            .into_iter()
-            .take(COS_ACTIVE_FLOW_COUNT_MAX_ROWS)
-            .map(|((ifindex, queue_id, worker_id), active_flow_count)| {
-                crate::protocol::CoSActiveFlowCountStatus {
-                    ifindex,
-                    queue_id,
-                    worker_id,
-                    active_flow_count,
-                }
-            })
-            .collect();
-        (out, truncated)
-    }
 
     pub fn drain_session_deltas(&self, max: usize) -> Vec<SessionDeltaInfo> {
         // #5290: fair, rotating-cursor drain instead of whole-budget-first-slot.
