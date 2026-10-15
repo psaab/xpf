@@ -4452,18 +4452,18 @@ func emitNATOverlap(lenient bool, msg string) ([]string, error) {
 // nat64PrefixOwnerKey returns the canonical allocator key for a NAT64 rule-set
 // prefix, and ok=false when the prefix would NOT build a live NAT64 allocator.
 //
-// It mirrors the Rust nat64.rs build condition — and validateNAT64PrefixStrict's
-// accept set — EXACTLY: the prefix must split on '/' into exactly two parts, the
-// mask must parse as a decimal 96 (so a leading-zero `/096` — which the strict
-// gate and Rust's numeric parse both accept — is honored, unlike a raw
-// netip.ParsePrefix which rejects it), and the address part must be IPv6 by the
-// colon-strict family rule. Only such a rule-set mints external tuples at
-// runtime, so only it is an allocator "owner" for the #5144 overlap gate. An
-// empty / malformed / non-/96 prefix builds no allocator (nat64.rs skips it; the
-// strict gate rejects a non-empty malformed prefix on commit and skips an empty
-// one) — enumerating it as an owner would FALSELY report an overlap (two
-// empty-prefix rule-sets sharing a pool, or an empty-prefix rule-set vs a live
-// source-NAT owner), so ok=false drops it from the owner set on both paths.
+// It mirrors the Rust nat64.rs build condition EXACTLY: the prefix must split on
+// '/' into exactly two parts, the mask must parse as a dataplane-accepted
+// decimal 96 (including a single leading '+', normalised before snapshot
+// build), and the address part must be IPv6 by the colon-strict family rule.
+// The commit gate remains stricter and requires the canonical mask spelling.
+// Only such a rule-set mints external tuples at runtime, so only it is an
+// allocator "owner" for the #5144 overlap gate. An empty / malformed / non-/96
+// prefix builds no allocator (nat64.rs skips it; the strict gate rejects a
+// non-empty malformed prefix on commit and skips an empty one) — enumerating it
+// would FALSELY report an overlap (two empty-prefix rule-sets sharing a pool,
+// or an empty-prefix rule-set vs a live source-NAT owner), so ok=false drops it
+// from the owner set on both paths.
 //
 // The key is the CANONICAL /96 network (the Rust 12-byte prefix identity) via
 // netip Masked(), so equivalent spellings — a leading-zero `/096`, an expanded
@@ -4474,7 +4474,7 @@ func nat64PrefixOwnerKey(prefix string) (string, bool) {
 	if len(parts) != 2 {
 		return "", false
 	}
-	if m, err := strconv.ParseUint(parts[1], 10, 8); err != nil || m != 96 {
+	if !dataplaneAcceptsNAT64Mask(parts[1]) {
 		return "", false
 	}
 	if natAddrFamily(parts[0]) != "v6" {
