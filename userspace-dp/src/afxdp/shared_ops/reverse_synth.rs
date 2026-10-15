@@ -171,6 +171,7 @@ table: Option<&str>,) -> SessionLookup {
         install_table_check: 0,
     };
     SessionLookup {
+        aux: SessionLookupAux::default(),
         decision,
         metadata,
         forwarding_generation: ForwardingGenerationStamp::default(),
@@ -244,6 +245,7 @@ table: Option<&str>,) -> Option<SyncedSessionEntry> {
             decision: entry.decision,
             metadata: entry.metadata.clone(),
             forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux::default(),
         },
         now_secs,
         0,

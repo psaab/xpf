@@ -68,6 +68,11 @@ tcp_flags: u8,) -> (SessionLookup, bool) { if let Some(shared) = resolved.shared
             decision: replica.decision,
             metadata: replica.metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux {
+                session_id: replica.session_id,
+                source_nat_static: replica.source_nat_static,
+                leak_incarnation: replica.leak_incarnation,
+            },
         },
         !materialized,
     );
@@ -280,17 +285,15 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         let shared_leak_incarnation = hit.shared_entry.as_ref().map(|entry| entry.leak_incarnation);
         let source_nat_static = match hit.shared_entry.as_ref() {
             Some(entry) => entry.source_nat_static,
-            None => sessions.source_nat_static_for(hit.key.as_ref(&flow.forward_key)),
+            // #13079: reuse the lookup's aux snapshot, no re-probe.
+            None => hit.lookup.aux.source_nat_static,
         };
         let keep_transient = poison_key.is_some_and(|(key, decision, metadata, origin)| {
             should_keep_synced_hit_transient(ha_state, now_secs, key, decision, metadata, origin)
         });
         let session_id_before_purge = shared_session_id
             .filter(|session_id| *session_id != 0)
-            .or_else(|| {
-                (!shared_was_present)
-                    .then(|| sessions.session_id_for(hit.key.as_ref(&flow.forward_key)))
-            })
+            .or_else(|| (!shared_was_present).then_some(hit.lookup.aux.session_id))
             .unwrap_or(0);
         let source_nat_validation_key = if keep_transient {
             shared_source_nat_original_key(
@@ -333,7 +336,8 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
                 if keep_transient {
                     session_id_before_purge
                 } else {
-                    sessions.session_id_for(resolved_key)
+                    // #13079: the resolved lookup already carries it.
+                    resolved.aux.session_id
                 }
             });
         let previous_policy_to_zone_id = forwarding_stale.then(|| {
@@ -459,6 +463,7 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         return Some(ResolvedFlowSessionDecision {
             key: resolved_key.clone(),
             session_id,
+            timeout_secs: sessions.timeout_secs_for(&resolved_key),
             decision,
             source_nat_static,
             metadata,
@@ -618,9 +623,12 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         flag_install_table_purge(worker_id);
     }
     let metadata = resolved.metadata;
+    // #13079: one install snapshot for both fields.
+    let install_info = sessions.installed_session_info(&flow.forward_key);
     Some(ResolvedFlowSessionDecision {
         key: flow.forward_key.clone(),
-        session_id: sessions.session_id_for(&flow.forward_key),
+        session_id: install_info.map(|info| info.session_id).unwrap_or(0),
+        timeout_secs: install_info.map(|info| info.timeout_secs).unwrap_or(0),
         decision,
         source_nat_static: None,
         metadata,

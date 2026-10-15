@@ -501,6 +501,7 @@ pub(crate) struct ForwardSessionMatch {
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
     pub(crate) forwarding_generation: ForwardingGenerationStamp,
+    pub(crate) aux: SessionLookupAux,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

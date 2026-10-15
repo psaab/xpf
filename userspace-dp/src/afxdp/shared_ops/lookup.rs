@@ -283,6 +283,11 @@ impl ResolvedSessionLookup {
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
                 forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux {
+                    session_id: entry.session_id,
+                    source_nat_static: entry.source_nat_static,
+                    leak_incarnation: entry.leak_incarnation,
+                },
             },
             shared_entry: Some(entry),
             origin,
@@ -295,6 +300,8 @@ impl ResolvedSessionLookup {
 pub(in crate::afxdp) struct ResolvedFlowSessionDecision {
     pub(in crate::afxdp) key: SessionKey,
     pub(in crate::afxdp) session_id: u64,
+    /// #13079: in-force timeout window from the same installed entry.
+    pub(in crate::afxdp) timeout_secs: u32,
     pub(in crate::afxdp) decision: SessionDecision,
     /// Ordinary source-NAT provenance from the installed or synced entry.
     /// `None` preserves conservative, revocable behavior for legacy rows.
@@ -625,6 +632,7 @@ tcp_flags: u8,) -> Option<ResolvedSessionLookup> {
                 decision: matched.decision,
                 metadata: matched.metadata,
                 forwarding_generation: matched.forwarding_generation,
+                aux: matched.aux,
             };
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,
@@ -705,6 +713,7 @@ now_ns: u64,) -> Option<ResolvedSessionLookup> {
                 decision: matched.decision,
                 metadata: matched.metadata,
                 forwarding_generation: matched.forwarding_generation,
+                aux: matched.aux,
             };
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,
@@ -862,6 +871,11 @@ now_ns: u64,) -> Option<ForwardSessionMatch> {
         decision: entry.decision,
         metadata: entry.metadata,
         forwarding_generation: ForwardingGenerationStamp::default(),
+        aux: SessionLookupAux {
+            session_id: entry.session_id,
+            source_nat_static: entry.source_nat_static,
+            leak_incarnation: entry.leak_incarnation,
+        },
     });
     let shared_match = if let Some(shared) = shared_match {
         if !crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
@@ -961,6 +975,11 @@ fn lookup_forward_nat_across_scopes_inner(
                 decision: entry.decision,
                 metadata: entry.metadata,
                 forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux {
+                    session_id: entry.session_id,
+                    source_nat_static: entry.source_nat_static,
+                    leak_incarnation: entry.leak_incarnation,
+                },
             });
         }
         return Some(local);
@@ -977,6 +996,11 @@ fn lookup_forward_nat_across_scopes_inner(
         decision: entry.decision,
         metadata: entry.metadata,
         forwarding_generation: ForwardingGenerationStamp::default(),
+        aux: SessionLookupAux {
+            session_id: entry.session_id,
+            source_nat_static: entry.source_nat_static,
+            leak_incarnation: entry.leak_incarnation,
+        },
     })
 }
 

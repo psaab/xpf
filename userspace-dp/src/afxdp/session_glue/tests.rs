@@ -6980,6 +6980,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             decision: test_decision(),
             metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux::default(),
         },
         1,
         0,
@@ -7001,6 +7002,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux::default(),
         },
         1,
         0,
@@ -7276,6 +7278,7 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
                 policy_counter: None,
             },
             forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux::default(),
         },
         100,
         110,
@@ -7621,6 +7624,7 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
                 policy_counter: None,
             },
             forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux::default(),
         },
         1,
         0,
@@ -15548,6 +15552,7 @@ fn reverse_companion_stamps_zero_install_table_9752() {
             decision: forward_decision,
             metadata: forward_metadata,
             forwarding_generation: ForwardingGenerationStamp::default(),
+            aux: SessionLookupAux::default(),
         },
         1_000_000_000,
         0,
@@ -18932,13 +18937,13 @@ fn across_scopes_absent_exact_key_uses_one_primary_index_probe_13078() {
         1,
         "#13078: the mutable exact lookup already distinguishes absent from stale"
     );
-
+}
 
 /// D5-07 source-level probe budget: the caller paths must consume the resolved
 /// lookup/install snapshot rather than querying the same flow key by field.
 #[test]
 fn resolved_flow_callers_reuse_snapshots_without_reprobing_13079() {
-    let glue = include_str!("mod.rs");
+    let glue = include_str!("resolve.rs");
     let resolver = function_body(glue, "fn resolve_flow_session_decision_with_conntrack(");
     let poll = include_str!("../poll_descriptor/mod.rs");
     let descriptor = function_body(poll, "fn poll_binding_process_descriptor_with_injection(");
