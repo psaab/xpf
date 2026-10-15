@@ -16,7 +16,7 @@ pub(super) fn service_exact_local_queue_direct(
     secondary_budget: u64,
     now_ns: u64,
     shared_recycles: &mut Vec<(u32, u64)>,
-) -> bool {
+) -> ExactServiceOutcome {
     let flow_fair = binding
         .cos
         .cos_interfaces
@@ -48,11 +48,11 @@ pub(super) fn service_exact_local_queue_direct(
     let build = {
         let root = match binding.cos.cos_interfaces.get_mut(&root_ifindex) {
             Some(root) => root,
-            None => return false,
+            None => return ExactServiceOutcome::NoProgress,
         };
         let queue = match root.queues.get_mut(queue_idx) {
             Some(queue) => queue,
-            None => return false,
+            None => return ExactServiceOutcome::NoProgress,
         };
         drain_exact_local_fifo_items_to_scratch(
             queue,
@@ -66,6 +66,7 @@ pub(super) fn service_exact_local_queue_direct(
     };
     match build {
         ExactCoSScratchBuild::Ready => {}
+        ExactCoSScratchBuild::VMinSkipped => unreachable!("FIFO queues have no V_min brake"),
         ExactCoSScratchBuild::Drop {
             error,
             dropped_bytes,
@@ -88,7 +89,7 @@ pub(super) fn service_exact_local_queue_direct(
                 .tx_submit_error_drops
                 .fetch_add(1, Ordering::Relaxed);
             binding.live.set_error(error);
-            return false;
+            return ExactServiceOutcome::NoProgress;
         }
         ExactCoSScratchBuild::MirrorTxFrameReserve { dropped_bytes } => {
             if dropped_bytes > 0 {
@@ -100,7 +101,7 @@ pub(super) fn service_exact_local_queue_direct(
                 .live
                 .mirror_drops_tx_frame_reserve
                 .fetch_add(1, Ordering::Relaxed);
-            return false;
+            return ExactServiceOutcome::NoProgress;
         }
     }
     if binding.scratch.scratch_exact_local_tx.is_empty() {
@@ -109,7 +110,7 @@ pub(super) fn service_exact_local_queue_direct(
         binding
             .live
             .set_tx_retry_status(TxRetryReason::NoFreeTxFrame);
-        return false;
+        return ExactServiceOutcome::NoProgress;
     }
 
     let mut writer = binding
@@ -167,7 +168,7 @@ pub(super) fn service_exact_local_queue_direct(
         binding
             .live
             .set_tx_retry_status(TxRetryReason::TxRingInsertFailed);
-        return false;
+        return ExactServiceOutcome::NoProgress;
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
     binding.tx_pipeline.outstanding_tx =
@@ -196,7 +197,7 @@ pub(super) fn service_exact_local_queue_direct(
     );
     apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
     maybe_wake_tx(binding, true, now_ns);
-    sent_packets > 0 || sent_bytes > 0
+    (sent_packets > 0 || sent_bytes > 0).into()
 }
 
 #[inline]
@@ -207,7 +208,7 @@ fn service_exact_local_queue_direct_flow_fair(
     secondary_budget: u64,
     now_ns: u64,
     shared_recycles: &mut Vec<(u32, u64)>,
-) -> bool {
+) -> ExactServiceOutcome {
     if binding.tx_pipeline.free_tx_frames.is_empty() {
         let _ = reap_tx_completions(binding, shared_recycles);
     }
@@ -222,11 +223,11 @@ fn service_exact_local_queue_direct_flow_fair(
     let build = {
         let root = match binding.cos.cos_interfaces.get_mut(&root_ifindex) {
             Some(root) => root,
-            None => return false,
+            None => return ExactServiceOutcome::NoProgress,
         };
         let queue = match root.queues.get_mut(queue_idx) {
             Some(queue) => queue,
-            None => return false,
+            None => return ExactServiceOutcome::NoProgress,
         };
         drain_exact_local_items_to_scratch_flow_fair(
             queue,
@@ -240,6 +241,7 @@ fn service_exact_local_queue_direct_flow_fair(
     };
     match build {
         ExactCoSScratchBuild::Ready => {}
+        ExactCoSScratchBuild::VMinSkipped => return ExactServiceOutcome::VMinSkipped,
         ExactCoSScratchBuild::Drop {
             error,
             dropped_bytes,
@@ -267,7 +269,7 @@ fn service_exact_local_queue_direct_flow_fair(
                 .tx_submit_error_drops
                 .fetch_add(1, Ordering::Relaxed);
             binding.live.set_error(error);
-            return false;
+            return ExactServiceOutcome::NoProgress;
         }
         ExactCoSScratchBuild::MirrorTxFrameReserve { dropped_bytes } => {
             if dropped_bytes > 0 {
@@ -279,7 +281,7 @@ fn service_exact_local_queue_direct_flow_fair(
                 .live
                 .mirror_drops_tx_frame_reserve
                 .fetch_add(1, Ordering::Relaxed);
-            return false;
+            return ExactServiceOutcome::NoProgress;
         }
     }
     if binding.scratch.scratch_local_tx.is_empty() {
@@ -288,7 +290,7 @@ fn service_exact_local_queue_direct_flow_fair(
         binding
             .live
             .set_tx_retry_status(TxRetryReason::NoFreeTxFrame);
-        return false;
+        return ExactServiceOutcome::NoProgress;
     }
 
     let mut writer = binding
@@ -344,7 +346,7 @@ fn service_exact_local_queue_direct_flow_fair(
         binding
             .live
             .set_tx_retry_status(TxRetryReason::TxRingInsertFailed);
-        return false;
+        return ExactServiceOutcome::NoProgress;
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
     binding.tx_pipeline.outstanding_tx =
@@ -375,7 +377,7 @@ fn service_exact_local_queue_direct_flow_fair(
     );
     apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
     maybe_wake_tx(binding, true, now_ns);
-    sent_packets > 0 || sent_bytes > 0
+    (sent_packets > 0 || sent_bytes > 0).into()
 }
 
 #[inline]
@@ -386,7 +388,7 @@ pub(super) fn service_exact_prepared_queue_direct(
     secondary_budget: u64,
     now_ns: u64,
     shared_recycles: &mut Vec<(u32, u64)>,
-) -> bool {
+) -> ExactServiceOutcome {
     let flow_fair = binding
         .cos
         .cos_interfaces
@@ -415,11 +417,11 @@ pub(super) fn service_exact_prepared_queue_direct(
     let build = {
         let root = match binding.cos.cos_interfaces.get_mut(&root_ifindex) {
             Some(root) => root,
-            None => return false,
+            None => return ExactServiceOutcome::NoProgress,
         };
         let queue = match root.queues.get_mut(queue_idx) {
             Some(queue) => queue,
-            None => return false,
+            None => return ExactServiceOutcome::NoProgress,
         };
         drain_exact_prepared_fifo_items_to_scratch(
             queue,
@@ -436,6 +438,7 @@ pub(super) fn service_exact_prepared_queue_direct(
     };
     match build {
         ExactCoSScratchBuild::Ready => {}
+        ExactCoSScratchBuild::VMinSkipped => unreachable!("FIFO queues have no V_min brake"),
         ExactCoSScratchBuild::Drop {
             error,
             dropped_bytes,
@@ -455,14 +458,14 @@ pub(super) fn service_exact_prepared_queue_direct(
                 .tx_submit_error_drops
                 .fetch_add(1, Ordering::Relaxed);
             binding.live.set_error(error);
-            return false;
+            return ExactServiceOutcome::NoProgress;
         }
         ExactCoSScratchBuild::MirrorTxFrameReserve { .. } => {
             unreachable!("prepared CoS queues do not drain local mirror clones")
         }
     }
     if binding.scratch.scratch_exact_prepared_tx.is_empty() {
-        return false;
+        return ExactServiceOutcome::NoProgress;
     }
 
     if cfg!(feature = "debug-log") {
@@ -525,7 +528,7 @@ pub(super) fn service_exact_prepared_queue_direct(
         binding
             .live
             .set_tx_retry_status(TxRetryReason::PreparedTxRingInsertFailed);
-        return false;
+        return ExactServiceOutcome::NoProgress;
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
     binding.tx_pipeline.outstanding_tx =
@@ -553,7 +556,7 @@ pub(super) fn service_exact_prepared_queue_direct(
     );
     apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
     maybe_wake_tx(binding, true, now_ns);
-    sent_packets > 0 || sent_bytes > 0
+    (sent_packets > 0 || sent_bytes > 0).into()
 }
 
 #[inline]
@@ -564,7 +567,7 @@ fn service_exact_prepared_queue_direct_flow_fair(
     secondary_budget: u64,
     now_ns: u64,
     shared_recycles: &mut Vec<(u32, u64)>,
-) -> bool {
+) -> ExactServiceOutcome {
     let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
     binding.scratch.scratch_prepared_tx.clear();
     let root_budget = binding
@@ -576,11 +579,11 @@ fn service_exact_prepared_queue_direct_flow_fair(
     let build = {
         let root = match binding.cos.cos_interfaces.get_mut(&root_ifindex) {
             Some(root) => root,
-            None => return false,
+            None => return ExactServiceOutcome::NoProgress,
         };
         let queue = match root.queues.get_mut(queue_idx) {
             Some(queue) => queue,
-            None => return false,
+            None => return ExactServiceOutcome::NoProgress,
         };
         drain_exact_prepared_items_to_scratch_flow_fair(
             queue,
@@ -597,6 +600,7 @@ fn service_exact_prepared_queue_direct_flow_fair(
     };
     match build {
         ExactCoSScratchBuild::Ready => {}
+        ExactCoSScratchBuild::VMinSkipped => return ExactServiceOutcome::VMinSkipped,
         ExactCoSScratchBuild::Drop {
             error,
             dropped_bytes,
@@ -623,14 +627,14 @@ fn service_exact_prepared_queue_direct_flow_fair(
                 .tx_submit_error_drops
                 .fetch_add(1, Ordering::Relaxed);
             binding.live.set_error(error);
-            return false;
+            return ExactServiceOutcome::NoProgress;
         }
         ExactCoSScratchBuild::MirrorTxFrameReserve { .. } => {
             unreachable!("prepared CoS queues do not drain local mirror clones")
         }
     }
     if binding.scratch.scratch_prepared_tx.is_empty() {
-        return false;
+        return ExactServiceOutcome::NoProgress;
     }
 
     if cfg!(feature = "debug-log") {
@@ -698,7 +702,7 @@ fn service_exact_prepared_queue_direct_flow_fair(
         binding
             .live
             .set_tx_retry_status(TxRetryReason::PreparedTxRingInsertFailed);
-        return false;
+        return ExactServiceOutcome::NoProgress;
     }
     binding.telemetry.dbg_tx_ring_submitted += inserted as u64;
     binding.tx_pipeline.outstanding_tx =
@@ -728,5 +732,5 @@ fn service_exact_prepared_queue_direct_flow_fair(
     );
     apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
     maybe_wake_tx(binding, true, now_ns);
-    sent_packets > 0 || sent_bytes > 0
+    (sent_packets > 0 || sent_bytes > 0).into()
 }

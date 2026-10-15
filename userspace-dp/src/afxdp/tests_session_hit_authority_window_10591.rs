@@ -222,6 +222,7 @@ fn cache_seed(
             nat64: false,
             nptv6: false,
             apply_nat_on_fabric: false,
+            last_queue_id: None,
         },
         decision,
         metadata: metadata.clone(),

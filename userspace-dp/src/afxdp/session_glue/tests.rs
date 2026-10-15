@@ -4443,6 +4443,7 @@ fn epoch_based_flow_cache_invalidation_for_demoted_owner_rg() {
             nat64: false,
             nptv6: false,
             apply_nat_on_fabric: false,
+            last_queue_id: None,
         },
         decision: test_decision(),
         metadata,
@@ -4536,6 +4537,7 @@ fn epoch_based_flow_cache_unrelated_rg_not_invalidated() {
             nat64: false,
             nptv6: false,
             apply_nat_on_fabric: false,
+            last_queue_id: None,
         },
         decision: test_decision(),
         metadata,
@@ -8957,6 +8959,7 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux::default(),
         },
         shared_entry: Some(SyncedSessionEntry {
             key: key.clone(),
@@ -9504,6 +9507,7 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux::default(),
         },
         shared_entry: Some(SyncedSessionEntry {
             key: key.clone(),
@@ -12531,9 +12535,10 @@ fn a_synthesized_reverse_records_no_ingress_ifindex_7169() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("afxdp")
-            .join("shared_ops.rs"),
+            .join("shared_ops")
+            .join("reverse_synth.rs"),
     )
-    .expect("shared_ops.rs must be readable");
+    .expect("shared_ops/reverse_synth.rs must be readable");
     let code: String = src
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
@@ -12587,9 +12592,9 @@ fn the_main_path_passes_a_resolved_arrival_zone_7169() {
             .join("src")
             .join("afxdp")
             .join("session_glue")
-            .join("mod.rs"),
+            .join("resolve.rs"),
     )
-    .expect("session_glue/mod.rs must be readable");
+    .expect("session_glue/resolve.rs must be readable");
     let code: String = src
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
@@ -12600,7 +12605,7 @@ fn the_main_path_passes_a_resolved_arrival_zone_7169() {
     // passes for free.
     assert!(
         code.contains("lookup_forward_nat_across_scopes_at("),
-        "session_glue/mod.rs no longer calls lookup_forward_nat_across_scopes_at — \
+        "session_glue/resolve.rs no longer calls lookup_forward_nat_across_scopes_at — \
          this guard is scanning for something that no longer exists"
     );
     // #9383: this used to assert the literal substring
@@ -17225,6 +17230,7 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
             decision: test_decision(),
             metadata: test_metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux::default(),
         },
         shared_entry: Some(SyncedSessionEntry {
             key: key.clone(),
@@ -18900,4 +18906,71 @@ fn session_upsert_fan_out_sheds_dead_sibling_12192() {
         enqueued_before + 1,
         "only the live sibling's queue attempt is counted as enqueued"
     );
+}
+
+#[test]
+fn across_scopes_absent_exact_key_uses_one_primary_index_probe_13078() {
+    let mut sessions = SessionTable::new();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let absent = test_key();
+
+    assert!(
+        lookup_session_across_scopes_for_test(
+            &mut sessions,
+            &shared_sessions,
+            &shared_forward_wire_sessions,
+            &absent,
+            1_000_000,
+            TCP_FLAG_ACK,
+        )
+        .is_none(),
+        "absent key must miss across all scopes"
+    );
+    assert_eq!(
+        sessions.expiry_key_index_probe_count_for_test(),
+        1,
+        "#13078: the mutable exact lookup already distinguishes absent from stale"
+    );
+
+
+/// D5-07 source-level probe budget: the caller paths must consume the resolved
+/// lookup/install snapshot rather than querying the same flow key by field.
+#[test]
+fn resolved_flow_callers_reuse_snapshots_without_reprobing_13079() {
+    let glue = include_str!("mod.rs");
+    let resolver = function_body(glue, "fn resolve_flow_session_decision_with_conntrack(");
+    let poll = include_str!("../poll_descriptor/mod.rs");
+    let descriptor = function_body(poll, "fn poll_binding_process_descriptor_with_injection(");
+    let keyed_probe_sites = [
+        "source_nat_static_for(&flow.forward_key",
+        "session_id_for(&flow.forward_key",
+        "leak_incarnation(&flow.forward_key",
+        "timeout_secs_for(&flow.forward_key",
+        "handshake_state_wire_for(&flow.forward_key",
+        "mark_source_nat_revalidated(&flow.forward_key",
+    ];
+
+    for site in keyed_probe_sites {
+        assert!(
+            !resolver.contains(site),
+            "resolver must reuse SessionLookup auxiliary data instead of {site}"
+        );
+        assert!(
+            !descriptor.contains(site),
+            "descriptor path must reuse the install snapshot instead of {site}"
+        );
+    }
+}
+
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let function = source
+        .split_once(signature)
+        .map(|(_, tail)| tail)
+        .unwrap_or_else(|| panic!("source must contain {signature}"));
+    let body_start = function.find('{').expect("function body opener") + 1;
+    function[body_start..]
+        .split_once("\n}\n")
+        .map(|(body, _)| body)
+        .expect("function body closer")
 }

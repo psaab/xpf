@@ -78,6 +78,9 @@ pub(crate) enum IpsecReplyAliasLookup {
 impl SessionTable {
     #[inline]
     fn resolve_lookup_handle(&self, key: &SessionKey) -> Option<(u32, bool)> {
+        #[cfg(test)]
+        self.expiry_key_index_probes
+            .fetch_add(1, AtomicOrdering::Relaxed);
         match self.key_to_handle.get(key) {
             Some(handle) => Some((*handle, false)),
             None => self
@@ -166,6 +169,15 @@ impl SessionTable {
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone_without_policy_counter(),
                 forwarding_generation: record.entry.forwarding_generation,
+                aux: SessionLookupAux {
+                    session_id: record.entry.session_id,
+                    source_nat_static: record.entry.source_nat_static,
+                    leak_incarnation: self
+                        .leak_incarnations
+                        .get(&record.key)
+                        .copied()
+                        .unwrap_or(0),
+                },
             },
             record.entry.origin,
         ))
@@ -188,9 +200,82 @@ impl SessionTable {
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone_without_policy_counter(),
                 forwarding_generation: record.entry.forwarding_generation,
+                aux: SessionLookupAux {
+                    session_id: record.entry.session_id,
+                    source_nat_static: record.entry.source_nat_static,
+                    leak_incarnation: self
+                        .leak_incarnations
+                        .get(&record.key)
+                        .copied()
+                        .unwrap_or(0),
+                },
             },
             record.entry.origin,
         ))
+    }
+    /// Expiry-aware lookup that distinguishes an idle-crossed indexed record
+    /// from an absent key without probing `key_to_handle` a second time.
+    pub(crate) fn probe_with_origin_expiry(
+        &self,
+        key: &SessionKey,
+        now_ns: u64,
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
+        let Some(record) = self.probe_record_with_origin(key) else {
+            return SessionExpiryProbe::Absent;
+        };
+        if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
+            return SessionExpiryProbe::IdleCrossed;
+        }
+        SessionExpiryProbe::Live((
+            SessionLookup {
+                decision: record.entry.decision,
+                metadata: record.entry.metadata.clone_without_policy_counter(),
+                forwarding_generation: record.entry.forwarding_generation,
+            },
+            record.entry.origin,
+        ))
+    }
+
+    /// Expiry-aware forward-wire match with stale/local-miss distinction from
+    /// the same candidate walk.
+    pub(crate) fn find_forward_wire_match_expiry(
+        &self,
+        wire_key: &SessionKey,
+        now_ns: u64,
+    ) -> SessionExpiryProbe<(ForwardSessionMatch, SessionOrigin)> {
+        let Some(bucket) = self.forward_wire_index.get(wire_key) else {
+            return SessionExpiryProbe::Absent;
+        };
+        let mut idle_crossed = false;
+        for &handle in bucket.iter() {
+            let Some(record) = self.entries.get(handle as usize) else {
+                continue;
+            };
+            let entry = &record.entry;
+            if entry.metadata.is_reverse
+                || forward_wire_key(&record.key, entry.decision.nat) != *wire_key
+            {
+                continue;
+            }
+            if now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns {
+                idle_crossed = true;
+                continue;
+            }
+            return SessionExpiryProbe::Live((
+                ForwardSessionMatch {
+                    key: record.key.clone(),
+                    decision: entry.decision,
+                    metadata: entry.metadata.clone(),
+                    forwarding_generation: entry.forwarding_generation,
+                },
+                entry.origin,
+            ));
+        }
+        if idle_crossed {
+            SessionExpiryProbe::IdleCrossed
+        } else {
+            SessionExpiryProbe::Absent
+        }
     }
 
     pub fn lookup_with_origin(
@@ -199,7 +284,10 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
     ) -> Option<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_inner(key, now_ns, tcp_flags, false)
+        match self.lookup_with_origin_inner(key, now_ns, tcp_flags, false) {
+            SessionExpiryProbe::Live(hit) => Some(hit),
+            SessionExpiryProbe::IdleCrossed | SessionExpiryProbe::Absent => None,
+        }
     }
 
     /// #10636: [`Self::lookup_with_origin`] WITHOUT the TCP close-state
@@ -215,13 +303,14 @@ impl SessionTable {
     /// re-bucket, the companion close propagation, and the HA close emit.
     /// The poll site applies the skipped close after an Owner verdict via
     /// [`Self::apply_deferred_owner_close`]; a foreign arrival drops it with
-    /// the packet.
-    pub fn lookup_with_origin_deferring_close(
+    /// the packet. The result preserves stale-vs-absent classification from
+    /// the same primary-index probe.
+    pub fn lookup_with_origin_deferring_close_expiry(
         &mut self,
         key: &SessionKey,
         now_ns: u64,
         tcp_flags: u8,
-    ) -> Option<(SessionLookup, SessionOrigin)> {
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
         self.lookup_with_origin_inner(key, now_ns, tcp_flags, true)
     }
 
@@ -231,7 +320,7 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
         defer_close: bool,
-    ) -> Option<(SessionLookup, SessionOrigin)> {
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
         // #964 Step 1: resolve handle from key. Direct-primary path
         // looks up via key_to_handle; alias path (NAT-translated
         // reverse key) goes via reverse_translated_index.
@@ -240,7 +329,9 @@ impl SessionTable {
         // (validate-on-lookup) so a translated-key collision no longer resolves
         // to a displaced/wrong session. The in-borrow alias check below
         // re-validates the same predicate as a stale-index guard.
-        let (handle, via_alias) = self.resolve_lookup_handle(key)?;
+        let Some((handle, via_alias)) = self.resolve_lookup_handle(key) else {
+            return SessionExpiryProbe::Absent;
+        };
         // Pre-compute the timeout before borrowing &mut self.entries
         // so the inner block doesn't need to access self.timeouts.
         let timeouts = self.timeouts;
@@ -261,21 +352,23 @@ impl SessionTable {
         // captured inside the borrow below so a TRANSITION can be announced to
         // the peer once the borrow has ended.
         let (result, actual_key, propagate, close_class_before, handshake_state_before) = {
-            let record = self.entries.get_mut(handle as usize)?;
+            let Some(record) = self.entries.get_mut(handle as usize) else {
+                return SessionExpiryProbe::Absent;
+            };
             // #964 Step 1: path-specific validation defends against
             // a stale secondary index pointing at a slab slot that
             // was reused by a different session (release-mode guard,
             // not just debug). Direct-primary checks record.key ==
             // *key; alias path verifies the NAT-translation roundtrip.
             if !Self::lookup_record_matches_key(record, key, via_alias) {
-                return None;
+                return SessionExpiryProbe::Absent;
             }
             // A hit is usable only before its strict idle deadline. The wheel
             // remains the owner of physical removal (and HA HOLD/SELF-HEAL
             // retention), but an idle-crossed entry cannot be re-admitted by
             // traffic before that sweep runs.
             if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
-                return None;
+                return SessionExpiryProbe::IdleCrossed;
             }
             let is_tcp = matches!(key.protocol, PROTO_TCP);
             let entry = &mut record.entry;
@@ -392,6 +485,15 @@ impl SessionTable {
                         // by borrow via `bound_policy_counter_for`.
                         metadata: entry.metadata.clone_without_policy_counter(),
                         forwarding_generation: entry.forwarding_generation,
+                        aux: SessionLookupAux {
+                            session_id: entry.session_id,
+                            source_nat_static: entry.source_nat_static,
+                            leak_incarnation: self
+                                .leak_incarnations
+                                .get(&record.key)
+                                .copied()
+                                .unwrap_or(0),
+                        },
                     },
                     entry.origin,
                 ),
@@ -428,7 +530,7 @@ impl SessionTable {
         // the throttled target_tick — that matches the model in the
         // plan (~100 ns per FxHashMap lookup on the slow path).
         self.push_to_wheel(&actual_key, now_ns);
-        Some(result)
+        SessionExpiryProbe::Live(result)
     }
 
     /// #10636: stamp the sticky close bits shared by inline and deferred close.
@@ -691,6 +793,69 @@ impl SessionTable {
         F: Fn(i32) -> u32,
     {
         self.find_forward_nat_match_inner(reply_key, Some(now_ns), &egress_routing_domain)
+    }
+    /// Expiry-aware NAT lookup that records stale candidates during the same
+    /// reverse-index walk used to select a live candidate.
+    pub(crate) fn find_forward_nat_match_expiry<F>(
+        &self,
+        reply_key: &SessionKey,
+        now_ns: u64,
+        egress_routing_domain: F,
+    ) -> ForwardNatExpiryProbe
+    where
+        F: Fn(i32) -> u32,
+    {
+        let zeroed;
+        let probe: &SessionKey = if reply_key.routing_domain == 0 {
+            reply_key
+        } else {
+            zeroed = reverse_match_key(reply_key);
+            &zeroed
+        };
+        let Some(bucket) = self.nat_reverse_index.get(probe) else {
+            return ForwardNatExpiryProbe::Absent;
+        };
+        let mut idle_crossed = false;
+        for &handle in bucket.iter() {
+            let Some(record) = self.entries.get(handle as usize) else {
+                continue;
+            };
+            let entry = &record.entry;
+            if entry.metadata.is_reverse
+                || !reply_matches_forward_session(&record.key, entry.decision.nat, probe)
+            {
+                continue;
+            }
+            let forward_domain = record.key.routing_domain;
+            if (crate::session::is_quarantined_routing_domain(forward_domain)
+                || crate::session::is_quarantined_routing_domain(reply_key.routing_domain))
+                && forward_domain != reply_key.routing_domain
+            {
+                continue;
+            }
+            if !crate::session::is_quarantined_routing_domain(forward_domain)
+                && !crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+                && egress_routing_domain(entry.decision.resolution.egress_ifindex)
+                    != reply_key.routing_domain
+            {
+                continue;
+            }
+            if now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns {
+                idle_crossed = true;
+                continue;
+            }
+            return ForwardNatExpiryProbe::Live(ForwardSessionMatch {
+                key: record.key.clone(),
+                decision: entry.decision,
+                metadata: entry.metadata.clone(),
+                forwarding_generation: entry.forwarding_generation,
+            });
+        }
+        if idle_crossed {
+            ForwardNatExpiryProbe::IdleCrossed
+        } else {
+            ForwardNatExpiryProbe::Absent
+        }
     }
 
     /// Find a live forward NAT candidate for an embedded quote without
@@ -1183,6 +1348,7 @@ impl SessionTable {
             decision: entry.decision,
             metadata: entry.metadata,
             forwarding_generation: entry.forwarding_generation,
+                aux: SessionLookupAux::default(),
         })
     }
 

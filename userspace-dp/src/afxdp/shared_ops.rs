@@ -945,6 +945,11 @@ impl ResolvedSessionLookup {
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
                 forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux {
+                    session_id: entry.session_id,
+                    source_nat_static: entry.source_nat_static,
+                    leak_incarnation: entry.leak_incarnation,
+                },
             },
             shared_entry: Some(entry),
             origin,
@@ -957,6 +962,7 @@ impl ResolvedSessionLookup {
 pub(super) struct ResolvedFlowSessionDecision {
     pub(super) key: SessionKey,
     pub(super) session_id: u64,
+    pub(super) timeout_secs: u32,
     pub(super) decision: SessionDecision,
     /// Ordinary source-NAT provenance from the installed or synced entry.
     /// `None` preserves conservative, revocable behavior for legacy rows.
@@ -1305,6 +1311,7 @@ pub(super) fn lookup_session_across_scopes_with_shared(
                 decision: matched.decision,
                 metadata: matched.metadata,
                 forwarding_generation: matched.forwarding_generation,
+                aux: sessions.lookup_aux_info(&matched.key),
             };
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,
@@ -1389,6 +1396,7 @@ pub(super) fn probe_session_across_scopes(
                 decision: matched.decision,
                 metadata: matched.metadata,
                 forwarding_generation: matched.forwarding_generation,
+                aux: sessions.lookup_aux_info(&matched.key),
             };
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,
@@ -1848,6 +1856,7 @@ pub(super) fn build_reverse_session_from_forward_match_in_table(
         decision,
         metadata,
         forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux::default(),
     }
 }
 

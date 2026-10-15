@@ -2305,9 +2305,14 @@ fn every_shared_session_lock_in_production_recovers_from_poison_6653() {
             if !name.ends_with(".rs") || is_test_file(&name) {
                 continue;
             }
-            // shared_ops.rs OWNS the policy: lock_shared_recover and
-            // lock_shared_publish are where a raw lock is the implementation.
-            if name == "shared_ops.rs" {
+            // shared_ops/store.rs owns the shared-map lock policy: its
+            // lock helpers are the only intended raw-lock implementation.
+            if name == "store.rs"
+                && path
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|parent| parent == "shared_ops")
+            {
                 continue;
             }
             let src = std::fs::read_to_string(&path).expect("read file");

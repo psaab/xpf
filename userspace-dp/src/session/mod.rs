@@ -1509,6 +1509,8 @@ pub(crate) struct SessionTable {
     ///
     /// No handle in the key index at all — the session was never installed
     /// under this key, or was removed.
+    #[cfg(test)]
+    expiry_key_index_probes: AtomicU64,
     lookup_miss_no_handle: AtomicU64,
     /// A handle resolved but pointed outside the slab — a stale handle
     /// surviving its record.
@@ -1786,6 +1788,8 @@ impl SessionTable {
             epoch_counter: 0,
             expired: 0,
             create_drops: 0,
+            #[cfg(test)]
+            expiry_key_index_probes: AtomicU64::new(0),
             lookup_miss_no_handle: AtomicU64::new(0),
             lookup_miss_stale_handle: AtomicU64::new(0),
             lookup_miss_key_mismatch: AtomicU64::new(0),
@@ -2909,6 +2913,12 @@ impl SessionTable {
             self.lookup_miss_key_mismatch.load(AtomicOrdering::Relaxed),
         )
     }
+    #[cfg(test)]
+    pub(crate) fn expiry_key_index_probe_count_for_test(&self) -> u64 {
+        self.expiry_key_index_probes
+            .load(AtomicOrdering::Relaxed)
+    }
+
 
     /// Convenience: borrow the entry only (skipping the canonical
     /// key field). Used by call sites that don't need the key.
@@ -2931,6 +2941,35 @@ impl SessionTable {
     #[inline]
     pub(crate) fn session_id_for(&self, key: &SessionKey) -> u64 {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
+    }
+
+    /// Read install-time fields together after a successful install.
+    /// Callers that need the conntrack mirror and replication payload should
+    /// perform this one primary-key probe rather than re-hashing per field.
+    #[inline]
+    pub(crate) fn installed_session_info(
+        &self,
+        key: &SessionKey,
+    ) -> Option<SessionInstallInfo> {
+        self.entry_by_key(key).map(|entry| SessionInstallInfo {
+            session_id: entry.session_id,
+            source_nat_static: entry.source_nat_static,
+            timeout_secs: (entry.expires_after_ns / 1_000_000_000) as u32,
+            handshake_state_wire: entry.tcp_handshake_state_wire(key.protocol),
+        })
+    }
+
+    /// Read local-hit attributes from one already-known canonical key.
+    #[inline]
+    pub(crate) fn lookup_aux_info(&self, key: &SessionKey) -> SessionLookupAux {
+        let Some(entry) = self.entry_by_key(key) else {
+            return SessionLookupAux::default();
+        };
+        SessionLookupAux {
+            session_id: entry.session_id,
+            source_nat_static: entry.source_nat_static,
+            leak_incarnation: self.leak_incarnations.get(key).copied().unwrap_or(0),
+        }
     }
     /// Return the session identity for the lowest live slab handle sharing
     /// this bare five-tuple, or None when no scoped incarnation is present.

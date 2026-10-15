@@ -227,6 +227,9 @@ pub(in crate::afxdp) fn drain_exact_local_items_to_scratch_flow_fair(
         // drain is suspended (hard-cap previously armed).
         let candidate_pop_count = queue.v_min.v_min_pop_count.wrapping_add(1);
         if !suspended && !cos_queue_v_min_continue(queue, candidate_pop_count) {
+            if scratch_local_tx.is_empty() {
+                return ExactCoSScratchBuild::VMinSkipped;
+            }
             break;
         }
         // #1229 v7: cap-aware front/pop. target_bps was sampled
@@ -517,6 +520,9 @@ pub(in crate::afxdp) fn drain_exact_prepared_items_to_scratch_flow_fair(
         // (#941 hard-cap) path unchanged.
         let candidate_pop_count = queue.v_min.v_min_pop_count.wrapping_add(1);
         if !suspended && !cos_queue_v_min_continue(queue, candidate_pop_count) {
+            if scratch_prepared_tx.is_empty() {
+                return ExactCoSScratchBuild::VMinSkipped;
+            }
             break;
         }
         // #1763 Lever A — fused select+pop (Prepared cap-aware arm).

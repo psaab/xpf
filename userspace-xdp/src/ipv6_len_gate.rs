@@ -29,3 +29,24 @@ pub const IPV6_FIXED_HDR_LEN: usize = 40;
 pub fn ipv6_declared_end(l3_offset: usize, payload_len: u16) -> usize {
     l3_offset + IPV6_FIXED_HDR_LEN + payload_len as usize
 }
+
+/// The UDP header length: the 9-byte WireGuard-classification read in
+/// `parse_l4` covers this header plus the first payload byte.
+pub const UDP_HDR_LEN: usize = 8;
+
+/// Whether the declared datagram covers the first UDP payload byte at
+/// `l4_offset` — the byte `parse_l4`'s 9-byte read classifies.
+///
+/// #13084: `parse_ipv6` deliberately parses L4 against the CAPTURE bound (see
+/// the #10662 note there) and reconciles against the declared end afterward.
+/// Its truncation check compares `payload_offset` (`l4_offset + UDP_HDR_LEN`)
+/// against the declared end, so a datagram declaring exactly a bare UDP header
+/// passes while the 9th (first payload) byte came from L2 padding/slack past
+/// the datagram. That byte must not steer WireGuard classification: the shim
+/// keeps the parsed packet but clears the transport-data claim unless this
+/// gate holds. `l4_offset` is the extension-walk result (not necessarily
+/// `l3_offset + IPV6_FIXED_HDR_LEN`), so it is taken as given.
+#[inline(always)]
+pub fn ipv6_udp_first_payload_byte_in_datagram(l4_offset: usize, declared_end: usize) -> bool {
+    declared_end >= l4_offset + UDP_HDR_LEN + 1
+}

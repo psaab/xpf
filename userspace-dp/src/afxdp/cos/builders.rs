@@ -160,6 +160,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
         // honored bitset (a clean first epoch); the Phase-2 wrap path
         // re-arms it on each genuine epoch boundary.
         waterfill_epoch_wrap_pending: true,
+        waterfill_v_min_skipped_epoch: false,
         exact_guarantee_rr: 0,
         nonexact_guarantee_rr: 0,
         #[cfg(test)]

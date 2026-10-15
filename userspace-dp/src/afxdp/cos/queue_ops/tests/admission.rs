@@ -253,6 +253,9 @@ fn drain_exact_prepared_items_to_scratch_recycles_dropped_prepared_frame() {
             assert_eq!(dropped_bytes, (tx_frame_capacity() + 1) as u64);
         }
         ExactCoSScratchBuild::Ready => panic!("oversized prepared frame must drop"),
+        ExactCoSScratchBuild::VMinSkipped => {
+            panic!("FIFO prepared queue cannot be V_min-throttled")
+        }
         ExactCoSScratchBuild::MirrorTxFrameReserve { .. } => {
             panic!("prepared frame must not trip mirror reserve handling")
         }

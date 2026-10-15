@@ -23,7 +23,8 @@ use crate::prefix::{PrefixV4, PrefixV6};
 use crate::screen::{InertProfileRef, ScreenProfile, ScreenState, ScreenVerdict, extract_screen_info};
 use crate::session::{
     ForwardSessionMatch, SessionCounters, SessionDecision, SessionDelta, SessionDeltaKind,
-    SessionInstall, SessionKey, SessionLookup, SessionMetadata, SessionOrigin, SessionTable,
+    SessionInstall, SessionKey, SessionLookup, SessionLookupAux,
+    SessionMetadata, SessionOrigin, SessionTable,
     SessionUpdate, forward_wire_key, reverse_canonical_key, reverse_session_key,
 };
 use crate::slowpath::{EnqueueOutcome, SlowPathReinjector, SlowPathStatus, open_tun};
@@ -148,7 +149,6 @@ pub(crate) use session_glue::{
 // (the production paths use the chunked drain-as-you-export in worker::loop_body).
 #[cfg(test)]
 pub(crate) use session_glue::export_forward_sessions_for_owner_rgs;
-#[path = "shared_ops.rs"]
 mod shared_ops;
 #[path = "shared_umem.rs"]
 mod shared_umem;
