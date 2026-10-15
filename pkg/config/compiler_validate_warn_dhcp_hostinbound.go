@@ -151,6 +151,7 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 	}
 
 	var warnings []string
+	lifelines := HostInboundLifelineSet(cfg)
 	for _, fam := range families {
 		if fam.srv == nil {
 			continue
@@ -166,14 +167,21 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 				continue
 			}
 			for _, ifn := range g.Interfaces {
-				// Group refs and zone keys use the same canonical logical-unit
-				// identity (#9821); padded unit spellings must resolve alike.
-				// #12957: the EFFECTIVE-POLICY probes below resolve through
-				// both spellings too — the compiled stamp answers for every
-				// spelling of an interface, but a stamp-free config (hand-built,
-				// pre-resolveDerivedConfig) keys its overrides by spelling, and a
-				// padded ref must not silently skip a canonically-keyed override.
-				ifKey := cfg.SplitInterfaceUnitRef(ifn).Literal
+				// Resolve a bare server binding as unit 0 when that logical
+				// unit has a zone assignment, matching the server's interface
+				// scope with zone ownership and per-unit overrides.
+				ifRef := cfg.SplitInterfaceUnitRef(ifn)
+				ifKey := ifRef.Literal
+				if !ifRef.HasUnit {
+					unit0 := ifRef.Base + ".0"
+					if _, ok := ifZone[unit0]; ok {
+						ifKey = unit0
+					}
+				}
+				if HostInboundLifelineInterface(ifn, lifelines) ||
+					HostInboundLifelineInterface(ifKey, lifelines) {
+					continue
+				}
 				zname, ok := ifZone[ifKey]
 				if !ok {
 					continue
@@ -208,7 +216,7 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 				zoneAdmits := z.HostInboundTraffic != nil &&
 					hostInboundAdmitsSystemService(z.HostInboundTraffic.SystemServices, fam.token)
 				if !overridden && zoneAdmits &&
-					!hostInboundAdmitsSystemService(z.ZoneLevelSystemServicesFor(z.HostInboundTraffic.SystemServices, ifn), fam.token) {
+					!hostInboundAdmitsSystemService(z.ZoneLevelSystemServicesFor(z.HostInboundTraffic.SystemServices, ifKey), fam.token) {
 					continue
 				}
 				// An override declared under either spelling REPLACES the zone
