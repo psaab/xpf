@@ -169,6 +169,15 @@ impl SessionTable {
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone_without_policy_counter(),
                 forwarding_generation: record.entry.forwarding_generation,
+                aux: SessionLookupAux {
+                    session_id: record.entry.session_id,
+                    source_nat_static: record.entry.source_nat_static,
+                    leak_incarnation: self
+                        .leak_incarnations
+                        .get(&record.key)
+                        .copied()
+                        .unwrap_or(0),
+                },
             },
             record.entry.origin,
         ))
@@ -191,6 +200,15 @@ impl SessionTable {
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone_without_policy_counter(),
                 forwarding_generation: record.entry.forwarding_generation,
+                aux: SessionLookupAux {
+                    session_id: record.entry.session_id,
+                    source_nat_static: record.entry.source_nat_static,
+                    leak_incarnation: self
+                        .leak_incarnations
+                        .get(&record.key)
+                        .copied()
+                        .unwrap_or(0),
+                },
             },
             record.entry.origin,
         ))
@@ -467,6 +485,15 @@ impl SessionTable {
                         // by borrow via `bound_policy_counter_for`.
                         metadata: entry.metadata.clone_without_policy_counter(),
                         forwarding_generation: entry.forwarding_generation,
+                        aux: SessionLookupAux {
+                            session_id: entry.session_id,
+                            source_nat_static: entry.source_nat_static,
+                            leak_incarnation: self
+                                .leak_incarnations
+                                .get(&record.key)
+                                .copied()
+                                .unwrap_or(0),
+                        },
                     },
                     entry.origin,
                 ),
@@ -1321,6 +1348,7 @@ impl SessionTable {
             decision: entry.decision,
             metadata: entry.metadata,
             forwarding_generation: entry.forwarding_generation,
+                aux: SessionLookupAux::default(),
         })
     }
 

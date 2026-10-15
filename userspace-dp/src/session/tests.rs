@@ -447,6 +447,10 @@ fn session_lookup_hits_after_install() {
             decision: decision(),
             metadata: metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux {
+                session_id: 1,
+                ..SessionLookupAux::default()
+            },
         })
     );
     let deltas = table.drain_deltas(8);
@@ -1929,6 +1933,10 @@ fn tcp_fin_keeps_session_until_closing_timeout() {
             decision: decision(),
             metadata: metadata(),
             forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux {
+                session_id: 1,
+                ..SessionLookupAux::default()
+            },
         })
     );
     // #9412: the FIN moves the session to CLOSING, which is announced once so
@@ -2742,6 +2750,10 @@ fn synced_sessions_do_not_emit_deltas() {
             decision: decision(),
             metadata: synced_meta,
             forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux {
+                session_id: 1,
+                ..SessionLookupAux::default()
+            },
         })
     );
     assert!(table.drain_deltas(8).is_empty());
@@ -2785,6 +2797,7 @@ fn upsert_synced_does_not_clobber_live_local_session() {
         .expect("live session");
     assert_eq!(hit.metadata, live);
     assert_eq!(hit.decision, decision());
+
 }
 
 #[test]
@@ -2850,6 +2863,10 @@ fn promote_synced_forward_session_emits_open_delta() {
             decision: decision(),
             metadata: promoted.clone(),
             forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux {
+                session_id: 1,
+                ..SessionLookupAux::default()
+            },
         })
     );
     let deltas = table.drain_deltas(8);
@@ -2893,6 +2910,10 @@ fn promote_synced_reverse_session_stays_quiet() {
             decision: decision(),
             metadata: promoted,
             forwarding_generation: ForwardingGenerationStamp::default(),
+                aux: SessionLookupAux {
+                session_id: 1,
+                ..SessionLookupAux::default()
+            },
         })
     );
     assert!(table.drain_deltas(8).is_empty());
@@ -10863,4 +10884,51 @@ fn ipsec_reply_alias_bucket_overflow_refuses_install_9506() {
         8,
         "overflow must not partially install a record"
     );
+}
+
+#[test]
+fn single_probe_install_and_lookup_carry_aux_fields_13079() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    let now = 1_000_000_000u64;
+    assert!(
+        table.install_with_protocol_with_origin_and_source_nat(
+            key.clone(),
+            decision(),
+            metadata(),
+            SessionOrigin::ForwardFlow,
+            now,
+            PROTO_TCP,
+            0x02,
+            Some(false),
+        ),
+        "forward install must succeed"
+    );
+    let installed = table
+        .installed_session_info(&key)
+        .expect("single-probe install info must describe the live entry");
+    assert_ne!(installed.session_id, 0, "install probe session id");
+    assert_eq!(installed.source_nat_static, Some(false));
+    assert_ne!(installed.timeout_secs, 0, "install probe timeout");
+    assert_eq!(
+        installed.handshake_state_wire,
+        table.handshake_state_wire_for(&key),
+        "install snapshot matches the entry's wire handshake state"
+    );
+    assert_eq!(installed.session_id, table.session_id_for(&key));
+    assert_eq!(installed.timeout_secs, table.timeout_secs_for(&key));
+    assert_eq!(
+        installed.handshake_state_wire,
+        table.handshake_state_wire_for(&key)
+    );
+
+    table.stamp_leak_incarnation(&key, 73);
+
+    let hit = table
+        .lookup(&key, now + 1_000_000, 0x10)
+        .expect("installed session must hit");
+    assert_eq!(hit.decision, decision());
+    assert_eq!(hit.aux.session_id, installed.session_id);
+    assert_eq!(hit.aux.source_nat_static, installed.source_nat_static);
+    assert_eq!(hit.aux.leak_incarnation, 73);
 }
