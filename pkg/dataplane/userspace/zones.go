@@ -156,8 +156,8 @@ func wgFanUpBaseRows(cfg *config.Config) map[string]bool {
 
 // hostInboundUnzonedFanUpBaseRows identifies physical snapshot rows whose
 // zone is derived solely from tagged unit membership and whose netdev is not
-// also owned by an untagged unit. Such a row describes untagged parent traffic,
-// not the tagged unit's zone.
+// also owned by an untagged unit. A unique native VLAN is an exception only
+// when its matching unit has a surviving snapshot zone.
 func hostInboundUnzonedFanUpBaseRows(cfg *config.Config, snaps []InterfaceSnapshot) map[string]bool {
 	fanUp := wgFanUpBaseRows(cfg)
 	if len(fanUp) == 0 {
@@ -169,7 +169,7 @@ func hostInboundUnzonedFanUpBaseRows(cfg *config.Config, snaps []InterfaceSnapsh
 			untaggedNetdevs[snap.LinuxName] = true
 		}
 	}
-	nativeUnits := nativeVLANUnitRefs(cfg)
+	nativeUnits := nativeVLANUnitRefs(cfg, snaps)
 	rows := make(map[string]bool)
 	for _, snap := range snaps {
 		if snap.IsUnit || !fanUp[snap.Name] {
@@ -181,7 +181,7 @@ func hostInboundUnzonedFanUpBaseRows(cfg *config.Config, snaps []InterfaceSnapsh
 		if ifc := cfg.Interfaces.Interfaces[snap.Name]; ifc != nil && ifc.Units[0] != nil {
 			continue
 		}
-		if nativeUnits[snap.Name] != "" {
+		if nativeUnits[snap.Name].name != "" {
 			continue
 		}
 		if !untaggedNetdevs[snap.LinuxName] {
@@ -191,14 +191,25 @@ func hostInboundUnzonedFanUpBaseRows(cfg *config.Config, snaps []InterfaceSnapsh
 	return rows
 }
 
-// nativeVLANUnitRefs returns base-interface refs whose configured native VLAN
-// resolves to exactly one valid unit. Unresolved and ambiguous native VLANs
-// deliberately have no entry: their untagged parent traffic remains unzoned.
-func nativeVLANUnitRefs(cfg *config.Config) map[string]string {
+// nativeVLANUnitRefs returns each base’s unique native unit only when that
+// unit survives snapshot classification in a zone. Unresolved, ambiguous,
+// unzoned, or quarantined native units leave the parent on the unzoned path.
+type nativeVLANUnitOwner struct {
+	name string
+	zone string
+}
+
+func nativeVLANUnitRefs(cfg *config.Config, snaps []InterfaceSnapshot) map[string]nativeVLANUnitOwner {
 	if cfg == nil {
 		return nil
 	}
-	refs := make(map[string]string)
+	unitZones := make(map[string]string, len(snaps))
+	for _, snap := range snaps {
+		if snap.IsUnit {
+			unitZones[snap.Name] = snap.Zone
+		}
+	}
+	owners := make(map[string]nativeVLANUnitOwner)
 	for name, iface := range cfg.Interfaces.Interfaces {
 		if iface == nil || iface.NativeVlanID <= 0 || iface.NativeVlanID > 4094 {
 			continue
@@ -212,9 +223,14 @@ func nativeVLANUnitRefs(cfg *config.Config) map[string]string {
 			matches++
 			unitRef = fmt.Sprintf("%s.%d", name, unitNum)
 		}
-		if matches == 1 {
-			refs[name] = unitRef
+		if matches != 1 {
+			continue
 		}
+		unitZone, exists := unitZones[unitRef]
+		if !exists || unitZone == "" {
+			continue
+		}
+		owners[name] = nativeVLANUnitOwner{name: unitRef, zone: unitZone}
 	}
-	return refs
+	return owners
 }
