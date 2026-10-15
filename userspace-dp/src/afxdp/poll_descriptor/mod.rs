@@ -349,7 +349,7 @@ use cookie_reply::{SynCookieReply, enqueue_syn_cookie_reply};
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
 use prerouting_scope::{PreroutingIngressScope, prerouting_ingress_scope};
 use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply, enqueue_session_miss_rst};
-use resolver_enqueue::try_enqueue_resolver;
+use resolver_enqueue::{note_kernel_probe, probe_throttled, try_enqueue_resolver};
 
 use filter::{
     NonPbrInputFilterEval, SessionHitInputFilterEval, SessionHitPbrRouteRevalidation,
@@ -9502,14 +9502,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // (else trigger_kernel_arp_probe — a raw
                                     // socket open/setsockopt/sendto/close — would
                                     // run per packet; AGY #1912 r1 High).
-                                    let tunnel_throttled = outer_if_distinct
-                                        && matches!(
-                                            binding
-                                                .resolver_enqueue_throttle
-                                                .get(&throttle_key),
-                                            Some(&t) if now_ns.saturating_sub(t)
-                                                < RESOLVER_ENQUEUE_THROTTLE_NS
-                                        );
+                                    // Apply the rate limit to every unresolved
+                                    // neighbor, not only distinct tunnel outer
+                                    // hops. Capacity and NAT64 misses are not
+                                    // retained in pending_neigh, so key dedup
+                                    // alone otherwise permits a syscall per RX.
+                                    let is_probe_throttled = probe_throttled(
+                                        &binding.resolver_enqueue_throttle,
+                                        &throttle_key,
+                                        now_ns,
+                                    );
                                     // Only spawn ping if we don't already have a
                                     // pending probe for this (ifindex, hop).
                                     // #1771 §2.2: pending_neigh is keyed by
@@ -9535,18 +9537,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // this never suppresses (byte-identical).
                                     let tunnel_without_outer = tunnel_marked && !outer_if_distinct;
                                     if !already_probing
-                                        && !tunnel_throttled
+                                        && !is_probe_throttled
                                         && !tunnel_without_outer
                                     {
-                                        let iface_name = worker_ctx
+                                        if let Some(name) = worker_ctx
                                             .forwarding
                                             .ifindex_to_name
                                             .get(&neigh_if)
-                                            .cloned();
-                                        if let Some(name) = iface_name {
+                                            .map(String::as_str)
+                                        {
                                             // Fast path: ICMP socket triggers kernel ARP
                                             // in microseconds (no fork/exec).
-                                            if trigger_kernel_arp_probe(&name, neigh_if, next_hop) {
+                                            if trigger_kernel_arp_probe(name, neigh_if, next_hop) {
                                                 worker_ctx.dynamic_neighbors.record_neighbor_probe(
                                                     throttle_key,
                                                     monotonic_nanos(),
@@ -9568,7 +9570,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // resolver re-reads the SAME throttle entry
                                     // and bumps it once, so the probe above and
                                     // this enqueue share one window per key.
-                                    if outer_if_distinct && !tunnel_throttled {
+                                    if outer_if_distinct && !is_probe_throttled {
                                         if let Some(resolver) = worker_ctx.neighbor_resolver {
                                             try_enqueue_resolver(
                                                 resolver,
@@ -9578,19 +9580,27 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 now_ns,
                                             );
                                         } else {
-                                            // No resolver (probe-only build): bump
-                                            // the throttle directly so the probe
-                                            // above is still rate-limited to one
-                                            // per window. Bounded like the neg
-                                            // cache.
-                                            let throttle = &mut binding.resolver_enqueue_throttle;
-                                            if throttle.len() >= MAX_NEG_NEIGH_CACHE
-                                                && !throttle.contains_key(&throttle_key)
-                                            {
-                                                throttle.clear();
-                                            }
-                                            throttle.insert(throttle_key, now_ns);
+                                            let _ = note_kernel_probe(
+                                                &mut binding.resolver_enqueue_throttle,
+                                                &worker_ctx.forwarding.ifindex_to_name,
+                                                throttle_key,
+                                                now_ns,
+                                            );
                                         }
+                                    } else if !tunnel_marked
+                                        && !already_probing
+                                        && !is_probe_throttled
+                                    {
+                                        // Capacity/NAT64 misses aren't retained
+                                        // in pending_neigh. Record the probe
+                                        // attempt, including syscall failure, to
+                                        // bound subsequent raw-socket work.
+                                        let _ = note_kernel_probe(
+                                            &mut binding.resolver_enqueue_throttle,
+                                            &worker_ctx.forwarding.ifindex_to_name,
+                                            throttle_key,
+                                            now_ns,
+                                        );
                                     }
                                 }
                                 // #5174: NAT64 MissingNeighbor fail-closed. The kernel
