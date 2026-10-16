@@ -56,7 +56,9 @@ pub(crate) fn handle_refresh_owner_rgs_for_test(
         owner_rgs, now_ns, now_secs,
     )
 }
-use promote::{purge_translated_synced_hit, should_keep_synced_hit_transient};
+use promote::should_keep_synced_hit_transient;
+#[cfg(test)]
+use promote::purge_translated_synced_hit;
 
 mod resolution;
 mod worker_commands;
