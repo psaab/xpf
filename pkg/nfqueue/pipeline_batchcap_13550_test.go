@@ -117,11 +117,10 @@ func TestEarlyCompletionThenRefusalCountsUncertainAndRetires13550(t *testing.T) 
 		t.Fatalf("stats = %+v, want Refused=1 and Uncertain=1 for early completion before refusal", stats)
 	}
 	p.mu.Lock()
-	flow := p.flows[frame.FlowKey]
-	retired := flow != nil && flow.retired
+	flowPresent := p.flows[frame.FlowKey] != nil
 	p.mu.Unlock()
-	if !retired {
-		t.Fatalf("flow not retired after early completion + refusal; queued follower remains replayable")
+	if flowPresent {
+		t.Fatalf("flow entry remains after uncertain refusal; queued follower could poison future packets")
 	}
 	// Both head (refusal) and follower (retire) must be terminal DROP.
 	if len(sink.verdicts) != 2 {

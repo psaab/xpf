@@ -268,7 +268,6 @@ type flowState struct {
 	frames      []CaptureFrame
 	pending     *pendingReinject
 	dispatching bool
-	retired     bool
 }
 
 // fragmentDenyKey is deliberately narrower than the legacy FragPool key. It
@@ -647,10 +646,6 @@ func (p *CapturePipeline) enqueueFlowLocked(frame CaptureFrame) []CaptureFrame {
 		flow = &flowState{}
 		p.flows[flowKey] = flow
 	}
-	if flow.retired {
-		p.stats.FlowRetires++
-		return []CaptureFrame{frame}
-	}
 	flow.frames = append(flow.frames, frame)
 	return nil
 }
@@ -658,7 +653,7 @@ func (p *CapturePipeline) enqueueFlowLocked(frame CaptureFrame) []CaptureFrame {
 func (p *CapturePipeline) eligibleLocked() []CaptureFrame {
 	owners := make(map[string][]CaptureFrame)
 	for _, flow := range p.flows {
-		if flow.retired || flow.pending != nil || flow.dispatching || len(flow.frames) == 0 {
+		if flow.pending != nil || flow.dispatching || len(flow.frames) == 0 {
 			continue
 		}
 		frame := flow.frames[0]
@@ -1298,14 +1293,12 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 func (p *CapturePipeline) retireFlow(key string) {
 	p.mu.Lock()
 	flow := p.flows[key]
-	if flow == nil || flow.retired {
+	if flow == nil {
 		p.mu.Unlock()
 		return
 	}
-	flow.retired = true
 	remaining := append([]CaptureFrame(nil), flow.frames...)
-	flow.frames = nil
-	flow.pending = nil
+	delete(p.flows, key)
 	p.mu.Unlock()
 	for _, frame := range remaining {
 		p.finishFrame(frame, VerdictDrop)
@@ -1452,7 +1445,6 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 			flow.pending = nil
 			drops = append(drops, flow.frames...)
 			flow.frames = nil
-			flow.retired = true
 			delete(p.flows, flowKey)
 		}
 		for {
