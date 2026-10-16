@@ -55,6 +55,9 @@ pub(super) fn enqueue_route_reject_reply(
     flow: Option<&SessionFlow>,
     counters: &mut BatchCounters,
 ) -> bool {
+    // The caller supplies the physical AF_XDP bind port for the shared
+    // synthetic-fabric-source guard. The helper resolves the logical VLAN
+    // unit itself for reply building and output classification.
     enqueue_reject_reply(
         tx_pipeline,
         forwarding,

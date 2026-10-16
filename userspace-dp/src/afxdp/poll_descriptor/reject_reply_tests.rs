@@ -3514,6 +3514,32 @@ fn route_reject_tcp_and_udp_emit_icmp_unreachable_14021() {
 }
 
 #[test]
+fn route_reject_suppresses_synthetic_fabric_source_14021() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let mut forwarding = stamped_fabric_reject_forwarding();
+    // Distinguish the physical fabric parent from its VLAN logical unit:
+    // the old route arm passed 5 to the synthetic-source guard instead of 21.
+    forwarding.ingress_logical_ifindex.insert((21, 0), 5);
+    let stamp = producer_minted_v2_reject_stamp(&mut forwarding);
+    let (mut frame, mut meta, _flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    meta.ingress_ifindex = 21;
+    meta.ingress_vlan_id = 0;
+    frame[6..12].copy_from_slice(&stamp);
+    let mut pipeline = tx_pipeline(64, 64);
+    let mut counters = BatchCounters::default();
+    assert!(!enqueue_route_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        21,
+        &frame,
+        meta,
+        None,
+        &mut counters,
+    ));
+    assert!(pipeline.pending_tx_local.is_empty());
+}
+
+#[test]
 fn route_reject_suppressed_and_rate_limited_fail_closed_14021() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
     use crate::afxdp::icmp_ratelimit::{
