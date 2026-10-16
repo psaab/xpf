@@ -4144,13 +4144,14 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 		}
 	})
 
-	// Degrade-safe: an upto with no usable length (UptoLen 0) must fall
-	// back to the orlonger-equivalent default and never emit an invalid
-	// FRR line.
+	// An upto with no usable length (UptoLen 0) is strict-invalid
+	// (#12067): the renderer degrades it to the orlonger-equivalent
+	// default, but #14137 treats the term's match set as unknowable —
+	// an accept term emits no sequence rather than widening to `le 32`.
 	t.Run("v4_upto_zero_degrades_to_default", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("10.0.0.0/8", 0))
-		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/8 le 32\n") {
-			t.Errorf("UptoLen 0 must degrade to default 'le 32', got:\n%s", got)
+		if strings.Contains(got, "permit 10.0.0.0/8") {
+			t.Errorf("UptoLen 0 accept must emit NO permit line (#14137), got:\n%s", got)
 		}
 		if strings.Contains(got, "ge ") {
 			t.Errorf("degrade path must not emit 'ge', got:\n%s", got)
@@ -4207,12 +4208,13 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 	})
 
 	// A /0 prefix with UptoLen 0 is the zero-value collision between
-	// "unset length" and "plen 0". It must degrade to the orlonger
-	// default (le 32), NOT silently render exact (Codex #2102 MAJOR #2).
+	// "unset length" and "plen 0". #14137: strict-invalid (#12067), so
+	// the accept term emits no sequence rather than degrading to the
+	// orlonger default `le 32` or silently rendering exact.
 	t.Run("v4_default_route_unset_upto_degrades_not_exact", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("0.0.0.0/0", 0))
-		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 0.0.0.0/0 le 32\n") {
-			t.Errorf("/0 with unset upto must degrade to 'le 32', not exact, got:\n%s", got)
+		if strings.Contains(got, "permit 0.0.0.0/0") {
+			t.Errorf("/0 with unset upto must emit NO permit line (#14137), got:\n%s", got)
 		}
 	})
 
@@ -4676,9 +4678,9 @@ func TestRouteFilterOrlongerMaxLengthValid(t *testing.T) {
 // belt-and-suspenders: a malformed prefix (which the commit validator
 // rejects, but the lenient load/HA-sync path can still feed to the
 // renderer) must NEVER produce an FRR prefix-list ENTRY. A lone
-// malformed prefix still emits the match line (fail-closed via an
-// undefined list → NOMATCH → DENY); a valid prefix alongside it
-// survives.
+// malformed prefix on an accept term emits NO sequence at all (#14137:
+// the term falls through rather than carrying a dangling match against
+// an undefined list); a valid prefix alongside it survives.
 func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
 	inlineName := inlinePrefixListName("p", "p", "t1", "")
 	inlineV4Name := inlinePrefixListName("p", "p", "t1", "_v4")
@@ -4692,8 +4694,13 @@ func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
 		if strings.Contains(got, "prefix-list "+inlineName+" seq") {
 			t.Errorf("lone malformed prefix must NOT materialise a prefix-list entry, got:\n%s", got)
 		}
-		if !strings.Contains(got, "address prefix-list "+inlineName+"\n") {
-			t.Errorf("lone malformed prefix must still emit the fail-closed match line, got:\n%s", got)
+		// #14137: an all-invalid accept term emits no sequence (falls
+		// through to the policy default) — never a dangling match.
+		if strings.Contains(got, "address prefix-list "+inlineName) {
+			t.Errorf("lone malformed prefix must NOT emit a dangling match line (#14137), got:\n%s", got)
+		}
+		if strings.Contains(got, "route-map p permit") {
+			t.Errorf("lone malformed accept must NOT degrade to a permit sequence, got:\n%s", got)
 		}
 	})
 
@@ -4724,13 +4731,13 @@ func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
 				t.Errorf("bad-address prefix %q must emit no permit line, got:\n%s", bad, got)
 			}
 			// No prefix-list ENTRY materialises (a count==0 list is FRR
-			// match-ALL); but the term still emits the match line so it is
-			// fail-closed (undefined list → NOMATCH → DENY).
+			// match-ALL); #14137: the all-invalid accept term emits no
+			// sequence at all rather than a dangling match line.
 			if strings.Contains(got, "prefix-list "+inlineName+" seq") {
 				t.Errorf("lone bad-address prefix %q must NOT materialise a prefix-list entry, got:\n%s", bad, got)
 			}
-			if !strings.Contains(got, "match ") || !strings.Contains(got, "address prefix-list "+inlineName+"\n") {
-				t.Errorf("lone bad-address prefix %q must still emit the fail-closed match line, got:\n%s", bad, got)
+			if strings.Contains(got, "address prefix-list "+inlineName) {
+				t.Errorf("lone bad-address prefix %q must NOT emit a dangling match line (#14137), got:\n%s", bad, got)
 			}
 		}
 	})
@@ -4751,9 +4758,9 @@ func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
 	// A valid v6 prefix alongside a malformed "v4-ish" index-0 prefix
 	// ("garbage" has no colon → the family heuristic buckets it v4). As of
 	// #2607 the term is mixed-family (one v4-bucketed, one v6) and SPLITS:
-	// the v4 sequence carries only the skipped "garbage" → no entry, but a
-	// fail-closed `match ip address prefix-list <derived _v4 name>` line; the v6
-	// sequence carries the valid /64 → an entry in the derived _v6 list plus a
+	// #14137: the all-invalid v4 group emits NO sequence (the accept term
+	// falls through for v4) rather than a dangling match; the v6 sequence
+	// carries the valid /64 → an entry in the derived _v6 list plus a
 	// `match ipv6 address prefix-list <derived _v6 name>` line.
 	t.Run("malformed_index0_then_valid_v6_splits", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
@@ -4765,8 +4772,8 @@ func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
 		if !strings.Contains(got, "match ipv6 address prefix-list "+inlineV6Name+"\n") {
 			t.Errorf("v6 sequence match line missing, got:\n%s", got)
 		}
-		if !strings.Contains(got, "match ip address prefix-list "+inlineV4Name+"\n") {
-			t.Errorf("v4 sequence fail-closed match line missing, got:\n%s", got)
+		if strings.Contains(got, "match ip address prefix-list "+inlineV4Name) {
+			t.Errorf("v4 group must NOT emit a dangling match line (#14137), got:\n%s", got)
 		}
 		if strings.Contains(got, "permit garbage") {
 			t.Errorf("malformed index-0 prefix must be skipped, got:\n%s", got)
@@ -5415,22 +5422,23 @@ func TestGeneratePolicyOptionsPrefixLengthRangeAtOrBelowBaseSkipped(t *testing.T
 			t.Errorf("emitted FRR-invalid %q (ge <= base prefix) — would brick frr-reload (#2525/#1880):\n%s", bad, got)
 		}
 	}
-	// The entries are skipped, so no prefix-list line exists; the match line is
-	// still emitted (fail-closed RMAP_NOMATCH).
+	// The entries are skipped, so no prefix-list line exists; #14137: the
+	// all-invalid accept terms emit no sequence (fall through to the
+	// policy default) rather than a dangling match line.
 	if strings.Contains(got, "prefix-list "+atBaseName+" seq") || strings.Contains(got, "prefix-list "+belowBaseName+" seq") {
 		t.Errorf("at/below-base range must emit NO prefix-list line:\n%s", got)
 	}
-	if !strings.Contains(got, "match ip address prefix-list "+atBaseName) {
-		t.Errorf("at-base term must still emit a match line (fail-closed):\n%s", got)
+	if strings.Contains(got, "match ip address prefix-list "+atBaseName) || strings.Contains(got, "match ip address prefix-list "+belowBaseName) {
+		t.Errorf("at/below-base term must NOT emit a dangling match line (#14137):\n%s", got)
 	}
 }
 
 // TestGeneratePolicyOptionsThroughSkipped verifies that the FRR-unsupported
 // "through" match-type (which only reaches the renderer on the tolerant
 // load/peer-sync path — the strict commit gate rejects it) renders NO
-// prefix-list line and NEVER the open-ended "le 32" fall-through (#2525). The
-// match line is still emitted, so the term resolves to RMAP_NOMATCH (DENY) —
-// fail-closed, not a silent permit.
+// prefix-list line and NEVER the open-ended "le 32" fall-through (#2525).
+// #14137: the all-invalid accept term emits no sequence (falls through
+// to the policy default) rather than a dangling match line.
 func TestGeneratePolicyOptionsThroughSkipped(t *testing.T) {
 	m := &Manager{frrConf: "/dev/null"}
 	po := &config.PolicyOptionsConfig{
@@ -5460,10 +5468,11 @@ func TestGeneratePolicyOptionsThroughSkipped(t *testing.T) {
 	if strings.Contains(got, "10.0.0.0/8 le 32") {
 		t.Errorf("through entry leaked the open-ended le 32 fall-through (#2525):\n%s", got)
 	}
-	// Fail-closed: the match line referencing the (now-empty) list is still
-	// emitted, so FRR resolves it to RMAP_NOMATCH (DENY).
-	if !strings.Contains(got, "match ip address prefix-list "+inlineName) {
-		t.Errorf("through term must still emit a match line (fail-closed DENY):\n%s", got)
+	if strings.Contains(got, "match ip address prefix-list "+inlineName) {
+		t.Errorf("through term must NOT emit a dangling match line (#14137):\n%s", got)
+	}
+	if strings.Contains(got, "route-map P permit") {
+		t.Errorf("through accept must NOT degrade to a permit sequence (#14137):\n%s", got)
 	}
 }
 

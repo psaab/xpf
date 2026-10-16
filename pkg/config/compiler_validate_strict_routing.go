@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -1579,18 +1580,17 @@ func failClosedInheritedInvalidRouteFilters12687(cfg *Config) {
 				if rf == nil || !rf.inherited {
 					continue
 				}
+				// The quarantine narrows `through` to a malformed
+				// operand only: a valid through is unrenderable but
+				// historically tolerated (#12687), and RouteFilter-
+				// EntrySkipped flags every through — so test the
+				// operand here and the shared predicate otherwise.
 				invalid := false
-				switch rf.MatchType {
-				case "upto":
-					invalid = rf.UptoLen == 0
-				case "prefix-length-range":
-					invalid = validatePrefixLengthRange(rf) != nil
-				case "through":
+				if rf.MatchType == "through" {
 					_, err := parseCIDRStrict(rf.ThroughPrefix, "10.0.0.0/24")
 					invalid = err != nil
-				case "exact", "longer", "orlonger":
-				default:
-					invalid = true
+				} else {
+					invalid = RouteFilterEntrySkipped(rf)
 				}
 				if invalid {
 					term.NextPolicy = false
@@ -1599,6 +1599,67 @@ func failClosedInheritedInvalidRouteFilters12687(cfg *Config) {
 				}
 			}
 		}
+	}
+}
+
+// RouteFilterEntrySkipped reports whether the FRR renderer would skip rf
+// as INVALID: a malformed prefix, an unknown or `through` match-type, a
+// malformed / out-of-range / at-or-below-base prefix-length-range, or an
+// invalid upto. It is the single source of truth for "this entry's match
+// set is unknowable", shared by the tolerant quarantine above and the
+// FRR route-filter term rule (#14137) so the two cannot drift. A
+// max-length `longer` is NOT skipped: that entry is valid with an
+// honestly empty match set, so no consumer may broaden it to deny-all.
+func RouteFilterEntrySkipped(rf *RouteFilter) bool {
+	if rf == nil {
+		return true
+	}
+	if _, _, err := net.ParseCIDR(rf.Prefix); err != nil {
+		return true
+	}
+	switch rf.MatchType {
+	case "exact", "orlonger", "longer":
+		return false
+	case "upto":
+		// Mirror renderRouteFilterEntry's upto arm: UptoLen==0 with
+		// plen<maxLen degrades to the open-ended `le maxLen`, but the
+		// strict gate rejects it as unparseable (#12067) — unknowable,
+		// not empty. An explicit length below the base or above the
+		// family max is likewise invalid; the boundary equal cases
+		// render an exact-equivalent bare permit and stay valid.
+		parts := strings.SplitN(rf.Prefix, "/", 2)
+		if len(parts) != 2 {
+			return true
+		}
+		plen, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return true
+		}
+		maxLen := 32
+		if strings.Contains(rf.Prefix, ":") {
+			maxLen = 128
+		}
+		if rf.UptoLen <= 0 {
+			// Renderable only on a max-length base, where the
+			// renderer emits the bare exact prefix; below max it
+			// degrades to the open-ended `le maxLen`, which the
+			// strict gate rejects as unparseable (#12067).
+			return plen < maxLen
+		}
+		if plen >= maxLen {
+			// Any explicit length on a max-length base renders the
+			// bare exact prefix (#2102) — valid, not skipped.
+			return false
+		}
+		return rf.UptoLen < plen || rf.UptoLen > maxLen
+	case "prefix-length-range":
+		return validatePrefixLengthRange(rf) != nil
+	case "through":
+		// FRR has no lossless equivalent regardless of whether the
+		// through operand parses (#2525); the match set is unknowable.
+		return true
+	default:
+		return true
 	}
 }
 
