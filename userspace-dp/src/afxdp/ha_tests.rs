@@ -1017,6 +1017,93 @@ fn upsert_synced_session_refuses_stale_generation_install() {
         "a legitimate newer install must not bump the stale-refusal counter"
     );
 }
+// #13709: the generation/ownership guards must evaluate the entry stored
+// when the tuple lease is held, not the snapshot taken before it. The hook
+// installs a replacement deterministically in that window; on current
+// master the gen-1 import then overwrites the gen-5 entry.
+#[test]
+fn upsert_stale_generation_arriving_during_snapshot_window_is_refused_13709() {
+    let coordinator = Coordinator::new();
+    let key = test_key();
+    let domain = coordinator.session_domain().clone();
+    let replacement = synced_entry_with_generation(5);
+    domain.set_synced_upsert_after_snapshot_hook_for_test(move |domain, _key| {
+        crate::afxdp::shared_ops::publish_shared_session(
+            &domain.sessions.synced,
+            &domain.sessions.nat,
+            &domain.sessions.forward_wire,
+            &domain.sessions.owner_rg_indexes,
+            &replacement,
+        );
+    });
+    let outcome = coordinator.upsert_synced_session(synced_entry_with_generation(1));
+    assert_eq!(
+        outcome,
+        super::session_import::SyncedImportOutcome::RejectedStaleGeneration,
+        "#13709: stale import racing a newer install must be refused under the lease"
+    );
+    assert_eq!(
+        synced_generation(&coordinator, &key),
+        Some(5),
+        "#13709: stale import overwrote the newer stored generation"
+    );
+}
+
+// #13709 local-ownership twin: a local-promoted entry installed in the
+// snapshot window must not be overwritten by a peer-synced import.
+#[test]
+fn upsert_peer_against_local_arriving_during_snapshot_window_keeps_local_13709() {
+    let coordinator = Coordinator::new();
+    let key = test_key();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    coordinator.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
+        1,
+        active_ha_runtime(now_secs),
+    )])));
+    let domain = coordinator.session_domain().clone();
+    let mut local = synced_entry_with_generation(5);
+    local.origin = SessionOrigin::ForwardFlow;
+    assert!(
+        !synced_entry_allows_local_replace(
+            &coordinator.ha.rg_runtime.load(),
+            1,
+            monotonic_nanos() / 1_000_000_000,
+        ),
+        "fixture must make RG 1 locally forwarding-active"
+    );
+    let replacement = local.clone();
+    domain.set_synced_upsert_after_snapshot_hook_for_test(move |domain, _key| {
+        crate::afxdp::shared_ops::publish_shared_session(
+            &domain.sessions.synced,
+            &domain.sessions.nat,
+            &domain.sessions.forward_wire,
+            &domain.sessions.owner_rg_indexes,
+            &replacement,
+        );
+    });
+    let outcome = coordinator.upsert_synced_session(synced_entry_with_generation(6));
+    assert_eq!(
+        outcome,
+        super::session_import::SyncedImportOutcome::Applied,
+        "a peer import refused by local ownership remains a non-error apply"
+    );
+    let stored = coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("shared sessions")
+        .get(&key)
+        .cloned();
+    assert_eq!(
+        stored.as_ref().map(|entry| entry.generation),
+        Some(5),
+        "#13709: peer import overwrote a local entry installed in the window"
+    );
+    assert!(
+        stored.is_some_and(|entry| !entry.origin.is_peer_synced()),
+        "#13709: stored entry lost local ownership to the racing peer import"
+    );
+}
 
 // ── #5674: synced-import aggregate admission bound (coordinator) ──────
 //
