@@ -516,8 +516,9 @@ impl Nptv6State {
                 && prefix_matches(&words, &rule.external_prefix, rule.prefix_words)
             {
                 // RFC 6296 §3.5 forbids the /48 0xFFFF subnet on a
-                // non-neutral mapping; §3.7 explicitly says an all-zero IID
-                // MUST be dropped. An all-ones /64 IID has no adjustment word.
+                // non-neutral mapping; §3.7 explicitly requires dropping
+                // all-zero IIDs. The all-ones /64 edge has no adjustment word.
+                // Preserve the input check and also check the adjusted IID.
                 if (rule.prefix_words == 3
                     && words[3] == 0xFFFF
                     && !is_zero_adjustment(rule.adjustment))
@@ -539,6 +540,11 @@ impl Nptv6State {
                 if !is_zero_adjustment(rule.adjustment) {
                     let inv_adj = !rule.adjustment; // ones-complement NOT
                     words[adj_word] = adjust_word(words[adj_word], inv_adj);
+                }
+                // The inverse adjustment can turn a nonzero external IID
+                // into all-zero; RFC 6296 §3.7 requires dropping that result.
+                if iid_is_all_zero(&words, rule.prefix_words) {
+                    return Nptv6Translation::Untranslatable;
                 }
                 *dst = words_to_ipv6(&words);
                 return Nptv6Translation::Translated;
@@ -599,6 +605,11 @@ impl Nptv6State {
                 // pair, whose prefix swap is already checksum-neutral.
                 if !is_zero_adjustment(rule.adjustment) {
                     words[adj_word] = adjust_word(words[adj_word], rule.adjustment);
+                }
+                // The forward adjustment can turn a nonzero internal IID
+                // into all-zero too; keep the outbound path symmetric.
+                if iid_is_all_zero(&words, rule.prefix_words) {
+                    return Nptv6Translation::Untranslatable;
                 }
                 *src = words_to_ipv6(&words);
                 return Nptv6Translation::Translated;
