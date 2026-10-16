@@ -262,11 +262,9 @@ pub(in crate::afxdp) struct ResolvedSessionLookup {
     pub(in crate::afxdp) lookup: SessionLookup,
     pub(in crate::afxdp) shared_entry: Option<SyncedSessionEntry>,
     pub(in crate::afxdp) origin: SessionOrigin,
-    /// #10636: this lookup went through the close-deferring variant, so a
-    /// TCP close the packet carries is NOT yet applied. The poll site applies
-    /// it after an Owner authority verdict and drops it with a foreign
-    /// arrival. True only for local hits; shared entries never defer.
-    pub(in crate::afxdp) close_deferred: bool,
+    /// #13938: this local hit lookup deferred every packet-state mutation
+    /// until the #9519 authority verdict, not only TCP close state.
+    pub(in crate::afxdp) authority_deferred: bool,
 }
 
 impl ResolvedSessionLookup {
@@ -276,7 +274,7 @@ impl ResolvedSessionLookup {
             lookup,
             shared_entry: None,
             origin,
-            close_deferred: true,
+            authority_deferred: true,
         }
     }
 
@@ -290,7 +288,7 @@ impl ResolvedSessionLookup {
             lookup,
             shared_entry: None,
             origin,
-            close_deferred: true,
+            authority_deferred: true,
         }
     }
 
@@ -310,7 +308,7 @@ impl ResolvedSessionLookup {
             },
             shared_entry: Some(entry),
             origin,
-            close_deferred: false,
+            authority_deferred: false,
         }
     }
 }
@@ -340,10 +338,12 @@ pub(in crate::afxdp) struct ResolvedFlowSessionDecision {
     /// per-packet reply repair until cache invalidation; Codex #1861
     /// r1 C1).
     pub(in crate::afxdp) install_failed: bool,
-    /// #10636: carried through from [`ResolvedSessionLookup::close_deferred`].
-    /// The poll site applies the deferred TCP close after an Owner authority
-    /// verdict (`apply_deferred_owner_close`).
-    pub(in crate::afxdp) close_deferred: bool,
+    /// The local packet hit lookup deferred session mutation until the #9519
+    /// authority verdict; shared entries do not defer a local mutation.
+    pub(in crate::afxdp) authority_deferred: bool,
+    /// #13938: carried through from [`ResolvedSessionLookup::authority_deferred`].
+    /// The poll site replays the complete hit mutation only after an Owner
+    /// verdict (`apply_deferred_owner_hit`).
     /// #12265: a stale-generation forwarding re-resolve computed during
     /// `resolve`, NOT yet persisted. The poll site persists it after an Owner
     /// authority verdict (`revalidate_forwarding_resolution`) and drops it
@@ -637,10 +637,11 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared(
     // #10886: lookup never evicts a closing pair for a SYN. The poll path
     // probes it read-only, checks authority, and only retires it after an
     // owner's new-flow policy permit.
-    // #10636: defer TCP close-state until the #9519 authority verdict names
-    // the owner (applied by `apply_deferred_owner_close` after an Owner
-    // verdict). A foreign RST/FIN must not drive close state it is dropped for.
-    match sessions.lookup_with_origin_deferring_close_expiry(key, now_ns, tcp_flags) {
+    // #13938: defer all local-hit state changes until the #9519 authority
+    // verdict names the packet's owner. Foreign packets must not promote the
+    // handshake, refresh idle time, propagate to the companion, queue HA
+    // updates, or refresh the expiry wheel.
+    match sessions.lookup_with_origin_deferring_authority(key, now_ns, tcp_flags) {
         crate::session::SessionExpiryProbe::Live((lookup, origin)) => {
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,

@@ -2105,20 +2105,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 resolved.metadata.owner_rg_id = owner_rg_id;
                             }
                         }
-                        // #10636: the resolve above deferred TCP close-state
-                        // until THIS verdict. An owner applies it now — before
-                        // the revalidation below, exactly where the inline
-                        // close used to land — while a foreign arrival drops
-                        // it with the packet: no window demotion, no #4109
-                        // companion propagation, no #9412 HA close Update.
-                        // Owner-only, not merely past-Drop: a permitted
-                        // foreign Forward must not keep a kill primitive.
-                        if foreign_arrival_zone.is_none()
-                            && resolved.close_deferred
-                            && meta.protocol == crate::ip_proto::PROTO_TCP
-                            && crate::tcp_flags::is_closing(meta.tcp_flags)
-                        {
-                            sessions.apply_deferred_owner_close(
+                        // #13938: replay every local-hit mutation only after
+                        // THIS packet's authority verdict names it an Owner.
+                        // Foreign packets retain the read-only snapshot for
+                        // their own policy/filters/host-inbound verdict but
+                        // cannot promote the handshake, refresh idle time,
+                        // mutate close state, propagate to the companion,
+                        // queue HA updates, or refresh the expiry wheel.
+                        // Owner-only: a permitted foreign Forward must not
+                        // keep any session-state mutation primitive.
+                        if foreign_arrival_zone.is_none() && resolved.authority_deferred {
+                            sessions.apply_deferred_owner_hit(
                                 &resolved.key,
                                 now_ns,
                                 meta.tcp_flags,

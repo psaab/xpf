@@ -478,7 +478,7 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
             source_nat_validation_key,
             created: false,
             install_failed: false,
-            close_deferred: hit.close_deferred,
+            authority_deferred: hit.authority_deferred,
             deferred_forwarding_revalidation,
             deferred_synced_promotion,
             deferred_shared_materialization,
@@ -652,7 +652,7 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         install_failed: !reverse_installed,
         // #10636: reverse-synthesized from a forward match (close, if any,
         // was stamped at install); never a deferred local hit.
-        close_deferred: false,
+        authority_deferred: false,
         deferred_synced_promotion: None,
         deferred_shared_materialization: None,
         deferred_forwarding_revalidation: None,

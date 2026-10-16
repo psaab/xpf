@@ -302,7 +302,7 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
     ) -> Option<(SessionLookup, SessionOrigin)> {
-        match self.lookup_with_origin_inner(key, now_ns, tcp_flags, false) {
+        match self.lookup_with_origin_inner(key, now_ns, tcp_flags, false, false) {
             SessionExpiryProbe::Live(hit) => Some(hit),
             SessionExpiryProbe::IdleCrossed | SessionExpiryProbe::Absent => None,
         }
@@ -329,7 +329,22 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_inner(key, now_ns, tcp_flags, true)
+        self.lookup_with_origin_inner(key, now_ns, tcp_flags, true, false)
+    }
+
+    /// #13938: a local hit is resolved before #9519 has decided whether this
+    /// packet owns the session. Defer every hit mutation (TCP handshake state,
+    /// refresh, companion propagation, HA updates, and wheel refresh), not
+    /// just FIN/RST close state. The poll path replays the normal lookup only
+    /// after an Owner verdict; foreign packets use the returned snapshot for
+    /// their packet-local verdict without changing the entry.
+    pub fn lookup_with_origin_deferring_authority(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        tcp_flags: u8,
+    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
+        self.lookup_with_origin_inner(key, now_ns, tcp_flags, true, true)
     }
 
     fn lookup_with_origin_inner(
@@ -338,6 +353,7 @@ impl SessionTable {
         now_ns: u64,
         tcp_flags: u8,
         defer_close: bool,
+        defer_all: bool,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
         // #964 Step 1: resolve handle from key. Direct-primary path
         // looks up via key_to_handle; alias path (NAT-translated
@@ -396,7 +412,7 @@ impl SessionTable {
             // direction refreshes a closing entry. A RST-aborted entry and
             // both TIME_WAIT halves therefore keep a fixed deadline.
             let was_closing = entry.closing;
-            let do_close = !defer_close && is_tcp && is_closing(tcp_flags);
+            let do_close = !defer_close && !defer_all && is_tcp && is_closing(tcp_flags);
             let close_progress = if do_close {
                 Self::stamp_tcp_close(entry, key, tcp_flags)
             } else {
@@ -407,15 +423,16 @@ impl SessionTable {
             // A bare reverse ACK cannot bypass the normal opening reap.
             // #10889: a non-TCP entry with an application override promotes
             // only on the first packet observed on its reverse half.
-            let promote_from_reverse = if is_tcp {
-                is_syn_ack(tcp_flags)
-                    && entry.metadata.is_reverse
-                    && (!entry.established || entry.handshake_pending)
-            } else {
-                !entry.established
-                    && entry.metadata.is_reverse
-                    && entry.metadata.inactivity_timeout_ns.is_some()
-            };
+            let promote_from_reverse = !defer_all
+                && if is_tcp {
+                    is_syn_ack(tcp_flags)
+                        && entry.metadata.is_reverse
+                        && (!entry.established || entry.handshake_pending)
+                } else {
+                    !entry.established
+                        && entry.metadata.is_reverse
+                        && entry.metadata.inactivity_timeout_ns.is_some()
+                };
             if promote_from_reverse {
                 entry.established = true;
                 if is_tcp {
@@ -424,7 +441,8 @@ impl SessionTable {
                     entry.handshake_pending = true;
                 }
             }
-            let promote_from_asymmetric_ack = is_tcp
+            let promote_from_asymmetric_ack = !defer_all
+                && is_tcp
                 && entry.syn_ack_first
                 && entry.handshake_pending
                 && entry.metadata.is_reverse
@@ -436,16 +454,17 @@ impl SessionTable {
             // With SYN-ACK-first pickup, only a reverse non-SYN, non-closing
             // ACK completes; retransmitted SYN-ACKs and closing ACKs remain
             // OPENING.
-            let handshake_completed = if entry.syn_ack_first {
-                promote_from_asymmetric_ack
-            } else {
-                is_tcp
-                    && entry.handshake_pending
-                    && !entry.metadata.is_reverse
-                    && has_ack(tcp_flags)
-                    && !has_syn(tcp_flags)
-                    && !is_closing(tcp_flags)
-            };
+            let handshake_completed = !defer_all
+                && if entry.syn_ack_first {
+                    promote_from_asymmetric_ack
+                } else {
+                    is_tcp
+                        && entry.handshake_pending
+                        && !entry.metadata.is_reverse
+                        && has_ack(tcp_flags)
+                        && !has_syn(tcp_flags)
+                        && !is_closing(tcp_flags)
+                };
             if handshake_completed {
                 entry.established = true;
                 entry.handshake_pending = false;
@@ -457,12 +476,10 @@ impl SessionTable {
             // the verdict, while a foreign packet is dropped. Ordinary hits
             // from the non-FINed half still refresh the half-close window.
             let deferred_close_segment = defer_close && is_tcp && is_closing(tcp_flags);
-            let refresh = !was_closing
-                || close_progress
-                || (!do_close
-                    && !deferred_close_segment
-                    && !entry.reset
-                    && !entry.fin_own);
+            let refresh = !defer_all
+                && (!was_closing
+                    || close_progress
+                    || (!do_close && !deferred_close_segment && !entry.reset && !entry.fin_own));
             if refresh {
                 entry.last_seen_ns = now_ns;
                 entry.expires_after_ns = if is_tcp && entry.closing {
@@ -545,27 +562,19 @@ impl SessionTable {
         // from the matched CANONICAL key (`actual_key`, not the alias lookup
         // `key`) + its own nat, exactly as `account_packet` hops reverse→forward.
         // Skipped entirely when there is nothing to propagate.
-        let state_transition =
-            propagate.close || propagate.established || propagate.handshake_completed;
+        let state_transition = !defer_all
+            && (propagate.close || propagate.established || propagate.handshake_completed);
         if state_transition {
             self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
-        }
-        // #9412/#10888: announce close-class and handshake-state transitions
-        // after companion propagation, so the forward entry's exported state
-        // reflects both directions. The emitter ignores unchanged states and
-        // peer-owned copies.
-        if state_transition {
-            self.emit_session_state_update(
-                &actual_key,
-                close_class_before,
-                handshake_state_before,
-            );
+            self.emit_session_state_update(&actual_key, close_class_before, handshake_state_before);
         }
         // Push the canonical key (NOT the alias lookup `key`) into
         // the wheel. push_to_wheel re-reads the record to compute
         // the throttled target_tick — that matches the model in the
         // plan (~100 ns per FxHashMap lookup on the slow path).
-        self.push_to_wheel(&actual_key, now_ns);
+        if !defer_all {
+            self.push_to_wheel(&actual_key, now_ns);
+        }
         SessionExpiryProbe::Live(result)
     }
 
@@ -592,6 +601,15 @@ impl SessionTable {
         entry.reset |= has_rst(tcp_flags);
         entry.fin_own |= has_fin(tcp_flags);
         progressed
+    }
+
+    /// #13938: replay the complete local hit state machine after packet
+    /// authority has accepted the session owner. The original lookup was
+    /// read-only; this second lookup preserves normal owner refresh,
+    /// handshake/close behavior, companion propagation, HA updates, and wheel
+    /// scheduling while foreign hits never reach it.
+    pub fn apply_deferred_owner_hit(&mut self, key: &SessionKey, now_ns: u64, tcp_flags: u8) {
+        let _ = self.lookup_with_origin(key, now_ns, tcp_flags);
     }
 
     /// #10636: apply a close the deferring lookup skipped, after the #9519
