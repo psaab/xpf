@@ -3929,8 +3929,8 @@ fn pre_policy_off_link_spoof_flood_leaves_capacity_untouched_13948() {
         let src = IpAddr::V4(Ipv4Addr::new(
             198,
             51,
-            (i >> 16) as u8,
             (i >> 8) as u8,
+            i as u8,
         ));
         super::super::neighbor_dispatch::learn_dynamic_neighbor_from_packet(
             &area, desc, meta, src, i as u64 + 1, &mut dedup, &state, &neighbors,
