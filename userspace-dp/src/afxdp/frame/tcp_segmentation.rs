@@ -124,6 +124,25 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
 ) -> Option<Vec<Vec<u8>>> {
+    segment_forwarded_tcp_frames_from_frame_with_commit(
+        frame,
+        meta,
+        decision,
+        forwarding,
+        apply_nat_on_fabric,
+        expected_ports,
+    )
+    .map(|frames| frames.into_iter().map(|(frame, _)| frame).collect())
+}
+
+pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    apply_nat_on_fabric: bool,
+    expected_ports: Option<(u16, u16)>,
+) -> Option<Vec<(Vec<u8>, Option<super::wg::WgEncapCommit>)>> {
     let meta = meta.into();
     if meta.protocol != PROTO_TCP {
         return None;
@@ -399,7 +418,7 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
                 &frame_out, meta, decision, forwarding,
             )?);
         } else {
-            out.push(frame_out);
+            out.push((frame_out, None));
         }
         data_offset += chunk_len;
         segment_index = segment_index.saturating_add(1);
@@ -614,7 +633,7 @@ fn encap_tunnel_segment(
     meta: ForwardPacketMeta,
     decision: &SessionDecision,
     forwarding: &ForwardingState,
-) -> Option<Vec<u8>> {
+) -> Option<(Vec<u8>, Option<super::wg::WgEncapCommit>)> {
     let kind = forwarding
         .tunnel_endpoints
         .get(&decision.resolution.tunnel_endpoint_id)
@@ -622,8 +641,12 @@ fn encap_tunnel_segment(
     match kind {
         Some(TunnelKind::Gre) => {
             encapsulate_native_gre_frame(frame_out, meta, decision, forwarding)
+                .map(|frame| (frame, None))
         }
-        Some(TunnelKind::WireGuard) => wg::wg_encap_frame(frame_out, meta, decision, forwarding),
+        Some(TunnelKind::WireGuard) => {
+            wg::wg_encap_frame_with_commit(frame_out, meta, decision, forwarding)
+                .map(|(frame, commit)| (frame, Some(commit)))
+        }
         // Unknown mode or missing endpoint row: fail closed.
         Some(TunnelKind::Unknown) | None => None,
     }
@@ -1039,7 +1062,6 @@ mod mode_aware_segmentation_tests {
         );
         assert_eq!(inner_lengths.iter().copied().max(), Some(route_mtu));
     }
-
 
     // ------- (b) encap dispatch -------------------------------------
 
@@ -1779,15 +1801,12 @@ mod mode_aware_segmentation_tests {
         meta.l4_offset = (14 + 40 + 12) as u16;
         assert!(ipv6_ah_sighted(&frame, libc::AF_INET6 as u8, 14));
         assert!(
-            segment_forwarded_tcp_frames_from_frame(
-                &frame, meta, &decision, &state, false, None,
-            )
-            .is_none(),
+            segment_forwarded_tcp_frames_from_frame(&frame, meta, &decision, &state, false, None,)
+                .is_none(),
             "AH-bearing TCP must not be segmented"
         );
     }
 }
-
 
 #[cfg(test)]
 mod saturating_segment_len_8321 {

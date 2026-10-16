@@ -14,9 +14,9 @@ use super::mss::wg_tcp_mss;
 // exercised the deleted wrappers (`outer_l2_with_vlan_when_set`
 // and `outer_ipv4_tos_propagates_dscp`) now call the consolidated
 // builders in `crate::afxdp::frame::headers` directly.
-use crate::afxdp::frame::{eth_header_len, write_eth_header_slice, write_ipv4_header};
 use super::scratch::WgWorkerScratch;
 use super::session::WgSession;
+use crate::afxdp::frame::{eth_header_len, write_eth_header_slice, write_ipv4_header};
 use snow::Builder;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -196,8 +196,12 @@ pub(crate) fn established_initiator_for(
         super::counters::monotonic_now_ns(),
     ));
     resp_session.mark_confirmed();
-    init_engine.install_session(&resp_pub, init_session).unwrap();
-    resp_engine.install_session(&init_pub, resp_session.clone()).unwrap();
+    init_engine
+        .install_session(&resp_pub, init_session)
+        .unwrap();
+    resp_engine
+        .install_session(&init_pub, resp_session.clone())
+        .unwrap();
     resp_engine.promote_next_for_test(&init_pub, &resp_session);
     init_engine
 }
@@ -577,7 +581,12 @@ fn decap_rejects_counter_at_reject_after_messages() {
     // don't need real ciphertext — the counter check fires before
     // the demux lookup or AEAD attempt.
     let mut wire = [0u8; 64];
-    encode_data_header(&mut wire, /*receiver_idx*/ 0xdead_beef, REJECT_AFTER_MESSAGES).unwrap();
+    encode_data_header(
+        &mut wire,
+        /*receiver_idx*/ 0xdead_beef,
+        REJECT_AFTER_MESSAGES,
+    )
+    .unwrap();
     let mut plain = [0u8; 128];
     let err = resp_engine.try_decap(&wire[..32], &mut plain).unwrap_err();
     assert_eq!(err, DecapError::CounterRejectAfterMessages);
@@ -786,9 +795,7 @@ fn decap_zeros_staging_on_crypto_failed_9918() {
     tampered[ct_off] ^= 0xFF;
     let mut plain = [0u8; 2048];
     plain.fill(0xa5);
-    let err = resp_engine
-        .try_decap(&tampered, &mut plain)
-        .unwrap_err();
+    let err = resp_engine.try_decap(&tampered, &mut plain).unwrap_err();
     assert_eq!(err, DecapError::CryptoFailed);
     let padded_inner_len = (inner.len() + 15) & !15;
     assert!(
@@ -925,7 +932,9 @@ fn encap_padded_plaintext_max_boundary() {
     // staging buffer.
     let inner = make(4097);
     let mut wire = [0u8; 8000];
-    let err = init_engine.try_encap(&resp_pub, &inner, &mut wire).unwrap_err();
+    let err = init_engine
+        .try_encap(&resp_pub, &inner, &mut wire)
+        .unwrap_err();
     assert_eq!(err, EncapError::BufferTooSmall);
 }
 
@@ -1171,7 +1180,10 @@ fn reconcile_peers_updates_endpoint_and_keepalive_for_existing_peer() {
         let table = engine.table_for_test();
         let idx = *table.peer_index_by_pubkey.get(&peer_pub).unwrap();
         let cfg = table.peers[idx as usize].config.clone();
-        assert_eq!(cfg.endpoint, Some(SocketAddr::from(([192, 0, 2, 1], 51820))));
+        assert_eq!(
+            cfg.endpoint,
+            Some(SocketAddr::from(([192, 0, 2, 1], 51820)))
+        );
         assert_eq!(cfg.persistent_keepalive, 25);
     }
 
@@ -1196,8 +1208,7 @@ fn reconcile_peers_updates_endpoint_and_keepalive_for_existing_peer() {
         "reconcile must publish the endpoint update in the new snapshot"
     );
     assert_eq!(
-        cfg.persistent_keepalive,
-        60,
+        cfg.persistent_keepalive, 60,
         "reconcile must publish the persistent_keepalive update in the new snapshot"
     );
 
@@ -1236,8 +1247,8 @@ fn reconcile_peers_updates_endpoint_and_keepalive_for_existing_peer() {
 #[test]
 fn old_snapshot_observes_old_config_after_concurrent_reconcile() {
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     let psk_old = [0x11u8; 32];
     let psk_new = [0x22u8; 32];
@@ -1490,10 +1501,7 @@ fn decap_accepts_nonzero_trailing_padding_and_bounds_to_inner_len() {
         "delivered bytes must be exactly the inner IPv4 packet"
     );
     assert_eq!(
-        resp_engine
-            .counters()
-            .decap_packets
-            .load(Ordering::Relaxed),
+        resp_engine.counters().decap_packets.load(Ordering::Relaxed),
         1,
         "the record counts as a successfully decapped data packet"
     );
@@ -1635,7 +1643,9 @@ fn try_decap_rejects_sub_poly1305_tag_records_without_panicking() {
     let mut sixteen_byte_ct = vec![0u8; super::WG_DATA_HEADER_LEN + super::POLY1305_TAG_LEN];
     encode_data_header(&mut sixteen_byte_ct, receiver_index, 0xdead_beef).unwrap();
     let mut plain = [0u8; 2048];
-    let err = resp_engine.try_decap(&sixteen_byte_ct, &mut plain).unwrap_err();
+    let err = resp_engine
+        .try_decap(&sixteen_byte_ct, &mut plain)
+        .unwrap_err();
     assert_ne!(
         err,
         DecapError::ShortRecord,
@@ -1819,14 +1829,21 @@ mod framed_handshake {
         // 1. Initiator builds msg1.
         let mut msg1 = [0u8; WG_MSG_INIT_LEN];
         let init_idx = init.create_initiation(&resp_pub, &mut msg1).unwrap();
-        assert_eq!(init.pending_count(), 1, "initiator holds one pending handshake");
+        assert_eq!(
+            init.pending_count(),
+            1,
+            "initiator holds one pending handshake"
+        );
 
         // 2. Responder consumes msg1, emits msg2, installs its session.
         let mut msg2 = [0u8; WG_MSG_RESPONSE_LEN];
-        let (recovered_init_pub, resp_idx) =
-            resp.consume_initiation_create_response(&msg1, &mut msg2).unwrap();
-        assert_eq!(recovered_init_pub, init_pub,
-            "responder must recover the initiator's static pubkey from msg1");
+        let (recovered_init_pub, resp_idx) = resp
+            .consume_initiation_create_response(&msg1, &mut msg2)
+            .unwrap();
+        assert_eq!(
+            recovered_init_pub, init_pub,
+            "responder must recover the initiator's static pubkey from msg1"
+        );
         assert_eq!(resp.pending_count(), 0, "responder completes synchronously");
 
         // 3. Initiator consumes msg2, installs its session.
@@ -1841,7 +1858,11 @@ mod framed_handshake {
         let enc = init.try_encap(&resp_pub, &inner, &mut wire).unwrap();
         let mut plain = [0u8; 2048];
         let dec = resp.try_decap(&wire[..enc.len], &mut plain).unwrap();
-        assert_eq!(&plain[..dec.len], &inner[..], "init->resp inner packet must round-trip");
+        assert_eq!(
+            &plain[..dec.len],
+            &inner[..],
+            "init->resp inner packet must round-trip"
+        );
         assert_eq!(dec.peer_pubkey, init_pub);
 
         // 5. Responder -> initiator transport record (responder now confirmed).
@@ -1850,7 +1871,11 @@ mod framed_handshake {
         let enc2 = resp.try_encap(&init_pub, &reply, &mut wire2).unwrap();
         let mut plain2 = [0u8; 2048];
         let dec2 = init.try_decap(&wire2[..enc2.len], &mut plain2).unwrap();
-        assert_eq!(&plain2[..dec2.len], &reply[..], "resp->init inner packet must round-trip");
+        assert_eq!(
+            &plain2[..dec2.len],
+            &reply[..],
+            "resp->init inner packet must round-trip"
+        );
         assert_eq!(dec2.peer_pubkey, resp_pub);
 
         // Indices are distinct (each side chose its own).
@@ -1886,8 +1911,10 @@ mod framed_handshake {
         assert_eq!(b.pending_count(), 1);
         let mut resp_a = [0u8; WG_MSG_RESPONSE_LEN];
         let mut resp_b = [0u8; WG_MSG_RESPONSE_LEN];
-        a.consume_initiation_create_response(&msg_b, &mut resp_a).unwrap();
-        b.consume_initiation_create_response(&msg_a, &mut resp_b).unwrap();
+        a.consume_initiation_create_response(&msg_b, &mut resp_a)
+            .unwrap();
+        b.consume_initiation_create_response(&msg_a, &mut resp_b)
+            .unwrap();
         // Both stalled: no pending, no confirmed session, egress fails.
         assert_eq!(a.pending_count(), 0, "crossed aborts both initiators");
         assert_eq!(b.pending_count(), 0, "crossed aborts both initiators");
@@ -1895,11 +1922,22 @@ mod framed_handshake {
         assert!(!b.peer_has_confirmed_session(&a_pub));
         let inner = ipv4_packet(Ipv4Addr::new(10, 9, 9, 1), Ipv4Addr::new(10, 9, 9, 2));
         let mut wire = [0u8; 2048];
-        assert_eq!(a.try_encap(&b_pub, &inner, &mut wire).unwrap_err(), EncapError::NoSession);
-        assert_eq!(b.try_encap(&a_pub, &inner, &mut wire).unwrap_err(), EncapError::NoSession);
+        assert_eq!(
+            a.try_encap(&b_pub, &inner, &mut wire).unwrap_err(),
+            EncapError::NoSession
+        );
+        assert_eq!(
+            b.try_encap(&a_pub, &inner, &mut wire).unwrap_err(),
+            EncapError::NoSession
+        );
         // Fresh-crossed hits the no-current arm (no `current` at all), not
         // the unconfirmed gate (which needs a `current` to gate on).
-        assert!(a.counters().encap_drops_no_session.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+        assert!(
+            a.counters()
+                .encap_drops_no_session
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= 1
+        );
         // Both Responses drop: the peer's Initiator pending is gone.
         assert_eq!(
             a.consume_response(&resp_b).unwrap_err(),
@@ -1914,7 +1952,8 @@ mod framed_handshake {
         let mut msg_fresh = [0u8; WG_MSG_INIT_LEN];
         a.create_initiation(&b_pub, &mut msg_fresh).unwrap();
         let mut resp_fresh = [0u8; WG_MSG_RESPONSE_LEN];
-        b.consume_initiation_create_response(&msg_fresh, &mut resp_fresh).unwrap();
+        b.consume_initiation_create_response(&msg_fresh, &mut resp_fresh)
+            .unwrap();
         a.consume_response(&resp_fresh).unwrap();
         let enc = a.try_encap(&b_pub, &inner, &mut wire).unwrap();
         let mut plain = [0u8; 2048];
@@ -2013,7 +2052,9 @@ mod framed_handshake {
         let parsed1 = parse_initiation(&msg1, &resp_pub).unwrap();
         assert_eq!(parsed1.sender_index, INIT_IDX);
         let mut ts_sink = [0u8; 12];
-        resp_hs.read_message(parsed1.noise_body, &mut ts_sink).unwrap();
+        resp_hs
+            .read_message(parsed1.noise_body, &mut ts_sink)
+            .unwrap();
         assert_eq!(ts_sink, tai64n);
         // Production responder sets the identified peer's PSK before msg2
         // (here zero, same as the builder preset — done for fidelity).
@@ -2028,7 +2069,9 @@ mod framed_handshake {
         assert_eq!(parsed2.sender_index, RESP_IDX);
         assert_eq!(parsed2.receiver_index, INIT_IDX);
         let mut sink2 = [0u8; MSG_RESPONSE_NOISE_LEN];
-        init_hs.read_message(parsed2.noise_body, &mut sink2).unwrap();
+        init_hs
+            .read_message(parsed2.noise_body, &mut sink2)
+            .unwrap();
         // Transports match (round-trip one record via snow directly).
         let init_tp = init_hs.into_stateless_transport_mode().unwrap();
         let resp_tp = resp_hs.into_stateless_transport_mode().unwrap();
@@ -2318,7 +2361,8 @@ mod framed_handshake {
         let mut msg1 = [0u8; WG_MSG_INIT_LEN];
         init.create_initiation(&resp_pub, &mut msg1).unwrap();
         let mut msg2 = [0u8; WG_MSG_RESPONSE_LEN];
-        resp.consume_initiation_create_response(&msg1, &mut msg2).unwrap();
+        resp.consume_initiation_create_response(&msg1, &mut msg2)
+            .unwrap();
         init.consume_response(&msg2).unwrap();
         // Replay msg2 — reservation already promoted/cleared.
         let err = init.consume_response(&msg2).unwrap_err();
@@ -2351,12 +2395,17 @@ mod framed_handshake {
         let mut msg1_b = [0u8; WG_MSG_INIT_LEN];
         let idx_b = init.create_initiation(&resp_pub, &mut msg1_b).unwrap();
         assert_ne!(idx_a, idx_b, "second handshake gets a fresh index");
-        assert_eq!(init.pending_count(), 1, "per-peer cap: only the latest pending survives");
+        assert_eq!(
+            init.pending_count(),
+            1,
+            "per-peer cap: only the latest pending survives"
+        );
 
         // The responder answers the SECOND msg1; the initiator can complete
         // it (its reservation survived).
         let mut msg2_b = [0u8; WG_MSG_RESPONSE_LEN];
-        resp.consume_initiation_create_response(&msg1_b, &mut msg2_b).unwrap();
+        resp.consume_initiation_create_response(&msg1_b, &mut msg2_b)
+            .unwrap();
         assert_eq!(init.consume_response(&msg2_b).unwrap().1, idx_b);
 
         // A response to the FIRST (aborted) handshake has no reservation.
@@ -2368,7 +2417,9 @@ mod framed_handshake {
         let mut m1b = [0u8; WG_MSG_INIT_LEN];
         init2.create_initiation(&rp2, &mut m1b).unwrap(); // aborts `first`
         let mut m2 = [0u8; WG_MSG_RESPONSE_LEN];
-        resp2.consume_initiation_create_response(&m1, &mut m2).unwrap();
+        resp2
+            .consume_initiation_create_response(&m1, &mut m2)
+            .unwrap();
         // m2's receiver_index echoes `first`, which is no longer pending.
         let _ = first;
         assert_eq!(
@@ -2390,7 +2441,8 @@ mod framed_handshake {
         let mut msg1 = [0u8; WG_MSG_INIT_LEN];
         init.create_initiation(&resp_pub, &mut msg1).unwrap();
         let mut msg2 = [0u8; WG_MSG_RESPONSE_LEN];
-        resp.consume_initiation_create_response(&msg1, &mut msg2).unwrap();
+        resp.consume_initiation_create_response(&msg1, &mut msg2)
+            .unwrap();
         init.consume_response(&msg2).unwrap();
         assert_eq!(init.pending_count(), 0);
         assert_eq!(resp.pending_count(), 0);
@@ -2571,8 +2623,8 @@ mod framed_handshake {
     fn reserve_pending_recovers_from_a_poisoned_reconcile_lock() {
         use crate::afxdp::wg::handshake_session::WG_HANDSHAKE_LOCK_POISON_RECOVERIES;
         use crate::afxdp::wg::session::SessionRole;
-        use std::sync::atomic::Ordering as AOrd;
         use std::sync::Arc as StdArc;
+        use std::sync::atomic::Ordering as AOrd;
 
         let (init, _resp, _init_pub, resp_pub) = engine_pair();
         let init = StdArc::new(init);
@@ -2616,8 +2668,8 @@ mod framed_handshake {
     /// post-storm clean handshake must still carry traffic.
     #[test]
     fn create_initiation_toctou_under_concurrent_peer_removal() {
-        use std::sync::atomic::{AtomicBool, Ordering as AOrd};
         use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicBool, Ordering as AOrd};
         use std::thread;
 
         let (init_priv, _init_pub) = keypair();
@@ -2662,7 +2714,11 @@ mod framed_handshake {
         churner.join().unwrap();
         // Settle peer-removed: no reservation may remain for the absent peer.
         init.reconcile_peers(&[]);
-        assert_eq!(init.pending_count(), 0, "no orphan reservation after the storm");
+        assert_eq!(
+            init.pending_count(),
+            0,
+            "no orphan reservation after the storm"
+        );
     }
 
     /// Concurrency regression for the Codex round-2 finding: completing a
@@ -2680,8 +2736,8 @@ mod framed_handshake {
     /// the right concurrency stressor for the lock discipline.
     #[test]
     fn concurrent_consume_response_and_reinitiation_is_sound() {
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AOrd};
         use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AOrd};
         use std::thread;
 
         // Two engines that know each other. Wrap in Arc for sharing.
@@ -2822,14 +2878,19 @@ mod framed_handshake {
         let mut m1 = [0u8; WG_MSG_INIT_LEN];
         init.create_initiation(&resp_pub, &mut m1).unwrap();
         let mut m2 = [0u8; WG_MSG_RESPONSE_LEN];
-        resp.consume_initiation_create_response(&m1, &mut m2).unwrap();
+        resp.consume_initiation_create_response(&m1, &mut m2)
+            .unwrap();
         init.consume_response(&m2).unwrap();
         let pkt = ipv4_packet(Ipv4Addr::new(10, 9, 9, 1), Ipv4Addr::new(10, 9, 9, 2));
         let mut w = [0u8; 2048];
         let e = init.try_encap(&resp_pub, &pkt, &mut w).unwrap();
         let mut p = [0u8; 2048];
         let d = resp.try_decap(&w[..e.len], &mut p).unwrap();
-        assert_eq!(&p[..d.len], &pkt[..], "post-storm handshake must still carry traffic");
+        assert_eq!(
+            &p[..d.len],
+            &pkt[..],
+            "post-storm handshake must still carry traffic"
+        );
     }
 }
 
@@ -2853,7 +2914,10 @@ fn wg_request_handshake_is_rate_limited_per_interval() {
         }],
     });
     // First edge at t=0 records.
-    assert!(engine.request_handshake(&pk, 0), "first request must record an edge");
+    assert!(
+        engine.request_handshake(&pk, 0),
+        "first request must record an edge"
+    );
     // A flood within the interval must NOT record additional edges.
     for t in 1..1000u64 {
         assert!(
@@ -2882,9 +2946,15 @@ fn wg_take_handshake_request_consumes_a_single_edge() {
             preshared_key: [0u8; 32].into(),
         }],
     });
-    assert!(!engine.take_handshake_request(&pk), "no edge pending initially");
+    assert!(
+        !engine.take_handshake_request(&pk),
+        "no edge pending initially"
+    );
     engine.request_handshake(&pk, 0);
-    assert!(engine.take_handshake_request(&pk), "pending edge must be taken");
+    assert!(
+        engine.take_handshake_request(&pk),
+        "pending edge must be taken"
+    );
     assert!(
         !engine.take_handshake_request(&pk),
         "edge must be cleared after one take"
@@ -2963,7 +3033,10 @@ fn wg_handshake_request_edge_is_per_peer_not_drained_by_lower_sorted_sibling() {
         !engine.take_handshake_request(&peer_b),
         "B must NOT drain an edge raised for A"
     );
-    assert!(engine.take_handshake_request(&peer_a), "A consumes its own edge");
+    assert!(
+        engine.take_handshake_request(&peer_a),
+        "A consumes its own edge"
+    );
 }
 
 /// #5164 fail-on-revert (rekey edge): identical ownership contract for the
@@ -2996,7 +3069,10 @@ fn wg_rekey_request_edge_is_per_peer_not_drained_by_lower_sorted_sibling() {
         !engine.take_rekey_request(&peer_b),
         "B must NOT drain an edge raised for A"
     );
-    assert!(engine.take_rekey_request(&peer_a), "A consumes its own rekey edge");
+    assert!(
+        engine.take_rekey_request(&peer_a),
+        "A consumes its own rekey edge"
+    );
 }
 
 #[test]
@@ -3034,7 +3110,10 @@ fn wg_no_session_encap_triggers_single_init_per_interval() {
             other => panic!("expected NoSession, got {other:?}"),
         }
     }
-    assert_eq!(edges, 1, "exactly one handshake edge per interval under flood");
+    assert_eq!(
+        edges, 1,
+        "exactly one handshake edge per interval under flood"
+    );
     // The control thread consumes the single edge.
     assert!(engine.take_handshake_request(&resp_pub));
     // After the interval, another flood produces one more edge.
@@ -3043,8 +3122,10 @@ fn wg_no_session_encap_triggers_single_init_per_interval() {
 
 #[test]
 fn wg_first_peer_pubkey_and_confirmed_session_helpers() {
-    let (init_engine, _resp_engine, _init_pub, resp_pub) =
-        established_pair(vec!["10.0.0.0/24".parse().unwrap()], vec!["10.0.0.0/24".parse().unwrap()]);
+    let (init_engine, _resp_engine, _init_pub, resp_pub) = established_pair(
+        vec!["10.0.0.0/24".parse().unwrap()],
+        vec!["10.0.0.0/24".parse().unwrap()],
+    );
     assert_eq!(
         init_engine.first_peer_pubkey(),
         Some(resp_pub),
@@ -3135,8 +3216,9 @@ fn wg_greatest_tai64n_carry_over_preserves_responder_anti_replay() {
     };
     let old = WgEngine::new(mk());
     // Simulate a valid accepted initiation advancing the high-water.
-    let t_last: [u8; super::tai64n::TAI64N_LEN] =
-        [0x40, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    let t_last: [u8; super::tai64n::TAI64N_LEN] = [
+        0x40, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    ];
     old.seed_greatest_tai64n(&[(resp_pub, t_last)]);
     assert_eq!(old.greatest_tai64n_by_pubkey(), vec![(resp_pub, t_last)]);
 
@@ -3164,8 +3246,9 @@ fn wg_greatest_tai64n_carry_over_preserves_responder_anti_replay() {
         !peer.check_and_update_tai64n(&older),
         "older-stamp replay must be rejected after carry-over"
     );
-    let newer: [u8; super::tai64n::TAI64N_LEN] =
-        [0x40, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x89];
+    let newer: [u8; super::tai64n::TAI64N_LEN] = [
+        0x40, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x89,
+    ];
     assert!(
         peer.check_and_update_tai64n(&newer),
         "strictly newer stamp must be accepted"
@@ -3237,7 +3320,10 @@ fn wg_request_handshake_single_edge_under_concurrent_callers() {
         1,
         "exactly one concurrent caller must win the rate-limit window"
     );
-    assert!(engine.take_handshake_request(&pk), "the winning edge is pending");
+    assert!(
+        engine.take_handshake_request(&pk),
+        "the winning edge is pending"
+    );
 }
 
 // ===================================================================
@@ -3284,8 +3370,9 @@ mod telemetry_counters {
         // Transport round-trip moves packet/byte counters symmetrically.
         let inner = ipv4_packet(Ipv4Addr::new(10, 1, 1, 1), Ipv4Addr::new(10, 1, 1, 2));
         let mut wire = [0u8; 2048];
-        let enc = init.try_encap(&resp_pub, &inner, &mut wire).unwrap();
         let mut plain = [0u8; 2048];
+        let enc = init.try_encap(&resp_pub, &inner, &mut wire).unwrap();
+        init.note_encap_sent(&resp_pub, enc);
         resp.try_decap(&wire[..enc.len], &mut plain).unwrap();
         assert_eq!(ic.encap_packets.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -3382,10 +3469,19 @@ mod telemetry_counters {
             .consume_initiation_create_response(&msg1, &mut msg2)
             .unwrap_err();
         assert_eq!(
-            other.counters().hs_rx_drops_mac1_mismatch.load(Ordering::Relaxed),
+            other
+                .counters()
+                .hs_rx_drops_mac1_mismatch
+                .load(Ordering::Relaxed),
             1
         );
-        assert_eq!(other.counters().hs_responses_created.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            other
+                .counters()
+                .hs_responses_created
+                .load(Ordering::Relaxed),
+            0
+        );
     }
 
     /// AllowedIPs-violating inner → decap_drops_allowed_ips.
@@ -3495,7 +3591,11 @@ mod telemetry_counters {
         assert!(!unconfirmed.is_confirmed());
         resp.force_current_for_test(&init_pub, unconfirmed);
         let err_gate = resp.try_encap(&init_pub, &inner, &mut wire).unwrap_err();
-        assert_eq!(err_gate, EncapError::NoSession, "wire error contract unchanged");
+        assert_eq!(
+            err_gate,
+            EncapError::NoSession,
+            "wire error contract unchanged"
+        );
         assert_eq!(
             rc.encap_drops_unconfirmed.load(Ordering::Relaxed),
             1,
@@ -3512,11 +3612,17 @@ mod telemetry_counters {
         let err2 = fresh.try_encap(&rp2, &inner, &mut wire).unwrap_err();
         assert_eq!(err2, EncapError::NoSession);
         assert_eq!(
-            fresh.counters().encap_drops_no_session.load(Ordering::Relaxed),
+            fresh
+                .counters()
+                .encap_drops_no_session
+                .load(Ordering::Relaxed),
             1
         );
         assert_eq!(
-            fresh.counters().encap_drops_unconfirmed.load(Ordering::Relaxed),
+            fresh
+                .counters()
+                .encap_drops_unconfirmed
+                .load(Ordering::Relaxed),
             0
         );
     }
@@ -3529,7 +3635,9 @@ mod telemetry_counters {
         let (init, _resp, _init_pub, _resp_pub) = framed_engine_pair();
         let (_, stranger_pub) = keypair();
         let mut msg1 = [0u8; crate::afxdp::wg::WG_MSG_INIT_LEN];
-        let _ = init.create_initiation(&stranger_pub, &mut msg1).unwrap_err();
+        let _ = init
+            .create_initiation(&stranger_pub, &mut msg1)
+            .unwrap_err();
         let ic = init.counters();
         assert_eq!(ic.hs_initiation_build_failures.load(Ordering::Relaxed), 1);
         assert_eq!(ic.hs_initiations_created.load(Ordering::Relaxed), 0);
@@ -3541,11 +3649,11 @@ mod telemetry_counters {
     fn handshake_request_edges_count_accepted_only() {
         let (init, _resp, _init_pub, resp_pub) = framed_engine_pair();
         assert!(init.request_handshake(&resp_pub, 10));
-        assert!(!init.request_handshake(&resp_pub, 20), "inside the rate window");
-        assert_eq!(
-            init.counters().hs_requests_armed.load(Ordering::Relaxed),
-            1
+        assert!(
+            !init.request_handshake(&resp_pub, 20),
+            "inside the rate window"
         );
+        assert_eq!(init.counters().hs_requests_armed.load(Ordering::Relaxed), 1);
     }
 
     /// Counters survive an identity-UNCHANGED reconcile (same engine
@@ -3555,7 +3663,12 @@ mod telemetry_counters {
         let (init, _resp, _init_pub, resp_pub) = framed_engine_pair();
         let mut msg1 = [0u8; crate::afxdp::wg::WG_MSG_INIT_LEN];
         init.create_initiation(&resp_pub, &mut msg1).unwrap();
-        assert_eq!(init.counters().hs_initiations_created.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            init.counters()
+                .hs_initiations_created
+                .load(Ordering::Relaxed),
+            1
+        );
         init.reconcile_peers(&[WgPeerConfig {
             pubkey: resp_pub,
             endpoint: None,
@@ -3564,7 +3677,9 @@ mod telemetry_counters {
             preshared_key: [0u8; 32].into(),
         }]);
         assert_eq!(
-            init.counters().hs_initiations_created.load(Ordering::Relaxed),
+            init.counters()
+                .hs_initiations_created
+                .load(Ordering::Relaxed),
             1,
             "reconcile with unchanged identity must not disturb counters"
         );
@@ -3577,7 +3692,10 @@ mod telemetry_counters {
         let (_, pubkey) = keypair();
         let hex = crate::afxdp::wg::encode_wg_key_hex(&pubkey);
         assert_eq!(hex.len(), 64);
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         let mut nib = 0u8;
         for (i, c) in hex.bytes().enumerate() {
             let v = match c {
@@ -3677,20 +3795,29 @@ mod s5_timer_tests {
         init.set_mock_now_ns(t0 + 118 * SEC);
         init.try_encap(&resp_pub, &inner_from_init(), &mut wire)
             .unwrap();
-        assert!(!init.take_rekey_request(&resp_pub), "below REKEY_AFTER_TIME");
+        assert!(
+            !init.take_rekey_request(&resp_pub),
+            "below REKEY_AFTER_TIME"
+        );
 
         // 121s: send arms.
         init.set_mock_now_ns(t0 + 121 * SEC);
         init.try_encap(&resp_pub, &inner_from_init(), &mut wire)
             .unwrap();
-        assert!(init.take_rekey_request(&resp_pub), "at/after REKEY_AFTER_TIME");
+        assert!(
+            init.take_rekey_request(&resp_pub),
+            "at/after REKEY_AFTER_TIME"
+        );
         assert!(!init.take_rekey_request(&resp_pub), "edge is consume-once");
 
         // Responder-role session: same age, no arm.
         resp.set_mock_now_ns(t0 + 121 * SEC);
         resp.try_encap(&init_pub, &inner_from_resp(), &mut wire)
             .unwrap();
-        assert!(!resp.take_rekey_request(&init_pub), "responder never age-rekeys");
+        assert!(
+            !resp.take_rekey_request(&init_pub),
+            "responder never age-rekeys"
+        );
     }
 
     /// T3 encap: refused at/after REJECT_AFTER_TIME with the session's
@@ -3709,7 +3836,10 @@ mod s5_timer_tests {
             init.counters().encap_drops_expired.load(Ordering::Relaxed),
             1
         );
-        assert!(init.take_rekey_request(&resp_pub), "send-side T3 arms the edge");
+        assert!(
+            init.take_rekey_request(&resp_pub),
+            "send-side T3 arms the edge"
+        );
         let session = init
             .sessions_by_local_index
             .read()
@@ -3871,7 +4001,10 @@ mod s5_timer_tests {
             .unwrap();
         init.set_mock_now_ns(t0 + 166 * SEC);
         init.try_decap(&wire[..enc.len], &mut out).unwrap();
-        assert!(init.take_rekey_request(&resp_pub), "initiator receive past 165s");
+        assert!(
+            init.take_rekey_request(&resp_pub),
+            "initiator receive past 165s"
+        );
 
         // Initiator-to-responder record, responder at 166s: no arm.
         init.set_mock_now_ns(t0 + 2 * SEC);
@@ -3882,7 +4015,10 @@ mod s5_timer_tests {
         let _ = init.take_rekey_request(&resp_pub);
         resp.set_mock_now_ns(t0 + 166 * SEC);
         resp.try_decap(&wire[..enc2.len], &mut out).unwrap();
-        assert!(!resp.take_rekey_request(&init_pub), "responder never age-rekeys");
+        assert!(
+            !resp.take_rekey_request(&init_pub),
+            "responder never age-rekeys"
+        );
     }
 
     /// expire_sessions tears down current sessions past 180s, removes
@@ -3902,10 +4038,7 @@ mod s5_timer_tests {
             "demux entry removed"
         );
         assert_eq!(init.current_session_local_index(&resp_pub), None);
-        assert_eq!(
-            init.counters().sessions_expired.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(init.counters().sessions_expired.load(Ordering::Relaxed), 1);
         // Idempotent.
         assert_eq!(init.expire_sessions(now), 0);
     }
@@ -3921,6 +4054,7 @@ mod s5_timer_tests {
         let mut out = [0u8; 2048];
         init.set_mock_now_ns(t0 + 1 * SEC);
         let enc = init.create_keepalive(&resp_pub, &mut wire).unwrap();
+        init.note_encap_sent(&resp_pub, enc);
         assert_eq!(
             enc.len,
             super::super::WG_DATA_HEADER_LEN + super::super::POLY1305_TAG_LEN,
@@ -3974,10 +4108,7 @@ mod s5_timer_tests {
             "a keepalive must carry the peer that sent it, not collapse into \
              MalformedInner (#7230); got {err:?}"
         );
-        assert_eq!(
-            resp.counters().decap_keepalives.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(resp.counters().decap_keepalives.load(Ordering::Relaxed), 1);
         let resp_peer = resp.peer_arc(&init_pub).unwrap();
         assert_eq!(
             resp_peer.last_recv_any_ns.load(Ordering::Relaxed),
@@ -4040,7 +4171,8 @@ mod s5_timer_tests {
         assert_eq!(a.send_keepalive, Some(KeepaliveKind::Passive));
         // A send clears the arm.
         init.set_mock_now_ns(t0 + 16 * SEC);
-        init.create_keepalive(&_resp_pub, &mut wire).unwrap();
+        let keepalive = init.create_keepalive(&_resp_pub, &mut wire).unwrap();
+        init.note_encap_sent(&_resp_pub, keepalive);
         let a = init.timer_pass(t0 + 30 * SEC, true);
         assert!(a.send_keepalive.is_none(), "send cleared the T6 arm");
     }
@@ -4058,8 +4190,10 @@ mod s5_timer_tests {
 
         for i in 0..14u64 {
             init.set_mock_now_ns(t0 + (1 + i) * SEC);
-            init.try_encap(&resp_pub, &inner_from_init(), &mut wire)
+            let enc = init
+                .try_encap(&resp_pub, &inner_from_init(), &mut wire)
                 .unwrap();
+            init.note_encap_sent(&resp_pub, enc);
         }
         let peer = init.peer_arc(&resp_pub).unwrap();
         assert_eq!(
@@ -4221,11 +4355,8 @@ mod s5_timer_tests {
         let mut msg1 = [0u8; 1024];
         let mut msg2 = [0u8; 1024];
         init.create_initiation(&resp_pub, &mut msg1).unwrap();
-        resp.consume_initiation_create_response(
-            &msg1[..super::super::WG_MSG_INIT_LEN],
-            &mut msg2,
-        )
-        .unwrap();
+        resp.consume_initiation_create_response(&msg1[..super::super::WG_MSG_INIT_LEN], &mut msg2)
+            .unwrap();
         assert_eq!(init.pending_count(), 1);
         init.abort_pending_for_peer(&resp_pub);
         assert_eq!(init.pending_count(), 0);
@@ -4280,11 +4411,8 @@ mod s5_timer_tests {
         let mut msg1 = [0u8; 1024];
         let mut msg2 = [0u8; 1024];
         init.create_initiation(&resp_pub, &mut msg1).unwrap();
-        resp.consume_initiation_create_response(
-            &msg1[..super::super::WG_MSG_INIT_LEN],
-            &mut msg2,
-        )
-        .unwrap();
+        resp.consume_initiation_create_response(&msg1[..super::super::WG_MSG_INIT_LEN], &mut msg2)
+            .unwrap();
         init.consume_response(&msg2[..super::super::WG_MSG_RESPONSE_LEN])
             .unwrap();
         let init_peer = init.peer_arc(&resp_pub).unwrap();
@@ -4321,6 +4449,90 @@ mod s5_timer_tests {
             8_000 * SEC,
             "valid msg1 is an authenticated receive"
         );
+    }
+    /// #13667 (D10-24): encryption must NOT commit send-side state.
+    /// `encap_inner` used to call `note_data_send`, bump
+    /// `encap_packets`/`encap_bytes`, and clear the T6 arm before the
+    /// caller knew the outer frame could be built or the socket send
+    /// would succeed. A dropped/failed send therefore armed T7, wiped
+    /// T6, delayed T8, and inflated counters for a packet that never
+    /// left the host.
+    #[test]
+    fn encap_defers_send_state_until_caller_confirms_delivery_13667() {
+        let (init, _resp, _init_pub, resp_pub, t0) = pair();
+        let peer = init.peer_arc(&resp_pub).unwrap();
+        let session = peer.current.read().unwrap().clone().unwrap();
+        // Arm T6 as if data was just received; a failed send must not clear it.
+        peer.t6_armed_recv_ns
+            .store(t0 + 1, std::sync::atomic::Ordering::Relaxed);
+        peer.t7_armed_send_ns
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        peer.last_send_any_ns
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let counters_before = init.counters().encap_packets.load(Ordering::Relaxed);
+        let bytes_before = init.counters().encap_bytes.load(Ordering::Relaxed);
+        let tx_before = session.tx_counter.load(Ordering::Relaxed);
+
+        init.set_mock_now_ns(t0 + 2 * SEC);
+        let nonce_before_failure = session.tx_counter.load(Ordering::Relaxed);
+        let mut undersized = [0xa5; 1];
+        assert!(
+            init.try_encap(&resp_pub, &inner_from_init(), &mut undersized)
+                .is_err()
+        );
+        assert_eq!(
+            session.tx_counter.load(Ordering::Relaxed),
+            nonce_before_failure
+        );
+        let mut wire = [0u8; 2048];
+        let enc = init
+            .try_encap(&resp_pub, &inner_from_init(), &mut wire)
+            .expect("encap encrypts");
+        assert!(enc.len > 0);
+        // Encryption consumed a nonce (unavoidable) but committed NO
+        // timer/counter state: the packet may still never be sent.
+        assert_eq!(
+            session.tx_counter.load(Ordering::Relaxed),
+            tx_before + 1,
+            "encryption necessarily consumes one nonce"
+        );
+        assert_eq!(
+            init.counters().encap_packets.load(Ordering::Relaxed),
+            counters_before,
+            "#13667: encap_packets must not bump before delivery is confirmed"
+        );
+        assert_eq!(
+            init.counters().encap_bytes.load(Ordering::Relaxed),
+            bytes_before,
+            "#13667: encap_bytes must not bump before delivery is confirmed"
+        );
+        assert_eq!(
+            peer.t7_armed_send_ns.load(Ordering::Relaxed),
+            0,
+            "#13667: T7 must not arm before the packet is actually sent"
+        );
+        assert_eq!(
+            peer.last_send_any_ns.load(Ordering::Relaxed),
+            0,
+            "#13667: last_send_any (T8 pacing) must not advance before send"
+        );
+        assert_eq!(
+            peer.t6_armed_recv_ns.load(Ordering::Relaxed),
+            t0 + 1,
+            "#13667: T6 arm must survive an unconfirmed encap"
+        );
+        init.note_encap_sent(&resp_pub, enc);
+        assert_eq!(
+            init.counters().encap_packets.load(Ordering::Relaxed),
+            counters_before + 1
+        );
+        assert_eq!(
+            init.counters().encap_bytes.load(Ordering::Relaxed),
+            bytes_before + inner_from_init().len() as u64
+        );
+        assert_eq!(peer.t7_armed_send_ns.load(Ordering::Relaxed), t0 + 2 * SEC);
+        assert_eq!(peer.last_send_any_ns.load(Ordering::Relaxed), t0 + 2 * SEC);
+        assert_eq!(peer.t6_armed_recv_ns.load(Ordering::Relaxed), 0);
     }
 }
 
@@ -4381,7 +4593,10 @@ mod tai64n_replay_tests {
         // builds a type-2 response.
         let mut resp_out = [0u8; WG_MSG_RESPONSE_LEN];
         let first = resp_engine.consume_initiation_create_response(&msg1, &mut resp_out);
-        assert!(first.is_ok(), "fresh initiation must be accepted: {first:?}");
+        assert!(
+            first.is_ok(),
+            "fresh initiation must be accepted: {first:?}"
+        );
 
         // Replay the IDENTICAL initiation. Its TAI64N now equals the
         // greatest already accepted from this peer, so the responder MUST
