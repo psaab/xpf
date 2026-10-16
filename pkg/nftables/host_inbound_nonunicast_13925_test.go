@@ -9,6 +9,8 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 )
 
 func TestHostInboundNonUnicastNetlink13925(t *testing.T) {
@@ -18,7 +20,7 @@ func TestHostInboundNonUnicastNetlink13925(t *testing.T) {
 			{
 				Zone: "untrust", SystemServices: []string{"ssh"},
 				V4Addrs: []string{"192.0.2.10"}, V6Addrs: []string{"2001:db8:1392::10"},
-				IngressNetdevs: []string{"wan0"},
+				IngressNetdevs:   []string{"wan0"},
 				IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-blue", Slaves: []string{"wan1"}}},
 			},
 			{
@@ -107,10 +109,11 @@ func assertAnyDrop13925(t *testing.T, rules []string, scope string) {
 	t.Fatalf("%s lacks a non-unicast default drop: %v", scope, rules)
 }
 
-// TestHostInboundNonUnicastUDPDelivery13925 sends real UDP payloads through the
-// installed production netlink table. A wildcard SNMP-style service socket
-// must not receive limited broadcast, ff02::1, or its local solicited-node
-// group from a closed zone; admitting `snmp` must restore delivery.
+// TestHostInboundNonUnicastUDPDelivery13925 injects valid UDP frames via
+// AF_PACKET from a separate peer netns through the installed production
+// netlink table. Wildcard SNMP-style sockets must not receive limited
+// broadcast, ff02::1, or the local solicited-node group from a closed zone;
+// admitting `snmp` must restore delivery.
 func TestHostInboundNonUnicastUDPDelivery13925(t *testing.T) {
 	enterPrivateNetns(t)
 	const (
@@ -120,23 +123,52 @@ func TestHostInboundNonUnicastUDPDelivery13925(t *testing.T) {
 		peerV6 = "2001:db8:1392::2"
 	)
 	hostLink := mkNamedVeth10751(t, unleasedTestNetdev10751, "v13925host", "v13925peer")
+	testNS, err := netns.Get()
+	if err != nil {
+		t.Fatalf("get test namespace: %v", err)
+	}
+	peerNS, err := netns.New()
+	if err != nil {
+		testNS.Close()
+		t.Fatalf("create peer namespace: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = netns.Set(testNS)
+		_ = peerNS.Close()
+		_ = testNS.Close()
+	})
+	if err := netns.Set(testNS); err != nil {
+		t.Fatalf("restore test namespace after peer creation: %v", err)
+	}
 	peerLink, err := netlink.LinkByName("v13925peer")
 	if err != nil {
-		t.Fatalf("find peer link: %v", err)
+		t.Fatalf("find peer interface: %v", err)
 	}
-	for _, addr := range []struct {
-		link netlink.Link
-		cidr string
-	}{
-		{hostLink, hostV4 + "/24"}, {peerLink, peerV4 + "/24"},
-		{hostLink, hostV6 + "/64"}, {peerLink, peerV6 + "/64"},
-	} {
-		mustAddrAdd10751(t, addr.link, addr.cidr)
+	if err := netlink.LinkSetNsFd(peerLink, int(peerNS)); err != nil {
+		t.Fatalf("move peer interface: %v", err)
 	}
-	waitAddrsValid10751(t, map[string][]string{
-		unleasedTestNetdev10751: {hostV6},
-		"v13925peer":            {peerV6},
-	})
+	if err := netns.Set(peerNS); err != nil {
+		t.Fatalf("enter peer namespace: %v", err)
+	}
+	peerLink, err = netlink.LinkByName("v13925peer")
+	if err != nil {
+		t.Fatalf("find moved peer interface: %v", err)
+	}
+	if err := netlink.LinkSetUp(peerLink); err != nil {
+		t.Fatalf("bring up peer interface: %v", err)
+	}
+	mustAddrAdd10751(t, peerLink, peerV4+"/24")
+	mustAddrAdd10751(t, peerLink, peerV6+"/64")
+	waitAddrsValid10751(t, map[string][]string{"v13925peer": {peerV6}})
+	peerMAC := append(net.HardwareAddr(nil), peerLink.Attrs().HardwareAddr...)
+	if err := netns.Set(testNS); err != nil {
+		t.Fatalf("return to test namespace: %v", err)
+	}
+
+	for _, cidr := range []string{hostV4 + "/24", hostV6 + "/64"} {
+		mustAddrAdd10751(t, hostLink, cidr)
+	}
+	waitAddrsValid10751(t, map[string][]string{unleasedTestNetdev10751: {hostV6}})
 	if err := netlink.LinkSetAllmulticastOn(hostLink); err != nil {
 		t.Fatalf("enable IPv6 multicast reception: %v", err)
 	}
@@ -157,23 +189,20 @@ func TestHostInboundNonUnicastUDPDelivery13925(t *testing.T) {
 		}
 	}
 
-	// Limited broadcast is delivered to a wildcard IPv4 socket only while
-	// the ingress zone admits the SNMP UDP/161 service tuple.
+	// The senders live in the peer netns, so these packets enter through the
+	// veth and exercise the host input chain's ingress-interface policy.
 	recv4, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 161})
 	if err != nil {
 		t.Fatalf("listen for IPv4 SNMP payload: %v", err)
 	}
 	defer recv4.Close()
-	send4, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP(peerV4), Port: 0})
-	if err != nil {
-		t.Fatalf("bind IPv4 peer sender: %v", err)
-	}
-	defer send4.Close()
-	enableBroadcast10751(t, send4)
 	sendBroadcast := func(payload []byte) func() error {
 		return func() error {
-			_, err := send4.WriteToUDP(payload, &net.UDPAddr{IP: net.IPv4bcast, Port: 161})
-			return err
+			frame := mixedFrameUDP12127(
+				unix.ETH_P_IP, peerMAC, net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+				net.ParseIP(peerV4), net.IPv4bcast, 32000, 161, 1, payload,
+			)
+			return sendMixedFrame12127(peerNS, "v13925peer", frame)
 		}
 	}
 	installServices([]string{"ssh"})
@@ -185,16 +214,7 @@ func TestHostInboundNonUnicastUDPDelivery13925(t *testing.T) {
 	if !udpExchangeRetryWant10751(t, recv4, sendBroadcast(wantBroadcast), wantBroadcast, 200*time.Millisecond, 2*time.Second) {
 		t.Fatal("snmp-admitting zone did not deliver limited-broadcast UDP/161")
 	}
-	if err := recv4.Close(); err != nil {
-		t.Fatalf("close IPv4 listener: %v", err)
-	}
 
-	sender6, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP(peerV6), Port: 0})
-	if err != nil {
-		t.Fatalf("bind IPv6 peer sender: %v", err)
-	}
-	defer sender6.Close()
-	oif := linkIndex10751(t, "v13925peer")
 	for _, group := range []struct {
 		name string
 		addr string
@@ -210,7 +230,16 @@ func TestHostInboundNonUnicastUDPDelivery13925(t *testing.T) {
 		}
 		send := func(payload []byte) func() error {
 			return func() error {
-				return sendToScope10751(t, sender6, payload, net.ParseIP(group.addr), 161, oif)
+				dstIP := net.ParseIP(group.addr)
+				dstMAC := net.HardwareAddr{0x33, 0x33, 0, 0, 0, 1}
+				if group.name == "solicited-node" {
+					dstMAC = net.HardwareAddr{0x33, 0x33, 0xff, 0, 0, 1}
+				}
+				frame := mixedFrameUDP12127(
+					unix.ETH_P_IPV6, peerMAC, dstMAC,
+					net.ParseIP(peerV6), dstIP, 32000, 161, 2, payload,
+				)
+				return sendMixedFrame12127(peerNS, "v13925peer", frame)
 			}
 		}
 		installServices([]string{"ssh"})
