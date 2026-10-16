@@ -3187,7 +3187,7 @@ struct EmbeddedV6ToV4Layout<'a> {
 }
 
 fn embedded_v6_to_v4_layout<'a>(embedded: &'a [u8]) -> Option<EmbeddedV6ToV4Layout<'a>> {
-    if embedded.len() < 40 {
+    if embedded.len() < 40 || nat64_v6_translation_ineligible(embedded) {
         return None;
     }
     // Clamp hostile or large quotes to the fixed stack-scratch contract. A

@@ -7878,6 +7878,83 @@ fn embedded_v6_to_v4_carries_the_quoted_fragmentation_9128() {
     }
 }
 
+/// #13697: the embedded (quoted) IPv6 packet of an ICMPv6 error must obey the
+/// same RFC 7915 5.1 translation-eligibility gate as the outer v6->v4
+/// translator. Before the fix `embedded_v6_to_v4_layout` resolved L4 through
+/// the extension chain without calling `nat64_v6_translation_ineligible`, so
+/// a quote carrying AH, an active Routing header, or Mobility/HIP/Shim6 was
+/// stripped and translated instead of dropped.
+#[test]
+fn embedded_v6_to_v4_rejects_translation_ineligible_quotes_13697() {
+    let (src_v6, dst_v6, ..) = nat64_test_addrs();
+    let map = embed_map_v6_to_v4_9128();
+    let mut out = [0u8; MAX_EMBEDDED_LEN];
+
+    // (a) Authentication Header (51) in the quoted packet.
+    let ah: [u8; 12] = [PROTO_TCP, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+    let quote_ah = make_ipv6_ext_then_tcp(src_v6, dst_v6, 51, &ah);
+    // (b) Routing header (43) with Segments Left > 0.
+    let rh: [u8; 8] = [PROTO_TCP, 0, 0, 1, 0, 0, 0, 0];
+    let quote_rh = make_ipv6_ext_then_tcp(src_v6, dst_v6, 43, &rh);
+    // (c) Mobility (135) / HIP (139) / Shim6 (140).
+    let generic: [u8; 8] = [PROTO_TCP, 0, 0, 0, 0, 0, 0, 0];
+
+    let mut ineligible: Vec<(&str, Vec<u8>)> = vec![
+        ("AH", quote_ah),
+        ("active Routing", quote_rh),
+    ];
+    for proto in [135u8, 139u8, 140u8] {
+        ineligible.push((
+            match proto {
+                135 => "Mobility",
+                139 => "HIP",
+                _ => "Shim6",
+            },
+            make_ipv6_ext_then_tcp(src_v6, dst_v6, proto, &generic),
+        ));
+    }
+    for (name, quote) in &ineligible {
+        assert!(
+            nat64_v6_translation_ineligible(quote),
+            "{name} quote must be classified translation-ineligible"
+        );
+        assert!(
+            translate_embedded_v6_to_v4(&mut out, quote, &map).is_none(),
+            "{name}-bearing embedded quote must be dropped, not translated (#13697)"
+        );
+        // End-to-end: the whole ICMPv6 error carrying the quote is dropped.
+        let icmp = build_icmpv6_error(1, 0, [0; 4], quote);
+        let mut msg_out = [0u8; MAX_EMBEDDED_LEN];
+        assert!(
+            translate_icmpv6_message_to_icmpv4(&mut msg_out, &icmp, &map).is_none(),
+            "ICMPv6 error quoting a {name}-bearing packet must be dropped (#13697)"
+        );
+    }
+
+    // Over-reject guards: inert extension headers in a quote still translate.
+    // Routing with Segments Left == 0 (RFC 7915 5.1: ignore and translate).
+    let rh0: [u8; 8] = [PROTO_TCP, 0, 0, 0, 0, 0, 0, 0];
+    let quote_rh0 = make_ipv6_ext_then_tcp(src_v6, dst_v6, 43, &rh0);
+    assert!(
+        translate_embedded_v6_to_v4(&mut out, &quote_rh0, &map).is_some(),
+        "Routing SL==0 embedded quote must still translate"
+    );
+    // Hop-by-Hop (0) / Destination Options (60).
+    for proto in [0u8, 60u8] {
+        let quote = make_ipv6_ext_then_tcp(src_v6, dst_v6, proto, &generic);
+        assert!(
+            translate_embedded_v6_to_v4(&mut out, &quote, &map).is_some(),
+            "ext header {proto} embedded quote must still translate"
+        );
+    }
+    // Plain quote (no extension headers).
+    let plain = quoted_v6_9128(None);
+    assert!(
+        translate_embedded_v6_to_v4(&mut out, &plain, &map).is_some(),
+        "plain embedded quote must still translate"
+    );
+}
+
 /// A quoted IPv4 packet with the given fragmentation word, carrying a UDP header.
 fn quoted_v4_9129(ident: u16, offset_units: u16, more: bool) -> Vec<u8> {
     let udp = [0x30u8, 0x39, 0x00, 0x50, 0x00, 0x08, 0x00, 0x00];
