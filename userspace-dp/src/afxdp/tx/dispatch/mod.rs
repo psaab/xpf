@@ -239,6 +239,15 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
                     }
                 }
                 Some(_) => EgressMtuDecision::Forward,
+                // A fragment that the NAT64 translator cannot handle must
+                // not fall back to a generic IPv6 MTU verdict: that can emit
+                // an unsolicited PTB for a packet which will be dropped by
+                // translation anyway. Valid translatable TCP/UDP fragments
+                // already have a preflight length above; keep the remaining
+                // fragments out of the generic path as well.
+                None if crate::nat64::ipv6_fragment_header(translated).is_some() => {
+                    EgressMtuDecision::Forward
+                }
                 None => forwarded_egress_mtu_decision(source_frame, l3, meta.addr_family, mtu),
             }
         } else {

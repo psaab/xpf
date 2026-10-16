@@ -2690,20 +2690,21 @@ pub(crate) fn v6_to_v4_output_len(packet: &[u8]) -> Option<usize> {
     if l4_offset > l4_end {
         return None;
     }
+    // Keep the preflight length consistent with the builder: a declared
+    // IPv6 payload that is not present in the captured packet is not
+    // translatable, including on the non-first-fragment fast return below.
+    let l4_payload = packet.get(l4_offset..l4_end)?;
     if ipv6_is_non_first_fragment(packet) {
         let fragment = ipv6_fragment_header(packet)?;
-        // A non-first ICMPv6 fragment is opaque payload just like TCP/UDP;
-        // only its translated IPv4 header size matters here. This does not
-        // relax the separate fail-closed handling of ICMPv6 first fragments.
-        if fragment.offset_units == 0
-            || !matches!(l4_protocol, PROTO_TCP | PROTO_UDP | PROTO_ICMPV6)
-        {
+        // `write_v6_to_v4_nonfirst_into` accepts only TCP/UDP. Fragmented
+        // ICMPv6 cannot be translated because its checksum covers the whole
+        // datagram, so it must fail the same MTU preflight gate.
+        if fragment.offset_units == 0 || !matches!(l4_protocol, PROTO_TCP | PROTO_UDP) {
             return None;
         }
-        let total_len = 20usize.checked_add(l4_end - l4_offset)?;
+        let total_len = 20usize.checked_add(l4_payload.len())?;
         return (total_len <= u16::MAX as usize).then_some(total_len);
     }
-    let l4_payload = packet.get(l4_offset..l4_end)?;
     let l4_len = match l4_protocol {
         PROTO_TCP | PROTO_UDP => l4_payload.len(),
         PROTO_ICMPV6 => {
