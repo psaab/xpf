@@ -196,6 +196,18 @@ type Manager struct {
 	peerConfirmedAbsent bool
 	peerNodeID          int
 	peerGroups          map[int]PeerGroupState
+	// latestPeerHeartbeatSession/Sequence are the session/sequence of the
+	// most recent peer heartbeat frame accepted by handlePeerHeartbeat
+	// (zero when none, or when that frame carried no echo-capable
+	// identity). buildHeartbeat echoes exactly this pair (#14163): the
+	// echo is a property of the last received FRAME, not of any one RG.
+	// Selecting it from peerGroups let a transfer-restore that puts an
+	// older PeerGroupState back for one RG (failover.go
+	// restorePeerTransferOutOverrideLocked) make a transmit echo a stale
+	// sequence the peer's strict freshness check then refuses, so its
+	// echo lease was not renewed for that frame. Guarded by m.mu.
+	latestPeerHeartbeatSession  uint64
+	latestPeerHeartbeatSequence uint64
 	// Optional software version metadata advertised via heartbeat.
 	localSoftwareVersion string
 	peerSoftwareVersion  string
