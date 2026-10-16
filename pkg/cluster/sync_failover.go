@@ -562,17 +562,16 @@ func (s *SessionSync) sendFailoverBatchResult(conn net.Conn, msgType uint8, rgID
 		err = writeMsg(conn, msgType, payload)
 	}
 	s.writeMu.Unlock()
+	if firstErr != nil && ackConn != nil && ackConn != conn {
+		s.handleDisconnect(ackConn)
+	}
 	if err != nil {
 		if firstErr != nil && conn != nil && ackConn != conn {
 			slog.Warn("cluster sync: batch failover result send error on active conn", "err", firstErr, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
 		}
 		slog.Warn("cluster sync: batch failover result send error", "err", err, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
 		s.stats.Errors.Add(1)
-		if ackConn != nil {
-			s.handleDisconnect(ackConn)
-		} else if conn != nil {
-			s.handleDisconnect(conn)
-		}
+		s.handleDisconnect(conn)
 		return
 	}
 }
