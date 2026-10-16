@@ -500,3 +500,14 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   valid lease on renew/rebind. A missing option 1 still falls back to `/24`;
   only a *present-but-degenerate* mask is refused. Valid prefixes including
   `/31` and `/32` (point-to-point / host leases) are accepted.
+- **Over-broad mask / martian yiaddr is refused (#14183, untrusted input).**
+  Extending #4101: `leaseFromACKv4` also refuses a contiguous mask broader
+  than `/8` (`/1`–`/7`) and a martian `yiaddr` in the non-forwardable ranges
+  refused for classless destinations/gateways (`0/8`, `127/8`, `169.254/16`,
+  `224/4`, `240/4`, including `255.255.255.255`). Otherwise `AddrReplace`
+  would install a connected prefix covering up to half of IPv4 (or bind a
+  loopback/multicast address) on the interface, letting a rogue server
+  divert that space on-link. `/8` and narrower (including `/31`/`/32`) and
+  private/documentation addresses remain valid. There is no
+  classless-trust override for the leased address itself: it is the
+  interface's own address, not an optional learned route.

@@ -454,26 +454,45 @@ func leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
 	}
 	ones, bits := net.IPMask(mask).Size()
 
-	// Reject a degenerate subnet mask (untrusted input). net.IPMask.Size()
-	// returns ones=0 for a zero mask (0.0.0.0 → /0) and (0,0) for a
-	// non-contiguous mask (e.g. 255.255.0.255). Either would make the lease
-	// YourIP/0 and cause the kernel to install an on-link 0.0.0.0/0 connected
-	// route on this interface — blackholing/hijacking ALL IPv4 forwarding
-	// until the lease is replaced. A rogue or broken server can force this
-	// with a single crafted ACK, so refuse the lease rather than commit it.
-	// leaseFromACKv4's error propagates through v4Exchange → runDHCPv4, which
-	// retries a fresh DISCOVER (acquire) or falls through to T2/expiry keeping
-	// the existing valid lease (renew/rebind) — no YourIP/0 is ever installed.
-	// RFC 2131 requires option 1 to carry a valid subnet mask.
-	if bits != 32 || ones == 0 {
+	// Reject a degenerate or over-broad subnet mask (untrusted input).
+	// net.IPMask.Size() returns ones=0 for a zero mask (0.0.0.0 → /0) and
+	// (0,0) for a non-contiguous mask (e.g. 255.255.0.255). Either would make
+	// the lease YourIP/0 and cause the kernel to install an on-link
+	// 0.0.0.0/0 connected route on this interface — blackholing/hijacking
+	// ALL IPv4 forwarding until the lease is replaced. A /1-/7 mask is only
+	// narrower in degree: AddrReplace still installs a connected prefix
+	// covering at least 1/128 of IPv4 (a /1 covers half), letting a rogue
+	// server divert that space on-link. No legitimate connected subnet is
+	// broader than /8, so refuse ones < 8 as well (#14183). The rejection
+	// propagates through v4Exchange → runDHCPv4, which retries a fresh
+	// DISCOVER (acquire) or falls through to T2/expiry keeping the existing
+	// valid lease (renew/rebind) — no over-broad prefix is ever installed.
+	// RFC 2131 requires option 1 to carry a valid subnet mask. Unlike
+	// classless routes, the leased address has no trust-override escape
+	// hatch: it is the interface's own address, not an optional route.
+	if bits != 32 || ones < 8 {
 		return nil, fmt.Errorf(
-			"DHCP ACK has invalid subnet mask %v on %s — refusing lease (would blackhole IPv4)",
+			"DHCP ACK has invalid or over-broad subnet mask %v on %s — refusing lease (would widen connected prefix)",
 			net.IP(mask), ifaceName)
 	}
 
 	addr, ok := netip.AddrFromSlice(yourIP.To4())
 	if !ok {
 		return nil, fmt.Errorf("invalid IP in DHCP ACK: %v", yourIP)
+	}
+
+	// Reject a martian yiaddr (untrusted input, #14183). The leased address
+	// is bound on the interface via AddrReplace and anchors the connected
+	// route, gateway/neighbor resolution, and downstream consumers. A
+	// loopback, "this-network", link-local, multicast, or reserved address
+	// is never a legitimate DHCP assignment — the same non-forwardable
+	// ranges refused for classless destinations and DHCP gateways
+	// (ClasslessRouteIsMartian). 255.255.255.255 is inside 240.0.0.0/4.
+	// Private and documentation ranges remain valid assignments.
+	if ClasslessRouteIsMartian(netip.PrefixFrom(addr, 32)) {
+		return nil, fmt.Errorf(
+			"DHCP ACK has martian yiaddr %v on %s — refusing lease",
+			addr, ifaceName)
 	}
 
 	lease := &Lease{
