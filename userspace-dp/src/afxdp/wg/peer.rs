@@ -38,13 +38,14 @@ use std::sync::{Arc, Mutex, RwLock};
 /// snapshot (one `Arc<PeerConfig>` per `PeerEntry`). `reconcile_peers`
 /// builds a FRESH `PeerConfig` for every commit and the whole table is
 /// published in a single `ArcSwap::store`, so a reader sees the
-/// fully-old or the fully-new tuple, never a mix. The hot egress path
-/// reads the endpoint straight from the loaded snapshot — no per-packet
-/// `RwLock` (folds codex-049-04).
+/// fully-old or the fully-new tuple, never a mix. `peer_for_dest`
+/// reads the configured fallback from this snapshot and prefers the
+/// separate live-endpoint slot on the reused peer `Arc`; live roaming
+/// and DDNS changes therefore do not require re-publishing config.
 ///
-/// Roaming (#1499 r4) is unaffected: a learned-endpoint update would
-/// still go through a reconcile (or a future table re-publish), which
-/// builds a new immutable bundle and swaps it atomically.
+/// Configured endpoint updates remain atomic with the other per-peer
+/// config fields. Runtime endpoint adoption is deliberately separate:
+/// it is mutable peer state, not part of a commit-time snapshot.
 pub(crate) struct PeerConfig {
     /// Optional outbound endpoint. `None` means responder-only.
     pub(crate) endpoint: Option<SocketAddr>,
@@ -459,14 +460,13 @@ pub(crate) struct Peer {
     /// endpoint from authenticated datagrams, and data records are most of
     /// them. Without this the learning degrades to handshake/keepalive cadence.
     ///
-    /// What it does NOT affect, measured rather than assumed: transit ENCAP
-    /// never read a learned endpoint. `peer_for_dest` returns
-    /// `entry.config.endpoint` from the per-snapshot config bundle, and
-    /// `reconcile_peers` — its only writer — has exactly one production caller,
-    /// `WgEngine::new`. The learned map (`effective_endpoints`) is referenced
-    /// only inside `coordinator/wg_control/mod.rs`. So what degrades without
-    /// this slot is the control thread's OWN sends — keepalives, handshake
-    /// initiations, the TUN-read egress — not the dataplane's forwarding.
+    /// #13664 closes the split: the endpoint learned here and adopted
+    /// into the control loop's `effective_endpoints` is also mirrored
+    /// into the peer's persistent `live_endpoint` slot. Both the
+    /// dataplane's `peer_for_dest` and control-thread sends therefore
+    /// follow the same authenticated roam / accepted DDNS address
+    /// rather than diverging to a commit-time endpoint versus live
+    /// learned endpoint.
     ///
     /// Shaped like `handshake_request_pending` beside it: per-peer,
     /// lossy-tolerable, drained by the control thread's existing
@@ -482,6 +482,18 @@ pub(crate) struct Peer {
     /// only on a CHANGE (the worker compares against the lock-free
     /// snapshot first), so duplicates never take the lock.
     pub(crate) roamed_endpoint: std::sync::Mutex<Option<SocketAddr>>,
+    /// #13664: last endpoint adopted for egress — an authenticated
+    /// roam or a DNS re-resolution that survived the roam hold —
+    /// written by the control thread exactly where it writes its own
+    /// effective-endpoint map. `peer_for_dest` reads this ahead of the
+    /// immutable commit-time `config.endpoint`, so dataplane transit
+    /// follows the peer instead of blackholing toward the stale
+    /// static address. Lives on the reused `Arc<Peer>`, so it survives
+    /// config commits; a fresh peer starts with `None` and falls back
+    /// to the configured endpoint. `ArcSwapOption` keeps packet-path
+    /// reads lock-free; allocations occur only when an endpoint is
+    /// adopted, not on egress.
+    pub(crate) live_endpoint: arc_swap::ArcSwapOption<SocketAddr>,
     /// Relaxed mirror of `roamed_endpoint.is_some()`, so the per-packet path
     /// can skip the mutex entirely once a roam is already pending and the
     /// control thread has not yet drained it.
@@ -532,12 +544,27 @@ impl Peer {
             next: RwLock::new(None),
             greatest_tai64n: Mutex::new([0u8; TAI64N_LEN]),
             roamed_endpoint: std::sync::Mutex::new(None),
+            live_endpoint: arc_swap::ArcSwapOption::new(None),
             roamed_endpoint_pending: AtomicBool::new(false),
             roam_snapshot: RoamSnapshot::new(),
             handshake_request_pending: AtomicBool::new(false),
             handshake_request_last_ns: AtomicU64::new(0),
             rekey_request_pending: AtomicBool::new(false),
         }
+    }
+
+    /// #13664: the adopted live endpoint for this peer, if any.
+    pub(crate) fn live_endpoint(&self) -> Option<SocketAddr> {
+        self.live_endpoint.load().as_deref().copied()
+    }
+
+    /// #13664: adopt `endpoint` as this peer's live egress target
+    /// (control thread only: roam drain, socket learning, DNS move).
+    pub(crate) fn adopt_live_endpoint(&self, endpoint: SocketAddr) {
+        if self.live_endpoint.load().as_deref() == Some(&endpoint) {
+            return;
+        }
+        self.live_endpoint.store(Some(Arc::new(endpoint)));
     }
 
     /// #4092 responder handshake anti-replay check-and-update. Given the

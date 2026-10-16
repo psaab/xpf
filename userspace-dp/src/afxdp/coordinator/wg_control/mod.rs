@@ -744,7 +744,9 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
                     // spoofed source for one peer cannot redirect another
                     // peer's traffic.
                     if let Some(peer) = outcome.peer() {
-                        effective_endpoints.insert(peer, canonicalize_endpoint(from));
+                        let endpoint = canonicalize_endpoint(from);
+                        effective_endpoints.insert(peer, endpoint);
+                        engine.adopt_live_endpoint(&peer, endpoint);
                         // #7158: stamp WHEN this peer was last heard from,
                         // authenticated. The endpoint resolver uses it to stay
                         // out of the way of a live roam — see
@@ -963,6 +965,7 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
             // the per-peer timers, so an initiation this pass uses the newest
             // address rather than the previous one.
             apply_resolved_endpoints(
+                Some(engine),
                 endpoint_resolver,
                 &peer_pubkeys,
                 &mut effective_endpoints,
@@ -1146,7 +1149,9 @@ fn adopt_worker_observation(
     now_ns: u64,
 ) -> bool {
     if let Some(observed) = engine.take_worker_observed_endpoint(pk) {
-        effective_endpoints.insert(*pk, canonicalize_endpoint(observed));
+        let endpoint = canonicalize_endpoint(observed);
+        effective_endpoints.insert(*pk, endpoint);
+        engine.adopt_live_endpoint(pk, endpoint);
         last_authenticated_rx.insert(*pk, now_ns);
         true
     } else {
@@ -1177,7 +1182,9 @@ mod tests;
 const WG_ENDPOINT_ROAM_HOLD_NS: u64 = crate::afxdp::wg::session::REKEY_ATTEMPT_TIME_NS;
 
 /// Adopt resolver answers into `effective_endpoints`, subject to the roam-hold
-/// rule above. Never blocks: `latest` is a map read, never a lookup.
+/// rule above. In production, the newly accepted answer is also mirrored into
+/// the peer's live endpoint slot; configured fallback endpoints are not
+/// promoted to live state. Never blocks: `latest` is a map read, never a lookup.
 ///
 /// #9918 F-162 trust boundary: a hostname endpoint trusts DNS for egress
 /// steering after 90 s of peer silence (see the roam-hold const above). An
@@ -1187,6 +1194,7 @@ const WG_ENDPOINT_ROAM_HOLD_NS: u64 = crate::afxdp::wg::session::REKEY_ATTEMPT_T
 /// opt-in hostnames. Moves surface via `endpoint_changed` /
 /// `endpoint_last_error` in status plus the `peer endpoint resolved` log below.
 fn apply_resolved_endpoints(
+    engine: Option<&crate::afxdp::wg::WgEngine>,
     resolver: Option<&crate::afxdp::wg::endpoint_resolver::WgEndpointResolver>,
     peer_pubkeys: &[[u8; 32]],
     effective_endpoints: &mut std::collections::HashMap<[u8; 32], SocketAddr>,
@@ -1212,6 +1220,12 @@ fn apply_resolved_endpoints(
             }
         }
         let prior = effective_endpoints.insert(*pk, resolved);
+        // Adopt only resolver changes, never the configured endpoint
+        // seeded into the map. Otherwise an unchanged static endpoint
+        // would become sticky live state and mask a later config commit.
+        if let Some(engine) = engine {
+            engine.adopt_live_endpoint(pk, resolved);
+        }
         // Rare by construction (a DDNS move, or first resolution at bring-up),
         // so this is not a hot-path log. It is the operator's account of WHY a
         // peer's endpoint moved without a commit.
@@ -1240,20 +1254,48 @@ mod endpoint_adoption_7158_tests {
     /// DDNS name moved is reached without a commit or a daemon restart.
     #[test]
     fn a_resolved_endpoint_is_adopted_when_the_peer_is_silent_7158() {
-        let resolver =
-            WgEndpointResolver::with_resolved_for_test(&[(PK, addr("203.0.113.9:51820"))]);
+        let resolved = addr("203.0.113.9:51820");
+        let configured = addr("198.51.100.1:51820");
+        let resolver = WgEndpointResolver::with_resolved_for_test(&[(PK, resolved)]);
+        let engine = crate::afxdp::wg::WgEngine::new(crate::afxdp::wg::WgEngineConfig {
+            local_private_key: [0x42; 32].into(),
+            listen_port: 51820,
+            peers: vec![crate::afxdp::wg::WgPeerConfig {
+                pubkey: PK,
+                endpoint: Some(configured),
+                persistent_keepalive: 0,
+                allowed_ips: vec!["10.0.0.0/8".parse().unwrap()],
+                preshared_key: [0u8; 32].into(),
+            }],
+        });
         let mut effective: HashMap<[u8; 32], SocketAddr> = HashMap::new();
-        effective.insert(PK, addr("198.51.100.1:51820"));
+        effective.insert(PK, configured);
         // Never heard from: no roam to protect.
         let heard: HashMap<[u8; 32], u64> = HashMap::new();
 
-        apply_resolved_endpoints(Some(&resolver), &[PK], &mut effective, &heard, 1_000, "wg0");
+        apply_resolved_endpoints(
+            Some(&engine),
+            Some(&resolver),
+            &[PK],
+            &mut effective,
+            &heard,
+            1_000,
+            "wg0",
+        );
 
         assert_eq!(
             effective.get(&PK).copied(),
             Some(addr("203.0.113.9:51820")),
             "a peer we have never heard from must take the resolved address; \
              this is the DDNS move the feature exists for (#7158)"
+        );
+        assert_eq!(
+            engine
+                .peer_for_dest("10.0.0.1".parse().unwrap())
+                .unwrap()
+                .1,
+            Some(resolved),
+            "#13664: an accepted DNS answer must also reach dataplane egress"
         );
     }
 
@@ -1280,7 +1322,7 @@ mod endpoint_adoption_7158_tests {
         // Heard from one nanosecond ago.
         heard.insert(PK, now - 1);
 
-        apply_resolved_endpoints(Some(&resolver), &[PK], &mut effective, &heard, now, "wg0");
+        apply_resolved_endpoints(None, Some(&resolver), &[PK], &mut effective, &heard, now, "wg0");
 
         assert_eq!(
             effective.get(&PK).copied(),
@@ -1308,7 +1350,7 @@ mod endpoint_adoption_7158_tests {
         // Silent for exactly the hold: the boundary is inclusive-yields.
         heard.insert(PK, now - WG_ENDPOINT_ROAM_HOLD_NS);
 
-        apply_resolved_endpoints(Some(&resolver), &[PK], &mut effective, &heard, now, "wg0");
+        apply_resolved_endpoints(None, Some(&resolver), &[PK], &mut effective, &heard, now, "wg0");
 
         assert_eq!(
             effective.get(&PK).copied(),
@@ -1359,13 +1401,18 @@ mod endpoint_adoption_7158_tests {
         );
         assert_eq!(effective.get(&init_pub), Some(&x));
         assert_eq!(
+            resp.peer_for_dest("10.123.0.1".parse().unwrap()).unwrap().1,
+            Some(x),
+            "#13664: worker-adopted roaming endpoint must reach dataplane egress"
+        );
+        assert_eq!(
             heard.get(&init_pub),
             Some(&now),
             "adopt must stamp EXACTLY the injected now — a real-clock \
              stamp or a deleted refresh breaks this cell"
         );
         // DNS offers Y while the peer is live: the hold preserves X.
-        apply_resolved_endpoints(Some(&resolver), &[init_pub], &mut effective, &heard, now, "wg0");
+        apply_resolved_endpoints(None, Some(&resolver), &[init_pub], &mut effective, &heard, now, "wg0");
         assert_eq!(
             effective.get(&init_pub),
             Some(&x),
@@ -1380,7 +1427,7 @@ mod endpoint_adoption_7158_tests {
         );
         assert!(adopt_worker_observation(&resp, &init_pub, &mut effective, &mut heard, now2));
         assert_eq!(heard.get(&init_pub), Some(&now2));
-        apply_resolved_endpoints(Some(&resolver), &[init_pub], &mut effective, &heard, now2, "wg0");
+        apply_resolved_endpoints(None, Some(&resolver), &[init_pub], &mut effective, &heard, now2, "wg0");
         assert_eq!(
             effective.get(&init_pub),
             Some(&x),
@@ -1399,6 +1446,7 @@ mod endpoint_adoption_7158_tests {
             "nothing queued: no adopt, no refresh"
         );
         apply_resolved_endpoints(
+            None,
             Some(&resolver),
             &[init_pub],
             &mut effective_old,
@@ -1478,7 +1526,7 @@ mod endpoint_adoption_7158_tests {
         let mut effective: HashMap<[u8; 32], SocketAddr> = HashMap::new();
         effective.insert(PK, addr("198.51.100.1:51820"));
         let heard: HashMap<[u8; 32], u64> = HashMap::new();
-        apply_resolved_endpoints(None, &[PK], &mut effective, &heard, 1_000, "wg0");
+        apply_resolved_endpoints(None, None, &[PK], &mut effective, &heard, 1_000, "wg0");
         assert_eq!(
             effective.get(&PK).copied(),
             Some(addr("198.51.100.1:51820"))

@@ -911,20 +911,22 @@ impl WgEngine {
             .collect()
     }
 
-    /// Each peer's (pubkey, configured-or-learned endpoint), in table
-    /// order (#1434). The control thread seeds its per-peer
-    /// effective-endpoint map from this at start. Slow path.
+    /// Each peer's (pubkey, live-or-configured endpoint), in table
+    /// order (#1434, #13664). The control thread seeds its per-peer
+    /// effective-endpoint map from this at start, so a restart
+    /// re-seeds the adopted live endpoint rather than resurrecting
+    /// the stale commit-time address. Slow path.
     pub(crate) fn peer_endpoints(&self) -> Vec<([u8; WG_KEY_LEN], Option<std::net::SocketAddr>)> {
         self.load_table()
             .peers
             .iter()
-            .map(|e| (e.peer.pubkey, e.config.endpoint))
+            .map(|e| (e.peer.pubkey, e.peer.live_endpoint().or(e.config.endpoint)))
             .collect()
     }
 
     /// #1434 B1b cryptokey routing on EGRESS: longest-prefix-match the
     /// inner destination IP against the AllowedIPs trie and return the
-    /// owning peer's (pubkey, configured-or-learned endpoint). `None`
+    /// owning peer's (pubkey, live-or-configured endpoint). `None`
     /// when no peer's AllowedIPs cover `inner_dst`. This is the encap
     /// counterpart to the decap-side AllowedIPs src-gate — the engine
     /// owns the LPM so the table swap is observed atomically. Slow-path
@@ -937,12 +939,38 @@ impl WgEngine {
         let table = self.load_table();
         let idx = table.allowed_ips.lookup(inner_dst)?;
         let entry = table.peers.get(idx as usize)?;
-        // #2836 / codex-049-04: endpoint is read from the immutable
-        // per-snapshot config bundle captured by this same `load`, so
-        // the AllowedIPs match and the endpoint come from ONE atomic
-        // snapshot (no torn old-prefix/new-endpoint pairing) and the
-        // hot egress path takes NO per-packet RwLock on the endpoint.
-        Some((entry.peer.pubkey, entry.config.endpoint))
+        // #2836 / codex-049-04: the AllowedIPs match and pubkey come
+        // from the immutable per-snapshot config bundle captured by
+        // this same `load`, so the LPM result can never pair an
+        // old-prefix match with a new peer. #13664: the endpoint,
+        // however, must be the peer's LIVE adopted endpoint (an
+        // authenticated roam or a DDNS re-resolution that survived
+        // the roam hold, mirrored into the peer by the control thread
+        // wherever it writes its own effective-endpoint map) ahead of
+        // the immutable commit-time `config.endpoint`; returning the
+        // static value blackholed roamed/DDNS peers on every
+        // dataplane encap/PTB/outer-MTU path that selects via this
+        // fn, while the control thread's keepalives (which use the
+        // adopted map) kept working and masked the failure.
+        Some((
+            entry.peer.pubkey,
+            entry.peer.live_endpoint().or(entry.config.endpoint),
+        ))
+    }
+
+    /// #13664: adopt an authenticated roam or a DDNS re-resolution
+    /// accepted after the roam hold as this peer's live egress target.
+    /// The control thread mirrors its effective-endpoint map into this
+    /// slot so `peer_for_dest` dataplane readers follow the peer. No-op
+    /// for an unknown peer.
+    pub(crate) fn adopt_live_endpoint(
+        &self,
+        peer_pubkey: &[u8; WG_KEY_LEN],
+        endpoint: std::net::SocketAddr,
+    ) {
+        if let Some(peer) = self.peer_arc(peer_pubkey) {
+            peer.adopt_live_endpoint(endpoint);
+        }
     }
 
     /// Whether the named peer currently has a confirmed (usable for
