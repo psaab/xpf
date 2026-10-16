@@ -206,9 +206,9 @@ func TestPrefixListFamilies_2607(t *testing.T) {
 }
 
 // TestFromPrefixListEmpty_FailClosed_2607 proves an undefined/empty referenced
-// list does not panic and defaults to a single IPv4 matcher against the
-// (undefined) list, which FRR resolves to NOMATCH — fail-closed, no silent
-// permit-all, byte-identical to the pre-#2607 undefined-list behavior.
+// list does not panic. #14136: the dangling match is now skipped (accept
+// emits no sequence and falls through) instead of emitting an undefined
+// reference FRR resolves to NOMATCH.
 func TestFromPrefixListEmpty_FailClosed_2607(t *testing.T) {
 	m := New()
 	po := &config.PolicyOptionsConfig{
@@ -220,11 +220,11 @@ func TestFromPrefixListEmpty_FailClosed_2607(t *testing.T) {
 		},
 	}
 	got := m.generatePolicyOptions(po)
-	if !strings.Contains(got, " match ip address prefix-list ghost\n") {
-		t.Errorf("undefined from-prefix-list: must default to a single `match ip address prefix-list ghost` (undefined → NOMATCH, fail-closed):\n%s", got)
+	if strings.Contains(got, "address prefix-list ghost") {
+		t.Errorf("undefined from-prefix-list: must NOT emit a dangling matcher:\n%s", got)
 	}
-	if strings.Contains(got, "match ipv6 address prefix-list ghost") {
-		t.Errorf("undefined from-prefix-list: must NOT emit an IPv6 matcher for an empty list:\n%s", got)
+	if strings.Contains(got, "route-map p permit") {
+		t.Errorf("undefined from-prefix-list accept must not degrade to a permit:\n%s", got)
 	}
 }
 

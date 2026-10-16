@@ -5255,15 +5255,16 @@ func TestPrefixListMatch_CoResidentRouteFilter_2607(t *testing.T) {
 func TestPrefixListMatch_UnknownName_DefaultsIPv4(t *testing.T) {
 	m := New()
 	// Term references a prefix-list that is not defined (nil prefixes).
-	// Falls back to the IPv4 matcher — byte-identical to pre-fix render,
-	// no panic.
+	// #14136: the dangling match is skipped — an accept term emits no
+	// sequence and falls through rather than emitting a reference FRR
+	// cannot resolve. Previously this asserted the dangling IPv4 matcher.
 	po := policyOptionsWithPrefixListTerm("ghost", nil, false)
 	got := m.generatePolicyOptions(po)
-	if !strings.Contains(got, " match ip address prefix-list ghost\n") {
-		t.Errorf("unknown prefix-list: must default to `match ip address prefix-list ghost` in:\n%s", got)
+	if strings.Contains(got, "address prefix-list ghost") {
+		t.Errorf("unknown prefix-list: must NOT emit a dangling matcher in:\n%s", got)
 	}
-	if strings.Contains(got, "match ipv6 address prefix-list ghost") {
-		t.Errorf("unknown prefix-list: must NOT emit the IPv6 matcher in:\n%s", got)
+	if strings.Contains(got, "route-map p permit") {
+		t.Errorf("unknown prefix-list accept must not degrade to a permit in:\n%s", got)
 	}
 }
 

@@ -448,6 +448,32 @@ func communityListMissingAtRender(po *config.PolicyOptionsConfig, name string) b
 	return false
 }
 
+// prefixListRefMissingAtRender reports whether one per-family
+// `match ip|ipv6 address prefix-list <name>` ref would dangle: the list is
+// undefined, or the prefix-list loop omits every entry of that family
+// (malformed entries fail net.ParseCIDR, #10823). The predicate is per-family
+// because a mixed list renders its families as independent FRR prefix-lists:
+// an all-malformed v6 half leaves the v6 ref dangling even when the v4 half
+// renders. Keeping this predicate in step with the emission loop (same
+// net.ParseCIDR test, same `:` family split) ensures every ref reported
+// missing has no rendered entry, and every rendered ref has at least one.
+func prefixListRefMissingAtRender(po *config.PolicyOptionsConfig, name, matchKW string) bool {
+	pl := po.PrefixLists[name]
+	if pl == nil {
+		return true
+	}
+	wantV6 := matchKW == "ipv6"
+	for _, prefix := range pl.Prefixes {
+		if strings.Contains(prefix, ":") != wantV6 {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(prefix); err == nil {
+			return false
+		}
+	}
+	return true
+}
+
 const nextPolicySequenceMarker = "on-match goto XPF_NEXT_POLICY_SEQUENCE"
 
 func policyHasNextPolicyTerm(ps *config.PolicyStatement) bool {
@@ -617,6 +643,57 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				continue
 			}
 			slog.Warn("frr: term matches on community list absent from frr.conf; skipping dangling match",
+				"route_map", routeMapName, "term", term.Name)
+		}
+		// #14136 fail-closed term rule, the prefix-list sibling of #9881 /
+		// #10822: the #10823 belt omits malformed prefix-list entries, but a
+		// `match ip|ipv6 address prefix-list` reference to a list with no
+		// rendered entry for that family (undefined, empty, or
+		// all-malformed-for-family) dangles, so reject terms over any such
+		// OR-branch render deny-all; other terms skip the dangling branch in
+		// the dispatch below. Never emit a dangling prefix-list match. The
+		// inline ACL form (#5730) is covered too: renderFromPrefixListACL
+		// omits the same malformed entries, so an all-malformed family would
+		// reference an undefined access-list instead.
+		// A name is fully dangling when EVERY per-family ref under it has
+		// no rendered entry. A mixed list with ONE rendered family is not
+		// fully dangling: its fine ref keeps emitting below and only the
+		// dangling family ref drops — deny-all for a partially-rendered
+		// reject would deny routes its fine branch never rejected, and the
+		// issue's undefined/all-skipped cases are already fully dangling.
+		danglingPrefixList := make(map[string]bool, len(term.PrefixList))
+		for _, plName := range term.PrefixList {
+			if plName == "" {
+				continue
+			}
+			if danglingPrefixList[plName] {
+				continue
+			}
+			danglingPrefixList[plName] = true
+			for _, ref := range fromPrefixListRefs(po, plName) {
+				if !prefixListRefMissingAtRender(po, ref.name, ref.matchKW) {
+					danglingPrefixList[plName] = false
+					break
+				}
+			}
+		}
+		anyDanglingPrefixList := false
+		for _, dangling := range danglingPrefixList {
+			if dangling {
+				anyDanglingPrefixList = true
+				break
+			}
+		}
+		if anyDanglingPrefixList {
+			if action == "deny" {
+				slog.Warn("frr: reject term matches on prefix-list absent from frr.conf; rendering deny-all",
+					"route_map", routeMapName, "term", term.Name)
+				fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(routeMapName), seq)
+				b.WriteString("exit\n")
+				seq += 10
+				continue
+			}
+			slog.Warn("frr: term matches on prefix-list absent from frr.conf; skipping dangling match",
 				"route_map", routeMapName, "term", term.Name)
 		}
 
@@ -1063,7 +1140,18 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// families bind a family-correct match line (#2607).
 		emitVariants := func(seqFam string, rfs []indexedRouteFilter, famPL string) {
 			for _, plName := range orElseEmpty(term.PrefixList) {
+				// #14136: never emit a dangling `match ... prefix-list`
+				// (see the term rule above). "" is the no-match sentinel,
+				// never dangling. Reject terms never reach here with a
+				// fully-dangling name (deny-all above). A mixed list with
+				// one dangling family drops only that family's ref below.
+				if danglingPrefixList[plName] {
+					continue
+				}
 				for _, plRef := range fromPrefixListRefs(po, plName) {
+					if plRef.name != "" && prefixListRefMissingAtRender(po, plRef.name, plRef.matchKW) {
+						continue
+					}
 					for _, comm := range orElseEmpty(term.FromCommunity) {
 						// #10822: never emit a dangling `match community`
 						// (see the term rule above). "" is the no-match

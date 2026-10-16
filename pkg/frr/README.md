@@ -1321,6 +1321,16 @@ step. Both are required — neither sees the other's case:
   contributes no match. `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`
   covers `/33`, bad-octet, and non-IP entries through both compile paths while
   checking valid siblings still render.
+- **Prefix-list references with no rendered entry are fail-closed at the
+  term (#14136).** `prefixListRefMissingAtRender` mirrors the #10823 belt
+  per family: a `from prefix-list` name that is undefined, empty, or whose
+  entries for a ref's family are all malformed has no rendered definition
+  (including the #5730 inline access-list form). A reject term over a
+  fully-dangling name renders a bare deny-all; accept and non-terminating
+  terms skip the dangling branch; a mixed list with one rendered family
+  keeps that family and drops only the dangling ref. No dangling
+  `match ip|ipv6 address prefix-list` (or inline-ACL) line is emitted —
+  the prefix-list sibling of the #9881 as-path and #10822 community rules.
 - **The #4498 route-map sweep is now split between sanitization and semantic
   omission guards.** The sweep found `set ip/ipv6 next-hop <term.NextHop>`,
   `set origin <term.Origin>`, and `match source-protocol <proto>` still using
