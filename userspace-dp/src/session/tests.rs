@@ -2305,22 +2305,16 @@ fn promote_synced_clears_syn_ack_first_pending_13678() {
 fn reverse_ack_completion_removes_pressure_shed_entry_13678() {
     let now = 1_000_000_000u64;
     let mut table = SessionTable::new();
-    let key = key_v4();
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        now,
-        PROTO_TCP,
-        TCP_SYN | TCP_ACK,
-    ));
-    assert!(table.pressure_shed_openings.contains_key(&key));
+    let forward = key_v4();
+    let reverse =
+        install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN | TCP_ACK);
+    assert!(table.pressure_shed_openings.contains_key(&forward));
 
     let mut reverse_meta = metadata();
     reverse_meta.is_reverse = true;
     assert!(table.update_session(
         SessionUpdate {
-            key: &key,
+            key: &reverse,
             decision: decision(),
             metadata: reverse_meta,
             origin: SessionOrigin::ForwardFlow,
@@ -2330,9 +2324,15 @@ fn reverse_ack_completion_removes_pressure_shed_entry_13678() {
         },
         false
     ));
-    let after = table.entry_by_key(&key).expect("completed session");
-    assert!(after.established && !after.handshake_pending && !after.syn_ack_first);
-    assert!(!table.pressure_shed_openings.contains_key(&key));
+
+    for key in [&forward, &reverse] {
+        let entry = table.entry_by_key(key).expect("completed session half");
+        assert!(entry.established && !entry.handshake_pending && !entry.syn_ack_first);
+        assert_eq!(entry.last_seen_ns, now + 1_000_000);
+        assert_eq!(entry.expires_after_ns, table.timeouts.tcp_established_ns);
+    }
+    assert!(!table.pressure_shed_openings.contains_key(&forward));
+    assert!(!table.pressure_shed_openings.contains_key(&reverse));
 }
 
 /// #13678 (D12-03, negative guard): a retransmitted SYN-ACK in the installing

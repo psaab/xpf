@@ -3389,11 +3389,21 @@ impl SessionTable {
                 rebucket = true;
             }
             if handshake_completed {
-                // #6752/#10891: the completing segment clears the matched half's
-                // gap; clear the companion too so the established half can
-                // retain its full idle window.
+                // #6752/#10891: clear the companion gap and give both halves
+                // the established idle window from the completing packet.
+                entry.established = true;
                 entry.handshake_pending = false;
                 entry.syn_ack_first = false;
+                entry.last_seen_ns = now_ns;
+                entry.expires_after_ns = session_timeout_ns(
+                    companion_key.protocol,
+                    0,
+                    true,
+                    &timeouts,
+                    entry.metadata.inactivity_timeout_ns,
+                    None,
+                );
+                rebucket = true;
             }
             if close {
                 // F17: a FIN/RST on one half kills the whole flow. Stamp the
@@ -3575,6 +3585,7 @@ impl SessionTable {
         let opening_override_ns = self.opening_override_for(metadata.ingress_zone);
         // #10507 A1: live policy generation for the Fresh-only reset below.
         let live_policy_gen = self.policy_revalidation_gen;
+        let reverse_syn_ack;
         let handshake_completed;
         {
             let record = self
@@ -3640,7 +3651,7 @@ impl SessionTable {
             // a non-TCP app-managed session promotes on a genuine reverse
             // packet; a forward-only refresh cannot open the long idle window.
             // #13677: a stray reverse SYN-ACK must not re-pend a completed handshake.
-            let reverse_syn_ack = matches!(protocol, PROTO_TCP)
+            reverse_syn_ack = matches!(protocol, PROTO_TCP)
                 && is_syn_ack(tcp_flags)
                 && metadata.is_reverse
                 && (!record.entry.established || record.entry.handshake_pending);
@@ -3708,6 +3719,20 @@ impl SessionTable {
             // epoch; the HOLD branch never writes seen_rg_epoch).
             record.entry.first_held_ns = 0;
             record.entry.seen_rg_epoch = 0;
+        }
+        if reverse_syn_ack || handshake_completed {
+            self.propagate_tcp_state_to_companion(
+                key,
+                now_ns,
+                TcpStatePropagation {
+                    nat: decision.nat,
+                    close: false,
+                    reset: false,
+                    fin: false,
+                    established: reverse_syn_ack,
+                    handshake_completed,
+                },
+            );
         }
         if protocol == PROTO_TCP {
             if !metadata.is_reverse {
