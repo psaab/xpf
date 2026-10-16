@@ -295,7 +295,7 @@ func TestLegacyPersistentNatGenerationStateLoads13867(t *testing.T) {
 		PendingRemote     map[string]bool   `json:"pending_remote,omitempty"`
 	}{
 		OriginID: origin, Generation: 4,
-		RemoteGenerations: map[string]uint64{remote: 0},
+		RemoteGenerations: map[string]uint64{remote: 7},
 	})
 	if err != nil {
 		t.Fatalf("marshal legacy state: %v", err)
@@ -309,8 +309,9 @@ func TestLegacyPersistentNatGenerationStateLoads13867(t *testing.T) {
 		t.Fatalf("load legacy state: %v", err)
 	}
 	state := m.persistentNatLeaseGeneration
+	remoteGeneration, remotePresent := state.RemoteGenerations[remote]
 	if state.OriginID != origin || state.Generation != 4 ||
-		state.RemoteGenerations[remote] != 0 ||
+		!remotePresent || remoteGeneration != 7 ||
 		len(state.LocalClearRemoteGenerations) != 0 {
 		t.Fatalf("loaded legacy state = %+v", state)
 	}
