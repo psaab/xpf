@@ -1426,6 +1426,19 @@ pub(crate) fn source_nat_translation_matches(
             if rule.no_translation
                 || (!crate::ip_proto::has_l4_ports(protocol) && packet_icmp.is_none())
             {
+                if let Some(det) = rule.deterministic_v4 {
+                    let IpAddr::V4(src_v4) = src_ip else {
+                        return false;
+                    };
+                    let Some((ip_idx, _)) = deterministic_indices_v4(&det, src_v4) else {
+                        return false;
+                    };
+                    if rule.pool_addresses_v4.get(ip_idx).copied().map(IpAddr::V4)
+                        != Some(translated_src)
+                    {
+                        return false;
+                    }
+                }
                 return translated_src_port.is_none();
             }
             if let Some(det) = rule.deterministic_v4 {
