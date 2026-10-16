@@ -1209,6 +1209,7 @@ fn insert_tunnel_endpoint(fwd: &mut ForwardingState, mode: &str, outer_family: i
             destination: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
             key,
             ttl: 64,
+            clear_dont_fragment_bit: false,
             transport_table: String::new(),
             wg_listen_port: 51820,
             wg_local_privkey: zeroize::Zeroizing::new([0u8; 32]),

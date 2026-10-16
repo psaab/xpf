@@ -157,6 +157,7 @@ pub(super) fn populate_tunnel_endpoints(
                 destination,
                 key: endpoint.key,
                 ttl,
+                clear_dont_fragment_bit: endpoint.clear_dont_fragment_bit,
                 transport_table: transport_table.into_owned(),
                 wg_listen_port: endpoint.wg_listen_port,
                 wg_local_privkey,

@@ -25,12 +25,12 @@
 //   - `write_ipv4_header` sets DF=1 (Flags+FragOffset = 0x4000) while
 //     retaining ID=0. RFC 6864 §4 / §5.3.1 permits a constant ID for
 //     atomic datagrams (DF=1, MF=0, FragOffset=0).
-//   - `write_ipv4_tunnel_header` emits DF clear with an advancing
-//     Identification. GRE and WireGuard outer datagrams can then be
-//     fragmented by a downstream router when the underlay path is
-//     smaller than the local link. This variant is intentionally limited
-//     to tunnel outers; generated ICMP errors and all other header users
-//     retain the default DF-set behavior.
+//   - `write_ipv4_tunnel_header` accepts an explicit DF choice and uses an
+//     advancing Identification. GRE copies inner IPv4 DF by default or
+//     clears it when configured; WireGuard always clears it. A clear-DF
+//     outer can be fragmented by a downstream router when the underlay path
+//     is smaller than the local link. Generated ICMP errors and other header
+//     users retain the default DF-set behavior.
 //   - `write_ipv6_header` writes the IPv6 fixed header with
 //     caller-supplied traffic-class / flow-label / hop-limit.
 //   - `write_udp_header` accepts a plain `u16` checksum (not
@@ -48,9 +48,8 @@ pub(in crate::afxdp) const TPID_8021Q: u16 = 0x8100;
 /// is not silently rewritten to 0x8100.
 pub(in crate::afxdp) const TPID_8021AD: u16 = 0x88a8;
 
-// RFC 6864 requires unique IDs for non-atomic IPv4 datagrams. Tunnel
-// outers use this counter because DF is clear and downstream fragmentation
-// is allowed.
+// RFC 6864 requires unique IDs for non-atomic IPv4 datagrams. When a tunnel
+// outer clears DF, its downstream fragments need distinct IDs for reassembly.
 static IPV4_TUNNEL_ID: AtomicU16 = AtomicU16::new(1);
 
 /// An egress 802.1Q/802.1ad tag carrying the full TCI (PCP, DEI, VID)
@@ -263,11 +262,9 @@ pub(in crate::afxdp) fn write_ipv4_header(
     Some(20)
 }
 
-/// Write a tunnel outer IPv4 header with DF clear, allowing downstream
-/// routers to fragment it when the underlay path MTU is smaller than the
-/// local egress MTU. The non-atomic datagram carries an advancing ID so
-/// fragments from separate packets do not share the constant ID used by
-/// `write_ipv4_header`'s DF-set atomic datagrams.
+/// Write a tunnel outer IPv4 header with caller-selected DF and an
+/// advancing Identification, preserving the RFC 6864 requirement for
+/// fragmented datagrams when DF is clear.
 #[inline]
 pub(in crate::afxdp) fn write_ipv4_tunnel_header(
     buf: &mut [u8],
@@ -277,13 +274,14 @@ pub(in crate::afxdp) fn write_ipv4_tunnel_header(
     tos: u8,
     ttl: u8,
     total_len: u16,
+    df: bool,
 ) -> Option<usize> {
     let ip = buf.get_mut(..20)?;
     ip[0] = 0x45;
     ip[1] = tos;
     ip[2..4].copy_from_slice(&total_len.to_be_bytes());
     ip[4..6].copy_from_slice(&IPV4_TUNNEL_ID.fetch_add(1, Ordering::Relaxed).to_be_bytes());
-    ip[6..8].copy_from_slice(&0u16.to_be_bytes()); // DF=0, FragOffset=0
+    ip[6..8].copy_from_slice(&(if df { 0x4000u16 } else { 0 }).to_be_bytes()); // DF, FragOffset=0
     ip[8] = if ttl == 0 { 64 } else { ttl };
     ip[9] = protocol;
     ip[10..12].copy_from_slice(&[0, 0]);

@@ -251,7 +251,9 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // their distinct terminal FIB disposition instead of discard.
 // v47 -> v48 (#13945): persistent-NAT lease permissions cross idle/display
 // wire records so endpoint-independent mappings retain inbound admission scope.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 48;
+// v48 -> v49 (#13957): GRE tunnel snapshots carry clear_dont_fragment_bit;
+// older helpers cannot honor the configured outer-DF behavior.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 49;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

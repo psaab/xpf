@@ -561,6 +561,10 @@ func tunnelSchemaChildren() map[string]*schemaNode {
 			validator:     validateInterfaceNumeric9899(1, 255),
 			children:      nil,
 		},
+		"clear-dont-fragment-bit": {
+			desc:     "Clear the GRE outer IPv4 Don't Fragment bit (default: copy inner DF)",
+			children: nil,
+		},
 		"keepalive": {
 			desc:          "Keepalive interval",
 			args:          1,

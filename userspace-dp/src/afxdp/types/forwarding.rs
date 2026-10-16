@@ -1488,6 +1488,7 @@ pub(in crate::afxdp) struct TunnelEndpoint {
     pub(in crate::afxdp) destination: IpAddr,
     pub(in crate::afxdp) key: u32,
     pub(in crate::afxdp) ttl: u8,
+    pub(in crate::afxdp) clear_dont_fragment_bit: bool,
     pub(in crate::afxdp) transport_table: String,
     // WireGuard (#1432 S2a, multi-peer #1434). Populated only when
     // mode == "wireguard".
@@ -1557,6 +1558,7 @@ impl std::fmt::Debug for TunnelEndpoint {
             .field("destination", &self.destination)
             .field("key", &self.key)
             .field("ttl", &self.ttl)
+            .field("clear_dont_fragment_bit", &self.clear_dont_fragment_bit)
             .field("transport_table", &self.transport_table)
             .field("wg_listen_port", &self.wg_listen_port)
             .field(

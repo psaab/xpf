@@ -850,8 +850,8 @@ impl super::Coordinator {
 
     /// #2331: native-GRE encap frames dropped because the fully built
     /// outer datagram exceeded the resolved local transport/egress MTU.
-    /// IPv4 tunnel outers leave DF clear for smaller downstream path
-    /// MTUs, but the local link still cannot transmit an oversized frame.
+    /// GRE copies inner IPv4 DF by default or clears it when configured.
+    /// The local link still cannot transmit an oversized frame.
     /// A nonzero value flags inner flows whose encapped size exceeds the
     /// local tunnel transport MTU (a missing/too-high inner MSS clamp or
     /// a non-TCP inner with no segmentation lever). Surfaced as

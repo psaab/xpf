@@ -251,6 +251,114 @@ fn build_forwarded_frame_from_frame_encapsulates_native_gre() {
     assert_eq!(&built[78..82], &[8, 8, 8, 8]);
 }
 
+#[test]
+fn native_gre_ipv4_outer_copies_or_clears_inner_df() {
+    let mut snapshot = native_gre_snapshot(true);
+    snapshot.interfaces[0].addresses.push(crate::protocol::snapshot::InterfaceAddressSnapshot {
+        family: "inet".to_string(),
+        address: "192.0.2.8/24".to_string(),
+        scope: 0,
+    });
+    let endpoint = &mut snapshot.tunnel_endpoints[0];
+    endpoint.outer_family = "inet".to_string();
+    endpoint.source = "192.0.2.8".to_string();
+    endpoint.destination = "203.0.113.9".to_string();
+    endpoint.transport_table = "inet.0".to_string();
+    snapshot.routes.push(crate::protocol::snapshot::RouteSnapshot {
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hops: vec!["192.0.2.1@reth0.80".to_string()],
+        ..Default::default()
+    });
+    snapshot.neighbors.push(crate::protocol::snapshot::NeighborSnapshot {
+        interface: "ge-0-0-2.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "192.0.2.1".to_string(),
+        mac: "00:11:22:33:44:55".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        ..Default::default()
+    });
+
+    let mut inner =
+        build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(8, 8, 8, 8), 64);
+    inner[20..22].copy_from_slice(&0x4000u16.to_be_bytes());
+    inner[24..26].fill(0);
+    let checksum = checksum16(&inner[14..34]);
+    inner[24..26].copy_from_slice(&checksum.to_be_bytes());
+    let inner_meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 11,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: (inner.len() - 14) as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        flow_src_addr: {
+            let mut addr = [0u8; 16];
+            addr[..4].copy_from_slice(&[10, 0, 61, 102]);
+            addr
+        },
+        flow_dst_addr: {
+            let mut addr = [0u8; 16];
+            addr[..4].copy_from_slice(&[8, 8, 8, 8]);
+            addr
+        },
+        flow_src_port: 0x1234,
+        ..UserspaceDpMeta::default()
+    };
+
+    let build = |snapshot: &crate::protocol::snapshot::ConfigSnapshot| {
+        let state = build_forwarding_state(snapshot);
+        let decision = SessionDecision {
+            resolution: lookup_forwarding_resolution_v4(
+                &state,
+                None,
+                Ipv4Addr::new(8, 8, 8, 8),
+                "sfmix.inet.0",
+                0,
+                true,
+                None,
+            )
+            .resolution,
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        build_forwarded_frame_from_frame(
+            &inner,
+            inner_meta,
+            &decision,
+            &state,
+            false,
+            Some((0x1234, 0)),
+        )
+        .expect("encapsulated GRE frame")
+    };
+
+    let copied = build(&snapshot);
+    let inner_df = u16::from_be_bytes([copied[48], copied[49]]) & 0x4000;
+    assert_eq!(inner_df, 0x4000, "fixture must carry inner IPv4 DF=1");
+    assert_eq!(
+        u16::from_be_bytes([copied[24], copied[25]]) & 0x4000,
+        inner_df,
+        "GRE default must copy the inner IPv4 DF bit"
+    );
+
+    snapshot.tunnel_endpoints[0].clear_dont_fragment_bit = true;
+    let cleared = build(&snapshot);
+    assert_eq!(
+        u16::from_be_bytes([cleared[24], cleared[25]]) & 0x4000,
+        0,
+        "clear-dont-fragment-bit must force outer DF=0"
+    );
+}
+
 
 #[test]
 fn local_origin_tunnel_tx_request_encapsulates_raw_ip_for_active_owner() {

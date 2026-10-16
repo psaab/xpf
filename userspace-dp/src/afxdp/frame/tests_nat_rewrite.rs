@@ -1788,6 +1788,7 @@ fn gre_forwarding_8896(id: u16) -> ForwardingState {
             ttl: 64,
             transport_table: String::new(),
             wg_listen_port: 0,
+            clear_dont_fragment_bit: false,
             wg_local_privkey: zeroize::Zeroizing::new([0u8; 32]),
             wg_peers: Vec::new(),
         },
