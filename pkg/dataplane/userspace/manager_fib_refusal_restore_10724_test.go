@@ -103,6 +103,9 @@ func TestBumpFIBGenerationRestoresBookkeepingOnRefusal10724(t *testing.T) {
 // A missing response does not prove refusal: the helper may have applied the
 // bump before the socket timed out. Keep the advanced generation in that
 // unknown-outcome case so the next full snapshot cannot publish a rollback.
+// The prefetch here was filtered for the pre-bump tunnel (st-old/65) while
+// the retained provider rows name st-after/33, so the locked no-fallback
+// stamp must withhold route authority instead of reusing that stale dump.
 func TestBumpFIBGenerationRetainsUnknownOutcomeBookkeeping10724(t *testing.T) {
 	transportErr := errors.New("control response deadline expired")
 	h := &fenceHook9696{mode: "fixed", fixed: 100, fibErr: transportErr}
@@ -140,6 +143,50 @@ func TestBumpFIBGenerationRetainsUnknownOutcomeBookkeeping10724(t *testing.T) {
 	if m.lastSnapshot.IpsecTunnelSnapshotGeneration != 31 {
 		t.Errorf("IpsecTunnelSnapshotGeneration after unknown outcome = %d, want retained provider value 31",
 			m.lastSnapshot.IpsecTunnelSnapshotGeneration)
+	}
+	if want := []IpsecTunnelRowSnapshot{{STN: "st-after", IfID: 32, LogicalIfindex: 33}}; !reflect.DeepEqual(m.lastSnapshot.IpsecTunnelRows, want) {
+		t.Errorf("IpsecTunnelRows after unknown outcome = %+v, want retained provider rows %+v",
+			m.lastSnapshot.IpsecTunnelRows, want)
+	}
+	inventory := m.lastSnapshot.PMechInventory
+	if inventory == nil || inventory == preInventory || inventory.Generation != 5 ||
+		inventory.FIBGeneration != 0 || inventory.Complete ||
+		len(inventory.MainRoutes) != 0 ||
+		len(inventory.TunnelRows) != 1 || inventory.TunnelRows[0].STN != "st-after" ||
+		inventory.TunnelRows[0].InventoryComplete || inventory.TunnelRows[0].InventoryValid ||
+		inventory.TunnelRows[0].InventoryReason != "MAIN_ROUTE_INVENTORY_STALE" ||
+		inventory.PolicyIdentity != pmechPolicyIdentity(m.lastSnapshot) {
+		t.Errorf("PMechInventory after unknown outcome = %+v, want withheld authority for gen 5/FIB 0 with retained provider tunnel row",
+			inventory)
+	}
+}
+
+// Control for the stale-prefetch case above: when the prefetch was filtered
+// for the same tunnel rows the retained provider returns, the unknown
+// outcome keeps a complete inventory carrying that tunnel's route.
+func TestBumpFIBGenerationRetainsUnknownOutcomeMatchingPrefetch10724(t *testing.T) {
+	transportErr := errors.New("control response deadline expired")
+	h := &fenceHook9696{mode: "fixed", fixed: 100, fibErr: transportErr}
+	m := newFenceManager9696(t, h)
+	m.lastSnapshot.FIBGeneration = 17
+	m.lastSnapshot.Generation = 4
+	m.generation = 4
+	preProvider := func(uint64, uint32) (uint64, []QueueEpochSnapshot, uint64, []IpsecTunnelRowSnapshot) {
+		return 61, []QueueEpochSnapshot{{Queue: 601, Epoch: 62}}, 63,
+			[]IpsecTunnelRowSnapshot{{STN: "st-after", IfID: 32, LogicalIfindex: 33}}
+	}
+	preInventory := stampPreInstallPostCaptureProvider10724(t, m, preProvider)
+
+	_, err := m.BumpFIBGeneration()
+	if !errors.Is(err, transportErr) {
+		t.Fatalf("BumpFIBGeneration error = %v, want transport failure", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastSnapshot.FIBGeneration != 0 || m.lastSnapshot.Generation != 5 || m.generation != 5 {
+		t.Errorf("unknown outcome must retain advanced generation: snapshot FIB=%d gen=%d allocator=%d, want 0/5/5",
+			m.lastSnapshot.FIBGeneration, m.lastSnapshot.Generation, m.generation)
 	}
 	if want := []IpsecTunnelRowSnapshot{{STN: "st-after", IfID: 32, LogicalIfindex: 33}}; !reflect.DeepEqual(m.lastSnapshot.IpsecTunnelRows, want) {
 		t.Errorf("IpsecTunnelRows after unknown outcome = %+v, want retained provider rows %+v",
