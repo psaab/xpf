@@ -34,7 +34,16 @@
 //! of conformant completed traffic. All entries count toward the domain's
 //! 32-entry reserve; at the bound, the oldest completed anchor may be reclaimed
 //! to admit a new key. Incomplete anchors are not reclaimed, and all entries
-//! remain subject to the fixed 64-entry shard cap.
+//! remain subject to the fixed 64-entry shard cap. Post-translation entries
+//! charge the sender quota to the pre-translation origin (`fairness_origin`,
+//! #14127) instead of the shared pool address, so tenants translated through
+//! one pool IP keep independent incomplete-fragment budgets; cross-origin
+//! entries in the same downstream domain count again once an origin's
+//! pending fragments have failed (the datagram is then poisoned and its
+//! ranges must stay anchored — see `overlap_entry_counts_for_sender_quota`).
+//! A fragment routed to a different egress domain with no address rewrite
+//! also gets a post key (egress domain only), so the downstream domain's
+//! anchor set is checked instead of skipped (#14127).
 //!
 //! Failure directions (explicit — they differ from `fragment_assoc`):
 //!   * Overlap/empty/overflow/capacity all fail CLOSED (drop). Sender quota
@@ -128,7 +137,9 @@ pub(crate) const OVERLAP_MAX_RANGES: usize = 16;
 /// Receiver's reassembly key + routing domain. `protocol` is the IPv4 Protocol byte;
 /// for IPv6 it is always 0 (dropped from the key — see module docs). `routing_domain`
 /// is stamped by the caller (flow's stamped domain, else the ingress SSOT); parse
-/// leaves it 0.
+/// leaves it 0. `fairness_origin` is `None` on arrival keys; post-translation
+/// keys carry the arrival sender for quota accounting only — it never
+/// participates in overlap membership (see the field doc).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct OverlapKey {
     pub(crate) addr_family: u8,
@@ -137,6 +148,15 @@ pub(crate) struct OverlapKey {
     pub(crate) ident: u32,
     pub(crate) protocol: u8,
     pub(crate) routing_domain: u32,
+    /// Pre-translation arrival identity, set only on keys derived by
+    /// `translated_overlap_key`. It is NOT part of the reassembly key:
+    /// downstream receivers merge fragments by the translated tuple
+    /// alone, so overlap membership must stay keyed on the fields
+    /// above. The origin only scopes the sender-fairness quota
+    /// (`overlap_sender`) so tenants sharing one translated source do
+    /// not share an incomplete-fragment budget (#14127). `None` on
+    /// arrival keys.
+    pub(crate) fairness_origin: Option<(u32, u8, IpAddr)>,
 }
 
 #[derive(Clone, Copy)]
@@ -236,10 +256,31 @@ pub(crate) fn overlap_shard_index(key: &OverlapKey) -> usize {
 }
 /// Fairness identity (#10658): the admitted sender. `dst`/`ident`/`protocol` are
 /// excluded — keying them would let one sender mint fresh quota by varying the
-/// destination, ident, or (v4) protocol byte.
+/// destination, ident, or (v4) protocol byte. On post-translation keys the
+/// identity is the pre-translation arrival sender (`fairness_origin`, #14127):
+/// the translated `src` is a shared pool address, so keying the quota on it
+/// would let one tenant's incomplete fragments exhaust every other tenant
+/// translated through the same pool address. The translated tuple still keys
+/// overlap membership (the downstream receiver reassembles on it alone), and
+/// an origin-less (arrival) key keys its quota on its own tuple.
 #[inline]
 fn overlap_sender(key: &OverlapKey) -> (u32, u8, IpAddr) {
-    (key.routing_domain, key.addr_family, key.src)
+    key.fairness_origin
+        .unwrap_or((key.routing_domain, key.addr_family, key.src))
+}
+
+/// Reassembly membership ignores `fairness_origin`: downstream
+/// receivers merge by the translated tuple alone, so two tenants'
+/// fragments for one downstream datagram must find the same entry
+/// even though their fairness origins differ (#14127).
+#[inline]
+fn overlap_same_datagram(a: &OverlapKey, b: &OverlapKey) -> bool {
+    a.addr_family == b.addr_family
+        && a.src == b.src
+        && a.dst == b.dst
+        && a.ident == b.ident
+        && a.protocol == b.protocol
+        && a.routing_domain == b.routing_domain
 }
 
 #[inline]
@@ -274,6 +315,41 @@ fn overlap_entry_complete(e: &OverlapEntry) -> bool {
         && !e.failed
         && e.terminal_end
             .is_some_and(|terminal_end| ranges_cover_terminal(e, terminal_end))
+}
+
+/// Whether an existing entry counts against a candidate's sender fairness
+/// quota. Completed entries never count (#13937). An incomplete entry
+/// counts when it shares the candidate's origin (same tenant, same
+/// arrival identity) — always true when the candidate has no origin
+/// (arrival path: `#10658` behaviour unchanged). Origin-distinct
+/// incomplete entries count only once the candidate origin's pending
+/// fragments have failed admission (#14127): origin-keying alone would
+/// let two tenants reuse one downstream datagram's ident (e.g. NAT64's
+/// 16-bit truncation), extend each other's ranges, and complete the
+/// datagram jointly, bypassing the anchored entry's overlap
+/// protection. After a failure the datagram is poisoned anyway, so
+/// reverting to the shared budget for incomplete entries of the same
+/// downstream routing domain restores the pre-#14127 cross-tenant
+/// protection without reintroducing the pre-failure starvation.
+#[inline]
+fn overlap_entry_counts_for_sender_quota(
+    e: &OverlapEntry,
+    candidate: &OverlapKey,
+    sender: (u32, u8, IpAddr),
+    poisoned: bool,
+) -> bool {
+    if overlap_entry_complete(e) {
+        return false;
+    }
+    match candidate.fairness_origin {
+        None => overlap_sender(&e.key) == sender,
+        Some(_) => {
+            e.key.fairness_origin == candidate.fairness_origin
+                || (poisoned
+                    && !e.failed
+                    && e.key.routing_domain == candidate.routing_domain)
+        }
+    }
 }
 /// Reject ranges that conflict with an already observed terminal fragment.
 /// Once a terminal end is known, every range must end at/before it; only the
@@ -569,7 +645,7 @@ impl OverlapTracker {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut lifetime_evictions = 0;
         shard.retain(|e| overlap_entry_live(e, now_ns, &mut lifetime_evictions));
-        let Some(pos) = shard.iter().position(|e| e.key == key) else {
+        let Some(pos) = shard.iter().position(|e| overlap_same_datagram(&e.key, &key)) else {
             return OverlapCheckResult {
                 dropped: false,
                 reason: None,
@@ -705,7 +781,7 @@ impl OverlapTracker {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut lifetime_evictions = 0;
         shard.retain(|e| overlap_entry_live(e, now_ns, &mut lifetime_evictions));
-        if let Some(pos) = shard.iter().position(|e| e.key == key) {
+        if let Some(pos) = shard.iter().position(|e| overlap_same_datagram(&e.key, &key)) {
             if terminal_conflict(&shard[pos], end, is_last) {
                 drop_counter.fetch_add(1, Ordering::Relaxed);
                 return OverlapCheckResult {
@@ -777,12 +853,23 @@ impl OverlapTracker {
         // entries count against the routing-domain reserve. Reclaiming the
         // oldest completed anchor at that limit lets #13937 conformant traffic
         // continue without allowing completions to bypass domain fairness.
+        // #14127: post-translation candidates key the sender quota on their
+        // pre-translation origin, so tenants sharing one pool address do not
+        // share a budget; cross-origin entries in the same downstream
+        // domain count again once this origin's pending fragments have
+        // failed (poisoned — see `overlap_entry_counts_for_sender_quota`),
+        // and the domain reserve below always counts the downstream domain.
         let sender = overlap_sender(&key);
+        let poisoned = key.fairness_origin.is_some()
+            && shard.iter().any(|e| {
+                overlap_sender(&e.key) == sender
+                    && e.key.fairness_origin == key.fairness_origin
+                    && e.failed
+            });
         let mut sender_entries = 0usize;
         let mut domain_entries = 0usize;
         for e in shard.iter() {
-            let complete = overlap_entry_complete(e);
-            if !complete && overlap_sender(&e.key) == sender {
+            if overlap_entry_counts_for_sender_quota(e, &key, sender, poisoned) {
                 sender_entries += 1;
             }
             if e.key.routing_domain == key.routing_domain {
@@ -888,7 +975,7 @@ impl OverlapTracker {
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(pos) = shard.iter().position(|e| e.key == token.key) else {
+        let Some(pos) = shard.iter().position(|e| overlap_same_datagram(&e.key, &token.key)) else {
             return false;
         };
         let e = &mut shard[pos];
@@ -914,7 +1001,7 @@ impl OverlapTracker {
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(pos) = shard.iter().position(|e| e.key == token.key) else {
+        let Some(pos) = shard.iter().position(|e| overlap_same_datagram(&e.key, &token.key)) else {
             return false;
         };
         let e = &mut shard[pos];
@@ -934,7 +1021,7 @@ impl OverlapTracker {
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(pos) = shard.iter().position(|e| e.key == token.key) else {
+        let Some(pos) = shard.iter().position(|e| overlap_same_datagram(&e.key, &token.key)) else {
             return false;
         };
         let e = &shard[pos];
@@ -998,6 +1085,7 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
                     ident,
                     protocol: proto,
                     routing_domain: 0,
+                    fairness_origin: None,
                 },
                 proto,
                 start,
@@ -1044,6 +1132,7 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
                     ident,
                     protocol: 0,
                     routing_domain: 0,
+                    fairness_origin: None,
                 },
                 next_header,
                 start,
@@ -1079,12 +1168,19 @@ pub(crate) enum TranslatedOverlapKey {
 /// either rewrite address missing yields an explicit fail-closed outcome. Returns
 /// `NotApplicable` when no post-check is needed. `egress_domain` is the downstream
 /// receiver's routing domain, resolved from the egress interface.
+///
+/// Every returned key carries `fairness_origin` = the pre-translation
+/// sender (`overlap_sender(pre)`), including a domain-change key with no
+/// address rewrite (#14127): the downstream domain's overlap anchors are
+/// checked under the egress domain, but the sender-fairness quota stays
+/// charged to the arrival tenant (see `overlap_sender`).
 pub(crate) fn translated_overlap_key(
     pre: &OverlapKey,
     fragment_next_header: u8,
     nat: &NatDecision,
     egress_domain: u32,
 ) -> TranslatedOverlapKey {
+    let fairness_origin = Some(overlap_sender(pre));
     if nat.nat64 {
         if pre.addr_family as i32 == libc::AF_INET6 {
             // v6→v4: pool + server addrs from the decision, ident truncated to 16 bits.
@@ -1098,6 +1194,7 @@ pub(crate) fn translated_overlap_key(
                 ident: pre.ident & 0xFFFF,
                 protocol: map_v6_to_v4_proto(fragment_next_header),
                 routing_domain: egress_domain,
+                fairness_origin,
             })
         } else {
             // v4→v6: post-key is injective in the pre-key (zero-extended ident +
@@ -1113,6 +1210,20 @@ pub(crate) fn translated_overlap_key(
             ident: pre.ident,
             protocol: pre.protocol,
             routing_domain: egress_domain,
+            fairness_origin,
+        })
+    } else if egress_domain != pre.routing_domain {
+        // #14127: no address rewrite, but the fragment crosses into a
+        // different downstream routing domain. The pre-key anchors only
+        // the arrival domain; the egress domain's receiver needs its own
+        // anchor set, so derive a post key that differs from `pre` only
+        // in routing domain (and the fairness origin stamp). Callers
+        // skip `post_key == pre_key`, and the domain change makes this
+        // key distinct, so the post-check runs.
+        TranslatedOverlapKey::Key(OverlapKey {
+            routing_domain: egress_domain,
+            fairness_origin,
+            ..*pre
         })
     } else {
         TranslatedOverlapKey::NotApplicable
@@ -1132,6 +1243,7 @@ mod tests {
             ident: 0xBEEF,
             protocol: 6,
             routing_domain: 0,
+            fairness_origin: None,
         }
     }
 
@@ -1143,6 +1255,7 @@ mod tests {
             ident: 0xBEEF,
             protocol: 6,
             routing_domain: 0,
+            fairness_origin: None,
         }
     }
 
@@ -1470,7 +1583,14 @@ mod tests {
         let TranslatedOverlapKey::Key(pb) = translated_overlap_key(&b, b.protocol, &nat, 0) else {
             panic!("same-family address translation requires a post-key");
         };
-        assert_eq!(pa, pb);
+        // #14127: the translated reassembly tuple is shared, but the
+        // fairness origin keeps the two tenants' quotas distinct — so
+        // assert the shared tuple fields, not whole-key equality.
+        assert_eq!(
+            (pa.addr_family, pa.src, pa.dst, pa.ident, pa.protocol, pa.routing_domain),
+            (pb.addr_family, pb.src, pb.dst, pb.ident, pb.protocol, pb.routing_domain)
+        );
+        assert_ne!(pa.fairness_origin, pb.fairness_origin);
         assert_eq!(pa.src, pool);
         let t = OverlapTracker::new();
         assert!(!t.check_and_record(pa, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
@@ -1509,6 +1629,7 @@ mod tests {
             ident,
             protocol: 0,
             routing_domain: 0,
+            fairness_origin: None,
         };
         let a = mk(0x0001_0001);
         let b = mk(0x0002_0001);
@@ -1518,7 +1639,10 @@ mod tests {
         let TranslatedOverlapKey::Key(pb) = translated_overlap_key(&b, 6, &nat, 0) else {
             panic!("NAT64 v6→v4 with both rewrites requires a post-key");
         };
-        assert_eq!(pa, pb);
+        assert_eq!(
+            (pa.addr_family, pa.src, pa.dst, pa.ident, pa.protocol, pa.routing_domain),
+            (pb.addr_family, pb.src, pb.dst, pb.ident, pb.protocol, pb.routing_domain)
+        );
         assert_eq!(pa.ident, 1);
         assert_eq!(pa.addr_family, libc::AF_INET as u8);
         let t = OverlapTracker::new();
@@ -1653,6 +1777,7 @@ mod tests {
             ident,
             protocol: 0,
             routing_domain: 0,
+            fairness_origin: None,
         };
         let TranslatedOverlapKey::Key(tcp_key) =
             translated_overlap_key(&pre(src_tcp, 0x0001_0001), 6, &nat, 0)
@@ -1697,6 +1822,7 @@ mod tests {
             ident: 0x0001_0001,
             protocol: 0,
             routing_domain: 0,
+            fairness_origin: None,
         };
         for nat in [
             NatDecision {
@@ -2457,6 +2583,7 @@ mod tests {
                     ident: *ident,
                     protocol: 6,
                     routing_domain: DOMAIN,
+                    fairness_origin: None,
                 };
                 if !t.check_and_record(key, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED) {
                     admitted += 1;
@@ -2479,6 +2606,7 @@ mod tests {
                     ident: *ident,
                     protocol: 6,
                     routing_domain: DOMAIN,
+                    fairness_origin: None,
                 };
                 assert_eq!(
                     overlap_shard_index_seeded(&key, 0),
@@ -2501,6 +2629,7 @@ mod tests {
             ident: 0,
             protocol: 6,
             routing_domain: DOMAIN,
+            fairness_origin: None,
         };
         while t.shard_index(&victim) != TARGET_SHARD {
             victim.ident += 1;
@@ -2543,7 +2672,8 @@ mod tests {
                         ident,
                         protocol: 6,
                         routing_domain: 7,
-                    };
+                        fairness_origin: None,
+                };
                     seen[t.shard_index(&key)] = true;
                 }
             }
@@ -2599,6 +2729,7 @@ mod tests {
                     ident: *ident,
                     protocol: 6,
                     routing_domain: 7,
+                    fairness_origin: None,
                 };
                 assert_eq!(
                     legacy_index(&key, 0x5c),
@@ -2622,7 +2753,8 @@ mod tests {
                             ident: *ident,
                             protocol: 6,
                             routing_domain: 7,
-                        };
+                            fairness_origin: None,
+                };
                         let old_shard = legacy_index(&key, seed);
                         old_occupancy[old_shard] += 1;
                         let shard = overlap_shard_index_seeded(&key, seed);
@@ -2692,5 +2824,212 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn post_nat_sender_quota_is_per_tenant_14127() {
+        // Decisive check from #14127: two permitted tenants sharing one
+        // translated source and one post-NAT shard. Tenant A leaves eight
+        // distinct first fragments incomplete; tenant B's different
+        // incomplete fragment must still be admitted on the post-NAT key
+        // (its pre-NAT key fits trivially), while tenant A's ninth is
+        // refused. RED on master: the post key's sender is the shared
+        // pool address, so B is denied by A's quota.
+        let pool = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+        let ext = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let nat = NatDecision {
+            rewrite_src: Some(pool),
+            ..NatDecision::default()
+        };
+        let post_key = |src: Ipv4Addr, ident: u32| {
+            let mut pre = v4_key();
+            pre.src = IpAddr::V4(src);
+            pre.dst = ext;
+            pre.ident = ident;
+            let TranslatedOverlapKey::Key(post) =
+                translated_overlap_key(&pre, pre.protocol, &nat, 0)
+            else {
+                panic!("SNAT fragment requires a post-key");
+            };
+            post
+        };
+        // Force every datagram into one shard so the per-shard quota is
+        // the binding constraint (the shard hashes family/src/dst/ident,
+        // and the post src/dst are identical for both tenants).
+        let seed = 1u64;
+        let tracker = OverlapTracker::with_seed(seed);
+        let mut idents_in_shard = |src: Ipv4Addr, shard: usize, count: usize| {
+            let mut out = Vec::new();
+            let mut ident = 0u32;
+            while out.len() < count {
+                let post = post_key(src, ident);
+                if overlap_shard_index_seeded(&post, seed) == shard {
+                    out.push(ident);
+                }
+                ident += 1;
+            }
+            out
+        };
+        let tenant_a = Ipv4Addr::new(10, 0, 61, 100);
+        let tenant_b = Ipv4Addr::new(10, 0, 61, 101);
+        let shard = overlap_shard_index_seeded(&post_key(tenant_a, 0), seed);
+        let a_idents = idents_in_shard(tenant_a, shard, OVERLAP_CAP_PER_SENDER_PER_SHARD + 1);
+        let b_ident = idents_in_shard(tenant_b, shard, OVERLAP_CAP_PER_SENDER_PER_SHARD + 2)
+            [OVERLAP_CAP_PER_SENDER_PER_SHARD + 1];
+        let now_ns = 1_000u64;
+        // Tenant A: eight incomplete first fragments admitted.
+        for &ident in &a_idents[..OVERLAP_CAP_PER_SENDER_PER_SHARD] {
+            let post = post_key(tenant_a, ident);
+            assert!(
+                !tracker.check_and_record(post, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+                "tenant A incomplete datagram {ident} must be admitted"
+            );
+        }
+        // Tenant B: a different incomplete fragment through the same
+        // pool address and shard must not be denied by A's quota.
+        let b_post = post_key(tenant_b, b_ident);
+        assert!(
+            !tracker.check_and_record(b_post, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+            "tenant B must not share tenant A's post-NAT sender quota"
+        );
+        // Tenant A's ninth incomplete datagram exceeds its own quota.
+        let a_ninth = post_key(tenant_a, a_idents[OVERLAP_CAP_PER_SENDER_PER_SHARD]);
+        assert!(
+            tracker.check_and_record(a_ninth, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+            "tenant A's ninth incomplete datagram must fail closed on its own quota"
+        );
+        // Completing tenant A's datagrams does not retroactively deny
+        // tenant B: B can still add a tail to its admitted head.
+        for &ident in &a_idents[..OVERLAP_CAP_PER_SENDER_PER_SHARD] {
+            let post = post_key(tenant_a, ident);
+            assert!(
+                !tracker.check_and_record(post, 8, 16, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+                "tenant A tail for {ident} must be admitted"
+            );
+        }
+        assert!(
+            !tracker.check_and_record(b_post, 8, 16, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+            "tenant B tail must remain admitted after A completes"
+        );
+    }
+
+    #[test]
+    fn domain_change_without_rewrite_gets_post_key_14127() {
+        // No address rewrite but egress_domain != pre.routing_domain:
+        // the downstream domain needs its own anchor set. RED on
+        // master: translated_overlap_key returns NotApplicable.
+        let mut pre = v4_key();
+        pre.routing_domain = 1;
+        let TranslatedOverlapKey::Key(post) =
+            translated_overlap_key(&pre, pre.protocol, &NatDecision::default(), 2)
+        else {
+            panic!("domain change without rewrite requires a post-key");
+        };
+        assert_eq!(post.routing_domain, 2);
+        assert_eq!(post.src, pre.src);
+        assert_eq!(post.dst, pre.dst);
+        assert_ne!(post, pre);
+        // Same-domain no-NAT stays NotApplicable (callers would skip
+        // an identical key anyway).
+        assert_eq!(
+            translated_overlap_key(&pre, pre.protocol, &NatDecision::default(), 1),
+            TranslatedOverlapKey::NotApplicable
+        );
+        // The egress-domain anchor actually anchors: a range recorded
+        // under the post key drops an overlapping second fragment, and
+        // the arrival domain's ranges do not leak into it.
+        let tracker = OverlapTracker::new();
+        assert!(!tracker.check_and_record(post, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert!(tracker.check_and_record(post, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert!(!tracker.check_and_record(pre, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+    }
+
+    #[test]
+    fn failed_post_nat_admission_keeps_cross_tenant_protection_14127() {
+        // A failed admission pins the entry (`failed`), so it can never
+        // complete or be reclaimed as a completion. Cross-origin
+        // incomplete entries in the same downstream domain must count
+        // against a later candidate from a poisoned origin again —
+        // otherwise two tenants could jointly complete one downstream
+        // datagram past the anchored ranges.
+        let pool = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+        let ext = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+        let nat = NatDecision {
+            rewrite_src: Some(pool),
+            ..NatDecision::default()
+        };
+        let post_key = |src: Ipv4Addr, ident: u32| {
+            let mut pre = v4_key();
+            pre.src = IpAddr::V4(src);
+            pre.dst = ext;
+            pre.ident = ident;
+            let TranslatedOverlapKey::Key(post) =
+                translated_overlap_key(&pre, pre.protocol, &nat, 0)
+            else {
+                panic!("SNAT fragment requires a post-key");
+            };
+            post
+        };
+        let seed = 1u64;
+        let tracker = OverlapTracker::with_seed(seed);
+        let tenant_a = Ipv4Addr::new(10, 0, 61, 100);
+        let tenant_b = Ipv4Addr::new(10, 0, 61, 101);
+        let shard = overlap_shard_index_seeded(&post_key(tenant_a, 0), seed);
+        let mut in_shard = |src: Ipv4Addr, count: usize| {
+            let mut out = Vec::new();
+            let mut ident = 0u32;
+            while out.len() < count {
+                if overlap_shard_index_seeded(&post_key(src, ident), seed) == shard {
+                    out.push(ident);
+                }
+                ident += 1;
+            }
+            out
+        };
+        let now_ns = 1_000u64;
+        // Tenant B fills its own post-NAT quota with incomplete heads.
+        let b_idents = in_shard(tenant_b, OVERLAP_CAP_PER_SENDER_PER_SHARD);
+        for &ident in &b_idents {
+            assert!(!tracker.check_and_record(
+                post_key(tenant_b, ident),
+                0,
+                8,
+                now_ns,
+                &FRAG_OVERLAP_POST_NAT_DROPPED
+            ));
+        }
+        // Tenant A records one head, then its admission fails (the
+        // packet is dropped downstream of the overlap record).
+        let a_ident = in_shard(tenant_a, OVERLAP_CAP_PER_SENDER_PER_SHARD + 1)[OVERLAP_CAP_PER_SENDER_PER_SHARD];
+        let a_post = post_key(tenant_a, a_ident);
+        let mut a_result = tracker.check_and_record_fragment_detailed(
+            a_post,
+            0,
+            8,
+            false,
+            now_ns,
+            &FRAG_OVERLAP_POST_NAT_DROPPED,
+        );
+        assert!(!a_result.dropped);
+        assert!(tracker.fail_admission(a_result.admission.take().expect("A admission")));
+        // A's failed entry stays anchored: an overlapping range drops.
+        assert!(tracker.check_overlap(a_post, 4, 12, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert_eq!(tracker.len(), OVERLAP_CAP_PER_SENDER_PER_SHARD + 1);
+        // With A poisoned, B's eight incomplete entries count against
+        // A again: A's next distinct datagram is refused fail-closed
+        // instead of minting a fresh origin-only budget past B's fill.
+        let a_next = in_shard(tenant_a, OVERLAP_CAP_PER_SENDER_PER_SHARD + 2)
+            [OVERLAP_CAP_PER_SENDER_PER_SHARD + 1];
+        assert_ne!(a_next, a_ident);
+        assert!(
+            tracker.check_and_record(
+                post_key(tenant_a, a_next),
+                0,
+                8,
+                now_ns,
+                &FRAG_OVERLAP_POST_NAT_DROPPED
+            ),
+            "poisoned origin must not bypass the shared downstream budget"
+        );
     }
 }
