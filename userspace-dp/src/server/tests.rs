@@ -8356,7 +8356,7 @@ const PPTP_EXPIRY_NEEDLE: &str =
 /// the same reason: the guard and its over-reach control must search for one
 /// string, not two copies of it.
 const PPTP_RESOLVE_NEEDLE: &str =
-    "flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(";
+    "crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(";
 
 /// Find the 0-based line whose trimmed start IS `needle` — a real statement,
 /// not a mention. Shared by the guard and its control for the same reason the
@@ -8559,7 +8559,7 @@ fn pptp_resolve_guard_does_not_accept_a_mention_7699() {
     const PROSE: &str =
         "        // the resolve rides flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain( here\n";
     const REAL: &str =
-        "        flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n            packet_frame,\n";
+        "        crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n            packet_frame,\n";
 
     assert!(
         pptp_drain_line(COMMENTED_OUT, PPTP_RESOLVE_NEEDLE).is_none(),
