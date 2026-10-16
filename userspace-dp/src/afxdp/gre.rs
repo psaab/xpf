@@ -5,6 +5,9 @@ const GRE_FLAG_ROUTING: u16 = 0x4000;
 pub(in crate::afxdp) const GRE_FLAG_KEY: u16 = 0x2000;
 pub(in crate::afxdp) const GRE_FLAG_SEQUENCE: u16 = 0x1000;
 const GRE_VERSION_MASK: u16 = 0x0007;
+/// RFC 2784 §2.2 marks the legacy Strict Source Route and Recursion Control
+/// fields reserved; unlike RFC 2784 §2.3 bits 6–12, they are not must-ignore.
+const GRE_UNSUPPORTED_LEGACY_FLAGS: u16 = 0x0c00;
 const GRE_PROTO_IPV4: u16 = 0x0800;
 const GRE_PROTO_IPV6: u16 = 0x86dd;
 
@@ -1120,6 +1123,11 @@ pub(super) fn try_native_gre_decap_from_frame_with_input_filter(
     // terminate (no PPTP ALG exists — #6842).
     if (flags_version & GRE_VERSION_MASK) != 0 {
         note_unsupported_gre_version(frame, meta, forwarding);
+        return None;
+    }
+    // Reject the unsupported legacy SSR/Recursion Control bits, but leave
+    // RFC 2784 §2.3 bits 6–12 untouched: receivers MUST ignore those bits.
+    if (flags_version & GRE_UNSUPPORTED_LEGACY_FLAGS) != 0 {
         return None;
     }
     // Source Route Entries (the Routing-Present R bit) are not parsed —
