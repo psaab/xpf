@@ -214,7 +214,7 @@ fn outline_arp_reply_learn_and_program(
         let key = (ifindex, arp.sender_ip);
         let solicited = worker_ctx
             .dynamic_neighbors
-            .take_arp_reply_solicited(&key, now_ns);
+            .peek_arp_reply_solicited(&key, now_ns);
         let Some(changed) = worker_ctx
             .dynamic_neighbors
             .insert_arp_reply_if_solicited_allows(
@@ -236,6 +236,11 @@ fn outline_arp_reply_learn_and_program(
             }
             return;
         };
+        if changed {
+            worker_ctx
+                .dynamic_neighbors
+                .take_arp_reply_solicited(&key, now_ns);
+        }
         if neigh_limiter.should_program(key, arp.sender_mac, changed, now_ns) {
             add_kernel_neighbor(key.0, key.1, arp.sender_mac);
         }
