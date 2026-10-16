@@ -1938,39 +1938,15 @@ fn parse_ipv6(
     // revalidation are observed rather than asserted about the source text.
     let walk = ipv6_ext_walk::walk_ipv6_ext_headers(data, data_end, l3_offset, protocol, offset)?;
     let wire_protocol = walk.protocol;
-    // #6704: `walk.non_first_fragment` is NOT consumed here yet, and that is a
-    // measured decision rather than an oversight. Every shape that acts on it
-    // — masking the parsed L4 values, forking the session block, gating the
-    // ICMP-type steering, even a lone extra `is_local_destination` on the
-    // fragment path — was REJECTED by the kernel verifier at 1,000,001
-    // processed instructions against the 1,000,000 cap. Carrying the sighting
-    // fits; consuming it does not fit until the shim buys headroom — and the
-    // headroom to buy is measured against the 850,000 install-blocking ceiling
-    // (`shimverify` exits 4 below the 15% floor, and the build recipe admits
-    // only exit 0), NOT against the 1,000,000 cap. No absolute baseline is
-    // quoted here on purpose: it moves with every shim change and rots without
-    // anyone editing this comment. The successor issue carries the full matrix
-    // and the current figure, dated to the commit it was measured at. What the
-    // sighting buys today is that the fragment dimension is finally
-    // COMPARABLE: userspace-dp's executable parity corpus
-    // reads this field against its own `non_first_fragment_offset_seen`, which
-    // was impossible while the walk returned a bare `(offset, protocol)`.
-    // #7494/#8249: a non-first fragment carries no L4 header — the bytes at the
-    // resolved offset are PAYLOAD. Substituting the sentinel routes it into
-    // `parse_l4`'s existing unknown-protocol arm, which returns zeroed ports and
-    // cannot fail, closing both v6 exposures at one site: no payload-derived
-    // tuple can match a session, and the TCP arm's data-offset drop — a
-    // disposition an off-path party selected by choosing a payload byte —
-    // disappears. This is the v4 fix at `parse_ipv4`, finally affordable for v6.
+    // #13959: a non-first fragment's bytes after the Fragment header are
+    // payload, not the extension header named by its Next Header. The walker
+    // stops there and carries this flag to the parser; use the sentinel so
+    // `parse_l4` cannot interpret payload bytes as transport fields.
     //
-    // THE GATE IS NOT AN OPTIMISATION, it is what makes the cost acceptable. A
-    // non-first fragment requires a Fragment extension header, and the header
-    // chain starts at `ip6[6]`. If that is a terminal L4 protocol the packet has
-    // NO extension headers, so it cannot be a fragment and the laundering is
-    // skipped entirely. `ip6[6]` is a direct read of the fixed header, not a
-    // walk result, so the gate itself costs no exit-state correlation. Ordinary
-    // IPv6 — which is nearly all traffic — takes the left branch and pays
-    // nothing.
+    // A non-first fragment requires an extension header, and the chain starts
+    // at `ip6[6]`. A terminal initial protocol therefore cannot be a fragment,
+    // so ordinary IPv6 takes the direct branch and pays nothing for the
+    // per-CPU scratch used to communicate the fragment sighting.
     let protocol = if eh_class(ip6[6]) == EH_CLASS_TERMINAL {
         walk.protocol
     } else {

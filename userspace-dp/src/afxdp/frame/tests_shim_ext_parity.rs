@@ -369,8 +369,8 @@ fn shim_ipv6_ext_walk_matches_userspace_walker() {
         facts.frag_hdr_size, userspace_frag,
         "#4555 Fragment-header ADVANCE drift: the shipped shim advances {} bytes past a Fragment \
          header (its emitted size_of::<FragHdr>()) but this crate advances {userspace_frag}. \
-         Every L4 offset in a fragmented IPv6 chain would differ between the two, so the shim's \
-         session key points at the wrong bytes. The IPv6 Fragment header is fixed at 8 bytes \
+         A first-fragment L4 offset would then differ between the two, so the shim's \
+         walk would point at the wrong bytes. The IPv6 Fragment header is fixed at 8 bytes \
          (RFC 8200 §4.5) — if FragHdr changed, that is the bug.",
         facts.frag_hdr_size,
     );
@@ -507,10 +507,9 @@ mod shim_walk;
 /// honest one, because it manufactures the belief that a regression is covered.
 ///
 /// So the corpus compares the shim's real output against this crate's real
-/// outcome, and the fragment state the shim CANNOT represent is handled where
-/// it belongs: `shim_is_not_more_permissive` states that gap explicitly, runs
-/// both real walkers to demonstrate it, and pins every sub-field of
-/// `ExtChainFragment` on the side that has one.
+/// outcome. A separate walk-level test compares the fragment state that the
+/// shim now reports against this crate's sightings and pins every sub-field
+/// of `ExtChainFragment`.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Verdict {
     /// Resolved a terminal upper-layer header at this offset.
@@ -554,7 +553,10 @@ fn raw_shim_walk(buf: &[u8], l3: usize) -> Option<shim_walk::ExtWalk> {
     shim_walk::walk_ipv6_ext_headers(data, data_end, l3 as u16, buf[l3 + 6], (l3 + 40) as u16)
 }
 
-/// Run the SHIM's walk on `buf` exactly as `parse_ipv6` does, as a `Verdict`.
+/// Classify only the shim's extension-walk result. This intentionally ignores
+/// `non_first_fragment`: `parse_ipv6` consumes that flag and substitutes its
+/// no-L4 sentinel before parsing transport fields. This helper is not a packet
+/// verdict.
 fn shim_verdict(buf: &[u8], l3: usize) -> Verdict {
     match raw_shim_walk(buf, l3) {
         None => Verdict::FailClosed,
@@ -990,7 +992,7 @@ fn expect_frag_reserved_case(reserved: u8) -> Vec<u8> {
 /// The corpus of L3-relative chains both walkers are run over.
 ///
 /// Shared by `shim_walk_and_userspace_walk_agree_over_a_corpus` and
-/// `shim_is_not_more_permissive` so the two cannot drift apart. Each buffer
+/// `shim_walk_is_not_more_permissive` so the two cannot drift apart. Each buffer
 /// starts at the IPv6 fixed header; `at_l3` prefixes it for the non-zero L3
 /// offsets.
 fn parity_corpus() -> Vec<(String, Vec<u8>)> {
@@ -2020,13 +2022,11 @@ fn expect_chain_terminal(terminal: u8) -> Vec<u8> {
 /// stops accounting for the L3 offset (invisible at `l3 = 0`, a fail-open of
 /// `l3` bytes at the 14 and 18 the shim actually passes).
 ///
-/// What it does NOT compare is stated, not implied: the shim's walk returns
-/// `(offset, protocol)` and no fragment state, so there is nothing on the shim
-/// side to compare `ExtChainWalk::fragment` or `non_first_fragment_offset_seen`
-/// against. `shim_is_not_more_permissive` covers that dimension explicitly.
-/// Derive the compared-field list from `Verdict` and from the shim's own return
-/// type rather than from this comment; a field the shim DOES produce that is
-/// absent here is the defect class this file exists to close.
+/// What it intentionally folds into `Verdict`: fragment state is not part of
+/// the walk-result parity comparison, so the companion test checks the raw
+/// walk's non-first sighting and full `ExtChainFragment` independently.
+/// Derive this comparison's fields from `Verdict` and the shim's return type;
+/// a field the shim produces but the verdict omits is covered separately.
 #[test]
 fn shim_walk_and_userspace_walk_agree_over_a_corpus() {
     let cases = parity_corpus();
@@ -2152,63 +2152,25 @@ fn shim_walk_and_userspace_walk_agree_over_a_corpus() {
         "#4555 BEHAVIOURAL parity drift between the shim's executed IPv6 extension-header walk \
          and this crate's walk_ipv6_ext_chain: {drift_total} divergence(s) over {compared} \
          chain/L3 pairs, showing the first {shown}. These are outcomes of running both walkers \
-         on the same bytes, so a divergence here is a real packet-handling difference: the shim \
-         would compute a session key from a different L4 offset (or accept a chain the \
-         forwarding path refuses) and the flow would be mis-steered or dropped. \
+         on the same bytes. This is a divergence between walk results, not a claim about the \
+         packet-level parser's no-L4 fragment handling. \
          Divergences:\n  {}",
         drift.join("\n  "),
         shown = drift.len(),
     );
 }
 
-/// The KNOWN, UNCLOSED non-parity, stated rather than papered over — the
-/// assertion the file has cited by name since #4555 round 5 without ever
-/// containing it.
+/// The executable parity corpus runs the shim's walk and the userspace-dp
+/// walk on real buffers. This test compares their fragment state and complete
+/// Fragment-header data; it tests walkers, not packet-level parsing.
 ///
-/// `walk_ipv6_ext_chain` returns an `ExtChainWalk`: outcome, PLUS the first
-/// `ExtChainFragment` sighting (its 8 raw bytes, or `None` when the buffer
-/// truncated them), PLUS `non_first_fragment_offset_seen`. Every one of those
-/// is consumed — `ipv6_is_any_fragment` matches on the DECLARATION,
-/// `ipv6_is_non_first_fragment` fails closed on unreadable bytes and refuses a
-/// non-first fragment's payload as an L4 header, and the NAT64 path reads the
-/// offset, the M flag and the 32-bit identification.
-///
-/// `walk_ipv6_ext_headers` returns `(offset, protocol)`. That is all of it.
-///
-/// A previous revision "closed" this by hand-writing a second walk loop inside
-/// the test and re-deriving the two fragment columns with the same expression
-/// `walk_ipv6_ext_chain` uses, then comparing the results. `X == X`: the
-/// widened corpus stayed green on the very non-first-fragment input it was
-/// widened to catch, and no shim-side edit could have moved either column. This
-/// test replaces that with three things that are all measured by RUNNING both
-/// real walkers:
-///
-///   1. the shim IS blind — two chains differing only in the Fragment header's
-///      offset/M/identification bytes give the same shim result;
-///   2. this crate is NOT — the same two chains give different `ExtChainWalk`s,
-///      with every sub-field of `ExtChainFragment` pinned;
-///   3. in the dimension the shim does represent, it is not more permissive:
-///      over the whole corpus, at every L3 offset, a chain the shim resolves to
-///      an L4 is resolved by this crate to the SAME L4.
-///
-/// NOT A SAFETY CLAIM, and NOT CLOSED — tracked as #6704, pre-existing and not
-/// introduced by #4555. On `IPv6 || Fragment(frag_off != 0, next = TCP)` the
-/// shim resolves `L4(48, TCP)` and hands offset 48 to `parse_l4`
-/// (`userspace-xdp/src/lib.rs`), which reads the fragment PAYLOAD as a TCP
-/// header — `sport = be16(b[48..50])`, `dport = be16(b[50..52])`,
-/// `data_offset = (b[60] >> 4) * 4`. This crate refuses those bytes everywhere.
-/// The shim's lookup can only HIT a session userspace INSTALLED, and userspace
-/// never installs one from a non-first fragment; the residual risk is a
-/// synthesised 5-tuple COINCIDING with a legitimate session, which then takes
-/// that session's fast path with no policy evaluation of its own. This test
-/// PINS the asymmetry so it cannot change unnoticed; it does not assert the
-/// asymmetry is harmless. Closing it means making the shim's walk carry the
-/// sighting — a shim change, `make generate`, and the #1864 verifier gate.
+/// The dedicated #13959 regression verifies that non-first-fragment payload
+/// bytes are not walked as another extension header by the shim.
 #[test]
-fn shim_is_not_more_permissive() {
+fn shim_walk_is_not_more_permissive() {
     // `IPv6 || Fragment(next=TCP, frag_off, ident) || 20 payload bytes`.
-    // Byte 60 is the payload byte `parse_l4` would read as the TCP data offset,
-    // set so the shim's TCP parse ACCEPTS these payload bytes as a header.
+    // The payload resembles TCP fields but `parse_ipv6` uses the fragment flag
+    // to select the no-L4 sentinel instead of reading them.
     let frag_chain = |frag_off: u16, ident: u32| -> Vec<u8> {
         let mut b = vec![0u8; 40];
         b[0] = 0x60;
@@ -2218,8 +2180,8 @@ fn shim_is_not_more_permissive() {
         b.extend_from_slice(&ident.to_be_bytes());
         b.extend_from_slice(&[0x11; 20]);
         b[48] = 0x04;
-        b[49] = 0xD2; // "source port" 1234, chosen by the sender
-        b[60] = 0x50; // data offset 5 words = 20 bytes, so parse_l4 accepts
+        b[49] = 0xD2; // payload byte that resembles source port 1234
+        b[60] = 0x50; // payload byte that resembles a 20-byte TCP data offset
         b
     };
     // frag_off bytes are the 13-bit offset in the top bits, then two reserved
@@ -2260,16 +2222,15 @@ fn shim_is_not_more_permissive() {
     assert_eq!(
         (shim_non_first.offset, shim_non_first.protocol),
         (48u16, TCP),
-        "#4555: the shim resolved something other than L4(48, TCP) on a non-first fragment; the \
-         documented divergence below is stated against that exact outcome"
+        "#13959: the raw walker must stop at offset 48 while preserving the Fragment header's \
+         next-protocol value"
     );
-    // The bytes the shim's parse_l4 would read as a TCP source port at offset
-    // 48 are fragment payload the sender chose, not a header.
+    // These payload bytes resemble a source port, but the packet parser sees
+    // `non_first_fragment` and substitutes the no-L4 sentinel.
     assert_eq!(
         u16::from_be_bytes([non_first[48], non_first[49]]),
         1234,
-        "#4555: the L4 offset the shim resolved does not point at the payload bytes this case \
-         planted, so the divergence below is being demonstrated on the wrong bytes"
+        "the test payload no longer resembles a TCP source port of 1234"
     );
 
     // 2. This crate is not blind, and every sub-field of `ExtChainFragment` is
@@ -2297,8 +2258,8 @@ fn shim_is_not_more_permissive() {
     assert!(!ipv6_is_non_first_fragment(&first));
     assert!(
         ipv6_is_non_first_fragment(&non_first),
-        "#4555: this crate stopped refusing a non-first fragment's payload as an L4 header, which \
-         is the ONLY thing standing between the shim's L4(48, TCP) and the forwarding path"
+        "#4555: the userspace-dp screen walk must recognize non-first fragments to avoid treating \
+         their payload as an L4 header"
     );
 
     // The readable/unreadable discriminant, on a DECLARED-but-truncated header.
@@ -2368,13 +2329,68 @@ fn shim_is_not_more_permissive() {
     }
     assert!(
         permissive.is_empty(),
-        "#4555: the shim resolved an L4 the forwarding path does not, on {} of {} chain/L3 pairs. \
-         The shim would build a session key for a packet userspace refuses to forward the same \
-         way. Cases:\n  {}",
+        "#4555: the shim's walk reported an L4 result where the userspace-dp walk did not, on {} \
+         of {} chain/L3 pairs. Walk-level cases:\n  {}",
         permissive.len(),
         cases.len() * L3_OFFSETS.len(),
         permissive.join("\n  ")
     );
+}
+
+#[test]
+fn nonfirst_fragment_payload_is_not_walked_as_ah_or_destopts_13959() {
+    // The payload's first two bytes mimic a valid extension header whose
+    // declared size overruns this fragment. A non-first fragment is not
+    // required to carry that extension header; these are just payload bytes.
+    for (name, next, payload) in [
+        ("DestOpts", DEST, [TCP, 0xff]),
+        ("AH", 51, [TCP, 0xff]),
+    ] {
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x60;
+        packet[6] = FRAG;
+        packet.extend_from_slice(&[next, 0, 0, 8, 0xde, 0xad, 0xbe, 0xef]);
+        packet.extend_from_slice(&payload);
+        // Keep payload_len consistent with the captured fragment.
+        let payload_len = (packet.len() - 40) as u16;
+        packet[4..6].copy_from_slice(&payload_len.to_be_bytes());
+        let walk = raw_shim_walk(&packet, 0).unwrap_or_else(|| {
+            panic!("non-first fragment with payload mimicking {name} was dropped by walker")
+        });
+        assert!(walk.non_first_fragment, "{name} payload lost fragment status");
+        assert_eq!(walk.offset, 48, "{name} payload changed fragment payload offset");
+        assert_eq!(walk.protocol, next, "{name} payload was consumed as an extension header");
+    }
+
+    // The first-fragment branch still traverses real headers. Check both
+    // length formulas and their truncation gates, not just DestOpts.
+    let walk_first = |next: u8, extension: &[u8]| {
+        let mut first = vec![0u8; 40];
+        first[0] = 0x60;
+        first[6] = FRAG;
+        first.extend_from_slice(&[next, 0, 0, 1, 0xde, 0xad, 0xbe, 0xef]);
+        first.extend_from_slice(extension);
+        let payload_len = (first.len() - 40) as u16;
+        first[4..6].copy_from_slice(&payload_len.to_be_bytes());
+        first
+    };
+    let mut dest_opts = [0u8; 8];
+    dest_opts[0] = TCP;
+    let walk = raw_shim_walk(&walk_first(DEST, &dest_opts), 0)
+        .expect("valid first-fragment DestOpts must parse");
+    assert!(!walk.non_first_fragment);
+    assert_eq!((walk.offset, walk.protocol), (56, TCP));
+
+    let mut ah = [0u8; 12];
+    ah[0] = TCP;
+    ah[1] = 1; // RFC 4302 (1+2)*4 byte AH
+    let walk = raw_shim_walk(&walk_first(51, &ah), 0)
+        .expect("valid first-fragment AH must parse");
+    assert_eq!((walk.offset, walk.protocol), (60, TCP));
+
+    // Truncated genuine headers retain fail-closed behavior for both arms.
+    assert!(raw_shim_walk(&walk_first(DEST, &[TCP, 0]), 0).is_none());
+    assert!(raw_shim_walk(&walk_first(51, &[TCP, 0]), 0).is_none());
 }
 
 /// NEGATIVE CONTROL for the behavioural corpus.
