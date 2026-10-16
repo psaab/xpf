@@ -4608,6 +4608,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // is being freed from.
                                 ingress_ifindex: meta.ingress_ifindex,
                                 ingress_vlan_id: meta.ingress_vlan_id,
+                                forward_ingress_vlan_id: None,
                                 owner_rg_id: 0,
                                 fabric_ingress: false,
                                 is_reverse: false,
@@ -5620,6 +5621,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // nothing else). See stamped_ingress_identity.
                                         ingress_ifindex: stamped_ifindex,
                                         ingress_vlan_id: stamped_vlan,
+                                        forward_ingress_vlan_id: None,
                                         owner_rg_id,
                                         fabric_ingress,
                                         is_reverse: false,
@@ -6040,6 +6042,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // carried"; the Go filter falls back to the zone approximation.
                                         ingress_ifindex: 0,
                                         ingress_vlan_id: 0,
+                                        forward_ingress_vlan_id: (stamped_ifindex != 0)
+                                            .then_some(stamped_vlan),
                                         owner_rg_id,
                                         fabric_ingress,
                                         is_reverse: true,

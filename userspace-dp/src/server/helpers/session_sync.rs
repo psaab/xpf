@@ -466,6 +466,7 @@ pub(crate) fn build_synced_session_entry(
                 0
             },
             ingress_vlan_id: req.ingress_vlan_id,
+            forward_ingress_vlan_id: None,
             // #919: prefer the wire u16 IDs when populated; fall back
             // to name lookup for older peers that only sent strings.
             ingress_zone: if req.ingress_zone_id != 0 {

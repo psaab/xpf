@@ -816,6 +816,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 0,
         fabric_ingress: false,
         is_reverse: false,

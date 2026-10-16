@@ -499,7 +499,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     session_key: &SessionKey,
     metadata: &SessionMetadata,
     arrival_ingress_ifindex: u32,
-    arrival_ingress_vlan_id: u16,
+    _arrival_ingress_vlan_id: u16,
     decision: SessionDecision,
     flow: &SessionFlow,
     origin: SessionOrigin,
@@ -541,9 +541,9 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                 // original WAN egress. Reverse metadata intentionally stores
                 // no predicted ingress (see SessionMetadata), so use the
                 // packet observation rather than copying the zero sentinel.
-                // These identities live only on the read-only validation
-                // copies; the reverse row remains truthful about its own
-                // unobserved ingress.
+                // The original forward ingress VLAN is separate provenance
+                // carried by synthesized reverse metadata: the reply may use
+                // an asymmetric VLAN and cannot supply the forward scope.
                 let reverse_ingress_ifindex = arrival_ingress_ifindex as i32;
                 let forward_ingress_ifindex = reverse_decision.resolution.egress_ifindex;
                 let forward_decision = SessionDecision {
@@ -562,7 +562,16 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                 let mut forward_metadata = metadata.clone();
                 forward_metadata.is_reverse = false;
                 forward_metadata.ingress_ifindex = forward_ingress_ifindex as u32;
-                forward_metadata.ingress_vlan_id = arrival_ingress_vlan_id;
+                let Some(forward_ingress_vlan_id) = metadata.forward_ingress_vlan_id else {
+                    return Some(PolicyRevocation {
+                        canonical_key: None,
+                        decision: reverse_decision,
+                        metadata: metadata.clone(),
+                        origin,
+                        reason: PolicyRevocationReason::StaleSourceNat,
+                    });
+                };
+                forward_metadata.ingress_vlan_id = forward_ingress_vlan_id;
                 std::mem::swap(
                     &mut forward_metadata.ingress_zone,
                     &mut forward_metadata.egress_zone,

@@ -287,6 +287,7 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
             ),
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
             fabric_ingress: false,
             is_reverse: false,

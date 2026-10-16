@@ -71,6 +71,7 @@ fn leak_metadata() -> SessionMetadata {
         egress_zone_check: 0,
         ingress_ifindex: 12,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 0,
         fabric_ingress: false,
         is_reverse: false,

@@ -995,6 +995,7 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
         // property the caller's non-fabric gate guarantees.
         ingress_ifindex,
         ingress_vlan_id,
+        forward_ingress_vlan_id: None,
         owner_rg_id,
         // The seed is created BY a locally ingressed packet. Recording it as
         // fabric_ingress would both be false and pull it into the

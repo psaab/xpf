@@ -277,6 +277,8 @@ pub(crate) struct SessionMetadata {
     /// alias onto the parent and reproduce the very cross-interface match
     /// this issue removes.
     pub(crate) ingress_vlan_id: u16,
+    /// Forward packet's ingress VLAN retained on a synthesized reverse row.
+    pub(crate) forward_ingress_vlan_id: Option<u16>,
     pub(crate) owner_rg_id: i32,
     pub(crate) fabric_ingress: bool,
     pub(crate) is_reverse: bool,
@@ -394,6 +396,7 @@ impl PartialEq for SessionMetadata {
             && self.egress_zone == other.egress_zone
             && self.ingress_ifindex == other.ingress_ifindex
             && self.ingress_vlan_id == other.ingress_vlan_id
+            && self.forward_ingress_vlan_id == other.forward_ingress_vlan_id
             && self.owner_rg_id == other.owner_rg_id
             && self.fabric_ingress == other.fabric_ingress
             && self.is_reverse == other.is_reverse
@@ -435,6 +438,7 @@ impl SessionMetadata {
             egress_zone_check: self.egress_zone_check,
             ingress_ifindex: self.ingress_ifindex,
             ingress_vlan_id: self.ingress_vlan_id,
+            forward_ingress_vlan_id: self.forward_ingress_vlan_id,
             owner_rg_id: self.owner_rg_id,
             fabric_ingress: self.fabric_ingress,
             is_reverse: self.is_reverse,

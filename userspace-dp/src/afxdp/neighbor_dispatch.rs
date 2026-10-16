@@ -1550,6 +1550,7 @@ pub(super) fn build_missing_neighbor_session_metadata(
     SessionMetadata {
         ingress_ifindex,
         ingress_vlan_id,
+        forward_ingress_vlan_id: None,
         ingress_zone,
         egress_zone,
         ingress_zone_check: crate::session::zone_vintage_check_for_id(
