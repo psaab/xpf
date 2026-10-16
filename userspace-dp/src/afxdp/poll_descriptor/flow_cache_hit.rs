@@ -785,16 +785,26 @@ pub(super) fn stage_flow_cache_hit(
                                         meta.into(),
                                         Some(&flow_key),
                                     );
-                                    enqueue_admitted_mirror_clone_to_live(
-                                        admission,
+                                    if mirror_output_filter_drops(
                                         worker_ctx.forwarding,
-                                        mirror_config,
-                                        mirror_frame,
+                                        mirror_config.output_ifindex,
+                                        &mirror_frame,
                                         meta.into(),
                                         Some(&flow_key),
-                                        cos_queue_id,
                                         now_ns,
-                                    )
+                                    ) {
+                                        MirrorCloneResult::OutputFiltered
+                                    } else {
+                                        enqueue_admitted_mirror_clone_to_live(
+                                            admission,
+                                            mirror_config,
+                                            mirror_frame,
+                                            meta.into(),
+                                            Some(&flow_key),
+                                            cos_queue_id,
+                                            now_ns,
+                                        )
+                                    }
                                 } else {
                                     MirrorCloneResult::NoFrame
                                 }

@@ -199,6 +199,16 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone(
         if !mirror_sample_allows(config.rate, &mut ingress_binding.mirror_sample_counter) {
             return None;
         }
+        if mirror_output_filter_drops(
+            forwarding,
+            config.output_ifindex,
+            frame,
+            meta,
+            flow_key,
+            now_ns,
+        ) {
+            return Some(MirrorCloneResult::OutputFiltered);
+        }
         let admission = match admit_mirror_clone_to_live(
             mirror_targets,
             mirror_tx_ifindex,
@@ -210,7 +220,6 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone(
         };
         return Some(enqueue_admitted_mirror_clone_to_live(
             admission,
-            forwarding,
             config,
             frame.to_vec(),
             meta,
@@ -326,7 +335,6 @@ pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     };
     enqueue_admitted_mirror_clone_to_live(
         admission,
-        forwarding,
         config,
         frame.to_vec(),
         meta,
@@ -338,7 +346,6 @@ pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
 
 pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
     admission: PendingTxAdmission,
-    forwarding: &ForwardingState,
     config: MirrorRuntimeConfig,
     frame: Vec<u8>,
     meta: ForwardPacketMeta,
@@ -346,16 +353,6 @@ pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
     cos_queue_id: Option<u8>,
     now_ns: u64,
 ) -> MirrorCloneResult {
-    if mirror_output_filter_drops(
-        forwarding,
-        config.output_ifindex,
-        &frame,
-        meta,
-        flow_key,
-        now_ns,
-    ) {
-        return MirrorCloneResult::OutputFiltered;
-    }
     if frame.len() > tx_frame_capacity() {
         return MirrorCloneResult::NoFrame;
     }
@@ -412,10 +409,20 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone_to_live(
             return Some(result);
         }
     };
+    if mirror_output_filter_drops(
+        forwarding,
+        config.output_ifindex,
+        frame,
+        meta,
+        flow_key,
+        now_ns,
+    ) {
+        record_mirror_clone_result(live, MirrorCloneResult::OutputFiltered, frame.len());
+        return Some(MirrorCloneResult::OutputFiltered);
+    }
     let cos_queue_id = mirror_cos_queue_id(forwarding, config.output_ifindex, meta, flow_key);
     let result = enqueue_admitted_mirror_clone_to_live(
         admission,
-        forwarding,
         config,
         frame.to_vec(),
         meta,
