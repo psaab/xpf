@@ -266,9 +266,24 @@ func TestHostInboundMLDQueryAndReportPaths10859(t *testing.T) {
 	}
 
 	// Types 130-132 (MLD) and 143 (MLDv2 Report) are not global ICMPv6
-	// accepts. A multicast Query destination (ff02::1) is outside the
-	// daddr-scoped local-unicast drop above and therefore reaches kernel input
-	// under the chain's ACCEPT policy.
+	// accepts. Link-scope MLD returns to the input chain's ACCEPT policy before
+	// the ff02 guard, but the return is scoped to ff02 so a unicast destination
+	// still hits the local-unicast zone drop asserted above.
+	const mldFallThrough = "ip6 daddr ff02::/16 icmpv6 type { 130, 131, 132, 143 } return"
+	if !strings.Contains(payload, mldFallThrough) {
+		t.Fatalf("link-scope MLD must retain fall-through before the ff02 guard:\n%s", payload)
+	}
+	for _, line := range strings.Split(payload, "\n") {
+		if strings.Contains(line, "icmpv6 type { 130, 131, 132, 143 } return") &&
+			!strings.Contains(line, "ip6 daddr ff02::/16") {
+			t.Fatalf("MLD fall-through must be scoped to link-scope destinations: %s", line)
+		}
+	}
+	mldIdx := strings.Index(payload, mldFallThrough)
+	dropIdx := strings.Index(payload, "ff02::/16 drop")
+	if dropIdx >= 0 && mldIdx > dropIdx {
+		t.Fatalf("link-scope MLD must return before non-unicast drop:\n%s", payload)
+	}
 	for _, line := range strings.Split(payload, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.Contains(line, "icmpv6") || !strings.Contains(line, "accept") {

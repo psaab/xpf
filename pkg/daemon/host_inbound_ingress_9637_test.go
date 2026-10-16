@@ -77,7 +77,11 @@ func TestHostInboundIngressRulesShape9637(t *testing.T) {
 		if strings.HasPrefix(s, "iifname ") {
 			lastIngress = i
 		}
-		if firstDest < 0 && (strings.HasPrefix(s, "ip daddr ") || strings.HasPrefix(s, "ip6 daddr ")) {
+		// The link-scope MLD return preserves the old base-chain fall-through;
+		// it is a non-unicast exception, not a destination-only local-address
+		// rule that the ingress zone scopes ahead of.
+		if firstDest < 0 && (strings.HasPrefix(s, "ip daddr ") || strings.HasPrefix(s, "ip6 daddr ")) &&
+			!strings.Contains(s, "icmpv6 type { 130, 131, 132, 143 } return") {
 			firstDest = i
 		}
 	}

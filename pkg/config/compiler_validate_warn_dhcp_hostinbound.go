@@ -6,9 +6,10 @@ import (
 )
 
 // compiler_validate_warn_dhcp_hostinbound.go carries the #6460 commit-time
-// WARNING that a configured DHCP server is reachable on an interface whose
-// security zone's `host-inbound-traffic system-services` set does NOT admit the
-// matching DHCP token.
+// WARNING when a configured DHCP server's interface zone omits the matching
+// `host-inbound-traffic system-services` token. For DHCPv4, the default raw
+// AF_PACKET path remains reachable regardless of that token; DHCPv6's UDP path
+// is now default-denied by the #13925 gate when `dhcpv6` is absent.
 //
 // WHY THIS IS ITS OWN ARM, AND NOT PART OF #11571. The #11571 enforcement gate
 // scopes host-bound multicast by routing-protocol token, destination group,

@@ -22,9 +22,10 @@ Non-catalog destinations otherwise retain their existing behavior, with the
 IPv6 link-scope multicast (`ff02::/16`) are judged by the ingress zone's
 effective host-inbound service/protocol set. Ordinary zone rules only match
 local unicast destinations, so without this gate these packets fell through the
-input chain's `policy accept`. Link-scope ICMPv6 ND remains globally admitted;
-MLD remains globally admitted as before. Unzoned and ambiguous ingress has no
-service admit and is denied for these non-unicast classes.
+input chain's `policy accept`. ND remains globally admitted; link-scope MLD
+retains its prior base-chain policy fall-through. Unzoned and ambiguous ingress
+has no service admit and is denied for these service payloads; prior global
+exemptions remain ahead of the gate (raw ESP/AH and ICMP errors/PMTU).
 
 The userspace classifier still applies the catalog group/family/protocol/token
 decision on AF_XDP host-delivery paths. Limited broadcast and IPv6 multicast
@@ -220,16 +221,15 @@ groups belonging to its expanded protocols.
 1. **Ingress-zone scope.** Kernel rules use the ingress `iifname` (or the
    equivalent VRF slave scope) together with the catalog group and protocol
    tuple. Zone-level and interface-override rules use their effective protocol
-   set; ambiguous and unzoned ingress has no allow rule and falls into the
-   catalog-group deny.
+   set; ambiguous and unzoned ingress has no service allow and falls into the
+   catalog-group or non-unicast deny, subject to the global exceptions above.
 
 2. **Default-deny groups and non-unicast destinations.** For every catalog
    group, only the exact family/group/protocol tuple admitted by that ingress
    zone is accepted. The #13925 guard separately scopes IPv4 limited broadcast
    and IPv6 `ff02::/16` to the zone's effective service/protocol set. Addressless
-   ingress views are still included; global ND/MLD exceptions and the documented
-   `any-service` wildcard are preserved. Other non-catalog traffic keeps its
-   existing behavior.
+   ingress views are still included; global ND accepts, link-scope MLD
+   fall-through, and the documented `any-service` wildcard are preserved.
 
 3. **Policy and conntrack ordering.** Explicit `to-zone junos-host` fine-policy
    decisions run before multicast/non-unicast admission. Their accept/drop rules
@@ -238,13 +238,15 @@ groups belonging to its expanded protocols.
 
 4. **Failure paths.** A cold-boot host-inbound fence denies catalog multicast,
    limited broadcast, and link-scope multicast when the main table is unavailable,
-   while preserving mandatory ND/MLD. Persistent DHCP backstops classify the
-   L3 destination with `fib daddr type { local, anycast }`, so unicast or
-   anycast IP in an L2 group frame cannot bypass the guard. Genuine IP
-   multicast/broadcast and MLD reach the main input chain, where catalog or
-   #13925 zone policy applies. VRF-slave IPv6 also drops `fe80::/10` directly
-   because strict route lookup can return `unreachable`; the coverage-gap
-   variant excludes retained destinations before applying that fallback. The
+   while preserving mandatory ND admits and link-scope MLD fall-through.
+   Persistent DHCP backstops classify the L3 destination with
+   `fib daddr type { local, anycast }`, so unicast or anycast IP in an L2
+   group frame cannot bypass the guard. Genuine IP multicast/broadcast and MLD
+   reach the main input chain, where catalog/non-unicast service policy applies
+   and MLD retains its prior base-chain policy behavior.
+   VRF-slave IPv6 also drops `fe80::/10` directly because strict route lookup
+   can return `unreachable`; the coverage-gap variant excludes retained
+   destinations before applying that fallback. The
    additive coverage-gap fence leaves retained-main-table multicast policy
    authoritative; it adds no broad ACCEPT.
 

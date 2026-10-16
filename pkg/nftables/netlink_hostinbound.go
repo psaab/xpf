@@ -67,7 +67,6 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		}
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
 		emitHostInboundICMPAcceptsNetlink(p)
-		emitHostInboundNonUnicastIngressGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 	} else {
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
@@ -81,7 +80,6 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
 		emitHostInboundICMPAcceptsNetlink(p)
-		emitHostInboundNonUnicastIngressGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 	}
 
 	// #10751/#11577: scoped DHCPv6 server replies pass before the backstop
@@ -96,6 +94,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundReinjectAcceptNetlink(p, famV4, reinjectV4)
 		emitHostInboundReinjectAcceptNetlink(p, famV6, reinjectV6)
 	}
+	emitHostInboundNonUnicastIngressGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
 	// #11409: VRF slave-name guards precede rules scoped to the shared
 	// LOCAL_IN master, so a zoned sibling cannot admit an unzoned member.
@@ -350,8 +349,10 @@ func emitHostInboundMulticastScopeNetlink(p *nlPlan, v HostInboundZoneView, f nl
 // limited broadcast and IPv6 link-scope multicast are judged by the ingress
 // zone rather than falling through the input chain's accept policy.
 func emitHostInboundNonUnicastIngressGuardsNetlink(p *nlPlan, views []HostInboundZoneView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
-	// Preserve the existing global MLD fall-through before gating ff02::/16.
-	p.rule().icmpType(famV6, []uint8{130, 131, 132, 143}).emit(verdictAccept()...)
+	// MLD returns to the base-chain policy as before; do not make it a global
+	// ACCEPT that skips existing host-inbound policy.
+	p.rule().daddr(famV6, []string{"ff02::/16"}, false).
+		icmpType(famV6, []uint8{130, 131, 132, 143}).emit(verdictReturn()...)
 	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
 	classes := []struct {
 		family nlFamily

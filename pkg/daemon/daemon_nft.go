@@ -1447,7 +1447,7 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 		rules = append(rules, mandatory[0])
 		emitHostInboundMulticastFenceDrops(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		rules = append(rules, mandatory[2:]...)
-		rules = append(rules, "    icmpv6 type { 130, 131, 132, 143 } accept")
+		rules = append(rules, "    ip6 daddr ff02::/16 icmpv6 type { 130, 131, 132, 143 } return")
 		emitHostInboundNonUnicastFenceDrops(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		rules = append(rules, mandatory[1])
 	} else {
@@ -2288,7 +2288,6 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
 		// (4) ND/PMTUD/ICMP-error accepts for NON-denied sources.
 		emitHostInboundICMPAccepts(&rules)
-		emitHostInboundNonUnicastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2319,7 +2318,6 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		rules = append(rules, "    ct state established,related ct direction reply accept")
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
 		emitHostInboundICMPAccepts(&rules)
-		emitHostInboundNonUnicastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2338,6 +2336,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		emitHostInboundReinjectAccept(&rules, "ip", reinjectV4)
 		emitHostInboundReinjectAccept(&rules, "ip6", reinjectV6)
 	}
+	emitHostInboundNonUnicastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 	// #11409: VRF slave-name guards precede rules scoped to the shared
 	// LOCAL_IN master, so a zoned sibling cannot admit the unzoned member.
 	emitHostInboundUnzonedVRFIngressDrop(&rules, unzonedIngressVRFSlaves, "ip", ingressV4)
@@ -2470,13 +2469,13 @@ func emitHostInboundMulticastScope(rules *[]string, v dpuserspace.ZoneHostInboun
 
 // emitHostInboundNonUnicastIngressGuards extends per-zone host-inbound
 // enforcement to limited broadcast and IPv6 link-scope multicast. Ordinary
-// zone rules are daddr-scoped to local unicast addresses, so these destinations
+// zone rules are daddr-scoped to local unicast destinations, so these destinations
 // otherwise reach the input chain's policy accept. These rules precede the
 // residual established accept; catalog multicast is handled separately above.
 func emitHostInboundNonUnicastIngressGuards(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
-	// MLD already reached the host via the chain's accept fall-through.
-	// Keep its link-local control traffic global before the ff02::/16 gate.
-	*rules = append(*rules, "    icmpv6 type { 130, 131, 132, 143 } accept")
+	// MLD must retain its previous fall-through behavior under the chain's
+	// accept policy, without becoming a global ACCEPT that bypasses policy.
+	*rules = append(*rules, "    ip6 daddr ff02::/16 icmpv6 type { 130, 131, 132, 143 } return")
 	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
 	classes := []struct {
 		family string
@@ -2559,7 +2558,7 @@ func emitHostInboundMulticastFenceDrops(rules *[]string, views []dpuserspace.Zon
 
 // emitHostInboundNonUnicastFenceDrops blocks non-unicast host destinations
 // until the current host-inbound generation is active. It runs after mandatory
-// ND/MLD admits and before the fence's broad established-flow accept.
+// ND admits and link-scope MLD fall-through, before the broad established accept.
 func emitHostInboundNonUnicastFenceDrops(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
 	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
 	for _, class := range []struct {
