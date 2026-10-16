@@ -993,12 +993,30 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 	client := &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: transport,
-		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// A network-reachable health endpoint can return attacker-controlled
 			// Location headers. Keep one probe from fanning out into an unbounded
 			// chain of additional requests.
 			if len(via) > maxProbeRedirectHops {
 				return fmt.Errorf("RPM HTTP probe redirect limit (%d hops) exceeded", maxProbeRedirectHops)
+			}
+			// #14178: the redirect target is chosen by the probed
+			// endpoint, not by the operator. The initial target was
+			// scoped and validated (scopeHTTPTargetZone12908 +
+			// canonicalizeHTTPTarget); a Location must not abandon
+			// that boundary for another origin — a different scheme,
+			// host, or effective port is a different service whose
+			// 2xx says nothing about the configured path, yet would
+			// be scored as this probe's pass and published to
+			// ip-monitoring. Same-origin hops (a path move on the
+			// configured endpoint) remain legitimate. Return a plain
+			// error, not ErrUseLastResponse: a refused redirect MUST
+			// fail the probe, never be scored from the 3xx response.
+			// Do not render the endpoint-supplied target in the
+			// error: it is untrusted and unbounded.
+			if len(via) > 0 && (req == nil || req.URL == nil || via[0] == nil || via[0].URL == nil ||
+				!sameOriginProbeURL(via[0].URL, req.URL)) {
+				return fmt.Errorf("RPM HTTP probe redirect to a different origin refused")
 			}
 			return nil
 		},
@@ -1080,6 +1098,38 @@ const maxProbeBodyBytes9049 = 1 << 20
 // maxProbeRedirectHops bounds the number of additional requests one probe can
 // make after the configured target redirects.
 const maxProbeRedirectHops = 3
+
+// sameOriginProbeURL reports whether two HTTP URLs share an origin for
+// #14178 redirect admission: scheme, hostname, and effective port must
+// all match. Credentials and paths are intentionally excluded — the
+// configured target may carry either, and a path move is the legitimate
+// redirect. Mirrors the feeds package's same-origin rule
+// (checkFeedRedirect) so endpoint-chosen redirects get one in-tree
+// doctrine.
+func sameOriginProbeURL(a, b *url.URL) bool {
+	if a == nil || b == nil || a.Hostname() == "" || b.Hostname() == "" {
+		return false
+	}
+	if !strings.EqualFold(a.Scheme, b.Scheme) ||
+		!strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	return probeOriginPort(a) == probeOriginPort(b)
+}
+
+func probeOriginPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
 
 func drainProbeBody(body io.Reader) error {
 	_, err := io.Copy(io.Discard, io.LimitReader(body, maxProbeBodyBytes9049))
