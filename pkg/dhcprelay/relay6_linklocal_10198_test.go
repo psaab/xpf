@@ -422,21 +422,23 @@ func TestDHCPv6ReplyDispatcherRoutesByInterfaceID10198(t *testing.T) {
 
 	innerA := newDHCPV6TestMessage(t)
 	armDHCPV6Reply(t, relayA, innerA)
+	innerA.(*dhcpv6.Message).MessageType = dhcpv6.MessageTypeAdvertise
 	replyA := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    net.ParseIP("2001:db8:1::1"),
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	replyA.AddOption(dhcpv6.OptInterfaceID([]byte("ll-a")))
 	replyA.AddOption(dhcpv6.OptRelayMessage(innerA))
 	innerB := newDHCPV6TestMessage(t)
 	armDHCPV6Reply(t, relayB, innerB)
+	innerB.(*dhcpv6.Message).MessageType = dhcpv6.MessageTypeAdvertise
 	replyB := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    net.ParseIP("2001:db8:2::1"),
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	replyB.AddOption(dhcpv6.OptInterfaceID([]byte("ll-b")))
 	replyB.AddOption(dhcpv6.OptRelayMessage(innerB))
@@ -494,21 +496,23 @@ func TestDHCPv6ReplyDispatcherDisambiguatesDuplicateInterfaceID10198(t *testing.
 
 	innerA := newDHCPV6TestMessage(t)
 	armDHCPV6Reply(t, relayA, innerA)
+	innerA.(*dhcpv6.Message).MessageType = dhcpv6.MessageTypeAdvertise
 	replyA := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    relayA.linkAddr,
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	replyA.AddOption(dhcpv6.OptInterfaceID([]byte("shared")))
 	replyA.AddOption(dhcpv6.OptRelayMessage(innerA))
 	innerB := newDHCPV6TestMessage(t)
 	armDHCPV6Reply(t, relayB, innerB)
+	innerB.(*dhcpv6.Message).MessageType = dhcpv6.MessageTypeAdvertise
 	replyB := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    relayB.linkAddr,
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	replyB.AddOption(dhcpv6.OptInterfaceID([]byte("shared")))
 	replyB.AddOption(dhcpv6.OptRelayMessage(innerB))
@@ -547,7 +551,7 @@ func TestDHCPv6ReplyDispatcherDisambiguatesDuplicateInterfaceID10198(t *testing.
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    ambiguousLink,
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	ambiguousReply.AddOption(dhcpv6.OptInterfaceID([]byte("ambiguous")))
 	ambiguousReply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
@@ -569,14 +573,14 @@ func TestDHCPv6ReplyDispatcherDisambiguatesDuplicateInterfaceID10198(t *testing.
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    ambiguousLink,
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	emptyReply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
 	unknownReply := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    ambiguousLink,
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	unknownReply.AddOption(dhcpv6.OptInterfaceID([]byte("unknown")))
 	unknownReply.AddOption(dhcpv6.OptRelayMessage(newDHCPV6TestMessage(t)))
@@ -665,11 +669,12 @@ func TestDHCPv6ServerLoopRoutesMismatchedInterfaceID10198(t *testing.T) {
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    targetRelay.linkAddr,
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	reply.AddOption(dhcpv6.OptInterfaceID([]byte("target")))
 	inner := newDHCPV6TestMessage(t)
 	armDHCPV6Reply(t, targetRelay, inner)
+	inner.(*dhcpv6.Message).MessageType = dhcpv6.MessageTypeAdvertise
 	reply.AddOption(dhcpv6.OptRelayMessage(inner))
 	server.push(reply.ToBytes())
 	deadline := time.Now().Add(time.Second)
@@ -726,11 +731,12 @@ func TestDHCPv6ServerLoopRoutesSameInterfaceIDDifferentLink10198(t *testing.T) {
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    targetRelay.linkAddr,
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	reply.AddOption(dhcpv6.OptInterfaceID([]byte("shared")))
 	inner := newDHCPV6TestMessage(t)
 	armDHCPV6Reply(t, targetRelay, inner)
+	inner.(*dhcpv6.Message).MessageType = dhcpv6.MessageTypeAdvertise
 	reply.AddOption(dhcpv6.OptRelayMessage(inner))
 	server.push(reply.ToBytes())
 	deadline := time.Now().Add(time.Second)
@@ -776,12 +782,13 @@ func TestDHCPv6ClientReplyDispatchRateLimited10198(t *testing.T) {
 	m := newDHCPV6Manager()
 	m.replyDispatcher = dispatcher
 	m.now = func() time.Time { return time.Unix(123, 0) }
-	relay := &dhcpV6Relay{
-		ifaceName:     "ll-rate-client",
-		kernelName:    "lo",
-		linkAddr:      net.ParseIP("2001:db8:41::1"),
-		maxPacketRate: 1,
-	}
+	// #14181: a Relay-Reply on a client socket is legitimate only for the
+	// receiving relay's own target, so the receiving relay must be the
+	// registered reply target (previously any receiving relay could select
+	// an arbitrary target by Interface-ID).
+	replyRelay.maxPacketRate = 0
+	relay := replyRelay
+	relay.maxPacketRate = 1
 	server := newFakeConn()
 	servers := []*net.UDPAddr{{IP: net.ParseIP("2001:db8:42::1"), Port: dhcpv6RelayPort}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -793,11 +800,12 @@ func TestDHCPv6ClientReplyDispatchRateLimited10198(t *testing.T) {
 
 	inner := newDHCPV6TestMessage(t)
 	armDHCPV6Reply(t, replyRelay, inner)
+	inner.(*dhcpv6.Message).MessageType = dhcpv6.MessageTypeAdvertise
 	reply := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    replyRelay.linkAddr,
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	reply.AddOption(dhcpv6.OptInterfaceID([]byte("ll-rate-reply")))
 	reply.AddOption(dhcpv6.OptRelayMessage(inner))
@@ -869,11 +877,12 @@ func TestDHCPv6ReplyDispatcherRestartsDeadServer10198(t *testing.T) {
 
 	inner := newDHCPV6TestMessage(t)
 	armDHCPV6Reply(t, relay, inner)
+	inner.(*dhcpv6.Message).MessageType = dhcpv6.MessageTypeAdvertise
 	reply := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
 		LinkAddr:    net.ParseIP("2001:db8:1::1"),
-		PeerAddr:    net.ParseIP("::1"),
+		PeerAddr:    net.ParseIP("fe80::99"),
 	}
 	reply.AddOption(dhcpv6.OptInterfaceID([]byte("ll-restart")))
 	reply.AddOption(dhcpv6.OptRelayMessage(inner))

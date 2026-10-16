@@ -334,6 +334,7 @@ type RelayStats struct {
 	RepliesDroppedDispatcherEmptyIID   uint64
 	RepliesDroppedDispatcherUnknownIID uint64
 	RepliesDroppedDispatcherAmbiguous  uint64
+	RepliesDroppedDispatcherLocal      uint64
 }
 
 // l2Replier is the raw-L2 unicast seam. *l2Sender implements it in production;
@@ -1246,7 +1247,7 @@ func (m *Manager) Stats() []RelayStats {
 			})
 		}
 		if dispatcherStats.parse != 0 || dispatcherStats.emptyIID != 0 ||
-			dispatcherStats.unknown != 0 || dispatcherStats.ambiguous != 0 {
+			dispatcherStats.unknown != 0 || dispatcherStats.ambiguous != 0 || dispatcherStats.local != 0 {
 			stats = append(stats, RelayStats{
 				Family:                             "inet6",
 				Interface:                          "<dhcpv6-reply-dispatcher>",
@@ -1254,6 +1255,7 @@ func (m *Manager) Stats() []RelayStats {
 				RepliesDroppedDispatcherEmptyIID:   dispatcherStats.emptyIID,
 				RepliesDroppedDispatcherUnknownIID: dispatcherStats.unknown,
 				RepliesDroppedDispatcherAmbiguous:  dispatcherStats.ambiguous,
+				RepliesDroppedDispatcherLocal:      dispatcherStats.local,
 			})
 		}
 		m.v6.mu.Unlock()

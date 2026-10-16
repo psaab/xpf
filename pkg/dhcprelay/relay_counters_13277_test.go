@@ -113,7 +113,7 @@ func TestDHCPV6ApplyPreservesCounters(t *testing.T) {
 		return dhcpV6Sockets{}, errors.New("test connection unavailable")
 	}
 	old := &dhcpV6Relay{ifaceName: "ge-0/0/0.0", done: make(chan struct{}),
-		pending: newPendingTableOf[pending6Key](8, time.Hour, time.Now),
+		pending: newPendingTableOf[pending6Key, pending6Entry](8, time.Hour, time.Now),
 		cancel:  func() {}}
 	close(old.done)
 	old.requestsRelayed.Store(31)
