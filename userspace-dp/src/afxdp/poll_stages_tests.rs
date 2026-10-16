@@ -5994,3 +5994,131 @@ fn ndp_na_override0_cas_preserves_live_entry_end_to_end_9893() {
         "the atomic CAS must preserve a live differing LLA on Override=0"
     );
 }
+
+/// #14238: stage 9 (`stage_classify_fabric_ingress`) is the sole production
+/// setter of `meta.fabric_ingress_ifindex`, and the BA trust lookup
+/// (`ba_ingress_trust_for_packet`) prefers that field — so the fail-closed
+/// property "only a validated V2 stamp populates it" must be pinned at the
+/// stage itself, not just at the selection functions (the #13967 regression
+/// hand-constructs the field, so a stage that stopped populating it — or
+/// populated it from an unvalidated stamp — would leave every merged test
+/// green while peer BA parity silently reverted). Drive a producer-minted
+/// V2 stamp (`resolve_fabric_redirect_for_ingress_identity`, the same helper
+/// the peer punt path uses) through the stage and assert the scoped
+/// identity's logical ifindex lands in the meta; V1 `Valid`, `Absent`, and
+/// `Invalid` stamps must all leave it 0.
+#[test]
+fn stage9_fabric_ingress_populates_scoped_ifindex_only_from_validated_v2_stamp_14238() {
+    // nat_snapshot: lan = reth1.0 (ifindex 24, RG 2), wan = reth0.80
+    // (ifindex 12, RG 1); the fabric parent is ifindex 21, overlay 101.
+    let forwarding =
+        build_forwarding_state(&super::super::test_fixtures::nat_snapshot_with_fabric());
+    // Preconditions: the V2 scope identity for the peer's LAN ingress
+    // (reth1.0) must exist and resolve to its logical ifindex, otherwise
+    // the positive cell below is vacuous.
+    let scoped_ifindex = 24;
+    let scope_id = forwarding
+        .ifindex_to_fabric_nat_scope_id
+        .get(&scoped_ifindex)
+        .copied()
+        .expect("14238 precondition: LAN ingress must carry a V2 NAT-scope id");
+    let identity = forwarding
+        .fabric_nat_scope_id_to_identity
+        .get(&scope_id)
+        .copied()
+        .expect("14238 precondition: scope id must resolve to an identity");
+    assert_eq!(identity.zone_id, TEST_LAN_ZONE_ID);
+    assert_eq!(identity.ifindex, scoped_ifindex);
+
+    // Producer-minted V2 stamp: the exact source MAC the peer's redirect
+    // path emits for a LAN-ingress punt.
+    let redirect = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        &forwarding,
+        Some(TEST_LAN_ZONE_ID),
+        Some(scoped_ifindex),
+    )
+    .expect("14238: producer must mint a V2 stamp for the LAN ingress identity");
+    let v2_src_mac = redirect.src_mac.expect("V2 fabric source stamp");
+    assert_eq!(&v2_src_mac[..3], &FABRIC_NAT_SCOPE_MAC_PREFIX);
+
+    let dst_mac = [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]; // our fabric link MAC (V1a)
+    let frame_with_src = |src_mac: [u8; 6]| -> Vec<u8> {
+        let mut frame = vec![0u8; 64];
+        frame[..6].copy_from_slice(&dst_mac);
+        frame[6..12].copy_from_slice(&src_mac);
+        frame
+    };
+    // V1 stamp for the same zone: valid zone claim, no scoped identity.
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    let v1_src_mac = [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo];
+
+    with_neighbor_learn_ctx(&forwarding, |ctx, _neighbors| {
+        // ha_state is empty in this ctx: no RG is locally forwarding-active,
+        // so the claimed zone's RG is peer-owned and both stamps validate.
+        let run_stage = |frame: &[u8]| -> (UserspaceDpMeta, FabricIngressOutcome) {
+            let mut meta = UserspaceDpMeta {
+                ingress_ifindex: 21,
+                ..Default::default()
+            };
+            let outcome = stage_classify_fabric_ingress(frame, &mut meta, TEST_NOW_SECS, ctx);
+            (meta, outcome)
+        };
+
+        // Validated V2: stage 9 must publish the scope identity's logical
+        // ifindex into the meta the BA trust lookup reads.
+        let (meta, outcome) = run_stage(&frame_with_src(v2_src_mac));
+        assert_eq!(
+            meta.fabric_ingress_ifindex, scoped_ifindex as u32,
+            "14238: a validated V2 stamp must populate fabric_ingress_ifindex \
+             with the scope identity's logical ifindex (RED if stage 9 stops \
+             populating it or populates it from the physical ingress)"
+        );
+        assert_eq!(outcome.ingress_zone_override, Some(TEST_LAN_ZONE_ID));
+        assert_eq!(outcome.ingress_nat_scope_ifindex, Some(scoped_ifindex));
+        assert!(!outcome.invalid_zone_stamp);
+        assert!(outcome.packet_fabric_ingress);
+        assert_ne!(
+            meta.meta_flags & crate::afxdp::icmp::FABRIC_INGRESS_FLAG,
+            0,
+            "14238: a validated V2 stamp must mark the packet fabric-ingress"
+        );
+
+        // V1 Valid: zone override only — the scoped field stays 0 so BA
+        // classification keeps the documented zone-only fallback.
+        let (meta, outcome) = run_stage(&frame_with_src(v1_src_mac));
+        assert_eq!(
+            meta.fabric_ingress_ifindex, 0,
+            "14238: a V1 (Valid, unscoped) stamp must leave fabric_ingress_ifindex 0"
+        );
+        assert_eq!(outcome.ingress_zone_override, Some(TEST_LAN_ZONE_ID));
+        assert_eq!(outcome.ingress_nat_scope_ifindex, None);
+        assert!(!outcome.invalid_zone_stamp);
+
+        // Absent: an ordinary (unstamped) source MAC on the fabric link.
+        let (meta, outcome) = run_stage(&frame_with_src([0x00, 0x25, 0x90, 0x12, 0x34, 0x56]));
+        assert_eq!(
+            meta.fabric_ingress_ifindex, 0,
+            "14238: an unstamped fabric frame must leave fabric_ingress_ifindex 0"
+        );
+        assert_eq!(outcome.ingress_zone_override, None);
+        assert_eq!(outcome.ingress_nat_scope_ifindex, None);
+        assert!(!outcome.invalid_zone_stamp);
+
+        // Invalid: a V2 marker carrying an unknown scope id must fail
+        // closed — flagged invalid and never trusted into the field.
+        let mut forged = v2_src_mac;
+        forged[3..6].copy_from_slice(&[0xff, 0xff, 0xff]);
+        let (meta, outcome) = run_stage(&frame_with_src(forged));
+        assert_eq!(
+            meta.fabric_ingress_ifindex, 0,
+            "14238: an invalid V2 stamp must leave fabric_ingress_ifindex 0 \
+             (fail-closed: unvalidated trust must never be admitted)"
+        );
+        assert_eq!(outcome.ingress_zone_override, None);
+        assert_eq!(outcome.ingress_nat_scope_ifindex, None);
+        assert!(
+            outcome.invalid_zone_stamp,
+            "14238: an unknown-scope V2 stamp must be reported Invalid"
+        );
+    });
+}
