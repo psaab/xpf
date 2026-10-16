@@ -1704,3 +1704,98 @@ fn conntrack_policy_restamp_mismatched_addrs_fail_closed_10511() {
         "an unknown address family must fail closed"
     );
 }
+
+// #13668 RED: ungated conntrack RMW must be fenced by TupleGate.
+#[test]
+fn conntrack_rmw_app_id_declines_under_gate_lease_13668() {
+    let _publish_guard = crate::afxdp::bpf_map::take_conntrack_publish_guard();
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let key = plain_key();
+    let decision = local_delivery_decision(0);
+    let metadata = synced_forward_metadata();
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, decision, &metadata,
+            &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+    );
+    let before = crate::afxdp::bpf_map::conntrack_row_for_test(&key).expect("seeded row");
+    let _lease = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([key.clone()])
+        .expect("test lease");
+    let ok = restamp_bpf_conntrack_app_id(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, 999);
+    assert!(!ok, "#13668: RMW must decline while tuple is gate-leased");
+    assert_eq!(crate::afxdp::bpf_map::conntrack_app_id_restamp_writes_for_test(), 0);
+    let after = crate::afxdp::bpf_map::conntrack_row_for_test(&key).expect("row survives");
+    assert_eq!(after.app_id, before.app_id);
+}
+
+#[test]
+fn conntrack_rmw_app_id_declines_under_clear_fence_13668() {
+    let _publish_guard = crate::afxdp::bpf_map::take_conntrack_publish_guard();
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let key = plain_key();
+    let decision = local_delivery_decision(0);
+    let metadata = synced_forward_metadata();
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, decision, &metadata,
+            &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+    );
+    let gate = crate::afxdp::bpf_map::global_tuple_gate();
+    let _fence = gate.begin_clear().expect("clear fence");
+    let ok = restamp_bpf_conntrack_app_id(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, 999);
+    assert!(!ok, "#13668: RMW must decline during clear fence");
+    assert_eq!(crate::afxdp::bpf_map::conntrack_app_id_restamp_writes_for_test(), 0);
+}
+
+#[test]
+fn conntrack_rmw_policy_declines_under_gate_lease_13668() {
+    let _g = crate::afxdp::bpf_map::take_conntrack_publish_guard();
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let key = plain_key();
+    assert_eq!(crate::afxdp::bpf_map::publish_bpf_conntrack_entry(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, local_delivery_decision(0), &synced_forward_metadata(), &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow), crate::afxdp::bpf_map::ConntrackPublishResult::Written);
+    let _lease = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease([key.clone()]).expect("lease");
+    // Policy restamp has no test-fd model; gated decline returns false before any map access.
+    assert!(!restamp_bpf_conntrack_policy(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, &synced_forward_metadata()), "#13668 policy RMW must decline under lease");
+}
+
+#[test]
+fn conntrack_rmw_origin_declines_under_gate_lease_13668() {
+    let _g = crate::afxdp::bpf_map::take_conntrack_publish_guard();
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let key = plain_key();
+    assert_eq!(crate::afxdp::bpf_map::publish_bpf_conntrack_entry(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, local_delivery_decision(0), &synced_forward_metadata(), &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow), crate::afxdp::bpf_map::ConntrackPublishResult::Written);
+    let before = crate::afxdp::bpf_map::conntrack_row_for_test(&key).unwrap().cluster_synced;
+    let _lease = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease([key.clone()]).expect("lease");
+    crate::afxdp::bpf_map::update_session_cluster_synced_origin(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, !before);
+    assert_eq!(crate::afxdp::bpf_map::conntrack_row_for_test(&key).unwrap().cluster_synced, before, "#13668 origin RMW must decline under lease");
+}
+
+#[test]
+fn conntrack_rmw_refresh_declines_under_gate_lease_13668() {
+    use crate::session::SessionTable;
+    let _g = crate::afxdp::bpf_map::take_conntrack_publish_guard();
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let key = plain_key();
+    assert_eq!(crate::afxdp::bpf_map::publish_bpf_conntrack_entry(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, local_delivery_decision(0), &synced_forward_metadata(), &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow), crate::afxdp::bpf_map::ConntrackPublishResult::Written);
+    let mut table = SessionTable::new();
+    assert!(table.install_with_protocol(key.clone(), local_delivery_decision(0), synced_forward_metadata(), 1_000_000_000, 6, 0x10));
+    let policy = crate::policy::PolicyState::default();
+    let _lease = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease([key.clone()]).expect("lease");
+    let _ = refresh_bpf_conntrack_last_seen(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &table, &policy, 2_000_000_000, 0, 4096);
+    assert_eq!(crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(), 0, "#13668 refresh RMW must decline under lease");
+}
+
+#[test]
+fn conntrack_rmw_app_id_succeeds_without_lease_13668() {
+    let _g = crate::afxdp::bpf_map::take_conntrack_publish_guard();
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let key = plain_key();
+    assert_eq!(crate::afxdp::bpf_map::publish_bpf_conntrack_entry(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, local_delivery_decision(0), &synced_forward_metadata(), &FastMap::default(), 0, 11, 42, 60, SessionOrigin::ForwardFlow), crate::afxdp::bpf_map::ConntrackPublishResult::Written);
+    assert!(restamp_bpf_conntrack_app_id(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &key, 999));
+    assert_eq!(crate::afxdp::bpf_map::conntrack_row_for_test(&key).unwrap().app_id, 999);
+}

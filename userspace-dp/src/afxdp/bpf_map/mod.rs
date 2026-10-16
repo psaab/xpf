@@ -853,6 +853,8 @@ thread_local! {
     /// revalidation test drives its hits synchronously on its own thread.
     static CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static CONNTRACK_TEST_REFRESH_WRITES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -889,6 +891,12 @@ pub(crate) fn clear_conntrack_rows_for_test() {
     CONNTRACK_TEST_ROWS.with(|rows| rows.borrow_mut().clear());
     CONNTRACK_TEST_APP_ID_RESTAMP_WRITES.with(|writes| writes.set(0));
     CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS.with(|lookups| lookups.set(0));
+    CONNTRACK_TEST_REFRESH_WRITES.with(|writes| writes.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn conntrack_refresh_writes_for_test() -> usize {
+    CONNTRACK_TEST_REFRESH_WRITES.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -1520,10 +1528,35 @@ fn record_restamp_attempt(addr_family: u8, fd: c_int) -> bool {
     RESTAMP_FAIL_ON_ATTEMPT.with(|fail| *fail.borrow() == Some(attempt))
 }
 
+/// #13668: gate admission for a single-tuple conntrack RMW. Mirrors the
+/// publish/delete twins (`with_publish`): decline (return the caller's
+/// failure value) while the tuple is gate-leased or a map clear is fenced,
+/// instead of racing the lease/clear with a stale full-row write.
+fn with_conntrack_rmw<T>(key: &SessionKey, decline: T, f: impl FnOnce() -> T) -> T {
+    match crate::afxdp::bpf_map::global_tuple_gate().with_publish(key, f) {
+        Ok(result) => result,
+        Err(_) => decline,
+    }
+}
+
 /// Restamp only policy metadata in an existing conntrack row. This is a
 /// read/modify/write: counters, timestamps, NAT state and session identity
 /// remain owned by the live row during a policy rename.
 pub(super) fn restamp_bpf_conntrack_policy(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    metadata: &SessionMetadata,
+) -> bool {
+    // #13668: decline under gate lease / clear fence. The `fd < 0` no-map
+    // early-true stays inside the raw body, so a declined restamp never
+    // masquerades as a successful no-op write.
+    with_conntrack_rmw(key, false, || {
+        restamp_bpf_conntrack_policy_raw(conntrack_v4_fd, conntrack_v6_fd, key, metadata)
+    })
+}
+
+fn restamp_bpf_conntrack_policy_raw(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     key: &SessionKey,
@@ -1782,6 +1815,18 @@ pub(super) fn restamp_bpf_conntrack_app_id(
     key: &SessionKey,
     app_id: u16,
 ) -> bool {
+    // #13668: see `restamp_bpf_conntrack_policy`.
+    with_conntrack_rmw(key, false, || {
+        restamp_bpf_conntrack_app_id_raw(conntrack_v4_fd, conntrack_v6_fd, key, app_id)
+    })
+}
+
+fn restamp_bpf_conntrack_app_id_raw(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    app_id: u16,
+) -> bool {
     if key.addr_family as i32 == libc::AF_INET {
         let (IpAddr::V4(src), IpAddr::V4(dst)) = (key.src_ip, key.dst_ip) else {
             return false;
@@ -1946,6 +1991,8 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
         budget,
         now_ns,
         |key, _decision, metadata, idle_ns, counters, expires_after_ns| {
+            // #13668: per-tuple gate for this row's RMW (see below); a
+            // declined tuple is skipped this slice, never written stale.
             // Only refresh forward entries — reverse entries mirror the forward.
             // #2501: the forward SessionEntry carries BOTH directions' counters
             // (the reverse entry shares them via the canonical forward key the
@@ -1971,6 +2018,7 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
             // after a live policy reorder).
             let reresolved_policy_id = policy
                 .reresolve_session_policy_id(metadata.policy_counter.as_ref(), metadata.policy_id);
+            let _rmw = with_conntrack_rmw(key, (), || {
             match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
                 (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
                     let bpf_key = bpf_session_key_v4(
@@ -1980,6 +2028,17 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
                         key.dst_port,
                         key.protocol,
                     );
+                    // #13668 test seam: model lookup+write on test rows.
+                    #[cfg(test)]
+                    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD {
+                        let exists = CONNTRACK_TEST_ROWS.with(|rows| {
+                            rows.borrow().contains_key(&bare_conntrack_test_key(key))
+                        });
+                        if exists {
+                            CONNTRACK_TEST_REFRESH_WRITES.with(|w| w.set(w.get() + 1));
+                        }
+                        return;
+                    }
                     let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
                     let rc = unsafe {
                         libbpf_sys::bpf_map_lookup_elem(
@@ -2100,6 +2159,7 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
                 }
                 _ => {}
             }
+            });
         },
     );
     RefreshSliceOutcome {
@@ -2156,8 +2216,33 @@ pub(super) fn update_session_cluster_synced_origin(
     key: &SessionKey,
     peer_synced: bool,
 ) {
+    // #13668: void RMW — decline is a silent skip; the next transition or
+    // refresh re-stamps the origin bit.
+    with_conntrack_rmw(key, (), || {
+        update_session_cluster_synced_origin_raw(conntrack_v4_fd, conntrack_v6_fd, key, peer_synced)
+    })
+}
+
+fn update_session_cluster_synced_origin_raw(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    peer_synced: bool,
+) {
     match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
-        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
+        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst))
+            if conntrack_v4_fd >= 0 || is_conntrack_test_fd(conntrack_v4_fd) =>
+        {
+            // #13668 test seam: model the origin-bit write on test rows.
+            #[cfg(test)]
+            if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD {
+                CONNTRACK_TEST_ROWS.with(|rows| {
+                    if let Some(row) = rows.borrow_mut().get_mut(&bare_conntrack_test_key(key)) {
+                        row.cluster_synced = peer_synced;
+                    }
+                });
+                return;
+            }
             let bpf_key = bpf_session_key_v4(
                 src.octets(),
                 dst.octets(),
