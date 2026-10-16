@@ -1373,6 +1373,12 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 				current.timestamp = group.WatchdogTimestamp
 			}
 		}
+		// A demotion can begin after the immutable snapshot was published.
+		// Fold the pending intent into the merged state before comparing it
+		// with last-sent state, so the ownership transition is immediately due.
+		if m.haWatchdogPendingDemotions.has(group.RGID) {
+			current.active = false
+		}
 		if group.RGID == rgID && timestamp > current.timestamp {
 			current.timestamp = timestamp
 		}
@@ -1407,13 +1413,10 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 		for id, current := range m.haDegradedCurrent {
 			// #11160: a queued demotion rides as INACTIVE, never omitted:
 			// the helper requires exact key-set equality and rejects a
-			// narrowed set with NeedsLock (nothing renews). The mismatch
-			// arm keeps the demoting RG on bounded stored-ownership
-			// receipts while the healthy remainder refreshes normally.
+			// narrowed set with NeedsLock (nothing renews). The effective
+			// state was already merged above so payload and throttle baseline
+			// describe the same full-set request.
 			active := current.active
-			if m.haWatchdogPendingDemotions.has(id) {
-				active = false
-			}
 			groups = append(groups, HAGroupStatus{
 				RGID:              id,
 				Active:            active,
