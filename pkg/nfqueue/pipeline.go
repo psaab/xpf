@@ -1043,7 +1043,9 @@ func (p *CapturePipeline) finishFrame(frame CaptureFrame, verdict Verdict) {
 	}
 	p.mu.Lock()
 	flowKey := frame.FlowKey
+	var flowInstance *flowState
 	if flow := p.flows[flowKey]; flow != nil && len(flow.frames) > 0 && flow.frames[0].Packet == frame.Packet {
+		flowInstance = flow
 		flow.dispatching = false
 		flow.frames = flow.frames[1:]
 		if len(flow.frames) == 0 && flow.pending == nil {
@@ -1057,7 +1059,7 @@ func (p *CapturePipeline) finishFrame(frame CaptureFrame, verdict Verdict) {
 		p.stats.Uncertain++
 		p.mu.Unlock()
 		p.uncertain("terminal sink error")
-		p.retireFlow(flowKey)
+		p.retireFlowIfSame(flowKey, flowInstance)
 		return
 	}
 	p.mu.Lock()
@@ -1300,6 +1302,23 @@ func (p *CapturePipeline) retireFlow(key string) {
 		return
 	}
 	remaining := append([]CaptureFrame(nil), flow.frames...)
+	delete(p.flows, key)
+	p.mu.Unlock()
+	for _, frame := range remaining {
+		p.finishFrame(frame, VerdictDrop)
+	}
+}
+
+func (p *CapturePipeline) retireFlowIfSame(key string, expected *flowState) {
+	if p == nil || expected == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.flows[key] != expected {
+		p.mu.Unlock()
+		return
+	}
+	remaining := append([]CaptureFrame(nil), expected.frames...)
 	delete(p.flows, key)
 	p.mu.Unlock()
 	for _, frame := range remaining {

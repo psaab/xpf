@@ -116,3 +116,98 @@ func TestTimeoutRetirementPreventsConcurrentFollowerDispatch13975(t *testing.T) 
 		t.Fatalf("terminal verdicts=%v, want head and both queued followers dropped", sink.verdicts)
 	}
 }
+
+type blockedFollowerErrorSink13975 struct {
+	started chan struct{}
+	release chan struct{}
+
+	mu       sync.Mutex
+	verdicts []uint32
+}
+
+func (s *blockedFollowerErrorSink13975) Verdict(pkt *Packet, _ Verdict) error {
+	s.mu.Lock()
+	s.verdicts = append(s.verdicts, pkt.id)
+	s.mu.Unlock()
+	if pkt.id == 2 {
+		close(s.started)
+		<-s.release
+		return errDrain13975
+	}
+	return nil
+}
+
+// TestDetachedFollowerSinkErrorCannotRetireFreshFlow13975 ensures a sink
+// error while terminalizing a detached follower cannot retire a newly-created
+// same-key flow.
+func TestDetachedFollowerSinkErrorCannotRetireFreshFlow13975(t *testing.T) {
+	var registry OriginRegistry
+	if err := registry.Register(77, CaptureOrigin{Family: CaptureFamilyInet, Hook: CaptureHookForward, Owner: "owner-a", STN: "st0", OwnedIfindex: 7}); err != nil {
+		t.Fatal(err)
+	}
+	sink := &blockedFollowerErrorSink13975{started: make(chan struct{}), release: make(chan struct{})}
+	submitter := new(pipelineTestSubmitter)
+	p, err := NewCapturePipeline(CapturePipelineConfig{
+		Registry: &registry, Phase: PipelineEnforcing, Sink: sink,
+		Submitter: submitter, LeaseMinter: &pipelineTestMinter{},
+		ZoneEvaluator: passZoneEvaluator9506{}, ZoneSnapshot: passZoneSnapshot9506{},
+		HandoffCap: 8, BatchCap: 4, AckDeadline: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []uint32{1, 2} {
+		if err := p.Enqueue(CaptureFrame{
+			Packet: pipelineTestPacket(77, 2, 2, 7, id), FlowKey: "detached-follower",
+			Generation: 1, SnapshotGeneration: 1, ConfigGeneration: 1, FIBGeneration: 1,
+			QueueNumber: 77, QueueEpoch: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := p.Drain(8); got != 2 {
+		t.Fatalf("initial Drain = %d, want 2", got)
+	}
+	p.mu.Lock()
+	head := p.pending[submitter.submitted[0].Lease.RequestID]
+	if head == nil {
+		p.mu.Unlock()
+		t.Fatal("missing admitted head")
+	}
+	head.deadlineMonoNS = 1
+	head.deadlineArmed = true
+	p.mu.Unlock()
+
+	pollDone := make(chan int, 1)
+	go func() { pollDone <- p.Poll(time.Now()) }()
+	select {
+	case <-sink.started:
+	case <-time.After(time.Second):
+		t.Fatal("retirement did not reach blocked follower sink")
+	}
+	if err := p.Enqueue(CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 3), FlowKey: "detached-follower",
+		Generation: 1, SnapshotGeneration: 1, ConfigGeneration: 1, FIBGeneration: 1,
+		QueueNumber: 77, QueueEpoch: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Drain(8); got != 1 {
+		t.Fatalf("fresh-flow Drain = %d, want 1", got)
+	}
+	if len(submitter.submitted) != 2 {
+		t.Fatalf("submitted = %d, want 2 including fresh same-key flow", len(submitter.submitted))
+	}
+	close(sink.release)
+	select {
+	case <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("Poll did not finish after releasing follower sink")
+	}
+	p.mu.Lock()
+	flowCount, pendingCount := len(p.flows), len(p.pending)
+	p.mu.Unlock()
+	if flowCount != 1 || pendingCount != 1 {
+		t.Fatalf("after detached follower sink error flows=%d pending=%d, want both 1", flowCount, pendingCount)
+	}
+}
