@@ -8185,12 +8185,12 @@ fn synced_eviction_of_address_only_clears_its_token_6528() {
     );
 }
 
-// #6528: a PERSISTENT incumbent's eviction must drop the lease refcount. This is
-// the piece with NO reclamation path: `gc_expired_chunked` sweeps leases that are
-// IDLE, and a lease whose `active_flows` never returns to zero is never idle, so
-// it never enters `lease_expirations` at all.
+// #6528/#13691: a PERSISTENT incumbent's successful eviction drops its lease
+// refcount. This synced tuple is incompatible with the incumbent lease, so the
+// new admission ordering must reject it without completing or deindexing that
+// still-live lease.
 #[test]
-fn synced_eviction_drops_the_persistent_lease_refcount_6528() {
+fn synced_refusal_preserves_the_persistent_lease_refcount_13691() {
     let rules = notrans_persistent_rules(vec!["203.0.113.1/32"], "any-remote-host", 300, false);
     let now = NS_PER_SEC;
     let a = expect_snat_decision(notrans_persistent_lookup(
@@ -8227,11 +8227,10 @@ fn synced_eviction_drops_the_persistent_lease_refcount_6528() {
         live.persistent_by_source
             .values()
             .next()
-            .map(|l| l.active_flows),
-        Some(0),
-        "#6528: the evicted flow must drop its lease refcount — a leaked \
-         refcount is never idle, so the lease never enters `lease_expirations` \
-         and NO GC path can reclaim it"
+            .map(|lease| lease.active_flows),
+        Some(1),
+        "#13691: a refused replacement must preserve the incumbent lease refcount \
+         and must not complete or deindex its live flow"
     );
 }
 

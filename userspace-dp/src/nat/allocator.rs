@@ -4511,12 +4511,11 @@ impl PortAllocator {
         }
         let mut live = self.capture_and_replace(&flow, capture_previous_holders);
         // A refresh of the same synced flow: if it already holds this exact
-        // translated tuple, it is reserved — nothing to do. If the tuple
-        // changed (should not happen on a stable sync), retire the stale
-        // reservation first so we do not leak the old port's bit — through the
-        // shared mode-correct teardown (#6528), which also honours a
-        // deterministic reservation's free-without-recycle (#5178).
-        if let Some(existing) = live.live_by_flow.get(&flow).copied() {
+        // translated tuple, it is reserved — nothing to do. A changed tuple is
+        // fully admitted below before the stale reservation is retired, so a
+        // refused re-decision preserves the incumbent.
+        let existing = live.live_by_flow.get(&flow).copied();
+        if let Some(existing) = existing {
             if existing.translated == translated {
                 // #6211 F2: this early return is where workers 2..N land — the
                 // synced entry is fanned out to every worker and each calls
@@ -4530,42 +4529,20 @@ impl PortAllocator {
                     slot.holders |= holder.bit();
                 }
                 *previous_snapshot = live.previous_snapshot();
-
                 return true;
             }
-            // #6528: retire the incumbent through the SAME mode-correct
-            // teardown `release_flow` uses. The unconditional
-            // `free_translated_port` this replaces was correct for exactly one
-            // of the three allocation modes:
-            //   - an ADDRESS-ONLY incumbent owns no occupancy bit, so the call
-            //     cleared a bit on pool address 0 (its hardcoded `addr_index`)
-            //     at the offset of the PRESERVED internal source port — a LIVE
-            //     PAT flow's bit whenever a PAT rule shares this allocator —
-            //     and recycled it, putting two flows on one translated tuple;
-            //     meanwhile its `address_only_owners` token was never cleared,
-            //     denying that public reverse identity forever.
-            //   - a PERSISTENT incumbent's port belongs to the LEASE, so the
-            //     call freed a port the lease still claimed, and the lease's
-            //     `active_flows` refcount was never dropped — a leaked refcount
-            //     is never idle, so the lease never enters `lease_expirations`
-            //     and no GC path can reclaim it.
-            // The eviction uses RELEASE (not rollback) semantics because the
-            // incumbent tuple WAS in service: this is a re-decision of a live
-            // flow, not the withdrawal of an allocation that never shipped.
-            self.unlink_live_allocation_locked(&mut live, &flow, existing);
-            Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         }
-        // #10190: synced PAT reservations use the same local allocator as
-        // address-only mints. The address-only token has no bitmap bit, so
-        // reject its exact reverse identity before joining/minting a PAT lease.
+        // #13691: all refusals must happen before stale-incumbent teardown.
+        // #10190: synced PAT reservations share the allocator with
+        // address-only mints, which have no bitmap bit.
         if live.address_only_owns_wire_identity(&flow, translated) {
             return false;
         }
-        // #11692: synced reservations share the same tracked-flow budget as
-        // local PAT and address-only allocations. This one check precedes all
-        // three insertion shapes below (joining a lease, minting a lease, or
-        // recording a non-persistent flow), while the live mutex is held.
-        if live.live_by_flow.len() >= self.shared.max_tracked_flows {
+        // The incumbent already consumes one tracked-flow slot; replacing it
+        // does not add another.
+        if live.live_by_flow.len().saturating_sub(if existing.is_some() { 1 } else { 0 })
+            >= self.shared.max_tracked_flows
+        {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -4609,15 +4586,55 @@ impl PortAllocator {
                 None => !live.persistent_nat_import_is_clear_fenced(key, now_ns),
             }
         });
+        // Refuse a stale lease tuple before retiring this flow's current
+        // reservation. The branch below can then join only a compatible lease.
+        if let Some((key, _)) = persistent {
+            if live
+                .persistent_by_source
+                .get(&key)
+                .is_some_and(|lease| lease.translated != translated || lease.addr_index != addr_index)
+            {
+                return false;
+            }
+        }
+        // A mint's persistent-table capacity check may run pressure GC; do it
+        // before any incumbent mutation, so a refusal preserves its state.
+        let mints_persistent_lease = persistent
+            .is_some_and(|(key, _)| !live.persistent_by_source.contains_key(&key));
+        if mints_persistent_lease && self.persistent_lease_capacity_reached(&mut live, now_ns) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        // Check bitmap ownership before teardown. The one allowed occupied
+        // case is the incumbent's own plain-PAT bit, which teardown releases
+        // immediately before this same guarded operation reserves it anew.
+        let incumbent_owns_candidate_bit = existing.is_some_and(|incumbent| {
+            incumbent.addr_index == addr_index
+                && incumbent.translated.port == translated.port
+                && incumbent.persistent_key.is_none()
+                && !incumbent.address_only
+        });
+        if !incumbent_owns_candidate_bit
+            && self.shared.occupancy[addr_index].offset_of(translated.port).is_none_or(|offset| {
+                self.shared.occupancy[addr_index].is_occupied(offset)
+            })
+            && !persistent.is_some_and(|(key, _)| {
+                live.persistent_by_source
+                    .get(&key)
+                    .is_some_and(|lease| lease.translated == translated && lease.addr_index == addr_index)
+            })
+        {
+            return false;
+        }
+        if let Some(existing) = existing {
+            // #6528: mode-correct release only after the new tuple has passed
+            // admission; a refusal above leaves the incumbent untouched.
+            self.unlink_live_allocation_locked(&mut live, &flow, existing);
+            Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
+        }
+        // A synced persistent flow joins its existing source lease when present.
         if let Some((persistent_key, timeout_ns)) = persistent {
             if let Some(lease) = live.persistent_by_source.get(&persistent_key).copied() {
-                // A lease that names a DIFFERENT tuple than the wire does is
-                // config drift or a stale import. Refuse rather than retarget:
-                // the same posture as the "never steal" CAS below, and the
-                // caller falls through to the next rule.
-                if lease.translated != translated || lease.addr_index != addr_index {
-                    return false;
-                }
                 let was_idle = lease.active_flows == 0;
                 if let Some(lease) = live.persistent_by_source.get_mut(&persistent_key) {
                     // #8132: the 0 -> 1 edge re-arms the ACTIVATION-ROLLBACK
@@ -4686,10 +4703,6 @@ impl PortAllocator {
         // A synced session may mint a fresh persistent lease only while the
         // persistent table has room. Existing leases returned through the
         // join path above and do not consume another entry.
-        if persistent.is_some() && self.persistent_lease_capacity_reached(&mut live, now_ns) {
-            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
         if !self.shared.occupancy[addr_index].reserve(translated.port) {
             return false;
         }
@@ -4858,7 +4871,8 @@ impl PortAllocator {
         // ADDRESS-ONLY (#5338) token is fanned out, and where an already-holding
         // worker lands on every refresh — so record the holder here, exactly as
         // `reserve_flow` does on its own early return.
-        if let Some(existing) = live.live_by_flow.get(&flow).copied() {
+        let existing = live.live_by_flow.get(&flow).copied();
+        if let Some(existing) = existing {
             if existing.translated == translated {
                 if let Some(slot) = live.live_by_flow.get_mut(&flow) {
                     slot.holders |= holder.bit();
@@ -4867,27 +4881,6 @@ impl PortAllocator {
                 *previous_snapshot = live.previous_snapshot();
                 return Ok(existing.translated);
             }
-            // #8597 K63: the incumbent record names a DIFFERENT reverse identity
-            // than the one this reservation asks for. The port-bearing arm has
-            // retired such an incumbent since #6528; this arm did not, and
-            // returned `existing.translated` without ever comparing it — so the
-            // caller was handed a tuple it did not ask for and never learned.
-            //
-            // On a SYNCED reservation the peer's tuple is authoritative: a
-            // disagreeing local record means this node holds a different public
-            // reverse identity than the peer's session actually uses, so replies
-            // land on the wrong flow or are denied — the same misdelivery class
-            // as the sibling findings in this batch, not a bookkeeping nit.
-            //
-            // Retired through the SAME mode-correct teardown the port-bearing
-            // arm uses. It is already right for this mode:
-            // `unlink_live_allocation_locked` clears the `address_only_owners`
-            // token (without which the OLD public identity stays denied
-            // forever) and skips `free_translated_port`, because an address-only
-            // record owns no occupancy bit — freeing one would clear a live PAT
-            // flow's bit at the offset of this flow's preserved source port.
-            self.unlink_live_allocation_locked(&mut live, &flow, existing);
-            Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         }
         // Collision: the reverse identity is already owned by a DIFFERENT flow.
         // Two flows sharing one public reverse tuple cannot coexist (their
@@ -4906,7 +4899,10 @@ impl PortAllocator {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
         }
-        if live.live_by_flow.len() >= self.shared.max_tracked_flows {
+        // The incumbent is already tracked; replacing it uses the same slot.
+        if live.live_by_flow.len().saturating_sub(usize::from(existing.is_some()))
+            >= self.shared.max_tracked_flows
+        {
             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
             return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
         }
@@ -4969,6 +4965,12 @@ impl PortAllocator {
                     idle_lease_to_deindex = Some((lease.addr_index, lease.expires_at_ns));
                 }
             }
+        }
+        if let Some(existing) = existing {
+            // #13691: retain the incumbent until collision, capacity, and lease
+            // admission have all succeeded.
+            self.unlink_live_allocation_locked(&mut live, &flow, existing);
+            Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         }
         live.insert_address_only_owner(rkey, flow);
         // #8132: join the source's lease, or mint it on the first session for
