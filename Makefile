@@ -141,6 +141,7 @@ test:
 	exit $$status
 
 rust-source-census-13961:
+	python3 scripts/rust-source-census-13961.py --self-test
 	python3 scripts/rust-source-census-13961.py userspace-dp/src
 
 # #9052 item 1: the root-capable aggregate. `test-shim-run` was a prerequisite
