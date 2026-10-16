@@ -5999,6 +5999,74 @@ fn ha_same_key_replace_dropping_snat_releases_the_old_row_9514() {
     );
 }
 
+// #13710 (D16-05): a same-key synced replacement that changes the NAT
+// decision must retire the OLD synthesized reverse companion. The forward
+// publish overwrites `entry.key`, but the companion key is derived from
+// `decision.nat`, so replacement leaves `reverse_session_key(K, natA)` in
+// `sessions.synced` forever: the later delete derives its companion from
+// the STORED (newest) decision and removes only `reverse_session_key(K,
+// natB)`. Unique ports (49530+) keep this cell off other cells' rows.
+fn synced_13710_contains(coordinator: &Coordinator, key: &SessionKey) -> bool {
+    coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("shared sessions")
+        .contains_key(key)
+}
+
+#[test]
+fn ha_same_key_replace_changing_nat_retires_old_reverse_companion_13710() {
+    let coordinator = Coordinator::new();
+    let key = test_key();
+    let (a, b) = (snat_row_9514(49530), snat_row_9514(49531));
+    let old_reverse = reverse_session_key(&key, a);
+    let new_reverse = reverse_session_key(&key, b);
+    assert_ne!(old_reverse, new_reverse, "precondition: A and B derive different reverse keys");
+
+    let mut first = synced_with_nat_9514(key.clone(), a, 1);
+    first.session_id = 1371001;
+    coordinator.upsert_synced_session(first);
+    assert!(synced_13710_contains(&coordinator, &old_reverse), "precondition: gen1 installs rev(A)");
+
+    let mut replacement = synced_with_nat_9514(key.clone(), b, 2);
+    replacement.session_id = 1371002;
+    coordinator.upsert_synced_session(replacement);
+    assert!(
+        !synced_13710_contains(&coordinator, &old_reverse),
+        "#13710: replacing K's NAT decision must retire the orphaned rev(A) companion"
+    );
+    assert!(synced_13710_contains(&coordinator, &new_reverse), "the replacement must install rev(B)");
+    assert!(synced_13710_contains(&coordinator, &key), "the forward session must survive replacement");
+
+    coordinator.delete_synced_session(key.clone(), false);
+    assert!(
+        !synced_13710_contains(&coordinator, &old_reverse)
+            && !synced_13710_contains(&coordinator, &new_reverse)
+            && !synced_13710_contains(&coordinator, &key),
+        "#13710: deleting the forward must leave no synced entries behind"
+    );
+}
+
+#[test]
+fn ha_same_key_replace_same_nat_keeps_reverse_companion_13710() {
+    let coordinator = Coordinator::new();
+    let key = test_key();
+    let a = snat_row_9514(49532);
+    let reverse = reverse_session_key(&key, a);
+
+    let mut first = synced_with_nat_9514(key.clone(), a, 1);
+    first.session_id = 1371003;
+    coordinator.upsert_synced_session(first);
+    let mut refresh = synced_with_nat_9514(key.clone(), a, 2);
+    refresh.session_id = 1371004;
+    coordinator.upsert_synced_session(refresh);
+    assert!(
+        synced_13710_contains(&coordinator, &reverse),
+        "#13710 control: a same-NAT refresh must keep its live reverse companion"
+    );
+}
+
 // #9678: a peer-synced upsert for a flow this node forwards as a LOCAL session,
 // while the owner RG is locally forwarding-active, must not touch the allocator
 // or the shared maps. The worker refuses that replace; before the fix the
