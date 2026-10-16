@@ -355,7 +355,9 @@ inspect or rewrite a packet sitting in a UMEM frame.
   extension-header walk, by contrast, is ONE shared loop since #6435:
   `inspect.rs::walk_ipv6_ext_chain` (an `#[inline(always)]` core returning an
   `ExtChainOutcome` verdict — `L4` / `NoNextHeader` / `Truncated` /
-  `OverLimit` — plus the recorded first Fragment-header sighting). Every
+  `OverLimit` / `NonFirstFragment` (#14116: the walk stops at a readable
+  non-first Fragment header instead of following its Next Header into
+  payload, mirroring the shim's #13959 stop) — plus the recorded first Fragment-header sighting). Every
   forwarding L4 resolver (`frame_l4_offset`, `packet_rel_l4_offset`,
   `packet_rel_l4_offset_and_protocol`), the #4743 over-limit gate
   (`ipv6_ext_chain_over_limit`), both fragment predicates
@@ -420,9 +422,13 @@ inspect or rewrite a packet sitting in a UMEM frame.
     construction; the two deliberate keep-outs (`screen/extract.rs`,
     `nat64_v6_translation_ineligible`) MUST keep the SAME set or the screen,
     meta, forwarding, and NAT64 paths disagree on the same packet.
-    **Repeated Fragment-header status (#10661):** the XDP shim judges every
-    sighting, so the shared walk carries `non_first_fragment_offset_seen`;
-    forwarding and NAT64 non-first guards use that all-sightings offset verdict.
+    **Repeated Fragment-header status (#10661, #14116):** the XDP shim judges every
+    sighting before its non-first stop, so the shared walk carries `non_first_fragment_offset_seen`;
+    forwarding and NAT64 non-first guards use that verdict. Since #14116 the
+    shared walk stops AT the first readable non-first sighting, so payload
+    bytes past it can neither be walked as extension headers nor fabricate a
+    later sighting; only the NAT64 L3-only non-first resolver recovers the
+    payload offset + Fragment Next Header from the recorded sighting.
     The overlap tracker keys range data to `first_non_atomic_fragment`, ignoring
     leading ATOMIC headers and returning Unreadable if any declared Fragment
     header is truncated. NAT64 retains first-declared data for an all-ATOMIC

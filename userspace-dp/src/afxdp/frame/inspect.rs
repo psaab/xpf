@@ -85,6 +85,14 @@ pub(crate) enum ExtChainOutcome {
     /// (`None` / `false`) on each of these; the wrappers keep folding
     /// them to the same verdict.
     Truncated,
+    /// #14116: a readable Fragment header carried non-zero offset bits.
+    /// Bytes after that header are fragment payload, not an extension-header
+    /// chain or an L4 header, so the walk stops there instead of following
+    /// the Fragment header's Next Header into payload. The recorded
+    /// fragment sighting (and `non_first_fragment_offset_seen`) carries the
+    /// details flowless consumers need; L4 consumers fail closed on this
+    /// verdict exactly as they do on `Truncated`/`OverLimit`.
+    NonFirstFragment,
     /// Still on an extension header after `MAX_IPV6_EXT_HEADERS`
     /// iterations — the over-limit, uninspectable chain the #2292
     /// walkers fail closed on and #4743's `ipv6_ext_chain_over_limit`
@@ -182,13 +190,20 @@ pub(crate) struct ExtChainWalk {
 /// (checked before any length byte of header 8 is touched), matching the
 /// shim's 7-iteration walk, which never reads header 8 at all.
 ///
-/// The walk ALWAYS runs to a terminal (or the bound), even past a
-/// Fragment header: the first declared Fragment header is RECORDED in
+/// The walk runs to a terminal (or the bound), except that it stops at a
+/// readable non-first Fragment header (#14116, mirroring the shim's
+/// #13959 stop and the screen walk): bytes after that header are fragment
+/// payload, so following its Next Header would interpret payload as
+/// extension headers — payload mimicking an overlong AH/DestOpts made the
+/// walk return `Truncated` and fail closed on a valid admitted fragment.
+/// The first declared Fragment header is RECORDED in
 /// [`ExtChainWalk::fragment`] for declaration-sensitive consumers. Status
-/// predicates use every readable sighting (`non_first_fragment_offset_seen`)
-/// or the first readable non-ATOMIC sighting
-/// (`first_non_atomic_fragment`), so an ATOMIC prefix cannot mask a later
-/// real fragment.
+/// predicates use every readable sighting BEFORE the stop
+/// (`non_first_fragment_offset_seen`) or the first readable non-ATOMIC
+/// sighting (`first_non_atomic_fragment`); a non-first sighting IS the
+/// stop, so no later (payload) header can be sighted past it — an ATOMIC
+/// prefix therefore cannot mask the real non-first header that follows
+/// it, and payload bytes cannot fabricate a later sighting either.
 /// `#[inline(always)]` keeps the shared body folded into each caller per
 /// the repo hot-path convention (in-crate, LTO off, codegen-units 16 —
 /// explicit attrs are required for cross-CGU inlining); the common
@@ -358,6 +373,24 @@ pub(crate) fn walk_ipv6_ext_chain(buf: &[u8], l3: usize) -> ExtChainWalk {
                         fragment_truncated,
                     };
                 }
+                // #14116: a readable non-first Fragment header ends the
+                // walk. Its payload is not an extension-header chain (the
+                // shim stops identically since #13959, the screen walk
+                // breaks likewise); following `frag[0]` into payload let
+                // payload mimicking an overlong AH/DestOpts turn this into
+                // `Truncated`, failing closed on a valid fragment.
+                // `record_fragment_sighting` has already latched
+                // `non_first_fragment_offset_seen` for this sighting.
+                if non_first_fragment_offset_seen {
+                    return ExtChainWalk {
+                        outcome: ExtChainOutcome::NonFirstFragment,
+                        fragment,
+                        non_first_fragment_offset_seen,
+                        ah_present,
+                        first_non_atomic_fragment,
+                        fragment_truncated,
+                    };
+                }
             }
             59 => {
                 return ExtChainWalk {
@@ -484,7 +517,9 @@ fn protocol_from_declared_packet(packet: &[u8], addr_family: u8) -> Option<u8> {
             match walk.outcome {
                 ExtChainOutcome::L4(_, protocol) => Some(protocol),
                 ExtChainOutcome::NoNextHeader => Some(59),
-                ExtChainOutcome::Truncated | ExtChainOutcome::OverLimit => None,
+                ExtChainOutcome::Truncated
+                | ExtChainOutcome::OverLimit
+                | ExtChainOutcome::NonFirstFragment => None,
             }
         }
         _ => None,

@@ -560,6 +560,12 @@ fn raw_shim_walk(buf: &[u8], l3: usize) -> Option<shim_walk::ExtWalk> {
 fn shim_verdict(buf: &[u8], l3: usize) -> Verdict {
     match raw_shim_walk(buf, l3) {
         None => Verdict::FailClosed,
+        // #14116: a non-first fragment stops at the Fragment header with
+        // the no-L4 sighting set; the packet-level parser substitutes the
+        // sentinel. Fold to NoL4 so it compares against userspace's
+        // NonFirstFragment verdict, NOT against the terminal L4 at the
+        // payload offset the raw walk reports.
+        Some(w) if w.non_first_fragment => Verdict::NoL4,
         Some(w) => match shim_walk::eh_class(w.protocol) {
             shim_walk::EH_CLASS_NONEXT => Verdict::NoL4,
             shim_walk::EH_CLASS_TERMINAL => Verdict::L4(w.offset as usize, w.protocol),
@@ -584,6 +590,11 @@ fn userspace_verdict(buf: &[u8], l3: usize) -> Verdict {
         ExtChainOutcome::NoNextHeader => Verdict::NoL4,
         ExtChainOutcome::OverLimit => Verdict::OverLimit,
         ExtChainOutcome::Truncated => Verdict::FailClosed,
+        // #14116: stopped at a readable non-first Fragment header. The
+        // shim's raw walk stops at the same header and reports the
+        // sighting; its caller substitutes the no-L4 sentinel, so at
+        // walk level both sides land on "no L4 here" — not a refusal.
+        ExtChainOutcome::NonFirstFragment => Verdict::NoL4,
     }
 }
 
@@ -2360,6 +2371,16 @@ fn nonfirst_fragment_payload_is_not_walked_as_ah_or_destopts_13959() {
         assert!(walk.non_first_fragment, "{name} payload lost fragment status");
         assert_eq!(walk.offset, 48, "{name} payload changed fragment payload offset");
         assert_eq!(walk.protocol, next, "{name} payload was consumed as an extension header");
+        // #14116: the userspace-dp walker must stop identically — payload
+        // mimicking an overlong header is not a Truncated chain.
+        let userspace = walk_ipv6_ext_chain(&packet, 0);
+        assert_eq!(
+            userspace.outcome,
+            ExtChainOutcome::NonFirstFragment,
+            "{name}: userspace walk must stop at the non-first Fragment header"
+        );
+        assert!(userspace.non_first_fragment_offset_seen, "{name}");
+        assert!(ipv6_is_non_first_fragment(&packet), "{name}");
     }
 
     // The first-fragment branch still traverses real headers. Check both
