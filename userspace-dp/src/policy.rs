@@ -4412,15 +4412,16 @@ fn rule_l3_matches(rule: &PolicyRule, state: &PolicyState, src_ip: IpAddr, dst_i
     src_ok && dst_ok
 }
 
-/// #4569: a port-bearing DENY that a flowless non-first fragment SKIPPED,
-/// remembered while walking rules in first-match precedence order so a later
-/// PERMIT verdict can be overridden to DROP (Junos fragment-association: a
-/// non-first fragment inherits the first-fragment's deny). `policy_id` +
-/// `policy_counter_idx` attribute the resulting DROP to the DENY rule for the
-/// emitted `PolicyDeny` event / hit accounting.
+/// #4569: a port-bearing DENY/REJECT that a flowless non-first fragment
+/// SKIPPED, remembered while walking rules in first-match precedence order so a
+/// later PERMIT verdict can be overridden to DROP. Preserve the skipped rule's
+/// action and log selection along with its identity.
 #[derive(Clone, Copy)]
 struct SkippedFragDeny {
+    action: PolicyAction,
     policy_id: u32,
+    log_session_init: bool,
+    log_session_close: bool,
     policy_counter_idx: u32,
 }
 
@@ -4452,24 +4453,27 @@ fn note_skipped_frag_deny(
 ) {
     if skipped.is_none() && miss == RuleMissReason::FragmentDenyOverlap {
         *skipped = Some(SkippedFragDeny {
+            action: rule.action,
             policy_id: rule.policy_id,
+            log_session_init: rule.log_session_init,
+            log_session_close: rule.log_session_close,
             policy_counter_idx: (idx as u32).saturating_add(1),
         });
     }
 }
 
-/// #4569: build the fail-closed DENY verdict a flowless fragment inherits from
-/// the port-bearing DENY it skipped. A dropped fragment installs no session, so
-/// the log-selection / timeout fields are inert; `policy_id` attributes the
-/// `PolicyDeny` event to the DENY rule. The DENY rule's own hit counter is left
-/// untouched — the fragment did not match that rule's L4 criteria; the drop is
-/// counted by the caller's `telemetry.dbg.policy_deny`.
+/// #4569: build the fail-closed verdict a flowless fragment inherits from the
+/// port-bearing DENY/REJECT it skipped. A dropped fragment installs no session,
+/// but retaining the rule's action and logging metadata keeps the result
+/// truthful and preserves parity with direct matches. The skipped rule's own
+/// hit counter remains untouched — the fragment did not match its L4 criteria;
+/// the drop is counted by the caller's `telemetry.dbg.policy_deny`.
 fn frag_associated_deny_result(deny: SkippedFragDeny) -> PolicyEvaluationResult {
     PolicyEvaluationResult {
-        action: PolicyAction::Deny,
+        action: deny.action,
         policy_id: deny.policy_id,
-        log_session_init: false,
-        log_session_close: false,
+        log_session_init: deny.log_session_init,
+        log_session_close: deny.log_session_close,
         inactivity_timeout: None,
         policy_counter_idx: deny.policy_counter_idx,
     }
