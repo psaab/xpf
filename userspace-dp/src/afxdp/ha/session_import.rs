@@ -247,13 +247,12 @@ struct AllocatorHolderSnapshot {
     nat64: Option<u128>,
 }
 impl crate::afxdp::ha::SessionDomain {
-    /// Install a one-shot #9960 test hook at the clone-to-removal seam.
+    /// Install a one-shot #9960/#13712 test hook at the candidate-to-lease seam.
     ///
-    /// The hook runs on the calling thread after the initial snapshot and all
-    /// #9714 early refusals, immediately before the conditional shared removal.
-    /// It is intentionally thread-local: a concurrent test can publish from a
-    /// second thread while this thread waits at a barrier, without allowing one
-    /// test's seam to affect another.
+    /// The hook runs on the calling thread after the initial snapshot and early
+    /// refusals, before tuple-lease acquisition. A test can publish an intervening
+    /// replacement deterministically; the under-lock decision remains authoritative.
+    /// It is intentionally thread-local so concurrent tests stay isolated.
     #[cfg(test)]
     pub(crate) fn set_synced_delete_after_clone_hook_for_test<F>(&self, hook: F)
     where
@@ -1791,6 +1790,12 @@ impl crate::afxdp::ha::SessionDomain {
         {
             return SyncedDeleteOutcome::StaleForward;
         }
+        // #9960/#13712: the test-only seam runs after the candidate snapshot
+        // and early identity refusals, before tuple-lease acquisition. Tests
+        // can exercise a replacement in the snapshot-to-lease window; the
+        // under-lock checks remain authoritative.
+        #[cfg(test)]
+        self.run_synced_delete_after_clone_hook(&key);
         let mut gate_keys = vec![key.clone()];
         if !forward_only {
             let reverse_nat = candidate_entry
@@ -1839,10 +1844,6 @@ impl crate::afxdp::ha::SessionDomain {
             PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
             return SyncedDeleteOutcome::RefusedLocalOwned;
         }
-        // #9960: a test-only barrier seam runs after the clone and all #9714
-        // early refusals, but before the under-lock decision or any teardown.
-        #[cfg(test)]
-        self.run_synced_delete_after_clone_hook(&key);
         // #9714 review round 2, finding 3: re-ask the decision UNDER THE LOCK, of
         // the entry actually being removed. The predicate's verdict and the returned
         // entry form ONE decision for the whole delete.
@@ -1897,6 +1898,19 @@ impl crate::afxdp::ha::SessionDomain {
                     under_lock_outcome = Some(SyncedDeleteOutcome::RefusedConcurrentLocalOwned);
                     return false;
                 }
+                // #13712: the candidate snapshot predates the tuple lease.
+                // Refuse under the removal lock if a concurrent upsert changed
+                // NAT so this lease does not cover the reverse tuple being torn
+                // down.
+                if !forward_only
+                    && !current.metadata.is_reverse
+                    && lease_to_finalize.is_some_and(|lease| {
+                        !lease.covers(&reverse_session_key(&current.key, current.decision.nat))
+                    })
+                {
+                    under_lock_outcome = Some(SyncedDeleteOutcome::RefusedGateBusy);
+                    return false;
+                }
                 true
             },
         );
@@ -1922,9 +1936,9 @@ impl crate::afxdp::ha::SessionDomain {
                             .delete_refused_identity
                             .fetch_add(1, Ordering::Relaxed);
                     }
+                    SyncedDeleteOutcome::RefusedGateBusy => {}
                     SyncedDeleteOutcome::Applied
                     | SyncedDeleteOutcome::RefusedLocalOwned
-                    | SyncedDeleteOutcome::RefusedGateBusy
                     | SyncedDeleteOutcome::RefusedMirrorDelete
                     | SyncedDeleteOutcome::StaleForward
                     | SyncedDeleteOutcome::PartialCompanion => {
