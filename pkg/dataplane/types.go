@@ -1182,7 +1182,7 @@ const (
 const MaxZones = 64
 
 // MaxRulesPerPolicy is the maximum number of rules in a single policy set.
-const MaxRulesPerPolicy = 256
+const MaxRulesPerPolicy = config.MaxPolicyRulesPerSet
 
 // DefaultPolicySentinelID is the reserved policy ID the userspace dataplane
 // stamps on an RT_FLOW deny/reject event produced by the IMPLICIT

@@ -248,6 +248,9 @@ func validatePolicyMatchApplicationsStrict(cfg *Config) error {
 			return err
 		}
 	}
+	if err := validatePolicyExpandedRuleCountStrict(cfg); err != nil {
+		return err
+	}
 	return nil
 }
 
