@@ -6740,6 +6740,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // now owns the egress RG, exactly as it does for a demoted
                     // session.
                     let mut hit = hit;
+                    // #13744: a first fragment admitted while its neighbor was
+                    // cold stores a MissingNeighbor resolution in the fragment
+                    // association. Its later sibling can arrive after the same
+                    // neighbor is installed; refresh that L2 resolution before
+                    // inheriting it, or the tail parks despite a live neighbor.
+                    if hit.resolution.disposition == ForwardingDisposition::MissingNeighbor
+                        && hit.resolution.tunnel_endpoint_id == 0
+                        && let Some(next_hop) = hit.resolution.next_hop
+                        && let Some(neighbor) = lookup_neighbor_entry(
+                            worker_ctx.forwarding,
+                            Some(worker_ctx.dynamic_neighbors),
+                            hit.resolution.egress_ifindex,
+                            next_hop,
+                        )
+                    {
+                        hit.resolution.neighbor_mac = Some(neighbor.mac);
+                        hit.resolution.disposition = ForwardingDisposition::ForwardCandidate;
+                    }
                     hit.resolution = enforce_ha_resolution_snapshot(
                         worker_ctx.forwarding,
                         worker_ctx.ha_state,
