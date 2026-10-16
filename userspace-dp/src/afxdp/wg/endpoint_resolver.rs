@@ -246,9 +246,9 @@ fn resolve_once(
     })
 }
 
-/// The single place where a lookup outcome is folded into shared state.
-/// Outcomes are applied in target order to preserve the existing counter,
-/// last-good-address and last-error semantics.
+/// Outcomes are applied as lookups complete. Per-peer last-good addresses and
+/// counters are updated for each result; the aggregate last-error reflects
+/// completion order.
 fn apply_resolution(
     shared: &ResolverShared,
     pubkey: &[u8; 32],
