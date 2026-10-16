@@ -699,6 +699,18 @@ all files stay in `package ipsec`, so the public API is unchanged.
   has no fixed peer to dial, and `trap` would initiate when traffic arrives.
   DPD always renders `dpd_action = clear` for a responder-only gateway, so a
   dead SA is cleared without restarting an outbound exchange.
+- **Post-change reinitiation honours initiation intent (#14140).**
+  `reinitiateChangedConnections` reinitiates a changed+terminated
+  connection only when its NEW rendered policy would itself initiate —
+  `establish-tunnels immediately` on a non-responder-only gateway (the
+  `start_action = start` arm, resolved through `resolveRemoteAddr` so a
+  legacy inline endpoint counts and a responder-only gateway does not).
+  `on-traffic` (trap), `responder-only`, and unset modes are terminated
+  but not eagerly reinitiated: the peer or the first matching packet
+  re-establishes under the new settings, as on a fresh load, and an
+  unrelated config change no longer fails Apply on a `swanctl --initiate`
+  against `%any`. The HA failover path (`reinitiateIPsecSAs`) is a
+  separate, explicitly operator-driven re-initiation and is unchanged.
 - **Two VPNs may not render the same SA name (#9624).** The renderer keeps
   child names unique only within one VPN (#5122). Across VPNs, two
   ordinary-looking configs collide:
