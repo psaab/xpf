@@ -31,6 +31,55 @@ import (
 // the cold-boot fence renders from the SAME firewall-local address snapshot the
 // host-inbound fence uses (wan reth0.50 172.16.50.8 / 2001:db8:50::8; em0/fxp0
 // lifelines are excluded by the view builders).
+// TestColdBootLo0FenceCarriesDHCPBackstop14135 is the #14135 fail-on-revert
+// proof. A DHCP interface that is unleased in the fence snapshot has no
+// address for the fence's destination drops to match, so without the
+// interface-scoped DHCP backstop the lo0 table alone would fall through to
+// policy accept for any address that interface later leases. The production
+// path applyLo0Filter -> BuildFenceAddrSets -> installLo0ColdBootFence must
+// therefore carry the backstop netdevs (and the DHCPv6 reply admits that
+// keep leasing alive) into the lo0 FenceSpec, exactly as the host-inbound
+// fence already does. Reverting the backstop fields out of
+// installLo0ColdBootFence (or out of buildLo0FencePayload) makes this RED.
+func TestColdBootLo0FenceCarriesDHCPBackstop14135(t *testing.T) {
+	cfg := lo0FenceTestConfig()
+	// ge-0/0/9 in the enforcing wan zone, DHCP in both families, no address
+	// in the fence snapshot: BuildFenceAddrSets must backstop it.
+	cfg.Interfaces.Interfaces["ge-0/0/9"] = &config.InterfaceConfig{
+		Name: "ge-0/0/9", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCP: true, DHCPv6: true}},
+	}
+	cfg.Security.Zones["wan"].Interfaces = append(cfg.Security.Zones["wan"].Interfaces, "ge-0/0/9.0")
+
+	spec, calls := fenceScopeInstaller(t, cfg)
+	if calls != 1 {
+		t.Fatalf("cold-boot lo0 fence install count = %d, want 1", calls)
+	}
+	if !sliceContains(spec.UnleasedV4, "ge-0-0-9") {
+		t.Errorf("lo0 fence omitted the DHCPv4 backstop netdev ge-0-0-9: %+v", spec)
+	}
+	if !sliceContains(spec.UnleasedV6, "ge-0-0-9") {
+		t.Errorf("lo0 fence omitted the DHCPv6 backstop netdev ge-0-0-9: %+v", spec)
+	}
+
+	// The text oracle must render the same backstop for that spec: the
+	// interface-scoped FIB-local/anycast drops are what deny a later-leased
+	// local address, and the DHCPv6 reply admit keeps the lease obtainable.
+	backstop := dhcpBackstopLists{
+		v4: spec.UnleasedVRFSlavesV4, v6: spec.UnleasedVRFSlavesV6,
+		admitV6: spec.DHCPv6Admit, admitVRFV6: spec.DHCPv6AdmitVRFSlaves,
+	}
+	fence := buildLo0FencePayload(dpuserspace.BuildZoneHostInboundViews(cfg),
+		spec.UnzonedV4, spec.UnzonedV6, nil, spec.UnleasedV4, spec.UnleasedV6, backstop)
+	for _, want := range []string{
+		`iifname "ge-0-0-9" meta nfproto ipv4 fib daddr type { local, anycast } drop`,
+		`iifname "ge-0-0-9" meta nfproto ipv6 fib daddr type { local, anycast } drop`,
+	} {
+		if !strings.Contains(fence, want) {
+			t.Errorf("lo0 fence payload missing DHCP backstop drop %q:\n%s", want, fence)
+		}
+	}
+}
+
 func lo0FenceTestConfig() *config.Config {
 	cfg := hostInboundTestConfig()
 	cfg.System.Lo0FilterInputV4 = "protect-re"
@@ -138,7 +187,7 @@ func TestColdBootLo0FenceIsLifelineSafe(t *testing.T) {
 	cfg := lo0FenceTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
-	fence := buildLo0FencePayload(views, unzonedV4, unzonedV6, nil)
+	fence := buildLo0FencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, dhcpBackstopLists{})
 
 	// The fence occupies the xpf_lo0 slot (the real RE-protection filter's table),
 	// at the lo0 filter priority so a successful InstallLo0 atomically replaces it.
@@ -166,7 +215,7 @@ func TestColdBootLo0FenceAdmitsMandatoryL3(t *testing.T) {
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
 	wgZonePorts := map[string][]uint16{"wan": {51820}}
-	fence := buildLo0FencePayload(views, unzonedV4, unzonedV6, wgZonePorts)
+	fence := buildLo0FencePayload(views, unzonedV4, unzonedV6, wgZonePorts, nil, nil, dhcpBackstopLists{})
 
 	for _, want := range []string{
 		"ct state established,related accept",

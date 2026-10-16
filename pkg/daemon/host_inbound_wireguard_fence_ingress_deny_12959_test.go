@@ -45,7 +45,7 @@ func TestWireGuardIngressDenyFenceAdmits12959(t *testing.T) {
 	views := wgFenceIngressDenyViews12959()
 	zonePorts := map[string][]uint16{"untrust": {51820, 51821}}
 	coldBoot := buildHostInboundFencePayload(views, nil, nil, nil, zonePorts, nil, nil, dhcpBackstopLists{})
-	lo0 := buildLo0FencePayload(views, nil, nil, zonePorts)
+	lo0 := buildLo0FencePayload(views, nil, nil, zonePorts, nil, nil, dhcpBackstopLists{})
 	for name, payload := range map[string]string{"cold-boot": coldBoot, "lo0": lo0} {
 		for _, want := range []string{
 			`iifname "ge-0-0-0" ip daddr { 198.51.100.1, 192.0.2.1 } udp dport { 51820, 51821 } accept`,
@@ -75,7 +75,7 @@ func TestWireGuardIngressDenyFenceAdmits12959(t *testing.T) {
 func TestWireGuardIngressDenyFenceNoListenerStaysFailClosed12959(t *testing.T) {
 	views := wgFenceIngressDenyViews12959()
 	coldBoot := buildHostInboundFencePayload(views, nil, nil, nil, nil, nil, nil, dhcpBackstopLists{})
-	lo0 := buildLo0FencePayload(views, nil, nil, nil)
+	lo0 := buildLo0FencePayload(views, nil, nil, nil, nil, nil, dhcpBackstopLists{})
 	for name, payload := range map[string]string{"cold-boot": coldBoot, "lo0": lo0} {
 		if strings.Contains(payload, "udp dport 5182") {
 			t.Fatalf("%s fence without WG listeners must contain no WG accept:\n%s", name, payload)

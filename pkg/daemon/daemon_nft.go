@@ -367,7 +367,13 @@ func lo0RenderedRuleCount(cfg *config.Config, filterV4, filterV6 string) int {
 // port(s)). It is the lo0-table analogue of installHostInboundColdBootFence and
 // shares the SAME FenceSpec + fence builder, differing only in the target table
 // (xpf_lo0 at lo0FilterPriority). It is attempted whenever a real lo0 install
-// failed and no real filter is currently loaded (lo0Enforced false).
+// failed and no real filter is currently loaded (lo0Enforced false). Like the
+// host-inbound fence it carries the DHCP backstop sets (#14135): an interface
+// that is unleased in this snapshot has no address for the destination drops
+// to match, so the interface-scoped FIB-local/anycast drops (plus the DHCPv6
+// reply admits that keep leasing alive) are what deny a later-leased local
+// address in the lo0 table alone, independent of whether xpf_hostinbound is
+// also present and healthy.
 //
 // Scope: the fence drops to the SAME dpuserspace.BuildFenceAddrSets scope the
 // host-inbound fence uses (#6492) — lifeline INTERFACES excluded, addresses
@@ -403,7 +409,8 @@ func lo0RenderedRuleCount(cfg *config.Config, filterV4, filterV6 string) int {
 // result; the daemon has done all it can.
 func (d *Daemon) installLo0ColdBootFence(sets dpuserspace.FenceAddrSets, wgZonePorts map[string][]uint16) error {
 	views, unzonedV4, unzonedV6 := sets.Views, sets.UnzonedV4, sets.UnzonedV6
-	fenceHasScopedDrop := len(unzonedV4) > 0 || len(unzonedV6) > 0
+	fenceHasScopedDrop := len(unzonedV4) > 0 || len(unzonedV6) > 0 ||
+		len(sets.UnleasedV4) > 0 || len(sets.UnleasedV6) > 0
 	for _, view := range views {
 		if len(view.V4Addrs) > 0 || len(view.V6Addrs) > 0 {
 			fenceHasScopedDrop = true
@@ -411,7 +418,18 @@ func (d *Daemon) installLo0ColdBootFence(sets dpuserspace.FenceAddrSets, wgZoneP
 		}
 	}
 	logFenceWithheld(xnft.Lo0TableName, sets)
-	spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGZonePorts: wgZonePorts}
+	spec := xnft.FenceSpec{
+		Views:                toNftViews(views),
+		UnzonedV4:            unzonedV4,
+		UnzonedV6:            unzonedV6,
+		WGZonePorts:          wgZonePorts,
+		UnleasedV4:           sets.UnleasedV4,
+		UnleasedV6:           sets.UnleasedV6,
+		UnleasedVRFSlavesV4:  sets.UnleasedVRFSlavesV4,
+		UnleasedVRFSlavesV6:  sets.UnleasedVRFSlavesV6,
+		DHCPv6Admit:          sets.AdmitV6,
+		DHCPv6AdmitVRFSlaves: sets.AdmitVRFSlavesV6,
+	}
 	if err := nftInstaller.InstallLo0ColdBootFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COLD-BOOT FAIL-OPEN GUARD: lo0 install failed AND the fail-closed "+
@@ -1403,17 +1421,18 @@ func buildHostInboundFencePayloadWithIngress(views []dpuserspace.ZoneHostInbound
 }
 
 // buildLo0FencePayload assembles the #6476 lo0 cold-boot fail-closed fence
-// payload (see installLo0ColdBootFence). It shares mandatory admits and
-// address-scoped drops with the host-inbound fence, but deliberately omits the
-// host-inbound stale-reply guard: lo0 protects a different policy surface and
-// must preserve its established-flow admit. The fence is rendered into the
-// xpf_lo0 table at the lo0 filter priority (0), the same slot the real lo0
-// RE-protection filter occupies, so a later successful InstallLo0 atomically
-// replaces it. Used by the T1 parity gate to prove the netlink
-// InstallLo0ColdBootFence is bit-equivalent. Empty address inputs intentionally
-// produce a zero-drop shell.
-func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgZonePorts map[string][]uint16) string {
-	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, nil, wgZonePorts, nil, nil, false, nil, nil, dhcpBackstopLists{})
+// payload (see installLo0ColdBootFence). It shares mandatory admits,
+// address-scoped drops, and the DHCP backstop sets (#14135) with the
+// host-inbound fence, but deliberately omits the host-inbound stale-reply
+// guard: lo0 protects a different policy surface and must preserve its
+// established-flow admit. The fence is rendered into the xpf_lo0 table at
+// the lo0 filter priority (0), the same slot the real lo0 RE-protection
+// filter occupies, so a later successful InstallLo0 atomically replaces it.
+// Used by the T1 parity gate to prove the netlink InstallLo0ColdBootFence
+// is bit-equivalent. Empty address/backstop inputs intentionally produce a
+// zero-drop shell.
+func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopLists) string {
+	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, nil, wgZonePorts, unleasedV4, unleasedV6, false, nil, nil, vrfBackstop)
 }
 
 // buildFenceTablePayload renders a fail-closed cold-boot fence into the named
