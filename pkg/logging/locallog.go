@@ -49,22 +49,35 @@ type LocalLogWriter struct {
 	// post-rotation reopen failed). These are audit-grade signals — an operator
 	// running `security log mode event` must be able to tell that audit lines
 	// are being lost. The two failure classes get SEPARATE ≤1/s warn clocks
-	// (lastDropWarn / lastRotWarn, mu-guarded) so a write-drop storm cannot
-	// suppress the rotation warning and vice versa.
+	// (lastDropWarn / lastRotWarn) so a write-drop storm cannot suppress the
+	// rotation warning and vice versa. lastDropWarn is reachable both under
+	// mu (Send/SendBinary) and unlocked (SendFromEventReader's enqueue-failure
+	// drop, #9025/#14191), so it is guarded by warnMu, not by mu alone;
+	// lastRotWarn is reached only under mu.
 	droppedWrites   atomic.Uint64
 	failedRotations atomic.Uint64
+	warnMu          sync.Mutex
 	lastDropWarn    time.Time
 	lastRotWarn     time.Time
 }
 
 // warnRateLimited emits a ≤1/s WARN carrying the current failure counters,
-// gated by the supplied per-class clock. Must be called with lw.mu held.
+// gated by the supplied per-class clock. The clock itself is guarded by
+// warnMu — a leaf lock taken only around the clock check/update and
+// released before slog.Warn, so a re-entrant slog handler cannot wedge it
+// and callers holding mu deadlock neither on it nor via it. Reachable from
+// two lock domains: under lw.mu (Send/SendBinary) and unlocked
+// (SendFromEventReader's queue-full/retired drop), which is exactly why it
+// cannot rely on lw.mu alone (#14191).
 func (lw *LocalLogWriter) warnRateLimited(clock *time.Time, msg string, err error) {
 	now := time.Now()
+	lw.warnMu.Lock()
 	if !clock.IsZero() && now.Sub(*clock) < time.Second {
+		lw.warnMu.Unlock()
 		return
 	}
 	*clock = now
+	lw.warnMu.Unlock()
 	slog.Warn(msg,
 		"err", err,
 		"path", lw.path,
@@ -259,6 +272,10 @@ func (lw *LocalLogWriter) SendFromEventReader(severity int, msg string) bool {
 	// reader goroutine pays only the channel send.
 	if !lw.async.enqueue(auditItem{severity: severity, line: msg}) {
 		lw.droppedWrites.Add(1)
+		// #14191: this warn runs WITHOUT lw.mu (holding it here would park
+		// the event reader behind a stalled writer — the stall #9025
+		// removed). warnRateLimited guards its clock with warnMu, so it is
+		// safe against the writer goroutine's under-mu warns.
 		lw.warnRateLimited(&lw.lastDropWarn,
 			"local security-log write dropped: writer queue full or retired", errFileUnavailable)
 		return false
