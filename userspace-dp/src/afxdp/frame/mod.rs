@@ -311,20 +311,13 @@ pub(super) fn build_nat64_forwarded_frame(
     forwarding: &ForwardingState,
 ) -> Option<Vec<u8>> {
     let mut frames = build_nat64_forwarded_frames(
-        frame,
-        meta,
-        decision,
-        nat64_reverse,
-        no_v6_frag_header,
-        forwarding,
-        0,
+        frame, meta, decision, nat64_reverse, no_v6_frag_header, forwarding, 0, 0,
     )?;
     (frames.len() == 1).then(|| frames.pop()).flatten()
 }
 
-/// Build one or more frames for a NAT64 forward. `v4_egress_mtu` is the
-/// translated IPv4 packet budget; DF-clear IPv4 outputs are fragmented before
-/// any tunnel encapsulation so every emitted frame fits its next hop.
+/// Build one or more frames for a NAT64 forward. MTUs are for the translated
+/// family; zero means unknown and preserves the historical whole-frame path.
 pub(super) fn build_nat64_forwarded_frames(
     frame: &[u8],
     meta: impl Into<ForwardPacketMeta>,
@@ -333,15 +326,11 @@ pub(super) fn build_nat64_forwarded_frames(
     no_v6_frag_header: bool,
     forwarding: &ForwardingState,
     v4_egress_mtu: usize,
+    v6_egress_mtu: usize,
 ) -> Option<SmallVec<[Vec<u8>; 1]>> {
     build_nat64_forwarded_frames_with_commit(
-        frame,
-        meta,
-        decision,
-        nat64_reverse,
-        no_v6_frag_header,
-        forwarding,
-        v4_egress_mtu,
+        frame, meta, decision, nat64_reverse, no_v6_frag_header, forwarding,
+        v4_egress_mtu, v6_egress_mtu,
     )
     .map(|frames| frames.into_iter().map(|(frame, _)| frame).collect())
 }
@@ -354,47 +343,30 @@ pub(super) fn build_nat64_forwarded_frames_with_commit(
     no_v6_frag_header: bool,
     forwarding: &ForwardingState,
     v4_egress_mtu: usize,
+    v6_egress_mtu: usize,
 ) -> Option<SmallVec<[(Vec<u8>, Option<wg::WgEncapCommit>); 1]>> {
     let meta = meta.into();
     let inner = build_nat64_inner_frame(frame, meta, decision, nat64_reverse, no_v6_frag_header)?;
     let inner_frames = if meta.addr_family as i32 == libc::AF_INET6 {
         fragment_nat64_ipv4_frame(inner, v4_egress_mtu)?
     } else {
-        let mut frames = SmallVec::new();
-        frames.push(inner);
-        frames
+        fragment_nat64_ipv6_frame(inner, v6_egress_mtu)?
     };
     if decision.resolution.tunnel_endpoint_id == 0 {
-        return Some(
-            inner_frames
-                .into_iter()
-                .map(|frame| (frame, None))
-                .collect(),
-        );
+        return Some(inner_frames.into_iter().map(|frame| (frame, None)).collect());
     }
-    // §8896: the inner frame's family is the TRANSLATED one, not the ingress
-    // family `meta` still describes. Passing `meta` through unchanged is the
-    // defect §8890 refused to ship: an IPv4 frame parsed as IPv6 yields a wrong
-    // length, a destination read past the header into the TCP payload, and
-    // therefore the wrong WireGuard peer or none.
     let inner_meta = nat64_translated_meta(meta, decision)?;
-    // §2327 preserved: dispatch on the TYPED kind and FAIL CLOSED on an
-    // unknown or missing mode.
-    let kind = forwarding
-        .tunnel_endpoints
-        .get(&decision.resolution.tunnel_endpoint_id)
+    let kind = forwarding.tunnel_endpoints.get(&decision.resolution.tunnel_endpoint_id)
         .map(|e| tunnel_mode_kind(&e.mode));
     let mut frames = SmallVec::new();
     for inner in inner_frames {
         let encapsulated = match kind {
-            Some(TunnelKind::WireGuard) => {
+            Some(TunnelKind::WireGuard) =>
                 wg::wg_encap_frame_with_commit(&inner, inner_meta, decision, forwarding)
-                    .map(|(frame, commit)| (frame, Some(commit)))
-            }
-            Some(TunnelKind::Gre) => {
+                    .map(|(frame, commit)| (frame, Some(commit))),
+            Some(TunnelKind::Gre) =>
                 encapsulate_native_gre_frame(&inner, inner_meta, decision, forwarding)
-                    .map(|frame| (frame, None))
-            }
+                    .map(|frame| (frame, None)),
             Some(TunnelKind::Unknown) | None => None,
         };
         crate::afxdp::cos::redirect_pool::recycle(inner);
@@ -457,6 +429,77 @@ fn fragment_nat64_ipv4_frame(frame: Vec<u8>, mtu: usize) -> Option<SmallVec<[Vec
         debug_assert_eq!(&fragment[ip_start + 4..ip_start + 6], identification);
         frames.push(fragment);
         offset += payload_len;
+    }
+    crate::afxdp::cos::redirect_pool::recycle(frame);
+    (!frames.is_empty()).then_some(frames)
+}
+
+/// RFC 7915 §4: fragment translated IPv6 datagrams at the translator, where
+/// the original IPv4 DF bit is still available. IPv6 routers cannot fragment.
+fn fragment_nat64_ipv6_frame(
+    frame: Vec<u8>,
+    mtu: usize,
+) -> Option<SmallVec<[Vec<u8>; 1]>> {
+    let l3 = frame_l3_offset(&frame)?;
+    let ip = frame.get(l3..)?;
+    if ip.len() < 40 || ip[0] >> 4 != 6 {
+        return None;
+    }
+    let payload_len = u16::from_be_bytes([ip[4], ip[5]]) as usize;
+    let total_len = 40usize.checked_add(payload_len)?;
+    if total_len > ip.len() {
+        return None;
+    }
+    let mut frames = SmallVec::new();
+    if mtu == 0 || total_len <= mtu {
+        frames.push(frame);
+        return Some(frames);
+    }
+    // IPv6 links have a 1280-byte minimum MTU. Reserve base + fragment headers.
+    let mtu = mtu.max(1280);
+    let base_next = ip[6];
+    let existing_fragment = base_next == 44;
+    if existing_fragment && payload_len < 8 {
+        return None;
+    }
+    let (next_header, base_offset, original_more, ident, data_offset) = if existing_fragment {
+        let frag = ip.get(40..48)?;
+        let word = u16::from_be_bytes([frag[2], frag[3]]);
+        (
+            frag[0],
+            usize::from(word >> 3) * 8,
+            word & 1 != 0,
+            u32::from_be_bytes(frag[4..8].try_into().ok()?),
+            48,
+        )
+    } else {
+        static NAT64_V6_FRAGMENT_ID: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(1);
+        (base_next, 0, false, NAT64_V6_FRAGMENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed), 40)
+    };
+    let data = ip.get(data_offset..total_len)?;
+    let max_data = mtu.saturating_sub(48) / 8 * 8;
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let len = (data.len() - offset).min(max_data);
+        let absolute = base_offset.checked_add(offset)?;
+        if absolute % 8 != 0 || absolute / 8 > 0x1fff {
+            return None;
+        }
+        let more = original_more || offset + len < data.len();
+        let mut fragment = Vec::with_capacity(l3 + 48 + len);
+        fragment.extend_from_slice(&frame[..l3]);
+        fragment.extend_from_slice(&ip[..40]);
+        fragment.push(next_header);
+        fragment.push(0);
+        let word = ((absolute / 8) as u16) << 3 | u16::from(more);
+        fragment.extend_from_slice(&word.to_be_bytes());
+        fragment.extend_from_slice(&ident.to_be_bytes());
+        fragment.extend_from_slice(&data[offset..offset + len]);
+        fragment[l3 + 4..l3 + 6].copy_from_slice(&((8 + len) as u16).to_be_bytes());
+        fragment[l3 + 6] = 44;
+        frames.push(fragment);
+        offset += len;
     }
     crate::afxdp::cos::redirect_pool::recycle(frame);
     (!frames.is_empty()).then_some(frames)

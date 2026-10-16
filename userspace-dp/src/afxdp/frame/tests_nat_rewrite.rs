@@ -2118,6 +2118,38 @@ fn nat64_8896_encapsulates_the_reverse_v4_to_v6_direction() {
     );
 }
 
+#[test]
+fn nat64_v4_reply_fragments_at_ipv6_egress_mtu_13943() {
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let mut reply = build_ipv4_tcp_frame(server, pool, 443, 40001, 1, 1, 0x10);
+    reply.resize(14 + 1500, 0x5a);
+    reply[16..18].copy_from_slice(&1500u16.to_be_bytes());
+    reply[18..20].copy_from_slice(&0x4242u16.to_be_bytes());
+    reply[20..22].copy_from_slice(&0u16.to_be_bytes());
+    reply[24..26].fill(0);
+    let ip_sum = checksum16(&reply[14..34]);
+    reply[24..26].copy_from_slice(&ip_sum.to_be_bytes());
+    let forward = Nat64State::forward_decision(pool, server, 40001);
+    let decision = icmp_test_decision(
+        forward.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443),
+    );
+    let reverse = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    let frames = build_nat64_forwarded_frames(
+        &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
+        &ForwardingState::default(), 0, 1500,
+    ).expect("NAT64 reverse frames");
+    assert!(frames.len() >= 2, "oversize DF-clear v4 reply must be fragmented");
+    for frame in &frames {
+        let ip = &frame[14..];
+        let total = 40 + u16::from_be_bytes([ip[4], ip[5]]) as usize;
+        assert!(total <= 1500, "translated fragment exceeds IPv6 egress MTU");
+        assert_eq!(ip[6], 44, "IPv6 fragment header required");
+    }
+}
+
 // #10729 X2-F6 RED cell 6: MSS clamp must not rewrite through AH. A v6+AH+TCP
 // SYN carrying MSS 1460 with selected MSS 536 must keep its MSS bytes after
 // the in-place rewrite (any rewrite breaks the AH ICV). Pre-fix the inner

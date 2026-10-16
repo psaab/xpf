@@ -565,11 +565,19 @@ fn enqueue_copy_fallback_frame(
     let mut build_failed = false;
     let mut fallback_to_slow_path = false;
     let built_frames = if is_nat64 {
-        let v4_egress_mtu = if request.meta.addr_family as i32 == libc::AF_INET6 {
-            nat64_v4_egress_mtu(source_frame, request.meta, &request.decision, forwarding)
-        } else {
-            0
-        };
+        let (v4_egress_mtu, v6_egress_mtu) =
+            if request.meta.addr_family as i32 == libc::AF_INET6 {
+                (nat64_v4_egress_mtu(source_frame, request.meta, &request.decision, forwarding), 0)
+            } else {
+                let l3 = frame_l3_offset(source_frame)
+                    .unwrap_or(request.meta.l3_offset as usize);
+                let input_df = source_frame.get(l3 + 6).is_some_and(|b| b & 0x40 != 0);
+                (0, if input_df {
+                    0
+                } else {
+                    nat64_v6_egress_mtu(source_frame, request.meta, &request.decision, forwarding)
+                })
+            };
         crate::afxdp::frame::build_nat64_forwarded_frames_with_commit(
             source_frame,
             request.meta,
@@ -578,6 +586,7 @@ fn enqueue_copy_fallback_frame(
             forwarding.nat64.no_v6_frag_header,
             forwarding,
             v4_egress_mtu,
+            v6_egress_mtu,
         )
     } else {
         crate::afxdp::frame::build_forwarded_frame_from_frame_with_commit(
@@ -1854,6 +1863,33 @@ fn nat64_v4_egress_mtu(
         ),
     )
     .saturating_sub(20)
+}
+
+/// #13943: egress IPv6 L3 MTU budget for a translated IPv4 input, i.e. the
+/// post-transform inner MTU (`post_transform_inner_mtu` already subtracts
+/// the 20-byte header delta for AF_INET, and composes tunnel budgets).
+/// `0` means no MTU is resolvable — the builder then forwards whole.
+#[inline(always)]
+fn nat64_v6_egress_mtu(
+    source_frame: &[u8],
+    meta: ForwardPacketMeta,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+) -> usize {
+    let mtu = post_transform_inner_mtu(
+        decision,
+        forwarding,
+        true,
+        meta.addr_family,
+        forwarded_egress_mtu(decision, forwarding),
+        crate::afxdp::icmp_ptb::post_transform_inner_destination(
+            source_frame,
+            meta,
+            decision,
+            true,
+        ),
+    );
+    if mtu == 0 { 0 } else { mtu.saturating_add(20) }
 }
 
 /// Whether a cache hit can skip the pending-forward dispatcher.

@@ -578,6 +578,12 @@ The exact admission boundary is documented in
 | SYN cookie flood protection | Yes |
 | Throughput (25G mlx5) | See validation/perf docs for current results |
 
+For the reverse NAT64 direction (IPv4 replies translated to IPv6), the
+userspace translator fragments DF-clear output at the IPv6 egress MTU,
+including the additional eight-byte Fragment Header on already-fragmented
+IPv4 input. DF-set oversized IPv4 remains an ICMP Packet Too Big path.
+Regression coverage: `nat64_v4_reply_fragments_at_ipv6_egress_mtu_13943`.
+
 SYN-cookie-dependent screen behavior runs in userspace with bounded
 SYN-ACK/RST replies and userspace status counters (#1374 closed). Port
 mirroring has bounded userspace runtime admission (#1376 closed).
