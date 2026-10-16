@@ -609,9 +609,26 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                 // an asymmetric VLAN and cannot supply the forward scope.
                 let reverse_ingress_ifindex = arrival_ingress_ifindex as i32;
                 let forward_ingress_ifindex = reverse_decision.resolution.egress_ifindex;
+                // #14128: the packet's observed ingress is the PHYSICAL
+                // arrival ifindex (the original WAN egress's bind parent on
+                // a VLAN trunk). `forwarding.egress` is keyed by LOGICAL
+                // unit ifindex, and interface-SNAT reads the logical unit's
+                // primary address — keying the reconstruction on the raw
+                // parent either misses the egress row entirely (fail-closed
+                // revocation of a live flow) or reads the parent row's
+                // address instead of the VLAN unit's. Resolve
+                // `(physical, arrival VLAN) -> logical` exactly as the
+                // ingress-side sites do; an untagged/physical arrival
+                // resolves to itself.
+                let forward_egress_ifindex = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+                    forwarding,
+                    reverse_ingress_ifindex,
+                    metadata.ingress_vlan_id,
+                )
+                .unwrap_or(reverse_ingress_ifindex);
                 let forward_decision = SessionDecision {
                     resolution: crate::afxdp::ForwardingResolution {
-                        egress_ifindex: reverse_ingress_ifindex,
+                        egress_ifindex: forward_egress_ifindex,
                         ..reverse_decision.resolution
                     },
                     nat: reverse_decision.nat.reverse(
@@ -621,6 +638,25 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                         reverse_key.dst_port,
                     ),
                     ..reverse_decision
+                };
+                // #14128: `NatDecision::reverse` is port-pair oriented: for
+                // ICMP it puts the translated identifier (carried in the
+                // reverse key's `src_port`, since the identifier is a single
+                // symmetric field — #4074) into `rewrite_src_port` as
+                // `Some(0)` (the reverse key's `dst_port`). The forward
+                // decision's translated identifier is the reverse key's
+                // `src_port`, not 0. Restore it or the validator sees a
+                // bogus translated port of 0 and rejects the mapping.
+                let forward_decision = if matches!(
+                    forward_query.protocol,
+                    crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+                ) && forward_decision.nat.rewrite_src_port == Some(0)
+                {
+                    let mut nat = forward_decision.nat;
+                    nat.rewrite_src_port = Some(reverse_key.src_port);
+                    SessionDecision { nat, ..forward_decision }
+                } else {
+                    forward_decision
                 };
                 let mut forward_metadata = metadata.clone();
                 forward_metadata.is_reverse = false;

@@ -1423,8 +1423,22 @@ pub(crate) fn source_nat_translation_matches(
             if !rule.pool_contains_address(translated_src) {
                 return false;
             }
+            // #14128: `packet_icmp` is the ORIGINAL forward packet's ICMP
+            // type/code (e.g. echo-request (8,0)), carried on the forward
+            // decision as `source_nat_icmp`. It is NOT the ICMP echo
+            // identifier — that lives in the session key's `src_port` and in
+            // `translated_src_port` for a PAT allocation. A query ICMP flow
+            // that allocated a translated identifier is a PAT translation
+            // even though `has_l4_ports` is false for ICMP, so it must NOT
+            // take the portless branch merely because a reconstructed
+            // decision lost its type/code. The portless branch is only for
+            // translations that never allocated an identifier/port.
+            let icmp_query_pat = matches!(protocol, PROTO_ICMP | PROTO_ICMPV6)
+                && translated_src_port.is_some();
             if rule.no_translation
-                || (!crate::ip_proto::has_l4_ports(protocol) && packet_icmp.is_none())
+                || (!icmp_query_pat
+                    && !crate::ip_proto::has_l4_ports(protocol)
+                    && packet_icmp.is_none())
             {
                 if let Some(det) = rule.deterministic_v4 {
                     let IpAddr::V4(src_v4) = src_ip else {
@@ -1461,10 +1475,16 @@ pub(crate) fn source_nat_translation_matches(
                 return translated_v4 == expected_addr
                     && (port_start..=port_end).contains(&(port as u32));
             }
-            return translated_src_port.map_or(
-                (rule.pool_port_low..=rule.pool_port_high).contains(&src_port),
-                |port| (rule.pool_port_low..=rule.pool_port_high).contains(&port),
-            );
+            // PAT (TCP/UDP port or ICMP identifier): the stored translation
+            // must carry a translated port/identifier inside the live pool
+            // range. A missing translated port means the session was
+            // installed under a portless branch (`port no-translation` or a
+            // port-less protocol); accepting it because the ORIGINAL
+            // `src_port` happens to fall in the new PAT range would keep a
+            // translation the current PAT rule never allocated (#14128).
+            return translated_src_port.is_some_and(|port| {
+                (rule.pool_port_low..=rule.pool_port_high).contains(&port)
+            });
         }
         return false;
     }

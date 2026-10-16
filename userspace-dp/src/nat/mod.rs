@@ -336,7 +336,18 @@ impl NatDecision {
             rewrite_dst: self.rewrite_src.map(|_| original_src),
             rewrite_src_port: self.rewrite_dst_port.map(|_| original_dst_port),
             rewrite_dst_port: self.rewrite_src_port.map(|_| original_src_port),
-            source_nat_icmp: None,
+            // #14128: preserve the forward packet's ICMP type/code across
+            // the direction swap. `source_nat_icmp` is packet identity
+            // (type/code), not direction-scoped translation state: the
+            // reverse companion of an ICMP query flow must reconstruct the
+            // same forward decision (including its typed rule selection)
+            // when the forward half is absent locally. Dropping it made a
+            // PAT ICMP mapping look portless on revalidation. The field is
+            // only consumed as the forward decision's `packet_icmp` on the
+            // reconstructed-forward path and in HA attribution of forward
+            // rows (reverse rows are gated `!is_reverse` at import), so
+            // carrying it on the reverse decision changes no wire rewrite.
+            source_nat_icmp: self.source_nat_icmp,
             nat64: self.nat64,
             nptv6: self.nptv6,
         }
