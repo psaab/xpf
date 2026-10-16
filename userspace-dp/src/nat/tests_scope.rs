@@ -189,6 +189,71 @@ fn source_nat_to_interface_scope_matches_only_named_egress() {
         "to-interface-scoped SNAT must NOT match traffic egressing another interface"
     );
 }
+// #13962 (H16-07): Source NAT scoped by `to routing-instance`: matches only
+// when the flow EGRESSES in the named VRF. The matching half must read
+// `egress_routing_instance`, never the ingress VRF — here the ingress RI is
+// held at a value that differs from both arms so an ingress/egress swap is
+// decisive, not coincidental. Fail-on-revert: deleting the
+// `to_routing_instance` gate in `scope_matches` (N1) makes the vrf-b
+// assertion match and so RED; comparing against `ingress_routing_instance`
+// makes BOTH assertions wrong (positive control RED, wrong arm GREEN).
+#[test]
+fn source_nat_to_routing_instance_scope_matches_only_named_egress_vrf() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "snat".to_string(),
+        to_routing_instance: "vrf-a".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    let src: IpAddr = "10.0.61.102".parse().unwrap();
+    let dst: IpAddr = "172.16.80.200".parse().unwrap();
+    let egress_v4 = Some("172.16.80.8".parse().unwrap());
+
+    // Egress in the named VRF -> matches, even though the ingress RI differs.
+    let to_vrf_a = NatScopeCtx {
+        ingress_routing_instance: "tenant-in",
+        egress_routing_instance: "vrf-a",
+        ..NatScopeCtx::default()
+    };
+    assert!(
+        match_source_nat(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &to_vrf_a,
+            "",
+            "",
+            src,
+            dst,
+            egress_v4,
+            None
+        )
+        .is_some(),
+        "to-routing-instance-scoped SNAT must match traffic egressing the named VRF"
+    );
+
+    // Egress in a DIFFERENT VRF -> no match.
+    let to_vrf_b = NatScopeCtx {
+        ingress_routing_instance: "tenant-in",
+        egress_routing_instance: "vrf-b",
+        ..NatScopeCtx::default()
+    };
+    assert!(
+        match_source_nat(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &to_vrf_b,
+            "",
+            "",
+            src,
+            dst,
+            egress_v4,
+            None
+        )
+        .is_none(),
+        "to-routing-instance-scoped SNAT must NOT match traffic egressing another VRF"
+    );
+}
 
 // A zone-scoped source NAT rule is unaffected by the #3096 scope plumbing
 // (no-regression): empty interface/RI scope = wildcard, so any interface/VRF
