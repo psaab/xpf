@@ -3154,3 +3154,84 @@ fn reverse_without_companion_missing_snat_provenance_fails_closed_13771() {
         PolicyRevocationReason::StaleSourceNat
     ));
 }
+
+/// #13910: #13789's early return skipped the provenance fail-closed arm for
+/// companion-less NAT64/NPTv6 reverse hits too. The source-NAT validator
+/// returns (true, None) unconditionally for NAT64/NPTv6, so missing forward
+/// VLAN provenance was their only stale-translation guard.
+#[test]
+fn reverse_without_companion_nat64_nptv6_missing_provenance_fails_closed_13910() {
+    for (shape, nat64, nptv6) in [
+        ("nat64", true, false),
+        ("nptv6", false, true),
+        ("nat64+nptv6", true, true),
+    ] {
+        let forwarding = reverse_snat_forwarding_13771(false);
+        let mut case = reverse_snat_case_from_production_13771(&forwarding);
+        case.5.forward_ingress_vlan_id = None;
+        assert!(
+            case.5.forward_ingress_vlan_id.is_none(),
+            "{shape}: fixture must have missing forward VLAN provenance"
+        );
+        case.4.nat.nat64 = nat64;
+        case.4.nat.nptv6 = nptv6;
+        case.4.nat.rewrite_src = Some("203.0.113.10".parse().expect("translated source"));
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(1, 1);
+        let revocation = reverse_snat_hit_13652(&forwarding, &mut sessions, &case)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{shape}: translated reverse hit without forward VLAN provenance \
+                     must fail closed"
+                )
+            });
+        assert!(revocation.canonical_key.is_none());
+        assert!(matches!(
+            revocation.reason,
+            PolicyRevocationReason::StaleSourceNat
+        ));
+        assert_eq!(sessions.len(), 0, "{shape}: drop-only verdict installs nothing");
+    }
+}
+
+/// #13910 control: NAT64/NPTv6 with recorded forward VLAN provenance is not
+/// rejected by the provenance arm and reaches the policy gate.
+#[test]
+fn reverse_without_companion_nat64_nptv6_with_provenance_survives_13910() {
+    for (shape, nat64, nptv6) in [("nat64", true, false), ("nptv6", false, true)] {
+        let forwarding = reverse_snat_forwarding_13771(false);
+        let mut case = reverse_snat_case_from_production_13771(&forwarding);
+        case.5.forward_ingress_vlan_id = Some(100);
+        case.4.nat.nat64 = nat64;
+        case.4.nat.nptv6 = nptv6;
+        case.4.nat.rewrite_src = Some("203.0.113.10".parse().expect("translated source"));
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(1, 1);
+        assert!(
+            reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
+            "{shape}: recorded forward provenance must let the reverse hit pass"
+        );
+    }
+}
+
+/// #13910 pin of #13789's intended narrowing: a companion-less reverse hit
+/// with NO source rewrite and no NAT64/NPTv6 translation is deliberately
+/// permitted through to the ordinary policy gate despite missing forward
+/// VLAN provenance.
+#[test]
+fn reverse_without_companion_no_rewrite_missing_provenance_permitted_13910() {
+    let forwarding = reverse_snat_forwarding_13771(false);
+    let mut case = reverse_snat_case_from_production_13771(&forwarding);
+    case.5.forward_ingress_vlan_id = None;
+    assert!(case.5.forward_ingress_vlan_id.is_none());
+    case.4.nat.rewrite_src = None;
+    case.4.nat.rewrite_dst = None;
+    case.4.nat.nat64 = false;
+    case.4.nat.nptv6 = false;
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(
+        reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
+        "untranslated reverse hit must pass through to the policy gate"
+    );
+}
