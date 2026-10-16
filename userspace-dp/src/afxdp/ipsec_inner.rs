@@ -408,6 +408,17 @@ fn d14_zone_gate(
         ));
     }
     let egress_zone = forwarding.egress_zone_id(lookup.resolution.egress_ifindex);
+    // Use the shared parser for declared-length-bounded TCP/UDP ports.
+    // Non-first fragments contain payload, not an L4 header, at this offset.
+    let ports = if crate::afxdp::frame::frame_is_non_first_fragment(&owned, meta) {
+        None
+    } else {
+        crate::afxdp::frame::live_frame_ports_from_meta_bytes(&owned, meta)
+    };
+    let (src_port, dst_port, l4_present) = match ports {
+        Some((src, dst)) => (src, dst, true),
+        None => (0, 0, false),
+    };
     let policy = crate::policy::evaluate_policy_result_l3_aware(
         &forwarding.policy,
         ingress_zone,
@@ -415,11 +426,11 @@ fn d14_zone_gate(
         source,
         destination,
         input.protocol,
-        0,
-        0,
+        src_port,
+        dst_port,
         None,
         input.inner_packet.len() as u64,
-        false,
+        l4_present,
     );
     if !matches!(policy.action, crate::policy::PolicyAction::Permit) {
         return Err(IpsecInnerDecision::Deny {
@@ -1179,6 +1190,216 @@ mod tests {
         let packet = test_packet_with_source([10, 0, 0, 1], [192, 0, 2, 5]);
         let decision = adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
         assert_eq!(decision.reason(), Some(reason::LEGACY_POLICY_DENY), "{decision:?}");
+    }
+    fn port_term_policy(protocol: &str, destination_port: &str) -> crate::policy::PolicyState {
+        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        zones.insert("vpn".into(), 1);
+        zones.insert("lan".into(), 2);
+        let rule = crate::PolicyRuleSnapshot {
+            name: "vpn-to-lan-port".into(),
+            from_zone: "vpn".into(),
+            to_zone: "lan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            application_terms: vec![crate::PolicyApplicationSnapshot {
+                name: "port-term".into(),
+                protocol: protocol.into(),
+                source_port: String::new(),
+                destination_port: destination_port.into(),
+                icmp_type: None,
+                icmp_code: None,
+                inactivity_timeout: None,
+            }],
+            action: "permit".into(),
+            ..Default::default()
+        };
+        crate::policy::parse_policy_state("deny", &[rule], &zones)
+    }
+
+    fn v4_l4_packet(protocol: u8, src: [u8; 4], dst: [u8; 4], src_port: u16, dst_port: u16, frag: u16) -> Vec<u8> {
+        let l4_len = if protocol == 17 { 8 } else { 20 };
+        let total = 20 + l4_len;
+        let mut packet = vec![0u8; total];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        packet[6..8].copy_from_slice(&frag.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = protocol;
+        packet[12..16].copy_from_slice(&src);
+        packet[16..20].copy_from_slice(&dst);
+        packet[20..22].copy_from_slice(&src_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&dst_port.to_be_bytes());
+        packet
+    }
+
+    fn v4_port_decision(protocol: u8, dst_port: u16, frag: u16) -> IpsecInnerDecision {
+        let proto_name = if protocol == 17 { "udp" } else { "tcp" };
+        let mut forwarding = local_lan_forwarding();
+        forwarding.policy = port_term_policy(proto_name, "443");
+        let view = view_with_rows(1, 1, st0_rows(), forwarding);
+        let packet = v4_l4_packet(protocol, [10, 0, 0, 1], [192, 0, 2, 5], 40000, dst_port, frag);
+        let mut inp = input(&packet, advisory(1, 1, 1, 1, 1));
+        inp.protocol = protocol;
+        adjudicate_ipsec_inner(&view, inp)
+    }
+
+    #[test]
+    fn d14_ipv4_tcp_matching_port_permits_14090() {
+        let d = v4_port_decision(6, 443, 0);
+        assert!(d.is_would_permit(), "{d:?}");
+    }
+
+    #[test]
+    fn d14_ipv4_tcp_nonmatching_port_denies_14090() {
+        let d = v4_port_decision(6, 8443, 0);
+        assert_eq!(d.reason(), Some(reason::LEGACY_POLICY_DENY), "{d:?}");
+    }
+
+    #[test]
+    fn d14_ipv4_udp_matching_port_permits_14090() {
+        let d = v4_port_decision(17, 443, 0);
+        assert!(d.is_would_permit(), "{d:?}");
+    }
+
+    #[test]
+    fn d14_ipv4_udp_nonmatching_port_denies_14090() {
+        let d = v4_port_decision(17, 8443, 0);
+        assert_eq!(d.reason(), Some(reason::LEGACY_POLICY_DENY), "{d:?}");
+    }
+
+    #[test]
+    fn d14_ipv4_first_fragment_matching_port_permits_14090() {
+        // MF set, offset 0: first fragment carries the real L4 header.
+        let d = v4_port_decision(6, 443, 0x2000);
+        assert!(d.is_would_permit(), "{d:?}");
+    }
+
+    #[test]
+    fn d14_ipv4_nonfirst_fragment_flowless_denies_against_port_term_14090() {
+        // Offset non-zero: bytes at L4 offset are payload spelling 443, must stay flowless.
+        let d = v4_port_decision(6, 443, 0x0001);
+        assert_eq!(d.reason(), Some(reason::LEGACY_POLICY_DENY), "{d:?}");
+    }
+
+    fn v6_view_and_packet(protocol: u8, dst_port: u16) -> (RuntimeView, Vec<u8>) {
+        let src: std::net::Ipv6Addr = "2001:db8:1::1".parse().expect("source");
+        let dst: std::net::Ipv6Addr = "2001:db8::5".parse().expect("destination");
+        let next_hop: std::net::Ipv6Addr = "2001:db8::ff".parse().expect("next hop");
+        let prefixes = [
+            ("::/0", 20, None),
+            ("2001:db8::/64", 20, Some(next_hop)),
+            ("2001:db8:1::/64", 10, Some("2001:db8:1::ff".parse().expect("tunnel hop"))),
+        ];
+        let routes = prefixes.iter().map(|(prefix, ifindex, hop)| {
+            IpsecMainRouteSnapshot {
+                domain: 0,
+                table: 254,
+                family: "inet6".into(),
+                destination: (*prefix).into(),
+                disposition: 1,
+                next_hops: vec![IpsecMainRouteNextHopSnapshot { ifindex: *ifindex, weight: 1 }],
+                ..Default::default()
+            }
+        }).collect();
+        let snapshot = IpsecPMechInventorySnapshot {
+            policy_identity: "01".repeat(32),
+            generation: 77,
+            fib_generation: 1,
+            complete: true,
+            main_routes: routes,
+            tunnel_rows: vec![IpsecPMechTunnelRowSnapshot {
+                stn: "st0".into(),
+                if_id: 1,
+                logical_ifindex: 10,
+                explicit_selectors: vec![IpsecTrafficSelectorSnapshot {
+                    name: "selector".into(),
+                    local_ts: "2001:db8::/64".into(),
+                    remote_ts: "2001:db8:1::/64".into(),
+                    source: "named".into(),
+                }],
+                effective_prefixes: vec!["2001:db8:1::/64".into()],
+                ingress_prefixes: vec!["2001:db8:1::/64".into()],
+                destination_prefixes: vec!["2001:db8::/64".into()],
+                inventory_generation: 77,
+                fib_generation: 1,
+                source_kind: "xfrmi".into(),
+                selector_provenance: "named".into(),
+                inventory_complete: true,
+                inventory_valid: true,
+                inventory_reason: String::new(),
+            }],
+        };
+        let inventory = Arc::new(PMechInventory::from_snapshot(Some(&snapshot)));
+        let mut forwarding = test_forwarding_authority();
+        forwarding.ifindex_to_zone_id.insert(20, 2);
+        forwarding.ifindex_unambiguous_zone_id.insert(20, 2);
+        forwarding.zone_id_to_name.insert(1, "vpn".into());
+        forwarding.zone_id_to_name.insert(2, "lan".into());
+        let table = prefixes.iter().map(|(prefix, ifindex, hop)| {
+            crate::afxdp::types::RouteEntryV6::single(
+                crate::prefix::PrefixV6::from_net(prefix.parse().expect("route prefix")),
+                *ifindex as i32,
+                0,
+                *hop,
+                false,
+                String::new(),
+                0,
+            )
+        }).collect();
+        forwarding.routes_v6.insert("inet6.0".into(), table);
+        forwarding.neighbors.insert(
+            (20, std::net::IpAddr::V6(next_hop)),
+            crate::afxdp::NeighborEntry { mac: [2, 0, 0, 0, 0, 20] },
+        );
+        forwarding.policy = port_term_policy(if protocol == 17 { "udp" } else { "tcp" }, "443");
+        let view = RuntimeView::new_with_ipsec_authority(
+            ValidationState { snapshot_installed: true, config_generation: 1, fib_generation: 1 },
+            Arc::new(forwarding),
+            Arc::new(st0_rows()),
+            1,
+            inventory,
+            1,
+        );
+        let mut packet = vec![0u8; 48];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&8u16.to_be_bytes());
+        packet[6] = protocol;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&src.octets());
+        packet[24..40].copy_from_slice(&dst.octets());
+        packet[40..42].copy_from_slice(&40000u16.to_be_bytes());
+        packet[42..44].copy_from_slice(&dst_port.to_be_bytes());
+        (view, packet)
+    }
+
+    fn v6_port_decision(protocol: u8, dst_port: u16) -> IpsecInnerDecision {
+        let (view, packet) = v6_view_and_packet(protocol, dst_port);
+        let mut inp = input(&packet, advisory(1, 1, 1, 1, 1));
+        inp.inner_family = libc::AF_INET6 as u8;
+        inp.inner_eth_proto = 0x86dd;
+        inp.protocol = protocol;
+        inp.rel_l4_offset = 40;
+        inp.payload_offset = 48;
+        adjudicate_ipsec_inner(&view, inp)
+    }
+
+    #[test]
+    fn d14_ipv6_tcp_matching_and_nonmatching_ports_14090() {
+        for (dst_port, matches) in [(443, true), (8443, false)] {
+            let d = v6_port_decision(6, dst_port);
+            assert_eq!(d.is_would_permit(), matches, "{d:?}");
+            assert_eq!(d.reason(), (!matches).then_some(reason::LEGACY_POLICY_DENY), "{d:?}");
+        }
+    }
+
+    #[test]
+    fn d14_ipv6_udp_matching_and_nonmatching_ports_14090() {
+        for (dst_port, matches) in [(443, true), (8443, false)] {
+            let d = v6_port_decision(17, dst_port);
+            assert_eq!(d.is_would_permit(), matches, "{d:?}");
+            assert_eq!(d.reason(), (!matches).then_some(reason::LEGACY_POLICY_DENY), "{d:?}");
+        }
     }
 
     #[test]
