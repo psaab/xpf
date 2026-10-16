@@ -165,7 +165,10 @@ pub(in crate::afxdp) enum CachedTxTuple<'a> {
     /// so family, addresses and protocol move together BY CONSTRUCTION rather
     /// than as three reads that can drift apart. Its ports are never read: this
     /// arm evaluates through the PORTLESS evaluator (#7992).
-    Flowless { wire_l3: &'a SessionKey },
+    Flowless {
+        wire_l3: &'a SessionKey,
+        ingress_l3: Option<&'a SessionKey>,
+    },
 }
 
 pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
@@ -201,11 +204,30 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection_flowless(
     meta: UserspaceDpMeta,
     wire_l3: &SessionKey,
 ) -> CachedTxSelectionDescriptor {
+    resolve_cached_cos_tx_selection_flowless_with_ingress(
+        forwarding,
+        egress_ifindex,
+        meta,
+        wire_l3,
+        None,
+    )
+}
+
+pub(in crate::afxdp) fn resolve_cached_cos_tx_selection_flowless_with_ingress(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+    meta: UserspaceDpMeta,
+    wire_l3: &SessionKey,
+    ingress_l3: Option<&SessionKey>,
+) -> CachedTxSelectionDescriptor {
     resolve_cached_cos_tx_selection_impl(
         forwarding,
         egress_ifindex,
         meta,
-        CachedTxTuple::Flowless { wire_l3 },
+        CachedTxTuple::Flowless {
+            wire_l3,
+            ingress_l3,
+        },
     )
 }
 
@@ -316,6 +338,7 @@ fn cached_cos_tx_selection_flowless(
     egress_ifindex: i32,
     meta: UserspaceDpMeta,
     wire_l3: &SessionKey,
+    ingress_l3: Option<&SessionKey>,
 ) -> CachedTxSelectionDescriptor {
     let iface = forwarding.cos.interfaces.get(&egress_ifindex);
     let ba_trust = iface
@@ -419,7 +442,9 @@ fn cached_cos_tx_selection_flowless(
         filter_counters = output_result.counters;
         three_color_policers = output_result.three_color_policers;
     }
-    let ingress_is_v6 = meta.addr_family as i32 == libc::AF_INET6;
+    let ingress_is_v6 = ingress_l3
+        .map(|key| key.addr_family as i32 == libc::AF_INET6)
+        .unwrap_or(meta.addr_family as i32 == libc::AF_INET6);
     let has_input_tx_selection =
         crate::filter::filter_state_has_input_tx_selection(&forwarding.filter_state, ingress_is_v6);
     let has_input_three_color_policer = crate::filter::filter_state_has_input_three_color_policer(
@@ -448,14 +473,21 @@ fn cached_cos_tx_selection_flowless(
         }
         .map(Arc::as_ref)
         .filter(|filter| filter.affects_tx_selection || filter.has_three_color_policer_terms);
-        if let (Some(ingress_filter), Some((src_ip, dst_ip))) =
-            (ingress_filter, ForwardPacketMeta::from(meta).l3_addrs())
+        let ingress_tuple = ingress_l3
+            .map(|key| (key.src_ip, key.dst_ip, key.protocol))
+            .or_else(|| {
+                ForwardPacketMeta::from(meta)
+                    .l3_addrs()
+                    .map(|(src_ip, dst_ip)| (src_ip, dst_ip, meta.protocol))
+            });
+        if let (Some(ingress_filter), Some((src_ip, dst_ip, ingress_protocol))) =
+            (ingress_filter, ingress_tuple)
         {
             let input_result = crate::filter::evaluate_filter_ref_tx_selection_cached_portless(
                 ingress_filter,
                 src_ip,
                 dst_ip,
-                meta.protocol,
+                ingress_protocol,
                 meta.dscp,
             );
             filter_dscp_rewrite = input_result.dscp_rewrite;
@@ -510,8 +542,17 @@ fn resolve_cached_cos_tx_selection_impl(
     // different post-NAT provenance) must be made to state which arm it takes
     // rather than falling into whichever one happens to be the wildcard.
     let (flow_key, ingress_flow_key) = match tuple {
-        CachedTxTuple::Flowless { wire_l3 } => {
-            return cached_cos_tx_selection_flowless(forwarding, egress_ifindex, meta, wire_l3);
+        CachedTxTuple::Flowless {
+            wire_l3,
+            ingress_l3,
+        } => {
+            return cached_cos_tx_selection_flowless(
+                forwarding,
+                egress_ifindex,
+                meta,
+                wire_l3,
+                ingress_l3,
+            );
         }
         CachedTxTuple::Flow {
             egress_wire_key,
@@ -857,6 +898,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection(
         extra,
         None,
         None,
+        None,
     )
 }
 
@@ -876,6 +918,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection_at(
         flow_key,
         extra,
         Some(now_ns),
+        None,
         None,
     )
 }
@@ -898,8 +941,10 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection_at_prenat(
     ingress_flow_key: Option<&SessionKey>,
     extra: crate::filter::TermMatchExtra,
     now_ns: u64,
-    // #7656: post-NAT L3 wire key for the flowless arm; see the internal fn.
+    // For a flowless native fragment, this is the frame-resolved PRE-NAT L3
+    // tuple; unlike `flowless_wire`, its protocol remains the ingress protocol.
     flowless_wire: Option<&SessionKey>,
+    flowless_ingress: Option<&SessionKey>,
 ) -> CoSTxSelection {
     resolve_cos_tx_selection_internal(
         forwarding,
@@ -910,6 +955,7 @@ pub(in crate::afxdp) fn resolve_cos_tx_selection_at_prenat(
         extra,
         Some(now_ns),
         flowless_wire,
+        flowless_ingress,
     )
 }
 
@@ -927,6 +973,7 @@ fn resolve_cos_tx_selection_internal(
     // the pre-translation addresses and protocol. When the caller can supply the
     // post-NAT tuple, all three reads come from it.
     flowless_wire: Option<&SessionKey>,
+    flowless_ingress: Option<&SessionKey>,
 ) -> CoSTxSelection {
     let meta = meta.into();
     // #3642: an interface `filter output` is applied on the EGRESS interface
@@ -1077,6 +1124,17 @@ fn resolve_cos_tx_selection_internal(
             };
             filter_log = output_result.log_match;
         }
+        let (ingress_is_v6, ingress_input_l3) = match flowless_ingress {
+            Some(key) => (
+                key.addr_family as i32 == libc::AF_INET6,
+                Some((key.src_ip, key.dst_ip, key.protocol)),
+            ),
+            None => (
+                meta.addr_family as i32 == libc::AF_INET6,
+                meta.l3_addrs()
+                    .map(|(src_ip, dst_ip)| (src_ip, dst_ip, meta.protocol)),
+            ),
+        };
         let has_input_tx_selection = crate::filter::filter_state_has_input_tx_selection(
             &forwarding.filter_state,
             ingress_is_v6,
@@ -1106,8 +1164,8 @@ fn resolve_cos_tx_selection_internal(
             }
             .map(Arc::as_ref)
             .filter(|filter| filter.affects_tx_selection || filter.has_three_color_policer_terms);
-            if let (Some(ingress_filter), Some((src_ip, dst_ip))) =
-                (ingress_filter, meta.l3_addrs())
+            if let (Some(ingress_filter), Some((src_ip, dst_ip, ingress_protocol))) =
+                (ingress_filter, ingress_input_l3)
             {
                 let mut input_extra = extra;
                 input_extra.ports_unknown = true;
@@ -1116,7 +1174,7 @@ fn resolve_cos_tx_selection_internal(
                         ingress_filter,
                         src_ip,
                         dst_ip,
-                        meta.protocol,
+                        ingress_protocol,
                         0,
                         0,
                         meta.dscp,
@@ -1129,7 +1187,7 @@ fn resolve_cos_tx_selection_internal(
                         ingress_filter,
                         src_ip,
                         dst_ip,
-                        meta.protocol,
+                        ingress_protocol,
                         0,
                         0,
                         meta.dscp,
