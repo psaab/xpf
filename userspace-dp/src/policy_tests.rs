@@ -9017,6 +9017,58 @@ fn parse_port_spec_preserves_zero_range_floor_13920() {
     // syntax is what disambiguates the literal zero from an omitted field.
     assert!(parse_port_spec("0").is_none());
 }
+#[test]
+fn zero_port_range_denies_literal_zero_when_l4_present_13920() {
+    for (protocol, src_port, dst_port, source_port, destination_port) in [
+        (PROTO_TCP, 0, 443, "0-1024", ""),
+        (PROTO_TCP, 40000, 0, "", "0-1024"),
+        (PROTO_UDP, 0, 443, "0-1024", ""),
+        (PROTO_UDP, 40000, 0, "", "0-1024"),
+    ] {
+        let state = parse_policy_state(
+            "permit",
+            &[PolicyRuleSnapshot {
+                name: "deny-zero-port".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["zero-port".to_string()],
+                application_terms: vec![PolicyApplicationSnapshot {
+                    name: "zero-port".to_string(),
+                    protocol: if protocol == PROTO_TCP { "tcp" } else { "udp" }.to_string(),
+                    source_port: source_port.to_string(),
+                    destination_port: destination_port.to_string(),
+                    icmp_type: None,
+                    icmp_code: None,
+                    inactivity_timeout: None,
+                }],
+                action: "deny".to_string(),
+                ..Default::default()
+            }],
+            &test_zone_name_to_id(),
+        );
+        let result = evaluate_policy_result_l3_aware(
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            "10.0.61.100".parse().expect("src"),
+            "172.16.80.200".parse().expect("dst"),
+            protocol,
+            src_port,
+            dst_port,
+            None,
+            64,
+            true,
+        );
+        assert_eq!(
+            result.action,
+            PolicyAction::Deny,
+            "literal port 0 must match an explicit zero-floor range"
+        );
+    }
+}
+
 
 // === #3783: configured_zone_pairs wildcard/global histogram-slot expansion ===
 

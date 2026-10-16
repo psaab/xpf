@@ -2747,39 +2747,23 @@ func matchSingleApp(cfg *config.Config, appName string, queryProto uint8, queryP
 			return false
 		}
 	}
-	// #3330: when the application term CONSTRAINS a destination port, an OMITTED
-	// query dst port must NOT match-any — it must fail closed, mirroring the
-	// runtime. The dataplane keys a single dst-port term in exact_dst_ports and
-	// range terms in range_terms (policy.rs CompiledApplications.matches): an
-	// omitted query port must NOT match-any — it must fail closed, mirroring the
-	// runtime. A concrete L4 port of 0 is allowed when the configured range
-	// explicitly includes it; `l4Present` distinguishes that tuple from a
-	// flowless packet whose extracted port also defaults to 0.
+	// #3330: when the application term CONSTRAINS a port, an OMITTED query
+	// port must NOT match-any — it must fail closed, mirroring the runtime.
+	// Query encodes an omitted port as zero, so it cannot distinguish a literal
+	// L4 port 0 from no extracted port; only the dataplane's `l4Present` bit can
+	// make that distinction.
 	if app.DestinationPort != "" {
 		// #5572: a non-first fragment (l4Present == false) has no L4 header, so a
 		// destination-port term fails closed unconditionally — even a term like
-		// `destination-port 0-1023` that a naive port-0 query would spuriously
-		// match. This is the exact port-gate the dataplane's matches() applies
-		// (exact_dst_ports / range_terms are consulted only when l4_present).
-		if !l4Present {
-			return false
-		}
-		if dstPort < 0 || !portMatches(app.DestinationPort, dstPort) {
+		// `destination-port 0-1023` must not match an omitted-port query.
+		if !l4Present || dstPort <= 0 || !portMatches(app.DestinationPort, dstPort) {
 			return false
 		}
 	}
 	// #3415: when the application term CONSTRAINS a source port, an omitted
-	// query source port must fail closed, mirroring the runtime. A concrete L4
-	// source port of 0 is valid when the configured range includes it, while
-	// `l4Present` below distinguishes flowless packets with no extracted port.
+	// query source port must fail closed, mirroring the runtime.
 	if app.SourcePort != "" {
-		// #5572: a non-first fragment has no L4 header — a source-port term fails
-		// closed unconditionally, the source-side sibling of the destination-port
-		// gate above.
-		if !l4Present {
-			return false
-		}
-		if srcPort < 0 || !portMatches(app.SourcePort, srcPort) {
+		if !l4Present || srcPort <= 0 || !portMatches(app.SourcePort, srcPort) {
 			return false
 		}
 	}
