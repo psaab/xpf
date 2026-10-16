@@ -4229,10 +4229,10 @@ impl SessionTable {
     ///
     /// #9856: `kind` gates export-tombstone harvest. Only `Terminal`
     /// (the session is really gone) logs a tombstone, and only when
-    /// the removed entry satisfies the STATIC part of the owner-RG
-    /// export predicate (forward, locally-owned, non-seed,
-    /// non-fabric-ingress, exportable disposition); the window parts
-    /// (owner-RG set, `install_epoch <= kick_epoch`) are checked at
+    /// the removed entry satisfies the STATIC part of the owner-RG export
+    /// predicate (forward, locally-held, non-seed, non-worker-replica,
+    /// non-TUN-origin, and disposition in {ForwardCandidate, FabricRedirect,
+    /// NoRoute, MissingNeighbor}); the window parts
     /// push time by the worker loop via
     /// `ExpiredSession::in_export_window`.
     fn remove_entry(&mut self, key: &SessionKey, kind: RemovalKind) -> Option<SessionEntry> {
@@ -4327,7 +4327,10 @@ impl SessionTable {
                 && !entry.origin.is_local_tun_origin()
                 && matches!(
                     entry.decision.resolution.disposition,
-                    ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+                    ForwardingDisposition::ForwardCandidate
+                        | ForwardingDisposition::FabricRedirect
+                        | ForwardingDisposition::NoRoute
+                        | ForwardingDisposition::MissingNeighbor
                 )
             {
                 if self.tombstone_log.len() >= MAX_TOMBSTONES_FOR_EXPORT {

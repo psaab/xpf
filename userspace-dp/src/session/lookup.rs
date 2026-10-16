@@ -1837,4 +1837,76 @@ mod export_unresolved_sessions_10790_tests {
             "terminal policy denials are not authoritative forwarding sessions"
         );
     }
+
+    // #13683: the bulk export admits NoRoute/MissingNeighbor rows, so a
+    // terminal removal inside the export window must harvest a tombstone
+    // for them too; otherwise the peer keeps a zombie. `remove_entry`
+    // previously admitted only ForwardCandidate/FabricRedirect.
+    #[test]
+    fn terminal_removal_harvests_tombstones_for_exportable_dispositions_13683() {
+        for disposition in [
+            ForwardingDisposition::ForwardCandidate,
+            ForwardingDisposition::FabricRedirect,
+            ForwardingDisposition::NoRoute,
+            ForwardingDisposition::MissingNeighbor,
+        ] {
+            let mut sessions = SessionTable::new();
+            let egress = if disposition == ForwardingDisposition::NoRoute { 0 } else { 12 };
+            let key = key(42001);
+            assert!(sessions.install_with_protocol_with_origin(
+                key.clone(),
+                decision(disposition, egress),
+                metadata(),
+                SessionOrigin::SyncImport,
+                1_000,
+                PROTO_TCP,
+                0,
+            ));
+            let kick_epoch = sessions.current_epoch();
+            sessions.delete(&key);
+            let mut harvested = Vec::new();
+            assert!(sessions.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
+                harvested.push((
+                    tombstone.key.clone(),
+                    tombstone.decision.resolution.disposition,
+                ));
+                true
+            }));
+            assert_eq!(
+                harvested,
+                vec![(key, disposition)],
+                "terminal removal of a {disposition:?} export row must yield its tombstone"
+            );
+            // Drain-once: a second take must see nothing (no double-close).
+            let mut again = Vec::new();
+            assert!(sessions.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
+                again.push(tombstone.key.clone());
+                true
+            }));
+            assert!(again.is_empty(), "tombstone must drain exactly once");
+        }
+    }
+
+    #[test]
+    fn terminal_removal_of_policy_denied_harvests_no_tombstone_13683() {
+        let mut sessions = SessionTable::new();
+        let key = key(42002);
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            decision(ForwardingDisposition::PolicyDenied, 0),
+            metadata(),
+            SessionOrigin::SyncImport,
+            1_000,
+            PROTO_TCP,
+            0,
+        ));
+        let kick_epoch = sessions.current_epoch();
+        sessions.delete(&key);
+        let mut harvested = Vec::new();
+        assert!(sessions.take_tombstones_for_export(kick_epoch, &[1], |tombstone| {
+            harvested.push(tombstone.key.clone());
+            true
+        }));
+        assert!(harvested.is_empty(), "PolicyDenied is not export-visible and must not tombstone");
+    }
 }
