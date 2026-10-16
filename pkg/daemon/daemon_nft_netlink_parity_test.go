@@ -283,6 +283,27 @@ func runNftNetlinkParityInner(t *testing.T) {
 		parityCheck(t, xnft.Lo0TableName, oracle, func() error { _, err := inst.InstallLo0(spec); return err })
 	})
 
+	// #13955: IPv4 is-fragment cannot be represented at lo0's input hook.
+	// The text mirror must reject the atomic load; the netlink builder's
+	// fail-closed refusal is pinned in pkg/nftables.
+	t.Run("lo0_v4_fragment_refusal_13955", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
+			"lo0f": {Terms: []*config.FirewallFilterTerm{{
+				Name: "drop-frags", IsFragment: true, Action: "discard",
+			}}},
+		}
+		cfg.PolicyOptions.PrefixLists = map[string]*config.PrefixList{}
+		oracle := buildLo0FilterPayload(cfg, "lo0f", "")
+		if !strings.Contains(oracle, nftRefuseIPv4Lo0Fragment) {
+			t.Fatalf("IPv4 fragment oracle did not refuse candidate table:\\n%s", oracle)
+		}
+		spec := toNftLo0Spec(cfg, "lo0f", "")
+		if len(spec.V4Terms) != 1 || !spec.V4Terms[0].IsFragment {
+			t.Fatalf("netlink spec lost IPv4 fragment marker: %+v", spec.V4Terms)
+		}
+	})
+
 	// #6804: the flexible-match-range predicate. Before the fix NEITHER renderer
 	// carried it — the lo0 netlink spec had no field for it at all — so the term
 	// rendered WITHOUT its narrowing on the chain that is the PRIMARY
@@ -1024,7 +1045,7 @@ func parityLo0Config() *config.Config {
 			// and produce bit-identical kernel state — never drop the predicate.
 			{Name: "named-svc", Protocols: []string{"tcp"}, DestinationPorts: []string{"ssh"}, Action: "accept"},
 			{Name: "range-drop", SourcePorts: []string{"1024", "2048"}, DestinationPorts: []string{"33434-33523"}, DSCPs: []string{"ef"}, Log: true, Action: "discard"},
-			{Name: "reject-term", DestPortsExcept: []string{"80", "443"}, ICMPTypes: []int{3}, ICMPCodes: []int{4}, IsFragment: true, Action: "reject"},
+			{Name: "reject-term", DestPortsExcept: []string{"80", "443"}, ICMPTypes: []int{3}, ICMPCodes: []int{4}, Action: "reject"},
 			{Name: "syn-only", TCPFlags: []string{"syn", "&", "!ack"}, Action: "accept"},
 			{Name: "count-only", Count: "audit"},
 			{Name: "multi", DestAddresses: []string{"10.0.1.1", "10.0.1.2"}, Protocols: []string{"tcp", "udp"}, Action: "accept"},

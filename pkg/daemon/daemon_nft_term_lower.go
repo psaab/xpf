@@ -248,8 +248,24 @@ func lo0HasUnresolvedPrefixListExcept(
 // offending leaves/actions are reported via slog at the emit site instead.
 const nftRefuseUnrepresentableFrom = `comment "unrepresentable from" __xpf_refuse_unrepresentable_from__`
 
+// nftRefuseIPv4Lo0Fragment is emitted when an IPv4 lo0 filter requests
+// `is-fragment`. The lo0 input hook runs after IPv4 defragmentation, so that
+// predicate is guaranteed false there; reject the atomic table update rather
+// than silently widening the rule (#13955).
+const nftRefuseIPv4Lo0Fragment = `comment "IPv4 lo0 fragment match unavailable after defragmentation" __xpf_refuse_ipv4_lo0_fragment__`
+
 func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixLists map[string]*config.PrefixList) []string {
 	var parts []string
+
+	// IPv4 packets are reassembled before the kernel input hook, where the
+	// lo0 mirror runs. Do not emit the now-unmatchable predicate as though it
+	// enforced the authored filter. The nft-invalid sentinel rejects the
+	// atomic replacement and leaves the prior ruleset in place (#13955).
+	if family == "ip" && term != nil && term.IsFragment {
+		slog.Warn("lo0 kernel nftables mirror: refusing IPv4 is-fragment term because input follows defragmentation",
+			"term", term.Name)
+		return []string{nftRefuseIPv4Lo0Fragment}
+	}
 
 	if lo0HasUnresolvedPrefixListExcept(term, prefixLists) {
 		slog.Warn("lo0 kernel nftables mirror: refusing load over unresolved except prefix-list",
