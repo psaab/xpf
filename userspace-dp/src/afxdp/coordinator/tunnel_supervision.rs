@@ -50,6 +50,80 @@ impl super::Coordinator {
         self.forwarding.wg_engines.len()
     }
 
+    /// #14131: whether endpoint `id` currently holds a LIVE WG control
+    /// thread (entry present with a handle — not a tombstone, not
+    /// pruned). A server-level cell asserts this across a refused apply,
+    /// where the defect was the entry being removed outright.
+    #[cfg(test)]
+    pub(crate) fn wg_thread_live_for_test(&self, id: u16) -> bool {
+        self.wg_control_threads
+            .get(&id)
+            .is_some_and(|entry| entry.handle.is_some())
+    }
+
+    /// #14131: whether endpoint `id` currently holds a LIVE GRE/IPIP
+    /// local-origin thread (entry present with a handle).
+    #[cfg(test)]
+    pub(crate) fn local_tunnel_thread_live_for_test(&self, id: u16) -> bool {
+        self.tunnel_sources
+            .get(&id)
+            .is_some_and(|entry| entry.handle.is_some())
+    }
+
+    /// #14131: register TUN stand-ins so coordinator-spawned WG / GRE
+    /// threads get socketpair fds instead of real TUN devices (the
+    /// registries are `pub(super)` inside their home modules and not
+    /// reachable from the server tests). Returns the test ends.
+    #[cfg(test)]
+    pub(crate) fn register_tunnel_tun_standins_for_test(
+        wg_name: &str,
+        gre_name: &str,
+    ) -> (std::fs::File, std::fs::File) {
+        (
+            super::wg_control::register_tun_standin_9521(wg_name),
+            crate::afxdp::tunnel::register_tun_standin_10553(gre_name),
+        )
+    }
+
+    /// #14131: install one fake worker record so the GRE spawn-pass
+    /// worker gate (`workers.records` non-empty) passes. A server-level
+    /// cell must call this AFTER its baseline reconcile, whose teardown
+    /// clears any record registered beforehand.
+    #[cfg(test)]
+    pub(crate) fn test_seed_worker_record_for_14131(&mut self) {
+        use std::collections::VecDeque;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::sync::Mutex;
+        let handle = crate::afxdp::types::WorkerHandle {
+            stop: std::sync::Arc::new(AtomicBool::new(false)),
+            heartbeat: std::sync::Arc::new(AtomicU64::new(0)),
+            commands: std::sync::Arc::new(Mutex::new(VecDeque::new())),
+            session_export_ack: std::sync::Arc::new(AtomicU64::new(0)),
+            cos_status: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+            runtime_atomics: std::sync::Arc::new(
+                crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new(),
+            ),
+            cold_path_atomics: std::sync::Arc::new(
+                crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new(),
+            ),
+        };
+        self.workers.register(
+            0,
+            super::worker_manager::WorkerRuntimeRecord::for_test(handle),
+            None,
+        );
+    }
+
+    /// #14131: run the GRE local-origin reconcile once (spawn pass
+    /// included) against the current forwarding state. A server-level
+    /// cell uses this after seeding a worker record post-baseline, so
+    /// the GRE thread spawns without a second snapshot apply (which
+    /// would itself be the code under test).
+    #[cfg(test)]
+    pub(crate) fn test_spawn_local_tunnels_for_14131(&mut self) {
+        self.reconcile_local_tunnel_sources();
+    }
+
     /// #1881: reconcile GRE local-origin threads against the current
     /// `forwarding.tunnel_endpoints`. Called from initial worker
     /// bring-up AND every armed `refresh_runtime_snapshot` — tunnel
