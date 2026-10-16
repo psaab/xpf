@@ -11,13 +11,11 @@
 //! kernel FIB with no zone policy (#2345 bypass); a deny written for the
 //! wire (public/VIP) tuple matched and cached the WRONG rule's denial id.
 //!
-//! These cells pin the pure `noroute_policy_adjudication` the arm now
-//! calls. The arm itself still cannot be driven from this crate (#7480
-//! note: it needs a live binding, a UMEM and a descriptor ring), so the
-//! wiring is held by the source shape: the arm passes
-//! `decision.resolution`, `decision.nat` and the flow the fences below it
-//! consume, and everything the deny path emits (event zones, app-id port,
-//! cached `CachedPolicyDeny`) is derived from this struct's fields.
+//! These cells pin `noroute_policy_adjudication`, extracted from the arm.
+//! #13769 also adds end-to-end cells below that drive a descriptor through
+//! `poll_binding_process_descriptor` itself, so the arm's wiring — notably
+//! the #13645 effective-protocol argument — is held behaviourally, not by
+//! feeding the selector and adjudicator by hand.
 
 use super::*;
 use crate::afxdp::forwarding_build::build_forwarding_state;
@@ -757,5 +755,122 @@ fn noroute_uses_flowless_effective_protocol_not_raw_meta_13645() {
         raw.denial.is_none(),
         "fixture premise: the raw inner-TCP stamp misses the ah deny, so the \
          effective-protocol feed is load-bearing"
+    );
+}
+
+/// #13769: drive the real descriptor through the NoRoute arm. The IPv6
+/// inner route selects a GRE logical egress; its deliberately unreachable
+/// outer endpoint makes the production resolver retain that egress with a
+/// NoRoute disposition. An AH-only deny must fire on the frame-derived
+/// protocol 51, not the shim's inner-TCP stamp 6.
+#[test]
+fn noroute_descriptor_uses_effective_protocol_for_ah_deny_13769() {
+    let mut snapshot = crate::afxdp::test_fixtures::native_gre_snapshot(false);
+    snapshot.zones.push(crate::ZoneSnapshot {
+        name: "lan".to_string(),
+        id: TEST_LAN_ZONE_ID,
+        ..Default::default()
+    });
+    let (sfmix_domain, _) = crate::session::install_table_identity("sfmix");
+    snapshot.interfaces.push(crate::InterfaceSnapshot {
+        name: "reth1.0".to_string(),
+        zone: "lan".to_string(),
+        linux_name: "ge-0-0-1".to_string(),
+        ifindex: 24,
+        routing_domain: sfmix_domain,
+        ..Default::default()
+    });
+    snapshot.policies = ah_deny_snapshot_13645().policies;
+    snapshot.policies[0].from_zone = "any".to_string();
+    snapshot.policies[0].to_zone = "any".to_string();
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "sfmix.inet6.0".to_string(),
+        family: "inet6".to_string(),
+        destination: "::/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["@gr-0/0/0.0".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    snapshot.tunnel_endpoints[0].destination = "2001:db8:dead::7".to_string();
+    let forwarding = build_forwarding_state(&snapshot);
+
+    let mut frame = vec![0u8; 14 + 40 + 12 + 20];
+    frame[..6].copy_from_slice(&[0xff; 6]);
+    frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+    frame[14] = 0x60;
+    frame[14 + 4..14 + 6].copy_from_slice(&32u16.to_be_bytes());
+    frame[14 + 6] = crate::ip_proto::PROTO_AH;
+    frame[14 + 7] = 64;
+    frame[14 + 8..14 + 24].copy_from_slice(
+        &"2001:db8:61::100"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
+    frame[14 + 24..14 + 40].copy_from_slice(
+        &"2001:db8::2"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
+    frame[14 + 40] = crate::ip_proto::PROTO_TCP;
+    frame[14 + 41] = 1;
+
+    let mut meta = crate::afxdp::tests_support::txn_meta_v6(24, frame.len());
+    meta.l4_offset = 14 + 40 + 12;
+    meta.flow_src_addr = "2001:db8:61::100".parse::<std::net::Ipv6Addr>().unwrap().octets();
+    meta.flow_dst_addr = "2001:db8::2".parse::<std::net::Ipv6Addr>().unwrap().octets();
+    assert_eq!(
+        crate::afxdp::frame::parse_session_flow_from_bytes(&frame, meta),
+        None,
+        "AH must enter NoRoute adjudication as flowless"
+    );
+    let route = crate::afxdp::forwarding::lookup_forwarding_resolution_inner(
+        &forwarding,
+        None,
+        "2001:db8::2".parse().expect("destination"),
+        Some("sfmix.inet6.0"),
+    )
+    .resolution;
+    assert_eq!(route.disposition, ForwardingDisposition::NoRoute);
+    assert_eq!(route.egress_ifindex, 362);
+    assert_eq!(
+        forwarding.egress_zone_id(route.egress_ifindex),
+        crate::test_zone_ids::TEST_SFMIX_ZONE_ID
+    );
+    let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth1.0");
+    let mut sessions = crate::session::SessionTable::new();
+    let (_batch, dbg) = crate::afxdp::tests_support::txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &BTreeMap::new(),
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(dbg.rx, 1, "the descriptor must reach the production poll body");
+    assert_eq!(dbg.no_route, 1, "the dead GRE underlay must take the NoRoute arm");
+    assert_eq!(
+        dbg.policy_deny, 1,
+        "the AH-only deny must be applied inside NoRoute adjudication; reverting \
+         the callsite to meta.protocol=TCP lets the default permit delegate it"
+    );
+    assert_eq!(dbg.forward, 0);
+    assert_eq!(
+        forwarding
+            .policy
+            .rule_for_policy_id(6464)
+            .expect("AH deny rule")
+            .hit_counter
+            .test_packet_count(),
+        1,
+        "the configured AH rule itself must adjudicate the descriptor"
     );
 }
