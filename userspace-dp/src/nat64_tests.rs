@@ -3207,6 +3207,12 @@ fn translate_v6_to_v4_first_fragment_still_translates() {
     udp[0..2].copy_from_slice(&1111u16.to_be_bytes());
     udp[2..4].copy_from_slice(&2222u16.to_be_bytes());
     udp[4..6].copy_from_slice(&8u16.to_be_bytes());
+    let checksum = checksum16_ipv6_pseudo(src_v6, dst_v6, PROTO_UDP, &udp);
+    udp[6..8].copy_from_slice(&if checksum == 0 {
+        0xFFFFu16.to_be_bytes()
+    } else {
+        checksum.to_be_bytes()
+    });
 
     // Fragment header with offset 0 (first fragment), MF can be set.
     let mut frag = vec![0u8; 8 + udp.len()];
@@ -3664,6 +3670,99 @@ fn nat64_fragment_drop_predicates_match_guards() {
     ));
     // Wrong/unknown family → not attributed.
     assert!(!frame_is_nat64_fragment_drop(&l2_frame(&icmp_first, 0x86dd), 0));
+}
+
+#[test]
+fn nat64_v6_to_v4_fragmented_udp_zero_checksum_drops_13696() {
+    let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::c000:0201".parse().unwrap();
+    let snat = Ipv4Addr::new(198, 51, 100, 1);
+    let dst4 = Ipv4Addr::new(192, 0, 2, 1);
+    let mut pkt = make_ipv6_frag_udp(src, dst, 5000, 6000, b"fragment", 0, true, 0xDEAD);
+    pkt[54..56].copy_from_slice(&[0, 0]);
+    let mut out = [0u8; 256];
+    // FAIL-ON-MASTER: master translates this first fragment after applying an
+    // address delta to the illegal zero checksum instead of dropping it.
+    assert!(translate_v6_to_v4(&pkt, snat, dst4, false).is_none());
+    assert!(write_v6_to_v4_into(&mut out, &pkt, snat, dst4, false).is_none());
+    assert_eq!(
+        out, [0u8; 256],
+        "#13696: reject before writing a partial IPv4 packet"
+    );
+    assert!(v6_to_v4_is_fragment_drop(&pkt));
+    assert!(frame_is_nat64_fragment_drop(
+        &l2_frame(&pkt, 0x86dd),
+        libc::AF_INET6
+    ));
+    assert!(v6_to_v4_output_len(&pkt).is_none());
+
+    // An atomic fragment contains the complete UDP datagram: recompute a valid
+    // checksum instead of applying an incremental delta to the zero baseline.
+    let mut atomic = make_ipv6_frag_udp(src, dst, 5000, 6000, b"atomic", 0, false, 0x1234);
+    atomic[54..56].copy_from_slice(&[0, 0]);
+    let translated = translate_v6_to_v4(&atomic, snat, dst4, false).expect("atomic fragment");
+    assert_ne!(&translated[26..28], &[0, 0]);
+    assert_eq!(
+        checksum16_ipv4_pseudo(snat, dst4, PROTO_UDP, &translated[20..]),
+        0
+    );
+}
+
+#[test]
+fn nat64_v6_to_v4_zero_checksum_fragment_guard_preserves_siblings_13696() {
+    let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst: Ipv6Addr = "64:ff9b::c000:0201".parse().unwrap();
+    let snat = Ipv4Addr::new(198, 51, 100, 1);
+    let dst4 = Ipv4Addr::new(192, 0, 2, 1);
+    let udp = make_ipv6_frag_udp(src, dst, 5000, 6000, b"fragment", 0, true, 0xDEAD);
+    let translated = translate_v6_to_v4(&udp, snat, dst4, false).expect("non-zero UDP checksum");
+    assert_eq!(
+        checksum16_ipv4_pseudo(snat, dst4, PROTO_UDP, &translated[20..]),
+        0
+    );
+    assert!(!v6_to_v4_is_fragment_drop(&udp));
+
+    // Construct a valid UDP datagram whose computed IPv6 checksum is exactly
+    // zero; RFC 768 requires transmitting that result as 0xFFFF.
+    let mut udp_zero_sum = [0u8; 10];
+    udp_zero_sum[0..2].copy_from_slice(&5000u16.to_be_bytes());
+    udp_zero_sum[2..4].copy_from_slice(&6000u16.to_be_bytes());
+    udp_zero_sum[4..6].copy_from_slice(&10u16.to_be_bytes());
+    let zero_sum_payload = (0..=u16::MAX)
+        .find(|word| {
+            udp_zero_sum[8..10].copy_from_slice(&word.to_be_bytes());
+            checksum16_ipv6_pseudo(src, dst, PROTO_UDP, &udp_zero_sum) == 0
+        })
+        .expect("one's-complement checksum has a zero-result payload word")
+        .to_be_bytes();
+    let udp_ffff = make_ipv6_frag_udp(src, dst, 5000, 6000, &zero_sum_payload, 0, true, 0xBEEF);
+    assert_eq!(&udp_ffff[54..56], &[0xff, 0xff]);
+    let translated = translate_v6_to_v4(&udp_ffff, snat, dst4, false)
+        .expect("computed-zero checksum encoded as 0xFFFF still translates");
+    assert_eq!(
+        checksum16_ipv4_pseudo(snat, dst4, PROTO_UDP, &translated[20..]),
+        0
+    );
+
+    // TCP 0x0000 is a legal checksum value; it is not UDP's no-checksum marker.
+    let mut tcp = vec![0u8; 20];
+    tcp[0..2].copy_from_slice(&5000u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&6000u16.to_be_bytes());
+    tcp[12] = 0x50;
+    let mut frag = vec![0u8; 8 + tcp.len()];
+    frag[0] = PROTO_TCP;
+    frag[2..4].copy_from_slice(&1u16.to_be_bytes());
+    frag[8..].copy_from_slice(&tcp);
+    let mut pkt = vec![0u8; 40 + frag.len()];
+    pkt[0] = 0x60;
+    pkt[4..6].copy_from_slice(&(frag.len() as u16).to_be_bytes());
+    pkt[6] = 44;
+    pkt[7] = 64;
+    pkt[8..24].copy_from_slice(&src.octets());
+    pkt[24..40].copy_from_slice(&dst.octets());
+    pkt[40..].copy_from_slice(&frag);
+    assert!(translate_v6_to_v4(&pkt, snat, dst4, false).is_some());
+    assert!(!v6_to_v4_is_fragment_drop(&pkt));
 }
 
 #[test]

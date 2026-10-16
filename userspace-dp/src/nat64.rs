@@ -82,8 +82,11 @@
 //!   * **v4→v6 UDP with a zero IPv4 checksum** — RFC 768 "no checksum present";
 //!     there is no baseline to adjust and IPv6 UDP mandates a checksum, so one
 //!     must be GENERATED.
-//!   * **v6→v4 UDP with a zero (illegal) IPv6 checksum** — no trustworthy
-//!     baseline; defended against with a recompute.
+//!   * **Complete v6→v4 UDP datagrams with a zero checksum** — the illegal
+//!     IPv6 UDP checksum has no baseline, but all payload bytes are available,
+//!     so the translated IPv4 checksum is recomputed. A real first fragment
+//!     with that checksum is instead dropped before output writes (#13696):
+//!     only part of the datagram is present, so recomputation is impossible.
 //!
 //! Pinned by the `nat64_3025_*` tests: the incremental output equals an
 //! independent full recompute (v6→v4 / v4→v6, TCP + UDP), the v4 zero-checksum
@@ -2350,8 +2353,9 @@ pub(crate) fn ipv6_fragment_header(packet: &[u8]) -> Option<Ipv6FragInfo> {
 /// fail-closed FRAGMENT drop in [`write_v6_to_v4_into`]?
 ///
 /// Any readable non-zero offset in the chain drops, regardless of preceding
-/// ATOMIC sightings. A real first fragment (M=1, offset 0) drops only for
-/// ICMPv6. An all-ATOMIC or non-fragment chain returns false.
+/// Any readable non-zero offset in the chain drops, regardless of preceding
+/// ATOMIC sightings. Real first fragments drop for ICMPv6, and for UDP with
+/// the illegal zero checksum. All-ATOMIC or non-fragment chains return false.
 pub(crate) fn v6_to_v4_is_fragment_drop(packet: &[u8]) -> bool {
     if ipv6_is_non_first_fragment(packet) {
         return true;
@@ -2359,11 +2363,18 @@ pub(crate) fn v6_to_v4_is_fragment_drop(packet: &[u8]) -> bool {
     let Some(info) = ipv6_fragment_header(packet) else {
         return false;
     };
-    if !info.more {
-        return false; // atomic fragment (MF=0, offset 0) — still translates
+    if info.offset_units != 0 {
+        return true;
     }
-    // First fragment (MF=1, offset 0): dropped only when it carries ICMPv6.
-    matches!(ipv6_l4_offset_and_protocol(packet), Some((_, PROTO_ICMPV6)))
+    if !info.more {
+        return false; // atomic fragment (MF=0, offset 0) — complete datagram
+    }
+    let Some((l4_offset, protocol)) = ipv6_l4_offset_and_protocol(packet) else {
+        return false;
+    };
+    protocol == PROTO_ICMPV6
+        || (protocol == PROTO_UDP
+            && packet.get(l4_offset + 6..l4_offset + 8) == Some(&[0, 0][..]))
 }
 /// #2562: v4→v6 twin of [`v6_to_v4_is_fragment_drop`] for the reverse NAT64
 /// direction, mirroring the drop conditions of [`write_v4_to_v6_into`].
@@ -2558,6 +2569,19 @@ fn write_v6_to_v4_translate(
         }
     }
 
+    // #13696 / RFC 8200 §8.1: IPv6 UDP requires a checksum. A zero field in a
+    // REAL first fragment is an illegal input and has no trustworthy
+    // incremental baseline; the full datagram is unavailable to recompute it.
+    // Drop before touching the caller's output buffer, matching the v4→v6
+    // sibling's zero-checksum fragment gate below. Atomic fragments have the
+    // complete datagram and remain eligible for a full checksum recompute.
+    if l4_protocol == PROTO_UDP
+        && ipv6_fragment_header(packet).is_some_and(|info| info.more && info.offset_units == 0)
+        && packet.get(l4_offset + 6..l4_offset + 8) == Some(&[0, 0][..])
+    {
+        return None;
+    }
+
     // The L4 region starts at the walked offset and ends at the IPv6
     // payload boundary (`40 + payload_len`). The ext-header bytes between
     // byte 40 and `l4_offset` are stripped by NAT64: RFC 7915 §5.1 maps the
@@ -2641,22 +2665,26 @@ fn write_v6_to_v4_translate(
     // BYTE-IDENTICAL to a full recompute over the whole payload (one's-complement
     // addition is exact), but without re-summing every byte:
     //
-    //   * #2488 FRAGMENT (TCP/UDP): a full recompute is IMPOSSIBLE — the first
-    //     fragment's checksum covers the whole reassembled payload that is not
-    //     present here — so the incremental adjustment is mandatory.
+    //   * #2488 FRAGMENT (TCP, or UDP with a non-zero baseline): a full
+    //     recompute is IMPOSSIBLE — the first fragment's checksum covers the
+    //     whole reassembled payload that is not present here — so incremental
+    //     adjustment is mandatory. A real first fragment with zero IPv6 UDP
+    //     checksum is dropped before output writes (#13696); an atomic UDP
+    //     fragment has all bytes and takes the full recompute.
     //   * #3025 NON-fragment (TCP, or UDP with a non-zero baseline checksum):
     //     a full recompute is possible but wasteful; the incremental adjustment
     //     produces the identical wire result at O(changed-words) cost.
     //   * ICMP: ICMPv6→ICMPv4 genuinely rewrites the message and ICMPv4 carries
     //     no pseudo-header, so `translate_icmpv6_message_to_icmpv4` already set
     //     the correct checksum and the generic recompute re-affirms it.
-    //   * Non-fragment UDP with a 0x0000 baseline: an IPv6 UDP checksum of zero
-    //     is illegal (no trustworthy baseline to adjust), so fall back to a full
-    //     recompute to GENERATE a valid one.
+    //   * Complete UDP datagrams with a zero v6 checksum: no trustworthy
+    //     baseline exists, so the full recompute generates a valid checksum.
     let nonfrag_incremental = frag_info.is_none()
         && (ipv4_protocol == PROTO_TCP
             || (ipv4_protocol == PROTO_UDP && out.get(26..28) != Some(&[0, 0][..])));
-    let frag_incremental = frag_info.is_some() && matches!(ipv4_protocol, PROTO_TCP | PROTO_UDP);
+    let frag_incremental = frag_info.is_some()
+        && (ipv4_protocol == PROTO_TCP
+            || (ipv4_protocol == PROTO_UDP && out.get(26..28) != Some(&[0, 0][..])));
     if frag_incremental || nonfrag_incremental {
         let mut v6_addrs = [0u8; 32];
         v6_addrs.copy_from_slice(&packet[8..40]);
@@ -2704,6 +2732,12 @@ pub(crate) fn v6_to_v4_output_len(packet: &[u8]) -> Option<usize> {
         }
         let total_len = 20usize.checked_add(l4_payload.len())?;
         return (total_len <= u16::MAX as usize).then_some(total_len);
+    }
+    if l4_protocol == PROTO_UDP
+        && ipv6_fragment_header(packet).is_some_and(|info| info.more && info.offset_units == 0)
+        && l4_payload.get(6..8) == Some(&[0, 0][..])
+    {
+        return None;
     }
     let l4_len = match l4_protocol {
         PROTO_TCP | PROTO_UDP => l4_payload.len(),
