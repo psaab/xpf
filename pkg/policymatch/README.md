@@ -622,14 +622,14 @@ override EXACTLY:
   `PolicyName`/`PolicyID`/`RuleID` name the real rule), and
   `Result.FragmentDenyNote()` renders the SSOT over-drop advisory.
 
-`Result.Action` on a fragment-associated verdict is ALWAYS `config.PolicyDeny`,
-never `reject`, even when the shadowing rule is a `reject`. A non-first fragment
-has no L4 header, so the dataplane cannot emit a RST/ICMP — it can only silently
-DROP — and `frag_associated_deny_result` hardcodes `PolicyAction::Deny` to match
-(`isSkippedFragDeny` still accepts a `reject` because a reject shadows the
-fragment identically to a deny; only the reported label is normalized to deny).
-Both verdicts are DROPs, so the #5572 false-permit is not re-introduced — this
-only keeps the deny-vs-reject label in parity with the wire.
+`Result.Action` on a fragment-associated verdict preserves the skipped rule's
+configured `deny` or `reject` action, matching the Rust
+`PolicyEvaluationResult` (#13705). This is the policy disposition, not a claim
+that a reject reply was sent: a non-first fragment has no L4 header and silently
+DROPs without RST/ICMP. The dataplane's RT_FLOW event path separately downgrades
+a reply-free Reject to DENY, while the simulator's match result retains the
+configured policy action. Both dispositions still drop the fragment, so the
+#5572 false-permit is not re-introduced.
 
 Scoped narrowly, mirroring the dataplane: a fragment a real (protocol-only /
 `any`) deny matches directly is a normal deny (not flagged as an override); a
