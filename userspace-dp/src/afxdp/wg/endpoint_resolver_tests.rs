@@ -1,11 +1,9 @@
-//! #7158 endpoint-resolver tests.
+//! #7158 and #13666 endpoint-resolver tests.
 //!
-//! Hermetic: every fixture uses either an IP literal (which `to_socket_addrs`
-//! parses without touching a resolver) or a syntactically invalid target (which
-//! it rejects with `InvalidInput`, also without touching a resolver). No test
-//! here depends on a name existing, on `/etc/hosts`, or on the sandbox having
-//! working DNS — a resolver-dependent fixture would fail differently on a
-//! developer box and in CI, and the failure would look like the code.
+//! Existing resolution fixtures use IP literals or syntactically invalid
+//! targets, so they do not depend on DNS, `/etc/hosts`, or external network.
+//! The injected lookup tests exercise concurrency and worker failure without
+//! invoking a real resolver.
 
 use super::*;
 
@@ -202,4 +200,110 @@ fn one_peers_failure_does_not_disturb_another_7158() {
          not abort the pass or discard earlier work"
     );
     assert!(sh.resolved.lock().unwrap().get(&PK_B).is_none());
+}
+
+/// #13666: multiple peers' blocking DNS lookups run concurrently, but the
+/// resolver thread alone folds outcomes into the shared state. The peak bound
+/// also prevents a large peer set from creating unbounded worker threads.
+#[test]
+fn peer_endpoint_lookups_are_bounded_and_concurrent_13666() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let sh = shared();
+    let targets: Vec<_> = (0..10)
+        .map(|n| {
+            let mut pubkey = [0u8; 32];
+            pubkey[0] = n;
+            (pubkey, format!("peer-{n}"))
+        })
+        .collect();
+    let active = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let held = resolve_once_with(&sh, &targets, false, |_| {
+        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(30));
+        active.fetch_sub(1, Ordering::SeqCst);
+        Ok(vec!["203.0.113.7:51820".parse().unwrap()])
+    });
+
+    assert_eq!(held, targets.len());
+    assert!(
+        peak.load(Ordering::SeqCst) > 1,
+        "peer lookups were serialized instead of concurrent"
+    );
+    assert!(
+        peak.load(Ordering::SeqCst) <= 8,
+        "lookup fan-out exceeded its configured bound"
+    );
+    assert_eq!(
+        sh.telemetry.counters.resolve_ok.load(Ordering::Relaxed),
+        targets.len() as u64
+    );
+}
+
+/// #13666: a panicking lookup is isolated to its peer and does not prevent
+/// later results from being applied.
+#[test]
+fn panicking_endpoint_lookup_does_not_stop_sibling_updates_13666() {
+    let sh = shared();
+    let targets = vec![
+        (PK_A, "panic-peer".to_string()),
+        (PK_B, "healthy-peer".to_string()),
+    ];
+    let held = resolve_once_with(&sh, &targets, false, |host| {
+        if host == "panic-peer" {
+            panic!("injected resolver panic");
+        }
+        Ok(vec!["203.0.113.8:51820".parse().unwrap()])
+    });
+
+    assert_eq!(held, 1);
+    assert_eq!(
+        sh.resolved.lock().unwrap().get(&PK_B).copied(),
+        Some("203.0.113.8:51820".parse().unwrap())
+    );
+    assert_eq!(
+        sh.telemetry.counters.resolve_fail.load(Ordering::Relaxed),
+        1
+    );
+}
+
+/// #13666: a single slow lookup must not hold later peers until it completes,
+/// including peers beyond the concurrent-worker limit.
+#[test]
+fn slow_endpoint_does_not_block_later_peers_13666() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let sh = shared();
+    let targets: Vec<_> = (0..9)
+        .map(|n| {
+            let mut pubkey = [0u8; 32];
+            pubkey[0] = n;
+            (pubkey, format!("peer-{n}"))
+        })
+        .collect();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let resolver = std::thread::spawn(move || {
+        resolve_once_with(&sh, &targets, false, |host| {
+            if host == "peer-0" {
+                release_rx.lock().unwrap().recv().unwrap();
+            } else if host == "peer-8" {
+                started_tx.send(()).unwrap();
+            }
+            Ok(vec!["203.0.113.9:51820".parse().unwrap()])
+        })
+    });
+
+    let later_peer_started = started_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+    release_tx.send(()).unwrap();
+    assert_eq!(resolver.join().unwrap(), 9);
+    assert!(
+        later_peer_started,
+        "the ninth peer lookup waited for the first slow worker/batch"
+    );
 }

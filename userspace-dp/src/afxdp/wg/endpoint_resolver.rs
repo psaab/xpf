@@ -14,8 +14,9 @@
 //! packet on the tunnel behind a slow or unreachable DNS server, converting a
 //! name-service problem into a forwarding outage.
 //!
-//! So lookups happen here, on a thread that may block freely, and the loop reads
-//! the latest answer with an uncontended lock and never waits for one.
+//! The dedicated resolver uses a bounded worker set for blocking lookups, and
+//! the control loop reads the latest answer with an uncontended lock and never
+//! waits for DNS.
 //!
 //! ## Why not at commit either
 //!
@@ -53,7 +54,7 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Re-resolve cadence once a peer has an address. DDNS records carry short
@@ -239,73 +240,160 @@ fn resolve_once(
     targets: &[([u8; 32], String)],
     socket_is_v6: bool,
 ) -> usize {
-    let mut held = 0usize;
-    for (pubkey, host_port) in targets {
-        match host_port.to_socket_addrs() {
-            Ok(addrs) => {
-                // Keep only the family the interface's single UDP socket can
-                // send from. A dual-stack name on a v4 socket must yield its A
-                // record, not whichever answer happened to sort first.
-                let chosen = addrs.into_iter().find(|a| a.is_ipv6() == socket_is_v6);
-                match chosen {
-                    Some(addr) => {
-                        shared
-                            .telemetry
-                            .counters
-                            .resolve_ok
-                            .fetch_add(1, Ordering::Relaxed);
-                        if let Ok(mut map) = shared.resolved.lock() {
-                            let prior = map.insert(*pubkey, addr);
-                            if prior != Some(addr) {
-                                shared
-                                    .telemetry
-                                    .counters
-                                    .endpoint_changed
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
+    resolve_once_with(shared, targets, socket_is_v6, |host_port| {
+        host_port.to_socket_addrs().map(|a| a.collect::<Vec<_>>())
+    })
+}
+
+/// The single place where a lookup outcome is folded into shared state.
+/// Outcomes are applied in target order to preserve the existing counter,
+/// last-good-address and last-error semantics.
+fn apply_resolution(
+    shared: &ResolverShared,
+    pubkey: &[u8; 32],
+    host_port: &str,
+    socket_is_v6: bool,
+    outcome: std::io::Result<Vec<SocketAddr>>,
+) -> bool {
+    match outcome {
+        Ok(addrs) => {
+            // Keep only the family the interface's single UDP socket can
+            // send from. A dual-stack name on a v4 socket must yield its A
+            // record, not whichever answer happened to sort first.
+            let chosen = addrs.into_iter().find(|a| a.is_ipv6() == socket_is_v6);
+            match chosen {
+                Some(addr) => {
+                    shared
+                        .telemetry
+                        .counters
+                        .resolve_ok
+                        .fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut map) = shared.resolved.lock() {
+                        let prior = map.insert(*pubkey, addr);
+                        if prior != Some(addr) {
+                            shared
+                                .telemetry
+                                .counters
+                                .endpoint_changed
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    None => {
-                        shared
-                            .telemetry
-                            .counters
-                            .family_mismatch
-                            .fetch_add(1, Ordering::Relaxed);
-                        set_last_error(
-                            shared,
-                            format!(
-                                "{host_port} resolved, but to no {} address; \
-                                 this WireGuard interface binds one {} UDP socket",
-                                if socket_is_v6 { "IPv6" } else { "IPv4" },
-                                if socket_is_v6 { "IPv6" } else { "IPv4" },
-                            ),
-                        );
-                    }
+                }
+                None => {
+                    shared
+                        .telemetry
+                        .counters
+                        .family_mismatch
+                        .fetch_add(1, Ordering::Relaxed);
+                    set_last_error(
+                        shared,
+                        format!(
+                            "{host_port} resolved, but to no {} address; \
+                             this WireGuard interface binds one {} UDP socket",
+                            if socket_is_v6 { "IPv6" } else { "IPv4" },
+                            if socket_is_v6 { "IPv6" } else { "IPv4" },
+                        ),
+                    );
                 }
             }
-            Err(e) => {
-                shared
-                    .telemetry
-                    .counters
-                    .resolve_fail
-                    .fetch_add(1, Ordering::Relaxed);
-                set_last_error(shared, format!("{host_port}: {e}"));
-                // Deliberately no removal from `resolved`: the last good
-                // address is retained across a failed lookup. See the module
-                // header for why tearing down here would make the tunnel less
-                // reliable than the name service.
-            }
         }
-        if shared
-            .resolved
-            .lock()
-            .map(|m| m.contains_key(pubkey))
-            .unwrap_or(false)
-        {
-            held += 1;
+        Err(e) => {
+            shared
+                .telemetry
+                .counters
+                .resolve_fail
+                .fetch_add(1, Ordering::Relaxed);
+            set_last_error(shared, format!("{host_port}: {e}"));
+            // Deliberately no removal from `resolved`: the last good
+            // address is retained across a failed lookup.
         }
     }
-    held
+    shared
+        .resolved
+        .lock()
+        .map(|m| m.contains_key(pubkey))
+        .unwrap_or(false)
+}
+
+/// A pass with the blocking lookup injected, so concurrency can be tested
+/// without depending on DNS or the environment.
+fn resolve_once_with<F>(
+    shared: &ResolverShared,
+    targets: &[([u8; 32], String)],
+    socket_is_v6: bool,
+    lookup: F,
+) -> usize
+where
+    F: Fn(&str) -> std::io::Result<Vec<SocketAddr>> + Sync,
+{
+    if targets.len() < 2 {
+        let mut held = 0;
+        for (pubkey, host_port) in targets {
+            if apply_resolution(shared, pubkey, host_port, socket_is_v6, lookup(host_port)) {
+                held += 1;
+            }
+        }
+        return held;
+    }
+    // Bound blocking calls and per-pass worker creation even if a tunnel has
+    // many peers. Workers claim the next target as soon as they finish, so a
+    // slow lookup does not hold up later peers merely because they share a
+    // batch. State application below remains single-threaded and ordered.
+    const MAX_CONCURRENT_LOOKUPS: usize = 8;
+    let lookup = &lookup;
+    let next_index = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let next_index = &next_index;
+        let (send, receive) = std::sync::mpsc::channel();
+        let workers = targets.len().min(MAX_CONCURRENT_LOOKUPS);
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let send = send.clone();
+            handles.push(scope.spawn(move || loop {
+                let index = next_index.fetch_add(1, Ordering::Relaxed);
+                let Some((_, host_port)) = targets.get(index) else {
+                    break;
+                };
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lookup(host_port)))
+                        .unwrap_or_else(|_| Err(std::io::Error::other("endpoint lookup panicked")));
+                if send.send((index, outcome)).is_err() {
+                    break;
+                }
+            }));
+        }
+        drop(send);
+
+        // Receive into indexed slots, then fold in target order so the
+        // observable counters and last-error value retain their old ordering.
+        let mut outcomes: Vec<Option<std::io::Result<Vec<SocketAddr>>>> =
+            (0..targets.len()).map(|_| None).collect();
+        for _ in 0..targets.len() {
+            let (index, outcome) = receive
+                .recv()
+                .expect("endpoint lookup workers stopped before completing the pass");
+            outcomes[index] = Some(outcome);
+        }
+        for handle in handles {
+            handle
+                .join()
+                .expect("endpoint lookup worker panicked outside the lookup");
+        }
+
+        let mut held = 0;
+        for ((pubkey, host_port), outcome) in targets.iter().zip(outcomes) {
+            if apply_resolution(
+                shared,
+                pubkey,
+                host_port,
+                socket_is_v6,
+                outcome.expect("each endpoint lookup must return one outcome"),
+            ) {
+                held += 1;
+            }
+        }
+        held
+    })
 }
 
 fn set_last_error(shared: &ResolverShared, msg: String) {
