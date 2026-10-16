@@ -11989,10 +11989,17 @@ fn purge_translated_synced_hit_releases_nat64_reservation_5295() {
         1_000_000,
         0,
     );
+    assert_eq!(
+        forwarding.nat64.prefixes[0]
+            .port_allocator
+            .snapshot()
+            .live_flows,
+        0,
+        "purge must release the active NAT64 session reference"
+    );
 
-    // After the purge releases the reservation, a fresh local NAT64 flow re-owns
-    // the freed first port 1024. On revert (no release) 1024 stays reserved and
-    // the fresh flow is pushed to 1025.
+    // Purge drops the active flow reference but keeps its idle BIB mapping.
+    // A different source therefore allocates the next pool port (1025).
     let (snat2, port2) = forwarding
         .nat64
         .allocate_source(
@@ -12007,9 +12014,8 @@ fn purge_translated_synced_hit_releases_nat64_reservation_5295() {
         .expect("probe NAT64 flow allocates");
     assert_eq!(snat2, snat, "single-address pool => same snat_v4");
     assert_eq!(
-        port2, 1024,
-        "purge must release the synced NAT64 flow's reserved port 1024 so a \
-         fresh flow re-owns it (leak on revert -> 1025)",
+        port2, 1025,
+        "the idle BIB mapping remains reserved after purge"
     );
 }
 
