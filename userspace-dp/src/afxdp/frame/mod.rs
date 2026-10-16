@@ -37,7 +37,7 @@ pub(in crate::afxdp) use wg::wg_transit_egress_physical_egress_ifindex;
 // moved verbatim into headers.rs.
 pub(in crate::afxdp) use headers::{
     TPID_8021AD, TPID_8021Q, TxVlanTag, eth_header_len, write_eth_header, write_eth_header_tagged,
-    write_ipv4_header, write_ipv6_header, write_udp_header,
+    write_ipv4_header, write_ipv4_tunnel_header, write_ipv6_header, write_udp_header,
 };
 // #2844: re-exported `pub(crate)` so the top-level `crate::nat64`
 // module (outside `crate::afxdp`) can use the one SSOT Ethernet writer.

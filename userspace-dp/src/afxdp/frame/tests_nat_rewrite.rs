@@ -1880,6 +1880,12 @@ fn nat64_8896_tunnel_marked_decision_is_encapsulated_not_plaintext() {
             &Ipv4Addr::new(203, 0, 113, 9).octets(),
             "#8896: outer destination must be the tunnel endpoint's. id={id}"
         );
+        let frag_word = u16::from_be_bytes([subject[20], subject[21]]);
+        assert_eq!(
+            frag_word & 0x4000,
+            0,
+            "native GRE outer IPv4 must leave DF clear for underlay fragmentation"
+        );
     }
 }
 
@@ -2001,15 +2007,18 @@ fn nat64_8896_encap_ignores_every_meta_field_but_family_and_l3() {
         assert_eq!(checksum16(ip), 0, "{label} inner IPv4 checksum is valid");
     }
 
-    // The size-keyed RFC 7915 DF policy assigns a fresh ID to each translated
-    // IPv4 datagram. Normalize only that ID and its dependent header checksum
-    // so this test remains focused on metadata independence.
+    // The GRE outer and translated IPv4 inner each get an advancing ID.
+    // Normalize both IDs and their dependent checksums so this comparison
+    // remains focused on metadata independence.
     let mut clean_normalized = clean.clone();
     let mut out_normalized = out.clone();
     for (frame, inner_l3) in [
         (&mut clean_normalized, clean_inner_l3),
         (&mut out_normalized, out_inner_l3),
     ] {
+        let outer_l3 = frame_l3_offset(frame).expect("outer L3 exists");
+        frame[outer_l3 + 4..outer_l3 + 6].fill(0);
+        frame[outer_l3 + 10..outer_l3 + 12].fill(0);
         frame[inner_l3 + 4..inner_l3 + 6].fill(0);
         frame[inner_l3 + 10..inner_l3 + 12].fill(0);
     }

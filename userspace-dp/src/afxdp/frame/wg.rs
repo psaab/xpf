@@ -22,7 +22,7 @@ use super::super::wg::{EncapError, POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, pad_to_
 use super::super::*;
 use super::checksum::checksum16_ipv6;
 use super::headers::{
-    write_eth_header_slice, write_ipv4_header, write_ipv6_header, write_udp_header,
+    write_eth_header_slice, write_ipv4_tunnel_header, write_ipv6_header, write_udp_header,
 };
 use std::net::IpAddr;
 
@@ -707,7 +707,7 @@ pub(super) fn wg_encap_frame_with_commit(
         (false, IpAddr::V4(dst)) => {
             let src = egress.and_then(|e| e.primary_v4)?;
             let total_len = u16::try_from(outer_ip_len + udp_len).ok()?;
-            write_ipv4_header(
+            write_ipv4_tunnel_header(
                 out.get_mut(outer_ip_start..outer_ip_start + 20)?,
                 src,
                 dst,

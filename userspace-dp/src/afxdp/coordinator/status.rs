@@ -849,16 +849,13 @@ impl super::Coordinator {
     }
 
     /// #2331: native-GRE encap frames dropped because the fully built
-    /// outer datagram exceeded the resolved transport/egress MTU while
-    /// the IPv4 outer carries DF=1 (the only outer the native builder
-    /// emits). A DF-set oversized outer cannot be fragmented downstream
-    /// and would silently blackhole every inner flow over the tunnel
-    /// with no PMTUD signal — so the builder refuses to emit it. Surfaced
-    /// as `xpf_userspace_gre_encap_df_oversize_drops_total`; a nonzero
-    /// value flags inner flows whose encapped size exceeds the tunnel
-    /// path MTU (a missing/too-high inner MSS clamp, or a non-TCP inner
-    /// with no segmentation lever). PMTUD/PTB signalling is deferred to
-    /// #2330.
+    /// outer datagram exceeded the resolved local transport/egress MTU.
+    /// IPv4 tunnel outers leave DF clear for smaller downstream path
+    /// MTUs, but the local link still cannot transmit an oversized frame.
+    /// A nonzero value flags inner flows whose encapped size exceeds the
+    /// local tunnel transport MTU (a missing/too-high inner MSS clamp or
+    /// a non-TCP inner with no segmentation lever). Surfaced as
+    /// `xpf_userspace_gre_encap_df_oversize_drops_total`.
     pub fn gre_encap_df_oversize_drops_total(&self) -> u64 {
         crate::afxdp::gre::GRE_ENCAP_DF_OVERSIZE_DROPS.load(Ordering::Relaxed)
     }

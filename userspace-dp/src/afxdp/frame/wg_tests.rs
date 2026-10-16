@@ -606,6 +606,12 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v4() {
     assert_ne!(outer_src, &[10, 123, 0, 1], "outer source must not be the tunnel addr");
     // And the destination is the peer endpoint (203.0.113.7).
     assert_eq!(&out[34..38], &[203, 0, 113, 7], "outer dst is the peer endpoint");
+    let outer_frag_word = u16::from_be_bytes([out[24], out[25]]);
+    assert_eq!(
+        outer_frag_word & 0x4000,
+        0,
+        "WireGuard outer IPv4 must leave DF clear for underlay fragmentation"
+    );
 }
 
 #[test]
