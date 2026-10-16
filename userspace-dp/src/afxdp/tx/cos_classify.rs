@@ -8,15 +8,14 @@ use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 #[path = "cos_classify_ba.rs"]
 mod ba;
 use ba::{
-    ba_ingress_trust, resolve_cos_queue_lp_rewrite, resolve_trusted_ba_loss_priority,
-    resolve_trusted_ba_queue_id, BaIngressTrust,
+    BaIngressTrust, ba_ingress_trust, resolve_cos_queue_lp_rewrite,
+    resolve_trusted_ba_loss_priority, resolve_trusted_ba_queue_id,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// #11787: packets whose filter-selected forwarding-class has no materialized
 /// queue and therefore use the pinned interface default queue.
-pub(in crate::afxdp) static FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL: AtomicU64 =
-    AtomicU64::new(0);
+pub(in crate::afxdp) static FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSTxSelection {
@@ -238,22 +237,14 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_queue_id(
         Some(flow_key) => {
             resolve_cached_cos_tx_selection(forwarding, egress_ifindex, meta, flow_key).queue_id
         }
-        None => forwarding
-            .cos
-            .interfaces
-            .get(&egress_ifindex)
-            .map(|iface| {
-                flowless_cos_ba_queue_id(
-                    forwarding,
-                    iface,
-                    meta,
-                    ba_ingress_trust(
-                        forwarding,
-                        meta.ingress_ifindex,
-                        meta.ingress_vlan_id,
-                    ),
-                )
-            }),
+        None => forwarding.cos.interfaces.get(&egress_ifindex).map(|iface| {
+            flowless_cos_ba_queue_id(
+                forwarding,
+                iface,
+                meta,
+                ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id),
+            )
+        }),
     }
 }
 
@@ -329,10 +320,10 @@ fn cached_cos_tx_selection_flowless(
     // #hb166 T-6(m): fragments / flowless packets carry no 5-tuple but
     // still carry a DSCP (and 802.1p PCP). Behavior-aggregate
     // classification is 5-tuple-independent — resolve it from `meta` so
-    // an EF fragment lands in its trusted BA queue instead of straddling the
-    // default queue. Filter forwarding-class / rewrite needs the flow
-    // key, so those stay unset (as before).
-    let queue_id =
+    // an EF fragment lands in its trusted BA queue instead of the default.
+    // The input-filter forwarding-class / rewrite are separately re-walked
+    // against the pre-NAT L3 metadata below (#13966).
+    let mut queue_id =
         iface.map(|iface| flowless_cos_ba_queue_id(forwarding, iface, meta, ba_trust));
     // #3995: flowless packets still resolve the loss-priority-aware CoS
     // rewrite from their own DSCP/PCP (default LOW when unclassified).
@@ -424,10 +415,73 @@ fn cached_cos_tx_selection_flowless(
         filter_counters = output_result.counters;
         three_color_policers = output_result.three_color_policers;
     }
+    let ingress_is_v6 = meta.addr_family as i32 == libc::AF_INET6;
+    let has_input_tx_selection =
+        crate::filter::filter_state_has_input_tx_selection(&forwarding.filter_state, ingress_is_v6);
+    let has_input_three_color_policer = crate::filter::filter_state_has_input_three_color_policer(
+        &forwarding.filter_state,
+        ingress_is_v6,
+    );
+    let mut filter_dscp_rewrite = None;
+    let mut filter_forwarding_class = None;
+    if has_input_tx_selection || has_input_three_color_policer {
+        let ingress_ifindex = resolve_ingress_logical_ifindex(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+        )
+        .unwrap_or(meta.ingress_ifindex as i32);
+        let ingress_filter = if ingress_is_v6 {
+            forwarding
+                .filter_state
+                .iface_filter_v6_fast
+                .get(&ingress_ifindex)
+        } else {
+            forwarding
+                .filter_state
+                .iface_filter_v4_fast
+                .get(&ingress_ifindex)
+        }
+        .map(Arc::as_ref)
+        .filter(|filter| filter.affects_tx_selection || filter.has_three_color_policer_terms);
+        if let (Some(ingress_filter), Some((src_ip, dst_ip))) =
+            (ingress_filter, ForwardPacketMeta::from(meta).l3_addrs())
+        {
+            let input_result = crate::filter::evaluate_filter_ref_tx_selection_cached_portless(
+                ingress_filter,
+                src_ip,
+                dst_ip,
+                meta.protocol,
+                meta.dscp,
+            );
+            filter_dscp_rewrite = input_result.dscp_rewrite;
+            filter_forwarding_class = input_result.forwarding_class;
+            three_color_policers.extend(input_result.three_color_policers);
+        }
+    }
+    if let (Some(iface), Some(forwarding_class)) = (iface, filter_forwarding_class.as_deref()) {
+        let (filter_queue, _) = map_filter_forwarding_class_queue(iface, Some(forwarding_class));
+        if filter_queue.is_some() {
+            queue_id = filter_queue;
+        }
+    }
+    let cos_rewrite = queue_id.and_then(|queue_id| {
+        resolve_cos_queue_lp_rewrite(
+            forwarding,
+            egress_ifindex,
+            meta.ingress_ifindex,
+            queue_id,
+            meta.dscp,
+            meta.ingress_pcp,
+            meta.ingress_vlan_present != 0,
+            ba_trust,
+        )
+    });
+    let dscp_rewrite = filter_dscp_rewrite.or(cos_rewrite);
     CachedTxSelectionDescriptor {
         queue_id,
         dscp_rewrite,
-        filter_dscp_rewrite: None,
+        filter_dscp_rewrite,
         drop,
         reject,
         reject_message,
@@ -490,11 +544,10 @@ fn resolve_cached_cos_tx_selection_impl(
     let has_output_tx_eval = output_filter.is_some();
     let has_input_tx_selection =
         crate::filter::filter_state_has_input_tx_selection(&forwarding.filter_state, ingress_is_v6);
-    let has_input_three_color_policer =
-        crate::filter::filter_state_has_input_three_color_policer(
-            &forwarding.filter_state,
-            ingress_is_v6,
-        );
+    let has_input_three_color_policer = crate::filter::filter_state_has_input_three_color_policer(
+        &forwarding.filter_state,
+        ingress_is_v6,
+    );
     if iface.is_none()
         && !has_output_tx_eval
         && !has_input_tx_selection
@@ -552,9 +605,9 @@ fn resolve_cached_cos_tx_selection_impl(
                 .get(&ingress_ifindex)
                 .map(Arc::as_ref)
         };
-        if let Some(ingress_filter) = ingress_filter.filter(|filter| {
-            filter.affects_tx_selection || filter.has_three_color_policer_terms
-        }) {
+        if let Some(ingress_filter) = ingress_filter
+            .filter(|filter| filter.affects_tx_selection || filter.has_three_color_policer_terms)
+        {
             // #5158: re-walk on the PRE-NAT ingress tuple, not `flow_key` (the
             // post-NAT egress wire key the output filter used above).
             let ingress_result = crate::filter::evaluate_filter_ref_tx_selection_cached(
@@ -581,9 +634,7 @@ fn resolve_cached_cos_tx_selection_impl(
     // classifier picks the queue from THIS packet's DSCP / PCP and must be
     // re-resolved on every hit.
     let (fc_queue, filter_forwarding_class_fallback_pinned) = iface
-        .map(|iface| {
-            map_filter_forwarding_class_queue(iface, forwarding_class.as_deref())
-        })
+        .map(|iface| map_filter_forwarding_class_queue(iface, forwarding_class.as_deref()))
         .unwrap_or((None, false));
     if filter_forwarding_class_fallback_pinned {
         FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -612,9 +663,7 @@ fn resolve_cached_cos_tx_selection_impl(
                 || !iface.inet_precedence_classifier.is_empty()
         })
     } else {
-        ba_trust.dscp.is_some()
-            || ba_trust.inet_precedence.is_some()
-            || ba_trust.ieee8021.is_some()
+        ba_trust.dscp.is_some() || ba_trust.inet_precedence.is_some() || ba_trust.ieee8021.is_some()
     };
     let ba_reclassify = fc_queue.is_none() && has_ba_classifier;
     // A filter class pins its queue, but its packet-dependent ingress loss
@@ -893,7 +942,7 @@ fn resolve_cos_tx_selection_internal(
         // 5-tuple-independent behavior-aggregate (DSCP / 802.1p) lookup from
         // `meta` so a marked fragment lands in its BA queue rather than the
         // default queue. Mirrors the cached-path None branch.
-        let queue_id = iface.map(|iface| {
+        let mut queue_id = iface.map(|iface| {
             resolve_trusted_ba_queue_id(
                 forwarding,
                 iface,
@@ -905,20 +954,7 @@ fn resolve_cos_tx_selection_internal(
             )
             .unwrap_or(iface.default_queue)
         });
-        // #3995: flowless packets still resolve the loss-priority-aware CoS
-        // rewrite from their own DSCP/PCP (default LOW when unclassified).
-        let dscp_rewrite = queue_id.and_then(|queue_id| {
-            resolve_cos_queue_lp_rewrite(
-                forwarding,
-                egress_ifindex,
-                meta.ingress_ifindex,
-                queue_id,
-                meta.dscp,
-                meta.ingress_pcp,
-                meta.ingress_vlan_present != 0,
-                ba_trust,
-            )
-        });
+        let mut filter_forwarding_class = None;
         // #5467: a flowless packet (a non-first IP fragment or a non-query
         // ICMP error/control packet — both carry NO usable L4 ports, #2344 /
         // #3290) still EGRESSES through the interface `filter output`. Before
@@ -958,12 +994,14 @@ fn resolve_cos_tx_selection_internal(
             ),
         };
         let mut drop = false;
-        let mut reject = false;
+        let mut filter_dscp_rewrite = None;
         // #6854: meaningless unless `reject`; see CoSTxSelection.reject_message.
         let mut reject_message = crate::filter::RejectMessage::ADMIN_PROHIBITED;
         let mut filter_log = None;
         // #6236 PR-2C: fold the `needs_tx_eval` precheck and the output-filter
         // fetch into ONE lookup (see the cached flowless arm above).
+        let mut reject = false;
+        let ingress_is_v6 = meta.addr_family as i32 == libc::AF_INET6;
         if let Some(output_filter) = crate::filter::interface_output_filter_needing_tx_eval(
             &forwarding.filter_state,
             egress_ifindex,
@@ -1017,6 +1055,91 @@ fn resolve_cos_tx_selection_internal(
             };
             filter_log = output_result.log_match;
         }
+        let has_input_tx_selection = crate::filter::filter_state_has_input_tx_selection(
+            &forwarding.filter_state,
+            ingress_is_v6,
+        );
+        let has_input_three_color_policer =
+            crate::filter::filter_state_has_input_three_color_policer(
+                &forwarding.filter_state,
+                ingress_is_v6,
+            );
+        if has_input_tx_selection || has_input_three_color_policer {
+            let ingress_ifindex = resolve_ingress_logical_ifindex(
+                forwarding,
+                meta.ingress_ifindex as i32,
+                meta.ingress_vlan_id,
+            )
+            .unwrap_or(meta.ingress_ifindex as i32);
+            let ingress_filter = if ingress_is_v6 {
+                forwarding
+                    .filter_state
+                    .iface_filter_v6_fast
+                    .get(&ingress_ifindex)
+            } else {
+                forwarding
+                    .filter_state
+                    .iface_filter_v4_fast
+                    .get(&ingress_ifindex)
+            }
+            .map(Arc::as_ref)
+            .filter(|filter| filter.affects_tx_selection || filter.has_three_color_policer_terms);
+            if let (Some(ingress_filter), Some((src_ip, dst_ip))) =
+                (ingress_filter, meta.l3_addrs())
+            {
+                let mut input_extra = extra;
+                input_extra.ports_unknown = true;
+                let ingress_result = if let Some(now_ns) = now_ns {
+                    crate::filter::evaluate_filter_ref_tx_selection_runtime_uncounted(
+                        ingress_filter,
+                        src_ip,
+                        dst_ip,
+                        meta.protocol,
+                        0,
+                        0,
+                        meta.dscp,
+                        input_extra,
+                        meta.pkt_len as u64,
+                        now_ns,
+                    )
+                } else {
+                    crate::filter::evaluate_filter_ref_tx_selection_uncounted(
+                        ingress_filter,
+                        src_ip,
+                        dst_ip,
+                        meta.protocol,
+                        0,
+                        0,
+                        meta.dscp,
+                        input_extra,
+                        meta.pkt_len as u64,
+                    )
+                };
+                drop |= ingress_result.policer_drop;
+                filter_forwarding_class = ingress_result.forwarding_class;
+                filter_dscp_rewrite = filter_dscp_rewrite.or(ingress_result.dscp_rewrite);
+            }
+        }
+        if let (Some(iface), Some(forwarding_class)) = (iface, filter_forwarding_class) {
+            let (filter_queue, _) =
+                map_filter_forwarding_class_queue(iface, Some(forwarding_class));
+            if filter_queue.is_some() {
+                queue_id = filter_queue;
+            }
+        }
+        let cos_rewrite = queue_id.and_then(|queue_id| {
+            resolve_cos_queue_lp_rewrite(
+                forwarding,
+                egress_ifindex,
+                meta.ingress_ifindex,
+                queue_id,
+                meta.dscp,
+                meta.ingress_pcp,
+                meta.ingress_vlan_present != 0,
+                ba_trust,
+            )
+        });
+        let dscp_rewrite = filter_dscp_rewrite.or(cos_rewrite);
         return CoSTxSelection {
             queue_id,
             dscp_rewrite,
@@ -1045,11 +1168,10 @@ fn resolve_cos_tx_selection_internal(
     let has_output_tx_eval = output_filter.is_some();
     let has_input_tx_selection =
         crate::filter::filter_state_has_input_tx_selection(&forwarding.filter_state, ingress_is_v6);
-    let has_input_three_color_policer =
-        crate::filter::filter_state_has_input_three_color_policer(
-            &forwarding.filter_state,
-            ingress_is_v6,
-        );
+    let has_input_three_color_policer = crate::filter::filter_state_has_input_three_color_policer(
+        &forwarding.filter_state,
+        ingress_is_v6,
+    );
     if iface.is_none()
         && !has_output_tx_eval
         && !has_input_tx_selection
@@ -1144,15 +1266,15 @@ fn resolve_cos_tx_selection_internal(
     // discard.
     let reject = matches!(output_result.action, crate::filter::FilterAction::Reject(_));
     let reject_message = if let crate::filter::FilterAction::Reject(m) = output_result.action {
-            m
+        m
     } else {
-            crate::filter::RejectMessage::ADMIN_PROHIBITED
+        crate::filter::RejectMessage::ADMIN_PROHIBITED
     };
     let mut ingress_forwarding_class = None;
     let filter_log = output_result.log_match;
-    if let Some(ingress_filter) = ingress_filter.filter(|filter| {
-        filter.affects_tx_selection || filter.has_three_color_policer_terms
-    }) {
+    if let Some(ingress_filter) = ingress_filter
+        .filter(|filter| filter.affects_tx_selection || filter.has_three_color_policer_terms)
+    {
         // #4085: the INGRESS input filter's `then count` terms are already
         // recorded exactly once by the input-filter ACTION evaluation
         // (`evaluate_non_pbr_input_filter` on the session-miss / DSCP-sensitive
@@ -1221,9 +1343,7 @@ fn resolve_cos_tx_selection_internal(
     // boots (#1960). On that boot this order is what makes "DSCP wins" true,
     // which is what the Go warning tells the operator will happen. Both L3
     // arms precede the L2 802.1p arm.
-    let forwarding_class = output_result
-        .forwarding_class
-        .or(ingress_forwarding_class);
+    let forwarding_class = output_result.forwarding_class.or(ingress_forwarding_class);
     let (filter_fc_queue, filter_fc_fallback_pinned) =
         map_filter_forwarding_class_queue(iface, forwarding_class);
     if filter_fc_fallback_pinned {
@@ -1606,7 +1726,11 @@ pub(super) fn resolve_cos_queue_idx(
 /// single-bucket-configuration case and the reason this went unnoticed.
 fn restore_flow_fair_frontier(
     queue: &mut CoSQueueRuntime,
-    saved: Option<(u64, [u64; COS_FLOW_FAIR_BUCKETS], [u64; COS_FLOW_FAIR_BUCKETS])>,
+    saved: Option<(
+        u64,
+        [u64; COS_FLOW_FAIR_BUCKETS],
+        [u64; COS_FLOW_FAIR_BUCKETS],
+    )>,
 ) {
     if let (Some(ff), Some((saved_queue_vtime, saved_head_finish, saved_tail_finish))) =
         (queue.flow_fair_state.as_mut(), saved)

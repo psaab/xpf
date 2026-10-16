@@ -4,13 +4,13 @@
 // `#[path = "cos_classify_tests.rs"]` from cos_classify.rs.
 
 use super::*;
-use crate::afxdp::tx::test_support::*;
-use crate::afxdp::types::{SharedCoSExactBacklog, SharedCoSRootLease};
 use crate::afxdp::cos::admission::{
     COS_FLOW_FAIR_MIN_SHARE_BYTES, flow_share_limit_call_probe_count,
     reset_flow_share_limit_call_probe,
 };
 use crate::afxdp::cos::builders::refresh_cos_runtime_shared_root_leases;
+use crate::afxdp::tx::test_support::*;
+use crate::afxdp::types::{SharedCoSExactBacklog, SharedCoSRootLease};
 use crate::filter::TermMatchExtra;
 use crate::{
     ClassOfServiceSnapshot, CoSDSCPClassifierEntrySnapshot, CoSDSCPClassifierSnapshot,
@@ -49,10 +49,8 @@ fn resolve_cos_queue_idx_falls_back_to_default_on_explicit_queue_miss() {
     };
     // Materializes queue 0 (best-effort, the default) at index 0 and queue 5 at
     // index 1. Queue 9 is never built.
-    let root = test_cos_runtime_with_queues(
-        10_000_000,
-        vec![queue(0, "best-effort"), queue(5, "voice")],
-    );
+    let root =
+        test_cos_runtime_with_queues(10_000_000, vec![queue(0, "best-effort"), queue(5, "voice")]);
 
     // Unmaterialized queue 9 -> default (best-effort) queue index, NOT None.
     assert_eq!(resolve_cos_queue_idx(&root, Some(9)), Some(0));
@@ -130,11 +128,7 @@ fn shared_exact_enqueue_partitions_configured_buffer_across_workers() {
     const IFINDEX: i32 = 42;
     const QUEUE_ID: u8 = 4;
 
-    let shared_root_lease = Arc::new(SharedCoSRootLease::new(
-        1_250_000_000,
-        BUFFER_BYTES,
-        SHARDS,
-    ));
+    let shared_root_lease = Arc::new(SharedCoSRootLease::new(1_250_000_000, BUFFER_BYTES, SHARDS));
     let fast_interfaces = test_cos_fast_interfaces(
         IFINDEX,
         IFINDEX,
@@ -264,11 +258,7 @@ fn shared_exact_enqueue_reads_shard_count_from_runtime_lease_snapshot() {
     const IFINDEX: i32 = 45;
     const QUEUE_ID: u8 = 4;
 
-    let shared_root_lease = Arc::new(SharedCoSRootLease::new(
-        1_250_000_000,
-        BUFFER_BYTES,
-        SHARDS,
-    ));
+    let shared_root_lease = Arc::new(SharedCoSRootLease::new(1_250_000_000, BUFFER_BYTES, SHARDS));
     let fast_interfaces = test_cos_fast_interfaces(
         IFINDEX,
         IFINDEX,
@@ -368,11 +358,7 @@ fn fast_map_lease_swap_refreshes_runtime_shard_snapshot() {
     const IFINDEX: i32 = 46;
     const QUEUE_ID: u8 = 4;
 
-    let lease_4_shards = Arc::new(SharedCoSRootLease::new(
-        1_250_000_000,
-        BUFFER_BYTES,
-        4,
-    ));
+    let lease_4_shards = Arc::new(SharedCoSRootLease::new(1_250_000_000, BUFFER_BYTES, 4));
     let fast_interfaces = test_cos_fast_interfaces(
         IFINDEX,
         IFINDEX,
@@ -409,11 +395,7 @@ fn fast_map_lease_swap_refreshes_runtime_shard_snapshot() {
 
     // The worker set shrinks 4 -> 2: the coordinator publishes a fresh
     // lease map, the worker loop swaps it in and refreshes the runtimes.
-    let lease_2_shards = Arc::new(SharedCoSRootLease::new(
-        1_250_000_000,
-        BUFFER_BYTES,
-        2,
-    ));
+    let lease_2_shards = Arc::new(SharedCoSRootLease::new(1_250_000_000, BUFFER_BYTES, 2));
     binding.cos.cos_fast_interfaces = test_cos_fast_interfaces(
         IFINDEX,
         IFINDEX,
@@ -481,11 +463,7 @@ fn shared_exact_non_guaranteed_enqueue_keeps_frame_liveness_at_65_shards() {
     const IFINDEX: i32 = 43;
     const QUEUE_ID: u8 = 4;
 
-    let shared_root_lease = Arc::new(SharedCoSRootLease::new(
-        1_250_000_000,
-        BUFFER_BYTES,
-        SHARDS,
-    ));
+    let shared_root_lease = Arc::new(SharedCoSRootLease::new(1_250_000_000, BUFFER_BYTES, SHARDS));
     let fast_interfaces = test_cos_fast_interfaces(
         IFINDEX,
         IFINDEX,
@@ -566,11 +544,7 @@ fn shared_exact_enqueue_restores_flow_headroom_over_partitioned_base() {
     const QUEUE_ID: u8 = 4;
     const ACTIVE_FLOWS: u64 = 4;
 
-    let shared_root_lease = Arc::new(SharedCoSRootLease::new(
-        1_250_000_000,
-        BUFFER_BYTES,
-        SHARDS,
-    ));
+    let shared_root_lease = Arc::new(SharedCoSRootLease::new(1_250_000_000, BUFFER_BYTES, SHARDS));
     let fast_interfaces = test_cos_fast_interfaces(
         IFINDEX,
         IFINDEX,
@@ -764,8 +738,8 @@ fn clone_prepared_request_for_cos_returns_local_copy_with_metadata() {
             dst_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
             src_port: 1111,
             dst_port: 2222,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
         egress_ifindex: 80,
         cos_queue_id: Some(4),
@@ -862,8 +836,8 @@ fn prepare_local_request_for_cos_materializes_prepared_frame() {
             dst_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
             src_port: 1111,
             dst_port: 2222,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
         egress_ifindex: 80,
         cos_queue_id: Some(5),
@@ -1569,8 +1543,8 @@ fn resolve_cos_queue_id_prefers_egress_output_filter_forwarding_class() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
     );
 
@@ -1579,8 +1553,8 @@ fn resolve_cos_queue_id_prefers_egress_output_filter_forwarding_class() {
 
 #[test]
 fn filter_forwarding_class_miss_pins_default_over_lower_precedence() {
-    let counter_before = FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let counter_before =
+        FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
     for (name, ba_fallback) in [("ingress filter", false), ("BA classifier", true)] {
         let mut snapshot = hb166_t3_middle_case_snapshot();
         snapshot
@@ -1590,10 +1564,7 @@ fn filter_forwarding_class_miss_pins_default_over_lower_precedence() {
             .expect("egress filter")
             .terms[0]
             .forwarding_class = "unmaterialized".into();
-        let cos = snapshot
-            .class_of_service
-            .as_mut()
-            .expect("CoS snapshot");
+        let cos = snapshot.class_of_service.as_mut().expect("CoS snapshot");
         cos.forwarding_classes.push(CoSForwardingClassSnapshot {
             name: "unmaterialized".into(),
             queue: 7,
@@ -1647,8 +1618,7 @@ fn filter_forwarding_class_miss_pins_default_over_lower_precedence() {
         );
     }
     assert_eq!(
-        FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL
-            .load(std::sync::atomic::Ordering::Relaxed)
+        FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
             - counter_before,
         4,
         "one fallback counter increment per live or cached seed resolution"
@@ -1926,13 +1896,8 @@ fn ba_classifier_requires_ingress_unit_binding_11386() {
         ("trusted ingress", &trusted, 7),
     ] {
         let expected_rewrite = if expected == 0 { Some(8) } else { Some(46) };
-        let fresh = resolve_cos_tx_selection(
-            forwarding,
-            202,
-            meta,
-            Some(&key),
-            TermMatchExtra::default(),
-        );
+        let fresh =
+            resolve_cos_tx_selection(forwarding, 202, meta, Some(&key), TermMatchExtra::default());
         assert_eq!(fresh.queue_id, Some(expected), "{name} fresh CoS selection");
         assert_eq!(
             fresh.dscp_rewrite, expected_rewrite,
@@ -1940,8 +1905,15 @@ fn ba_classifier_requires_ingress_unit_binding_11386() {
         );
 
         let cached = resolve_cached_cos_tx_selection(forwarding, 202, meta, &key);
-        assert_eq!(cached.queue_id, Some(expected), "{name} cached seed selection");
-        assert_eq!(cached.dscp_rewrite, expected_rewrite, "{name} cached seed rewrite");
+        assert_eq!(
+            cached.queue_id,
+            Some(expected),
+            "{name} cached seed selection"
+        );
+        assert_eq!(
+            cached.dscp_rewrite, expected_rewrite,
+            "{name} cached seed rewrite"
+        );
         let (hit_queue, hit_rewrite) = reclassify_cached_ba_queue_and_lp_rewrite(
             forwarding,
             202,
@@ -2230,8 +2202,8 @@ fn resolve_cos_queue_id_uses_reverse_output_source_port_filter() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
             src_port: 5201,
             dst_port: 49152,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
     );
     let forward_shape_on_reverse_egress = resolve_cos_queue_id(
@@ -2251,8 +2223,8 @@ fn resolve_cos_queue_id_uses_reverse_output_source_port_filter() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
             src_port: 49152,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
     );
 
@@ -2391,8 +2363,8 @@ fn resolve_cached_cos_tx_selection_prefers_egress_output_filter_and_keeps_counte
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     );
 
@@ -2516,8 +2488,8 @@ fn resolve_cos_queue_id_uses_ingress_input_filter_when_no_output_filter_exists()
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
     );
 
@@ -2640,8 +2612,8 @@ fn resolve_cached_cos_tx_selection_uses_ingress_input_filter_when_no_output_exis
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     );
 
@@ -2781,8 +2753,8 @@ fn ingress_input_filter_rewalk_uses_prenat_key_5158() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     // POST-NAT egress wire tuple — DNAT rewrote the destination port to 8443, so
     // it no longer matches the ingress term's destination-port 443.
@@ -2928,8 +2900,8 @@ fn resolve_cached_cos_tx_selection_keeps_counter_only_output_filter_hits() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     );
 
@@ -3016,8 +2988,8 @@ fn resolve_cos_tx_selection_counts_counter_only_output_filter_hits() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
         TermMatchExtra::default(),
     );
@@ -3079,8 +3051,8 @@ fn resolve_cos_tx_selection_drops_terminal_output_filter_without_log() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
         TermMatchExtra::default(),
     );
@@ -3137,8 +3109,8 @@ fn resolve_cos_tx_selection_drops_reject_output_filter_without_log() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
         TermMatchExtra::default(),
     );
@@ -3254,7 +3226,10 @@ fn resolve_cos_tx_selection_flowless_enforces_output_discard() {
         matched.drop,
         "#5467: a flowless packet matching an output `then discard` term must drop"
     );
-    assert!(!matched.reject, "then discard is a silent drop, not a reject");
+    assert!(
+        !matched.reject,
+        "then discard is a silent drop, not a reject"
+    );
     assert_eq!(matched.filter_log, None);
 
     // Control: a flowless packet that does NOT match any deny term still
@@ -3313,13 +3288,12 @@ fn flowless_output_protocol_filter_uses_native_fragment_header_11338() {
         meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
         meta.l3_offset = 14;
         meta.l4_offset = 34;
-        let flowless_wire_flow =
-            crate::afxdp::forward_request::l3_wire_session_flow_from_frame(
-                &frame,
-                meta,
-                crate::nat::NatDecision::default(),
-            )
-            .expect("native fragment protocol must resolve from its frame");
+        let flowless_wire_flow = crate::afxdp::forward_request::l3_wire_session_flow_from_frame(
+            &frame,
+            meta,
+            crate::nat::NatDecision::default(),
+        )
+        .expect("native fragment protocol must resolve from its frame");
         let wire_key = flowless_wire_flow.forward_key;
         assert_eq!(
             wire_key.protocol, wire_protocol,
@@ -3341,15 +3315,13 @@ fn flowless_output_protocol_filter_uses_native_fragment_header_11338() {
             "{label}: runtime output filter must use the fragment header protocol"
         );
 
-        let cached =
-            resolve_cached_cos_tx_selection_flowless(&forwarding, 202, meta, &wire_key);
+        let cached = resolve_cached_cos_tx_selection_flowless(&forwarding, 202, meta, &wire_key);
         assert_eq!(
             cached.drop, should_drop,
             "{label}: cached flowless output filter must use the fragment header protocol"
         );
     }
 }
-
 
 #[test]
 fn resolve_cos_tx_selection_flowless_enforces_output_reject() {
@@ -3533,7 +3505,10 @@ fn resolve_cached_cos_tx_selection_flowless_enforces_output_discard() {
         "#6055: a flowless cached-arm packet matching an output `then discard` \
          term must drop (not fail open)"
     );
-    assert!(!matched.reject, "then discard is a silent drop, not a reject");
+    assert!(
+        !matched.reject,
+        "then discard is a silent drop, not a reject"
+    );
     assert_eq!(matched.filter_log, None);
 
     // Control: a flowless packet that does NOT match any deny term still
@@ -3585,7 +3560,10 @@ fn resolve_cached_cos_tx_selection_flowless_enforces_output_reject() {
         flowless_v4_meta([172, 16, 80, 200]),
         &flowless_v4_wire_key([172, 16, 80, 200]),
     );
-    assert!(selection.drop, "#6055: flowless cached `then reject` must drop");
+    assert!(
+        selection.drop,
+        "#6055: flowless cached `then reject` must drop"
+    );
     assert!(
         selection.reject,
         "#6055: flowless cached `then reject` must set the reject flag"
@@ -4240,8 +4218,8 @@ fn resolve_cos_tx_selection_uses_ingress_filter_dscp_rewrite_when_no_output_filt
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
         TermMatchExtra::default(),
     );
@@ -4339,8 +4317,8 @@ fn resolve_cos_tx_selection_skips_ingress_filter_without_tx_selection_effects() 
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
         TermMatchExtra::default(),
     );
@@ -4408,8 +4386,8 @@ fn resolve_cos_tx_selection_returns_none_when_no_cos_or_tx_selection_filters_exi
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
         TermMatchExtra::default(),
     );
@@ -4597,8 +4575,8 @@ fn resolve_cos_queue_id_uses_dscp_classifier_when_filters_do_not_set_class() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
     );
 
@@ -4712,8 +4690,8 @@ fn resolve_cos_queue_id_uses_ieee8021_classifier_when_filters_do_not_set_class()
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
     );
 
@@ -4817,8 +4795,8 @@ fn resolve_cos_queue_id_does_not_use_ieee8021_classifier_for_untagged_packets() 
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
     );
 
@@ -4963,8 +4941,8 @@ fn resolve_cos_queue_id_preserves_ingress_classification_when_output_filter_has_
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
     );
 
@@ -5052,8 +5030,8 @@ fn resolve_cos_tx_selection_preserves_output_filter_dscp_rewrite_without_forward
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
         TermMatchExtra::default(),
     );
@@ -5247,11 +5225,16 @@ fn cos_dscp_rewrite_keys_on_forwarding_class_and_loss_priority() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         };
-        let selection =
-            resolve_cos_tx_selection(&forwarding, 202, meta, Some(&key), TermMatchExtra::default());
+        let selection = resolve_cos_tx_selection(
+            &forwarding,
+            202,
+            meta,
+            Some(&key),
+            TermMatchExtra::default(),
+        );
         // The cached-descriptor path must resolve identically.
         let cached = resolve_cached_cos_tx_selection(&forwarding, 202, meta, &key);
         assert_eq!(
@@ -5745,8 +5728,8 @@ fn classify_generated_reply_counterfactual_trigger_keying_would_misverdict() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
         src_port: 49152,
         dst_port: 53,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let pre_fix = resolve_cos_tx_selection_at(
         &forwarding,
@@ -5800,8 +5783,8 @@ fn output_filter_family_selected_by_egress_key_for_nat64_3642() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)),
         src_port: 33000,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     // Ingress metadata is IPv6 (the pre-NAT64 family).
     let ingress_v6_meta = UserspaceDpMeta {
@@ -6046,8 +6029,8 @@ fn resolve_cos_tx_selection_honors_tcp_flags_per_packet_match() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let meta = || UserspaceDpMeta {
         ingress_ifindex: 5,
@@ -6096,7 +6079,6 @@ fn resolve_cos_tx_selection_honors_tcp_flags_per_packet_match() {
         "a non-SYN packet must NOT be classified into the SYN-gated EF queue (#2362 fold B)"
     );
 }
-
 
 // #2621 regression guard: an accepted input firewall-filter whose fall-through
 // `then { forwarding-class; dscp; policer; next term; }` classify term precedes
@@ -6250,8 +6232,8 @@ fn pbr_classify_flow_key() -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -6569,8 +6551,8 @@ fn count4085_v4_key() -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -6582,8 +6564,8 @@ fn count4085_v6_key() -> SessionKey {
         dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 200)),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -6628,7 +6610,12 @@ fn ingress_count_term_counter(
 
 /// Leg 1 of the session-miss path: the input-filter ACTION evaluation records
 /// the `then count` hit-counter exactly once (the ONE legitimate count).
-fn count4085_action_eval(forwarding: &ForwardingState, is_v6: bool, key: &SessionKey, pkt_len: u64) {
+fn count4085_action_eval(
+    forwarding: &ForwardingState,
+    is_v6: bool,
+    key: &SessionKey,
+    pkt_len: u64,
+) {
     crate::filter::evaluate_interface_filter_non_routing_counted(
         &forwarding.filter_state,
         101,
@@ -6708,9 +6695,18 @@ fn input_filter_count_plus_fc_counts_once_none_now_ns_branch_v4() {
     let meta = count4085_meta(false);
 
     count4085_action_eval(&forwarding, false, &key, meta.pkt_len as u64);
-    assert_eq!(counter.packets.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 
-    let sel = resolve_cos_tx_selection(&forwarding, 202, meta, Some(&key), TermMatchExtra::default());
+    let sel = resolve_cos_tx_selection(
+        &forwarding,
+        202,
+        meta,
+        Some(&key),
+        TermMatchExtra::default(),
+    );
     assert_eq!(sel.queue_id, Some(1));
     assert_eq!(
         counter.packets.load(std::sync::atomic::Ordering::Relaxed),
@@ -6731,7 +6727,10 @@ fn input_filter_count_plus_policer_counts_once_and_still_meters_v4() {
     let meta = count4085_meta(false);
 
     count4085_action_eval(&forwarding, false, &key, meta.pkt_len as u64);
-    assert_eq!(counter.packets.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 
     let sel = resolve_cos_tx_selection_at(
         &forwarding,
@@ -7014,8 +7013,8 @@ fn resolve_cos_queue_id_preserves_input_fc_under_counter_only_output_filter() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         }),
     );
     assert_eq!(
@@ -7046,8 +7045,8 @@ fn resolve_cached_cos_tx_selection_preserves_input_fc_under_counter_only_output_
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     );
     assert_eq!(
@@ -7203,7 +7202,11 @@ fn inet_precedence_fixture(
                     map_entry("video", "video-sched"),
                 ],
             }],
-            schedulers: vec![sched("be-sched"), sched("voice-sched"), sched("video-sched")],
+            schedulers: vec![
+                sched("be-sched"),
+                sched("voice-sched"),
+                sched("video-sched"),
+            ],
             ..Default::default()
         }),
         ..Default::default()
@@ -7230,8 +7233,8 @@ fn inet_precedence_test_key() -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -7265,7 +7268,12 @@ fn inet_precedence_queue_for_dscp(snapshot: &ConfigSnapshot, dscp: u8) -> Option
 /// `Some(5)` assertion goes red — the pre-#6847 behaviour.
 #[test]
 fn inet_precedence_classifier_steers_packet_into_its_forwarding_class_queue() {
-    let snapshot = inet_precedence_fixture("", "prec-cl", vec![], vec![prec_entry("voice", "low", vec![5])]);
+    let snapshot = inet_precedence_fixture(
+        "",
+        "prec-cl",
+        vec![],
+        vec![prec_entry("voice", "low", vec![5])],
+    );
     assert_eq!(
         inet_precedence_queue_for_dscp(&snapshot, 46),
         Some(5),
@@ -7288,7 +7296,12 @@ fn inet_precedence_classifier_steers_packet_into_its_forwarding_class_queue() {
 /// directions is what makes this a shift test rather than a single-value one.
 #[test]
 fn inet_precedence_classifier_reads_the_top_three_bits_of_the_ds_field() {
-    let snapshot = inet_precedence_fixture("", "prec-cl", vec![], vec![prec_entry("voice", "low", vec![5])]);
+    let snapshot = inet_precedence_fixture(
+        "",
+        "prec-cl",
+        vec![],
+        vec![prec_entry("voice", "low", vec![5])],
+    );
     for dscp in [40u8, 41, 46, 47] {
         assert_eq!(
             inet_precedence_queue_for_dscp(&snapshot, dscp),
@@ -7356,7 +7369,12 @@ fn dscp_classifier_wins_over_inet_precedence_when_both_are_bound() {
 /// the `ba_reclassify` gate and this goes red.
 #[test]
 fn inet_precedence_classifier_marks_flow_for_ba_reclassification() {
-    let snapshot = inet_precedence_fixture("", "prec-cl", vec![], vec![prec_entry("voice", "low", vec![5])]);
+    let snapshot = inet_precedence_fixture(
+        "",
+        "prec-cl",
+        vec![],
+        vec![prec_entry("voice", "low", vec![5])],
+    );
     let forwarding = build_forwarding_state(&snapshot);
     let key = inet_precedence_test_key();
     let descriptor = resolve_cached_cos_tx_selection(
@@ -7545,8 +7563,8 @@ fn cached_cos_tx_selection_carries_the_reject_message_type_6854() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
             src_port: 12345,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     );
     assert!(
@@ -7636,19 +7654,17 @@ fn clone_prepared_request_for_cos_refuses_an_out_of_bounds_descriptor_8597_k41()
 /// The distrust control below (ingress with no binding) keeps Some(0): the fix
 /// must move the locus, not trust everything.
 fn locus_split_snapshot_11679() -> ConfigSnapshot {
-    let interface = |ifindex: i32,
-                     cos_dscp_classifier: &str,
-                     usable_cos: bool|
-     -> InterfaceSnapshot {
-        InterfaceSnapshot {
-            ifindex,
-            cos_shaping_rate_bytes_per_sec: if usable_cos { 10_000_000 } else { 0 },
-            cos_scheduler_map: if usable_cos { "wan-map" } else { "" }.into(),
-            cos_dscp_classifier: cos_dscp_classifier.into(),
-            cos_dscp_rewrite_rule: if usable_cos { "wan-rw" } else { "" }.into(),
-            ..Default::default()
-        }
-    };
+    let interface =
+        |ifindex: i32, cos_dscp_classifier: &str, usable_cos: bool| -> InterfaceSnapshot {
+            InterfaceSnapshot {
+                ifindex,
+                cos_shaping_rate_bytes_per_sec: if usable_cos { 10_000_000 } else { 0 },
+                cos_scheduler_map: if usable_cos { "wan-map" } else { "" }.into(),
+                cos_dscp_classifier: cos_dscp_classifier.into(),
+                cos_dscp_rewrite_rule: if usable_cos { "wan-rw" } else { "" }.into(),
+                ..Default::default()
+            }
+        };
     let scheduler = |name: &str| CoSSchedulerSnapshot {
         name: name.into(),
         priority: "low".into(),
@@ -7656,19 +7672,17 @@ fn locus_split_snapshot_11679() -> ConfigSnapshot {
         buffer_size_bytes: 128_000,
         ..Default::default()
     };
-    let entry = |forwarding_class: &str, loss_priority: &str, dscp_value| {
-        CoSDSCPClassifierEntrySnapshot {
+    let entry =
+        |forwarding_class: &str, loss_priority: &str, dscp_value| CoSDSCPClassifierEntrySnapshot {
             forwarding_class: forwarding_class.into(),
             loss_priority: loss_priority.into(),
             dscp_values: vec![dscp_value],
-        }
-    };
-    let classifier = |name: &str, entries: Vec<CoSDSCPClassifierEntrySnapshot>| {
-        CoSDSCPClassifierSnapshot {
+        };
+    let classifier =
+        |name: &str, entries: Vec<CoSDSCPClassifierEntrySnapshot>| CoSDSCPClassifierSnapshot {
             name: name.into(),
             entries,
-        }
-    };
+        };
     ConfigSnapshot {
         interfaces: vec![
             interface(202, "bulk", true),
@@ -7695,10 +7709,7 @@ fn locus_split_snapshot_11679() -> ConfigSnapshot {
                 classifier("bulk", vec![entry("bulk-data", "low", 46)]),
                 classifier(
                     "voice",
-                    vec![
-                        entry("voice", "high", 46),
-                        entry("bulk-data", "low", 10),
-                    ],
+                    vec![entry("voice", "high", 46), entry("bulk-data", "low", 10)],
                 ),
             ],
             schedulers: vec![
@@ -7813,7 +7824,10 @@ fn tx_queue_follows_ingress_unit_classifier_not_egress_11679() {
         voice_meta.ingress_vlan_id,
     )
     .expect("#11679 a cached BA hit must re-resolve the ingress-only binding");
-    assert_eq!(hit_queue, 1, "#11679 the hit uses ingress classifier DSCP 10");
+    assert_eq!(
+        hit_queue, 1,
+        "#11679 the hit uses ingress classifier DSCP 10"
+    );
     assert_eq!(
         hit_rewrite,
         Some(17),
@@ -7857,9 +7871,8 @@ fn compiled_cos_wire_fixture_drives_queue_and_loss_priority_11808() {
         "../../../tests/fixtures/protocol_wire_cos_v1.json"
     ))
     .expect("CoS differential fixture is valid JSON");
-    let empty: ClassOfServiceSnapshot =
-        serde_json::from_value(fixture["empty_snapshot"].clone())
-            .expect("empty CoS wire sample decodes");
+    let empty: ClassOfServiceSnapshot = serde_json::from_value(fixture["empty_snapshot"].clone())
+        .expect("empty CoS wire sample decodes");
     assert!(empty.forwarding_classes.is_empty());
     assert!(empty.dscp_classifiers.is_empty());
     assert!(empty.dscp_rewrite_rules.is_empty());
@@ -7873,9 +7886,8 @@ fn compiled_cos_wire_fixture_drives_queue_and_loss_priority_11808() {
         "the empty-array control must stay pinned in both directions"
     );
 
-    let cos: ClassOfServiceSnapshot =
-        serde_json::from_value(fixture["populated_snapshot"].clone())
-            .expect("populated Go CoS wire sample decodes");
+    let cos: ClassOfServiceSnapshot = serde_json::from_value(fixture["populated_snapshot"].clone())
+        .expect("populated Go CoS wire sample decodes");
     assert!(
         cos.ieee8021_classifiers.is_empty() && cos.inet_precedence_classifiers.is_empty(),
         "omitted optional classifier arrays default to empty on the Go wire"
@@ -7903,18 +7915,11 @@ fn compiled_cos_wire_fixture_drives_queue_and_loss_priority_11808() {
         (10, 1, 11), // bulk-data / low
         (46, 5, 55), // duplicate: last entry voice / high wins
         (48, 5, 54), // voice / medium-high
-        (50, 0, 1), // undefined FC was skipped; unclassified default is BE / low
+        (50, 0, 1),  // undefined FC was skipped; unclassified default is BE / low
     ] {
-        let (queue, rewrite) = reclassify_cached_ba_queue_and_lp_rewrite(
-            &forwarding,
-            42,
-            dscp,
-            0,
-            false,
-            0,
-            0,
-        )
-        .unwrap_or_else(|| panic!("DSCP {dscp} has no CoS queue verdict"));
+        let (queue, rewrite) =
+            reclassify_cached_ba_queue_and_lp_rewrite(&forwarding, 42, dscp, 0, false, 0, 0)
+                .unwrap_or_else(|| panic!("DSCP {dscp} has no CoS queue verdict"));
         assert_eq!(
             (queue, rewrite),
             (want_queue, Some(want_rewrite)),
@@ -7935,9 +7940,195 @@ fn compiled_cos_wire_fixture_drives_queue_and_loss_priority_11808() {
         !voice.guarantee_enabled,
         "undefined scheduler must not fabricate a guarantee"
     );
-    assert_eq!(voice.priority, 5, "undefined scheduler keeps safe low priority");
+    assert_eq!(
+        voice.priority, 5,
+        "undefined scheduler keeps safe low priority"
+    );
     assert_eq!(
         voice.surplus_weight, 1,
         "undefined scheduler must use minimal safe surplus weight"
+    );
+}
+
+// #13966 (H18-01): flowless transit packets must walk the ingress INPUT
+// filter for tx-selection exactly as the flow-keyed arm does — metering
+// three-color policers and taking `then forwarding-class` / `then dscp`
+// from L3-only terms. Before the fix both flowless arms (fresh
+// `resolve_cos_tx_selection_at_prenat(.., None, ..)` and cached
+// `resolve_cached_cos_tx_selection_flowless`) applied only the BA queue
+// and the OUTPUT filter, so a non-first fragment evaded an input policer
+// and lost filter-assigned class/marking.
+fn h18_input_l3_policer_snapshot() -> ConfigSnapshot {
+    ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth1.0".into(),
+                ifindex: 101,
+                parent_ifindex: 5,
+                vlan_id: 0,
+                hardware_addr: "02:bf:72:00:61:01".into(),
+                filter_input_v4: "in-l3-pol".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth0.0".into(),
+                ifindex: 202,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_shaping_burst_bytes: 256_000,
+                cos_scheduler_map: "wan-map".into(),
+                ..Default::default()
+            },
+        ],
+        filters: vec![FirewallFilterSnapshot {
+            name: "in-l3-pol".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "metered".into(),
+                source_addresses: vec!["10.0.61.0/24".into()],
+                action: "accept".into(),
+                policer: "trickle".into(),
+                forwarding_class: "expedited-forwarding".into(),
+                dscp_rewrite: Some(46),
+                ..Default::default()
+            }],
+        }],
+        three_color_policers: vec![ThreeColorPolicerSnapshot {
+            name: "trickle".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 1,
+            peak_or_excess_rate_bytes_per_sec: 0,
+            peak_or_excess_burst_bytes: 1,
+            then_action: "discard".into(),
+        }],
+        class_of_service: Some(count_fc_two_class_service()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn h18_13966_flow_keyed_packet_is_policed_and_classified_control() {
+    let forwarding = build_forwarding_state(&h18_input_l3_policer_snapshot());
+    let key = count4085_v4_key();
+    let meta = count4085_meta(false);
+    let sel = resolve_cos_tx_selection_at(
+        &forwarding,
+        202,
+        meta,
+        Some(&key),
+        TermMatchExtra::default(),
+        1_000_000_000,
+    );
+    assert!(sel.drop, "control: input policer meters RED -> drop");
+    assert_eq!(sel.queue_id, Some(1), "control: input fc -> EF queue");
+    assert_eq!(sel.dscp_rewrite, Some(46), "control: input dscp");
+}
+
+#[test]
+fn h18_13966_flowless_fresh_arm_is_policed_and_classified() {
+    let forwarding = build_forwarding_state(&h18_input_l3_policer_snapshot());
+    let key = count4085_v4_key();
+    let meta = flowless_v4_meta([172, 16, 80, 200]);
+    let wire = SessionKey {
+        src_port: 0,
+        dst_port: 0,
+        ..key.clone()
+    };
+    let sel = resolve_cos_tx_selection_at_prenat(
+        &forwarding,
+        202,
+        meta,
+        None,
+        None,
+        flowless_extra(),
+        1_000_000_000,
+        Some(&wire),
+    );
+    assert!(
+        sel.drop,
+        "#13966: non-first fragment must be metered by the input policer"
+    );
+    assert_eq!(
+        sel.queue_id,
+        Some(1),
+        "#13966: input fc must classify the fragment"
+    );
+    assert_eq!(
+        sel.dscp_rewrite,
+        Some(46),
+        "#13966: input `then dscp` must mark the fragment"
+    );
+}
+
+#[test]
+fn h18_13966_flowless_cached_arm_is_classified() {
+    // The cached flowless descriptor has no now_ns meter, so its policer
+    // verdict arrives via the captured three_color_policers handles (replayed
+    // by apply_cached_three_color_policers); fc/dscp apply immediately.
+    let forwarding = build_forwarding_state(&h18_input_l3_policer_snapshot());
+    let key = count4085_v4_key();
+    let meta = flowless_v4_meta([172, 16, 80, 200]);
+    let wire = SessionKey {
+        src_port: 0,
+        dst_port: 0,
+        ..key.clone()
+    };
+    let sel = resolve_cached_cos_tx_selection_flowless(&forwarding, 202, meta, &wire);
+    assert_eq!(
+        sel.queue_id,
+        Some(1),
+        "#13966: cached flowless input fc must classify the fragment"
+    );
+    assert_eq!(
+        sel.filter_dscp_rewrite,
+        Some(46),
+        "#13966: cached flowless input `then dscp` must mark the fragment"
+    );
+    assert_eq!(
+        sel.dscp_rewrite,
+        Some(46),
+        "#13966: cached flowless dscp_rewrite must carry the input mark"
+    );
+    assert!(
+        sel.three_color_policers.len() != 0,
+        "#13966: cached flowless must capture the input policer for replay metering"
+    );
+}
+
+#[test]
+fn h18_13966_flowless_port_bearing_input_term_does_not_match() {
+    // A port-bearing input term must still decline on a flowless packet
+    // (ports_unknown): only L3-only terms take effect.
+    let mut snapshot = h18_input_l3_policer_snapshot();
+    snapshot.filters[0].terms[0].source_addresses.clear();
+    snapshot.filters[0].terms[0].destination_ports = vec!["443".into()];
+    let forwarding = build_forwarding_state(&snapshot);
+    let key = count4085_v4_key();
+    let meta = flowless_v4_meta([172, 16, 80, 200]);
+    let wire = SessionKey {
+        src_port: 0,
+        dst_port: 0,
+        ..key.clone()
+    };
+    let sel = resolve_cos_tx_selection_at_prenat(
+        &forwarding,
+        202,
+        meta,
+        None,
+        None,
+        flowless_extra(),
+        1_000_000_000,
+        Some(&wire),
+    );
+    assert!(
+        !sel.drop,
+        "#13966: port-bearing input term must not meter a flowless packet"
+    );
+    assert_ne!(
+        sel.queue_id,
+        Some(1),
+        "#13966: port-bearing input term must not classify a flowless packet"
     );
 }
