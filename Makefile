@@ -125,6 +125,7 @@ install: build build-ctl
 test:
 	@status=0; \
 	$(MAKE) test-go || status=$$?; \
+	$(MAKE) rust-source-census-13961 || status=$$?; \
 	$(MAKE) test-rust || status=$$?; \
 	$(MAKE) harness-census || status=$$?; \
 	$(MAKE) test-routing-kernel || status=$$?; \
@@ -138,6 +139,9 @@ test:
 	echo "  XFRM lifecycle tests also SKIP if NETLINK_XFRM is unavailable;"; \
 	echo "  test-root runs them with XPF_REQUIRE_XFRM_LIFECYCLE=1 (#10868)."; \
 	exit $$status
+
+rust-source-census-13961:
+	python3 scripts/rust-source-census-13961.py userspace-dp/src
 
 # #9052 item 1: the root-capable aggregate. `test-shim-run` was a prerequisite
 # of NOTHING — not of `test`, not of `selftest`, not of any ledger row — so the
