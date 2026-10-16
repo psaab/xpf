@@ -1591,14 +1591,10 @@ impl WgEngine {
         // ensure the output buffer can hold header + ciphertext +
         // tag at the padded size.
         //
-        // All bound checks fire BEFORE any observable side effect
-        // (counter advance, header write into `out`). Callers can
-        // therefore rely on the contract "on Err, the output buffer
-        // and the session's tx_counter are untouched". An oversized
-        // `out` paired with an oversized `inner_ip` previously tripped
-        // the PADDED_PLAINTEXT_MAX guard AFTER `next_tx_counter()`
-        // had already advanced the counter; the staging guard is
-        // hoisted above the counter consume to close that hole.
+        // All bound checks fire BEFORE counter reservation or output
+        // writes, so ordinary size/staging failures leave state untouched.
+        // Once reserved, the nonce is permanently consumed even if AEAD
+        // fails: gaps are safe, while reusing the nonce is not.
         let padded_len = pad_to_16(inner_ip.len());
         let required = WG_DATA_HEADER_LEN + padded_len + POLY1305_TAG_LEN;
         if out.len() < required {
@@ -1607,16 +1603,9 @@ impl WgEngine {
         if padded_len > PADDED_PLAINTEXT_MAX {
             return Err(self.counters.count_encap_err(EncapError::BufferTooSmall));
         }
-        // Serialize counter reservation through AEAD so a failed
-        // encryption can leave the nonce available without allowing a
-        // concurrent sender to reuse it.
-        let _tx_guard = session.tx_lock.lock().unwrap_or_else(|e| e.into_inner());
         let counter = session
-            .tx_counter
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if counter >= super::session::REJECT_AFTER_MESSAGES {
-            return Err(self.counters.count_encap_err(EncapError::RekeyRequired));
-        }
+            .next_tx_counter()
+            .ok_or_else(|| self.counters.count_encap_err(EncapError::RekeyRequired))?;
         let _ = encode_data_header(out, session.peer_index, counter)
             .ok_or_else(|| self.counters.count_encap_err(EncapError::BufferTooSmall))?;
         // Stage the padded plaintext on the stack. We use
@@ -1683,10 +1672,6 @@ impl WgEngine {
             .transport
             .write_message(counter, plaintext, payload)
             .map_err(|_| self.counters.count_encap_err(EncapError::CryptoFailed))?;
-        session
-            .tx_counter
-            .store(counter + 1, std::sync::atomic::Ordering::Relaxed);
-        drop(_tx_guard);
         Ok(EncapOutcome {
             len: WG_DATA_HEADER_LEN + n,
             receiver_index: session.peer_index,
