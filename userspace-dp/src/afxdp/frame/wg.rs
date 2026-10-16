@@ -411,7 +411,10 @@ pub(in crate::afxdp) fn wg_endpoint_physical_outer_mtu(
 /// the encap builder applies DNAT into the outgoing frame before its own peer
 /// LPM (`inner_dst_ip(&out)`), so a DNAT-across-AllowedIPs-peers flow on
 /// distinct underlays must not split the dispatch NIC from the byte NIC. NAT64
-/// is excluded (address-family change → returns `None`, the logical fallback).
+/// follows the same rule with its translated destination: for a forward
+/// v6-to-v4 packet that is `rewrite_dst`, and for a reverse v4-to-v6 packet
+/// that destination is not recoverable from the decision alone, so that
+/// direction keeps the logical fallback (fail-closed, never mis-selected).
 ///
 /// Returns `None` — the caller keeps the pre-#6308 logical fallback — when the
 /// decision is not a WG transit-egress (no tunnel id / a GRE or unknown mode),
@@ -450,36 +453,55 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex(
     // the OTHER peer's L2 — a wire mismatch. Resolve the peer from the POST-NAT
     // dst so dispatch and bytes agree on ONE physical NIC.
     //
-    // NAT64 (`nat.nat64`) is deliberately excluded: it changes the address
-    // family, so `rewrite_dst` is a DIFFERENT-family address and the pre-NAT
-    // frame dst is the pre-translation family — NEITHER is a valid same-family
-    // AllowedIPs key for this WG endpoint's (same-family) peers, so reusing
-    // either would mis-select. Fail closed to the caller's logical-ifindex
-    // fallback (the pre-#6308 drop) rather than dispatch to a mis-selected NIC;
-    // a NAT64→WG transit flow is undeliverable on this path regardless (the
-    // pre-NAT frame parse already returned `None` here for that family
-    // mismatch).
-    if decision.nat.nat64 {
+    // #14117: NAT64 composes the same way. `build_nat64_inner_frame` writes
+    // the translated destination into the inner frame before encapsulation:
+    // for the forward direction (IPv6 ingress) that is `rewrite_dst` (an IPv4
+    // address), and the encapsulator LPMs AllowedIPs on it. So a NAT64 forward
+    // packet must ALSO select its peer from `rewrite_dst` — excluding it made
+    // dispatch fall back to the pre-translation resolution (the logical wgN
+    // ifindex or an unrelated default route), splitting dispatch from the
+    // encapsulated bytes. The reverse direction (IPv4 ingress) translates to
+    // the original IPv6 destination carried only in `Nat64ReverseInfo`, which
+    // this helper does not receive; its translated destination cannot be
+    // derived from the decision, so it keeps the logical fallback rather than
+    // guessing a peer from the pre-translation IPv4 destination (fail-closed,
+    // never a mis-selected NIC). Fragmented forward packets carry the same
+    // `rewrite_dst` on their association decision, so they follow the same
+    // peer as their first fragment.
+    if decision.nat.nat64 && inner_addr_family as i32 == libc::AF_INET {
         return None;
     }
     // Same inner-destination peer selection the encap builder / PTB path use,
-    // but keyed on the POST-DNAT dst (`nat.rewrite_dst`) when a same-family DNAT
-    // applies, else the frame's parsed inner dst (with the `meta.l3_offset`
-    // fallback) — which for a non-DNAT flow is byte-identical to the frame the
-    // encap path reads. Then LPM the AllowedIPs trie to the covering peer's
-    // endpoint.
-    let inner_dst = decision.nat.rewrite_dst.or_else(|| {
-        frame_l3_offset(inner_frame)
-            .or_else(|| {
-                crate::afxdp::frame::nibble_trusted_stamp(
-                    inner_frame,
-                    inner_l3_offset,
-                    inner_addr_family,
-                )
-            })
-            .and_then(|l3| inner_frame.get(l3..))
-            .and_then(|pkt| crate::afxdp::gre::inner_dst_ip(pkt, inner_addr_family))
-    });
+    // but keyed on the POST-DNAT dst (`nat.rewrite_dst`) when a DNAT or a
+    // forward NAT64 translation applies, else the frame's parsed inner dst
+    // (with the `meta.l3_offset` fallback) — which for a non-DNAT flow is
+    // byte-identical to the frame the encap path reads. Then LPM the
+    // AllowedIPs trie to the covering peer's endpoint. For NAT64 the frame
+    // destination is the pre-translation family and must never be used as an
+    // AllowedIPs key: if the translated destination is absent, fail closed to
+    // the caller's logical fallback instead of falling back to the frame.
+    let inner_dst = if decision.nat.nat64 {
+        decision.nat.rewrite_dst
+    } else {
+        decision.nat.rewrite_dst.or_else(|| {
+            frame_l3_offset(inner_frame)
+                .or_else(|| {
+                    crate::afxdp::frame::nibble_trusted_stamp(
+                        inner_frame,
+                        inner_l3_offset,
+                        inner_addr_family,
+                    )
+                })
+                .and_then(|l3| inner_frame.get(l3..))
+                .and_then(|pkt| crate::afxdp::gre::inner_dst_ip(pkt, inner_addr_family))
+        })
+    };
+    // A NAT64 forward packet with no translated destination has no valid
+    // AllowedIPs key: fail closed instead of letting `wg_peer_outer_dst`
+    // substitute an arbitrary first peer.
+    if decision.nat.nat64 && inner_dst.is_none() {
+        return None;
+    }
     let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst)?;
     let outer = outer_physical_egress_resolution(forwarding, endpoint, outer_dst);
     Some(outer_egress_ifindex_or_fallback(
