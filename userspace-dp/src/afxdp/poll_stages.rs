@@ -630,6 +630,7 @@ pub(super) fn stage_classify_fabric_ingress(
         }
         ZoneEncodedFabricStamp::Absent | ZoneEncodedFabricStamp::Invalid => (None, None),
     };
+    meta.fabric_ingress_ifindex = ingress_nat_scope_ifindex.unwrap_or_default() as u32;
     let invalid_zone_stamp = stamp == ZoneEncodedFabricStamp::Invalid;
     let packet_fabric_ingress = ingress_zone_override.is_some()
         || ingress_is_fabric_overlay(worker_ctx.forwarding, meta.ingress_ifindex as i32);

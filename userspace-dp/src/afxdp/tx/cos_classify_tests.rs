@@ -1922,6 +1922,7 @@ fn ba_classifier_requires_ingress_unit_binding_11386() {
             meta.ingress_vlan_present != 0,
             meta.ingress_ifindex,
             meta.ingress_vlan_id,
+            meta.fabric_ingress_ifindex,
         )
         .expect("egress BA binding requests per-packet cache-hit classification");
         assert_eq!(hit_queue, expected, "{name} cached hit selection");
@@ -7281,6 +7282,88 @@ fn inet_precedence_classifier_steers_packet_into_its_forwarding_class_queue() {
     );
 }
 
+/// A validated V2 fabric stamp carries the peer's logical ingress ifindex so
+/// fresh, cached-seed, and cache-hit BA classification use the same trust
+/// binding as direct ingress.
+#[test]
+fn fabric_scoped_ingress_preserves_ba_queue_and_rewrite_across_selection_paths_13967() {
+    let mut snapshot =
+        inet_precedence_fixture("", "prec-cl", vec![], vec![prec_entry("voice", "high", vec![5])]);
+    let egress = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 202)
+        .expect("egress interface");
+    egress.cos_inet_precedence_classifier.clear();
+    egress.cos_dscp_rewrite_rule = "voice-rw".into();
+    snapshot
+        .class_of_service
+        .as_mut()
+        .expect("fixture CoS")
+        .dscp_rewrite_rules = vec![CoSDSCPRewriteRuleSnapshot {
+        name: "voice-rw".into(),
+        entries: vec![
+            CoSDSCPRewriteRuleEntrySnapshot {
+                forwarding_class: "voice".into(),
+                loss_priority: "high".into(),
+                dscp_value: 34,
+            },
+            CoSDSCPRewriteRuleEntrySnapshot {
+                forwarding_class: "voice".into(),
+                loss_priority: "low".into(),
+                dscp_value: 10,
+            },
+        ],
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let key = inet_precedence_test_key();
+    let dscp = 46;
+    let direct_meta = UserspaceDpMeta {
+        ingress_ifindex: 999,
+        addr_family: libc::AF_INET as u8,
+        dscp,
+        ..Default::default()
+    };
+    let direct = resolve_cos_queue_id(&forwarding, 202, direct_meta, None);
+    let direct_seed = resolve_cached_cos_tx_selection(&forwarding, 202, direct_meta, &key);
+    let fabric_meta = UserspaceDpMeta {
+        ingress_ifindex: 4242,
+        fabric_ingress_ifindex: 999,
+        addr_family: libc::AF_INET as u8,
+        dscp,
+        ..Default::default()
+    };
+    let fresh = resolve_cos_queue_id(&forwarding, 202, fabric_meta, None);
+    let cached_seed = resolve_cached_cos_tx_selection(&forwarding, 202, fabric_meta, &key);
+    let cache_hit = reclassify_cached_ba_queue_and_lp_rewrite(
+        &forwarding,
+        202,
+        dscp,
+        0,
+        false,
+        fabric_meta.ingress_ifindex,
+        fabric_meta.ingress_vlan_id,
+        fabric_meta.fabric_ingress_ifindex,
+    );
+    let legacy_meta = UserspaceDpMeta {
+        fabric_ingress_ifindex: 0,
+        ..fabric_meta
+    };
+    let zone_only_fallback = resolve_cos_queue_id(&forwarding, 202, legacy_meta, None);
+    assert_eq!(direct, Some(5), "direct ingress selects the voice queue");
+    assert_eq!(direct_seed.queue_id, direct);
+    assert_eq!(direct_seed.dscp_rewrite, Some(34));
+    assert_eq!(fresh, direct, "fabric fresh selection matches direct ingress");
+    assert_eq!(cached_seed.queue_id, direct_seed.queue_id);
+    assert_eq!(cached_seed.dscp_rewrite, direct_seed.dscp_rewrite);
+    assert_eq!(cache_hit, Some((5, Some(34))));
+    assert_eq!(
+        zone_only_fallback,
+        Some(0),
+        "zone-only fabric ingress retains the documented default fallback"
+    );
+}
+
 /// #6847: the classifier reads the TOP THREE BITS of the DS field, not the
 /// bottom three and not the whole field. This pins the `(dscp >> 3) & 0x7`
 /// derivation against the plausible wrong shifts:
@@ -7822,6 +7905,7 @@ fn tx_queue_follows_ingress_unit_classifier_not_egress_11679() {
         voice_meta.ingress_vlan_present != 0,
         voice_meta.ingress_ifindex,
         voice_meta.ingress_vlan_id,
+        voice_meta.fabric_ingress_ifindex,
     )
     .expect("#11679 a cached BA hit must re-resolve the ingress-only binding");
     assert_eq!(
@@ -7917,9 +8001,17 @@ fn compiled_cos_wire_fixture_drives_queue_and_loss_priority_11808() {
         (48, 5, 54), // voice / medium-high
         (50, 0, 1),  // undefined FC was skipped; unclassified default is BE / low
     ] {
-        let (queue, rewrite) =
-            reclassify_cached_ba_queue_and_lp_rewrite(&forwarding, 42, dscp, 0, false, 0, 0)
-                .unwrap_or_else(|| panic!("DSCP {dscp} has no CoS queue verdict"));
+        let (queue, rewrite) = reclassify_cached_ba_queue_and_lp_rewrite(
+            &forwarding,
+            42,
+            dscp,
+            0,
+            false,
+            0,
+            0,
+            0,
+        )
+        .unwrap_or_else(|| panic!("DSCP {dscp} has no CoS queue verdict"));
         assert_eq!(
             (queue, rewrite),
             (want_queue, Some(want_rewrite)),
