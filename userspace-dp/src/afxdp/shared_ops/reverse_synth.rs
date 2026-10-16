@@ -275,6 +275,7 @@ table: Option<&str>,) -> Option<SyncedSessionEntry> {
         // `companion_keeps_alive` then held the closing forward alive with it.
         tcp_close_class: entry.tcp_close_class,
         tcp_handshake_state: entry.tcp_handshake_state,
+        pptp_call_ids: 0,
         source_nat_static: entry.source_nat_static,
     })
 }
@@ -526,6 +527,7 @@ tcp_flags: u8,) -> (SessionLookup, bool) {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key),
+            pptp_call_ids: 0,
             source_nat_static: reverse.aux.source_nat_static,
         };
         publish_shared_session(

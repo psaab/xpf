@@ -49,6 +49,17 @@ pub(crate) struct SyncedSessionEntry {
     /// #10888: the owning node's TCP handshake state (`0` = legacy/established).
     /// `upsert_synced_with_origin` applies it independently of close class.
     pub(crate) tcp_handshake_state: u8,
+    /// #14303: the PPTP call-id pair (`PptpCall::to_wire_call_ids`) for a
+    /// `Pptp(handle)` forward session, `PPTP_CALL_IDS_ABSENT` (0) otherwise.
+    /// Carried on the shared entry so the coordinator bulk export and the
+    /// tunnel-remap purge — which iterate the shared map and have no worker
+    /// `SessionTable` association table to consult — can stamp the same pair
+    /// the incremental producers stamp via `pptp_call_ids_wire_for`. Set from
+    /// the verified wire pair at HA import; local publishes leave 0 because
+    /// the owning worker stamps its own Open delta from its live table, and
+    /// this entry's pair is only read when re-exporting a peer-originated
+    /// session this node adopted.
+    pub(crate) pptp_call_ids: u64,
 }
 
 impl SyncedSessionEntry {

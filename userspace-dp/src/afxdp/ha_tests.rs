@@ -442,6 +442,7 @@ fn update_ha_state_prewarms_split_rg_reverse_sessions_on_activation() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -556,6 +557,7 @@ fn update_ha_state_demotion_recovers_from_poisoned_worker_command_mutex() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -679,6 +681,7 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -843,6 +846,7 @@ fn synced_entry_with_generation(generation: u64) -> SyncedSessionEntry {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     }
 }
@@ -1153,6 +1157,7 @@ fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     }
 }
@@ -1776,6 +1781,7 @@ fn synced_snat_entry() -> SyncedSessionEntry {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     }
 }
@@ -1961,6 +1967,7 @@ fn coordinator_with_tunnel_session(tunnel_endpoint_id: u16) -> (Coordinator, Ses
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -2056,6 +2063,91 @@ fn purge_remapped_tunnel_sessions_no_drop_on_lossless_success() {
     assert_eq!(
         stats.dropped, 0,
         "no drop must be recorded when the close delta was queued losslessly"
+    );
+}
+
+/// #14303: a PPTP session that reaches the standby only via bulk export must
+/// carry its call-id pair, or the import gate withholds it as
+/// `pptp-call-ids-not-carried` — the #13965 failure surviving on the resync
+/// path. The shared entry carries the verified pair from import, and the
+/// bulk export stamps it instead of the hardcoded 0.
+///
+/// FAIL-ON-REVERT: restore `pptp_call_ids: 0` in `snapshot_all_sessions_export`
+/// (or stop carrying the pair on the shared entry at import) and the exported
+/// delta reads 0, so the peer import assertion below fails.
+#[test]
+fn bulk_exported_pptp_session_carries_its_call_id_pair_14303() {
+    let src = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    let dst = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+    let call = crate::session::pptp::PptpCall::new(src, 0x1111, dst, 0x2222);
+    let expected = call.to_wire_call_ids();
+
+    // The peer record as it arrives: a PPTP GRE session carrying its pair.
+    let req = crate::SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_GRE,
+        src_ip: src.to_string(),
+        dst_ip: dst.to_string(),
+        tunnel_discriminator: crate::session::TunnelDiscriminator::Pptp(call.handle()).to_wire(),
+        pptp_call_ids: expected,
+        egress_ifindex: 12,
+        owner_rg_id: 1,
+        ..crate::SessionSyncRequest::default()
+    };
+    let zones = rustc_hash::FxHashMap::default();
+    let entry = crate::server::helpers::build_synced_session_entry(&req, &zones, 0)
+        .expect("a PPTP record carrying its pair must import");
+    assert_eq!(
+        entry.pptp_call_ids, expected,
+        "import must retain the pair on the shared entry"
+    );
+
+    // Publish it as a locally-owned forward session on an active RG, the
+    // population the bulk export walks.
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    let mut entry = entry;
+    entry.origin = SessionOrigin::ForwardFlow;
+    entry.metadata.owner_rg_id = 1;
+    entry.metadata.fabric_ingress = false;
+    entry.decision.resolution.disposition = ForwardingDisposition::ForwardCandidate;
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("activate RG 1");
+    let (sender, _rx) = crate::event_stream::EventStreamSender::test_sender(true, 16);
+    coordinator.event_stream = Some(sender);
+
+    let export = coordinator
+        .snapshot_all_sessions_export()
+        .expect("bulk export");
+    let deltas = export.deltas_for_test();
+    assert_eq!(deltas.len(), 1, "the PPTP forward session must be exported");
+    assert_eq!(
+        deltas[0].pptp_call_ids, expected,
+        "bulk export must stamp the call-id pair, not 0, or the standby withholds the session"
+    );
+
+    // The exported delta, re-encoded as the peer's sync request, must import
+    // instead of being withheld.
+    let mut peer_req = req.clone();
+    peer_req.pptp_call_ids = deltas[0].pptp_call_ids;
+    let imported = crate::server::helpers::build_synced_session_entry(&peer_req, &zones, 0)
+        .expect("the bulk-exported PPTP session must import on the peer");
+    assert_eq!(
+        imported.key.discriminator,
+        crate::session::TunnelDiscriminator::Pptp(call.handle())
     );
 }
 
@@ -2604,6 +2696,7 @@ fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     }
 }
@@ -2820,6 +2913,7 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
 
@@ -4204,6 +4298,7 @@ fn a_deleted_synced_session_leaves_no_reverse_prewarm_key_after_a_route_moves_72
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     assert_eq!(
@@ -4297,6 +4392,7 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     // Same source, different port: a distinct key that lands in the SAME two
@@ -4396,6 +4492,7 @@ fn a_route_move_adds_the_new_prewarm_filing_and_delete_clears_all_of_them_7209()
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     assert_eq!(
@@ -4485,6 +4582,7 @@ fn a_removal_outside_the_delete_verb_still_unfiles_the_prewarm_key_7209() {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         };
         assert_eq!(
@@ -4566,6 +4664,7 @@ fn a_promoted_then_deleted_synced_session_leaves_no_prewarm_key_7209() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     assert_eq!(
@@ -4663,6 +4762,7 @@ fn a_refresh_never_drops_a_prewarm_filing_the_current_fib_cannot_rederive_7209()
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     assert_eq!(
@@ -4797,6 +4897,7 @@ fn an_import_under_an_emptied_forwarding_table_publishes_a_dead_reverse_companio
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
@@ -4952,6 +5053,7 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
@@ -5120,6 +5222,7 @@ fn stop_inner_empties_the_forwarding_table_that_a_released_lock_would_expose_720
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     assert_eq!(
@@ -8211,6 +8314,7 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     let now_ns = monotonic_nanos();
@@ -8361,6 +8465,7 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
 
@@ -9080,6 +9185,7 @@ fn fixture_10512_lease(
         session_id: forward_id,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     forward.metadata.is_reverse = false;
@@ -9343,6 +9449,7 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
             session_id: 0xF40512,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         };
         crate::afxdp::shared_ops::publish_shared_session(
@@ -9460,6 +9567,7 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
             session_id: 0xF70512,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         };
         crate::afxdp::shared_ops::publish_shared_session(
@@ -10420,6 +10528,7 @@ fn coord_list_bound_shared_only_row_reports_incomplete_12072() {
         session_id,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -10494,6 +10603,7 @@ fn coord_list_bound_sync_import_resolves_current_policy_id_12072() {
         session_id,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     publish_shared_session(
@@ -10608,6 +10718,7 @@ fn coord_list_unbound_peer_row_excluded_from_prepublish_12072() {
             session_id,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         };
         publish_shared_session(
@@ -10823,6 +10934,7 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
             session_id: 0xC1EA9000 + domain as u64,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         };
         crate::afxdp::shared_ops::publish_shared_session(
@@ -10874,6 +10986,7 @@ fn clear_mirror_bpf_failure_retains_authority_10512() {
         session_id: 0xC1EA9,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     crate::afxdp::shared_ops::publish_shared_session(
@@ -10923,6 +11036,7 @@ fn clear_mirror_over_cap_fails_closed_untouched_10512() {
             session_id: 0xC1EA9000 + domain as u64,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         };
         crate::afxdp::shared_ops::publish_shared_session(
@@ -11178,6 +11292,7 @@ fn pbr_stamped_split_rg_reverse_prewarm_uses_native_table_12086() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
 
@@ -11285,6 +11400,7 @@ fn reverse_prewarm_uses_native_table_instead_of_default_12086() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     assert!(matches!(
@@ -11333,6 +11449,7 @@ fn reverse_prewarm_unresolvable_domain_keeps_default_reply_rg_12086() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     assert!(matches!(
@@ -11512,6 +11629,7 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     let key = entry.key.clone();
@@ -11605,6 +11723,7 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         }
     };

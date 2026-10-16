@@ -276,6 +276,7 @@ fn shared_closing_copies(
                 session_id: sessions.session_id_for(key),
                 tcp_close_class: sessions.close_class_wire_for(key),
                 tcp_handshake_state: 0,
+                pptp_call_ids: 0,
                 source_nat_static: None,
             },
         );

@@ -9847,6 +9847,7 @@ fn f4_seed_shared_only(
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
@@ -10114,6 +10115,7 @@ fn import_entry_9718(
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     }
 }
@@ -12263,6 +12265,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         };
         crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
@@ -12363,6 +12366,7 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)

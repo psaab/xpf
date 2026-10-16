@@ -304,7 +304,7 @@ impl crate::afxdp::Coordinator {
                 bulk_resync: false,
                 tcp_close_class: entry.tcp_close_class,
                 tcp_handshake_state: entry.tcp_handshake_state,
-                pptp_call_ids: 0,
+                pptp_call_ids: entry.pptp_call_ids,
                 purge_retirement: false,
             });
         }
@@ -347,6 +347,11 @@ impl AllSessionsExport {
         }
         eprintln!("xpf-ha: exported {count} sessions to event stream for bulk sync");
         Ok(count)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deltas_for_test(&self) -> &[crate::session::SessionDelta] {
+        &self.deltas
     }
 }
 

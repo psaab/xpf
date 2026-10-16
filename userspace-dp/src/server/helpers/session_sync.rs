@@ -377,6 +377,7 @@ pub(crate) fn build_synced_session_entry(
         // copy gets its close bits and its close window.
         tcp_close_class: req.tcp_close_class,
         tcp_handshake_state: req.tcp_handshake_state,
+        pptp_call_ids: req.pptp_call_ids,
         key,
         decision: crate::session::SessionDecision {
             resolution: afxdp::ForwardingResolution {
