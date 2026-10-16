@@ -5107,6 +5107,202 @@ fn wg1866_disarmed_same_plan_apply_does_not_hold_wg_ports() {
     );
 }
 
+// --- #14131: defer prune must not precede the fallible binding replan -------
+
+/// #14131: a `defer_workers=true` apply that REMOVES a live WG endpoint
+/// but whose binding plan is REFUSED (here a wild ifindex on an added
+/// data interface) must leave the live WG + GRE tunnel threads intact.
+/// The prunes stop+join+REMOVE entries — they are not tombstones, so
+/// neither the liveness sweeps nor the snapshot/status rollback on the
+/// refusal path can resurrect them; if the prune ran first, the helper
+/// would keep advertising the prior snapshot while its prior tunnels
+/// were already dead.
+///
+/// RED-on-revert: with the prune before `replan_queues`, this apply
+/// prunes both entries, replans to `Err`, restores the prior snapshot,
+/// and returns `binding plan refused` — while both thread maps are
+/// empty. Every thread assertion below flips.
+#[test]
+fn apply_snapshot_defer_plan_refusal_keeps_live_tunnel_threads_14131() {
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let (_wg_tun, _gre_tun) = crate::afxdp::Coordinator::register_tunnel_tun_standins_for_test(
+        "wgt14131", "gre14131",
+    );
+    let wg_port = crate::test_ports::reserve_ephemeral_udp_port();
+    let state = new_state(ProcessStatus {
+        workers: 0,
+        forwarding_armed: true,
+        capabilities: forwarding_caps(),
+        ..ProcessStatus::default()
+    });
+    {
+        let mut guard = state.lock().expect("state");
+        // #10694: pin an empty SA baseline so the armed baseline reconcile
+        // reaches worker bring-up instead of the SA-readiness gate.
+        guard.afxdp.force_ipsec_sa_ready = true;
+        // The GRE spawn pass is gated on a registered worker record
+        // (tunnel_supervision plan SMR-1); the same record lets the
+        // zero-binding baseline reconcile keep GRE threads spawnable.
+        // The baseline reconcile's teardown clears records, so the test
+        // re-registers after the baseline apply below.
+        guard.afxdp.test_install_export_worker(0);
+    }
+
+    let wg_iface = crate::protocol::snapshot::InterfaceSnapshot {
+        name: "wgt14131".to_string(),
+        linux_name: "wgt14131".to_string(),
+        ifindex: 4251,
+        tunnel: true,
+        ..Default::default()
+    };
+    let gre_iface = crate::protocol::snapshot::InterfaceSnapshot {
+        name: "gre14131".to_string(),
+        linux_name: "gre14131".to_string(),
+        ifindex: 4252,
+        tunnel: true,
+        ..Default::default()
+    };
+    let wg_endpoint = crate::protocol::snapshot::TunnelEndpointSnapshot {
+        id: 1,
+        interface: "wgt14131".to_string(),
+        linux_name: "wgt14131".to_string(),
+        ifindex: 4251,
+        mode: "wireguard".to_string(),
+        wg_listen_port: wg_port,
+        wg_local_privkey_hex:
+            "a01010101010101010101010101010101010101010101010101010101010101a".to_string(),
+        wg_peers: vec![crate::protocol::snapshot::TunnelWgPeerSnapshot {
+            wg_peer_pubkey_hex:
+                "b02020202020202020202020202020202020202020202020202020202020202b".to_string(),
+            wg_allowed_ips: vec!["10.77.0.0/24".to_string()],
+            wg_endpoint: "127.0.0.1:9".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let gre_endpoint = crate::protocol::snapshot::TunnelEndpointSnapshot {
+        id: 2,
+        interface: "gre14131".to_string(),
+        linux_name: "gre14131".to_string(),
+        ifindex: 4252,
+        mode: "gre".to_string(),
+        outer_family: "inet".to_string(),
+        source: "192.0.2.1".to_string(),
+        destination: "198.51.100.7".to_string(),
+        ttl: 64,
+        ..Default::default()
+    };
+    let baseline = ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 1,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        capabilities: forwarding_caps(),
+        map_pins: ok_map_pins(),
+        interfaces: vec![wg_iface.clone(), gre_iface.clone()],
+        tunnel_endpoints: vec![wg_endpoint, gre_endpoint],
+        ..ConfigSnapshot::default()
+    };
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(baseline);
+        let response = run_request_delivering_wg_secrets(state.clone(), request);
+        assert!(response.ok, "baseline apply: {}", response.error);
+    }
+    // The baseline reconcile's teardown cleared the worker records
+    // BEFORE its post-readiness GRE spawn pass, so that pass's gate
+    // (records non-empty) saw an empty map and spawned nothing. Seed a
+    // record now and run the spawn pass directly — a second snapshot
+    // apply would exercise the code under test instead of arranging
+    // the fixture.
+    {
+        let mut guard = state.lock().expect("state");
+        guard.afxdp.test_seed_worker_record_for_14131();
+        guard.afxdp.test_spawn_local_tunnels_for_14131();
+    }
+    {
+        let guard = state.lock().expect("state");
+        assert_eq!(
+            guard.afxdp.wg_engine_count_for_test(),
+            1,
+            "precondition: baseline apply holds the WG engine"
+        );
+        assert!(
+            guard.afxdp.wg_thread_live_for_test(1),
+            "precondition: WG thread is live"
+        );
+        assert!(
+            guard.afxdp.local_tunnel_thread_live_for_test(2),
+            "precondition: GRE thread is live"
+        );
+        assert!(
+            !guard.afxdp.local_tunnel_deliveries.load().is_empty(),
+            "precondition: tunnel deliveries are published"
+        );
+    }
+
+    // Candidate: defer_workers, both tunnels REMOVED, plus a data
+    // interface whose wild ifindex refuses the whole binding plan.
+    // Removing the tunnels changes the plan key, so this takes the
+    // NOT-same-plan leg where the defer prune + replan ordering lives.
+    let candidate = ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 2,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        capabilities: forwarding_caps(),
+        map_pins: ok_map_pins(),
+        interfaces: vec![crate::protocol::snapshot::InterfaceSnapshot {
+            name: "ge-0/0/0".to_string(),
+            linux_name: "ge-0-0-0".to_string(),
+            ifindex: 70_000,
+            zone: "trust".to_string(),
+            rx_queues: 1,
+            ..Default::default()
+        }],
+        zones: vec![trust_zone_6140()],
+        defer_workers: true,
+        ..ConfigSnapshot::default()
+    };
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(candidate);
+    let response = run_request(state.clone(), request);
+    assert!(!response.ok, "wild-ifindex defer apply must be refused");
+    assert!(
+        response.error.contains("binding plan refused"),
+        "error must be the plan refusal, got: {}",
+        response.error
+    );
+
+    let guard = state.lock().expect("state");
+    assert_eq!(
+        guard.snapshot.as_ref().map(|s| s.generation),
+        Some(1),
+        "refused apply must keep the prior snapshot as the baseline"
+    );
+    assert_eq!(
+        guard.status.last_snapshot_generation, 1,
+        "refused apply must not advance the reported generation"
+    );
+    assert!(
+        guard.afxdp.wg_thread_live_for_test(1),
+        "refused apply must keep the WG thread live (prune must not precede replan)"
+    );
+    assert!(
+        guard.afxdp.local_tunnel_thread_live_for_test(2),
+        "refused apply must keep the GRE thread live (prune must not precede replan)"
+    );
+    let deliveries = guard.afxdp.local_tunnel_deliveries.load();
+    assert!(
+        deliveries.contains_key(&4251),
+        "refused apply must keep the WG delivery published"
+    );
+    assert!(
+        deliveries.contains_key(&4252),
+        "refused apply must keep the GRE delivery published"
+    );
+}
+
 // --- #2962: owner-RG export must not hold the ServerState lock ----------
 
 /// Fail-on-revert: the owner-RG session export must run its blocking 15 s

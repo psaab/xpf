@@ -351,7 +351,7 @@ pub(super) fn apply(
             // Ok(())) — a teardown with no integrity build; and when armed it
             // would spawn workers, violating the defer contract. So run the
             // SAME pre-teardown integrity legs directly (policy preflight +
-            // mandatory-map openability + full forwarding build), BEFORE the
+            // mandatory-map openability + full forwarding build), BEFORE any
             // side-effecting tunnel/WG prunes and the guard.snapshot swap,
             // and fail CLOSED on error. This adds integrity VALIDATION, not
             // activation — the worker spawn stays deferred below.
@@ -381,6 +381,44 @@ pub(super) fn apply(
                 );
                 return;
             }
+        }
+        // #14131: the binding-plan computation is PURE (it reads only the
+        // candidate snapshot, the worker count, the existing bindings, and
+        // the arm flag) and REFUSES fallibly (slot cap / wild ifindex /
+        // NAT-holder width). It must run BEFORE any side-effecting prune:
+        // the defer-branch prunes below stop+join+REMOVE live WG / local
+        // tunnel threads, and neither the tombstone sweeps
+        // (`reconcile_wg_control_liveness` /
+        // `reconcile_local_tunnel_liveness` — entries are gone, not
+        // tombstones) nor the rollback below (which restores only
+        // `guard.snapshot` + status fields) can resurrect a removed entry.
+        // Computing the plan first and pruning only on `Ok` keeps a
+        // REFUSED apply fully side-effect-free, exactly like the
+        // integrity-validation leg above; the prune then runs against a
+        // snapshot already known to be installable.
+        let replanned = match replan_queues(
+            Some(&snapshot),
+            guard.status.workers,
+            &existing_bindings,
+            // #6749: new slots inherit the box's current arm state rather than
+            // coming up unarmed and disabling every other binding with them.
+            guard.status.forwarding_armed,
+        ) {
+            Ok(bindings) => bindings,
+            Err(reason) => {
+                guard.status.last_snapshot_generation = prev_last_snapshot_generation;
+                guard.status.last_fib_generation = prev_last_fib_generation;
+                guard.status.last_snapshot_at = prev_last_snapshot_at;
+                guard.status.capabilities = prev_capabilities;
+                response.ok = false;
+                response.error = format!("binding plan refused: {reason}");
+                eprintln!(
+                    "CTRL_REQ: apply_snapshot rejected (plan refused): {reason} — keeping previous state"
+                );
+                return;
+            }
+        };
+        if defer_workers {
             // #1866 Change 2b (D4): the defer branch stores the snapshot
             // WITHOUT reconciling, leaving the coordinator's forwarding
             // (and so its WG desired set) stale until the deferred
@@ -398,36 +436,6 @@ pub(super) fn apply(
                 .prune_local_tunnel_sources_for_snapshot(&snapshot);
         }
         let prev_snapshot = std::mem::replace(&mut guard.snapshot, Some(snapshot));
-        // GPT-6: a REFUSED plan must never install. `replan_queues` returns
-        // `Err` (not an empty `Ok`) for NAT-holder/slot-cap/wild-ifindex
-        // refusals; installing an empty plan here would tear down the working
-        // config's workers below and persist the breakage as the baseline.
-        // Nothing has been torn down yet (bindings uninstalled, reconcile not
-        // run), so restore the prior snapshot + status fields and fail closed
-        // — mirroring the defer-integrity leg above.
-        let replanned = match replan_queues(
-            guard.snapshot.as_ref(),
-            guard.status.workers,
-            &existing_bindings,
-            // #6749: new slots inherit the box's current arm state rather than
-            // coming up unarmed and disabling every other binding with them.
-            guard.status.forwarding_armed,
-        ) {
-            Ok(bindings) => bindings,
-            Err(reason) => {
-                guard.snapshot = prev_snapshot;
-                guard.status.last_snapshot_generation = prev_last_snapshot_generation;
-                guard.status.last_fib_generation = prev_last_fib_generation;
-                guard.status.last_snapshot_at = prev_last_snapshot_at;
-                guard.status.capabilities = prev_capabilities;
-                response.ok = false;
-                response.error = format!("binding plan refused: {reason}");
-                eprintln!(
-                    "CTRL_REQ: apply_snapshot rejected (plan refused): {reason} — keeping previous state"
-                );
-                return;
-            }
-        };
         guard.status.bindings = replanned;
         if defer_workers {
             eprintln!(
