@@ -34,6 +34,18 @@ type DB struct {
 	// It samples the loaded active config while confirm.json recovery holds the
 	// Store lock; implementations must not call back into Store.
 	confirmRecoveryClockSkewCheck func(*config.Config) bool
+
+	// writeConfirmCover is the guarded tree's encryption profile for the
+	// NEXT WriteConfirm (#14172). commitConfirmedLocked sets it from the
+	// candidate it is about to promote (committedTree) before the
+	// provisional/final writeConfirmState calls, and clears it after.
+	// Every other WriteConfirm caller leaves it "" and the record is
+	// encrypted under its PrevTree profile alone, as before. DB-scoped
+	// rather than a WriteConfirm parameter: the public signature is the
+	// persistence boundary used across the package and by test fixtures,
+	// and a parameter would have to be threaded through every tombstone,
+	// migration and retry write that knows nothing about a guarded tree.
+	writeConfirmCover confirmEncryptionCover
 }
 
 var (
@@ -380,10 +392,28 @@ func (db *DB) ReadConfirm() (*confirmRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read confirm state: %w", err)
 	}
-	data, _, err = db.maybeDecryptTreeJSON(data, nil)
+	data, decrypted, err := db.maybeDecryptTreeJSON(data, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt confirm state: %w", err)
 	}
+	// Unexpected-plaintext warning (#14172, #4579 A4-06 parity). When the
+	// rollback target declares a master-password every write path seals the
+	// body (encodeConfirm now also seals under the guarded tree's cover —
+	// see below), so a record that reads back plaintext while its PrevTree
+	// declares a master-password was written without the AES-GCM envelope:
+	// a pre-#14172 build, a restore from an unencrypted backup, or
+	// tampering. Reaching this state needs write access to the 0600/0700
+	// .configdb (root/owner), so it is not a privilege-escalation vector;
+	// the warn makes the silent at-rest exposure visible instead of
+	// loading the cleartext secrets without a trace. The guarded-tree half
+	// of the judgement lives in recoverPendingConfirmLocked, which knows
+	// the loaded active tree; ReadConfirm itself only sees PrevTree.
+	// Legacy plaintext records stay READABLE — rejecting them would strand
+	// every pending window written before the cover existed — and instead
+	// warn here and rely on GuardedHash/PreviousHash/Resolved/deadline
+	// checks in recovery to contain a tampered record (a record whose
+	// hashes no longer bind the active config is stale-dropped, never
+	// rolled back). The warning is boot/recovery-paced, never per-packet.
 	// Reject a null/array/scalar top-level body BEFORE decoding: a literal
 	// `null` decodes into a zero-value confirmRecord with NO error (#5637). The
 	// encrypted write path always inner-marshals a struct to an object, so this
@@ -420,6 +450,13 @@ func (db *DB) ReadConfirm() (*confirmRecord, error) {
 	}
 	if rec.PrevTree == nil {
 		return nil, fmt.Errorf("parse confirm state: pending commit-confirmed record has no rollback target")
+	}
+	if !decrypted && confirmNeedsEncryption(rec, nil) {
+		slog.Warn("pending commit-confirmed record declares a master-password but was read as "+
+			"UNENCRYPTED plaintext (expected an AES-GCM envelope) — the record "+
+			"may have been written before the guarded-tree cover, downgraded, restored from an "+
+			"unencrypted backup, or tampered with; its secrets are exposed at rest",
+			"path", db.confirmPath(), "issue", "#14172")
 	}
 	return rec, nil
 }
@@ -719,8 +756,12 @@ func (db *DB) writeTreeMarked(path string, tree *config.ConfigTree, committed bo
 
 // encodeConfirm produces the exact bytes WriteConfirm persists: the indented
 // record, encrypted under the rollback target's master-password when it has
-// one. It refuses a record ReadConfirm would refuse (#9617), so the
-// commit-confirmed path can size-check the record BEFORE it promotes anything
+// one, else under the guarded tree's cover profile when commitConfirmedLocked
+// set one (#14172: adding a master-password in the guarded commit must not
+// leave the confirm record — rollback target and safety fields alike — in
+// cleartext while active.json from the same commit is encrypted). It refuses
+// a record ReadConfirm would refuse (#9617), so the commit-confirmed path can
+// size-check the record BEFORE it promotes anything
 // (commitConfirmedLocked) using the same function the write uses.
 // widestConfirmDeadline is a deadline whose JSON is as long as any deadline's
 // can be, for sizing a confirm record before its real deadline exists (#9617).
@@ -737,9 +778,11 @@ func (db *DB) encodeConfirm(rec *confirmRecord) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal confirm state: %w", err)
 	}
-	data, err = db.maybeEncryptTreeJSON(data, rec.PrevTree, nil)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt confirm state: %w", err)
+	if prf := confirmEncryptionPRF(rec.PrevTree, db.writeConfirmCover); prf != "" {
+		data, err = db.encryptTreeJSON(data, prf, nil)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt confirm state: %w", err)
+		}
 	}
 	header := []byte(fmt.Sprintf("%s v=%d\n", confirmEnvelopeMagic, confirmEnvelopeVersion))
 	enveloped := make([]byte, 0, len(header)+len(data))
