@@ -42,7 +42,7 @@ var fabricStampCluster10105 = []string{
 
 func hasFabricIngressBaTrustAdvisory13967(cfg *Config) bool {
 	for _, warning := range cfg.Warnings {
-		if strings.Contains(warning, "fabric ingress BA (#13967)") {
+		if strings.Contains(warning, "fabric ingress BA fallback (#13967)") {
 			return true
 		}
 	}

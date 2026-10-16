@@ -411,7 +411,10 @@ pub(super) struct UserspaceDpMeta {
     pub(super) flow_dst_addr: [u8; 16],
     pub(super) config_generation: u64,
     pub(super) fib_generation: u32,
-    pub(super) reserved2: u32,
+    /// Stable peer-side logical ingress ifindex recovered from a validated
+    /// V2 fabric scope stamp; zero when no scoped ingress identity is carried.
+    /// Reuses the existing reserved tail word; metadata ABI size is unchanged.
+    pub(super) fabric_ingress_ifindex: u32,
 }
 
 const _: [(); 96] = [(); std::mem::size_of::<UserspaceDpMeta>()];
@@ -450,6 +453,7 @@ pub(super) struct ForwardPacketMeta {
     // resolution, before the ordinary egress path.
     pub(super) flow_src_addr: [u8; 16],
     pub(super) flow_dst_addr: [u8; 16],
+    pub(super) fabric_ingress_ifindex: u32,
 }
 
 impl ForwardPacketMeta {
@@ -531,6 +535,7 @@ impl From<UserspaceDpMeta> for ForwardPacketMeta {
             flow_dst_port: meta.flow_dst_port,
             flow_src_addr: meta.flow_src_addr,
             flow_dst_addr: meta.flow_dst_addr,
+            fabric_ingress_ifindex: meta.fabric_ingress_ifindex,
         }
     }
 }
@@ -565,7 +570,7 @@ impl From<ForwardPacketMeta> for UserspaceDpMeta {
             flow_dst_addr: meta.flow_dst_addr,
             config_generation: 0,
             fib_generation: 0,
-            reserved2: 0,
+            fabric_ingress_ifindex: meta.fabric_ingress_ifindex,
         }
     }
 }

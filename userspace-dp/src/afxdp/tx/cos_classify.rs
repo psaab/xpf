@@ -8,8 +8,8 @@ use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 #[path = "cos_classify_ba.rs"]
 mod ba;
 use ba::{
-    BaIngressTrust, ba_ingress_trust, resolve_cos_queue_lp_rewrite,
-    resolve_trusted_ba_loss_priority, resolve_trusted_ba_queue_id,
+    ba_ingress_trust_for_packet, resolve_cos_queue_lp_rewrite,
+    resolve_trusted_ba_loss_priority, resolve_trusted_ba_queue_id, BaIngressTrust,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -237,14 +237,18 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_queue_id(
         Some(flow_key) => {
             resolve_cached_cos_tx_selection(forwarding, egress_ifindex, meta, flow_key).queue_id
         }
-        None => forwarding.cos.interfaces.get(&egress_ifindex).map(|iface| {
-            flowless_cos_ba_queue_id(
-                forwarding,
-                iface,
-                meta,
-                ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id),
-            )
-        }),
+        None => forwarding
+            .cos
+            .interfaces
+            .get(&egress_ifindex)
+            .map(|iface| {
+                flowless_cos_ba_queue_id(
+                    forwarding,
+                    iface,
+                    meta,
+                    ba_ingress_trust_for_packet(forwarding, meta),
+                )
+            }),
     }
 }
 
@@ -315,7 +319,7 @@ fn cached_cos_tx_selection_flowless(
 ) -> CachedTxSelectionDescriptor {
     let iface = forwarding.cos.interfaces.get(&egress_ifindex);
     let ba_trust = iface
-        .map(|_| ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id))
+        .map(|_| ba_ingress_trust_for_packet(forwarding, meta))
         .unwrap_or_default();
     // #hb166 T-6(m): fragments / flowless packets carry no 5-tuple but
     // still carry a DSCP (and 802.1p PCP). Behavior-aggregate
@@ -516,7 +520,7 @@ fn resolve_cached_cos_tx_selection_impl(
     };
     let iface = forwarding.cos.interfaces.get(&egress_ifindex);
     let ba_trust = iface
-        .map(|_| ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id))
+        .map(|_| ba_ingress_trust_for_packet(forwarding, meta))
         .unwrap_or_default();
 
     // #3642: select the output-filter family from the (post-NAT) wire key the
@@ -749,13 +753,22 @@ pub(in crate::afxdp) fn reclassify_cached_ba_queue_and_lp_rewrite(
     ingress_vlan_present: bool,
     ingress_ifindex: u32,
     ingress_vlan_id: u16,
+    fabric_ingress_ifindex: u32,
 ) -> Option<(u8, Option<u8>)> {
     forwarding
         .cos
         .interfaces
         .get(&egress_ifindex)
         .and_then(|iface| {
-            let trust = ba_ingress_trust(forwarding, ingress_ifindex, ingress_vlan_id);
+            let trust = ba_ingress_trust_for_packet(
+                forwarding,
+                UserspaceDpMeta {
+                    ingress_ifindex,
+                    ingress_vlan_id,
+                    fabric_ingress_ifindex,
+                    ..Default::default()
+                },
+            );
             let queue_id = resolve_trusted_ba_queue_id(
                 forwarding,
                 iface,
@@ -790,8 +803,17 @@ pub(in crate::afxdp) fn reclassify_cached_cos_lp_rewrite(
     ingress_vlan_present: bool,
     ingress_ifindex: u32,
     ingress_vlan_id: u16,
+    fabric_ingress_ifindex: u32,
 ) -> Option<u8> {
-    let trust = ba_ingress_trust(forwarding, ingress_ifindex, ingress_vlan_id);
+    let trust = ba_ingress_trust_for_packet(
+        forwarding,
+        UserspaceDpMeta {
+            ingress_ifindex,
+            ingress_vlan_id,
+            fabric_ingress_ifindex,
+            ..Default::default()
+        },
+    );
     resolve_cos_queue_lp_rewrite(
         forwarding,
         egress_ifindex,
@@ -935,7 +957,7 @@ fn resolve_cos_tx_selection_internal(
     }
     let iface = forwarding.cos.interfaces.get(&egress_ifindex);
     let ba_trust = iface
-        .map(|_| ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id))
+        .map(|_| ba_ingress_trust_for_packet(forwarding, meta))
         .unwrap_or_default();
     let Some(flow_key) = flow_key else {
         // #hb166 T-6(m): flowless / fragment classification — run the

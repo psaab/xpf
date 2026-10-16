@@ -20,6 +20,6 @@ func fabricStampSharedSegmentAdvisories10105(cfg *Config) []string {
 	}
 	return []string{
 		"chassis cluster fabric zone stamp (#10105): fabric links MUST be a private two-peer L2 domain (direct-attached, dedicated VLAN/bridge, or operator-provided MACsec); shared switching with a live RG split is unsupported because the zone stamp is cloneable by an L2-adjacent host",
-		"class-of-service fabric ingress BA (#13967): packets received over the HA fabric are treated as untrusted for DSCP/inet-precedence/802.1p behavior-aggregate classification; they use the egress default queue and loss-priority rewrite, so voice/network-control traffic crossing the fabric may receive best-effort treatment",
+		"class-of-service fabric ingress BA fallback (#13967): packets without a validated V2 scope stamp cannot preserve the peer's classifier and use the fabric parent's local binding; if no local classifier or output filter selects a forwarding class, the egress default queue and loss-priority rewrite apply. V2-scoped arrivals preserve the peer BA classifier",
 	}
 }

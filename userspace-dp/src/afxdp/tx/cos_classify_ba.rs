@@ -28,6 +28,24 @@ pub(super) fn ba_ingress_trust(
         .unwrap_or_default()
 }
 
+/// Read BA bindings from the validated peer logical unit when the V2 fabric
+/// stamp carries one; otherwise use this packet's local ingress identity.
+pub(super) fn ba_ingress_trust_for_packet(
+    forwarding: &ForwardingState,
+    meta: impl Into<ForwardPacketMeta>,
+) -> BaIngressTrust {
+    let meta = meta.into();
+    if meta.fabric_ingress_ifindex != 0 {
+        return forwarding
+            .cos
+            .ingress_classifier_bindings
+            .get(&(meta.fabric_ingress_ifindex as i32))
+            .copied()
+            .unwrap_or_default();
+    }
+    ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id)
+}
+
 /// Resolve the BA queue from the logical ingress unit's indexed classifier
 /// tables, then clamp it to the egress interface's materialized queue set.
 /// Locally generated packets have no ingress binding and retain the legacy

@@ -1150,13 +1150,15 @@ Important current behavior:
 
   consulted in that order: both L3 arms (which read the DS field) precede the
   L2 802.1p arm (which needs a VLAN tag)
-- HA fabric arrivals are treated as untrusted for BA classification: the
-  egress node sees the fabric parent rather than the peer's node-local ingress
-  unit, so DSCP, IP-precedence, and 802.1p mappings are not trusted. Such
-  traffic uses the egress default queue and loss-priority rewrite. A chassis
-  cluster with a configured fabric link emits a commit-time warning because
-  voice and network-control traffic crossing the fabric may receive
-  best-effort treatment (#13967).
+- Scoped V2 HA fabric stamps carry the peer's logical ingress identity, so the
+  egress node uses that peer unit's BA classifier binding for DSCP,
+  IP-precedence, and 802.1p selection. Zone-only V1 or unstamped arrivals lack
+  this identity and use the fabric parent's local binding instead. A fabric
+  parent classifier or output filter can still select a forwarding class;
+  without one, queue selection and loss-priority rewriting use the egress
+  defaults. A configured cluster fabric emits a commit-time warning about the
+  fallback because voice and network-control traffic may receive best-effort
+  treatment (#13967).
 
 - a BA classifier code-point that maps to a forwarding-class whose queue the
   interface does NOT materialize (the forwarding-class has no `scheduler-map`

@@ -547,6 +547,7 @@ pub(super) fn stage_flow_cache_hit(
                 meta.ingress_vlan_present != 0,
                 meta.ingress_ifindex,
                 meta.ingress_vlan_id,
+                meta.fabric_ingress_ifindex,
             )
         } else {
             None
@@ -565,6 +566,7 @@ pub(super) fn stage_flow_cache_hit(
                     meta.ingress_vlan_present != 0,
                     meta.ingress_ifindex,
                     meta.ingress_vlan_id,
+                    meta.fabric_ingress_ifindex,
                 )
             })
         } else {
