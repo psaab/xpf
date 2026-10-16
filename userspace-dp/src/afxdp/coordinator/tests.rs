@@ -1131,6 +1131,7 @@ fn stamp_injected_packet_tuple_builds_ipv4_icmp_flow_key() {
     let mut meta = UserspaceDpMeta {
         addr_family: libc::AF_INET as u8,
         protocol: 0,
+        flow_src_addr: [0xff; 16],
         ..UserspaceDpMeta::default()
     };
     let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
@@ -1153,6 +1154,7 @@ fn stamp_injected_packet_tuple_builds_ipv4_icmp_flow_key() {
     let flow = parse_session_flow_from_meta(meta).expect("metadata flow");
     assert_eq!(meta.protocol, PROTO_ICMP);
     assert_eq!(meta.l3_offset, 14);
+    assert_eq!(&meta.flow_src_addr[4..], &[0; 12]);
     assert_eq!(meta.l4_offset, 34);
     assert_eq!(meta.payload_offset, 42);
     assert_eq!(
