@@ -879,6 +879,12 @@ per-path:
   records without `ArmedAt` are capped at the maximum accepted confirm window.
   The boot ID remains diagnostic provenance; neither value is a monotonic
   deadline that can survive reboot.
+  Pending recovery evaluates the guarded/previous hashes against BOTH
+  the raw on-disk generation (captured before Load's tolerant repairs)
+  and the effective normalized tree, and normalizes the record's
+  `PrevTree` with the same repairs before compiling or promoting it
+  (#14168); a live record recognized only via the raw hash is rebound
+  to the effective hash, while unrelated generations remain stale.
 
   Before a FIRST rollback writes the never-committed active marker (#12167),
   it first persists `confirm.json` with a past-deadline sentinel. If the
