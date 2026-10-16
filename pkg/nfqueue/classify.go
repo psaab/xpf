@@ -135,23 +135,61 @@ func classifyIPv6(payload []byte) (CaptureClassification, error) {
 	copy(c.Dst[:], payload[24:40])
 	next := payload[6]
 	headerEnd := 40
-	if next == 44 { // Fragment parsing is limited to an immediate Fragment header.
-		if payloadLength < 8 {
-			return CaptureClassification{}, errors.New("nfqueue: truncated IPv6 fragment header")
+	// Walk the IPv6 extension chain with the same type set, advance
+	// arithmetic, and 8-header bound as Rust walk_ipv6_ext_chain
+	// (userspace-dp/src/afxdp/frame/inspect.rs, MAX_IPV6_EXT_HEADERS):
+	// generic length-prefixed headers (0/43/60/135/139/140/253/254)
+	// advance (HdrExtLen+1)*8, AH (51) advances (len+2)*4, Fragment (44)
+	// advances a fixed 8 bytes, and any other protocol (including ESP 50
+	// and No-Next-Header 59) is the terminal protocol. A Fragment header
+	// anywhere in the walked chain marks the packet a fragment (#13976);
+	// a chain still on a traversable header after 8 iterations is
+	// rejected rather than adjudicated unresolved.
+walk:
+	for range 8 {
+		switch next {
+		case 0, 43, 60, 135, 139, 140, 253, 254: // HBH, Routing, DstOpts, Mobility, HIP, Shim6, experimental
+			if headerEnd+2 > end {
+				return CaptureClassification{}, errors.New("nfqueue: truncated IPv6 extension header")
+			}
+			extLen := (int(payload[headerEnd+1]) + 1) * 8
+			if extLen > end-headerEnd {
+				return CaptureClassification{}, errors.New("nfqueue: invalid IPv6 extension header length")
+			}
+			next = payload[headerEnd]
+			headerEnd += extLen
+		case 51: // Authentication Header (RFC 4302 (len+2)*4)
+			if headerEnd+2 > end {
+				return CaptureClassification{}, errors.New("nfqueue: truncated IPv6 extension header")
+			}
+			extLen := (int(payload[headerEnd+1]) + 2) * 4
+			if extLen > end-headerEnd {
+				return CaptureClassification{}, errors.New("nfqueue: invalid IPv6 extension header length")
+			}
+			next = payload[headerEnd]
+			headerEnd += extLen
+		case 44: // Fragment (RFC 8200 §4.5, fixed 8 bytes)
+			if headerEnd+8 > end {
+				return CaptureClassification{}, errors.New("nfqueue: truncated IPv6 fragment header")
+			}
+			frag := payload[headerEnd : headerEnd+8]
+			next = frag[0]
+			word := binary.BigEndian.Uint16(frag[2:4])
+			c.FragMore = word&1 != 0
+			c.FragOffset = uint32(word>>3) * 8
+			c.FragID = binary.BigEndian.Uint32(frag[4:8])
+			c.IsFragment = true // atomic fragments remain fragments.
+			headerEnd += 8
+			break walk
+		default:
+			break walk
 		}
-		frag := payload[40:48]
-		next = frag[0]
-		word := binary.BigEndian.Uint16(frag[2:4])
-		c.FragMore = word&1 != 0
-		c.FragOffset = uint32(word>>3) * 8
-		c.FragID = binary.BigEndian.Uint32(frag[4:8])
-		c.IsFragment = true // atomic fragments (offset=0, M=0) remain fragments.
-		headerEnd = 48
 	}
-	// IPv6 headers other than TCP and UDP have no ports to extract. Like the
-	// IPv4 classifier, retain their protocol number and classify them by
-	// endpoints so they can reach policy and reinjection (#10897).
-	// Extension chains after an immediate Fragment header remain unparsed.
+	if !c.IsFragment && (next == 0 || next == 43 || next == 44 || next == 51 ||
+		next == 60 || next == 135 || next == 139 || next == 140 ||
+		next == 253 || next == 254) {
+		return CaptureClassification{}, errors.New("nfqueue: IPv6 extension chain exceeds limit")
+	}
 	c.Proto = next
 	c.payloadOffset = headerEnd
 	c.payloadLength = end - headerEnd

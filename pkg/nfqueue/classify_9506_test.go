@@ -306,13 +306,22 @@ func TestClassifyV6NonTransportProtocols10897(t *testing.T) {
 		name  string
 		proto byte
 	}{
-		{name: "hop-by-hop", proto: 0},
-		{name: "destination-options", proto: 60},
+		{name: "hop-by-hop", proto: 59},
+		{name: "destination-options", proto: 59},
 		{name: "icmpv6", proto: 58},
 		{name: "esp", proto: 50},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			packet := classifyV6Packet(t, tc.proto, src, dst, 1, 2, 3, 4)
+			first := tc.proto
+			body := []byte{1, 2, 3, 4}
+			if tc.name == "hop-by-hop" || tc.name == "destination-options" {
+				first = 0
+				if tc.name == "destination-options" {
+					first = 60
+				}
+				body = []byte{tc.proto, 0, 0, 0, 0, 0, 0, 0}
+			}
+			packet := classifyV6Packet(t, first, src, dst, body...)
 			got, err := ClassifyCapturePayload(packet)
 			if err != nil {
 				t.Fatalf("ClassifyCapturePayload: %v", err)
@@ -368,5 +377,131 @@ func TestClassifyV6FragmentNonTransportProtocols10897(t *testing.T) {
 				t.Fatalf("fragment piece = %+v, ok=%v", piece, ok)
 			}
 		})
+	}
+}
+
+// #13976: a Fragment header behind a walked extension chain must classify
+// as a fragment. Before the fix only an immediate NextHeader==44 was
+// recognised, so HBH/Routing/DstOpts/AH -> Fragment packets escaped
+// IsFragment (no FragmentKey, ordinary flow queue instead of the
+// enforcing fragment path).
+func TestClassifyV6FragmentBehindExtChain13976(t *testing.T) {
+	src, dst := net.ParseIP("2001:db8::7"), net.ParseIP("2001:db8::8")
+	ext := func(next, hdrExtLen byte) []byte {
+		h := make([]byte, (int(hdrExtLen)+1)*8)
+		h[0] = next
+		h[1] = hdrExtLen
+		return h
+	}
+	frag := func(next byte, offMF uint16, id uint32, tail ...byte) []byte {
+		h := make([]byte, 8)
+		h[0] = next
+		binary.BigEndian.PutUint16(h[2:4], offMF)
+		binary.BigEndian.PutUint32(h[4:8], id)
+		return append(h, tail...)
+	}
+	udp := []byte{0x00, 0x35, 0x00, 0x35, 0xaa, 0xbb}
+	cases := []struct {
+		name string
+		pkt  []byte
+	}{
+		{"hbh-first", classifyV6Packet(t, 0, src, dst, append(ext(44, 0), frag(17, 0x0001, 42, udp...)...)...)},
+		{"routing-first", classifyV6Packet(t, 43, src, dst, append(ext(44, 0), frag(17, 0x0001, 42, udp...)...)...)},
+		{"dstopts-first", classifyV6Packet(t, 60, src, dst, append(ext(44, 0), frag(17, 0x0001, 42, udp...)...)...)},
+		{"ah-first", classifyV6Packet(t, 51, src, dst, append([]byte{44, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, frag(17, 0x0001, 42, udp...)...)...)},
+		{"mobility-first", classifyV6Packet(t, 135, src, dst, append(ext(44, 0), frag(17, 0x0001, 42, udp...)...)...)},
+		{"hip-first", classifyV6Packet(t, 139, src, dst, append(ext(44, 0), frag(17, 0x0001, 42, udp...)...)...)},
+		{"shim6-first", classifyV6Packet(t, 140, src, dst, append(ext(44, 0), frag(17, 0x0001, 42, udp...)...)...)},
+		{"exp253-first", classifyV6Packet(t, 253, src, dst, append(ext(44, 0), frag(17, 0x0001, 42, udp...)...)...)},
+		{"exp254-first", classifyV6Packet(t, 254, src, dst, append(ext(44, 0), frag(17, 0x0001, 42, udp...)...)...)},
+		{"multi-hop", classifyV6Packet(t, 0, src, dst, append(append(ext(43, 0), ext(44, 1)...), frag(6, 0x0011, 7, 0x00, 0x50, 0x01, 0xbb, 0, 0, 0, 0)...)...)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ClassifyCapturePayload(tc.pkt)
+			if err != nil {
+				t.Fatalf("Classify: %v", err)
+			}
+			if !got.IsFragment || !got.FragMore || got.FragID == 0 {
+				t.Fatalf("classification = %+v, want fragment behind ext chain", got)
+			}
+			if _, ok := got.FragmentKey(1, 0, 1); !ok {
+				t.Fatalf("no fragment key for %+v", got)
+			}
+			if got.FragOffset == 0 {
+				if !got.HasPorts {
+					t.Fatalf("first fragment behind chain must expose ports: %+v", got)
+				}
+			} else if got.HasPorts {
+				t.Fatalf("non-first fragment must not expose ports: %+v", got)
+			}
+			piece, ok := got.FragmentPiece(tc.pkt)
+			if !ok || piece.Offset != got.FragOffset || len(piece.Data) == 0 {
+				t.Fatalf("piece = %+v ok=%v class=%+v", piece, ok, got)
+			}
+		})
+	}
+	// Non-first fragment behind chain: offset preserved.
+	nonFirst := classifyV6Packet(t, 0, src, dst, append(ext(44, 0), frag(17, 0x0009, 42, 1, 2, 3, 4)...)...)
+	got, err := ClassifyCapturePayload(nonFirst)
+	if err != nil || !got.IsFragment || got.FragOffset != 8 || got.HasPorts {
+		t.Fatalf("non-first behind chain = %+v err=%v", got, err)
+	}
+	// Negatives: chains without Fragment stay unfragmented and keep ports.
+	noFrag := classifyV6Packet(t, 0, src, dst, append(ext(6, 0), udp...)...)
+	got, err = ClassifyCapturePayload(noFrag)
+	if err != nil || got.IsFragment || !got.HasPorts || got.SrcPort != 53 {
+		t.Fatalf("no-frag chain = %+v err=%v", got, err)
+	}
+	// Truncated / over-long chains fail closed.
+	for name, pkt := range map[string][]byte{
+		"trunc-ext":   classifyV6Packet(t, 0, src, dst, 44),
+		"overrun-ext": classifyV6Packet(t, 0, src, dst, 44, 5, 0, 0),
+		"trunc-frag-behind": classifyV6Packet(t, 0, src, dst,
+			append(ext(44, 0), 17, 0)...),
+	} {
+		if _, err := ClassifyCapturePayload(pkt); err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+	}
+	// Over-limit: 8 extension headers before Fragment exceeds the
+	// 8-iteration bound (the Fragment would be the 9th header).
+	var over []byte
+	for range 8 {
+		over = append(over, ext(60, 0)...)
+	}
+	over = append(over, ext(44, 0)...)
+	over = append(over, frag(17, 1, 9, udp...)...)
+	if _, err := ClassifyCapturePayload(classifyV6Packet(t, 60, src, dst, over...)); err == nil {
+		t.Fatal("over-limit chain: expected error")
+	}
+	// Boundary parity with Rust MAX_IPV6_EXT_HEADERS=8: six extension
+	// headers then a Fragment as the 7th header (terminal on the 8th
+	// iteration) still resolves as a fragment.
+	var atBound []byte
+	for range 6 {
+		atBound = append(atBound, ext(60, 0)...)
+	}
+	atBound = append(atBound, ext(44, 0)...)
+	atBound = append(atBound, frag(17, 0x0001, 43, udp...)...)
+	got, err = ClassifyCapturePayload(classifyV6Packet(t, 60, src, dst, atBound...))
+	if err != nil || !got.IsFragment || got.FragID != 43 || !got.HasPorts {
+		t.Fatalf("fragment within bound = %+v err=%v, want resolved fragment", got, err)
+	}
+	// Seven extension headers then a Fragment as the 8th header: the
+	// fragment is declared at the walk bound. The sibling Rust walker
+	// records the sighting but returns OverLimit (its non-fragment
+	// consumers fail closed); this capture classifier likewise cannot
+	// adjudicate past the bound, so it must fail closed rather than
+	// classify — and must never return a plain (non-fragment) verdict
+	// that would be submitted for adjudication.
+	var atLimit []byte
+	for range 7 {
+		atLimit = append(atLimit, ext(60, 0)...)
+	}
+	atLimit = append(atLimit, ext(44, 0)...)
+	atLimit = append(atLimit, frag(17, 0x0001, 44, udp...)...)
+	if _, err := ClassifyCapturePayload(classifyV6Packet(t, 60, src, dst, atLimit...)); err == nil {
+		t.Fatal("fragment as 8th header: expected over-limit error")
 	}
 }
