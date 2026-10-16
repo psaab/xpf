@@ -208,10 +208,16 @@ impl PMechInventory {
             return Self::default();
         }
         let identity = decode_policy_identity(&snapshot.policy_identity);
+        let tunnel_ifindices = snapshot
+            .tunnel_rows
+            .iter()
+            .filter(|tunnel| tunnel.logical_ifindex > 0)
+            .map(|tunnel| tunnel.logical_ifindex as u32)
+            .collect::<FastSet<_>>();
         let route_index = main_routes_valid(&snapshot.main_routes);
         let routes_valid = route_index.is_some();
         let mixed_ecmp_ambiguous =
-            has_mixed_tunnel_egress(&snapshot.main_routes, &snapshot.tunnel_rows);
+            has_mixed_tunnel_egress(&snapshot.main_routes, &tunnel_ifindices);
         let mut out = Self {
             policy_identity: identity.unwrap_or_default(),
             generation: snapshot.generation,
@@ -238,7 +244,12 @@ impl PMechInventory {
                 recompute_selector_projection(&snapshot.main_routes, index, row)
             });
             let recomputed_destination_projection = route_index.as_ref().and_then(|index| {
-                recompute_local_selector_projection(&snapshot.main_routes, index, row)
+                recompute_local_selector_projection(
+                    &snapshot.main_routes,
+                    index,
+                    row,
+                    &tunnel_ifindices,
+                )
             });
             let projection_valid = routes_valid
                 && recomputed_projection.as_ref().is_some_and(|projection| {
@@ -510,13 +521,8 @@ impl RoutePrefixIndex {
 
 fn has_mixed_tunnel_egress(
     routes: &[crate::protocol::IpsecMainRouteSnapshot],
-    tunnels: &[crate::protocol::IpsecPMechTunnelRowSnapshot],
+    tunnel_ifindices: &FastSet<u32>,
 ) -> bool {
-    let tunnel_ifindices = tunnels
-        .iter()
-        .filter(|tunnel| tunnel.logical_ifindex > 0)
-        .map(|tunnel| tunnel.logical_ifindex as u32)
-        .collect::<FastSet<_>>();
     routes.iter().any(|route| {
         if route.disposition != RTN_UNICAST || route.next_hops.len() < 2 {
             return false;
@@ -533,6 +539,14 @@ fn has_mixed_tunnel_egress(
                 .iter()
                 .any(|hop| tunnel_ifindices.contains(&hop.ifindex))
     })
+}
+fn has_mixed_egress(
+    next_hops: &[crate::protocol::IpsecMainRouteNextHopSnapshot],
+) -> bool {
+    next_hops.len() >= 2
+        && next_hops[1..]
+            .iter()
+            .any(|hop| hop.ifindex != next_hops[0].ifindex)
 }
 
 fn main_route_prefix(route: &crate::protocol::IpsecMainRouteSnapshot) -> Option<IpNet> {
@@ -621,6 +635,7 @@ fn recompute_local_selector_projection(
     routes: &[crate::protocol::IpsecMainRouteSnapshot],
     route_index: &RoutePrefixIndex,
     tunnel: &crate::protocol::IpsecPMechTunnelRowSnapshot,
+    tunnel_ifindices: &FastSet<u32>,
 ) -> Option<BTreeSet<String>> {
     let mut projection = BTreeSet::new();
     let mut selectors = Vec::new();
@@ -630,12 +645,15 @@ fn recompute_local_selector_projection(
         }
     }
     for (&ifindex, owned_routes) in &route_index.owned_routes_by_ifindex {
-        if ifindex == tunnel.logical_ifindex as u32 {
+        if tunnel_ifindices.contains(&ifindex) {
             continue;
         }
         for &node_index in owned_routes {
-            let route_prefixes =
-                route_index.route_prefixes_for_leg(node_index, ifindex, routes);
+            let route = &routes[route_index.nodes[node_index].route_index?];
+            if route.disposition != RTN_UNICAST || has_mixed_egress(&route.next_hops) {
+                continue;
+            }
+            let route_prefixes = route_index.route_prefixes_for_leg(node_index, ifindex, routes);
             for route_prefix in route_prefixes {
                 for selector_prefix in &selectors {
                     if let Some(intersection) = intersect_prefixes(&route_prefix, selector_prefix) {
@@ -1476,6 +1494,53 @@ mod tests {
         }
         assert!(inventory.exact_tunnel("st0", 9, 10).is_none());
     }
+    #[test]
+    fn local_projection_excludes_route_via_other_tunnel() {
+        let mut snapshot = inventory_snapshot(
+            vec![
+                route(0, 254, "10.0.0.0/24", RTN_UNICAST, vec![hop(10)]),
+                route(0, 254, "10.1.0.0/24", RTN_UNICAST, vec![hop(30)]),
+                route(0, 254, "198.18.0.0/24", RTN_UNICAST, vec![hop(30)]),
+            ],
+            "10.0.0.0/24",
+            &["10.0.0.0/24"],
+            &["10.0.0.0/24"],
+        );
+        snapshot.tunnel_rows[0].explicit_selectors[0].local_ts = "198.18.0.0/24".into();
+        snapshot.tunnel_rows[0].destination_prefixes.clear();
+        let mut other = snapshot.tunnel_rows[0].clone();
+        other.stn = "st1".into();
+        other.if_id = 11;
+        other.logical_ifindex = 30;
+        other.explicit_selectors[0].remote_ts = "10.1.0.0/24".into();
+        other.effective_prefixes = vec!["10.1.0.0/24".into()];
+        other.ingress_prefixes = vec!["10.1.0.0/24".into()];
+        snapshot.tunnel_rows.push(other);
+        let inventory = PMechInventory::from_snapshot(Some(&snapshot));
+        assert!(inventory.complete(), "rows: {:?}", inventory.tunnels.values().map(|r| (&r.stn, &r.inventory_reason)).collect::<Vec<_>>());
+        assert!(inventory.exact_tunnel("st0", 9, 10).is_some());
+        assert!(inventory.exact_tunnel("st1", 11, 30).is_some());
+    }
+
+    #[test]
+    fn local_projection_excludes_non_tunnel_mixed_ecmp_route() {
+        let mut snapshot = inventory_snapshot(
+            vec![
+                route(0, 254, "10.0.0.0/24", RTN_UNICAST, vec![hop(10)]),
+                route(0, 254, "198.18.0.0/24", RTN_UNICAST, vec![hop(20), hop(21)]),
+            ],
+            "10.0.0.0/24",
+            &["10.0.0.0/24"],
+            &["10.0.0.0/24"],
+        );
+        snapshot.tunnel_rows[0].explicit_selectors[0].local_ts = "198.18.0.0/24".into();
+        snapshot.tunnel_rows[0].destination_prefixes.clear();
+        let inventory = PMechInventory::from_snapshot(Some(&snapshot));
+        assert!(inventory.complete(), "rows: {:?}", inventory.tunnels.values().map(|r| (&r.stn, &r.inventory_reason)).collect::<Vec<_>>());
+        let row = inventory.exact_tunnel("st0", 9, 10).expect("non-tunnel mixed ECMP must not invalidate row");
+        assert!(row.destination_prefixes.is_empty());
+    }
+
 
     #[test]
     fn prefix_hierarchy_emits_siblings_for_edge_blockers() {
