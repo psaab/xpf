@@ -262,9 +262,7 @@ pub(super) fn owner_hit_icmp_verdict(
     now_ns: u64,
 ) -> Option<OwnerHitIcmpVerdict> {
     // Host-bound packets have a different authority plane (`junos-host`).
-    // Transit owners can be judged from the session's recorded zone pair and
-    // this packet's ICMP type; an absent fabric stamp does not disable that
-    // packet-scoped check.
+    // Transit owners are judged by their ingress identity and this packet's ICMP type using the LIVE egress zone. FabricRedirect is the exception: its stored egress is the fabric transport, so its admission zone remains authoritative (#7770).
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery {
         return None;
     }
@@ -273,17 +271,21 @@ pub(super) fn owner_hit_icmp_verdict(
     // must be consulted; only actual reply types coast on the session.
     let packet_icmp = policy_packet_icmp(packet_frame, meta);
     if metadata.is_reverse
-        && matches!(meta.protocol, crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6)
+        && matches!(
+            meta.protocol,
+            crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+        )
     {
         if packet_icmp.is_some_and(|(icmp_type, _)| {
             crate::afxdp::frame::icmp_reply_type(meta.protocol, icmp_type)
         }) {
             return None;
         }
+        let egress_zone = hit_egress_zone(forwarding, metadata, decision);
         let result = evaluate_policy_result_without_counting_at(
             &forwarding.policy,
             metadata.ingress_zone,
-            metadata.egress_zone,
+            egress_zone,
             flow.src_ip,
             flow.dst_ip,
             meta.protocol,
@@ -309,6 +311,7 @@ pub(super) fn owner_hit_icmp_verdict(
     {
         return None;
     }
+    let egress_zone = hit_egress_zone(forwarding, metadata, decision);
     let dst_ip = decision.nat.rewrite_dst.unwrap_or(flow.dst_ip);
     let dst_port = decision
         .nat
@@ -317,7 +320,7 @@ pub(super) fn owner_hit_icmp_verdict(
     let result = evaluate_policy_result_without_counting_at(
         &forwarding.policy,
         metadata.ingress_zone,
-        metadata.egress_zone,
+        egress_zone,
         flow.src_ip,
         dst_ip,
         meta.protocol,
@@ -336,6 +339,21 @@ pub(super) fn owner_hit_icmp_verdict(
             })
         },
     )
+}
+
+/// The recorded zone is the policy destination only when the stored egress
+/// names a fabric transport rather than the flow's actual egress.
+#[inline]
+fn hit_egress_zone(
+    forwarding: &ForwardingState,
+    metadata: &SessionMetadata,
+    decision: SessionDecision,
+) -> u16 {
+    if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
+        metadata.egress_zone
+    } else {
+        forwarding.egress_zone_id(decision.resolution.egress_ifindex)
+    }
 }
 
 #[cold]
@@ -371,7 +389,7 @@ pub(super) fn foreign_hit_verdict(
     let result = evaluate_policy_result_without_counting_at(
         &forwarding.policy,
         arrival_zone,
-        metadata.egress_zone,
+        hit_egress_zone(forwarding, metadata, decision),
         flow.src_ip,
         dst_ip,
         meta.protocol,

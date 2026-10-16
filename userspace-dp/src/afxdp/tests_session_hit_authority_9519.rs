@@ -2195,3 +2195,158 @@ fn a_foreign_ack_is_dropped_without_refreshing_the_session_13938() {
          (#13938: dropped packets keep nothing alive)"
     );
 }
+
+/// #13924 (H03-02): an established ICMP session must not survive its egress
+/// interface being moved into a denying zone merely because a
+/// type-constrained ICMP term exists somewhere on the box. The typed owner
+/// check judges the session's RECORDED egress zone, and the #8618
+/// revalidation declines type-dependent ICMP, so pre-fix the moved flow
+/// keeps forwarding. Post-fix the verdict judges the LIVE egress zone
+/// (recorded zone only for FabricRedirect), so the echo drops.
+fn icmp_hit_forwarding_egress_moved(
+    permit_to_dmz: bool,
+    permit_dmz_to_wan: bool,
+) -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    for interface in &mut snapshot.interfaces {
+        match interface.ifindex {
+            WAN_IFINDEX => {
+                interface.redundancy_group = 1;
+                interface.zone = "dmz".to_string();
+                interface.egress_zone = "dmz".to_string();
+            }
+            LAN_IFINDEX => {
+                interface.redundancy_group = 2;
+                interface.addresses.push(InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.0.61.1/24".into(),
+                    scope: 0,
+                });
+            }
+            _ => {}
+        }
+    }
+    snapshot.policies = vec![
+        icmp_type8_rule("lan-icmp-permit", "lan", "wan", "permit"),
+        icmp_type8_rule(
+            "dmz-icmp-policy",
+            "dmz",
+            "wan",
+            if permit_dmz_to_wan { "permit" } else { "deny" },
+        ),
+        icmp_type8_rule("wan-icmp-deny", "wan", "lan", "deny"),
+    ];
+    if permit_to_dmz {
+        snapshot.policies.push(icmp_type8_rule(
+            "lan-icmp-permit-moved",
+            "lan",
+            "dmz",
+            "permit",
+        ));
+    }
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".into(),
+        zone: "dmz".into(),
+        linux_name: "ge-0-0-2".into(),
+        ifindex: DMZ_IFINDEX,
+        hardware_addr: "02:bf:72:02:00:01".into(),
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: "172.16.80.200".into(),
+        mac: "02:bf:72:00:80:08".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".into(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".into(),
+        ip: REAL.to_string(),
+        mac: "02:bf:72:01:00:01".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    build_forwarding_state(&snapshot)
+}
+
+#[test]
+fn established_icmp_drops_after_egress_zone_move_13924() {
+    // Control: egress still in `wan`; the typed permit forwards.
+    let fw = icmp_hit_forwarding();
+    let (_key, mut sessions) = established_icmp_hit(false, Some((7, 9)), None);
+    let (batch, dbg, _h, _rx) = drive_icmp_hit_with_events(&fw, &mut sessions, LAN_IFINDEX, 8);
+    assert_eq!(batch.validated_packets, 1, "control: descriptor validation");
+    assert_eq!(dbg.session_hit, 1, "control: established hit");
+    assert_eq!(dbg.tx, 1, "control: no-move typed flow still forwards");
+    assert_eq!(session_count(&sessions), 1, "control: session survives");
+
+    // Cell: same session shape, but the egress interface now sits in `dmz`,
+    // which has no permit to itself and default-denies. The recorded
+    // egress_zone on the session still names `wan`.
+    let fw = icmp_hit_forwarding_egress_moved(false, false);
+    let (_key, mut sessions) = established_icmp_hit(false, Some((7, 9)), None);
+    let (batch, dbg, _h, _rx) = drive_icmp_hit_with_events(&fw, &mut sessions, LAN_IFINDEX, 8);
+    assert_eq!(batch.validated_packets, 1, "cell: descriptor validation");
+    assert_eq!(dbg.session_hit, 1, "cell: established hit");
+    assert_eq!(
+        dbg.tx, 0,
+        "cell: echo into the moved (denying) egress zone must not transmit"
+    );
+    assert!(
+        dbg.policy_deny >= 1,
+        "cell: the drop must be counted as a policy deny"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        1,
+        "drop does not mutate the existing session"
+    );
+
+    // Control: an egress move is not intrinsically a revocation; when the
+    // live pair is explicitly permitted, the typed echo still forwards.
+    let fw = icmp_hit_forwarding_egress_moved(true, false);
+    let (_key, mut sessions) = established_icmp_hit(false, Some((7, 9)), None);
+    let (batch, dbg, _h, _rx) = drive_icmp_hit_with_events(&fw, &mut sessions, LAN_IFINDEX, 8);
+    assert_eq!(
+        batch.validated_packets, 1,
+        "permitted-move control: descriptor validation"
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "permitted-move control: established hit"
+    );
+    assert_eq!(
+        dbg.tx, 1,
+        "permitted-move control: explicitly permitted pair forwards"
+    );
+
+    // The guarded foreign-hit twin must also use the live egress zone. With
+    // the stale recorded `wan` destination, dmz -> wan permits; the moved
+    // egress is dmz and default-denies dmz -> dmz.
+    let fw = icmp_hit_forwarding_egress_moved(false, true);
+    let (_key, mut sessions) = established_icmp_hit(false, Some((7, 9)), None);
+    let (batch, dbg, _h, _rx) = drive_icmp_hit_with_events(&fw, &mut sessions, DMZ_IFINDEX, 8);
+    assert_eq!(
+        batch.validated_packets, 1,
+        "foreign cell: descriptor validation"
+    );
+    assert_eq!(dbg.session_hit, 1, "foreign cell: established hit");
+    assert_eq!(dbg.tx, 0, "foreign cell: moved egress must not transmit");
+    assert_eq!(
+        dbg.foreign_authority_drops, 1,
+        "foreign cell: live-zone deny is counted"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        1,
+        "foreign cell: the owner session is unchanged"
+    );
+}
