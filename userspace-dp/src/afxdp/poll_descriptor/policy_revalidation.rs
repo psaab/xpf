@@ -562,6 +562,12 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                 let mut forward_metadata = metadata.clone();
                 forward_metadata.is_reverse = false;
                 forward_metadata.ingress_ifindex = forward_ingress_ifindex as u32;
+                if forward_decision.nat.rewrite_src.is_none()
+                    || forward_decision.nat.nat64
+                    || forward_decision.nat.nptv6
+                {
+                    return None;
+                }
                 let Some(forward_ingress_vlan_id) = metadata.forward_ingress_vlan_id else {
                     return Some(PolicyRevocation {
                         canonical_key: None,
