@@ -3235,3 +3235,75 @@ fn reverse_without_companion_no_rewrite_missing_provenance_permitted_13910() {
         "untranslated reverse hit must pass through to the policy gate"
     );
 }
+#[test]
+fn established_session_is_revoked_when_its_dnat_rule_is_withdrawn_13923() {
+    let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
+    let mut synced = crate::server::helpers::build_synced_session_entry(
+        &imported_snat_request(1, true),
+        &zones,
+        0,
+    )
+    .expect("HA session fixture");
+    let translated_dst: IpAddr = "10.0.0.10".parse().expect("translated destination");
+    synced.decision.nat.rewrite_dst = Some(translated_dst);
+    synced.decision.nat.rewrite_dst_port = Some(8443);
+    let key = synced.key.clone();
+    let decision = synced.decision;
+    let metadata = synced.metadata.clone();
+    let origin = synced.origin;
+    let source_nat_static = synced.source_nat_static;
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let rule = crate::protocol::DestinationNATRuleSnapshot {
+        name: "web-forward".to_string(),
+        destination_address: "198.51.100.1".to_string(),
+        destination_port: 443,
+        protocol: "tcp".to_string(),
+        pool_address: "10.0.0.10".to_string(),
+        pool_port: 8443,
+        ..Default::default()
+    };
+    let mut configured = imported_snat_forwarding(false);
+    configured.dnat_table = crate::nat::DnatTable::from_snapshots(
+        &[rule],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.upsert_synced_with_origin(synced.into_session_install(1), false));
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &configured,
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            &flow,
+            origin,
+            source_nat_static,
+            None,
+        )
+        .is_none(),
+        "the session must survive while its port-forward still matches"
+    );
+    sessions.set_forwarding_revalidation_gen(2, 2);
+    let withdrawn = imported_snat_forwarding(false);
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &withdrawn,
+            &mut sessions,
+            &key,
+            &metadata,
+            decision,
+            &flow,
+            origin,
+            source_nat_static,
+            None,
+        )
+        .is_some(),
+        "withdrawing the destination-NAT rule must revoke the established session"
+    );
+}

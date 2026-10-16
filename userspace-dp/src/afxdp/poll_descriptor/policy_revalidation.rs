@@ -352,6 +352,67 @@ fn arrival_carries_translated_source(nat: NatDecision, flow: &SessionFlow) -> bo
             .is_none_or(|port| port == flow.forward_key.src_port)
 }
 
+/// Check that a stored destination translation still matches the active
+/// pre-routing NAT rule for this flow. DNAT is independent of route identity:
+/// a route/config generation change must not keep a withdrawn port-forward
+/// alive.
+fn destination_nat_translation_still_valid(
+    forwarding: &ForwardingState,
+    decision: &SessionDecision,
+    metadata: &SessionMetadata,
+    forward_key: &SessionKey,
+) -> bool {
+    let nat = decision.nat;
+    let Some(translated_dst) = nat.rewrite_dst else {
+        return true;
+    };
+    if nat.nat64 || nat.nptv6 || !crate::ip_proto::has_l4_ports(forward_key.protocol) {
+        return true;
+    }
+
+    let ingress_ifindex = metadata.ingress_ifindex as i32;
+    let zone_override = (metadata.fabric_ingress || ingress_ifindex == 0)
+        .then_some(metadata.ingress_zone);
+    let scope = super::prerouting_ingress_scope(
+        forwarding,
+        ingress_ifindex,
+        metadata.ingress_vlan_id,
+        zone_override,
+        None,
+    );
+    let expected = forwarding
+        .static_nat
+        .match_dnat_with_counter_scoped(
+            forward_key.dst_ip,
+            forward_key.dst_port,
+            Some(forward_key.src_ip),
+            scope.zone_name,
+            scope.ifname,
+            scope.routing_instance,
+        )
+        .map(|(decision, _)| decision)
+        .or_else(|| {
+            forwarding
+                .dnat_table
+                .lookup_with_counter_scoped(
+                    forward_key.protocol,
+                    forward_key.src_ip,
+                    forward_key.dst_ip,
+                    forward_key.src_port,
+                    forward_key.dst_port,
+                    scope.zone_name,
+                    scope.ifname,
+                    scope.routing_instance,
+                    None,
+                )
+                .map(|(decision, _)| decision)
+        });
+    expected.is_some_and(|current| {
+        current.rewrite_dst == Some(translated_dst)
+            && current.rewrite_dst_port == nat.rewrite_dst_port
+    })
+}
+
 /// Check whether a stored forward source translation remains expressible by
 /// the same live NAT branch for its original tuple. This is read-only: it
 /// never allocates a replacement address, port, or interface-NAT identity.
@@ -366,11 +427,13 @@ fn source_nat_translation_still_valid(
     stored_static: Option<bool>,
 ) -> (bool, Option<bool>) {
     let nat = decision.nat;
+    let destination_valid =
+        destination_nat_translation_still_valid(forwarding, decision, metadata, forward_key);
     let Some(translated_src) = nat.rewrite_src else {
-        return (true, None);
+        return (destination_valid, None);
     };
     if nat.nat64 || nat.nptv6 {
-        return (true, None);
+        return (destination_valid, None);
     }
 
     let ingress_ifindex = metadata.ingress_ifindex as i32;
@@ -434,7 +497,7 @@ fn source_nat_translation_still_valid(
         let valid = stored_static != Some(false)
             && static_nat.rewrite_src == Some(translated_src)
             && static_nat.rewrite_src_port == nat.rewrite_src_port;
-        return (valid, valid.then_some(true));
+        return (valid && destination_valid, valid.then_some(true));
     }
     if stored_static == Some(true) {
         return (false, None);
@@ -456,7 +519,7 @@ fn source_nat_translation_still_valid(
         egress.primary_v4,
         egress.primary_v6,
     );
-    (valid, valid.then_some(false))
+    (valid && destination_valid, valid.then_some(false))
 }
 
 /// Revalidate source NAT before any policy-generation, ICMP, host-delivery, or
