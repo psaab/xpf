@@ -71,8 +71,13 @@ func (m *Manager) bumpGeneration() uint64 {
 // its own retry semantics (the cached neighbor view is only advanced
 // on success, so the next bump re-diffs and re-sends).
 func (m *Manager) BumpFIBGeneration() (uint32, error) {
-	newGen, shimErr := m.bpfShim.BumpFIBGeneration()
-	// The P-MECH route dump is the only part of a bump that scales with the
+	var newGen uint32
+	var shimErr error
+	if m.bumpFIBGenerationHook != nil {
+		newGen, shimErr = m.bumpFIBGenerationHook()
+	} else {
+		newGen, shimErr = m.bpfShim.BumpFIBGeneration()
+	}
 	// main table. Take it before m.mu so status polls, neighbor updates, and
 	// publishes never wait behind it; the stamp below uses it only if the
 	// config and tunnel rows it was filtered for are still current.

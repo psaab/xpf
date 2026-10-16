@@ -651,6 +651,10 @@ type Manager struct {
 	// the session path — without this the #9629 sender would ship bound by
 	// nothing CI runs, the #6994 failure mode).
 	sessionRequestHook func(ControlRequest, *ProcessStatus) error
+	// bumpFIBGenerationHook replaces the shim's generation-map bump in tests
+	// that need a nonzero generation without loading privileged BPF maps.
+	// Production leaves it nil.
+	bumpFIBGenerationHook func() (uint32, error)
 
 	// haWatchdogSessionLockHook is a test-only rendezvous immediately before
 	// the generation-fenced watchdog sender takes sessionMu. Production leaves
