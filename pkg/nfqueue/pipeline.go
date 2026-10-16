@@ -1114,9 +1114,6 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 		if clockErr != nil || pending.deadlineMonoNS == 0 || nowMonoNS >= pending.deadlineMonoNS {
 			expired = append(expired, pending)
 			delete(p.pending, id)
-			if flow := p.flows[pending.frame.FlowKey]; flow != nil && flow.pending == pending {
-				flow.pending = nil
-			}
 			p.deadlineCancelQueue = append(p.deadlineCancelQueue, pending.lease.RequestID)
 		}
 	}
@@ -1139,7 +1136,7 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 			}, "Uncertain")
 		}
 		p.finishFrame(pending.frame, VerdictDrop)
-		p.retireFlow(pending.frame.FlowKey)
+		p.retirePendingFlow(pending)
 		resolved++
 	}
 	p.dispatchEligible()
@@ -1152,9 +1149,6 @@ func (p *CapturePipeline) failPending(reason string) int {
 	for id, item := range p.pending {
 		pending = append(pending, item)
 		delete(p.pending, id)
-		if flow := p.flows[item.frame.FlowKey]; flow != nil {
-			flow.pending = nil
-		}
 		p.stats.Uncertain++
 	}
 	p.mu.Unlock()
@@ -1171,7 +1165,7 @@ func (p *CapturePipeline) failPending(reason string) int {
 			}, "Uncertain")
 		}
 		p.finishFrame(item.frame, VerdictDrop)
-		p.retireFlow(item.frame.FlowKey)
+		p.retirePendingFlow(item)
 	}
 	return len(pending)
 }
@@ -1210,9 +1204,6 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		return true
 	}
 	delete(p.pending, completion.RequestID)
-	if flow := p.flows[pending.frame.FlowKey]; flow != nil {
-		flow.pending = nil
-	}
 	family, hook := d11OriginWire(pending.frame.origin)
 	originMismatch := pending.ledger != nil &&
 		(completion.Family != family ||
@@ -1230,6 +1221,11 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		completion.Outcome == CompletionAccepted ||
 		completion.Outcome == CompletionWouldReinject
 	ambiguous := identityMismatch || bytesMismatch || outcomeUncertain
+	if !ambiguous {
+		if flow := p.flows[pending.frame.FlowKey]; flow != nil && flow.pending == pending {
+			flow.pending = nil
+		}
+	}
 	if ambiguous {
 		// Accepted/WouldReinject are advisory outcomes, not terminal q0
 		// commits. Treat them exactly like an uncertain completion so the
@@ -1283,7 +1279,7 @@ func (p *CapturePipeline) resolveCompletion(completion ReinjectCompletion) bool 
 		}
 		p.uncertain(reason)
 		p.finishFrame(pending.frame, VerdictDrop)
-		p.retireFlow(pending.frame.FlowKey)
+		p.retirePendingFlow(pending)
 		return true
 	}
 	if wouldPermit {
@@ -1305,6 +1301,28 @@ func (p *CapturePipeline) retireFlow(key string) {
 	}
 	remaining := append([]CaptureFrame(nil), flow.frames...)
 	delete(p.flows, key)
+	p.mu.Unlock()
+	for _, frame := range remaining {
+		p.finishFrame(frame, VerdictDrop)
+	}
+}
+
+// retirePendingFlow binds deferred retirement to the exact admitted head.
+// Keeping that head in flow.pending until this transition prevents dispatch
+// of its followers between finishFrame and retirement; the pointer check also
+// prevents a stale callback from deleting a fresh flow with the same key.
+func (p *CapturePipeline) retirePendingFlow(pending *pendingReinject) {
+	if p == nil || pending == nil {
+		return
+	}
+	p.mu.Lock()
+	flow := p.flows[pending.frame.FlowKey]
+	if flow == nil || flow.pending != pending {
+		p.mu.Unlock()
+		return
+	}
+	remaining := append([]CaptureFrame(nil), flow.frames...)
+	delete(p.flows, pending.frame.FlowKey)
 	p.mu.Unlock()
 	for _, frame := range remaining {
 		p.finishFrame(frame, VerdictDrop)
@@ -1496,9 +1514,6 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 		current := p.pending[item.lease.RequestID] == item
 		if current {
 			delete(p.pending, item.lease.RequestID)
-			if flow := p.flows[item.frame.FlowKey]; flow != nil && flow.pending == item {
-				flow.pending = nil
-			}
 		}
 		p.mu.Unlock()
 		if !current {
@@ -1514,7 +1529,7 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 			Outcome: CompletionUncertain, Reason: "pipeline cancelled",
 		}, "Uncertain")
 		p.finishFrame(item.frame, VerdictDrop)
-		p.retireFlow(item.frame.FlowKey)
+		p.retirePendingFlow(item)
 	}
 	if !scoped {
 		for flowKey := range d11Flows {
