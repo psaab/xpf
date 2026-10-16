@@ -144,8 +144,17 @@ func eventPolicyNodes9984(tree *ConfigTree) map[string][]*Node {
 				continue
 			}
 			inSection := inEventOptions || node.Name() == "event-options"
-			if inSection && node.Name() == "policy" && len(node.Keys) >= 2 {
-				out[node.Keys[1]] = append(out[node.Keys[1]], node)
+			if inSection && node.Name() == "policy" {
+				// Mirror namedInstances, used by compileEventOptions: a
+				// direct policy carries its name in Keys[1]; the
+				// one-key-container shape `policy { p { ... } }` files
+				// each named instance as a child of the policy node.
+				// Indexing only Keys>=2 made a solely nested plant-class
+				// invisible to stamping/quarantine while the compiler
+				// still honoured it (#14142).
+				for _, inst := range namedInstances([]*Node{node}) {
+					out[inst.name] = append(out[inst.name], inst.node)
+				}
 			}
 			walk(node.Children, inSection)
 		}
