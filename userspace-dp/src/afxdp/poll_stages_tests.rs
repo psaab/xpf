@@ -3876,6 +3876,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
             0x1122_3344_5566_7788,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
             IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+            crate::test_zone_ids::TEST_LAN_ZONE_ID,
+            0,
         ),
         TEST_NOW_NS,
     );
@@ -4117,6 +4119,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
         0x5152_5354_5556_5758,
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
         IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+        crate::test_zone_ids::TEST_LAN_ZONE_ID,
+        0,
     );
     ike_exchanges.seed(seeded_key, TEST_NOW_NS);
 
@@ -4198,6 +4202,158 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
         ),
         "ESP-in-UDP must stay exempt — the #6471 discriminator touches IKE \
          only, never the IPsec data plane",
+    );
+}
+
+/// #14124 RED-on-revert (integration): seed an established exchange on
+/// the PERMIT zone, then replay the same SPI/source/destination on the
+/// DENY zone — the seed must NOT supply admission there. Also asserts
+/// (a) the same packet on the seeding zone still passes (positive
+/// control), and (b) an ingress in a different routing domain (VRF)
+/// on the SAME denied-zone interface misses the seed even when the
+/// flow's stamped domain differs. Denied means the packet falls to
+/// the ingress zone's coarse host-inbound gate, NOT that fine policy
+/// or strongSwan authentication is bypassed — those remain separate.
+///
+/// Fail-on-revert: restore the pre-#14124 key (SPI + address pair
+/// only) and the DENY-zone replay returns `Passthrough`.
+#[test]
+fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
+    const DENY_IF: u32 = 24;
+    const PERMIT_IF: u32 = 25;
+    let forwarding = build_forwarding_state(&ike_gate_snapshot());
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-1"),
+        ifindex: DENY_IF as i32,
+    };
+    let live = BindingLiveState::new();
+    let binding_lookup = WorkerBindingLookup::default();
+    let mirror_targets = MirrorTargetMap::default();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let dnat_fds = DnatTableFds::default();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        DataplaneEventRateLimitConfig { events_per_second: 0, burst: 0 },
+    );
+    let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let worker_ctx = WorkerContext {
+        pptp_control: &__pptp_control_7699,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding: &forwarding,
+        ha_state: &ha_state,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: Some(&event_handle),
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        dnat_fds: &dnat_fds,
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+    // Seed as the PERMIT zone (wan id) admitted it.
+    ike_exchanges.seed(
+        crate::afxdp::forwarding::IkeExchangeKey::new(
+            0x5152_5354_5556_5758,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+            crate::test_zone_ids::TEST_WAN_ZONE_ID,
+            0,
+        ),
+        TEST_NOW_NS,
+    );
+    let est = ike_v4_frame_spis(false, 0x5152_5354_5556_5758, 0xdead_beef_cafe_0001);
+    let flow = ipsec_flow(libc::AF_INET, PROTO_UDP, 500);
+    // Positive control: same packet on the seeding (permit) zone passes.
+    assert!(
+        matches!(
+            stage_ipsec_passthrough_check(
+                Some(&flow), &est, ike_v4_meta(&est, PERMIT_IF), None,
+                &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS,
+            ),
+            IpsecPassthroughOutcome::Passthrough
+        ),
+        "control: the seeded exchange must still pass on its own zone (#14124)"
+    );
+    // Cross-zone: same SPI/addrs on the DENY zone must be gated.
+    assert!(
+        matches!(
+            stage_ipsec_passthrough_check(
+                Some(&flow), &est, ike_v4_meta(&est, DENY_IF), None,
+                &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS,
+            ),
+            IpsecPassthroughOutcome::Denied { .. }
+        ),
+        "an exchange admitted on the permit zone must not supply the \
+         established exemption on the deny zone (#14124)"
+    );
+    // Cross-VRF: same denied-zone ingress, flow stamped tenant domain.
+    let mut vrf_flow = ipsec_flow(libc::AF_INET, PROTO_UDP, 500);
+    vrf_flow.forward_key.routing_domain = 100_001;
+    assert!(
+        matches!(
+            stage_ipsec_passthrough_check(
+                Some(&vrf_flow), &est, ike_v4_meta(&est, DENY_IF), None,
+                &live, &worker_ctx, TEST_NOW_NS, TEST_NOW_SECS,
+            ),
+            IpsecPassthroughOutcome::Denied { .. }
+        ),
+        "a default-VRF seed must not vouch for a tenant-VRF ingress (#14124)"
+    );
+}
+
+/// #14124: the local-destination claim is VRF-scoped. An address
+/// configured only in tenant-a (`tenant-a.inet.0`) is NOT a local XFRM
+/// destination for a packet ingressing the default instance, and IS
+/// for a packet ingressing tenant-a; the unscoped predicate stays
+/// global (its other callers' contract is unchanged).
+#[test]
+fn owns_ipsec_local_destination_in_table_is_vrf_scoped_14124() {
+    let mut snapshot = ike_gate_snapshot();
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 24 {
+            iface.routing_instance = "tenant-a".to_string();
+            iface.routing_domain = 100_001;
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
+    assert!(
+        forwarding.owns_ipsec_local_destination(dst),
+        "premise: unscoped predicate remains address-global"
+    );
+    assert!(
+        forwarding.owns_ipsec_local_destination_in_table(dst, "tenant-a.inet.0"),
+        "the owning VRF must claim its interface address (#14124)"
+    );
+    assert!(
+        !forwarding.owns_ipsec_local_destination_in_table(dst, "inet.0"),
+        "a tenant-a address must not be locally terminated in the \
+         default VRF absent a transit DNAT override (#14124)"
     );
 }
 
