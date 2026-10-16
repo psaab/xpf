@@ -2718,6 +2718,84 @@ fn syn_ack_session_misses_are_visible_to_syn_flood_gate_10891() {
     }
 }
 
+/// #13699 (D14-20): a session-miss SYN-ACK flood must NOT latch the zone's
+/// SYN-cookie-active window. SYN-ACKs can never complete a cookie
+/// handshake, so letting them arm cookie mode both switches session-miss
+/// ACK validation to the hard-drop active arm and skips the per-source
+/// SYN sketch (`cookie_active` in `ZoneScreenState::syn_flood_gate`) for
+/// every subsequent initial SYN for the 64s window — one spoofed
+/// SYN-ACK burst disables per-source SYN-flood protection.
+/// FAIL-ON-REVERT: restoring the real codec flag on the SYN-ACK hook
+/// latches `syn_cookie_active_until_secs` past the attack threshold and
+/// the `syn_cookie_active_until_for_test` assertion below flips.
+#[test]
+fn syn_ack_miss_flood_does_not_latch_syn_cookie_active_13699() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 2; // low aggregate attack threshold
+    profile.syn_cookie = true;
+    profile.syn_flood_src_threshold = 1; // keep a distinct initial-SYN source below its cap until tested
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let attacker = IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1));
+    let victim = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
+    let syn_ack = tcp_pkt(attacker, victim, 1234, 80, TCP_SYN | TCP_ACK);
+    // Flood past the aggregate attack threshold with session-miss
+    // SYN-ACKs: every one drops as `syn-flood` (a SYN-ACK cannot be
+    // answered with a cookie challenge) ...
+    for i in 0..5 {
+        let expected = if i == 0 { None } else { Some("syn-flood") };
+        assert_eq!(
+            state.syn_ack_flood_drop_on_new_flow("trust", &syn_ack, 100, 100),
+            expected,
+            "SYN-ACK miss {i} verdict"
+        );
+    }
+    // ... but the drops must leave the zone's cookie-active window at 0.
+    assert_eq!(
+        state.syn_cookie_active_until_for_test("trust"),
+        0,
+        "SYN-ACK flood latched syn_cookie_active_until_secs (#13699)"
+    );
+
+    // After the SYN-ACK aggregate window expires, a distinct initial-SYN
+    // source still reaches the per-source sketch: the first packet passes,
+    // then the configured source cap drops its second packet. A latched
+    // cookie-active window would bypass this cap.
+    let syn_src = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44));
+    let syn = tcp_pkt(syn_src, victim, 4321, 80, TCP_SYN);
+    assert_eq!(
+        state.check_packet("trust", &syn, 2_000_000_100),
+        ScreenVerdict::Pass
+    );
+    assert_eq!(
+        state.check_packet("trust", &syn, 2_000_000_100),
+        ScreenVerdict::Drop("syn-flood"),
+        "per-source sketch must remain enabled after SYN-ACK flood (#13699)"
+    );
+
+    // Guarded twin: an actual initial-SYN flood is still allowed to activate
+    // SYN-cookie mode, preventing an overbroad latch fix from disabling the
+    // intended cookie response.
+    let mut syn_state = make_state(
+        "trust",
+        ScreenProfile {
+            syn_flood_threshold: 2,
+            syn_cookie: true,
+            ..ScreenProfile::default()
+        },
+    );
+    syn_state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    let ordinary_syn = tcp_pkt(attacker, victim, 1234, 80, TCP_SYN);
+    for _ in 0..3 {
+        let _ = syn_state.check_packet("trust", &ordinary_syn, 100);
+    }
+    assert_eq!(
+        syn_state.syn_cookie_active_until_for_test("trust"),
+        164,
+        "ordinary initial SYN flood must retain cookie activation (#13699)"
+    );
+}
+
 
 /// #12872 (D7-04): the session-miss caller drains warning-band alarms against
 /// the SYN-ACK tuple/zone, so they cannot attach to a later flow-backed packet.

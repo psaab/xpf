@@ -1017,6 +1017,7 @@ impl ScreenState {
                     now_secs,
                     codec_available,
                     syn_cookie_validated,
+                    true,
                 ) {
                     SynFloodGate::Admit { alarm } => {
                         if alarm {
@@ -1253,7 +1254,7 @@ impl ScreenState {
             if zstate.profile.syn_flood_threshold == 0 {
                 return None;
             }
-            zstate.syn_flood_gate(pkt, now_ns, now_secs, codec_available, false)
+            zstate.syn_flood_gate(pkt, now_ns, now_secs, codec_available, false, false)
         };
         match gate {
             SynFloodGate::Admit { alarm } => {

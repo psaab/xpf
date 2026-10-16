@@ -414,6 +414,10 @@ impl ZoneScreenState {
     /// across the gate, so a `MintChallenge` result guarantees the caller's
     /// PHASE-2 `syn_cookie_codec` is still `Some`. Worker-local counters only;
     /// no allocation, lock, or dynamic dispatch on the packet path.
+    /// `cookie_activation_allowed` is false for session-miss SYN-ACKs. Those
+    /// packets are still flood-metered and dropped over the aggregate
+    /// threshold, but cannot trigger an unanswerable challenge or poison the
+    /// cookie-active window used by later initial SYNs.
     #[inline]
     pub(super) fn syn_flood_gate(
         &mut self,
@@ -422,6 +426,7 @@ impl ZoneScreenState {
         now_secs: u64,
         codec_available: bool,
         validated_client: bool,
+        cookie_activation_allowed: bool,
     ) -> SynFloodGate {
         // Copy the small SYN scalar thresholds/flags out of the profile up
         // front so the immutable profile read is released before the mutable
@@ -491,6 +496,15 @@ impl ZoneScreenState {
                 // flood must not keep cookie-active alive indefinitely.
                 if validated_client {
                     return SynFloodGate::Admit { alarm: false };
+                }
+                // Session-miss SYN-ACKs are metered by this shared gate, but
+                // cannot be answered with a valid SYN-cookie challenge.
+                // Never let their unanswerable flood arm the cookie-active
+                // window: doing so would switch ACK validation into active
+                // mode and disable the per-source SYN sketch for later
+                // initial SYNs. Preserve the aggregate drop verdict.
+                if !cookie_activation_allowed {
+                    return SynFloodGate::DropAggregate;
                 }
                 // In `alarm-without-drop` (audit) mode do NOT mark the zone
                 // SYN-cookie-active. The challenge minted by the caller is
