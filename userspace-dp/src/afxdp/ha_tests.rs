@@ -11462,3 +11462,140 @@ fn synced_delete_refuses_when_nat_lands_after_candidate_read_13712() {
         violations.join("\n  - ")
     );
 }
+// #14084: a zero-worker HA import must not publish an interface-mode
+// identity that aliases the firewall's fixed IKE/NAT-T control tuple.
+// #13995/#14016 guarded the allocator, but `upsert_synced_session` only
+// reserved when a worker was registered; with none, the forbidden
+// translated identity (egress:4500 for a flow to P:4500) was published
+// forward + reverse and later replayed to workers by bring-up.
+#[test]
+fn zero_worker_import_refuses_interface_control_tuple_14084() {
+    // Fixed local egress address used by the receiver's forwarding snapshot.
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    // Deliberately NO worker registered: the zero-worker window.
+
+    let egress = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
+    let remote = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    let entry = SyncedSessionEntry {
+        key: SessionKey {
+            protocol: crate::ip_proto::PROTO_UDP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101)),
+            dst_ip: remote,
+            src_port: 5000,
+            dst_port: 4500,
+            ..test_key()
+        },
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision {
+                rewrite_src: Some(egress),
+                rewrite_src_port: Some(4500),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: crate::ip_proto::PROTO_UDP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        source_nat_static: None,
+    };
+    let key = entry.key.clone();
+    let outcome = coordinator.upsert_synced_session(entry);
+    assert_eq!(
+        outcome,
+        super::session_import::SyncedImportOutcome::RejectedReserve,
+        "a zero-worker import naming the local NAT-T identity egress:4500 \
+         must be refused before publication (#14084)"
+    );
+    assert!(
+        !synced6600_contains(&coordinator, &key),
+        "the forbidden forward identity must not be published (#14084)"
+    );
+    let reverse_key = SessionKey {
+        src_ip: remote,
+        dst_ip: egress,
+        src_port: 4500,
+        dst_port: 4500,
+        ..key.clone()
+    };
+    assert!(
+        !synced6600_contains(&coordinator, &reverse_key),
+        "the synthesized reverse companion P:4500 -> egress:4500 must not \
+         be published (#14084)"
+    );
+    assert_eq!(
+        coordinator.synced_import_reserve_refused_total(),
+        1,
+        "the refusal must be counted as a reserve refusal (#14084)"
+    );
+    // Register a worker after the zero-worker import. Bring-up replay derives
+    // its queue entirely from the shared snapshot, which must still be empty.
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    assert!(
+        coordinator.snapshot_shared_session_entries().is_empty(),
+        "bring-up replay must have no forbidden forward or reverse authority to install (#14084)"
+    );
+    assert!(
+        commands.lock().expect("worker commands").is_empty(),
+        "the rejected import must not have queued a worker upsert (#14084)"
+    );
+
+
+    // Control: a non-aliasing interface identity (egress:5000) still imports.
+    let ok = SyncedSessionEntry {
+        key: SessionKey {
+            src_port: 5001,
+            ..key.clone()
+        },
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision {
+                rewrite_src: Some(egress),
+                rewrite_src_port: Some(5000),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        ..SyncedSessionEntry {
+            key: key.clone(),
+            decision: test_decision(),
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: crate::ip_proto::PROTO_UDP,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            source_nat_static: None,
+        }
+    };
+    let ok_key = ok.key.clone();
+    let ok_outcome = coordinator.upsert_synced_session(ok);
+    assert!(
+        !matches!(
+            ok_outcome,
+            super::session_import::SyncedImportOutcome::RejectedReserve
+        ),
+        "a non-aliasing interface identity must not be reserve-refused (#14084)"
+    );
+    assert!(
+        synced6600_contains(&coordinator, &ok_key),
+        "a non-aliasing interface identity must still be published (#14084)"
+    );
+}

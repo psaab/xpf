@@ -243,9 +243,9 @@ pub(crate) use allocator::{
 pub(crate) use allocator::PersistentLeaseDebugState;
 pub(crate) use destination::{DnatKey, DnatTable, DnatValue};
 pub(crate) use iface_registry::{
-    INTERFACE_SNAT_IDENTITY_EXHAUSTION, INTERFACE_SNAT_PAT_COLLISIONS,
-    INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION, INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS,
-    InterfaceNatAllocators,
+    conflicts_with_local_control_tuple, INTERFACE_SNAT_IDENTITY_EXHAUSTION,
+    INTERFACE_SNAT_PAT_COLLISIONS, INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION,
+    INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS, InterfaceNatAllocators,
 };
 pub(crate) use allocator::allocator_capacity;
 pub(crate) use source::{
