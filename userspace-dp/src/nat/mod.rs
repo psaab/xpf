@@ -176,6 +176,10 @@ mod tests_deterministic_collision_10721;
 #[cfg(test)]
 #[path = "tests_addr_only_sibling_9131.rs"]
 mod tests_addr_only_sibling_9131;
+// #13690: round-robin address-only allocations retain the selected pool index.
+#[cfg(test)]
+#[path = "tests_addr_only_index_13690.rs"]
+mod tests_addr_only_index_13690;
 // #10018: PersistentSourceKey must include routing scope so overlapping
 // subscribers in different VRFs cannot share a persistent NAT lease.
 #[cfg(test)]
