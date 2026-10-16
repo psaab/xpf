@@ -250,10 +250,26 @@ pub(super) fn build_injected_packet(
         .ok_or_else(|| "missing neighbor MAC".to_string())?;
     match (src, dst) {
         (IpAddr::V4(src_v4), IpAddr::V4(dst_v4)) => {
-            build_injected_ipv4(req, dst_mac, src_v4, dst_v4, src_port, egress)
+            build_injected_ipv4(
+                req,
+                dst_mac,
+                src_v4,
+                dst_v4,
+                src_port,
+                resolution.tx_vlan_id,
+                egress,
+            )
         }
         (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) => {
-            build_injected_ipv6(req, dst_mac, src_v6, dst_v6, src_port, egress)
+            build_injected_ipv6(
+                req,
+                dst_mac,
+                src_v6,
+                dst_v6,
+                src_port,
+                resolution.tx_vlan_id,
+                egress,
+            )
         }
         _ => Err("injected packet source and destination address families differ".to_string()),
     }
@@ -2235,9 +2251,10 @@ pub(super) fn build_injected_ipv4(
     src_ip: Ipv4Addr,
     dst_ip: Ipv4Addr,
     src_port: u16,
+    tx_vlan_id: u16,
     egress: &EgressInterface,
 ) -> Result<Vec<u8>, String> {
-    let eth_len = if egress.vlan_id > 0 { 18 } else { 14 };
+    let eth_len = if tx_vlan_id > 0 { 18 } else { 14 };
     let min_total = eth_len + 20 + 8 + 16;
     // #2443: clamp target_len to the inject maximum so a bypassed length
     // bound cannot pre-allocate a huge buffer here. The reject path in
@@ -2260,7 +2277,7 @@ pub(super) fn build_injected_ipv4(
     })?;
 
     let mut frame = Vec::with_capacity(target_len);
-    write_eth_header(&mut frame, dst_mac, egress.src_mac, egress.vlan_id, 0x0800);
+    write_eth_header(&mut frame, dst_mac, egress.src_mac, tx_vlan_id, 0x0800);
 
     let ip_start = frame.len();
     frame.extend_from_slice(&[
@@ -2302,9 +2319,10 @@ pub(super) fn build_injected_ipv6(
     src_ip: Ipv6Addr,
     dst_ip: Ipv6Addr,
     src_port: u16,
+    tx_vlan_id: u16,
     egress: &EgressInterface,
 ) -> Result<Vec<u8>, String> {
-    let eth_len = if egress.vlan_id > 0 { 18 } else { 14 };
+    let eth_len = if tx_vlan_id > 0 { 18 } else { 14 };
     let min_total = eth_len + 40 + 8 + 16;
     // #2443: clamp target_len to the inject maximum (defense in depth;
     // the request is rejected up front in `inject_test_packet`).
@@ -2324,7 +2342,7 @@ pub(super) fn build_injected_ipv6(
     })?;
 
     let mut frame = Vec::with_capacity(target_len);
-    write_eth_header(&mut frame, dst_mac, egress.src_mac, egress.vlan_id, 0x86dd);
+    write_eth_header(&mut frame, dst_mac, egress.src_mac, tx_vlan_id, 0x86dd);
     frame.extend_from_slice(&[
         0x60,
         0x00,

@@ -2055,22 +2055,29 @@ fn native_vlan_native_unit_egress_is_untagged_13979() {
         ],
         ..Default::default()
     });
-    assert_eq!(
-        state.egress_tx_vlan_id(NATIVE_UNIT),
-        0,
-        "frames toward the native unit must leave untagged"
-    );
-    assert_eq!(
-        state.egress_tx_vlan_id(TAGGED_UNIT),
-        200,
-        "non-native units keep their 802.1Q tag"
-    );
-    assert_eq!(
-        state.egress_tx_vlan_id(PARENT),
-        0,
-        "untagged/access egress stays untagged"
-    );
-    assert_eq!(state.egress_tx_vlan_id(999), 0, "unknown ifindex is untagged");
+    let wire_frame = |ifindex| {
+        let mut frame = Vec::new();
+        crate::afxdp::frame::write_eth_header(
+            &mut frame,
+            [0; 6],
+            [1; 6],
+            state.egress_tx_vlan_id(ifindex),
+            0x0800,
+        );
+        frame
+    };
+    let native_frame = wire_frame(NATIVE_UNIT);
+    assert_eq!(native_frame.len(), 14, "native-unit egress must be untagged");
+    assert_eq!(&native_frame[12..14], &[0x08, 0x00]);
+
+    let tagged_frame = wire_frame(TAGGED_UNIT);
+    assert_eq!(tagged_frame.len(), 18, "non-native egress keeps its tag");
+    assert_eq!(&tagged_frame[12..14], &[0x81, 0x00]);
+    assert_eq!(&tagged_frame[14..16], &[0x00, 200]);
+
+    let access_frame = wire_frame(PARENT);
+    assert_eq!(access_frame.len(), 14, "access egress stays untagged");
+    assert_eq!(wire_frame(999).len(), 14, "unknown egress stays untagged");
 }
 
 // #3070: host-inbound-traffic enforcement. A configured zone admits only its

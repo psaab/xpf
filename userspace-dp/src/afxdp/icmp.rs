@@ -400,6 +400,26 @@ fn ingress_reply_l2(frame: &[u8]) -> Option<([u8; 6], [u8; 6], TxVlanTag)> {
     Some((src_mac, dst_mac, ingress_tag))
 }
 
+/// Pick the L2 tag for a reflected error. Native-VLAN units always transmit
+/// untagged, even when a tagged frame arrived on that unit; other interfaces
+/// retain the historical full-tag reflection behavior.
+pub(super) fn reflected_egress_tag(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+    ingress_tag: TxVlanTag,
+) -> TxVlanTag {
+    if forwarding
+        .native_vlan_egress_ifindexes
+        .contains(&egress_ifindex)
+    {
+        TxVlanTag::NONE
+    } else if ingress_tag.emits() {
+        ingress_tag
+    } else {
+        TxVlanTag::from(forwarding.egress_tx_vlan_id(egress_ifindex))
+    }
+}
+
 pub(super) fn build_local_time_exceeded_v4(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -449,11 +469,7 @@ pub(super) fn build_local_icmp_error_v4(
     // is reflected with its priority intact. Fall back to the egress
     // interface's configured VID (bare 802.1Q, PCP 0) when ingress was
     // untagged.
-    let tag = if ingress_tag.emits() {
-        ingress_tag
-    } else {
-        TxVlanTag::from(forwarding.egress_tx_vlan_id(ingress_ifindex))
-    };
+    let tag = reflected_egress_tag(forwarding, ingress_ifindex, ingress_tag);
     let eth_len = tag.header_len();
     let total_len = 20usize.checked_add(8)?.checked_add(quoted_len)?;
     let mut out = Vec::with_capacity(eth_len + total_len);
@@ -551,11 +567,7 @@ pub(super) fn build_local_icmp_error_v6(
     // #2149: preserve the inbound tag (TPID + PCP + DEI + VID) on the
     // reflected error; fall back to the egress configured VID when
     // ingress was untagged. See the v4 builder for the rationale.
-    let tag = if ingress_tag.emits() {
-        ingress_tag
-    } else {
-        TxVlanTag::from(forwarding.egress_tx_vlan_id(ingress_ifindex))
-    };
+    let tag = reflected_egress_tag(forwarding, ingress_ifindex, ingress_tag);
     let eth_len = tag.header_len();
     let outer_payload_len = 8usize.checked_add(quoted_len)?;
     let mut out = Vec::with_capacity(eth_len + 40 + outer_payload_len);

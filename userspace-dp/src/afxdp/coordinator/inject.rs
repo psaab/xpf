@@ -106,10 +106,10 @@ pub(super) fn stamp_injected_packet_tuple(
     meta: &mut UserspaceDpMeta,
     frame_len: usize,
     tuple: InjectedPacketTuple,
-    egress: &EgressInterface,
+    tx_vlan_id: u16,
 ) -> Result<(), String> {
     meta.pkt_len = frame_len.min(u16::MAX as usize) as u16;
-    let l3_offset = if egress.vlan_id > 0 { 18 } else { 14 };
+    let l3_offset = if tx_vlan_id > 0 { 18 } else { 14 };
     meta.l3_offset = l3_offset;
     meta.flow_src_addr = [0; 16];
     meta.flow_dst_addr = [0; 16];
@@ -263,7 +263,12 @@ impl super::Coordinator {
                             egress,
                         )?;
                         let mut tx_meta = meta;
-                        stamp_injected_packet_tuple(&mut tx_meta, frame.len(), tuple, egress)?;
+                        stamp_injected_packet_tuple(
+                            &mut tx_meta,
+                            frame.len(),
+                            tuple,
+                            resolution.tx_vlan_id,
+                        )?;
                         let now_ns = monotonic_nanos();
                         let cos_flow = parse_session_flow_from_meta(tx_meta);
                         // #2362 fold B: classify the injected control packet on

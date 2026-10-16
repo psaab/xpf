@@ -24,6 +24,28 @@ fn forwarding_with_egress(vlan_id: u16) -> ForwardingState {
     state
 }
 
+#[test]
+fn native_vlan_reflected_error_untags_but_other_egress_reflects_priority_13979() {
+    let mut forwarding = forwarding_with_egress(100);
+    let inbound_tag = TxVlanTag::from(100);
+    forwarding.native_vlan_egress_ifindexes.insert(ICMP_IFINDEX);
+
+    let native_tag = reflected_egress_tag(&forwarding, ICMP_IFINDEX, inbound_tag);
+    let mut native_frame = Vec::new();
+    write_eth_header_tagged(&mut native_frame, [0; 6], EGRESS_SRC_MAC, native_tag, 0x0800);
+    assert_eq!(native_frame.len(), 14);
+    assert_eq!(&native_frame[12..14], &[0x08, 0x00]);
+
+    forwarding.native_vlan_egress_ifindexes.remove(&ICMP_IFINDEX);
+    let priority_tag = TxVlanTag::from_parts(0x8100, 5, false, 0);
+    let reflected_tag = reflected_egress_tag(&forwarding, ICMP_IFINDEX, priority_tag);
+    let mut tagged_frame = Vec::new();
+    write_eth_header_tagged(&mut tagged_frame, [0; 6], EGRESS_SRC_MAC, reflected_tag, 0x0800);
+    assert_eq!(tagged_frame.len(), 18);
+    assert_eq!(&tagged_frame[12..14], &[0x81, 0x00]);
+    assert_eq!(&tagged_frame[14..16], &0xA000u16.to_be_bytes());
+}
+
 #[derive(Clone, Copy)]
 enum InL2 {
     Untagged,
