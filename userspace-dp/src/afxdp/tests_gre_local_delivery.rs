@@ -2860,3 +2860,108 @@ fn gre_outer_ce_over_not_ect_counts_underlay_once_12289() {
         "fallback pin: the descriptor must still validate exactly once"
     );
 }
+
+/// #13970 (H19-04): slow-path policy and NAT hit counters must charge
+/// `meta.pkt_len` (the decapsulated inner frame) for a GRE-decapped flow,
+/// exactly as the flow-cache hit does (`flow_cache_hit.rs`), never
+/// `desc.len` (the outer UMEM frame). Pre-fix the outer length is charged,
+/// so this goes RED with bytes == outer frame length.
+#[test]
+fn gre_decapped_slow_path_hit_counters_charge_inner_length_13970() {
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.default_policy = "deny".to_string();
+    snapshot.policies = vec![PolicyRuleSnapshot {
+        name: "allow-lan-wan".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "permit".to_string(),
+        ..Default::default()
+    }];
+    snapshot.tunnel_endpoints[0].zone = "lan".to_string();
+    if let Some(iface) = snapshot.interfaces.iter_mut().find(|i| i.ifindex == 77) {
+        iface.zone = "lan".to_string();
+    }
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat".to_string(),
+        counter_id: 5,
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+
+    let policy_counters = crate::policy::PolicyCounterStore::default();
+    let nat_counters = crate::nat::NatCounterStore::default();
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state_with_counters(
+        &snapshot,
+        &policy_counters,
+        &nat_counters,
+    );
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let mut sessions = SessionTable::new();
+
+    let inner = build_gre_inner_tcp_syn_packet_v4(Ipv4Addr::new(8, 8, 8, 8));
+    let frame = build_gre_to_self_outer_frame_v4(80, &inner);
+    let meta = gre_to_self_outer_meta(80, frame.len());
+    // Inner synthetic frame = 14-byte Ethernet + inner IP packet; that is
+    // the `meta.pkt_len` the flow-cache twin charges.
+    let inner_pkt_len = (14 + inner.len()) as u64;
+    assert!(
+        (frame.len() as u64) > inner_pkt_len,
+        "fixture: outer frame must be longer than the inner frame"
+    );
+
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(
+        dbg.forward, 1,
+        "#13970 fixture must forward one decapped packet \
+         (rx={}, validated={}, policy_deny={}, local={}, no_route={}, \
+         missing_neigh={}, disposition_other={}, tx_err={}, build_fail={})",
+        dbg.rx,
+        _batch.validated_packets,
+        dbg.policy_deny,
+        dbg.local,
+        dbg.no_route,
+        dbg.missing_neigh,
+        dbg.disposition_other,
+        dbg.tx_err,
+        dbg.frame_build_none
+    );
+
+    let rule = forwarding
+        .policy
+        .rules
+        .iter()
+        .find(|r| r.rule_id.contains("allow-lan-wan"))
+        .expect("allow-lan-wan rule must exist");
+    assert_eq!(rule.hit_counter.test_packet_count(), 1, "#13970: one policy hit");
+    assert_eq!(
+        rule.hit_counter.test_byte_count(),
+        inner_pkt_len,
+        "#13970: policy bytes must be the inner pkt_len, not outer desc.len={}",
+        frame.len()
+    );
+
+    let snaps = nat_counters.snapshots();
+    assert_eq!(snaps.len(), 1, "#13970: exactly one SNAT counter, got {snaps:?}");
+    assert_eq!(snaps[0].packets, 1, "#13970: one NAT hit");
+    assert_eq!(
+        snaps[0].bytes, inner_pkt_len,
+        "#13970: NAT bytes must be the inner pkt_len, not outer desc.len={}",
+        frame.len()
+    );
+}

@@ -1587,7 +1587,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta,
                                     policy_dst,
                                     from_zone_id,
-                                    desc.len as u64,
+                                    meta.pkt_len as u64,
                                     now_ns,
                                 ),
                                 JunosHostLocalPolicy::Dropped
@@ -2248,7 +2248,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     resolved.metadata.policy_counter_idx,
                                 )
                             {
-                                crate::policy::record_policy_hit_counter(counter, desc.len as u64);
+                                crate::policy::record_policy_hit_counter(
+                                    counter,
+                                    meta.pkt_len as u64,
+                                );
                             }
                         }
                         // #9519: never seed the flow cache from a FOREIGN packet.
@@ -3148,7 +3151,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         resolved.decision,
                                     ),
                                     authority_zone,
-                                    desc.len as u64,
+                                    meta.pkt_len as u64,
                                     now_ns,
                                 ),
                                 JunosHostLocalPolicy::Dropped
@@ -4571,7 +4574,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         Some(policy_dst_port),
                                     ),
                                     from_zone_id,
-                                    desc.len as u64,
+                                    meta.pkt_len as u64,
                                     now_ns,
                                 )
                             } else {
@@ -4746,7 +4749,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // delivery path, so only the pre-routing
                                 // DNAT counter is bumped, once.
                                 if let Some(c) = pre_routing_dnat_counter.as_ref() {
-                                    c.add(desc.len as u64);
+                                    c.add(meta.pkt_len as u64);
                                 }
                                 // #2008 M5: stamp the resolved application id.
                                 // #3321: directional resolution (service = dst
@@ -4877,7 +4880,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow.forward_key.src_port,
                                 policy_dst_port,
                                 policy_icmp,
-                                desc.len as u64,
+                                meta.pkt_len as u64,
                                 now_ns,
                             );
                             // #1620: cold-path latency histogram post-eval record.
@@ -5840,7 +5843,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // DNAT/static-DNAT and SNAT/static-
                                         // SNAT counters are independent Arcs;
                                         // a DNAT+SNAT flow bumps both.
-                                        let nat_hit_len = desc.len as u64;
+                                        let nat_hit_len = meta.pkt_len as u64;
                                         if let Some(c) = pre_routing_dnat_counter.as_ref() {
                                             c.add(nat_hit_len);
                                         }
@@ -7576,7 +7579,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             0,
                             0,
                             policy_icmp,
-                            desc.len as u64,
+                            meta.pkt_len as u64,
                             // #3291: L4 header ABSENT — port-bearing app terms
                             // fail closed; address/protocol/`any` still match.
                             false,
@@ -7829,7 +7832,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_logical,
                             from_zone_id,
                             ingress_zone_override,
-                            desc.len as u64,
+                            meta.pkt_len as u64,
                             now_ns,
                         ) {
                             FlowlessLocalVerdict::Deliver => {
@@ -8496,7 +8499,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 == ForwardingDisposition::ForwardCandidate
                             && let Some(counter) = pre_routing_dnat_counter.as_ref()
                         {
-                            counter.add(desc.len as u64);
+                            counter.add(meta.pkt_len as u64);
                         }
                         // #11053: only an admitted control segment may teach
                         // a PPTP call association. A control close removes all
@@ -8931,7 +8934,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     ),
                                     l4_present,
                                     policy_icmp,
-                                    desc.len as u64,
+                                    meta.pkt_len as u64,
                                     now_ns,
                                 );
                                 let ingress_zone_override =
@@ -9340,7 +9343,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         flow.forward_key.src_port,
                                         policy_dst_port,
                                         policy_icmp,
-                                        desc.len as u64,
+                                        meta.pkt_len as u64,
                                         now_ns,
                                     );
                                     seed_policy_result = Some(policy_result);
@@ -9540,7 +9543,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 0,
                                                 0,
                                                 policy_icmp,
-                                                desc.len as u64,
+                                                meta.pkt_len as u64,
                                                 // L4 header ABSENT — port-bearing app
                                                 // terms fail closed.
                                                 false,
@@ -10431,7 +10434,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // SNAT allocation back, so it is never
                                         // counted). Count the DNAT and SNAT
                                         // per-rule hits once each.
-                                        let nat_hit_len = desc.len as u64;
+                                        let nat_hit_len = meta.pkt_len as u64;
                                         if let Some(c) = pre_routing_dnat_counter.as_ref() {
                                             c.add(nat_hit_len);
                                         }
