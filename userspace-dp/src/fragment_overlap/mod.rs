@@ -103,7 +103,7 @@ use crate::nat::NatDecision;
 pub(crate) static FRAG_OVERLAP_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Range-cap overflow drops (17th disjoint range, fail-closed).
 pub(crate) static FRAG_OVERLAP_OVERFLOW_DROPPED: AtomicU64 = AtomicU64::new(0);
-/// Capacity drops (sender/domain quota or a full shard; fail-closed, no live eviction).
+/// Capacity drops (sender/domain quota or full shard without reclaimable anchors).
 pub(crate) static FRAG_OVERLAP_SHARD_FULL_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Post-translation overlap drops (TX-site hook, translated key).
 pub(crate) static FRAG_OVERLAP_POST_NAT_DROPPED: AtomicU64 = AtomicU64::new(0);
