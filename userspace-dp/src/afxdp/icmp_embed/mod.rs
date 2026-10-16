@@ -162,7 +162,10 @@ impl<T> EmbeddedMatchOutcome<T> {
 /// floor off (the residual — a short quote admitted it should have refused).
 /// `get()` keeps this panic-free; full stamp verification is the #9900
 /// follow-up. `outer_datagram_end` shares this residual (same stamp).
-pub(in crate::afxdp::icmp_embed) fn outer_error_atomic(frame: &[u8], meta: &UserspaceDpMeta) -> bool {
+pub(in crate::afxdp::icmp_embed) fn outer_error_atomic(
+    frame: &[u8],
+    meta: &UserspaceDpMeta,
+) -> bool {
     let outer = frame.get(meta.l3_offset as usize..).unwrap_or(&[]);
     let fragmented = match meta.addr_family as i32 {
         libc::AF_INET => crate::afxdp::frame::ipv4_is_any_fragment(outer),
@@ -182,7 +185,10 @@ pub(in crate::afxdp::icmp_embed) fn outer_error_atomic(frame: &[u8], meta: &User
 /// `builders.rs`) ship a shorter quote — a 4-byte quote smuggled past the
 /// 8-byte floor. Raw-stamp residual: like `outer_error_atomic` this reads at
 /// the raw `meta.l3_offset` — see the disclosure there (#9900 follow-up).
-pub(in crate::afxdp::icmp_embed) fn outer_datagram_end(frame: &[u8], meta: &UserspaceDpMeta) -> usize {
+pub(in crate::afxdp::icmp_embed) fn outer_datagram_end(
+    frame: &[u8],
+    meta: &UserspaceDpMeta,
+) -> usize {
     let l3 = meta.l3_offset as usize;
     match meta.addr_family as i32 {
         libc::AF_INET => {
@@ -355,8 +361,17 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame(
     now_ns: u64,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     try_embedded_icmp_nat_match_from_frame_inner(
-        frame, meta, sessions, forwarding, dynamic_neighbors, shared_sessions,
-        shared_nat_sessions, None, shared_forward_wire_sessions, now_ns, None,
+        frame,
+        meta,
+        sessions,
+        forwarding,
+        dynamic_neighbors,
+        shared_sessions,
+        shared_nat_sessions,
+        None,
+        shared_forward_wire_sessions,
+        now_ns,
+        None,
     )
 }
 
@@ -375,8 +390,16 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame_with_ingress_zone(
     ingress_zone_override: Option<u16>,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
     try_embedded_icmp_nat_match_from_frame_inner(
-        frame, meta, sessions, forwarding, dynamic_neighbors, shared_sessions,
-        shared_nat_sessions, None, shared_forward_wire_sessions, now_ns,
+        frame,
+        meta,
+        sessions,
+        forwarding,
+        dynamic_neighbors,
+        shared_sessions,
+        shared_nat_sessions,
+        None,
+        shared_forward_wire_sessions,
+        now_ns,
         ingress_zone_override,
     )
 }
@@ -577,21 +600,30 @@ pub(in crate::afxdp::icmp_embed) fn resolve_quoted_pptp_discriminator(
     quoted_call_id: Option<u16>,
     quoted_dst: IpAddr,
 ) -> TunnelDiscriminator {
+    resolve_quoted_pptp_discriminator_in_domain(sessions, 0, quoted, quoted_call_id, quoted_dst)
+}
+
+pub(in crate::afxdp::icmp_embed) fn resolve_quoted_pptp_discriminator_in_domain(
+    sessions: &SessionTable,
+    routing_domain: u32,
+    quoted: TunnelDiscriminator,
+    quoted_call_id: Option<u16>,
+    quoted_dst: IpAddr,
+) -> TunnelDiscriminator {
     if !matches!(quoted, TunnelDiscriminator::Unparseable) {
         return quoted;
     }
     let Some(call_id) = quoted_call_id else {
         return quoted;
     };
-    // `quoted_dst` is the destination of the packet the error is ABOUT, i.e. the
-    // peer the sender was transmitting to -- exactly the `(dst, call_id)` pair
-    // the association table is indexed by.
-    match sessions.pptp().resolve(quoted_dst, call_id) {
+    match sessions
+        .pptp()
+        .resolve_in_domain(routing_domain, quoted_dst, call_id)
+    {
         Some(handle) => TunnelDiscriminator::Pptp(handle),
         None => quoted,
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // #9298 - resolving a QUOTED PPTP Call ID so an ICMP error about a PPTP data
@@ -665,6 +697,70 @@ mod pptp_embedded_9298 {
              session carries. Left `Unparseable` it equals no session and the \
              ICMP error stays unresolved - the PMTUD suppression #9031 fixed \
              for keyed GRE (#9298)"
+        );
+    }
+
+    #[test]
+    fn a_quoted_pptp_call_id_resolves_only_in_its_routing_domain_13681() {
+        let mut sessions = SessionTable::new();
+        let call_a = crate::session::pptp::PptpCall::new_in_domain(
+            10,
+            IpAddr::from(PEER_A),
+            100,
+            IpAddr::from(PEER_B),
+            200,
+        );
+        let call_b = crate::session::pptp::PptpCall::new_in_domain(
+            20,
+            IpAddr::from(PEER_A),
+            100,
+            IpAddr::from(PEER_B),
+            200,
+        );
+        let control_a = crate::session::pptp::ControlChannelId::new_in_domain(
+            10,
+            IpAddr::from(PEER_A),
+            49_152,
+            IpAddr::from(PEER_B),
+            1723,
+        );
+        let control_b = crate::session::pptp::ControlChannelId::new_in_domain(
+            20,
+            IpAddr::from(PEER_A),
+            49_152,
+            IpAddr::from(PEER_B),
+            1723,
+        );
+        let handle_a = sessions
+            .pptp_mut()
+            .install(call_a, control_a, 1_000)
+            .expect("domain 10 call");
+        let handle_b = sessions
+            .pptp_mut()
+            .install(call_b, control_b, 1_000)
+            .expect("domain 20 call");
+
+        for (domain, expected) in [(10, handle_a), (20, handle_b)] {
+            assert_eq!(
+                resolve_quoted_pptp_discriminator_in_domain(
+                    &sessions,
+                    domain,
+                    TunnelDiscriminator::Unparseable,
+                    Some(200),
+                    IpAddr::from(PEER_B),
+                ),
+                TunnelDiscriminator::Pptp(expected)
+            );
+        }
+        assert_eq!(
+            resolve_quoted_pptp_discriminator_in_domain(
+                &sessions,
+                30,
+                TunnelDiscriminator::Unparseable,
+                Some(200),
+                IpAddr::from(PEER_B),
+            ),
+            TunnelDiscriminator::Unparseable
         );
     }
 

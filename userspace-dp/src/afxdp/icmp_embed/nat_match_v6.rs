@@ -110,8 +110,9 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     );
     // #9298: upgrade an `Unparseable` PPTP quote to the live call's handle.
     // No-op for every other quote; a miss stays `Unparseable`.
-    let quoted_discriminator = super::resolve_quoted_pptp_discriminator(
+    let quoted_discriminator = super::resolve_quoted_pptp_discriminator_in_domain(
         ctx.sessions,
+        embedded_routing_domain,
         hdr.discriminator,
         hdr.pptp_call_id,
         hdr.dst,

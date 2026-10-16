@@ -61,8 +61,9 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
             // caller, so the resolve here changes nothing today -- it is here so
             // whoever wires it does not inherit a path that silently misses
             // every PPTP quote.
-            let quoted_discriminator = super::resolve_quoted_pptp_discriminator(
+            let quoted_discriminator = super::resolve_quoted_pptp_discriminator_in_domain(
                 sessions,
+                routing_domain,
                 hdr.discriminator,
                 hdr.pptp_call_id,
                 emb_dst,
@@ -104,8 +105,9 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
             )?;
             let emb_src = IpAddr::V6(hdr.src_wire);
             // #9298: see the v4 arm.
-            let quoted_discriminator = super::resolve_quoted_pptp_discriminator(
+            let quoted_discriminator = super::resolve_quoted_pptp_discriminator_in_domain(
                 sessions,
+                routing_domain,
                 hdr.discriminator,
                 hdr.pptp_call_id,
                 hdr.dst,

@@ -139,11 +139,7 @@ mod tests {
 
     /// A version-1 GRE frame plus the meta for it, with the outer endpoints
     /// given as parameters so a cell can send in both directions.
-    fn pptp_v4_frame(
-        src: [u8; 4],
-        dst: [u8; 4],
-        call_id: u16,
-    ) -> (Vec<u8>, UserspaceDpMeta) {
+    fn pptp_v4_frame(src: [u8; 4], dst: [u8; 4], call_id: u16) -> (Vec<u8>, UserspaceDpMeta) {
         let mut f = vec![0u8; 20];
         f[0] = 0x45; // IPv4, IHL 5
         f[9] = crate::ip_proto::PROTO_GRE;
@@ -320,9 +316,10 @@ mod tests {
 
         // Past the timeout measured from INSTALL, but not from that packet.
         let after_install_timeout = 1_000 + crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS + 1;
-        let expired = sessions
-            .pptp_mut()
-            .expire_idle(after_install_timeout, crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS);
+        let expired = sessions.pptp_mut().expire_idle(
+            after_install_timeout,
+            crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS,
+        );
         assert_eq!(
             expired, 0,
             "an association carrying data was expired on its LEARN time. The \
@@ -330,6 +327,42 @@ mod tests {
              call frees a 16-bit id that is reused, so the next call taking it \
              mis-attributes onto the dead handle (#7699)"
         );
+    }
+
+    /// The production resolver must select associations in the packet's route
+    /// domain, even when another domain has the same endpoints and call IDs.
+    #[test]
+    fn pptp_gre_resolution_is_scoped_to_routing_domain_13681() {
+        let a = std::net::IpAddr::from(PEER_A);
+        let b = std::net::IpAddr::from(PEER_B);
+        let mut sessions = crate::session::SessionTable::new();
+        let call_one = crate::session::pptp::PptpCall::new_in_domain(10, a, 100, b, 200);
+        let control_one =
+            crate::session::pptp::ControlChannelId::new_in_domain(10, a, 49_152, b, 1723);
+        let call_two = crate::session::pptp::PptpCall::new_in_domain(20, a, 100, b, 200);
+        let control_two =
+            crate::session::pptp::ControlChannelId::new_in_domain(20, a, 49_152, b, 1723);
+        let handle_one = sessions
+            .pptp_mut()
+            .install(call_one, control_one, 1_000)
+            .expect("domain 10 call");
+        let handle_two = sessions
+            .pptp_mut()
+            .install(call_two, control_two, 1_000)
+            .expect("domain 20 call");
+
+        let (frame, meta) = pptp_v4_frame(PEER_A, PEER_B, 200);
+        let key_one = pptp_data_session_flow_in_domain(&frame, meta, &mut sessions, 10, 2_000)
+            .expect("domain 10 packet")
+            .forward_key;
+        let key_two = pptp_data_session_flow_in_domain(&frame, meta, &mut sessions, 20, 2_000)
+            .expect("domain 20 packet")
+            .forward_key;
+        assert_eq!(key_one.routing_domain, 10);
+        assert_eq!(key_two.routing_domain, 20);
+        assert_ne!(key_one.discriminator, key_two.discriminator);
+        assert_eq!(key_one.discriminator, TunnelDiscriminator::Pptp(handle_one));
+        assert_eq!(key_two.discriminator, TunnelDiscriminator::Pptp(handle_two));
     }
 
     // --- #7699: the PPTP (GRE version 1) call-id extractor -------------------
@@ -830,20 +863,33 @@ pub(in crate::afxdp) fn pptp_data_session_flow(
     sessions: &mut crate::session::SessionTable,
     now_ns: u64,
 ) -> Option<SessionFlow> {
+    pptp_data_session_flow_in_domain(frame, meta, sessions, 0, now_ns)
+}
+
+pub(in crate::afxdp) fn pptp_data_session_flow_in_domain(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    sessions: &mut crate::session::SessionTable,
+    routing_domain: u32,
+    now_ns: u64,
+) -> Option<SessionFlow> {
     if meta.protocol != crate::ip_proto::PROTO_GRE {
         return None;
     }
     let outer_end = super::gre::outer_datagram_end(frame, meta)?;
     let call_id = pptp_call_id(frame, meta.l4_offset as usize, outer_end)?;
     let mut flow = super::frame::parse_session_flow_from_meta(meta)?;
+    flow.forward_key.routing_domain = routing_domain;
     // `resolve_and_touch`, not `resolve`: refreshing on use is what makes the
     // idle timeout mean "no traffic" rather than "old". Without a data-path
     // caller the clock only advanced at install, so a long-lived call carrying
     // data aged out on its LEARN time.
-    let Some(handle) = sessions
-        .pptp_mut()
-        .resolve_and_touch(flow.forward_key.dst_ip, call_id, now_ns)
-    else {
+    let Some(handle) = sessions.pptp_mut().resolve_and_touch_in_domain(
+        routing_domain,
+        flow.forward_key.dst_ip,
+        call_id,
+        now_ns,
+    ) else {
         sessions.pptp_mut().note_unassociated();
         return None;
     };

@@ -270,9 +270,10 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
         now_ns,
     );
     let mut learned = 0;
-    for seg in inbox.take_pending(now_ns) {
+    for (routing_domain, seg) in inbox.take_pending_in_domain(now_ns) {
         let parsed = crate::session::pptp_control::parse_control_segment(&seg.payload);
-        let control = crate::session::pptp::ControlChannelId::new(
+        let control = crate::session::pptp::ControlChannelId::new_in_domain(
+            routing_domain,
             seg.src,
             seg.src_port,
             seg.dst,
@@ -283,7 +284,8 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
                 call_id,
                 peer_call_id,
             } => {
-                let call = crate::session::pptp::PptpCall::new(
+                let call = crate::session::pptp::PptpCall::new_in_domain(
+                    routing_domain,
                     seg.src,
                     call_id,
                     seg.dst,

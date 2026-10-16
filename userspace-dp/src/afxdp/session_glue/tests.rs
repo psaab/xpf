@@ -13816,7 +13816,7 @@ fn own_pptp_retry_does_not_overtake_queued_cdn_12133() {
     let (resolved, pending) = run_own_pptp_retry_behind_queued_cdn_12133(true);
     eprintln!(
         "CDN_FIFO: own_retry=true, new_call_resolve={resolved:?}, \
-         expected=1907514186, pending_installs={pending}"
+         expected=derived handle, pending_installs={pending}"
     );
     let (pac, pns): (IpAddr, IpAddr) = (
         "198.51.100.7".parse().unwrap(),
@@ -13836,7 +13836,7 @@ fn peer_pptp_retry_preserves_queued_cdn_ordering_12133() {
     let (resolved, pending) = run_own_pptp_retry_behind_queued_cdn_12133(false);
     eprintln!(
         "CDN_FIFO: own_retry=false, new_call_resolve={resolved:?}, \
-         expected=1907514186, pending_installs={pending}"
+         expected=derived handle, pending_installs={pending}"
     );
     let (pac, pns): (IpAddr, IpAddr) = (
         "198.51.100.7".parse().unwrap(),
@@ -18326,6 +18326,16 @@ fn demote_owner_rgs_resolves_live_route_before_restamp_11373() {
 ///
 /// mode 0 = Q drains next with a non-empty queue; mode 1 = Q drains next with
 /// an empty queue; mode 2 = peer X drains next.
+fn replacement_pptp_handle_12133() -> u32 {
+    crate::session::pptp::PptpCall::new(
+        "198.51.100.7".parse().unwrap(),
+        0x1111,
+        "203.0.113.9".parse().unwrap(),
+        0x3333,
+    )
+    .handle()
+}
+
 fn run_both_refused_pptp_retry_resolves_replacement_12133(
     mode: u8,
 ) -> (Option<u32>, Option<u32>, Option<u32>, usize, usize) {
@@ -18518,8 +18528,8 @@ fn both_refused_pptp_retry_resolves_replacement_own_nonempty_12133() {
          X(pac,0x1111)={x_pac:?} pending_installs={pending_installs} \
          pending_cdns={pending_cdns}"
     );
-    assert_eq!(q_pac, Some(1907514186));
-    assert_eq!(q_pns, Some(1907514186));
+    assert_eq!(q_pac, Some(replacement_pptp_handle_12133()));
+    assert_eq!(q_pns, Some(replacement_pptp_handle_12133()));
     assert_eq!(pending_installs, 0);
     assert_eq!(pending_cdns, 0);
 }
@@ -18533,8 +18543,8 @@ fn both_refused_pptp_retry_resolves_replacement_own_empty_12133() {
          X(pac,0x1111)={x_pac:?} pending_installs={pending_installs} \
          pending_cdns={pending_cdns}"
     );
-    assert_eq!(q_pac, Some(1907514186));
-    assert_eq!(q_pns, Some(1907514186));
+    assert_eq!(q_pac, Some(replacement_pptp_handle_12133()));
+    assert_eq!(q_pns, Some(replacement_pptp_handle_12133()));
     assert_eq!(pending_installs, 0);
     assert_eq!(pending_cdns, 0);
 }
@@ -18548,8 +18558,8 @@ fn both_refused_pptp_retry_resolves_replacement_peer_12133() {
          X(pac,0x1111)={x_pac:?} pending_installs={pending_installs} \
          pending_cdns={pending_cdns}"
     );
-    assert_eq!(q_pac, Some(1907514186));
-    assert_eq!(q_pns, Some(1907514186));
+    assert_eq!(q_pac, Some(replacement_pptp_handle_12133()));
+    assert_eq!(q_pns, Some(replacement_pptp_handle_12133()));
     assert_eq!(pending_installs, 0);
     assert_eq!(pending_cdns, 0);
 }
