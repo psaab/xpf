@@ -134,6 +134,33 @@ func TestDNATAllValidDestinationListAccepted(t *testing.T) {
 	}
 }
 
+// A valid mixed-family bracket list cannot be installed against one pool:
+// every destination is translated to the same pool host, so reject the rule
+// rather than leaving its cross-family list entry silently untranslated.
+func TestDNATMixedFamilyDestinationListRejected13922(t *testing.T) {
+	cfg := &Config{}
+	cfg.Security.NAT.Destination = &DestinationNATConfig{
+		Pools: map[string]*NATPool{"dp": {Name: "dp", Address: "10.0.0.5"}},
+		RuleSets: []*NATRuleSet{
+			{Name: "rs1", FromZone: "untrust", Rules: []*NATRule{
+				{
+					Name: "r1",
+					Match: NATMatch{
+						DestinationAddresses: []string{"203.0.113.10/32", "2001:db8::10/128"},
+						DestinationAddress:   "203.0.113.10/32",
+					},
+					Then: NATThen{Type: NATDestination, PoolName: "dp"},
+				},
+			}},
+		},
+	}
+	err := validateDestinationNATAddressesStrict(cfg)
+	if err == nil || !strings.Contains(err.Error(), "address family") ||
+		!strings.Contains(err.Error(), "2001:db8::10/128") {
+		t.Fatalf("a valid mixed-family destination list must reject with the offending destination, got: %v", err)
+	}
+}
+
 // #3164: a DNAT match destination-address that is a MULTI-HOST prefix
 // (e.g. 198.51.100.0/24) is now HONORED — the snapshot builder carries the
 // canonical prefix to the wire and the Rust DnatTable installs a
