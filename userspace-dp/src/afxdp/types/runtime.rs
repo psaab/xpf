@@ -734,6 +734,8 @@ pub(in crate::afxdp) enum WorkerCommand {
     UpsertSynced(SyncedSessionEntry),
     UpsertLocal(SyncedSessionEntry),
     DeleteSynced(SessionKey),
+    /// Locally initiated clear/delete; the worker harvests a local Close.
+    DeleteLocalControl(SessionKey),
     /// #10512 scoped HA delete: like `DeleteSynced`, but the worker removes
     /// the entry ONLY when its live session id still matches — a
     /// replacement installed after the shared remove (queue delay) keeps

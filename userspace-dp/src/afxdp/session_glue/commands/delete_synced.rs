@@ -370,7 +370,18 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
         PEER_DELETE_REFUSED_LOCAL_OWNED.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    sessions.delete(&key);
+    // Locally initiated clears/policy removals emit one harvested close;
+    // peer-driven deletes remain silent to avoid duplicate records.
+    if !enforce_peer_owner {
+        let reason = if remove_mirror {
+            crate::event_stream::codec::RT_FLOW_CLOSE_REASON_CLEAR
+        } else {
+            crate::event_stream::codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE
+        };
+        sessions.delete_with_control_close(&key, reason);
+    } else {
+        sessions.delete(&key);
+    }
     deleted_keys.push(key.clone());
     if let Some(lookup) = delete_alias {
         // #4388: release the NAT pool port reserved for this peer-synced

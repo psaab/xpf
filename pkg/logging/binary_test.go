@@ -206,7 +206,9 @@ func TestRawEventContractMatchesDataplaneEvent(t *testing.T) {
 		closeReasonTCPFIN != dataplane.CloseReasonTCPFIN ||
 		closeReasonTCPRST != dataplane.CloseReasonTCPRST ||
 		closeReasonAgeOut != dataplane.CloseReasonAgeOut ||
-		closeReasonPolicy != dataplane.CloseReasonPolicy {
+		closeReasonPolicy != dataplane.CloseReasonPolicy ||
+		closeReasonClear != dataplane.CloseReasonClear ||
+		closeReasonPolicyDelete != dataplane.CloseReasonPolicyDelete {
 		t.Fatalf("close reason constants drifted")
 	}
 	if len(screenFlagNames) != len(dataplane.ScreenFlagNames) {

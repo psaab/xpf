@@ -1302,6 +1302,43 @@ impl SessionTable {
         self.remove_entry(key, RemovalKind::Terminal);
     }
 
+    /// Emit a close harvested from an entry removed by a local control-plane
+    /// action. Peer replicas remain silent so one logical flow has one close.
+    pub(crate) fn delete_with_control_close(&mut self, key: &SessionKey, reason: u8) {
+        let Some(removed) = self.remove_entry(key, RemovalKind::Terminal) else {
+            return;
+        };
+        let metadata = removed.metadata.clone();
+        if metadata.is_reverse
+            || removed.origin.is_peer_synced()
+            || removed.origin.is_local_tun_origin()
+            || removed.origin == SessionOrigin::FabricPuntSeed
+        {
+            return;
+        }
+        self.push_delta(SessionDelta {
+            provenance: ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Close,
+            key: key.clone(),
+            decision: removed.decision,
+            metadata,
+            source_nat_static: removed.source_nat_static,
+            policy_generation: removed.policy_generation,
+            origin: removed.origin,
+            fabric_redirect_sync: false,
+            created_ns: removed.created_ns,
+            last_seen_ns: removed.last_seen_ns,
+            counters: removed.counters,
+            observed_tos: removed.observed_tos,
+            observed_tcp_flags: removed.observed_tcp_flags,
+            session_id: removed.session_id,
+            bulk_resync: false,
+            tcp_close_class: reason,
+            tcp_handshake_state: 0,
+            purge_retirement: false,
+        });
+    }
+
     pub fn demote_owner_rg(&mut self, owner_rg_id: i32) -> Vec<crate::session::SessionKey> {
         if owner_rg_id <= 0 {
             return Vec::new();

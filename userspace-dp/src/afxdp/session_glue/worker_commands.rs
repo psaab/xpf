@@ -538,6 +538,24 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                     worker_id,
                 );
             }
+            WorkerCommand::DeleteLocalControl(key) => {
+                commands::handle_delete_synced_with_guard(
+                    sessions,
+                    session_map,
+                    forwarding,
+                    ha_state,
+                    key,
+                    now_ns,
+                    now_secs,
+                    &mut deleted_synced_keys,
+                    worker_id,
+                    false,
+                    true,
+                    &mut Vec::new(),
+                    0,
+                    None,
+                );
+            }
             WorkerCommand::DeleteSyncedConditional { key, expected_id, companion } => {
                 commands::handle_delete_synced_conditional(
                     sessions,

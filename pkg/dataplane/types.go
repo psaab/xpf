@@ -980,12 +980,14 @@ type Event struct {
 
 // Close reason constants (must match C CLOSE_REASON_* defines).
 const (
-	CloseReasonNone    = 0
-	CloseReasonTimeout = 1
-	CloseReasonTCPFIN  = 2
-	CloseReasonTCPRST  = 3
-	CloseReasonAgeOut  = 4
-	CloseReasonPolicy  = 5
+	CloseReasonNone         = 0
+	CloseReasonTimeout      = 1
+	CloseReasonTCPFIN       = 2
+	CloseReasonTCPRST       = 3
+	CloseReasonAgeOut       = 4
+	CloseReasonPolicy       = 5
+	CloseReasonClear        = 7
+	CloseReasonPolicyDelete = 8
 )
 
 // Tail call program indices -- must match C constants.

@@ -215,9 +215,8 @@ impl Coordinator {
         }
     }
 
-    /// #9714 test seam: register worker `worker_id` with a command queue a server-side
-    /// cell cannot otherwise reach, and return a reader of how many `DeleteSynced`
-    /// commands have been queued to it.
+    /// #9714 test seam: register a worker command queue and return a reader of
+    /// how many mirrored delete commands (peer-synced or local-control) it has.
     pub(crate) fn register_counting_worker_for_test(
         &mut self,
         worker_id: u32,
@@ -244,7 +243,13 @@ impl Coordinator {
             commands.lock().map_or(0, |queue| {
                 queue
                     .iter()
-                    .filter(|command| matches!(command, WorkerCommand::DeleteSynced(_)))
+                    .filter(|command| {
+                        matches!(
+                            command,
+                            WorkerCommand::DeleteSynced(_)
+                                | WorkerCommand::DeleteLocalControl(_)
+                        )
+                    })
                     .count()
             })
         })

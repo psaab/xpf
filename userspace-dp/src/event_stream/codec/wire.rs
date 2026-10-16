@@ -119,6 +119,8 @@ pub(crate) const RT_FLOW_CLOSE_REASON_TCP_FIN: u8 = 2;
 pub(crate) const RT_FLOW_CLOSE_REASON_TCP_RST: u8 = 3;
 pub(crate) const RT_FLOW_CLOSE_REASON_AGE_OUT: u8 = 4;
 pub(crate) const RT_FLOW_CLOSE_REASON_POLICY: u8 = 5;
+pub(crate) const RT_FLOW_CLOSE_REASON_CLEAR: u8 = 7;
+pub(crate) const RT_FLOW_CLOSE_REASON_POLICY_DELETE: u8 = 8;
 // DENY/PERMIT are wire-format documentation pinned by codec_tests;
 // like REJECT below they have no non-test reader (#1826: exposed when
 // the stale module-level allow was removed).

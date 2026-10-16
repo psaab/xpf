@@ -149,12 +149,13 @@ impl EventStreamWorkerHandle {
                     // the additive [152:160] slot so the SESSION_CLOSE record
                     // carries the same id as this session's SESSION_CREATE.
                     delta.session_id,
-                    // #13971: preserve the terminal TCP close class captured
-                    // before removal. RST has its own reason; both FIN classes
-                    // render as Junos TCP FIN; remaining closes are idle timeout.
+                    // #13971/#13972: ordinary TCP closes retain their close
+                    // class; control-plane teardown uses dedicated close reasons.
                     match delta.tcp_close_class {
                         3 => codec::RT_FLOW_CLOSE_REASON_TCP_RST,
                         1 | 2 => codec::RT_FLOW_CLOSE_REASON_TCP_FIN,
+                        7 => codec::RT_FLOW_CLOSE_REASON_CLEAR,
+                        8 => codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE,
                         _ => codec::RT_FLOW_CLOSE_REASON_TIMEOUT,
                     },
                 )

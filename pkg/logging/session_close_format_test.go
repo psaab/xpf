@@ -119,3 +119,17 @@ func TestStandardNonCloseStillRendersAction(t *testing.T) {
 		t.Errorf("POLICY_DENY standard line must still render action=deny; got: %s", got)
 	}
 }
+
+func TestControlPlaneCloseReasonsRender(t *testing.T) {
+	for _, tc := range []struct {
+		code uint8
+		want string
+	}{
+		{closeReasonClear, "clear"},
+		{closeReasonPolicyDelete, "policy delete"},
+	} {
+		if got := closeReasonName(tc.code); got != tc.want {
+			t.Errorf("closeReasonName(%d) = %q, want %q", tc.code, got, tc.want)
+		}
+	}
+}

@@ -125,14 +125,10 @@ const (
 	closeReasonTCPRST  = 3
 	closeReasonAgeOut  = 4
 	closeReasonPolicy  = 5
-	// #3610: a host-inbound-traffic admission deny. Carried in the RT_FLOW
-	// reason byte on a POLICY_DENY event (the userspace-dp
-	// emit_host_inbound_deny_event rides the policy-deny wire kind with this
-	// distinct reason). Must equal the Rust RT_FLOW_CLOSE_REASON_HOST_INBOUND
-	// (userspace-dp/src/afxdp/event_emit.rs). Lets the structured
-	// RT_FLOW_SESSION_DENY record and operators tell a control-plane
-	// host-inbound drop apart from a transit security-policy deny.
-	closeReasonHostInbound = 6
+	// Control-plane removals carry explicit close reasons in SESSION_CLOSE.
+	closeReasonHostInbound  = 6
+	closeReasonClear        = 7
+	closeReasonPolicyDelete = 8
 )
 
 const (
@@ -1438,6 +1434,10 @@ func closeReasonName(reason uint8) string {
 		// #3610: a control-plane host-inbound-traffic admission deny (distinct
 		// from a transit security-policy deny).
 		return "Denied by host-inbound-traffic"
+	case closeReasonClear:
+		return "clear"
+	case closeReasonPolicyDelete:
+		return "policy delete"
 	default:
 		return "N/A"
 	}

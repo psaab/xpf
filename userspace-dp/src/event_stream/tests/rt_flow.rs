@@ -63,6 +63,11 @@ fn test_emit_session_close_rt_flow_carries_close_reason_13971() {
         (1, codec::RT_FLOW_CLOSE_REASON_TCP_FIN),
         (2, codec::RT_FLOW_CLOSE_REASON_TCP_FIN),
         (3, codec::RT_FLOW_CLOSE_REASON_TCP_RST),
+        (codec::RT_FLOW_CLOSE_REASON_CLEAR, codec::RT_FLOW_CLOSE_REASON_CLEAR),
+        (
+            codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE,
+            codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE,
+        ),
     ] {
         let (handle, rx) = test_worker_handle(
             8,

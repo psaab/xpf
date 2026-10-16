@@ -19433,3 +19433,149 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
         .map(|(body, _)| body)
         .expect("function body closer")
 }
+
+/// #13972: control-plane removals must emit exactly one harvested Close.
+#[test]
+fn control_plane_delete_emits_harvested_close_13972() {
+    use crate::afxdp::bpf_map::{RECORDER_ONLY_MAP_FD, SteeringMap};
+    let now_ns = 1_000_000_000u64;
+    let install = |sessions: &mut SessionTable, origin: SessionOrigin| {
+        let key = test_key();
+        let mut metadata = test_metadata();
+        metadata.log_session_close = true;
+        assert!(sessions.install_with_protocol_with_origin(
+            key.clone(),
+            test_decision(),
+            metadata,
+            origin,
+            now_ns,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+        sessions.drain_deltas(16);
+        for _ in 0..10 {
+            sessions.account_packet(&key, 1000, TCP_FLAG_ACK, 0);
+        }
+        key
+    };
+    // Locally owned, non-peer delete: one Close with harvested counters.
+    {
+        let mut sessions = SessionTable::new();
+        let key = install(&mut sessions, SessionOrigin::ForwardFlow);
+        let session_id = sessions.session_id_for(&key);
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        super::commands::handle_delete_synced_with_guard(
+            &mut sessions,
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            key.clone(),
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            0,
+            false,
+            true,
+            &mut deferred,
+            0,
+            None,
+        );
+        let deltas = sessions.drain_deltas(16);
+        assert_eq!(deltas.len(), 1, "local control-plane delete must emit one Close: {deltas:?}");
+        let close = &deltas[0];
+        assert_eq!(close.kind, crate::session::SessionDeltaKind::Close);
+        assert_eq!(close.key, key);
+        assert_eq!(close.counters.fwd_packets, 10);
+        assert_eq!(close.counters.fwd_bytes, 10_000);
+        assert_eq!(close.created_ns, now_ns);
+        assert_eq!(close.session_id, session_id);
+        assert_eq!(close.tcp_close_class, 7, "clear reason marker");
+    }
+    // Policy-batch path: same single Close.
+    {
+        let mut sessions = SessionTable::new();
+        let key = install(&mut sessions, SessionOrigin::ForwardFlow);
+        let forward_id = sessions.session_id_for(&key);
+        let item = crate::afxdp::PolicyDeleteItem {
+            key: key.clone(),
+            session_id: forward_id,
+            forward_only: true,
+            companion_session_id: 0,
+            captured_companion: None,
+        };
+        let mut report = crate::afxdp::PolicyDeleteBatchReport {
+            cancelled: false,
+            partial: vec![false],
+            refused: vec![false],
+        };
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        assert!(super::commands::handle_remove_policy_item(
+            &mut sessions,
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            &item,
+            &mut report,
+            0,
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            0,
+            &mut deferred,
+        ));
+        let deltas = sessions.drain_deltas(16);
+        assert_eq!(deltas.len(), 1, "policy delete must emit one Close: {deltas:?}");
+        assert_eq!(deltas[0].counters.fwd_bytes, 10_000);
+        assert_eq!(deltas[0].tcp_close_class, 8);
+    }
+    // Peer-synced entry: silent (exactly one Close across nodes).
+    {
+        let mut sessions = SessionTable::new();
+        let key = install(&mut sessions, SessionOrigin::SyncImport);
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        super::commands::handle_delete_synced_with_guard(
+            &mut sessions,
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            key,
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            0,
+            false,
+            false,
+            &mut deferred,
+            0,
+            None,
+        );
+        assert!(sessions.drain_deltas(16).is_empty(), "peer-synced delete must emit no Close");
+    }
+    // Peer-originated delete of locally owned entry (peer_delete=true): silent.
+    {
+        let mut sessions = SessionTable::new();
+        let key = install(&mut sessions, SessionOrigin::ForwardFlow);
+        let mut deleted_keys = Vec::new();
+        let mut deferred = Vec::new();
+        super::commands::handle_delete_synced_with_guard(
+            &mut sessions,
+            SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+            &ForwardingState::default(),
+            &BTreeMap::new(),
+            key,
+            now_ns,
+            now_ns / 1_000_000_000,
+            &mut deleted_keys,
+            0,
+            true,
+            true,
+            &mut deferred,
+            0,
+            None,
+        );
+        assert!(sessions.drain_deltas(16).is_empty(), "peer-originated delete must emit no Close");
+    }
+}
