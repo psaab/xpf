@@ -179,6 +179,10 @@ func DestinationNATRuleExcludedReason(dnat *DestinationNATConfig, rule *NATRule)
 	// invalid port would wrap on the uint16 cast or collapse to preserve-
 	// destination-port. All publish NO entry so the rule matches nothing rather
 	// than translating to the wrong place.
+	if pool.DuplicateAddressStatements != "" {
+		return "pool " + quoteName(rule.Then.PoolName) + " has duplicate address statements [" +
+			pool.DuplicateAddressStatements + "]; exactly one address statement is supported"
+	}
 	if pool.AddressInvalidSpec != "" {
 		return "pool " + quoteName(rule.Then.PoolName) + " " +
 			dnatPoolInvalidAddressKind(pool.AddressInvalidSpec) + " is unsupported"

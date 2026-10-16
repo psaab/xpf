@@ -18,7 +18,17 @@ import (
 // than one non-port address token is present, retain the full token sequence
 // in Address and AddressInvalidSpec so strict validation rejects it instead
 // of silently keeping only the final token.
-func parseDNATPoolAddress(pool *NATPool, prop *Node) {
+//
+// #14197: a DNAT pool carries ONE effective address. Every address-bearing
+// statement is recorded; when more than one DISTINCT statement survives
+// (intra-block or across repeated blocks), it is surfaced via
+// DuplicateAddressStatements for the strict gate / tolerant exclusion —
+// a second statement no longer silently overwrites the first or clears
+// its AddressInvalidSpec. Identical repeats (a `load merge` re-stating
+// the same pool) collapse in compileNATDestination. Port-only statements
+// (`address port <N>`) carry no address and neither count nor clear a
+// prior statement's markers (#10289).
+func parseDNATPoolAddress(pool *NATPool, prop *Node, addressStatements *[]string) {
 	toks := append([]string(nil), prop.Keys[1:]...)
 	for _, c := range prop.Children {
 		toks = append(toks, c.Keys...)
@@ -47,6 +57,45 @@ func parseDNATPoolAddress(pool *NATPool, prop *Node) {
 		pool.Address = strings.Join(addresses, " ")
 		pool.AddressInvalidSpec = pool.Address
 	}
+	*addressStatements = append(*addressStatements, strings.Join(addresses, " "))
+	if len(*addressStatements) > 1 {
+		pool.DuplicateAddressStatements = strings.Join(*addressStatements, "; ")
+	}
+}
+
+// allSameString reports whether every element equals the first.
+func allSameString(ss []string) bool {
+	for _, s := range ss[1:] {
+		if s != ss[0] {
+			return false
+		}
+	}
+	return len(ss) > 0
+}
+
+// mergeDNATPoolAddressStatements folds a repeated pool block's address
+// statements into the already-merged pool (#14197). The prior block's
+// effective statement is reconstructed from Address (which holds the full
+// joined spec when AddressInvalidSpec is set); if the merged pool already
+// carries a duplicate record, the new statements append to it. A repeated
+// block re-stating the IDENTICAL address is a `load merge` restatement,
+// not a duplicate.
+func mergeDNATPoolAddressStatements(existing *NATPool, stmts []string) {
+	if len(stmts) == 0 {
+		return
+	}
+	if existing.DuplicateAddressStatements != "" {
+		existing.DuplicateAddressStatements += "; " + strings.Join(stmts, "; ")
+		return
+	}
+	if existing.Address == "" {
+		return
+	}
+	if len(stmts) == 1 && stmts[0] == existing.Address {
+		return
+	}
+	prior := existing.Address
+	existing.DuplicateAddressStatements = prior + "; " + strings.Join(stmts, "; ")
 }
 
 func dnatPoolInvalidAddressKind(spec string) string {
@@ -66,9 +115,10 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 		}
 	}
 
-	// Parse pools
+	// Parse pools.
 	for _, inst := range namedInstances(node.FindChildren("pool")) {
 		pool := &NATPool{Name: inst.name}
+		var addressStatements []string
 
 		for _, prop := range expandFlatRun(inst.node.Children, schemaForPath("security", "nat", "destination", "pool")) {
 			switch prop.Name() {
@@ -83,7 +133,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 				// "port" for an `address port 80` statement and dropped the port
 				// entirely. Walk every token so the address and the nested port are
 				// each captured.
-				parseDNATPoolAddress(pool, prop)
+				parseDNATPoolAddress(pool, prop, &addressStatements)
 			case "port":
 				// Top-level `port <N>` form (flat-set / older configs).
 				if v := nodeVal(prop); v != "" {
@@ -102,11 +152,24 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 				pool.UnknownLeaves = append(pool.UnknownLeaves, prop.Name())
 			}
 		}
+		// #14197/#10289 reconciliation: identical repeated `address`
+		// statements (a `load merge` re-stating the same pool) carry one
+		// effective statement, not a duplicate.
+		if pool.DuplicateAddressStatements != "" && allSameString(addressStatements) {
+			pool.DuplicateAddressStatements = ""
+			addressStatements = addressStatements[:1]
+		}
 
 		if existing := sec.NAT.Destination.Pools[pool.Name]; existing != nil {
+			// #14197: a repeated pool block carrying another address
+			// statement is a duplicate, not a silent replacement.
+			mergeDNATPoolAddressStatements(existing, addressStatements)
 			if pool.Address != "" {
 				existing.Address = pool.Address
 				existing.AddressInvalidSpec = pool.AddressInvalidSpec
+			}
+			if pool.DuplicateAddressStatements != "" {
+				existing.DuplicateAddressStatements = pool.DuplicateAddressStatements
 			}
 			if pool.PortRaw != "" {
 				existing.PortRaw = pool.PortRaw
