@@ -334,6 +334,49 @@ mod tests {
         );
     }
 
+    /// #13942: an off-path sender that knows (or guesses) a live Call ID must
+    /// not keep the association alive. Without a source check any host can
+    /// refresh last_seen forever while the real control channel is alive.
+    #[test]
+    fn a_spoofed_sender_cannot_refresh_or_claim_a_call_13942() {
+        const ATTACKER: [u8; 4] = [192, 0, 2, 99];
+        let mut sessions = crate::session::SessionTable::new();
+        install_call(&mut sessions, 100, 200);
+        let late = 1_000 + crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS - 1;
+        let (f, m) = pptp_v4_frame(ATTACKER, PEER_B, 200);
+        assert!(
+            pptp_data_session_flow(&f, m, &mut sessions, late).is_none(),
+            "a packet from a non-peer source must not resolve to the call \
+             handle, however valid its Call ID is (#13942)"
+        );
+
+        let after_install_timeout = 1_000 + crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS + 1;
+        assert_eq!(
+            sessions.pptp_mut().expire_idle(
+                after_install_timeout,
+                crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS,
+            ),
+            1,
+            "a spoofed packet refreshed the association: any sender can keep \
+             a PPTP data association alive indefinitely (#13942)"
+        );
+
+        let mut sessions = crate::session::SessionTable::new();
+        let handle = install_call(&mut sessions, 100, 200);
+        let (f, m) = pptp_v4_frame(PEER_A, PEER_B, 200);
+        let flow = pptp_data_session_flow(&f, m, &mut sessions, late)
+            .expect("the control peer's data packet must still resolve");
+        assert_eq!(flow.forward_key.discriminator, TunnelDiscriminator::Pptp(handle));
+        assert_eq!(
+            sessions.pptp_mut().expire_idle(
+                after_install_timeout,
+                crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS,
+            ),
+            0,
+            "the legitimate peer's packet must refresh the idle clock"
+        );
+    }
+
     /// The production resolver must select associations in the packet's route
     /// domain, even when another domain has the same endpoints and call IDs.
     #[test]
@@ -911,6 +954,7 @@ pub(in crate::afxdp) fn pptp_data_session_flow_in_domain(
     // data aged out on its LEARN time.
     let Some(handle) = sessions.pptp_mut().resolve_and_touch_in_domain(
         routing_domain,
+        flow.src_ip,
         flow.forward_key.dst_ip,
         call_id,
         now_ns,

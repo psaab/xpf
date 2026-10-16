@@ -92,6 +92,15 @@ impl PptpCall {
             || (self.hi == allocator && self.hi_call_id == call_id)
     }
 
+    /// Whether the directional outer endpoints belong to this call.
+    ///
+    /// A data packet's Call ID is allocated by its destination, so accepting
+    /// the destination alias alone lets any source claim the call. Both peer
+    /// endpoints must match the learned association.
+    fn permits_data_peers(&self, src: IpAddr, dst: IpAddr) -> bool {
+        (src == self.lo && dst == self.hi) || (src == self.hi && dst == self.lo)
+    }
+
     /// Encode the call-id pair for the HA sync wire (#7699).
     ///
     /// Never returns [`PPTP_CALL_IDS_ABSENT`], so a receiver can read `0` as
@@ -441,24 +450,28 @@ impl PptpAssociations {
     /// 16-bit id that is REUSED.
     pub(crate) fn resolve_and_touch(
         &mut self,
+        src: IpAddr,
         dst: IpAddr,
         call_id: u16,
         now_ns: u64,
     ) -> Option<u32> {
-        self.resolve_and_touch_in_domain(0, dst, call_id, now_ns)
+        self.resolve_and_touch_in_domain(0, src, dst, call_id, now_ns)
     }
 
     pub(crate) fn resolve_and_touch_in_domain(
         &mut self,
         routing_domain: u32,
+        src: IpAddr,
         dst: IpAddr,
         call_id: u16,
         now_ns: u64,
     ) -> Option<u32> {
         let handle = *self.by_allocator.get(&(routing_domain, dst, call_id))?;
-        if let Some(rec) = self.by_handle.get_mut(&handle) {
-            rec.last_seen_ns = now_ns;
+        let rec = self.by_handle.get_mut(&handle)?;
+        if !rec.call.permits_data_peers(src, dst) {
+            return None;
         }
+        rec.last_seen_ns = now_ns;
         Some(handle)
     }
 
@@ -978,7 +991,7 @@ mod routing_domain_13681_tests {
         assert_eq!(t.resolve_in_domain(100_001, a, 0x1111), Some(h1));
         assert_eq!(t.resolve_in_domain(100_002, a, 0x1111), Some(h2));
         assert_eq!(
-            t.resolve_and_touch_in_domain(100_002, b, 0x2222, 9),
+            t.resolve_and_touch_in_domain(100_002, a, b, 0x2222, 9),
             Some(h2)
         );
 
@@ -1152,7 +1165,7 @@ mod expiry_tests_7699 {
 
         let before_bound = T0 + ASSOCIATION_IDLE_TIMEOUT_NS - 1;
         assert_eq!(
-            t.resolve_and_touch(pns, 0xBBBB, before_bound),
+            t.resolve_and_touch(pac, pns, 0xBBBB, before_bound),
             Some(handle),
             "a call carrying data just before the bound must resolve"
         );
@@ -1168,7 +1181,7 @@ mod expiry_tests_7699 {
         // The call has now remained active for MORE than the idle bound.
         let touched_at = T0 + ASSOCIATION_IDLE_TIMEOUT_NS + 1;
         assert_eq!(
-            t.resolve_and_touch(pns, 0xBBBB, touched_at),
+            t.resolve_and_touch(pac, pns, 0xBBBB, touched_at),
             Some(handle),
             "a live call must still resolve after fifteen minutes"
         );
