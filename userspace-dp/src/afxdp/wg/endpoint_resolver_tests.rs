@@ -270,14 +270,15 @@ fn panicking_endpoint_lookup_does_not_stop_sibling_updates_13666() {
     );
 }
 
-/// #13666: a single slow lookup must not hold later peers until it completes,
+/// #13666: a slow peer must not block later lookups or adoption of their answers,
 /// including peers beyond the concurrent-worker limit.
 #[test]
 fn slow_endpoint_does_not_block_later_peers_13666() {
-    use std::sync::mpsc;
-    use std::time::Duration;
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
 
-    let sh = shared();
+    let sh = Arc::new(shared());
+    let resolver_sh = Arc::clone(&sh);
     let targets: Vec<_> = (0..9)
         .map(|n| {
             let mut pubkey = [0u8; 32];
@@ -285,11 +286,13 @@ fn slow_endpoint_does_not_block_later_peers_13666() {
             (pubkey, format!("peer-{n}"))
         })
         .collect();
+    let mut peer_8 = [0u8; 32];
+    peer_8[0] = 8;
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Mutex::new(release_rx);
     let resolver = std::thread::spawn(move || {
-        resolve_once_with(&sh, &targets, false, |host| {
+        resolve_once_with(&resolver_sh, &targets, false, |host| {
             if host == "peer-0" {
                 release_rx.lock().unwrap().recv().unwrap();
             } else if host == "peer-8" {
@@ -300,10 +303,90 @@ fn slow_endpoint_does_not_block_later_peers_13666() {
     });
 
     let later_peer_started = started_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let later_peer_applied = loop {
+        if sh.resolved.lock().unwrap().contains_key(&peer_8) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::yield_now();
+    };
     release_tx.send(()).unwrap();
     assert_eq!(resolver.join().unwrap(), 9);
+    assert!(later_peer_started, "the ninth peer lookup did not start");
     assert!(
-        later_peer_started,
-        "the ninth peer lookup waited for the first slow worker/batch"
+        later_peer_applied,
+        "the ninth peer answer was not applied before releasing the slow first lookup"
+    );
+}
+
+/// #13666: dropping the resolver is nonblocking even when DNS is in flight,
+/// and workers do not schedule more peers after shutdown begins.
+#[test]
+fn dropping_resolver_does_not_wait_for_inflight_lookup_13666() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
+
+    let shared = Arc::new(shared());
+    let worker_shared = Arc::clone(&shared);
+    let all_workers_started = Arc::new(Barrier::new(9));
+    let worker_started_barrier = Arc::clone(&all_workers_started);
+    let release_workers = Arc::new(Barrier::new(9));
+    let worker_release_barrier = Arc::clone(&release_workers);
+    let late_peer_scheduled = Arc::new(AtomicBool::new(false));
+    let late_peer_probe = Arc::clone(&late_peer_scheduled);
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let targets: Vec<_> = (0..9)
+        .map(|n| {
+            let mut pubkey = [0u8; 32];
+            pubkey[0] = n;
+            (pubkey, format!("peer-{n}"))
+        })
+        .collect();
+    let handle = std::thread::spawn(move || {
+        let _ = resolve_once_with(&worker_shared, &targets, false, |host| {
+            let n: usize = host.strip_prefix("peer-").unwrap().parse().unwrap();
+            if n < 8 {
+                worker_started_barrier.wait();
+                worker_release_barrier.wait();
+            } else {
+                late_peer_probe.store(true, Ordering::Relaxed);
+            }
+            Ok(vec!["203.0.113.10:51820".parse().unwrap()])
+        });
+        finished_tx.send(()).unwrap();
+    });
+    let resolver = WgEndpointResolver {
+        shared: Arc::clone(&shared),
+        join: Some(handle),
+    };
+
+    // All eight workers are inside their injected lookup; peer 8 is still
+    // unscheduled.
+    all_workers_started.wait();
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let dropper = std::thread::spawn(move || {
+        drop(resolver);
+        dropped_tx.send(()).unwrap();
+    });
+    let dropped_without_wait = dropped_rx.recv_timeout(Duration::from_millis(500)).is_ok();
+    release_workers.wait();
+    dropper.join().unwrap();
+    finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    assert!(
+        dropped_without_wait,
+        "resolver Drop waited for an in-flight DNS lookup"
+    );
+    assert!(
+        !late_peer_scheduled.load(Ordering::Relaxed),
+        "a worker scheduled another peer after stop was set"
+    );
+    assert!(
+        shared.resolved.lock().unwrap().is_empty(),
+        "shutdown must not apply results after the resolver is dropped"
     );
 }
