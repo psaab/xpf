@@ -295,3 +295,96 @@ func TestRecvMemoRestoresOverLossyMirrorV610068(t *testing.T) {
 			got.InstallTableDomain, got.InstallTableCheck)
 	}
 }
+
+// #14157: a peer reboot / incarnation switch runs resetRecvGen
+// (resetRecvSessionGen with preserve=false), which recreated the receiver
+// generation, scoped-generation and source-NAT receive maps but left
+// installTableRecvV4/V6 untouched. A rebooted peer may reuse both a tuple
+// and a sessionID, so the dead incarnation's record then matched the new
+// session: a stamp-less (0,0) install restored the stale domain/check via
+// restoreInstallTableLocked, and a promoted-standby resend restored it via
+// lookupRecvInstallTableLocked. The namespace reset must discard the
+// received installing-table memos; the same-incarnation reclaim
+// (preserve=true) must retain them, exactly as it retains tombstones.
+func TestRecvMemoNamespaceResetDiscards14157(t *testing.T) {
+	fwd := rtflowKeyV4(41157)
+	ss, dp := lossyRecvSync9752(t)
+	ss.installClusterSyncedV4(fwd, dataplane.SessionValue{SessionID: 77, RTFlowSessionID: 77, Generation: 10,
+		InstallTableDomain: 525590, InstallTableCheck: 3318534811})
+	if got := lastSet9752(t, dp); got.InstallTableDomain != 525590 || got.InstallTableCheck != 3318534811 {
+		t.Fatal("FIXTURE: stamped install did not land")
+	}
+	ss.resetRecvGen()
+	ss.recvGenMu.Lock()
+	_, kept := ss.installTableRecvV4[fwd]
+	ss.recvGenMu.Unlock()
+	if kept {
+		t.Fatal("#14157: namespace reset left the dead incarnation's received installing-table record in place")
+	}
+	// Decisive check: the rebooted peer reuses the tuple AND sessionID and
+	// states (0,0). No stale identity may be restored into the new session.
+	ss.installClusterSyncedV4(fwd, dataplane.SessionValue{SessionID: 77, RTFlowSessionID: 77, Generation: 11})
+	if got := lastSet9752(t, dp); got.InstallTableDomain != 0 || got.InstallTableCheck != 0 {
+		t.Fatalf("#14157: after a namespace reset, a reused tuple+sessionID install stating (0,0) "+
+			"inherited the dead incarnation's (%d,%d)", got.InstallTableDomain, got.InstallTableCheck)
+	}
+	// Resend path: a promoted standby that only received the incarnation
+	// consults the receive memo when stamping a mirror-sourced (0,0) resend.
+	// It must stay (0,0) after the reset, not resurrect the dead stamp.
+	resend := dataplane.SessionValue{SessionID: 77, RTFlowSessionID: 77}
+	ss.stampInstallGenV4(fwd, &resend)
+	if resend.InstallTableDomain != 0 || resend.InstallTableCheck != 0 {
+		t.Fatalf("#14157: after a namespace reset, a resend for a reused tuple+sessionID restored "+
+			"the dead incarnation's (%d,%d) from the receive memo", resend.InstallTableDomain, resend.InstallTableCheck)
+	}
+}
+
+// #14157: IPv6 twin of the namespace-reset check above.
+func TestRecvMemoNamespaceResetDiscardsV614157(t *testing.T) {
+	fwd := rtflowKeyV6(41157)
+	ss, dp := lossyRecvSync9752(t)
+	ss.installClusterSyncedV6(fwd, dataplane.SessionValueV6{SessionID: 77, RTFlowSessionID: 77, Generation: 10,
+		InstallTableDomain: 525590, InstallTableCheck: 3318534811})
+	if got := lastSetV610068(t, dp); got.InstallTableDomain != 525590 || got.InstallTableCheck != 3318534811 {
+		t.Fatal("FIXTURE: stamped v6 install did not land")
+	}
+	ss.resetRecvGen()
+	ss.recvGenMu.Lock()
+	_, kept := ss.installTableRecvV6[fwd]
+	ss.recvGenMu.Unlock()
+	if kept {
+		t.Fatal("#14157: namespace reset left the dead incarnation's received v6 installing-table record in place")
+	}
+	ss.installClusterSyncedV6(fwd, dataplane.SessionValueV6{SessionID: 77, RTFlowSessionID: 77, Generation: 11})
+	if got := lastSetV610068(t, dp); got.InstallTableDomain != 0 || got.InstallTableCheck != 0 {
+		t.Fatalf("#14157: after a namespace reset, a reused v6 tuple+sessionID install stating (0,0) "+
+			"inherited the dead incarnation's (%d,%d)", got.InstallTableDomain, got.InstallTableCheck)
+	}
+	resend := dataplane.SessionValueV6{SessionID: 77, RTFlowSessionID: 77}
+	ss.stampInstallGenV6(fwd, &resend)
+	if resend.InstallTableDomain != 0 || resend.InstallTableCheck != 0 {
+		t.Fatalf("#14157: after a namespace reset, a v6 resend for a reused tuple+sessionID restored "+
+			"the dead incarnation's (%d,%d) from the receive memo", resend.InstallTableDomain, resend.InstallTableCheck)
+	}
+}
+
+// #14157: the same-incarnation bulk reclaim (preserve=true) is NOT a
+// namespace switch: the peer's sessions are the same incarnations, so the
+// received installing-table memos must survive it. Clearing them there
+// would reintroduce the pre-#9752 loss where a stamp-less resend after a
+// same-incarnation re-prime falls back to the default table.
+func TestRecvMemoReclaimRetains14157(t *testing.T) {
+	fwd := rtflowKeyV4(41158)
+	ss, dp := lossyRecvSync9752(t)
+	ss.installClusterSyncedV4(fwd, dataplane.SessionValue{SessionID: 77, RTFlowSessionID: 77, Generation: 10,
+		InstallTableDomain: 525590, InstallTableCheck: 3318534811})
+	if got := lastSet9752(t, dp); got.InstallTableDomain != 525590 {
+		t.Fatal("FIXTURE: stamped install did not land")
+	}
+	ss.reclaimRecvLiveGen()
+	ss.installClusterSyncedV4(fwd, dataplane.SessionValue{SessionID: 77, RTFlowSessionID: 77, Generation: 11})
+	if got := lastSet9752(t, dp); got.InstallTableDomain != 525590 || got.InstallTableCheck != 3318534811 {
+		t.Fatalf("#14157: same-incarnation reclaim must retain the received installing-table record; "+
+			"a stamp-less resend installed (%d,%d)", got.InstallTableDomain, got.InstallTableCheck)
+	}
+}

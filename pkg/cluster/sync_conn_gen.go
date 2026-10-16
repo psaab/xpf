@@ -1351,6 +1351,14 @@ func (s *SessionSync) resetRecvSessionGen(preserve bool) {
 		s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 		s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
 		s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
+		// #14157: the received installing-table identity is per-incarnation
+		// like the source-NAT memo below: a rebooted peer may reuse a tuple
+		// AND a sessionID, so a surviving record would restore the dead
+		// incarnation's domain/check into the new session on a stamp-less
+		// (0,0) install (restoreInstallTableLocked) and on the promoted-
+		// standby resend path (lookupRecvInstallTableLocked). Discard both.
+		s.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
+		s.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable)
 		// #11064: discard typed source-NAT identities from the peer's prior
 		// namespace; its rebooted sessions may reuse old session identifiers.
 		s.sourceNatICMPRecvV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
