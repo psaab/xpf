@@ -339,10 +339,17 @@ func (r *Runner) currentPath() string {
 	return filepath.Join(r.cfg.VersionsDir, currentLink)
 }
 
+// readlinkCurrent is the os.Readlink seam for the `current` symlink. A
+// package var so a test can inject a NON-ENOENT lookup failure (EIO/EINVAL)
+// and prove version-dir deletion fails closed instead of treating the live
+// version as unknown-and-therefore-deletable (#14166). Production is
+// os.Readlink.
+var readlinkCurrent = os.Readlink
+
 // readCurrentVersion resolves the version the `current` symlink points at,
 // or "" if it does not exist (very first cut).
 func (r *Runner) readCurrentVersion() (string, error) {
-	target, err := os.Readlink(r.currentPath())
+	target, err := readlinkCurrent(r.currentPath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil

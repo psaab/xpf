@@ -481,7 +481,19 @@ func (r *Runner) gc(j *Journal) error {
 	if j.PreviousVersion != "" {
 		protected[j.PreviousVersion] = true
 	}
-	cur, _ := r.readCurrentVersion()
+	// Fail closed on an indeterminate live version (#14166): readCurrentVersion
+	// returns ("", nil) only for a genuinely absent `current`; any other error
+	// (EIO, EINVAL when `current` is not a symlink, ...) means the live dir is
+	// unknown. Discarding it would leave that dir unprotected and GC could
+	// RemoveAll the running daemon's binaries once it fell past retention.
+	// Defer all deletion and surface the error; callers log it as non-fatal
+	// to an otherwise-committed cut, and a later GC retries.
+	cur, curErr := r.readCurrentVersion()
+	if curErr != nil {
+		return fmt.Errorf("gc: cannot determine the live `current` version; "+
+			"deferring all version-dir deletion rather than risk deleting "+
+			"the running version: %w", curErr)
+	}
 	if cur != "" {
 		protected[cur] = true
 	}
