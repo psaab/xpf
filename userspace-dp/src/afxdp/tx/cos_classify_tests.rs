@@ -2775,6 +2775,7 @@ fn ingress_input_filter_rewalk_uses_prenat_key_5158() {
         TermMatchExtra::default(),
         now_ns,
         None,
+        None,
     );
     assert_eq!(
         runtime.queue_id,
@@ -2807,6 +2808,7 @@ fn ingress_input_filter_rewalk_uses_prenat_key_5158() {
         Some(&egress_wire_key),
         TermMatchExtra::default(),
         now_ns,
+        None,
         None,
     );
     assert_eq!(
@@ -3309,6 +3311,7 @@ fn flowless_output_protocol_filter_uses_native_fragment_header_11338() {
             None,
             extra,
             0,
+            Some(&wire_key),
             Some(&wire_key),
         );
         assert_eq!(
@@ -8138,6 +8141,7 @@ fn h18_13966_flowless_fresh_arm_is_policed_and_classified() {
         flowless_extra(),
         1_000_000_000,
         Some(&wire),
+        None,
     );
     assert!(
         sel.drop,
@@ -8214,6 +8218,7 @@ fn h18_13966_flowless_port_bearing_input_term_does_not_match() {
         flowless_extra(),
         1_000_000_000,
         Some(&wire),
+        None,
     );
     assert!(
         !sel.drop,
@@ -8224,4 +8229,48 @@ fn h18_13966_flowless_port_bearing_input_term_does_not_match() {
         Some(1),
         "#13966: port-bearing input term must not classify a flowless packet"
     );
+}
+
+#[test]
+fn h18_13966_flowless_fragment_uses_native_ingress_protocol() {
+    let mut snapshot = h18_input_l3_policer_snapshot();
+    snapshot.filters[0].terms[0].protocols = vec!["tcp".into()];
+    let forwarding = build_forwarding_state(&snapshot);
+    let base_key = count4085_v4_key();
+    let ingress_key = SessionKey {
+        src_port: 0,
+        dst_port: 0,
+        ..base_key.clone()
+    };
+    let wire_key = ingress_key.clone();
+    let meta = UserspaceDpMeta {
+        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        ..flowless_v4_meta([172, 16, 80, 200])
+    };
+
+    let fresh = resolve_cos_tx_selection_at_prenat(
+        &forwarding,
+        202,
+        meta,
+        None,
+        None,
+        flowless_extra(),
+        1_000_000_000,
+        Some(&wire_key),
+        Some(&ingress_key),
+    );
+    assert!(fresh.drop, "resolved TCP ingress protocol must match the policer");
+    assert_eq!(fresh.queue_id, Some(1));
+    assert_eq!(fresh.dscp_rewrite, Some(46));
+
+    let cached = resolve_cached_cos_tx_selection_flowless_with_ingress(
+        &forwarding,
+        202,
+        meta,
+        &wire_key,
+        Some(&ingress_key),
+    );
+    assert_eq!(cached.queue_id, Some(1));
+    assert_eq!(cached.filter_dscp_rewrite, Some(46));
+    assert_eq!(cached.three_color_policers.len(), 1);
 }

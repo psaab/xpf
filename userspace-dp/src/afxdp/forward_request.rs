@@ -318,6 +318,11 @@ pub(super) fn build_live_forward_request_from_frame(
     } else {
         None
     };
+    let flowless_ingress_flow = if tx_selection_flow.is_none() {
+        crate::afxdp::frame::l3_enforcement_flow_from_frame(frame, meta)
+    } else {
+        None
+    };
     let cos = precomputed_tx_selection
         .map(|selection| CoSTxSelection {
             queue_id: selection.queue_id,
@@ -348,6 +353,7 @@ pub(super) fn build_live_forward_request_from_frame(
                 crate::afxdp::frame::term_match_extra_from_frame(frame, meta),
                 now_ns,
                 flowless_wire_flow.as_ref().map(|f| &f.forward_key),
+                flowless_ingress_flow.as_ref().map(|flow| &flow.forward_key),
             )
         });
     // #7176 (C179-001): the reject-reply + filter-log side effects of a

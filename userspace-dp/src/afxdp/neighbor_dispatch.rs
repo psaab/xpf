@@ -798,6 +798,11 @@ pub(super) fn retry_pending_neigh(
         } else {
             None
         };
+        let flowless_ingress_flow = if pkt.flow_key.is_none() {
+            crate::afxdp::frame::l3_enforcement_flow_from_frame(source_frame, pkt.meta)
+        } else {
+            None
+        };
         let cos = resolve_cos_tx_selection_at_prenat(
             forwarding,
             decision.resolution.egress_ifindex,
@@ -807,6 +812,9 @@ pub(super) fn retry_pending_neigh(
             cos_extra,
             now_ns,
             flowless_wire_flow.as_ref().map(|f| &f.forward_key),
+            flowless_ingress_flow
+                .as_ref()
+                .map(|flow| &flow.forward_key),
         );
         if cos.drop {
             // #7176 (C179-001): apply the SAME reject-reply / filter-log side
