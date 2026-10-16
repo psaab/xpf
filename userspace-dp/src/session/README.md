@@ -398,11 +398,14 @@ active/active `owner_rg<=0` residual) both clear `companion_eligible` after
 bumping their own counter, so the probe can neither override the leak ceiling
 nor miscount them; and on a standby the `Hold` arm already retains BOTH halves
 (it `continue`s before the probe is reached), making the probe redundant there.
-When an entry crosses its idle timeout it probes its forward↔reverse companion
-(recovered by `reverse_session_key` on the entry's OWN key + nat, its own
-inverse, exactly as `account_packet` hops reverse↔forward). If the companion
-is itself still within its idle window (the exact complement of the wheel's
-strict-`>` expiry test), this half is re-stamped from the companion's REAL
+When an eligible entry crosses its idle timeout, it probes its
+forward↔reverse companion (recovered by `reverse_session_key` on the entry's
+OWN key + nat, its own inverse, exactly as `account_packet` hops
+reverse↔forward). Retention requires an established, non-pending companion
+within its own idle window (the exact complement of the wheel's strict-`>`
+expiry test), and the reset/close guards must allow it: a reset entry, reset
+companion, or closing companion that owns a FIN cannot provide refresh. If
+those conditions hold, this half is re-stamped from the companion's REAL
 `last_seen_ns` and `rebucket_alive_entry`'d instead of removed, and the
 `kept_alive_by_companion` `WheelPopStats` counter is bumped. Bounded and
 terminating: the re-stamp copies the companion's real timestamp (never
