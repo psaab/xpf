@@ -408,9 +408,17 @@ fn d14_zone_gate(
         ));
     }
     let egress_zone = forwarding.egress_zone_id(lookup.resolution.egress_ifindex);
+    // AH-sighted IPv6 chains keep protocol-51 identity even though the shim
+    // reports the inner TCP/UDP header. Resolve that identity before port
+    // parsing or policy evaluation, matching the flowless packet path.
+    let effective_protocol = crate::afxdp::frame::flowless_effective_protocol(&owned, meta);
     // Use the shared parser for declared-length-bounded TCP/UDP ports.
     // Non-first fragments contain payload, not an L4 header, at this offset.
-    let ports = if crate::afxdp::frame::frame_is_non_first_fragment(&owned, meta) {
+    let ports = if !matches!(
+        effective_protocol,
+        crate::ip_proto::PROTO_TCP | crate::ip_proto::PROTO_UDP
+    ) || crate::afxdp::frame::frame_is_non_first_fragment(&owned, meta)
+    {
         None
     } else {
         crate::afxdp::frame::live_frame_ports_from_meta_bytes(&owned, meta)
@@ -425,7 +433,7 @@ fn d14_zone_gate(
         egress_zone,
         source,
         destination,
-        input.protocol,
+        effective_protocol,
         src_port,
         dst_port,
         None,
@@ -1400,6 +1408,28 @@ mod tests {
             assert_eq!(d.is_would_permit(), matches, "{d:?}");
             assert_eq!(d.reason(), (!matches).then_some(reason::LEGACY_POLICY_DENY), "{d:?}");
         }
+    }
+
+    #[test]
+    fn d14_ipv6_ah_sighted_tcp_443_does_not_match_tcp_term_14090() {
+        let (view, plain) = v6_view_and_packet(6, 443);
+        let mut packet = vec![0u8; 72];
+        packet[..40].copy_from_slice(&plain[..40]);
+        packet[4..6].copy_from_slice(&32u16.to_be_bytes());
+        packet[6] = 51; // AH
+        packet[40] = 6; // AH next-header: TCP
+        packet[41] = 1; // 12-byte AH header
+        packet[52..54].copy_from_slice(&40000u16.to_be_bytes());
+        packet[54..56].copy_from_slice(&443u16.to_be_bytes());
+        let mut inp = input(&packet, advisory(1, 1, 1, 1, 1));
+        inp.inner_family = libc::AF_INET6 as u8;
+        inp.inner_eth_proto = 0x86dd;
+        inp.protocol = 6; // Shim walks past AH and reports its inner TCP header.
+        inp.rel_l4_offset = 52;
+        inp.payload_offset = 72;
+
+        let d = adjudicate_ipsec_inner(&view, inp);
+        assert_eq!(d.reason(), Some(reason::LEGACY_POLICY_DENY), "{d:?}");
     }
 
     #[test]
