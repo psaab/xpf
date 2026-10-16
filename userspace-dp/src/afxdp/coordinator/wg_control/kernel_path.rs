@@ -67,7 +67,7 @@ pub(crate) trait WgKernelPathView {
     fn ingress(&self, ifindex: Option<u32>) -> WgKernelPathIngress;
     /// The shim's `is_local_destination`: a local address that is not an
     /// interface-mode NAT address.
-    fn destination_is_local(&self, dst: IpAddr) -> bool;
+    fn destination_is_local(&self, dst: IpAddr, ifindex: Option<u32>) -> bool;
 }
 
 pub(crate) fn kernel_path_disposition(
@@ -128,6 +128,19 @@ pub(crate) fn classify_ingress(
 pub(crate) fn shim_v4_key(addr: Ipv4Addr) -> u32 {
     u32::from_ne_bytes(addr.octets())
 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ShimLocalV4Key {
+    domain: u32,
+    addr: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ShimLocalV6Key {
+    domain: u32,
+    addr: [u8; 16],
+}
 
 /// The shim's `is_local_destination` rule on its two lookups: an interface-mode
 /// NAT address is NOT local (its traffic takes the SNAT listener's worker path),
@@ -138,26 +151,29 @@ pub(crate) fn shim_is_local_destination(in_interface_nat: bool, in_local: bool) 
 }
 
 const INGRESS_IFACES_PIN: &str = "/sys/fs/bpf/xpf/userspace_ingress_ifaces";
+const INGRESS_DOMAINS_PIN: &str = "/sys/fs/bpf/xpf/userspace_ingress_domains";
 const INGRESS_IFACE_FLAG_ADJUDICATED: u8 = 1;
-const LOCAL_V4_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v4";
-const LOCAL_V6_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v6";
+const LOCAL_V4_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v4_domain";
+const LOCAL_V6_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v6_domain";
 const INTERFACE_NAT_V4_PIN: &str = "/sys/fs/bpf/xpf/userspace_interface_nat_v4";
 const INTERFACE_NAT_V6_PIN: &str = "/sys/fs/bpf/xpf/userspace_interface_nat_v6";
 const REOPEN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
-
 struct ShimMaps {
     ingress: crate::afxdp::bpf_map::OwnedFd,
+    ingress_domains: crate::afxdp::bpf_map::OwnedFd,
     local_v4: crate::afxdp::bpf_map::OwnedFd,
     local_v6: crate::afxdp::bpf_map::OwnedFd,
     nat_v4: crate::afxdp::bpf_map::OwnedFd,
     nat_v6: crate::afxdp::bpf_map::OwnedFd,
 }
 
+
 impl ShimMaps {
     fn open() -> std::io::Result<Self> {
         use crate::afxdp::bpf_map::OwnedFd;
         Ok(Self {
             ingress: OwnedFd::open_bpf_map(INGRESS_IFACES_PIN)?,
+            ingress_domains: OwnedFd::open_bpf_map(INGRESS_DOMAINS_PIN)?,
             local_v4: OwnedFd::open_bpf_map(LOCAL_V4_PIN)?,
             local_v6: OwnedFd::open_bpf_map(LOCAL_V6_PIN)?,
             nat_v4: OwnedFd::open_bpf_map(INTERFACE_NAT_V4_PIN)?,
@@ -188,6 +204,25 @@ fn lookup_u8<K>(fd: libc::c_int, key: &K) -> std::io::Result<Option<u8>> {
         Err(err)
     }
 }
+fn lookup_u32<K>(fd: libc::c_int, key: &K) -> std::io::Result<Option<u32>> {
+    let mut value = 0u32;
+    let rc = unsafe {
+        libbpf_sys::bpf_map_lookup_elem(
+            fd,
+            key as *const K as *const libc::c_void,
+            &mut value as *mut u32 as *mut libc::c_void,
+        )
+    };
+    if rc == 0 {
+        return Ok(Some(value));
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ENOENT) {
+        Ok(None)
+    } else {
+        Err(err)
+    }
+}
 
 /// #9594 test seam: per-tunnel stand-ins for the shim's maps, consulted by
 /// `ShimMapsKernelPathView` BEFORE bpffs. Keyed by tunnel name like
@@ -197,8 +232,9 @@ fn lookup_u8<K>(fd: libc::c_int, key: &K) -> std::io::Result<Option<u8>> {
 #[derive(Clone, Default)]
 pub(crate) struct TestShimMaps9594 {
     pub(crate) ingress: std::collections::HashSet<u32>,
-    pub(crate) local: std::collections::HashSet<IpAddr>,
+    pub(crate) local: std::collections::HashSet<(u32, IpAddr)>,
     pub(crate) interface_nat: std::collections::HashSet<IpAddr>,
+    pub(crate) ingress_domains: std::collections::HashMap<u32, u32>,
 }
 
 #[cfg(test)]
@@ -299,29 +335,41 @@ impl WgKernelPathView for ShimMapsKernelPathView {
         classify_ingress(ifindex, in_set, self.known_interface(idx))
     }
 
-    fn destination_is_local(&self, dst: IpAddr) -> bool {
+    fn destination_is_local(&self, dst: IpAddr, ifindex: Option<u32>) -> bool {
+        let Some(ifindex) = ifindex else {
+            return false;
+        };
         #[cfg(test)]
         if let Some(maps) = test_shim_maps_9594(&self.tunnel_name) {
+            let Some(domain) = maps.ingress_domains.get(&ifindex) else {
+                return false;
+            };
             return shim_is_local_destination(
                 maps.interface_nat.contains(&dst),
-                maps.local.contains(&dst),
+                maps.local.contains(&(*domain, dst)),
             );
         }
-        self.with_maps(|maps| match dst {
-            IpAddr::V4(v4) => {
-                let key = shim_v4_key(v4);
-                // A read error counts as "NAT" and as "not local": fail closed.
-                shim_is_local_destination(
-                    !matches!(lookup_u8(maps.nat_v4.fd, &key), Ok(None)),
-                    matches!(lookup_u8(maps.local_v4.fd, &key), Ok(Some(_))),
-                )
-            }
-            IpAddr::V6(v6) => {
-                let key = v6.octets();
-                shim_is_local_destination(
-                    !matches!(lookup_u8(maps.nat_v6.fd, &key), Ok(None)),
-                    matches!(lookup_u8(maps.local_v6.fd, &key), Ok(Some(_))),
-                )
+        self.with_maps(|maps| {
+            let Ok(Some(domain)) = lookup_u32(maps.ingress_domains.fd, &ifindex) else {
+                return false;
+            };
+            match dst {
+                IpAddr::V4(v4) => {
+                    let key = shim_v4_key(v4);
+                    let local_key = ShimLocalV4Key { domain, addr: key };
+                    shim_is_local_destination(
+                        !matches!(lookup_u8(maps.nat_v4.fd, &key), Ok(None)),
+                        matches!(lookup_u8(maps.local_v4.fd, &local_key), Ok(Some(_))),
+                    )
+                }
+                IpAddr::V6(v6) => {
+                    let key = v6.octets();
+                    let local_key = ShimLocalV6Key { domain, addr: key };
+                    shim_is_local_destination(
+                        !matches!(lookup_u8(maps.nat_v6.fd, &key), Ok(None)),
+                        matches!(lookup_u8(maps.local_v6.fd, &local_key), Ok(Some(_))),
+                    )
+                }
             }
         })
         .unwrap_or(false)
@@ -436,7 +484,7 @@ impl WgKernelPathView for UncoveredKernelPathView {
     fn ingress(&self, _ifindex: Option<u32>) -> WgKernelPathIngress {
         WgKernelPathIngress::Uncovered
     }
-    fn destination_is_local(&self, _dst: IpAddr) -> bool {
+    fn destination_is_local(&self, _dst: IpAddr, _ifindex: Option<u32>) -> bool {
         false
     }
 }

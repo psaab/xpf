@@ -1407,7 +1407,7 @@ impl super::kernel_path::WgKernelPathView for FixedKernelPathView9594 {
         self.asked.lock().unwrap_or_else(|e| e.into_inner()).push(ifindex);
         self.ingress
     }
-    fn destination_is_local(&self, dst: std::net::IpAddr) -> bool {
+    fn destination_is_local(&self, dst: std::net::IpAddr, _ifindex: Option<u32>) -> bool {
         self.local.contains(&dst)
     }
 }

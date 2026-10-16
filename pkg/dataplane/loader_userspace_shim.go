@@ -631,10 +631,11 @@ func userspacePinnedShimMaps() []string {
 		"userspace_ctrl",
 		"userspace_bindings",
 		"userspace_ingress_ifaces",
+		"userspace_ingress_domains",
 		"userspace_heartbeat",
 		"userspace_xsk_map",
-		"userspace_local_v4",
-		"userspace_local_v6",
+		"userspace_local_v4_domain",
+		"userspace_local_v6_domain",
 		"userspace_interface_nat_v4",
 		"userspace_interface_nat_v6",
 		// #12119: WireGuard's ingress-zone resolver and address/port

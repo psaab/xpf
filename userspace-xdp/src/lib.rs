@@ -235,7 +235,19 @@ struct UserspaceBindingValue {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct UserspaceLocalV4Key {
+    domain: u32,
+    addr: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct UserspaceLocalV6Key {
+    domain: u32,
+    addr: [u8; 16],
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserspaceInterfaceNatV6Key {
     addr: [u8; 16],
 }
 #[repr(C)]
@@ -431,6 +443,8 @@ static USERSPACE_BINDINGS: Array<UserspaceBindingValue> =
 // the kernel host-inbound path.
 #[map(name = "userspace_ingress_ifaces")]
 static USERSPACE_INGRESS_IFACES: HashMap<u32, u8> = HashMap::with_max_entries(MAX_INTERFACES, 0);
+#[map(name = "userspace_ingress_domains")]
+static USERSPACE_INGRESS_DOMAINS: HashMap<u32, u32> = HashMap::with_max_entries(MAX_INTERFACES, 0);
 
 // XDP must resolve the physical arrival interface and VLAN to one validated
 // security zone before it claims an outer WireGuard transport record.
@@ -450,17 +464,16 @@ static USERSPACE_HEARTBEAT: Array<u64> = Array::with_max_entries(BINDING_SLOT_MA
 #[map(name = "userspace_xsk_map")]
 static USERSPACE_XSK_MAP: XskMap = XskMap::with_max_entries(BINDING_SLOT_MAP_MAX_ENTRIES, 0);
 
-#[map(name = "userspace_local_v4")]
-static USERSPACE_LOCAL_V4: HashMap<u32, u8> = HashMap::with_max_entries(8192, 0);
-
-#[map(name = "userspace_local_v6")]
+#[map(name = "userspace_local_v4_domain")]
+static USERSPACE_LOCAL_V4: HashMap<UserspaceLocalV4Key, u8> = HashMap::with_max_entries(8192, 0);
+#[map(name = "userspace_local_v6_domain")]
 static USERSPACE_LOCAL_V6: HashMap<UserspaceLocalV6Key, u8> = HashMap::with_max_entries(8192, 0);
 
 #[map(name = "userspace_interface_nat_v4")]
 static USERSPACE_INTERFACE_NAT_V4: HashMap<u32, u8> = HashMap::with_max_entries(8192, 0);
 
 #[map(name = "userspace_interface_nat_v6")]
-static USERSPACE_INTERFACE_NAT_V6: HashMap<UserspaceLocalV6Key, u8> =
+static USERSPACE_INTERFACE_NAT_V6: HashMap<UserspaceInterfaceNatV6Key, u8> =
     HashMap::with_max_entries(8192, 0);
 
 // NOTE: This map MUST be pinned/reused from the main eBPF pipeline's
@@ -665,13 +678,16 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     let Some(parsed) = parsed else {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_PARSE_FAIL);
     };
+    let ingress_domain = unsafe { USERSPACE_INGRESS_DOMAINS.get(&ingress_ifindex) }
+        .copied()
+        .unwrap_or(u32::MAX);
 
     // #12055/#13932: the worker's VID-0 guard runs after this shim has
     // already returned firewall-owned traffic to the kernel. Carry the
     // tagged-only ingress classification in userspace_ingress_ifaces and
     // reject VID-0 frames to local or interface-NAT addresses before any
     // local PASS path (including session hits and degraded/control fallbacks).
-    if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed) {
+    if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed, ingress_domain) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
     let native_gre =
@@ -709,7 +725,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 USERSPACE_FALLBACK_REASON_BINDING_MISSING,
                 &parsed,
             );
-            if is_degraded_local_or_control(ctrl, data, data_end, &parsed) {
+            if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain) {
                 return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_BINDING_MISSING);
             }
             return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_BINDING_MISSING);
@@ -726,7 +742,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             USERSPACE_FALLBACK_REASON_BINDING_NOT_READY,
             &parsed,
         );
-        if is_degraded_local_or_control(ctrl, data, data_end, &parsed) {
+        if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain) {
             return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_BINDING_NOT_READY);
         }
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_BINDING_NOT_READY);
@@ -743,7 +759,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             USERSPACE_FALLBACK_REASON_HEARTBEAT_MISSING,
             &parsed,
         );
-        if is_degraded_local_or_control(ctrl, data, data_end, &parsed) {
+        if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain) {
             return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_MISSING);
         }
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_MISSING);
@@ -773,7 +789,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE,
             &parsed,
         );
-        if is_degraded_local_or_control(ctrl, data, data_end, &parsed) {
+        if is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain) {
             return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE);
         }
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE);
@@ -813,7 +829,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // SNAT replies on a WG listen port must reach the worker for reverse NAT
     // rather than being stolen by the listener owner-map control steer.
     let wg_steer_candidate = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
-        && wg_steer_to_kernel(ctrl, &parsed, ingress_ifindex);
+        && wg_steer_to_kernel(ctrl, &parsed, ingress_ifindex, ingress_domain);
     // Only packets that would be stolen by the WG steer need an early session
     // lookup. All other packets retain the existing later lookup and avoid extra
     // map work on the early-fallback path.
@@ -915,7 +931,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // predicate caught them and returned the same
                 // `cpumap_or_pass`. Declining here is what actually moves them
                 // onto the AF_XDP redirect.
-                let local_destination = is_local_destination(&parsed);
+                let local_destination = is_local_destination(&parsed, ingress_domain);
                 let wg_rx_enabled = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0;
                 // #12119: the WG owner map records configured interface
                 // addresses independently of local-delivery NAT exclusions.
@@ -970,10 +986,10 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
             }
         }
     } else {
-        let inner_action = classify_native_gre_inner(data, data_end, &parsed);
+        let inner_action = classify_native_gre_inner(data, data_end, &parsed, ingress_domain);
         if inner_action == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
             && native_gre_inner_pass_steers_to_kernel_typed(
-                OuterDestinationLocal::from_is_local_destination(is_local_destination(&parsed)),
+                OuterDestinationLocal::from_is_local_destination(is_local_destination(&parsed, ingress_domain)),
                 InnerSessionAction::from_classifier_action(inner_action),
             )
         {
@@ -1191,7 +1207,8 @@ fn session_action_for_key(key: &UserspaceSessionKey) -> u8 {
     unsafe { USERSPACE_SESSIONS.get(key).copied() }.unwrap_or(0)
 }
 
-fn classify_native_gre_inner(data: usize, data_end: usize, outer: &ParsedPacket) -> u8 {
+#[inline(always)]
+fn classify_native_gre_inner(data: usize, data_end: usize, outer: &ParsedPacket, ingress_domain: u32) -> u8 {
     let gre_offset = outer.l4_offset as usize;
     let Some(gre) = (unsafe { read_bytes(data, data_end, gre_offset, 4) }) else {
         return 0;
@@ -1204,14 +1221,14 @@ fn classify_native_gre_inner(data: usize, data_end: usize, outer: &ParsedPacket)
         return 0;
     };
     match gre_proto {
-        GRE_PROTO_IPV4 => classify_native_gre_inner_ipv4(data, data_end, inner_offset),
-        GRE_PROTO_IPV6 => classify_native_gre_inner_ipv6(data, data_end, inner_offset),
+        GRE_PROTO_IPV4 => classify_native_gre_inner_ipv4(data, data_end, inner_offset, ingress_domain),
+        GRE_PROTO_IPV6 => classify_native_gre_inner_ipv6(data, data_end, inner_offset, ingress_domain),
         _ => 0,
     }
 }
 
 #[inline(never)]
-fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize) -> u8 {
+fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize, ingress_domain: u32) -> u8 {
     let Some(iph) = (unsafe { read_bytes(data, data_end, l3_offset, 20) }) else {
         return 0;
     };
@@ -1290,7 +1307,7 @@ fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize
     if unsafe { USERSPACE_INTERFACE_NAT_V4.get(&dst_v4) }.is_some() {
         return USERSPACE_SESSION_ACTION_REDIRECT;
     }
-    if unsafe { USERSPACE_LOCAL_V4.get(&dst_v4) }.is_some() {
+    if unsafe { USERSPACE_LOCAL_V4.get(&UserspaceLocalV4Key { domain: ingress_domain, addr: dst_v4 }) }.is_some() {
         return USERSPACE_SESSION_ACTION_REDIRECT;
     }
     0
@@ -1340,8 +1357,7 @@ fn dnat_lookup_v6(protocol: u8, dst_ip: &[u8; 16], dst_port: u16) -> Option<Dnat
     unsafe { DNAT_TABLE_V6.get(&exact).copied() }
 }
 
-#[inline(never)]
-fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize) -> u8 {
+fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize, ingress_domain: u32) -> u8 {
     let Some(ip6) = (unsafe { read_bytes(data, data_end, l3_offset, 40) }) else {
         return 0;
     };
@@ -1379,7 +1395,7 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
     };
     key.src_addr.copy_from_slice(&ip6[8..24]);
     key.dst_addr.copy_from_slice(&ip6[24..40]);
-    let dst_key = UserspaceLocalV6Key { addr: key.dst_addr };
+    let dst_key = UserspaceInterfaceNatV6Key { addr: key.dst_addr };
     let Some(l4_offset) = l3_offset.checked_add(40) else {
         return 0;
     };
@@ -1427,7 +1443,7 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
     if unsafe { USERSPACE_INTERFACE_NAT_V6.get(&dst_key) }.is_some() {
         return USERSPACE_SESSION_ACTION_REDIRECT;
     }
-    if unsafe { USERSPACE_LOCAL_V6.get(&dst_key) }.is_some() {
+    if unsafe { USERSPACE_LOCAL_V6.get(&UserspaceLocalV6Key { domain: ingress_domain, addr: key.dst_addr }) }.is_some() {
         return USERSPACE_SESSION_ACTION_REDIRECT;
     }
     0
@@ -1440,7 +1456,7 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     // until after parse_l2 still permits an attacker-selected L2/control pass.
     // Unlike the enabled path, ctrl-disabled transit MUST NOT pass to the
     // kernel outside xpf policy; fail closed with the established counter.
-    let (_, ingress_iface_flags) = userspace_ingress_metadata(ctx);
+    let (ingress_ifindex, ingress_iface_flags) = userspace_ingress_metadata(ctx);
     if !degraded_ctrl_disabled::ingress_adjudicated(ingress_iface_flags) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     }
@@ -1474,10 +1490,13 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     let Some(parsed) = parsed else {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     };
-    if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed) {
+    let ingress_domain = unsafe { USERSPACE_INGRESS_DOMAINS.get(&ingress_ifindex) }
+        .copied()
+        .unwrap_or(u32::MAX);
+    if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed, ingress_domain) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
-    let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed);
+    let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain);
     match degraded_ctrl_disabled::ctrl_disabled_action(ingress_iface_flags, false, local_or_control)
     {
         degraded_ctrl_disabled::DegradedCtrlDisabledDisposition::PassLocalControl => {
@@ -1502,23 +1521,28 @@ fn userspace_ingress_metadata(ctx: &XdpContext) -> (u32, u8) {
 fn is_tagged_only_vid0_firewall_owned_destination(
     ingress_iface_flags: u8,
     pkt: &ParsedPacket,
+    domain: u32,
 ) -> bool {
     ingress_iface_flags & USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY != 0
         && pkt.vlan_id == 0
-        && is_firewall_owned_destination(pkt)
+        && is_firewall_owned_destination(pkt, domain)
 }
 
 #[inline(never)]
-fn is_firewall_owned_destination(pkt: &ParsedPacket) -> bool {
+fn is_firewall_owned_destination(pkt: &ParsedPacket, domain: u32) -> bool {
     match pkt.addr_family {
         AF_INET => {
-            unsafe { USERSPACE_LOCAL_V4.get(&pkt.dst_v4) }.is_some()
+            is_local_destination(pkt, domain)
                 || unsafe { USERSPACE_INTERFACE_NAT_V4.get(&pkt.dst_v4) }.is_some()
         }
         AF_INET6 => {
-            let key = UserspaceLocalV6Key { addr: pkt.dst_addr };
-            unsafe { USERSPACE_LOCAL_V6.get(&key) }.is_some()
-                || unsafe { USERSPACE_INTERFACE_NAT_V6.get(&key) }.is_some()
+            is_local_destination(pkt, domain)
+                || unsafe {
+                    USERSPACE_INTERFACE_NAT_V6.get(&UserspaceLocalV6Key {
+                        addr: pkt.dst_addr,
+                    })
+                }
+                .is_some()
         }
         _ => false,
     }
@@ -1549,6 +1573,7 @@ fn is_degraded_local_or_control(
     data: usize,
     data_end: usize,
     parsed: &ParsedPacket,
+    ingress_domain: u32,
 ) -> bool {
     if should_fallback_early(parsed) {
         return true;
@@ -1558,7 +1583,7 @@ fn is_degraded_local_or_control(
     if is_icmp_to_interface_nat_local(parsed) {
         return true;
     }
-    let destination_is_local = is_local_destination(parsed);
+    let destination_is_local = is_local_destination(parsed, ingress_domain);
     if parsed.protocol == PROTO_ICMPV6
         && degraded_ndp::is_local_ndp_control(parsed.icmp_type, destination_is_local)
     {
@@ -1577,11 +1602,11 @@ fn is_degraded_local_or_control(
     // outer here either; the degraded path is cold, so the outer predicate
     // runs before the inner classify.
     if parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0 {
-        let outer_is_local = is_local_destination(parsed);
+        let outer_is_local = destination_is_local;
         return native_gre_inner_pass_steers_to_kernel_typed(
             OuterDestinationLocal::from_is_local_destination(outer_is_local),
             InnerSessionAction::from_classifier_action(classify_native_gre_inner(
-                data, data_end, parsed,
+                data, data_end, parsed, ingress_domain,
             )),
         );
     }
@@ -2036,7 +2061,7 @@ fn parse_ipv6(
 /// excluded local address, the exact configured WG listener owner-map tuple
 /// is the additional authority; a port-only match would shunt transit/DNAT UDP
 /// to the kernel and bypass the userspace policy engine.
-fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
+fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket, ingress_ifindex: u32, ingress_domain: u32) -> bool {
     // Order is load-bearing (#1432, #9587): the UDP test first, then the
     // bounded set scan (register compares), and the destination checks last.
     // Nothing below runs for a packet that is not UDP to a steered port.
@@ -2057,7 +2082,7 @@ fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket, ingress_ifindex:
     // checked. The owner-map fallback is restricted to the exact configured
     // listener destination, ingress zone, and port.
     let local_destination =
-        is_local_destination(pkt) || wg_zone_admits_packet(pkt, ingress_ifindex);
+        is_local_destination(pkt, ingress_domain) || wg_zone_admits_packet(pkt, ingress_ifindex);
     wg_steer_to_kernel_on_port_match(local_destination, pkt.udp_wg_transport_data)
 }
 
@@ -2107,21 +2132,25 @@ fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     unsafe { USERSPACE_WG_ZONE_ADMISSION.get(&admission_key) }.is_some()
 }
 
-fn is_local_destination(pkt: &ParsedPacket) -> bool {
+#[inline(always)]
+fn is_local_destination(pkt: &ParsedPacket, domain: u32) -> bool {
     match pkt.addr_family {
-        AF_INET => {
-            if unsafe { USERSPACE_INTERFACE_NAT_V4.get(&pkt.dst_v4) }.is_some() {
-                return false;
-            }
-            unsafe { USERSPACE_LOCAL_V4.get(&pkt.dst_v4) }.is_some()
-        }
-        AF_INET6 => {
-            let key = UserspaceLocalV6Key { addr: pkt.dst_addr };
-            if unsafe { USERSPACE_INTERFACE_NAT_V6.get(&key) }.is_some() {
-                return false;
-            }
-            unsafe { USERSPACE_LOCAL_V6.get(&key) }.is_some()
-        }
+        AF_INET => unsafe {
+            USERSPACE_LOCAL_V4
+                .get(&UserspaceLocalV4Key {
+                    domain,
+                    addr: pkt.dst_v4,
+                })
+                .is_some()
+        },
+        AF_INET6 => unsafe {
+            USERSPACE_LOCAL_V6
+                .get(&UserspaceLocalV6Key {
+                    domain,
+                    addr: pkt.dst_addr,
+                })
+                .is_some()
+        },
         _ => true,
     }
 }
@@ -2142,7 +2171,7 @@ fn is_icmp_to_interface_nat_local(pkt: &ParsedPacket) -> bool {
             if pkt.protocol != PROTO_ICMPV6 || (pkt.icmp_type != 128 && pkt.icmp_type != 129) {
                 return false;
             }
-            unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceLocalV6Key { addr: pkt.dst_addr }) }
+            unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key { addr: pkt.dst_addr }) }
                 .is_some()
         }
         _ => false,
@@ -2164,7 +2193,7 @@ fn is_interface_nat_destination(pkt: &ParsedPacket) -> bool {
     match pkt.addr_family {
         AF_INET => unsafe { USERSPACE_INTERFACE_NAT_V4.get(&pkt.dst_v4) }.is_some(),
         AF_INET6 => {
-            unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceLocalV6Key { addr: pkt.dst_addr }) }
+            unsafe { USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key { addr: pkt.dst_addr }) }
                 .is_some()
         }
         _ => false,

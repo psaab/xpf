@@ -100,8 +100,8 @@ func fragLoad(t *testing.T) *ebpf.Collection {
 	// See the ambiguity note above: the iface gate is silent, so it must never
 	// be the variable. Same for the binding gate.
 	for idx := uint32(0); idx < fragIfaceRange; idx++ {
-		if err := coll.Maps["userspace_ingress_ifaces"].Put(idx, uint8(1)); err != nil {
-			t.Fatalf("ingress_ifaces[%d]: %v", idx, err)
+		if err := coll.Maps["userspace_ingress_ifaces"].Put(idx, uint8(userspaceIngressIfaceFlagAdjudicated)); err != nil {
+			t.Fatalf("seed userspace_ingress_ifaces: %v", err)
 		}
 	}
 	bv := userspaceBindingValue{Slot: fragSlot, Flags: userspaceBindingReady}

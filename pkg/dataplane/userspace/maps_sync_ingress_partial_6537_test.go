@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/rlimit"
 )
 
 // ingressSnapshot builds a ConfigSnapshot whose ingress-adjudicated ifindex set
@@ -28,9 +27,6 @@ func ingressSnapshot(ifindexes ...int) *ConfigSnapshot {
 // the given type/size injected.
 func newIngressManager(t *testing.T, typ ebpf.MapType, maxEntries uint32) (*Manager, *ebpf.Map) {
 	t.Helper()
-	if err := rlimit.RemoveMemlock(); err != nil {
-		t.Skipf("RemoveMemlock: %v", err)
-	}
 	m := New()
 	ifaceMap, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       typ,
@@ -43,6 +39,17 @@ func newIngressManager(t *testing.T, typ ebpf.MapType, maxEntries uint32) (*Mana
 	}
 	t.Cleanup(func() { ifaceMap.Close() })
 	injectShimMap(t, m.bpfShim, mapNameUserspaceIngressIfaces, ifaceMap)
+	domainMap, err := ebpf.NewMap(&ebpf.MapSpec{
+		Type:       ebpf.Hash,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: maxEntries,
+	})
+	if err != nil {
+		skipIfBPFMapUnavailable(t, "new userspace_ingress_domains map", err)
+	}
+	t.Cleanup(func() { domainMap.Close() })
+	injectShimMap(t, m.bpfShim, mapNameUserspaceIngressDomains, domainMap)
 	return m, ifaceMap
 }
 

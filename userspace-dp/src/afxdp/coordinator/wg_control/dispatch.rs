@@ -230,7 +230,7 @@ pub(super) fn dispatch_inbound(
                     let ingress = kernel_path_view.ingress(ingress_ifindex);
                     let inner_is_local =
                         super::kernel_path::inner_destination(&decap_buf[..outcome.len])
-                            .is_some_and(|dst| kernel_path_view.destination_is_local(dst));
+                            .is_some_and(|dst| kernel_path_view.destination_is_local(dst, ingress_ifindex));
                     if super::kernel_path::kernel_path_disposition(ingress, inner_is_local)
                         == super::kernel_path::WgKernelPathDisposition::DropDegradedTransit
                     {
