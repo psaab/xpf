@@ -1171,6 +1171,7 @@ func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeS
 
 	m.policySchedulerDesired = activeCopy
 	m.policySchedulerDesiredSet = true
+	m.policySchedulerDesiredFailClosed = failClosed
 	if cfg == nil {
 		if m.lastSnapshot == nil {
 			// #3780: no snapshot ever published — nothing to
