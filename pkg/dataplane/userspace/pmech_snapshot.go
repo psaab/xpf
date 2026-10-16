@@ -16,6 +16,7 @@ import (
 	"github.com/psaab/xpf/pkg/ipsec"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
+	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
 
@@ -35,17 +36,37 @@ var pmechMainRouteIterFn = func(visit func(netlink.Route) bool) error {
 
 var pmechMainRouteSourceSelectorFn = pmechMainRouteHasSourceSelector
 
-func pmechMainRouteHasSourceSelector() (bool, error) {
+func pmechMainRouteSourceSelectorRequest() *nl.NetlinkRequest {
 	request := nl.NewNetlinkRequest(unix.RTM_GETROUTE, unix.NLM_F_DUMP)
 	message := nl.NewRtMsg()
 	message.Family = uint8(netlink.FAMILY_ALL)
+	message.Table = uint8(pmechMainTable)
 	request.AddData(message)
+	table := make([]byte, 4)
+	binary.NativeEndian.PutUint32(table, pmechMainTable)
+	request.AddData(nl.NewRtAttr(unix.RTA_TABLE, table))
+	return request
+}
+
+func pmechMainRouteHasSourceSelector() (bool, error) {
+	request := pmechMainRouteSourceSelectorRequest()
+	socket, err := nl.GetNetlinkSocketAt(netns.None(), netns.None(), unix.NETLINK_ROUTE)
+	if err != nil {
+		return false, err
+	}
+	defer socket.Close()
+	if err := unix.SetsockoptInt(socket.GetFd(), unix.SOL_NETLINK, unix.NETLINK_GET_STRICT_CHK, 1); err != nil {
+		return false, err
+	}
+	request.Sockets = map[int]*nl.SocketHandle{
+		unix.NETLINK_ROUTE: {Socket: socket},
+	}
 
 	var (
 		sourceSpecific bool
 		parseErr       error
 	)
-	err := request.ExecuteIter(unix.NETLINK_ROUTE, unix.RTM_NEWROUTE, func(raw []byte) bool {
+	err = request.ExecuteIter(unix.NETLINK_ROUTE, unix.RTM_NEWROUTE, func(raw []byte) bool {
 		table, hasSelector, err := pmechRawRouteSourceSelector(raw)
 		if err != nil {
 			parseErr = err
