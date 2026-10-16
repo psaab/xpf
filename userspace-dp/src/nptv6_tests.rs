@@ -1334,3 +1334,85 @@ fn scanned_word_checksum_neutral_64_10290() {
         "scanned-word translation must stay checksum-neutral"
     );
 }
+
+// #13694: the inbound RFC 6296 §3.7 all-zero-IID check must run on the
+// post-adjustment words. Before the fix, an external IID whose first word
+// equals the adjustment (with the remaining IID words zero) passed the
+// pre-adjustment check, then the inverse adjustment mapped it onto the
+// internal all-zero IID.
+#[test]
+fn inbound_iid_adjusting_to_all_zero_is_untranslatable_13694() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "adj-to-zero".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1:2:3::/64".to_string(),
+        external_prefix: "2001:db8:1:2::/64".to_string(),
+    }]);
+    let adj = compute_adjustment(
+        &[0xfd00, 0x0001, 0x0002, 0x0003],
+        &[0x2001, 0x0db8, 0x0001, 0x0002],
+        4,
+    );
+    assert!(
+        !is_zero_adjustment(adj),
+        "test pair must be non-neutral so the inverse adjustment really runs (adj={adj:#06x})"
+    );
+    assert_eq!(
+        adjust_word(adj, !adj),
+        0,
+        "chosen first IID word must adjust inbound to exactly 0x0000"
+    );
+    // External IID = [adj, 0, 0, 0]: non-zero before adjustment, all-zero after.
+    let mut words = [0u16; 8];
+    words[0] = 0x2001;
+    words[1] = 0x0db8;
+    words[2] = 0x0001;
+    words[3] = 0x0002;
+    words[4] = adj;
+    let mut dst = words_to_ipv6(&words);
+    let original = dst;
+    assert!(
+        !iid_is_all_zero(&ipv6_to_words(&dst), 4),
+        "pre-adjustment IID must be non-zero, isolating the post-adjustment defect"
+    );
+    assert_eq!(
+        state.translate_inbound_result(&mut dst, ""),
+        Nptv6Translation::Untranslatable,
+        "an IID that adjusts to all-zero MUST be dropped inbound (RFC 6296 §3.7)"
+    );
+    assert_eq!(dst, original, "a refused address must be left untouched");
+}
+
+// Preserve inbound/outbound parity: RFC 6296's all-zero-IID restriction
+// applies to the translated address as well as the input address.
+#[test]
+fn outbound_iid_adjusting_to_all_zero_is_untranslatable_13694() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "adj-to-zero".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1:2:3::/64".to_string(),
+        external_prefix: "2001:db8:1:2::/64".to_string(),
+    }]);
+    let adj = compute_adjustment(
+        &[0xfd00, 0x0001, 0x0002, 0x0003],
+        &[0x2001, 0x0db8, 0x0001, 0x0002],
+        4,
+    );
+    assert!(!is_zero_adjustment(adj));
+    let mut words = [0u16; 8];
+    words[0] = 0xfd00;
+    words[1] = 0x0001;
+    words[2] = 0x0002;
+    words[3] = 0x0003;
+    words[4] = !adj;
+    assert_eq!(adjust_word(words[4], adj), 0);
+    let mut src = words_to_ipv6(&words);
+    let original = src;
+    assert!(!iid_is_all_zero(&ipv6_to_words(&src), 4));
+    assert_eq!(
+        state.translate_outbound_result(&mut src, ""),
+        Nptv6Translation::Untranslatable,
+        "an IID that adjusts to all-zero MUST be dropped outbound (RFC 6296 §3.7)"
+    );
+    assert_eq!(src, original, "a refused address must be left untouched");
+}
