@@ -1710,13 +1710,12 @@ func buildUserspaceIngressIfindexes(snapshot *ConfigSnapshot) []uint32 {
 // buildUserspaceTaggedOnlyIngressIfindexes mirrors
 // forwarding_build::interfaces::populate_egress's VID-0 ownership decision
 // (#11297/#11434) for the XDP shim. Each set member is an ifindex whose VID-0
-// ingress has no configured VLAN identity: tagged VLAN units nominate both
-// their AF_XDP bind parent and their own child ifindex; explicit unit 0 removes
-// its bind target; a configured native VLAN removes the parent only when one
-// unambiguous unit carries that VID, while an unresolved/ambiguous native
-// selection keeps the parent tagged-only. The returned set is published in
-// the tagged-only bit of userspace_ingress_ifaces, whose existing adjudicated
-// bit remains set for every emitted ingress row.
+// ingress has no configured VLAN identity. Tagged VLAN units nominate their
+// AF_XDP bind parent, but not their VLAN child: Linux strips the VLAN header
+// before generic XDP runs on that child, so the child's VID-0 packet may be a
+// tagged host-bound packet delivered by the parent. Explicit unit 0 removes
+// its bind target; configured native VLAN selection removes the parent only
+// when one unambiguous unit carries that VID.
 func buildUserspaceTaggedOnlyIngressIfindexes(snapshot *ConfigSnapshot) map[uint32]struct{} {
 	if snapshot == nil {
 		return nil
@@ -1743,8 +1742,11 @@ func buildUserspaceTaggedOnlyIngressIfindexes(snapshot *ConfigSnapshot) map[uint
 			bindIfindex = iface.ParentIfindex
 		}
 		if iface.ParentIfindex > 0 && iface.VLANID > 0 && iface.VLANID <= 4094 {
+			// Only packets seen on the bind parent retain their wire VLAN
+			// identity. The child generic-XDP hook sees kernel-untagged frames
+			// after VLAN demultiplexing, so marking it TAGGED_ONLY would drop
+			// legitimate local traffic for this VLAN unit.
 			taggedOnly[uint32(bindIfindex)] = struct{}{}
-			taggedOnly[uint32(iface.Ifindex)] = struct{}{}
 		}
 		if iface.IsUnit && strings.HasSuffix(iface.Name, ".0") && iface.VLANID == 0 {
 			untaggedUnitIfindexes[uint32(bindIfindex)] = struct{}{}

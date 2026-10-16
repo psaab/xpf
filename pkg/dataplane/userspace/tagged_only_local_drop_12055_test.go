@@ -22,25 +22,25 @@ func TestUserspaceXDPTaggedOnlyIngressIfindexes12055(t *testing.T) {
 		want map[uint32]bool
 	}{
 		{
-			name: "tagged-only parent and child ifindexes",
+			name: "tagged-only parent only; child sees kernel-untagged frames",
 			rows: clone(base),
-			want: map[uint32]bool{10: true, 11: true, 12: true},
+			want: map[uint32]bool{10: true},
 		},
 		{
-			name: "explicit untagged unit zero owns the parent only",
+			name: "explicit untagged unit zero owns the parent; VLAN children are not tagged-only",
 			rows: append(clone(base), InterfaceSnapshot{
 				Name: "ge-0/0/1.0", Ifindex: 10, LinuxName: "ge-0-0-1", VLANID: 0, IsUnit: true,
 			}),
-			want: map[uint32]bool{11: true, 12: true},
+			want: map[uint32]bool{},
 		},
 		{
-			name: "resolved native vlan owns parent but child remains tagged-only",
+			name: "resolved native vlan owns parent and children are not tagged-only",
 			rows: func() []InterfaceSnapshot {
 				rows := clone(base)
 				rows[0].NativeVLANID = 50
 				return rows
 			}(),
-			want: map[uint32]bool{11: true, 12: true},
+			want: map[uint32]bool{},
 		},
 		{
 			name: "unresolved native vlan keeps parent tagged-only",
@@ -49,7 +49,7 @@ func TestUserspaceXDPTaggedOnlyIngressIfindexes12055(t *testing.T) {
 				rows[0].NativeVLANID = 99
 				return rows
 			}(),
-			want: map[uint32]bool{10: true, 11: true, 12: true},
+			want: map[uint32]bool{10: true},
 		},
 		{
 			name: "ambiguous native selection keeps parent tagged-only",
@@ -59,7 +59,7 @@ func TestUserspaceXDPTaggedOnlyIngressIfindexes12055(t *testing.T) {
 				rows[0].NativeVLANID = 80
 				return rows
 			}(),
-			want: map[uint32]bool{10: true, 11: true, 12: true},
+			want: map[uint32]bool{10: true},
 		},
 	}
 	for _, tc := range tests {
@@ -95,8 +95,8 @@ func TestUserspaceXDPTaggedOnlyIngressMapPublishesFlag12055(t *testing.T) {
 	}
 	for ifindex, want := range map[uint32]uint8{
 		10: userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
-		11: userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
-		12: userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+		11: userspaceIngressIfaceFlagAdjudicated,
+		12: userspaceIngressIfaceFlagAdjudicated,
 		20: userspaceIngressIfaceFlagAdjudicated,
 	} {
 		var got uint8
@@ -159,6 +159,12 @@ func TestUserspaceXDPTaggedOnlyVID0LocalDropsAndControls12055(t *testing.T) {
 			name:    "tagged local ipv4 remains local",
 			flags:   userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
 			packet:  func() []byte { return singleTagIPv4UDP(0x8100, srcV4, localV4) },
+			localV4: true, wantAction: xdpActionPass,
+		},
+		{
+			name:    "kernel-untagged local ipv4 on VLAN child remains local",
+			flags:   userspaceIngressIfaceFlagAdjudicated,
+			packet:  func() []byte { return udpIPv4TestPacket(srcV4, localV4) },
 			localV4: true, wantAction: xdpActionPass,
 		},
 		{
