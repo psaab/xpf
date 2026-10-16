@@ -1519,3 +1519,70 @@ fn static_nat_silent_skips_surface_parse_errors_13283() {
     let _t2 = StaticNatTable::from_snapshots(&[port_rule], &counters);
     assert_eq!(counters.static_parse_errors(), 2, "#13283: block static rule with port must be counted");
 }
+
+// #13689: overlapping equal-tier blocks must resolve by longest prefix
+// (DnatTable::match_prefix_slots parity), not first-seen config order.
+#[test]
+fn static_nat_block_equal_tier_longest_prefix_wins_both_orders_13689() {
+    let short = block_snapshot("198.51.100.0/24", "192.168.1.0/24", "untrust");
+    let mut long_dnat = block_snapshot("198.51.100.128/25", "10.0.0.0/25", "untrust");
+    long_dnat.name = "block-long-dnat".to_string();
+    let mut long_snat = block_snapshot("203.0.113.128/25", "192.168.1.128/25", "untrust");
+    long_snat.name = "block-long-snat".to_string();
+    let orders = [
+        vec![short.clone(), long_dnat.clone(), long_snat.clone()],
+        vec![long_dnat, long_snat, short],
+    ];
+    for ordered in orders {
+        let table = StaticNatTable::from_snapshots(&ordered, &NatCounterStore::default());
+        // DNAT: the short and long external prefixes overlap, but translate
+        // to distinct internal blocks.
+        assert_eq!(
+            table
+                .match_dnat("198.51.100.200".parse().expect("ext"), "untrust")
+                .map(|d| d.rewrite_dst),
+            Some(Some("10.0.0.72".parse().expect("long-prefix int"))),
+            "#13689: equal-tier /25 must beat /24 regardless of order"
+        );
+        // Reverse SNAT has a separate overlapping pair with distinct external
+        // blocks, so it independently exercises internal-prefix precedence.
+        assert_eq!(
+            table
+                .match_snat("192.168.1.200".parse().expect("int"), "untrust")
+                .map(|d| d.rewrite_src),
+            Some(Some("203.0.113.200".parse().expect("long-prefix ext"))),
+            "#13689: reverse equal-tier /25 must beat /24 regardless of order"
+        );
+        // Outside both /25s, the broad /24 still applies in each direction.
+        assert_eq!(
+            table
+                .match_dnat("198.51.100.7".parse().expect("ext"), "untrust")
+                .map(|d| d.rewrite_dst),
+            Some(Some("192.168.1.7".parse().expect("short-prefix int")))
+        );
+        assert_eq!(
+            table
+                .match_snat("192.168.1.7".parse().expect("int"), "untrust")
+                .map(|d| d.rewrite_src),
+            Some(Some("198.51.100.7".parse().expect("short-prefix ext")))
+        );
+    }
+}
+
+#[test]
+fn static_nat_block_scope_tier_beats_longer_prefix_13689() {
+    // Tier still dominates length: zone-scoped /24 beats unscoped /25.
+    let zone_short = block_snapshot("198.51.100.0/24", "192.168.1.0/24", "untrust");
+    let mut unscoped_long = block_snapshot("198.51.100.128/25", "10.0.0.0/25", "");
+    unscoped_long.name = "block-long".to_string();
+    for ordered in [[zone_short.clone(), unscoped_long.clone()], [unscoped_long, zone_short]] {
+        let table = StaticNatTable::from_snapshots(&ordered, &NatCounterStore::default());
+        assert_eq!(
+            table
+                .match_dnat("198.51.100.200".parse().expect("ext"), "untrust")
+                .map(|d| d.rewrite_dst),
+            Some(Some("192.168.1.200".parse().expect("zone int"))),
+            "#13689: scope tier must beat prefix length"
+        );
+    }
+}
