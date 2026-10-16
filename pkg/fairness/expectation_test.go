@@ -49,6 +49,44 @@ func TestParseRSSExpectationRejectsInvalidValues(t *testing.T) {
 		})
 	}
 }
+func TestParseRSSExpectationRejectsInvertedOperators(t *testing.T) {
+	// #13659: blind <=/>=/= -> : normalization silently inverted
+	// spellings into each key's hardcoded semantics.
+	for _, raw := range []string{
+		"cstruct>=0.5", "cstruct>0.5", "cstruct=0.5", "cstruct<0.5",
+		"cstruct-max>=0.5", "cstruct-max=0.5",
+		"max-worker-flow-share<=0.5", "max-worker-flow-share>=0.5",
+		"max-worker-flow-share>0.5", "max-worker-flow-share=0.5",
+		"active-workers<=2", "active-workers<2", "active-workers=2",
+		"active-workers>2", "at-least-active-workers<=4",
+		"at-least-active-workers=4", "cstruct=>0.5", "cstruct=<0.5",
+		"cstruct==0.5",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := ParseRSSExpectation(raw); err == nil {
+				t.Fatalf("ParseRSSExpectation(%q) succeeded, want operator error", raw)
+			} else if !strings.Contains(err.Error(), "operator") {
+				t.Fatalf("ParseRSSExpectation(%q) error = %v, want operator error", raw, err)
+			}
+		})
+	}
+	// Documented spellings per key remain accepted.
+	for raw, want := range map[string]string{
+		"cstruct<=0.5":              "cstruct-max:0.5",
+		"cstruct-max:0.5":           "cstruct-max:0.5",
+		"max-worker-flow-share:50%": "max-worker-flow-share:0.5",
+		"at-least-active-workers:4": "at-least-active-workers:4",
+		"active-workers>=4":         "at-least-active-workers:4",
+	} {
+		got, err := ParseRSSExpectation(raw)
+		if err != nil {
+			t.Fatalf("ParseRSSExpectation(%q): %v", raw, err)
+		}
+		if got.Canonical() != want {
+			t.Fatalf("ParseRSSExpectation(%q) canonical = %q, want %q", raw, got.Canonical(), want)
+		}
+	}
+}
 
 func TestRSSExpectationMetricShape(t *testing.T) {
 	tests := []struct {
