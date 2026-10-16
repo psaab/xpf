@@ -168,15 +168,6 @@ impl Coordinator {
                 counts.skipped_unknown_pool += 1;
                 continue;
             };
-            // This node's OWN pool order — the record carries an address, and
-            // the index is resolved here (part 1, module note 3).
-            let addrs: Vec<IpAddr> = rule
-                .pool_addresses_v4
-                .iter()
-                .copied()
-                .map(IpAddr::V4)
-                .chain(rule.pool_addresses_v6.iter().copied().map(IpAddr::V6))
-                .collect();
             // Fast path only: skip records a stable peer already owns before
             // touching this allocator. Racy peer mints are settled by the
             // allocator's post-claim recheck, which rolls our claim back.
@@ -191,9 +182,9 @@ impl Coordinator {
                 counts.skipped_identity_busy += 1;
                 continue;
             }
-            let outcome = rule.pool_allocator.import_idle_lease(
-                &rec.lease,
-                &addrs,
+            let outcome = rule.pool_allocator.import_idle_lease_at(
+                lease,
+                rule.pool_index_of(lease.translated_ip),
                 rule.persistent_nat_timeout_ns,
                 now_ns,
             );

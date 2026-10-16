@@ -3335,6 +3335,29 @@ impl PortAllocator {
             by_addr.insert((expires_at_ns, key));
         }
     }
+    /// Retire stale idle leases before HA admission. Revoked active shells
+    /// remain owned until their final flow releases.
+    pub(super) fn reclaim_expired_idle_lease_locked(
+        &self,
+        live: &mut PortAllocatorLiveState,
+        key: PersistentSourceKey,
+        now_ns: u64,
+    ) -> bool {
+        let Some(lease) = live.persistent_by_source.get(&key).copied() else {
+            return false;
+        };
+        if lease.active_flows != 0 || (!lease.revoked && lease.expires_at_ns > now_ns) {
+            return false;
+        }
+        Self::remove_lease_expiration_locked(live, lease.addr_index, lease.expires_at_ns, key);
+        live.remove_persistent_lease(&key);
+        if !lease.address_only {
+            self.free_translated_port(lease.addr_index, lease.translated.port, true);
+        }
+        true
+    }
+
+
 
     fn remove_lease_expiration_locked(
         live: &mut PortAllocatorLiveState,
@@ -4568,6 +4591,11 @@ impl PortAllocator {
         // A synced live flow may join a still-draining shell to retain its
         // active wire tuple. If clear removed the lease, reserve this session
         // without persistence instead of recreating the cleared pin.
+        if let Some((key, _)) = persistent {
+            if !live.persistent_nat_import_is_clear_fenced(&key, now_ns) {
+                self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
+            }
+        }
         let persistent = persistent.filter(|(key, _)| {
             match live.persistent_by_source.get(key) {
                 // #10784 R2B1: a synced session may join a LIVE lease only. An
@@ -4895,6 +4923,11 @@ impl PortAllocator {
         // `addr_index >= occupancy.len()` guard on the port-bearing arm.
         // Match the port-bearing path: live sessions may join a draining shell,
         // but a removed tombstoned lease must not be minted again by session sync.
+        if let Some((key, _)) = persistent {
+            if !live.persistent_nat_import_is_clear_fenced(&key, now_ns) {
+                self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
+            }
+        }
         let persistent = persistent.filter(|(key, _)| {
             match live.persistent_by_source.get(key) {
                 // #10784 R2B1: address-only twin of the PAT liveness gate above.

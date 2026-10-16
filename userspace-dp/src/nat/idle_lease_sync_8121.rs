@@ -226,13 +226,24 @@ impl PortAllocator {
             .collect()
     }
 
-    /// Install one exported idle lease. `pool_addresses` is this node's pool
-    /// for the owning rule, in its own order — the record's address is resolved
-    /// against it rather than trusting a carried index.
+    /// Test-only wrapper. Production resolves the pool index through the
+    /// owning rule's O(1) address map before calling `import_idle_lease_at`.
+    #[cfg(test)]
     pub(crate) fn import_idle_lease(
         &self,
         rec: &IdleLeaseRecord,
         pool_addresses: &[IpAddr],
+        local_timeout_ns: u64,
+        now_ns: u64,
+    ) -> IdleLeaseImport {
+        let addr_index = pool_addresses.iter().position(|a| *a == rec.translated_ip);
+        self.import_idle_lease_at(rec, addr_index, local_timeout_ns, now_ns)
+    }
+
+    pub(crate) fn import_idle_lease_at(
+        &self,
+        rec: &IdleLeaseRecord,
+        addr_index: Option<usize>,
         local_timeout_ns: u64,
         now_ns: u64,
     ) -> IdleLeaseImport {
@@ -246,9 +257,12 @@ impl PortAllocator {
             local_timeout_ns.min(rec.timeout_ns),
         );
         let remaining_ns = rec.remaining_ns.min(timeout_ns);
-        let Some(addr_index) = pool_addresses.iter().position(|a| *a == rec.translated_ip) else {
+        let Some(addr_index) = addr_index else {
             return IdleLeaseImport::SkippedUnknownAddress;
         };
+        if addr_index >= self.address_slots() {
+            return IdleLeaseImport::SkippedUnknownAddress;
+        }
         let key = PersistentSourceKey {
             protocol: rec.protocol,
             src_ip: rec.src_ip,
@@ -260,6 +274,7 @@ impl PortAllocator {
         if live.persistent_nat_import_is_clear_fenced(&key, now_ns) {
             return IdleLeaseImport::SkippedClearFenced;
         }
+        self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
         if live.persistent_by_source.contains_key(&key) {
             return IdleLeaseImport::SkippedExisting;
         }
