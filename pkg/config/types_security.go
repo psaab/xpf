@@ -1310,6 +1310,20 @@ type NATPool struct {
 	// the compiler does not model. This compile-time diagnostic is consumed by
 	// the corresponding strict gate and never serialized to the dataplane.
 	UnknownLeaves []string `json:"-"`
+	// DuplicateAddressStatements records the distinct `address` statements
+	// authored for a destination-NAT pool when more than one survives
+	// (#14197). A DNAT pool address is a single-host wire field: two
+	// distinct `address` statements in one pool (in one block or across
+	// repeated blocks, flat or hierarchical — indistinguishable at
+	// compile time) previously compiled last-wins with no diagnostic: an
+	// invalid first statement's AddressInvalidSpec was silently cleared
+	// by a valid second one, and two valid hosts silently kept only the
+	// last. Identical restatements collapse and are not recorded. This
+	// records the joined authored specs so validateDNATPoolStrict rejects
+	// at commit and DestinationNATRuleExcludedReason fails closed on the
+	// tolerant path. `json:"-"`: compile-time artifact, never serialized
+	// (like PortRaw).
+	DuplicateAddressStatements string `json:"-"`
 	// PortNoTranslation records the source-pool `port no-translation` modifier
 	// (#3906). When true the pool translates the source ADDRESS but PRESERVES
 	// the original source port (Junos 1:1 source-port behaviour) — the

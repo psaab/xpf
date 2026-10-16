@@ -81,22 +81,29 @@ func TestDNATPoolSingleAddressStillCompiles10289(t *testing.T) {
 	}
 }
 
-// A later single-address leaf replaces an earlier multi-token leaf. The
-// replacement must clear the old marker; otherwise the effective valid host is
-// rejected and the tolerant builder drops it.
+// #14197 supersedes this cell's original premise: two DISTINCT address
+// statements for one pool are a duplicate the strict gate rejects, in
+// every spelling — the flat-set sequence below is indistinguishable from
+// the hierarchical duplicate at compile time (both arrive as successive
+// `address` leaves under one `pool p1` node). The marker is no longer
+// silently cleared; the operator removes the superseded statement. The
+// port-only half is unchanged: it carries no address and must not clear
+// the marker. (Test name retained for history.)
 func TestDNATPoolAddressOverrideClearsRangeMarker10289(t *testing.T) {
 	tree := dnatPoolTree(t,
 		"set security nat destination pool p1 address 10.1.0.1 to 10.1.0.9",
 		"set security nat destination pool p1 address 10.2.0.1",
 	)
-	cfg, err := CompileConfig(tree)
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "duplicate address statements") {
+		t.Fatalf("range followed by a distinct valid address must reject as duplicate, got %v", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("range followed by a valid address must compile: %v", err)
+		t.Fatalf("CompileConfigLenient: %v", err)
 	}
 	pool := cfg.Security.NAT.Destination.Pools["p1"]
-	if pool.Address != "10.2.0.1" || pool.AddressInvalidSpec != "" {
-		t.Fatalf("effective pool = (%q, %q), want valid host with no stale marker",
-			pool.Address, pool.AddressInvalidSpec)
+	if pool.DuplicateAddressStatements != "10.1.0.1 to 10.1.0.9; 10.2.0.1" {
+		t.Fatalf("pool DuplicateAddressStatements = %q, want both statements", pool.DuplicateAddressStatements)
 	}
 
 	// A port-only leaf carries no address information and must not clear an
@@ -110,8 +117,10 @@ func TestDNATPoolAddressOverrideClearsRangeMarker10289(t *testing.T) {
 	}
 }
 
-// Repeated hierarchical pool blocks merge into one named pool. A later valid
-// address must replace both the effective address and the earlier marker.
+// #14197: repeated hierarchical pool blocks carrying distinct address
+// statements are a duplicate, not a silent replacement. The merged pool
+// records both statements so the strict gate rejects and the tolerant
+// exclusion fails closed; parse-level assertions pin the record.
 func TestDNATPoolRepeatedBlockMergeClearsRangeMarker10289(t *testing.T) {
 	const cfgText = `
 security {
@@ -136,8 +145,13 @@ security {
 	if pool == nil {
 		t.Fatal("merged destination pool P1 missing")
 	}
-	if pool.Address != "10.2.0.1" || pool.AddressInvalidSpec != "" {
-		t.Fatalf("merged pool = (%q, %q), want valid host with no stale marker",
-			pool.Address, pool.AddressInvalidSpec)
+	if pool.DuplicateAddressStatements != "10.1.0.1 to 10.1.0.9; 10.2.0.1" {
+		t.Fatalf("merged pool DuplicateAddressStatements = %q, want both statements recorded",
+			pool.DuplicateAddressStatements)
+	}
+	cfg := &Config{}
+	cfg.Security = *sec
+	if err := validateDNATPoolStrict(cfg); err == nil || !strings.Contains(err.Error(), "duplicate address statements") {
+		t.Fatalf("strict gate = %v, want duplicate address statements rejection", err)
 	}
 }

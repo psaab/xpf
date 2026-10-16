@@ -548,6 +548,17 @@ func validateDNATPoolStrict(cfg *Config) error {
 		// Address: the dataplane needs a single host (bare IP, /32, or /128).
 		// A multi-token address was previously collapsed by the parser to its
 		// final token, so reject the retained raw spec before host validation.
+		// #14197: more than one `address` statement in one pool (intra-block
+		// or across repeated blocks) silently overwrote the prior statement
+		// and cleared its invalid marker. Reject before the single-host
+		// checks so the operator sees the duplicate, not just the survivor.
+		if pool.DuplicateAddressStatements != "" {
+			return fmt.Errorf(
+				"destination-nat pool %q: duplicate address statements %q are unsupported "+
+					"(destination-NAT pools require exactly one address statement with a single host; "+
+					"remove all but one address statement)",
+				name, pool.DuplicateAddressStatements)
+		}
 		if pool.AddressInvalidSpec != "" {
 			kind := dnatPoolInvalidAddressKind(pool.AddressInvalidSpec)
 			return fmt.Errorf(
