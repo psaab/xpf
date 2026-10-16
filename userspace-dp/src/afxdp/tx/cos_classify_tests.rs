@@ -8271,6 +8271,171 @@ fn h18_13966_flowless_fragment_uses_native_ingress_protocol() {
     assert_eq!(cached.filter_dscp_rewrite, Some(46));
     assert_eq!(cached.three_color_policers.len(), 1);
 }
+
+// #14239: the #14214 regression above hand-supplies the resolved protocol in
+// `ingress_key`. This cell instead builds real non-first-fragment frames and
+// derives the ingress key ONLY through the production derivation
+// `l3_enforcement_flow_from_frame` (which resolves the native protocol from
+// the IP header via `flowless_effective_protocol`), then feeds that derived
+// key into the same fresh + cached TX selection the callers use. If the
+// derivation returned the sentinel (or the wrong protocol), the TCP-scoped
+// input policer term would not match and every assertion below fails — the
+// hand-supplied regression cannot detect that.
+#[test]
+fn h18_14239_flowless_fragment_frame_derived_ingress_protocol() {
+    let mut snapshot = h18_input_l3_policer_snapshot();
+    snapshot.filters[0].terms[0].protocols = vec!["tcp".into()];
+    let forwarding = build_forwarding_state(&snapshot);
+
+    // IPv4: eth_ipv4_frag_frame stamps proto=TCP (ip[9]) at src 10.0.61.100
+    // -> dst 172.16.80.200, matching the h18 source prefix + count4085 dst.
+    let v4_frame = crate::afxdp::tests_support::eth_ipv4_frag_frame(
+        0x0001,
+        &[0; 8],
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let v4_meta = UserspaceDpMeta {
+        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        l3_offset: 14,
+        l4_offset: 34,
+        pkt_len: v4_frame.len() as u16,
+        ..flowless_v4_meta([172, 16, 80, 200])
+    };
+    let v4_derived = crate::afxdp::frame::l3_enforcement_flow_from_frame(&v4_frame, v4_meta)
+        .expect("#14239: v4 fragment must yield an L3 enforcement flow");
+    assert_eq!(
+        v4_derived.forward_key.protocol, PROTO_TCP,
+        "#14239: frame derivation must recover TCP from the IPv4 Protocol byte, not the sentinel"
+    );
+    assert_eq!(v4_derived.forward_key.src_port, 0);
+    assert_eq!(v4_derived.forward_key.dst_port, 0);
+    let v4_ingress = v4_derived.forward_key.clone();
+    let v4_wire = v4_ingress.clone();
+    let v4_extra = crate::afxdp::frame::term_match_extra_from_frame(&v4_frame, v4_meta);
+    let fresh = resolve_cos_tx_selection_at_prenat(
+        &forwarding,
+        202,
+        v4_meta,
+        None,
+        None,
+        v4_extra,
+        1_000_000_000,
+        Some(&v4_wire),
+        Some(&v4_ingress),
+    );
+    assert!(
+        fresh.drop,
+        "#14239: frame-derived TCP ingress protocol must match the policer (fresh)"
+    );
+    assert_eq!(fresh.queue_id, Some(1));
+    assert_eq!(fresh.dscp_rewrite, Some(46));
+
+    let cached = resolve_cached_cos_tx_selection_flowless_with_ingress(
+        &forwarding,
+        202,
+        v4_meta,
+        &v4_wire,
+        Some(&v4_ingress),
+    );
+    assert_eq!(cached.queue_id, Some(1));
+    assert_eq!(cached.filter_dscp_rewrite, Some(46));
+    assert_eq!(cached.three_color_policers.len(), 1);
+
+    // Negative control on the SAME frame: flipping the IP Protocol byte to
+    // UDP must make the derivation yield UDP and the TCP-scoped term must
+    // then NOT match — proving the match above is protocol-driven, not an
+    // unconditional policer hit.
+    let mut udp_frame = v4_frame.clone();
+    udp_frame[23] = PROTO_UDP;
+    let udp_derived = crate::afxdp::frame::l3_enforcement_flow_from_frame(&udp_frame, v4_meta)
+        .expect("#14239: v4 UDP fragment must yield an L3 enforcement flow");
+    assert_eq!(udp_derived.forward_key.protocol, PROTO_UDP);
+    let udp_ingress = udp_derived.forward_key.clone();
+    let udp_wire = udp_ingress.clone();
+    let udp_extra = crate::afxdp::frame::term_match_extra_from_frame(&udp_frame, v4_meta);
+    let udp_fresh = resolve_cos_tx_selection_at_prenat(
+        &forwarding,
+        202,
+        v4_meta,
+        None,
+        None,
+        udp_extra,
+        1_000_000_000,
+        Some(&udp_wire),
+        Some(&udp_ingress),
+    );
+    assert!(
+        !udp_fresh.drop,
+        "#14239: UDP-derived ingress must not match the TCP-scoped policer"
+    );
+    assert_ne!(udp_fresh.queue_id, Some(1));
+
+    // IPv6: eth_ipv6_frag_frame stamps Fragment Next-Header=TCP, src
+    // 2001:559:8585:80::100 -> dst 2001:559:8585:80::200. Re-point the h18
+    // fixture at the v6 family so the same TCP-scoped term is evaluated
+    // through the v6 Fragment-header derivation.
+    let mut v6_snapshot = h18_input_l3_policer_snapshot();
+    v6_snapshot.filters[0].family = "inet6".into();
+    v6_snapshot.filters[0].terms[0].protocols = vec!["tcp".into()];
+    v6_snapshot.filters[0].terms[0].source_addresses =
+        vec!["2001:559:8585:80::/64".into()];
+    v6_snapshot.interfaces[0].filter_input_v4.clear();
+    v6_snapshot.interfaces[0].filter_input_v6 = "in-l3-pol".into();
+    let v6_forwarding = build_forwarding_state(&v6_snapshot);
+    let v6_frame = crate::afxdp::tests_support::eth_ipv6_frag_frame(0x0001, &[0; 8]);
+    let mut v6_src = [0u8; 16];
+    v6_src.copy_from_slice(&v6_frame[22..38]);
+    let mut v6_dst = [0u8; 16];
+    v6_dst.copy_from_slice(&v6_frame[38..54]);
+    let v6_meta = UserspaceDpMeta {
+        ingress_ifindex: 5,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        dscp: 0,
+        pkt_len: v6_frame.len() as u16,
+        l3_offset: 14,
+        l4_offset: 62,
+        flow_src_addr: v6_src,
+        flow_dst_addr: v6_dst,
+        ..Default::default()
+    };
+    let v6_derived = crate::afxdp::frame::l3_enforcement_flow_from_frame(&v6_frame, v6_meta)
+        .expect("#14239: v6 fragment must yield an L3 enforcement flow");
+    assert_eq!(
+        v6_derived.forward_key.protocol, PROTO_TCP,
+        "#14239: frame derivation must recover TCP from the Fragment Next-Header, not the sentinel"
+    );
+    let v6_ingress = v6_derived.forward_key.clone();
+    let v6_wire = v6_ingress.clone();
+    let v6_extra = crate::afxdp::frame::term_match_extra_from_frame(&v6_frame, v6_meta);
+    let v6_fresh = resolve_cos_tx_selection_at_prenat(
+        &v6_forwarding,
+        202,
+        v6_meta,
+        None,
+        None,
+        v6_extra,
+        1_000_000_000,
+        Some(&v6_wire),
+        Some(&v6_ingress),
+    );
+    assert!(
+        v6_fresh.drop,
+        "#14239: frame-derived TCP ingress protocol must match the policer (v6 fresh)"
+    );
+    assert_eq!(v6_fresh.queue_id, Some(1));
+    assert_eq!(v6_fresh.dscp_rewrite, Some(46));
+    let v6_cached = resolve_cached_cos_tx_selection_flowless_with_ingress(
+        &v6_forwarding,
+        202,
+        v6_meta,
+        &v6_wire,
+        Some(&v6_ingress),
+    );
+    assert_eq!(v6_cached.queue_id, Some(1));
+    assert_eq!(v6_cached.filter_dscp_rewrite, Some(46));
+    assert_eq!(v6_cached.three_color_policers.len(), 1);
+}
 #[test]
 fn egress_dscp_rewrite_unmaterialized_fc_does_not_bleach_and_no_unmaterialized_guard() {
     // #13968: egress scheduler map materializes only BE/bulk. Ingress EF->voice q5,
