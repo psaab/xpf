@@ -934,6 +934,9 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 			retainDebt()
 			return fmt.Errorf("update userspace_ingress_ifaces %d: %w", ifindex, err)
 		}
+		// The ingress row is live as soon as Update succeeds. Record it before
+		// touching the companion domain map so any later error remains reapable.
+		installed = append(installed, ifindex)
 		domain, ok := localAddressRoutingDomain(snapshot, int(ifindex))
 		if !ok {
 			// Ambiguous parent/fabric ingress has no safe local domain.
@@ -947,7 +950,6 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 			retainDebt()
 			return fmt.Errorf("update userspace_ingress_domains %d: %w", ifindex, err)
 		}
-		installed = append(installed, ifindex)
 	}
 	// HashMap: Delete removes the entry. ErrKeyNotExist is expected
 	// across daemon restarts (idempotent). Any other failure must be
