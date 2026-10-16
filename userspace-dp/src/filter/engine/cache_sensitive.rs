@@ -167,15 +167,15 @@ fn evaluate_filter_ref_tx_selection_cached_v6(
 /// the seed (first) packet of an N-packet cacheable flow.
 ///
 /// The walk mirrors the `Always`-policy walk of
-/// `evaluate_filter_ref_non_routing_counted` (the non-PBR / session-HIT
-/// per-packet counter): it captures every matched non-routing `then count` term
-/// up to AND INCLUDING the terminal action term, and DEFERS at a matched
-/// routing-instance (PBR) term — returning the counters accumulated before it —
-/// so the PBR term's counter stays owned by the routing-instance evaluator
-/// (which counts it on the session-miss packet). This preserves the #2620
-/// `NonRoutingCountPolicy` count-ownership split on the cached path (a naive
-/// "capture every matched term" walk would double/under-count a filter that
-/// mixes routing-affecting and count terms).
+/// `evaluate_filter_ref_non_routing_counted` combined with the routing-instance
+/// walk: it captures every matched `then count` term up to AND INCLUDING the
+/// terminal action term. A matched routing-instance (PBR) term is terminal for
+/// this purpose (#14121): its `then count`/`then log` are part of the admitted
+/// flow's per-packet accounting, so the handle is collected before returning
+/// instead of being deferred to a routing evaluator that never runs on a
+/// flow-cache HIT. Fall-through terms before it are collected in order.
+/// Caller-side seed charging stays exactly-once via the existing
+/// `seed_packet_already_counted` split.
 ///
 /// This only COLLECTS `Arc<FilterTermCounter>` handles; it never calls
 /// `record_filter_counter`. The seed path charges the handles exactly once —
@@ -241,15 +241,14 @@ fn capture_input_filter_counters_v4(
         ) {
             continue;
         }
-        // A matched routing-instance (PBR) term defers to the routing-instance
-        // evaluator — mirror evaluate_filter_ref_non_routing_counted's early
-        // return so the PBR term's count is not re-attributed to the cached
-        // input replay (#2620 ownership).
-        if !term.routing_instance.is_empty() {
-            return counters;
-        }
         if term.has_count {
             counters.push(term.counter.clone());
+        }
+        // #14121: a matched routing-instance term is the terminal steering
+        // term for an admitted flow. Include its counter (above) before
+        // stopping, mirroring the routing evaluator's cold-path charge.
+        if !term.routing_instance.is_empty() {
+            return counters;
         }
         if !term.continue_term {
             return counters;
@@ -318,11 +317,12 @@ fn capture_input_filter_counters_v6(
         ) {
             continue;
         }
-        if !term.routing_instance.is_empty() {
-            return counters;
-        }
         if term.has_count {
             counters.push(term.counter.clone());
+        }
+        // #14121: see the v4 capture walk.
+        if !term.routing_instance.is_empty() {
+            return counters;
         }
         if !term.continue_term {
             return counters;

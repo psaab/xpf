@@ -252,7 +252,10 @@ fn interface_filter_log_match_returns_filter_and_term_identity() {
 }
 
 #[test]
-fn interface_filter_log_match_skips_pbr_terms_without_double_emit() {
+fn interface_filter_log_match_captures_pbr_term_for_cache_replay_14121() {
+    // #14121: the cache-seed log capture must freeze a matched PBR term's own
+    // `then log` so flow-cache hits can replay it. Previously this returned
+    // `None`, so only the cold PBR packet ever logged.
     let state = make_filter_state_with_interfaces(
         &[FirewallFilterSnapshot {
             name: "pbr-in".into(),
@@ -288,9 +291,70 @@ fn interface_filter_log_match_skips_pbr_terms_without_double_emit() {
         0,
         TermMatchExtra::default(),
         true,
-    );
+    )
+    .expect("PBR term log must be captured for cache replay (#14121)");
+    assert_eq!(log_match.term_id, 0);
+    assert_eq!(log_match.action, FilterAction::Accept);
+}
 
-    assert_eq!(log_match, None);
+#[test]
+fn input_filter_counters_cached_includes_pbr_term_14121() {
+    // #14121: the cache-seed counter capture must include a matched PBR
+    // term's `then count` (and any fall-through counters before it), so
+    // flow-cache hits replay them. Previously the walk returned at the PBR
+    // term without pushing its counter.
+    let state = make_filter_state_with_interfaces(
+        &[FirewallFilterSnapshot {
+            name: "pbr-count-in".into(),
+            family: "inet".into(),
+            terms: vec![
+                FirewallTermSnapshot {
+                    name: "count-before".into(),
+                    protocols: vec!["tcp".into()],
+                    destination_ports: vec!["443".into()],
+                    action: String::new(),
+                    next_term: true,
+                    count: "pre-pbr".into(),
+                    ..Default::default()
+                },
+                FirewallTermSnapshot {
+                    name: "route-and-count".into(),
+                    protocols: vec!["tcp".into()],
+                    destination_ports: vec!["443".into()],
+                    action: "accept".into(),
+                    count: "pbr-hit".into(),
+                    routing_instance: "blue".into(),
+                    ..Default::default()
+                },
+            ],
+        }],
+        &[crate::InterfaceSnapshot {
+            ifindex: 7,
+            filter_input_v4: "pbr-count-in".into(),
+            ..Default::default()
+        }],
+    );
+    let counters = evaluate_interface_input_filter_counters_cached(
+        &state,
+        7,
+        false,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        PROTO_TCP,
+        49152,
+        443,
+        0,
+    );
+    assert_eq!(
+        counters.len(),
+        2,
+        "fall-through + PBR term counters must both be captured for cache replay (#14121)"
+    );
+    // Replay once and assert both handles charged.
+    counters.for_each(|c| record_filter_counter(c, 100));
+    let filter = state.iface_filter_v4_fast.get(&7).expect("input filter");
+    assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    assert_eq!(filter.terms[1].counter.packets.load(Ordering::Relaxed), 1);
 }
 
 #[test]

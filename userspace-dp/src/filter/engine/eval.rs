@@ -1264,10 +1264,16 @@ fn evaluate_filter_ref_log_match(
             continue;
         }
         if skip_routing_instance && !term.routing_instance.is_empty() {
-            // The route-lookup-affecting PBR term is handled by the
-            // routing-instance evaluator; its log is not emitted on this path.
-            // Any earlier fall-through log_match still carries the verdict the
-            // packet receives here (default Accept on the non-PBR path).
+            // #14121: for the cache-seed capture (`skip_routing_instance`), a
+            // matched PBR term's own `then log` belongs to the admitted flow
+            // and must be frozen for cache-hit replay. The cold PBR path
+            // emits it once via `ingress_route_table_override`; without
+            // capturing it here every later cache hit would be silent.
+            // Record it (latest wins) and stop at the steering term.
+            if let Some(lm) = filter_log_match(filter, term) {
+                acc_log = Some(lm);
+            }
+            final_action = term.action;
             break;
         }
         final_action = term.action;

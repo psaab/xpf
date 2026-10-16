@@ -1254,16 +1254,18 @@ sync.
   so behavior-aggregate CoS classification follows the inner codepoint rather
   than the outer tunnel DSCP.
 
-  **Interface INPUT filter `then count` on cache hits (#3777):** the
+  **Interface INPUT filter `then count` on cache hits (#3777/#14121):** the
   output/TX `then count` handles have been replayed on every flow-cache hit
   since #2573 (`tx_selection.filter_counters`); the INPUT side now mirrors
   that via `RewriteDescriptor::input_filter_counters`, captured once at seed
   by `evaluate_interface_input_filter_counters_cached` and replayed in
-  `flow_cache_hit.rs`. A matched routing-instance (PBR) term is EXCLUDED at
-  capture (its count is owned by the routing-instance evaluator, #2620), and
-  the captured set is deduped against `tx_selection.filter_counters`
+  `flow_cache_hit.rs`. A matched routing-instance (PBR) term's counter and
+  `then log` are captured at seed (#14121) — the routing evaluator never
+  runs on a cache hit, so excluding them reported only the first packet —
+  and the captured set is deduped against `tx_selection.filter_counters`
   (`retain_absent_from`) so a count-plus-forwarding-class input term the cos
-  TX-selection rebuild already folded in is not recorded twice.
+  TX-selection rebuild already folded in is not recorded twice. Cached
+  PBR logs replay with the `Input` source; the cold packet keeps `Pbr`.
 
   **Short-lived flow-backed deny caching (#11073):** `PolicyDenied` and
   `DiscardRoute` decisions are cached only for UDP and established TCP ACK
