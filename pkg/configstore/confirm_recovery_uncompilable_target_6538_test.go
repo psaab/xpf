@@ -10,22 +10,41 @@ import (
 )
 
 // uncompilableTree returns a tree that a previously-committed config could
-// plausibly hold and that the LENIENT compile still rejects.
+// plausibly hold and that the LENIENT compile still rejects AFTER the
+// #14168 pending-confirm normalization (normalizePendingConfirmTree applies
+// rewriteRetiredDataplaneType + SanitizeTreeControlChars to PrevTree before
+// compile/promotion — #14301).
 //
-// `system dataplane-type ebpf` is the concrete production trigger, not a
-// contrived one: it was a legal committed value before the #1373 retirement,
-// and Store.Load repairs it (rewriteRetiredDataplaneType) only on the tree it
-// reads out of active.json — never on the PrevTree carried inside confirm.json.
-// A node that armed `commit confirmed` on an older build and reboots into a
-// current one therefore reaches recoverPendingConfirmLocked with exactly this
-// rollback target.
+// `apply-groups` naming a group that is not defined under `groups` is
+// genuinely uncompilable on every compile path: group expansion returns
+// "apply-groups references undefined group", and neither tolerant repair
+// touches it — the dataplane-type rewrite rewrites only a retired
+// `system dataplane-type` leaf, and the control-char scrub scrubs only
+// control characters in free-text values. It is the same trigger
+// brokenActiveTree9884 and TestLoadCommittedConfigCompileFailureFailsClosed
+// use for a present-but-uncompilable committed config: the text is
+// unchanged, but a group definition the target relied on is no longer
+// present (removed, or supplied only for another cluster node), so a
+// target that compiled when committed fails even the lenient compile at
+// boot.
+//
+// The retired `system dataplane-type ebpf` leaf this fixture used before
+// #14301 is NO LONGER uncompilable as a rollback target: since #14286
+// (#14168) normalizePendingConfirmTree repairs exactly that leaf in
+// PrevTree before compiling it, so it silently compiled and the #6538
+// sentinels below lost their premise (expired cell failed on its premise
+// check; the in-window cells passed without ever exercising a nil
+// confirmPrevCfg from a failed compile).
 func uncompilableTree(t *testing.T) *config.ConfigTree {
 	t.Helper()
 	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "probe"))
 	if err := s.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetFromInput("system dataplane-type ebpf"); err != nil {
+	if err := s.SetFromInput("apply-groups xpf6538-undefined-group"); err != nil {
+		t.Fatalf("SetFromInput: %v", err)
+	}
+	if err := s.SetFromInput("system host-name Prev"); err != nil {
 		t.Fatalf("SetFromInput: %v", err)
 	}
 	tree := s.candidate.Clone()
@@ -33,6 +52,16 @@ func uncompilableTree(t *testing.T) *config.ConfigTree {
 	if _, err := s.compileTreeLenient(tree); err == nil {
 		t.Fatal("premise broken: the probe tree compiles leniently; it cannot " +
 			"stand in for an uncompilable rollback target")
+	}
+	// #14301: the fixture must remain uncompilable after the exact repairs
+	// recoverPendingConfirmLocked applies to PrevTree, not merely before
+	// them — that gap is what superseded the retired-leaf fixture.
+	normalized := tree.Clone()
+	normalizePendingConfirmTree(normalized)
+	if _, err := s.compileTreeLenient(normalized); err == nil {
+		t.Fatal("premise broken: the probe tree compiles leniently after " +
+			"normalizePendingConfirmTree (#14168 repairs); it cannot stand in " +
+			"for an uncompilable rollback target (#14301)")
 	}
 	return tree
 }

@@ -795,10 +795,12 @@ func normalizePendingConfirmTree(tree *config.ConfigTree) bool {
 //
 // #6538: it returns an error so Load can FAIL CLOSED when the recovery leaves
 // no compiled config. The rollback target here is a previously-committed
-// config, and Load repairs the tree it reads from active.json
-// (rewriteRetiredDataplaneType, SanitizeTreeControlChars) but never the
-// PrevTree carried inside confirm.json — so a target committed on an older
-// build can fail even the LENIENT compile. Warning and continuing assigned the
+// config; since #14168 it is normalized with the same repairs Load applies
+// to the tree it reads from active.json (normalizePendingConfirmTree:
+// rewriteRetiredDataplaneType, SanitizeTreeControlChars), but a target that
+// is genuinely uncompilable even after those repairs — e.g. an
+// `apply-groups` reference to a group no longer defined — still fails even
+// the LENIENT compile. Warning and continuing assigned the
 // nil into s.compiled while marking everCommitted, which the daemon resolves
 // to a NORMAL boot with NO policy: positional claim-all interface naming on a
 // box with no compiled configuration. The returned error is tagged
