@@ -40,6 +40,37 @@ var fabricStampCluster10105 = []string{
 	"set chassis cluster fabric-interface fab0",
 }
 
+func hasFabricIngressBaTrustAdvisory13967(cfg *Config) bool {
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "fabric ingress BA (#13967)") {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFabricIngressBaTrustAdvisoryOnConfiguredFabric13967(t *testing.T) {
+	cfg := compileFabricStamp10105(t, fabricStampCluster10105, CompileConfig)
+	if !hasFabricIngressBaTrustAdvisory13967(cfg) {
+		t.Fatalf("configured fabric must warn that BA markings are untrusted; warnings=%v", cfg.Warnings)
+	}
+}
+
+func TestFabricIngressBaTrustAdvisoryAbsentWithoutFabric13967(t *testing.T) {
+	commands := append([]string(nil), fabricStampCluster10105[:3]...)
+	cfg := compileFabricStamp10105(t, commands, CompileConfig)
+	if hasFabricIngressBaTrustAdvisory13967(cfg) {
+		t.Fatalf("a cluster without a fabric link must not emit the BA advisory; warnings=%v", cfg.Warnings)
+	}
+}
+
+func TestFabricIngressBaTrustAdvisoryIsNotRepeatedOnTolerantLoad13967(t *testing.T) {
+	cfg := compileFabricStamp10105(t, fabricStampCluster10105, CompileConfigLenient)
+	if hasFabricIngressBaTrustAdvisory13967(cfg) {
+		t.Fatalf("tolerant load must not repeat the commit-time BA advisory; warnings=%v", cfg.Warnings)
+	}
+}
+
 func TestFabricStampSharedSegmentAdvisoryOnConfiguredFabric10105(t *testing.T) {
 	cfg := compileFabricStamp10105(t, fabricStampCluster10105, CompileConfig)
 	if !hasFabricStamp10105Warning(cfg) {
