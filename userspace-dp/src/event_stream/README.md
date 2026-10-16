@@ -247,8 +247,8 @@ periodic ACK from the daemon.
   filter-log source discriminator (`pbr`, `input`, `output`, `cached-output`,
   or `lo0`). Close events interpret that same byte as a close reason. #13971
   carries the session's terminal TCP class in byte `[134]`: idle timeout for
-  an unclassified/idle close, TCP FIN for CLOSING/TIME_WAIT, and TCP RST for
-  The reasons match Go's existing `closeReasonName` table; structured
+  an unclassified/idle close, TCP FIN for CLOSING/TIME_WAIT, and TCP RST for an
+  abort. The reasons match Go's existing `closeReasonName` table; structured
   `RT_FLOW_SESSION_CLOSE` records no longer fall back to `reason="N/A"`.
   No frame size or protocol version changes.
 - `producer.rs` — non-blocking helper-side producer API for RT_FLOW
