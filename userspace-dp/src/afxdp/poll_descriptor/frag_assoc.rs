@@ -1133,6 +1133,7 @@ fn flowbacked_requires_nat_translation_on_egress(
             .match_snat_with_counter_scoped(
                 flow.src_ip,
                 flow.forward_key.src_port,
+                Some(flow.forward_key.protocol),
                 Some(source_nat_dst_ip),
                 to_zone,
                 nat_scope.egress_ifname,

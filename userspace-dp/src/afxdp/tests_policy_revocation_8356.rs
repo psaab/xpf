@@ -9507,6 +9507,7 @@ fn drive_removed_source_nat_rule_11600(
             .match_snat_with_counter_scoped(
                 IpAddr::V4(SRC),
                 SPORT,
+                Some(crate::ip_proto::PROTO_TCP),
                 Some(IpAddr::V4(remote)),
                 "wan",
                 scope.egress_ifname,

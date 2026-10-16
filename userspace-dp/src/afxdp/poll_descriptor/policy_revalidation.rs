@@ -425,6 +425,7 @@ fn source_nat_translation_still_valid(
     if let Some((static_nat, _)) = forwarding.static_nat.match_snat_with_counter_scoped(
         forward_key.src_ip,
         forward_key.src_port,
+        Some(forward_key.protocol),
         Some(source_nat_dst),
         to_zone,
         scope.egress_ifname,

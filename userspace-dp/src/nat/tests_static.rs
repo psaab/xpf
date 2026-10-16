@@ -1035,13 +1035,116 @@ fn static_nat_mapped_port_snat_untranslates_src_port() {
     let int: IpAddr = "10.0.0.5".parse().unwrap();
 
     let (decision, _) = table
-        .match_snat_with_counter(int, 80, "untrust")
+        .match_snat_with_counter_scoped(
+            int,
+            80,
+            Some(crate::ip_proto::PROTO_TCP),
+            None,
+            "untrust",
+            "",
+            "",
+        )
         .expect("matched internal mapped-port");
     assert_eq!(decision.rewrite_src, Some(ext), "src IP must be the external IP");
     assert_eq!(
         decision.rewrite_src_port,
         Some(8080),
         "src port must be un-translated to the external match port"
+    );
+}
+
+// #13685: the packet parser lifts the 16-bit ICMP Echo/Query Identifier into
+// `forward_key.src_port` (with `dst_port == 0`). If that identifier happens to
+// equal a port-specific static-NAT rule's SNAT key port (the mapped-port or,
+// for a port-scoped 1:1, the match port), the outbound ICMP packet MUST NOT be
+// misread as a TCP/UDP return flow: no source translation, no port/identifier
+// rewrite, and no per-rule hit-counter association. Whole-address rules remain
+// eligible for ICMP (address-only translation is protocol-agnostic), and
+// TCP/UDP return traffic on the exact port still matches.
+#[test]
+fn static_nat_snat_icmp_identifier_must_not_match_port_scoped_rule() {
+    let table = StaticNatTable::from_snapshots(
+        &[mapped_port_snapshot()],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let int: IpAddr = "10.0.0.5".parse().unwrap();
+
+    for protocol in [crate::ip_proto::PROTO_ICMP, crate::ip_proto::PROTO_ICMPV6] {
+        assert!(
+            table
+                .match_snat_with_counter_scoped(int, 80, Some(protocol), None, "untrust", "", "",)
+                .is_none(),
+            "ICMP (protocol {protocol}) id 80 colliding with mapped-port must not static-SNAT"
+        );
+    }
+    // SCTP/other port-less protocols likewise must not consume the port probe.
+    assert!(
+        table
+            .match_snat_with_counter_scoped(
+                int,
+                80,
+                Some(crate::ip_proto::PROTO_SCTP),
+                None,
+                "untrust",
+                "",
+                "",
+            )
+            .is_none(),
+        "non-TCP/UDP protocol must not match the port-scoped static SNAT rule"
+    );
+    // TCP/UDP on the mapped port still reverse-translate + un-translate port.
+    for protocol in [crate::ip_proto::PROTO_TCP, crate::ip_proto::PROTO_UDP] {
+        let (decision, _) = table
+            .match_snat_with_counter_scoped(int, 80, Some(protocol), None, "untrust", "", "")
+            .expect("TCP/UDP mapped-port return flow must still match");
+        assert_eq!(decision.rewrite_src_port, Some(8080));
+    }
+}
+
+// #13685 sibling: with BOTH a port-mapped rule and a whole-address rule on the
+// same internal host, an outbound ICMP packet whose identifier collides with
+// the mapped port must fall through to the whole-address rule (no port
+// rewrite) instead of being hijacked by the port-scoped rule.
+#[test]
+fn static_nat_snat_icmp_identifier_falls_back_to_whole_address() {
+    let table = StaticNatTable::from_snapshots(
+        &[
+            mapped_port_snapshot(), // 203.0.113.1:8080 -> 10.0.0.5:80
+            StaticNATRuleSnapshot {
+                source_addresses: Vec::new(),
+                counter_id: 0,
+                name: "whole".to_string(),
+                from_zone: "untrust".to_string(),
+                from_interface: String::new(),
+                from_routing_instance: String::new(),
+                external_ip: "203.0.113.10/32".to_string(),
+                internal_ip: "10.0.0.5/32".to_string(),
+                match_destination_port: 0,
+                mapped_port: 0,
+            },
+        ],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let int: IpAddr = "10.0.0.5".parse().unwrap();
+    let (decision, _) = table
+        .match_snat_with_counter_scoped(
+            int,
+            80,
+            Some(crate::ip_proto::PROTO_ICMP),
+            None,
+            "untrust",
+            "",
+            "",
+        )
+        .expect("whole-address rule must still translate ICMP by address");
+    assert_eq!(
+        decision.rewrite_src,
+        Some("203.0.113.10".parse().unwrap()),
+        "ICMP must use the whole-address mapping, not the port-mapped rule's external IP"
+    );
+    assert_eq!(
+        decision.rewrite_src_port, None,
+        "ICMP identifier must not be rewritten as an L4 port"
     );
 }
 
@@ -1161,7 +1264,15 @@ fn static_nat_match_port_without_mapped_port_scopes_reverse_snat() {
     // port (8080 — no translation happened) IS source-translated to the
     // external IP, with NO source-port rewrite.
     let (snat, _) = table
-        .match_snat_with_counter(int, 8080, "untrust")
+        .match_snat_with_counter_scoped(
+            int,
+            8080,
+            Some(crate::ip_proto::PROTO_TCP),
+            None,
+            "untrust",
+            "",
+            "",
+        )
         .expect("return from the port-scoped service");
     assert_eq!(snat.rewrite_src, Some(ext), "src IP must be the external IP");
     assert_eq!(
@@ -1172,7 +1283,17 @@ fn static_nat_match_port_without_mapped_port_scopes_reverse_snat() {
     // The bug: a packet from ANY OTHER source port on the internal host MUST
     // NOT be source-translated. This is the whole-host broadening #2769 fixes.
     assert!(
-        table.match_snat_with_counter(int, 1234, "untrust").is_none(),
+        table
+            .match_snat_with_counter_scoped(
+                int,
+                1234,
+                Some(crate::ip_proto::PROTO_TCP),
+                None,
+                "untrust",
+                "",
+                "",
+            )
+            .is_none(),
         "off-port outbound must NOT be source-translated (reverse SNAT must \
          stay scoped to the matched port)"
     );

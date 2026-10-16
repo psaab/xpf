@@ -285,13 +285,13 @@ fn static_nat_snat_from_interface_scope_matches_only_named_egress() {
     let int: IpAddr = "192.168.1.10".parse().unwrap();
     assert!(
         table
-            .match_snat_with_counter_scoped(int, 0, None, "", "ge-0/0/1.0", "")
+            .match_snat_with_counter_scoped(int, 0, None, None, "", "ge-0/0/1.0", "")
             .is_some(),
         "interface-scoped static SNAT must match on the named egress interface"
     );
     assert!(
         table
-            .match_snat_with_counter_scoped(int, 0, None, "", "ge-0/0/2.0", "")
+            .match_snat_with_counter_scoped(int, 0, None, None, "", "ge-0/0/2.0", "")
             .is_none(),
         "interface-scoped static SNAT must NOT match on another egress interface"
     );
@@ -392,13 +392,13 @@ fn static_nat_snat_source_address_gates_reverse() {
     let out_scope: IpAddr = "203.0.113.99".parse().unwrap();
     assert!(
         table
-            .match_snat_with_counter_scoped(int, 0, Some(in_scope), "", "", "")
+            .match_snat_with_counter_scoped(int, 0, None, Some(in_scope), "", "", "")
             .is_some(),
         "reverse static SNAT must fire toward a client inside `match source-address`"
     );
     assert!(
         table
-            .match_snat_with_counter_scoped(int, 0, Some(out_scope), "", "", "")
+            .match_snat_with_counter_scoped(int, 0, None, Some(out_scope), "", "", "")
             .is_none(),
         "reverse static SNAT must NOT fire toward a client outside `match source-address`"
     );
@@ -543,7 +543,7 @@ fn static_nat_snat_scope_differentiated_rules_coexist_3605() {
     let int: IpAddr = "192.168.1.10".parse().unwrap();
     // Return packet egressing trust -> un-NAT to 203.0.113.10 (overwritten rule).
     let via_trust = table
-        .match_snat_with_counter_scoped(int, 0, None, "trust", "", "")
+        .match_snat_with_counter_scoped(int, 0, None, None, "trust", "", "")
         .map(|(d, _)| d.rewrite_src);
     assert_eq!(
         via_trust,
@@ -552,7 +552,7 @@ fn static_nat_snat_scope_differentiated_rules_coexist_3605() {
     );
     // Return packet egressing wan -> un-NAT to 203.0.113.20.
     let via_wan = table
-        .match_snat_with_counter_scoped(int, 0, None, "wan", "", "")
+        .match_snat_with_counter_scoped(int, 0, None, None, "wan", "", "")
         .map(|(d, _)| d.rewrite_src);
     assert_eq!(
         via_wan,
@@ -1077,6 +1077,7 @@ fn static_nat_reverse_block_context_precedence_is_interface_first_11351() {
                 "10.0.0.42".parse().unwrap(),
                 0,
                 None,
+                None,
                 "trust",
                 "ge-0/0/1.0",
                 "VR1",
@@ -1118,6 +1119,7 @@ fn static_nat_reverse_context_precedence_is_interface_first_11351() {
             .match_snat_with_counter_scoped(
                 "10.0.0.10".parse().unwrap(),
                 0,
+                None,
                 None,
                 "trust",
                 "ge-0/0/1.0",
