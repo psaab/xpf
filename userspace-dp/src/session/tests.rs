@@ -1151,13 +1151,30 @@ fn session_timeout_ns_honors_app_override() {
             DEFAULT_ICMP_SESSION_TIMEOUT_NS
         );
     }
+    // #13964: preserve the fallback default when no app timeout is present.
     assert_eq!(
-        session_timeout_ns(u8::MAX, 0, false, &to, Some(app), None),
+        session_timeout_ns(u8::MAX, 0, false, &to, None, None),
         OTHER_SESSION_TIMEOUT_NS
     );
     assert_eq!(
-        session_timeout_ns(u8::MAX, 0, true, &to, Some(app), None),
-        app
+        session_timeout_ns(u8::MAX, 0, true, &to, None, None),
+        OTHER_SESSION_TIMEOUT_NS
+    );
+    // Promoted other-protocol flows use the per-app override, distinct from
+    // the 30 s fallback (and TCP/UDP/ICMP defaults).
+    let other_app = 90_000_000_000u64;
+    assert_eq!(
+        session_timeout_ns(u8::MAX, 0, false, &to, Some(other_app), None),
+        OTHER_SESSION_TIMEOUT_NS
+    );
+    assert_eq!(
+        session_timeout_ns(u8::MAX, 0, true, &to, Some(other_app), None),
+        other_app,
+        "promoted other-protocol flow must use the per-app override"
+    );
+    assert_eq!(
+        session_timeout_ns(crate::ip_proto::PROTO_GRE, 0, true, &to, Some(other_app), None),
+        other_app
     );
     // Closing/RST TCP: the override never extends the short reap window
     // (and the closing branch is consulted before the OPENING branch).
