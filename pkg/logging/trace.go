@@ -145,26 +145,36 @@ type TraceWriter struct {
 	// failed). Both are audit-grade signals: an operator who enabled
 	// traceoptions must be able to tell that telemetry is being lost. The two
 	// failure classes get SEPARATE ≤1/s warn clocks (lastDropWarn /
-	// lastRotWarn, mu-guarded; HandleEvent/rotate run under mu) so a write-drop
-	// storm cannot suppress the rotation warning, and vice versa.
+	// lastRotWarn) so a write-drop storm cannot suppress the rotation
+	// warning, and vice versa. Both clocks are reached only under mu today;
+	// they are guarded by warnMu as well so the invariant does not rest on
+	// every present and future caller holding mu (#14191, same shape as
+	// LocalLogWriter).
 	// #9025: the bounded queue + writer goroutine that keeps the disk write
 	// OFF the EventStream reader goroutine.
 	async *asyncAuditWriter
 
 	droppedWrites   atomic.Uint64
 	failedRotations atomic.Uint64
+	warnMu          sync.Mutex
 	lastDropWarn    time.Time
 	lastRotWarn     time.Time
 }
 
 // warnRateLimited emits a ≤1/s WARN carrying the current failure counters,
-// gated by the supplied per-class clock. Must be called with tw.mu held.
+// gated by the supplied per-class clock. The clock itself is guarded by
+// warnMu — a leaf lock taken only around the clock check/update and
+// released before slog.Warn, so a re-entrant slog handler cannot wedge it
+// and callers holding mu deadlock neither on it nor via it (#14191).
 func (tw *TraceWriter) warnRateLimited(clock *time.Time, msg string, err error) {
 	now := time.Now()
+	tw.warnMu.Lock()
 	if !clock.IsZero() && now.Sub(*clock) < time.Second {
+		tw.warnMu.Unlock()
 		return
 	}
 	*clock = now
+	tw.warnMu.Unlock()
 	slog.Warn(msg,
 		"err", err,
 		"path", tw.path,
