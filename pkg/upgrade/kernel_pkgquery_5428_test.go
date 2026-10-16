@@ -40,8 +40,9 @@ func TestPruneInactiveSlot_PrePurgeQueryErrorFailsSafe(t *testing.T) {
 
 	purgeAttempted := false
 	sys := &realKernelSystem{
-		fsRoot:         root,
-		pkgInstalledFn: func(string) (bool, error) { return false, dpkgParseErr() },
+		fsRoot:          root,
+		runningKernelFn: func() (string, error) { return knownGood, nil },
+		pkgInstalledFn:  func(string) (bool, error) { return false, dpkgParseErr() },
 		aptGetFn: func(args ...string) error {
 			if len(args) > 0 && args[0] == "purge" {
 				purgeAttempted = true
@@ -86,7 +87,8 @@ func TestPruneInactiveSlot_PostPurgeQueryErrorKeepsFiles(t *testing.T) {
 
 	purged := false
 	sys := &realKernelSystem{
-		fsRoot: root,
+		fsRoot:          root,
+		runningKernelFn: func() (string, error) { return knownGood, nil },
 		pkgInstalledFn: func(string) (bool, error) {
 			if !purged {
 				return true, nil // installed before the purge

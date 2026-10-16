@@ -335,8 +335,18 @@ type KernelSystem interface {
 	// DisarmWatchdog stops the hardware watchdog after a successful promote or
 	// a failed arm unwind.
 	DisarmWatchdog() error
+	// RestoreInactiveSlotSelector resets ONLY the inactive slot's selector
+	// back to the known-good kernel (the non-destructive first step of a
+	// prune). Safe while running the candidate: it changes what the NEXT
+	// boot loads, never the live kernel. Used when the destructive prune
+	// must be deferred because the candidate is still running (#14165).
+	RestoreInactiveSlotSelector(slot, knownGoodUnameR string) error
 	// PruneInactiveSlot resets the inactive slot's selector back to the
 	// known-good kernel and purges the un-promoted candidate kernel pkg.
+	// DESTRUCTIVE: it purges the candidate packages and deletes
+	// /lib/modules/<candidate> + /boot/*-<candidate>. Callers MUST NOT call
+	// it while the candidate is the running kernel (#14165); the real
+	// implementation enforces the same check against uname -r.
 	PruneInactiveSlot(slot, knownGoodUnameR, candidateVersion string) error
 
 	// Now returns the current time.

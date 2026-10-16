@@ -242,6 +242,11 @@ func (f *fakeKernelSystem) DisarmWatchdog() error {
 	f.wdArmed = false
 	return nil
 }
+func (f *fakeKernelSystem) RestoreInactiveSlotSelector(slot, kg string) error {
+	f.log("restore-selector:" + slot)
+	f.selectors[slot] = kg
+	return nil
+}
 func (f *fakeKernelSystem) PruneInactiveSlot(slot, kg, cand string) error {
 	f.log("prune:" + slot)
 	f.selectors[slot] = kg
@@ -383,10 +388,18 @@ func TestKernelPromoteRevertOnVerifyReject(t *testing.T) {
 	if contains(f.calls, "bootorder-front:0004") {
 		t.Fatal("promoted the candidate despite verify REJECT")
 	}
-	if !contains(f.calls, "prune:"+SlotB) {
-		t.Fatal("did not prune the inactive slot on revert")
+	// #14165: the box IS running the candidate at the revert decision (Gate 2
+	// positively confirmed running == CandidateVersion before verifyAndPromote),
+	// so the destructive prune MUST be deferred: purging / deleting the running
+	// kernel's /lib/modules + /boot files orphans the live kernel. Only the
+	// non-destructive restore (BootOrder front + selector -> known-good for the
+	// NEXT boot) may run; the prune happens on a later boot once off it.
+	if contains(f.calls, "prune:"+SlotB) {
+		t.Fatal("#14165: pruned the RUNNING candidate on revert (selector purge must be deferred)")
 	}
-	// inactive selector reset to known-good
+	// inactive selector reset to known-good for the NEXT boot (non-destructive
+	// selector write is part of prune's first step; when prune is deferred the
+	// selector must still be restored so the next boot prefers known-good).
 	if f.selectors[SlotB] != "6.18.5-10-generic" {
 		t.Fatalf("inactive selector not reset on revert: %q", f.selectors[SlotB])
 	}

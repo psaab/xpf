@@ -200,23 +200,24 @@ func (f kernelStatusFakeSys) KernelHeld() (bool, error)               { return f
 func (f kernelStatusFakeSys) InstallCandidateKernel(string) (string, error) {
 	return "", nil
 }
-func (f kernelStatusFakeSys) DefaultBootEntry() (string, error)             { return "", nil }
-func (f kernelStatusFakeSys) WriteSlotSelector(string, string) error        { return nil }
-func (f kernelStatusFakeSys) ReadSlotSelector(string) (string, error)       { return "", nil }
-func (f kernelStatusFakeSys) SetBootNext(string) error                      { return nil }
-func (f kernelStatusFakeSys) GetBootNext() (string, error)                  { return "", nil }
-func (f kernelStatusFakeSys) ClearBootNext() error                          { return nil }
-func (f kernelStatusFakeSys) ArmWatchdog() error                            { return nil }
-func (f kernelStatusFakeSys) Reboot() error                                 { return nil }
-func (f kernelStatusFakeSys) WritePromotionMarker(string) error             { return nil }
-func (f kernelStatusFakeSys) ClearPromotionMarker() error                   { return nil }
-func (f kernelStatusFakeSys) ClearRollLease() error                         { return nil }
-func (f kernelStatusFakeSys) WriteLastRoll(upgrade.KernelRollOutcome) error { return nil }
-func (f kernelStatusFakeSys) BootCurrent() (string, error)                  { return "", nil }
-func (f kernelStatusFakeSys) VerifyDataplane() (bool, error)                { return true, nil }
-func (f kernelStatusFakeSys) ForwardBeacon(time.Duration) (bool, error)     { return true, nil }
-func (f kernelStatusFakeSys) SetBootOrderFront(string) error                { return nil }
-func (f kernelStatusFakeSys) DisarmWatchdog() error                         { return nil }
+func (f kernelStatusFakeSys) DefaultBootEntry() (string, error)                { return "", nil }
+func (f kernelStatusFakeSys) WriteSlotSelector(string, string) error           { return nil }
+func (f kernelStatusFakeSys) ReadSlotSelector(string) (string, error)          { return "", nil }
+func (f kernelStatusFakeSys) SetBootNext(string) error                         { return nil }
+func (f kernelStatusFakeSys) GetBootNext() (string, error)                     { return "", nil }
+func (f kernelStatusFakeSys) ClearBootNext() error                             { return nil }
+func (f kernelStatusFakeSys) ArmWatchdog() error                               { return nil }
+func (f kernelStatusFakeSys) Reboot() error                                    { return nil }
+func (f kernelStatusFakeSys) WritePromotionMarker(string) error                { return nil }
+func (f kernelStatusFakeSys) ClearPromotionMarker() error                      { return nil }
+func (f kernelStatusFakeSys) ClearRollLease() error                            { return nil }
+func (f kernelStatusFakeSys) WriteLastRoll(upgrade.KernelRollOutcome) error    { return nil }
+func (f kernelStatusFakeSys) BootCurrent() (string, error)                     { return "", nil }
+func (f kernelStatusFakeSys) VerifyDataplane() (bool, error)                   { return true, nil }
+func (f kernelStatusFakeSys) ForwardBeacon(time.Duration) (bool, error)        { return true, nil }
+func (f kernelStatusFakeSys) SetBootOrderFront(string) error                   { return nil }
+func (f kernelStatusFakeSys) DisarmWatchdog() error                            { return nil }
+func (f kernelStatusFakeSys) RestoreInactiveSlotSelector(string, string) error { return nil }
 func (f kernelStatusFakeSys) PruneInactiveSlot(string, string, string) error {
 	return nil
 }
