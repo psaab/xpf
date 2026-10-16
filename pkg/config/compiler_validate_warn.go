@@ -1922,16 +1922,13 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	warnings = append(warnings, validateHostInboundCrossScopeExceptWarnings(cfg)...)
 	warnings = append(warnings, validateDeviceMapHostInboundLifelineWarnings11365(cfg)...)
 
-	// #6460: a configured DHCP server answers on every interface its
-	// `dhcp-local-server` / `dhcpv6-local-server` group binds, REGARDLESS of the
-	// zone's `host-inbound-traffic system-services` set — DHCPv4 because Kea
-	// receives on an AF_PACKET raw socket that is delivered before the netfilter
-	// input hook, DHCPv6 because the ff02::1:2 request matches no per-zone
-	// unicast `daddr` rule and falls through the input chain's accept policy.
-	// #11571's managed-routing cross-check applies only to FRR protocols, and
-	// its nft/Rust catalog gate intentionally excludes DHCP's distinct groups
-	// and delivery paths. This DHCP-specific shape therefore needs its own
-	// advisory; the DHCP request path remains outside that enforcement.
+	// #6460: warn when a DHCP server's interface zone omits the matching
+	// host-inbound service. DHCPv4's default raw AF_PACKET receive path still
+	// bypasses the input hook, so the token cannot constrain direct clients.
+	// DHCPv6 uses UDP and ff02::1:2 now reaches the #13925 per-zone link-scope
+	// gate: omitting dhcpv6 default-denies the request. #11571's cross-check
+	// applies only to FRR routing protocols, so the DHCP services keep their
+	// DHCP-specific diagnostic.
 	warnings = append(warnings, validateDHCPServerHostInboundBypassWarnings(cfg)...)
 	warnings = append(warnings, validateDHCPSocketTypeWarnings(cfg)...)
 

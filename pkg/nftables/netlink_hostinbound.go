@@ -67,6 +67,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		}
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
 		emitHostInboundICMPAcceptsNetlink(p)
+		emitHostInboundNonUnicastIngressGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 	} else {
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
@@ -80,6 +81,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
 		emitHostInboundICMPAcceptsNetlink(p)
+		emitHostInboundNonUnicastIngressGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 	}
 
 	// #10751/#11577: scoped DHCPv6 server replies pass before the backstop
@@ -344,6 +346,66 @@ func emitHostInboundMulticastScopeNetlink(p *nlPlan, v HostInboundZoneView, f nl
 	scoped(groups).emit(verdictDrop()...)
 }
 
+// emitHostInboundNonUnicastIngressGuardsNetlink mirrors the text oracle:
+// limited broadcast and IPv6 link-scope multicast are judged by the ingress
+// zone rather than falling through the input chain's accept policy.
+func emitHostInboundNonUnicastIngressGuardsNetlink(p *nlPlan, views []HostInboundZoneView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
+	// Preserve the existing global MLD fall-through before gating ff02::/16.
+	p.rule().icmpType(famV6, []uint8{130, 131, 132, 143}).emit(verdictAccept()...)
+	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
+	classes := []struct {
+		family nlFamily
+		addrs  []string
+	}{
+		{family: famV4, addrs: []string{"255.255.255.255"}},
+		{family: famV6, addrs: []string{"ff02::/16"}},
+	}
+	for _, class := range classes {
+		if len(unzonedIngressVRFSlaves) > 0 {
+			p.rule().sdifname(unzonedIngressVRFSlaves).daddr(class.family, class.addrs, false).emit(verdictDrop()...)
+		}
+		if len(unzonedIngressNetdevs) > 0 {
+			p.rule().iifname(unzonedIngressNetdevs).daddr(class.family, class.addrs, false).emit(verdictDrop()...)
+		}
+		for _, v := range views {
+			direct := hostInboundDirectIngressNetdevs(v)
+			if len(direct) > 0 {
+				emitHostInboundNonUnicastScopeNetlink(p, v, class.family, func() *ruleAsm {
+					return p.rule().iifname(direct).daddr(class.family, class.addrs, false)
+				})
+			}
+			for _, scope := range v.IngressVRFScopes {
+				if scope.Master == "" || len(scope.Slaves) == 0 {
+					continue
+				}
+				emitHostInboundNonUnicastScopeNetlink(p, v, class.family, func() *ruleAsm {
+					return p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).daddr(class.family, class.addrs, false)
+				})
+			}
+		}
+		if len(ambiguous) > 0 {
+			p.rule().iifname(ambiguous).daddr(class.family, class.addrs, false).emit(verdictDrop()...)
+		}
+	}
+}
+
+func emitHostInboundNonUnicastScopeNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, scoped func() *ruleAsm) {
+	if hostInboundAllowsAll(v) {
+		scoped().emit(verdictAccept()...)
+		return
+	}
+	for _, frag := range hostInboundMatchFragments(v, f) {
+		a := scoped()
+		frag.build(a)
+		if frag.reject {
+			a.emit(rejectTCPReset()...)
+		} else {
+			a.emit(verdictAccept()...)
+		}
+	}
+	scoped().emit(verdictDrop()...)
+}
+
 // emitHostInboundMulticastFenceDropsNetlink keeps the host-inbound cold-boot
 // fence fail-closed for every catalog group.
 func emitHostInboundMulticastFenceDropsNetlink(p *nlPlan, views []HostInboundZoneView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
@@ -373,6 +435,43 @@ func emitHostInboundMulticastFenceDropsNetlink(p *nlPlan, views []HostInboundZon
 						daddr(f, groups, false).emit(verdictDrop()...)
 				}
 			}
+		}
+	}
+}
+
+// emitHostInboundNonUnicastFenceDropsNetlink blocks limited broadcast and
+// IPv6 link-scope multicast until the current host-inbound generation is live.
+// The caller places mandatory ND/MLD admits before this and established flows
+// after it.
+func emitHostInboundNonUnicastFenceDropsNetlink(p *nlPlan, views []HostInboundZoneView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
+	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
+	for _, class := range []struct {
+		family nlFamily
+		addrs  []string
+	}{
+		{family: famV4, addrs: []string{"255.255.255.255"}},
+		{family: famV6, addrs: []string{"ff02::/16"}},
+	} {
+		if len(unzonedIngressVRFSlaves) > 0 {
+			p.rule().sdifname(unzonedIngressVRFSlaves).daddr(class.family, class.addrs, false).emit(verdictDrop()...)
+		}
+		if len(unzonedIngressNetdevs) > 0 {
+			p.rule().iifname(unzonedIngressNetdevs).daddr(class.family, class.addrs, false).emit(verdictDrop()...)
+		}
+		for _, v := range views {
+			direct := hostInboundDirectIngressNetdevs(v)
+			if len(direct) > 0 {
+				p.rule().iifname(direct).daddr(class.family, class.addrs, false).emit(verdictDrop()...)
+			}
+			for _, scope := range v.IngressVRFScopes {
+				if scope.Master != "" && len(scope.Slaves) > 0 {
+					p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).
+						daddr(class.family, class.addrs, false).emit(verdictDrop()...)
+				}
+			}
+		}
+		if len(ambiguous) > 0 {
+			p.rule().iifname(ambiguous).daddr(class.family, class.addrs, false).emit(verdictDrop()...)
 		}
 	}
 }

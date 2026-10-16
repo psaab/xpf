@@ -1372,9 +1372,9 @@ func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, un
 // (#6492 Finding A). During the fence window even a `system-services all` zone
 // is denied (maximally fail-closed); the next clean commit restores the accepts.
 // The shared mandatory/address rules cannot drift between host-inbound and lo0;
-// only the host-inbound fence additionally drops catalog groups on represented
-// ingress before established accepts. Empty address inputs still permit those
-// ingress-scoped group drops; a truly empty scope emits no drops.
+// only the host-inbound fence additionally drops catalog groups and non-unicast
+// destinations on represented ingress before established accepts. Empty address
+// inputs still permit those ingress-scoped drops; a truly empty scope emits no drops.
 func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string, guardStaleReplies bool, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, vrfBackstop dhcpBackstopLists) string {
 	var rules []string
 	rules = append(rules, "add table inet "+tableName)
@@ -1391,7 +1391,10 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 	if guardStaleReplies {
 		rules = append(rules, mandatory[0])
 		emitHostInboundMulticastFenceDrops(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
-		rules = append(rules, mandatory[1:]...)
+		rules = append(rules, mandatory[2:]...)
+		rules = append(rules, "    icmpv6 type { 130, 131, 132, 143 } accept")
+		emitHostInboundNonUnicastFenceDrops(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
+		rules = append(rules, mandatory[1])
 	} else {
 		rules = append(rules, mandatory...)
 	}
@@ -2212,6 +2215,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
 		// (4) ND/PMTUD/ICMP-error accepts for NON-denied sources.
 		emitHostInboundICMPAccepts(&rules)
+		emitHostInboundNonUnicastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2242,6 +2246,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		rules = append(rules, "    ct state established,related ct direction reply accept")
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
 		emitHostInboundICMPAccepts(&rules)
+		emitHostInboundNonUnicastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// #11574: selected-port mismatch guards ran before the reply-direction
 		// accept; exact same-owner ingress/destination admits follow the fine
 		// junos-host jumps below.
@@ -2390,6 +2395,61 @@ func emitHostInboundMulticastScope(rules *[]string, v dpuserspace.ZoneHostInboun
 	*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
 }
 
+// emitHostInboundNonUnicastIngressGuards extends per-zone host-inbound
+// enforcement to limited broadcast and IPv6 link-scope multicast. Ordinary
+// zone rules are daddr-scoped to local unicast addresses, so these destinations
+// otherwise reach the input chain's policy accept. These rules precede the
+// residual established accept; catalog multicast is handled separately above.
+func emitHostInboundNonUnicastIngressGuards(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
+	// MLD already reached the host via the chain's accept fall-through.
+	// Keep its link-local control traffic global before the ff02::/16 gate.
+	*rules = append(*rules, "    icmpv6 type { 130, 131, 132, 143 } accept")
+	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
+	classes := []struct {
+		family string
+		addrs  []string
+	}{
+		{family: "ip", addrs: []string{"255.255.255.255"}},
+		{family: "ip6", addrs: []string{"ff02::/16"}},
+	}
+	for _, class := range classes {
+		family := class.family
+		addrs := class.addrs
+		if len(unzonedIngressVRFSlaves) > 0 {
+			*rules = append(*rules, "    meta sdifname "+nftIifnameSet(unzonedIngressVRFSlaves)+" "+family+" daddr "+nftAddrSet(addrs)+" drop")
+		}
+		if len(unzonedIngressNetdevs) > 0 {
+			*rules = append(*rules, "    iifname "+nftIifnameSet(unzonedIngressNetdevs)+" "+family+" daddr "+nftAddrSet(addrs)+" drop")
+		}
+		for _, v := range views {
+			direct := hostInboundDirectIngressNetdevs(v)
+			if len(direct) > 0 {
+				emitHostInboundNonUnicastScope(rules, v, "iifname "+nftIifnameSet(direct)+" ", family, addrs)
+			}
+			for _, vrf := range v.IngressVRFScopes {
+				if vrf.Master != "" && len(vrf.Slaves) > 0 {
+					emitHostInboundNonUnicastScope(rules, v, hostInboundVRFIngressPrefix(vrf.Master, vrf.Slaves), family, addrs)
+				}
+			}
+		}
+		if len(ambiguous) > 0 {
+			*rules = append(*rules, "    iifname "+nftIifnameSet(ambiguous)+" "+family+" daddr "+nftAddrSet(addrs)+" drop")
+		}
+	}
+}
+
+func emitHostInboundNonUnicastScope(rules *[]string, v dpuserspace.ZoneHostInboundView, prefix, family string, addrs []string) {
+	scope := prefix + family + " daddr " + nftAddrSet(addrs)
+	if hostInboundAllowsAll(v) {
+		*rules = append(*rules, "    "+scope+" accept")
+		return
+	}
+	for _, match := range hostInboundMatchSet(v, family) {
+		*rules = append(*rules, "    "+scope+" "+match.match+" "+match.action)
+	}
+	*rules = append(*rules, "    "+scope+" drop")
+}
+
 // emitHostInboundMulticastFenceDrops keeps the cold-boot fence fail-closed for
 // catalog groups. Ingress scopes exclude lifelines; every VRF view is scoped by
 // its exact local members.
@@ -2420,6 +2480,43 @@ func emitHostInboundMulticastFenceDrops(rules *[]string, views []dpuserspace.Zon
 					*rules = append(*rules, "    "+scope+family+" daddr "+nftAddrSet(groups)+" drop")
 				}
 			}
+		}
+	}
+}
+
+// emitHostInboundNonUnicastFenceDrops blocks non-unicast host destinations
+// until the current host-inbound generation is active. It runs after mandatory
+// ND/MLD admits and before the fence's broad established-flow accept.
+func emitHostInboundNonUnicastFenceDrops(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
+	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
+	for _, class := range []struct {
+		family string
+		addrs  []string
+	}{
+		{family: "ip", addrs: []string{"255.255.255.255"}},
+		{family: "ip6", addrs: []string{"ff02::/16"}},
+	} {
+		family, addrs := class.family, class.addrs
+		if len(unzonedIngressVRFSlaves) > 0 {
+			*rules = append(*rules, "    meta sdifname "+nftIifnameSet(unzonedIngressVRFSlaves)+" "+family+" daddr "+nftAddrSet(addrs)+" drop")
+		}
+		if len(unzonedIngressNetdevs) > 0 {
+			*rules = append(*rules, "    iifname "+nftIifnameSet(unzonedIngressNetdevs)+" "+family+" daddr "+nftAddrSet(addrs)+" drop")
+		}
+		for _, v := range views {
+			direct := hostInboundDirectIngressNetdevs(v)
+			if len(direct) > 0 {
+				*rules = append(*rules, "    iifname "+nftIifnameSet(direct)+" "+family+" daddr "+nftAddrSet(addrs)+" drop")
+			}
+			for _, vrf := range v.IngressVRFScopes {
+				if vrf.Master != "" && len(vrf.Slaves) > 0 {
+					scope := hostInboundVRFIngressPrefix(vrf.Master, vrf.Slaves)
+					*rules = append(*rules, "    "+scope+family+" daddr "+nftAddrSet(addrs)+" drop")
+				}
+			}
+		}
+		if len(ambiguous) > 0 {
+			*rules = append(*rules, "    iifname "+nftIifnameSet(ambiguous)+" "+family+" daddr "+nftAddrSet(addrs)+" drop")
 		}
 	}
 }

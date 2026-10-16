@@ -20,6 +20,10 @@ func hostInboundFenceMandatoryAdmitsNetlink(p *nlPlan) {
 
 func emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p *nlPlan) {
 	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
+	emitHostInboundFenceL3AdmitsNetlink(p)
+}
+
+func emitHostInboundFenceL3AdmitsNetlink(p *nlPlan) {
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).emit(verdictAccept()...)
 	p.rule().icmpType(famV6, []uint8{133, 134, 135, 136, 137}).emit(verdictAccept()...)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).emit(verdictAccept()...)
@@ -174,10 +178,14 @@ func buildHostInboundFenceNetlink(p *nlPlan, spec FenceSpec) {
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyFenceRules(
 		spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts,
 	))
-	// Preserve global ESP/AH, then deny catalog groups before established flows.
+	// Preserve global ESP/AH and catalog guards. Mandatory L3 admits precede
+	// the non-unicast fence, which in turn must precede established flows.
 	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 	emitHostInboundMulticastFenceDropsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
-	emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p)
+	emitHostInboundFenceL3AdmitsNetlink(p)
+	p.rule().icmpType(famV6, []uint8{130, 131, 132, 143}).emit(verdictAccept()...)
+	emitHostInboundNonUnicastFenceDropsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
+	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	buildFenceDropsAfterMandatoryAdmitsNetlink(p, spec)
 }
 

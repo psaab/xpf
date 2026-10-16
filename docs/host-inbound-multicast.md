@@ -16,23 +16,30 @@ overrides replace the zone-level protocol set. Matching is independent of
 firewall-local unicast addresses, so an addressless but configured ingress is
 still gated.
 
-Each catalog group has a default-deny rule. A wrong group, family, IP protocol,
-ICMP type, or transport is denied; catalog traffic on unzoned or ambiguous
-ingress is denied as well. Non-catalog destinations retain their existing
-host-inbound behavior. The userspace classifier receives the actual destination
-IP at host-delivery decisions, including the GRE outer path, and applies the
-same group/family/protocol/token decision.
+The #11571 catalog groups have exact tuple admission and default-deny rules.
+Non-catalog destinations otherwise retain their existing behavior, with the
+#13925 non-unicast exception: IPv4 limited broadcast (`255.255.255.255`) and
+IPv6 link-scope multicast (`ff02::/16`) are judged by the ingress zone's
+effective host-inbound service/protocol set. Ordinary zone rules only match
+local unicast destinations, so without this gate these packets fell through the
+input chain's `policy accept`. Link-scope ICMPv6 ND remains globally admitted;
+MLD remains globally admitted as before. Unzoned and ambiguous ingress has no
+service admit and is denied for these non-unicast classes.
 
-Explicit `to-zone junos-host` fine-policy denies run before the coarse multicast
-gate, while the multicast guard itself precedes the residual established /
-related accept so conntrack cannot bypass the current zone decision. Existing
-global ND, PMTUD/error, and ESP/AH exceptions and the explicit
-`system-services any-service` wildcard retain their established behavior.
+The userspace classifier still applies the catalog group/family/protocol/token
+decision on AF_XDP host-delivery paths. Limited broadcast and IPv6 multicast
+take the shim's early kernel path, so #13925 is enforced by the kernel input
+chain; it does not alter AF_PACKET delivery ahead of that hook.
 
-The gate applies to the catalog below; it does not change DHCP, which uses a
-different destination and delivery path (see the DHCP sibling section).
-Host-bound routing multicast is therefore no longer packet-wide via the
-input-chain `policy accept` fall-through.
+Explicit `to-zone junos-host` fine-policy denies run before the coarse catalog
+multicast gate, while both catalog and non-unicast guards precede the residual
+established/related accept so conntrack cannot bypass the current zone decision.
+The explicit `system-services any-service` wildcard retains its established
+behavior for these classes.
+
+The DHCP server uses distinct destination and delivery paths (see the DHCP
+sibling section): DHCPv6 is now gated by the `dhcpv6` service on UDP, while the
+default DHCPv4 raw AF_PACKET path remains outside the input hook.
 
 ## Managed-routing commit gate
 
@@ -61,27 +68,23 @@ still enforced by the dataplane gate.
 
 ## The DHCP-server sibling (#6460)
 
-The DHCP server remains a separate #6460 admission issue. The managed-routing
-gate cross-checks routing-protocol tokens against FRR, while the DHCP server is
-neither a routing protocol nor rendered into FRR. A separate advisory
-(`validateDHCPServerHostInboundBypassWarnings`,
-`pkg/config/compiler_validate_warn_dhcp_hostinbound.go`) warns when a DHCP
-server binds an interface whose zone's effective `host-inbound-traffic
-system-services` set omits `dhcp` / `dhcpv6`.
+The DHCP server has a separate #6460 admission advisory. The managed-routing
+commit gate checks FRR protocols; this diagnostic checks `system-services`
+tokens for DHCP server interfaces. It warns when the effective zone or
+interface-level host-inbound set omits the matching `dhcp` / `dhcpv6` token.
 
-The two DHCP families bypass enforcement for **different** reasons, and the
-message names the relevant path:
+The two DHCP families have different outcomes:
 
-| Family | Why the zone token does not bound it |
+| Family | Host-inbound behavior |
 |---|---|
-| DHCPv4 (`dhcp`) | **Two planes, both bypassed (#7489).** (1) A client addresses its DISCOVER/REQUEST to the **255.255.255.255 broadcast**, and `should_fallback_early` (`userspace-xdp/src/lib.rs`) hands `dst_v4 == 0xffff_ffff` straight to the kernel — the request never enters the AF_XDP userspace dataplane or its host-inbound gate. (2) xpf renders Kea's `Dhcp4` with **no** `dhcp-socket-type` key (`pkg/dhcpserver/dhcpserver.go` emits `interfaces-config` with an `interfaces` list and nothing else), so Kea's default `raw` applies and the server receives on an **AF_PACKET** socket, delivered **before** the netfilter input hook. |
-| DHCPv6 (`dhcpv6`) | Kea's `Dhcp6` has no raw mode, but a client addresses the server at **ff02::1:2**. This DHCP group is not in the routing-multicast catalog, so the routing group gate does not match it; it retains the separate DHCPv6 path and advisory described above. |
+| DHCPv4 (`dhcp`) | A DISCOVER/REQUEST to **255.255.255.255** takes the shim's early kernel path. The new #13925 gate admits kernel INPUT traffic only when the ingress zone's `dhcp` service matches UDP 67/68. However, xpf renders Kea's `Dhcp4` with no `dhcp-socket-type` key, so Kea defaults to a raw **AF_PACKET** socket delivered before the netfilter input hook. Direct clients therefore still reach Kea regardless of the zone token. `system services dhcp-local-server dhcp-socket-type udp` moves Kea onto UDP, where the token governs relayed/renewing traffic; that mode does not serve directly attached address-less clients. |
+| DHCPv6 (`dhcpv6`) | Kea's `Dhcp6` receives on UDP. Its **ff02::1:2** request is within the #13925 link-scope gate: UDP 546/547 is admitted only when the ingress zone's effective services include `dhcpv6` (or `any-service`). Without the token the request is default-denied before the server receives it. |
 
-The remedy in the message deliberately leads with **removing the interface from
-the group**, not with adding the token: adding the token cannot enforce anything
-on the DHCP server's request path (both planes above are bypassed), so presenting
-it as *the fix* would restate the same false signal in a new place. The token is
-offered only as a way to record that the segment is meant to be served.
+The advisory distinguishes the remedies. For DHCPv4 raw mode, removing an
+interface from the server group is the way to stop direct service; adding
+`dhcp` records intended exposure but cannot constrain Kea's AF_PACKET path.
+For DHCPv6, adding `dhcpv6` is the actual admission needed to serve clients;
+removing the interface from the group stops service altogether.
 
 ### Scope of the bypass argument — do not generalise it (#7489)
 
@@ -166,32 +169,26 @@ A raw-socket consumer bound to `ge-0-0-1` therefore never sees it: wrong device
 for `packet_rcv`'s filter, and no L2 header for a filter that reads the
 ethertype at offset 12 — which Kea's LPF does, as its first test.
 
-The practical consequence: routing DHCPv4 into the dataplane so the gate can
-*admit* it would not gate DHCP, it would take the server off the air. Any
-proposal to enforce host-inbound for a raw-socket service has to be a
-deny-side-only change, leaving the admit path exactly as it is.
+The AF_XDP gate is deny-only for a physical **AF_PACKET** consumer: denied
+packets never reach the kernel, but an admitted LocalDelivery packet is written
+to `xpf-usp0` without its Ethernet header, not passed through on the ingress
+NIC. Therefore routing raw-socket Kea DHCPv4 into the dataplane would take the
+server off the air. The default raw socket also receives before netfilter, so
+the #13925 input rule cannot constrain direct DHCPv4 clients; this bypass is
+specific to that server path and remains why the v4 advisory recommends
+removing an interface from the server group.
 
-The DHCP warning continues to use the same zone-attribution and effective-
-admission helpers, but it remains WARN-only because DHCP's delivery paths are
-not governed by the routing-multicast gate. The #1960 no-brick treatment for
-managed routing is implemented separately by the strict-commit / tolerant-load
-gate above.
+DHCPv6 differs: Kea receives on UDP, so the #13925 `ff02::/16` input gate
+admits the `dhcpv6` service tuple and drops it when the service is absent. The
+#6460 warning remains warn-only but now describes the v4 bypass or v6
+default-deny accurately; neither valid configuration is rejected at commit.
 
-**The DHCP server's bypass is not repaired by routing-multicast enforcement.**
-The v6 leg's `ff02::1:2` group is not a catalog entry. The v4 leg reaches Kea's
-default `raw` socket through the broadcast / AF_PACKET path before the netfilter
-input hook; an input-chain drop cannot constrain a consumer that receives on
-that earlier path (#7318 measured the INPUT drop while Kea still answered).
-
-#7318 shipped the opt-in half: `system services dhcp-local-server
-dhcp-socket-type udp` moves Dhcp4 onto a UDP socket that does traverse the
-input hook, at which point the per-zone `dhcp` token governs the server path
-with no Component A required — because on UDP Kea does not receive broadcast
-at all, so the broadcast-specific accept fall-through has no DHCP listener
-behind it. The DEFAULT is unchanged (`raw`), because udp serves relayed and
-renewing clients only and stops serving directly-attached address-less clients;
-that is a deployment choice, not a bug fix. Whether the default should ever flip
-is still open and deliberately unprejudiced.
+#7318's opt-in `system services dhcp-local-server dhcp-socket-type udp` moves
+Dhcp4 onto a UDP socket that traverses the input hook, where the per-zone
+`dhcp` token governs it. UDP mode serves relayed and renewing clients only; it
+does not serve directly attached address-less clients. The default remains
+`raw` because changing that behavior is a deployment choice, not a fix for the
+AF_PACKET bypass.
 
 ## Protocol → multicast-group catalog
 
@@ -226,26 +223,30 @@ groups belonging to its expanded protocols.
    set; ambiguous and unzoned ingress has no allow rule and falls into the
    catalog-group deny.
 
-2. **Default-deny catalog groups.** For every catalog group, only the exact
-   family/group/protocol tuple admitted by that ingress zone is accepted.
-   Addressless ingress views are still included. Non-catalog traffic keeps its
-   existing behavior; explicit global control exceptions and the documented
-   `any-service` wildcard are preserved.
+2. **Default-deny groups and non-unicast destinations.** For every catalog
+   group, only the exact family/group/protocol tuple admitted by that ingress
+   zone is accepted. The #13925 guard separately scopes IPv4 limited broadcast
+   and IPv6 `ff02::/16` to the zone's effective service/protocol set. Addressless
+   ingress views are still included; global ND/MLD exceptions and the documented
+   `any-service` wildcard are preserved. Other non-catalog traffic keeps its
+   existing behavior.
 
 3. **Policy and conntrack ordering.** Explicit `to-zone junos-host` fine-policy
-   decisions run before multicast admission. The multicast accept/drop rules
+   decisions run before multicast/non-unicast admission. Their accept/drop rules
    run before residual established/related accepts so an old conntrack entry
    cannot bypass a changed zone decision.
 
-4. **Failure paths.** A cold-boot host-inbound fence denies catalog multicast
-   when the main table is unavailable. Persistent DHCP backstops classify the
+4. **Failure paths.** A cold-boot host-inbound fence denies catalog multicast,
+   limited broadcast, and link-scope multicast when the main table is unavailable,
+   while preserving mandatory ND/MLD. Persistent DHCP backstops classify the
    L3 destination with `fib daddr type { local, anycast }`, so unicast or
-   anycast IP in an L2 group frame cannot bypass the guard, while genuine
-   multicast/broadcast IP destinations and MLD retain their fall-through behavior.
-   VRF-slave IPv6 also drops `fe80::/10` directly because strict route lookup can
-   return `unreachable`; the coverage-gap variant excludes retained destinations
-   before applying that fallback. The additive coverage-gap fence leaves
-   retained-main-table multicast policy authoritative; it adds no broad ACCEPT.
+   anycast IP in an L2 group frame cannot bypass the guard. Genuine IP
+   multicast/broadcast and MLD reach the main input chain, where catalog or
+   #13925 zone policy applies. VRF-slave IPv6 also drops `fe80::/10` directly
+   because strict route lookup can return `unreachable`; the coverage-gap
+   variant excludes retained destinations before applying that fallback. The
+   additive coverage-gap fence leaves retained-main-table multicast policy
+   authoritative; it adds no broad ACCEPT.
 
 5. **Kernel/Rust lockstep.** The Go catalog
    (`pkg/config/host_inbound_multicast.go`), zone-view construction

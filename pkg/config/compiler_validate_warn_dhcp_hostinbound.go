@@ -15,12 +15,13 @@ import (
 // family, and ingress zone. DHCP server admission uses the separate
 // `system-services` grammar: DHCP is neither a routing protocol nor rendered
 // into FRR, so the managed-routing check cannot inspect it. In addition,
-// DHCPv4 and DHCPv6 bypass these enforcement surfaces for different reasons
-// described below, so this check needs its own diagnostics.
-//
-// THE MECHANISM, PER FAMILY. The two families are unenforced for DIFFERENT
-// reasons, and the message says which, because an operator who is told the wrong
-// reason will reach for the wrong remedy.
+// DHCPv4's raw AF_PACKET receive path remains outside netfilter; DHCPv6 uses a
+// UDP socket and its ff02::1:2 destination is now covered by the #13925
+// per-ingress-zone non-unicast gate. The same advisory therefore reports a v4
+// bypass but a v6 default-deny when the matching service token is absent.
+
+// THE MECHANISM, PER FAMILY. The two families have different enforcement
+// outcomes, and the diagnostic names the relevant path and remedy.
 //
 //   - DHCPv4 (`system services dhcp-local-server`) — TWO planes have to be
 //     accounted for, and #7489 corrected this entry because it originally named
@@ -45,40 +46,24 @@ import (
 //     below before reusing this argument.
 //
 //   - DHCPv6 (`system services dhcpv6-local-server`) — Kea's Dhcp6 has no raw
-//     mode; it receives on UDP. But a client's Solicit/Request is addressed to
-//     the All_DHCP_Relay_Agents_and_Servers multicast group ff02::1:2. The
-//     #11571 group gate intentionally covers only the routing-multicast catalog,
-//     which does not contain this DHCP destination. The existing per-zone
-//     host-inbound rules for unicast addresses — accepts and the catch-all
-//     deny — therefore match neither this multicast destination, so it continues
-//     to fall through the base chain's `policy accept`
-//     (pkg/nftables/netlink_installer.go) to the host stack.
+//     mode and receives on UDP. A client's Solicit/Request is addressed to the
+//     All_DHCP_Relay_Agents_and_Servers multicast group ff02::1:2. #13925 adds
+//     `ff02::/16` to per-ingress-zone host-inbound enforcement, where the
+//     `dhcpv6` token admits UDP 546/547. Without that token the request is
+//     default-denied before reaching Kea; with it, the service is admitted.
 //
-// WARN-ONLY FOR THIS DHCP PATH. This advisory does not install nft or Rust rules
-// for DHCP; the DHCP server's request paths remain outside the routing-multicast
-// gate. The config is valid Junos and the box already serves it; rejecting would
-// brick a commit on a working DHCP deployment for a condition that has been true
-// since the feature shipped (#1960 no-brick). This function has no error return
-// and takes no `lenient` flag, so the no-brick property is structural rather
-// than a convention a later edit could quietly invert — the same posture the
-// #5619 secure-tunnel-plaintext advisory takes for the same reason.
+// WARN-ONLY DIAGNOSTIC. The advisory does not install nft or Rust rules and
+// never rejects a valid DHCP configuration. DHCPv4's existing raw path remains
+// a known bypass; DHCPv6 now follows the configured host-inbound posture and
+// the warning helps operators avoid accidentally blocking their server.
+// This function has no error return and takes no `lenient` flag, so its no-brick
+// property is structural rather than a convention a later edit could invert.
 //
-// WHY THE OPERATOR NEEDS TELLING. `host-inbound-traffic system-services` is the
-// knob a Junos operator reaches for to bound which segments a host service
-// answers on, and on Junos it DOES bound DHCP. Here the zone stanza commits
-// cleanly, renders, and reads as enforced while the DHCP server answers on every
-// interface its `dhcp-local-server` group binds regardless. An operator who
-// tightens a zone and sees the commit accepted has been told something specific
-// and untrue about their posture — the #5619 doctrine. The concrete exposure is
-// a rogue-lease surface: a group bound to an interface in a zone that omits the
-// token serves addresses, gateway and DNS to anything on that segment.
-//
-// THE REMEDY IS DELIBERATELY NOT "ADD THE TOKEN". Adding the token silences
-// nothing real FOR THE DHCP SERVER'S REQUEST PATH — both planes above are
-// bypassed — so telling the operator to add it as a FIX would be the same false
-// signal in a new place. The message names both moves and labels them: remove
-// the interface from the group (the move that actually stops serving that
-// segment), or add the token to record the intent that the segment IS served.
+// `host-inbound-traffic system-services` is the Junos knob that bounds host
+// services by zone. For v4, the raw socket means adding `dhcp` records intent
+// but cannot constrain direct clients; remove an interface from the server
+// group to stop serving that segment. For v6, omitting `dhcpv6` now makes the
+// host-inbound gate deny the request, while adding it admits UDP delivery.
 //
 // SCOPE, and do not generalise past it (#7489). "The AF_PACKET tap is upstream
 // of netfilter" is an argument about ONE plane and does NOT establish that a
@@ -106,12 +91,13 @@ import (
 
 // dhcpHostInboundFamily is one DHCP family's advisory inputs: the stanza the
 // operator authored, the `system-services` token Junos gates it with, and the
-// per-family sentence explaining why the token is not enforced here.
+// family-specific enforcement outcome.
 type dhcpHostInboundFamily struct {
-	srv     *DHCPLocalServerConfig
-	stanza  string // authored stanza name, for the message
-	token   string // host-inbound system-services token Junos gates this with
-	whyOpen string // family-specific mechanism sentence
+	srv                         *DHCPLocalServerConfig
+	stanza                      string // authored stanza name, for the message
+	token                       string // host-inbound system-services token Junos gates this with
+	mechanism                   string
+	servesDespiteMissingService bool
 }
 
 // validateDHCPServerHostInboundBypassWarnings emits the #6460 advisory. One
@@ -133,20 +119,15 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 			srv:    cfg.System.DHCPServer.DHCPLocalServer,
 			stanza: "dhcp-local-server",
 			token:  "dhcp",
-			whyOpen: "a DHCPv4 client addresses the server at the 255.255.255.255 broadcast, " +
-				"which the XDP shim hands to the kernel without entering the userspace " +
-				"dataplane, and Kea then receives it on an AF_PACKET raw socket delivered " +
-				"BEFORE the netfilter input hook — so neither host-inbound plane sees the " +
-				"request",
+			mechanism:                   "the client sends to the 255.255.255.255 broadcast, which the XDP shim passes to the kernel without entering the AF_XDP userspace dataplane, while Kea's AF_PACKET raw socket receives before the netfilter input hook",
+			servesDespiteMissingService: true,
 		},
 		{
 			srv:    cfg.System.DHCPServer.DHCPv6LocalServer,
 			stanza: "dhcpv6-local-server",
 			token:  "dhcpv6",
-			whyOpen: "a DHCPv6 client addresses the server at the ff02::1:2 multicast group, " +
-				"and every per-zone host-inbound rule is scoped to the zone's UNICAST " +
-				"addresses, so the request matches no rule and falls through the input " +
-				"chain's accept policy",
+			mechanism:                   "the client sends to the ff02::1:2 multicast group, which the #13925 per-zone link-scope gate admits on UDP 546/547 only when this zone permits dhcpv6",
+			servesDespiteMissingService: false,
 		},
 	}
 
@@ -245,15 +226,15 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 					explanation = fmt.Sprintf("the per-interface host-inbound-traffic system-services override omits %q", fam.token)
 					remedy = fmt.Sprintf("add `host-inbound-traffic system-services %s` to interface %q in zone %q.", fam.token, ifn, zname)
 				}
+				effect := "the DHCP server answers on that interface REGARDLESS of the zone's host-inbound set"
+				guidance := fmt.Sprintf("To stop serving that segment, remove %q from group %q; to record that the segment is meant to be served, %s", ifn, gname, remedy)
+				if !fam.servesDespiteMissingService {
+					effect = "host-inbound drops these requests before the DHCP server receives them"
+					guidance = fmt.Sprintf("To admit DHCP service, %s; to stop serving that segment, remove %q from group %q", remedy, ifn, gname)
+				}
 				warnings = append(warnings, fmt.Sprintf(
-					"system services %s group %q serves interface %q (security zone %q) but "+
-						"%s — the "+
-						"DHCP server answers on that interface REGARDLESS of the zone's "+
-						"host-inbound set, because %s (#6460). The zone stanza does not bound "+
-						"it. To stop serving that segment, remove %q from group %q; to record "+
-						"that the segment IS meant to be served, %s",
-					fam.stanza, gname, ifn, zname, explanation, fam.whyOpen,
-					ifn, gname, remedy))
+					"system services %s group %q serves interface %q (security zone %q) but %s because %s (#6460). %s",
+					fam.stanza, gname, ifn, zname, effect, explanation+" — "+fam.mechanism, guidance))
 			}
 		}
 	}
