@@ -144,7 +144,7 @@ func TestBuildOneRuleSnapshotNoSentinelForSupportedApp(t *testing.T) {
 }
 
 func TestUserspacePortSpecRepresentableMirrorsRust(t *testing.T) {
-	ok := []string{"", "1", "443", "65535", "80-90", "https", "ftp-data", "syslog"}
+	ok := []string{"", "1", "443", "65535", "80-90", "0-10", "https", "ftp-data", "syslog"}
 	for _, s := range ok {
 		if !userspacePortSpecRepresentable(s) {
 			t.Errorf("userspacePortSpecRepresentable(%q) = false, want true", s)
@@ -154,7 +154,7 @@ func TestUserspacePortSpecRepresentableMirrorsRust(t *testing.T) {
 	// uppercase forms are NOT recognized by Rust (it would drop the term), so
 	// the gate must reject them here too rather than accept-then-mismatch.
 	bad := []string{
-		"0", "65536", "99999", "5-1", "0-10", "abc", "80-", "-80", "80-abc",
+		"0", "65536", "99999", "5-1", "abc", "80-", "-80", "80-abc",
 		"HTTP", "Https", "DNS",
 	}
 	for _, s := range bad {

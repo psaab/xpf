@@ -9,15 +9,14 @@ import "testing"
 // against validatePortSpec, the gate that runs at commit:
 //
 //	spec     junosHostParsePorts     validatePortSpec
-//	"+80"    [{80 80}], true         rejected (not a number)
-//	"0"      [{0 0}],  true          rejected (must be 1-65535)
-//	"00"     [{0 0}],  true          rejected
-//	"0-100"  [{0 100}], true         rejected
+//	"+80"    rejected                rejected (not a number)
+//	"0"      rejected                rejected (single port is ambiguous)
+//	"00"     rejected                rejected
+//	"0-100"  [{0 100}], true         accepted (explicit range endpoint)
 //
 // Why the divergence matters rather than being cosmetic: the projection this
 // parser feeds sets RenderedPolicyKeys, which is a SUPPRESSION claim — "this
-// deny is enforced, so do not warn about it". For a port-0 spec that claim is
-// false, and the operator's only diagnostic is the one being silenced.
+// deny is enforced, so do not warn about it". Explicit ranges include port 0.
 
 // TestJunosHostPortsAgreeWithTheCommitGate_8597 asserts the AGREEMENT rather
 // than a table of verdicts. A pinned table here would be a second statement of
@@ -29,11 +28,10 @@ import "testing"
 func TestJunosHostPortsAgreeWithTheCommitGate_8597(t *testing.T) {
 	for _, spec := range []string{
 		"80", "443", "1", "65535", "80-90", "1-65535",
-		"+80", "0", "00", "0-100", "65536", "-0", "abc", "80-79",
+		"+80", "0", "00", "65536", "-0", "abc", "80-79",
 		// A non-canonical token INSIDE a range. Without these the range arm
-		// can be reverted to strconv.Atoi and every cell stays green — which
-		// is exactly what the mutation reported before they were added.
-		"+80-90", "80-+90", "0-0", "00-90",
+		// can be reverted to strconv.Atoi and every cell stays green.
+		"+80-90", "80-+90", "00-90",
 	} {
 		_, parserOK := junosHostParsePorts(spec)
 		gateOK := validatePortSpec(spec) == nil
@@ -55,9 +53,8 @@ func TestJunosHostPortsRejectTheMeasuredDivergences_8597(t *testing.T) {
 		why  string
 	}{
 		{"+80", "a leading sign is not a canonical numeric token"},
-		{"0", "port 0 is below the 1..65535 floor the commit gate enforces"},
+		{"0", "port 0 is ambiguous without explicit range syntax"},
 		{"00", "same, in the spelling that also hides behind Atoi"},
-		{"0-100", "the range arm needs the floor too"},
 		{"100-0", "and the ordering check must still fire"},
 		{"+80-90", "a non-canonical token in the LOW half of a range"},
 		{"80-+90", "and in the HIGH half — the two arms are separate parses"},
@@ -70,15 +67,15 @@ func TestJunosHostPortsRejectTheMeasuredDivergences_8597(t *testing.T) {
 
 // TestJunosHostPortsKeepTheirDocumentedShapes_8597 is the OVER-BROAD control.
 //
-// Two things must survive the tightening: the ordinary specs, and the
-// SPACE-SEPARATED multi-port spelling that is this parser's own input shape.
-// validatePortSpec rejects that spelling, so an over-eager "make them agree"
+// The ordinary specs, explicit zero-floor range, and SPACE-SEPARATED
+// multi-port spelling must remain accepted.
 // fix would delete a form this parser exists to accept.
 func TestJunosHostPortsKeepTheirDocumentedShapes_8597(t *testing.T) {
 	for _, tc := range []struct {
 		spec string
 		want []PortRange
 	}{
+		{"0-100", []PortRange{{Lo: 0, Hi: 100}}},
 		{"80", []PortRange{{Lo: 80, Hi: 80}}},
 		{"80-90", []PortRange{{Lo: 80, Hi: 90}}},
 		{"1", []PortRange{{Lo: 1, Hi: 1}}},

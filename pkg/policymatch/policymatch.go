@@ -2751,12 +2751,10 @@ func matchSingleApp(cfg *config.Config, appName string, queryProto uint8, queryP
 	// query dst port must NOT match-any — it must fail closed, mirroring the
 	// runtime. The dataplane keys a single dst-port term in exact_dst_ports and
 	// range terms in range_terms (policy.rs CompiledApplications.matches): an
-	// omitted query port arrives as 0, which a real app port (e.g. 80) never
-	// equals and no app range admits, so the constrained term does NOT match.
-	// The old `&& dstPort > 0` gate skipped the check entirely for an omitted
-	// port, reporting a permit for a port-constrained app no concrete packet
-	// would hit (sibling of #3323's protocol omission). An UNCONSTRAINED dst
-	// port term (app.DestinationPort == "") still matches any port, unchanged.
+	// omitted query port must NOT match-any — it must fail closed, mirroring the
+	// runtime. A concrete L4 port of 0 is allowed when the configured range
+	// explicitly includes it; `l4Present` distinguishes that tuple from a
+	// flowless packet whose extracted port also defaults to 0.
 	if app.DestinationPort != "" {
 		// #5572: a non-first fragment (l4Present == false) has no L4 header, so a
 		// destination-port term fails closed unconditionally — even a term like
@@ -2766,29 +2764,14 @@ func matchSingleApp(cfg *config.Config, appName string, queryProto uint8, queryP
 		if !l4Present {
 			return false
 		}
-		if dstPort <= 0 || !portMatches(app.DestinationPort, dstPort) {
+		if dstPort < 0 || !portMatches(app.DestinationPort, dstPort) {
 			return false
 		}
 	}
-	// #3415: when the application term CONSTRAINS a source port, an OMITTED query
-	// source port must NOT match-any — it must fail closed, mirroring the runtime
-	// and the now fail-closed protocol (#3323) and destination-port (#3330)
-	// siblings above. The runtime always carries a concrete source port and the
-	// dataplane gates a source-port-constrained app on it (appid.matchTuple ->
-	// portInSpec(srcPort, appSrcPort); policy.rs CompiledApplications.matches): a
-	// packet whose source port differs from the app's `source-port` never
-	// matches. An omitted query source port arrives as 0, which a real app source
-	// port (e.g. 5000) never equals and no app range admits, so the constrained
-	// term does NOT match. The old `&& srcPort > 0` gate skipped the check for an
-	// omitted port — #3107's deliberate diagnostic stance — and over-certified a
-	// permit for a source-port-bearing app no concrete packet would hit. This
-	// supersedes that #3107 absent-source-port contract: source port is ephemeral
-	// and rarely known, but a SOURCE-PORT-CONSTRAINED app is rare, and certifying
-	// a permit/deny for a broader class of packets than the runtime enforces is
-	// the exact over-match #3323/#3330 closed. An UNCONSTRAINED source-port term
-	// (app.SourcePort == "") still matches any port, unchanged — the common case
-	// (no source-port constraint) is unaffected, so a query omitting source port
-	// against an ordinary destination-port app behaves exactly as before.
+	// #3415: when the application term CONSTRAINS a source port, an omitted
+	// query source port must fail closed, mirroring the runtime. A concrete L4
+	// source port of 0 is valid when the configured range includes it, while
+	// `l4Present` below distinguishes flowless packets with no extracted port.
 	if app.SourcePort != "" {
 		// #5572: a non-first fragment has no L4 header — a source-port term fails
 		// closed unconditionally, the source-side sibling of the destination-port
@@ -2796,7 +2779,7 @@ func matchSingleApp(cfg *config.Config, appName string, queryProto uint8, queryP
 		if !l4Present {
 			return false
 		}
-		if srcPort <= 0 || !portMatches(app.SourcePort, srcPort) {
+		if srcPort < 0 || !portMatches(app.SourcePort, srcPort) {
 			return false
 		}
 	}

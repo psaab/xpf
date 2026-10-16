@@ -9002,6 +9002,21 @@ fn parse_port_spec_rejects_signed_3606() {
         }])
     );
 }
+#[test]
+fn parse_port_spec_preserves_zero_range_floor_13920() {
+    let range = parse_port_spec("0-1024").expect("zero-floor range parses");
+    assert_eq!(range, vec![PortRange { low: 0, high: 1024 }]);
+    assert!(port_ranges_match(&range, 0), "port 0 belongs to 0-1024");
+    assert!(port_ranges_match(&range, 1024), "range upper bound is inclusive");
+    assert!(!port_ranges_match(&range, 1025), "port above range must not match");
+
+    let only_zero = parse_port_spec("0-0").expect("explicit 0-0 range parses");
+    assert!(port_ranges_match(&only_zero, 0));
+    assert!(!port_ranges_match(&only_zero, 1));
+    // A bare zero still is not a port constraint spelling; explicit range
+    // syntax is what disambiguates the literal zero from an omitted field.
+    assert!(parse_port_spec("0").is_none());
+}
 
 // === #3783: configured_zone_pairs wildcard/global histogram-slot expansion ===
 

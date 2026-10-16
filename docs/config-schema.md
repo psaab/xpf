@@ -15575,26 +15575,19 @@ silent, alias pins on a foreign protocol or custom port still warn, a globally
 disabled ALG warns naming the `security alg <proto> disable` knob (service
 port, no port, and a spanning range), and an unrelated disable stays silent.
 
-### #4336 — application `source-port` / `destination-port` `0-N` range floor
+### #4336 / #13920 — application `source-port` / `destination-port` `0-N` range floor
 
 Junos accepts `0` as the FLOOR of an application port range. Real vSRX
-multi-term application defs routinely split a port space as `0-N` /
-`N+1-65535` (e.g. FaceTime `term 0_41640 { source-port 0-41640; }`). xpf
-hard-rejected the low half with `source-port: invalid port 0: must be
-1-65535` — a pure drop-in blocker. `resolveAppPort` (`compiler_applications.go`,
-the single canonicalization chokepoint for BOTH direct-match and inline-term
-ports) now normalizes a range floor of `0` to `1`. Port 0 never appears on the
-wire, so `0-N` matches identically to `1-N`; normalizing at this one point keeps
-the config, `validatePortSpec`, the `userspacePortSpecRepresentable` #2124
-capability gate, and the Rust `parse_port_spec` all in agreement (the latter two
-both reject a raw `0` floor, so accepting `0-N` WITHOUT normalizing would create
-a commit-succeeds / apply-fails split). A bare single port `0` (no hyphen) stays
-invalid, matching Junos, and an out-of-range / non-numeric endpoint still
-hard-rejects on the referenced (strict) path. Regression coverage:
-`pkg/config/compiler_application_port_range_zero_4336_test.go` (source-port,
-destination-port, and inline-term `0-N` normalized to `1-N`; normal `1-N`
-unchanged; garbage still rejected) plus the `FaceTime-0_41640` assertion in
-`TestMultiTermApplication`.
+multi-term application definitions split a port space as `0-N` /
+`N+1-65535` (e.g. FaceTime `source-port 0-41640`). The application compiler,
+strict validator, Go capability gate, and Rust policy parser preserve the zero
+floor: port 0 is present in valid TCP/UDP tuples and a deny over `0-N` must
+match it. Previously `resolveAppPort` rewrote `0-N` to `1-N`, allowing a
+port-0 tuple to miss a configured deny and fall through to the default policy.
+A bare single port `0` stays invalid; `0-0` remains unrepresentable in the
+application-identification catalog because `(0,0)` there is the unconstrained
+sentinel. Regression coverage includes both application port dimensions,
+inline terms, Go policy matching, and Rust range parsing.
 
 ### #3366 — application EITHER direct OR term-based; conflicting duplicate term leaf
 

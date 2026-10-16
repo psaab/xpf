@@ -1927,14 +1927,14 @@ func TestMultiTermApplication(t *testing.T) {
 	if ft.DestinationPort != "3478-3497" {
 		t.Errorf("FaceTime dest-port: got %q, want 3478-3497", ft.DestinationPort)
 	}
-	// #4336: the `0-41640` low-half term is accepted (Junos allows 0 as a range
-	// floor) and its floor is normalized to 1 so it is dataplane-representable.
+	// #4336 / #13920: the `0-41640` low-half term preserves its literal floor
+	// so a policy deny over the range includes port-0 traffic.
 	ft0 := cfg.Applications.Applications["FaceTime-0_41640"]
 	if ft0 == nil {
 		t.Fatal("missing term app FaceTime-0_41640")
 	}
-	if ft0.SourcePort != "1-41640" {
-		t.Errorf("FaceTime-0_41640 source-port: got %q, want 1-41640 (0 floor normalized)", ft0.SourcePort)
+	if ft0.SourcePort != "0-41640" {
+		t.Errorf("FaceTime-0_41640 source-port: got %q, want 0-41640 (literal floor preserved)", ft0.SourcePort)
 	}
 	if _, isSet := cfg.Applications.ApplicationSets["simple-app"]; isSet {
 		t.Error("simple-app should NOT be an application-set")

@@ -611,12 +611,7 @@ func rustParsedProtocolBeforeFix(proto string) bool {
 // this gate accepts but Rust rejects would silently drop the term and collapse
 // the rule to match-any (the same fail-open this fix closes). Empty means "no
 // port constraint" (ok); known service aliases resolve to a single port; a bare
-// number must be 1..65535; a low-high range needs low > 0 && low <= high.
-//
-// The service-alias match is CASE-SENSITIVE on the raw spec, mirroring Rust
-// `parse_port_spec` exactly (it matches `"http"` literally and does NOT
-// lowercase). Lowercasing here would accept e.g. "HTTP" that Rust would reject
-// and then drop — the precise mismatch that reopens the fail-open.
+// number must be 1..65535; a low-high range may start at 0 and needs low <= high.
 func userspacePortSpecRepresentable(spec string) bool {
 	if spec == "" {
 		return true
@@ -632,7 +627,7 @@ func userspacePortSpecRepresentable(spec string) bool {
 		if errL != nil || errH != nil {
 			return false
 		}
-		return l != 0 && l <= h
+		return l <= h
 	}
 	p, err := strconv.ParseUint(spec, 10, 16)
 	if err != nil {

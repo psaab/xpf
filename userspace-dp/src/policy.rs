@@ -4791,7 +4791,7 @@ fn parse_port_spec(spec: &str) -> Option<Vec<PortRange>> {
     if let Some((low, high)) = normalized.split_once('-') {
         let low = parse_port_u16(low)?;
         let high = parse_port_u16(high)?;
-        if low == 0 || low > high {
+        if low > high {
             return None;
         }
         return Some(vec![PortRange { low, high }]);

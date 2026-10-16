@@ -71,11 +71,12 @@ func TestBuildCatalogPortZeroSentinel_5194(t *testing.T) {
 		}
 	}
 
-	// A 0-N range is NARROWED to 1-N (port 0 is reserved / never on the wire) —
-	// it stays emittable but its low bound is 1, not the sentinel 0.
+	// A 0-N range stays emittable with its literal low bound. The Rust
+	// catalog matcher treats the nonzero high bound as the discriminator
+	// from the (0,0) unconstrained sentinel.
 	lz := entriesByName["lowzerorng"]
-	if len(lz) != 1 || lz[0].DstPortLow != 1 || lz[0].DstPortHigh != 1024 {
-		t.Fatalf("lowzerorng entry = %+v, want a single tcp 1-1024 entry (0 narrowed to 1)", lz)
+	if len(lz) != 1 || lz[0].DstPortLow != 0 || lz[0].DstPortHigh != 1024 {
+		t.Fatalf("lowzerorng entry = %+v, want a single tcp 0-1024 entry", lz)
 	}
 
 	// A bare source-port 0 is likewise the unconstrained-SOURCE sentinel; the app
