@@ -464,22 +464,43 @@ pub(crate) fn extract_screen_info(
                     //   offset (13 bits, top) | reserved (2 bits) | M (1 bit, lowest)
                     // Mirrors BPF #866: MF=0x1, offset=0xFFF8.
                     let frag_off = u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]);
-                    info.ip_frag_off = frag_off;
-                    info.is_fragment = (frag_off & 0x1) != 0 || (frag_off & 0xFFF8) != 0;
-                    info.is_first_fragment = (frag_off & 0x1) != 0 && (frag_off & 0xFFF8) == 0;
-                    // #2293: payload-region bytes that precede THIS
-                    // fragment's data — every extension header up to and
-                    // including this 8-byte fragment header. `offset + 8`
-                    // is the frame position of the fragment payload;
-                    // subtract the base-header end (`l3_offset + 40`) to
-                    // get the payload-region offset of the fragment data.
-                    // `ip_payload_len - frag_data_off` is then the L4/data
-                    // bytes this fragment carries. Saturating: a hostile
-                    // chain whose declared payload_len is smaller than the
-                    // headers we walked yields 0 contribution, never an
-                    // underflow.
-                    info.frag_data_off =
-                        ((offset + 8).saturating_sub(l3_offset + 40)) as u16;
+                    // #14129: STICKY fragment status across a repeated
+                    // Fragment header chain. Canonical rule mirrors the
+                    // forwarding/tracker doctrines (#10661): a chain
+                    // containing ANY non-ATOMIC Fragment header is a
+                    // fragment, and the FIRST non-ATOMIC sighting governs
+                    // ip_frag_off/frag_data_off. An ATOMIC header (offset 0,
+                    // M 0) is a no-op (RFC 8200 4.5) and must never clear a
+                    // real fragment observed earlier, nor become the
+                    // governing header when a real one follows. Previously
+                    // the second sighting OVERWROTE
+                    // is_fragment/is_first_fragment/ip_frag_off/
+                    // frag_data_off, so [real-first][ATOMIC] reported
+                    // non-fragment and suppressed syn-frag / icmp-fragment
+                    // (and ping-of-death / teardrop sizing) even though a
+                    // real first fragment and terminal L4 bytes were
+                    // present. Keep the first non-ATOMIC sighting's fields;
+                    // ignore ATOMIC sightings entirely when one exists.
+                    // One every-sighting refinement, matching the forwarding
+                    // L4-refusal verdict: a later non-zero offset downgrades
+                    // is_first_fragment to false (terminal bytes are not a
+                    // trustworthy L4 header), without replacing the
+                    // governing header's sizing fields.
+                    let is_atomic = (frag_off & 0xFFF8) == 0 && (frag_off & 0x1) == 0;
+                    if !is_atomic {
+                        if !info.is_fragment {
+                            info.ip_frag_off = frag_off;
+                            info.is_fragment = true;
+                            info.is_first_fragment =
+                                (frag_off & 0x1) != 0 && (frag_off & 0xFFF8) == 0;
+                            // #2293: payload-region bytes that precede THIS
+                            // (governing) fragment's data.
+                            info.frag_data_off =
+                                ((offset + 8).saturating_sub(l3_offset + 40)) as u16;
+                        } else if (frag_off & 0xFFF8) != 0 {
+                            info.is_first_fragment = false;
+                        }
+                    }
                     // #3120: a NON-FIRST fragment (fragment offset > 0)
                     // genuinely carries no L4 header in THIS packet — the
                     // TCP header lives in the first fragment — so stopping
