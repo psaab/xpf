@@ -460,6 +460,32 @@ func parseAddressBookEntries(node *Node, ab *AddressBook) {
 		}
 		return idx
 	}
+	// #14200: a container-shaped `address { h1 10.0.0.1/32; }` /
+	// `address-set { s1 { ... } }` carries NO name on the entry node itself
+	// (Keys==["address"]/["address-set"]); the hierarchical schema descent
+	// admits it, but the entries below expect the name at Keys[1]. Such a node
+	// must be recorded exactly like an unknown keyword (strict reject via
+	// validateAddressSetMembersDefinedStrict; tolerant load warns and
+	// quarantines same-name references via CollidingNames / zone-local fold),
+	// never silently `continue`d — otherwise a zone-local reference falls back
+	// to a broader same-name global twin. Names are recovered from immediate
+	// children: a leaf child's Keys[0] is the entry name; a non-leaf child's
+	// Keys are the name (and any packed tail, mirroring the default arm).
+	recordNameless := func(child *Node) {
+		entry := AddressBookUnknownEntry{Keyword: child.Name()}
+		for _, nested := range child.Children {
+			entry.Names = append(entry.Names, nested.Keys...)
+		}
+		ab.UnknownBookEntries = append(ab.UnknownBookEntries, entry)
+		if len(entry.Names) > 0 {
+			if ab.CollidingNames == nil {
+				ab.CollidingNames = make(map[string]struct{})
+			}
+			for _, name := range entry.Names {
+				ab.CollidingNames[name] = struct{}{}
+			}
+		}
+	}
 	for _, child := range node.Children {
 		switch child.Name() {
 		case "address":
@@ -470,6 +496,7 @@ func parseAddressBookEntries(node *Node, ab *AddressBook) {
 			// address keeps its prefix and a non-prefix sub-stanza never
 			// overwrites Value (#2222).
 			if len(child.Keys) < 2 {
+				recordNameless(child)
 				continue
 			}
 			name := child.Keys[1]
@@ -492,7 +519,11 @@ func parseAddressBookEntries(node *Node, ab *AddressBook) {
 			// name the `address` case was hardened to above (#2222). Junos
 			// unions same-named address-sets, so dedup members (first-seen
 			// order) rather than accumulating duplicates.
-			if len(child.Keys) >= 2 {
+			if len(child.Keys) < 2 {
+				recordNameless(child)
+				continue
+			}
+			{
 				name := child.Keys[1]
 				as := ab.AddressSets[name]
 				if as == nil {
