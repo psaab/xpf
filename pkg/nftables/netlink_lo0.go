@@ -26,6 +26,19 @@ import (
 // into the plan, mirroring buildLo0FilterPayload. The caller has created the
 // table + `input` chain (priority nftLo0FilterPriority, policy accept).
 func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
+	// IPv4 is reassembled by the kernel at prerouting before packets reach
+	// the input hook. Therefore the fragment offset/MF field that the lo0
+	// input filter would inspect has already been cleared. Refuse the whole
+	// candidate atomically rather than installing a filter whose authored
+	// is-fragment term can never match (#13955). IPv6 fragment-header matching
+	// remains available on input and is intentionally unaffected.
+	for _, term := range spec.V4Terms {
+		if term.IsFragment {
+			p.fail(fmt.Errorf("lo0 filter term %q: IPv4 is-fragment cannot be enforced after kernel defragmentation at the input hook (#13955)",
+				term.Name))
+			return
+		}
+	}
 	seen := map[string]bool{}
 	declareCounters := func(terms []Lo0FilterTerm) {
 		for _, t := range terms {
@@ -49,6 +62,7 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 		buildLo0TermNetlink(p, t, famV6)
 	}
 }
+
 
 // buildLo0TermNetlink lowers one filter term to 0, 1, or 2 kernel rules,
 // mirroring nftRulesFromTerm.

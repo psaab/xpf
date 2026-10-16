@@ -1098,26 +1098,21 @@ func TestNftRuleFromTermPortExcept(t *testing.T) {
 	}
 }
 
-// TestNftRuleFromTermFragment covers the #3231 fix for the IPv6 is-fragment
-// bug (071-09). The ip4 chain emits the IPv4 fragment-offset test; the ip6
-// chain must emit the IPv6 fragment extension-header test (`exthdr frag
-// exists`), NOT `ip frag-off`, which is an inet6 syntax error that rejects the
-// whole ruleset and fails the lo0 filter OPEN.
+// TestNftRuleFromTermFragment pins #3231 IPv6 parity and #13955's fail-closed
+// IPv4 input-hook handling. IPv4 fragments are already reassembled before the
+// lo0 input hook; the nft text mirror therefore refuses the atomic update
+// rather than rendering a predicate that can never match.
 func TestNftRuleFromTermFragment(t *testing.T) {
 	prefixLists := map[string]*config.PrefixList{}
-
 	term := &config.FirewallFilterTerm{
 		Name:       "drop-frags",
 		IsFragment: true,
 		Action:     "discard",
 	}
-
 	rule := nftRule(t, term, "ip", prefixLists)
-	want := "ip frag-off & 0x1fff != 0 drop"
-	if rule != want {
-		t.Errorf("ip4 fragment:\n got:  %s\n want: %s", rule, want)
+	if rule != nftRefuseIPv4Lo0Fragment {
+		t.Fatalf("IPv4 fragment rule = %q, want fail-closed refusal %q", rule, nftRefuseIPv4Lo0Fragment)
 	}
-
 	rule6 := nftRule(t, term, "ip6", prefixLists)
 	want6 := "exthdr frag exists drop"
 	if rule6 != want6 {
