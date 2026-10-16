@@ -539,7 +539,8 @@ pub(super) fn build_nat64_l3_packet_for_slow_path(
     }
     let l3_offset = frame_l3_offset(frame)?;
     let packet = frame.get(l3_offset..)?;
-    let (translated_family, translated_protocol, mut out) = match meta.addr_family as i32 {
+    let (translated_family, translated_protocol, mut out, non_first) = match meta.addr_family as i32
+    {
         libc::AF_INET6 => {
             let src_v4 = match decision.nat.rewrite_src {
                 Some(IpAddr::V4(address)) => address,
@@ -549,41 +550,69 @@ pub(super) fn build_nat64_l3_packet_for_slow_path(
                 Some(IpAddr::V4(address)) => address,
                 _ => return None,
             };
+            // #14114: a non-first fragment has no L4 header, so translate
+            // L3-only and preserve Hop Limit for the delegated kernel FIB,
+            // exactly as the whole-packet slow path preserves it. The
+            // ordinary non-first translator decrements, so the slow path
+            // uses its preserve-TTL twin.
+            let non_first = is_non_first_fragment(packet, libc::AF_INET6 as u8);
             let mut out = vec![0; packet.len()];
-            let written = crate::nat64::write_v6_to_v4_into_preserve_ttl(
-                &mut out,
-                packet,
-                src_v4,
-                dst_v4,
-                no_v6_frag_header,
-            )?;
+            let written = if non_first {
+                crate::nat64::write_v6_to_v4_nonfirst_into_preserve_ttl(
+                    &mut out, packet, src_v4, dst_v4,
+                )?
+            } else {
+                crate::nat64::write_v6_to_v4_into_preserve_ttl(
+                    &mut out,
+                    packet,
+                    src_v4,
+                    dst_v4,
+                    no_v6_frag_header,
+                )?
+            };
             out.truncate(written);
             let protocol = if meta.protocol == PROTO_ICMPV6 {
                 PROTO_ICMP
             } else {
                 meta.protocol
             };
-            (libc::AF_INET as u8, protocol, out)
+            (libc::AF_INET as u8, protocol, out, non_first)
         }
         libc::AF_INET => {
             let reverse = nat64_reverse?;
+            let non_first = is_non_first_fragment(packet, libc::AF_INET as u8);
             let mut out = vec![0; packet.len().saturating_add(40)];
-            let written = crate::nat64::write_v4_to_v6_into_preserve_ttl(
-                &mut out,
-                packet,
-                reverse.orig_dst_v6,
-                reverse.orig_src_v6,
-            )?;
+            let written = if non_first {
+                crate::nat64::write_v4_to_v6_nonfirst_into_preserve_ttl(
+                    &mut out,
+                    packet,
+                    reverse.orig_dst_v6,
+                    reverse.orig_src_v6,
+                )?
+            } else {
+                crate::nat64::write_v4_to_v6_into_preserve_ttl(
+                    &mut out,
+                    packet,
+                    reverse.orig_dst_v6,
+                    reverse.orig_src_v6,
+                )?
+            };
             out.truncate(written);
             let protocol = if meta.protocol == PROTO_ICMP {
                 PROTO_ICMPV6
             } else {
                 meta.protocol
             };
-            (libc::AF_INET6 as u8, protocol, out)
+            (libc::AF_INET6 as u8, protocol, out, non_first)
         }
         _ => return None,
     };
+    // A non-first fragment's payload bytes sit where an L4 header would be;
+    // rewriting them as ports would corrupt the datagram. The L3-only
+    // translators already copied them verbatim.
+    if non_first {
+        return Some(out);
+    }
     let l4_offset = packet_rel_l4_offset(&out, translated_family)?;
     apply_nat64_port_translation_at(
         &mut out,
