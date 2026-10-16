@@ -68,6 +68,7 @@ impl SchedulerHeartbeatLease {
         if self.version.load(Ordering::Acquire) == 0 {
             return false;
         }
+        let received_at_ns = self.received_at_ns.load(Ordering::Acquire);
         // A worker may capture `now_ns` just before a concurrent heartbeat is
         // accepted, then observe that heartbeat's newer receipt stamp. That
         // does not mean the lease is expired: its timestamp proves a heartbeat
