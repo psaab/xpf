@@ -119,13 +119,20 @@ fn vmin_r7_rejoiner_does_not_trap_surviving_peer() {
     // Survivor (worker 0) publishes its real, terabytes-ahead vtime.
     floor.slots[0].publish(FRONTIER);
 
-    // Rejoiner (worker 1) rebuilds + seeds + performs its first publish.
+    // Rejoiner (worker 1) rebuilds + seeds, then has a live bucket before
+    // publishing its committed frontier. The guard intentionally skips
+    // empty workers so rejoin tests model a participating worker explicitly.
     let mut rejoiner = test_cos_runtime_with_queues(10_000_000_000 / 8, vec![r7_exact_queue(0)]);
     let fast = vec![test_queue_fast_path_for_promotion_with_floor(
         true,
         Some(Arc::clone(&floor)),
     )];
     apply_cos_queue_flow_fair_promotion(&mut rejoiner, &fast, 1);
+    account_cos_queue_flow_enqueue(
+        &mut rejoiner.queues[0],
+        Some(&test_session_key(1234, 5201)),
+        1500,
+    );
     publish_committed_queue_vtime(Some(&rejoiner.queues[0]));
     // Post-fix the rejoiner's slot reflects the frontier, not ~0.
     assert_eq!(

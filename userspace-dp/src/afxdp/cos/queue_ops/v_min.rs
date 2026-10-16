@@ -90,7 +90,17 @@ pub(in crate::afxdp) fn publish_committed_queue_vtime(queue: Option<&CoSQueueRun
     let Some(slot) = floor.slots.get(queue.v_min.worker_id as usize) else {
         return;
     };
-    slot.publish(ff.queue_vtime);
+    if ff.active_flow_buckets == 0 {
+        // #13657 (D8-04): last-bucket drain vacated this slot via
+        // `account_cos_queue_flow_dequeue` (#941 A). A post-settle publish
+        // must not resurrect it with the frozen queue_vtime — that would
+        // leave this idle worker phantom-participating in peers' V_min
+        // reduction. Same guard as the pop-time vacate: no active buckets,
+        // no participation. Re-vacate (idempotent) instead of publishing.
+        slot.vacate();
+    } else {
+        slot.publish(ff.queue_vtime);
+    }
 }
 
 #[inline]
@@ -120,8 +130,10 @@ pub(in crate::afxdp) fn cos_queue_v_min_consume_suspension(queue: &mut CoSQueueR
         // because a prior hard-cap armed suspension. Pre-fix these were
         // uncounted, so telemetry read "brake idle" while it was actually
         // suppressed ~99% of the time under persistent skew.
-        queue.v_min.v_min_suspended_batches_scratch =
-            queue.v_min.v_min_suspended_batches_scratch.saturating_add(1);
+        queue.v_min.v_min_suspended_batches_scratch = queue
+            .v_min
+            .v_min_suspended_batches_scratch
+            .saturating_add(1);
         return true;
     }
     false
