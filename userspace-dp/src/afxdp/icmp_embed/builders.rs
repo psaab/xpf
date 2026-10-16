@@ -325,7 +325,7 @@ pub(in crate::afxdp::icmp_embed) fn build_nat_reversed_icmp_error_v6(
                 words_old.push(old_id);
                 words_new.push(icmp_match.original_src_port);
             }
-            if !words_old.is_empty() && cur_csum != 0 {
+            if !words_old.is_empty() {
                 let mut nc = checksum16_adjust(cur_csum, &words_old, &words_new);
                 if nc == 0 { nc = 0xffff; }
                 pkt.get_mut(emb_l4_offset+2..emb_l4_offset+4)?.copy_from_slice(&nc.to_be_bytes());
@@ -623,7 +623,7 @@ pub(in crate::afxdp::icmp_embed) fn build_snat_outbound_icmp_error_v6(
                     }
                 }
             }
-            if !wo.is_empty() && cur_csum != 0 {
+            if !wo.is_empty() {
                 let mut nc = checksum16_adjust(cur_csum, &wo, &wn);
                 if nc == 0 { nc = 0xffff; }
                 pkt.get_mut(emb_l4_offset+2..emb_l4_offset+4)?.copy_from_slice(&nc.to_be_bytes());

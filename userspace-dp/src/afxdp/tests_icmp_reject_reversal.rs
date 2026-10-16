@@ -2088,3 +2088,63 @@ fn icmp_embed_v6_addr_delta_without_port_rewrite_13650() {
         "#13650: outbound SNAT without port rewrite must still repair quoted checksum for dst delta");
     assert_eq!(&out2[emb_l4 + 4..emb_l4 + 6], &0x1234u16.to_be_bytes());
 }
+/// #13773 (regression from #13650): a genuinely-zero quoted ICMPv6 checksum
+/// is a legitimate checksum value (RFC 4443 has no zero-means-omitted rule),
+/// so address/identifier deltas after NAT MUST apply to it.
+#[test]
+fn icmp_embed_v6_zero_quoted_checksum_adjusted_13773() {
+    let router6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let snat6: Ipv6Addr = "2001:db8:1::100".parse().unwrap();
+    let client6: Ipv6Addr = "fd00::102".parse().unwrap();
+    let server6: Ipv6Addr = "2001:db8:2::1".parse().unwrap();
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    let emb_l4 = 14 + 40 + 8 + 40;
+    let make_zero_frame = || {
+        let mut f = build_icmpv6_te_frame(router6, snat6, server6, snat_port, 80, PROTO_ICMPV6);
+        f[emb_l4 + 2..emb_l4 + 4].copy_from_slice(&[0, 0]);
+        let mut found = None;
+        for seq in 0u32..=0xffff {
+            f[emb_l4 + 6..emb_l4 + 8].copy_from_slice(&(seq as u16).to_be_bytes());
+            if checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &f[emb_l4..emb_l4 + 8]) == 0 {
+                found = Some(seq as u16);
+                break;
+            }
+        }
+        let seq = found.expect("a seq yielding zero quoted checksum exists");
+        f[emb_l4 + 6..emb_l4 + 8].copy_from_slice(&seq.to_be_bytes());
+        f[emb_l4 + 2..emb_l4 + 4].copy_from_slice(&[0, 0]);
+        assert_eq!(checksum16_ipv6(snat6, server6, PROTO_ICMPV6, &f[emb_l4..emb_l4 + 8]), 0,
+            "fixture: quoted checksum genuinely zero");
+        f
+    };
+    // Reverse: adjust source address and echo identifier.
+    let frame = make_zero_frame();
+    let mut m = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
+    m.embedded_proto = PROTO_ICMPV6;
+    m.original_dst = IpAddr::V6(server6);
+    let out = build_nat_reversed_icmp_error_v6(&frame, icmpv6_te_meta(54), &m).expect("v6 reverse builds");
+    let mut wo = crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()).to_vec();
+    wo.push(snat_port);
+    let mut wn = crate::afxdp::frame::ipv6_words_from_octets(client6.octets()).to_vec();
+    wn.push(client_port);
+    let mut exp = checksum16_adjust(0, &wo, &wn);
+    if exp == 0 { exp = 0xffff; }
+    assert_ne!(exp, 0);
+    assert_eq!(u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]), exp,
+        "#13773: reverse builder must adjust a genuinely-zero quoted ICMPv6 checksum");
+    // Outbound: adjust destination address only (identifier unchanged).
+    let frame2 = make_zero_frame();
+    let mut m2 = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
+    m2.embedded_proto = PROTO_ICMPV6;
+    m2.original_dst = IpAddr::V6(server6);
+    m2.nat.rewrite_src_port = Some(snat_port);
+    let out2 = build_snat_outbound_icmp_error_v6(&frame2, icmpv6_te_meta(54), &m2).expect("v6 snat builds");
+    let mut exp2 = checksum16_adjust(0,
+        &crate::afxdp::frame::ipv6_words_from_octets(server6.octets()),
+        &crate::afxdp::frame::ipv6_words_from_octets(snat6.octets()));
+    if exp2 == 0 { exp2 = 0xffff; }
+    assert_ne!(exp2, 0);
+    assert_eq!(u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]), exp2,
+        "#13773: SNAT-outbound builder must adjust a genuinely-zero quoted ICMPv6 checksum");
+}
