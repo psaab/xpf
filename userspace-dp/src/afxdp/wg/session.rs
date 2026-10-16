@@ -130,11 +130,10 @@ pub(crate) struct WgSession {
     /// Receiver index that *we* put in the WG data header when
     /// sending to the peer. Peer-chosen at handshake time.
     pub(crate) peer_index: u32,
-    /// Monotonic outbound counter. The transmit lock serializes
-    /// reservation through successful AEAD so failed encryption does
-    /// not consume a nonce and concurrent workers never reuse one.
+    /// Monotonic outbound counter. Values are atomically reserved before
+    /// encryption; a failed encryption may leave a nonce gap, but it can
+    /// never cause nonce reuse.
     pub(crate) tx_counter: AtomicU64,
-    pub(crate) tx_lock: Mutex<()>,
     /// Replay tracker for inbound packets.
     pub(crate) replay: Mutex<ReplayState>,
     /// Stored so the engine can route demuxed packets back through
@@ -241,7 +240,6 @@ impl WgSession {
             local_index,
             peer_index,
             tx_counter: AtomicU64::new(0),
-            tx_lock: Mutex::new(()),
             replay: Mutex::new(ReplayState::default()),
             peer_pubkey,
             confirmed: AtomicBool::new(confirmed),
@@ -620,6 +618,92 @@ mod session_tests {
         assert_eq!(KEEPALIVE_TIMEOUT_NS, 10_000_000_000);
         assert_eq!(NO_REPLY_REINIT_NS, 15_000_000_000);
         assert_eq!(RECV_REKEY_HORIZON_NS, 165_000_000_000);
+    }
+
+    #[test]
+    fn concurrent_reserve_next_counter_reserves_contiguous_unique_range() {
+        // #13899: many workers sharing one session's transmit counter
+        // must reserve disjoint, contiguous values. The counter handed
+        // to ChaCha20-Poly1305 is the nonce, so a duplicate is a nonce
+        // reuse. The reservation must be a single atomic
+        // fetch-update; a read-check-store split lets two workers
+        // observe the same start value and both encrypt with it.
+        const THREADS: u64 = 8;
+        const PER_THREAD: u64 = 257;
+        let counter = AtomicU64::new(0);
+        let counter_ref = &counter;
+        let start = std::sync::Barrier::new(THREADS as usize);
+        let start_ref = &start;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..THREADS {
+                handles.push(scope.spawn(move || {
+                    start_ref.wait();
+                    let mut mine = Vec::with_capacity(PER_THREAD as usize);
+                    for _ in 0..PER_THREAD {
+                        mine.push(
+                            reserve_next_counter(counter_ref).expect("fresh counter has space"),
+                        );
+                    }
+                    mine
+                }));
+            }
+            let mut reserved: Vec<u64> = handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("reservation worker panicked"))
+                .collect();
+            reserved.sort_unstable();
+            let expected: Vec<u64> = (0..THREADS * PER_THREAD).collect();
+            assert_eq!(
+                reserved, expected,
+                "concurrent reservations must be unique and contiguous"
+            );
+            assert_eq!(
+                counter.load(Ordering::Relaxed),
+                THREADS * PER_THREAD,
+                "every reservation must advance the counter exactly once"
+            );
+        });
+    }
+
+    #[test]
+    fn concurrent_reserve_at_ceiling_grants_one_tail_then_refuses() {
+        // #13899: the ceiling is also a reservation. Exactly one
+        // worker may take the last value below REJECT_AFTER_MESSAGES;
+        // the rest must observe the ceiling, and the counter must
+        // stop there instead of wrapping or over-advancing.
+        const THREADS: u64 = 8;
+        const PER_THREAD: u64 = 64;
+        let start_value = REJECT_AFTER_MESSAGES - 1;
+        let counter = AtomicU64::new(start_value);
+        let counter_ref = &counter;
+        let start = std::sync::Barrier::new(THREADS as usize);
+        let start_ref = &start;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..THREADS {
+                handles.push(scope.spawn(move || {
+                    start_ref.wait();
+                    (0..PER_THREAD)
+                        .filter_map(|_| reserve_next_counter(counter_ref))
+                        .collect::<Vec<u64>>()
+                }));
+            }
+            let granted: Vec<u64> = handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("ceiling reservation worker panicked"))
+                .collect();
+            assert_eq!(
+                granted,
+                vec![start_value],
+                "exactly one worker may reserve the last counter below the ceiling"
+            );
+            assert_eq!(
+                counter.load(Ordering::Relaxed),
+                REJECT_AFTER_MESSAGES,
+                "counter must stop at REJECT_AFTER_MESSAGES under contention"
+            );
+        });
     }
 
     #[test]
