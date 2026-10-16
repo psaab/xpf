@@ -215,11 +215,11 @@ func TestTheRecursionBoundRefusesRatherThanWavesThrough9939(t *testing.T) {
 	quoted := []bool{false, false, true}
 
 	// BELOW the limit: the payload is adjudicated and denied on its merits.
-	if err := authorizeEmbeddedChangeConfig9939(cfg, "planter", parts, quoted, 0); err == nil {
+	if err := authorizeEmbeddedChangeConfig9939(cfg, "planter", nil, parts, quoted, 0); err == nil {
 		t.Fatal("below the limit a denied payload was allowed; this cell would prove nothing")
 	}
 	// AT the limit: refused, and for the BUDGET reason rather than the merits.
-	err := authorizeEmbeddedChangeConfig9939(cfg, "planter", parts, quoted, changeConfigRecursionLimit9939)
+	err := authorizeEmbeddedChangeConfig9939(cfg, "planter", nil, parts, quoted, changeConfigRecursionLimit9939)
 	if err == nil {
 		t.Fatal("at the recursion limit the payload was ALLOWED; running out of budget must not " +
 			"read as having found nothing (#9939)")
@@ -230,7 +230,7 @@ func TestTheRecursionBoundRefusesRatherThanWavesThrough9939(t *testing.T) {
 	// And an ALLOWED payload at the limit is refused too — the bound is about
 	// not having looked, not about what was found.
 	allowed := []string{"change-configuration", "commands", "set system host-name ok"}
-	if err := authorizeEmbeddedChangeConfig9939(cfg, "planter", allowed, quoted, changeConfigRecursionLimit9939); err == nil {
+	if err := authorizeEmbeddedChangeConfig9939(cfg, "planter", nil, allowed, quoted, changeConfigRecursionLimit9939); err == nil {
 		t.Fatal("an ALLOWED payload passed at the recursion limit; the bound must refuse on not " +
 			"having looked, not on what it found")
 	}

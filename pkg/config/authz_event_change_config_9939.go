@@ -58,7 +58,26 @@ func embeddedChangeConfigCommands9939(parts []string, quoted []bool) []string {
 
 // authorizeEmbeddedChangeConfig9939 adjudicates every command a payload on this
 // line carries, against the planting class's own regexes.
-func authorizeEmbeddedChangeConfig9939(cfg *Config, class string, parts []string, quoted []bool, depth int) error {
+//
+// The payload is located on the RESOLVED path (#14143), not the typed
+// fragment: `authorizeConfigMutationDepth9939` resolves `editPath` into the
+// outer paths it adjudicates, and the store prepends the same cursor before
+// it writes, so scanning only the typed parts misses every payload planted
+// from inside the stanza. An operator who has done
+// `edit event-options policy p then change-configuration` and types
+// `set commands "set system …"` carries no `change-configuration` token in
+// the typed line at all — the ancestors live only in the cursor. The scan
+// therefore runs over editPath+parts, with quoted provenance padded for the
+// (never quoted) cursor elements.
+//
+// copy/rename carry no payload text on the line: the commands they plant
+// already exist in the candidate under the source subtree, and both
+// endpoints are adjudicated as paths by configMutationPaths. What moves is
+// re-stamped to the mover's class by StampChangedEventPlantClasses and
+// re-adjudicated command-by-command at fire time
+// (eventengine.validatePlantClass), so no payload text exists here to scan
+// and none is fabricated from the endpoint names.
+func authorizeEmbeddedChangeConfig9939(cfg *Config, class string, editPath, parts []string, quoted []bool, depth int) error {
 	if depth >= changeConfigRecursionLimit9939 {
 		// Refuse rather than allow. A payload nested deeper than anyone writes
 		// on purpose is not something to wave through because the walk ran out
@@ -67,7 +86,33 @@ func authorizeEmbeddedChangeConfig9939(cfg *Config, class string, parts []string
 			"nested deeper than %d levels, which cannot be adjudicated",
 			class, changeConfigRecursionLimit9939)
 	}
-	for _, cmd := range embeddedChangeConfigCommands9939(parts, quoted) {
+	// #14143: the payload marker is located on the RESOLVED path, but for
+	// copy/rename the resolved endpoints are the payload's LOCATION, not its
+	// text — the destination words after `commands` (a policy name, a `to`
+	// separator) are not commands. Scanning them would adjudicate a command
+	// the engine never runs, so those verbs return here: their moved
+	// commands are re-stamped and fire-time re-adjudicated (see above).
+	if parts[0] == "copy" || parts[0] == "rename" {
+		return nil
+	}
+	resolved := parts
+	resolvedQuoted := quoted
+	if len(editPath) > 0 && len(parts) > 0 {
+		// Resolve exactly as configMutationPaths and the store do: cursor +
+		// typed path WITHOUT the verb. Keeping the verb would interleave it
+		// between the cursor's `change-configuration` and the typed
+		// `commands`, and the adjacent-pair scan would walk past the payload.
+		resolved = make([]string, 0, len(editPath)+len(parts)-1)
+		resolved = append(resolved, editPath...)
+		resolved = append(resolved, parts[1:]...)
+		resolvedQuoted = make([]bool, len(editPath))
+		if len(quoted) == len(parts) {
+			resolvedQuoted = append(resolvedQuoted, quoted[1:]...)
+		} else {
+			resolvedQuoted = append(resolvedQuoted, quoted...)
+		}
+	}
+	for _, cmd := range embeddedChangeConfigCommands9939(resolved, resolvedQuoted) {
 		cmd = strings.TrimSpace(cmd)
 		if cmd == "" {
 			continue
