@@ -1718,6 +1718,120 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
     }
 }
 
+/// #13675 (D11-09): replay must not publish REDIRECT for an active-RG
+/// LocalDelivery synced session. The worker twin
+/// `publish_worker_session_map_entry` publishes PASS_TO_KERNEL (forward
+/// only, plus SNAT reverse-wire REDIRECT); the coordinator replay used to
+/// call `publish_live_session_entry` directly, mis-steering host-bound
+/// packets and claiming the reverse NAT row under Coordinator.
+/// FAIL-ON-REVERT: restoring the unconditional live publish reds the
+/// PASS_TO_KERNEL / no-Coordinator-reverse assertions below.
+#[test]
+fn replay_synced_sessions_publishes_kernel_local_for_local_delivery_13675() {
+    use crate::afxdp::bpf_map::{
+        RECORDER_ONLY_MAP_FD, SteeringMap, clear_session_map_writes, session_map_writes,
+    };
+    let mut coordinator = Coordinator::new();
+    // Active owner RG 1 so allow_replace_local=false, as in production
+    // for a session this node is actively forwarding.
+    coordinator.store_ha_lease_for_test(1, 60);
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+        src_port: 40000,
+        dst_port: 22,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::LocalDelivery,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 254))),
+                rewrite_src_port: Some(40001),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_LAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        source_nat_static: None,
+    };
+    let queues = WorkerCommandQueues::new(BTreeMap::from([(
+        0u32,
+        Arc::new(Mutex::new(VecDeque::new())),
+    )]));
+    clear_session_map_writes();
+    let replayed = coordinator.replay_synced_sessions(
+        &[entry],
+        &queues,
+        SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
+    );
+    assert_eq!(replayed, 1);
+    let writes = session_map_writes();
+    assert!(
+        writes.iter().any(|w| w.key == key
+            && w.value == Some(USERSPACE_SESSION_ACTION_PASS_TO_KERNEL)),
+        "replay must publish PASS_TO_KERNEL for active LocalDelivery, got {writes:?}"
+    );
+    assert!(
+        !writes.iter().any(|w| w.key == key
+            && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT)),
+        "replay must not publish forward REDIRECT for kernel-local session, got {writes:?}"
+    );
+    // SNAT reverse-wire row: kernel-local publish adds exactly one
+    // REDIRECT (the reverse wire key); live publish adds several rows
+    // (forward wire, reverse wire, reverse canonical).
+    let reverse_redirects = writes
+        .iter()
+        .filter(|w| w.key != key && w.value == Some(USERSPACE_SESSION_ACTION_REDIRECT))
+        .count();
+    assert_eq!(
+        reverse_redirects, 1,
+        "only the SNAT reverse-wire REDIRECT row may be claimed, got {writes:?}"
+    );
+}
+
 
 #[test]
 fn resolution_target_uses_rewritten_destination_for_reverse_dnat() {
