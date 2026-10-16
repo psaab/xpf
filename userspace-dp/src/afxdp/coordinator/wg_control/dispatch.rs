@@ -139,6 +139,7 @@ pub(super) fn dispatch_inbound(
                             // #1888 S5: msg2 on the wire is an
                             // authenticated SEND.
                             engine.note_handshake_sent(&peer_pubkey, monotonic_nanos());
+                            InboundOutcome::CompletedResponder(peer_pubkey)
                         }
                         Err(e) => {
                             WgCounters::bump(&engine.counters().hs_send_errors);
@@ -147,9 +148,20 @@ pub(super) fn dispatch_inbound(
                                 tunnel_name,
                                 format!("wg_response_send:{from}:{e}"),
                             );
+                            // #13665: msg2 never left the host, so this is
+                            // NOT a responder completion — reporting
+                            // CompletedResponder would make the caller drain
+                            // this peer's rekey/handshake request edges for
+                            // a response the peer can never confirm. The
+                            // msg1 did authenticate, so degrade to
+                            // Authenticated (endpoint learning retained);
+                            // the armed edges survive and the peer's
+                            // retransmitted msg1 drives the retry. The
+                            // installed responder session and the consumed
+                            // handshake state are left untouched.
+                            InboundOutcome::Authenticated(peer_pubkey)
                         }
                     }
-                    InboundOutcome::CompletedResponder(peer_pubkey)
                 }
                 Err(_e) => {
                     debug_log!("WG[{}]: drop initiation reason={:?}", tunnel_name, _e);
