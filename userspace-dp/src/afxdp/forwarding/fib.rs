@@ -1044,7 +1044,7 @@ fn select_v4_route<'a>(
         .iter()
         .find(|entry| entry.table == table && entry.prefix.contains(ip));
     let mut matched_prefix_len = None;
-    let mut fallback = None;
+    let mut fallback: Option<(&'a RouteEntryV4, Option<&'a RouteNextHopV4>)> = None;
     let mut spread_hash = ecmp_flow_hash;
 
     if let Some(routes) = state.routes_v4.get(table) {
@@ -1071,9 +1071,13 @@ fn select_v4_route<'a>(
             // row's next_hops remains ECMP; a later row is tried only when the
             // current tier has no live member.
             if route.discard {
-                // A later discard row must not replace a preferred gateway
-                // already retained as the cold-path fallback.
-                if fallback.is_none() {
+                // Preserve an earlier gateway only when it has a drivable
+                // next-hop. An empty/invalid fallback must not suppress this
+                // terminal discard row.
+                let fallback_drivable = fallback.is_some_and(|(_, selected)| {
+                    selected.is_some_and(|nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0)
+                });
+                if !fallback_drivable {
                     return Some(ResolvedRouteV4::Static {
                         route,
                         selected: None,
@@ -1156,7 +1160,7 @@ fn select_v6_route<'a>(
         .iter()
         .find(|entry| entry.table == table && entry.prefix.contains(ip));
     let mut matched_prefix_len = None;
-    let mut fallback = None;
+    let mut fallback: Option<(&'a RouteEntryV6, Option<&'a RouteNextHopV6>)> = None;
     let mut spread_hash = ecmp_flow_hash;
 
     if let Some(routes) = state.routes_v6.get(table) {
@@ -1183,8 +1187,11 @@ fn select_v6_route<'a>(
             // within a row, fall through to the next row only if all members
             // in the current tier are unavailable.
             if route.discard {
-                // Keep the v4 discard handling identical.
-                if fallback.is_none() {
+                // Keep the v4 drivable-fallback gate identical.
+                let fallback_drivable = fallback.is_some_and(|(_, selected)| {
+                    selected.is_some_and(|nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0)
+                });
+                if !fallback_drivable {
                     return Some(ResolvedRouteV6::Static {
                         route,
                         selected: None,

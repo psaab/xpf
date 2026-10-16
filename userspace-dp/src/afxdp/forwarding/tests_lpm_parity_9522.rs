@@ -908,14 +908,23 @@ fn less_preferred_discard_does_not_shadow_drivable_gateway_13950() {
             v6_route("2001:db8:300::/48", vec!["2001:db8:99::2"], 5),
             discard_route_13950("2001:db8:300::/48", "inet6", 10),
         ],
-        vec![],
+        vec![
+            reachable_neighbor_11316("ge-0-0-0", 11, "inet", "10.99.0.2", "00:11:22:33:44:61"),
+            reachable_neighbor_11316(
+                "ge-0-0-0",
+                11,
+                "inet6",
+                "2001:db8:99::2",
+                "00:11:22:33:44:62",
+            ),
+        ],
     ));
 
     let v4 = resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5));
     assert_eq!(
         v4.disposition,
-        ForwardingDisposition::MissingNeighbor,
-        "v4: less-preferred discard must not shadow the preferred drivable gateway"
+        ForwardingDisposition::ForwardCandidate,
+        "v4: less-preferred discard must not shadow the preferred live gateway"
     );
     assert_eq!(v4.egress_ifindex, 11);
     assert_eq!(v4.next_hop, Some(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2))));
@@ -923,8 +932,8 @@ fn less_preferred_discard_does_not_shadow_drivable_gateway_13950() {
     let v6 = resolve_v6(&state, "2001:db8:300::5".parse().unwrap());
     assert_eq!(
         v6.disposition,
-        ForwardingDisposition::MissingNeighbor,
-        "v6: less-preferred discard must not shadow the preferred drivable gateway"
+        ForwardingDisposition::ForwardCandidate,
+        "v6: less-preferred discard must not shadow the preferred live gateway"
     );
     assert_eq!(v6.egress_ifindex, 11);
     assert_eq!(
@@ -1011,5 +1020,32 @@ fn less_preferred_discard_does_not_shadow_unresolved_gateway_13950() {
     assert_eq!(
         v6.next_hop,
         Some(IpAddr::V6("2001:db8:99::2".parse().unwrap()))
+    );
+}
+
+/// A gateway row without a usable next-hop must not suppress a later discard.
+/// This is especially important for IPv6 recursive link-local next-hops, which
+/// are intentionally retained without an output ifindex.
+#[test]
+fn nondrivable_gateway_does_not_suppress_discard_13950() {
+    let state = build_forwarding_state(&discard_snapshot_13950(
+        vec![
+            v4_route("203.0.113.0/24", vec!["198.18.0.1"], 5),
+            discard_route_13950("203.0.113.0/24", "inet", 10),
+            v6_route("2001:db8:300::/48", vec!["fe80::2"], 5),
+            discard_route_13950("2001:db8:300::/48", "inet6", 10),
+        ],
+        vec![],
+    ));
+
+    assert_eq!(
+        resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5)).disposition,
+        ForwardingDisposition::DiscardRoute,
+        "an empty gateway row must not suppress a later discard"
+    );
+    assert_eq!(
+        resolve_v6(&state, "2001:db8:300::5".parse().unwrap()).disposition,
+        ForwardingDisposition::DiscardRoute,
+        "a zero-ifindex link-local gateway must not suppress a later discard"
     );
 }
