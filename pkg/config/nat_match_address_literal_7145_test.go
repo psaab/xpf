@@ -98,8 +98,19 @@ func nat7145Kinds() []nat7145Kind {
 
 // nat7145Cmds builds the full flat-set corpus for one (kind, leaf, values) cell.
 func nat7145Cmds(k nat7145Kind, leaf string, values ...string) []string {
+	scaffold := append([]string{}, k.scaffold...)
+	if k.name == "destination" && leaf == "destination-address" {
+		for _, value := range values {
+			if strings.Contains(value, ":") {
+				for i, cmd := range scaffold {
+					scaffold[i] = strings.Replace(cmd, "address 10.0.2.5/32", "address 2001:db8::5/128", 1)
+				}
+				break
+			}
+		}
+	}
 	cmds := append([]string{}, nat7145Base...)
-	cmds = append(cmds, k.scaffold...)
+	cmds = append(cmds, scaffold...)
 	cmds = append(cmds, k.sibling[leaf]...)
 	set := "set security nat " + k.name + " rule-set " + k.ruleSet + " rule R1 match " + leaf
 	for _, v := range values {

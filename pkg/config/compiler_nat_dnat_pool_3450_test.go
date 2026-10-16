@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -28,10 +29,17 @@ func dnatPoolTree(t *testing.T, poolCmds ...string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
 	cmds := append([]string{}, poolCmds...)
+	matchAddress := "203.0.113.10/32"
+	for _, cmd := range poolCmds {
+		if strings.Contains(cmd, ":") {
+			matchAddress = "2001:db8::10/128"
+			break
+		}
+	}
 	cmds = append(cmds,
 		"set security zones security-zone untrust",
 		"set security nat destination rule-set RS from zone untrust",
-		"set security nat destination rule-set RS rule R1 match destination-address 203.0.113.10/32",
+		"set security nat destination rule-set RS rule R1 match destination-address "+matchAddress,
 		"set security nat destination rule-set RS rule R1 then destination-nat pool p1",
 	)
 	for _, cmd := range cmds {
