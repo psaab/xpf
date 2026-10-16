@@ -3539,6 +3539,130 @@ fn route_reject_suppresses_synthetic_fabric_source_14021() {
     assert!(pipeline.pending_tx_local.is_empty());
 }
 
+/// #14237: disposition→reply regression for the #14108 call-site defect.
+/// Drives the extracted `RejectRoute` arm seam (`handle_route_reject_disposition`)
+/// exactly as `poll_binding_process_descriptor` does — with the physical
+/// binding ifindex 21 while the fixture's logical VLAN unit is 5 — instead of
+/// calling `enqueue_route_reject_reply` with a hand-picked argument. The
+/// seam resolves nothing itself; it must forward 21 to the synthetic-fabric
+/// gate. Reverting the seam (or the poll arm) to resolve/pass the logical
+/// unit 5 makes the gate miss the fabric link (parent 21), so the stamped
+/// frame enqueues an ICMP unreachable and both assertions go RED. On
+/// pristine `7a4cc2ccdf10` this seam does not exist and, transplanted with
+/// the pre-fix arm body (logical resolution), the stamped leg enqueues.
+/// Controls: the same stamped frame under `DiscardRoute` stays silent
+/// through the seam (disposition guard), and an unstamped frame under
+/// `RejectRoute` on the same fabric fixture still enqueues (the seam is
+/// not an unconditional suppressor).
+#[test]
+fn route_reject_disposition_arm_uses_physical_binding_ifindex_14237() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let mut forwarding = stamped_fabric_reject_forwarding();
+    // Physical fabric parent 21 (binding) vs its VLAN logical unit 5:
+    // the pre-fix arm passed 5 to the gate and missed the fabric link.
+    forwarding.ingress_logical_ifindex.insert((21, 0), 5);
+    // Premise: the two identities really are distinct for this fixture —
+    // 21 is the fabric parent, 5 is not a fabric ifindex at all.
+    assert!(crate::afxdp::forwarding::ingress_is_fabric(&forwarding, 21));
+    assert!(!crate::afxdp::forwarding::ingress_is_fabric(&forwarding, 5));
+    assert_eq!(
+        crate::afxdp::forwarding::resolve_ingress_logical_ifindex(&forwarding, 21, 0),
+        Some(5),
+        "fixture premise: (21, vlan 0) must resolve to logical unit 5"
+    );
+    let stamp = producer_minted_v2_reject_stamp(&mut forwarding);
+    let (mut frame, mut meta, _flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    meta.ingress_ifindex = 21;
+    meta.ingress_vlan_id = 0;
+    frame[6..12].copy_from_slice(&stamp);
+    // Premise: with the logical unit the gate would NOT suppress, with the
+    // physical binding it does — the distinction is load-bearing.
+    assert!(!crate::afxdp::forwarding::ingress_has_synthetic_fabric_source(
+        &forwarding, 5, &frame
+    ));
+    assert!(crate::afxdp::forwarding::ingress_has_synthetic_fabric_source(
+        &forwarding, 21, &frame
+    ));
+
+    // Stamped RejectRoute through the production seam (binding 21): silent.
+    let mut pipeline = tx_pipeline(
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(
+        !handle_route_reject_disposition(
+            ForwardingDisposition::RejectRoute,
+            &mut pipeline,
+            &forwarding,
+            21,
+            &frame,
+            meta,
+            None,
+            &mut counters,
+        ),
+        "stamped fabric RejectRoute via the disposition arm must not enqueue \
+         (RED if the arm/seam passes logical 5 instead of binding 21)"
+    );
+    assert!(pipeline.pending_tx_local.is_empty());
+
+    // Control 1: DiscardRoute through the same seam stays silent even for
+    // an unstamped, otherwise-replyable frame (disposition guard).
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (frame2, meta2, _flow2) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    let mut pipeline = tx_pipeline(64, 64);
+    let mut counters = BatchCounters::default();
+    assert!(!handle_route_reject_disposition(
+        ForwardingDisposition::DiscardRoute,
+        &mut pipeline,
+        &forwarding,
+        21,
+        &frame2,
+        meta2,
+        None,
+        &mut counters,
+    ));
+    assert!(pipeline.pending_tx_local.is_empty());
+
+    // Control 2: unstamped RejectRoute through the seam still enqueues an
+    // ICMP unreachable (the seam is not an unconditional suppressor). Use
+    // the reserved-budget sizing the other enqueue-positive route tests
+    // use (tx_pipeline(64, 64) leaves no budget after the SYN-cookie
+    // reserve, which would suppress for a fixture reason).
+    let mut pipeline = tx_pipeline(
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(
+        handle_route_reject_disposition(
+            ForwardingDisposition::RejectRoute,
+            &mut pipeline,
+            &forwarding,
+            21,
+            &frame2,
+            meta2,
+            None,
+            &mut counters,
+        ),
+        "unstamped RejectRoute via the disposition arm must enqueue"
+    );
+    assert_eq!(pipeline.pending_tx_local.len(), 1);
+    let reply = pipeline.pending_tx_local.pop_front().expect("route reject reply");
+    assert_eq!(&reply.bytes[34..36], &[3, 1]);
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+}
+
 #[test]
 fn route_reject_suppressed_and_rate_limited_fail_closed_14021() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;

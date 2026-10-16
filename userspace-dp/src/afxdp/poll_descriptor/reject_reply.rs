@@ -529,6 +529,43 @@ fn enqueue_reject_reply(
     true
 }
 
+/// #14237: the `RejectRoute` disposition arm, extracted from
+/// `poll_binding_process_descriptor` so its call-site wiring is unit-testable
+/// (the poll loop body itself is un-callable). The arm MUST supply the
+/// physical AF_XDP binding ifindex (`binding_ifindex`) — never a
+/// VLAN-resolved logical unit — to `enqueue_route_reject_reply`: the shared
+/// synthetic-fabric-source gate keys `ingress_is_fabric` on the physical
+/// parent/overlay, while the helper resolves the logical unit itself for
+/// reply building. Passing the logical unit (the pre-#14108 defect) missed
+/// the fabric link and emitted an ICMP unreachable reflecting the synthetic
+/// V2 stamp MAC. The disposition guard lives here too, so a test driving
+/// this seam with any other disposition proves the arm stays silent.
+#[cold]
+#[inline(never)]
+pub(super) fn handle_route_reject_disposition(
+    disposition: ForwardingDisposition,
+    tx_pipeline: &mut WorkerTxPipeline,
+    forwarding: &ForwardingState,
+    binding_ifindex: i32,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    flow: Option<&SessionFlow>,
+    counters: &mut BatchCounters,
+) -> bool {
+    if !matches!(disposition, ForwardingDisposition::RejectRoute) {
+        return false;
+    }
+    enqueue_route_reject_reply(
+        tx_pipeline,
+        forwarding,
+        binding_ifindex,
+        packet_frame,
+        meta,
+        flow,
+        counters,
+    )
+}
+
 #[cfg(test)]
 #[path = "reject_reply_tests.rs"]
 mod tests;
