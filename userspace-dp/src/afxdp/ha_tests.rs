@@ -11260,3 +11260,114 @@ fn reverse_prewarm_unresolvable_domain_keeps_default_reply_rg_12086() {
          best-effort reply RG 2 filing rather than skip it",
     );
 }
+
+/// #13712 (D16-14): `delete_synced_session_gen_marked` leased the reverse
+/// tuple from the PRE-LOCK `candidate_entry` (read before the tuple-gate
+/// lease), then derived the reverse key it actually tore down from the
+/// UNDER-LOCK `removed_entry`. A concurrent NAT-carrying upsert landing
+/// between the candidate read and the removal therefore made the delete
+/// tear down a reverse conntrack row it never leased — violating the
+/// tuple-gate invariant and racing packet-worker conntrack publishes.
+///
+/// The hook is the deterministic seam: the initial snapshot finds NOTHING
+/// (candidate `None`, so the lease covers the un-NATed reverse), the hook
+/// then installs the session WITH a NAT translation, and the under-lock
+/// removal removes that incarnation. The delete must refuse with
+/// `RefusedGateBusy` (fail-closed, retryable) and remove nothing, exactly
+/// as `remove_shared_policy_item` — the guarded twin in the same file —
+/// refuses to act on an incarnation other than the one it captured.
+#[test]
+fn synced_delete_refuses_when_nat_lands_after_candidate_read_13712() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    let worker_a = Arc::new(Mutex::new(VecDeque::new()));
+    let worker_b = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(worker_a.clone())),
+        None,
+    );
+    coordinator.workers.register(
+        1,
+        WorkerRuntimeRecord::for_test(test_worker_handle(worker_b.clone())),
+        None,
+    );
+
+    // The session exists only inside the hook: at candidate-read time the
+    // shared map is empty, so a pre-lock lease can only name the un-NATed
+    // reverse tuple.
+    let entry = reserve6600_entry(43712, 53712);
+    let key = entry.key.clone();
+    let reverse_key = reverse_session_key(&key, entry.decision.nat);
+    assert!(
+        !coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced map")
+            .contains_key(&key),
+        "FIXTURE: the forward key must start absent, or the candidate read \
+         would lease the NATed reverse and the cell proves nothing"
+    );
+
+    let domain = coordinator.session_domain().clone();
+    let mut reverse = entry.clone();
+    reverse.key = reverse_key.clone();
+    reverse.origin = SessionOrigin::ReverseFlow;
+    reverse.metadata.is_reverse = true;
+    domain.set_synced_delete_after_clone_hook_for_test(move |domain, _key| {
+        for installed in [&entry, &reverse] {
+            crate::afxdp::shared_ops::publish_shared_session(
+                &domain.sessions.synced,
+                &domain.sessions.nat,
+                &domain.sessions.forward_wire,
+                &domain.sessions.owner_rg_indexes,
+                installed,
+            );
+        }
+    });
+
+    let outcome = domain.delete_synced_session(key.clone(), false);
+
+    let mut violations: Vec<String> = Vec::new();
+    if outcome != super::session_import::SyncedDeleteOutcome::RefusedGateBusy {
+        violations.push(format!(
+            "delete applied to an incarnation whose NATed reverse tuple was \
+             never leased; outcome {outcome:?}, expected RefusedGateBusy"
+        ));
+    }
+    let synced = coordinator.sessions.synced.lock().expect("synced map");
+    if !synced.contains_key(&key) {
+        violations.push(
+            "delete removed the shared forward authority under a lease that \
+             never covered its reverse tuple"
+                .to_string(),
+        );
+    }
+    if !synced.contains_key(&reverse_key) {
+        violations.push(
+            "delete removed the shared reverse companion whose tuple was \
+             never leased"
+                .to_string(),
+        );
+    }
+    drop(synced);
+    let queued_delete = [&worker_a, &worker_b].iter().any(|queue| {
+        queue.lock().expect("commands").iter().any(|cmd| {
+            matches!(cmd, WorkerCommand::DeleteSynced(k) if *k == key || *k == reverse_key)
+        })
+    });
+    if queued_delete {
+        violations.push(
+            "delete fanned DeleteSynced to workers for an incarnation it \
+             refused to remove"
+                .to_string(),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "#13712: {} of 4 properties violated:\n  - {}",
+        violations.len(),
+        violations.join("\n  - ")
+    );
+}
