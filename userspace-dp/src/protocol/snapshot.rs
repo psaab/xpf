@@ -1410,8 +1410,11 @@ mod route_mtu_wire_tests {
 
     #[test]
     fn route_mtu_round_trips_and_zero_is_omitted() {
-        let route = RouteSnapshot { reject: false, mtu: 1400,
-        ..Default::default() };
+        let route = RouteSnapshot {
+            reject: false,
+            mtu: 1400,
+            ..Default::default()
+        };
         let value = serde_json::to_value(&route).expect("serialize route");
         assert_eq!(value["mtu"], 1400);
         let decoded: RouteSnapshot = serde_json::from_value(value).expect("deserialize route");

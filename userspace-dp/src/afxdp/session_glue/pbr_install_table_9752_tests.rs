@@ -1154,14 +1154,18 @@ fn pbr_key_for(src_port: u16, dst: Ipv4Addr) -> SessionKey {
 #[test]
 fn ecmp_spread_preserved_within_installing_table() {
     let mut snapshot = pbr_snapshot();
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "blue.inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "9.9.9.9/32".to_string(),
-    next_hops: vec![
-        "172.16.50.253".to_string(),
-        "172.16.50.254".to_string(),
-    ],
-    mtu: 0, ..Default::default() });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "blue.inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "9.9.9.9/32".to_string(),
+        next_hops: vec![
+            "172.16.50.253".to_string(),
+            "172.16.50.254".to_string(),
+        ],
+        mtu: 0,
+        ..Default::default()
+    });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
         ifindex: BLUE_IFINDEX,

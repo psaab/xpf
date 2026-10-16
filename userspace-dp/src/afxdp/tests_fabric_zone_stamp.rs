@@ -303,11 +303,15 @@ fn established_ri_snat_forward_11061(
             interface.routing_domain = tenant_domain;
         }
     }
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "tenant-a.inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "0.0.0.0/0".to_string(),
-    next_hops: vec!["172.16.80.1@reth0.80".to_string()],
-    mtu: 0, ..Default::default() });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "tenant-a.inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hops: vec!["172.16.80.1@reth0.80".to_string()],
+        mtu: 0,
+        ..Default::default()
+    });
     let forwarding = build_forwarding_state(&snapshot);
     assert!(forwarding.has_routing_domains);
     assert!(!forwarding.ambiguous_fabric_zone_ids.contains(&TEST_LAN_ZONE_ID));

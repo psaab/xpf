@@ -1868,16 +1868,19 @@ fn wg_two_peer_asymmetric_snapshot() -> crate::ConfigSnapshot {
         ..Default::default()
     });
     // Route to peer B's endpoint egresses reth0.50.
-    snap.routes.push(crate::RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "198.51.100.0/24".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec!["172.16.50.1@reth0.50".to_string()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snap.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "198.51.100.0/24".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.50.1@reth0.50".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     {
         let ep = &mut snap.tunnel_endpoints[0];
         // Peer A: give it the smaller pubkey so it is first in any sorted order

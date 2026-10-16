@@ -470,16 +470,19 @@ pub(super) fn wg_two_peer_dnat_snapshot() -> ConfigSnapshot {
     });
     // Route peer B's outer endpoint (198.51.100.7) out reth0.50 via the
     // connected next-hop 172.16.50.1 (mirroring the base peer-A route).
-    snap.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "198.51.100.0/24".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec!["172.16.50.1@reth0.50".to_string()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snap.routes.push(RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "198.51.100.0/24".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.50.1@reth0.50".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     // Mirror peer B in the endpoint hydration so `endpoint.wg_peers` matches the
     // live two-peer engine the test inserts (the dispatch path selects via the
     // engine's AllowedIPs LPM; this keeps the hydrated snapshot consistent).
@@ -1418,16 +1421,19 @@ fn tunnel_routes_6722() -> Vec<RouteSnapshot> {
     ["192.168.99.0/24", "192.168.98.0/24", "192.168.97.0/24"]
         .iter()
         .zip(["10.5.5.2", "10.6.6.2", "10.7.7.2"])
-        .map(|(dst, nh)| RouteSnapshot { reject: false, table: "inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: (*dst).to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec![nh.to_string()],
-        discard: false,
-        next_table: String::new(),
-        preference: 5,
-        rule_priority: 0,
-        mtu: 0, })
+        .map(|(dst, nh)| RouteSnapshot {
+            reject: false,
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: (*dst).to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec![nh.to_string()],
+            discard: false,
+            next_table: String::new(),
+            preference: 5,
+            rule_priority: 0,
+            mtu: 0,
+        })
         .collect()
 }
 

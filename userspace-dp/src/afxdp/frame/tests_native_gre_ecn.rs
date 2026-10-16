@@ -304,16 +304,19 @@ fn local_origin_tunnel_tx_request_accepts_owned_ipv6_in_tunnel_instance() {
         address: "2001:db8:255:192::42/64".to_string(),
         scope: 0,
     });
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(),
-    family: "inet6".to_string(),
-    destination: "::/0".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec!["2001:db8:255:192::41".to_string()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "sfmix.inet6.0".to_string(),
+        family: "inet6".to_string(),
+        destination: "::/0".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["2001:db8:255:192::41".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     let state = build_forwarding_state(&snapshot);
     let src = "2001:db8:255:192::42".parse::<Ipv6Addr>().unwrap();
     assert!(

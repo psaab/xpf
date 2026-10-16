@@ -141,11 +141,14 @@ mod tests {
     }
 
     fn blue_route() -> crate::RouteSnapshot {
-        crate::RouteSnapshot { reject: false, table: "blue.inet.0".into(),
-        family: "inet".into(),
-        destination: "10.0.0.0/8".into(),
-        next_hops: vec!["172.16.50.254".into()],
-        ..Default::default() }
+        crate::RouteSnapshot {
+            reject: false,
+            table: "blue.inet.0".into(),
+            family: "inet".into(),
+            destination: "10.0.0.0/8".into(),
+            next_hops: vec!["172.16.50.254".into()],
+            ..Default::default()
+        }
     }
 
     /// The registry carries every instance with presence, with preformed

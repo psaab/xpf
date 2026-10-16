@@ -3895,26 +3895,32 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
             && !(route.family == "inet6" && route.destination == "::/0")
     });
     snapshot.routes.extend([
-        RouteSnapshot { reject: false, table: "inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: "172.16.80.100/32".to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec!["172.16.80.1@reth0.80".to_string()],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0, },
-        RouteSnapshot { reject: false, table: "inet6.0".to_string(),
-        family: "inet6".to_string(),
-        destination: "fd00:100::/48".to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0, },
+        RouteSnapshot {
+            reject: false,
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "172.16.80.100/32".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec!["172.16.80.1@reth0.80".to_string()],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+            mtu: 0,
+        },
+        RouteSnapshot {
+            reject: false,
+            table: "inet6.0".to_string(),
+            family: "inet6".to_string(),
+            destination: "fd00:100::/48".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+            mtu: 0,
+        },
     ]);
     snapshot.source_nat_rules.clear();
     snapshot.destination_nat_rules = vec![DestinationNATRuleSnapshot {
@@ -5249,16 +5255,19 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
         link_local: false,
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "9.9.9.9/32".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec!["172.16.80.1@reth0.80".to_string()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "9.9.9.9/32".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.80.1@reth0.80".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     let v1_forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);

@@ -18272,16 +18272,19 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let peer_worker_commands = Vec::new();
     let ha_state = BTreeMap::new();
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "8.8.8.8/32".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec![],
-    discard: true,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0,
-    mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "8.8.8.8/32".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     let discard_forwarding = build_forwarding_state(&snapshot);
     sessions.set_forwarding_revalidation_gen(1, 2);
     assert!(discard_forwarding

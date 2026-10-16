@@ -5722,11 +5722,14 @@ fn static_bare_link_local_gateway_refuses_ambiguous_interfaces_11322() {
             ..Default::default()
         }
     }
-    let route = |destination: &str, next_hop: &str| crate::RouteSnapshot { reject: false, table: "inet6.0".into(),
-    family: "inet6".into(),
-    destination: destination.into(),
-    next_hops: vec![next_hop.into()],
-    ..Default::default() };
+    let route = |destination: &str, next_hop: &str| crate::RouteSnapshot {
+        reject: false,
+        table: "inet6.0".into(),
+        family: "inet6".into(),
+        destination: destination.into(),
+        next_hops: vec![next_hop.into()],
+        ..Default::default()
+    };
     let one = iface(
         "ge-0/0/1.0",
         "ge-0-0-1",
@@ -11935,12 +11938,15 @@ fn learned_link_local_next_hop_binds_its_own_link_in_any_order_9512() {
             ..Default::default()
         }
     }
-    let route = |dst: &str, hops: &[&str]| crate::RouteSnapshot { reject: false, table: "inet6.0".into(),
-    family: "inet6".into(),
-    destination: dst.into(),
-    next_hops: hops.iter().map(|h| h.to_string()).collect(),
-    mtu: 0,
-    ..Default::default() };
+    let route = |dst: &str, hops: &[&str]| crate::RouteSnapshot {
+        reject: false,
+        table: "inet6.0".into(),
+        family: "inet6".into(),
+        destination: dst.into(),
+        next_hops: hops.iter().map(|h| h.to_string()).collect(),
+        mtu: 0,
+        ..Default::default()
+    };
     let one = iface(
         "ge-0/0/1.0",
         "ge-0-0-1",
@@ -12690,16 +12696,22 @@ fn mixed_static_recursive_backup_resolves_via_second_static_12183() {
         routes,
         ..Default::default()
     };
-    let second_static = crate::RouteSnapshot { reject: false, table: "inet.0".into(),
-    family: "inet".into(),
-    destination: "10.10.0.0/24".into(),
-    next_hops: vec![terminal_gateway.to_string()],
-    ..Default::default() };
-    let mixed_row = crate::RouteSnapshot { reject: false, table: "inet.0".into(),
-    family: "inet".into(),
-    destination: "10.20.0.0/24".into(),
-    next_hops: vec![direct_dead.to_string(), recursive_gateway.to_string()],
-    ..Default::default() };
+    let second_static = crate::RouteSnapshot {
+        reject: false,
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "10.10.0.0/24".into(),
+        next_hops: vec![terminal_gateway.to_string()],
+        ..Default::default()
+    };
+    let mixed_row = crate::RouteSnapshot {
+        reject: false,
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "10.20.0.0/24".into(),
+        next_hops: vec![direct_dead.to_string(), recursive_gateway.to_string()],
+        ..Default::default()
+    };
     for (label, order) in [
         (
             "mixed row first",
@@ -13464,12 +13476,15 @@ fn recursive_static_v6_controls_kill_surviving_mutants_12398() {
         }],
         ..Default::default()
     };
-    let route = |destination: &str, next_hops: &[&str], preference: i32| crate::RouteSnapshot { reject: false, table: "inet6.0".into(),
-    family: "inet6".into(),
-    destination: destination.into(),
-    next_hops: next_hops.iter().map(|spec| (*spec).into()).collect(),
-    preference,
-    ..Default::default() };
+    let route = |destination: &str, next_hops: &[&str], preference: i32| crate::RouteSnapshot {
+        reject: false,
+        table: "inet6.0".into(),
+        family: "inet6".into(),
+        destination: destination.into(),
+        next_hops: next_hops.iter().map(|spec| (*spec).into()).collect(),
+        preference,
+        ..Default::default()
+    };
     let mut discard = route("2001:db8:13::/64", &[], 5);
     discard.discard = true;
     let snapshot = ConfigSnapshot {
@@ -13846,11 +13861,14 @@ fn recursive_static_v6_cycles_do_not_exhaust_work_before_terminal_12398() {
         },
     ];
     for gateway in cycle_hops {
-        routes.push(crate::RouteSnapshot { reject: false, table: "inet6.0".into(),
-        family: "inet6".into(),
-        destination: format!("{gateway}/128"),
-        next_hops: vec![gateway],
-        ..Default::default() });
+        routes.push(crate::RouteSnapshot {
+            reject: false,
+            table: "inet6.0".into(),
+            family: "inet6".into(),
+            destination: format!("{gateway}/128"),
+            next_hops: vec![gateway],
+            ..Default::default()
+        });
     }
     let snapshot = ConfigSnapshot {
         interfaces: vec![InterfaceSnapshot {

@@ -5522,18 +5522,22 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         link_local: false,
     });
     // One sfmix.inet.0 ECMP prefix with a mixed direct + tunnel next-hop set.
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "203.0.113.0/24".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec![
-        "192.0.2.2@ge-0/0/1".to_string(), // direct
-        "@gr-0/0/0.0".to_string(),        // tunnel (endpoint id 1)
-    ],
-    discard: false,
-    next_table: String::new(),
-    preference: 5,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "sfmix.inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![
+            "192.0.2.2@ge-0/0/1".to_string(), // direct
+            "@gr-0/0/0.0".to_string(),        // tunnel (endpoint id 1)
+        ],
+        discard: false,
+        next_table: String::new(),
+        preference: 5,
+        rule_priority: 0,
+        mtu: 0,
+    });
     let state = build_forwarding_state(&snapshot);
 
     // The FIB retains BOTH next-hops, and exactly one carries a tunnel id.
@@ -5736,18 +5740,22 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
         router: true,
         link_local: false,
     });
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "inet.0".to_string(),
-    family: "inet".to_string(),
-    destination: "203.0.113.0/24".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec![
-        "192.0.2.2@ge-0/0/1".to_string(), // direct, live
-        "@gr-0/0/0.0".to_string(),        // tunnel, underlay WITHDRAWN
-    ],
-    discard: false,
-    next_table: String::new(),
-    preference: 5,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![
+            "192.0.2.2@ge-0/0/1".to_string(), // direct, live
+            "@gr-0/0/0.0".to_string(),        // tunnel, underlay WITHDRAWN
+        ],
+        discard: false,
+        next_table: String::new(),
+        preference: 5,
+        rule_priority: 0,
+        mtu: 0,
+    });
     let state = build_forwarding_state(&snapshot);
 
     // Sweep the per-flow hash: EVERY flow must forward via the live direct hop
@@ -5825,18 +5833,22 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
     });
     // One sfmix.inet6.0 INNER ECMP prefix mixing a direct v6 hop + the tunnel hop.
     // (Disjoint from the GRE outer prefix 2602:ffd3:0:2::/64.)
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(),
-    family: "inet6".to_string(),
-    destination: "2001:db8:dead::/48".to_string(),
-    next_hop_weights: vec![],
-    next_hops: vec![
-        "2001:db8:ec::2@ge-0/0/1".to_string(), // direct
-        "@gr-0/0/0.0".to_string(),             // tunnel (endpoint id 1)
-    ],
-    discard: false,
-    next_table: String::new(),
-    preference: 5,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "sfmix.inet6.0".to_string(),
+        family: "inet6".to_string(),
+        destination: "2001:db8:dead::/48".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![
+            "2001:db8:ec::2@ge-0/0/1".to_string(), // direct
+            "@gr-0/0/0.0".to_string(),             // tunnel (endpoint id 1)
+        ],
+        discard: false,
+        next_table: String::new(),
+        preference: 5,
+        rule_priority: 0,
+        mtu: 0,
+    });
     let state = build_forwarding_state(&snapshot);
 
     // The sfmix.inet6.0 table also holds the GRE outer prefix; find OUR mixed prefix.

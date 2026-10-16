@@ -2178,15 +2178,19 @@ fn push_gre_underlay_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnaps
             ttl: 64,
             ..Default::default()
         });
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "inet.0".into(),
-    family: "inet".into(),
-    destination: "203.0.113.0/24".into(),
-    next_hop_weights: vec![],
-    next_hops: vec!["172.16.80.1@reth0.80".into()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "203.0.113.0/24".into(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.80.1@reth0.80".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.80".into(),
         ifindex: 12,
@@ -2261,15 +2265,19 @@ fn forwarding_with_blue_pbr_tunnel_10630() -> ForwardingState {
         ..Default::default()
     });
     push_gre_underlay_10630(&mut snapshot);
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "blue.inet.0".into(),
-    family: "inet".into(),
-    destination: "172.16.80.0/24".into(),
-    next_hop_weights: vec![],
-    next_hops: vec!["@gr-0/0/0.0".into()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "blue.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hop_weights: vec![],
+        next_hops: vec!["@gr-0/0/0.0".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
             iface.filter_input_v4 = "edge-in".into();
@@ -2304,15 +2312,19 @@ fn forwarding_with_green_pbr_native_10630() -> ForwardingState {
         }],
         ..Default::default()
     });
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "green.inet.0".into(),
-    family: "inet".into(),
-    destination: "172.16.80.0/24".into(),
-    next_hop_weights: vec![],
-    next_hops: vec!["172.16.80.1@reth0.80".into()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "green.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.80.1@reth0.80".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.80".into(),
         ifindex: 12,
@@ -2358,15 +2370,19 @@ fn forwarding_with_green_pbr_tunnel_10630() -> ForwardingState {
     });
     push_gre_underlay_10630(&mut snapshot);
     push_second_gre_10630(&mut snapshot);
-    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "green.inet.0".into(),
-    family: "inet".into(),
-    destination: "172.16.80.0/24".into(),
-    next_hop_weights: vec![],
-    next_hops: vec!["@gr-0/0/0.1".into()],
-    discard: false,
-    next_table: String::new(),
-    preference: 0,
-    rule_priority: 0, mtu: 0, });
+    snapshot.routes.push(crate::RouteSnapshot {
+        reject: false,
+        table: "green.inet.0".into(),
+        family: "inet".into(),
+        destination: "172.16.80.0/24".into(),
+        next_hop_weights: vec![],
+        next_hops: vec!["@gr-0/0/0.1".into()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
             iface.filter_input_v4 = "edge-in".into();
