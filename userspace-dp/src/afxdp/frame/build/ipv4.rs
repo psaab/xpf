@@ -8,7 +8,8 @@
 use super::super::tcp::clamp_tcp_mss_frame;
 use super::super::{
     adjust_ipv4_header_checksum, apply_nat_ipv4, enforce_expected_ports_at,
-    ipv4_is_non_first_fragment, recompute_l4_checksum_ipv4, restore_l4_tuple_from_meta,
+    ipv4_is_any_fragment, ipv4_is_non_first_fragment, recompute_l4_checksum_ipv4,
+    restore_l4_tuple_from_meta,
 };
 use crate::afxdp::{ForwardPacketMeta, SessionDecision};
 use std::net::Ipv4Addr;
@@ -89,13 +90,11 @@ pub(in crate::afxdp::frame) fn build_forwarded_frame_into_ipv4(
     if selected_tcp_mss > 0 {
         let _ = clamp_tcp_mss_frame(out, ip_start, selected_tcp_mss);
     }
-    // #1852: skip the full L4 recompute on a non-first fragment — it
-    // writes the checksum at ihl+16/+6, which is payload here. The forced
-    // tunnel-egress recompute (tunnel_endpoint_id != 0) would otherwise
-    // re-corrupt the very bytes the NAT/port gates above protected.
-    // (`repaired_ports` is already false for fragments — the ICMP-ident
-    // restore is gated — so only the forced-tunnel term can fire.)
-    if !non_first_fragment && (force_tunnel_l4_recompute || (repaired_ports && !enforced)) {
+    // #13934: first fragments carry an L4 header but lack the full datagram
+    // checksum input. Preserve their sender checksum for reassembly.
+    if !ipv4_is_any_fragment(&out[ip_start..])
+        && (force_tunnel_l4_recompute || (repaired_ports && !enforced))
+    {
         recompute_l4_checksum_ipv4(&mut out[ip_start..], ihl, meta.protocol, true)?;
     }
     Some(())

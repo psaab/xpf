@@ -786,6 +786,207 @@ fn build_tunnel_egress_non_first_fragment_skips_forced_l4_recompute() {
         "forced tunnel L4 recompute must not touch non-first fragment payload"
     );
 }
+// #13934 (H07-01): a FIRST fragment (offset 0, MF set) carries the real L4
+// header, but that header covers only the bytes of THIS fragment — the L4
+// length/payload of the reassembled datagram is not present. The copy
+// builder's forced tunnel-egress recompute must therefore NOT run on ANY
+// fragment: recomputing over the fragment alone writes a checksum that
+// fails verification after reassembly, and the tunnel peer drops the
+// reassembled datagram. Before the fix the guard was non-first-only
+// (`!non_first_fragment`), so a first fragment's valid checksum was
+// overwritten. RED-on-revert: gate on `!non_first_fragment` again and the
+// inner TCP checksum no longer verifies over the fragment and the stored
+// checksum bytes differ from the sender's.
+#[test]
+fn build_tunnel_egress_first_fragment_preserves_inner_l4_checksum() {
+    // Complete TCP datagram has 12 payload bytes, but the FIRST fragment
+    // contains only 4. The L4 checksum thus covers bytes unavailable in the
+    // fragment and is changed by any recompute over the fragment alone.
+    let mut complete_tcp = vec![0x04u8; 24];
+    complete_tcp[0..2].copy_from_slice(&12345u16.to_be_bytes());
+    complete_tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
+    complete_tcp[12] = 6 << 4;
+    complete_tcp[13] = 0x10;
+    complete_tcp.extend_from_slice(&[
+        0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    ]);
+    let mut complete_ip = frag_v4_packet(PROTO_TCP, 0x0000, &complete_tcp);
+    crate::afxdp::frame::checksum::recompute_l4_checksum_ipv4(
+        &mut complete_ip, 20, PROTO_TCP, false,
+    )
+    .expect("seed complete-datagram TCP checksum");
+    let mut first_fragment = complete_tcp[..28].to_vec();
+    first_fragment[16..18].copy_from_slice(&complete_ip[36..38]);
+    let ip = frag_v4_packet(PROTO_TCP, 0x2000, &first_fragment);
+    let mut frame = vec![0u8; 14];
+    frame.extend_from_slice(&ip);
+    let sender_csum = [frame[14 + 20 + 16], frame[14 + 20 + 17]];
+    assert_ne!(sender_csum, [0, 0], "sender checksum must be non-zero");
+
+    let (meta, decision) = tunnel_egress_meta_decision_v4();
+    let mut egress = vec![0u8; frame.len()];
+    let written = build_forwarded_frame_into_from_frame(
+        &mut egress,
+        &frame,
+        meta,
+        &decision,
+        &ForwardingState::default(),
+        false,
+        None,
+    )
+    .expect("build");
+    assert_eq!(written, frame.len(), "copy build preserves frame length");
+    assert_eq!(
+        [egress[14 + 20 + 16], egress[14 + 20 + 17]],
+        sender_csum,
+        "forced tunnel L4 recompute must not touch a FIRST fragment's \
+         inner checksum (it covers only this fragment's bytes)"
+    );
+}
+
+// Control: an unfragmented tunnel-egress packet still gets the forced
+// recompute, so a corrupted checksum is repaired. Guards against an
+// over-broad fix that disables the tunnel recompute entirely.
+#[test]
+fn build_tunnel_egress_unfragmented_still_recomputes_inner_l4_checksum() {
+    let mut tcp = vec![0x04u8; 24];
+    tcp[0..2].copy_from_slice(&12345u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
+    tcp[12] = 6 << 4;
+    tcp[13] = 0x10;
+    tcp[16..18].copy_from_slice(&[0x12, 0x34]); // deliberately wrong checksum
+    let ip = frag_v4_packet(PROTO_TCP, 0x0000, &tcp);
+    let mut frame = vec![0u8; 14];
+    frame.extend_from_slice(&ip);
+    assert!(
+        !tcp_checksum_ok_ipv4(&frame[14..]),
+        "control packet starts with an invalid inner TCP checksum"
+    );
+    let (meta, decision) = tunnel_egress_meta_decision_v4();
+    let mut egress = vec![0u8; frame.len()];
+    build_forwarded_frame_into_from_frame(
+        &mut egress,
+        &frame,
+        meta,
+        &decision,
+        &ForwardingState::default(),
+        false,
+        None,
+    )
+    .expect("build");
+    assert!(
+        tcp_checksum_ok_ipv4(&egress[14..]),
+        "unfragmented tunnel-egress packet must still get the forced recompute"
+    );
+}
+
+// IPv6 analogue: a first fragment (Fragment header, offset 0, M=1) carries
+// the real TCP header at rel_l4 = 48, but the checksum again covers only
+// this fragment. The v6 copy-build arm must skip the forced recompute too.
+#[test]
+fn build_tunnel_egress_v6_first_fragment_preserves_inner_l4_checksum() {
+    let mut complete_tcp = vec![0x04u8; 24];
+    complete_tcp[0..2].copy_from_slice(&12345u16.to_be_bytes());
+    complete_tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
+    complete_tcp[12] = 6 << 4;
+    complete_tcp[13] = 0x10;
+    complete_tcp.extend_from_slice(&[
+        0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    ]);
+    let mut complete_ip = frag_v6_packet(PROTO_TCP, None, &complete_tcp);
+    crate::afxdp::frame::checksum::recompute_l4_checksum_ipv6(
+        &mut complete_ip, 40, PROTO_TCP,
+    )
+    .expect("seed complete-datagram TCP checksum");
+    let mut first_fragment = complete_tcp[..28].to_vec();
+    first_fragment[16..18].copy_from_slice(&complete_ip[56..58]);
+    let ip = frag_v6_packet(PROTO_TCP, Some(0x0001), &first_fragment);
+    let mut frame = vec![0u8; 14];
+    frame.extend_from_slice(&ip);
+    let sender_csum = [frame[14 + 48 + 16], frame[14 + 48 + 17]];
+    assert_ne!(sender_csum, [0, 0], "sender checksum must be non-zero");
+
+    let meta: ForwardPacketMeta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 14 + 48,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        ..UserspaceDpMeta::default()
+    }
+    .into();
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 7,
+            next_hop: Some(IpAddr::V6(std::net::Ipv6Addr::from([0x30u8; 16]))),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut egress = vec![0u8; frame.len()];
+    build_forwarded_frame_into_from_frame(
+        &mut egress,
+        &frame,
+        meta,
+        &decision,
+        &ForwardingState::default(),
+        false,
+        None,
+    )
+    .expect("build");
+    assert_eq!(
+        [egress[14 + 48 + 16], egress[14 + 48 + 17]],
+        sender_csum,
+        "forced tunnel L4 recompute must not touch a v6 FIRST fragment's \
+         inner checksum"
+    );
+}
+
+// Shared IPv4 tunnel-egress meta/decision (tunnel_endpoint_id != 0 drives
+// force_tunnel_l4_recompute in the copy builder).
+fn tunnel_egress_meta_decision_v4() -> (ForwardPacketMeta, SessionDecision) {
+    let meta: ForwardPacketMeta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        ..UserspaceDpMeta::default()
+    }
+    .into();
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 7,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    (meta, decision)
+}
 
 
 // #5568 (security — SCALAR classification from physical slack): the scalar L4
