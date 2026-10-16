@@ -338,6 +338,29 @@ fn teardown_purge_forward(
     now_ns: u64,
     worker_id: u32,
 ) -> bool {
+    let removed = remove_shared_session_if(
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        key,
+        |entry| {
+            entry.decision.install_table_domain == decision.install_table_domain
+                && entry.decision.install_table_check == decision.install_table_check
+                && install_table_purge_predicate(
+                    shared_runtime.load().forwarding(),
+                    &entry.key,
+                    &entry.decision,
+                )
+        },
+    );
+    let closed_id = sessions.session_id_for(key);
+    sessions.delete(key);
+    // A declined fence preserves shared authority; do not release NAT or
+    // delete BPF state that may still serve the replacement incarnation.
+    if matches!(removed, SharedRemoval::Declined) {
+        return false;
+    }
     release_source_nat_allocation_for_worker(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
@@ -364,35 +387,9 @@ fn teardown_purge_forward(
         conntrack_v4_fd,
         conntrack_v6_fd,
     );
-    let closed_id = sessions.session_id_for(key);
-    sessions.delete(key);
-    let removed = remove_shared_session_if(
-        shared_sessions,
-        shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
-        key,
-        |entry| {
-            entry.decision.install_table_domain == decision.install_table_domain
-                && entry.decision.install_table_check == decision.install_table_check
-                && install_table_purge_predicate(
-                    shared_runtime.load().forwarding(),
-                    &entry.key,
-                    &entry.decision,
-                )
-        },
-    );
-    // Coordinator rows release only when shared authority actually went away
-    // (a decline keeps the entry live — releasing would strand it). The close
-    // delta is gated the same way: on decline there is nothing to announce,
-    // and an ordinary Close would destroy the preserved entry downstream.
-    if !matches!(removed, SharedRemoval::Declined) {
-        release_coordinator_session_rows(session_map, key);
-        sessions.emit_close_delta_with_origin(key.clone(), *decision, metadata.clone(), origin, true, closed_id);
-        true
-    } else {
-        false
-    }
+    release_coordinator_session_rows(session_map, key);
+    sessions.emit_close_delta_with_origin(key.clone(), *decision, metadata.clone(), origin, true, closed_id);
+    true
 }
 
 /// #9752: companion-half purge teardown. The shared entry must backlink to
@@ -418,6 +415,28 @@ fn teardown_purge_companion(
     now_ns: u64,
     worker_id: u32,
 ) {
+    let removed = remove_shared_session_if(
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        companion_key,
+        |entry| {
+            purge_companion_is_linked(
+                forward_key,
+                forward_decision,
+                &entry.key,
+                &entry.decision,
+                &entry.metadata,
+            )
+        },
+    );
+    let closed_companion_id = sessions.session_id_for(companion_key);
+    sessions.delete(companion_key);
+    // A declined linkage fence preserves a newer companion incarnation.
+    if matches!(removed, SharedRemoval::Declined) {
+        return;
+    }
     release_source_nat_allocation_for_worker(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
@@ -444,36 +463,13 @@ fn teardown_purge_companion(
         conntrack_v4_fd,
         conntrack_v6_fd,
     );
-    let closed_companion_id = sessions.session_id_for(companion_key);
-    sessions.delete(companion_key);
-    let removed = remove_shared_session_if(
-        shared_sessions,
-        shared_nat_sessions,
-        shared_forward_wire_sessions,
-        shared_owner_rg_indexes,
-        companion_key,
-        |entry| {
-            purge_companion_is_linked(
-                forward_key,
-                forward_decision,
-                &entry.key,
-                &entry.decision,
-                &entry.metadata,
-            )
-        },
+    release_coordinator_session_rows(session_map, companion_key);
+    sessions.emit_close_delta_with_origin(
+        companion_key.clone(),
+        *companion_decision,
+        companion_metadata.clone(),
+        companion_origin,
+        true,
+        closed_companion_id,
     );
-    // Same fence gate as the forward half (today vacuous — the emit fn skips
-    // reverse halves — but load-bearing if that ever changes: a declined
-    // shared companion must never gain an ordinary Close downstream).
-    if !matches!(removed, SharedRemoval::Declined) {
-        release_coordinator_session_rows(session_map, companion_key);
-        sessions.emit_close_delta_with_origin(
-            companion_key.clone(),
-            *companion_decision,
-            companion_metadata.clone(),
-            companion_origin,
-            true,
-            closed_companion_id,
-        );
-    }
 }

@@ -3227,3 +3227,122 @@ fn transition_debt_terminal_observation_arms_purge_13673() {
         "live-table transition-debt Demote must not arm the purge (#13673)"
     );
 }
+
+/// #13670: a fenced decline must preserve the live session's global state.
+/// The shared entry carries a different stamp, so `remove_shared_session_if`
+/// declines; NAT release and BPF steering/conntrack deletes must wait for the
+/// fence instead of running ahead of it. Pre-fix this test observes the
+/// steering delete and the released pool port despite the decline.
+#[test]
+fn purge_fence_decline_preserves_nat_and_bpf_state_13670() {
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    let channel = RuntimeViewChannel::default();
+    let forwarding = Arc::new(pbr_state());
+    publish_pbr_view(&channel, 7, forwarding.clone());
+    let reader = channel.reader();
+    let mut sessions = SessionTable::new();
+    let key = pbr_key();
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(40000),
+        ..NatDecision::default()
+    };
+    let mut decision = stamped_decision(unusable_resolution());
+    decision.nat = nat;
+    let mut forwarding = (*forwarding).clone();
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+        name: "pool-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "p".to_string(),
+        pool_addresses: vec!["203.0.113.1/32".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..crate::SourceNATRuleSnapshot::default()
+    }]);
+    crate::nat::reserve_synced_source_nat_allocation_for_worker(
+        &forwarding.iface_nat_allocators,
+        &forwarding.source_nat_rules,
+        &key,
+        nat,
+        false,
+        None,
+        NOW_NS,
+        0,
+    );
+    assert_eq!(
+        crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports,
+        1,
+        "precondition: the forward flow holds one pool port"
+    );
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::SyncImport,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    let mut diverged = decision;
+    diverged.install_table_domain = 12345;
+    diverged.install_table_check = 999;
+    let shared = shared_maps();
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&key, diverged, pbr_metadata()),
+    );
+    let mut purge_forwarding = rotated_blue_gone_state();
+    purge_forwarding.source_nat_rules = forwarding.source_nat_rules.clone();
+    let rotated = Arc::new(purge_forwarding);
+    publish_pbr_view(&channel, 8, rotated.clone());
+    let forwarding = Arc::new(forwarding);
+    assert!(super::install_table_purge::install_table_purge_predicate(
+        &rotated,
+        &key,
+        &decision,
+    ));
+    assert!(super::install_table_purge::install_table_purge_predicate(
+        reader.load().forwarding(),
+        &key,
+        &decision,
+    ));
+    let mut purge = super::install_table_purge::InstallTablePurge::default();
+    purge.arm(8);
+    let mut evicted = Vec::new();
+    let purged = purge.step(
+        &mut sessions,
+        SteeringMap::unshared_for_test(crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD),
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &shared.peer_worker_commands,
+        &rotated,
+        &reader,
+        8,
+        NOW_NS,
+        0,
+        &mut evicted,
+    );
+    assert_eq!(purged, 1);
+    assert!(shared.sessions.lock().expect("lock").contains_key(&key));
+    assert_eq!(
+        crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports,
+        1,
+        "fence decline must not release the live session's NAT port"
+    );
+    assert!(
+        crate::afxdp::bpf_map::session_map_writes()
+            .iter()
+            .all(|write| write.value.is_some()),
+        "fence decline must not delete the live session's BPF steering rows"
+    );
+}
