@@ -107,10 +107,14 @@ func TestDHCPServerHostInboundBypassWarnings(t *testing.T) {
 	cfgG.System.DHCPServer.DHCPv6LocalServer = mkDHCPGroups("g6", "ge-0/0/1.0")
 	wG := validateDHCPServerHostInboundBypassWarnings(cfgG)
 	if !hasWarn6460(wG, `system services dhcpv6-local-server group "g6"`) {
-		t.Fatalf("(g) expected v6 bypass warning (the v4 token does not admit dhcpv6), got %v", wG)
+		t.Fatalf("(g) expected v6 admission warning (the v4 token does not admit dhcpv6), got %v", wG)
 	}
 	if !hasWarn6460(wG, "ff02::1:2 multicast group") {
 		t.Fatalf("(g) v6 warning must name the multicast mechanism, got %v", wG)
+	}
+	if !hasWarn6460(wG, "host-inbound drops these requests before the DHCP server receives them") ||
+		!hasWarn6460(wG, "To admit DHCP service") {
+		t.Fatalf("(g) v6 warning must explain default-deny and how to admit service, got %v", wG)
 	}
 	if hasWarn6460(wG, "AF_PACKET") {
 		t.Fatalf("(g) v6 warning must NOT claim the AF_PACKET mechanism, got %v", wG)
