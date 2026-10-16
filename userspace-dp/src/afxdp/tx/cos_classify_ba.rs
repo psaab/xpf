@@ -59,45 +59,15 @@ pub(super) fn resolve_trusted_ba_queue_id(
     vlan_present: bool,
     trust: BaIngressTrust,
 ) -> Option<u8> {
-    let queue_id = if ingress_ifindex == 0 {
-        resolve_cos_dscp_classifier_queue_id(egress_iface, dscp)
-            .or_else(|| resolve_cos_inet_precedence_classifier_queue_id(egress_iface, dscp))
-            .or_else(|| {
-                resolve_cos_ieee8021_classifier_queue_id(
-                    egress_iface,
-                    ingress_pcp,
-                    vlan_present,
-                )
-            })
-    } else {
-        trust
-            .dscp
-            .and_then(|index| forwarding.cos.dscp_classifier_tables.get(index))
-            .and_then(|classifier| classifier.queue_by_dscp[usize::from(dscp & 0x3f)])
-            .or_else(|| {
-                trust
-                    .inet_precedence
-                    .and_then(|index| forwarding.cos.inet_precedence_classifier_tables.get(index))
-                    .and_then(|classifier| {
-                        classifier.queue_by_prec[usize::from((dscp >> 3) & 0x7)]
-                    })
-            })
-            .or_else(|| {
-                if !vlan_present {
-                    return None;
-                }
-                trust
-                    .ieee8021
-                    .and_then(|index| forwarding.cos.ieee8021_classifier_tables.get(index))
-                    .and_then(|classifier| {
-                        classifier
-                            .queue_by_pcp
-                            .get(usize::from(ingress_pcp))
-                            .copied()
-                            .flatten()
-                    })
-            })
-    }?;
+    let queue_id = resolve_trusted_ba_class_queue_id(
+        forwarding,
+        egress_iface,
+        ingress_ifindex,
+        dscp,
+        ingress_pcp,
+        vlan_present,
+        trust,
+    )?;
     let word = egress_iface.queue_id_bitmap[usize::from(queue_id) >> 6];
     let bit = 1_u64 << (queue_id & 63);
     Some(if word & bit != 0 {
@@ -105,6 +75,57 @@ pub(super) fn resolve_trusted_ba_queue_id(
     } else {
         egress_iface.default_queue
     })
+}
+
+/// #13968: resolve the packet's ORIGINAL (pre-clamp) forwarding-class queue
+/// id from the trusted ingress BA classifiers — the same code-point walk as
+/// [`resolve_trusted_ba_queue_id`] but WITHOUT clamping to the egress
+/// interface's materialized queue set. The egress DSCP rewrite keys on this
+/// class, not on the queue the egress scheduler happened to materialize:
+/// when the class has no scheduler-map entry on egress the queue clamps to
+/// the default queue, but the packet must still be re-marked by its own
+/// class's rewrite entry. Returns `None` when no BA classifier matches.
+pub(super) fn resolve_trusted_ba_class_queue_id(
+    forwarding: &ForwardingState,
+    egress_iface: &CoSInterfaceConfig,
+    ingress_ifindex: u32,
+    dscp: u8,
+    ingress_pcp: u8,
+    vlan_present: bool,
+    trust: BaIngressTrust,
+) -> Option<u8> {
+    if ingress_ifindex == 0 {
+        return resolve_cos_dscp_classifier_queue_id(egress_iface, dscp)
+            .or_else(|| resolve_cos_inet_precedence_classifier_queue_id(egress_iface, dscp))
+            .or_else(|| {
+                resolve_cos_ieee8021_classifier_queue_id(egress_iface, ingress_pcp, vlan_present)
+            });
+    }
+    trust
+        .dscp
+        .and_then(|index| forwarding.cos.dscp_classifier_tables.get(index))
+        .and_then(|classifier| classifier.queue_by_dscp[usize::from(dscp & 0x3f)])
+        .or_else(|| {
+            trust
+                .inet_precedence
+                .and_then(|index| forwarding.cos.inet_precedence_classifier_tables.get(index))
+                .and_then(|classifier| classifier.queue_by_prec[usize::from((dscp >> 3) & 0x7)])
+        })
+        .or_else(|| {
+            if !vlan_present {
+                return None;
+            }
+            trust
+                .ieee8021
+                .and_then(|index| forwarding.cos.ieee8021_classifier_tables.get(index))
+                .and_then(|classifier| {
+                    classifier
+                        .queue_by_pcp
+                        .get(usize::from(ingress_pcp))
+                        .copied()
+                        .flatten()
+                })
+        })
 }
 
 /// Resolve the current packet's ingress-classified loss-priority. Each binding
@@ -194,4 +215,38 @@ pub(super) fn resolve_cos_queue_lp_rewrite(
         trust,
     );
     lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied()
+}
+
+/// #13968: resolve the egress DSCP rewrite by the packet's ORIGINAL
+/// forwarding-class (its pre-clamp BA class queue id) and loss-priority,
+/// falling back to the clamped-queue entry only when the class has no
+/// rewrite entry of its own. When the class IS materialized on egress both
+/// keys name the same (class, LP) entry, so this is bit-identical to
+/// [`resolve_cos_queue_lp_rewrite`]; when it is not, the clamped queue's
+/// class (usually best-effort) must not bleach the packet's marking.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_cos_class_lp_rewrite(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+    ingress_ifindex: u32,
+    class_queue_id: Option<u8>,
+    queue_id: u8,
+    dscp: u8,
+    ingress_pcp: u8,
+    vlan_present: bool,
+    trust: BaIngressTrust,
+) -> Option<u8> {
+    let lp = forwarding.cos.lp_rewrite.get(&egress_ifindex)?;
+    let plp = resolve_trusted_ba_loss_priority(
+        lp,
+        forwarding,
+        ingress_ifindex,
+        dscp,
+        ingress_pcp,
+        vlan_present,
+        trust,
+    );
+    class_queue_id
+        .and_then(|cq| lp.dscp_rewrite_by_fc_lp.get(&(cq, plp)).copied())
+        .or_else(|| lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied())
 }

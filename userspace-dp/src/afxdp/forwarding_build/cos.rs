@@ -292,6 +292,11 @@ fn build_cos_lp_rewrite(
         &tables.inet_precedence_classifiers,
     )?;
     let mut dscp_rewrite_by_queue_lp: FastMap<(u8, u8), u8> = FastMap::default();
+    // #13968: retain the rule keyed by forwarding-class so a packet whose
+    // BA class has no materialized egress queue still rewrites by its
+    // original class. Keyed by the class's global queue id (the same key
+    // the classifier tables produce), NOT the clamped egress queue.
+    let mut dscp_rewrite_by_fc_lp: FastMap<(u8, u8), u8> = FastMap::default();
     if let Some(rule) = tables.dscp_rewrite_rules.get(&iface.cos_dscp_rewrite_rule) {
         for queue in &cfg.queues {
             for lp in 0..COS_LOSS_PRIORITY_LEVELS {
@@ -303,12 +308,18 @@ fn build_cos_lp_rewrite(
                 }
             }
         }
+        for ((fc, lp), &dscp) in &rule.dscp_by_fc_lp {
+            if let Some(&queue_id) = tables.class_to_queue.get(fc) {
+                dscp_rewrite_by_fc_lp.insert((queue_id, *lp), dscp);
+            }
+        }
     }
     Ok(CoSLossPriorityRewrite {
         dscp_lp_by_dscp,
         ieee8021_lp_by_pcp,
         inet_precedence_lp_by_prec,
         dscp_rewrite_by_queue_lp,
+        dscp_rewrite_by_fc_lp,
     })
 }
 

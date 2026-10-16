@@ -189,6 +189,18 @@ pub(in crate::afxdp) struct CoSLossPriorityRewrite {
     /// full loss-priority matrix (not just LOW) so a differentiated rule is
     /// applied per-flow.
     pub(in crate::afxdp) dscp_rewrite_by_queue_lp: FastMap<(u8, u8), u8>,
+    /// #13968: `(forwarding_class, loss_priority)` → egress DSCP code-point,
+    /// retaining the egress interface's rewrite rule keyed by the packet's
+    /// ORIGINAL forwarding-class. `dscp_rewrite_by_queue_lp` is compiled over
+    /// the egress interface's MATERIALIZED queues only, so a packet whose
+    /// ingress BA class (e.g. voice/q5) has no scheduler-map entry on egress
+    /// is clamped to the default queue and its rewrite would be read from the
+    /// clamped queue's class (best-effort) — bleaching EF to DSCP 0 (or losing
+    /// the rewrite entirely when the default queue has no entry). Junos
+    /// rewrite-rules key on (forwarding-class, loss-priority); the queue the
+    /// packet happens to land on is a scheduler concern, not the class it was
+    /// classified into. Empty when the interface has no rewrite rule.
+    pub(in crate::afxdp) dscp_rewrite_by_fc_lp: FastMap<(u8, u8), u8>,
 }
 
 /// #1746: operator-selectable equal-flow target policy. Decides the
