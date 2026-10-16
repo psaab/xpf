@@ -163,10 +163,14 @@ func validateDeviceMapStrict(cfg *Config) error {
 
 	// Build the RETH-member set so a key-mac override on a RETH member can
 	// be rejected (R-6): a RETH member's MAC alternates physical<->virtual.
+	// #14194: keyed by the CANONICAL Linux name, like the duplicate-name
+	// check below (#6546). Keying on the raw declared spelling let a slash
+	// RETH member paired with a dash device-map entry (or vice versa) miss
+	// this lookup entirely, admitting `key mac` strict.
 	rethMembers := make(map[string]bool)
 	for _, ifc := range cfg.Interfaces.Interfaces {
 		if ifc != nil && ifc.RedundantParent != "" {
-			rethMembers[ifc.Name] = true
+			rethMembers[LinuxIfName(ifc.Name)] = true
 		}
 	}
 
@@ -241,8 +245,9 @@ func validateDeviceMapStrict(cfg *Config) error {
 		}
 
 		// R-6: RETH member must stay PCI-keyed (OriginalName= match); a
-		// mac-leading key order is rejected.
-		if rethMembers[e.LogicalName] {
+		// mac-leading key order is rejected. #14194: look up by the
+		// canonical Linux name so dash/slash aliases hit the same member.
+		if rethMembers[LinuxIfName(e.LogicalName)] {
 			switch e.EffectiveKeyOrder() {
 			case DeviceMapKeyMAC, DeviceMapKeyMACThenPCI:
 				return fmt.Errorf("chassis device-map: interface %q is a RETH member; its MAC "+

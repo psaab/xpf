@@ -184,6 +184,17 @@ type Binding struct {
 // R-6); the strict commit validator already rejects key mac on a RETH
 // member, so here the MAC leg is skipped for them as defense in depth.
 func Resolve(entries []config.DeviceMapEntry, nics []PresentNIC, rethMembers map[string]bool) []Binding {
+	// #14194: canonicalise the RETH-member set to Linux names once, so a
+	// caller keying it on the raw Junos spelling (`ge-0/0/3`, as
+	// hand-built maps and older producers do) still protects a dash-spelt
+	// entry (`ge-0-0-3`), and vice versa. RethMembersFromConfig already
+	// returns canonical keys; this makes Resolve robust to either.
+	canonRETH := make(map[string]bool, len(rethMembers))
+	for name, isMember := range rethMembers {
+		if isMember {
+			canonRETH[config.LinuxIfName(name)] = true
+		}
+	}
 	byPCI := make(map[string][]*PresentNIC)
 	byPermMAC := make(map[string][]*PresentNIC)
 	for i := range nics {
@@ -201,7 +212,7 @@ func Resolve(entries []config.DeviceMapEntry, nics []PresentNIC, rethMembers map
 	out := make([]Binding, 0, len(entries))
 	for _, e := range entries {
 		logical := config.LinuxIfName(e.LogicalName)
-		isRETH := rethMembers[e.LogicalName]
+		isRETH := canonRETH[logical]
 		rb := Binding{Entry: e, Status: BindUnbound}
 
 		allowMAC := e.MAC != "" && !isRETH
@@ -387,6 +398,12 @@ func keySequence(e config.DeviceMapEntry, allowPCI, allowMAC bool) []string {
 
 // RethMembersFromConfig returns the set of logical names that are RETH
 // members in the config (RedundantParent set).
+//
+// #14194: keys are the CANONICAL Linux names (LinuxIfName), not the raw
+// declared spellings. Interfaces are normally declared Junos-style
+// (`ge-0/0/3`) while device-map entries may be written in the kernel
+// dash spelling (`ge-0-0-3`); keying raw let the alias miss the R-6
+// lookup in both the strict validator and Resolve.
 func RethMembersFromConfig(cfg *config.Config) map[string]bool {
 	m := make(map[string]bool)
 	if cfg == nil {
@@ -394,7 +411,7 @@ func RethMembersFromConfig(cfg *config.Config) map[string]bool {
 	}
 	for _, ifc := range cfg.Interfaces.Interfaces {
 		if ifc != nil && ifc.RedundantParent != "" {
-			m[ifc.Name] = true
+			m[config.LinuxIfName(ifc.Name)] = true
 		}
 	}
 	return m
