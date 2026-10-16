@@ -2,7 +2,7 @@
 
 use super::allocator::{NatHolder, PoolAddressFamily, PortAllocator, TranslatedTuple};
 use super::idle_lease_sync_8121::{IdleLeaseImport, IdleLeaseRecord};
-use super::source::{PersistentNatPermit, SourceNatFlowKey};
+use super::source::{PersistentNatPermit, SourceNatFailureReason, SourceNatFlowKey};
 use std::net::{IpAddr, Ipv4Addr};
 
 const TCP: u8 = 6;
@@ -3055,4 +3055,274 @@ fn expired_idle_lease_does_not_block_synced_address_only_13692() {
         .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
         .expect("synced address-only lease must remain persistent");
     assert_eq!(lease.active_flows, 1);
+
+}
+// #13691: a stale-tuple re-decision must not retire the incumbent until the
+// replacement tuple has cleared every admission check. Retiring first frees
+// the incumbent's port and completes its lease; a refused replacement then
+// leaves the still-live flow with no allocation at all.
+//
+// RED on master: the occupied-port refusal below lands AFTER the #6528
+// eviction, so the incumbent record and its occupancy bit are already gone.
+#[test]
+fn pat_stale_tuple_refusal_keeps_incumbent_13691() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 20_100, 20_101);
+    let f = flow("10.0.80.1", 30_000);
+    let other = flow("10.0.80.2", 30_001);
+    let first = TranslatedTuple {
+        ip: IpAddr::V4(addrs[0]),
+        port: 20_100,
+    };
+    let busy = TranslatedTuple {
+        ip: IpAddr::V4(addrs[0]),
+        port: 20_101,
+    };
+    for (owner, tuple) in [(f, first), (other, busy)] {
+        assert!(allocator.reserve_flow_maybe_persistent(
+            owner,
+            tuple,
+            0,
+            false,
+            1_000,
+            NatHolder::Untracked,
+            None,
+            false,
+            &mut None,
+        ));
+    }
+    assert!(
+        !allocator.reserve_flow_maybe_persistent(
+            f,
+            busy,
+            0,
+            false,
+            2_000,
+            NatHolder::Untracked,
+            None,
+            false,
+            &mut None,
+        ),
+        "a tuple owned by a different live flow must be refused"
+    );
+    assert_eq!(
+        allocator.debug_live_flow_translated(&f),
+        Some(first),
+        "a refused replacement must leave the incumbent record intact"
+    );
+    assert!(
+        allocator.debug_is_port_occupied(0, first.port),
+        "the incumbent port bit must still be held"
+    );
+    assert!(allocator.debug_is_port_occupied(0, busy.port));
+    assert_eq!(allocator.live_flow_count(), 2);
+}
+
+// #13691: same ordering defect, exercised through the persistent-lease
+// mismatch refusal (a lease naming a different tuple) and the replacement's
+// own lease identity.
+#[test]
+fn pat_stale_tuple_lease_mismatch_keeps_incumbent_13691() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 20_200, 20_201);
+    let f = flow("10.0.80.3", 30_002);
+    let first = TranslatedTuple {
+        ip: IpAddr::V4(addrs[0]),
+        port: 20_200,
+    };
+    let changed = TranslatedTuple {
+        ip: IpAddr::V4(addrs[0]),
+        port: 20_201,
+    };
+    let key = f.persistent_source_key(PersistentNatPermit::TargetHostPort);
+    assert!(allocator.reserve_flow_maybe_persistent(
+        f,
+        first,
+        0,
+        false,
+        1_000,
+        NatHolder::Untracked,
+        Some((key, TIMEOUT_NS)),
+        false,
+        &mut None,
+    ));
+    assert!(
+        !allocator.reserve_flow_maybe_persistent(
+            f,
+            changed,
+            0,
+            false,
+            2_000,
+            NatHolder::Untracked,
+            Some((key, TIMEOUT_NS)),
+            false,
+            &mut None,
+        ),
+        "the incumbent lease names the old tuple, so the changed tuple must be refused"
+    );
+    assert_eq!(allocator.debug_live_flow_translated(&f), Some(first));
+    assert!(allocator.debug_is_port_occupied(0, first.port));
+    let debug = allocator
+        .debug_persistent_lease_for_flow(&f, PersistentNatPermit::TargetHostPort)
+        .expect("incumbent lease must survive a refused replacement");
+    assert_eq!(debug.translated, first);
+    assert_eq!(debug.active_flows, 1, "the lease refcount must be untouched");
+    assert_eq!(debug.completed_flows, 0);
+}
+
+// #13691: address-only twin. The replacement identity collides with a PAT
+// flow's exact reverse identity, which is checked only after the incumbent
+// token has been retired on master.
+#[test]
+fn address_only_stale_tuple_refusal_keeps_incumbent_13691() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 20_300, 20_301);
+    let pat_flow = flow("10.0.80.4", 30_003);
+    let pat_tuple = TranslatedTuple {
+        ip: IpAddr::V4(addrs[0]),
+        port: 20_300,
+    };
+    assert!(allocator.reserve_flow_maybe_persistent(
+        pat_flow,
+        pat_tuple,
+        0,
+        false,
+        1_000,
+        NatHolder::Untracked,
+        None,
+        false,
+        &mut None,
+    ));
+    // This flow's preserved source port IS the PAT flow's translated port, so
+    // its address-only identity at the PAT address collides exactly.
+    let ao_flow = flow("10.0.80.5", 20_300);
+    let home_ip = IpAddr::V4(addrs[1]);
+    assert_eq!(
+        allocator.reserve_address_only_maybe_persistent(
+            ao_flow,
+            home_ip,
+            1,
+            1_000,
+            NatHolder::Untracked,
+            None,
+            false,
+            &mut None,
+        ),
+        Ok(TranslatedTuple {
+            ip: home_ip,
+            port: 20_300
+        })
+    );
+    assert_eq!(
+        allocator.reserve_address_only_maybe_persistent(
+            ao_flow,
+            IpAddr::V4(addrs[0]),
+            0,
+            2_000,
+            NatHolder::Untracked,
+            None,
+            false,
+            &mut None,
+        ),
+        Err(SourceNatFailureReason::AllocatorExhausted),
+        "the PAT-owned reverse identity must refuse the stale-tuple move"
+    );
+    assert_eq!(
+        allocator.debug_live_flow_translated(&ao_flow),
+        Some(TranslatedTuple {
+            ip: home_ip,
+            port: 20_300
+        }),
+        "a refused move must leave the incumbent address-only token intact"
+    );
+    assert!(
+        allocator
+            .debug_address_only_owners()
+            .iter()
+            .any(|(_, owner)| *owner == ao_flow),
+        "the incumbent reverse-identity token must still be owned"
+    );
+}
+
+// #13691 positive control: an admissible replacement still replaces the
+// incumbent — the port-bearing arm frees the old port, the address-only arm
+// moves its token.
+#[test]
+fn stale_tuple_admissible_replacement_still_replaces_13691() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 20_400, 20_401);
+    let f = flow("10.0.80.6", 30_004);
+    let first = TranslatedTuple {
+        ip: IpAddr::V4(addrs[0]),
+        port: 20_400,
+    };
+    let next = TranslatedTuple {
+        ip: IpAddr::V4(addrs[0]),
+        port: 20_401,
+    };
+    assert!(allocator.reserve_flow_maybe_persistent(
+        f,
+        first,
+        0,
+        false,
+        1_000,
+        NatHolder::Untracked,
+        None,
+        false,
+        &mut None,
+    ));
+    assert!(allocator.reserve_flow_maybe_persistent(
+        f,
+        next,
+        0,
+        false,
+        2_000,
+        NatHolder::Untracked,
+        None,
+        false,
+        &mut None,
+    ));
+    assert_eq!(allocator.debug_live_flow_translated(&f), Some(next));
+    assert!(!allocator.debug_is_port_occupied(0, first.port));
+    assert!(allocator.debug_is_port_occupied(0, next.port));
+    assert_eq!(allocator.live_flow_count(), 1);
+
+    let ao_flow = flow("10.0.80.7", 30_005);
+    let home_ip = IpAddr::V4(addrs[1]);
+    let moved_ip = IpAddr::V4(addrs[2]);
+    assert!(allocator
+        .reserve_address_only_maybe_persistent(
+            ao_flow,
+            home_ip,
+            1,
+            1_000,
+            NatHolder::Untracked,
+            None,
+            false,
+            &mut None,
+        )
+        .is_ok());
+    assert_eq!(
+        allocator.reserve_address_only_maybe_persistent(
+            ao_flow,
+            moved_ip,
+            2,
+            2_000,
+            NatHolder::Untracked,
+            None,
+            false,
+            &mut None,
+        ),
+        Ok(TranslatedTuple {
+            ip: moved_ip,
+            port: 30_005
+        })
+    );
+    assert_eq!(
+        allocator.debug_live_flow_translated(&ao_flow),
+        Some(TranslatedTuple {
+            ip: moved_ip,
+            port: 30_005
+        })
+    );
 }
