@@ -20,26 +20,59 @@ pub(crate) fn parse_rss_expectation(raw: &str) -> Result<RssExpectation, String>
     }
 
     let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-    let normalized = compact
-        .replace("<=", ":")
-        .replace(">=", ":")
-        .replace('=', ":");
-    let mut parts = normalized.splitn(2, ':');
-    let key = parts.next().unwrap_or_default();
-    let value = parts.next().unwrap_or_default();
+    // Parse the operator explicitly instead of normalizing it away:
+    // collapsing <=, >=, and = into ':' silently inverted the meaning
+    // of e.g. cstruct>=X (a ceiling key) or active-workers<=N (a floor
+    // key). Only the operator(s) matching each key's hardcoded
+    // semantics are accepted; anything else fails closed.
+    let Some(op_pos) = compact.find(['<', '>', '=', ':']) else {
+        return Err(format!(
+            "unknown --rss-expectation {raw}; expected any, balanced, \
+             at-least-active-workers:N, max-worker-flow-share:X, or cstruct-max:X"
+        ));
+    };
+    let (op, op_len): (&str, usize) = if compact[op_pos..].starts_with("<=") {
+        ("<=", 2)
+    } else if compact[op_pos..].starts_with(">=") {
+        (">=", 2)
+    } else if compact.as_bytes()[op_pos] == b':' {
+        (":", 1)
+    } else {
+        return Err(format!(
+            "invalid --rss-expectation operator in {raw}; expected ':' or a \
+             comparison operator valid for the key (<= for cstruct, >= for \
+             at-least-active-workers)"
+        ));
+    };
+    let key = &compact[..op_pos];
+    let value = &compact[op_pos + op_len..];
+    let check_op = |allowed: &[&str]| -> Result<(), String> {
+        if allowed.contains(&op) {
+            Ok(())
+        } else {
+            Err(format!(
+                "invalid --rss-expectation operator '{op}' for {key} in {raw}; \
+                 expected {}",
+                allowed.join(" or ")
+            ))
+        }
+    };
     match key {
         "at-least-active-workers" | "active-workers" => {
+            check_op(&[":", ">="])?;
             let n = value
                 .parse::<u32>()
                 .map_err(|_| format!("invalid --rss-expectation active worker count: {raw}"))?;
             Ok(RssExpectation::AtLeastActiveWorkers(n))
         }
         "max-worker-flow-share" => {
+            check_op(&[":"])?;
             let share = parse_fraction_or_percent(value)
                 .map_err(|e| format!("invalid --rss-expectation max-worker-flow-share: {e}"))?;
             Ok(RssExpectation::MaxWorkerFlowShare(share))
         }
         "cstruct-max" | "cstruct" => {
+            check_op(&[":", "<="])?;
             let max = parse_nonnegative_number_or_percent(value)
                 .map_err(|e| format!("invalid --rss-expectation cstruct threshold: {e}"))?;
             Ok(RssExpectation::CstructMax(max))
@@ -199,5 +232,63 @@ mod tests {
         let (pass, reason) = evaluate_rss_expectation(&expectation, &[4, 4, 0, 0, 0, 0], 0.0, 6);
         assert!(!pass);
         assert!(reason.contains("active_workers=2"), "reason: {reason}");
+    }
+
+    #[test]
+    fn rss_expectation_rejects_inverted_operators() {
+        // D8-19 (#13659): the blind '<=' / '>=' / '=' -> ':' normalization
+        // silently inverted these spellings into the hardcoded ceiling /
+        // lower-bound semantics. Only the documented spellings per key are
+        // valid: cstruct keys take ':' or '<='; at-least/active-workers
+        // take ':' or '>='; max-worker-flow-share takes ':' only.
+        for raw in [
+            "cstruct>=0.5",
+            "cstruct>0.5",
+            "cstruct=0.5",
+            "cstruct<0.5",
+            "cstruct-max>=0.5",
+            "cstruct-max=0.5",
+            "max-worker-flow-share<=0.5",
+            "max-worker-flow-share>=0.5",
+            "max-worker-flow-share>0.5",
+            "max-worker-flow-share=0.5",
+            "active-workers<=2",
+            "active-workers<2",
+            "active-workers=2",
+            "active-workers>2",
+            "at-least-active-workers<=4",
+            "at-least-active-workers<4",
+            "at-least-active-workers=4",
+            "cstruct=>0.5",
+            "cstruct=<0.5",
+            "cstruct==0.5",
+        ] {
+            let err = parse_rss_expectation(raw).expect_err(raw);
+            assert!(err.contains("operator"), "err for {raw}: {err}");
+        }
+    }
+
+    #[test]
+    fn rss_expectation_accepts_documented_operator_spellings() {
+        assert_eq!(
+            parse_rss_expectation("cstruct<=0.5").unwrap(),
+            RssExpectation::CstructMax(0.5)
+        );
+        assert_eq!(
+            parse_rss_expectation("cstruct-max:0.5").unwrap(),
+            RssExpectation::CstructMax(0.5)
+        );
+        assert_eq!(
+            parse_rss_expectation("max-worker-flow-share:50%").unwrap(),
+            RssExpectation::MaxWorkerFlowShare(0.5)
+        );
+        assert_eq!(
+            parse_rss_expectation("at-least-active-workers:4").unwrap(),
+            RssExpectation::AtLeastActiveWorkers(4)
+        );
+        assert_eq!(
+            parse_rss_expectation("active-workers>=4").unwrap(),
+            RssExpectation::AtLeastActiveWorkers(4)
+        );
     }
 }

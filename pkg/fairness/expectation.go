@@ -79,28 +79,60 @@ func ParseRSSExpectation(raw string) (RSSExpectation, error) {
 		}
 		return r
 	}, raw)
-	normalized := strings.ReplaceAll(compact, "<=", ":")
-	normalized = strings.ReplaceAll(normalized, ">=", ":")
-	normalized = strings.ReplaceAll(normalized, "=", ":")
-	key, value, ok := strings.Cut(normalized, ":")
-	if !ok {
+	// Parse the operator explicitly instead of normalizing it away:
+	// collapsing <=, >=, and = into ':' silently inverted the meaning
+	// of e.g. cstruct>=X (a ceiling key) or active-workers<=N (a floor
+	// key). Only the operator(s) matching each key's hardcoded
+	// semantics are accepted; anything else fails closed.
+	opIdx := strings.IndexAny(compact, "<>=:")
+	if opIdx < 0 {
 		return RSSExpectation{}, fmt.Errorf("unknown RSS expectation %q; expected any, balanced, at-least-active-workers:N, max-worker-flow-share:X, or cstruct-max:X", raw)
+	}
+	var op string
+	var opLen int
+	switch {
+	case strings.HasPrefix(compact[opIdx:], "<="):
+		op, opLen = "<=", 2
+	case strings.HasPrefix(compact[opIdx:], ">="):
+		op, opLen = ">=", 2
+	case compact[opIdx] == ':':
+		op, opLen = ":", 1
+	default:
+		return RSSExpectation{}, fmt.Errorf("invalid RSS expectation operator in %q; expected ':' or a comparison operator valid for the key (<= for cstruct, >= for at-least-active-workers)", raw)
+	}
+	key, value := compact[:opIdx], compact[opIdx+opLen:]
+	checkOp := func(allowed ...string) error {
+		for _, a := range allowed {
+			if op == a {
+				return nil
+			}
+		}
+		return fmt.Errorf("invalid RSS expectation operator %q for %s in %q; expected %s", op, key, raw, strings.Join(allowed, " or "))
 	}
 
 	switch key {
 	case "at-least-active-workers", "active-workers":
+		if err := checkOp(":", ">="); err != nil {
+			return RSSExpectation{}, err
+		}
 		n, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
 			return RSSExpectation{}, fmt.Errorf("invalid RSS expectation active worker count %q", raw)
 		}
 		return RSSExpectation{Kind: RSSExpectationAtLeastActiveWorkers, ActiveWorkers: uint32(n)}, nil
 	case "max-worker-flow-share":
+		if err := checkOp(":"); err != nil {
+			return RSSExpectation{}, err
+		}
 		share, err := parseFractionOrPercent(value)
 		if err != nil {
 			return RSSExpectation{}, fmt.Errorf("invalid RSS expectation max-worker-flow-share: %w", err)
 		}
 		return RSSExpectation{Kind: RSSExpectationMaxWorkerFlowShare, Threshold: share}, nil
 	case "cstruct", "cstruct-max":
+		if err := checkOp(":", "<="); err != nil {
+			return RSSExpectation{}, err
+		}
 		max, err := parseNonnegativeNumberOrPercent(value)
 		if err != nil {
 			return RSSExpectation{}, fmt.Errorf("invalid RSS expectation cstruct threshold: %w", err)
