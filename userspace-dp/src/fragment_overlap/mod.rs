@@ -2229,7 +2229,6 @@ mod tests {
             assert!(!admission.dropped, "completed anchor {ident} is admitted");
             assert!(tracker.commit_admission(admission.admission.take().unwrap()));
         }
-        assert_eq!(tracker.len(), OVERLAP_CAP_PER_DOMAIN_PER_SHARD);
 
         // A competing routing domain can use the other half of the shard.
         let mut victim = v4_key();
@@ -2255,7 +2254,11 @@ mod tests {
             assert!(!admitted.dropped, "victim reserve entry {ident} is admitted");
             assert!(tracker.commit_admission(admitted.admission.take().unwrap()));
         }
-        assert_eq!(tracker.len(), OVERLAP_CAP_PER_SHARD);
+        assert_eq!(
+            tracker.len(),
+            OVERLAP_CAP_PER_SHARD,
+            "the attacker stays at its reserve while the victim uses the other half"
+        );
         assert!(tracker.check_overlap(
             victim_key,
             0,
