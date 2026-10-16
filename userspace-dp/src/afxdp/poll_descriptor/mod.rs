@@ -4715,6 +4715,37 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     .installed_session_info(&flow.forward_key)
                                     .expect("successful local session install has a table entry");
                                 let session_id = install_info.session_id;
+                                // #13926: anchor an admitted host-bound first
+                                // fragment to its LocalMiss session. Non-first
+                                // fragments can then inherit this exact
+                                // host-delivery decision; orphan tails still
+                                // take the flowless host-inbound gate.
+                                if let Some(l3_packet) = packet_frame.get(
+                                    verified_l3_or_stamp(
+                                        packet_frame,
+                                        meta.l3_offset,
+                                        meta.addr_family,
+                                    )..,
+                                ) {
+                                    let authority = frag_ingress_authority_with_nat_scope(
+                                        worker_ctx.forwarding,
+                                        meta,
+                                        ingress_zone_override,
+                                        ingress_nat_scope_ifindex,
+                                    );
+                                    if same_family_or_plain_install_forward_fragment_assoc(
+                                        worker_ctx.forwarding,
+                                        l3_packet,
+                                        meta.addr_family as i32,
+                                        authority,
+                                        &decision,
+                                        &flow.forward_key,
+                                        session_id,
+                                        now_ns,
+                                    ) {
+                                        telemetry.counters.record_nat64_frag_assoc_evicted();
+                                    }
+                                }
                                 // #8125: see the sibling site.
                                 let timeout_secs = install_info.timeout_secs;
                                 publish_bpf_conntrack_entry(
@@ -6744,6 +6775,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // now owns the egress RG, exactly as it does for a demoted
                     // session.
                     let mut hit = hit;
+                    // #13926: a live session-bound fragment association for a
+                    // LocalDelivery decision is proof that its first fragment
+                    // passed host-inbound admission and host policy. This lets
+                    // the associated tail use the trusted reinject path without
+                    // rerunning port-based gates against its absent L4 header.
+                    if fragment_association_hit
+                        && hit.resolution.disposition == ForwardingDisposition::LocalDelivery
+                    {
+                        host_inbound_gate_proof = true;
+                    }
                     // #13744: a first fragment admitted while its neighbor was
                     // cold stores a MissingNeighbor resolution in the fragment
                     // association. Its later sibling can arrive after the same

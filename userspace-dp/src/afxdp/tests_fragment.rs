@@ -793,6 +793,113 @@ fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
         "#10130: LocalDelivery reply-tail rejection is observable"
     );
 }
+/// #13926: admitted UDP to an interface-NAT local address must associate its
+/// committed first-fragment LocalDelivery decision with the admitted session.
+/// A same-datagram tail is then reinjected to the host; an orphan tail remains
+/// subject to ordinary flowless host-inbound checks and is denied.
+#[test]
+fn admitted_interface_nat_udp_fragments_deliver_only_with_admitted_head_13926() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-lan-wan".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+    snapshot
+        .zones
+        .iter_mut()
+        .find(|zone| zone.name == "wan")
+        .unwrap()
+        .host_inbound_system_services = vec!["dns".to_string()];
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+    let mut first = udp_reply_frag_frame_10130(0x2000, 0x1392);
+    first[34..36].copy_from_slice(&33333u16.to_be_bytes());
+    first[36..38].copy_from_slice(&53u16.to_be_bytes());
+    let mut meta = UserspaceDpMeta {
+        ingress_ifindex: 12,
+        ingress_vlan_id: 80,
+        flow_src_port: 33333,
+        flow_dst_port: 53,
+        flow_src_addr: [172, 16, 80, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        flow_dst_addr: [172, 16, 80, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ..udp_frag_meta_5689()
+    };
+    meta.protocol = PROTO_UDP;
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+
+    let (_batch_first, dbg_first) = txn_run_descriptor_with_reinjector(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        meta,
+        &reinjector,
+    );
+    assert_eq!(dbg_first.local, 1, "admitted head must take LocalDelivery");
+    assert_eq!(sessions.len(), 1, "LocalDelivery head must create its local session");
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        1,
+        "admitted LocalDelivery first fragment must publish its session-bound association"
+    );
+
+    let tail = udp_reply_frag_frame_10130(0x0001, 0x1392);
+    let mut tail_meta = meta;
+    tail_meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+    tail_meta.flow_src_port = 0;
+    tail_meta.flow_dst_port = 0;
+    let (batch_tail, dbg_tail) = txn_run_descriptor_with_reinjector(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &tail,
+        tail_meta,
+        &reinjector,
+    );
+    assert_eq!(
+        batch_tail.host_inbound_denied_packets, 0,
+        "an admitted association tail must not be mistaken for an orphan"
+    );
+    assert_eq!(dbg_tail.local, 1, "the admitted tail must inherit LocalDelivery");
+    assert_eq!(
+        binding.live.slow_path_packets.load(Ordering::Relaxed),
+        2,
+        "both fragments must be delivered through trusted kernel reinjection"
+    );
+
+    // Different identification means no first-fragment admission owns this tail.
+    let orphan = udp_reply_frag_frame_10130(0x0001, 0x1393);
+    let (batch_orphan, dbg_orphan) = txn_run_descriptor_with_reinjector(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &orphan,
+        tail_meta,
+        &reinjector,
+    );
+    assert_eq!(dbg_orphan.local, 1, "orphan tail resolves to LocalDelivery before gating");
+    assert_eq!(
+        batch_orphan.host_inbound_denied_packets, 1,
+        "an orphan tail has no L4 port and must fail the configured dns-only host-inbound gate"
+    );
+    assert_eq!(
+        binding.live.slow_path_packets.load(Ordering::Relaxed),
+        2,
+        "the orphan tail must not be reinjected to the host"
+    );
+}
 
 /// #8367: on the FLOWLESS TX path under plain SNAT, the egress interface
 /// `filter output` must be MATCHED — and its `then log` event ATTRIBUTED —
