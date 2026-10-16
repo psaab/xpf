@@ -450,6 +450,11 @@ Guard layers (`build-userspace-xdp.sh`):
      immediately after the verifier-gated install, so the manifest stays
      in LOCKSTEP with the object it describes and can never record a
      source hash newer than the object that source produced.
+   - The separate `userspace_xdp_gate_verdict.json` attests both the object
+     hash and canonical digest of those build inputs. The build recipe
+     captures the digest before compiling and passes it to `shimverify`;
+     manifest regeneration copies it only when both hashes match. Thus
+     running `cmd/shim-manifest` alone cannot refresh trust in a stale object.
    - `TestUserspaceXDPShimObjectMatchesSourceManifest` (a plain, non-root
      `make test` test) recomputes the manifest from the working tree and
      fails when it drifts — editing a shim source, adding a new `.rs`

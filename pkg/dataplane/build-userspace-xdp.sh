@@ -106,6 +106,9 @@ fi
 MAX_INTERFACES="$(awk '/^#define MAX_INTERFACES /{print $3; exit}' "${REPO_ROOT}/bpf/headers/xpf_common.h")"
 [[ -n "${MAX_INTERFACES}" ]] || fail "failed to parse MAX_INTERFACES from ${REPO_ROOT}/bpf/headers/xpf_common.h"
 export MAX_INTERFACES
+SHIM_BUILD_DIGEST="$("${GO_BIN}" -C "${REPO_ROOT}" run ./cmd/shim-manifest -repo-root "${REPO_ROOT}" -print-build-digest)" || \
+	fail "failed to hash the shim build inputs"
+[[ "${SHIM_BUILD_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || fail "invalid shim build-input digest"
 
 (
 	cd "${CRATE_DIR}"
@@ -142,11 +145,11 @@ run_verifier() {
 	local allow_low="${XPF_SHIM_ALLOW_LOW_HEADROOM:-0}"
 	if [[ "$(id -u)" -eq 0 ]]; then
 		SHIMVERIFY_ATTESTATION="$(mktemp -t shimverify-attestation.XXXXXX)" || return 1
-		XPF_SHIM_ALLOW_LOW_HEADROOM="${allow_low}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
+		XPF_SHIM_ALLOW_LOW_HEADROOM="${allow_low}" XPF_SHIM_BUILD_DIGEST="${SHIM_BUILD_DIGEST}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
 	elif sudo -n true 2>/dev/null; then
 		SHIMVERIFY_ATTESTATION="$(sudo -n mktemp -t shimverify-attestation.XXXXXX)" || return 99
 		sudo -n chmod 0644 "${SHIMVERIFY_ATTESTATION}" || return 99
-		sudo -n env "XPF_SHIM_ALLOW_LOW_HEADROOM=${allow_low}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
+		sudo -n env "XPF_SHIM_ALLOW_LOW_HEADROOM=${allow_low}" "XPF_SHIM_BUILD_DIGEST=${SHIM_BUILD_DIGEST}" "${SHIMVERIFY}" "${CANDIDATE}" --gate-verdict "${SHIMVERIFY_ATTESTATION}"
 	else
 		return 99
 	fi

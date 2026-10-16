@@ -43,6 +43,9 @@ func TestUserspaceXDPShimObjectMatchesSourceManifest(t *testing.T) {
 		t.Fatalf("marshal recomputed manifest: %v", err)
 	}
 
+	if want.BuildDigest == "" {
+		t.Fatalf("no current verifier-gated build digest for shim inputs; a hand-run of cmd/shim-manifest cannot refresh the gate verdict (run `make generate`)")
+	}
 	if string(committedBytes) == string(wantBytes) {
 		return
 	}
@@ -171,6 +174,23 @@ func TestUserspaceXDPManifestCoversTrackedShimInputs(t *testing.T) {
 		if !gotPaths[must] {
 			t.Errorf("manifest must cover critical build input %q", must)
 		}
+	}
+}
+
+func TestUserspaceXDPBuildDigestMatchesManifestInputSet13963(t *testing.T) {
+	t.Parallel()
+
+	const repoRoot = "../.."
+	manifest, err := ComputeUserspaceXDPManifest(repoRoot)
+	if err != nil {
+		t.Fatalf("compute manifest: %v", err)
+	}
+	digest, err := UserspaceXDPBuildDigest(repoRoot)
+	if err != nil {
+		t.Fatalf("compute build digest: %v", err)
+	}
+	if got := userspaceXDPBuildDigest(manifest.Inputs); got != digest {
+		t.Fatalf("manifest input digest = %q, command digest = %q", got, digest)
 	}
 }
 
