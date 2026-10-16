@@ -720,7 +720,16 @@ impl SessionTable {
         if pair.reverse != pair.forward && self.key_to_handle.contains_key(&pair.reverse) {
             reclaimed += 1;
         }
-        self.len().saturating_sub(reclaimed).saturating_add(needed) <= self.max_sessions
+        // #14126: match can_admit / raw install, which charge
+        // reserved_session_slots (outstanding IPsec install plans).
+        // Crediting reclaimed closing rows without charging the
+        // reservation would admit, evict the old pair, then fail the
+        // replacement install against slots already promised elsewhere.
+        self.len()
+            .saturating_sub(reclaimed)
+            .saturating_add(self.reserved_session_slots)
+            .saturating_add(needed)
+            <= self.max_sessions
     }
 
     /// #10287/#10886: evict a live closing TCP incarnation after an authorized
