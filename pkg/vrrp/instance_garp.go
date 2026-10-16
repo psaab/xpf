@@ -158,10 +158,12 @@ func (vi *vrrpInstance) sendGARP(force bool) {
 	vips := vi.vipsSnapshot()
 	epoch := vi.garpEpoch.Load()
 	ownerGen := vi.ownerGen.Load()
-	count, ok := vi.reserveGARPBurstLocked(vips, epoch, ownerGen, force)
+	deduped := epoch > 0 && vi.lastGARPEpoch.Load() == epoch
+	pendingOnly := deduped && len(vi.pendingGARPVIPs) > 0
+	count, ok := vi.reserveGARPBurstGateLocked(vips, epoch, ownerGen, force, pendingOnly)
 	vi.vipMu.Unlock()
 	if ok {
-		vi.sendGARPReserved(vips, epoch, ownerGen, count)
+		vi.sendGARPReservedMode(vips, epoch, ownerGen, count, pendingOnly)
 	}
 }
 
@@ -253,11 +255,39 @@ func (vi *vrrpInstance) sendGARPFor(vips []string, epoch, ownerGen uint64, force
 // vipMu. The caller holds vipMu, including the full-set snapshot path, so a
 // membership update cannot invalidate a snapshot before its pending VIPs are
 // recorded.
+// Suppression gate (#14155): a non-forced caller is admitted when the
+// epoch dedup has not reserved this epoch, OR when the full-set snapshot
+// still carries pending VIPs whose synchronous first frame was never
+// confirmed. The second arm exists for the becomeMaster window: the
+// tenure populated pending under vipMu at promotion, but a concurrent
+// epoch bump reserved the newer epoch for a bounded (added-only)
+// announcement, so the deferred failover sender must not be treated as
+// a duplicate for VIPs that were never announced. Only sendGARP (the
+// full-set path) sets that flag — sendGARPFor passes false, so bounded
+// membership announcements keep strict epoch dedup, and the 500ms time
+// dampener below still applies to every non-forced admission.
 func (vi *vrrpInstance) reserveGARPBurstLocked(vips []string, epoch, ownerGen uint64, force bool) (int, bool) {
+	return vi.reserveGARPBurstGateLocked(vips, epoch, ownerGen, force, false)
+}
+
+func (vi *vrrpInstance) reserveGARPBurstGateLocked(vips []string, epoch, ownerGen uint64, force, drainPending bool) (int, bool) {
+	deduped := epoch > 0 && vi.lastGARPEpoch.Load() == epoch
+	// A retained pending VIP is announced only by sendGARPReserved's
+	// per-VIP pending check; the epoch dedup in garpSendAllowedForOwner
+	// would suppress the whole snapshot before that check could run.
+	// This bypass is limited to the deadline the sender already captured:
+	// the membership announcement reserved the current epoch under
+	// vipMu, so a non-forced sender acquiring vipMu afterwards still
+	// faces the time dampener for the retained VIPs.
+	allowPending := drainPending && len(vips) > 0 && len(vi.pendingGARPVIPs) > 0
 	if vi.getState() != StateMaster ||
 		vi.ownerGen.Load() != ownerGen ||
 		vi.garpEpoch.Load() != epoch ||
-		!vi.garpSendAllowedForOwner(force, time.Now().UnixNano(), ownerGen) {
+		(!allowPending &&
+			!vi.garpSendAllowedForOwner(force, time.Now().UnixNano(), ownerGen)) ||
+		(allowPending && deduped &&
+			!force && garpDampened(vi.lastGARPTime.Load(), time.Now().UnixNano()) &&
+			vi.lastGARPOwnerGen.Load() == ownerGen) {
 		return 0, false
 	}
 	// #8597 (muse-004 K20): under vi.mu — updateConfig writes this field on the
@@ -290,6 +320,14 @@ func (vi *vrrpInstance) reserveGARPBurstLocked(vips []string, epoch, ownerGen ui
 }
 
 func (vi *vrrpInstance) sendGARPReserved(vips []string, epoch, ownerGen uint64, count int) {
+	vi.sendGARPReservedMode(vips, epoch, ownerGen, count, false)
+}
+
+// sendGARPReservedMode emits a reserved burst. In pendingOnly mode the
+// reservation was admitted only to drain VIPs still pending for this
+// epoch (#14155), so non-pending snapshot entries are skipped: they
+// already received their synchronous first frame for this epoch.
+func (vi *vrrpInstance) sendGARPReservedMode(vips []string, epoch, ownerGen uint64, count int, pendingOnly bool) {
 	stillMaster := func() bool {
 		return vi.getState() == StateMaster &&
 			vi.ownerGen.Load() == ownerGen &&
@@ -302,6 +340,12 @@ func (vi *vrrpInstance) sendGARPReserved(vips []string, epoch, ownerGen uint64, 
 			vi.garpEpoch.Load() != epoch {
 			vi.vipMu.Unlock()
 			return
+		}
+		if pendingOnly {
+			if _, pending := vi.pendingGARPVIPs[canonicalVIPIdentity(vip)]; !pending {
+				vi.vipMu.Unlock()
+				continue
+			}
 		}
 		ip, ipNet, err := net.ParseCIDR(vip)
 		if err != nil {

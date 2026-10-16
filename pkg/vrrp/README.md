@@ -407,7 +407,12 @@ the baseline with an ordinary advert.
   MAC just changed and the correction GARP must not be swallowed by a routine
   burst that fired in the prior 500 ms (#2081). The decision lives in the
   network-free helper `garpSendAllowed`, which is unit-tested directly.
-  `updateVIPs` advances the epoch before starting any VIP withdrawal; additions
+  `becomeMaster` records its actuated VIPs as pending under `vipMu` before
+  releasing the lock (#14155), so an `updateVIPs` that publishes a newer
+  epoch before the deferred failover sender runs carries the still-
+  unannounced VIPs into its announcement pass instead of announcing only
+  the added VIPs and epoch-deduping the failover sender. `updateVIPs`
+  advances the epoch before starting any VIP withdrawal; additions
   advance it when their membership is published. A deletion callback is
   therefore invalid while later removals are still pending. `sendGARPFor`
   tracks VIPs until their synchronous first frame succeeds; if an epoch change
