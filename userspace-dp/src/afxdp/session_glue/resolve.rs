@@ -630,7 +630,7 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         session_id: install_info.map(|info| info.session_id).unwrap_or(0),
         timeout_secs: install_info.map(|info| info.timeout_secs).unwrap_or(0),
         decision,
-        source_nat_static: None,
+        source_nat_static: resolved.aux.source_nat_static,
         metadata,
         origin: SessionOrigin::ReverseFlow,
         source_nat_validation_key: None,

@@ -361,7 +361,7 @@ use filter::{
     stage11_input_filter_terminal,
 };
 use policy_revalidation::{
-    revalidate_zone_policy_on_session_hit, source_nat_revocation_on_session_hit,
+    revalidate_zone_policy_on_session_hit, source_nat_revocation_on_session_hit_with_ingress,
     tun_origin_forward, tun_origin_reverse, tun_origin_reverse_exempt,
 };
 
@@ -2642,17 +2642,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // policy-generation/ICMP/foreign-hit gates: even a
                         // fresh policy verdict cannot keep a translation the
                         // live NAT configuration no longer permits.
-                        let mut session_hit_revocation = source_nat_revocation_on_session_hit(
-                            worker_ctx.forwarding,
-                            sessions,
-                            &resolved.key,
-                            &resolved.metadata,
-                            resolved.decision,
-                            flow,
-                            resolved.origin,
-                            resolved.source_nat_static,
-                            resolved.source_nat_validation_key.as_ref(),
-                        );
+                        let mut session_hit_revocation =
+                            source_nat_revocation_on_session_hit_with_ingress(
+                                worker_ctx.forwarding,
+                                sessions,
+                                &resolved.key,
+                                &resolved.metadata,
+                                meta.ingress_ifindex,
+                                meta.ingress_vlan_id,
+                                resolved.decision,
+                                flow,
+                                resolved.origin,
+                                resolved.source_nat_static,
+                                resolved.source_nat_validation_key.as_ref(),
+                            );
                         let owner_icmp_verdict = if session_hit_revocation.is_none()
                             && foreign_arrival_zone.is_none()
                         {
