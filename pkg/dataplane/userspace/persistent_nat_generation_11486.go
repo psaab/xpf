@@ -7,11 +7,23 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 const maxPersistentNatGenerationPeers11486 = 16
+
+// Four 30s lease advertisements provide a bounded replay window while
+// allowing a non-clearing peer to rebuild post-clear leases.
+const persistentNatLocalClearFenceLifetime = 2 * time.Minute
+
+func (m *Manager) persistentNatLeaseNowLocked() time.Time {
+	if m.persistentNatLeaseNowFn != nil {
+		return m.persistentNatLeaseNowFn()
+	}
+	return time.Now()
+}
 
 // PersistentNatLeaseBatch is one sender-owned idle-lease advertisement set.
 // Generation is durable on the sender and advances before every authoritative
@@ -23,12 +35,13 @@ type PersistentNatLeaseBatch struct {
 }
 
 type persistentNatLeaseGenerationState struct {
-	OriginID                    string            `json:"origin_id"`
-	Generation                  uint64            `json:"generation"`
-	RemoteGenerations           map[string]uint64 `json:"remote_generations,omitempty"`
-	LocalClearRemoteGenerations map[string]uint64 `json:"local_clear_remote_generations,omitempty"`
-	PendingLocalClear           bool              `json:"pending_local_clear,omitempty"`
-	PendingRemote               map[string]bool   `json:"pending_remote,omitempty"`
+	OriginID                       string            `json:"origin_id"`
+	Generation                     uint64            `json:"generation"`
+	RemoteGenerations              map[string]uint64 `json:"remote_generations,omitempty"`
+	LocalClearRemoteGenerations    map[string]uint64 `json:"local_clear_remote_generations,omitempty"`
+	LocalClearRemoteGenerationEnds map[string]int64  `json:"local_clear_remote_generation_ends,omitempty"`
+	PendingLocalClear              bool              `json:"pending_local_clear,omitempty"`
+	PendingRemote                  map[string]bool   `json:"pending_remote,omitempty"`
 }
 
 var persistentNatLeaseGenerationPath11486 = "/var/lib/xpf/persistent-nat-lease-generation.json"
@@ -87,6 +100,16 @@ func (m *Manager) loadPersistentNatLeaseGenerationLocked() error {
 		if state.LocalClearRemoteGenerations == nil {
 			state.LocalClearRemoteGenerations = make(map[string]uint64)
 		}
+		if state.LocalClearRemoteGenerationEnds == nil {
+			state.LocalClearRemoteGenerationEnds = make(map[string]int64)
+		}
+		legacyFence := false
+		for origin := range state.LocalClearRemoteGenerations {
+			if _, ok := state.LocalClearRemoteGenerationEnds[origin]; !ok {
+				state.LocalClearRemoteGenerationEnds[origin] = m.persistentNatLeaseNowLocked().Add(persistentNatLocalClearFenceLifetime).UnixNano()
+				legacyFence = true
+			}
+		}
 		if state.PendingRemote == nil {
 			state.PendingRemote = make(map[string]bool)
 		}
@@ -103,12 +126,25 @@ func (m *Manager) loadPersistentNatLeaseGenerationLocked() error {
 				return errors.New("persistent-NAT lease generation state has orphaned local-clear remote generation")
 			}
 		}
+		for origin := range state.LocalClearRemoteGenerationEnds {
+			if !validPersistentNatLeaseOrigin11486(origin) || origin == state.OriginID {
+				return errors.New("persistent-NAT lease generation state has invalid local-clear remote expiry origin")
+			}
+			if _, ok := state.LocalClearRemoteGenerations[origin]; !ok {
+				return errors.New("persistent-NAT lease generation state has orphaned local-clear remote expiry")
+			}
+		}
 		for origin := range state.PendingRemote {
 			if !validPersistentNatLeaseOrigin11486(origin) || origin == state.OriginID {
 				return errors.New("persistent-NAT lease generation state has invalid pending remote origin")
 			}
 			if _, ok := state.RemoteGenerations[origin]; !ok {
 				return errors.New("persistent-NAT lease generation state has orphaned pending remote clear")
+			}
+		}
+		if legacyFence {
+			if err := m.persistPersistentNatLeaseGenerationLocked(state); err != nil {
+				return err
 			}
 		}
 		m.persistentNatLeaseGeneration = state
@@ -123,12 +159,13 @@ func (m *Manager) loadPersistentNatLeaseGenerationLocked() error {
 		return err
 	}
 	state := persistentNatLeaseGenerationState{
-		OriginID:                    origin,
-		Generation:                  1,
-		RemoteGenerations:           make(map[string]uint64),
-		LocalClearRemoteGenerations: make(map[string]uint64),
-		PendingLocalClear:           true,
-		PendingRemote:               make(map[string]bool),
+		OriginID:                       origin,
+		Generation:                     1,
+		RemoteGenerations:              make(map[string]uint64),
+		LocalClearRemoteGenerations:    make(map[string]uint64),
+		LocalClearRemoteGenerationEnds: make(map[string]int64),
+		PendingLocalClear:              true,
+		PendingRemote:                  make(map[string]bool),
 	}
 	if err := m.persistPersistentNatLeaseGenerationLocked(state); err != nil {
 		return err
@@ -163,6 +200,10 @@ func clonePersistentNatLeaseGenerationState11486(state persistentNatLeaseGenerat
 	clone.LocalClearRemoteGenerations = make(map[string]uint64, len(state.LocalClearRemoteGenerations))
 	for origin, generation := range state.LocalClearRemoteGenerations {
 		clone.LocalClearRemoteGenerations[origin] = generation
+	}
+	clone.LocalClearRemoteGenerationEnds = make(map[string]int64, len(state.LocalClearRemoteGenerationEnds))
+	for origin, expiresAt := range state.LocalClearRemoteGenerationEnds {
+		clone.LocalClearRemoteGenerationEnds[origin] = expiresAt
 	}
 	clone.PendingRemote = make(map[string]bool, len(state.PendingRemote))
 	for origin, pending := range state.PendingRemote {

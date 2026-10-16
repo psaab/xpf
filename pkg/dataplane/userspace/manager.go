@@ -199,12 +199,19 @@ type Manager struct {
 	persistentNatLeaseGeneration       persistentNatLeaseGenerationState
 	persistentNatLeaseGenerationLoaded bool
 	persistentNatLeaseGenerationPath   string
-	cfg                                config.UserspaceConfig
-	clusterHA                          bool
-	captureEpochProvider               CaptureEpochProvider
-	captureAuthorityCommitter          func(configGeneration uint64, snapshot *ConfigSnapshot)
-	policySnapshotCommitter            func(configGeneration uint64)
-	policySnapshotPrePublisher         func(generation uint64) error
+	// persistentNatLeaseNowFn overrides the wall clock for persistent-NAT
+	// lease generation bookkeeping. Production leaves it nil (time.Now);
+	// tests inject a fake clock. Guarded by mu.
+	persistentNatLeaseNowFn func() time.Time
+	// persistentNatLocalClearDropLoggedAt rate-limits fenced-batch warnings
+	// per origin. Runtime-only; guarded by mu.
+	persistentNatLocalClearDropLoggedAt map[string]time.Time
+	cfg                                 config.UserspaceConfig
+	clusterHA                           bool
+	captureEpochProvider                CaptureEpochProvider
+	captureAuthorityCommitter           func(configGeneration uint64, snapshot *ConfigSnapshot)
+	policySnapshotCommitter             func(configGeneration uint64)
+	policySnapshotPrePublisher          func(generation uint64) error
 	// policySnapshotPrepublishGeneration records the deferred full snapshot
 	// whose prepublish capture succeeded. Recovery reuses that proof only while
 	// its policy/rename identity remains unchanged, even if a partial publish
