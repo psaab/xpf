@@ -2815,6 +2815,144 @@ fn poll_descriptor_nat64_v6_to_v4_pmtud_from_wrong_zone_denied_10666() {
     );
 }
 
+/// #14122: attach an egress output filter to the WAN unit (reth0.80,
+/// ifindex 12) — the egress of the V6->V4 NAT64 translated error.
+fn n14122_attach_wan_output_filter(snapshot: &mut ConfigSnapshot, term: FirewallTermSnapshot) {
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 12 {
+            iface.filter_output_v4 = "wan-out-14122".to_string();
+        }
+    }
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "wan-out-14122".to_string(),
+        family: "inet".to_string(),
+        terms: vec![term],
+        ..Default::default()
+    });
+}
+
+/// #14122 driver: V6->V4 NAT64 Time-Exceeded (type 11 / code 0 after
+/// translation; outer src = pool 172.16.80.50, dst = 8.8.8.8) with an
+/// egress output filter on the WAN unit. Returns (forwards, recycles).
+/// Zone policy permits LAN->WAN so only the output filter can drop.
+fn n14122_run_v6_to_v4(term: Option<FirewallTermSnapshot>) -> (usize, usize) {
+    let lan_router: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("lan v6 router");
+    let frame = build_icmpv6_te_frame_with_mac(
+        lan_router,
+        n6472_pref64_server(),
+        n6472_client_v6(),
+        N6472_SERVER_PORT,
+        N6472_CLIENT_PORT,
+        PROTO_TCP,
+        TEST_LAN_MAC,
+    );
+    let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
+    if let Some(term) = term {
+        n14122_attach_wan_output_filter(&mut snapshot, term);
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    n6472_install_sessions(&mut sessions, 123_000_000_000 - 1);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 24,
+        l3_offset: 14,
+        l4_offset: 54,
+        payload_offset: 62,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let _ = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    (
+        binding.scratch.scratch_forwards.len(),
+        binding.scratch.scratch_recycle.len(),
+    )
+}
+
+/// #14122 FAIL-ON-REVERT: a V6->V4 NAT64 reversed ICMP error egresses as
+/// IPv4 ICMP type 11 / code 0 from the pool address to the v4 server. An
+/// egress output filter keyed on exactly that post-translation identity
+/// (IPv4 family, post-NAT addresses, icmp-type/icmp-code) MUST drop it at
+/// queue time. Pre-fix the queue classified on the ingress v6 meta with a
+/// meta-only extra (`l4_present=false`), so the term never matched and the
+/// error was queued. Controls prove the match is on the translated tuple:
+/// the same type with a different code, and the right type/code with a
+/// non-pool source, both still queue.
+#[test]
+fn nat64_v6_to_v4_embedded_error_dropped_by_post_translation_output_filter_14122() {
+    let matching = FirewallTermSnapshot {
+        name: "drop-translated-te".to_string(),
+        action: "discard".to_string(),
+        protocols: vec!["icmp".to_string()],
+        source_addresses: vec!["172.16.80.50/32".to_string()],
+        destination_addresses: vec!["8.8.8.8/32".to_string()],
+        icmp_types: vec![11],
+        icmp_codes: vec![0],
+        ..Default::default()
+    };
+    assert_eq!(
+        n14122_run_v6_to_v4(Some(matching)),
+        (0, 1),
+        "#14122: post-translation IPv4 icmp-type/code + address output term must drop the queued NAT64 error"
+    );
+    // Control: no output filter — the translated error queues.
+    assert_eq!(
+        n14122_run_v6_to_v4(None),
+        (1, 0),
+        "#14122 control: without the output filter the translated error must queue"
+    );
+    // Control: same type, wrong code — must not match.
+    let wrong_code = FirewallTermSnapshot {
+        name: "drop-wrong-code".to_string(),
+        action: "discard".to_string(),
+        protocols: vec!["icmp".to_string()],
+        source_addresses: vec!["172.16.80.50/32".to_string()],
+        destination_addresses: vec!["8.8.8.8/32".to_string()],
+        icmp_types: vec![11],
+        icmp_codes: vec![1],
+        ..Default::default()
+    };
+    assert_eq!(
+        n14122_run_v6_to_v4(Some(wrong_code)),
+        (1, 0),
+        "#14122 control: icmp-code 1 must not match the translated code-0 error"
+    );
+    // Control: right type/code, non-pool (pre-translation-style) source —
+    // must not match the post-translation wire source.
+    let wrong_src = FirewallTermSnapshot {
+        name: "drop-wrong-src".to_string(),
+        action: "discard".to_string(),
+        protocols: vec!["icmp".to_string()],
+        source_addresses: vec!["172.16.80.1/32".to_string()],
+        destination_addresses: vec!["8.8.8.8/32".to_string()],
+        icmp_types: vec![11],
+        icmp_codes: vec![0],
+        ..Default::default()
+    };
+    assert_eq!(
+        n14122_run_v6_to_v4(Some(wrong_src)),
+        (1, 0),
+        "#14122 control: a non-pool source must not match the post-translation wire tuple"
+    );
+}
+
 
 // ---------------------------------------------------------------------------
 // #9162: the SAME two NAT64 ICMP-error translations, in a NON-DEFAULT routing
