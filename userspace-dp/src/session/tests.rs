@@ -488,7 +488,7 @@ fn local_snat_origin_is_on_initial_open_delta_12187() {
 }
 
 #[test]
-fn transient_seed_installs_stay_out_of_delta_stream() {
+fn missing_neighbor_and_fabric_punt_seed_delta_origins_13974() {
     let mut table = SessionTable::new();
     let now = 1_000_000_000u64;
     let key = key_v4();
@@ -517,14 +517,20 @@ fn transient_seed_installs_stay_out_of_delta_stream() {
         PROTO_TCP,
         0x10,
     ));
+    let deltas = table.drain_deltas(8);
+    assert_eq!(
+        deltas.iter().filter(|d| d.origin == SessionOrigin::MissingNeighborSeed).count(),
+        1,
+        "missing-neighbor seeds emit one local telemetry Open (#13974); fabric-punt seeds stay silent"
+    );
     assert!(
-        table.drain_deltas(8).is_empty(),
-        "transient missing-neighbor and fabric-punt seeds must stay local"
+        deltas.iter().all(|d| d.origin != SessionOrigin::FabricPuntSeed),
+        "fabric-punt seeds must not enter the delta stream"
     );
 }
 
 #[test]
-fn missing_neighbor_seed_expire_stays_out_of_delta_stream() {
+fn missing_neighbor_seed_expire_emits_local_close_delta_13974() {
     let mut table = SessionTable::new();
     let key = key_v4();
     let then = 1_000_000_000u64;
@@ -537,12 +543,18 @@ fn missing_neighbor_seed_expire_stays_out_of_delta_stream() {
         PROTO_TCP,
         0x10,
     ));
-    assert!(table.drain_deltas(8).is_empty());
+    let opens = table.drain_deltas(8);
+    assert_eq!(opens.len(), 1);
+    assert_eq!(opens[0].kind, SessionDeltaKind::Open);
+    assert_eq!(opens[0].origin, SessionOrigin::MissingNeighborSeed);
     table.last_gc_ns = then + 301_000_000_000;
     let expired = table.expire_stale_entries(then + 302_000_000_000);
     assert_eq!(expired.len(), 1);
     assert_eq!(expired[0].key, key);
-    assert!(table.drain_deltas(8).is_empty());
+    let closes = table.drain_deltas(8);
+    assert_eq!(closes.len(), 1);
+    assert_eq!(closes[0].kind, SessionDeltaKind::Close);
+    assert_eq!(closes[0].origin, SessionOrigin::MissingNeighborSeed);
 }
 
 #[test]
