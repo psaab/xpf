@@ -325,9 +325,14 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame_with_input_filter(
     if !wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip) {
         return None;
     }
-    // The listener and destination each have unique ownership in this
-    // ingress zone. A mismatch remains unclaimed for the existing host-inbound
-    // policy to deny; this owner check does not replace service-token policy.
+    // Apply the physical ingress firewall before AEAD work. Apart from avoiding
+    // wasted crypto for denied packets, this prevents denied authenticated
+    // records from consuming replay/session state or changing peer endpoints
+    // through the Keepalive and MalformedInner outcome arms below.
+    if !outer_input_filter_allows(frame, meta) {
+        *input_filter_rejected = true;
+        return None;
+    }
     let mut decap_buf = scratch.decap_out.borrow_mut();
     // #9018: `.ok()?` used to collapse EVERY error arm here, and two of them
     // carry the proven peer public key on purpose: `Keepalive` (#7230) and
@@ -392,12 +397,9 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame_with_input_filter(
     };
     let inner_len = packet_trimmed_len(inner, inner_family)?;
     let inner = inner.get(..inner_len)?;
+
     let (protocol, rel_l4_offset, payload_offset) =
         parse_inner_protocol_and_offsets(inner, inner_family)?;
-    if !outer_input_filter_allows(frame, meta) {
-        *input_filter_rejected = true;
-        return None;
-    }
 
     let (synthetic, inner_meta) =
         crate::afxdp::logical_ingress::build_logical_ingress_ethernet_packet(

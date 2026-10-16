@@ -3706,3 +3706,79 @@ fn wg_tun_origin_domain_vrf_hit_delivers_10038() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #13663: the outer input filter must gate decap BEFORE any AEAD/state effect.
+// A filter-denied outer must not consume replay, bump decap counters, or roam
+// the peer endpoint — on data, keepalive, and malformed-inner records alike.
+// The deny callback mirrors the poll-loop production closure, which returns
+// false exactly when enforce_tunnel_outer_input_filter rejects the outer.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn worker_decap_input_filter_denied_data_has_no_state_effect_13663() {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, init_pub, resp_pub) = established_pair(allowed.clone(), allowed);
+    let (forwarding, id) = forwarding_with_engine(resp);
+    let engine = std::sync::Arc::clone(&forwarding.wg_engines[&id]);
+    let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+    let frame = outer_frame_from(&wire[..enc.len], WG_PORT, ROAMED_OUTER, ROAMED_SPORT);
+    let meta = outer_meta(frame.len());
+    let scratch = WgWorkerScratch::new(4096);
+    let mut rejected = false;
+    assert!(super::decap::try_wg_decap_from_frame_with_input_filter(
+        &frame, meta, &forwarding, &scratch, &mut |_, _| false, &mut rejected,
+    )
+    .is_none());
+    assert!(rejected, "#13663: denied outer must set input_filter_rejected");
+    assert_eq!(engine.counters().decap_packets.load(Ordering::Relaxed), 0, "#13663: denied outer must not decap");
+    assert_eq!(decap_outcomes_observed(&engine), 0, "#13663: denied outer must not touch replay/counters");
+    assert_eq!(engine.take_worker_observed_endpoint(&init_pub), None, "#13663: denied outer must not roam the endpoint");
+    // Replay untouched: the same record decaps under an allowing filter.
+    let mut rejected2 = false;
+    let decapped = super::decap::try_wg_decap_from_frame_with_input_filter(
+        &frame, meta, &forwarding, &scratch, &mut |_, _| true, &mut rejected2,
+    )
+    .expect("#13663: denied attempt must leave replay unconsumed");
+    assert!(!rejected2);
+    assert_eq!(&decapped.frame[14..], &inner[..]);
+    assert_eq!(engine.take_worker_observed_endpoint(&init_pub), Some(std::net::SocketAddr::from((ROAMED_OUTER, ROAMED_SPORT))), "#13663: allowed outer still roams");
+}
+
+#[test]
+fn worker_decap_input_filter_denied_keepalive_and_malformed_do_not_roam_13663() {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, init_pub, resp_pub) = established_pair(allowed.clone(), allowed.clone());
+    let (forwarding, id) = forwarding_with_engine(resp);
+    let engine = std::sync::Arc::clone(&forwarding.wg_engines[&id]);
+    let scratch = WgWorkerScratch::new(4096);
+    // Keepalive leg.
+    let mut wire = vec![0u8; 2048];
+    let enc = init.create_keepalive(&resp_pub, &mut wire).expect("initiator keepalive");
+    let frame = outer_frame_from(&wire[..enc.len], WG_PORT, ROAMED_OUTER, ROAMED_SPORT);
+    let mut rejected = false;
+    assert!(super::decap::try_wg_decap_from_frame_with_input_filter(
+        &frame, outer_meta(frame.len()), &forwarding, &scratch, &mut |_, _| false, &mut rejected,
+    )
+    .is_none());
+    assert!(rejected, "#13663: denied keepalive must set input_filter_rejected");
+    assert_eq!(engine.counters().decap_keepalives.load(Ordering::Relaxed), 0, "#13663: denied keepalive must not reach decap");
+    assert_eq!(engine.take_worker_observed_endpoint(&init_pub), None, "#13663: denied keepalive must not roam");
+    // Malformed-inner leg (fresh engines so counters/endpoints are independent).
+    let (init2, resp2, init2_pub, resp2_pub) = established_pair(allowed.clone(), allowed);
+    let (forwarding2, id2) = forwarding_with_engine(resp2);
+    let engine2 = std::sync::Arc::clone(&forwarding2.wg_engines[&id2]);
+    let mut wire2 = vec![0u8; 2048];
+    let enc2 = init2.try_encap(&resp2_pub, &[0xffu8; 32], &mut wire2).expect("initiator encap");
+    let frame2 = outer_frame_from(&wire2[..enc2.len], WG_PORT, ROAMED_OUTER, ROAMED_SPORT);
+    let mut rejected2 = false;
+    assert!(super::decap::try_wg_decap_from_frame_with_input_filter(
+        &frame2, outer_meta(frame2.len()), &forwarding2, &scratch, &mut |_, _| false, &mut rejected2,
+    )
+    .is_none());
+    assert!(rejected2, "#13663: denied malformed-inner must set input_filter_rejected");
+    assert_eq!(decap_outcomes_observed(&engine2), 0, "#13663: denied malformed-inner must not reach decap");
+    assert_eq!(engine2.take_worker_observed_endpoint(&init2_pub), None, "#13663: denied malformed-inner must not roam");
+}
+
