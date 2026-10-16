@@ -708,7 +708,7 @@ impl ScreenState {
         self.syn_cookie_full_epoch_override = Some(full_epoch);
     }
 
-    /// #4969: standby SYN-cookie ACK validation budget check — the per-zone
+    /// #13700: standby SYN-cookie invalid-MAC budget check — the per-zone
     /// `TokenBucket` now lives on `ZoneScreenState`. An absent zone (no profile)
     /// returns `true` (limited), preserving the pre-#4969 `unwrap_or(true)`.
     fn standby_syn_cookie_ack_validation_limited(&mut self, zone: &str, now_ns: u64) -> bool {
@@ -721,11 +721,9 @@ impl ScreenState {
             .unwrap_or(true)
     }
 
-    /// #9902 F-023: flood-ACTIVE SYN-cookie ACK validation budget check — the
-    /// per-zone `TokenBucket` lives on `ZoneScreenState`, separate from the
-    /// standby one. An absent zone (no profile) returns `true` (limited),
-    /// matching the standby helper: without a profile there is no active
-    /// window to validate into.
+    /// #13700: flood-ACTIVE invalid-MAC budget check. The per-zone `TokenBucket`
+    /// lives on `ZoneScreenState`, separate from the standby one. An absent
+    /// zone returns `true` (limited), matching the standby helper.
     fn active_syn_cookie_ack_validation_limited(&mut self, zone: &str, now_ns: u64) -> bool {
         self.zones
             .get_mut(zone)
@@ -1497,33 +1495,15 @@ impl ScreenState {
         };
         let cookie_isn = pkt.tcp_ack.wrapping_sub(1);
         let current_epoch = self.current_syn_cookie_full_epoch(now_secs);
-        if !locally_active {
-            if !SynCookieCodec::wire_epoch_matches_validation_window(current_epoch, cookie_isn) {
-                return SynCookieAckVerdict::NotApplicable;
-            }
-            if self.standby_syn_cookie_ack_validation_limited(zone, now_ns) {
-                return SynCookieAckVerdict::NotApplicable;
-            }
-        } else {
-            // #9902 F-023: the flood-active arm used to validate EVERY session-
-            // miss ACK unthrottled — a spoofed-ACK flood bought unbounded SipHash
-            // work per ACK. Throttle it fail-closed like every other active arm
-            // (closing flags, no codec, bad MAC all refuse):
-            // out-of-window ACKs refuse BEFORE spending budget (this moves the
-            // `cookie_full_epoch is None` check below ahead of budget charging —
-            // verdict-preserving, since a failed MAC validation is Invalid here
-            // too), and over-budget ACKs refuse as `ActiveBudgetExceeded`
-            // without MAC work. The 24-bit MAC is KEPT (widening it is a
-            // wire-incompatible ISN layout change shared with HA peers); the
-            // throttle is bounded hardening. #13286: the dedicated
-            // `syn_cookie_active_budget_drops` counter makes throttle episodes
-            // distinguishable from bad-MAC floods in `syn_cookie_ack_invalid`.
-            if !SynCookieCodec::wire_epoch_matches_validation_window(current_epoch, cookie_isn) {
-                return SynCookieAckVerdict::Invalid;
-            }
-            if self.active_syn_cookie_ack_validation_limited(zone, now_ns) {
-                return SynCookieAckVerdict::ActiveBudgetExceeded;
-            }
+        if !locally_active
+            && !SynCookieCodec::wire_epoch_matches_validation_window(current_epoch, cookie_isn)
+        {
+            return SynCookieAckVerdict::NotApplicable;
+        }
+        if locally_active
+            && !SynCookieCodec::wire_epoch_matches_validation_window(current_epoch, cookie_isn)
+        {
+            return SynCookieAckVerdict::Invalid;
         }
         // The cookie MAC binds the full 4-tuple (that is what makes the
         // cookie unforgeable for this connection); the whitelist it seeds is
@@ -1545,8 +1525,15 @@ impl ScreenState {
             );
             SynCookieAckVerdict::Validated
         } else if locally_active {
-            SynCookieAckVerdict::Invalid
+            if self.active_syn_cookie_ack_validation_limited(zone, now_ns) {
+                SynCookieAckVerdict::ActiveBudgetExceeded
+            } else {
+                SynCookieAckVerdict::Invalid
+            }
         } else {
+            // Failed MACs consume the standby invalid-attempt budget; valid
+            // cookies above never touch this zone-wide bucket.
+            let _ = self.standby_syn_cookie_ack_validation_limited(zone, now_ns);
             SynCookieAckVerdict::NotApplicable
         }
     }

@@ -4493,35 +4493,119 @@ fn syn_cookie_standby_ack_validation_is_rate_limited() {
     valid_ack.tcp_seq = 3;
     valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
 
-    // A valid ACK at the same instant is still capped (budget exhausted): the
-    // standby guard refuses to spend more SipHash beyond the per-second budget.
+    // Bad MACs are still charged, but valid returning handshakes bypass the
+    // failed-attempt budget even when spoofed ACKs have exhausted it.
     assert_eq!(
         peer.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
-        SynCookieAckVerdict::NotApplicable,
-        "standby validation budget should cap SipHash work at this instant"
-    );
-    assert_eq!(peer.syn_cookie_validated_len(), 0);
-
-    // #2937 RETAINED: a sub-millisecond straddle (+1us) accrues a negligible
-    // refill, so the attacker cannot double its plausible-ACK allowance by
-    // bursting across a boundary — the valid ACK stays capped.
-    assert_eq!(
-        peer.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns + 1_000, 128),
-        SynCookieAckVerdict::NotApplicable,
-        "a sub-ms micro-burst must not refill the standby budget"
-    );
-    assert_eq!(peer.syn_cookie_validated_len(), 0);
-
-    // #3607: after a full second the bucket refills at its configured rate, so
-    // a legitimate returning client (e.g. right after a failover) is NO LONGER
-    // suppressed — the old sliding window kept it capped until a fully idle
-    // second. The valid ACK now validates.
-    assert_eq!(
-        peer.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns + NS, 129),
         SynCookieAckVerdict::Validated,
-        "the standby budget refills at its configured rate (#3607)"
+        "standby failed-MAC budget must not starve a legitimate ACK"
     );
     assert_eq!(peer.syn_cookie_validated_len(), 1);
+    // The bucket remains exhausted for the instant; another bad MAC still
+    // cannot enter the accepted path.
+    assert_eq!(
+        peer.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128),
+        SynCookieAckVerdict::NotApplicable
+    );
+    assert_eq!(peer.syn_cookie_validated_len(), 1);
+}
+
+/// #13700: charging the zone-wide ACK budget before the MAC lets a burst of
+/// epoch-matched forgeries starve a legitimate handshake at the same instant.
+/// Failed MACs consume the invalid-attempt budget; a valid cookie does not.
+#[test]
+fn syn_cookie_standby_failed_macs_do_not_starve_valid_ack_13700() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut peer = make_state("trust", profile);
+    peer.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    peer.set_syn_cookie_full_epoch_for_test(41);
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    let mut bad_ack = syn.clone();
+    bad_ack.tcp_flags = TCP_ACK;
+    bad_ack.tcp_seq = 2;
+    bad_ack.tcp_ack =
+        (((41u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT) | 0x1234).wrapping_add(1);
+    let base_ns = 128 * NS;
+    for _ in 0..SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
+        assert_eq!(
+            peer.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128),
+            SynCookieAckVerdict::NotApplicable
+        );
+    }
+    assert_eq!(peer.syn_cookie_standby_ack_available("trust"), 0);
+    let valid_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
+    let mut valid_ack = syn.clone();
+    valid_ack.tcp_flags = TCP_ACK;
+    valid_ack.tcp_seq = 3;
+    valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+    assert_eq!(
+        peer.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
+        SynCookieAckVerdict::Validated,
+        "a valid cookie must validate even after failed MACs spent the invalid budget"
+    );
+    assert_eq!(peer.syn_cookie_validated_len(), 1);
+}
+
+/// #13700 (active twin): flood-active forgeries spend the invalid-attempt
+/// budget, but a valid cookie still validates without waiting for a refill.
+#[test]
+fn syn_cookie_active_failed_macs_do_not_starve_valid_ack_13700() {
+    let mut profile = ScreenProfile::default();
+    profile.syn_flood_threshold = 1;
+    profile.syn_cookie = true;
+    let mut state = make_state("trust", profile);
+    state.update_syn_cookie_master_key(Some(syn_cookie_key()));
+    state.set_syn_cookie_full_epoch_for_test(41);
+    state.force_syn_cookie_active_for_test("trust", 200);
+    let syn = tcp_pkt(
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        49152,
+        443,
+        TCP_SYN,
+    );
+    let mut bad_ack = syn.clone();
+    bad_ack.tcp_flags = TCP_ACK;
+    bad_ack.tcp_seq = 2;
+    bad_ack.tcp_ack =
+        (((41u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT) | 0x1234).wrapping_add(1);
+    let base_ns = 128 * NS;
+    for _ in 0..SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
+        assert_eq!(
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128),
+            SynCookieAckVerdict::Invalid
+        );
+    }
+    assert_eq!(state.syn_cookie_active_ack_available("trust"), 0);
+    let valid_cookie = syn_cookie_codec().mint_isn(
+        SynCookieTuple::from_packet(&syn),
+        syn_cookie_zone_tag("trust"),
+        41,
+        syn.tcp_mss,
+    );
+    let mut valid_ack = syn.clone();
+    valid_ack.tcp_flags = TCP_ACK;
+    valid_ack.tcp_seq = 3;
+    valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
+        SynCookieAckVerdict::Validated,
+        "a valid cookie must validate even after failed MACs spent the invalid budget"
+    );
+    assert_eq!(state.syn_cookie_validated_len(), 1);
 }
 
 #[test]
@@ -8493,14 +8577,10 @@ fn syn_cookie_mixed_version_pair_disagrees_from_the_first_boundary_9173() {
     );
 }
 
-/// #9902 F-023: flood-active-zone ACK validation is rate-limited (fail-closed
-/// Invalid), like the standby path — a flood of spoofed ACKs must not buy
-/// unbounded SipHash work per ACK.
-///
-/// FAIL-ON-REVERT: remove the active-arm limiter check and the 65th ACK
-/// validates instead of refusing as Invalid.
+/// #9902 F-023 / #13700: failed flood-active ACKs charge a separate
+/// invalid-attempt budget, but valid cookies bypass it after spoofed noise.
 #[test]
-fn syn_cookie_active_ack_validation_is_rate_limited_9902() {
+fn syn_cookie_active_failed_macs_are_limited_without_starving_valid_ack_13700() {
     let mut profile = ScreenProfile::default();
     profile.syn_flood_threshold = 1;
     profile.syn_cookie = true;
@@ -8516,6 +8596,26 @@ fn syn_cookie_active_ack_validation_is_rate_limited_9902() {
         443,
         TCP_SYN,
     );
+    let mut bad_ack = syn.clone();
+    bad_ack.tcp_flags = TCP_ACK;
+    bad_ack.tcp_seq = 2;
+    bad_ack.tcp_ack =
+        (((41u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT) | 0x1234).wrapping_add(1);
+
+    let base_ns = 128 * NS;
+    for _ in 0..SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
+        assert_eq!(
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128),
+            SynCookieAckVerdict::Invalid
+        );
+    }
+    assert_eq!(state.syn_cookie_active_ack_available("trust"), 0);
+    assert_eq!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128),
+        SynCookieAckVerdict::ActiveBudgetExceeded,
+        "over-budget failed MACs retain their distinct diagnostic verdict"
+    );
+
     let valid_cookie = syn_cookie_codec().mint_isn(
         SynCookieTuple::from_packet(&syn),
         syn_cookie_zone_tag("trust"),
@@ -8526,30 +8626,12 @@ fn syn_cookie_active_ack_validation_is_rate_limited_9902() {
     valid_ack.tcp_flags = TCP_ACK;
     valid_ack.tcp_seq = 3;
     valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
-
-    // Drain the whole test budget (64/s) at ONE instant with valid ACKs.
-    let base_ns = 128 * NS;
-    for _ in 0..SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
-        assert_eq!(
-            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
-            SynCookieAckVerdict::Validated
-        );
-    }
-    assert_eq!(state.syn_cookie_active_ack_available("trust"), 0);
     assert_eq!(
         state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
-        SynCookieAckVerdict::ActiveBudgetExceeded,
-        "over-budget active-path ACKs must refuse fail-closed, not validate"
-    );
-    // Same source, so the validated-client cache holds one entry: the 64
-    // validations above shared it, and the throttled ACK added nothing.
-    assert_eq!(state.syn_cookie_validated_len(), 1);
-    // Refill next second (still active: 129 < 200).
-    assert_eq!(
-        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns + NS, 129),
         SynCookieAckVerdict::Validated,
-        "the active budget refills at its configured rate"
+        "a valid cookie must validate after failed MACs exhaust the budget"
     );
+    assert_eq!(state.syn_cookie_validated_len(), 1);
 }
 
 /// #9902 F-023 (M23.3): out-of-window ACKs refuse as Invalid WITHOUT spending
@@ -8639,12 +8721,17 @@ fn syn_cookie_active_spend_leaves_standby_budget_full_9902() {
     valid_ack.tcp_flags = TCP_ACK;
     valid_ack.tcp_seq = 3;
     valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+    let mut bad_ack = syn.clone();
+    bad_ack.tcp_flags = TCP_ACK;
+    bad_ack.tcp_seq = 3;
+    bad_ack.tcp_ack =
+        (((41u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT) | 0x1234).wrapping_add(1);
 
     let base_ns = 128 * NS;
     for _ in 0..SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
         assert_eq!(
-            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
-            SynCookieAckVerdict::Validated
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128),
+            SynCookieAckVerdict::Invalid
         );
     }
     assert_eq!(state.syn_cookie_active_ack_available("trust"), 0);
@@ -8660,12 +8747,12 @@ fn syn_cookie_active_spend_leaves_standby_budget_full_9902() {
         SynCookieAckVerdict::Validated,
         "standby validation must draw on its own untouched budget"
     );
-    assert_eq!(
-        state.syn_cookie_standby_ack_available("trust"),
-        SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC as u64 - 1
+    assert!(
+        state.syn_cookie_standby_ack_untouched("trust"),
+        "valid standby ACK must not charge the failed-MAC bucket"
     );
-}
 
+}
 /// #9902 F-023 (standby→active): spending the standby budget leaves the active
 /// budget full — background misses cannot clip flood-time handshakes.
 #[test]
@@ -8719,9 +8806,9 @@ fn syn_cookie_standby_spend_leaves_active_budget_full_9902() {
         SynCookieAckVerdict::Validated,
         "active validation must draw on its own untouched budget"
     );
-    assert_eq!(
-        state.syn_cookie_active_ack_available("trust"),
-        SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC as u64 - 1
+    assert!(
+        state.syn_cookie_active_ack_untouched("trust"),
+        "valid active ACK must not charge the failed-MAC bucket"
     );
 }
 
@@ -9097,31 +9184,24 @@ fn syn_cookie_active_budget_exhaustion_is_not_invalid_13286() {
         443,
         TCP_SYN,
     );
-    let valid_cookie = syn_cookie_codec().mint_isn(
-        SynCookieTuple::from_packet(&syn),
-        syn_cookie_zone_tag("trust"),
-        41,
-        syn.tcp_mss,
-    );
-    let mut valid_ack = syn.clone();
-    valid_ack.tcp_flags = TCP_ACK;
-    valid_ack.tcp_seq = 3;
-    valid_ack.tcp_ack = valid_cookie.wrapping_add(1);
+    let mut bad_ack = syn.clone();
+    bad_ack.tcp_flags = TCP_ACK;
+    bad_ack.tcp_seq = 3;
+    bad_ack.tcp_ack =
+        (((41u32 & SYN_COOKIE_EPOCH_MASK) << SYN_COOKIE_EPOCH_SHIFT) | 0x1234).wrapping_add(1);
     let base_ns = 128 * NS;
     for _ in 0..SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC {
         assert_eq!(
-            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128),
-            SynCookieAckVerdict::Validated
+            state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128),
+            SynCookieAckVerdict::Invalid
         );
     }
     assert_eq!(state.syn_cookie_active_ack_available("trust"), 0);
     let throttled =
-        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &valid_ack, base_ns, 128);
-    assert_ne!(
+        state.validate_syn_cookie_ack_on_session_miss("trust", 7, &bad_ack, base_ns, 128);
+    assert_eq!(
         throttled,
-        SynCookieAckVerdict::Invalid,
-        "budget-throttled legitimate ACK must not be counted as invalid cookie"
+        SynCookieAckVerdict::ActiveBudgetExceeded,
+        "the exhausted active failed-MAC budget keeps its distinct verdict"
     );
-    assert_ne!(throttled, SynCookieAckVerdict::Validated);
-    assert_ne!(throttled, SynCookieAckVerdict::NotApplicable);
 }
