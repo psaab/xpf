@@ -3761,15 +3761,48 @@ fn translate_v6_to_v4_size_keys_df_at_1260_octets() {
 }
 
 #[test]
-fn nat64_v6_to_v4_output_len_accepts_nonfirst_icmpv6_fragment() {
+fn nat64_v6_to_v4_output_len_rejects_nonfirst_icmpv6_fragment_13698() {
     let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
     let packet = make_ipv6_frag_icmpv6(src_v6, dst_v6, 3, true, 0x1234_5678);
+    // #4617: fragmented ICMPv6 is untranslatable (its checksum covers the
+    // whole datagram), so the non-first builder drops it; the length-only
+    // MTU preflight must agree instead of returning Some(28).
+    let mut out = vec![0u8; packet.len()];
     assert_eq!(
-        v6_to_v4_output_len(&packet),
-        Some(28),
-        "non-first ICMPv6 payload becomes a 20-byte IPv4 header plus 8 opaque bytes"
+        write_v6_to_v4_nonfirst_into(
+            &mut out,
+            &packet,
+            Ipv4Addr::new(198, 51, 100, 1),
+            Ipv4Addr::new(198, 51, 100, 50),
+        ),
+        None,
+        "guarded twin must drop a non-first ICMPv6 fragment"
     );
+    assert_eq!(v6_to_v4_output_len(&packet), None);
+}
+
+#[test]
+fn nat64_v6_to_v4_output_len_rejects_truncated_nonfirst_fragment_13698() {
+    let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+
+    // Non-first UDP fragment whose declared payload_len (2000) overruns the
+    // captured bytes: the builder's payload slice fails, so preflight must
+    // not invent Some(2012) and trigger a spurious Packet Too Big.
+    let mut udp = make_ipv6_frag_udp(src_v6, dst_v6, 5000, 6000, b"12345678", 3, true, 0x42);
+    udp[4..6].copy_from_slice(&2000u16.to_be_bytes());
+    assert_eq!(v6_to_v4_output_len(&udp), None);
+
+    // Same truncation on a non-first ICMPv6 fragment (payload_len 9000).
+    let mut icmp = make_ipv6_frag_icmpv6(src_v6, dst_v6, 3, true, 0x1234_5678);
+    icmp[4..6].copy_from_slice(&9000u16.to_be_bytes());
+    assert_eq!(v6_to_v4_output_len(&icmp), None);
+
+    // Positive control: an intact non-first TCP/UDP fragment still reports
+    // its translated length (20-byte IPv4 header plus opaque payload).
+    let intact = make_ipv6_frag_udp(src_v6, dst_v6, 5000, 6000, b"12345678", 3, true, 0x42);
+    assert_eq!(v6_to_v4_output_len(&intact), Some(36));
 }
 #[test]
 fn nat64_v6_to_v4_output_len_rejects_nonfirst_unsupported_protocol() {
