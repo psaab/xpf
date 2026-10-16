@@ -110,13 +110,12 @@ func configMutationLineFor(fullMethod string, req any) (string, bool) {
 			// activate/deactivate have one. Prepending "set "
 			// here turns, for example, "copy <src> to <dst>" into one unrelated
 			// path and lets an anchored deny bypass the gate (#10304, #9938 F-029).
-			if strings.HasPrefix(input, "copy ") ||
-				strings.HasPrefix(input, "rename ") ||
-				strings.HasPrefix(input, "insert ") {
-				return input, true
-			}
-			if fields := strings.Fields(input); len(fields) > 0 &&
-				(fields[0] == "deactivate" || fields[0] == "activate") {
+			// #14147: route on the lexed verb the handler now also uses,
+			// so a tab after the verb is gated on its real endpoints too
+			// instead of falling through to the "set " prepend below.
+			if verb, isMutation := config.ConfigMutationVerb(input); isMutation &&
+				(verb == "copy" || verb == "rename" || verb == "insert" ||
+					verb == "deactivate" || verb == "activate") {
 				return input, true
 			}
 			if line := strings.TrimSpace(input); line != "" {

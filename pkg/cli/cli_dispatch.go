@@ -387,9 +387,9 @@ func (c *CLI) dispatchConfig(line string) error {
 		fullPath := append(c.store.GetEditPath(), parts[1:]...)
 		return c.store.ActivateFromInputAsPlantClass("", config.EventPlantClassForMutation(c.userClass), strings.Join(fullPath, " "))
 	case "copy", "rename":
-		return c.handleCopyRename(parts)
+		return c.handleCopyRename(line)
 	case "insert":
-		return c.handleInsert(parts)
+		return c.handleInsert(line)
 	case "show":
 		return c.handleConfigShow(parts[1:])
 	case "commit":
