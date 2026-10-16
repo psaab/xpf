@@ -44,10 +44,30 @@ func TestBuildSSHDConfig_FiltersInjectedAlgorithms_4902(t *testing.T) {
 	ssh := &config.SSHServiceConfig{
 		KeyExchange: []string{"curve25519-sha256", "kex,PermitRootLogin yes"},
 		Ciphers:     []string{"aes256-gcm@openssh.com", "bad cipher"},
-		MACs:        []string{"hmac-sha2-256\nPermitRootLogin yes"}, // all invalid -> line omitted
+		MACs:        []string{"hmac-sha2-256\nPermitRootLogin yes"}, // all invalid
 	}
-	got := buildSSHDConfig(ssh)
+	// #14111: the pure string renderer now reports the all-invalid MACs list
+	// through its Err variant; the string form returns "" rather than a
+	// bounds-only drop-in that silently drops every restriction. Partial
+	// filtering is asserted through buildSSHDConfigErr below, which is also
+	// the variant applySSHConfig consumes.
+	if got := buildSSHDConfig(ssh); got != "" {
+		t.Errorf("buildSSHDConfig with an all-invalid list = %q, want \"\" (fail-closed render, #14111)", got)
+	}
+	if _, err := buildSSHDConfigErr(ssh); err == nil {
+		t.Fatal("buildSSHDConfigErr with an all-invalid MACs list = nil, want error (#14111)")
+	}
 
+	// Partial filtering: valid tokens render, injected tokens are dropped.
+	partial := &config.SSHServiceConfig{
+		KeyExchange: []string{"curve25519-sha256", "kex,PermitRootLogin yes"},
+		Ciphers:     []string{"aes256-gcm@openssh.com", "bad cipher"},
+		MACs:        []string{"hmac-sha2-256", "hmac-sha2-256\nPermitRootLogin yes"},
+	}
+	got, err := buildSSHDConfigErr(partial)
+	if err != nil {
+		t.Fatalf("buildSSHDConfigErr(partial) = %v, want nil", err)
+	}
 	// The one valid KEX token renders; the comma-injection token is filtered.
 	if !strings.Contains(got, "KexAlgorithms curve25519-sha256\n") {
 		t.Errorf("valid KEX dropped; got:\n%s", got)
@@ -58,9 +78,8 @@ func TestBuildSSHDConfig_FiltersInjectedAlgorithms_4902(t *testing.T) {
 	if !strings.Contains(got, "Ciphers aes256-gcm@openssh.com\n") {
 		t.Errorf("valid cipher dropped; got:\n%s", got)
 	}
-	// MACs list had only an invalid token, so no MACs line is emitted.
-	if strings.Contains(got, "MACs ") {
-		t.Errorf("MACs line emitted from an all-invalid list; got:\n%s", got)
+	if !strings.Contains(got, "MACs hmac-sha2-256\n") {
+		t.Errorf("valid MAC dropped; got:\n%s", got)
 	}
 }
 

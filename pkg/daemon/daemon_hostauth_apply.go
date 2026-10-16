@@ -49,12 +49,66 @@ import (
 // apply-boundary validation immediately below.
 
 // validateAuthorizedSSHKeys enforces the authorized_keys apply-boundary format
-// shared by non-root login and root-authentication.
+// shared by non-root login and root-authentication. OpenSSH accepts many key
+// types besides the ssh-* family (ecdsa-sha2-nistp256/384/521 and the FIDO
+// sk-* variants). Junos operators habitually store the full
+// "<type> <base64> <comment>" string as the leaf value, so an ecdsa key filed
+// under any ssh-* leaf reaches this point verbatim; requiring an ssh- prefix
+// rejected such a valid key and skipped ALL provisioning for that user
+// (#14111). The accepted set is therefore the OpenSSH authorized_keys key-type
+// vocabulary — still a fail-closed allowlist: an option-prefixed line
+// (`command="..." ssh-ed25519 ...`), a bare blob, or any unknown type is
+// refused before any credential mutation. A whitespace-separated base64 blob
+// must follow the type; the comment is optional.
+
+// sshAuthorizedKeyTypes is the OpenSSH authorized_keys key-type vocabulary
+// accepted at the apply boundary (#14111).
+var sshAuthorizedKeyTypes = map[string]bool{
+	"ssh-ed25519":                                 true,
+	"ssh-rsa":                                     true,
+	"ssh-dss":                                     true,
+	"ecdsa-sha2-nistp256":                         true,
+	"ecdsa-sha2-nistp384":                         true,
+	"ecdsa-sha2-nistp521":                         true,
+	"sk-ssh-ed25519@openssh.com":                  true,
+	"sk-ecdsa-sha2-nistp256@openssh.com":          true,
+	"ssh-ed25519-cert-v01@openssh.com":            true,
+	"ssh-rsa-cert-v01@openssh.com":                true,
+	"ssh-dss-cert-v01@openssh.com":                true,
+	"ecdsa-sha2-nistp256-cert-v01@openssh.com":    true,
+	"ecdsa-sha2-nistp384-cert-v01@openssh.com":    true,
+	"ecdsa-sha2-nistp521-cert-v01@openssh.com":    true,
+	"sk-ssh-ed25519-cert-v01@openssh.com":         true,
+	"sk-ecdsa-sha2-nistp256-cert-v01@openssh.com": true,
+}
+
+func validAuthorizedSSHKey(key string) bool {
+	typ, blob, ok := strings.Cut(key, " ")
+	if !ok || !sshAuthorizedKeyTypes[typ] {
+		return false
+	}
+	blob = strings.TrimLeft(blob, " ")
+	if blob == "" {
+		return false
+	}
+	if i := strings.IndexByte(blob, ' '); i >= 0 {
+		blob = blob[:i]
+	}
+	for _, r := range blob {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '+' || r == '/' || r == '=' || r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 func validateAuthorizedSSHKeys(principal string, keys []string) error {
 	for i, key := range keys {
-		if strings.ContainsAny(key, "\r\n") || !strings.HasPrefix(key, "ssh-") {
-			return fmt.Errorf("SSH key %d for %s must be a single-line ssh-* public key", i+1, principal)
+		if strings.ContainsAny(key, "\r\n") || !validAuthorizedSSHKey(key) {
+			return fmt.Errorf("SSH key %d for %s must be a single-line OpenSSH public key", i+1, principal)
 		}
 	}
 	return nil
@@ -114,6 +168,12 @@ func loginUserShell(name string) (string, bool, error) {
 	}
 	return "", false, nil
 }
+
+// chownSSHDir owns a user's .ssh directory by numeric (uid, gid). It is a
+// package var only so tests that stage fake passwd uids (which an
+// unprivileged test process cannot chown to) can observe/skip the real
+// filesystem ownership change; production always calls os.Chown (#14111).
+var chownSSHDir = func(dir string, uid, gid int) error { return os.Chown(dir, uid, gid) }
 
 // applySystemLogin creates OS user accounts and SSH authorized_keys from
 // system { login { user ... } } configuration.
@@ -330,20 +390,34 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 				fail(fmt.Errorf("create .ssh dir for %s: %w", user.Name, err))
 				continue
 			}
-			// Chown the .ssh DIR to the user UNCONDITIONALLY (idempotent),
-			// not only when the key content changes. MkdirAllDurable creates
-			// it root-owned; if this chown ran only inside the content-changed
-			// branch, a crash between the durable key write and the chown
-			// would leave a durable root-owned .ssh that, since the key
-			// content then matches on reboot, the whole block (and the chown)
-			// would skip forever — never repairing the dir owner (Codex r2
-			// HIGH). Running it every apply closes that window.
-			// `--` stops chown parsing "-name:-name" as options (#5005).
-			if out, err := runCommandTimeout("chown", "-R", "--", user.Name+":"+user.Name, sshDir); err != nil {
+			// Chown the .ssh DIR to the resolved (uid, gid) — not to the
+			// textual "<name>:<name>" pair. An existing account whose
+			// primary group is not eponymously named (e.g. alice:users)
+			// has no group named after the user, so the name-based chown
+			// failed on every apply; with a freshly created root-owned 0700
+			// .ssh the user then could not traverse the directory at all
+			// (#14111). (uid, gid) was already resolved above (#1916 D7);
+			// numeric ids also keep this root-privileged exec free of any
+			// username/group-name operand to mis-parse (the #5005 `--`
+			// concern is subsumed). Run it UNCONDITIONALLY (idempotent),
+			// not only when the key content changes: MkdirAllDurable
+			// creates the dir root-owned, so a crash between the durable
+			// key write and this chown would otherwise leave a durable
+			// root-owned .ssh that later applies skip forever because the
+			// key content already matches (Codex r2 HIGH). Only the dir
+			// itself is chowned: authorized_keys is installed with the
+			// same owner by fsatomic.WithOwner(uid, gid) below, and a
+			// recursive walk would also re-own operator-placed files.
+			// A chown failure ABORTS this user's key install: claiming
+			// marker-first ownership and writing keys into a directory
+			// whose ownership is unproven would report convergence over a
+			// .ssh the user may not be able to traverse.
+			if err := chownSSHDir(sshDir, uid, gid); err != nil {
 				slog.Warn("failed to chown ssh dir",
-					"user", user.Name, "dir", sshDir,
-					"err", err, "output", strings.TrimSpace(string(out)))
+					"user", user.Name, "dir", sshDir, "err", err)
+				keyClaim.rollback() // #6797: no key file was written
 				fail(fmt.Errorf("chown .ssh dir for %s: %w", user.Name, err))
+				continue
 			}
 
 			keysContent := strings.Join(user.SSHKeys, "\n") + "\n"
@@ -858,7 +932,16 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 			return fmt.Errorf("apply SSH cross-connection password lockout: %w", err)
 		}
 	}
-	content := buildSSHDConfig(ssh)
+	content, contentErr := buildSSHDConfigErr(ssh)
+	if contentErr != nil {
+		// #14111: a nonempty algorithm restriction that filters to nothing
+		// must fail the apply WITHOUT touching the drop-in. Writing the
+		// mandatory-bounds-only body (or removing the drop-in) would
+		// silently revert sshd to its built-in algorithm defaults; leaving
+		// the previously installed drop-in in force and reporting the
+		// error keeps the last known restriction until the config is fixed.
+		return fmt.Errorf("render sshd config: %w", contentErr)
+	}
 	if content == "" {
 		if live := d.liveConfig12169(); live != nil && live.System.Services != nil &&
 			buildSSHDConfig(live.System.Services.SSH) != "" {
@@ -1074,6 +1157,20 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 // not a safe OpenSSH algorithm name (config.ValidateSSHAlgorithm), the
 // render-side belt for #4902.
 func filterSSHAlgorithms(in []string) []string {
+	out, _ := filterSSHAlgorithmsErr(in)
+	return out
+}
+
+// filterSSHAlgorithmsErr is filterSSHAlgorithms plus the fail-closed signal
+// for the #14111 algorithm-fallback defect: it reports an error when a
+// NONEMPTY operator-specified list filters down to nothing. Omitting the
+// directive line in that case silently reverted sshd to its built-in
+// algorithm defaults — the operator asked for a restriction and got the
+// lenient default instead. Partial filtering (some valid tokens remain)
+// still renders the survivors; only the all-invalid nonempty case, where
+// rendering nothing would DROP the restriction, is an error. An empty
+// input list is not an error: the directive was never specified.
+func filterSSHAlgorithmsErr(in []string) ([]string, error) {
 	out := in[:0:0]
 	for _, tok := range in {
 		if err := config.ValidateSSHAlgorithm(tok, nil); err != nil {
@@ -1082,12 +1179,29 @@ func filterSSHAlgorithms(in []string) []string {
 		}
 		out = append(out, tok)
 	}
-	return out
+	if len(in) > 0 && len(out) == 0 {
+		return nil, fmt.Errorf("all %d SSH algorithm token(s) %q are invalid; refusing to silently revert to sshd defaults", len(in), in)
+	}
+	return out, nil
 }
 
 func buildSSHDConfig(ssh *config.SSHServiceConfig) string {
+	content, _ := buildSSHDConfigErr(ssh)
+	return content
+}
+
+// buildSSHDConfigErr is buildSSHDConfig plus the #14111 fail-closed signal:
+// when a nonempty operator-specified algorithm list (key-exchange, ciphers,
+// or macs) filters to nothing, it returns an error instead of a drop-in that
+// silently omits the requested restriction and reverts sshd to its defaults.
+// Callers that mutate or remove the live drop-in (applySSHConfig) use this
+// variant and refuse to touch sshd state on error — the previously installed
+// drop-in (or factory defaults) stays in force and the apply reports the
+// failure so it is retried, never a silent downgrade. Pure render/compare
+// callers keep using buildSSHDConfig.
+func buildSSHDConfigErr(ssh *config.SSHServiceConfig) (string, error) {
 	if ssh == nil {
-		return ""
+		return "", nil
 	}
 	lines := []string{
 		"MaxAuthTries 3",
@@ -1113,16 +1227,30 @@ func buildSSHDConfig(ssh *config.SSHServiceConfig) string {
 	// token carrying a comma/space/control char (which would smuggle a second
 	// sshd directive token onto the line, or fail the reload) is dropped; the
 	// strict commit gate (config.ValidateSSHAlgorithm) rejects it at commit.
-	if kex := filterSSHAlgorithms(ssh.KeyExchange); len(kex) > 0 {
+	// #14111: a nonempty list that filters to EMPTY is an error, not a silent
+	// omission — see filterSSHAlgorithmsErr.
+	kex, err := filterSSHAlgorithmsErr(ssh.KeyExchange)
+	if err != nil {
+		return "", fmt.Errorf("key-exchange: %w", err)
+	}
+	if len(kex) > 0 {
 		lines = append(lines, "KexAlgorithms "+strings.Join(kex, ","))
 	}
 	// #4305 S-4: sshd hardening knobs. sshd validates the algorithm
 	// spellings and numeric ranges at reload; xpf gates the injection/breakage
 	// shape (#4902) and lets sshd own the spelling check.
-	if ciphers := filterSSHAlgorithms(ssh.Ciphers); len(ciphers) > 0 {
+	ciphers, err := filterSSHAlgorithmsErr(ssh.Ciphers)
+	if err != nil {
+		return "", fmt.Errorf("ciphers: %w", err)
+	}
+	if len(ciphers) > 0 {
 		lines = append(lines, "Ciphers "+strings.Join(ciphers, ","))
 	}
-	if macs := filterSSHAlgorithms(ssh.MACs); len(macs) > 0 {
+	macs, err := filterSSHAlgorithmsErr(ssh.MACs)
+	if err != nil {
+		return "", fmt.Errorf("macs: %w", err)
+	}
+	if len(macs) > 0 {
 		lines = append(lines, "MACs "+strings.Join(macs, ","))
 	}
 	if ssh.ConnectionLimit > 0 {
@@ -1138,9 +1266,9 @@ func buildSSHDConfig(ssh *config.SSHServiceConfig) string {
 		lines = append(lines, fmt.Sprintf("ClientAliveCountMax %d", ssh.ClientAliveCountMax))
 	}
 	if len(lines) == 0 {
-		return ""
+		return "", nil
 	}
-	return "# Managed by xpf — do not edit\n" + strings.Join(lines, "\n") + "\n"
+	return "# Managed by xpf — do not edit\n" + strings.Join(lines, "\n") + "\n", nil
 }
 
 // applyRootAuth applies AND declaratively reconciles `system

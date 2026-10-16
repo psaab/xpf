@@ -358,6 +358,7 @@ func isolateFirstCommitRollbackHostAuth12169(t *testing.T) {
 	origUsers, origHome, origRootSSH := provisionedUsersDir, homeBaseDir, rootSSHDir
 	origSudoers, origSudoersValidate := sudoersDir, validateSudoersFile
 	origSSHDPath, origSSHDReload, origSSHDValidate := sshdConfPath, sshdReloadCmd, sshdValidateCmd
+	origChownSSHDir := chownSSHDir
 	origInstaller, origBarrierPath := nftInstaller, EarlyInputHandoffMarkerPath
 	origSnapshots := sampleHostInboundSnapshots
 	origDetect, origRecord := detectLifelineInterfaceFn, lifelineRecordNameFn
@@ -376,6 +377,10 @@ func isolateFirstCommitRollbackHostAuth12169(t *testing.T) {
 	lifelineRecordNameFn = func() (string, bool) { return "", false }
 	validateSudoersFile = func(string) error { return nil }
 	sshdReloadCmd = func() ([]byte, error) { return nil, nil }
+	// These fixtures stage fake passwd uids (1001…) that an unprivileged
+	// test process cannot chown to; #14111 made the .ssh dir chown a real
+	// os.Chown, so observe it through the seam instead of performing it.
+	chownSSHDir = func(string, int, int) error { return nil }
 	sshdValidateCmd = func() ([]byte, error) { return nil, nil }
 
 	for _, dir := range []string{
@@ -398,6 +403,7 @@ func isolateFirstCommitRollbackHostAuth12169(t *testing.T) {
 		provisionedUsersDir, homeBaseDir, rootSSHDir = origUsers, origHome, origRootSSH
 		sudoersDir, validateSudoersFile = origSudoers, origSudoersValidate
 		sshdConfPath, sshdReloadCmd, sshdValidateCmd = origSSHDPath, origSSHDReload, origSSHDValidate
+		chownSSHDir = origChownSSHDir
 		nftInstaller, EarlyInputHandoffMarkerPath = origInstaller, origBarrierPath
 		sampleHostInboundSnapshots = origSnapshots
 		detectLifelineInterfaceFn, lifelineRecordNameFn = origDetect, origRecord

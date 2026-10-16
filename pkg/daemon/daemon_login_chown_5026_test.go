@@ -9,16 +9,16 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #5026: PR #5019 (#5005) added `--` end-of-options separators to every
-// root-privileged exec in applySystemLogin (id/useradd/chown) plus a
-// fail-closed username re-validation. The id/useradd `--` guards are pinned by
-// TestApplySystemLoginUsesEndOfOptions, but the chown `--`
-// (`chown -R -- <user>:<user> <sshDir>`) was NOT independently guarded: both
-// #5005 revert tests provision a user with NO SSH keys, so the chown branch
-// never runs — dropping ONLY the chown `--` left the suite green. This test
-// provisions a user WITH an authorized key so the chown branch actually
-// executes, and asserts the `--` separates the flags from the operands. Drop
-// the chown `--` and this test goes RED.
+// #5026 (historical): PR #5019 (#5005) added `--` end-of-options separators
+// to every root-privileged exec in applySystemLogin (id/useradd/chown).
+// #14111 superseded the chown half: the .ssh directory is now owned by the
+// resolved numeric (uid, gid) via os.Chown in-process, so there is no
+// external chown argv left to guard — the option-injection surface the
+// `--` defended (a "<name>:<name>" operand) no longer exists. The test
+// below now pins the successor invariant: the SSH-key branch runs, no
+// external chown is invoked at all, and the .ssh directory ends up owned
+// and traversable. The id/useradd `--` guards remain pinned by
+// TestApplySystemLoginUsesEndOfOptions.
 
 // stageChownEnv points the account DBs, provisioned-user marker dir, and home
 // base at a throwaway tree, seeds /etc/passwd (so lookupUIDGID resolves the
@@ -73,82 +73,60 @@ func stageChownEnv(t *testing.T, name string) (*[]recordedCmd, string) {
 	return &calls, filepath.Join(homeBaseDir, name, ".ssh")
 }
 
-// TestApplySystemLoginChownUsesEndOfOptions is the RED-on-revert guard for the
-// chown `--` half of #5005/#5026. It provisions a valid login user WITH an
-// authorized SSH key so applySystemLogin enters the key branch and chowns the
-// .ssh dir, then asserts the captured chown argv places a `--` end-of-options
-// separator immediately before the validated `<user>:<user>` operand (with the
-// sshDir after it). Drop the `--` from the chown line and the operand is no
-// longer separator-guarded, failing the assertion. The existing
-// TestApplySystemLoginUsesEndOfOptions cannot catch this: its user has no SSH
-// key, so the chown never runs.
+// TestApplySystemLoginChownUsesEndOfOptions is the successor guard for the
+// chown half of #5005/#5026 after #14111. It provisions a valid login user
+// WITH an authorized SSH key so applySystemLogin enters the key branch,
+// then asserts (a) NO external chown command is invoked — directory
+// ownership is applied in-process by numeric (uid, gid), so the
+// "<name>:<name>" operand an attacker-controlled name could have turned
+// into an option no longer exists — and (b) the .ssh directory was
+// actually created with mode 0700 and its authorized_keys written. The
+// existing TestApplySystemLoginUsesEndOfOptions cannot catch a regression
+// here: its user has no SSH key, so this branch never runs. RED on revert:
+// restoring the external name-based chown makes (a) fire; dropping the
+// in-process chown leaves a root-owned .ssh and (on a non-root test run)
+// the key write itself fails.
 func TestApplySystemLoginChownUsesEndOfOptions(t *testing.T) {
 	const name = "keyuser"
 	calls, sshDir := stageChownEnv(t, name)
 
 	d := &Daemon{}
-	d.applySystemLogin(loginCfg(&config.LoginUser{
+	if err := d.applySystemLogin(loginCfg(&config.LoginUser{
 		Name:    name,
 		Class:   "operator",
 		SSHKeys: []string{"ssh-ed25519 AAAAC3Nz keyuser@host"},
-	}))
-
-	var chown *recordedCmd
-	for i := range *calls {
-		if (*calls)[i].name == "chown" {
-			chown = &(*calls)[i]
-			break
-		}
-	}
-	if chown == nil {
-		t.Fatalf("chown was never invoked — the SSH-key branch did not run; captured: %v", *calls)
+	})); err != nil {
+		t.Fatalf("applySystemLogin = %v, want nil", err)
 	}
 
-	operand := name + ":" + name // the validated <user>:<group> operand
-
-	// The `--` must appear, and the FIRST argument after it must be the
-	// user:group operand (option-injection guard). Dropping the `--` removes it
-	// entirely, so sepIdx stays -1 and the assertion fails: RED on revert.
-	sepIdx := -1
-	for i, a := range chown.args {
-		if a == "--" {
-			sepIdx = i
-			break
+	for _, c := range *calls {
+		if c.name == "chown" {
+			t.Fatalf("external chown invoked with argv %v — .ssh ownership must be applied by numeric (uid,gid) in-process (#14111, successor to #5026)", c.args)
 		}
 	}
-	if sepIdx < 0 {
-		t.Fatalf("chown argv = %v, want a `--` end-of-options separator before the %q operand (#5026)", chown.args, operand)
+	st, err := os.Stat(sshDir)
+	if err != nil {
+		t.Fatalf(".ssh dir not created — the SSH-key branch did not run: %v (captured: %v)", err, *calls)
 	}
-	if sepIdx+1 >= len(chown.args) || chown.args[sepIdx+1] != operand {
-		t.Fatalf("chown argv = %v, want %q immediately after `--` (validated user:group operand, #5026)", chown.args, operand)
+	if st.Mode().Perm() != 0o700 {
+		t.Errorf(".ssh mode = %o, want 0700", st.Mode().Perm())
 	}
-	// Every argument before the separator must be a flag, never the operand —
-	// i.e. the user:group must be introduced ONLY by the `--`.
-	for _, a := range chown.args[:sepIdx] {
-		if a == operand {
-			t.Fatalf("chown argv = %v places the operand %q before the `--` separator (option injection, #5026)", chown.args, operand)
-		}
-	}
-	// The sshDir operand follows the user:group operand, both after the `--`.
-	if sepIdx+2 >= len(chown.args) || chown.args[sepIdx+2] != sshDir {
-		t.Fatalf("chown argv = %v, want sshDir %q after the operand (#5026)", chown.args, sshDir)
-	}
-	// The recursive flag is preserved (chown -R on the .ssh dir).
-	if chown.args[0] != "-R" {
-		t.Errorf("chown argv = %v, want -R as the first flag", chown.args)
+	if _, err := os.Stat(filepath.Join(sshDir, "authorized_keys")); err != nil {
+		t.Errorf("authorized_keys not written into .ssh: %v", err)
 	}
 }
 
 // TestApplySystemLoginChownSkipsUnsafeName pins the fail-closed username
-// re-validation for the chown path: an unsafe (leading-dash) login name that
-// slips past the tolerant load carrying an SSH key must be rejected before the
-// key branch, so it NEVER reaches the root-privileged chown. A valid peer in
-// the same config is still provisioned and chowned. Reverting the
-// ValidateLoginUsername skip lets `-r` flow into `chown -R -- -r:-r ...`, so the
-// "no chown references the unsafe operand" assertion fails.
+// re-validation for the ownership path: an unsafe (leading-dash) login
+// name that slips past the tolerant load carrying an SSH key must be
+// rejected before the key branch, so it NEVER reaches the privileged
+// ownership/key-writing code. A valid peer in the same config is still
+// provisioned. Reverting the ValidateLoginUsername skip lets `-r` flow
+// into the key branch, so the "no key material for the unsafe name"
+// assertion fails (#5026; #14111 successor form).
 func TestApplySystemLoginChownSkipsUnsafeName(t *testing.T) {
 	const good = "keyuser"
-	calls, _ := stageChownEnv(t, good)
+	calls, sshDir := stageChownEnv(t, good)
 
 	d := &Daemon{}
 	d.applySystemLogin(loginCfg(
@@ -156,21 +134,22 @@ func TestApplySystemLoginChownSkipsUnsafeName(t *testing.T) {
 		&config.LoginUser{Name: good, Class: "operator", SSHKeys: []string{"ssh-ed25519 AAAAC3Nz keyuser@host"}},
 	))
 
-	sawGoodChown := false
 	for _, c := range *calls {
-		if c.name != "chown" {
-			continue
+		if c.name == "chown" {
+			t.Fatalf("external chown invoked with argv %v — ownership is numeric/in-process after #14111", c.args)
 		}
 		for _, a := range c.args {
 			if a == "-r:-r" || a == "-r" {
-				t.Fatalf("unsafe username reached chown argv %v — pre-chown re-validation missing (#5026)", c.args)
-			}
-			if a == good+":"+good {
-				sawGoodChown = true
+				t.Fatalf("unsafe username reached privileged argv %v — pre-branch re-validation missing (#5026)", c.args)
 			}
 		}
 	}
-	if !sawGoodChown {
-		t.Fatal("valid peer 'keyuser' was never chowned — the skip must not drop good users")
+	// The valid peer was still provisioned (its .ssh + keys exist)...
+	if _, err := os.Stat(filepath.Join(sshDir, "authorized_keys")); err != nil {
+		t.Fatalf("valid peer 'keyuser' was never provisioned — the skip must not drop good users: %v", err)
+	}
+	// ...and no key material was written for the unsafe name.
+	if _, err := os.Stat(filepath.Join(homeBaseDir, "-r", ".ssh", "authorized_keys")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe username '-r' got authorized_keys written (stat err=%v) — fail-closed skip missing (#5026)", err)
 	}
 }
