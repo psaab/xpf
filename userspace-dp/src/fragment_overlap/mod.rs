@@ -281,8 +281,6 @@ fn terminal_conflict(e: &OverlapEntry, start: u32, end: u32, is_last: bool) -> b
     }
 }
 
-
-
 #[inline]
 fn completion_token(e: &OverlapEntry) -> Option<OverlapCompletionToken> {
     let terminal_end = e.terminal_end?;

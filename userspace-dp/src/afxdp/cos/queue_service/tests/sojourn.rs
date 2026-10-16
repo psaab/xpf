@@ -135,8 +135,8 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
     assert_eq!(sent_packets, 1);
     assert_eq!(
         tracker.len(),
-        1,
-        "accepted flow-fair local prefix commits; retry suffix stays held"
+        2,
+        "accepted flow-fair local prefix completes but remains protected"
     );
     let mut expected = CoSQueueSojourn::default();
     expected.record(enq_a, now_ns);
@@ -172,8 +172,8 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
     assert_eq!(sent_packets, 1);
     assert_eq!(
         tracker.len(),
-        0,
-        "flow-fair local retry commits its remaining admission"
+        2,
+        "flow-fair local retry completes but retains both overlap entries"
     );
     expected.record(enq_b, now_ns);
     assert_eq!(
@@ -235,8 +235,8 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
     assert_eq!(sent_packets, 1);
     assert_eq!(
         tracker.len(),
-        1,
-        "accepted flow-fair prepared prefix commits; retry suffix stays held"
+        2,
+        "accepted flow-fair prepared prefix completes but remains protected"
     );
     let mut expected = CoSQueueSojourn::default();
     expected.record(enq_a, now_ns);
@@ -269,8 +269,8 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
     assert_eq!(sent_packets, 1);
     assert_eq!(
         tracker.len(),
-        0,
-        "flow-fair prepared retry commits its remaining admission"
+        2,
+        "flow-fair prepared retry completes but retains both overlap entries"
     );
     expected.record(enq_b, now_ns);
     assert_eq!(

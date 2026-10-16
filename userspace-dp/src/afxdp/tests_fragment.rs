@@ -2407,9 +2407,9 @@ fn flowless_fragment_bytes_are_charged_to_no_session_9956() {
     }
     assert_eq!(
         forwarding.nat64.frag_overlap.len(),
-        0,
-        "#10285: queued first+last requests settle their overlap admissions \
-         only after explicit TX acceptance"
+        1,
+        "#10285: accepted first+last requests complete admission but retain \
+         overlap ranges through the reassembly window (#13680)"
     );
 }
 

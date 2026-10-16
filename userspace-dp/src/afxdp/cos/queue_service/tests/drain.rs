@@ -751,8 +751,8 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
     assert!(scratch_local_tx.is_empty());
     assert_eq!(
         tracker.len(),
-        2,
-        "accepted FIFO prefix commits its admission; retry suffix stays held"
+        3,
+        "accepted FIFO prefix completes but remains protected; retry suffix stays held"
     );
     assert_eq!(free_tx_frames, VecDeque::from([128, 192]));
     assert_eq!(root.queues[0].hot.items.len(), 2);
@@ -943,8 +943,8 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
 
     assert_eq!(
         tracker.len(),
-        2,
-        "accepted prepared FIFO prefix commits; retry suffix stays held"
+        3,
+        "accepted prepared prefix completes but remains protected; retry suffix stays held"
     );
     assert_eq!(sent_packets, 1);
     assert_eq!(sent_bytes, 1);
