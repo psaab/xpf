@@ -350,7 +350,7 @@ pub(super) fn build_local_time_exceeded_request(
             next_hop: None,
             neighbor_mac: None,
             src_mac: Some(egress.src_mac),
-            tx_vlan_id: egress.vlan_id,
+            tx_vlan_id: forwarding.egress_tx_vlan_id(logical_ingress),
             route_mtu: 0,
             transport_route_mtu: 0,
         }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
@@ -452,7 +452,7 @@ pub(super) fn build_local_icmp_error_v4(
     let tag = if ingress_tag.emits() {
         ingress_tag
     } else {
-        TxVlanTag::from(egress.vlan_id)
+        TxVlanTag::from(forwarding.egress_tx_vlan_id(ingress_ifindex))
     };
     let eth_len = tag.header_len();
     let total_len = 20usize.checked_add(8)?.checked_add(quoted_len)?;
@@ -554,7 +554,7 @@ pub(super) fn build_local_icmp_error_v6(
     let tag = if ingress_tag.emits() {
         ingress_tag
     } else {
-        TxVlanTag::from(egress.vlan_id)
+        TxVlanTag::from(forwarding.egress_tx_vlan_id(ingress_ifindex))
     };
     let eth_len = tag.header_len();
     let outer_payload_len = 8usize.checked_add(quoted_len)?;

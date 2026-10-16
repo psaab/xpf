@@ -624,7 +624,7 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
     let tag = if ingress_tag.emits() {
         ingress_tag
     } else {
-        TxVlanTag::from(egress.vlan_id)
+        TxVlanTag::from(forwarding.egress_tx_vlan_id(ingress_ifindex))
     };
     let eth_len = tag.header_len();
     let total_len = 20usize.checked_add(8)?.checked_add(quoted_len)?;
@@ -742,7 +742,7 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
     let tag = if ingress_tag.emits() {
         ingress_tag
     } else {
-        TxVlanTag::from(egress.vlan_id)
+        TxVlanTag::from(forwarding.egress_tx_vlan_id(ingress_ifindex))
     };
     let eth_len = tag.header_len();
     let max_quote = 1280usize.saturating_sub(40 + 8);

@@ -1803,6 +1803,9 @@ pub(super) fn populate_egress(
                 state
                     .ingress_logical_ifindex
                     .insert((parent_ifindex, 0), native_unit_ifindex);
+                state
+                    .native_vlan_egress_ifindexes
+                    .insert(native_unit_ifindex);
                 tagged_only_ingress_ifindexes.remove(&parent_ifindex);
             }
             None => {
