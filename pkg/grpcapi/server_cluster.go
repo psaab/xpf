@@ -491,7 +491,7 @@ func grpcResolveAddress(cfg *config.Config, name string) string {
 	return ""
 }
 
-func (s *Server) Complete(_ context.Context, req *pb.CompleteRequest) (*pb.CompleteResponse, error) {
+func (s *Server) Complete(ctx context.Context, req *pb.CompleteRequest) (*pb.CompleteResponse, error) {
 	// req.Pos is the caller-supplied cursor offset into req.Line. It is an
 	// int32 on the wire, so a crafted negative value would make the
 	// upper-bound guard below pass (int(-1) < len(text)) and slice
@@ -529,11 +529,13 @@ func (s *Server) Complete(_ context.Context, req *pb.CompleteRequest) (*pb.Compl
 		words = words[:len(words)-1]
 	}
 
+	// #14144: bind live-config-derived candidates to the admitted principal.
+	auth := s.completionAuthFor(ctx)
 	var pairs []completionPair
 	if req.ConfigMode {
-		pairs = s.completeConfigPairs(words, partial)
+		pairs = s.completeConfigPairsAuth(words, partial, &auth)
 	} else {
-		pairs = s.completeOperationalPairs(words, partial)
+		pairs = s.completeOperationalPairsAuth(words, partial, &auth)
 	}
 
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].name < pairs[j].name })
@@ -618,12 +620,20 @@ func (s *Server) completionValueProvider() config.ValueProvider {
 }
 
 func (s *Server) completeOperationalPairs(words []string, partial string) []completionPair {
+	auth := legacyCompletionAuth()
+	return s.completeOperationalPairsAuth(words, partial, &auth)
+}
+
+func (s *Server) completeOperationalPairsAuth(words []string, partial string, auth *completionAuth) []completionPair {
 	// "show configuration <path>" — delegate sub-path to config schema
 	if subPath, ok := resolveShowConfigurationWords(words); ok {
 		if resolvedPath, resolved := config.ResolveConsumedSetPathTokens(subPath); resolved {
 			subPath = resolvedPath
 		}
-		schemaCompletions := config.CompleteSetPathWithValues(subPath, s.completionValueProvider())
+		if !auth.showConfigPathAllowed(subPath) {
+			return nil
+		}
+		schemaCompletions := config.CompleteSetPathWithValues(subPath, auth.wrapProvider(s))
 		if schemaCompletions != nil {
 			var pairs []completionPair
 			for _, sc := range schemaCompletions {
@@ -636,10 +646,7 @@ func (s *Server) completeOperationalPairs(words []string, partial string) []comp
 			}
 		}
 	}
-	var cfg *config.Config
-	if s.store != nil {
-		cfg = s.store.ActiveConfig()
-	}
+	cfg := auth.treeConfig(s, words)
 	candidates := cmdtree.CompleteFromTreeWithDesc(cmdtree.OperationalTree, words, partial, cfg)
 	pairs := make([]completionPair, len(candidates))
 	for i, c := range candidates {
@@ -649,6 +656,11 @@ func (s *Server) completeOperationalPairs(words []string, partial string) []comp
 }
 
 func (s *Server) completeConfigPairs(words []string, partial string) []completionPair {
+	auth := legacyCompletionAuth()
+	return s.completeConfigPairsAuth(words, partial, &auth)
+}
+
+func (s *Server) completeConfigPairsAuth(words []string, partial string, auth *completionAuth) []completionPair {
 	if len(words) == 0 {
 		return filterCompletionPairs(cmdtree.ConfigTopLevel, partial)
 	}
@@ -669,7 +681,10 @@ func (s *Server) completeConfigPairs(words []string, partial string) []completio
 		if resolvedPath, resolved := config.ResolveConsumedSetPathTokens(pathWords); resolved {
 			pathWords = resolvedPath
 		}
-		schemaCompletions := config.CompleteSetPathWithValues(pathWords, s.completionValueProvider())
+		if !auth.configPathAllowed(pathWords) {
+			return nil
+		}
+		schemaCompletions := config.CompleteSetPathWithValues(pathWords, auth.wrapProvider(s))
 		if schemaCompletions == nil {
 			return nil
 		}
@@ -681,10 +696,7 @@ func (s *Server) completeConfigPairs(words []string, partial string) []completio
 		}
 		return pairs
 	case "run":
-		var cfg *config.Config
-		if s.store != nil {
-			cfg = s.store.ActiveConfig()
-		}
+		cfg := auth.treeConfig(s, words[1:])
 		names := cmdtree.CompleteFromTree(cmdtree.OperationalTree, words[1:], partial, cfg)
 		var pairs []completionPair
 		for _, name := range names {
