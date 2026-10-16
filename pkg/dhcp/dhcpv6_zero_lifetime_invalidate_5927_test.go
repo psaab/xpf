@@ -38,7 +38,7 @@ func TestParseV6ReplyZeroLifetimeDistinction_5927(t *testing.T) {
 
 	// (b) The only IA_NA IAADDR has valid-lifetime 0 → explicit invalidation.
 	advZero := iaNAReply(t, &dhcpv6.OptIAAddress{
-		IPv6Addr:          mustIP(t, "2001:db8::1"),
+		IPv6Addr:          mustIP(t, "2606:4700::1"),
 		PreferredLifetime: 100 * time.Second,
 		ValidLifetime:     0,
 	})
@@ -63,7 +63,7 @@ func TestParseV6ReplyZeroLifetimeDistinction_5927(t *testing.T) {
 
 	// (ii) Positive lifetime → installs normally, no sentinel.
 	advPos := iaNAReply(t, &dhcpv6.OptIAAddress{
-		IPv6Addr:          mustIP(t, "2001:db8::2"),
+		IPv6Addr:          mustIP(t, "2606:4700::2"),
 		PreferredLifetime: 50 * time.Second,
 		ValidLifetime:     100 * time.Second,
 	})
@@ -78,7 +78,7 @@ func TestParseV6ReplyZeroLifetimeDistinction_5927(t *testing.T) {
 	// (iii) 0xFFFFFFFF (infinite) is a non-zero lifetime → installed normally,
 	// never mistaken for an invalidation.
 	advInf := iaNAReply(t, &dhcpv6.OptIAAddress{
-		IPv6Addr:          mustIP(t, "2001:db8::3"),
+		IPv6Addr:          mustIP(t, "2606:4700::3"),
 		PreferredLifetime: 0xFFFFFFFF * time.Second,
 		ValidLifetime:     0xFFFFFFFF * time.Second,
 	})
@@ -111,7 +111,7 @@ func newV6InvalidationManager(modes *[]dhcpExchangeMode, exchange func(n int, mo
 func TestRunDHCPv6ExplicitInvalidationDeconfigures_5927(t *testing.T) {
 	leaseX := &Lease{
 		Interface: "wan0", Family: AFInet6,
-		Address:   netip.MustParsePrefix("2001:db8::1/128"),
+		Address:   netip.MustParsePrefix("2606:4700::1/128"),
 		LeaseTime: 100 * time.Second,
 		Obtained:  time.Now(),
 	}
@@ -162,7 +162,7 @@ func TestRunDHCPv6ExplicitInvalidationDeconfigures_5927(t *testing.T) {
 func TestRunDHCPv6AbsentIANAKeepsAddress_5927(t *testing.T) {
 	leaseX := &Lease{
 		Interface: "wan0", Family: AFInet6,
-		Address:   netip.MustParsePrefix("2001:db8::1/128"),
+		Address:   netip.MustParsePrefix("2606:4700::1/128"),
 		LeaseTime: 100 * time.Second,
 		Obtained:  time.Now(),
 	}
