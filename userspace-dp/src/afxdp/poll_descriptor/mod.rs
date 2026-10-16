@@ -8712,16 +8712,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                         ForwardingDisposition::RejectRoute => {
                             telemetry.dbg.disposition_other += 1;
-                            let ingress_logical = resolve_ingress_logical_ifindex(
-                                worker_ctx.forwarding,
-                                meta.ingress_ifindex as i32,
-                                meta.ingress_vlan_id,
-                            )
-                            .unwrap_or(meta.ingress_ifindex as i32);
                             let _ = reject_reply::enqueue_route_reject_reply(
                                 &mut binding.tx_pipeline,
                                 worker_ctx.forwarding,
-                                ingress_logical,
+                                binding.ifindex,
                                 packet_frame,
                                 meta,
                                 flow.as_ref(),
