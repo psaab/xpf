@@ -294,6 +294,59 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
     rewritten_frame: Vec<u8>,
     #[cfg(feature = "debug-log")] icmpv6_trace: bool,
 ) -> EmbeddedIcmpReversal {
+    // #14122: classify CoS / the egress output filter on the frame that
+    // actually leaves the box. `rewritten_frame` is post-translation (its
+    // outer family, addresses and ICMP type/code may all differ from the
+    // ingress packet — NAT64 swaps ICMPv6<->ICMP and the address family),
+    // while `meta` describes the INGRESS packet. The pre-fix tail passed the
+    // ingress `meta`, no post-translation flow key and
+    // `term_match_extra_from_meta(meta)`: the flowless arm then selected the
+    // output filter by the ingress family, matched it against the ingress
+    // addresses/protocol, and (via the meta-only extra) reported
+    // `l4_present=false` for ICMP, so every `icmp-type`/`icmp-code` term
+    // failed closed and never matched. A V6->V4 NAT64 reversed error could
+    // therefore evade a matching IPv4 output rule, and the queue below marks
+    // classification complete so no second authoritative check runs.
+    //
+    // Derive the extra, the synthetic wire key and the classification meta
+    // from the rewritten frame exactly as the #7656 flowless forward path
+    // does (`forward_request.rs`): family/addresses/protocol move together
+    // from the wire, the ICMP type/code come from the wire L4 header, and
+    // ports stay 0 with `ports_unknown` set so no port term can match a
+    // fabricated tuple. BA classification (DSCP/PCP) still reads the packet
+    // via `wire_meta.dscp`/`ingress_*`; the NAT64 translators copy the
+    // traffic class / TOS into the rewritten frame, and the same-family
+    // builders preserve the outer header, so that read is the egress one.
+    // Every derivation failure fails closed (drop + budget refund, the same
+    // terminal as a CoS drop) rather than falling back to the ingress tuple.
+    let Some((wire_flow, wire_meta)) = queued_embedded_icmp_identity(&rewritten_frame) else {
+        sessions.refund_icmp_error_not_delivered(budget_key, now_ns);
+        return EmbeddedIcmpReversal::Dropped;
+    };
+    // `queued_embedded_icmp_identity` leaves DSCP 0 (it parses addresses
+    // only); recover the egress DSCP from the rewritten wire header so BA
+    // classification sees the packet that leaves, not a zeroed class.
+    let wire_dscp = {
+        let l3 = wire_meta.l3_offset as usize;
+        match wire_meta.addr_family as i32 {
+            libc::AF_INET => rewritten_frame.get(l3 + 1).map(|tos| tos >> 2).unwrap_or(0),
+            libc::AF_INET6 => rewritten_frame
+                .get(l3..l3 + 2)
+                .map(|b| (((b[0] & 0x0f) << 2) | (b[1] >> 6)) & 0x3f)
+                .unwrap_or(0),
+            _ => 0,
+        }
+    };
+    let mut wire_forward_meta: ForwardPacketMeta = wire_meta.into();
+    wire_forward_meta.ingress_ifindex = meta.ingress_ifindex;
+    wire_forward_meta.ingress_vlan_id = meta.ingress_vlan_id;
+    wire_forward_meta.ingress_pcp = meta.ingress_pcp;
+    wire_forward_meta.ingress_vlan_present = meta.ingress_vlan_present;
+    wire_forward_meta.dscp = wire_dscp;
+    wire_forward_meta.fabric_ingress_ifindex = meta.fabric_ingress_ifindex;
+    let mut extra =
+        crate::afxdp::frame::term_match_extra_from_frame(&rewritten_frame, wire_forward_meta);
+    extra.ports_unknown = true;
     let icmp_decision = SessionDecision {
         resolution: icmp_resolution,
         nat: NatDecision::default(),
@@ -305,22 +358,24 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
     } else {
         resolve_tx_binding_ifindex(worker_ctx.forwarding, icmp_decision.resolution.egress_ifindex)
     };
-    let cos = resolve_cos_tx_selection_at(
+    let cos = resolve_cos_tx_selection_at_prenat(
         worker_ctx.forwarding,
         icmp_decision.resolution.egress_ifindex,
-        meta,
-        // #5690: the reversed error is a synthesized L3 reply. Classify CoS by
-        // the outer DSCP / 802.1p only (`flow_key = None`): the quoted
-        // transport flow is NOT the outer flow, and a non-query ICMP error
-        // carries no trustworthy 5-tuple (its metadata `[l4+4..l4+6)` bytes are
-        // a control word, not ports), so a port-bearing output/CoS term must
-        // fail closed rather than key on a fabricated tuple.
+        wire_forward_meta,
+        // #5690/#14122: the reversed error is a synthesized L3 reply with no
+        // trustworthy 5-tuple (a non-query ICMP error's `[l4+4..l4+6)` bytes
+        // are a control word, not ports), so it never becomes a session /
+        // flow-cache authority. The egress OUTPUT filter instead runs on the
+        // post-translation L3 wire key (ports 0) via the flowless-wire slot,
+        // and the ingress INPUT re-walk runs on that same L3 tuple — the only
+        // tuple this packet has. Port terms fail closed on both legs
+        // (`ports_unknown` above; ICMP carries no ports at all).
         None,
-        // #2362 fold B: generated ICMP error reply — meta-only extra
-        // (tcp_flags authoritative; no per-packet frame re-read for this
-        // synthesized frame).
-        crate::afxdp::frame::term_match_extra_from_meta(meta.into()),
+        None,
+        extra,
         now_ns,
+        Some(&wire_flow.forward_key),
+        Some(&wire_flow.forward_key),
     );
     if cos.drop {
         #[cfg(feature = "debug-log")]
