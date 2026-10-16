@@ -1412,11 +1412,12 @@ on one of them is destructive for the other:
    commit on a fresh store; and
 2. *the recovered rollback target failed even the LENIENT compile* —
    `recoverPendingConfirmLocked` re-arming a window that was still open at
-   boot. `Store.Load` repairs the tree it reads from `active.json`
-   (`rewriteRetiredDataplaneType`, `SanitizeTreeControlChars`) but never the
-   `PrevTree` carried inside `confirm.json`, so a target committed on an
-   older build — `system dataplane-type ebpf` is the concrete case — reaches
-   the recovery uncompilable.
+   boot. Since #14168 the `PrevTree` carried inside `confirm.json` is
+   normalized with the same repairs `Store.Load` applies to the tree it
+   reads from `active.json` (`normalizePendingConfirmTree`), so a retired
+   `system dataplane-type ebpf` target now compiles; a genuinely
+   uncompilable target — e.g. an `apply-groups` reference to a group no
+   longer defined — still reaches the recovery uncompilable (#14301).
 
 `Store.confirmPrevFirst` records the fact where it is known (the arm site
 reads the PRE-promotion `s.compiled`; the recovery site reads the persisted
