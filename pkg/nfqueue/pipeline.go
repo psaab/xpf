@@ -1357,6 +1357,15 @@ func (p *CapturePipeline) retirePendingFlow(pending *pendingReinject) {
 // cancel the matching requests without deleting their local pending entries.
 // The caller must continue polling until each Rust completion is resolved;
 // pipeline Close remains the fallback for requests that never receive one.
+// The Rust fence is issued twice: once with the pending-derived queue
+// scopes (tombstoning only the queues that had work) and once with an
+// empty queue-scope set under the same permit epoch, which closes the
+// whole permit (#14208). The second fence matters when pending work
+// covers only a subset of queues: tombstoning queue A alone would
+// otherwise leave queue B's authority open for a fresh ordinary FORWARD
+// lease minted during the drain window. Both sends travel on the
+// ordered submit stream, so the close cannot be overtaken by a later
+// submit.
 func (p *CapturePipeline) CancelForD11Drain(permitEpoch uint64) error {
 	if p == nil || permitEpoch == 0 {
 		return nil
@@ -1388,6 +1397,9 @@ func (p *CapturePipeline) CancelForD11Drain(permitEpoch uint64) error {
 			scopes = append(scopes, scope)
 		}
 		_, err = p.submitter.CancelReinject(ids, permitEpoch, scopes)
+		if err == nil && len(scopes) != 0 {
+			_, err = p.submitter.CancelReinject(nil, permitEpoch, nil)
+		}
 	}
 	p.submitGate.Unlock()
 	p.drainDeadlineCancelQueue()
