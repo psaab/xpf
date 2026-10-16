@@ -64,17 +64,17 @@ pub(crate) const IFACE_PAT_PORT_HIGH: u16 = 65535;
 /// egress address. The value is shared with the IPsec classifier/admission.
 pub(crate) const IFACE_RESERVED_UDP_PORTS: [u16; 2] = crate::ip_proto::IKE_UDP_PORTS;
 
-/// Whether preserving this interface-SNAT tuple would alias the firewall's
-/// own fixed-port IKE/NAT-T reverse identity.
+/// Whether a translated source port aliases the firewall's fixed-port
+/// IKE/NAT-T reverse identity for this remote destination.
 #[inline]
 pub(crate) fn conflicts_with_local_control_tuple(
     protocol: u8,
-    src_port: u16,
+    translated_src_port: u16,
     dst_port: u16,
 ) -> bool {
     protocol == crate::ip_proto::PROTO_UDP
-        && src_port == dst_port
-        && IFACE_RESERVED_UDP_PORTS.contains(&src_port)
+        && translated_src_port == dst_port
+        && IFACE_RESERVED_UDP_PORTS.contains(&translated_src_port)
 }
 
 /// Retained-allocator cap. This bounds RETAINED cardinality, not

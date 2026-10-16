@@ -945,3 +945,58 @@ fn interface_snat_never_mints_own_fixed_control_ports_13944() {
         "non-reserved UDP/54321 must stay preserved (preserve-first unchanged)"
     );
 }
+
+// A non-reserved source port can still PAT onto a fixed IKE/NAT-T port when
+// the remote destination uses that same port. Keep the candidate out of the
+// reverse LocalDelivery identity even though the original tuple did not match.
+#[test]
+fn interface_snat_pat_never_selects_local_control_port_13944() {
+    // Two tracked identities fit while the one-port test range constrains PAT
+    // to the forbidden UDP/4500 candidate.
+    let allocator = super::allocator::PortAllocator::new(2, 4500, 4500);
+    let remote = SERVER.parse().expect("remote");
+    let egress = EGRESS.parse().expect("egress");
+    let first = SourceNatFlowKey {
+        protocol: PROTO_UDP_U8,
+        src_ip: "10.0.61.101".parse().expect("first host"),
+        dst_ip: remote,
+        src_port: 5000,
+        dst_port: 4500,
+        routing_scope: 0,
+    };
+    assert_eq!(
+        allocator
+            .allocate_interface_identity(first, egress, NatHolder::Untracked)
+            .expect("first flow preserves"),
+        super::allocator::InterfaceIdentity {
+            port: 5000,
+            patted: false,
+        }
+    );
+
+    let second = SourceNatFlowKey {
+        src_ip: "10.0.61.102".parse().expect("second host"),
+        ..first
+    };
+    assert_eq!(
+        allocator.allocate_interface_identity(second, egress, NatHolder::Untracked),
+        Err(SourceNatFailureReason::InterfaceIdentityExhausted),
+        "a forced PAT candidate UDP/4500 would alias the local control reverse key"
+    );
+
+    let sync_allocator = super::allocator::PortAllocator::new(1, 4500, 4500);
+    let mut previous_snapshot = None;
+    assert_eq!(
+        sync_allocator.reserve_interface_identity(
+            second,
+            egress,
+            4500,
+            1_000,
+            NatHolder::Untracked,
+            false,
+            &mut previous_snapshot,
+        ),
+        super::allocator::InterfaceDomainReserve::IdentityConflict,
+        "peer-synced PAT identity must not claim the fixed local control key"
+    );
+}

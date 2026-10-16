@@ -5139,11 +5139,11 @@ impl PortAllocator {
     ) -> Result<InterfaceIdentity, super::source::SourceNatFailureReason> {
         let rkey_for = |port: u16| AddressOnlyReverseKey::for_flow(&flow, translated_ip, port);
         let preserved = flow.src_port;
-        // #13944: the reverse NAT key for UDP H:port -> P:port is
-        // P:port -> egress:port. For the firewall's fixed IKE/NAT-T ports
-        // this is also the host-local LocalDelivery key, which session
-        // install would replace. Force PAT before the allocator's ordinary
-        // preserve-first ownership check; the PAT range excludes both ports.
+        // #13944: the reverse NAT key for UDP H:source -> P:destination
+        // is P:destination -> egress:source. For the firewall's fixed
+        // IKE/NAT-T ports this aliases the host-local LocalDelivery key when
+        // both ports match. Force PAT before preserve-first for exact control
+        // tuples; the PAT loop also excludes a matching fixed-port candidate.
         let reserved_local_tuple = crate::nat::iface_registry::conflicts_with_local_control_tuple(
             flow.protocol,
             flow.src_port,
@@ -5216,7 +5216,12 @@ impl PortAllocator {
                 let offset = (start + probed) % span;
                 let candidate = self.port_low.saturating_add(offset as u16);
                 probed += 1;
-                if live.address_only_owners.contains_key(&rkey_for(candidate)) {
+                if crate::nat::iface_registry::conflicts_with_local_control_tuple(
+                    flow.protocol,
+                    candidate,
+                    flow.dst_port,
+                ) || live.address_only_owners.contains_key(&rkey_for(candidate))
+                {
                     continue;
                 }
                 self.insert_interface_record_locked(
@@ -5270,10 +5275,9 @@ impl PortAllocator {
     ) -> InterfaceDomainReserve {
         if crate::nat::iface_registry::conflicts_with_local_control_tuple(
             flow.protocol,
-            flow.src_port,
+            translated_port,
             flow.dst_port,
-        ) && translated_port == flow.src_port
-        {
+        ) {
             // #13944: HA imports must obey the active node's local-service
             // exclusion too; never publish an interface-SNAT identity that
             // aliases the local IKE/NAT-T session.
