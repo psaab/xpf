@@ -2133,6 +2133,11 @@ fn icmp_embed_v6_zero_quoted_checksum_adjusted_13773() {
     assert_ne!(exp, 0);
     assert_eq!(u16::from_be_bytes([out[emb_l4 + 2], out[emb_l4 + 3]]), exp,
         "#13773: reverse builder must adjust a genuinely-zero quoted ICMPv6 checksum");
+    assert_eq!(
+        checksum16_ipv6(client6, server6, PROTO_ICMPV6, &out[emb_l4..emb_l4 + 8]),
+        0,
+        "#13773: reverse output checksum must verify independently over the rewritten quote"
+    );
     // Outbound: adjust destination address only (identifier unchanged).
     let frame2 = make_zero_frame();
     let mut m2 = icmpv6_te_match_fixture(snat6, client6, snat_port, client_port);
@@ -2147,4 +2152,9 @@ fn icmp_embed_v6_zero_quoted_checksum_adjusted_13773() {
     assert_ne!(exp2, 0);
     assert_eq!(u16::from_be_bytes([out2[emb_l4 + 2], out2[emb_l4 + 3]]), exp2,
         "#13773: SNAT-outbound builder must adjust a genuinely-zero quoted ICMPv6 checksum");
+    assert_eq!(
+        checksum16_ipv6(snat6, snat6, PROTO_ICMPV6, &out2[emb_l4..emb_l4 + 8]),
+        0,
+        "#13773: outbound output checksum must verify independently over the rewritten quote"
+    );
 }
