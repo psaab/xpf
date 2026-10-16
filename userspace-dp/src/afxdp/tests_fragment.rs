@@ -78,6 +78,199 @@ fn non_first_fragment_v4_not_dropped_by_port_matching_output_filter() {
     );
 }
 
+// #14239: production-caller parity for the flowless native-fragment ingress
+// protocol. The #14214 regression hand-supplied the resolved protocol; the
+// frame-derived cell in cos_classify_tests covers the derivation + shared
+// callee. This cell drives the IMMEDIATE caller
+// `build_live_forward_request_from_frame` itself with a real non-first
+// fragment whose meta carries SHIM_PROTO_FRAGMENT_NO_L4, so reverting either
+// the derivation or this caller's wiring (passing None / the sentinel key as
+// `flowless_ingress`) turns it RED: the TCP-scoped input policer would not
+// match and the request would be built instead of dropped.
+#[test]
+fn h18_14239_live_forward_fragment_uses_frame_derived_ingress_protocol() {
+    // Ingress reth1.0 (101, parent 5) input filter: TCP-scoped, tiny
+    // three-color policer (RED -> discard), fc EF + dscp 46. Egress reth0.0
+    // (202) is the CoS interface. Mirrors h18_input_l3_policer_snapshot in
+    // cos_classify_tests (not visible from this module).
+    let forwarding = build_forwarding_state(&ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth1.0".into(),
+                ifindex: 101,
+                parent_ifindex: 5,
+                vlan_id: 0,
+                hardware_addr: "02:bf:72:00:61:01".into(),
+                filter_input_v4: "in-l3-pol".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth0.0".into(),
+                ifindex: 202,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_shaping_burst_bytes: 256_000,
+                cos_scheduler_map: "wan-map".into(),
+                ..Default::default()
+            },
+        ],
+        filters: vec![FirewallFilterSnapshot {
+            name: "in-l3-pol".into(),
+            family: "inet".into(),
+            terms: vec![FirewallTermSnapshot {
+                name: "metered".into(),
+                source_addresses: vec!["10.0.61.0/24".into()],
+                protocols: vec!["tcp".into()],
+                action: "accept".into(),
+                policer: "trickle".into(),
+                forwarding_class: "expedited-forwarding".into(),
+                dscp_rewrite: Some(46),
+                ..Default::default()
+            }],
+        }],
+        three_color_policers: vec![ThreeColorPolicerSnapshot {
+            name: "trickle".into(),
+            mode: "single-rate".into(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 1,
+            peak_or_excess_rate_bytes_per_sec: 0,
+            peak_or_excess_burst_bytes: 1,
+            then_action: "discard".into(),
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![
+                CoSForwardingClassSnapshot { name: "best-effort".into(), queue: 0 },
+                CoSForwardingClassSnapshot { name: "expedited-forwarding".into(), queue: 1 },
+            ],
+            schedulers: vec![
+                CoSSchedulerSnapshot {
+                    name: "be-sched".into(),
+                    transmit_rate_bytes: 4_000_000,
+                    priority: "low".into(),
+                    buffer_size_bytes: 128_000,
+                    ..Default::default()
+                },
+                CoSSchedulerSnapshot {
+                    name: "ef-sched".into(),
+                    transmit_rate_bytes: 6_000_000,
+                    priority: "strict-high".into(),
+                    buffer_size_bytes: 64_000,
+                    ..Default::default()
+                },
+            ],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        scheduler: "be-sched".into(),
+                    },
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "expedited-forwarding".into(),
+                        scheduler: "ef-sched".into(),
+                    },
+                ],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let ingress_ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-1"),
+        ifindex: 5,
+    };
+    let decision = SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 202,
+        tx_ifindex: 202,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+        tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+
+    // Real non-first fragment: IP Protocol byte = TCP, src 10.0.61.100 ->
+    // dst 172.16.80.200 (eth_ipv4_frag_frame). Meta carries the sentinel.
+    let frame = eth_ipv4_frag_frame(0x0001, &[0; 8], TEST_LAN_MAC);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 5,
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        pkt_len: frame.len() as u16,
+        l3_offset: 14,
+        l4_offset: 34,
+        flow_src_addr: [10, 0, 61, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        flow_dst_addr: [172, 16, 80, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ..UserspaceDpMeta::default()
+    };
+    let req = build_live_forward_request_from_frame(
+        &WorkerBindingLookup::default(),
+        0,
+        &ingress_ident,
+        XdpDesc { addr: 0, len: frame.len() as u32, options: 0 },
+        &frame,
+        meta,
+        &decision,
+        &forwarding,
+        None,
+        None,
+        false,
+        1_000_000_000,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        req.is_none(),
+        "#14239: immediate caller must drop the TCP fragment via the frame-derived ingress policer"
+    );
+
+    // Negative control: same frame with Protocol=UDP. The derived ingress
+    // protocol is UDP, the TCP-scoped term does not match, and the caller
+    // must build the request on the EF queue with the input dscp absent
+    // (no policer drop, no EF classification from the TCP term).
+    let mut udp_frame = frame.clone();
+    udp_frame[23] = PROTO_UDP;
+    let udp_req = build_live_forward_request_from_frame(
+        &WorkerBindingLookup::default(),
+        0,
+        &ingress_ident,
+        XdpDesc { addr: 0, len: udp_frame.len() as u32, options: 0 },
+        &udp_frame,
+        meta,
+        &decision,
+        &forwarding,
+        None,
+        None,
+        false,
+        1_000_000_000,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("#14239: UDP fragment must not be dropped by the TCP-scoped policer");
+    assert_ne!(
+        udp_req.cos_queue_id,
+        Some(1),
+        "#14239: UDP fragment must not take the TCP term's EF queue"
+    );
+}
+
 #[test]
 fn control_icmp_v4_installs_no_synthesized_tx_flow_key() {
     // #3290 (TX/CoS side): a permitted ICMPv4 control packet (Time-Exceeded)
