@@ -382,3 +382,68 @@ fn companion_retention_respects_close_state_and_direction_10885() {
     assert!(table.entry_by_key(&forward).is_none());
     assert!(table.entry_by_key(&reverse).is_none());
 }
+
+/// #13682 (D12-13): the close-DEferring lookup (`defer_close = true`, #10636)
+/// runs BEFORE the #9519 owner-zone verdict, so a foreign-zone RST/FIN that
+/// will be dropped must not slide a closing entry's deadline while it waits.
+/// Pre-fix the scrubbed flags made `do_close` false, so the refresh gate read
+/// a closing segment as ordinary traffic: on the non-FINed companion
+/// (`!fin_own`, `!reset`) `refresh` was true and `last_seen_ns` re-stamped
+/// onto the FIN_WAIT/CLOSING window — a dropped foreign packet extending the
+/// close deadline the inline path (#10885) explicitly fixes.
+///
+/// RED pre-fix: the deferring RST/FIN hits below re-stamp the reverse half.
+#[test]
+fn deferring_lookup_foreign_close_segments_do_not_slide_closing_13682() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let t0 = 10_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+
+    // Owner FIN half-closes: forward is FINed, reverse is the non-FINed half.
+    let fin_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, fin_ns, TCP_FIN).is_some());
+    let rev_before = table.entry_by_key(&reverse).expect("reverse half-close");
+    assert!(!rev_before.fin_own && !rev_before.reset && rev_before.closing);
+    let rev_stamp = rev_before.last_seen_ns;
+    let rev_window = rev_before.expires_after_ns;
+
+    // A foreign RST/FIN pair arrives through the deferring (pre-verdict)
+    // lookup. The verdict will drop them; they must not slide the deadline.
+    for (label, flags) in [("rst", TCP_RST), ("fin", TCP_FIN)] {
+        let hit_ns = rev_stamp + 1_000_000_000;
+        assert!(matches!(
+            table.lookup_with_origin_deferring_close_expiry(&reverse, hit_ns, flags),
+            SessionExpiryProbe::Live(_)
+        ));
+        let rev = table.entry_by_key(&reverse).expect("reverse after deferring hit");
+        assert_eq!(
+            rev.last_seen_ns, rev_stamp,
+            "{label}: a deferred (pre-verdict) close segment must not slide the closing deadline"
+        );
+        assert_eq!(
+            rev.expires_after_ns, rev_window,
+            "{label}: a deferred close segment must not re-apply the close window"
+        );
+        assert!(
+            !rev.fin_own && !rev.reset,
+            "{label}: the deferring lookup must not stamp close state either"
+        );
+    }
+
+    // Control: ordinary (non-closing) traffic from the non-FINed direction
+    // through the same deferring lookup still slides the half-close, exactly
+    // as the inline path does (#10885) — the gate targets closing segments,
+    // not the deferring lookup itself.
+    let ack_ns = rev_stamp + 2_000_000_000;
+    assert!(matches!(
+        table.lookup_with_origin_deferring_close_expiry(&reverse, ack_ns, TCP_ACK),
+        SessionExpiryProbe::Live(_)
+    ));
+    assert_eq!(
+        table.entry_by_key(&reverse).expect("reverse ack").last_seen_ns,
+        ack_ns,
+        "control: non-closing traffic still refreshes via the deferring lookup"
+    );
+}
