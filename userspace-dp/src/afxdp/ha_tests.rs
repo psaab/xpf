@@ -11476,12 +11476,13 @@ fn synced_delete_refuses_when_nat_lands_after_candidate_read_13712() {
 // forward + reverse and later replayed to workers by bring-up.
 #[test]
 fn zero_worker_import_refuses_interface_control_tuple_14084() {
-    // Fixed local egress address used by the receiver's forwarding snapshot.
+    // The forwarding table is exactly empty during stop_inner(false)'s
+    // reconcile/quiesce window; no egress address can identify the alias.
     let mut coordinator = Coordinator::new();
-    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    coordinator.set_forwarding_for_test(ForwardingState::default());
     // Deliberately NO worker registered: the zero-worker window.
 
-    let egress = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
+    let egress = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     let remote = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
     let entry = SyncedSessionEntry {
         key: SessionKey {
