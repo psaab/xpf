@@ -3419,6 +3419,12 @@ fn test_empty_excluded_source_fails_closed_v4() {
 #[test]
 fn test_empty_excluded_destination_fails_closed_v6() {
     let mut snap = v3_rule("r-empty-excl-dst", &[92], &[]);
+    snap.source_book_ids.clear();
+    snap.source_literals = vec!["any".to_string()];
+    snap.destination_book_ids = vec![92];
+    // The helper seeds destination_literals=["any"]; clear that default so
+    // the v3 shape comes from the empty address-book reference alone.
+    snap.destination_literals.clear();
     snap.destination_address_excluded = true;
     let counter_store = PolicyCounterStore::default();
     let books = [book(92, "empty-dst", &[], &[])];
