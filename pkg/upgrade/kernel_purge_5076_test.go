@@ -49,8 +49,9 @@ func TestPruneInactiveSlot_PurgeFailureLeavesFiles(t *testing.T) {
 
 	var purgeArgs []string
 	sys := &realKernelSystem{
-		fsRoot:         root,
-		pkgInstalledFn: func(string) (bool, error) { return true, nil }, // candidate installed
+		fsRoot:          root,
+		runningKernelFn: func() (string, error) { return knownGood, nil },
+		pkgInstalledFn:  func(string) (bool, error) { return true, nil }, // candidate installed
 		aptGetFn: func(args ...string) error {
 			purgeArgs = args
 			return fmt.Errorf("dpkg: error: dpkg frontend lock held by another process")
@@ -98,7 +99,8 @@ func TestPruneInactiveSlot_PurgeSuccessSweepsFiles(t *testing.T) {
 
 	purged := false
 	sys := &realKernelSystem{
-		fsRoot: root,
+		fsRoot:          root,
+		runningKernelFn: func() (string, error) { return knownGood, nil },
 		// Installed before the purge, absent after — dpkg confirms removal.
 		pkgInstalledFn: func(string) (bool, error) { return !purged, nil },
 		aptGetFn: func(args ...string) error {
@@ -131,9 +133,10 @@ func TestPruneInactiveSlot_PartialPurgeKeepsFiles(t *testing.T) {
 	modulesDir, bootFile := seedCandidatePayload(t, root, cand)
 
 	sys := &realKernelSystem{
-		fsRoot:         root,
-		pkgInstalledFn: func(string) (bool, error) { return true, nil }, // never confirmed absent
-		aptGetFn:       func(args ...string) error { return nil },
+		fsRoot:          root,
+		runningKernelFn: func() (string, error) { return knownGood, nil },
+		pkgInstalledFn:  func(string) (bool, error) { return true, nil }, // never confirmed absent
+		aptGetFn:        func(args ...string) error { return nil },
 	}
 
 	err := sys.PruneInactiveSlot("xpf-B", knownGood, cand)
@@ -161,8 +164,9 @@ func TestPruneInactiveSlot_NothingInstalledSweeps(t *testing.T) {
 
 	purgeCalled := false
 	sys := &realKernelSystem{
-		fsRoot:         root,
-		pkgInstalledFn: func(string) (bool, error) { return false, nil },
+		fsRoot:          root,
+		runningKernelFn: func() (string, error) { return knownGood, nil },
+		pkgInstalledFn:  func(string) (bool, error) { return false, nil },
 		aptGetFn: func(args ...string) error {
 			purgeCalled = true
 			return nil

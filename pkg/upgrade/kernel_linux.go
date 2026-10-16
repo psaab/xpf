@@ -102,7 +102,10 @@ type realKernelSystem struct {
 	//                  against a temp-rooted filesystem.
 	aptGetFn       func(args ...string) error
 	pkgInstalledFn func(pkg string) (bool, error)
-	fsRoot         string
+	// runningKernelFn overrides `uname -r` so the #14165 running-kernel
+	// prune guard can be exercised without booting a test kernel.
+	runningKernelFn func() (string, error)
+	fsRoot          string
 }
 
 // aptGetCmd runs apt-get through the injected seam when present, else the real
@@ -268,6 +271,9 @@ func (s *realKernelSystem) FreeBytes(path string) (uint64, error) {
 }
 
 func (s *realKernelSystem) RunningKernel() (string, error) {
+	if s.runningKernelFn != nil {
+		return s.runningKernelFn()
+	}
 	out, err := captureCmd("uname", "-r")
 	if err != nil {
 		return "", err
@@ -955,6 +961,14 @@ func (s *realKernelSystem) DisarmWatchdog() error {
 	return nil
 }
 
+// RestoreInactiveSlotSelector writes ONLY the inactive slot's selector back
+// to the known-good kernel (#14165). It never purges packages or deletes
+// files, so it is safe while the candidate is the running kernel: it changes
+// what the NEXT boot loads, not the live kernel.
+func (s *realKernelSystem) RestoreInactiveSlotSelector(slot, knownGoodUnameR string) error {
+	return s.WriteSlotSelector(slot, knownGoodUnameR)
+}
+
 func (s *realKernelSystem) PruneInactiveSlot(slot, knownGoodUnameR, candidateVersion string) error {
 	// Fail CLOSED on an unsafe candidate segment BEFORE any purge, glob, or
 	// delete (#5452). candidateVersion feeds `apt-get purge linux-image-<ver>`
@@ -967,13 +981,31 @@ func (s *realKernelSystem) PruneInactiveSlot(slot, knownGoodUnameR, candidateVer
 	if err := ValidateKernelSegment("kernel candidate version", candidateVersion); err != nil {
 		return fmt.Errorf("kernel-upgrade prune: %w", err)
 	}
+	// #14165: NEVER purge or delete the running kernel. The revert path can
+	// reach this prune while positively running the candidate (Gate 2
+	// confirmed running == CandidateVersion, then verify/beacon/BootOrder
+	// failed): purging linux-image-<candidate> and sweeping
+	// /lib/modules/<candidate> + /boot/*-<candidate> orphans the live
+	// kernel (no modules for late loads, no boot files), and on the
+	// attempt-cap path the box then STAYS UP in that state. Fail closed:
+	// if uname -r is unreadable we cannot prove we are off the candidate,
+	// and if it equals the candidate the prune must be deferred to a later
+	// boot. The caller restores the selector separately, so refusing here
+	// never strands the next boot on the candidate.
+	running, rkErr := s.RunningKernel()
+	if rkErr != nil {
+		return fmt.Errorf("kernel-upgrade prune: running kernel unreadable, refusing to prune candidate %s: %w", candidateVersion, rkErr)
+	}
+	if running == candidateVersion {
+		return fmt.Errorf("kernel-upgrade prune: candidate %s is the running kernel; prune deferred until a boot off it", candidateVersion)
+	}
 	// Restore the inactive slot's boot selector to the KNOWN-GOOD kernel FIRST.
 	// This is the load-bearing safety step and it is independent of the package
 	// cleanup below: whatever happens to the candidate's packages, the slot
 	// selector never points at the (possibly half-removed) candidate. Doing it
 	// before any package/file mutation guarantees a later failure cannot strand
 	// the selector on the candidate (#5076).
-	if err := s.WriteSlotSelector(slot, knownGoodUnameR); err != nil {
+	if err := s.RestoreInactiveSlotSelector(slot, knownGoodUnameR); err != nil {
 		return err
 	}
 	// The candidate kernel packages are HELD (InstallCandidateKernel re-holds

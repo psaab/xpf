@@ -858,9 +858,24 @@ func (r *KernelRunner) revert(j *KernelJournal, reason error) error {
 // (active) slot at the FRONT of BootOrder (so even if a prior crash left the
 // candidate first, a reboot lands on known-good — Codex High), the watchdog
 // disarmed (so an Arm()-armed watchdog can't bounce the known-good boot —
-// Copilot), and the un-promoted candidate pruned. All best-effort: the
-// firmware-cleared BootNext remains the floor regardless. Shared by revert()
-// (incl. the attempt-cap give-up path) and cleanupAlreadyOnKnownGood.
+// Copilot), the inactive slot's selector rewritten to the known-good kernel,
+// and — ONLY when positively off the candidate — the un-promoted candidate
+// pruned. All best-effort: the firmware-cleared BootNext remains the floor
+// regardless. Shared by revert() (incl. the attempt-cap give-up path) and
+// cleanupAlreadyOnKnownGood.
+//
+// #14165: revert() is routinely entered WHILE RUNNING the candidate (Gate 2
+// positively confirmed running == CandidateVersion, then verify / beacon /
+// BootOrder failed). Pruning there purges linux-image-<candidate> and deletes
+// /lib/modules/<candidate> + /boot/*-<candidate> from under the live kernel,
+// and on the attempt-cap path the box then stays up in that orphaned state.
+// So the destructive prune is gated on a fresh RunningKernel read: equal to
+// the candidate, or unreadable (cannot prove we are off it), DEFERS the prune
+// — the selector + BootOrder restore above still runs, so the next boot lands
+// on known-good and a later gate pass (journal still armed if the clear
+// failed, or the operator) can prune safely. Only positive evidence of a
+// non-candidate running kernel prunes in place. The real PruneInactiveSlot
+// re-checks uname -r itself as a second, independent fail-closed layer.
 func (r *KernelRunner) restoreKnownGood(j *KernelJournal) {
 	sys := r.cfg.Sys
 	if entries, err := sys.BootEntries(); err == nil {
@@ -877,8 +892,22 @@ func (r *KernelRunner) restoreKnownGood(j *KernelJournal) {
 	if err := sys.DisarmWatchdog(); err != nil {
 		r.logf("kernel-upgrade: WARNING disarm watchdog: %v", err)
 	}
-	if err := sys.PruneInactiveSlot(j.InactiveSlot, j.KnownGoodVersion, j.CandidateVersion); err != nil {
-		r.logf("kernel-upgrade: WARNING prune inactive slot: %v", err)
+	// Non-destructive selector restore FIRST and UNCONDITIONALLY: even when
+	// the prune below is deferred, the inactive slot must not keep pointing
+	// at the candidate for the next boot.
+	if err := sys.RestoreInactiveSlotSelector(j.InactiveSlot, j.KnownGoodVersion); err != nil {
+		r.logf("kernel-upgrade: WARNING restore inactive slot selector: %v", err)
+	}
+	running, rkErr := sys.RunningKernel()
+	switch {
+	case rkErr != nil:
+		r.logf("kernel-upgrade: WARNING running kernel unreadable (%v); DEFER prune of candidate %s until a boot can prove it is not running", rkErr, j.CandidateVersion)
+	case running == j.CandidateVersion:
+		r.logf("kernel-upgrade: candidate %s is the RUNNING kernel; DEFER prune (selector + BootOrder restored for next boot)", running)
+	default:
+		if err := sys.PruneInactiveSlot(j.InactiveSlot, j.KnownGoodVersion, j.CandidateVersion); err != nil {
+			r.logf("kernel-upgrade: WARNING prune inactive slot: %v", err)
+		}
 	}
 	// Clear the durable promotion marker (r2 AGY #6: a reverted node must not
 	// retain a "promoted" marker from a prior same-version roll) and the local
