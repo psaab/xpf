@@ -98,6 +98,19 @@ func TestIPv6UnitMTUHierarchicalRejected13936(t *testing.T) {
 }`), "#13936")
 }
 
+// Unit 0 and unit 1 share the physical link. The planner writes the lowest
+// referenced untagged unit MTU (1000) to that link, so an IPv6-bearing sibling
+// with no family MTU still has an effective link MTU below 1280.
+func TestIPv6UnitMTULowReferencedSiblingRejected13936(t *testing.T) {
+	assertCommitRejects(t, flatTreeFromSets(t,
+		"set interfaces ge-0-0-0 unit 0 family inet address 10.0.0.1/24",
+		"set interfaces ge-0-0-0 unit 0 family inet mtu 1000",
+		"set interfaces ge-0-0-0 unit 1 family inet6 address 2001:db8:1::1/64",
+		"set security zones security-zone trust interfaces ge-0-0-0.0",
+		"set security zones security-zone trust interfaces ge-0-0-0.1",
+	), "interfaces ge-0-0-0 unit 1: effective mtu 1000")
+}
+
 // Controls: the boundary and every non-IPv6 / no-committed-MTU shape
 // still commit.
 func TestIPv6UnitMTUControlsAccepted13936(t *testing.T) {
@@ -134,6 +147,7 @@ func TestIPv6UnitMTUControlsAccepted13936(t *testing.T) {
 			"set interfaces ge-0-0-0 mtu 1000",
 			"set interfaces ge-0-0-0 unit 0 family inet6 address 2001:db8::1/64",
 			"set interfaces ge-0-0-0 unit 0 family inet6 mtu 1500",
+			"set security zones security-zone trust interfaces ge-0-0-0.0",
 		},
 	}
 	for name, sets := range cases {
