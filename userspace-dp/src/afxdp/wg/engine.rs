@@ -518,9 +518,8 @@ pub(crate) struct WgEngine {
     /// identity-changing rebuild — see counters.rs.
     pub(in crate::afxdp::wg) counters: WgCounters,
     /// #4094 PR-A: responder cookie-reply / MAC2 under-load DoS mitigation
-    /// — a per-tunnel rotating secret, an inbound-initiation load gate, a
-    /// cookie-reply emission budget, and MAC2 verification, all keyed on
-    /// this engine's responder static public key. Consulted by
+    /// — a per-tunnel rotating secret, an inbound-initiation load gate,
+    /// per-source cookie-reply limiting, and MAC2 verification. Consulted by
     /// `classify_initiation` before the expensive Noise responder path.
     pub(in crate::afxdp::wg) cookie: super::cookie::CookieChecker,
     /// #4094 PR-B: initiator-side per-peer cookie state — the last
@@ -692,18 +691,10 @@ impl WgEngine {
             WgCounters::bump(&self.counters.hs_rx_under_load_mac2_ok);
             return InitiationAction::Process;
         }
-        // Valid MAC1, under load, no valid MAC2 → challenge with a cookie
-        // reply (gated below). Only a sender that knows our public key
-        // (MAC1 proves it) can draw a reply, so a spoofed flood cannot
-        // make us a reflector. #4332: gate on the per-SOURCE bucket FIRST
-        // so a flood from one source throttles only itself and cannot drain
-        // the global per-window budget away from a legit peer at a different
-        // source. BOTH the per-source bucket and the global budget must pass.
+        // Per-source limiting is the only cookie-reply rate gate. A global
+        // first-come cap lets a rotating fresh-source flood starve legitimate
+        // peers (#13958).
         if !self.cookie.source_reply_allowed(from.ip(), now_ns) {
-            WgCounters::bump(&self.counters.hs_cookie_reply_budget_drops);
-            return InitiationAction::Drop;
-        }
-        if !self.cookie.reply_budget_available(now_ns) {
             WgCounters::bump(&self.counters.hs_cookie_reply_budget_drops);
             return InitiationAction::Drop;
         }

@@ -140,25 +140,6 @@ fn load_gate_trips_over_threshold_and_grace_holds() {
     assert!(!cc.note_initiation(base + 3_000_000_000));
 }
 
-#[test]
-fn reply_budget_caps_per_window() {
-    let our_pub = [0x66u8; 32];
-    let cc = CookieChecker::new(&our_pub);
-    let base = 10_000_000_000;
-    let mut granted = 0u64;
-    for _ in 0..(COOKIE_REPLY_BUDGET_PER_WINDOW + 10) {
-        if cc.reply_budget_available(base) {
-            granted += 1;
-        }
-    }
-    assert_eq!(
-        granted, COOKIE_REPLY_BUDGET_PER_WINDOW,
-        "budget caps emission per window"
-    );
-    // A new window refills.
-    assert!(cc.reply_budget_available(base + UNDER_LOAD_WINDOW_NS));
-}
-
 /// #4094 Copilot BUG-1: `now_ns == 0` is a LEGITIMATE timestamp (very
 /// early CLOCK_MONOTONIC, or a failed clock read that returns 0), not
 /// "uninitialized". With the old `window_start_ns == 0` sentinel the
@@ -180,24 +161,6 @@ fn load_gate_trips_at_now_zero() {
         under,
         "the under-load gate must trip even when now_ns is 0 \
              (0 is a valid window start, not 'uninitialized')"
-    );
-}
-
-/// #4094 BUG-1 companion: the reply budget also must not reset every
-/// call at now_ns == 0 (else it would grant unlimited replies).
-#[test]
-fn reply_budget_caps_at_now_zero() {
-    let our_pub = [0x78u8; 32];
-    let cc = CookieChecker::new(&our_pub);
-    let mut granted = 0u64;
-    for _ in 0..(COOKIE_REPLY_BUDGET_PER_WINDOW + 10) {
-        if cc.reply_budget_available(0) {
-            granted += 1;
-        }
-    }
-    assert_eq!(
-        granted, COOKIE_REPLY_BUDGET_PER_WINDOW,
-        "the budget must cap per window even at now_ns == 0"
     );
 }
 
@@ -318,11 +281,8 @@ fn source_bucket_burst_then_throttle() {
     assert!(!cc.source_reply_allowed(s, now + PACKET_COST_NS));
 }
 
-/// The isolation #4332 buys over the global-only budget: a source that has
-/// exhausted its bucket does NOT starve a DIFFERENT source, which still
-/// draws its full burst. RED on revert (no per-source layer, the direct
-/// method disappears; and at the engine level A's flood drains the shared
-/// budget — see `classify_initiation_per_source_budget_isolation`).
+/// Per-source buckets remain independent: exhausting source A's burst does
+/// not stop a different source from drawing its own burst.
 #[test]
 fn source_bucket_isolates_sources() {
     let cc = CookieChecker::new(&[0x82u8; 32]);
@@ -348,43 +308,19 @@ fn source_bucket_isolates_sources() {
     );
 }
 
-/// The table is hard-capped at [`SOURCE_TABLE_MAX`]: a spoofed-source-IP
-/// flood cannot grow the map without bound. A NEW source over the cap fails
-/// CLOSED (no reply, not inserted); an already-tracked source is still
-/// served.
+/// The table remains bounded but replaces an old bucket to keep new peers
+/// eligible under a rotating-source flood.
 #[test]
-fn source_table_cap_fails_closed() {
+fn source_table_cap_evicts_for_new_sources() {
     let cc = CookieChecker::new(&[0x83u8; 32]);
     let now = 10_000_000_000u64;
-    // Fill to the cap with distinct sources, all within one GC interval
-    // (same `now`) so none are reclaimed.
     for i in 0..SOURCE_TABLE_MAX {
         let ip = IpAddr::V4(std::net::Ipv4Addr::from(0x0A00_0000u32 + i as u32));
-        assert!(
-            cc.source_reply_allowed(ip, now),
-            "a fresh source under the cap is admitted"
-        );
+        assert!(cc.source_reply_allowed(ip, now));
     }
+    let legit = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1));
+    assert!(cc.source_reply_allowed(legit, now));
     assert_eq!(cc.source_table_len_for_test(), SOURCE_TABLE_MAX);
-    // A NEW source over the cap is DENIED and NOT inserted — fail closed
-    // against the memory-amplification vector.
-    let overflow = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1));
-    assert!(
-        !cc.source_reply_allowed(overflow, now),
-        "a new source over the table cap fails closed (denied, no reply)"
-    );
-    assert!(!cc.source_contains_for_test(overflow));
-    assert_eq!(
-        cc.source_table_len_for_test(),
-        SOURCE_TABLE_MAX,
-        "the table never grows past its cap under a spoofed-IP flood"
-    );
-    // An already-tracked source (drew 1 of its burst) is still served.
-    let tracked = IpAddr::V4(std::net::Ipv4Addr::from(0x0A00_0000u32));
-    assert!(
-        cc.source_reply_allowed(tracked, now),
-        "an already-tracked source is not refused by the cap"
-    );
 }
 
 /// #9908: valid-MAC2 admission has its own bounded source table and
@@ -406,14 +342,8 @@ fn handshake_source_bucket_burst_and_table_cap() {
         granted, SOURCE_HANDSHAKE_BURST,
         "one source gets exactly the bounded handshake burst"
     );
-    assert!(cc.source_handshake_allowed(
-        source,
-        now + HANDSHAKE_PACKET_COST_NS
-    ));
-    assert!(!cc.source_handshake_allowed(
-        source,
-        now + HANDSHAKE_PACKET_COST_NS
-    ));
+    assert!(cc.source_handshake_allowed(source, now + HANDSHAKE_PACKET_COST_NS));
+    assert!(!cc.source_handshake_allowed(source, now + HANDSHAKE_PACKET_COST_NS));
 
     for i in 0..(SOURCE_TABLE_MAX - 1) {
         let ip = IpAddr::V6(std::net::Ipv6Addr::from(i as u128));
