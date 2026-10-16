@@ -4179,9 +4179,11 @@ impl SessionTable {
     #[inline]
     pub fn promote_synced_with_origin(&mut self, mut req: SessionUpdate<'_>) -> bool {
         // #13939: the Owner path applies a deferred FIN/RST immediately after
-        // promotion. Keep close progress for that step so it propagates to the
-        // companion instead of being consumed by this in-place update.
-        req.tcp_flags &= !(TCP_FIN | TCP_RST);
+        // promotion. Do not let its ACK bit complete a pending handshake before
+        // that close propagates to the companion.
+        if is_closing(req.tcp_flags) {
+            req.tcp_flags = 0;
+        }
         self.update_session(req, false)
     }
 

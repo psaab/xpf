@@ -75,3 +75,69 @@ fn promoted_synced_fin_closes_both_halves_13939() {
     assert_eq!(fwd.expires_after_ns, TCP_CLOSING_TIMEOUT_NS);
     assert_eq!(rev.expires_after_ns, TCP_CLOSING_TIMEOUT_NS);
 }
+
+#[test]
+fn promoted_synced_fin_ack_does_not_complete_pending_handshake_13939() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let reverse = reverse_session_key(&forward, NatDecision::default());
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    for (key, row_metadata) in [
+        (forward.clone(), metadata()),
+        (reverse.clone(), reverse_metadata.clone()),
+    ] {
+        assert!(table.install_with_protocol_with_origin(
+            key,
+            decision(),
+            row_metadata,
+            SessionOrigin::SyncImport,
+            NOW_NS,
+            PROTO_TCP,
+            TCP_ACK,
+        ));
+    }
+
+    // Model an imported SYN-first session after its SYN-ACK: the forward half
+    // remains handshake-pending until a valid completing ACK is observed.
+    let handle = table.key_to_handle[&forward];
+    let entry = &mut table
+        .entries
+        .get_mut(handle as usize)
+        .expect("forward")
+        .entry;
+    entry.established = true;
+    entry.handshake_pending = true;
+
+    let flags = TCP_FIN | TCP_ACK;
+    assert!(table.promote_synced_with_origin(SessionUpdate {
+        key: &forward,
+        decision: decision(),
+        metadata: metadata(),
+        origin: SessionOrigin::SharedPromote,
+        now_ns: NOW_NS + 1,
+        protocol: PROTO_TCP,
+        tcp_flags: flags,
+    }));
+    assert!(
+        table
+            .entry_by_key(&forward)
+            .expect("promoted forward")
+            .handshake_pending,
+        "a FIN|ACK promotion must not complete the pending handshake"
+    );
+
+    table.apply_deferred_owner_close(&forward, NOW_NS + 1, flags);
+    assert!(
+        table
+            .entry_by_key(&forward)
+            .expect("closed forward")
+            .closing
+    );
+    assert!(
+        table
+            .entry_by_key(&reverse)
+            .expect("closed reverse")
+            .closing
+    );
+}
