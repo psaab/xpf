@@ -304,6 +304,26 @@ func (a *IpsecCapturePipeline) Start() error {
 	return nil
 }
 
+// captureFrameForQueue joins immutable queue scope to the sampled packet/config
+// authority before classification attaches packet-specific identity.
+func captureFrameForQueue(
+	packet *nfqueue.Packet,
+	captureQueue IpsecCaptureQueue,
+	configGeneration uint64,
+	fibGeneration uint32,
+) nfqueue.CaptureFrame {
+	return nfqueue.CaptureFrame{
+		Packet: packet, Generation: captureQueue.Generation,
+		SnapshotGeneration: captureQueue.SnapshotGeneration,
+		ConfigGeneration:   configGeneration,
+		FIBGeneration:      fibGeneration,
+		QueueNumber:        captureQueue.QueueNumber,
+		QueueEpoch:         captureQueue.QueueEpoch,
+		Tunnel:             captureQueue.Tunnel,
+		VRF:                captureQueue.VRF,
+	}
+}
+
 // receiveQueue owns Recv for one queue. Close is deliberately deferred until
 // all receive loops have joined in Stop because Queue.Close must not race with
 // Recv.
@@ -324,16 +344,7 @@ func (a *IpsecCapturePipeline) receiveQueue(ctx context.Context, captureQueue Ip
 		}
 		configGeneration := a.configGeneration.Load()
 		fibGeneration := a.fibGeneration.Load()
-		frame := nfqueue.CaptureFrame{
-			Packet: packet, Generation: captureQueue.Generation,
-			SnapshotGeneration: captureQueue.SnapshotGeneration,
-			ConfigGeneration:   configGeneration,
-			FIBGeneration:      fibGeneration,
-			QueueNumber:        captureQueue.QueueNumber,
-			QueueEpoch:         captureQueue.QueueEpoch,
-			Tunnel:             captureQueue.Tunnel,
-			VRF:                captureQueue.VRF,
-		}
+		frame := captureFrameForQueue(packet, captureQueue, configGeneration, fibGeneration)
 		classification, err := nfqueue.ClassifyCapturePayload(packet.Payload())
 		if err != nil {
 			_ = a.pipeline.RejectPreFrame(frame, nfqueue.CaptureClassificationError)

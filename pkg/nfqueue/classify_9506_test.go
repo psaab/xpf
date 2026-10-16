@@ -113,13 +113,11 @@ func TestClassifyV4DFWholeIsNotFragment9506(t *testing.T) {
 	}
 }
 
-// #13977: CaptureClassification.FlowKey carries only the inner 5-tuple, so
-// identical inner tuples arriving on different IPsec tunnel/VRF capture
-// queues (or a rotated queue generation) collapse into one per-flow FIFO in
-// CapturePipeline — cross-tunnel head-of-line blocking and retireFlow
-// cross-talk. FragmentKey already carries (tunnel, vrf, generation); the
-// flow-scope key must exist for BOTH fragments and whole packets (fragments
-// key the flow FIFO before reassembly) and must vary with every dimension.
+// #13977: CaptureClassification.FlowKey describes only the inner datagram or
+// transport tuple. Non-fragment CaptureFrames use it as the owner of
+// CapturePipeline's per-flow FIFO and retirement state, so those keys must
+// include the admitted tunnel/VRF/queue/generation scope. Fragments bypass
+// that FIFO and retain their independent FragmentKey scope.
 func TestClassifyFlowScopeKeySeparatesCaptureBoundaries13977(t *testing.T) {
 	pkt := classifyV4Packet(t, 0x2222, 0x4000, 6, net.ParseIP("10.3.0.1"), net.ParseIP("10.3.0.2"),
 		0x00, 0x50, 0x01, 0xbb, 0xde, 0xad, 0xbe, 0xef)
@@ -152,22 +150,38 @@ func TestClassifyFlowScopeKeySeparatesCaptureBoundaries13977(t *testing.T) {
 	if q0 := scopedCaptureFlowKey(got.FlowKey, 7, 0, 3, 0); q0 == base {
 		t.Fatalf("queue-0 scoped key unexpectedly equals queue-9 key %q", base)
 	}
-	// Fragments key the flow FIFO too: a fragment's scoped key must separate
-	// by the same dimensions and must not equal the whole-packet key.
+	// Fragment frames bypass the per-flow FIFO, but their existing sibling
+	// identity remains scoped by tunnel, VRF, and capture generation.
 	firstFrag := classifyV4Packet(t, 77, 0x2000, 17, net.ParseIP("10.3.0.1"), net.ParseIP("10.3.0.2"),
 		0x00, 0x35, 0x00, 0x35, 0xaa, 0xbb)
 	frag, err := ClassifyCapturePayload(firstFrag)
 	if err != nil {
 		t.Fatalf("Classify frag: %v", err)
 	}
-	if scopedCaptureFlowKey(frag.FlowKey, 7, 0, 3, 9) == scopedCaptureFlowKey(frag.FlowKey, 8, 0, 3, 9) {
-		t.Fatal("fragment scoped keys collide across tunnels")
+	baseFragment, ok := frag.FragmentKey(7, 0, 3)
+	if !ok {
+		t.Fatal("FragmentKey refused fragment")
 	}
-	if scopedCaptureFlowKey(frag.FlowKey, 7, 0, 3, 9) == base {
-		t.Fatal("fragment scoped key equals whole-packet scoped key")
+	otherTunnel, _ := frag.FragmentKey(8, 0, 3)
+	otherVRF, _ := frag.FragmentKey(7, 1, 3)
+	otherGeneration, _ := frag.FragmentKey(7, 0, 4)
+	if baseFragment == otherTunnel || baseFragment == otherVRF || baseFragment == otherGeneration {
+		t.Fatal("fragment identity collides across tunnel/VRF/generation")
 	}
 }
 
+// This regression uses only the pre-existing CaptureFrame API. On the
+// unfixed pipeline, queue and generation values were ignored by flow identity.
+func TestCapturePipelineFlowFIFOSeparatesQueueGeneration13977(t *testing.T) {
+	p := &CapturePipeline{flows: make(map[string]*flowState)}
+	first := CaptureFrame{FlowKey: "same-inner-tuple", Generation: 3, QueueNumber: 9}
+	second := CaptureFrame{FlowKey: "same-inner-tuple", Generation: 4, QueueNumber: 10}
+	p.enqueueFlowLocked(first)
+	p.enqueueFlowLocked(second)
+	if len(p.flows) != 2 {
+		t.Fatalf("per-flow FIFOs = %d, want 2 across queue/generation scopes", len(p.flows))
+	}
+}
 func TestCapturePipelineFlowFIFOSeparatesCaptureScopes13977(t *testing.T) {
 	p := &CapturePipeline{flows: make(map[string]*flowState)}
 	base := CaptureFrame{FlowKey: "inner-flow", Tunnel: 7, Generation: 3, QueueNumber: 9}
