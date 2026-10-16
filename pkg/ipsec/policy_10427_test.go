@@ -44,7 +44,7 @@ func TestEffectiveTrafficSelectorsOneSidedWildcard10427(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.IPsecConfig{
 				VPNs: map[string]*config.IPsecVPN{
-					"v1": {
+					"v1": {PSK: "fixture-secret",
 						Name:          "v1",
 						Gateway:       "192.0.2.1",
 						BindInterface: tc.bindIface,

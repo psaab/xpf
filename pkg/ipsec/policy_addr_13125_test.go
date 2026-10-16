@@ -47,7 +47,7 @@ func TestPolicyAddr13125RethDottedAndVRRP(t *testing.T) {
 				"gw-dotted": {Name: "gw-dotted", Address: "203.0.113.2", ExternalIface: "wan.ext.0"},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"vpn-reth": {Gateway: "gw-reth", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
+				"vpn-reth": {PSK: "fixture-secret", Gateway: "gw-reth", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
 			},
 		}},
 	}

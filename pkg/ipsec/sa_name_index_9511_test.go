@@ -39,15 +39,15 @@ func TestSANameIndexCoversEveryRenderedSection9511(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
 			// Multi-selector: children site-a-ts1 / site-a-ts2, none named site-a.
-			"site-a": {Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
+			"site-a": {PSK: "fixture-secret", Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"ts1": ts9511("ts1", "10.0.1.0/24", "10.9.1.0/24"),
 					"ts2": ts9511("ts2", "10.0.2.0/24", "10.9.2.0/24"),
 				}},
 			// No selector: the one child is named after the VPN (the control).
-			"plain": {Name: "plain", Gateway: "172.16.0.2", IPsecPolicy: "ipsec-pol"},
+			"plain": {PSK: "fixture-secret", Name: "plain", Gateway: "172.16.0.2", IPsecPolicy: "ipsec-pol"},
 			// #5122 sanitised collision: both children carry a hash suffix.
-			"coll": {Name: "coll", Gateway: "172.16.0.3", IPsecPolicy: "ipsec-pol",
+			"coll": {PSK: "fixture-secret", Name: "coll", Gateway: "172.16.0.3", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"x/y": ts9511("x/y", "10.0.3.0/24", "10.9.3.0/24"),
 					"x:y": ts9511("x:y", "10.0.4.0/24", "10.9.4.0/24"),
@@ -101,20 +101,20 @@ func TestSANameIndexListsEveryVPNRenderingACollidingName9511(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"a": {Name: "a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
+			"a": {PSK: "fixture-secret", Name: "a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"b-c": ts9511("b-c", "10.0.1.0/24", "10.9.1.0/24"),
 					"d":   ts9511("d", "10.0.2.0/24", "10.9.2.0/24"),
 				}},
-			"a-b": {Name: "a-b", Gateway: "172.16.0.2", IPsecPolicy: "ipsec-pol",
+			"a-b": {PSK: "fixture-secret", Name: "a-b", Gateway: "172.16.0.2", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"c": ts9511("c", "10.0.3.0/24", "10.9.3.0/24"),
 				}},
-			"blue": {Name: "blue", Gateway: "172.16.0.3", IPsecPolicy: "ipsec-pol",
+			"blue": {PSK: "fixture-secret", Name: "blue", Gateway: "172.16.0.3", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"red": ts9511("red", "10.0.4.0/24", "10.9.4.0/24"),
 				}},
-			"blue-red": {Name: "blue-red", Gateway: "172.16.0.4", IPsecPolicy: "ipsec-pol"},
+			"blue-red": {PSK: "fixture-secret", Name: "blue-red", Gateway: "172.16.0.4", IPsecPolicy: "ipsec-pol"},
 		},
 		Policies:  saIndexPolicies9511(),
 		Proposals: saIndexProposals9511(),
@@ -160,13 +160,13 @@ func TestSANameIndexExcludesVPNsTheRendererSkips9511(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"good": {Name: "good", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
+			"good": {PSK: "fixture-secret", Name: "good", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"x": ts9511("x", "10.0.1.0/24", "10.9.1.0/24"),
 				}},
 			// A dangling single-label gateway reference is unrenderable (#2074),
 			// reachable through the tolerant load and peer-sync paths.
-			"good-x": {Name: "good-x", Gateway: "dangling", IPsecPolicy: "ipsec-pol"},
+			"good-x": {PSK: "fixture-secret", Name: "good-x", Gateway: "dangling", IPsecPolicy: "ipsec-pol"},
 		},
 		Policies:  saIndexPolicies9511(),
 		Proposals: saIndexProposals9511(),
@@ -203,7 +203,7 @@ func TestActiveSANamesPublishesResolvableChildNames9511(t *testing.T) {
 `
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"site-a": {Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
+			"site-a": {PSK: "fixture-secret", Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"ts1": ts9511("ts1", "10.0.1.0/24", "10.9.1.0/24"),
 					"ts2": ts9511("ts2", "10.0.2.0/24", "10.9.2.0/24"),
@@ -242,12 +242,12 @@ func TestSANameIndexSkipsUnsupportedAuthVPN9511(t *testing.T) {
 			"gw-bad": {Address: "172.16.9.9", IKEPolicy: "pol-bad"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"site-a": {Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
+			"site-a": {PSK: "fixture-secret", Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"ts1": ts9511("ts1", "10.0.1.0/24", "10.9.1.0/24"),
 					"ts2": ts9511("ts2", "10.0.2.0/24", "10.9.2.0/24"),
 				}},
-			"bad": {Name: "bad", Gateway: "gw-bad", IPsecPolicy: "ipsec-pol"},
+			"bad": {PSK: "fixture-secret", Name: "bad", Gateway: "gw-bad", IPsecPolicy: "ipsec-pol"},
 		},
 		Policies:  saIndexPolicies9511(),
 		Proposals: saIndexProposals9511(),
@@ -284,7 +284,7 @@ func TestSANameIndexKeysEligibilityByVPNNotSanitizedName9511(t *testing.T) {
 	tabbed := "x" + string(rune(9)) + "y"
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"x y":  {Name: "x y", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+			"x y":  {PSK: "fixture-secret", Name: "x y", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			tabbed: {Name: tabbed, Gateway: "dangling", IPsecPolicy: "ipsec-pol"},
 		},
 		Policies:  saIndexPolicies9511(),
@@ -317,7 +317,7 @@ func TestActiveSANamesIKEOnlyRowPublishesTheConnectionName9511(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"site-a": {Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
+			"site-a": {PSK: "fixture-secret", Name: "site-a", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"ts1": ts9511("ts1", "10.0.1.0/24", "10.9.1.0/24"),
 					"ts2": ts9511("ts2", "10.0.2.0/24", "10.9.2.0/24"),

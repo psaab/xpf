@@ -17,6 +17,9 @@ func setTree9623(t *testing.T, vpnName string) *ConfigTree {
 		"set security ike gateway gw1 address 198.51.100.1",
 		`set security ipsec vpn "` + vpnName + `" ike gateway gw1`,
 		`set security ipsec vpn "` + vpnName + `" bind-interface st0`,
+		// A key so the #14139 missing-PSK gate stays silent and these
+		// cells measure only the name gates they are named for.
+		`set security ipsec vpn "` + vpnName + `" pre-shared-key fixture-secret`,
 	} {
 		path, err := ParseSetCommand(cmd)
 		if err != nil {

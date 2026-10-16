@@ -116,8 +116,8 @@ func TestRenderConfig_AHProposalSkipsVPN_4298(t *testing.T) {
 			"gw-esp": {Name: "gw-esp", Address: "192.0.2.2"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun-ah":  {Name: "tun-ah", Gateway: "gw-ah", IPsecPolicy: "ah-pol"},
-			"tun-esp": {Name: "tun-esp", Gateway: "gw-esp", IPsecPolicy: "esp-pol"},
+			"tun-ah":  {PSK: "fixture-secret", Name: "tun-ah", Gateway: "gw-ah", IPsecPolicy: "ah-pol"},
+			"tun-esp": {PSK: "fixture-secret", Name: "tun-esp", Gateway: "gw-esp", IPsecPolicy: "esp-pol"},
 		},
 	}
 	conns := parseSwanctlDoc(t, New().generateConfig(cfg)).at(t, "connections")

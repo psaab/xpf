@@ -52,7 +52,7 @@ func TestRenderValidEndpoints_5630(t *testing.T) {
 					"gw": {Name: "gw", Address: c.gwAddr, LocalAddress: c.gwLocal},
 				},
 				VPNs: map[string]*config.IPsecVPN{
-					"tun": {Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol"},
+					"tun": {PSK: "fixture-secret", Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol"},
 				},
 				Policies: map[string]*config.IPsecPolicyDef{
 					"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"prop1"}},

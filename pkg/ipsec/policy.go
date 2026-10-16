@@ -33,6 +33,7 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // OMITTED from the render — a skip class: an unrenderable gateway reference
 // (#2074), an unresolved ike-policy chain (#2270), an unusable IKE DH group
 // (#9919 F-161), an unsupported IKE authentication method, a malformed PSK,
+// a PSK connection with no effective secret (#14139),
 // a `protocol ah` proposal with no ESP render path (#4298), a section-breaking
 // VPN name (#9495), an unresolved ipsec-policy chain (#9919 F-090), an unusable
 // ESP/PFS DH group (#9919 F-161), a non-empty bind-interface that resolves to
@@ -285,6 +286,23 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 				continue
 			}
 			decodedPSKs[name] = decoded
+		} else if authMethod == "psk" {
+			// A PSK connection with no effective secret (#14139, D5-06)
+			// would render auth = psk with no matching secrets{} entry,
+			// leaving strongSwan to consult another VPN's secret whose
+			// identities overlap. Every other credential/render failure
+			// skips the VPN; a missing credential must do the same
+			// (fail-closed), so Apply unloads it and tears down any
+			// stale SA. Pubkey (certificate) VPNs have no PSK by
+			// design and are unaffected.
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: pre-shared-key authentication "+
+				"with no pre-shared key configured (neither the vpn "+
+				"pre-shared-key nor the ike-policy fallback) — configure "+
+				"a key (rendering the connection without a secret would "+
+				"let strongSwan select another VPN's secret)",
+				"vpn", name)
+			continue
 		}
 
 		// This VPN passed every skip check, so it is emitted into the
@@ -947,8 +965,10 @@ func escapeSwanctlQuoted(s string) string {
 //
 //   - the remote peer identity: the configured remote-id when set,
 //     otherwise the concrete remote gateway address (strongSwan uses the
-//     peer IP as its default identity when no id is negotiated). This is
-//     the discriminator between two PSK VPNs to different peers;
+//     peer IP as its default identity when no id is negotiated) — one
+//     selector per address when the gateway carries a comma-separated
+//     multi-address list (#14139). This is the discriminator between
+//     two PSK VPNs to different peers;
 //   - the local identity, added only when a local-id is explicitly
 //     configured, so the secret is also selected when strongSwan looks it
 //     up by our own identity (a harmless extra owner — two VPNs on the
@@ -972,11 +992,18 @@ func pskIDSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 	}
 	// Remote peer identity — the discriminator. Prefer the explicit
 	// remote-id (the identity the peer presents / we expect), else the
-	// concrete remote gateway address.
+	// concrete remote gateway address. remoteAddr may be a comma-
+	// separated multi-address list (the same list rendered verbatim
+	// into remote_addrs): emit one selector per address (#14139,
+	// D5-06). The whole comma-joined string is not an IKE identity —
+	// it matches no peer, silently leaving the secret unscoped for
+	// every address in the list.
 	if gw != nil && gw.RemoteIDValue != "" {
 		add(formatIdentity(gw.RemoteIDType, gw.RemoteIDValue))
 	} else {
-		add(remoteAddr)
+		for _, addr := range strings.Split(remoteAddr, ",") {
+			add(strings.TrimSpace(addr))
+		}
 	}
 	// Local identity, when explicitly configured.
 	if gw != nil && gw.LocalIDValue != "" {

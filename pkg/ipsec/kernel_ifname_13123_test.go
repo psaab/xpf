@@ -58,7 +58,7 @@ func gatewayCfg13123(ifaceRef string) *config.Config {
 				"gw": {Name: "gw", Address: "203.0.113.1", ExternalIface: ifaceRef},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"vpn": {Gateway: "gw", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
+				"vpn": {PSK: "fixture-secret", Gateway: "gw", LocalID: "10.0.1.0/24", RemoteID: "10.0.2.0/24"},
 			},
 		}},
 	}

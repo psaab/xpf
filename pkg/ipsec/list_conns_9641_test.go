@@ -141,8 +141,8 @@ func TestListLoadedConnsUnreachableIsAnError9641(t *testing.T) {
 func proofConfig9641() *config.IPsecConfig {
 	return &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"proof-plain": {Name: "proof-plain", Gateway: "198.51.100.61"},
-			"proof-ms": {Name: "proof-ms", Gateway: "198.51.100.62",
+			"proof-plain": {PSK: "fixture-secret", Name: "proof-plain", Gateway: "198.51.100.61"},
+			"proof-ms": {PSK: "fixture-secret", Name: "proof-ms", Gateway: "198.51.100.62",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"ts1": {Name: "ts1", LocalIP: "10.61.1.0/24", RemoteIP: "10.62.1.0/24"},
 					"ts2": {Name: "ts2", LocalIP: "10.61.2.0/24", RemoteIP: "10.62.2.0/24"},
@@ -157,7 +157,7 @@ func proofConfig9641() *config.IPsecConfig {
 // still equal what charon listed.
 func TestExpectedLoadedConnsExcludesSkippedVPN9641(t *testing.T) {
 	cfg := proofConfig9641()
-	cfg.VPNs["skipped"] = &config.IPsecVPN{Name: "skipped", Gateway: "dangling"}
+	cfg.VPNs["skipped"] = &config.IPsecVPN{PSK: "fixture-secret", Name: "skipped", Gateway: "dangling"}
 	text, rendered, err := (&Manager{}).renderConfig(cfg)
 	if err != nil || rendered["skipped"] {
 		t.Fatalf("FIXTURE: a dangling gateway must be a skip, not a render error (err %v, rendered %v)", err, rendered)
@@ -190,7 +190,7 @@ func TestExpectedLoadedConnsExcludesUnsupportedAuthVPN9641(t *testing.T) {
 	cfg.IKEProposals = map[string]*config.IKEProposal{"prop-bad": {Name: "prop-bad", AuthMethod: "bogus", EncryptionAlg: "aes-256-cbc", AuthAlg: "sha-256"}}
 	cfg.IKEPolicies = map[string]*config.IKEPolicy{"pol-bad": {Proposals: []string{"prop-bad"}}}
 	cfg.Gateways = map[string]*config.IPsecGateway{"gw-bad": {Address: "172.16.9.9", IKEPolicy: "pol-bad"}}
-	cfg.VPNs["broken"] = &config.IPsecVPN{Name: "broken", Gateway: "gw-bad"}
+	cfg.VPNs["broken"] = &config.IPsecVPN{PSK: "fixture-secret", Name: "broken", Gateway: "gw-bad"}
 
 	_, rendered, err := (&Manager{}).renderConfig(cfg)
 	if err != nil {

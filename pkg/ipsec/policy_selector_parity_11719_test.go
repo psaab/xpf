@@ -19,12 +19,12 @@ func TestModeledIPsecSelectorPairsMatchRenderer11719(t *testing.T) {
 	}{
 		{
 			name: "wildcard/wildcard",
-			vpn:  &config.IPsecVPN{BindInterface: "st0.0"},
+			vpn:  &config.IPsecVPN{PSK: "fixture-secret", BindInterface: "st0.0"},
 			want: []selectorPair{{wildcard, wildcard}},
 		},
 		{
 			name: "explicit disjoint children",
-			vpn: &config.IPsecVPN{
+			vpn: &config.IPsecVPN{PSK: "fixture-secret",
 				BindInterface: "st0.0",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"branch-b": {LocalIP: "10.20.0.0/24", RemoteIP: "192.0.2.0/24"},
@@ -38,7 +38,7 @@ func TestModeledIPsecSelectorPairsMatchRenderer11719(t *testing.T) {
 		},
 		{
 			name: "one-sided explicit child",
-			vpn: &config.IPsecVPN{
+			vpn: &config.IPsecVPN{PSK: "fixture-secret",
 				BindInterface: "st0.0",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"local-only": {LocalIP: "10.30.0.0/24"},
@@ -48,7 +48,7 @@ func TestModeledIPsecSelectorPairsMatchRenderer11719(t *testing.T) {
 		},
 		{
 			name: "malformed child omitted while valid sibling remains",
-			vpn: &config.IPsecVPN{
+			vpn: &config.IPsecVPN{PSK: "fixture-secret",
 				BindInterface: "st0.0",
 				LocalID:       "10.40.0.0/24",
 				RemoteID:      "10.50.0.0/24",
@@ -61,7 +61,7 @@ func TestModeledIPsecSelectorPairsMatchRenderer11719(t *testing.T) {
 		},
 		{
 			name: "selector-shaped identity fallback",
-			vpn: &config.IPsecVPN{
+			vpn: &config.IPsecVPN{PSK: "fixture-secret",
 				BindInterface: "st0.0",
 				LocalID:       "10.70.0.0/24",
 				RemoteID:      "2001:db8:70::/48",
@@ -70,7 +70,7 @@ func TestModeledIPsecSelectorPairsMatchRenderer11719(t *testing.T) {
 		},
 		{
 			name: "FQDN identity falls back to route wildcard",
-			vpn: &config.IPsecVPN{
+			vpn: &config.IPsecVPN{PSK: "fixture-secret",
 				BindInterface: "st0.0",
 				LocalID:       "vpn.example",
 			},
@@ -78,7 +78,7 @@ func TestModeledIPsecSelectorPairsMatchRenderer11719(t *testing.T) {
 		},
 		{
 			name: "explicit child inherits selector-shaped identities",
-			vpn: &config.IPsecVPN{
+			vpn: &config.IPsecVPN{PSK: "fixture-secret",
 				BindInterface: "st0.0",
 				LocalID:       "10.80.0.0/24",
 				RemoteID:      "10.81.0.0/24",
@@ -90,7 +90,7 @@ func TestModeledIPsecSelectorPairsMatchRenderer11719(t *testing.T) {
 		},
 		{
 			name: "policy-based omitted side remains unknown",
-			vpn:  &config.IPsecVPN{LocalID: "10.90.0.0/24"},
+			vpn:  &config.IPsecVPN{PSK: "fixture-secret", LocalID: "10.90.0.0/24"},
 			want: []selectorPair{{"10.90.0.0/24", ""}},
 		},
 	}

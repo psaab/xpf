@@ -15,7 +15,7 @@ func proposalRenderConfig9906(slot, value string) *config.IPsecConfig {
 			"gw": {Name: "gw", Address: "192.0.2.1"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Name: "tun", Gateway: "gw", IPsecPolicy: "esp-pol"},
+			"tun": {PSK: "fixture-secret", Name: "tun", Gateway: "gw", IPsecPolicy: "esp-pol"},
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
 			"esp-pol": {Name: "esp-pol", Proposals: []string{"esp"}},
@@ -65,7 +65,7 @@ func TestRenderRejectsProposalMetacharacters_9906(t *testing.T) {
 func TestRenderRejectsBareNonAEADESP_9907(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Name: "tun", Gateway: "192.0.2.1", IPsecPolicy: "esp-pol"},
+			"tun": {PSK: "fixture-secret", Name: "tun", Gateway: "192.0.2.1", IPsecPolicy: "esp-pol"},
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
 			"esp-pol": {Name: "esp-pol", Proposals: []string{"bare"}},
@@ -92,7 +92,7 @@ func TestRenderRejectsBareNonAEADESP_9907(t *testing.T) {
 func TestRenderAllowsAEADESPWithoutSeparateIntegrity_9907(t *testing.T) {
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Name: "tun", Gateway: "192.0.2.1", IPsecPolicy: "esp-pol"},
+			"tun": {PSK: "fixture-secret", Name: "tun", Gateway: "192.0.2.1", IPsecPolicy: "esp-pol"},
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
 			"esp-pol": {Name: "esp-pol", Proposals: []string{"gcm"}},
@@ -141,7 +141,7 @@ func TestRenderPreservesSafeProposalLists_9906(t *testing.T) {
 
 func TestProposalRenderErrorNamesUnsafeInput_9906(t *testing.T) {
 	value := "aes256#injected"
-	_, _, err := resolveESPSettings(proposalRenderConfig9906("esp", value), &config.IPsecVPN{IPsecPolicy: "esp-pol"})
+	_, _, err := resolveESPSettings(proposalRenderConfig9906("esp", value), &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "esp-pol"})
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", value)) {
 		t.Fatalf("unsafe resolver error must name value %q, got %v", value, err)
 	}
@@ -158,7 +158,7 @@ func TestLegacyDirectESPBadDHSentinel_9919(t *testing.T) {
 			},
 		},
 	}
-	_, _, err := resolveESPSettings(cfg, &config.IPsecVPN{IPsecPolicy: "legacy"})
+	_, _, err := resolveESPSettings(cfg, &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "legacy"})
 	if !errors.Is(err, errDHGroupUnresolved) {
 		t.Fatalf("legacy direct ESP bad DH must return errDHGroupUnresolved, got %v", err)
 	}

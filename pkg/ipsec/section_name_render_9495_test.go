@@ -21,7 +21,7 @@ func vpnCfg9495(names ...string) *config.IPsecConfig {
 		VPNs: map[string]*config.IPsecVPN{},
 	}
 	for _, n := range names {
-		cfg.VPNs[n] = &config.IPsecVPN{Name: n, Gateway: "gw"}
+		cfg.VPNs[n] = &config.IPsecVPN{PSK: "fixture-secret", Name: n, Gateway: "gw"}
 	}
 	return cfg
 }

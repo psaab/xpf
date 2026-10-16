@@ -60,8 +60,8 @@ func renderableTwoVPN() *config.IPsecConfig {
 			"gw-sibling": {Name: "gw-sibling", Address: "192.0.2.2", IKEPolicy: "ikepol"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"target":  {Name: "target", Gateway: "gw-target", IPsecPolicy: "esppol"},
-			"sibling": {Name: "sibling", Gateway: "gw-sibling", IPsecPolicy: "esppol"},
+			"target":  {PSK: "fixture-secret", Name: "target", Gateway: "gw-target", IPsecPolicy: "esppol"},
+			"sibling": {PSK: "fixture-secret", Name: "sibling", Gateway: "gw-sibling", IPsecPolicy: "esppol"},
 		},
 	}
 }

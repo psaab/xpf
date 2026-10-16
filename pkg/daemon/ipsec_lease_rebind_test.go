@@ -35,7 +35,7 @@ func leaseRebindConfig(dhcp bool, addr string) *config.Config {
 					"gw": {Name: "gw", Address: "203.0.113.1", ExternalIface: "wan0.0"},
 				},
 				VPNs: map[string]*config.IPsecVPN{
-					"tun": {Gateway: "gw"},
+					"tun": {PSK: "fixture-secret", Gateway: "gw"},
 				},
 			},
 		},

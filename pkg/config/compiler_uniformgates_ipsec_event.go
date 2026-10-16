@@ -286,5 +286,20 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #14139 (D5-06): a PSK-authenticated VPN with no effective secret
+	// (neither the vpn key nor the ike-policy fallback) would render an
+	// auth=psk connection with no secret of its own, leaving strongSwan
+	// to consult another VPN's secret. Strict on commit / commit-check;
+	// lenient on load / peer-sync (warn, and the pkg/ipsec render belt
+	// skips the VPN so the other tunnels keep loading).
+	if err := validateIPsecPSKPresenceStrict(cfg); err != nil {
+		if opts.lenientIPsecPSKPresence {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec missing pre-shared key (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

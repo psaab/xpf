@@ -65,7 +65,7 @@ func renderImmediateVPN(t *testing.T) string {
 		},
 		VPNs: map[string]*config.IPsecVPN{
 			// `immediately` requests start_action = start.
-			"vpn-a": {
+			"vpn-a": {PSK: "fixture-secret",
 				Name: "vpn-a", Gateway: "gw-a", IPsecPolicy: "ipsec-pol",
 				BindInterface: "st0.0", EstablishTunnels: "immediately",
 			},
@@ -128,7 +128,7 @@ func TestStartActionAbsentWhenEstablishTunnelsUnset7165(t *testing.T) {
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-prop"}, PFSGroup: 14},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"vpn-a": {Name: "vpn-a", Gateway: "gw-a", IPsecPolicy: "ipsec-pol", BindInterface: "st0.0"},
+			"vpn-a": {PSK: "fixture-secret", Name: "vpn-a", Gateway: "gw-a", IPsecPolicy: "ipsec-pol", BindInterface: "st0.0"},
 		},
 	}
 	rendered, _, err := m.renderConfig(cfg)

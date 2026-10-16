@@ -800,6 +800,13 @@ all files stay in `package ipsec`, so the public API is unchanged.
   legacy any-peer behavior for that one tunnel. A cert/EAP VPN has no PSK,
   so it emits no secret block and is unaffected. The selector values reuse
   the `sanitizeSwanctlValue`/`escapeSwanctlQuoted` quoting (#1798/#2126).
+  Two #14139 (D5-06) refinements: a comma-separated multi-address gateway
+  yields one `id-<n>` per address (the comma-joined string is not an IKE
+  identity and matched no peer), and a PSK VPN whose effective secret
+  (vpn key, then ike-policy fallback) is empty is skipped at render
+  rather than loading an `auth = psk` connection with no secret of its
+  own; commit likewise rejects it (`validateIPsecPSKPresenceStrict`,
+  tolerant paths warn).
 - **Traffic-selector `local_ts`/`remote_ts` sanitize, shape belt, and commit
   gate (#4098/#10884).** The child SA `local_ts = <value>` /
   `remote_ts = <value>` lines (from

@@ -31,7 +31,7 @@ func TestGenerateConfigClampsExtremeRekeyTime10882(t *testing.T) {
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-p2"}, PFSGroup: 14},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "gw", IPsecPolicy: "ipsec-pol"},
+			"tun": {PSK: "fixture-secret", Gateway: "gw", IPsecPolicy: "ipsec-pol"},
 		},
 	}
 

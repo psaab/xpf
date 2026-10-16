@@ -21,7 +21,7 @@ func buildAddrCfg(gwAddr, gwDyn, gwLocal, vpnLocal string) *config.IPsecConfig {
 			"gw": {Name: "gw", Address: gwAddr, DynamicHostname: gwDyn, LocalAddress: gwLocal},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol", LocalAddr: vpnLocal},
+			"tun": {PSK: "fixture-secret", Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol", LocalAddr: vpnLocal},
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"prop1"}},
@@ -170,7 +170,7 @@ func TestSwanctlProposalsInjectionNeutralized_6469(t *testing.T) {
 			"gw": {Name: "gw", Address: "203.0.113.1", IKEPolicy: "ike-pol"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Name: "tun", Gateway: "gw"},
+			"tun": {PSK: "fixture-secret", Name: "tun", Gateway: "gw"},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
 			"ike-pol": {Name: "ike-pol", Proposals: []string{"ike-prop"}},
@@ -184,7 +184,7 @@ func TestSwanctlProposalsInjectionNeutralized_6469(t *testing.T) {
 			"gw": {Name: "gw", Address: "203.0.113.1"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol"},
+			"tun": {PSK: "fixture-secret", Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol"},
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"prop1"}},
@@ -232,7 +232,7 @@ func TestSwanctlProposalsLegitPreserved_6469(t *testing.T) {
 			"gw": {Name: "gw", Address: "203.0.113.1", IKEPolicy: "ike-pol"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol"},
+			"tun": {PSK: "fixture-secret", Name: "tun", Gateway: "gw", IPsecPolicy: "ipsec-pol"},
 		},
 		IKEPolicies: map[string]*config.IKEPolicy{
 			"ike-pol": {Name: "ike-pol", Proposals: []string{"ike-a", "ike-b"}},

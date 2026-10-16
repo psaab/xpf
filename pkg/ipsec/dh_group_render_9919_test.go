@@ -25,7 +25,7 @@ func TestUnlistedDHGroupSkipsVPN_9919(t *testing.T) {
 	t.Run("ESP proposal 99", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+				"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			},
 			Proposals: map[string]*config.IPsecProposal{
 				"esp-p2": {Name: "esp-p2", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128", DHGroup: 99},
@@ -47,7 +47,7 @@ func TestUnlistedDHGroupSkipsVPN_9919(t *testing.T) {
 	t.Run("ESP real-but-omitted 17", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+				"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			},
 			Proposals: map[string]*config.IPsecProposal{
 				"esp-p2": {Name: "esp-p2", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128", DHGroup: 17},
@@ -77,7 +77,7 @@ func TestUnlistedDHGroupSkipsVPN_9919(t *testing.T) {
 				"gw1": {Name: "gw1", Address: "192.0.2.1", IKEPolicy: "ike-pol"},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "gw1"},
+				"tun1": {PSK: "fixture-secret", Gateway: "gw1"},
 			},
 		}
 		got, rendered, err := m.renderConfig(cfg)
@@ -92,7 +92,7 @@ func TestUnlistedDHGroupSkipsVPN_9919(t *testing.T) {
 	t.Run("PFS 99", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+				"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			},
 			Proposals: map[string]*config.IPsecProposal{
 				"esp-p2": {Name: "esp-p2", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128"},
@@ -113,7 +113,7 @@ func TestUnlistedDHGroupSkipsVPN_9919(t *testing.T) {
 	t.Run("negative group skips", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+				"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			},
 			Proposals: map[string]*config.IPsecProposal{
 				"esp-p2": {Name: "esp-p2", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128", DHGroup: -5},
@@ -134,7 +134,7 @@ func TestUnlistedDHGroupSkipsVPN_9919(t *testing.T) {
 	t.Run("recorded InvalidSpec skips", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+				"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			},
 			Proposals: map[string]*config.IPsecProposal{
 				"esp-p2": {Name: "esp-p2", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128", DHGroupInvalidSpec: "nonsense"},
@@ -164,7 +164,7 @@ func TestPFSEffectiveGroupOnly_9919(t *testing.T) {
 	t.Run("good PFS overrides bad proposal DH", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+				"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			},
 			Proposals: map[string]*config.IPsecProposal{
 				"esp-p2": {Name: "esp-p2", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128", DHGroup: 99},
@@ -186,7 +186,7 @@ func TestPFSEffectiveGroupOnly_9919(t *testing.T) {
 	t.Run("bad PFS poisons good proposal DH", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+				"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			},
 			Proposals: map[string]*config.IPsecProposal{
 				"esp-p2": {Name: "esp-p2", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128", DHGroup: 14},
@@ -224,7 +224,7 @@ func TestPartialDHListRendersGoodEntries_9919(t *testing.T) {
 				"gw1": {Name: "gw1", Address: "192.0.2.1", IKEPolicy: "ike-pol"},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "gw1"},
+				"tun1": {PSK: "fixture-secret", Gateway: "gw1"},
 			},
 		}
 		got, rendered, err := m.renderConfig(cfg)
@@ -250,7 +250,7 @@ func TestPartialDHListRendersGoodEntries_9919(t *testing.T) {
 				"gw1": {Name: "gw1", Address: "192.0.2.1", IKEPolicy: "ike-pol"},
 			},
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "gw1"},
+				"tun1": {PSK: "fixture-secret", Gateway: "gw1"},
 			},
 		}
 		got, rendered, err := m.renderConfig(cfg)
@@ -265,7 +265,7 @@ func TestPartialDHListRendersGoodEntries_9919(t *testing.T) {
 	t.Run("ESP good+bad renders good only", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+				"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			},
 			Proposals: map[string]*config.IPsecProposal{
 				"esp-good": {Name: "esp-good", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128", DHGroup: 14},
@@ -288,7 +288,7 @@ func TestPartialDHListRendersGoodEntries_9919(t *testing.T) {
 	t.Run("ESP bad+bad skips", func(t *testing.T) {
 		cfg := &config.IPsecConfig{
 			VPNs: map[string]*config.IPsecVPN{
-				"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
+				"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "ipsec-pol"},
 			},
 			Proposals: map[string]*config.IPsecProposal{
 				"esp-bad1": {Name: "esp-bad1", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128", DHGroup: 99},
@@ -315,8 +315,8 @@ func TestBadDHSkipsLeavesHealthySibling_9919(t *testing.T) {
 	m := &Manager{configDir: t.TempDir(), configPath: t.TempDir() + "/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"bad":     {Gateway: "172.16.0.1", IPsecPolicy: "bad-pol"},
-			"healthy": {Gateway: "172.16.0.2", IPsecPolicy: "good-pol"},
+			"bad":     {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "bad-pol"},
+			"healthy": {PSK: "fixture-secret", Gateway: "172.16.0.2", IPsecPolicy: "good-pol"},
 		},
 		Proposals: map[string]*config.IPsecProposal{
 			"esp-bad":  {Name: "esp-bad", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256-128", DHGroup: 99},
@@ -354,7 +354,7 @@ func TestResolveDHGroupsReturnSkipSentinels_9919(t *testing.T) {
 				"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-p2"}},
 			},
 		}
-		_, _, err := resolveESPSettings(cfg, &config.IPsecVPN{IPsecPolicy: "ipsec-pol"})
+		_, _, err := resolveESPSettings(cfg, &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "ipsec-pol"})
 		if !errors.Is(err, errDHGroupUnresolved) {
 			t.Fatalf("bad ESP DH must return errDHGroupUnresolved, got %v", err)
 		}
@@ -413,7 +413,7 @@ func TestNoRandTimeEmitted_9919(t *testing.T) {
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-p2"}},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun": {Gateway: "gw", IPsecPolicy: "ipsec-pol"},
+			"tun": {PSK: "fixture-secret", Gateway: "gw", IPsecPolicy: "ipsec-pol"},
 		},
 	}
 	got := m.generateConfig(cfg)

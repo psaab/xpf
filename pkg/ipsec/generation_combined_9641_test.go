@@ -17,7 +17,7 @@ import (
 
 func combinedProofConfig9641() (*config.IPsecConfig, string) {
 	return &config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{
-		"proof-gen": {Name: "proof-gen", Gateway: "198.51.100.64", LocalAddr: "192.0.2.64",
+		"proof-gen": {PSK: "fixture-secret", Name: "proof-gen", Gateway: "198.51.100.64", LocalAddr: "192.0.2.64",
 			TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 				"ts1": {Name: "ts1", LocalIP: "10.65.1.0/24", RemoteIP: "10.66.1.0/24"},
 			}},
