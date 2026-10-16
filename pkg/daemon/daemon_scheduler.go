@@ -61,15 +61,16 @@ func (d *Daemon) reconcilePolicySchedulerLockedAt(cfg *config.Config, now time.T
 	}
 
 	var sched *scheduler.Scheduler
+	loc := policySchedulerLocation(cfg, now)
 	sched, activeState := scheduler.NewPrimedInLocation(cfg.Schedulers, func(ctx context.Context, activeState map[string]bool) error {
 		// #8660: the SCHEDULER'S ctx, handed to us by the tick. Not
 		// `d.daemonCtx`, which is the raw production-uncancelled parent — a
 		// tick parked on the semaphore with that one is released by nothing,
 		// so `stopPolicySchedulerLoop`'s `schedulerWg.Wait()` blocked behind a
 		// wedged apply and shutdown never reached HA relinquish.
-		failClosed := sched != nil && sched.RepublishFailClosed()
+		failClosed := sched != nil && sched.PolicyFailClosed(time.Now())
 		return d.publishPolicyScheduleStateWithLatch(ctx, epoch, activeState, failClosed)
-	}, now, policySchedulerLocation(cfg, now))
+	}, now, loc)
 	sched.SetHeartbeatFn(func(ctx context.Context) {
 		d.heartbeatPolicySchedule(ctx, epoch)
 	})
@@ -96,6 +97,7 @@ func (d *Daemon) policySchedulerActiveStateAndFailClosedForApplyLocked(cfg *conf
 	if previous != nil {
 		var previousState map[string]bool
 		previousState, failClosed = previous.ActiveStateWithFailClosed()
+		failClosed = failClosed || previous.PolicyFailClosed(now)
 		if previous.InRecoveryHold(now) {
 			// #12885: a wall-clock recovery hold survives a scheduler
 			// config change for apply seeding — prime nothing active.
@@ -105,8 +107,10 @@ func (d *Daemon) policySchedulerActiveStateAndFailClosedForApplyLocked(cfg *conf
 			return previousState, failClosed
 		}
 	}
-	_, activeState := scheduler.NewPrimedInLocation(cfg.Schedulers, func(context.Context, map[string]bool) error { return nil }, now, policySchedulerLocation(cfg, now))
-	if failClosed {
+	loc := policySchedulerLocation(cfg, now)
+	_, activeState := scheduler.NewPrimedInLocation(cfg.Schedulers, func(context.Context, map[string]bool) error { return nil }, now, loc)
+	if failClosed || loc == nil {
+		failClosed = true
 		for name := range activeState {
 			activeState[name] = false
 		}

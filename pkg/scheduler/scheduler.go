@@ -218,6 +218,21 @@ func (s *Scheduler) InRecoveryHold(now time.Time) bool {
 	return !s.unsafeUntil.IsZero() && now.Before(s.unsafeUntil)
 }
 
+// PolicyFailClosed reports whether schedule freshness is unknown for a
+// publication at now. Unlike RepublishFailClosed, this also covers the
+// wall-clock recovery hold and an unavailable configured time zone. In those
+// states the active map is all-false, so the dataplane must retain scheduled
+// DENY/REJECT eligibility while leaving scheduled permits inactive.
+func (s *Scheduler) PolicyFailClosed(now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.republishFailClosed || s.zoneUnavailable ||
+		(!s.unsafeUntil.IsZero() && now.Before(s.unsafeUntil))
+}
+
 // Update replaces the scheduler configurations and re-evaluates immediately.
 func (s *Scheduler) Update(schedulers map[string]*config.SchedulerConfig) {
 	s.mu.Lock()
@@ -247,6 +262,12 @@ func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
 	changed := false
 	newActive := make(map[string]bool, len(s.schedulers))
 	wallClockDiscontinuous := s.wallClockDiscontinuousLocked(now)
+	// The action-aware deny-first disposition changes even if the inactive
+	// schedule map happens to remain all-false across the clock step. Publish
+	// that transition rather than heartbeating the stale, ordinary disposition.
+	if wallClockDiscontinuous {
+		changed = true
+	}
 	wallClockUnsafe := wallClockDiscontinuous
 	if !wallClockUnsafe && !s.unsafeUntil.IsZero() {
 		if now.Before(s.unsafeUntil) {

@@ -52,3 +52,19 @@ func TestApplySeedingHonorsRecoveryHold12885(t *testing.T) {
 		t.Fatalf("steady control staged = %v failClosed=%v, want active workhours", staged2, failClosed2)
 	}
 }
+
+// #13919: syntactically valid but unloadable zone names must seed the
+// action-aware deny-first disposition, not just an all-false scheduler map.
+func TestApplySeedingFailsClosedForUnavailableZone13919(t *testing.T) {
+	now := time.Date(2026, 2, 12, 12, 0, 0, 0, time.UTC)
+	cfg := &config.Config{
+		System: config.SystemConfig{TimeZone: "America/Los_Angels"},
+		Schedulers: map[string]*config.SchedulerConfig{
+			"workhours": {Name: "workhours", AllDay: true},
+		},
+	}
+	staged, failClosed := (&Daemon{}).policySchedulerActiveStateAndFailClosedForApplyLocked(cfg, now)
+	if !failClosed || staged["workhours"] {
+		t.Fatalf("unavailable zone staged = %v failClosed=%t, want inactive plus deny-eligible disposition", staged, failClosed)
+	}
+}
