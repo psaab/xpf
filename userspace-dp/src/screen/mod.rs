@@ -1692,3 +1692,6 @@ mod tests_10662_len_gate;
 #[cfg(test)]
 #[path = "tests_13084_ipv6_wg_pad.rs"]
 mod tests_13084_ipv6_wg_pad;
+#[cfg(test)]
+#[path = "tests_14129_chained_frag.rs"]
+mod tests_14129_chained_frag;

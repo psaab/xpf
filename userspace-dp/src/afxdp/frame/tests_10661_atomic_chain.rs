@@ -17,12 +17,10 @@
 // header (matching the plain control's ranges byte-for-byte), and L4
 // presence is refused when ANY sighting carries a non-zero offset (the
 // shim's long-standing verdict). ATOMIC-alone and double-ATOMIC chains stay
-// `NonFragment` everywhere.
+// `NonFragment` everywhere. #14129 extends the same first-non-ATOMIC rule
+// to the screens (sticky, never overwritten by a later ATOMIC).
 //
-// Two orderings are EXPLICITLY reconciled rather than unified (see the
-// residual cells): `[real-first][ATOMIC]`, where the screens' overwrite
-// reports non-fragment while the tracker still tracks (both safe: the
-// terminal L4 bytes are genuinely present), and
+// One ordering remains EXPLICITLY reconciled rather than unified:
 // `[real-first][real-non-first]`, where the tracker records the first-real
 // (wider, conservative) range while every L4 gate agrees non-first.
 #![allow(unused_imports)]
@@ -317,15 +315,14 @@ fn atomic_then_real_first_agreement_10661() {
 }
 
 #[test]
-fn real_first_then_atomic_residual_10661() {
-    // EXPLICITLY RECONCILED, not unified: on `[real-first][ATOMIC]` the
-    // tracker keys the first REAL header (Fragment-first) while the
-    // screens' overwrite lands on the trailing ATOMIC (non-fragment).
-    // Composition is safe either way — the tracker is engaged AND the
-    // terminal L4 bytes are genuinely present (every L4 gate agrees) —
-    // and making the screens sticky here would newly blind the TCP-flag
-    // screens on a packet everyone else treats as first-fragment. Pins
-    // both halves so neither drifts silently.
+fn real_first_then_atomic_sticky_10661_14129() {
+    // #14129 supersedes the #10661 residual for the SCREENS: on
+    // `[real-first][ATOMIC]` the tracker keys the first REAL header and
+    // the screens now do the same (sticky first non-ATOMIC sighting).
+    // The trailing ATOMIC is a no-op and must not clear the real first
+    // fragment, so syn-frag / icmp-fragment stay eligible on the
+    // terminal L4 bytes everyone agrees are present. Forwarding and
+    // shim verdicts are unchanged (offset 0 in every sighting).
     let pkt = v6_frag_chain(
         &[(WORD_FIRST, IDENT_REAL), (WORD_ATOMIC, IDENT_ATOMIC)],
         &tcp20(),
@@ -341,9 +338,10 @@ fn real_first_then_atomic_residual_10661() {
     let frame = eth14(&pkt);
     let info = screen_of(&frame, PROTO_TCP);
     assert!(
-        !info.is_fragment && !info.is_first_fragment,
-        "#10661 residual: screens report the trailing ATOMIC header"
+        info.is_fragment && info.is_first_fragment,
+        "#14129: screens must retain the real first header (syn-frag eligible)"
     );
+    assert_eq!(info.ip_frag_off, WORD_FIRST);
     assert_eq!(
         raw_shim_walk(&pkt, 0).map(|w| w.non_first_fragment),
         Some(false)
