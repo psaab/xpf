@@ -52,6 +52,14 @@ const SYN_COOKIE_VALIDATED_CACHE_TTL_SECS: u64 = SynCookieCodec::EPOCH_SECS;
 pub(super) const SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC: u32 = 4096;
 #[cfg(test)]
 pub(super) const SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC: u32 = 8;
+/// #13952: maximum SYN-cookie ACK MAC attempts per client key and worker per
+/// second, including the initial bucket burst, this allows up to 1040 attempts
+/// during a 64-second cookie epoch.
+#[cfg(not(test))]
+pub(super) const SYN_COOKIE_FAILED_ATTEMPT_RATE_LIMIT_PER_SEC: u32 = 16;
+#[cfg(test)]
+pub(super) const SYN_COOKIE_FAILED_ATTEMPT_RATE_LIMIT_PER_SEC: u32 = 256;
+
 /// #9902 F-023: flood-ACTIVE SYN-cookie ACK validation budget, per worker per
 /// zone (a separate `TokenBucket` from the standby one: standby sizes
 /// rare-miss opportunism on an idle zone, while active is the flood regime

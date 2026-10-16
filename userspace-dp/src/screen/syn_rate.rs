@@ -354,6 +354,26 @@ impl<C: SketchCell> SynRateSketch<C> {
         self.increment_indices(indices, now, threshold)
     }
 
+    /// Charge one SYN-cookie ACK attempt against its `(src, dst, dport)` client
+    /// key. This is a fixed-size count-min sketch: collisions can only reduce
+    /// admission, never let a key undercount its attempts.
+    pub(super) fn increment_cookie_client_key(
+        &mut self,
+        src: &IpAddr,
+        dst: &IpAddr,
+        dst_port: u16,
+        now: u64,
+        threshold: u32,
+    ) -> bool {
+        let mut indices = [0usize; ROWS];
+        for (row, slot) in indices.iter_mut().enumerate() {
+            let mut h = HotPathSeededState::new(self.seed).build_hasher();
+            (ROW_SEEDS[row], src, dst, dst_port).hash(&mut h);
+            *slot = (h.finish() as usize) & self.mask;
+        }
+        self.increment_indices(indices, now, threshold)
+    }
+
     /// Total cell capacity (`ROWS * cols`). Test seam to assert no growth under a
     /// flood (the structure is fixed-capacity).
     #[cfg(test)]

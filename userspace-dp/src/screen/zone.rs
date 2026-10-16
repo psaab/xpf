@@ -103,6 +103,11 @@ pub(super) struct ZoneScreenState {
     /// SYN-cookie active.
     pub(super) syn_src_sketch: Option<SynRateSketch<TokenBucket>>,
     /// Monotonic seconds until which the zone is SYN-cookie active (0 = never).
+    /// #13952 pre-MAC attempts, shared by active and standby validation.
+    /// `Some` iff SYN cookies are enabled; fixed-capacity and collision-biased
+    /// fail closed.
+    syn_cookie_ack_attempt_sketch: Option<SynRateSketch<TokenBucket>>,
+
     pub(super) syn_cookie_active_until_secs: u64,
     /// #3607 standby SYN-cookie ACK validation budget (`TokenBucket`).
     pub(super) syn_cookie_standby_ack_counter: TokenBucket,
@@ -187,6 +192,8 @@ impl ZoneScreenState {
             (profile.udp_flood_threshold > 0).then(SynRateSketch::for_flood_dst);
         let syn_dst_sketch = (profile.syn_flood_dst_threshold > 0).then(SynRateSketch::for_dst);
         let syn_src_sketch = (profile.syn_flood_src_threshold > 0).then(SynRateSketch::for_src);
+        let syn_cookie_ack_attempt_sketch =
+            profile.syn_cookie.then(SynRateSketch::for_flood_dst);
         Self {
             profile,
             icmp_counter: TokenBucket::default(),
@@ -197,6 +204,7 @@ impl ZoneScreenState {
             udp_dst_sketch,
             syn_dst_sketch,
             syn_src_sketch,
+            syn_cookie_ack_attempt_sketch,
             syn_cookie_active_until_secs: 0,
             syn_cookie_standby_ack_counter: TokenBucket::default(),
             syn_cookie_active_ack_counter: TokenBucket::default(),
@@ -282,13 +290,38 @@ impl ZoneScreenState {
             self.profile.syn_flood_src_threshold > 0,
             SynRateSketch::for_src,
         );
+        reconcile_flood_sketch(
+            &mut self.syn_cookie_ack_attempt_sketch,
+            self.profile.syn_cookie,
+            SynRateSketch::for_flood_dst,
+        );
         if self.profile.syn_flood_alarm_threshold == 0 {
             self.syn_alarm_last_emit_sec = u64::MAX;
         }
+
         // #9425 member 2 and #12876 — see the doc comment above.
         if self.profile.alarm_without_drop || activation_slice_changed {
             self.syn_cookie_active_until_secs = 0;
         }
+    }
+    /// #13952: consume one pre-MAC ACK attempt for `(src, dst, dport)`.
+    /// Shared across active/standby role changes. `true` means limited.
+    pub(super) fn syn_cookie_ack_attempt_limited(
+        &mut self,
+        pkt: &ScreenPacketInfo,
+        now_ns: u64,
+    ) -> bool {
+        self.syn_cookie_ack_attempt_sketch
+            .as_mut()
+            .is_none_or(|sketch| {
+                sketch.increment_cookie_client_key(
+                    &pkt.src_ip,
+                    &pkt.dst_ip,
+                    pkt.dst_port,
+                    now_ns,
+                    super::syncookie::SYN_COOKIE_FAILED_ATTEMPT_RATE_LIMIT_PER_SEC,
+                )
+            })
     }
 
     /// #4112 F18: ICMP flood admission. (1) the per-DESTINATION count-min
