@@ -526,12 +526,15 @@ func (m *Manager) buildHeartbeat() *HeartbeatPacket {
 		HeartbeatSession:  session,
 		HeartbeatSequence: sequence,
 	}
-	for _, peerGroup := range m.peerGroups {
-		if peerGroup.heartbeatSession != 0 && peerGroup.heartbeatSequence != 0 {
-			pkt.PeerHeartbeatSession = peerGroup.heartbeatSession
-			pkt.PeerHeartbeatSequence = peerGroup.heartbeatSequence
-			break
-		}
+	// #14163: echo the most recent peer heartbeat FRAME's identity, held
+	// at Manager level. Ranging peerGroups and taking the first nonzero
+	// entry selected from mixed snapshots after a transfer restore put
+	// an older PeerGroupState back for one RG: the transmit could echo
+	// that stale sequence and the peer's strict > check would not renew
+	// its lease for the frame.
+	if m.latestPeerHeartbeatSession != 0 && m.latestPeerHeartbeatSequence != 0 {
+		pkt.PeerHeartbeatSession = m.latestPeerHeartbeatSession
+		pkt.PeerHeartbeatSequence = m.latestPeerHeartbeatSequence
 	}
 	for _, rg := range m.groups {
 		// A kernel-upgrade hold parks this node SECONDARY unconditionally
@@ -721,6 +724,17 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	}
 	echoSupported := m.peerHAProtocolVersion >= heartbeatEchoProtocolVersion &&
 		pkt.HeartbeatSession != 0 && pkt.HeartbeatSequence != 0
+	// #14163: the echo source is the last received frame, stamped here
+	// under m.mu regardless of which RGs the frame carries (including
+	// none). A frame without an echo-capable identity clears it, so a
+	// later buildHeartbeat never echoes a superseded incarnation.
+	if echoSupported {
+		m.latestPeerHeartbeatSession = pkt.HeartbeatSession
+		m.latestPeerHeartbeatSequence = pkt.HeartbeatSequence
+	} else {
+		m.latestPeerHeartbeatSession = 0
+		m.latestPeerHeartbeatSequence = 0
+	}
 	localSession, localSequence := uint64(0), uint64(0)
 	if echoSupported {
 		localSession = m.LocalProcessToken()
@@ -861,6 +875,10 @@ func (m *Manager) handlePeerTimeout() {
 
 	m.peerAlive = false
 	m.peerGroups = make(map[int]PeerGroupState)
+	// #14163: a timed-out peer's identity must no longer be echoed; the
+	// old first-nonzero scan got this for free from the empty map.
+	m.latestPeerHeartbeatSession = 0
+	m.latestPeerHeartbeatSequence = 0
 	m.peerMonitors = nil
 	m.peerSoftwareVersion = ""
 	m.peerHAProtocolVersion = 0

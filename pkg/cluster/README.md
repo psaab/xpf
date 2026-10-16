@@ -456,6 +456,14 @@ bounded initial lease; absence of this optional trailer is not a version error.
 The extension is gated by the advertised HA protocol version and does not bump
 that version: its optional encoding is backward-compatible, and the lease
 fallback preserves election behavior with older peers.
+The echoed identity is the last received frame's, held at Manager level
+(`latestPeerHeartbeatSession/Sequence`, stamped in `handlePeerHeartbeat`
+and cleared on peer timeout), never selected from `peerGroups` (#14163).
+A transfer restore can put an older `PeerGroupState` back for one RG
+while the others carry the newest frame; picking the first nonzero
+per-RG entry from that mixed map echoed a stale sequence the peer's
+strict freshness check refused, so its lease went unrenewed for that
+frame. Cells: `heartbeat_echo_mixed_snapshot_14163_test.go`.
 
 ### A heartbeat RESTART is not a cold boot (#9722)
 
