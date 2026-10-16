@@ -217,7 +217,7 @@ func unrepresentableFromLeaves(term *config.FirewallFilterTerm) []string {
 	leaves = append(leaves, term.ValuelessFrom...)
 	return leaves
 }
-func lo0HasUnresolvedPrefixListExcept(
+func lo0HasUnresolvedPrefixListRef(
 	term *config.FirewallFilterTerm,
 	prefixLists map[string]*config.PrefixList,
 ) bool {
@@ -225,27 +225,28 @@ func lo0HasUnresolvedPrefixListExcept(
 		return false
 	}
 	for _, ref := range term.SourcePrefixLists {
-		if ref.Except && prefixLists[ref.Name] == nil {
+		if prefixLists[ref.Name] == nil {
 			return true
 		}
 	}
 	for _, ref := range term.DestPrefixLists {
-		if ref.Except && prefixLists[ref.Name] == nil {
+		if prefixLists[ref.Name] == nil {
 			return true
 		}
 	}
 	return false
 }
 
-// nftRefuseUnrepresentableFrom is the #9875/#11451/#11896 refusal rule,
-// CONSTANT by design: no term-controlled text is interpolated into it.
+// nftRefuseUnrepresentableFrom is the #9875/#11451/#11896/#14132 refusal
+// rule, CONSTANT by design: no term-controlled text is interpolated into it.
 // UnknownFrom holds raw node names and the lexer permits embedded quotes, so
 // a refusal that quoted leaf names would make rejection isolation depend on
 // diagnostic contents — a crafted name could break out of the comment.
-// Conflicting terminal actions and unresolved except prefix-lists also use this
-// whole-plan refusal rather than installing a partial or widened term. The
-// nft-invalid bareword rejects the atomic load and prior generation is retained;
-// offending leaves/actions are reported via slog at the emit site instead.
+// Conflicting terminal actions and unresolved prefix-lists (except #11451,
+// positive #14132) also use this whole-plan refusal rather than installing a
+// partial or narrowed term. The nft-invalid bareword rejects the atomic load
+// and prior generation is retained; offending leaves/actions are reported via
+// slog at the emit site instead.
 const nftRefuseUnrepresentableFrom = `comment "unrepresentable from" __xpf_refuse_unrepresentable_from__`
 
 // nftRefuseIPv4Lo0Fragment is emitted when an IPv4 lo0 filter requests
@@ -267,8 +268,8 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 		return []string{nftRefuseIPv4Lo0Fragment}
 	}
 
-	if lo0HasUnresolvedPrefixListExcept(term, prefixLists) {
-		slog.Warn("lo0 kernel nftables mirror: refusing load over unresolved except prefix-list",
+	if lo0HasUnresolvedPrefixListRef(term, prefixLists) {
+		slog.Warn("lo0 kernel nftables mirror: refusing load over unresolved prefix-list",
 			"term", term.Name)
 		return []string{nftRefuseUnrepresentableFrom}
 	}

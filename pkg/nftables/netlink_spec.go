@@ -178,18 +178,20 @@ type Lo0FilterTerm struct {
 	// tcp-flags direction: rendering the term without its narrowing is the
 	// fail-open this issue is about.
 	FlexMatchUnrepresentable bool
-	// FromUnrepresentable marks a term whose `from` block carried a match leaf
-	// the dataplane does NOT enforce (config.FirewallFilterTerm.UnknownFrom,
-	// #3307 — ttl / source-mac-address / ip-options / fragment-offset /
-	// hop-limit / ...) or a value-bearing leaf written with NO operand
-	// (config.FirewallFilterTerm.ValuelessFrom, #8480 — `from protocol;`).
-	// #11896 reuses the same refusal channel for conflicting terminal actions:
-	// applying their conservative internal discard would install a fresh drop.
-	// The marker shares the userspace wire field
-	// (dpuserspace.FirewallTermSnapshot.FromUnrepresentable) so both mirrors
-	// refuse the same candidate. Strict commit rejects these shapes; tolerant
-	// load / peer-sync warns (#1960) and refuses the netlink plan CLOSED, retaining
-	// the existing ruleset.
+	// FromUnrepresentable marks a term whose `from` block carried a match
+	// leaf the dataplane does NOT enforce
+	// (config.FirewallFilterTerm.UnknownFrom, #3307 — ttl /
+	// source-mac-address / ip-options / fragment-offset / hop-limit / ...)
+	// or a value-bearing leaf written with NO operand
+	// (config.FirewallFilterTerm.ValuelessFrom, #8480 — `from protocol;`),
+	// or ANY unresolved prefix-list reference — except (#11451) or
+	// positive (#14132). #11896 reuses the same refusal channel for
+	// conflicting terminal actions: applying their conservative internal
+	// discard would install a fresh drop. The marker shares the userspace
+	// wire field (dpuserspace.FirewallTermSnapshot.FromUnrepresentable) so
+	// both mirrors refuse the same candidate. Strict commit rejects these
+	// shapes; tolerant load / peer-sync warns (#1960) and refuses the
+	// netlink plan CLOSED, retaining the existing ruleset.
 	FromUnrepresentable bool
 
 	Log   bool
