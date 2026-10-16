@@ -858,39 +858,18 @@ impl StaticNatTable {
     /// An empty `from_zone` ("any zone") matches every egress zone, preserving
     /// the wildcard rule behaviour.
     ///
-    /// Returns just the decision; the cold path uses
-    /// [`match_snat_with_counter`] (#2218) for the per-rule hit counter.
+    /// Returns just the decision; callers that carry a packet tuple use
+    /// [`match_snat_with_counter_scoped`] (#2218) for its per-rule hit counter.
     ///
     /// #2491: the test-only port-less wrapper looks up the whole-address
     /// entry (port `0` exercises only the `None` fallback).
     #[cfg(test)]
     pub(crate) fn match_snat(&self, src_ip: IpAddr, egress_zone: &str) -> Option<NatDecision> {
-        self.match_snat_with_counter(src_ip, 0, egress_zone)
+        self.match_snat_with_counter_scoped(src_ip, 0, None, None, egress_zone, "", "")
             .map(|(decision, _)| decision)
     }
 
-    /// #2218: as [`match_snat`] but also returns the matched entry's
-    /// per-rule hit counter (if any).
-    ///
-    /// #2491: `src_port` is the return packet's source port — for a
-    /// port-mapped flow this is the internal `mapped_port`. A port-specific
-    /// entry keyed on `Some(src_port)` is tried first; on a miss the
-    /// whole-address entry keyed on `None` is the fallback. When the matched
-    /// entry carries a `mapped_port`, the decision un-translates the source
-    /// port back to the external `match_dst_port`.
-    pub(crate) fn match_snat_with_counter(
-        &self,
-        src_ip: IpAddr,
-        src_port: u16,
-        egress_zone: &str,
-    ) -> Option<(NatDecision, Option<Arc<NatRuleCounter>>)> {
-        // Unscoped wrapper: empty interface/RI scope = wildcard (pre-#3096);
-        // `None` peer = skip the #3435 source gate (test / zone-only path).
-        self.match_snat_with_counter_scoped(src_ip, src_port, None, egress_zone, "", "")
-    }
-
-    /// #3096: as [`match_snat_with_counter`] but additionally gates each
-    /// candidate on the static-NAT rule's `from interface` /
+    /// #3096: gates each candidate on the static-NAT rule's `from interface` /
     /// `from routing-instance` scope against the packet's EGRESS interface
     /// config-name and routing-instance — the SNAT-direction analog of the
     /// DNAT ingress gate (the rule's `from` external context is matched on
@@ -907,6 +886,7 @@ impl StaticNatTable {
         &self,
         src_ip: IpAddr,
         src_port: u16,
+        protocol: Option<u8>,
         dst_ip: Option<IpAddr>,
         egress_zone: &str,
         egress_ifname: &str,
@@ -930,8 +910,11 @@ impl StaticNatTable {
         };
         // #3605/#11351: the reverse mapping uses the same static-NAT context
         // hierarchy as DNAT; port-specific still precedes whole-address.
-        if let Some(entry) = pick_scoped(self.snat.get(&(src_ip, Some(src_port))), &zone_ok)
-            .or_else(|| pick_scoped(self.snat.get(&(src_ip, None)), &zone_ok))
+        let port_ok = protocol.is_some_and(crate::ip_proto::has_l4_ports);
+        if let Some(entry) = (port_ok
+            .then(|| pick_scoped(self.snat.get(&(src_ip, Some(src_port))), &zone_ok))
+            .flatten())
+        .or_else(|| pick_scoped(self.snat.get(&(src_ip, None)), &zone_ok))
         {
             // For a port-mapped rule, un-translate the source port back to the
             // external (pre-translation) port; for a whole-address rule this is
