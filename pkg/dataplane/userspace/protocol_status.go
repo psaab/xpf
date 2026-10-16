@@ -780,16 +780,13 @@ type ProcessStatus struct {
 	WgDecapEcnIllegalDropsTotal uint64 `json:"wg_decap_ecn_illegal_drops_total,omitempty"`
 	// #2331: native-GRE encap frames dropped because the fully built outer
 	// datagram (outer IP + GRE[+key] + inner) exceeded the resolved
-	// transport/egress MTU while the IPv4 outer carries DF=1 (the only
-	// outer the native encap builder emits). A DF-set oversized outer
-	// cannot be fragmented downstream and would silently blackhole every
-	// inner flow with no PMTUD signal — so the builder refuses to emit it.
-	// Surfaced as xpf_userspace_gre_encap_df_oversize_drops_total. PMTUD /
+	// transport/egress MTU. GRE copies inner IPv4 DF by default or clears it
+	// when configured; this counts the local-MTU backstop independent of
+	// outer DF. Surfaced as xpf_userspace_gre_encap_df_oversize_drops_total.
 	// PTB signalling for this path landed in #2330 (TX dispatcher): when a
 	// PTB is owed the pre-build decision emits it and skips the encap, so
-	// this counts only the residual where none is owed -- a non-DF IPv4
-	// inner (#8942: the old "deferred to #2330" read as an open gap).
-	// Omitempty for wire compat with older helpers (defaults to 0).
+	// the counter covers the residual oversized outer rejected by the
+	// builder. Omitempty for wire compat with older helpers (defaults to 0).
 	GreEncapDfOversizeDropsTotal uint64 `json:"gre_encap_df_oversize_drops_total,omitempty"`
 	// #2782: native-GRE decap frames dropped because the GRE
 	// Checksum-Present (C) bit was set but the GRE checksum failed to

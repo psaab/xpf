@@ -38,20 +38,17 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 		"Native-GRE encap frames dropped because the fully built "+
 			"outer datagram (outer IP + GRE header, including the "+
 			"optional 4-byte key, + inner packet) exceeded the "+
-			"resolved transport/egress MTU while the IPv4 outer "+
-			"carries DF=1 (the only outer the native encap builder "+
-			"emits; the IPv6 outer cannot be fragmented in-path "+
-			"either). A DF-set oversized outer cannot be fragmented "+
-			"downstream and would silently blackhole every inner flow "+
-			"over the tunnel with no PMTUD signal back to the inner "+
-			"source, so the builder refuses to emit it. A nonzero "+
+			"resolved local transport/egress MTU. GRE copies inner IPv4 "+
+			"DF by default or clears it with clear-dont-fragment-bit; "+
+			"IPv6 outer packets cannot be fragmented in-path either. The "+
+			"local builder refuses the oversized datagram. A nonzero "+
 			"value flags inner flows whose encapped size exceeds the "+
 			"tunnel path MTU (typically a missing or too-high inner "+
 			"MSS clamp, or a non-TCP inner with no segmentation "+
 			"lever). PTB signalling for this path is implemented in "+
-			"the TX dispatcher (#2330) and pre-empts the encap when a "+
-			"PTB is owed, so this counter is the residual case where "+
-			"none is owed: a non-DF IPv4 inner (#2331).",
+			"the TX dispatcher (#2330) and pre-empts encap when a PTB "+
+			"is owed, so this counter reports residual local-MTU "+
+			"oversize drops.",
 		nil, nil,
 	)
 	c.userspaceGreDecapChecksumInvalidDrops = prometheus.NewDesc(

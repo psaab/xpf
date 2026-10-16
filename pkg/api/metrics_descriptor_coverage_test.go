@@ -658,7 +658,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_shared_session_poison_recoveries_total",             // #2402/#6641 shared-session poison recoveries
 		"xpf_userspace_gre_decap_ecn_illegal_drops_total",                  // #2315 RFC 6040 4.2 decap illegal-combo drops
 		"xpf_userspace_wg_decap_ecn_illegal_drops_total",                   // #2317 WG RFC 6040 4.2 decap illegal-combo drops
-		"xpf_userspace_gre_encap_df_oversize_drops_total",                  // #2331 GRE encap DF-set oversized-outer drops
+		"xpf_userspace_gre_encap_df_oversize_drops_total",                  // #2331 GRE encap local-MTU oversized datagram drops
 		"xpf_userspace_gre_decap_checksum_invalid_drops_total",             // #2782 GRE decap checksum-present invalid drops
 		"xpf_userspace_gre_decap_unsupported_version_refusals_total",       // #6842 GRE decap refused: non-zero GRE version (PPTP) at a configured endpoint
 		"xpf_userspace_gre_decap_pt_nibble_mismatch_refusals_total",        // #10865 GRE decap refused: configured endpoint PT/nibble mismatch

@@ -751,10 +751,9 @@ type xpfCollector struct {
 	// inner) — the WG sibling of the GRE counter above.
 	userspaceWgDecapEcnIllegalDrops *prometheus.Desc
 	// #2331: native-GRE encap frames dropped because the fully built outer
-	// datagram exceeded the resolved transport/egress MTU while the IPv4
-	// outer carries DF=1 (the only outer the native builder emits). A
-	// DF-set oversized outer cannot be fragmented downstream and would
-	// silently blackhole every inner flow with no PMTUD signal.
+	// datagram exceeded the resolved transport/egress MTU. GRE copies inner
+	// IPv4 DF by default or clears it when configured; the counter reports
+	// the local-MTU backstop independently of outer DF behavior.
 	userspaceGreEncapDfOversizeDrops *prometheus.Desc
 	// #2782: native-GRE decap frames dropped because the Checksum-Present
 	// (C) bit was set but the GRE checksum failed to verify (or the header
