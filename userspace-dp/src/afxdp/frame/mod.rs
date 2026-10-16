@@ -539,16 +539,15 @@ pub(super) fn build_nat64_l3_packet_for_slow_path(
     }
     let l3_offset = frame_l3_offset(frame)?;
     let packet = frame.get(l3_offset..)?;
-    // #14114 supersedes the #14115 fail-closed guard for this builder: a
+    // #14114 supersedes the #14115 fail-closed drop for this builder: a
     // non-first fragment with a recorded NAT64 decision is translated
-    // L3-only below and returns before the port rewrite, so its opaque
-    // payload bytes can never be read as L4. Fail closed if either arm
-    // declines to classify it as non-first.
-    if !matches!(meta.addr_family as i32, libc::AF_INET6 | libc::AF_INET)
-        && is_non_first_fragment(packet, meta.addr_family)
-    {
-        return None;
-    }
+    // L3-only by the AF_INET6/AF_INET arms below and returns before the
+    // port rewrite, so its opaque payload bytes can never be read as L4.
+    // Any other addr_family fails closed via the match's
+    // `_ => return None` arm (#14305). There is deliberately no separate
+    // non-first guard here: `is_non_first_fragment` returns `false` for
+    // non-IP families, so a guard keyed on both conditions could never
+    // fire.
     let (translated_family, translated_protocol, mut out, non_first) = match meta.addr_family as i32
     {
         libc::AF_INET6 => {
