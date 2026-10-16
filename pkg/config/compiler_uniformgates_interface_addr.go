@@ -42,5 +42,17 @@ func runUniformGatesInterfaceAddr(_ *ConfigTree, cfg *Config, opts compileOpts) 
 			return err
 		}
 	}
+
+	// RFC 8200 §5 minimum IPv6 link MTU (#13936). The compiled effective
+	// unit MTU is the value applied to the link; tolerant loads warn so
+	// persisted configurations remain bootable (#1960).
+	if err := validateIPv6UnitMTUStrict(cfg); err != nil {
+		if opts.lenientIPv6UnitMTU13936 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("IPv6 unit MTU (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	return nil
 }
