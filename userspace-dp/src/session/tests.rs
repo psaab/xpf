@@ -2178,6 +2178,316 @@ fn closing_flag_is_sticky_on_ha_promote() {
         "an HA-promoted FIN'd session must keep the 30s close window (#3489)"
     );
 }
+/// #13678 (D12-03): `update_session` must run the same TCP handshake
+/// transitions as `lookup_with_origin_inner`: a reverse SYN-ACK on an
+/// OPENING entry opens the pending gap (300s must NOT be granted before the
+/// completing ACK), and the completing forward ACK clears both handshake
+/// markers so the entry leaves the opening window.
+#[test]
+fn update_session_mirrors_handshake_transitions_13678() {
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    // Bare-SYN install: OPENING (not established, not pending).
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::SyncImport,
+        now,
+        PROTO_TCP,
+        TCP_SYN,
+    ));
+    let _ = table.drain_deltas(8);
+    let before = table.entry_by_key(&key).expect("installed entry");
+    assert!(!before.established && !before.handshake_pending);
+
+    // Reverse SYN-ACK refresh (the promote/refresh production reach):
+    // lookup.rs sets established+handshake_pending; update_session must too.
+    let mut reverse_meta = metadata();
+    reverse_meta.is_reverse = true;
+    assert!(table.update_session(
+        SessionUpdate {
+            key: &key,
+            decision: decision(),
+            metadata: reverse_meta,
+            origin: SessionOrigin::SharedPromote,
+            now_ns: now + 1_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_SYN | TCP_ACK,
+        },
+        false
+    ));
+    let after_synack = table.entry_by_key(&key).expect("entry after SYN-ACK");
+    assert!(after_synack.established, "reverse SYN-ACK must promote");
+    assert!(
+        after_synack.handshake_pending,
+        "#13678: reverse SYN-ACK via update_session must open the handshake gap"
+    );
+    assert_eq!(
+        after_synack.expires_after_ns, table.timeouts.tcp_opening_ns,
+        "#13678: a pending handshake must stay on the opening window, not 300s"
+    );
+
+    // Completing forward ACK: clears pending + syn_ack_first, 300s window.
+    assert!(table.update_session(
+        SessionUpdate {
+            key: &key,
+            decision: decision(),
+            metadata: metadata(),
+            origin: SessionOrigin::ForwardFlow,
+            now_ns: now + 2_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_ACK,
+        },
+        false
+    ));
+    let after_ack = table.entry_by_key(&key).expect("entry after ACK");
+    assert!(!after_ack.handshake_pending, "#13678: completing ACK must clear pending");
+    assert!(!after_ack.syn_ack_first, "#13678: completing ACK must clear syn_ack_first");
+    assert!(!table.pressure_shed_openings.contains_key(&key));
+    assert_eq!(
+        after_ack.expires_after_ns, table.timeouts.tcp_established_ns,
+        "#13678: a completed handshake earns the established window"
+    );
+}
+
+/// #13678 (D12-03): a SYN-ACK-first pending entry promoted via
+/// `promote_synced_with_origin` with completing reverse-ACK evidence must not
+/// stay trapped pending: both markers clear and the established window opens.
+#[test]
+fn promote_synced_clears_syn_ack_first_pending_13678() {
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        decision(),
+        metadata(),
+        SessionOrigin::SyncImport,
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let _ = table.drain_deltas(8);
+    let seeded = table.entry_by_key(&key).expect("installed entry");
+    assert!(
+        seeded.handshake_pending && seeded.syn_ack_first,
+        "premise: SYN-ACK-first install seeds the asymmetric pending state"
+    );
+
+    // Promote with the completing reverse ACK (promote_synced_with_origin is
+    // update_session(req, false); the req carries the packet's flags).
+    let mut reverse_meta = metadata();
+    reverse_meta.is_reverse = true;
+    assert!(table.promote_synced_with_origin(SessionUpdate {
+        key: &key,
+        decision: decision(),
+        metadata: reverse_meta,
+        origin: SessionOrigin::SharedPromote,
+        now_ns: now + 1_000_000,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_ACK,
+    }));
+    let after = table.entry_by_key(&key).expect("entry after promote");
+    assert!(!after.handshake_pending, "#13678: promote must clear pending on completion");
+    assert!(!after.syn_ack_first, "#13678: promote must clear syn_ack_first on completion");
+    assert_eq!(table.handshake_state_wire_for(&key), 4);
+    assert_eq!(
+        after.expires_after_ns, table.timeouts.tcp_established_ns,
+        "#13678: a completed promoted handshake earns the established window"
+    );
+}
+
+/// #13678: a reverse ACK can complete a SYN-ACK-first handshake while updating
+/// the reverse half; remove the forward key from SYN-pressure shed membership.
+#[test]
+fn reverse_ack_completion_removes_pressure_shed_entry_13678() {
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    assert!(table.pressure_shed_openings.contains_key(&key));
+
+    let mut reverse_meta = metadata();
+    reverse_meta.is_reverse = true;
+    assert!(table.update_session(
+        SessionUpdate {
+            key: &key,
+            decision: decision(),
+            metadata: reverse_meta,
+            origin: SessionOrigin::ForwardFlow,
+            now_ns: now + 1_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_ACK,
+        },
+        false
+    ));
+    let after = table.entry_by_key(&key).expect("completed session");
+    assert!(after.established && !after.handshake_pending && !after.syn_ack_first);
+    assert!(!table.pressure_shed_openings.contains_key(&key));
+}
+
+/// #13678 (D12-03, negative guard): a retransmitted SYN-ACK in the installing
+/// direction must NOT complete a SYN-ACK-first handshake via update_session —
+/// only the reverse non-SYN ACK may (mirrors lookup.rs).
+#[test]
+fn update_session_retransmitted_synack_keeps_syn_ack_first_13678() {
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let _ = table.drain_deltas(8);
+    assert!(table.update_session(
+        SessionUpdate {
+            key: &key,
+            decision: decision(),
+            metadata: metadata(),
+            origin: SessionOrigin::ForwardFlow,
+            now_ns: now + 1_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_SYN | TCP_ACK,
+        },
+        false
+    ));
+    let after = table.entry_by_key(&key).expect("entry after retransmit");
+    assert!(after.handshake_pending && after.syn_ack_first);
+    assert_eq!(after.expires_after_ns, table.timeouts.tcp_opening_ns);
+}
+
+/// #13677 parity: a stale reverse SYN-ACK must not re-open the handshake gate
+/// once an update_session refresh has already established the session.
+#[test]
+fn update_session_reverse_synack_does_not_repend_established_13677() {
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    assert!(table.install_with_protocol(
+        key.clone(),
+        decision(),
+        metadata(),
+        now,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    assert!(table.entry_by_key(&key).expect("established entry").established);
+
+    let mut reverse_meta = metadata();
+    reverse_meta.is_reverse = true;
+    assert!(table.update_session(
+        SessionUpdate {
+            key: &key,
+            decision: decision(),
+            metadata: reverse_meta,
+            origin: SessionOrigin::ForwardFlow,
+            now_ns: now + 1_000_000,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_SYN | TCP_ACK,
+        },
+        false
+    ));
+    let after = table.entry_by_key(&key).expect("entry after stale SYN-ACK");
+    assert!(after.established && !after.handshake_pending);
+    assert_eq!(after.expires_after_ns, table.timeouts.tcp_established_ns);
+}
+/// #13676 parity: update_session must not complete either handshake phase on
+/// invalid TCP flags; only an ACK-bearing non-SYN, non-closing segment completes.
+#[test]
+fn update_session_completion_requires_valid_ack_13676() {
+    for (name, bad_flags) in [
+        ("retransmitted SYN", TCP_SYN),
+        ("SYN+ACK", TCP_SYN | TCP_ACK),
+        ("RST", TCP_RST),
+        ("FIN|ACK", TCP_FIN | TCP_ACK),
+    ] {
+        let mut table = SessionTable::new();
+        let key = key_v4();
+        let now = 1_000_000_000u64;
+        assert!(table.install_with_protocol(
+            key.clone(),
+            decision(),
+            metadata(),
+            now,
+            PROTO_TCP,
+            TCP_SYN,
+        ));
+        let mut reverse_meta = metadata();
+        reverse_meta.is_reverse = true;
+        assert!(table.update_session(
+            SessionUpdate {
+                key: &key,
+                decision: decision(),
+                metadata: reverse_meta,
+                origin: SessionOrigin::ForwardFlow,
+                now_ns: now + 1_000_000,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_SYN | TCP_ACK,
+            },
+            false
+        ));
+        let _ = table.update_session(
+            SessionUpdate {
+                key: &key,
+                decision: decision(),
+                metadata: metadata(),
+                origin: SessionOrigin::ForwardFlow,
+                now_ns: now + 2_000_000,
+                protocol: PROTO_TCP,
+                tcp_flags: bad_flags,
+            },
+            false
+        );
+        assert!(
+            table.entry_by_key(&key).expect("pending session").handshake_pending,
+            "#13676: {name} ({bad_flags:#x}) completed the normal handshake"
+        );
+    }
+
+    for bad_flags in [TCP_RST | TCP_ACK, TCP_FIN | TCP_ACK] {
+        let mut table = SessionTable::new();
+        let key = key_v4();
+        let now = 1_000_000_000u64;
+        assert!(table.install_with_protocol(
+            key.clone(),
+            decision(),
+            metadata(),
+            now,
+            PROTO_TCP,
+            TCP_SYN | TCP_ACK,
+        ));
+        let mut reverse_meta = metadata();
+        reverse_meta.is_reverse = true;
+        assert!(table.update_session(
+            SessionUpdate {
+                key: &key,
+                decision: decision(),
+                metadata: reverse_meta,
+                origin: SessionOrigin::ForwardFlow,
+                now_ns: now + 1_000_000,
+                protocol: PROTO_TCP,
+                tcp_flags: bad_flags,
+            },
+            false
+        ));
+        let entry = table.entry_by_key(&key).expect("SYN-ACK-first session");
+        assert!(!entry.established && entry.handshake_pending && entry.syn_ack_first);
+    }
+}
+
 
 /// #3152 FAIL-ON-REVERT: a TCP session created by a bare SYN (SYN set, ACK
 /// clear) must start in the OPENING (half-open) state and take the short
@@ -4857,13 +5167,41 @@ fn reference_update_session(
     // plain `=`, the in-place-vs-reference parity sweep would stay blind to the
     // #3489 bug (both sides would agree on the wrong non-sticky behavior).
     entry.closing |= matches!(protocol, PROTO_TCP) && (tcp_flags & (TCP_FIN | TCP_RST)) != 0;
-    // #3152/#4109/#10889: mirror update_session's TCP SYN-ACK and non-TCP
-    // reverse-packet promotion gates for the in-place/reference parity sweep.
+    // #3152/#4109/#6752/#10891/#13678: mirror update_session's complete TCP
+    // handshake transitions, including the SYN-ACK pending gap and the
+    // asymmetric reverse-ACK completion gate.
+    let reverse_syn_ack = matches!(protocol, PROTO_TCP)
+        && is_syn_ack(tcp_flags)
+        && metadata.is_reverse
+        && (!entry.established || entry.handshake_pending);
+    let handshake_completed = if entry.syn_ack_first {
+        matches!(protocol, PROTO_TCP)
+            && entry.handshake_pending
+            && metadata.is_reverse
+            && has_ack(tcp_flags)
+            && !has_syn(tcp_flags)
+            && !is_closing(tcp_flags)
+    } else {
+        matches!(protocol, PROTO_TCP)
+            && entry.handshake_pending
+            && !metadata.is_reverse
+            && has_ack(tcp_flags)
+            && !has_syn(tcp_flags)
+            && !is_closing(tcp_flags)
+    };
     entry.established |=
-        (matches!(protocol, PROTO_TCP) && is_syn_ack(tcp_flags) && metadata.is_reverse)
+        reverse_syn_ack
             || (!matches!(protocol, PROTO_TCP)
                 && metadata.is_reverse
                 && metadata.inactivity_timeout_ns.is_some());
+    if reverse_syn_ack && !entry.syn_ack_first {
+        entry.handshake_pending = true;
+    }
+    if handshake_completed {
+        entry.established = true;
+        entry.handshake_pending = false;
+        entry.syn_ack_first = false;
+    }
     entry.expires_after_ns = if entry.closing {
         if entry.reset {
             TCP_RST_TIMEOUT_NS
