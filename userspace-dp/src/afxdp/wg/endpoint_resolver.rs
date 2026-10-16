@@ -224,9 +224,10 @@ impl WgEndpointResolver {
 impl Drop for WgEndpointResolver {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+        // `to_socket_addrs` cannot be cancelled. Detach the resolver thread
+        // rather than making tunnel teardown wait for an in-flight DNS timeout;
+        // it owns an Arc and stops scheduling work once this flag is set.
+        drop(self.join.take());
     }
 }
 
@@ -329,16 +330,23 @@ where
     if targets.len() < 2 {
         let mut held = 0;
         for (pubkey, host_port) in targets {
-            if apply_resolution(shared, pubkey, host_port, socket_is_v6, lookup(host_port)) {
+            if shared.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let outcome = lookup(host_port);
+            if shared.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if apply_resolution(shared, pubkey, host_port, socket_is_v6, outcome) {
                 held += 1;
             }
         }
         return held;
     }
     // Bound blocking calls and per-pass worker creation even if a tunnel has
-    // many peers. Workers claim the next target as soon as they finish, so a
-    // slow lookup does not hold up later peers merely because they share a
-    // batch. State application below remains single-threaded and ordered.
+    // many peers. Workers claim the next target as they finish; the resolver
+    // applies each result immediately, so a slow peer neither blocks later
+    // lookups nor delays adoption of a completed answer.
     const MAX_CONCURRENT_LOOKUPS: usize = 8;
     let lookup = &lookup;
     let next_index = AtomicUsize::new(0);
@@ -349,48 +357,47 @@ where
         let mut handles = Vec::with_capacity(workers);
         for _ in 0..workers {
             let send = send.clone();
-            handles.push(scope.spawn(move || loop {
-                let index = next_index.fetch_add(1, Ordering::Relaxed);
-                let Some((_, host_port)) = targets.get(index) else {
-                    break;
-                };
-                let outcome =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lookup(host_port)))
-                        .unwrap_or_else(|_| Err(std::io::Error::other("endpoint lookup panicked")));
-                if send.send((index, outcome)).is_err() {
-                    break;
+            handles.push(scope.spawn(move || {
+                loop {
+                    if shared.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let index = next_index.fetch_add(1, Ordering::Relaxed);
+                    let Some((_, host_port)) = targets.get(index) else {
+                        break;
+                    };
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        lookup(host_port)
+                    }))
+                    .unwrap_or_else(|_| Err(std::io::Error::other("endpoint lookup panicked")));
+                    if shared.stop.load(Ordering::Relaxed) || send.send((index, outcome)).is_err() {
+                        break;
+                    }
                 }
             }));
         }
         drop(send);
 
-        // Receive into indexed slots, then fold in target order so the
-        // observable counters and last-error value retain their old ordering.
-        let mut outcomes: Vec<Option<std::io::Result<Vec<SocketAddr>>>> =
-            (0..targets.len()).map(|_| None).collect();
+        let mut held = 0;
         for _ in 0..targets.len() {
-            let (index, outcome) = receive
-                .recv()
-                .expect("endpoint lookup workers stopped before completing the pass");
-            outcomes[index] = Some(outcome);
+            if shared.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let Ok((index, outcome)) = receive.recv() else {
+                break;
+            };
+            if shared.stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let (pubkey, host_port) = &targets[index];
+            if apply_resolution(shared, pubkey, host_port, socket_is_v6, outcome) {
+                held += 1;
+            }
         }
         for handle in handles {
             handle
                 .join()
                 .expect("endpoint lookup worker panicked outside the lookup");
-        }
-
-        let mut held = 0;
-        for ((pubkey, host_port), outcome) in targets.iter().zip(outcomes) {
-            if apply_resolution(
-                shared,
-                pubkey,
-                host_port,
-                socket_is_v6,
-                outcome.expect("each endpoint lookup must return one outcome"),
-            ) {
-                held += 1;
-            }
         }
         held
     })
