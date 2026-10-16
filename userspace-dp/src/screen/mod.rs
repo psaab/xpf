@@ -276,6 +276,7 @@ use scan::{IpSweepTracker, PortScanTracker};
 use syn_rate::SynRateSketch;
 use syncookie::SYN_COOKIE_ACTIVE_ACK_VALIDATION_RATE_LIMIT_PER_SEC;
 use syncookie::SYN_COOKIE_STANDBY_ACK_VALIDATION_RATE_LIMIT_PER_SEC;
+use syncookie::SYN_COOKIE_FAILED_ATTEMPT_RATE_LIMIT_PER_SEC;
 #[cfg(not(test))]
 use syncookie::SynCookieValidatedCache;
 use zone::{SynFloodGate, ZoneScreenState};
@@ -1506,6 +1507,22 @@ impl ScreenState {
         {
             return SynCookieAckVerdict::Invalid;
         }
+        // #13952: bound candidate MAC checks by client key before SipHash.
+        // The active arm retains its distinct drop verdict; standby remains
+        // fail-open. This shared per-zone sketch survives active/standby
+        // changes and is independent of the post-MAC aggregate diagnostics.
+        let pre_mac_limited = self
+            .zones
+            .get_mut(zone)
+            .is_none_or(|zstate| zstate.syn_cookie_ack_attempt_limited(pkt, now_ns));
+        if pre_mac_limited {
+            return if locally_active {
+                SynCookieAckVerdict::ActiveBudgetExceeded
+            } else {
+                SynCookieAckVerdict::NotApplicable
+            };
+        }
+
         // The cookie MAC binds the full 4-tuple (that is what makes the
         // cookie unforgeable for this connection); the whitelist it seeds is
         // source-scoped (#9419) because the client that comes back does so on
