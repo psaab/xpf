@@ -289,6 +289,7 @@ fn transit_martian_source_gate_drops_preexisting_session_hit_10689() {
             egress_zone_check: 0,
             ingress_ifindex: 24,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 1,
             fabric_ingress: false,
             is_reverse: false,

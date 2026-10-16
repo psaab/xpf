@@ -42,6 +42,7 @@ fn metadata(is_reverse: bool) -> SessionMetadata {
         egress_zone_check: 0,
         ingress_ifindex: if is_reverse { 0 } else { IF_A as u32 },
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         fabric_ingress: false,
         is_reverse,

@@ -53,6 +53,7 @@ fn delta_with_session_id(session_id: u64) -> SessionDelta {
         egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         fabric_ingress: false,
         is_reverse: false,

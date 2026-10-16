@@ -113,6 +113,8 @@ table: Option<&str>,) -> SessionLookup {
         // makes the record worse while leaving the hole open.
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: (forward_match.metadata.ingress_ifindex != 0)
+            .then_some(forward_match.metadata.ingress_vlan_id),
         // Reverse companions are owned by the RG that currently owns the
         // client-side egress resolution, not necessarily the RG that owned the
         // original forward session. This matters during failback when a second

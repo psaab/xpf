@@ -84,6 +84,7 @@ pub(in crate::session) fn metadata() -> SessionMetadata {
         egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         fabric_ingress: false,
         is_reverse: false,
@@ -1093,6 +1094,7 @@ fn metadata_with_app_timeout(ns: u64) -> SessionMetadata {
     SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         inactivity_timeout_ns: Some(ns),
         policy_counter_idx: 0,
         policy_counter: None,
@@ -2866,6 +2868,7 @@ fn metadata_with_zone(zone: u16) -> SessionMetadata {
     SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         ingress_zone: zone,
         ..metadata()
     }
@@ -9148,6 +9151,7 @@ fn metadata_reverse() -> SessionMetadata {
     SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         is_reverse: true,
         ..metadata()
     }

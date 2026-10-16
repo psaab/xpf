@@ -351,6 +351,7 @@ fn established_ri_snat_forward_11061(
         egress_zone_check: 0,
         ingress_ifindex: 24,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         fabric_ingress: false,
         is_reverse: false,
@@ -2350,6 +2351,7 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
         egress_zone_check: 0,
         ingress_ifindex: 21,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         // The session was imported from the peer over the fabric.
         fabric_ingress: true,
@@ -2729,6 +2731,7 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
         egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         // Production writers own a reverse companion by its client-side
         // egress RG: LAN's RG 1, not the peer-owned forward egress RG 2.
         owner_rg_id: 1,
@@ -3183,6 +3186,7 @@ fn unstamped_parent_session_hit_not_redirected_10314() {
         // current packet is another frame on that same parent, but unstamped.
         ingress_ifindex: 21,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         fabric_ingress: false,
         is_reverse: false,
@@ -3491,6 +3495,7 @@ fn flowless_icmp_error_pbr_discard_on_quarantine_counts_11061() {
             egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 0,
             fabric_ingress: false,
             is_reverse: false,
@@ -3992,6 +3997,7 @@ fn fabric_stamped_icmp_error_resolves_tenant_session_13647() {
             egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 0,
             fabric_ingress: false,
             is_reverse: false,
@@ -4141,6 +4147,7 @@ fn fabric_stamped_icmpv6_error_gates_nptv6_on_stamped_zone_13647() {
         egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 0,
         fabric_ingress: false,
         is_reverse: false,

@@ -357,6 +357,7 @@ fn cached_entry() -> FlowCacheEntry {
             // production cannot install on this path.
             ingress_ifindex: PHYS_INGRESS_IFINDEX as u32,
             ingress_vlan_id: INGRESS_VLAN_ID,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 0,
             fabric_ingress: false,
             is_reverse: false,

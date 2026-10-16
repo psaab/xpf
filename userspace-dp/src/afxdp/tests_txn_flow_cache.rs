@@ -2787,6 +2787,7 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
             // revocation on the Stale arm (len 0 instead of 2).
             ingress_ifindex: 24,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 1,
             fabric_ingress: false,
             is_reverse: false,

@@ -757,6 +757,7 @@ fn established_icmp_hit(
         egress_zone_check: 0,
         ingress_ifindex: ingress_ifindex as u32,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: seeded_owner_rg_id.unwrap_or(live_owner_rg_id),
         fabric_ingress: false,
         is_reverse,

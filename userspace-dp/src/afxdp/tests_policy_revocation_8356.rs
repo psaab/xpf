@@ -278,6 +278,7 @@ fn metadata(is_reverse: bool) -> SessionMetadata {
         egress_zone_check: 0,
         ingress_ifindex: LAN_IFINDEX as u32,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 0,
         fabric_ingress: false,
         is_reverse,
@@ -2528,6 +2529,7 @@ fn descriptor_path_stale_dnat_hit_restamps_conntrack_app_id_12191() {
         egress_zone_check: 0,
         ingress_ifindex: WAN_INGRESS_IFINDEX as u32,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 0,
         fabric_ingress: false,
         is_reverse: false,
@@ -2979,6 +2981,7 @@ fn drive_moved_interface_9384(
     let metadata = SessionMetadata {
         ingress_zone: entry_ingress_zone,
         egress_zone: TEST_WAN_ZONE_ID,
+        forward_ingress_vlan_id: None,
         ..metadata(false)
     };
     assert!(
@@ -3086,6 +3089,7 @@ fn a_move_into_a_still_permitted_zone_does_not_revoke_9384() {
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
+        forward_ingress_vlan_id: None,
         ..metadata(false)
     };
     assert!(sessions.install_with_protocol_with_origin(
@@ -3213,6 +3217,7 @@ fn an_arrival_with_no_interface_identity_still_declines_9513() {
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
+        forward_ingress_vlan_id: None,
         ..metadata(false)
     };
     assert!(sessions.install_with_protocol_with_origin(
@@ -3978,6 +3983,7 @@ fn reverse_metadata_for_9604(fwd_ingress_zone: u16, fwd_egress_zone: u16) -> Ses
         egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 0,
         fabric_ingress: false,
         is_reverse: true,

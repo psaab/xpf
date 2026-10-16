@@ -3123,6 +3123,7 @@ mod filter_log_egress_zone_tests {
                 // Untagged, hence vlan id 0.
                 ingress_ifindex: LAN_IFINDEX_6722 as u32,
                 ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
                 egress_zone: 0,
                 ingress_zone_check: 0,
                 egress_zone_check: 0,

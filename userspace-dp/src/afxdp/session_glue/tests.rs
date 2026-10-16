@@ -71,6 +71,7 @@ fn test_metadata() -> SessionMetadata {
         egress_zone_check: 0,
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         fabric_ingress: false,
         is_reverse: false,
@@ -834,6 +835,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             fabric_ingress: false,
             owner_rg_id: 0,
             ..test_metadata()
@@ -1023,6 +1025,7 @@ fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
             metadata: SessionMetadata {
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
                 fabric_ingress: true,
                 ..test_metadata()
             },
@@ -1250,7 +1253,7 @@ fn lookup_session_across_scopes_returns_shared_entry() {
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision: test_decision(),
-        metadata: SessionMetadata { ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -1692,7 +1695,7 @@ fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -1780,6 +1783,7 @@ fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholde
         SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             fabric_ingress: true,
             ..test_metadata()
         },
@@ -1791,7 +1795,7 @@ fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholde
     let shared_entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -2394,6 +2398,7 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
         SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             fabric_ingress: true,
             ..test_metadata()
         },
@@ -2405,7 +2410,7 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
     let shared_entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -2464,6 +2469,7 @@ fn lookup_forward_nat_across_scopes_ignores_fabric_wire_placeholder_without_shar
         SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             fabric_ingress: true,
             ..test_metadata()
         },
@@ -2503,7 +2509,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -3288,7 +3294,7 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
     let entry = SyncedSessionEntry {
         key: key.clone(),
         decision,
-        metadata: SessionMetadata { ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -3367,7 +3373,7 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
     let entry = SyncedSessionEntry {
         key: translated_key.clone(),
         decision,
-        metadata: SessionMetadata { ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -3471,7 +3477,7 @@ fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_
     assert!(sessions.install_with_protocol_with_origin(
         translated_key.clone(),
         decision,
-        SessionMetadata { ..test_metadata() },
+        SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         SessionOrigin::SyncImport,
         1_000_000,
         PROTO_TCP,
@@ -3555,7 +3561,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     let entry = SyncedSessionEntry {
         key: translated_key.clone(),
         decision,
-        metadata: SessionMetadata { ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -3660,7 +3666,7 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
     let entry = SyncedSessionEntry {
         key: translated_key.clone(),
         decision,
-        metadata: SessionMetadata { ..test_metadata() },
+        metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         leak_incarnation: 0,
         origin: SessionOrigin::SyncImport,
         protocol: PROTO_TCP,
@@ -3799,7 +3805,7 @@ fn resolve_flow_session_decision_keeps_local_synced_translated_hit_transient_on_
     assert!(sessions.install_with_protocol_with_origin(
         translated_key.clone(),
         decision,
-        SessionMetadata { ..test_metadata() },
+        SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
         SessionOrigin::SyncImport,
         1_000_000,
         PROTO_TCP,
@@ -3873,7 +3879,7 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
         PROTO_TCP,
         0x10,
     ));
-    let synced_metadata = SessionMetadata { ..test_metadata() };
+    let synced_metadata = SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() };
     let synced_decision = SessionDecision {
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
@@ -3958,7 +3964,7 @@ fn apply_worker_commands_preserves_local_session_for_active_owner_rg() {
         .push_back(WorkerCommand::UpsertSynced(SyncedSessionEntry {
             key: key.clone(),
             decision: synced_decision,
-            metadata: SessionMetadata { ..test_metadata() },
+            metadata: SessionMetadata { forward_ingress_vlan_id: None, ..test_metadata() },
             leak_incarnation: 0,
             origin: SessionOrigin::SyncImport,
             protocol: PROTO_TCP,
@@ -4416,6 +4422,7 @@ fn epoch_based_flow_cache_invalidation_for_demoted_owner_rg() {
     let metadata = SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         ..test_metadata()
     };
@@ -4511,6 +4518,7 @@ fn epoch_based_flow_cache_unrelated_rg_not_invalidated() {
     let metadata = SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         ..test_metadata()
     };
@@ -5177,6 +5185,7 @@ fn apply_worker_commands_exports_owner_rg_forward_sessions_without_teardown() {
     let metadata = SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         ..test_metadata()
     };
@@ -5247,6 +5256,7 @@ fn apply_worker_commands_does_not_export_missing_neighbor_seed_sessions() {
     let metadata = SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id: 1,
         ..test_metadata()
     };
@@ -5370,6 +5380,7 @@ fn demote_shared_owner_rgs_preserves_reverse_entries_and_marks_all_synced() {
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             is_reverse: true,
             ..test_metadata()
         },
@@ -5844,6 +5855,7 @@ fn demoted_shared_local_forward_session_enters_reverse_prewarm_index() {
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             fabric_ingress: true,
             ..test_metadata()
         },
@@ -5903,6 +5915,7 @@ fn prewarm_reverse_synced_sessions_after_demotion_recomputes_split_owner_reverse
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             fabric_ingress: true,
             ..test_metadata()
         },
@@ -6113,6 +6126,7 @@ fn apply_worker_commands_demote_split_reverse_owner_rg_rewrites_to_fabric_redire
             egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 2,
             fabric_ingress: false,
             is_reverse: true,
@@ -6200,6 +6214,7 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_rewrites_to_forward_cand
             egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 2,
             fabric_ingress: false,
             is_reverse: true,
@@ -6292,6 +6307,7 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_updates_stale_indexed_se
             egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 1,
             fabric_ingress: false,
             is_reverse: true,
@@ -6387,6 +6403,7 @@ fn apply_worker_commands_refresh_owner_rg_updates_reverse_session_owned_by_other
             egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 2,
             fabric_ingress: false,
             is_reverse: true,
@@ -6482,6 +6499,7 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_remote_reverse_session_on_pee
             egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 2,
             fabric_ingress: false,
             is_reverse: true,
@@ -6572,6 +6590,7 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_shared_promote_reverse_on_pee
             egress_zone_check: 0,
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 2,
             fabric_ingress: false,
             is_reverse: true,
@@ -7268,6 +7287,7 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
                 egress_zone_check: 0,
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
                 owner_rg_id: 2,
                 fabric_ingress: false,
                 is_reverse: false,
@@ -7310,6 +7330,7 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_adds_reverse_companion() {
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             fabric_ingress: true,
             ..test_metadata()
         },
@@ -7468,6 +7489,7 @@ fn prewarm_reverse_synced_sessions_recomputes_when_reverse_owner_rg_activates() 
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             fabric_ingress: true,
             ..test_metadata()
         },
@@ -7539,6 +7561,7 @@ fn reverse_prewarm_index_tracks_split_reverse_owner_rg_candidate() {
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             fabric_ingress: true,
             ..test_metadata()
         },
@@ -7614,6 +7637,7 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
                 egress_zone_check: 0,
                 ingress_ifindex: 0,
                 ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
                 owner_rg_id: 1,
                 fabric_ingress: false,
                 is_reverse: false,
@@ -7657,6 +7681,7 @@ fn republish_bpf_session_entries_covers_all_sessions_in_owner_rg_index() {
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
             owner_rg_id: 1,
             ..test_metadata()
         },
@@ -9061,6 +9086,7 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
     let wire_key = forward_wire_key(&key, decision.nat);
     let mut sessions = SessionTable::new();
     let placeholder_metadata = SessionMetadata {
+        forward_ingress_vlan_id: None,
         fabric_ingress: true,
         ..test_metadata()
     };
@@ -9068,6 +9094,7 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
     incumbent_decision.resolution.egress_ifindex = incumbent_egress_ifindex;
     incumbent_decision.resolution.tx_ifindex = incumbent_egress_ifindex;
     let incumbent_metadata = SessionMetadata {
+        forward_ingress_vlan_id: None,
         ingress_zone: 91,
         egress_zone: 92,
         policy_id: 777,
@@ -11361,6 +11388,7 @@ fn synced_local_delivery_forward_metadata(owner_rg_id: i32) -> SessionMetadata {
     SessionMetadata {
         ingress_ifindex: 0,
         ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
         owner_rg_id,
         is_reverse: false,
         fabric_ingress: false,
@@ -12514,6 +12542,7 @@ fn handle_upsert_synced_resolves_active_zone_pair_for_snat_reserve_6211() {
         // ingress_zone 1 = "lan", egress_zone 2 = "wan" — the ACTIVE's pair,
         // as carried by SessionSyncRequest's ingress_zone_id/egress_zone_id.
         metadata: SessionMetadata {
+            forward_ingress_vlan_id: None,
             ingress_zone: 1,
             egress_zone: 2,
             is_reverse: false,
@@ -12633,6 +12662,7 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
         key: key.clone(),
         decision,
         metadata: SessionMetadata {
+            forward_ingress_vlan_id: None,
             ingress_zone: 1,
             egress_zone: 2,
             is_reverse: false,
@@ -13262,6 +13292,7 @@ fn f3_entry_6979(nat: NatDecision) -> SyncedSessionEntry {
         key: f3_key_6979(),
         decision,
         metadata: SessionMetadata {
+            forward_ingress_vlan_id: None,
             ingress_zone: 1,
             egress_zone: 2,
             is_reverse: false,
@@ -15501,6 +15532,7 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
     // The forward flow: lan -> wan. `egress_zone` is what the #7169 arrival-zone
     // check compares against.
     let metadata = SessionMetadata {
+        forward_ingress_vlan_id: None,
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
         ..test_metadata()

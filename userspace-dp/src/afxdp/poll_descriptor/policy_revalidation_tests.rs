@@ -70,6 +70,7 @@ fn marker_forward_10038() -> (SessionDecision, SessionMetadata, SessionOrigin) {
             inactivity_timeout_ns: None,
             policy_counter_idx: 0,
             policy_counter: None,
+            forward_ingress_vlan_id: None,
         },
         SessionOrigin::TunOrigin,
     )
@@ -1257,6 +1258,7 @@ fn permitted_stale_hit_restamps_conntrack_app_id_12191() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        forward_ingress_vlan_id: None,
     };
 
     let mut snapshot = crate::afxdp::test_fixtures::policy_deny_snapshot();
@@ -1486,6 +1488,7 @@ fn reverse_stale_hit_restamps_forward_ipv6_conntrack_row_12191() {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        forward_ingress_vlan_id: None,
     };
     let mut reverse_metadata = metadata.clone();
     reverse_metadata.is_reverse = true;
@@ -1647,6 +1650,7 @@ fn app_id_revalidation_metadata(is_reverse: bool) -> SessionMetadata {
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        forward_ingress_vlan_id: None,
     }
 }
 
@@ -2208,6 +2212,7 @@ fn snat_vlan_trunk_case_12861(
         inactivity_timeout_ns: None,
         policy_counter_idx: 0,
         policy_counter: None,
+        forward_ingress_vlan_id: None,
     };
     (forwarding, decision, metadata, key)
 }
@@ -2734,15 +2739,17 @@ fn reverse_snat_hit_13652(
         dst_ip: case.1.dst_ip,
         forward_key: case.1.clone(),
     };
-    let mut observed_metadata = case.5.clone();
-    // Reverse session metadata has no guessed ingress identity; the
-    // production poll path supplies the current frame's observed ifindex.
+    let mut observed_metadata = case.5.clone_without_policy_counter();
+    // The reverse row has no observed ingress identity; simulate a reply
+    // arriving on VLAN 200, distinct from the forward ingress.
     observed_metadata.ingress_ifindex = 12;
-    source_nat_revocation_on_session_hit(
+    source_nat_revocation_on_session_hit_with_ingress(
         forwarding,
         sessions,
         &case.1,
         &observed_metadata,
+        12,
+        200,
         case.4,
         &flow,
         case.6,
@@ -2902,7 +2909,11 @@ fn reverse_snat_case_from_production_13771(
         decision: forward_decision,
         metadata: SessionMetadata {
             ingress_ifindex: 11,
-            ingress_vlan_id: 0,
+            ingress_vlan_id: forwarding
+                .egress
+                .get(&11)
+                .map(|iface| iface.vlan_id)
+                .expect("LAN interface"),
             ..forward_metadata.clone()
         },
         forwarding_generation: crate::session::ForwardingGenerationStamp::default(),
@@ -3034,6 +3045,78 @@ fn reverse_without_companion_unchanged_interface_snat_survives_13771() {
         );
     }
 }
+/// #13789: reverse-side VLAN 200 must not replace forward ingress VLAN 100
+/// when validating a companion-less SNAT translation.
+#[test]
+fn reverse_without_companion_uses_forward_vlan_for_snat_scope_13789() {
+    let mut forwarding = reverse_snat_forwarding_13771(true);
+    forwarding.egress.get_mut(&11).expect("LAN interface").vlan_id = 100;
+    forwarding
+        .ingress_logical_ifindex
+        .insert((11, 200), 14);
+    forwarding
+        .ifindex_to_config_name
+        .insert(11, "ge-0/0/0.100".to_string());
+    forwarding
+        .ifindex_to_config_name
+        .insert(14, "ge-0/0/0.200".to_string());
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+        crate::protocol::SourceNATRuleSnapshot {
+            name: "forward-vlan-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            from_interface: "ge-0/0/0.100".to_string(),
+            to_interface: "ge-0/0/1.0".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            ..Default::default()
+        },
+    ]);
+    let case = reverse_snat_case_from_production_13771(&forwarding);
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(
+        reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
+        "forward VLAN 100 SNAT must survive reverse ingress on VLAN 200"
+    );
+}
+
+/// #13789 symmetry control: equal forward/reverse VLANs still validate.
+#[test]
+fn reverse_without_companion_symmetric_vlan_snat_scope_survives_13789() {
+    let mut forwarding = reverse_snat_forwarding_13771(true);
+    forwarding.egress.get_mut(&11).expect("LAN interface").vlan_id = 200;
+    forwarding
+        .ingress_logical_ifindex
+        .insert((11, 200), 14);
+    forwarding
+        .ifindex_to_config_name
+        .insert(14, "ge-0/0/0.200".to_string());
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+        crate::protocol::SourceNATRuleSnapshot {
+            name: "symmetric-vlan-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            from_interface: "ge-0/0/0.200".to_string(),
+            to_interface: "ge-0/0/1.0".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            ..Default::default()
+        },
+    ]);
+    let case = reverse_snat_case_from_production_13771(&forwarding);
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(
+        reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
+        "symmetric VLAN SNAT scope must survive"
+    );
+}
+
 
 /// #13771 negative control: withdrawing SNAT still revokes a
 /// companion-less reverse hit.
