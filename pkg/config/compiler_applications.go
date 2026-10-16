@@ -1020,22 +1020,18 @@ func resolveAppPort(spec string) string {
 	if lo, hi, found := strings.Cut(trimmed, "-"); found {
 		l, ok1 := resolveSinglePort(lo)
 		h, ok2 := resolveSinglePort(hi)
-		// #4336: Junos accepts 0 as the FLOOR of a port range. Real vSRX
-		// multi-term application defs routinely split a port space as
-		// `0-N` / `N+1-65535` (e.g. FaceTime `source-port 0-41640`).
-		// resolveSinglePort rejects the literal "0" (it clamps to [1,65535]),
-		// which left the raw `0-N` spec to be hard-rejected by validatePortSpec
-		// ("invalid port 0: must be 1-65535") — a pure drop-in blocker. Port 0
-		// never appears on the wire, so `0-N` matches identically to `1-N`;
-		// normalize the floor to 1 here, at the SINGLE canonicalization
-		// chokepoint for both direct-match and inline-term ports, so the
-		// resulting spec passes validatePortSpec AND is representable by the
-		// userspace dataplane (the Rust parse_port_spec and the Go #2124
-		// userspacePortSpecRepresentable gate both reject a 0 floor). A bare
-		// single port 0 (no hyphen) stays invalid, matching Junos.
+		// Junos accepts port 0 as a range endpoint. Preserve a zero floor
+		// verbatim: the dataplane's range representation distinguishes 0-N
+		// from an absent constraint, and port 0 is present on the wire in
+		// valid TCP/UDP tuples. A bare single port 0 remains invalid.
 		if !ok1 {
 			if n, err := parseCanonicalPort(strings.TrimSpace(lo)); err == nil && n == 0 {
-				l, ok1 = 1, true
+				l, ok1 = 0, true
+			}
+		}
+		if !ok2 {
+			if n, err := parseCanonicalPort(strings.TrimSpace(hi)); err == nil && n == 0 {
+				h, ok2 = 0, true
 			}
 		}
 		if ok1 && ok2 && l <= h {
@@ -1094,9 +1090,8 @@ func parseCanonicalPort(s string) (int, error) {
 	return ParseCanonicalUint(s)
 }
 
-// validatePortSpec checks that a port specification is valid.
-// Valid formats: "80", "8080-8090", named ports like "http".
-//
+// validatePortSpec checks that a port specification is valid. Valid formats
+// include "80", "8080-8090", a zero-floor range ("0-1024"), and named ports.
 // Application named ports are resolved to numerics by resolveAppPort at compile
 // time (compileApplications / parseApplicationTerms), so by the time this gate
 // runs a recognized service name is already a number. The 15 literal names below
@@ -1130,11 +1125,11 @@ func validatePortSpec(spec string) error {
 		if err1 != nil || err2 != nil {
 			return fmt.Errorf("invalid port range %q: non-numeric", spec)
 		}
-		if lo < 1 || lo > 65535 {
-			return fmt.Errorf("invalid port %d: must be 1-65535", lo)
+		if lo > 65535 {
+			return fmt.Errorf("invalid port %d: must be 0-65535 in a range", lo)
 		}
-		if hi < 1 || hi > 65535 {
-			return fmt.Errorf("invalid port %d: must be 1-65535", hi)
+		if hi > 65535 {
+			return fmt.Errorf("invalid port %d: must be 0-65535", hi)
 		}
 		if lo > hi {
 			return fmt.Errorf("invalid port range %q: start > end", spec)

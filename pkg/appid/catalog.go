@@ -140,10 +140,8 @@ func BuildCatalog(cfg *config.Config) (Catalog, error) {
 		proto, protoOK := ProtocolNumber(app.Protocol)
 
 		dstLow, dstHigh, derr := parsePortRange(app.DestinationPort)
-		// #5194 A3-b1-F2: sanitize an EXPLICIT destination port so a literal
-		// 0/0-0 (which parsePortRange returns as the (0,0) "no constraint"
-		// sentinel) does not ship a catalog row that over-matches every port.
-		// Only the EMPTY spec legitimately encodes unconstrained; skip it here.
+		// Empty bounds alone encode "unconstrained"; preserve explicit 0-N
+		// ranges so packets with port 0 remain inside the configured range.
 		dstOK := true
 		if derr == nil && app.DestinationPort != "" {
 			dstLow, dstHigh, dstOK = NormalizeExplicitPortRange(dstLow, dstHigh)
@@ -519,28 +517,13 @@ func parsePortRange(spec string) (uint16, uint16, error) {
 	return uint16(port), uint16(port), nil
 }
 
-// NormalizeExplicitPortRange sanitizes a NON-EMPTY parsed application port
-// range so it can never collide with the (0,0) pair the Rust matcher reserves
-// for "no port constraint" (#5194 A3-b1-F2). Only an EMPTY port spec
-// legitimately encodes the unconstrained sentinel — parsePortRange returns
-// (0,0) for "" — so the caller must NOT route the empty case through here.
-//
-// Port 0 is reserved by IANA and never appears on the wire, so a range whose
-// low bound is 0 but whose high bound is a real port is narrowed to 1..high. A
-// range that consists solely of port 0 — a bare "0" or "0-0" — has no
-// representable, non-sentinel port; it is reported unemittable (ok=false) so
-// the caller ships no catalog row, exactly mirroring the reversed-range
-// fail-closed behavior. Without this a tolerantly-loaded `destination-port 0`
-// application emitted a (0,0) catalog row that over-matched EVERY port of its
-// protocol.
+// NormalizeExplicitPortRange keeps the application catalog's (0,0) sentinel
+// reserved for an omitted port constraint. An explicit range with high==0
+// would collide with that sentinel and cannot be represented; all other
+// ascending ranges, including 0-N, retain their literal bounds.
 func NormalizeExplicitPortRange(low, high uint16) (nlow, nhigh uint16, ok bool) {
 	if high == 0 {
-		// Either a bare "0"/"0-0" (low==0) or a reversed "N-0" (low>0); neither
-		// has a representable, non-sentinel port. Fail closed.
 		return low, high, false
-	}
-	if low == 0 {
-		low = 1
 	}
 	return low, high, true
 }

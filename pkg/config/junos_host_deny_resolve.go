@@ -438,7 +438,7 @@ func junosHostParsePorts(spec string) ([]PortRange, bool) {
 			continue
 		}
 		v, err := parseCanonicalPort(part)
-		if err != nil || !junosHostPortInRange(v) {
+		if err != nil || v < 1 || !junosHostPortInRange(v) {
 			return nil, false
 		}
 		out = append(out, PortRange{Lo: uint16(v), Hi: uint16(v)})
@@ -446,31 +446,9 @@ func junosHostParsePorts(spec string) ([]PortRange, bool) {
 	return out, true
 }
 
-// junosHostPortInRange is the port domain this parser accepts, and it is
-// deliberately the SAME one validatePortSpec enforces: 1..65535.
-//
-// #8597 (muse-004 K67). This parser used strconv.Atoi with a `v < 0 || v >
-// 65535` check, and diverged from the commit-time gate in two ways. Measured:
-//
-//	spec     junosHostParsePorts     validatePortSpec
-//	"+80"    [{80 80}], true         rejected (not a number)
-//	"0"      [{0 0}],  true          rejected (must be 1-65535)
-//	"00"     [{0 0}],  true          rejected
-//	"0-100"  [{0 100}], true         rejected
-//
-// Why the divergence matters rather than being cosmetic: the projection this
-// parser feeds sets RenderedPolicyKeys, which is a SUPPRESSION claim — "this
-// deny is enforced, so do not warn about it". For a port-0 spec that claim is
-// false, and the operator's only diagnostic is the one being silenced.
-//
-// parseCanonicalPort is the same helper the commit gate uses (ParseCanonicalUint
-// underneath), so the two cannot drift on what a numeric token is. The floor is
-// stated here rather than inlined twice because both the range and single-port
-// arms need it and a hand-copied bound in one of them is how this started.
-//
-// The space-separated multi-port spelling this parser accepts and
-// validatePortSpec does not is NOT a divergence to close: it is this parser's
-// documented input shape (`strings.Fields`), and the over-reach control pins it.
+// junosHostPortInRange is the range endpoint domain shared with
+// validatePortSpec: 0..65535. The single-port arm separately rejects 0
+// because only an explicit range can distinguish it from an omitted port.
 func junosHostPortInRange(p int) bool {
-	return p >= 1 && p <= 65535
+	return p >= 0 && p <= 65535
 }
