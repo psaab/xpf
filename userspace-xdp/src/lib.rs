@@ -1499,7 +1499,10 @@ fn userspace_ingress_metadata(ctx: &XdpContext) -> (u32, u8) {
 }
 
 #[inline(always)]
-fn is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags: u8, pkt: &ParsedPacket) -> bool {
+fn is_tagged_only_vid0_firewall_owned_destination(
+    ingress_iface_flags: u8,
+    pkt: &ParsedPacket,
+) -> bool {
     ingress_iface_flags & USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY != 0
         && pkt.vlan_id == 0
         && is_firewall_owned_destination(pkt)

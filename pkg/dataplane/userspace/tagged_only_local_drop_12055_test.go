@@ -122,6 +122,11 @@ func TestUserspaceXDPTaggedOnlyVID0LocalDropsAndControls12055(t *testing.T) {
 		copy(tagged[16:], packet[12:])
 		return tagged
 	}
+	priorityTaggedPacket := func(packet []byte) []byte {
+		tagged := taggedPacket(packet)
+		binary.BigEndian.PutUint16(tagged[14:16], 0x6000)
+		return tagged
+	}
 	icmpv4EchoPacket := func() []byte {
 		pkt := ipv4TestPacket(srcV4, localV4, 1, 8)
 		pkt[34] = 8
@@ -178,6 +183,12 @@ func TestUserspaceXDPTaggedOnlyVID0LocalDropsAndControls12055(t *testing.T) {
 			name:           "untagged interface-nat ipv6 echo drops",
 			flags:          userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
 			packet:         func() []byte { return icmpv6TestPacket(srcV6, localV6, 128) },
+			interfaceNatV6: true, wantAction: xdpActionDrop, wantTagged: true,
+		},
+		{
+			name:           "priority-tagged interface-nat ipv6 echo drops",
+			flags:          userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet:         func() []byte { return priorityTaggedPacket(icmpv6TestPacket(srcV6, localV6, 128)) },
 			interfaceNatV6: true, wantAction: xdpActionDrop, wantTagged: true,
 		},
 		{
