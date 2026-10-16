@@ -689,15 +689,21 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     if !firewall_self_originated {
         return Err("local_tunnel_source_not_owned_in_routing_instance".to_string());
     }
-    // #6471: seed only after the zone and source-ownership gates above, so an
-    // unzoned or cross-VRF packet cannot create the host-inbound IKE exemption.
-    // A non-first fragment carries no IKE header, so there is nothing to seed.
+    // #6471/#14124: seed only after the zone and source-ownership gates
+    // above, so an unzoned or cross-VRF packet cannot create the
+    // host-inbound IKE exemption. Scoped to the tunnel egress zone and
+    // the flow's stamped routing domain — the scope the peer's
+    // GRE-inner replies will be adjudicated under at Stage 11. A
+    // non-first fragment carries no IKE header, so there is nothing
+    // to seed (#14119 made `flow` optional here).
     if let Some(flow) = flow.as_ref() {
         crate::afxdp::forwarding::maybe_seed_local_origin_ike(
             ike_exchanges,
             &inner_frame,
             meta.l4_offset as usize,
             flow,
+            zone_id,
+            flow.forward_key.routing_domain,
             monotonic_nanos(),
         );
     }

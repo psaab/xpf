@@ -287,29 +287,55 @@ pub(in crate::afxdp) const IKE_EXCHANGE_IDLE_NS: u64 = 24 * 3600 * 1_000_000_000
 
 const _: () = assert!(IKE_EXCHANGE_TABLE_CAP >= 1);
 
-/// #6471: identity of a live IKE exchange for the established-vs-forged
-/// discriminator. Keyed on the Initiator SPI plus the exchange's address
-/// pair — NOT the IKE ports, so an RFC 5996 NAT-T port float (500 -> 4500
-/// mid-exchange) does not strand the seed; the Initiator SPI (64-bit random
-/// per exchange) is the collision-proof discriminator strongSwan itself
-/// uses. The Responder SPI is deliberately absent: the responder's reply is
-/// never observed on the inbound-only dataplane, so its value cannot be
-/// learned here. This mirrors the kernel conntrack match the PRIMARY path
-/// relies on (a 4-tuple-established entry, likewise MOBIKE-fragile) rather
-/// than strengthening it.
+/// #6471/#14124: identity of a live IKE exchange for the
+/// established-vs-forged discriminator. Keyed on the Initiator SPI plus
+/// the exchange's address pair, the ingress zone that admitted the
+/// seed, and the ingress routing domain (VRF) — NOT the IKE ports, so
+/// an RFC 5996 NAT-T port float (500 -> 4500 mid-exchange) does not
+/// strand the seed; the Initiator SPI (64-bit random per exchange) is
+/// the collision-proof discriminator strongSwan itself uses. The
+/// Responder SPI is deliberately absent: the responder's reply is
+/// never observed on the inbound-only dataplane, so its value cannot
+/// be learned here.
+///
+/// #14124: the zone and routing domain are part of the identity
+/// because the seed vouches for admission on ONE ingress scope only.
+/// The pre-#14124 key (SPI + address pair alone) let an exchange
+/// admitted on an IKE-permitting zone supply the established
+/// exemption for the same SPI/source/destination arriving on a
+/// second, IKE-denied zone (multihomed peer or spoof-capable
+/// ingress), and let an address configured only in another VRF be
+/// treated as the same local termination. `ingress_zone_id` is the
+/// host-inbound gate's from-zone (`u16`, 0 = unzoned/unknown, which
+/// never matches a zoned seed); `routing_domain` is the
+/// `SessionKey::routing_domain` stamp (`ingress_routing_domain`,
+/// 0 = default instance). A seed and a follow-up agree on both only
+/// when they ingress the same zone in the same VRF — cross-zone or
+/// cross-VRF packets miss and face their own zone's host-inbound
+/// gate, exactly like an unseeded forged packet.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(in crate::afxdp) struct IkeExchangeKey {
     pub(in crate::afxdp) initiator_spi: u64,
     pub(in crate::afxdp) peer_ip: IpAddr,
     pub(in crate::afxdp) local_ip: IpAddr,
+    pub(in crate::afxdp) ingress_zone_id: u16,
+    pub(in crate::afxdp) routing_domain: u32,
 }
 
 impl IkeExchangeKey {
-    pub(in crate::afxdp) fn new(initiator_spi: u64, peer_ip: IpAddr, local_ip: IpAddr) -> Self {
+    pub(in crate::afxdp) fn new(
+        initiator_spi: u64,
+        peer_ip: IpAddr,
+        local_ip: IpAddr,
+        ingress_zone_id: u16,
+        routing_domain: u32,
+    ) -> Self {
         Self {
             initiator_spi,
             peer_ip,
             local_ip,
+            ingress_zone_id,
+            routing_domain,
         }
     }
 }
@@ -581,7 +607,7 @@ impl IkeExchangeTable {
 /// #6471: the shared handle workers + GRE local-origin threads hold.
 pub(in crate::afxdp) type SharedIkeExchangeTable = Arc<IkeExchangeTable>;
 
-/// #6471: seed the exchange table for a FIREWALL-INITIATED IKE exchange
+/// #6471/#14124: seed the exchange table for a FIREWALL-INITIATED IKE exchange
 /// routed via a local-origin tunnel (native GRE). The outbound initiation is
 /// read off the tunnel's TUN device by `local_tunnel_source_loop` and never
 /// crosses Stage 11, so without this seed the peer's replies (Responder SPI
@@ -597,11 +623,20 @@ pub(in crate::afxdp) type SharedIkeExchangeTable = Arc<IkeExchangeTable>;
 /// Responder SPI) seeds — IKE replies/retransmissions the firewall sends
 /// later in the exchange are ignored, and non-IKE UDP on 500/4500 cannot
 /// parse as an initiation.
+///
+/// #14124: `ingress_zone_id` / `routing_domain` scope the seed to the
+/// scope the peer's replies will ingress. The tunnel builder passes
+/// the tunnel egress zone and the flow's stamped routing domain (the
+/// tunnel interface's routing instance): the GRE-inner reply is
+/// adjudicated under the tunnel zone, so a seed scoped any wider
+/// would vouch for zones/VRFs the outbound exchange never used.
 pub(in crate::afxdp) fn maybe_seed_local_origin_ike(
     table: &IkeExchangeTable,
     packet_frame: &[u8],
     l4_offset: usize,
     flow: &SessionFlow,
+    ingress_zone_id: u16,
+    routing_domain: u32,
     now_ns: u64,
 ) {
     let protocol = flow.forward_key.protocol;
@@ -611,7 +646,13 @@ pub(in crate::afxdp) fn maybe_seed_local_origin_ike(
     }
     if let Some(initiator_spi) = ike_initiation_spi(packet_frame, l4_offset, dst_port) {
         table.seed(
-            IkeExchangeKey::new(initiator_spi, flow.dst_ip, flow.src_ip),
+            IkeExchangeKey::new(
+                initiator_spi,
+                flow.dst_ip,
+                flow.src_ip,
+                ingress_zone_id,
+                routing_domain,
+            ),
             now_ns,
         );
     }
@@ -782,7 +823,33 @@ mod tests {
             spi,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
             IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+            7,
+            0,
         )
+    }
+
+    #[test]
+    fn exchange_match_is_zone_and_vrf_scoped_14124() {
+        // #14124 RED-on-revert: dropping `ingress_zone_id` /
+        // `routing_domain` from the key makes the cross-zone and
+        // cross-VRF lookups below hit the seed — the established
+        // exemption would again vouch for an ingress scope that
+        // never admitted the exchange.
+        let table = IkeExchangeTable::new();
+        table.seed(key(7), 1_000);
+        assert!(table.matches(&key(7), 2_000), "same scope must hit");
+        let mut other_zone = key(7);
+        other_zone.ingress_zone_id = 8;
+        assert!(
+            !table.matches(&other_zone, 2_000),
+            "a seed from zone 7 must not vouch for zone 8 (#14124)"
+        );
+        let mut other_vrf = key(7);
+        other_vrf.routing_domain = 100_001;
+        assert!(
+            !table.matches(&other_vrf, 2_000),
+            "a seed from the default VRF must not vouch for tenant-a (#14124)"
+        );
     }
 
     #[test]
@@ -797,7 +864,9 @@ mod tests {
             &IkeExchangeKey::new(
                 7,
                 IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
-                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+                7,
+                0
             ),
             2_000
         ));
@@ -1014,17 +1083,25 @@ mod tests {
         let src = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 1)); // firewall local
         let dst = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)); // tunnel peer
         let init = ike_frame(false, 0x5152_5354_5556_5758, 0);
-        maybe_seed_local_origin_ike(&table, &init, 34, &seed_flow(PROTO_UDP, 500), 1_000);
-        // The peer's REPLY direction lookup: (initiator SPI, peer, local).
-        assert!(table.matches(&IkeExchangeKey::new(0x5152_5354_5556_5758, dst, src), 2_000));
+        maybe_seed_local_origin_ike(&table, &init, 34, &seed_flow(PROTO_UDP, 500), 7, 0, 1_000);
+        // The peer's REPLY direction lookup: (initiator SPI, peer, local),
+        // scoped to the seeding zone/domain (#14124).
+        assert!(table.matches(
+            &IkeExchangeKey::new(0x5152_5354_5556_5758, dst, src, 7, 0),
+            2_000
+        ));
+        assert!(!table.matches(
+            &IkeExchangeKey::new(0x5152_5354_5556_5758, dst, src, 8, 0),
+            2_000
+        ));
 
         // Non-IKE UDP (wrong port), non-initiation (responder set), and ESP
         // must not seed.
         let table2 = IkeExchangeTable::new();
-        maybe_seed_local_origin_ike(&table2, &init, 34, &seed_flow(PROTO_UDP, 53), 1_000);
+        maybe_seed_local_origin_ike(&table2, &init, 34, &seed_flow(PROTO_UDP, 53), 7, 0, 1_000);
         let est = ike_frame(false, 9, 9);
-        maybe_seed_local_origin_ike(&table2, &est, 34, &seed_flow(PROTO_UDP, 500), 1_000);
-        maybe_seed_local_origin_ike(&table2, &init, 34, &seed_flow(PROTO_ESP, 0), 1_000);
+        maybe_seed_local_origin_ike(&table2, &est, 34, &seed_flow(PROTO_UDP, 500), 7, 0, 1_000);
+        maybe_seed_local_origin_ike(&table2, &init, 34, &seed_flow(PROTO_ESP, 0), 7, 0, 1_000);
         assert_eq!(table2.len(), 0);
     }
 }

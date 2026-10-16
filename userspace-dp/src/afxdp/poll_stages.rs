@@ -1442,6 +1442,15 @@ fn ike_host_inbound_deny_zone(
 /// destination the firewall interface address. The host-inbound gate below
 /// therefore applies only to genuinely local IKE, including DNAT-to-self.
 ///
+/// #14124: both the claim and the established-exchange match are scoped
+/// to the ingress packet's own zone + routing domain (VRF). The claim
+/// uses `owns_ipsec_local_destination_in_table` with the ingress
+/// interface's canonical table, so an address configured only in
+/// another VRF (and no matching transit DNAT) returns `NotClaimed`
+/// instead of being treated as locally terminated. The exchange key
+/// carries the admitting zone id and routing domain, so a seed from
+/// one zone/VRF never supplies the exemption on another.
+///
 /// Non-IPsec packets fall through unchanged (`NotClaimed`).
 #[inline]
 pub(super) fn stage_ipsec_passthrough_check(
@@ -1461,13 +1470,38 @@ pub(super) fn stage_ipsec_passthrough_check(
     if !is_ipsec_traffic(meta.protocol, dst_port) {
         return IpsecPassthroughOutcome::NotClaimed;
     }
-    // #5620/#11439: claim only packets whose raw destination is locally
-    // delivered after the NAT ownership distinction. `local_v*` also contains
-    // transit NAT externals for proxy-ARP/ND. A matching transit DNAT must also
-    // override configured-interface locality (for example UDP/500 to the WAN
-    // address), while unrelated IPsec traffic to that same address remains
-    // local. A NAT-to-self translation remains subject to the #4323 host gate.
-    if !worker_ctx.forwarding.owns_ipsec_local_destination(flow.dst_ip)
+    // #14124: resolve the ingress scope (logical ifindex, from-zone,
+    // routing domain / table) once. The established-exchange key and
+    // the local-destination claim are both scoped to it: a seed
+    // admitted on one zone/VRF must not vouch for another, and an
+    // address owned only in another VRF must not be claimed as local.
+    let (ingress_logical, from_zone_id, _gated_override) =
+        ike_host_inbound_gate_context(flow, meta, ingress_zone_override, now_secs, worker_ctx);
+    let routing_domain = flow.forward_key.routing_domain;
+    let ingress_instance = worker_ctx
+        .forwarding
+        .ifindex_to_routing_instance
+        .get(&ingress_logical)
+        .map(String::as_str)
+        .unwrap_or("");
+    let (table_v4, table_v6) =
+        crate::afxdp::forwarding_build::connected_route_tables(ingress_instance);
+    let ingress_table = if matches!(flow.dst_ip, IpAddr::V6(_)) {
+        table_v6.as_str()
+    } else {
+        table_v4.as_str()
+    };
+    // #5620/#11439/#14124: claim only packets whose raw destination is
+    // locally delivered after the NAT ownership distinction, in the
+    // ingress packet's own VRF. `local_v*` also contains transit NAT
+    // externals for proxy-ARP/ND. A matching transit DNAT must also
+    // override configured-interface locality (for example UDP/500 to
+    // the WAN address), while unrelated IPsec traffic to that same
+    // address remains local. A NAT-to-self translation remains
+    // subject to the #4323 host gate.
+    if !worker_ctx
+        .forwarding
+        .owns_ipsec_local_destination_in_table(flow.dst_ip, ingress_table)
         || ipsec_destination_matches_transit_dnat(
             &worker_ctx.forwarding,
             flow,
@@ -1492,10 +1526,12 @@ pub(super) fn stage_ipsec_passthrough_check(
             }
         }
         crate::afxdp::forwarding::IpsecAdmissionClass::Exempt => {
-            // #6471: a Responder-SPI-nonzero IKE packet is "established" only
-            // with a matching live-exchange seed; otherwise it faces the same
-            // host-inbound gate as a NEW initiation. ESP/AH, ESP-in-UDP and
-            // NAT-T keepalives (`None`) stay unconditionally exempt.
+            // #6471/#14124: a Responder-SPI-nonzero IKE packet is
+            // "established" only with a matching live-exchange seed
+            // scoped to THIS ingress zone + routing domain; otherwise
+            // it faces the same host-inbound gate as a NEW initiation.
+            // ESP/AH, ESP-in-UDP and NAT-T keepalives (`None`) stay
+            // unconditionally exempt.
             if let Some(initiator_spi) = crate::afxdp::forwarding::established_ike_initiator_spi(
                 packet_frame,
                 meta.l4_offset as usize,
@@ -1505,6 +1541,8 @@ pub(super) fn stage_ipsec_passthrough_check(
                     initiator_spi,
                     flow.src_ip,
                     flow.dst_ip,
+                    from_zone_id,
+                    routing_domain,
                 );
                 if !worker_ctx.ike_exchanges.matches(&key, now_ns)
                     && let Some(from_zone_id) = ike_host_inbound_deny_zone(

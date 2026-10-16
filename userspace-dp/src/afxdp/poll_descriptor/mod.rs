@@ -1505,6 +1505,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         });
                         let pending_ike_seed = if is_positive_ike {
                             let flow = flow.as_ref().expect("positive IKE has a parsed flow");
+                            // #14124: scope the seed to the ingress
+                            // zone + routing domain that admitted this
+                            // initiation, resolved exactly as Stage 11
+                            // resolves its match key.
+                            let (_seed_logical, seed_zone_id, _seed_override) =
+                                ike_host_inbound_gate_context(
+                                    flow,
+                                    meta,
+                                    ingress_zone_override,
+                                    now_secs,
+                                    worker_ctx,
+                                );
                             crate::afxdp::forwarding::ike_initiation_spi(
                                 stage11_packet_frame,
                                 meta.l4_offset as usize,
@@ -1515,6 +1527,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     initiator_spi,
                                     flow.src_ip,
                                     flow.dst_ip,
+                                    seed_zone_id,
+                                    flow.forward_key.routing_domain,
                                 )
                             })
                         } else {

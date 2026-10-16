@@ -632,11 +632,16 @@ fn local_origin_tunnel_owned_ike_seeds_before_encapsulation_10518() {
     .expect("owned IKE initiation must remain encap-able");
 
     assert_eq!(ike_exchanges.len(), 1);
+    // #14124: the local-origin seed is scoped to the tunnel egress
+    // zone (sfmix) and the flow's routing domain. The fixture's GRE
+    // interface carries no `routing_domain`, so the domain is 0.
     assert!(ike_exchanges.matches(
         &crate::afxdp::forwarding::IkeExchangeKey::new(
             LOCAL_IKE_INITIATOR_SPI_10518,
             IpAddr::V4(dst),
             IpAddr::V4(src),
+            crate::test_zone_ids::TEST_SFMIX_ZONE_ID,
+            0,
         ),
         monotonic_nanos(),
     ));

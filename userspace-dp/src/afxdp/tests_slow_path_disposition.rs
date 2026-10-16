@@ -2755,6 +2755,8 @@ fn stage11_ike_new_and_established_bypass_stale_sa_gate_10516() {
         initiator_spi,
         IpAddr::V4(src),
         IpAddr::V4(dst),
+        crate::test_zone_ids::TEST_LAN_ZONE_ID,
+        0,
     );
     let (_, established_delegated, established_counters, established_recycled, established_queues) =
         run_stage11_frame_poll_with_seeded_ike_10516(
@@ -2923,6 +2925,8 @@ fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
         initiator_spi,
         IpAddr::V4(src),
         IpAddr::V4(dst),
+        crate::test_zone_ids::TEST_LAN_ZONE_ID,
+        0,
     );
     let (
         established_trusted,
@@ -3610,6 +3614,8 @@ fn ike_key_10525() -> crate::afxdp::forwarding::IkeExchangeKey {
         IKE_10525_SPI,
         IpAddr::V4(IKE_10525_SRC),
         IpAddr::V4(IKE_10525_VIP),
+        crate::test_zone_ids::TEST_WAN_ZONE_ID,
+        0,
     )
 }
 
@@ -4185,6 +4191,8 @@ fn t3_gre_inner_seeded_followup_late_deny_drops_10585() {
         0x1058_5003,
         IpAddr::V4(src),
         IpAddr::V4(dst),
+        crate::test_zone_ids::TEST_WAN_ZONE_ID,
+        0,
     );
     ike_exchanges.seed(key.clone(), 123_000_000_000);
     let frame = build_gre_inner_ike_frame_10585(src, dst, 40_000, 500, 0x1058_5003, 0xaabb_ccdd);
@@ -4215,6 +4223,8 @@ fn t4_gre_inner_ike_control_delegates_and_seeds_10585() {
         0x1058_5004,
         IpAddr::V4(src),
         IpAddr::V4(dst),
+        crate::test_zone_ids::TEST_WAN_ZONE_ID,
+        0,
     );
     let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
     let (trusted, delegated, recycled, queues, batch, dbg) =

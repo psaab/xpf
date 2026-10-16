@@ -1175,6 +1175,61 @@ impl ForwardingState {
             }
         }
     }
+    /// #14124: VRF-scoped form of [`Self::owns_ipsec_local_destination`].
+    /// The unscoped predicate is address-global: an address configured
+    /// only in another routing instance (or a NAT-to-self external whose
+    /// translations are scoped to another instance) still reads as
+    /// locally terminated, so Stage 11 claimed the packet for XFRM and
+    /// applied the wrong VRF's admission. This form additionally
+    /// requires the destination to be locally owned in the ingress
+    /// packet's own routing table, mirroring the table-scoped
+    /// local-delivery decision (`local_*_owned_by_table` in fib.rs):
+    ///
+    /// - interface addresses and interface-NAT addresses are owned
+    ///   only in their interface's connected table (never wildcarded);
+    /// - NAT externals are owned in their rule's scoped table, or in
+    ///   every table for an unscoped (wildcard) rule.
+    ///
+    /// `ingress_table` is the ingress interface's canonical table
+    /// (`connected_route_tables(routing_instance)` for the ingress
+    /// logical ifindex). An address with no table attribution at all
+    /// (hand-built test states, lo0 helpers) is NOT owned here —
+    /// fail-closed: Stage 11 returns `NotClaimed` and the packet
+    /// takes ordinary forwarding/policy instead of XFRM reinjection.
+    #[inline]
+    pub(in crate::afxdp) fn owns_ipsec_local_destination_in_table(
+        &self,
+        ip: IpAddr,
+        ingress_table: &str,
+    ) -> bool {
+        if !self.owns_ipsec_local_destination(ip) {
+            return false;
+        }
+        match ip {
+            IpAddr::V4(v4) => {
+                self.local_nat_any_table_v4.contains(&v4)
+                    || self
+                        .local_tables_v4
+                        .get(&v4)
+                        .is_some_and(|tables| tables.contains(ingress_table))
+                    || self
+                        .interface_nat_tables_v4
+                        .get(&v4)
+                        .is_some_and(|tables| tables.contains(ingress_table))
+            }
+            IpAddr::V6(v6) => {
+                self.local_nat_any_table_v6.contains(&v6)
+                    || self
+                        .local_tables_v6
+                        .get(&v6)
+                        .is_some_and(|tables| tables.contains(ingress_table))
+                    || self
+                        .interface_nat_tables_v6
+                        .get(&v6)
+                        .is_some_and(|tables| tables.contains(ingress_table))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
