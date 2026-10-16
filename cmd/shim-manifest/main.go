@@ -27,12 +27,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("shim-manifest", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repoRoot := fs.String("repo-root", ".", "repository root the manifest paths are relative to")
+	printBuildDigest := fs.Bool("print-build-digest", false, "print the source/toolchain build digest without writing the manifest")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintf(stderr, "shim-manifest: unexpected argument(s) %v\n", fs.Args())
 		return 2
+	}
+	if *printBuildDigest {
+		digest, err := dataplane.UserspaceXDPBuildDigest(*repoRoot)
+		if err != nil {
+			fmt.Fprintf(stderr, "shim-manifest: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, digest)
+		return 0
 	}
 	if err := dataplane.WriteUserspaceXDPManifest(*repoRoot); err != nil {
 		fmt.Fprintf(stderr, "shim-manifest: %v\n", err)

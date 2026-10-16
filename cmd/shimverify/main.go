@@ -117,7 +117,7 @@ func run(
 
 	decision := decide(stats, getenv(allowLowHeadroomEnv) == "1")
 	if withVerdict && (decision.exit == 0 || decision.exit == 6) {
-		if err := writeGateVerdict(args[3], path, stats, decision); err != nil {
+		if err := writeGateVerdict(args[3], path, stats, decision, getenv("XPF_SHIM_BUILD_DIGEST")); err != nil {
 			fmt.Fprintf(stderr, "shimverify: write gate verdict %s: %v\n", args[3], err)
 			return 1
 		}
@@ -363,13 +363,20 @@ type gateVerdict struct {
 	SchemaVersion    int              `json:"schema_version"`
 	VerifiedAt       string           `json:"verified_at"`
 	ObjectSHA256     string           `json:"object_sha256"`
+	BuildDigest      string           `json:"build_digest"`
 	Verdict          string           `json:"verdict"`
 	OverrideConsumed bool             `json:"override_consumed"`
 	Reason           string           `json:"reason"`
 	Stats            gateVerdictStats `json:"stats"`
 }
 
-func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierStats, decision shimverifyDecision) error {
+func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierStats, decision shimverifyDecision, buildDigest string) error {
+	if len(buildDigest) != sha256.Size*2 {
+		return fmt.Errorf("missing or invalid source build digest (XPF_SHIM_BUILD_DIGEST)")
+	}
+	if _, err := hex.DecodeString(buildDigest); err != nil {
+		return fmt.Errorf("invalid source build digest: %w", err)
+	}
 	objectHash, err := shimCandidateSHA256(objectPath)
 	if err != nil {
 		return err
@@ -387,6 +394,7 @@ func writeGateVerdict(outPath, objectPath string, stats dataplane.ShimVerifierSt
 		SchemaVersion:    1,
 		VerifiedAt:       time.Now().UTC().Format(time.RFC3339Nano),
 		ObjectSHA256:     objectHash,
+		BuildDigest:      buildDigest,
 		Verdict:          decision.label,
 		OverrideConsumed: decision.overrideConsumed,
 		Reason:           reason,

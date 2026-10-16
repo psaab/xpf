@@ -388,7 +388,12 @@ func TestShimverifyWritesGateVerdict(t *testing.T) {
 			gotExit := run(
 				[]string{"shimverify", objectPath, "--gate-verdict", verdictPath},
 				&stdout, &stderr,
-				func(string) string { return tc.override },
+				func(key string) string {
+					if key == "XPF_SHIM_BUILD_DIGEST" {
+						return strings.Repeat("a", 64)
+					}
+					return tc.override
+				},
 				func(path string) (dataplane.ShimVerifierStats, error) {
 					if path != objectPath {
 						t.Fatalf("verifier path = %q, want %q", path, objectPath)
@@ -411,6 +416,9 @@ func TestShimverifyWritesGateVerdict(t *testing.T) {
 			sum := sha256.Sum256(object)
 			if got.SchemaVersion != 1 || got.ObjectSHA256 != hex.EncodeToString(sum[:]) {
 				t.Errorf("schema/object binding = (%d, %q), want schema 1 and candidate SHA-256", got.SchemaVersion, got.ObjectSHA256)
+			}
+			if got.BuildDigest != strings.Repeat("a", 64) {
+				t.Errorf("build digest = %q, want attested source digest", got.BuildDigest)
 			}
 			if _, err := time.Parse(time.RFC3339Nano, got.VerifiedAt); err != nil {
 				t.Errorf("verified_at %q is not a timestamp: %v", got.VerifiedAt, err)

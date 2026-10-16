@@ -43,6 +43,11 @@ const (
 	// committed freshness manifest.
 	UserspaceXDPManifestRelPath = "pkg/dataplane/userspace_xdp_manifest.json"
 
+	// UserspaceXDPGateVerdictRelPath is the repo-relative verifier
+	// attestation written by build-userspace-xdp.sh next to the tracked
+	// object whenever an object is verifier-gated and installed (#10909).
+	UserspaceXDPGateVerdictRelPath = "pkg/dataplane/userspace_xdp_gate_verdict.json"
+
 	// userspaceXDPObjectRelPath is the tracked shim object embedded by
 	// userspace_xdp_rust.go (`//go:embed userspace_xdp_bpfel.o`).
 	userspaceXDPObjectRelPath = "pkg/dataplane/userspace_xdp_bpfel.o"
@@ -97,6 +102,12 @@ type shimManifestEntry struct {
 type shimFreshnessManifest struct {
 	Comment string            `json:"_comment"`
 	Object  shimManifestEntry `json:"object"`
+	// BuildDigest is SHA-256 over the sorted freshness inputs in
+	// canonical "path<TAB>sha256<LF>" form, below. It is emitted only
+	// when Compute has been shown the verifier gate verdict attesting
+	// that this object was built and installed (#13963); empty means
+	// no such attestation, which the freshness test treats as stale.
+	BuildDigest string `json:"build_digest,omitempty"`
 	// ShimFacts are the object's SELF-REPORTED compile-time values
 	// (#4555), read back out of the object via ReadShimFactsFromObject
 	// rather than modelled from the shim's source. Recording them here
@@ -105,6 +116,54 @@ type shimFreshnessManifest struct {
 	// checks the same numbers the generator measured.
 	ShimFacts *ShimFacts          `json:"shim_facts"`
 	Inputs    []shimManifestEntry `json:"inputs"`
+}
+
+// userspaceXDPBuildDigest is the source digest the verifier gate
+// verdict attests, in canonical form: for every freshness input in
+// sorted order, its repo-relative path, a TAB, its lowercase hex
+// SHA-256 and a LF. Recorded in the verdict as a single SHA-256 over
+// that stream, so the freshness test can recognise a manifest that a
+// hand-run of cmd/shim-manifest re-stamped without a rebuild.
+func userspaceXDPBuildDigest(entries []shimManifestEntry) string {
+	h := sha256.New()
+	for _, e := range entries {
+		fmt.Fprintf(h, "%s\t%s\n", e.Path, e.SHA256)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// userspaceXDPGateVerdict is the subset of the #10909 gate-verdict
+// sidecar the freshness gate consumes: the object the verifier gated
+// and, from #13963, the build digest its build was gated under.
+type userspaceXDPGateVerdict struct {
+	ObjectSHA256 string `json:"object_sha256"`
+	BuildDigest  string `json:"build_digest"`
+}
+
+func readUserspaceXDPGateVerdict(repoRoot string) (*userspaceXDPGateVerdict, error) {
+	b, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(UserspaceXDPGateVerdictRelPath)))
+	if err != nil {
+		return nil, err
+	}
+	var v userspaceXDPGateVerdict
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", UserspaceXDPGateVerdictRelPath, err)
+	}
+	return &v, nil
+}
+
+// UserspaceXDPBuildDigest returns the canonical digest of all source and
+// toolchain inputs that produce the embedded shim object.
+func UserspaceXDPBuildDigest(repoRoot string) (string, error) {
+	paths, err := userspaceXDPFreshnessInputPaths(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	entries, err := hashUserspaceXDPInputs(repoRoot, paths)
+	if err != nil {
+		return "", err
+	}
+	return userspaceXDPBuildDigest(entries), nil
 }
 
 // userspaceXDPFreshnessInputPaths returns the sorted, repo-relative set
@@ -171,13 +230,9 @@ func ComputeUserspaceXDPManifest(repoRoot string) (*shimFreshnessManifest, error
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]shimManifestEntry, 0, len(inputs))
-	for _, rel := range inputs {
-		h, err := sha256File(filepath.Join(repoRoot, filepath.FromSlash(rel)))
-		if err != nil {
-			return nil, fmt.Errorf("hash input %q: %w", rel, err)
-		}
-		entries = append(entries, shimManifestEntry{Path: rel, SHA256: h})
+	entries, err := hashUserspaceXDPInputs(repoRoot, inputs)
+	if err != nil {
+		return nil, err
 	}
 
 	facts, err := ReadShimFactsFromObject(objAbs)
@@ -185,18 +240,35 @@ func ComputeUserspaceXDPManifest(repoRoot string) (*shimFreshnessManifest, error
 		return nil, fmt.Errorf("read emitted shim facts (#4555): %w", err)
 	}
 
-	return &shimFreshnessManifest{
+	manifest := &shimFreshnessManifest{
 		Comment:   userspaceXDPManifestComment,
 		Object:    shimManifestEntry{Path: userspaceXDPObjectRelPath, SHA256: objHash},
 		ShimFacts: facts,
 		Inputs:    entries,
-	}, nil
+	}
+	verdict, err := readUserspaceXDPGateVerdict(repoRoot)
+	if err == nil && verdict.ObjectSHA256 == objHash && verdict.BuildDigest == userspaceXDPBuildDigest(entries) {
+		manifest.BuildDigest = verdict.BuildDigest
+	}
+	return manifest, nil
+}
+
+func hashUserspaceXDPInputs(repoRoot string, paths []string) ([]shimManifestEntry, error) {
+	entries := make([]shimManifestEntry, 0, len(paths))
+	for _, rel := range paths {
+		h, err := sha256File(filepath.Join(repoRoot, filepath.FromSlash(rel)))
+		if err != nil {
+			return nil, fmt.Errorf("hash input %q: %w", rel, err)
+		}
+		entries = append(entries, shimManifestEntry{Path: rel, SHA256: h})
+	}
+	return entries, nil
 }
 
 // MarshalUserspaceXDPManifest renders the manifest deterministically as
-// indented JSON with a trailing newline. Struct field order (Comment,
-// Object, Inputs) and the sorted Inputs slice make the output stable, so
-// a regenerated manifest yields a clean git diff when nothing changed.
+// indented JSON with a trailing newline. Struct field order and sorted
+// input entries make the output stable, so a regenerated manifest yields
+// a clean git diff when nothing changed.
 func MarshalUserspaceXDPManifest(m *shimFreshnessManifest) ([]byte, error) {
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
