@@ -87,7 +87,7 @@ func setupDebtConvergence10034(t *testing.T, clustered bool) (*debtHarness9642, 
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -140,7 +140,7 @@ func setupChangedPlanDebtConvergence10034(t *testing.T, clustered bool) (*debtHa
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, false); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: changed-plan transport failure must fail the publish")

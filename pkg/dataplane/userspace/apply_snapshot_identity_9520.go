@@ -66,20 +66,84 @@ func stampSnapshotContentDigest(snap *ConfigSnapshot) error {
 	return nil
 }
 
-// prepareSnapshotForApply detaches and revalidates interface rows before classification and send.
-func prepareSnapshotForApply(snap *ConfigSnapshot) {
+// prepareSnapshotForApply detaches and revalidates interface rows before
+// classification and send, then rebuilds the snapshot sections derived
+// from those rows so no derived ifindex can outlive the row it came from
+// (#14209).
+func (m *Manager) prepareSnapshotForApply(snap *ConfigSnapshot) {
 	// #11086: re-resolve interface rows against the live kernel before
 	// classification, digest, and send. revalidateSnapshotIfindexes detaches
 	// the interface backing array and LinkUp pointers before mutating them.
-	if refreshed, dropped := revalidateSnapshotIfindexes(snap); refreshed+dropped > 0 {
+	refreshed, dropped := revalidateSnapshotIfindexes(snap)
+	if refreshed+dropped > 0 {
 		slog.Info("userspace: snapshot interface rows revalidated at apply",
 			"refreshed", refreshed, "dropped", dropped)
+		m.rebuildDerivedSectionsAfterRevalidate(snap)
 	}
+}
+
+// rebuildDerivedSectionsAfterRevalidate re-derives the sections the full
+// build computes FROM the interface rows — Routes (connected rows and
+// next-hop qualification read row ifindexes/addresses), Fabrics,
+// TunnelEndpoints and MirrorConfigs/MirrorExclusions — against the
+// revalidated rows (#14209).
+//
+// Before this rebuild, revalidation refreshed only Interfaces: a link
+// recreated between build and apply shipped a current ingress row joined
+// to tunnel/mirror egress rows carrying the OLD ifindex (Rust consumes
+// the tunnel endpoint's own ifindex in forwarding_build/tunnels.rs), and
+// a vanished link kept its connected route and mirror. The link-event
+// refresh (RefreshInterfaceRowsForLink) already rebuilds exactly these
+// sections after revalidating; the normal apply now does the same, from
+// the same builders, so the two paths cannot drift.
+//
+// The rebuild runs ONLY when revalidation actually moved a row, and only
+// when the snapshot carries its Config: without a config there is nothing
+// to derive from, and a hand-built snapshot's derived rows are its
+// author's own. When it runs, the freshly rebuilt rows are re-quarantined
+// (quarantineCollidingZones unzones tunnel endpoints of quarantined
+// zones) and ZoneSetValidated is recomputed exactly as
+// RefreshInterfaceRowsForLink does, so a rebuild can never resurrect a
+// quarantined zone's tunnel or stale validation state. A route build
+// error keeps the previously derived rows: they were built from the same
+// config, and failing the apply over a transient kernel enumeration
+// error would discard a snapshot whose interface rows are already
+// correct — the stale-derived window stays bounded by the next apply.
+//
+// Fabrics use buildFabricSnapshotsFrom against the fresh xfrm sample
+// taken above, NOT the plan-preserving resample: the binding plan key is
+// computed AFTER prepareSnapshotForApply at every caller, so a fabric
+// parent ifindex that moved with a recreated link moves the plan key
+// with it and both planes replan together.
+func (m *Manager) rebuildDerivedSectionsAfterRevalidate(snap *ConfigSnapshot) {
+	if snap == nil || snap.Config == nil {
+		return
+	}
+	cfg := snap.Config
+	liveXfrm, xfrmDumpFailed := sampleLiveXfrmNetdevs()
+	snap.xfrmDumpFailed = xfrmDumpFailed
+	if routes, capped, err := buildRouteSnapshots(cfg, snap.Interfaces, m.routeOverlayForSnapshot(snap)); err != nil {
+		slog.Warn("userspace: keeping prior routes after apply-time rebuild failure (#14209)",
+			"err", err)
+	} else {
+		snap.Routes = routes
+		snap.LearnedRouteImportCapped = capped
+	}
+	snap.Fabrics = buildFabricSnapshotsFrom(cfg, liveXfrm)
+	snap.TunnelEndpoints = buildTunnelEndpointSnapshots(cfg, snap.Interfaces)
+	snap.MirrorConfigs, snap.MirrorExclusions = buildMirrorConfigSnapshots(cfg, snap.Interfaces)
+	collisions := quarantineCollidingZones(snap)
+	if len(collisions) > 0 {
+		snap.zoneIDCollisions = collisions
+		snap.Summary.ZoneCount = len(snap.Zones)
+		snap.Summary.PolicyCount = len(snap.Policies)
+	}
+	snap.ZoneSetValidated = len(snap.Zones) > 0 && len(snap.zoneIDCollisions) == 0
 }
 
 // requestApplySnapshotLocked prepares interface rows before sending the snapshot.
 func (m *Manager) requestApplySnapshotLocked(snap *ConfigSnapshot, status *ProcessStatus) error {
-	prepareSnapshotForApply(snap)
+	m.prepareSnapshotForApply(snap)
 	return m.requestApplySnapshotPreparedLocked(snap, status)
 }
 

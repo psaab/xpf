@@ -191,7 +191,7 @@ func TestNeighborReplaceGenerationSeedsFromStartupResponseBeforeFirstPush(t *tes
 	// deliberately no statusLoop tick between exposure and regeneration.
 	m.mu.Lock()
 	var startupStatus ProcessStatus
-	prepareSnapshotForApply(startupSnapshot)
+	m.prepareSnapshotForApply(startupSnapshot)
 	if err := m.publishPreparedSnapshotFailClosedLocked(startupSnapshot, &startupStatus, false); err != nil {
 		m.mu.Unlock()
 		t.Fatalf("startup apply_snapshot: %v", err)

@@ -254,7 +254,7 @@ func TestOrdinaryRefusalStillRetainsThePreviousPlan9337(t *testing.T) {
 	}
 
 	var status ProcessStatus
-	prepareSnapshotForApply(refused)
+	m.prepareSnapshotForApply(refused)
 	err := m.publishPreparedSnapshotFailClosedLocked(refused, &status, true)
 	if m.syncCancel != nil {
 		m.syncCancel()

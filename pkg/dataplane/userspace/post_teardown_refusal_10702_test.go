@@ -122,7 +122,7 @@ func TestPostTeardownRefusalDisablesCtrlAndArmsRetryDebt10702(t *testing.T) {
 	attempted := &ConfigSnapshot{Version: ProtocolVersion, Generation: 42}
 
 	m.mu.Lock()
-	prepareSnapshotForApply(attempted)
+	m.prepareSnapshotForApply(attempted)
 	err := m.publishPreparedSnapshotFailClosedLocked(attempted, &ProcessStatus{}, true)
 	m.mu.Unlock()
 	if m.syncCancel == nil {

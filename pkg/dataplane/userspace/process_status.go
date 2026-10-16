@@ -149,7 +149,7 @@ func (m *Manager) syncSnapshotLocked() error {
 	if deferPlan(snapshotBindingPlanKey(&retained)) {
 		return nil
 	}
-	prepareSnapshotForApply(&retained)
+	m.prepareSnapshotForApply(&retained)
 	planKey := snapshotBindingPlanKey(&retained)
 	if deferPlan(planKey) {
 		return nil
