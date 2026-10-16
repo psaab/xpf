@@ -288,18 +288,18 @@ func writeDHCPRelayFamilyStats(out io.Writer, heading string, stats []dhcprelay.
 		}
 	} else {
 		fmt.Fprintf(out, "\n%s:\n", bindingHeading)
-		fmt.Fprintf(out, "  %-16s %-14s %-22s %-16s %s\n",
+		fmt.Fprintf(out, "  %-16s %-14s %-22s %-16s %-22s %s\n",
 			"Interface", "Pending", "Dropped (no-request)", "Pending evicted",
-			"Refused (forcerenew)")
+			"Refused (forcerenew)", "Dropped (bad-ciaddr)")
 		for _, s := range stats {
 			if s.Family == "inet6" {
 				continue
 			}
-			fmt.Fprintf(out, "  %-16s %-14s %-22d %-16d %d\n",
+			fmt.Fprintf(out, "  %-16s %-14s %-22d %-16d %-22d %d\n",
 				s.Interface,
 				fmt.Sprintf("%d/%d", s.PendingSize, s.PendingCapacity),
 				s.RepliesDroppedNoRequest, s.PendingEvicted,
-				s.RepliesDroppedForceRenew)
+				s.RepliesDroppedForceRenew, s.RepliesDroppedBadCiaddr)
 		}
 	}
 

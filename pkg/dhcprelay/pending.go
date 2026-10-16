@@ -1,6 +1,7 @@
 package dhcprelay
 
 import (
+	"net"
 	"sync"
 	"time"
 
@@ -48,6 +49,13 @@ import (
 // the server echoes the zero chaddr, so the key round-trips. They simply lean
 // entirely on the xid for uniqueness, which is the pre-existing RFC 2131
 // matching rule and no weaker than what the client itself relies on.
+//
+// ciaddr is likewise NOT part of the key (#14188): a DISCOVER/SELECTING
+// request carries ciaddr 0.0.0.0 while its ACK may carry the leased address
+// there, so keying on it would break ordinary exchanges. Instead the v4
+// insert path records the request ciaddr beside the entry (see
+// insertPending / requestCiaddr / matchesPending) and the ciaddr-unicast
+// delivery row requires the reply ciaddr to equal it.
 //
 // FAIL DIRECTION. This table gates live DHCP for real clients, so every path
 // that can drop a legitimate reply is counted and logged on interfaceRelay
@@ -221,6 +229,10 @@ type pendingSlotOf[K comparable] struct {
 	// key is re-inserted, the map moves to the new generation and every older
 	// slot becomes stale. See pendingEntry.gen.
 	gen uint64
+	// ciaddr is the v4 request ciaddr recorded beside the binding (#14188).
+	// Zero for the v6 instantiation, which never reads it. Only live slots
+	// carry it into snapshot/adopt.
+	ciaddr net.IP
 }
 
 // pendingSlot is the v4 pending key's ring slot. Alias, not a copy: every
@@ -232,6 +244,9 @@ type pendingSlot = pendingSlotOf[pendingKey]
 type pendingEntry struct {
 	exp time.Time
 	gen uint64
+	// ciaddr is the request ciaddr for the v4 ciaddr-unicast check (#14188);
+	// zero/unused for v6.
+	ciaddr net.IP
 }
 
 // pendingTableOf is a bounded, expiring set of outstanding relayed requests,
@@ -425,14 +440,84 @@ func (t *pendingTableOf[K]) insert(k K) {
 	t.pushLocked(k, now.Add(t.ttl))
 }
 
+// insertCiaddr is insert plus the request ciaddr recorded beside the entry.
+// It inserts normally (identical expiry/eviction discipline) then stamps
+// the ciaddr onto the live entry and its owning ring slot.
+func (t *pendingTableOf[K]) insertCiaddr(k K, ciaddr net.IP) {
+	if t == nil {
+		return
+	}
+	t.insert(k)
+	if ciaddr == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[k]
+	if !ok {
+		return
+	}
+	ci4 := append(net.IP(nil), ciaddr.To4()...)
+	e.ciaddr = ci4
+	t.entries[k] = e
+	// Update the owning ring slot (newest slot for this key/gen).
+	for i := t.count - 1; i >= 0; i-- {
+		idx := (t.head + i) % len(t.ring)
+		if t.ring[idx].gen == e.gen {
+			// Key equality check via map generation is sufficient: gen is unique.
+			t.ring[idx].ciaddr = ci4
+			break
+		}
+	}
+}
+
+// insertPending records a v4 forwarded request and its ciaddr (#14188).
+func insertPending(t *pendingTable, pkt *dhcpv4.DHCPv4) {
+	if t == nil || pkt == nil {
+		return
+	}
+	t.insertCiaddr(pendingKeyFor(pkt), pkt.ClientIPAddr.To4())
+}
+
+// requestCiaddr returns the ciaddr recorded for an unexpired binding.
+func requestCiaddr(t *pendingTable, k pendingKey) (net.IP, bool) {
+	if t == nil {
+		return nil, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[k]
+	if !ok || !t.now().Before(e.exp) {
+		return nil, false
+	}
+	if e.ciaddr == nil {
+		return nil, true
+	}
+	return append(net.IP(nil), e.ciaddr...), true
+}
+
+// matchesPending returns the recorded request ciaddr and whether the
+// binding exists and is unexpired.
+func matchesPending(t *pendingTable, k pendingKey) (net.IP, bool) {
+	return requestCiaddr(t, k)
+}
+
 // pushLocked records one key with an explicit expiry, assigning it a fresh
 // generation. Callers MUST push in non-decreasing expiry order so the ring
 // stays expiry-ordered, and MUST have already made room. Caller holds mu.
 func (t *pendingTableOf[K]) pushLocked(k K, exp time.Time) {
+	t.pushLockedCiaddr(k, exp, nil)
+}
+
+func (t *pendingTableOf[K]) pushLockedCiaddr(k K, exp time.Time, ciaddr net.IP) {
 	gen := t.nextGen
 	t.nextGen++
-	t.entries[k] = pendingEntry{exp: exp, gen: gen}
-	t.ring[(t.head+t.count)%len(t.ring)] = pendingSlotOf[K]{key: k, exp: exp, gen: gen}
+	var ci4 net.IP
+	if ciaddr != nil {
+		ci4 = append(net.IP(nil), ciaddr.To4()...)
+	}
+	t.entries[k] = pendingEntry{exp: exp, gen: gen, ciaddr: ci4}
+	t.ring[(t.head+t.count)%len(t.ring)] = pendingSlotOf[K]{key: k, exp: exp, gen: gen, ciaddr: ci4}
 	t.count++
 }
 
@@ -576,7 +661,7 @@ func (t *pendingTableOf[K]) adopt(slots []pendingSlotOf[K]) {
 		slots = slots[len(slots)-capacity:] // keep the NEWEST (longest-lived)
 	}
 	for _, s := range slots {
-		t.pushLocked(s.key, s.exp)
+		t.pushLockedCiaddr(s.key, s.exp, s.ciaddr)
 	}
 }
 
