@@ -199,3 +199,83 @@ func TestPersistentNatGenerationZeroDoesNotImplyClear11486(t *testing.T) {
 	case <-time.After(25 * time.Millisecond):
 	}
 }
+
+// #13867: a local clear revokes leases from every origin, so it must also
+// close the admission door to pre-clear equal-generation batches — including
+// leases whose key was not installed at clear time (therefore has no Rust
+// per-key tombstone) — while a peer that clears at a newer generation reopens
+// admission for genuinely post-clear leases.
+func TestLocalClearEqualGenerationFence13867(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nat-generation.json")
+	const origin = "0123456789abcdef0123456789abcdef"
+	m, helper := persistentNatGenerationManager11486(t, path)
+
+	batch := PersistentNatLeaseBatch{OriginID: origin, Generation: 8}
+	if err := m.ImportPersistentNatLeaseBatch(batch); err != nil {
+		t.Fatalf("import empty generation 8: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("generation 8 first request = %q, want clear", got)
+	}
+
+	// A local clear revokes every lease in the helper and must fence later
+	// equal-generation imports.
+	if _, _, _, err := m.ClearPersistentNATLeasesWithGeneration("", 0); err != nil {
+		t.Fatalf("local clear: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("local clear helper request = %q, want clear", got)
+	}
+
+	// Delayed pre-clear batch: same generation 8, containing a lease key
+	// never installed locally, so no per-key tombstone exists for it.
+	batch.Leases = []IdleLeaseWire{scopedLease10018()}
+
+	if err := m.ImportPersistentNatLeaseBatch(batch); err != nil {
+		t.Fatalf("delayed equal-generation import: %v", err)
+	}
+	select {
+	case req := <-helper.requests:
+		t.Fatalf("delayed equal-generation batch reached helper as %q after local clear", req.Type)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	// The fence must survive a daemon restart via durable state.
+	restarted, restartHelper := persistentNatGenerationManager11486(t, path)
+	if err := restarted.ImportPersistentNatLeaseBatch(batch); err != nil {
+		t.Fatalf("delayed equal-generation import after restart: %v", err)
+	}
+	select {
+	case req := <-restartHelper.requests:
+		t.Fatalf("post-restart delayed batch reached helper as %q", req.Type)
+	case <-time.After(25 * time.Millisecond):
+	}
+	batch.Generation = 7
+	if err := restarted.ImportPersistentNatLeaseBatch(batch); err != nil {
+		t.Fatalf("older-generation import: %v", err)
+	}
+	select {
+	case req := <-restartHelper.requests:
+		t.Fatalf("older-generation batch reached helper as %q", req.Type)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	// A genuinely post-clear batch advances the watermark: generation 9 must
+	// clear-and-import, preserving post-clear subscriber import behavior.
+	batch.Generation = 9
+	if err := restarted.ImportPersistentNatLeaseBatch(batch); err != nil {
+		t.Fatalf("post-clear generation 9 import: %v", err)
+	}
+	if got := (<-restartHelper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("generation 9 first request = %q, want clear", got)
+	}
+	if req := <-restartHelper.requests; req.Type != "import_idle_leases" || !req.ClearGenerationValidated {
+		t.Fatalf("generation 9 import = %+v, want generation-validated import", req)
+	}
+	if err := restarted.ImportPersistentNatLeaseBatch(batch); err != nil {
+		t.Fatalf("post-clear equal-generation import: %v", err)
+	}
+	if req := <-restartHelper.requests; req.Type != "import_idle_leases" {
+		t.Fatalf("post-clear equal-generation request = %+v, want additive import", req)
+	}
+}

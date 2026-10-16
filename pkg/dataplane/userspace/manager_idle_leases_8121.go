@@ -147,6 +147,10 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 	if batch.OriginID == state.OriginID {
 		return errors.New("refusing persistent-NAT lease batch from local origin")
 	}
+	if clearGeneration, cleared := state.LocalClearRemoteGenerations[batch.OriginID]; cleared &&
+		batch.Generation <= clearGeneration {
+		return nil
+	}
 	if generation, ok := state.RemoteGenerations[batch.OriginID]; ok && batch.Generation < generation {
 		return nil
 	}
@@ -303,15 +307,25 @@ func (m *Manager) ClearPersistentNATLeasesWithGeneration(peerOrigin string, peer
 		return 0, "", 0, err
 	}
 	state := clonePersistentNatLeaseGenerationState11486(m.persistentNatLeaseGeneration)
+	if peerOrigin != "" && peerOrigin == state.OriginID {
+		return 0, "", 0, errors.New("peer persistent-NAT clear origin matches local origin")
+	}
+	// A clear revokes all locally held leases, so no later batch at a
+	// generation already observed from a peer can restore pre-clear state.
+	// Exempt a forwarded peer clear only when it advances that peer's
+	// generation; that newer generation can carry genuinely post-clear leases.
+	for origin, generation := range state.RemoteGenerations {
+		if origin == peerOrigin && peerGeneration > generation {
+			continue
+		}
+		state.LocalClearRemoteGenerations[origin] = generation
+	}
 	if state.Generation == ^uint64(0) {
 		return 0, "", 0, errors.New("persistent-NAT clear generation exhausted")
 	}
 	state.Generation++
 	state.PendingLocalClear = true
 	if peerOrigin != "" {
-		if peerOrigin == state.OriginID {
-			return 0, "", 0, errors.New("peer persistent-NAT clear origin matches local origin")
-		}
 		old, seen := state.RemoteGenerations[peerOrigin]
 		if !seen && len(state.RemoteGenerations) >= maxPersistentNatGenerationPeers11486 {
 			return 0, "", 0, errors.New("persistent-NAT lease generation peer limit reached")
