@@ -16,6 +16,8 @@ pub(crate) struct IpsecPMechTunnelRowSnapshot {
     pub effective_prefixes: Vec<String>,
     #[serde(rename = "ingress_prefixes", default)]
     pub ingress_prefixes: Vec<String>,
+    #[serde(rename = "destination_prefixes", default)]
+    pub destination_prefixes: Vec<String>,
     #[serde(rename = "inventory_generation", default)]
     pub inventory_generation: u64,
     #[serde(rename = "fib_generation", default)]

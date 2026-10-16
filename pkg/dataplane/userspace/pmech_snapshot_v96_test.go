@@ -283,3 +283,50 @@ func TestPMechMixedOwnedForeignECMPPoisonsInventory(t *testing.T) {
 		}
 	}
 }
+
+func TestPMechLocalDestinationProjectionUsesLocalSelectorAndNonTunnelRoutes13956(t *testing.T) {
+	remote := v96MainRoute(t, "10.0.0.0/24", unix.RTN_UNICAST, 10)
+	local := v96MainRoute(t, "192.0.2.0/24", unix.RTN_UNICAST, 20)
+	snapshot := v96SelectorSnapshot()
+	stampPMechInventoryFromRoutes(snapshot, []netlink.Route{remote, local}, nil)
+	row := snapshot.PMechInventory.TunnelRows[0]
+	if !row.InventoryValid {
+		t.Fatalf("local and remote projections should validate together: %+v", row)
+	}
+	if got := row.DestinationPrefixes; len(got) != 1 || got[0] != "192.0.2.0/24" {
+		t.Fatalf("destination projection = %v, want local selector intersection [192.0.2.0/24]", got)
+	}
+	if got := row.EffectivePrefixes; len(got) != 1 || got[0] != "10.0.0.0/24" {
+		t.Fatalf("remote ingress projection = %v, want [10.0.0.0/24]", got)
+	}
+}
+func TestPMechLocalDestinationProjectionSupportsIPv6Selectors13956(t *testing.T) {
+	_, remoteDst, err := net.ParseCIDR("fd01::/64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, localDst, err := net.ParseCIDR("fd00::/64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := netlink.Route{Table: int(pmechMainTable), Family: unix.AF_INET6, Dst: remoteDst, Type: unix.RTN_UNICAST, LinkIndex: 10}
+	local := netlink.Route{Table: int(pmechMainTable), Family: unix.AF_INET6, Dst: localDst, Type: unix.RTN_UNICAST, LinkIndex: 20}
+	snapshot := &ConfigSnapshot{
+		Generation: 11, FIBGeneration: 7,
+		Config: &config.Config{Security: config.SecurityConfig{IPsec: config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{
+			"vpn": {BindInterface: "st0", LocalID: "fd00::/64", RemoteID: "fd01::/64"},
+		}}}},
+		IpsecTunnelRows: []IpsecTunnelRowSnapshot{{STN: "st0", IfID: 9, LogicalIfindex: 10}},
+	}
+	stampPMechInventoryFromRoutes(snapshot, []netlink.Route{remote, local}, nil)
+	row := snapshot.PMechInventory.TunnelRows[0]
+	if !row.InventoryValid {
+		t.Fatalf("IPv6 local and remote projections should validate together: %+v", row)
+	}
+	if got := row.DestinationPrefixes; len(got) != 1 || got[0] != "fd00::/64" {
+		t.Fatalf("IPv6 destination projection = %v, want [fd00::/64]", got)
+	}
+	if got := row.EffectivePrefixes; len(got) != 1 || got[0] != "fd01::/64" {
+		t.Fatalf("IPv6 remote ingress projection = %v, want [fd01::/64]", got)
+	}
+}

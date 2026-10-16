@@ -7,6 +7,7 @@ type IpsecPMechTunnelRowSnapshot struct {
 	ExplicitSelectors   []IpsecTrafficSelectorSnapshot `json:"explicit_selectors,omitempty"`
 	EffectivePrefixes   []string                       `json:"effective_prefixes,omitempty"`
 	IngressPrefixes     []string                       `json:"ingress_prefixes,omitempty"`
+	DestinationPrefixes []string                       `json:"destination_prefixes,omitempty"`
 	InventoryGeneration uint64                         `json:"inventory_generation,omitempty"`
 	FIBGeneration       uint32                         `json:"fib_generation,omitempty"`
 	SourceKind          string                         `json:"source_kind,omitempty"`

@@ -43,6 +43,7 @@ fn pmech_inventory_for(
             }],
             effective_prefixes: vec![prefix.clone()],
             ingress_prefixes: vec![prefix],
+            destination_prefixes: Vec::new(),
             inventory_generation: generation,
             fib_generation,
             source_kind: "xfrmi".into(),

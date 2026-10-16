@@ -283,15 +283,16 @@ func (p *pmechRoutePrefetch) matches(snap *ConfigSnapshot) bool {
 }
 
 // pmechRouteCollector validates every main-table route it is given but keeps
-// only the routes that can change a tunnel row's projection: a route with a
-// leg on a tunnel's logical ifindex (ownership and mixed-ECMP poisoning), or
-// a route overlapping a remote traffic selector (a more-specific route only
-// changes a row's effective prefixes where it intersects the row's
-// selectors). The inventory, its sort, and its JSON therefore scale with the
-// tunnel-relevant table, not with the whole main table.
+// only routes that can change a tunnel row's projections: routes with a leg on
+// a tunnel's logical ifindex (ownership and mixed-ECMP poisoning), or routes
+// overlapping a local or remote traffic selector (a more-specific route only
+// changes its effective projection where it intersects the selectors). The
+// inventory, its sort, and its JSON therefore scale with the tunnel-relevant
+// table, not with the whole main table.
 type pmechRouteCollector struct {
 	tunnelIfindexes map[uint32]struct{}
 	remotePrefixes  []netip.Prefix
+	localPrefixes   []netip.Prefix
 	total           int
 	hasIPv6         bool
 	invalid         bool
@@ -309,6 +310,9 @@ func newPMechRouteCollector(tunnelRows []IpsecTunnelRowSnapshot,
 		for _, selector := range selectorsBySTN[row.STN] {
 			if prefixes, ok := selectorPrefixes(selector.RemoteTS); ok {
 				collector.remotePrefixes = append(collector.remotePrefixes, prefixes...)
+			}
+			if prefixes, ok := selectorPrefixes(selector.LocalTS); ok {
+				collector.localPrefixes = append(collector.localPrefixes, prefixes...)
 			}
 		}
 	}
@@ -343,6 +347,11 @@ func (c *pmechRouteCollector) relevant(row IpsecMainRouteSnapshot, prefix netip.
 		}
 	}
 	for _, selector := range c.remotePrefixes {
+		if selector.Addr().Is4() == prefix.Addr().Is4() && selector.Overlaps(prefix) {
+			return true
+		}
+	}
+	for _, selector := range c.localPrefixes {
 		if selector.Addr().Is4() == prefix.Addr().Is4() && selector.Overlaps(prefix) {
 			return true
 		}
@@ -520,6 +529,43 @@ func (c *pmechRouteCollector) stamp(snap *ConfigSnapshot,
 				}
 			}
 		}
+	}
+
+	for i := range inventory.TunnelRows {
+		row := &inventory.TunnelRows[i]
+		for _, route := range parsedRoutes {
+			if route.snapshot.Disposition != uint8(unix.RTN_UNICAST) || pmechRouteHasMixedEgress(route) {
+				continue
+			}
+			for _, nextHop := range route.nextHops {
+				if _, tunnelEgress := c.tunnelIfindexes[nextHop.Ifindex]; tunnelEgress {
+					continue
+				}
+				eligiblePrefixes := pmechRoutePrefixesForLegIndex(route, nextHop.Ifindex, routeIndex)
+				for _, selector := range row.ExplicitSelectors {
+					if selector.LocalTS == "" {
+						continue
+					}
+					selectorPrefixes, ok := selectorPrefixes(selector.LocalTS)
+					if !ok {
+						row.InventoryValid = false
+						row.InventoryReason = "LOCAL_SELECTOR_UNRESOLVED"
+						continue
+					}
+					for _, eligible := range eligiblePrefixes {
+						for _, selectorPrefix := range selectorPrefixes {
+							if selectorPrefix.Addr().Is4() != eligible.Addr().Is4() {
+								continue
+							}
+							if effective, ok := intersectPrefixes(eligible, selectorPrefix); ok {
+								row.DestinationPrefixes = append(row.DestinationPrefixes, effective.String())
+							}
+						}
+					}
+				}
+			}
+		}
+		row.DestinationPrefixes = canonicalPrefixSet(row.DestinationPrefixes)
 	}
 
 	for i := range inventory.TunnelRows {

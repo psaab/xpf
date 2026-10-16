@@ -184,6 +184,7 @@ pub(in crate::afxdp) struct PMechTunnelRow {
     explicit_selectors: Vec<crate::protocol::IpsecTrafficSelectorSnapshot>,
     effective_prefixes: Vec<String>,
     ingress_prefixes: Vec<IpNet>,
+    destination_prefixes: Vec<IpNet>,
     inventory_generation: u64,
     fib_generation: u32,
     source_kind: String,
@@ -231,8 +232,13 @@ impl PMechInventory {
             let (effective_parsed, effective_valid) =
                 parse_canonical_prefixes(&row.effective_prefixes);
             let (ingress_prefixes, prefixes_valid) = parse_canonical_prefixes(&row.ingress_prefixes);
+            let (destination_prefixes, destination_valid) =
+                parse_canonical_prefixes(&row.destination_prefixes);
             let recomputed_projection = route_index.as_ref().and_then(|index| {
                 recompute_selector_projection(&snapshot.main_routes, index, row)
+            });
+            let recomputed_destination_projection = route_index.as_ref().and_then(|index| {
+                recompute_local_selector_projection(&snapshot.main_routes, index, row)
             });
             let projection_valid = routes_valid
                 && recomputed_projection.as_ref().is_some_and(|projection| {
@@ -240,7 +246,13 @@ impl PMechInventory {
                         && prefixes_valid
                         && canonical_prefix_strings(&effective_parsed).eq(projection)
                         && canonical_prefix_strings(&ingress_prefixes).eq(projection)
-                });
+                })
+                && recomputed_destination_projection
+                    .as_ref()
+                    .is_some_and(|projection| {
+                        destination_valid
+                            && canonical_prefix_strings(&destination_prefixes).eq(projection)
+                    });
             let inventory_reason = if mixed_ecmp_ambiguous {
                 "MAIN_ROUTE_ECMP_AMBIGUOUS".to_string()
             } else if routes_valid && !projection_valid {
@@ -264,7 +276,8 @@ impl PMechInventory {
                 && effective_valid
                 && projection_valid
                 && prefixes_valid
-                && !ingress_prefixes.is_empty();
+                && !ingress_prefixes.is_empty()
+                && destination_valid;
             if row.if_id != 0 {
                 *if_id_claims.entry(row.if_id).or_default() += 1;
             }
@@ -275,6 +288,7 @@ impl PMechInventory {
                 explicit_selectors: row.explicit_selectors.clone(),
                 effective_prefixes,
                 ingress_prefixes,
+                destination_prefixes,
                 inventory_generation: row.inventory_generation,
                 fib_generation: row.fib_generation,
                 source_kind: row.source_kind.clone(),
@@ -355,15 +369,10 @@ impl PMechTunnelRow {
             .any(|prefix| prefix.contains(&source))
     }
 
-    /// #9506 S9.5: destination containment in the tunnel's selector
-    /// projection. Construction (`from_snapshot`) admits a row only when
-    /// the canonicalized effective and ingress prefix sets are EQUAL and
-    /// both equal the route-derived recomputation, so membership in
-    /// `ingress_prefixes` is membership in the projection. A forwarded
-    /// (permitted) frame may only re-enter the kernel main table when its
-    /// destination is inside this set.
+    /// Destination authority is the local side of the selector; the
+    /// route-derived remote ingress projection is only valid for inner source.
     pub(in crate::afxdp) fn allows_destination(&self, destination: IpAddr) -> bool {
-        self.ingress_prefixes
+        self.destination_prefixes
             .iter()
             .any(|prefix| prefix.contains(&destination))
     }
@@ -601,6 +610,37 @@ fn recompute_selector_projection(
             for selector_prefix in &selectors {
                 if let Some(intersection) = intersect_prefixes(route_prefix, selector_prefix) {
                     projection.insert(intersection.to_string());
+                }
+            }
+        }
+    }
+    Some(projection)
+}
+
+fn recompute_local_selector_projection(
+    routes: &[crate::protocol::IpsecMainRouteSnapshot],
+    route_index: &RoutePrefixIndex,
+    tunnel: &crate::protocol::IpsecPMechTunnelRowSnapshot,
+) -> Option<BTreeSet<String>> {
+    let mut projection = BTreeSet::new();
+    let mut selectors = Vec::new();
+    for selector in &tunnel.explicit_selectors {
+        if !selector.local_ts.is_empty() {
+            selectors.extend(selector_prefixes(&selector.local_ts)?);
+        }
+    }
+    for (&ifindex, owned_routes) in &route_index.owned_routes_by_ifindex {
+        if ifindex == tunnel.logical_ifindex as u32 {
+            continue;
+        }
+        for &node_index in owned_routes {
+            let route_prefixes =
+                route_index.route_prefixes_for_leg(node_index, ifindex, routes);
+            for route_prefix in route_prefixes {
+                for selector_prefix in &selectors {
+                    if let Some(intersection) = intersect_prefixes(&route_prefix, selector_prefix) {
+                        projection.insert(intersection.to_string());
+                    }
                 }
             }
         }
@@ -1144,11 +1184,12 @@ mod tests {
     }
 
     fn inventory_snapshot(
-        routes: Vec<crate::protocol::IpsecMainRouteSnapshot>,
+        mut routes: Vec<crate::protocol::IpsecMainRouteSnapshot>,
         remote_ts: &str,
         effective: &[&str],
         ingress: &[&str],
     ) -> crate::protocol::IpsecPMechInventorySnapshot {
+        routes.push(route(0, 254, "192.0.2.0/24", RTN_UNICAST, vec![hop(20)]));
         crate::protocol::IpsecPMechInventorySnapshot {
             policy_identity: "ab".repeat(32),
             generation: 77,
@@ -1167,6 +1208,7 @@ mod tests {
                 }],
                 effective_prefixes: effective.iter().map(|value| (*value).into()).collect(),
                 ingress_prefixes: ingress.iter().map(|value| (*value).into()).collect(),
+                destination_prefixes: vec!["192.0.2.0/24".into()],
                 inventory_generation: 77,
                 fib_generation: 3,
                 source_kind: "xfrmi".into(),
