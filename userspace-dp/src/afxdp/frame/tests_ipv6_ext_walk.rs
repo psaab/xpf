@@ -191,15 +191,88 @@ fn ext_walk_first_fragment_then_ext_still_resolves_l4() {
     ));
 }
 
+#[test]
+fn ext_walk_nonfirst_fragment_payload_is_not_walked_14116() {
+    // #14116: a valid non-first fragment whose payload mimics an overlong
+    // DestOpts/AH header. Pre-fix the walker followed the Fragment header's
+    // Next Header into payload and returned Truncated, so every L4 resolver
+    // failed closed (None) on a fragment that should get the flowless
+    // non-first treatment: no L4 offset, but the fragment status sighted.
+    for (name, next, payload) in [
+        ("DestOpts", 60u8, [PROTO_TCP, 0xff]),
+        ("AH", 51u8, [PROTO_TCP, 0xff]),
+    ] {
+        let mut body = frag8(next, 0x0008).to_vec();
+        body.extend_from_slice(&payload);
+        let pkt = v6_pkt(44, &body);
+        let w = walk_ipv6_ext_chain(&pkt, 0);
+        assert_eq!(
+            w.outcome,
+            ExtChainOutcome::NonFirstFragment,
+            "{name}: payload mimicking an overlong header must stop at the \
+             non-first Fragment header, not fail closed as Truncated"
+        );
+        assert!(w.non_first_fragment_offset_seen, "{name}");
+        assert!(ipv6_is_non_first_fragment(&pkt), "{name}");
+        assert!(ipv6_is_any_fragment(&pkt), "{name}");
+        // No L4 is surrendered from payload bytes, but this is the
+        // non-first verdict, not truncation/over-limit.
+        assert_eq!(packet_rel_l4_offset(&pkt, libc::AF_INET6 as u8), None, "{name}");
+        assert_eq!(
+            packet_rel_l4_offset_and_protocol(&pkt, libc::AF_INET6 as u8),
+            None,
+            "{name}"
+        );
+        assert!(!ipv6_ext_chain_over_limit(
+            &frame_of(&pkt),
+            libc::AF_INET6 as u8
+        ), "{name}");
+    }
+
+    // Payload that DOES fit as a chain still is not walked: a DestOpts-
+    // shaped payload resolving to TCP must not yield an L4 verdict.
+    let mut body = frag8(60, 0x0008).to_vec();
+    body.extend_from_slice(&ext8(PROTO_TCP));
+    body.extend_from_slice(&[0u8; 20]);
+    let pkt = v6_pkt(44, &body);
+    assert_eq!(
+        walk_ipv6_ext_chain(&pkt, 0).outcome,
+        ExtChainOutcome::NonFirstFragment
+    );
+    assert_eq!(packet_rel_l4_offset(&pkt, libc::AF_INET6 as u8), None);
+
+    // Control: the same overlong headers after a FIRST fragment (offset 0,
+    // M=1) are real extension headers and keep failing closed.
+    for next in [60u8, 51] {
+        let mut body = frag8(next, 0x0001).to_vec();
+        body.extend_from_slice(&[PROTO_TCP, 0xff]);
+        let pkt = v6_pkt(44, &body);
+        assert_eq!(
+            walk_ipv6_ext_chain(&pkt, 0).outcome,
+            ExtChainOutcome::Truncated,
+            "first-fragment overlong header (next={next}) must stay Truncated"
+        );
+    }
+
+    // Control: a valid first fragment → DestOpts → TCP still resolves.
+    let mut body = frag8(60, 0x0001).to_vec();
+    body.extend_from_slice(&ext8(PROTO_TCP));
+    body.extend_from_slice(&[0u8; 20]);
+    let pkt = v6_pkt(44, &body);
+    assert_eq!(
+        walk_ipv6_ext_chain(&pkt, 0).outcome,
+        ExtChainOutcome::L4(56, PROTO_TCP)
+    );
+}
+
 
 #[test]
 fn ext_walk_over_limit_records_fragment_and_fails_l4_closed() {
-    // FRAG(non-first bits) + MAX_IPV6_EXT_HEADERS DestOpts headers: the
-    // walk exhausts the bound still on an ext header (OverLimit), but the
-    // recorded first-Fragment sighting must survive — the pre-#6435
-    // predicates returned from the Fragment arm without ever reaching the
-    // bound.
-    let mut body = frag8(60, 0x0008).to_vec();
+    // A chain still on an extension header at the bound is OverLimit even
+    // when an earlier FIRST fragment was sighted: FRAG(offset 0, M=1) +
+    // MAX_IPV6_EXT_HEADERS DestOpts headers exhausts the bound, but the
+    // recorded first-Fragment sighting must survive.
+    let mut body = frag8(60, 0x0001).to_vec();
     for _ in 0..MAX_IPV6_EXT_HEADERS {
         body.extend_from_slice(&ext8(60));
     }
@@ -216,6 +289,27 @@ fn ext_walk_over_limit_records_fragment_and_fails_l4_closed() {
         None
     );
     assert_eq!(frame_l4_offset(&frame_of(&pkt), libc::AF_INET6 as u8), None);
+    assert!(ipv6_is_any_fragment(&pkt));
+    assert!(!ipv6_is_non_first_fragment(&pkt));
+
+    // #14116: the same payload after a NON-FIRST fragment is not walked at
+    // all — the walk stops at the Fragment header (NonFirstFragment, not
+    // OverLimit), while the fragment predicates still sight it.
+    let mut body = frag8(60, 0x0008).to_vec();
+    for _ in 0..MAX_IPV6_EXT_HEADERS {
+        body.extend_from_slice(&ext8(60));
+    }
+    body.extend_from_slice(&[0u8; 8]);
+    let pkt = v6_pkt(44, &body);
+    assert_eq!(
+        walk_ipv6_ext_chain(&pkt, 0).outcome,
+        ExtChainOutcome::NonFirstFragment
+    );
+    assert!(!ipv6_ext_chain_over_limit(
+        &frame_of(&pkt),
+        libc::AF_INET6 as u8
+    ));
+    assert_eq!(packet_rel_l4_offset(&pkt, libc::AF_INET6 as u8), None);
     assert!(ipv6_is_any_fragment(&pkt));
     assert!(ipv6_is_non_first_fragment(&pkt));
 }

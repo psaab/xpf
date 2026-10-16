@@ -274,6 +274,22 @@ pub(super) fn parse_ndp_neighbor_advert(raw_frame: &[u8]) -> Option<NdpNeighborA
     let walk = super::frame::walk_ipv6_ext_chain(l3_slice, 0);
     let (rel_l4, protocol) = match walk.outcome {
         super::frame::ExtChainOutcome::L4(offset, proto) => (offset, proto),
+        // #14116: stopped at a readable non-first Fragment header. Its
+        // payload is not an L4 header, so this cannot be confirmed as an
+        // NA — but a chain that sighted a Fragment header is exactly the
+        // RFC 6980 fragmented-ND shape the gate below counts, and the
+        // Fragment header's Next Header naming ICMPv6 is readable without
+        // touching payload. Count the refusal once, as the gate would.
+        super::frame::ExtChainOutcome::NonFirstFragment => {
+            let names_icmpv6 = walk
+                .fragment
+                .and_then(|fragment| fragment.bytes)
+                .is_some_and(|bytes| bytes[0] == NEXT_HEADER_ICMPV6);
+            if names_icmpv6 {
+                NDP_NA_FRAG_REFUSED.fetch_add(1, Ordering::Relaxed);
+            }
+            return None;
+        }
         // Truncated/OverLimit/NoNextHeader: fail closed WITHOUT counting —
         // the shape is unconfirmable as NA (accepted residual: uncounted
         // but refused, never learned).

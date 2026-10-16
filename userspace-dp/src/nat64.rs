@@ -2151,8 +2151,24 @@ pub(crate) fn translate_v6_to_v4(
 /// responsible for the non-first-fragment check (a non-first fragment carries
 /// NO L4 header at this offset — its bytes are payload).
 fn ipv6_l4_offset_and_protocol(packet: &[u8]) -> Option<(usize, u8)> {
-    match walk_ipv6_ext_chain(packet, 0).outcome {
+    let walk = walk_ipv6_ext_chain(packet, 0);
+    match walk.outcome {
         ExtChainOutcome::L4(offset, protocol) => Some((offset, protocol)),
+        // #14116: a non-first fragment carries no L4, but NAT64's L3-only
+        // non-first translator needs the payload offset (first byte past
+        // the Fragment header) and the Fragment header's Next Header —
+        // exactly what the pre-#14116 walk surrendered by walking payload
+        // to a terminal. The fragment sighting is already recorded; fail
+        // closed if it is unreadable.
+        ExtChainOutcome::NonFirstFragment => {
+            let fragment = walk.fragment?;
+            let bytes = fragment.bytes?;
+            if walk.non_first_fragment_offset_seen {
+                Some((fragment.header_offset + 8, bytes[0]))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
