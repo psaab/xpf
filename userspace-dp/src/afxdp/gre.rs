@@ -7,7 +7,7 @@ pub(in crate::afxdp) const GRE_FLAG_SEQUENCE: u16 = 0x1000;
 const GRE_VERSION_MASK: u16 = 0x0007;
 /// RFC 2784 §2.2 marks the legacy Strict Source Route and Recursion Control
 /// fields reserved; unlike RFC 2784 §2.3 bits 6–12, they are not must-ignore.
-const GRE_UNSUPPORTED_LEGACY_FLAGS: u16 = 0x0c00;
+pub(in crate::afxdp) const GRE_UNSUPPORTED_LEGACY_FLAGS: u16 = 0x0c00;
 const GRE_PROTO_IPV4: u16 = 0x0800;
 const GRE_PROTO_IPV6: u16 = 0x86dd;
 

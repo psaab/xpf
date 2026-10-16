@@ -34,7 +34,7 @@
 //! Discriminator".
 #![allow(dead_code)]
 
-use super::gre::{GRE_FLAG_CHECKSUM, GRE_FLAG_KEY};
+use super::gre::{GRE_FLAG_CHECKSUM, GRE_FLAG_KEY, GRE_UNSUPPORTED_LEGACY_FLAGS};
 use super::types::{SessionFlow, UserspaceDpMeta};
 use crate::session::TunnelDiscriminator;
 
@@ -82,6 +82,11 @@ pub(in crate::afxdp) fn gre_transit_discriminator(
     // Source Route Entries have no fixed offset, so nothing behind them can be
     // located — including the Key.
     if (flags_version & GRE_FLAG_ROUTING) != 0 {
+        return TunnelDiscriminator::Unparseable;
+    }
+    // Match native decapsulation: legacy SSR/Recursion Control bit 0 is
+    // unsupported, while RFC 2784 §2.3 bits 6–12 remain must-ignore.
+    if (flags_version & GRE_UNSUPPORTED_LEGACY_FLAGS) != 0 {
         return TunnelDiscriminator::Unparseable;
     }
     if (flags_version & GRE_FLAG_KEY) == 0 {
@@ -484,6 +489,26 @@ mod tests {
             gre_transit_discriminator(&f, GRE_OFF, end),
             TunnelDiscriminator::Unparseable,
             "a version-1 header must fail CLOSED, not fall back to Unkeyed"
+        );
+    }
+
+    #[test]
+    fn unsupported_legacy_bits_are_unparseable_13662() {
+        for bit in [0x0800u16, 0x0400u16] {
+            let (f, end) = frame(K | bit, &[0x0000_0055], 0);
+            assert_eq!(
+                gre_transit_discriminator(&f, GRE_OFF, end),
+                TunnelDiscriminator::Unparseable,
+                "unsupported legacy bit {bit:#06x} must not establish keyed transit identity"
+            );
+        }
+
+        // These RFC 2784 §2.3 bits are different: receivers must ignore them,
+        // preserving RFC 2890 Key extraction.
+        let (ignored, ignored_end) = frame(K | 0x03f8, &[0x0000_0055], 0);
+        assert_eq!(
+            gre_transit_discriminator(&ignored, GRE_OFF, ignored_end),
+            TunnelDiscriminator::Keyed(0x55)
         );
     }
 
