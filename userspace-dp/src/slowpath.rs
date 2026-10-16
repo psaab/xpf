@@ -753,15 +753,28 @@ fn ipsec_inner_descriptor(
             crate::afxdp::packet_rel_l4_offset_and_protocol_for_ipsec(bytes, inner_family)
         {
             let payload = match protocol {
-                6 if bytes.len() >= offset.saturating_add(20) => offset.saturating_add(20),
-                17 if bytes.len() >= offset.saturating_add(8) => offset.saturating_add(8),
-                _ => offset,
+                6 => offset
+                    .checked_add(12)
+                    .and_then(|field| bytes.get(field))
+                    .map(|byte| usize::from(byte >> 4) * 4)
+                    .filter(|header_len| *header_len >= 20)
+                    .and_then(|header_len| offset.checked_add(header_len))
+                    .filter(|end| *end <= bytes.len()),
+                17 if bytes.len() >= offset.saturating_add(8) => {
+                    Some(offset.saturating_add(8))
+                }
+                6 => None,
+                _ => Some(offset),
             };
-            (
-                u16::try_from(offset).unwrap_or(u16::MAX),
-                protocol,
-                u16::try_from(payload).unwrap_or(u16::MAX),
-            )
+            if let Some(payload) = payload {
+                (
+                    u16::try_from(offset).unwrap_or(u16::MAX),
+                    protocol,
+                    u16::try_from(payload).unwrap_or(u16::MAX),
+                )
+            } else {
+                (0, 0, 0)
+            }
         } else {
             (0, 0, 0)
         };

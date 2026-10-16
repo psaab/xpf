@@ -1,4 +1,5 @@
 use super::*;
+use crate::slowpath_reinject_9506::CaptureOrigin;
 
 /// #2378 fail-on-revert: when conf/all/rp_filter is strict (1) or loose (2),
 /// the per-device rp_filter=0 we write on the slow-path TUN is overridden by
@@ -51,6 +52,80 @@ fn read_all_rp_filter_parses_and_tolerates_missing() {
     std::fs::write(&ok, "garbage").unwrap();
     assert_eq!(read_all_rp_filter(ok.to_str().unwrap()), None);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn ipsec_descriptor_frame(bytes: Vec<u8>) -> SubmitFrame {
+    SubmitFrame {
+        lease: ReinjectLease {
+            permit_epoch: 1,
+            queue_epoch: 1,
+            queue_number: 0,
+            request_id: 1,
+        },
+        flow_tag: 0,
+        flags: 0,
+        origin: CaptureOrigin::default(),
+        bytes,
+        snapshot_generation: 0,
+        config_generation: 0,
+        fib_generation: 0,
+        zone_id: 0,
+        if_id: 1,
+        pmech_inventory_generation: 0,
+        pmech_inventory_fib_generation: 0,
+        pmech_policy_identity: [0; 32],
+        deadline_mono_ns: 0,
+        deadline_clock_id: 0,
+    }
+}
+
+fn ipv4_tcp_packet(tcp_header_len: usize, present_len: usize) -> Vec<u8> {
+    let mut pkt = vec![0u8; present_len];
+    pkt[0] = 0x45;
+    pkt[2..4].copy_from_slice(&(present_len as u16).to_be_bytes());
+    pkt[9] = 6;
+    if present_len >= 20 + 13 {
+        pkt[20 + 12] = ((tcp_header_len / 4) as u8) << 4;
+    }
+    pkt
+}
+
+#[test]
+fn ipsec_inner_descriptor_uses_tcp_data_offset_with_options_13713() {
+    // 32-byte TCP header (8 bytes of options): payload starts at 20+32=52,
+    // not at the hardcoded 20-byte header end (40).
+    let pkt = ipv4_tcp_packet(32, 52 + 7);
+    let desc = ipsec_inner_descriptor(&ipsec_descriptor_frame(pkt), 1, 1, 1);
+    assert_eq!(desc.protocol, 6);
+    assert_eq!(desc.rel_l4_offset, 20);
+    assert_eq!(desc.payload_offset, 52);
+}
+
+#[test]
+fn ipsec_inner_descriptor_uses_tcp_data_offset_v6_13713() {
+    let mut pkt = vec![0u8; 40 + 28 + 4];
+    pkt[0] = 0x60;
+    pkt[6] = 6;
+    pkt[40 + 12] = 7 << 4;
+    let desc = ipsec_inner_descriptor(&ipsec_descriptor_frame(pkt), 1, 1, 1);
+    assert_eq!(desc.protocol, 6);
+    assert_eq!(desc.rel_l4_offset, 40);
+    assert_eq!(desc.payload_offset, 68);
+}
+
+#[test]
+fn ipsec_inner_descriptor_rejects_subminimum_tcp_data_offset_13713() {
+    let pkt = ipv4_tcp_packet(16, 20 + 20);
+    let desc = ipsec_inner_descriptor(&ipsec_descriptor_frame(pkt), 1, 1, 1);
+    assert_eq!((desc.rel_l4_offset, desc.protocol, desc.payload_offset), (0, 0, 0));
+}
+
+#[test]
+fn ipsec_inner_descriptor_rejects_tcp_data_offset_past_packet_13713() {
+    // Declares a 60-byte TCP header but only 20 TCP bytes are present.
+    let pkt = ipv4_tcp_packet(60, 20 + 20);
+    let desc = ipsec_inner_descriptor(&ipsec_descriptor_frame(pkt), 1, 1, 1);
+    assert_eq!((desc.rel_l4_offset, desc.protocol, desc.payload_offset), (0, 0, 0));
 }
 
 /// #2471 fail-on-revert: when the MTU-programming ioctl FAILS, the slow
