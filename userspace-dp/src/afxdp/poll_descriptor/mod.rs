@@ -1481,10 +1481,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 }
                             }
                         };
-                        // #10525: Stage 11 claims DNAT-to-self IKE before the
-                        // ordinary LocalDelivery arms. Re-run the same lo0
-                        // and `to-zone junos-host` gates here, before the
-                        // delegated reinject. The kernel lo0 chain still
+                        // #10525/#14125: Stage 11 claims DNAT-to-self IKE
+                        // and SA-checked ESP-in-UDP before the ordinary
+                        // LocalDelivery arms. Re-run the same lo0 and
+                        // `to-zone junos-host` gates here, before the
+                        // delegated reinject, for every packet that will
+                        // actually be reinjected. Raw ESP/AH never reaches
+                        // this point (hard-dropped above) and malformed IKE
+                        // / SA misses have already continued, so the only
+                        // reinjected classes are positive IKE and
+                        // SA-checked ESP-in-UDP. The kernel lo0 chain still
                         // enforces its own terms; this userspace gate is
                         // required for the delegated xpf-usp1 path, whose
                         // iifname is intentionally outside kernel junos-host
@@ -1514,8 +1520,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         } else {
                             None
                         };
-                        if is_positive_ike {
-                            let flow = flow.as_ref().expect("positive IKE has a parsed flow");
+                        // Every reinjected packet pays the fine gates, not
+                        // only positive IKE (#14125). flow is always Some
+                        // here: the outlet arm above continued on None.
+                        if let Some(flow) = flow.as_ref() {
                             let (ingress_logical, from_zone_id, ingress_zone_override) =
                                 ike_host_inbound_gate_context(
                                     flow,
@@ -1535,7 +1543,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             debug_assert_eq!(
                                 policy_dst,
                                 (flow.dst_ip, flow.forward_key.dst_port),
-                                "#9529: Stage-11 IKE gate must judge wire == post-translation tuple"
+                                "#9529: Stage-11 gate must judge wire == post-translation tuple"
                             );
                             let (lo0_action, lo0_log) = apply_lo0_filter_action(
                                 worker_ctx.forwarding,
