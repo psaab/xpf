@@ -10,20 +10,15 @@
 
 use super::*;
 
-/// #4381: allocate a UNIQUE translated `(pool v4 address, L4 port/identifier)`
-/// for a NAT64 forward flow, reusing the pool-mode SNAT [`PortAllocator`].
-///
-/// NAT64 is a many-to-one (v6→v4) translation exactly like pool-mode source
-/// NAT: several IPv6 clients are hidden behind one IPv4 pool address, so two
-/// clients that share a source port (TCP/UDP) or ICMP echo identifier MUST get
-/// DISTINCT translated values or their reverse (v4→v6) 5-tuples collide and the
-/// server's replies are mis-associated — the missing RFC 6146 BIB. Rather than
-/// hand-roll a parallel allocator, the crate-root `nat64` module drives the
-/// same collision-free `PortAllocator` the pool-mode SNAT path uses.
+/// RFC 6146 §3.5.2 binding-independent mapping: NAT64 pools allocate one
+/// translated tuple per IPv6 transport address (protocol, source IPv6, source
+/// port), not per remote endpoint. Reuse the source-NAT allocator's persistent
+/// lease table with `AnyRemoteHost`; its active-flow refcount keeps the binding
+/// reserved until every session using it closes, then the 300-second idle lease
+/// lifetime preserves the BIB as required by RFC 6146.
 ///
 /// This thin wrapper keeps the module-private `TranslatedTuple` /
-/// `PoolAddressFamily` types out of `nat64.rs`. NAT64 never uses persistent NAT
-/// or address-persistent stickiness, so those knobs are fixed off.
+/// `PoolAddressFamily` types out of `nat64.rs`. NAT64 uses no address stickiness.
 pub(crate) fn allocate_nat64_pool_port(
     allocator: &PortAllocator,
     flow: SourceNatFlowKey,
@@ -35,11 +30,11 @@ pub(crate) fn allocate_nat64_pool_port(
     let translated = allocator.allocate_translation(
         flow,
         PoolAddressFamily::V4(pool_v4),
-        0,     // family_offset — the v4 pool starts at index 0
+        0,     // family_offset — NAT64 pool addresses start at index 0
         false, // address_persistent
-        false, // persistent_nat
-        PersistentNatPermit::default(),
-        0, // persistent_nat_timeout_ns — unused when persistent_nat is false
+        true,  // persistent_nat: BIB identity excludes the remote endpoint
+        PersistentNatPermit::AnyRemoteHost,
+        300 * 1_000_000_000, // RFC 6146 idle BIB lifetime
         now_ns,
         holder,
     )?;
