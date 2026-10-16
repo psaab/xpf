@@ -916,6 +916,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         0,
         SessionHitVerdict::Foreign,
         &mut resolved,
+        &mut Vec::new(),
     );
     assert!(resolved.deferred_synced_promotion.is_some());
     assert!(resolved.deferred_shared_materialization.is_some());
@@ -951,6 +952,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         0,
         SessionHitVerdict::Owner,
         &mut resolved,
+        &mut Vec::new(),
     );
 
     assert_eq!(
@@ -12033,6 +12035,166 @@ fn purge_translated_synced_hit_reverse_entry_releases_nothing_5295() {
         1,
         "a reverse/alias purge must NOT release the forward flow's reservation",
     );
+}
+
+// #13674 (D11-08) FAIL-ON-REVERT: the transient purge must also (1) delete
+// the kernel BPF conntrack row (it previously reached
+// `delete_session_map_entry_for_removed_session`, which hardcodes -1,-1
+// conntrack fds), (2) queue `DeleteSynced` to sibling workers when it
+// actually removes the shared entry (previously siblings kept local
+// replicas + NAT holder bits until idle timeout), and (3) record the
+// purged key in `evicted_keys` for per-binding flow-cache invalidation
+// (previously the local delete was invisible to the flow cache).
+// Neutralizing any one leg (restore -1,-1, drop the replicate, or drop
+// the evicted_keys push) reddens the matching assertion below.
+#[test]
+fn purge_translated_synced_hit_full_teardown_13674() {
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    let forwarding = ForwardingState::default();
+
+    let orig_key = test_key();
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(40000),
+        ..NatDecision::default()
+    };
+    let wire_key = forward_wire_key(&orig_key, nat);
+    let decision = SessionDecision {
+        resolution: test_local_delivery_decision().resolution,
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = test_metadata();
+
+    // Seed the kernel conntrack row the purge must delete.
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &wire_key,
+            decision,
+            &metadata,
+            &FastMap::default(),
+            0,
+            0,
+            1,
+            300,
+            SessionOrigin::SyncImport,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written,
+    );
+    assert!(
+        crate::afxdp::bpf_map::conntrack_row_for_test(&wire_key).is_some(),
+        "precondition: conntrack row present",
+    );
+
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        wire_key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let _ = sessions.drain_deltas(16);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // The shared entry the purge removes (drives the sibling replicate).
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &SyncedSessionEntry {
+            key: wire_key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            session_id: 1,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            source_nat_static: None,
+            leak_incarnation: 0,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+        },
+    );
+    let shared = SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+    };
+
+    let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands = vec![peer_queue.clone()];
+    let mut evicted_keys: Vec<SessionKey> = Vec::new();
+    let mut resolved = ResolvedFlowSessionDecision {
+        key: wire_key.clone(),
+        session_id: 1,
+        timeout_secs: 300,
+        decision,
+        source_nat_static: None,
+        metadata: metadata.clone(),
+        origin: SessionOrigin::SyncImport,
+        source_nat_validation_key: None,
+        created: false,
+        install_failed: false,
+        close_deferred: false,
+        deferred_forwarding_revalidation: None,
+        deferred_synced_promotion: None,
+        deferred_shared_materialization: None,
+        deferred_synced_purge: Some(DeferredSyncedPurge {
+            key: wire_key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            origin: SessionOrigin::SyncImport,
+        }),
+    };
+    maybe_promote_synced_session_with_conntrack(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        -1,
+        shared,
+        &peer_worker_commands,
+        empty_worker_commands_by_id(),
+        &forwarding,
+        1_000_000,
+        TCP_FLAG_ACK,
+        0,
+        SessionHitVerdict::Owner,
+        &mut resolved,
+        &mut evicted_keys,
+    );
+
+    // (1) conntrack row deleted
+    assert!(
+        crate::afxdp::bpf_map::conntrack_row_for_test(&wire_key).is_none(),
+        "purge must delete the kernel BPF conntrack row (stale on revert)",
+    );
+    // (2) sibling DeleteSynced queued
+    {
+        let pending = peer_queue.lock().unwrap();
+        assert!(
+            pending.iter().any(|cmd| matches!(cmd, WorkerCommand::DeleteSynced(k) if *k == wire_key)),
+            "purge that removes the shared entry must queue DeleteSynced to siblings, got {pending:?}",
+        );
+    }
+    // (3) flow-cache eviction recorded
+    assert!(
+        evicted_keys.contains(&wire_key),
+        "purge must record the key in evicted_keys for flow-cache invalidation, got {evicted_keys:?}",
+    );
+    // existing: local entry gone
+    assert!(sessions.lookup(&wire_key, 1_000_000, TCP_FLAG_ACK).is_none());
 }
 
 

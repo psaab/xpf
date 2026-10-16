@@ -130,6 +130,7 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
         worker_id,
         None,
     )?;
+    let mut purged_keys = Vec::new();
     maybe_promote_synced_session_with_conntrack(
         sessions,
         session_map,
@@ -149,6 +150,7 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
         worker_id,
         verdict,
         &mut resolved,
+        &mut purged_keys,
     );
     if verdict == SessionHitVerdict::Owner
         && let Some(revalidation) = resolved.deferred_forwarding_revalidation.take()

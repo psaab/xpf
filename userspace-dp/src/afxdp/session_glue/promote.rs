@@ -240,21 +240,27 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     worker_id: u32,
     verdict: SessionHitVerdict,
     resolved: &mut ResolvedFlowSessionDecision,
+    evicted_keys: &mut Vec<SessionKey>,
 ) {
     if verdict != SessionHitVerdict::Owner {
         return;
     }
-
     apply_deferred_synced_purge(
         sessions,
         session_map,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
         shared,
+        peer_worker_commands,
+        worker_commands_by_id,
         forwarding,
         now_ns,
         worker_id,
         verdict,
         resolved,
+        evicted_keys,
     );
+
     super::apply_deferred_shared_materialization(
         sessions,
         forwarding,
@@ -308,14 +314,30 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
 /// a non-pool / non-reserved session) frees nothing and a double-free is
 /// impossible — `release_flow` is a no-op when the flow was never tracked.
 ///
+/// #13674 (D11-08): this purge also owns the remaining teardown legs its
+/// sibling purges (`purge_one_install_table_key`) run. It must (a) delete
+/// the BPF conntrack mirror — the plain
+/// `delete_session_map_entry_for_removed_session` hardcodes `-1,-1`
+/// conntrack fds, leaving a stale kernel row the next packet would hit;
+/// (b) fan `DeleteSynced` to sibling workers (via the repairing helper, so
+/// a refused queue's NAT holder teardown still runs) when the shared entry
+/// was actually removed — otherwise siblings serve local replicas until
+/// idle timeout; and (c) push the key into `evicted_keys` so the caller
+/// invalidates per-binding flow-cache slots. Returns whether the purge
+/// fired (guard passed), so callers can gate follow-up work.
+///
 /// `key` identifies the stored session and is the tuple tested by the
 /// translated-forward guard. `forwarding`, `now_ns`, and `worker_id` scope
 /// the local NAT reservation release.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
+pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
     shared: SharedSessionRefs<'_>,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &WorkerCommandQueues,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: &SessionMetadata,
@@ -326,19 +348,41 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
     // session, whose reservation every worker holds, so it must drop only this
     // worker's bit.
     worker_id: u32,
-) {
+    evicted_keys: &mut Vec<SessionKey>,
+) -> bool {
     if !origin.is_peer_synced() || !is_translated_forward_session_key(key, decision, metadata) {
-        return;
+        return false;
     }
-    remove_shared_session(
+    let removed = remove_shared_session_if(
         shared.sessions,
         shared.nat_sessions,
         shared.forward_wire_sessions,
         shared.owner_rg_indexes,
         key,
+        |_| true,
     );
-    delete_session_map_entry_for_removed_session(session_map, key, decision, metadata);
+    delete_session_map_entry_for_removed_session_with_origin(
+        session_map,
+        key,
+        decision,
+        metadata,
+        origin,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+    );
     sessions.delete(key);
+    evicted_keys.push(key.clone());
+    if matches!(removed, SharedRemoval::Removed(_)) {
+        replicate_session_delete_repairing(
+            peer_worker_commands,
+            worker_commands_by_id,
+            forwarding,
+            key,
+            decision.nat,
+            metadata.is_reverse,
+            now_ns,
+        );
+    }
     // #5295: return the pool reservation to the local allocator, exactly as
     // `handle_delete_synced` does on the delete-sync teardown. `is_reverse` is
     // the ownership guard (a reverse entry owns no source-NAT/NAT64 reservation);
@@ -360,16 +404,56 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
         now_ns,
         worker_id,
     );
+    true
+}
+/// Backwards-compatible internal wrapper for tests and callers that have no
+/// conntrack fds, sibling command queues, or flow-cache invalidation owner.
+#[cfg(test)]
+pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    shared: SharedSessionRefs<'_>,
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    origin: SessionOrigin,
+    forwarding: &ForwardingState,
+    now_ns: u64,
+    worker_id: u32,
+) {
+    let mut evicted_keys = Vec::new();
+    purge_translated_synced_hit_with_context(
+        sessions,
+        session_map,
+        -1,
+        -1,
+        shared,
+        &[],
+        empty_worker_commands_by_id(),
+        key,
+        decision,
+        metadata,
+        origin,
+        forwarding,
+        now_ns,
+        worker_id,
+        &mut evicted_keys,
+    );
 }
 fn apply_deferred_synced_purge(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
     shared: SharedSessionRefs<'_>,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &WorkerCommandQueues,
     forwarding: &ForwardingState,
     now_ns: u64,
     worker_id: u32,
     verdict: SessionHitVerdict,
     resolved: &mut ResolvedFlowSessionDecision,
+    evicted_keys: &mut Vec<SessionKey>,
 ) {
     if verdict != SessionHitVerdict::Owner {
         return;
@@ -377,10 +461,14 @@ fn apply_deferred_synced_purge(
     let Some(purge) = resolved.deferred_synced_purge.take() else {
         return;
     };
-    purge_translated_synced_hit(
+    purge_translated_synced_hit_with_context(
         sessions,
         session_map,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
         shared,
+        peer_worker_commands,
+        worker_commands_by_id,
         &purge.key,
         purge.decision,
         &purge.metadata,
@@ -388,5 +476,6 @@ fn apply_deferred_synced_purge(
         forwarding,
         now_ns,
         worker_id,
+        evicted_keys,
     );
 }
