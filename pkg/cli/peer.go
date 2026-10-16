@@ -129,7 +129,26 @@ func (c *CLI) dialPeer() *grpc.ClientConn {
 // (reboot, shutdown, etc.) via the fabric gRPC link. When peerSystemActionFn
 // is set, the request is satisfied locally without a fabric dial.
 func (c *CLI) requestPeerSystemAction(ctx context.Context, action string) (string, error) {
-	ctx = metadata.AppendToOutgoingContext(ctx, "x-peer-forwarded", "1")
+	return c.requestPeerSystemActionWithPersistentNatGeneration(ctx, action, "", 0)
+}
+
+// requestPeerSystemActionWithPersistentNatGeneration is
+// requestPeerSystemAction plus the durable persistent-NAT clear
+// generation fence (#11486): when origin is non-empty it forwards
+// x-peer-persistent-nat-{origin,generation} so the peer records
+// RemoteGenerations[origin]=generation and rejects pre-clear lease
+// replays. Mirrors grpcapi's
+// proxyPeerSystemActionWithPersistentNatGeneration; metadata keys
+// must stay in sync with
+// pkg/grpcapi/persistent_nat_clear_generation_11486.go.
+func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Context, action string, origin string, generation uint64) (string, error) {
+	pairs := []string{"x-peer-forwarded", "1"}
+	if origin != "" {
+		pairs = append(pairs,
+			"x-peer-persistent-nat-origin", origin,
+			"x-peer-persistent-nat-generation", strconv.FormatUint(generation, 10))
+	}
+	ctx = metadata.AppendToOutgoingContext(ctx, pairs...)
 	if c.peerSystemActionFn != nil {
 		return c.peerSystemActionFn(ctx, action)
 	}
