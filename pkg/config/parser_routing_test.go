@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -2110,6 +2111,59 @@ func TestGRETunnelKeepaliveSetSyntax(t *testing.T) {
 	}
 	if tc.Key != 100 {
 		t.Errorf("Key = %d, want 100", tc.Key)
+	}
+}
+
+func TestTunnelClearDontFragmentBitSetSyntax13957(t *testing.T) {
+	cmds := []string{
+		"set interfaces gre0 tunnel clear-dont-fragment-bit",
+		"set interfaces gre1 unit 0 tunnel clear-dont-fragment-bit",
+		"set interfaces gre2 tunnel mode gre",
+	}
+	tree := &ConfigTree{}
+	for _, cmd := range cmds {
+		path, err := ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%v): %v", path, err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	if got := cfg.Interfaces.Interfaces["gre0"].Tunnel.ClearDontFragmentBit; !got {
+		t.Fatal("interface-level clear-dont-fragment-bit was not compiled")
+	}
+	if got := cfg.Interfaces.Interfaces["gre1"].Units[0].Tunnel.ClearDontFragmentBit; !got {
+		t.Fatal("unit-level clear-dont-fragment-bit was not compiled")
+	}
+	if got := cfg.Interfaces.Interfaces["gre2"].Tunnel.ClearDontFragmentBit; got {
+		t.Fatal("GRE default must copy the inner IPv4 DF bit")
+	}
+}
+
+func TestTunnelClearDontFragmentBitAccepted13957(t *testing.T) {
+	path, err := ParseSetCommand("set interfaces gre0 tunnel clear-dont-fragment-bit")
+	if err != nil {
+		t.Fatalf("ParseSetCommand: %v", err)
+	}
+	tree := &ConfigTree{}
+	if err := tree.SetPath(path); err != nil {
+		t.Fatalf("SetPath: %v", err)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("GRE clear-dont-fragment-bit should be accepted: %v", err)
+	}
+	wire, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if !strings.Contains(string(wire), `"ClearDontFragmentBit":true`) {
+		t.Fatalf("compiled config lost the GRE clear setting: %s", wire)
 	}
 }
 

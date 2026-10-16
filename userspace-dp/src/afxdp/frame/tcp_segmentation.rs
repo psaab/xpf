@@ -780,6 +780,7 @@ mod mode_aware_segmentation_tests {
             destination: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
             key: 0,
             ttl: 64,
+            clear_dont_fragment_bit: false,
             transport_table: "inet.0".to_string(),
             wg_listen_port: 51820,
             wg_local_privkey: zeroize::Zeroizing::new([0u8; 32]),

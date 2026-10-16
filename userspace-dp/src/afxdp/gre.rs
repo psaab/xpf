@@ -175,9 +175,9 @@ pub(in crate::afxdp) static WG_DECAP_ECN_ILLEGAL_DROPS: AtomicU64 = AtomicU64::n
 
 /// #2331: count of native-GRE encap frames dropped because the fully
 /// built outer datagram (outer IP + GRE header[+key] + inner packet)
-/// exceeds the resolved local transport/egress MTU. GRE IPv4 outers
-/// now leave DF clear for smaller downstream path MTUs, but the local
-/// link still cannot transmit an oversized frame. Surfaced via
+/// exceeds the resolved local transport/egress MTU. GRE IPv4 outers copy
+/// the inner DF bit by default or clear it when explicitly configured, but
+/// the local link still cannot transmit an oversized frame. Surfaced via
 /// `coordinator/status.rs` as
 /// `xpf_userspace_gre_encap_df_oversize_drops_total`. A nonzero value
 /// flags inner flows whose encapped size exceeds the local tunnel
@@ -1325,14 +1325,12 @@ pub(super) fn encapsulate_native_gre_frame(
     };
 
     // #2331: refuse to emit an outer datagram larger than the local
-    // transport/egress MTU. IPv4 tunnel outers leave DF clear for downstream
-    // path fragmentation, but a local NIC cannot transmit a frame larger
-    // than its own MTU; IPv6 routers also cannot fragment in-path. Compare
-    // the built outer L3 length (outer IP + GRE[+key] + inner; L2 is not
-    // part of the MTU budget) against the same resolved outer MTU used by
-    // the rest of the tunnel path. GRE key bytes are already included in
-    // `gre_len`. Drop + bump is a final backstop; PTB signalling is handled
-    // by the TX dispatcher before this builder is called.
+    // transport/egress MTU. GRE copies inner IPv4 DF by default or clears it
+    // by explicit configuration; the local NIC cannot transmit a frame
+    // larger than its MTU. Compare the built outer L3 length (outer IP +
+    // GRE[+key] + inner; L2 is excluded) against the resolved outer MTU.
+    // GRE key bytes are included in `gre_len`; drop + bump is a final
+    // backstop, with PTB signalling handled by the TX dispatcher beforehand.
     let outer_l3_len = gre_encapped_outer_len(outer_ip_len, gre_len, inner_packet.len());
     let outer_mtu = tunnel_outer_mtu(forwarding, decision, endpoint);
     if outer_l3_len > outer_mtu {
@@ -1386,8 +1384,11 @@ pub(super) fn encapsulate_native_gre_frame(
                 _ => return None,
             };
             let total_len = u16::try_from(outer_ip_len + gre_len + inner_packet.len()).ok()?;
-            // Clear DF for underlay fragmentation; PMTUD feedback is not
-            // consumed by this userspace tunnel endpoint.
+            // Copy inner IPv4 DF by default; IPv6 has no DF bit, so its GRE
+            // outer remains DF-set unless the explicit clear knob is enabled.
+            let outer_df = !endpoint.clear_dont_fragment_bit
+                && (inner_meta.addr_family as i32 != libc::AF_INET
+                    || inner_packet.get(6).is_some_and(|flags| flags & 0x40 != 0));
             write_ipv4_tunnel_header(
                 out.get_mut(outer_ip_start..outer_ip_start + 20)?,
                 src,
@@ -1396,6 +1397,7 @@ pub(super) fn encapsulate_native_gre_frame(
                 outer_tos,
                 endpoint.ttl,
                 total_len,
+                outer_df,
             )?;
         }
         libc::AF_INET6 => {

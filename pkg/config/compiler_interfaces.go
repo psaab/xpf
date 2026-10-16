@@ -380,6 +380,8 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 					}
 				case "wireguard":
 					parseTunnelWireguard(tc, prop)
+				case "clear-dont-fragment-bit":
+					tc.ClearDontFragmentBit = true
 				}
 				if skipIface9899 {
 					break
@@ -523,6 +525,8 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 								tc.KeepaliveRetry = n
 							}
 						}
+					case "clear-dont-fragment-bit":
+						tc.ClearDontFragmentBit = true
 					case "wireguard":
 						parseTunnelWireguard(tc, prop)
 					}
