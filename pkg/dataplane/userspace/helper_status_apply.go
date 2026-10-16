@@ -432,12 +432,6 @@ func (m *Manager) applyRuntimeModeLocked(ctrl *userspaceCtrlValue) {
 	}
 }
 
-// applyPrimaryBindingRowsLocked writes one userspace_bindings row per live
-// helper binding and returns the accumulated row inventory. The three error
-// exits fail ctrl closed exactly as the inline loop did; they carry the
-// partial inventory back only so no information is lost — the caller returns
-// on a non-nil error without touching m.lastBindingIndices, which is the
-// pre-#6429 behaviour.
 // bindingSlotOutOfRangeError reports a helper-supplied binding slot that the
 // slot-keyed shim maps cannot address.
 //
@@ -458,6 +452,12 @@ func bindingSlotOutOfRangeError(slot uint32, ifindex int, queue uint32) error {
 		slot, dataplane.BindingSlotMapMaxEntries, ifindex, queue,
 	)
 }
+
+// applyPrimaryBindingRowsLocked writes one userspace_bindings row per live
+// helper binding and returns the accumulated row inventory. The three error
+// exits fail ctrl closed exactly as the inline loop did; they return partial
+// inventory to the caller, which merges it with the prior inventory because
+// already-written rows and uncleared prior rows must remain reachable.
 
 func (m *Manager) applyPrimaryBindingRowsLocked(
 	status *ProcessStatus,
