@@ -264,6 +264,24 @@ fn ranges_cover_terminal(e: &OverlapEntry, terminal_end: u32) -> bool {
     }
     covered_end == terminal_end
 }
+/// Reject ranges that conflict with an already observed terminal fragment.
+/// Once a terminal end is known, every range must end at/before it; only the
+/// terminal fragment itself may end exactly there. When terminal is first
+/// observed, existing ranges may not extend past its end.
+#[inline]
+fn terminal_conflict(e: &OverlapEntry, start: u32, end: u32, is_last: bool) -> bool {
+    if let Some(terminal_end) = e.terminal_end {
+        end > terminal_end || (is_last && end != terminal_end) || (!is_last && end == terminal_end)
+    } else {
+        is_last
+            && e.ranges
+                .iter()
+                .take(e.len as usize)
+                .any(|&(_, range_end)| range_end > end)
+    }
+}
+
+
 
 #[inline]
 fn completion_token(e: &OverlapEntry) -> Option<OverlapCompletionToken> {
@@ -521,7 +539,7 @@ impl OverlapTracker {
         key: OverlapKey,
         start: u32,
         end: u32,
-        _is_last: bool,
+        is_last: bool,
         now_ns: u64,
         drop_counter: &AtomicU64,
     ) -> OverlapCheckResult {
@@ -552,6 +570,17 @@ impl OverlapTracker {
                 tracker: None,
             };
         };
+        if terminal_conflict(&shard[pos], start, end, is_last) {
+            drop_counter.fetch_add(1, Ordering::Relaxed);
+            return OverlapCheckResult {
+                dropped: true,
+                reason: Some(OverlapDropReason::Overlap),
+                lifetime_evictions,
+                completion: None,
+                admission: None,
+                tracker: None,
+            };
+        }
         for i in 0..(shard[pos].len as usize) {
             let (rs, re) = shard[pos].ranges[i];
             if start.max(rs) < end.min(re) {
@@ -668,6 +697,17 @@ impl OverlapTracker {
         let mut lifetime_evictions = 0;
         shard.retain(|e| overlap_entry_live(e, now_ns, &mut lifetime_evictions));
         if let Some(pos) = shard.iter().position(|e| e.key == key) {
+            if terminal_conflict(&shard[pos], start, end, is_last) {
+                drop_counter.fetch_add(1, Ordering::Relaxed);
+                return OverlapCheckResult {
+                    dropped: true,
+                    reason: Some(OverlapDropReason::Overlap),
+                    lifetime_evictions,
+                    completion: None,
+                    admission: None,
+                    tracker: None,
+                };
+            }
             for i in 0..(shard[pos].len as usize) {
                 let (rs, re) = shard[pos].ranges[i];
                 if start.max(rs) < end.min(re) {
@@ -780,8 +820,24 @@ impl OverlapTracker {
     }
 
     /// Settle a recorded fragment after its final TX admission succeeds.
-    /// Reclaim happens only when every recorded fragment has settled, the
-    /// datagram has a terminal range, and no admission failed.
+    ///
+    /// #13680 (D12-07): when every recorded fragment has settled, none
+    /// failed, and the ranges cover the terminal end, the datagram is
+    /// complete — but the entry is NOT deleted here. Deleting it on
+    /// completion reopened overlap detection for the same ident: a
+    /// replayed/overlapping fragment arriving within the reassembly
+    /// window (e.g. a decoy tail that never reached the destination)
+    /// would start a fresh entry and bypass the recorded ranges. The
+    /// completed ranges are held as overlap anchors until the idle TTL
+    /// (`OVERLAP_TTL_NS`, refreshed by each recorded fragment) or the
+    /// 60s absolute lifetime expires them via the usual liveness sweep —
+    /// the same retention `fail_admission` already applied to failed
+    /// datagrams. Live completed anchors are never evicted to free
+    /// shard capacity; a full shard fails closed instead.
+    ///
+    /// Returns `true` when this settlement completes the datagram
+    /// (all settled, no failure, ranges cover the terminal end); the
+    /// entry itself remains recorded either way.
     pub(crate) fn commit_admission(&self, token: OverlapAdmissionToken) -> bool {
         let idx = self.shard_index(&token.key);
         let mut shard = self.shards[idx]
@@ -798,7 +854,6 @@ impl OverlapTracker {
         if e.pending == 0 && !e.failed {
             if let Some(terminal_end) = e.terminal_end {
                 if ranges_cover_terminal(e, terminal_end) {
-                    shard.remove(pos);
                     return true;
                 }
             }
@@ -1521,8 +1576,8 @@ mod tests {
                 if next_header == 6 && offset_bytes == 48 {
                     assert_eq!(
                         tracker.len(),
-                        1,
-                        "UDP train remains live after TCP completes"
+                        2,
+                        "completed TCP and live UDP trains both retain their anchors"
                     );
                 }
             }
@@ -1532,7 +1587,7 @@ mod tests {
         assert_ne!(tcp_post, udp_post);
         assert_eq!(tcp_post.protocol, 6);
         assert_eq!(udp_post.protocol, 17);
-        assert_eq!(tracker.len(), 0, "both trains complete independently");
+        assert_eq!(tracker.len(), 2, "both completed trains remain protected");
     }
 
     #[test]
@@ -1657,7 +1712,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_datagram_reclaims_only_after_all_admissions_10285() {
+    fn completed_datagram_stays_protected_through_reassembly_window_13680() {
         let t = OverlapTracker::new();
         let mut first = t.check_and_record_fragment_detailed(
             v4_key(),
@@ -1682,8 +1737,12 @@ mod tests {
         assert_eq!(t.len(), 1, "release is deferred until all gates pass");
         assert!(!t.commit_admission(last_admission));
         assert_eq!(t.len(), 1, "tail may settle before the head");
-        assert!(t.commit_admission(first_admission));
-        assert_eq!(t.len(), 0, "completed datagram is reclaimed immediately");
+        assert!(
+            t.commit_admission(first_admission),
+            "completed datagram is reported complete but held for the reassembly window"
+        );
+        assert_eq!(t.len(), 1);
+        assert!(t.check_overlap(v4_key(), 0, 16, 3_000, &FRAG_OVERLAP_DROPPED));
     }
 
     #[test]
@@ -1726,7 +1785,7 @@ mod tests {
         assert_eq!(t.len(), 1, "head and middle remain unsettled");
         assert!(!t.commit_admission(first_admission));
         assert!(t.commit_admission(middle_admission));
-        assert_eq!(t.len(), 0);
+        assert_eq!(t.len(), 1, "completed entry is held, not reclaimed early");
     }
 
     #[test]
@@ -1754,14 +1813,15 @@ mod tests {
         let done_admission = done.admission.take().expect("tail admission");
         assert!(!t.commit_admission(done_admission));
         assert!(t.commit_admission(first_admission));
-        assert_eq!(t.len(), 0);
+        assert_eq!(t.len(), 1, "settled-complete entry held for TTL window");
 
+        // Advancing past TTL expires the held entry; the same key then starts fresh.
         let mut second = t.check_and_record_fragment_detailed(
             key,
             0,
             8,
             true,
-            3_000,
+            3_000 + OVERLAP_TTL_NS + 1,
             &FRAG_OVERLAP_DROPPED,
         );
         let current = second.admission.take().expect("reinserted admission");
@@ -1773,8 +1833,11 @@ mod tests {
             "incarnation IDs prevent ABA deletion"
         );
         assert_eq!(t.len(), 1);
-        assert!(t.commit_admission(current));
-        assert_eq!(t.len(), 0);
+        assert!(
+            t.commit_admission(current),
+            "freshly completed single-fragment entry reports completion but stays held"
+        );
+        assert_eq!(t.len(), 1);
     }
 
     #[test]
@@ -1804,7 +1867,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_entries_free_shard_capacity_without_eviction_10285() {
+    fn completed_entries_hold_shard_capacity_until_expiry_10285() {
         let t = OverlapTracker::new();
         let target = overlap_shard_index(&v4_key());
         let mut keys = Vec::new();
@@ -1874,7 +1937,9 @@ mod tests {
         for token in tokens {
             assert!(t.commit_admission(token));
         }
-        let mut admitted = t.check_and_record_fragment_detailed(
+        assert_eq!(t.len(), OVERLAP_CAP_PER_SHARD);
+        let full1 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
+        let still_full = t.check_and_record_fragment_detailed(
             keys[OVERLAP_CAP_PER_SHARD],
             0,
             8,
@@ -1882,9 +1947,25 @@ mod tests {
             2_000,
             &FRAG_OVERLAP_DROPPED,
         );
-        assert!(!admitted.dropped);
+        assert!(still_full.dropped, "completed live anchors are not evicted");
+        assert_eq!(
+            FRAG_OVERLAP_SHARD_FULL_DROPPED
+                .load(Ordering::Relaxed)
+                .wrapping_sub(full1),
+            1
+        );
+        let mut admitted = t.check_and_record_fragment_detailed(
+            keys[OVERLAP_CAP_PER_SHARD],
+            0,
+            8,
+            true,
+            1_000 + OVERLAP_TTL_NS + 1,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(!admitted.dropped, "expired anchors release capacity");
         assert!(t.commit_admission(admitted.admission.take().expect("admitted token")));
-        assert_eq!(t.len(), 0);
+        assert_eq!(t.len(), 1);
+
     }
 
     #[test]
@@ -1920,10 +2001,75 @@ mod tests {
             &FRAG_OVERLAP_DROPPED,
         );
         assert!(
-            last.completion.is_none(),
-            "ranges extending past the terminal fragment are not completion"
+            last.dropped,
+            "a previously recorded range extending past the terminal end conflicts"
         );
         assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn terminal_end_conflicts_match_pure_and_record_checks_13680() {
+        let t = OverlapTracker::new();
+        let key = v4_key();
+        let mut first = t.check_and_record_fragment_detailed(
+            key,
+            0,
+            8,
+            false,
+            1_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(!first.dropped);
+        assert!(!t.commit_admission(first.admission.take().expect("first admission")));
+        let mut last = t.check_and_record_fragment_detailed(
+            key,
+            8,
+            16,
+            true,
+            2_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(!last.dropped);
+        assert!(t.commit_admission(last.admission.take().expect("terminal admission")));
+
+        assert!(t.check_overlap_fragment(
+            key,
+            16,
+            24,
+            false,
+            3_000,
+            &FRAG_OVERLAP_DROPPED,
+        ));
+        let beyond_terminal = t.check_and_record_fragment_detailed(
+            key,
+            16,
+            24,
+            false,
+            3_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(beyond_terminal.dropped);
+        assert!(
+            t.check_overlap_fragment(
+                key,
+                24,
+                32,
+                true,
+                4_000,
+                &FRAG_OVERLAP_DROPPED,
+            ),
+            "a second terminal end cannot replace the established terminal"
+        );
+        let wrong_terminal = t.check_and_record_fragment_detailed(
+            key,
+            24,
+            32,
+            true,
+            4_000,
+            &FRAG_OVERLAP_DROPPED,
+        );
+        assert!(wrong_terminal.dropped);
+        assert_eq!(t.len(), 1, "conflicts leave the recorded anchor unchanged");
     }
 
     #[test]
@@ -1941,12 +2087,13 @@ mod tests {
         let stale = first.admission.take().expect("first admission");
         let stale_incarnation = stale.incarnation;
         assert!(t.commit_admission(stale));
+        // A new incarnation is possible only after the old live anchor expires.
         let mut second = t.check_and_record_fragment_detailed(
             key,
             0,
             8,
             true,
-            2_000,
+            1_000 + OVERLAP_TTL_NS + 1,
             &FRAG_OVERLAP_DROPPED,
         );
         let current = second.admission.take().expect("reinserted admission");
@@ -1959,7 +2106,7 @@ mod tests {
         );
         assert_eq!(t.len(), 1);
         assert!(t.commit_admission(current));
-        assert_eq!(t.len(), 0);
+        assert_eq!(t.len(), 1);
     }
 
     #[test]
