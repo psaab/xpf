@@ -267,6 +267,22 @@ matching host-bound packets go to the kernel without reaching worker screen stag
 LAND check is intentionally unconditional, unlike the worker's profile-gated
 check; loopback traffic does not traverse the XDP hook.
 
+Since #13953 the same unconditional LAND drop also guards every other
+terminal kernel-pass arm in the shim: the healthy session-miss
+local-destination and ICMP-to-interface-NAT-local arms, the WireGuard
+steer fallthrough, the early-filter pass, and the degraded path
+(control-disabled, missing/not-ready binding, stale heartbeat), whose
+local/control predicate has no session dimension. The check runs once,
+after the tagged-only VID-0 drop and the adjudicated-interface gate, in
+both the healthy and the control-disabled entry paths, and increments the
+`land_drop` degraded-path counter (plus the shared transit/strict drop
+counters). Screens other than LAND apply to host-bound traffic only as
+follows: flood screens are mirrored for XDP-passed traffic by the
+`xpf_hostinbound` input chain below; the remaining worker screens
+(stateless/TCP-flag/fragment, scan/sweep, limit-session) do not run on
+packets the shim passes to the kernel, because that pass is terminal and
+the worker never sees the packet.
+
 Flood screens are mirrored in the `inet xpf_hostinbound` **input** chain, which
 still sees XDP-passed traffic. Reply-direction rules run before the established
 reply accept; original-direction rules run after any fine `junos-host` policy.

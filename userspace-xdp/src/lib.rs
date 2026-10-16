@@ -54,7 +54,8 @@ const USERSPACE_FALLBACK_REASON_TRANSIT_DROP: u32 = 15;
 const USERSPACE_FALLBACK_REASON_QINQ_DROP: u32 = 16;
 const USERSPACE_FALLBACK_REASON_STAG_DROP: u32 = 17;
 const USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP: u32 = 18;
-const USERSPACE_FALLBACK_REASON_MAX: u32 = 19;
+const USERSPACE_FALLBACK_REASON_LAND_DROP: u32 = 19;
+const USERSPACE_FALLBACK_REASON_MAX: u32 = 20;
 const USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED: u8 =
     degraded_ctrl_disabled::INGRESS_IFACE_FLAG_ADJUDICATED;
 const USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY: u8 = 2;
@@ -81,6 +82,7 @@ mod gre_classify;
 mod ipv4_len_gate;
 mod ipv6_ext_walk;
 mod ipv6_len_gate;
+mod land;
 mod tunnel_frag;
 mod wg_classify;
 use binding_index::{
@@ -96,6 +98,7 @@ use ipv6_ext_walk::{
     read_bytes,
 };
 use ipv6_len_gate::{ipv6_declared_end, ipv6_udp_first_payload_byte_in_datagram};
+use land::is_land;
 use tunnel_frag::{
     degraded_interface_nat_esp_passes_to_kernel, interface_nat_tunnel_passes_to_kernel,
 };
@@ -690,6 +693,17 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed, ingress_domain) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
+    // #13953: every kernel-pass arm below this point is terminal — the worker's
+    // screen stage 10 never sees the packet, and no other screen runs. Drop
+    // equal source/destination packets here so the session-miss local,
+    // interface-NAT-ICMP, WireGuard-steer, early-filter, and degraded arms are
+    // all covered by one compare (the predicate lives in `land`, host-executed
+    // by the userspace-dp regression). Ordered after the tagged-only VID-0
+    // drop so that shape keeps its own counter, and after the #8279 authority
+    // gate so a non-adjudicated ifindex still takes cpumap_or_pass untouched.
+    if is_land(&parsed.src_addr, &parsed.dst_addr) {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
+    }
     let native_gre =
         parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0;
 
@@ -889,7 +903,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // differs from the worker's profile-gated check_land: an
                 // equal-address host-bound packet is pathological, and
                 // loopback never traverses this XDP hook.
-                if parsed.src_addr == parsed.dst_addr {
+                if is_land(&parsed.src_addr, &parsed.dst_addr) {
                     return Ok(xdp_action::XDP_DROP);
                 }
                 record_trace(
@@ -1495,6 +1509,11 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
         .unwrap_or(u32::MAX);
     if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed, ingress_domain) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
+    }
+    // #13953: the ctrl-disabled local/control pass is terminal like every
+    // healthy kernel-pass arm; a LAND packet must not ride it to local sockets.
+    if is_land(&parsed.src_addr, &parsed.dst_addr) {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
     }
     let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain);
     match degraded_ctrl_disabled::ctrl_disabled_action(ingress_iface_flags, false, local_or_control)

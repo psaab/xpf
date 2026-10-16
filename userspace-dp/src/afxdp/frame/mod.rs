@@ -2628,6 +2628,11 @@ mod tests_9782_copy;
 #[cfg(test)]
 #[path = "tests_shim_tunnel_frag_10677.rs"]
 mod tests_shim_tunnel_frag_10677;
+// #13953: the shim's LAND (equal source/destination) predicate, executed
+// rather than modelled — same shape as above.
+#[cfg(test)]
+#[path = "tests_shim_land_13953.rs"]
+mod tests_shim_land_13953;
 // #10661: ATOMIC+real Fragment chain consistency cells (tracker/shim/screens).
 #[cfg(test)]
 #[path = "tests_10661_atomic_chain.rs"]

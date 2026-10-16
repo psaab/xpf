@@ -777,7 +777,7 @@ func appendBindingIndex(indices []uint32, idx uint32) []uint32 {
 
 // degradedPathReasonNames maps BPF array index to a human-readable name.
 // Must stay in sync with USERSPACE_FALLBACK_REASON_* in userspace-xdp/src/lib.rs.
-var degradedPathReasonNames = [19]string{
+var degradedPathReasonNames = [20]string{
 	0:  "ctrl_disabled",
 	1:  "parse_fail",
 	2:  "binding_missing",
@@ -797,6 +797,7 @@ var degradedPathReasonNames = [19]string{
 	16: "qinq_drop",
 	17: "stag_drop",
 	18: "tagged_only_local_drop",
+	19: "land_drop",
 }
 
 // readDegradedPathStatsLocked reads retained-shim degraded-path counters and
