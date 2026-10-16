@@ -517,6 +517,24 @@ fn mac_change_epoch_bulk_replace_no_bump_on_same_mac() {
 }
 
 #[test]
+fn bulk_neighbor_mirror_preserves_current_binding_unless_permanent() {
+    let map = ShardedNeighborMap::new();
+    let k = key_v4(7, 42);
+    let live = entry(0xCD);
+    let stale = entry(0xAB);
+    map.insert(k, live);
+
+    let rows = map.bulk_replace_neighbors_preserving_changes(&[k], &[(7, k.1, stale)], &[]);
+    assert_eq!(rows, vec![(7, k.1, live)]);
+    assert_eq!(map.get(&k), Some(live));
+
+    let rows =
+        map.bulk_replace_neighbors_preserving_changes(&[k], &[(7, k.1, stale)], &[k]);
+    assert_eq!(rows, vec![(7, k.1, stale)]);
+    assert_eq!(map.get(&k), Some(stale));
+}
+
+#[test]
 fn mac_change_epoch_bulk_replace_bumps_on_pure_removal_per_shard() {
     let map = ShardedNeighborMap::new();
     let (removed, untouched) = keys_in_distinct_shards();

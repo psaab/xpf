@@ -816,30 +816,57 @@ impl ShardedNeighborMap {
         remove_keys: &[(i32, IpAddr)],
         insert_entries: &[(i32, IpAddr, NeighborEntry)],
     ) {
-        let reinserted_keys = if remove_keys.is_empty() || insert_entries.is_empty() {
-            None
-        } else {
-            let mut keys = FastSet::default();
-            keys.reserve(insert_entries.len());
-            for (ifindex, ip, _) in insert_entries {
-                keys.insert((*ifindex, *ip));
-            }
-            Some(keys)
-        };
+        let _ = self.bulk_replace_neighbors_inner(remove_keys, insert_entries, None);
+    }
+
+    /// Apply a manager mirror while preserving an existing dynamic MAC when
+    /// the snapshot disagrees. The comparison and write share the bulk lock,
+    /// so a concurrent monitor update cannot be overwritten after a stale
+    /// pre-check. NUD_PERMANENT rows are allowed to replace it.
+    pub(crate) fn bulk_replace_neighbors_preserving_changes(
+        &self,
+        remove_keys: &[(i32, IpAddr)],
+        insert_entries: &[(i32, IpAddr, NeighborEntry)],
+        permanent_keys: &[(i32, IpAddr)],
+    ) -> Vec<(i32, IpAddr, NeighborEntry)> {
+        self.bulk_replace_neighbors_inner(remove_keys, insert_entries, Some(permanent_keys))
+    }
+
+    fn bulk_replace_neighbors_inner(
+        &self,
+        remove_keys: &[(i32, IpAddr)],
+        insert_entries: &[(i32, IpAddr, NeighborEntry)],
+        permanent_keys: Option<&[(i32, IpAddr)]>,
+    ) -> Vec<(i32, IpAddr, NeighborEntry)> {
+        let mut effective_entries = Vec::with_capacity(insert_entries.len());
         self.with_all_shards(|bulk| {
-            // Snapshot the prior MAC for every INCOMING key BEFORE any
-            // removal — the replace removes the old entry before the
-            // matching insert, so reading after would always miss it.
-            // #5147: mark the SHARD of each key that genuinely changed MAC,
-            // so the bump below is per-shard, not a single global epoch.
             let mut changed_shards = [false; NUM_SHARDS];
             for (ifindex, ip, entry) in insert_entries {
-                if let Some(prior) = bulk.get(&(*ifindex, *ip))
-                    && prior.mac != entry.mac
-                {
-                    changed_shards[shard_idx(&(*ifindex, *ip))] = true;
+                let key = (*ifindex, *ip);
+                let effective = match (permanent_keys, bulk.get(&key)) {
+                    (Some(permanent_keys), Some(prior))
+                        if !permanent_keys.contains(&key) && prior.mac != entry.mac =>
+                    {
+                        prior
+                    }
+                    _ => *entry,
+                };
+                if bulk.get(&key).is_some_and(|prior| prior.mac != effective.mac) {
+                    changed_shards[shard_idx(&key)] = true;
                 }
+                effective_entries.push((key.0, key.1, effective));
             }
+
+            let reinserted_keys = if remove_keys.is_empty() || effective_entries.is_empty() {
+                None
+            } else {
+                let mut keys = FastSet::default();
+                keys.reserve(effective_entries.len());
+                for (ifindex, ip, _) in &effective_entries {
+                    keys.insert((*ifindex, *ip));
+                }
+                Some(keys)
+            };
             for key in remove_keys {
                 let removed = bulk.remove_if_present(key).is_some();
                 let reinserted = reinserted_keys
@@ -849,42 +876,17 @@ impl ShardedNeighborMap {
                     changed_shards[shard_idx(key)] = true;
                 }
             }
-            for (ifindex, ip, entry) in insert_entries {
+            for (ifindex, ip, entry) in &effective_entries {
                 bulk.insert((*ifindex, *ip), *entry);
             }
-            // Bump under the same bulk lock as the mutation so a
-            // concurrent fast-path hit cannot keep a stale decision.
-            // #5147: bump each shard with a MAC replacement or actual
-            // removal exactly once; an unrelated shard remains valid.
             for (shard, &changed) in changed_shards.iter().enumerate() {
                 if changed {
                     self.bump_shard_epoch(shard);
                 }
             }
         });
-        // #9071: bump the INSERT GENERATION too. The three per-key insert paths
-        // do; the two bulk paths did not, so #7156's poll-loop gate --
-        // `neigh_generation != binding.last_neigh_generation` -- never fired for
-        // a neighbour learned through here, and the buffered packet for that hop
-        // waited for the RESOLUTION_RECHECK_INTERVAL_NS backstop instead.
-        //
-        // The shard epoch and the insert generation answer DIFFERENT questions
-        // and neither substitutes for the other: the epoch invalidates cached
-        // flows resolved to one shard, and the generation tells the poll loop a
-        // resolution pass is worth running at all.
-        //
-        // ONLY WHEN SOMETHING WAS INSTALLED. Bumping unconditionally makes the
-        // gate fire on every netlink sync, empty or not -- the #7156
-        // optimisation removed while looking like a fix, since a counter that
-        // advances on every call carries the same information as one that never
-        // advances.
-        //
-        // The condition is "did we install anything", NOT `changed_shards`,
-        // which tracks invalidating mapping changes for the flow cache. Those
-        // answer different questions: a brand-new key has no prior mapping to
-        // invalidate, but is still a fresh resolution the poll loop may be
-        // waiting for.
-        self.bump_insert_generation_9071(!insert_entries.is_empty());
+        self.bump_insert_generation_9071(!effective_entries.is_empty());
+        effective_entries
     }
 
     /// #3169: bump-aware atomic multi-key insert for the #1787 RX

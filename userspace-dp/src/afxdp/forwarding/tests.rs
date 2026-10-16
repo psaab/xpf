@@ -1221,6 +1221,7 @@ fn manager_neighbor_mirror_cannot_replace_live_mac_without_confirmation_13951() 
     };
     assert!(coordinator.apply_manager_neighbors(true, 1, &[(7, target, original)]));
     assert!(coordinator.apply_manager_neighbors(true, 2, &[(7, target, original)]));
+    coordinator.dynamic_neighbors_ref().remove(&(7, target));
     assert!(coordinator.apply_manager_neighbors(true, 3, &[(7, target, spoofed)]));
     assert_eq!(
         lookup_neighbor_entry(
@@ -1250,12 +1251,29 @@ fn manager_neighbor_mirror_cannot_replace_live_mac_without_confirmation_13951() 
         "a matching monitor-confirmed binding must converge"
     );
 
+    // The manager snapshot can lag after monitor confirmation. Neither a
+    // stale row matching the old static value nor a third MAC may erase the
+    // newer dynamic binding.
+    coordinator.forwarding.neighbors.insert((7, target), original);
+    assert!(coordinator.apply_manager_neighbors(true, 5, &[(7, target, original)]));
+    assert_eq!(coordinator.dynamic_neighbors_ref().get(&(7, target)), Some(spoofed));
+    assert_eq!(coordinator.forwarding.neighbors.get(&(7, target)), Some(&spoofed));
+
+    let unconfirmed = NeighborEntry {
+        mac: [0x02, 0, 0, 0, 0, 4],
+    };
+    coordinator.forwarding.neighbors.insert((7, target), original);
+    assert!(coordinator.apply_manager_neighbors(true, 6, &[(7, target, unconfirmed)]));
+    assert_eq!(coordinator.dynamic_neighbors_ref().get(&(7, target)), Some(spoofed));
+    assert_eq!(coordinator.forwarding.neighbors.get(&(7, target)), Some(&spoofed));
+
+
     let permanent = NeighborEntry {
         mac: [0x02, 0, 0, 0, 0, 3],
     };
     assert!(coordinator.apply_manager_neighbors_with_permanent(
         true,
-        5,
+        7,
         &[(7, target, permanent)],
         &[(7, target)],
     ));

@@ -927,22 +927,20 @@ impl Coordinator {
                     return None;
                 }
                 let key = (*ifindex, *ip);
-                let permanent = permanent_keys.contains(&key);
-                let dynamic = self.neighbors.dynamic.get(&key);
-                let prior_static = self.forwarding.neighbors.get(&key).copied();
-                let prior = prior_static.or(dynamic);
-                // The mirror is not evidence that a changed MAC was solicited.
-                // The monitor applies its CAS before the debounced replace;
-                // a matching dynamic entry is its probe-confirmed signal.
-                if !permanent && dynamic != Some(*entry)
-                    && prior.is_some_and(|prior| prior.mac != entry.mac)
-                {
-                    return prior_static.map(|prior| (*ifindex, *ip, prior));
+                if !permanent_keys.contains(&key) {
+                    if let Some(dynamic) = self.neighbors.dynamic.get(&key) {
+                        if dynamic.mac != entry.mac {
+                            return Some((*ifindex, *ip, dynamic));
+                        }
+                    } else if let Some(prior) = self.forwarding.neighbors.get(&key).copied()
+                        && prior.mac != entry.mac
+                    {
+                        return Some((*ifindex, *ip, prior));
+                    }
                 }
                 Some((*ifindex, *ip, *entry))
             })
             .collect();
-        let neighbors = accepted.as_slice();
 
         let old_manager_keys = if replace {
             self.neighbors
@@ -953,32 +951,30 @@ impl Coordinator {
         } else {
             Vec::new()
         };
+        // #949: replace + insert under a single bulk acquisition so
+        // readers see either the pre-replace or post-replace state.
+        // Conflicting non-permanent MACs retain the dynamic binding observed
+        // under that same lock, so a monitor update racing this snapshot wins.
+        let neighbors = self
+            .neighbors
+            .dynamic
+            .bulk_replace_neighbors_preserving_changes(
+                &old_manager_keys,
+                &accepted,
+                permanent_keys,
+            );
         if let Ok(mut manager_keys) = self.neighbors.manager_keys.lock() {
             if replace {
                 manager_keys.clear();
             }
-            for (ifindex, ip, _) in neighbors {
-                manager_keys.insert((*ifindex, *ip));
-            }
+            manager_keys.extend(neighbors.iter().map(|(ifindex, ip, _)| (*ifindex, *ip)));
         }
-        // #949: replace + insert under a single bulk acquisition so
-        // readers see either the pre-replace or post-replace state,
-        // never a half-replaced set. `bulk_replace_neighbors` locks all
-        // 64 shards in shard-index order (deadlock-free invariant).
-        // #3048/#11375: it also advances per-shard neighbor epochs when this
-        // Go snapshot changes an existing MAC or removes an old manager key
-        // absent from the new snapshot. Same-MAC reinsertions and brand-new
-        // keys do not bump. `old_manager_keys` is empty when `!replace`, so
-        // the removals are skipped exactly as before.
-        self.neighbors
-            .dynamic
-            .bulk_replace_neighbors(&old_manager_keys, neighbors);
         if replace {
             for key in &old_manager_keys {
                 self.forwarding.neighbors.remove(key);
             }
         }
-        for (ifindex, ip, entry) in neighbors {
+        for (ifindex, ip, entry) in &neighbors {
             self.forwarding.neighbors.insert((*ifindex, *ip), *entry);
         }
         if replace || !neighbors.is_empty() {
