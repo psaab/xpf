@@ -252,6 +252,21 @@ plus option-order and junk variants.
   options.
 - Nothing else moved.
 
+## A placeholder name is not a keyword (#14196)
+
+`resolveTreeWord` never resolves a `<placeholder>` key — neither the exact
+`<host>` nor a `<`-prefix that uniquely expands to it. A placeholder names a
+value slot, not a word an operator may type, so a literal angle-bracket word
+is operator data: the value-slot arms consume it once while its slot is
+empty (kept raw, like any other value) and refuse it once filled. Before
+this, `ping 192.0.2.1 <` canonicalized to `ping 192.0.2.1 <host>` — a fake
+keyword in the string the login-class gate judges, while the handler ran
+the real target — so an anchored `deny-commands "^ping 192.0.2.1$"` matched
+neither that string nor the keyword-only prefix (`ping`) and the denied
+ping ran. Completion is unaffected: placeholder names reach the operator
+only as end-of-walk candidates and typed-leaf hints, never through word
+resolution.
+
 ## Typed leaves
 
 A `Node` with `ValueType != ValueAny` is a typed leaf: it expects exactly

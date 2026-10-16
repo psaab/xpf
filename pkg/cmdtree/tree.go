@@ -1405,16 +1405,41 @@ func ResolveUniquePrefix(items []string, input string) (string, bool) {
 	return matches[0], true
 }
 
+// resolveTreeWord resolves one operator word against a tree level: an exact
+// keyword, or the one keyword it uniquely prefixes (#7172). A <placeholder>
+// key is NEVER a keyword (#14196). A placeholder names a value slot, not a
+// word an operator may type, so it is excluded from both arms: an exact
+// `<host>` and every `<`-prefix that would uniquely expand to it fall through
+// to the caller's value-slot arms, which consume it as data exactly once
+// (#9505) or refuse it when that slot is already filled. Letting the
+// placeholder resolve as a keyword rewrote a trailing literal `<` into a
+// fake `<host>` keyword in the canonical string the login-class gate judges,
+// while the handler executed the real target before it — so an anchored
+// `deny-commands "^ping <target>$"` matched neither the polluted full form
+// nor the keyword-only prefix (which stops at the target) and the denied
+// ping ran.
 func resolveTreeWord(tree map[string]*Node, word string) (string, *Node, []string, bool) {
-	if node, ok := tree[word]; ok {
+	if node, ok := tree[word]; ok && !isPlaceholder(word) {
 		return word, node, nil, true
 	}
-	matches := FilterPrefix(KeysOf(tree), word)
-	if len(matches) == 1 {
-		name := matches[0]
-		return name, tree[name], matches, true
+	var names []string
+	for name := range tree {
+		if !isPlaceholder(name) && strings.HasPrefix(name, word) {
+			names = append(names, name)
+		}
 	}
-	return "", nil, matches, false
+	if len(names) == 1 {
+		name := names[0]
+		return name, tree[name], names, true
+	}
+	if len(names) == 0 {
+		// No real keyword matches. Report placeholder names among the prefix
+		// matches so a caller distinguishing ambiguity from absence does not
+		// read a lone `<...` prefix as an unknown word with no candidates;
+		// a single placeholder is still not a resolution.
+		return "", nil, FilterPrefix(KeysOf(tree), word), false
+	}
+	return "", nil, names, false
 }
 
 // CompleteFromTree walks the tree to find completion candidates for the given words and partial.

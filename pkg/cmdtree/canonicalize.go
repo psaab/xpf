@@ -47,6 +47,15 @@ const (
 // word must be a child of the node that took it, or, under a node that declares
 // Options, another option. Anything else is refused.
 //
+// A PLACEHOLDER NAME IS NOT A KEYWORD (#14196). `<host>` and its `<`-prefixes
+// name a value slot, never a word an operator may type, so resolveTreeWord
+// never resolves them: a literal `<...` word reaches the value-slot arms like
+// any other data word — consumed once while its slot is empty, refused once
+// filled. Before this, `ping 192.0.2.1 <` canonicalized to
+// `ping 192.0.2.1 <host>`, a fake keyword the gate judged while the handler
+// ran the real target, and an anchored deny on that target matched neither
+// the polluted string nor the keyword-only prefix.
+//
 // THE BOOL IS NOT ADVISORY. On anything other than CanonicalOK the returned
 // words are the input unchanged, and a caller enforcing a restriction MUST fail
 // closed: it does not know what command it is holding, so it cannot know that a
