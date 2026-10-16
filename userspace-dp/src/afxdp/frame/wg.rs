@@ -601,7 +601,7 @@ pub(super) fn wg_encap_frame_with_commit(
         None => decision.resolution.src_mac?,
     };
     let vlan_id = match egress {
-        Some(e) => e.vlan_id,
+        Some(_) => forwarding.egress_tx_vlan_id(physical_egress_ifindex),
         None => decision.resolution.tx_vlan_id,
     };
     let dst_mac = outer_resolution.resolution.neighbor_mac?;

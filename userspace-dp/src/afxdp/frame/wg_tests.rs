@@ -613,6 +613,24 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v4() {
         "WireGuard outer IPv4 must leave DF clear for underlay fragmentation"
     );
 }
+#[test]
+fn wg_encap_native_vlan_underlay_egress_is_untagged_13979() {
+    let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
+    install_v4_peer_next_hop_neighbor(&mut state);
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    state
+        .wg_engines
+        .insert(1, Arc::new(established_initiator_engine(peer_ep, "10.123.0.0/24")));
+    state.native_vlan_egress_ifindexes.insert(12);
+
+    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &wg_encap_decision(), &state)
+        .expect("WG encap must build against the selected peer underlay");
+
+    assert_eq!(&out[12..14], &[0x08, 0x00], "native underlay must emit untagged IPv4");
+    assert_eq!(&out[14..15], &[0x45], "outer IPv4 header immediately follows Ethernet");
+    assert_eq!(&out[26..30], &[172, 16, 80, 8], "outer source remains physical WAN primary");
+}
+
 
 #[test]
 fn wg_encap_frame_resolves_outer_route_once_v4() {
