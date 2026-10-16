@@ -5889,6 +5889,29 @@ fn deterministic_cgnat_translation_matches_only_own_block_13687() {
     assert!(!matches("100.64.0.5", "203.0.113.1", 1024));
     assert!(!matches("100.64.0.5", "203.0.113.2", 3584));
     assert!(!matches("100.64.0.99", "203.0.113.1", 3584));
+    let mut no_translation_rules = rules.clone();
+    no_translation_rules[0].no_translation = true;
+    let matches_address_only = |src: &str, translated: &str| {
+        source_nat_translation_matches(
+            &no_translation_rules,
+            &NatScopeCtx::default(),
+            "subs",
+            "inet",
+            src.parse().unwrap(),
+            "8.8.8.8".parse().unwrap(),
+            PROTO_TCP,
+            40000,
+            443,
+            None,
+            translated.parse().unwrap(),
+            None,
+            None,
+            None,
+        )
+    };
+    assert!(matches_address_only("100.64.0.5", "203.0.113.1"));
+    assert!(!matches_address_only("100.64.0.5", "203.0.113.2"));
+    assert!(!matches_address_only("100.64.0.99", "203.0.113.1"));
 }
 
 
