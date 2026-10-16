@@ -208,7 +208,10 @@ func TestStoreFlatLoadVerbsAreTakenVerbatim9892(t *testing.T) {
 		}
 		// The renderer must return the line VERBATIM — first token still
 		// the verb — and the anchored deny must refuse it.
-		got := LoadMutationLines(line)
+		got, gotErr := LoadMutationLines(line)
+		if gotErr != nil {
+			t.Fatalf("LoadMutationLines(%q) error = %v", line, gotErr)
+		}
 		if len(got) != 1 || got[0] != line {
 			t.Errorf("LoadMutationLines(%q) = %q; a replayable flat verb was re-parsed", line, got)
 		}
@@ -234,7 +237,10 @@ func TestStoreFlatLoadVerbsAreTakenVerbatim9892(t *testing.T) {
 // what the gate concludes: a defect here is invisible to every cell above that
 // uses a single-path body.
 func TestLoadMutationLinesRendersEveryLeaf9892(t *testing.T) {
-	lines := LoadMutationLines("system {\n    host-name a;\n    domain-name b;\n}")
+	lines, linesErr := LoadMutationLines("system {\n    host-name a;\n    domain-name b;\n}")
+	if linesErr != nil {
+		t.Fatalf("LoadMutationLines error = %v", linesErr)
+	}
 	if len(lines) < 2 {
 		t.Fatalf("hierarchical content rendered %d set lines, want one per leaf: %v", len(lines), lines)
 	}
@@ -244,7 +250,10 @@ func TestLoadMutationLinesRendersEveryLeaf9892(t *testing.T) {
 		}
 	}
 	// A set-format body is taken verbatim, not re-parsed.
-	flat := LoadMutationLines("set system host-name a\ndelete system domain-name")
+	flat, flatErr := LoadMutationLines("set system host-name a\ndelete system domain-name")
+	if flatErr != nil {
+		t.Fatalf("LoadMutationLines error = %v", flatErr)
+	}
 	if len(flat) != 2 {
 		t.Errorf("set-format content rendered %d lines, want 2: %v", len(flat), flat)
 	}

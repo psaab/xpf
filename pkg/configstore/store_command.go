@@ -804,9 +804,22 @@ func (s *Store) LoadSetAsPlantClass(sessionID, plantClass, content string) (int,
 	if s.candidate == nil {
 		return 0, fmt.Errorf("not in configuration mode")
 	}
+	// #14145: route through the same shared classifier the authorization
+	// gate uses, so the store applies exactly the representation that was
+	// adjudicated. Before, this replayed the RAW lines while the gate
+	// adjudicated its own comment-stripped view; a mid-token '[/*' opened
+	// a fictitious comment in the gate's scanner (the real lexer keeps
+	// '[', '/' and '*' inside an identifier), the gate adjudicated zero
+	// lines, and this raw replay applied the hidden denied lines. A
+	// classifier error (unterminated block comment) is refused here too,
+	// as LoadMerge/LoadOverride already do.
+	_, flatContent, err := config.ClassifyLoadContent(content)
+	if err != nil {
+		return 0, fmt.Errorf("parse error: %w", err)
+	}
 	working := s.candidate.Clone()
 	count := 0
-	for i, line := range strings.Split(content, "\n") {
+	for i, line := range strings.Split(flatContent, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

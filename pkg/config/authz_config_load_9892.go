@@ -61,11 +61,24 @@ func IsFlatLoadLine(line string) bool {
 	}
 }
 
-// ClassifyLoadContent returns whether a load body routes to flat replay and the
-// input with lexer-recognized comments replaced by whitespace. Comment removal
-// is shared with authorization so a verb in comment prose cannot change which
-// representation the store applies. An unterminated block comment is rejected
-// instead of allowing a partial import.
+// ClassifyLoadContent returns whether a load body routes to flat replay and
+// the input with lexer-recognized comments replaced by whitespace. Comment
+// removal is shared with authorization so a verb in comment prose cannot
+// change which representation the store applies. An unterminated block
+// comment is rejected instead of allowing a partial import.
+//
+// The token model here MUST mirror the real lexer (lexer.go). That lexer
+// only recognizes a comment opener in its gap scanner
+// (skipWhitespaceAndComments), i.e. where a token could START — never
+// inside readIdentifier, which consumes '/', '*', '[' and ']' as ordinary
+// identifier characters once a token has begun (#8453: a '[' met
+// mid-token at bracket depth 0 is literal). This classifier therefore
+// opens a comment only when NOT inside a bare token, and a '[' or ']'
+// met mid-token does NOT end the token: `set ... host-name a[/*` is one
+// identifier to both lexers, so no comment opens (#14145). A '[' that
+// BEGINS a token (after whitespace or a structural delimiter) is bracket
+// list sugar just as the real lexer's skip loop consumes it, so the
+// scanner stays at a token boundary and a '/*' there is a comment.
 func ClassifyLoadContent(content string) (flat bool, uncommented string, err error) {
 	var b strings.Builder
 	b.Grow(len(content))
@@ -127,8 +140,17 @@ func ClassifyLoadContent(content string) (flat bool, uncommented string, err err
 		}
 		b.WriteByte(ch)
 		switch ch {
-		case ' ', '\t', '\r', '{', '}', ';', '|', '[', ']':
+		case ' ', '\t', '\r', '{', '}', ';', '|':
 			inToken = false
+		case '[', ']':
+			// A bracket that BEGINS a token is list sugar the real
+			// lexer's skip loop consumes, so the scanner stays at a
+			// token boundary (inToken stays false) and a following
+			// '/*' is a comment. A bracket met MID-token was consumed
+			// by readIdentifier as a literal character (#8453), so the
+			// token continues and inToken stays true. The pre-fix code
+			// reset inToken on every bracket, which is how `a[/*`
+			// opened a fictitious comment (#14145).
 		default:
 			inToken = true
 		}
@@ -146,17 +168,24 @@ func ClassifyLoadContent(content string) (flat bool, uncommented string, err err
 	return flat, uncommented, nil
 }
 
-// LoadMutationLines returns the set-form mutation lines a load body writes.
+// LoadMutationLines returns the set-form mutation lines a load body writes,
+// or an error when the shared classifier cannot classify the body at all
+// (an unterminated block comment). Authorization MUST refuse on that error:
+// adjudicating an unclassifiable body as zero mutations is a fail-open
+// (#14145).
 //
-// Set-format content is taken line by line. Hierarchical content is parsed and
-// rendered as set lines, so every leaf path it writes is checked. Content that
-// does not parse yields its parsed part; the store's own Load refuses what it
-// cannot parse, and adjudicating the parsable part is strictly better than
-// adjudicating nothing.
-func LoadMutationLines(content string) []string {
+// Set-format content is taken line by line. Hierarchical content is parsed
+// and rendered as set lines, so every leaf path it writes is checked.
+// Hierarchical content is parsed from the comment-free form: the store's
+// hierarchical branch parses the raw body, whose real lexer reaches the
+// same statements because comments are gap text to it as well.
+// Content that does not parse yields its parsed part; the store's own Load
+// refuses what it cannot parse, and adjudicating the parsable part is
+// strictly better than adjudicating nothing.
+func LoadMutationLines(content string) ([]string, error) {
 	flat, uncommented, err := ClassifyLoadContent(content)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	if flat {
 		var lines []string
@@ -166,11 +195,11 @@ func LoadMutationLines(content string) []string {
 				lines = append(lines, line)
 			}
 		}
-		return lines
+		return lines, nil
 	}
-	tree, _ := NewParser(content).Parse()
+	tree, _ := NewParser(uncommented).Parse()
 	if tree == nil {
-		return nil
+		return nil, nil
 	}
 	var lines []string
 	for _, line := range strings.Split(tree.FormatSet(), "\n") {
@@ -178,7 +207,7 @@ func LoadMutationLines(content string) []string {
 			lines = append(lines, line)
 		}
 	}
-	return lines
+	return lines, nil
 }
 
 // AuthorizeConfigLoad adjudicates a `load` against the caller's configuration
@@ -205,7 +234,16 @@ func AuthorizeConfigLoad(cfg *Config, class, mode, content string) error {
 			"load %s replaces the whole candidate, so the paths it deletes cannot be "+
 			"adjudicated one by one; use load merge or load set (#9892)", class, mode)
 	}
-	for _, line := range LoadMutationLines(content) {
+	mutationLines, err := LoadMutationLines(content)
+	if err != nil {
+		// Fail closed (#14145): a body the shared classifier cannot
+		// classify must not be adjudicated as zero mutations. The
+		// store rejects the same body, so refusing here refuses no
+		// load the store would have applied.
+		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+			"the load content cannot be classified for adjudication: %w", class, err)
+	}
+	for _, line := range mutationLines {
 		if err := AuthorizeConfigMutation(cfg, class, nil, line); err != nil {
 			return err
 		}

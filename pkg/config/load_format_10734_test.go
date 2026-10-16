@@ -69,7 +69,10 @@ func TestClassifyLoadContentSkipsComments10734(t *testing.T) {
 // adjudicated lines as if the operator wrote it.
 func TestLoadMutationLinesSkipsCommentVerbs10734(t *testing.T) {
 	hier := "system {\n    host-name day0-test;\n}\n/*\ndelete after 2026-01-01.\n*/\n"
-	lines := LoadMutationLines(hier)
+	lines, linesErr := LoadMutationLines(hier)
+	if linesErr != nil {
+		t.Fatalf("LoadMutationLines error = %v", linesErr)
+	}
 	if len(lines) == 0 {
 		t.Fatal("hierarchical content rendered no lines")
 	}
@@ -82,7 +85,10 @@ func TestLoadMutationLinesSkipsCommentVerbs10734(t *testing.T) {
 		}
 	}
 
-	flat := LoadMutationLines("/* backup header */\nset system host-name a\n# note\ndelete system domain-name\n")
+	flat, flatErr := LoadMutationLines("/* backup header */\nset system host-name a\n# note\ndelete system domain-name\n")
+	if flatErr != nil {
+		t.Fatalf("LoadMutationLines error = %v", flatErr)
+	}
 	if len(flat) != 2 || flat[0] != "set system host-name a" || flat[1] != "delete system domain-name" {
 		t.Errorf("flat content with comments rendered %q, want the two verb lines verbatim", flat)
 	}
