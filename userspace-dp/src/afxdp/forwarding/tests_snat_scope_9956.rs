@@ -217,6 +217,63 @@ fn snat_scope_resolves_the_logical_vlan_unit_9956() {
         "#9956 F-052 control: unit-A traffic must still match its own scoped rule"
     );
 }
+/// #13962 (H16-07): the to-routing-instance scope uses the resolved egress
+/// identity, independently of the (different) ingress routing instance.
+#[test]
+fn snat_to_routing_instance_uses_egress_vrf_13962() {
+    let mut snapshot = trunk_snapshot();
+    snapshot.interfaces[3].routing_instance = "tenant-b".to_string();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "snat-to-b".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        to_routing_instance: "tenant-b".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let flow_a = unit_flow(Ipv4Addr::new(10, 0, 61, 100), DOMAIN_A);
+
+    // Ingress is tenant-a, but egress 24 is tenant-b. A matching rule proves
+    // the scope is taken from the route's egress interface, not ingress.
+    assert!(
+        match_source_nat_for_flow(
+            &forwarding,
+            11,
+            0,
+            None,
+            "lan",
+            "wan",
+            24,
+            &flow_a,
+        )
+        .is_some(),
+        "#13962: traffic from tenant-a must match a to-tenant-b rule when egress is tenant-b"
+    );
+
+    // Same ingress, different egress routing instance: the rule must not
+    // apply just because the ingress instance still matches some unrelated
+    // context. The test's altered forwarding map models an egress in tenant-c.
+    let mut wrong_egress = forwarding;
+    wrong_egress
+        .ifindex_to_routing_instance
+        .insert(24, "tenant-c".to_string());
+    assert!(
+        match_source_nat_for_flow(
+            &wrong_egress,
+            11,
+            0,
+            None,
+            "lan",
+            "wan",
+            24,
+            &flow_a,
+        )
+        .is_none(),
+        "#13962: a to-tenant-b rule must not match when the resolved egress is tenant-c"
+    );
+}
 
 /// A fabric punt's local physical ingress is the fabric link, not the
 /// original logical interface. Its stamp must recover the peer's NAT scope.
