@@ -283,16 +283,25 @@ pub fn walk_ipv6_ext_headers(
             }
             EH_CLASS_FRAGMENT => {
                 let frag = unsafe { read_bytes(data, data_end, offset as usize, 8) }?;
-                // #6704: all 8 bytes were already read for the advance, so the
+                // #6704/#13959: all 8 bytes were already read for the advance, so the
                 // offset test is two of them and a mask. RFC 8200 §4.5 puts the
                 // 13-bit fragment offset in the upper bits of bytes 2..4; a
                 // non-zero offset means every byte the walk lands on after this
                 // header is PAYLOAD of an earlier datagram, not an L4 header.
-                if (u16::from_be_bytes([frag[2], frag[3]]) & 0xFFF8) != 0 {
-                    non_first_fragment = true;
-                }
+                // Stop after this header: following its declared next-header would
+                // interpret payload as extension headers, where an attacker can
+                // choose an AH/DestOpts length that overruns the packet and make
+                // the walk fail closed. The caller substitutes
+                // PROTO_FRAGMENT_NO_L4 for this sighting, matching the sibling
+                // screen and userspace walkers.
+                let non_first_fragment_sighting =
+                    (u16::from_be_bytes([frag[2], frag[3]]) & 0xFFF8) != 0;
                 protocol = frag[0];
                 offset = offset.checked_add(mem::size_of::<FragHdr>() as u16)?;
+                if non_first_fragment_sighting {
+                    non_first_fragment = true;
+                    break;
+                }
             }
             _ => break,
         }
