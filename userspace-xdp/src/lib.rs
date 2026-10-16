@@ -55,7 +55,8 @@ const USERSPACE_FALLBACK_REASON_QINQ_DROP: u32 = 16;
 const USERSPACE_FALLBACK_REASON_STAG_DROP: u32 = 17;
 const USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP: u32 = 18;
 const USERSPACE_FALLBACK_REASON_MAX: u32 = 19;
-const USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED: u8 = 1;
+const USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED: u8 =
+    degraded_ctrl_disabled::INGRESS_IFACE_FLAG_ADJUDICATED;
 const USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY: u8 = 2;
 const USERSPACE_CTRL_FLAG_CPUMAP: u32 = 1;
 const USERSPACE_CTRL_FLAG_TRACE: u32 = 2;
@@ -73,6 +74,7 @@ const USERSPACE_CTRL_FLAG_STRICT: u32 = 8;
 /// property.
 const USERSPACE_CTRL_FLAG_WG_RX: u32 = 16;
 mod binding_index;
+mod degraded_ctrl_disabled;
 mod degraded_ndp;
 mod early_filter;
 mod gre_classify;
@@ -1434,7 +1436,7 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     // Unlike the enabled path, ctrl-disabled transit MUST NOT pass to the
     // kernel outside xpf policy; fail closed with the established counter.
     let (_, ingress_iface_flags) = userspace_ingress_metadata(ctx);
-    if ingress_iface_flags & USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED == 0 {
+    if !degraded_ctrl_disabled::ingress_adjudicated(ingress_iface_flags) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     }
     let data = ctx.data();
@@ -1470,10 +1472,16 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     if is_tagged_only_vid0_local_destination(ingress_iface_flags, &parsed) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
-    if is_degraded_local_or_control(ctrl, data, data_end, &parsed) {
-        return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
+    let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed);
+    match degraded_ctrl_disabled::ctrl_disabled_action(ingress_iface_flags, false, local_or_control)
+    {
+        degraded_ctrl_disabled::DegradedCtrlDisabledDisposition::PassLocalControl => {
+            pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED)
+        }
+        degraded_ctrl_disabled::DegradedCtrlDisabledDisposition::DropTransit => {
+            drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED)
+        }
     }
-    drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED)
 }
 
 #[inline(always)]

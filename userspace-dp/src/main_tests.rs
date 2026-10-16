@@ -2824,6 +2824,8 @@ fn shim_token_seq_count(hay: &[String], needle: &[&str]) -> usize {
 // for the host. What runs below is the code the BPF object is built from.
 #[path = "../../userspace-xdp/src/binding_index.rs"]
 mod shim_binding_index;
+#[path = "../../userspace-xdp/src/degraded_ctrl_disabled.rs"]
+mod shim_degraded_ctrl_disabled;
 
 /// The value ladder both coordinate axes are driven over: `2^k`, `2^k - 1` and
 /// `2^k + 1` for every representable `k`, plus `0` and `ceiling`.
@@ -5897,16 +5899,18 @@ fn shim_degraded_ctrl_disabled_tests_adjudicated_before_parse_13632() {
         "#13632: degraded path never fetches ingress metadata"
     );
     let gate_fetch = fetch[0];
-    let gate_bit = only(
+    let gate = only(
         &toks,
         &[
+            "degraded_ctrl_disabled",
+            ":",
+            ":",
+            "ingress_adjudicated",
+            "(",
             "ingress_iface_flags",
-            "&",
-            "USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED",
-            "=",
-            "=",
+            ")",
         ],
-        "ADJUDICATED bit test",
+        "ADJUDICATED gate",
     );
     let l2 = only(
         &toks,
@@ -5935,9 +5939,9 @@ fn shim_degraded_ctrl_disabled_tests_adjudicated_before_parse_13632() {
         ("local/control exemption", exemption),
     ] {
         assert!(
-            gate_fetch < idx && gate_bit < idx,
+            gate_fetch < idx && gate < idx,
             "#13632: {label} is reached before ingress adjudication (fetch={gate_fetch}, \
-             bit test={gate_bit}, site={idx}); raw-L3 source octets must never \
+             pure gate={gate}, site={idx}); raw-L3 source octets must never \
              influence this disabled-mode DROP/local-control decision"
         );
     }
@@ -5951,7 +5955,7 @@ fn shim_degraded_ctrl_disabled_tests_adjudicated_before_parse_13632() {
         "USERSPACE_FALLBACK_REASON_CTRL_DISABLED",
         ")",
     ];
-    let after_gate = &toks[gate_bit + 5..];
+    let after_gate = &toks[gate + 7..];
     assert!(
         after_gate
             .windows(drop.len())
@@ -5961,6 +5965,52 @@ fn shim_degraded_ctrl_disabled_tests_adjudicated_before_parse_13632() {
          passing to the kernel would bypass policy on an attached interface"
     );
 }
+/// #13763: exercise the exact host-shared #13632 decision code. Unlike the
+/// privileged XDP packet test, this runs on unprivileged builders and fails
+/// behaviorally if unadjudicated ingress can reach parsing or if the
+#[test]
+fn shim_degraded_ctrl_disabled_decision_13632() {
+    use shim_degraded_ctrl_disabled::{
+        DegradedCtrlDisabledDisposition as Disposition, INGRESS_IFACE_FLAG_ADJUDICATED,
+        ctrl_disabled_action, ingress_adjudicated,
+    };
+
+    // A raw-L3 tunnel's first source octets can be misread as a local L2
+    // destination if parsed. Even if a hypothetical shifted parse reports a
+    // local/control hit, the exact decision must fail closed before that fact
+    // can grant the kernel-pass exemption.
+    let raw_l3_flags = 0;
+    assert!(!ingress_adjudicated(raw_l3_flags));
+    assert_eq!(
+        ctrl_disabled_action(raw_l3_flags, false, false),
+        Disposition::DropTransit,
+        "unadjudicated raw-L3 transit must drop"
+    );
+    assert_eq!(
+        ctrl_disabled_action(raw_l3_flags, false, true),
+        Disposition::DropTransit,
+        "unadjudicated raw-L3 cannot take the local/control exemption"
+    );
+
+    let adjudicated = INGRESS_IFACE_FLAG_ADJUDICATED;
+    assert!(ingress_adjudicated(adjudicated));
+    assert_eq!(
+        ctrl_disabled_action(adjudicated, false, true),
+        Disposition::PassLocalControl,
+        "adjudicated local/control traffic retains the kernel-pass exemption"
+    );
+    assert_eq!(
+        ctrl_disabled_action(adjudicated, false, false),
+        Disposition::DropTransit,
+        "adjudicated transit must still drop while control is disabled"
+    );
+    assert_eq!(
+        ctrl_disabled_action(adjudicated, true, true),
+        Disposition::DropTransit,
+        "tagged-only VID-0 local traffic retains its earlier DROP"
+    );
+}
+
 
 // ---------------------------------------------------------------------------
 // #7497: the binding-slot capacity cap.
