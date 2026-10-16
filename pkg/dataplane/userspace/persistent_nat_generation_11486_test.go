@@ -201,6 +201,136 @@ func TestPersistentNatGenerationZeroDoesNotImplyClear11486(t *testing.T) {
 	}
 }
 
+func TestExpiredLocalClearFenceAdmitsSameGeneration13909(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nat-generation.json")
+	const origin = "0123456789abcdef0123456789abcdef"
+	const local = "fedcba9876543210fedcba9876543210"
+	expiredState := struct {
+		OriginID                       string            `json:"origin_id"`
+		Generation                     uint64            `json:"generation"`
+		RemoteGenerations              map[string]uint64 `json:"remote_generations"`
+		LocalClearRemoteGenerations    map[string]uint64 `json:"local_clear_remote_generations"`
+		LocalClearRemoteGenerationEnds map[string]int64  `json:"local_clear_remote_generation_ends"`
+	}{
+		OriginID: local, Generation: 4,
+		RemoteGenerations:              map[string]uint64{origin: 8},
+		LocalClearRemoteGenerations:    map[string]uint64{origin: 8},
+		LocalClearRemoteGenerationEnds: map[string]int64{origin: time.Now().Add(-time.Second).UnixNano()},
+	}
+	data, err := json.Marshal(expiredState)
+	if err != nil {
+		t.Fatalf("marshal expired fence state: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write expired fence state: %v", err)
+	}
+	m, helper := persistentNatGenerationManager11486(t, path)
+	if err := m.ImportPersistentNatLeaseBatch(PersistentNatLeaseBatch{
+		OriginID: origin, Generation: 8, Leases: []IdleLeaseWire{scopedLease10018()},
+	}); err != nil {
+		t.Fatalf("import same-generation post-expiry lease: %v", err)
+	}
+	select {
+	case req := <-helper.requests:
+		if req.Type != "import_idle_leases" {
+			t.Fatalf("expired-fence import = %+v, want import_idle_leases", req)
+		}
+	case <-time.After(25 * time.Millisecond):
+		t.Fatal("expired fence continued rejecting same-generation lease batch")
+	}
+	restarted, staleHelper := persistentNatGenerationManager11486(t, path)
+	if err := restarted.ImportPersistentNatLeaseBatch(PersistentNatLeaseBatch{
+		OriginID: origin, Generation: 7, Leases: []IdleLeaseWire{scopedLease10018()},
+	}); err != nil {
+		t.Fatalf("import stale generation after fence expiry and restart: %v", err)
+	}
+	select {
+	case req := <-staleHelper.requests:
+		t.Fatalf("stale generation reached helper after fence expiry as %q", req.Type)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+// #13909: a local clear fences delayed same-generation batches only for a
+// bounded interval. A peer that does not clear must eventually be able to
+// advertise leases created after this node's clear.
+func TestLocalClearFenceExpiresWithoutPeerClear13909(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nat-generation.json")
+	const origin = "0123456789abcdef0123456789abcdef"
+	m, helper := persistentNatGenerationManager11486(t, path)
+	now := time.Unix(1_800_000_000, 0)
+	m.persistentNatLeaseNowFn = func() time.Time { return now }
+
+	batch := PersistentNatLeaseBatch{OriginID: origin, Generation: 8}
+	if err := m.ImportPersistentNatLeaseBatch(batch); err != nil {
+		t.Fatalf("import empty generation 8: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("generation 8 first request = %q, want clear", got)
+	}
+	if _, _, _, err := m.ClearPersistentNATLeasesWithGeneration("", 0); err != nil {
+		t.Fatalf("local clear: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("local clear helper request = %q, want clear", got)
+	}
+
+	batch.Leases = []IdleLeaseWire{scopedLease10018()}
+	if err := m.ImportPersistentNatLeaseBatch(batch); err != nil {
+		t.Fatalf("same-generation batch inside fence: %v", err)
+	}
+	select {
+	case req := <-helper.requests:
+		t.Fatalf("same-generation batch reached helper before fence expiry as %q", req.Type)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	now = now.Add(persistentNatLocalClearFenceLifetime + time.Nanosecond)
+	if err := m.ImportPersistentNatLeaseBatch(batch); err != nil {
+		t.Fatalf("same-generation batch after fence expiry: %v", err)
+	}
+	if req := <-helper.requests; req.Type != "import_idle_leases" {
+		t.Fatalf("same-generation batch after expiry = %+v, want import_idle_leases", req)
+	}
+	if len(m.persistentNatLeaseGeneration.LocalClearRemoteGenerations) != 0 ||
+		len(m.persistentNatLeaseGeneration.LocalClearRemoteGenerationEnds) != 0 {
+		t.Fatalf("expired fence was not pruned: %+v", m.persistentNatLeaseGeneration)
+	}
+}
+
+func TestLocalClearFenceDoesNotBlockNewOrigin13909(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nat-generation.json")
+	const knownOrigin = "0123456789abcdef0123456789abcdef"
+	const newOrigin = "fedcba9876543210fedcba9876543210"
+	m, helper := persistentNatGenerationManager11486(t, path)
+	if err := m.ImportPersistentNatLeaseBatch(PersistentNatLeaseBatch{
+		OriginID: knownOrigin, Generation: 8,
+	}); err != nil {
+		t.Fatalf("import known peer: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("known peer barrier = %q, want clear", got)
+	}
+	if _, _, _, err := m.ClearPersistentNATLeasesWithGeneration("", 0); err != nil {
+		t.Fatalf("local clear: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("local clear helper request = %q, want clear", got)
+	}
+
+	if err := m.ImportPersistentNatLeaseBatch(PersistentNatLeaseBatch{
+		OriginID: newOrigin, Generation: 1, Leases: []IdleLeaseWire{scopedLease10018()},
+	}); err != nil {
+		t.Fatalf("import newly observed peer after local clear: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("new peer generation barrier = %q, want clear", got)
+	}
+	if req := <-helper.requests; req.Type != "import_idle_leases" {
+		t.Fatalf("new peer lease import = %+v, want import_idle_leases", req)
+	}
+}
+
 // #13867: a local clear revokes leases from every origin, so it must also
 // close the admission door to pre-clear equal-generation batches — including
 // leases whose key was not installed at clear time (therefore has no Rust

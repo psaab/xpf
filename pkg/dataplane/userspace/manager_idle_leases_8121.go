@@ -3,6 +3,8 @@ package userspace
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 )
 
 // ErrPersistentNatLeaseScopeProtocolIncompatible means the helper has not
@@ -132,8 +134,10 @@ func (m *Manager) ExportPersistentNatLeaseBatch() (PersistentNatLeaseBatch, erro
 
 // ImportPersistentNatLeaseBatch applies one peer-originated set. A newer
 // durable generation is a clear barrier: persist it before clearing local
-// allocator state, then import the new-generation records. Older delayed
-// batches are rejected indefinitely, including across daemon restarts.
+// allocator state, then import the new-generation records. Older peer
+// generations are rejected indefinitely; local-clear equal-generation fences
+// are bounded to protect against delayed pre-clear snapshots without starving
+// peers that continue advertising at an unchanged generation.
 func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) error {
 	if !validPersistentNatLeaseOrigin11486(batch.OriginID) {
 		return errors.New("persistent-NAT lease batch has invalid origin identity")
@@ -143,12 +147,30 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 	if err := m.loadPersistentNatLeaseGenerationLocked(); err != nil {
 		return err
 	}
-	state := m.persistentNatLeaseGeneration
+	state := clonePersistentNatLeaseGenerationState11486(m.persistentNatLeaseGeneration)
 	if batch.OriginID == state.OriginID {
 		return errors.New("refusing persistent-NAT lease batch from local origin")
 	}
+	now := m.persistentNatLeaseNowLocked()
+	if m.prunePersistentNatLocalClearFencesLocked(state, now) {
+		if err := m.storePersistentNatLeaseGenerationLocked(state); err != nil {
+			return err
+		}
+	}
 	if clearGeneration, cleared := state.LocalClearRemoteGenerations[batch.OriginID]; cleared &&
 		batch.Generation <= clearGeneration {
+		if m.persistentNatLocalClearDropLoggedAt == nil {
+			m.persistentNatLocalClearDropLoggedAt = make(map[string]time.Time)
+		}
+		lastLogged := m.persistentNatLocalClearDropLoggedAt[batch.OriginID]
+		if lastLogged.IsZero() || now.Sub(lastLogged) >= persistentNatLocalClearFenceLifetime {
+			slog.Warn("persistent-NAT lease batch rejected by temporary local-clear fence; peer leases may resume after the fence expires or a newer generation arrives",
+				"origin", batch.OriginID, "generation", batch.Generation,
+				"clear_generation", clearGeneration, "expires_at",
+				time.Unix(0, state.LocalClearRemoteGenerationEnds[batch.OriginID]).UTC(),
+				"issue", "#13909")
+			m.persistentNatLocalClearDropLoggedAt[batch.OriginID] = now
+		}
 		return nil
 	}
 	if generation, ok := state.RemoteGenerations[batch.OriginID]; ok && batch.Generation < generation {
@@ -165,6 +187,8 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 		state = clonePersistentNatLeaseGenerationState11486(state)
 		state.RemoteGenerations[batch.OriginID] = batch.Generation
 		state.PendingRemote[batch.OriginID] = true
+		delete(state.LocalClearRemoteGenerations, batch.OriginID)
+		delete(state.LocalClearRemoteGenerationEnds, batch.OriginID)
 		if err := m.storePersistentNatLeaseGenerationLocked(state); err != nil {
 			return err
 		}
@@ -185,6 +209,23 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 		ClearGenerationValidated: true,
 	})
 	return err
+}
+
+// prunePersistentNatLocalClearFencesLocked drops fences that have reached
+// their bounded replay-protection interval or have been superseded by a newer
+// durable generation. Caller holds m.mu.
+func (m *Manager) prunePersistentNatLocalClearFencesLocked(state persistentNatLeaseGenerationState, now time.Time) bool {
+	changed := false
+	for origin, generation := range state.LocalClearRemoteGenerations {
+		expiresAt := state.LocalClearRemoteGenerationEnds[origin]
+		remoteGeneration := state.RemoteGenerations[origin]
+		if now.UnixNano() >= expiresAt || remoteGeneration > generation {
+			delete(state.LocalClearRemoteGenerations, origin)
+			delete(state.LocalClearRemoteGenerationEnds, origin)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // ImportIdleLeases imports leases at the local helper boundary. Cluster sync
@@ -310,15 +351,21 @@ func (m *Manager) ClearPersistentNATLeasesWithGeneration(peerOrigin string, peer
 	if peerOrigin != "" && peerOrigin == state.OriginID {
 		return 0, "", 0, errors.New("peer persistent-NAT clear origin matches local origin")
 	}
-	// A clear revokes all locally held leases, so no later batch at a
-	// generation already observed from a peer can restore pre-clear state.
-	// Exempt a forwarded peer clear only when it advances that peer's
-	// generation; that newer generation can carry genuinely post-clear leases.
+	// A clear revokes all locally held leases. During the bounded replay
+	// window, fence each known peer at its observed generation so delayed
+	// same-generation batches cannot restore pre-clear state. Exempt a
+	// forwarded peer clear only when it advances that peer's generation;
+	// that newer generation can carry genuinely post-clear leases.
+	now := m.persistentNatLeaseNowLocked()
+	m.prunePersistentNatLocalClearFencesLocked(state, now)
 	for origin, generation := range state.RemoteGenerations {
 		if origin == peerOrigin && peerGeneration > generation {
+			delete(state.LocalClearRemoteGenerations, origin)
+			delete(state.LocalClearRemoteGenerationEnds, origin)
 			continue
 		}
 		state.LocalClearRemoteGenerations[origin] = generation
+		state.LocalClearRemoteGenerationEnds[origin] = now.Add(persistentNatLocalClearFenceLifetime).UnixNano()
 	}
 	if state.Generation == ^uint64(0) {
 		return 0, "", 0, errors.New("persistent-NAT clear generation exhausted")
