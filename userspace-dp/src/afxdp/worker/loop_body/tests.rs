@@ -579,6 +579,7 @@ mod flow_cache_invalidation_tests {
                     session_id: 0,
                     tcp_close_class: 0,
                     tcp_handshake_state: 0,
+                    pptp_call_ids: 0,
                 },
             );
             let shared_sessions = Arc::new(Mutex::new(shared_sessions_map));

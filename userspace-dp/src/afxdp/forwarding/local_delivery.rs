@@ -117,6 +117,7 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: sessions.handshake_state_wire_for(key),
+        pptp_call_ids: sessions.pptp_call_ids_wire_for(key),
         source_nat_static: None,
     };
     // #1789: count a failed helper-local session publish (same

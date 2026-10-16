@@ -183,6 +183,7 @@ pub(in crate::afxdp::session_glue) fn handle_probe_policy_tuples(
                 session_id: sessions.session_id_for(key),
                 tcp_close_class: 0,
                 tcp_handshake_state: 0,
+                pptp_call_ids: 0,
                 source_nat_static: None,
             },
         ));

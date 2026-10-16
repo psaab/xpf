@@ -2349,6 +2349,7 @@ impl crate::afxdp::ha::SessionDomain {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         });
     }
@@ -2504,6 +2505,7 @@ mod rejected_mirror_reservation_10790_tests {
             session_id,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         }
     }
@@ -2637,6 +2639,7 @@ mod rejected_mirror_reservation_10790_tests {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             source_nat_static: None,
         };
         let allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;

@@ -182,6 +182,7 @@ fn probe_publish(
         session_id: PROBE_SESSION_ID,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         source_nat_static: None,
     };
     publish_shared_session(&maps.0, &maps.1, &maps.2, &maps.3, &entry);

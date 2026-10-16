@@ -6014,6 +6014,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             tcp_handshake_state: forward_install_info
                                                 .expect("installed forward session info")
                                                 .handshake_state_wire,
+                                            pptp_call_ids: sessions
+                                                .pptp_call_ids_wire_for(&flow.forward_key),
                                         };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
@@ -6403,6 +6405,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             tcp_handshake_state: forward_install_info
                                                 .expect("installed forward session info")
                                                 .handshake_state_wire,
+                                            pptp_call_ids: 0,
                                             source_nat_static: None,
                                         };
                                         publish_shared_session(
@@ -10555,6 +10558,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             tcp_handshake_state: pending_install_info
                                                 .expect("installed neighbor seed info")
                                                 .handshake_state_wire,
+                                            pptp_call_ids: 0,
                                         };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,

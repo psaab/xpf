@@ -107,7 +107,7 @@ impl crate::afxdp::Coordinator {
                     observed_tcp_flags: 0,
                     tcp_close_class: entry.tcp_close_class,
                     tcp_handshake_state: entry.tcp_handshake_state,
-                    pptp_call_ids: 0,
+                    pptp_call_ids: entry.pptp_call_ids,
                     purge_retirement: false, });
                 }
             }
