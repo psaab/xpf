@@ -8,12 +8,15 @@ encryption when a master password is set.
 
 ## Redacted compare output
 
-`ShowCompareRedacted` keeps secret values constant-masked on both removed and
-added arms, then emits adjacent `[secret fingerprint removed: <8-hex>]` /
-`[secret fingerprint added: <8-hex>]` metadata for changed values. Identical
-configs still render `[no changes]`. Credential-bearing URLs retain
-`RedactURL`'s safe endpoint context; fingerprints cover only the URL components
-that redaction hides.
+`ShowCompareRedacted` and `ShowCompareRollbackRedacted` keep secret values
+constant-masked on both removed and added arms, then emit adjacent
+`[secret fingerprint removed: <8-hex>]` / `[secret fingerprint added: <8-hex>]`
+metadata for changed values. Identical configs still render `[no changes]`.
+Credential-bearing URLs retain `RedactURL`'s safe endpoint context; fingerprints
+cover only the URL components that redaction hides. Both compares must use the
+fingerprint-aware `config.FormatCompareRedacted`; constant-masking both arms
+with `RedactedClone` first would collapse distinct secrets to one placeholder
+and hide a secret-only difference as `[no changes]` (#14170).
 
 The constructor is fail-closed (#1893): `New(filePath) (*Store, error)`
 returns an error when the `.configdb` directory cannot be created.
