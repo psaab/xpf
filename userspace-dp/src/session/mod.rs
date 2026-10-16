@@ -693,7 +693,7 @@ use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
 // TCP_FIN/TCP_RST via `super::*`. The session-closing test is the shared
 // `is_closing` predicate.
 use crate::tcp_flags::{
-    TCP_FIN, TCP_RST, has_fin, has_rst, is_closing, is_initial_syn, is_syn_ack,
+    TCP_FIN, TCP_RST, has_ack, has_fin, has_rst, has_syn, is_closing, is_initial_syn, is_syn_ack,
 };
 
 #[allow(unused_macros)]
@@ -3562,6 +3562,7 @@ impl SessionTable {
         let opening_override_ns = self.opening_override_for(metadata.ingress_zone);
         // #10507 A1: live policy generation for the Fresh-only reset below.
         let live_policy_gen = self.policy_revalidation_gen;
+        let handshake_completed;
         {
             let record = self
                 .entries
@@ -3625,11 +3626,49 @@ impl SessionTable {
             // #3152/#4109: TCP promotes on a genuine reverse SYN-ACK. #10889:
             // a non-TCP app-managed session promotes on a genuine reverse
             // packet; a forward-only refresh cannot open the long idle window.
+            // #13677: a stray reverse SYN-ACK must not re-pend a completed handshake.
+            let reverse_syn_ack = matches!(protocol, PROTO_TCP)
+                && is_syn_ack(tcp_flags)
+                && metadata.is_reverse
+                && (!record.entry.established || record.entry.handshake_pending);
+            // #13678 (D12-03): mirror lookup.rs's handshake completion: a
+            // SYN-ACK-first entry completes only on a reverse non-SYN ACK;
+            // a SYN-first entry completes only on a valid forward ACK.
+            // Retransmitted SYNs and closing ACKs leave the gate pending.
+            handshake_completed = if record.entry.syn_ack_first {
+                matches!(protocol, PROTO_TCP)
+                    && record.entry.handshake_pending
+                    && metadata.is_reverse
+                    && has_ack(tcp_flags)
+                    && !has_syn(tcp_flags)
+                    && !is_closing(tcp_flags)
+            } else {
+                matches!(protocol, PROTO_TCP)
+                    && record.entry.handshake_pending
+                    && !metadata.is_reverse
+                    && has_ack(tcp_flags)
+                    && !has_syn(tcp_flags)
+                    && !is_closing(tcp_flags)
+            };
+            // #3152/#4109: TCP promotes on a genuine reverse SYN-ACK. #10889:
+            // a non-TCP app-managed session promotes on a genuine reverse
+            // packet; a forward-only refresh cannot open the long idle window.
             record.entry.established |=
-                (matches!(protocol, PROTO_TCP) && is_syn_ack(tcp_flags) && metadata.is_reverse)
+                reverse_syn_ack
                     || (!matches!(protocol, PROTO_TCP)
                         && metadata.is_reverse
                         && metadata.inactivity_timeout_ns.is_some());
+            // #13678/#6752: a reverse SYN-ACK on an OPENING entry opens the
+            // handshake gap exactly as lookup.rs does — `established` above
+            // must NOT grant the established window before the completing ACK.
+            if reverse_syn_ack && !record.entry.syn_ack_first {
+                record.entry.handshake_pending = true;
+            }
+            if handshake_completed {
+                record.entry.established = true;
+                record.entry.handshake_pending = false;
+                record.entry.syn_ack_first = false;
+            }
             record.entry.expires_after_ns = if record.entry.closing {
                 tcp_close_window_ns(record.entry.tcp_close_class(), &self.timeouts)
             } else {
@@ -3657,14 +3696,22 @@ impl SessionTable {
             record.entry.first_held_ns = 0;
             record.entry.seen_rg_epoch = 0;
         }
-        if protocol == PROTO_TCP && !metadata.is_reverse {
-            let remains_opening = self
-                .entry_by_key(key)
-                .is_some_and(|entry| Self::is_pressure_shed_opening(key, entry, false));
-            if remains_opening {
-                self.pressure_shed_openings.insert(key.clone(), ());
-            } else {
+        if protocol == PROTO_TCP {
+            if !metadata.is_reverse {
+                let remains_opening = self
+                    .entry_by_key(key)
+                    .is_some_and(|entry| Self::is_pressure_shed_opening(key, entry, false));
+                if remains_opening {
+                    self.pressure_shed_openings.insert(key.clone(), ());
+                } else {
+                    self.pressure_shed_openings.remove(key);
+                }
+            } else if handshake_completed {
+                // The pressure-shed index is keyed by the forward half even
+                // when the completing ACK updated its reverse companion.
                 self.pressure_shed_openings.remove(key);
+                let forward_key = reverse_session_key(key, decision.nat);
+                self.pressure_shed_openings.remove(&forward_key);
             }
         }
         // #10310/#10985: keep zone-keyed counts balanced across in-place
