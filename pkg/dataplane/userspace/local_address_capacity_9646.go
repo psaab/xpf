@@ -47,11 +47,24 @@ func isLocalAddressCapacityError(err error) bool {
 // checkLocalAddressCapacity refuses a set the shim maps cannot hold. A set of
 // exactly the capacity fits.
 func checkLocalAddressCapacity(v4, v6 int) error {
-	if v4 > userspaceLocalAddressMapCapacity {
-		return &localAddressCapacityError{Map: mapNameUserspaceLocalV4, Desired: v4, Capacity: userspaceLocalAddressMapCapacity}
+	if err := checkAddressMapCapacity(mapNameUserspaceLocalV4, v4); err != nil {
+		return err
 	}
-	if v6 > userspaceLocalAddressMapCapacity {
-		return &localAddressCapacityError{Map: mapNameUserspaceLocalV6, Desired: v6, Capacity: userspaceLocalAddressMapCapacity}
+	return checkAddressMapCapacity(mapNameUserspaceLocalV6, v6)
+}
+
+// checkInterfaceNATAddressCapacity applies the same shim limit to the
+// interface-NAT maps (#13724).
+func checkInterfaceNATAddressCapacity(v4, v6 int) error {
+	if err := checkAddressMapCapacity(mapNameUserspaceInterfaceNATv4, v4); err != nil {
+		return err
+	}
+	return checkAddressMapCapacity(mapNameUserspaceInterfaceNATv6, v6)
+}
+
+func checkAddressMapCapacity(mapName string, desired int) error {
+	if desired > userspaceLocalAddressMapCapacity {
+		return &localAddressCapacityError{Map: mapName, Desired: desired, Capacity: userspaceLocalAddressMapCapacity}
 	}
 	return nil
 }

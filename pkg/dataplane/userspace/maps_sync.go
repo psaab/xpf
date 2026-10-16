@@ -311,6 +311,10 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 	if err := checkLocalAddressCapacity(len(desiredV4), len(desiredV6)); err != nil {
 		return err
 	}
+	natV4, natV6, rstV4, rstV6 := buildDesiredInterfaceNATAddressSetsWithExclusions(snapshot, excludedV4, excludedV6)
+	if err := checkInterfaceNATAddressCapacity(len(natV4), len(natV6)); err != nil {
+		return err
+	}
 	if err := m.syncIngressIfaceMapLocked(snapshot); err != nil {
 		return err
 	}
@@ -320,7 +324,7 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 	if err := m.syncUserspaceWGZoneMapsLocked(snapshot); err != nil {
 		return err
 	}
-	return m.syncInterfaceNATAddressMapsWithExclusionsLocked(snapshot, excludedV4, excludedV6)
+	return m.syncInterfaceNATAddressMapsWithSetsLocked(natV4, natV6, rstV4, rstV6)
 }
 
 type userspaceCtrlLookupHook func(ctrlMapUpdater, uint32, *userspaceCtrlValue) error
@@ -1003,35 +1007,35 @@ func (m *Manager) syncLocalAddressMapsWithSetsLocked(
 		return errors.New("userspace_local_v6 map not loaded")
 	}
 
-	for key := range desiredV4 {
-		if err := localV4Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
-			return fmt.Errorf("update userspace_local_v4 %08x: %w", key, err)
-		}
-	}
-	for key := range desiredV6 {
-		if err := localV6Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
-			return fmt.Errorf("update userspace_local_v6 %+v: %w", key, err)
-		}
-	}
-
-	// A transient netlink AddrList failure (or an interrupted/ENOBUFS
-	// partial dump) yields a NON-AUTHORITATIVE desired set that may be
-	// missing kernel-owned VIP addresses (VRRP VIPs, secondary locals).
-	// Pruning against that partial set would delete live VRRP VIP / local
-	// keys from userspace_local_v4/v6 and blackhole packets destined to
-	// the VIP / SSH / BGP / IKE local endpoints (#3924). Treat the
-	// incomplete enumeration as non-authoritative: the adds above already
-	// landed (adding is always safe — it only ever widens the local set),
-	// but SKIP the stale-key prune this cycle and warn. The next reconcile
-	// with a complete enumeration removes any genuinely stale keys.
+	// A transient netlink AddrList failure (or interrupted dump) makes the
+	// desired set non-authoritative: retain existing keys and only add.
 	if !enumComplete {
+		for key := range desiredV4 {
+			if err := localV4Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update userspace_local_v4 %08x: %w", key, err)
+			}
+		}
+		for key := range desiredV6 {
+			if err := localV6Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update userspace_local_v6 %+v: %w", key, err)
+			}
+		}
 		m.mapsSyncTelemetry.localAddrPruneSkipped.Add(1)
 		slog.Warn("userspace local-address sync: netlink AddrList enumeration incomplete; " +
 			"skipping stale-key prune to avoid removing VRRP VIP/local keys from " +
 			"userspace_local_v4/v6 (will reconcile on the next complete enumeration)")
 		return nil
 	}
+	// On a complete enumeration the desired set is authoritative. Prune stale
+	// keys before adding replacements so map occupancy never exceeds max_entries.
+	return pruneLocalAddressKeys(localV4Map, localV6Map, desiredV4, desiredV6)
+}
 
+func pruneLocalAddressKeys(
+	localV4Map, localV6Map *ebpf.Map,
+	desiredV4 map[uint32]struct{},
+	desiredV6 map[userspaceLocalV6Key]struct{},
+) error {
 	var (
 		localV4Key uint32
 		localV4Val uint8
@@ -1039,18 +1043,27 @@ func (m *Manager) syncLocalAddressMapsWithSetsLocked(
 	localV4Iter := localV4Map.Iterate()
 	var staleLocalV4Keys []uint32
 	for localV4Iter.Next(&localV4Key, &localV4Val) {
-		if _, keep := desiredV4[localV4Key]; keep {
-			continue
+		if _, keep := desiredV4[localV4Key]; !keep {
+			staleLocalV4Keys = append(staleLocalV4Keys, localV4Key)
 		}
-		staleLocalV4Keys = append(staleLocalV4Keys, localV4Key)
 	}
 	if err := localV4Iter.Err(); err != nil {
 		return fmt.Errorf("iterate userspace_local_v4: %w", err)
 	}
-	for _, key := range staleLocalV4Keys {
-		if err := localV4Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("delete userspace_local_v4 %08x: %w", key, err)
-		}
+	if err := reconcileAddressMapKeys(staleLocalV4Keys, desiredV4,
+		func(key uint32) error {
+			if err := localV4Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				return fmt.Errorf("delete userspace_local_v4 %08x: %w", key, err)
+			}
+			return nil
+		},
+		func(key uint32) error {
+			if err := localV4Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update userspace_local_v4 %08x: %w", key, err)
+			}
+			return nil
+		}); err != nil {
+		return err
 	}
 
 	var (
@@ -1060,17 +1073,47 @@ func (m *Manager) syncLocalAddressMapsWithSetsLocked(
 	localV6Iter := localV6Map.Iterate()
 	var staleLocalV6Keys []userspaceLocalV6Key
 	for localV6Iter.Next(&localV6Key, &localV6Val) {
-		if _, keep := desiredV6[localV6Key]; keep {
-			continue
+		if _, keep := desiredV6[localV6Key]; !keep {
+			staleLocalV6Keys = append(staleLocalV6Keys, localV6Key)
 		}
-		staleLocalV6Keys = append(staleLocalV6Keys, localV6Key)
 	}
 	if err := localV6Iter.Err(); err != nil {
 		return fmt.Errorf("iterate userspace_local_v6: %w", err)
 	}
-	for _, key := range staleLocalV6Keys {
-		if err := localV6Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("delete userspace_local_v6 %+v: %w", key, err)
+	if err := reconcileAddressMapKeys(staleLocalV6Keys, desiredV6,
+		func(key userspaceLocalV6Key) error {
+			if err := localV6Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				return fmt.Errorf("delete userspace_local_v6 %+v: %w", key, err)
+			}
+			return nil
+		},
+		func(key userspaceLocalV6Key) error {
+			if err := localV6Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update userspace_local_v6 %+v: %w", key, err)
+			}
+			return nil
+		}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reconcileAddressMapKeys removes stale keys before adding desired keys. The
+// ordering keeps replacement occupancy within fixed-capacity hash maps.
+func reconcileAddressMapKeys[K comparable](
+	stale []K,
+	desired map[K]struct{},
+	deleteKey func(K) error,
+	updateKey func(K) error,
+) error {
+	for _, key := range stale {
+		if err := deleteKey(key); err != nil {
+			return err
+		}
+	}
+	for key := range desired {
+		if err := updateKey(key); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1135,11 +1178,15 @@ func (m *Manager) buildDesiredLocalAddressSetsWithExclusions(snapshot *ConfigSna
 			}
 			if v4 := ip.To4(); v4 != nil && family == netlink.FAMILY_V4 {
 				key := binary.BigEndian.Uint32(v4)
-				desiredV4[key] = struct{}{}
+				if !excludedV4[key] {
+					desiredV4[key] = struct{}{}
+				}
 			} else if v6 := ip.To16(); v6 != nil && family == netlink.FAMILY_V6 {
 				var key [16]byte
 				copy(key[:], v6)
-				desiredV6[userspaceLocalV6Key{Addr: key}] = struct{}{}
+				if !excludedV6[key] {
+					desiredV6[userspaceLocalV6Key{Addr: key}] = struct{}{}
+				}
 			}
 		}
 	}
@@ -1148,10 +1195,15 @@ func (m *Manager) buildDesiredLocalAddressSetsWithExclusions(snapshot *ConfigSna
 
 func (m *Manager) syncInterfaceNATAddressMapsLocked(snapshot *ConfigSnapshot) error {
 	excludedV4, excludedV6 := buildNATTranslatedLocalAddressExclusions(snapshot)
-	return m.syncInterfaceNATAddressMapsWithExclusionsLocked(snapshot, excludedV4, excludedV6)
+	desiredV4, desiredV6, rstV4, rstV6 := buildDesiredInterfaceNATAddressSetsWithExclusions(snapshot, excludedV4, excludedV6)
+	return m.syncInterfaceNATAddressMapsWithSetsLocked(desiredV4, desiredV6, rstV4, rstV6)
 }
 
-func (m *Manager) syncInterfaceNATAddressMapsWithExclusionsLocked(snapshot *ConfigSnapshot, excludedV4 map[uint32]bool, excludedV6 map[[16]byte]bool) error {
+func (m *Manager) syncInterfaceNATAddressMapsWithSetsLocked(
+	desiredV4 map[uint32]struct{},
+	desiredV6 map[userspaceLocalV6Key]struct{},
+	rstV4, rstV6 []netip.Addr,
+) error {
 	natV4Map := m.bpfShim.Map(mapNameUserspaceInterfaceNATv4)
 	if natV4Map == nil {
 		return errors.New("userspace_interface_nat_v4 map not loaded")
@@ -1160,59 +1212,11 @@ func (m *Manager) syncInterfaceNATAddressMapsWithExclusionsLocked(snapshot *Conf
 	if natV6Map == nil {
 		return errors.New("userspace_interface_nat_v6 map not loaded")
 	}
-
-	desiredV4, desiredV6, rstV4, rstV6 := buildDesiredInterfaceNATAddressSetsWithExclusions(snapshot, excludedV4, excludedV6)
-	for key := range desiredV4 {
-		if err := natV4Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
-			return fmt.Errorf("update userspace_interface_nat_v4 %08x: %w", key, err)
-		}
+	if err := checkInterfaceNATAddressCapacity(len(desiredV4), len(desiredV6)); err != nil {
+		return err
 	}
-	for key := range desiredV6 {
-		if err := natV6Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
-			return fmt.Errorf("update userspace_interface_nat_v6 %+v: %w", key, err)
-		}
-	}
-
-	var (
-		natV4Key uint32
-		natV4Val uint8
-	)
-	natV4Iter := natV4Map.Iterate()
-	var staleNatV4Keys []uint32
-	for natV4Iter.Next(&natV4Key, &natV4Val) {
-		if _, keep := desiredV4[natV4Key]; keep {
-			continue
-		}
-		staleNatV4Keys = append(staleNatV4Keys, natV4Key)
-	}
-	if err := natV4Iter.Err(); err != nil {
-		return fmt.Errorf("iterate userspace_interface_nat_v4: %w", err)
-	}
-	for _, key := range staleNatV4Keys {
-		if err := natV4Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("delete userspace_interface_nat_v4 %08x: %w", key, err)
-		}
-	}
-
-	var (
-		natV6Key userspaceLocalV6Key
-		natV6Val uint8
-	)
-	natV6Iter := natV6Map.Iterate()
-	var staleNatV6Keys []userspaceLocalV6Key
-	for natV6Iter.Next(&natV6Key, &natV6Val) {
-		if _, keep := desiredV6[natV6Key]; keep {
-			continue
-		}
-		staleNatV6Keys = append(staleNatV6Keys, natV6Key)
-	}
-	if err := natV6Iter.Err(); err != nil {
-		return fmt.Errorf("iterate userspace_interface_nat_v6: %w", err)
-	}
-	for _, key := range staleNatV6Keys {
-		if err := natV6Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-			return fmt.Errorf("delete userspace_interface_nat_v6 %+v: %w", key, err)
-		}
+	if err := pruneNATAddressKeys(natV4Map, natV6Map, desiredV4, desiredV6); err != nil {
+		return err
 	}
 
 	slices.SortFunc(rstV4, netip.Addr.Compare)
@@ -1240,6 +1244,69 @@ func (m *Manager) syncInterfaceNATAddressMapsWithExclusionsLocked(snapshot *Conf
 		m.lastRSTAttempt = now
 		m.lastRSTv4 = slices.Clone(rstV4)
 		m.lastRSTv6 = slices.Clone(rstV6)
+	}
+	return nil
+}
+
+func pruneNATAddressKeys(
+	natV4Map, natV6Map *ebpf.Map,
+	desiredV4 map[uint32]struct{},
+	desiredV6 map[userspaceLocalV6Key]struct{},
+) error {
+	var v4Key uint32
+	var v4Val uint8
+	v4Iter := natV4Map.Iterate()
+	var staleV4 []uint32
+	for v4Iter.Next(&v4Key, &v4Val) {
+		if _, keep := desiredV4[v4Key]; !keep {
+			staleV4 = append(staleV4, v4Key)
+		}
+	}
+	if err := v4Iter.Err(); err != nil {
+		return fmt.Errorf("iterate userspace_interface_nat_v4: %w", err)
+	}
+	if err := reconcileAddressMapKeys(staleV4, desiredV4,
+		func(key uint32) error {
+			if err := natV4Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				return fmt.Errorf("delete userspace_interface_nat_v4 %08x: %w", key, err)
+			}
+			return nil
+		},
+		func(key uint32) error {
+			if err := natV4Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update userspace_interface_nat_v4 %08x: %w", key, err)
+			}
+			return nil
+		}); err != nil {
+		return err
+	}
+
+	var v6Key userspaceLocalV6Key
+	var v6Val uint8
+	v6Iter := natV6Map.Iterate()
+	var staleV6 []userspaceLocalV6Key
+	for v6Iter.Next(&v6Key, &v6Val) {
+		if _, keep := desiredV6[v6Key]; !keep {
+			staleV6 = append(staleV6, v6Key)
+		}
+	}
+	if err := v6Iter.Err(); err != nil {
+		return fmt.Errorf("iterate userspace_interface_nat_v6: %w", err)
+	}
+	if err := reconcileAddressMapKeys(staleV6, desiredV6,
+		func(key userspaceLocalV6Key) error {
+			if err := natV6Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				return fmt.Errorf("delete userspace_interface_nat_v6 %+v: %w", key, err)
+			}
+			return nil
+		},
+		func(key userspaceLocalV6Key) error {
+			if err := natV6Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
+				return fmt.Errorf("update userspace_interface_nat_v6 %+v: %w", key, err)
+			}
+			return nil
+		}); err != nil {
+		return err
 	}
 	return nil
 }
