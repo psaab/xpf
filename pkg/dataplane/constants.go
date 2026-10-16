@@ -48,5 +48,10 @@ const (
 	// a check against the larger value admits slots these maps cannot
 	// address — which is why the write-side composed-index guards do not
 	// stand in for it.
-	BindingSlotMapMaxEntries uint32 = 4096
+	// UserspaceSessionsMaxEntries sizes the shim's no-prealloc steering map
+	// for the 16-worker binding-planner ceiling, 131072 sessions per worker,
+	// and up to four distinct rows per live session (NAT wire aliases).
+	// It mirrors USERSPACE_SESSIONS_MAX_ENTRIES in userspace-xdp/src/lib.rs.
+	UserspaceSessionsMaxEntries uint32 = 16 * 131072 * 4
+	BindingSlotMapMaxEntries    uint32 = 4096
 )
