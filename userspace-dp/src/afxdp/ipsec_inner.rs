@@ -1291,6 +1291,23 @@ mod tests {
     }
 
     fn v6_view_and_packet(protocol: u8, dst_port: u16) -> (RuntimeView, Vec<u8>) {
+        let proto_name = if protocol == 17 { "udp" } else { "tcp" };
+        v6_view_and_packet_inner(proto_name, "443", protocol, dst_port)
+    }
+
+    fn v6_view_and_packet_with_policy(
+        policy_protocol: &str,
+        policy_dst_port: &str,
+    ) -> (RuntimeView, Vec<u8>) {
+        v6_view_and_packet_inner(policy_protocol, policy_dst_port, 6, 443)
+    }
+
+    fn v6_view_and_packet_inner(
+        policy_protocol: &str,
+        policy_dst_port: &str,
+        protocol: u8,
+        dst_port: u16,
+    ) -> (RuntimeView, Vec<u8>) {
         let src: std::net::Ipv6Addr = "2001:db8:1::1".parse().expect("source");
         let dst: std::net::Ipv6Addr = "2001:db8::5".parse().expect("destination");
         let next_hop: std::net::Ipv6Addr = "2001:db8::ff".parse().expect("next hop");
@@ -1360,7 +1377,7 @@ mod tests {
             (20, std::net::IpAddr::V6(next_hop)),
             crate::afxdp::NeighborEntry { mac: [2, 0, 0, 0, 0, 20] },
         );
-        forwarding.policy = port_term_policy(if protocol == 17 { "udp" } else { "tcp" }, "443");
+        forwarding.policy = port_term_policy(policy_protocol, policy_dst_port);
         let view = RuntimeView::new_with_ipsec_authority(
             ValidationState { snapshot_installed: true, config_generation: 1, fib_generation: 1 },
             Arc::new(forwarding),
@@ -1379,6 +1396,28 @@ mod tests {
         packet[40..42].copy_from_slice(&40000u16.to_be_bytes());
         packet[42..44].copy_from_slice(&dst_port.to_be_bytes());
         (view, packet)
+    }
+
+    fn v6_ah_packet(plain: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0u8; 72];
+        packet[..40].copy_from_slice(&plain[..40]);
+        packet[4..6].copy_from_slice(&32u16.to_be_bytes());
+        packet[6] = 51; // AH
+        packet[40] = 6; // AH next-header: TCP
+        packet[41] = 1; // 12-byte AH header
+        packet[52..54].copy_from_slice(&40000u16.to_be_bytes());
+        packet[54..56].copy_from_slice(&443u16.to_be_bytes());
+        packet
+    }
+
+    fn v6_ah_input(packet: &[u8]) -> IpsecInnerInput<'_> {
+        let mut inp = input(packet, advisory(1, 1, 1, 1, 1));
+        inp.inner_family = libc::AF_INET6 as u8;
+        inp.inner_eth_proto = 0x86dd;
+        inp.protocol = 6; // Shim walks past AH and reports its inner TCP header.
+        inp.rel_l4_offset = 52;
+        inp.payload_offset = 72;
+        inp
     }
 
     fn v6_port_decision(protocol: u8, dst_port: u16) -> IpsecInnerDecision {
@@ -1413,21 +1452,31 @@ mod tests {
     #[test]
     fn d14_ipv6_ah_sighted_tcp_443_does_not_match_tcp_term_14090() {
         let (view, plain) = v6_view_and_packet(6, 443);
-        let mut packet = vec![0u8; 72];
-        packet[..40].copy_from_slice(&plain[..40]);
-        packet[4..6].copy_from_slice(&32u16.to_be_bytes());
-        packet[6] = 51; // AH
-        packet[40] = 6; // AH next-header: TCP
-        packet[41] = 1; // 12-byte AH header
-        packet[52..54].copy_from_slice(&40000u16.to_be_bytes());
-        packet[54..56].copy_from_slice(&443u16.to_be_bytes());
-        let mut inp = input(&packet, advisory(1, 1, 1, 1, 1));
-        inp.inner_family = libc::AF_INET6 as u8;
-        inp.inner_eth_proto = 0x86dd;
-        inp.protocol = 6; // Shim walks past AH and reports its inner TCP header.
-        inp.rel_l4_offset = 52;
-        inp.payload_offset = 72;
+        let packet = v6_ah_packet(&plain);
+        let d = adjudicate_ipsec_inner(&view, v6_ah_input(&packet));
+        assert_eq!(d.reason(), Some(reason::LEGACY_POLICY_DENY), "{d:?}");
+    }
 
+    #[test]
+    fn d14_ipv6_ah_sighted_tcp_443_matches_only_ah_term_14217() {
+        // The same AH->TCP/443 packet that denies against the TCP/443 permit
+        // (cell above) is admitted only by a protocol-51 term.
+        let (view, plain) = v6_view_and_packet_with_policy("ah", "");
+        let packet = v6_ah_packet(&plain);
+        let d = adjudicate_ipsec_inner(&view, v6_ah_input(&packet));
+        assert!(d.is_would_permit(), "{d:?}");
+    }
+
+    #[test]
+    fn d14_ipv6_ah_sighted_udp_443_does_not_match_udp_term_14217() {
+        // UDP twin: AH next-header is UDP and the shim-stamped inner header
+        // spells dst-port 443, but protocol-51 identity must not match the
+        // UDP/443 permit term.
+        let (view, plain) = v6_view_and_packet(17, 443);
+        let mut packet = v6_ah_packet(&plain);
+        packet[40] = 17; // AH next-header: UDP
+        let mut inp = v6_ah_input(&packet);
+        inp.protocol = 17;
         let d = adjudicate_ipsec_inner(&view, inp);
         assert_eq!(d.reason(), Some(reason::LEGACY_POLICY_DENY), "{d:?}");
     }
