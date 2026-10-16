@@ -118,10 +118,40 @@ type userspaceLocalV6Key struct {
 	Addr [16]byte
 }
 
+type userspaceLocalV4Key struct {
+	Domain uint32
+	Addr   uint32
+}
+
+type userspaceShimLocalV6Key struct {
+	Domain uint32
+	Addr   [16]byte
+}
+
 type userspaceLocalAddressEntry struct {
-	v4    bool
-	v4Key uint32
-	v6Key userspaceLocalV6Key
+	v4     bool
+	domain uint32
+	v4Key  uint32
+	v6Key  userspaceLocalV6Key
+}
+
+func localAddressRoutingDomain(snapshot *ConfigSnapshot, ifindex int) (uint32, bool) {
+	if snapshot == nil || ifindex <= 0 {
+		return 0, false
+	}
+	found := false
+	var domain uint32
+	for _, iface := range snapshot.Interfaces {
+		if iface.Ifindex != ifindex || iface.AdminDisabled {
+			continue
+		}
+		if found && domain != iface.RoutingDomain {
+			return 0, false
+		}
+		domain = iface.RoutingDomain
+		found = true
+	}
+	return domain, found
 }
 
 func (m *Manager) programBootstrapMapsLocked(snapshot *ConfigSnapshot, cfg config.UserspaceConfig) error {
@@ -870,6 +900,10 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 	if ifaceMap == nil {
 		return errors.New("userspace_ingress_ifaces map not loaded")
 	}
+	domainMap := m.bpfShim.Map(mapNameUserspaceIngressDomains)
+	if domainMap == nil {
+		return errors.New("userspace_ingress_domains map not loaded")
+	}
 
 	// #6784: make the delete inventory truthful about the PINNED map before
 	// anything reads it. On a fresh Manager (daemon restart) this is what turns
@@ -900,7 +934,22 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 			retainDebt()
 			return fmt.Errorf("update userspace_ingress_ifaces %d: %w", ifindex, err)
 		}
+		// The ingress row is live as soon as Update succeeds. Record it before
+		// touching the companion domain map so any later error remains reapable.
 		installed = append(installed, ifindex)
+		domain, ok := localAddressRoutingDomain(snapshot, int(ifindex))
+		if !ok {
+			// Ambiguous parent/fabric ingress has no safe local domain.
+			// Delete stale domain so local lookup fails closed and traffic
+			// continues through userspace policy.
+			if err := domainMap.Delete(ifindex); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+				retainDebt()
+				return fmt.Errorf("delete ambiguous userspace_ingress_domains %d: %w", ifindex, err)
+			}
+		} else if err := domainMap.Update(ifindex, domain, ebpf.UpdateAny); err != nil {
+			retainDebt()
+			return fmt.Errorf("update userspace_ingress_domains %d: %w", ifindex, err)
+		}
 	}
 	// HashMap: Delete removes the entry. ErrKeyNotExist is expected
 	// across daemon restarts (idempotent). Any other failure must be
@@ -914,6 +963,10 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 		if err := ifaceMap.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 			retainDebt()
 			return fmt.Errorf("delete userspace_ingress_ifaces %d: %w", k, err)
+		}
+		if err := domainMap.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			retainDebt()
+			return fmt.Errorf("delete userspace_ingress_domains %d: %w", k, err)
 		}
 	}
 	m.lastIngressIfaces = newIngress
@@ -1027,8 +1080,8 @@ func (m *Manager) syncLocalAddressMapsLocked(snapshot *ConfigSnapshot) error {
 // syncLocalAddressMapsWithSetsLocked writes an already-built (and, #9646,
 // capacity-checked) local-address set into userspace_local_v4/v6.
 func (m *Manager) syncLocalAddressMapsWithSetsLocked(
-	desiredV4 map[uint32]struct{},
-	desiredV6 map[userspaceLocalV6Key]struct{},
+	desiredV4 map[userspaceLocalV4Key]struct{},
+	desiredV6 map[userspaceShimLocalV6Key]struct{},
 	enumComplete bool,
 ) error {
 	localV4Map := m.bpfShim.Map(mapNameUserspaceLocalV4)
@@ -1066,15 +1119,15 @@ func (m *Manager) syncLocalAddressMapsWithSetsLocked(
 
 func pruneLocalAddressKeys(
 	localV4Map, localV6Map *ebpf.Map,
-	desiredV4 map[uint32]struct{},
-	desiredV6 map[userspaceLocalV6Key]struct{},
+	desiredV4 map[userspaceLocalV4Key]struct{},
+	desiredV6 map[userspaceShimLocalV6Key]struct{},
 ) error {
 	var (
-		localV4Key uint32
+		localV4Key userspaceLocalV4Key
 		localV4Val uint8
 	)
 	localV4Iter := localV4Map.Iterate()
-	var staleLocalV4Keys []uint32
+	var staleLocalV4Keys []userspaceLocalV4Key
 	for localV4Iter.Next(&localV4Key, &localV4Val) {
 		if _, keep := desiredV4[localV4Key]; !keep {
 			staleLocalV4Keys = append(staleLocalV4Keys, localV4Key)
@@ -1084,15 +1137,15 @@ func pruneLocalAddressKeys(
 		return fmt.Errorf("iterate userspace_local_v4: %w", err)
 	}
 	if err := reconcileAddressMapKeys(staleLocalV4Keys, desiredV4,
-		func(key uint32) error {
+		func(key userspaceLocalV4Key) error {
 			if err := localV4Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-				return fmt.Errorf("delete userspace_local_v4 %08x: %w", key, err)
+				return fmt.Errorf("delete userspace_local_v4 %+v: %w", key, err)
 			}
 			return nil
 		},
-		func(key uint32) error {
+		func(key userspaceLocalV4Key) error {
 			if err := localV4Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
-				return fmt.Errorf("update userspace_local_v4 %08x: %w", key, err)
+				return fmt.Errorf("update userspace_local_v4 %+v: %w", key, err)
 			}
 			return nil
 		}); err != nil {
@@ -1100,11 +1153,11 @@ func pruneLocalAddressKeys(
 	}
 
 	var (
-		localV6Key userspaceLocalV6Key
+		localV6Key userspaceShimLocalV6Key
 		localV6Val uint8
 	)
 	localV6Iter := localV6Map.Iterate()
-	var staleLocalV6Keys []userspaceLocalV6Key
+	var staleLocalV6Keys []userspaceShimLocalV6Key
 	for localV6Iter.Next(&localV6Key, &localV6Val) {
 		if _, keep := desiredV6[localV6Key]; !keep {
 			staleLocalV6Keys = append(staleLocalV6Keys, localV6Key)
@@ -1114,13 +1167,13 @@ func pruneLocalAddressKeys(
 		return fmt.Errorf("iterate userspace_local_v6: %w", err)
 	}
 	if err := reconcileAddressMapKeys(staleLocalV6Keys, desiredV6,
-		func(key userspaceLocalV6Key) error {
+		func(key userspaceShimLocalV6Key) error {
 			if err := localV6Map.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 				return fmt.Errorf("delete userspace_local_v6 %+v: %w", key, err)
 			}
 			return nil
 		},
-		func(key userspaceLocalV6Key) error {
+		func(key userspaceShimLocalV6Key) error {
 			if err := localV6Map.Update(key, uint8(1), ebpf.UpdateAny); err != nil {
 				return fmt.Errorf("update userspace_local_v6 %+v: %w", key, err)
 			}
@@ -1173,20 +1226,20 @@ func (m *Manager) addrListForLocalSync(link netlink.Link, family int) ([]netlink
 // be missing kernel-owned VIP addresses), so the caller MUST NOT prune
 // existing map keys against them (#3924). Config-derived entries are
 // always present regardless of enumeration outcome.
-func (m *Manager) buildDesiredLocalAddressSets(snapshot *ConfigSnapshot) (desiredV4 map[uint32]struct{}, desiredV6 map[userspaceLocalV6Key]struct{}, enumComplete bool) {
+func (m *Manager) buildDesiredLocalAddressSets(snapshot *ConfigSnapshot) (desiredV4 map[userspaceLocalV4Key]struct{}, desiredV6 map[userspaceShimLocalV6Key]struct{}, enumComplete bool) {
 	excludedV4, excludedV6 := buildNATTranslatedLocalAddressExclusions(snapshot)
 	return m.buildDesiredLocalAddressSetsWithExclusions(snapshot, excludedV4, excludedV6)
 }
 
-func (m *Manager) buildDesiredLocalAddressSetsWithExclusions(snapshot *ConfigSnapshot, excludedV4 map[uint32]bool, excludedV6 map[[16]byte]bool) (desiredV4 map[uint32]struct{}, desiredV6 map[userspaceLocalV6Key]struct{}, enumComplete bool) {
-	desiredV4 = make(map[uint32]struct{})
-	desiredV6 = make(map[userspaceLocalV6Key]struct{})
+func (m *Manager) buildDesiredLocalAddressSetsWithExclusions(snapshot *ConfigSnapshot, excludedV4 map[uint32]bool, excludedV6 map[[16]byte]bool) (desiredV4 map[userspaceLocalV4Key]struct{}, desiredV6 map[userspaceShimLocalV6Key]struct{}, enumComplete bool) {
+	desiredV4 = make(map[userspaceLocalV4Key]struct{})
+	desiredV6 = make(map[userspaceShimLocalV6Key]struct{})
 	for _, entry := range buildLocalAddressEntriesWithExclusions(snapshot, excludedV4, excludedV6) {
 		if entry.v4 {
-			desiredV4[entry.v4Key] = struct{}{}
+			desiredV4[userspaceLocalV4Key{Domain: entry.domain, Addr: entry.v4Key}] = struct{}{}
 			continue
 		}
-		desiredV6[entry.v6Key] = struct{}{}
+		desiredV6[userspaceShimLocalV6Key{Domain: entry.domain, Addr: entry.v6Key.Addr}] = struct{}{}
 	}
 	// Also add kernel addresses (VIPs added by VRRP) that aren't in the
 	// config snapshot. Without this, the XDP shim doesn't recognize VIP
@@ -1209,16 +1262,20 @@ func (m *Manager) buildDesiredLocalAddressSetsWithExclusions(snapshot *ConfigSna
 			if ip == nil {
 				continue
 			}
+			domain, known := localAddressRoutingDomain(snapshot, addr.LinkIndex)
+			if !known {
+				continue
+			}
 			if v4 := ip.To4(); v4 != nil && family == netlink.FAMILY_V4 {
 				key := binary.BigEndian.Uint32(v4)
 				if !excludedV4[key] {
-					desiredV4[key] = struct{}{}
+					desiredV4[userspaceLocalV4Key{Domain: domain, Addr: key}] = struct{}{}
 				}
 			} else if v6 := ip.To16(); v6 != nil && family == netlink.FAMILY_V6 {
 				var key [16]byte
 				copy(key[:], v6)
 				if !excludedV6[key] {
-					desiredV6[userspaceLocalV6Key{Addr: key}] = struct{}{}
+					desiredV6[userspaceShimLocalV6Key{Domain: domain, Addr: key}] = struct{}{}
 				}
 			}
 		}
@@ -1522,8 +1579,8 @@ func buildLocalAddressEntriesWithExclusions(snapshot *ConfigSnapshot, excludedV4
 	if snapshot == nil {
 		return nil
 	}
-	seenV4 := make(map[uint32]bool)
-	seenV6 := make(map[[16]byte]bool)
+	seenV4 := make(map[userspaceLocalV4Key]bool)
+	seenV6 := make(map[userspaceShimLocalV6Key]bool)
 	out := make([]userspaceLocalAddressEntry, 0)
 	for _, iface := range snapshot.Interfaces {
 		if iface.AdminDisabled || unresolvedLo0LocalAddressOwner(iface) {
@@ -1536,11 +1593,12 @@ func buildLocalAddressEntriesWithExclusions(snapshot *ConfigSnapshot, excludedV4
 			}
 			if v4 := ip.To4(); v4 != nil {
 				key := binary.BigEndian.Uint32(v4)
-				if excludedV4[key] || seenV4[key] {
+				entryKey := userspaceLocalV4Key{Domain: iface.RoutingDomain, Addr: key}
+				if excludedV4[key] || seenV4[entryKey] {
 					continue
 				}
-				seenV4[key] = true
-				out = append(out, userspaceLocalAddressEntry{v4: true, v4Key: key})
+				seenV4[entryKey] = true
+				out = append(out, userspaceLocalAddressEntry{v4: true, domain: iface.RoutingDomain, v4Key: key})
 				continue
 			}
 			v6 := ip.To16()
@@ -1549,11 +1607,12 @@ func buildLocalAddressEntriesWithExclusions(snapshot *ConfigSnapshot, excludedV4
 			}
 			var key [16]byte
 			copy(key[:], v6)
-			if excludedV6[key] || seenV6[key] {
+			entryKey := userspaceShimLocalV6Key{Domain: iface.RoutingDomain, Addr: key}
+			if excludedV6[key] || seenV6[entryKey] {
 				continue
 			}
-			seenV6[key] = true
-			out = append(out, userspaceLocalAddressEntry{v4: false, v6Key: userspaceLocalV6Key{Addr: key}})
+			seenV6[entryKey] = true
+			out = append(out, userspaceLocalAddressEntry{domain: iface.RoutingDomain, v6Key: userspaceLocalV6Key{Addr: key}})
 		}
 	}
 	return out

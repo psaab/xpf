@@ -22,7 +22,7 @@ func hostAddrs9646(n int, v6 bool) []netlink.Addr {
 		} else {
 			ip = net.IPv4(10, byte(i>>16), byte(i>>8), byte(i)).To4()
 		}
-		out = append(out, netlink.Addr{IPNet: &net.IPNet{IP: ip, Mask: net.CIDRMask(len(ip)*8, len(ip)*8)}})
+		out = append(out, netlink.Addr{LinkIndex: 11, IPNet: &net.IPNet{IP: ip, Mask: net.CIDRMask(len(ip)*8, len(ip)*8)}})
 	}
 	return out
 }
@@ -62,7 +62,7 @@ func TestLocalAddressSetPastCapacityDoesNotDisableCtrl9646(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, ctrl := managerWithHostAddrs9646(tc.v4, tc.v6)
-			err := m.syncUserspaceClassifierMapsFailClosedLocked(&ConfigSnapshot{})
+			err := m.syncUserspaceClassifierMapsFailClosedLocked(&ConfigSnapshot{Interfaces: []InterfaceSnapshot{{Ifindex: 11}}})
 			if err == nil {
 				t.Fatal("an oversized local-address set synced without error")
 			}
@@ -88,7 +88,7 @@ func TestLocalAddressSetPastCapacityDoesNotDisableCtrl9646(t *testing.T) {
 // the control that stops the cell above from passing on "never fail closed".
 func TestLocalAddressSetAtCapacityStillFailsClosedOnAnOrdinaryError9646(t *testing.T) {
 	m, ctrl := managerWithHostAddrs9646(userspaceLocalAddressMapCapacity, userspaceLocalAddressMapCapacity)
-	err := m.syncUserspaceClassifierMapsFailClosedLocked(&ConfigSnapshot{})
+	err := m.syncUserspaceClassifierMapsFailClosedLocked(&ConfigSnapshot{Interfaces: []InterfaceSnapshot{{Ifindex: 11}}})
 	if err == nil {
 		t.Fatal("expected the unloaded-map failure")
 	}
@@ -137,7 +137,7 @@ func TestStatusPollKeepsCtrlOnACapacityRefusal9646(t *testing.T) {
 			return addrs, nil
 		}
 		m.syncClassifierMapsHook = nil
-		m.lastSnapshot = &ConfigSnapshot{}
+		m.lastSnapshot = &ConfigSnapshot{Interfaces: []InterfaceSnapshot{{Ifindex: 11}}}
 	}
 
 	m, ctrl := seamedManager(t)

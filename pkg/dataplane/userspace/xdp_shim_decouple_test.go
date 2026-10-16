@@ -407,21 +407,27 @@ func injectUserspaceBootstrapMaps(t *testing.T, m *Manager) {
 		ValueSize:  8,
 		MaxEntries: 4096,
 	})
-	injectShimMapSpec(t, m.bpfShim, "userspace_ingress_ifaces", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceIngressIfaces, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    4,
 		ValueSize:  1,
 		MaxEntries: dataplane.MaxInterfaces,
 	})
-	injectShimMapSpec(t, m.bpfShim, "userspace_local_v4", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceIngressDomains, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: dataplane.MaxInterfaces,
+	})
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLocalV4, &ebpf.MapSpec{
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV4Key{})),
 		ValueSize:  1,
 		MaxEntries: 8192,
 	})
-	injectShimMapSpec(t, m.bpfShim, "userspace_local_v6", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLocalV6, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
+		KeySize:    uint32(unsafe.Sizeof(userspaceShimLocalV6Key{})),
 		ValueSize:  1,
 		MaxEntries: 8192,
 	})
@@ -524,8 +530,15 @@ func updateUserspaceXDPTestBinding(t *testing.T, coll *ebpf.Collection, idx uint
 }
 
 func updateUserspaceXDPTestIngress(t *testing.T, coll *ebpf.Collection, ifindex uint32) {
+	updateUserspaceXDPTestIngressDomain(t, coll, ifindex, 0)
+}
+
+func updateUserspaceXDPTestIngressDomain(t *testing.T, coll *ebpf.Collection, ifindex, domain uint32) {
 	t.Helper()
-	updateUserspaceXDPTestMap(t, coll, "userspace_ingress_ifaces", ifindex, uint8(1))
+	updateUserspaceXDPTestMap(t, coll, "userspace_ingress_ifaces", ifindex, uint8(userspaceIngressIfaceFlagAdjudicated))
+	if coll.Maps["userspace_ingress_domains"] != nil {
+		updateUserspaceXDPTestMap(t, coll, "userspace_ingress_domains", ifindex, domain)
+	}
 }
 
 // userspaceXDPTestRunIfindex is the ingress ifindex BPF_PROG_TEST_RUN presents
@@ -585,11 +598,13 @@ func updateUserspaceXDPTestHeartbeat(t *testing.T, coll *ebpf.Collection, slot u
 
 func updateUserspaceXDPTestLocalV4(t *testing.T, coll *ebpf.Collection, ip [4]byte) {
 	t.Helper()
-	updateUserspaceXDPTestMap(t, coll, "userspace_local_v4", binary.BigEndian.Uint32(ip[:]), uint8(1))
+	updateUserspaceXDPTestMap(t, coll, mapNameUserspaceLocalV4, userspaceLocalV4Key{
+		Domain: 0, Addr: binary.BigEndian.Uint32(ip[:]),
+	}, uint8(1))
 }
 func updateUserspaceXDPTestLocalV6(t *testing.T, coll *ebpf.Collection, ip [16]byte) {
 	t.Helper()
-	updateUserspaceXDPTestMap(t, coll, "userspace_local_v6", userspaceLocalV6Key{Addr: ip}, uint8(1))
+	updateUserspaceXDPTestMap(t, coll, mapNameUserspaceLocalV6, userspaceShimLocalV6Key{Domain: 0, Addr: ip}, uint8(1))
 }
 
 func updateUserspaceXDPTestInterfaceNATV4(t *testing.T, coll *ebpf.Collection, ip [4]byte) {

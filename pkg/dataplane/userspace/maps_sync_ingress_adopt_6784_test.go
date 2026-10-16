@@ -15,7 +15,7 @@ import (
 func prepopulateIngressRows(t *testing.T, ifaceMap *ebpf.Map, ifindexes ...uint32) {
 	t.Helper()
 	for _, idx := range ifindexes {
-		if err := ifaceMap.Update(idx, uint8(1), ebpf.UpdateAny); err != nil {
+		if err := ifaceMap.Update(idx, uint8(userspaceIngressIfaceFlagAdjudicated), ebpf.UpdateAny); err != nil {
 			t.Fatalf("prepopulate userspace_ingress_ifaces %d: %v", idx, err)
 		}
 	}

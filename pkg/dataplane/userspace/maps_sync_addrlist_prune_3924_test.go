@@ -23,7 +23,7 @@ func newLocalAddressMaps(t *testing.T, m *Manager) (v4, v6 *ebpf.Map) {
 	var err error
 	v4, err = ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV4Key{})),
 		ValueSize:  1,
 		MaxEntries: 64,
 	})
@@ -33,7 +33,7 @@ func newLocalAddressMaps(t *testing.T, m *Manager) (v4, v6 *ebpf.Map) {
 	t.Cleanup(func() { v4.Close() })
 	v6, err = ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
+		KeySize:    uint32(unsafe.Sizeof(userspaceShimLocalV6Key{})),
 		ValueSize:  1,
 		MaxEntries: 64,
 	})
@@ -41,27 +41,27 @@ func newLocalAddressMaps(t *testing.T, m *Manager) (v4, v6 *ebpf.Map) {
 		t.Fatalf("new userspace_local_v6 map: %v", err)
 	}
 	t.Cleanup(func() { v6.Close() })
-	injectShimMap(t, m.bpfShim, "userspace_local_v4", v4)
-	injectShimMap(t, m.bpfShim, "userspace_local_v6", v6)
+	injectShimMap(t, m.bpfShim, mapNameUserspaceLocalV4, v4)
+	injectShimMap(t, m.bpfShim, mapNameUserspaceLocalV6, v6)
 	return v4, v6
 }
 
-func v4Key(t *testing.T, s string) uint32 {
+func v4Key(t *testing.T, s string) userspaceLocalV4Key {
 	t.Helper()
 	ip := net.ParseIP(s).To4()
 	if ip == nil {
 		t.Fatalf("bad v4 addr %q", s)
 	}
-	return binary.BigEndian.Uint32(ip)
+	return userspaceLocalV4Key{Addr: binary.BigEndian.Uint32(ip)}
 }
 
-func v6Key(t *testing.T, s string) userspaceLocalV6Key {
+func v6Key(t *testing.T, s string) userspaceShimLocalV6Key {
 	t.Helper()
 	ip := net.ParseIP(s).To16()
 	if ip == nil {
 		t.Fatalf("bad v6 addr %q", s)
 	}
-	var k userspaceLocalV6Key
+	var k userspaceShimLocalV6Key
 	copy(k.Addr[:], ip)
 	return k
 }

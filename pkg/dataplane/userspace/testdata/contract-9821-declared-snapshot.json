@@ -1,5 +1,5 @@
 {
-  "version": 46,
+  "version": 47,
   "generation": 0,
   "generated_at": "1970-01-01T00:00:00Z",
   "summary": {
@@ -19,8 +19,8 @@
     "bindings": "/sys/fs/bpf/xpf/userspace_bindings",
     "heartbeat": "/sys/fs/bpf/xpf/userspace_heartbeat",
     "xsk": "/sys/fs/bpf/xpf/userspace_xsk_map",
-    "local_v4": "/sys/fs/bpf/xpf/userspace_local_v4",
-    "local_v6": "/sys/fs/bpf/xpf/userspace_local_v6",
+    "local_v4": "/sys/fs/bpf/xpf/userspace_local_v4_domain",
+    "local_v6": "/sys/fs/bpf/xpf/userspace_local_v6_domain",
     "sessions": "/sys/fs/bpf/xpf/userspace_sessions",
     "conntrack_v4": "/sys/fs/bpf/xpf/sessions",
     "conntrack_v6": "/sys/fs/bpf/xpf/sessions_v6",
@@ -561,9 +561,7 @@
     },
     "EventOptions": null,
     "BridgeDomains": null,
-    "Warnings": [
-      "zone interface defined (downgraded to warning on tolerant path): security zone \"trust\" references interface \"ge-0/0/5.0.0\", which is not defined under `interfaces` (nor materialized as the lo0 loopback or an IPsec secure-tunnel bind-interface); Junos rejects a zone member that names no configured interface — define the interface or fix the typo (the daemon brings an unconfigured interface DOWN, so the zone member silently carries no traffic)"
-    ],
+    "Warnings": null,
     "LenientNATTerminalActionRules": null
   },
   "userspace": {

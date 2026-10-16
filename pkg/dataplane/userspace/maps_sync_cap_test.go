@@ -180,7 +180,7 @@ func TestSyncLocalAddressMapsDeletesStaleBeforeAddingReplacement13724(t *testing
 	m := New()
 	localV4Map, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV4Key{})),
 		ValueSize:  1,
 		MaxEntries: 1,
 	})
@@ -188,14 +188,14 @@ func TestSyncLocalAddressMapsDeletesStaleBeforeAddingReplacement13724(t *testing
 		t.Fatalf("new userspace_local_v4 map: %v", err)
 	}
 	t.Cleanup(func() { localV4Map.Close() })
-	injectShimMap(t, m.bpfShim, "userspace_local_v4", localV4Map)
-	injectShimMapSpec(t, m.bpfShim, "userspace_local_v6", &ebpf.MapSpec{
-		Type: ebpf.Hash, KeySize: uint32(unsafe.Sizeof(userspaceLocalV6Key{})), ValueSize: 1, MaxEntries: 16,
+	injectShimMap(t, m.bpfShim, mapNameUserspaceLocalV4, localV4Map)
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLocalV6, &ebpf.MapSpec{
+		Type: ebpf.Hash, KeySize: uint32(unsafe.Sizeof(userspaceShimLocalV6Key{})), ValueSize: 1, MaxEntries: 16,
 	})
 	m.addrListForLocalSyncHook = func(_ netlink.Link, _ int) ([]netlink.Addr, error) { return nil, nil }
 
-	oldLocal := binary.BigEndian.Uint32([]byte{192, 0, 2, 1})
-	newLocal := binary.BigEndian.Uint32([]byte{198, 51, 100, 1})
+	oldLocal := userspaceLocalV4Key{Addr: binary.BigEndian.Uint32([]byte{192, 0, 2, 1})}
+	newLocal := userspaceLocalV4Key{Addr: binary.BigEndian.Uint32([]byte{198, 51, 100, 1})}
 	if err := localV4Map.Update(oldLocal, uint8(1), ebpf.UpdateAny); err != nil {
 		t.Fatalf("seed userspace_local_v4: %v", err)
 	}
@@ -268,10 +268,10 @@ func TestBuildDesiredLocalAddressSetsExcludesKernelNATAddresses13724(t *testing.
 	if !complete {
 		t.Fatal("address enumeration unexpectedly incomplete")
 	}
-	if _, found := gotV4[binary.BigEndian.Uint32(ipv4)]; found {
+	if _, found := gotV4[userspaceLocalV4Key{Addr: binary.BigEndian.Uint32(ipv4)}]; found {
 		t.Fatal("excluded kernel IPv4 interface-NAT address was added to userspace_local_v4")
 	}
-	if _, found := gotV6[userspaceLocalV6Key{Addr: key6}]; found {
+	if _, found := gotV6[userspaceShimLocalV6Key{Addr: key6}]; found {
 		t.Fatal("excluded kernel IPv6 interface-NAT address was added to userspace_local_v6")
 	}
 }
@@ -350,21 +350,27 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 	m := New()
 	ctrlMap, _ := injectCtrlAndBindingMaps(t, m)
 	injectUserspaceWGZoneMaps(t, m)
-	injectShimMapSpec(t, m.bpfShim, "userspace_ingress_ifaces", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceIngressIfaces, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    4,
 		ValueSize:  1,
 		MaxEntries: 16,
 	})
-	injectShimMapSpec(t, m.bpfShim, "userspace_local_v4", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceIngressDomains, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 16,
+	})
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLocalV4, &ebpf.MapSpec{
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV4Key{})),
 		ValueSize:  1,
 		MaxEntries: 1024,
 	})
-	injectShimMapSpec(t, m.bpfShim, "userspace_local_v6", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLocalV6, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
+		KeySize:    uint32(unsafe.Sizeof(userspaceShimLocalV6Key{})),
 		ValueSize:  1,
 		MaxEntries: 1024,
 	})
@@ -545,21 +551,27 @@ func TestClassifierMapRefreshMissingCtrlRowReturnsClassifierError(t *testing.T) 
 
 func injectClassifierRefreshMapsWithNATV4(t *testing.T, m *Manager) *ebpf.Map {
 	t.Helper()
-	injectShimMapSpec(t, m.bpfShim, "userspace_ingress_ifaces", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceIngressIfaces, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    4,
 		ValueSize:  1,
 		MaxEntries: 16,
 	})
-	injectShimMapSpec(t, m.bpfShim, "userspace_local_v4", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceIngressDomains, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: 16,
+	})
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLocalV4, &ebpf.MapSpec{
+		Type:       ebpf.Hash,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV4Key{})),
 		ValueSize:  1,
 		MaxEntries: 1024,
 	})
-	injectShimMapSpec(t, m.bpfShim, "userspace_local_v6", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceLocalV6, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
+		KeySize:    uint32(unsafe.Sizeof(userspaceShimLocalV6Key{})),
 		ValueSize:  1,
 		MaxEntries: 1024,
 	})

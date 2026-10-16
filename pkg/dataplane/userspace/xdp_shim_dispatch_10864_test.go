@@ -141,7 +141,7 @@ func TestUserspaceXDPDispatchUsesLibWiring10864(t *testing.T) {
 			name:   "unicast NDP to a local IPv6 address reaches kernel",
 			packet: icmpv6TestPacket(globalV6Source, localV6, 135),
 			seed: func(t *testing.T, coll *ebpf.Collection) {
-				updateUserspaceXDPTestMap(t, coll, "userspace_local_v6", userspaceLocalV6Key{Addr: localV6}, uint8(1))
+				updateUserspaceXDPTestMap(t, coll, mapNameUserspaceLocalV6, userspaceShimLocalV6Key{Domain: 0, Addr: localV6}, uint8(1))
 			},
 			wantAction:  xdpActionPass,
 			absentStats: []string{"early_filter", "redirect_err"},

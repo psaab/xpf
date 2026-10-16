@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/rlimit"
 )
 
 // ingressSnapshot builds a ConfigSnapshot whose ingress-adjudicated ifindex set
@@ -28,9 +27,6 @@ func ingressSnapshot(ifindexes ...int) *ConfigSnapshot {
 // the given type/size injected.
 func newIngressManager(t *testing.T, typ ebpf.MapType, maxEntries uint32) (*Manager, *ebpf.Map) {
 	t.Helper()
-	if err := rlimit.RemoveMemlock(); err != nil {
-		t.Skipf("RemoveMemlock: %v", err)
-	}
 	m := New()
 	ifaceMap, err := ebpf.NewMap(&ebpf.MapSpec{
 		Type:       typ,
@@ -43,6 +39,17 @@ func newIngressManager(t *testing.T, typ ebpf.MapType, maxEntries uint32) (*Mana
 	}
 	t.Cleanup(func() { ifaceMap.Close() })
 	injectShimMap(t, m.bpfShim, mapNameUserspaceIngressIfaces, ifaceMap)
+	domainMap, err := ebpf.NewMap(&ebpf.MapSpec{
+		Type:       ebpf.Hash,
+		KeySize:    4,
+		ValueSize:  4,
+		MaxEntries: maxEntries,
+	})
+	if err != nil {
+		skipIfBPFMapUnavailable(t, "new userspace_ingress_domains map", err)
+	}
+	t.Cleanup(func() { domainMap.Close() })
+	injectShimMap(t, m.bpfShim, mapNameUserspaceIngressDomains, domainMap)
 	return m, ifaceMap
 }
 
@@ -189,5 +196,41 @@ func TestSyncIngressIfaceMapRetainsInventoryOnDeleteFailure(t *testing.T) {
 				"installed); an unrecorded row is unreachable to every later "+
 				"sync (#6537)", m.lastIngressIfaces, want)
 		}
+	}
+}
+func TestSyncIngressIfaceMapRecordsRowBeforeDomainMapFailure13929(t *testing.T) {
+	m, ifaceMap := newIngressManager(t, ebpf.Hash, 16)
+	domainMap := m.bpfShim.Map(mapNameUserspaceIngressDomains)
+	if domainMap == nil {
+		t.Fatal("userspace_ingress_domains map not loaded")
+	}
+	if err := domainMap.Close(); err != nil {
+		t.Fatalf("close domain map to force update failure: %v", err)
+	}
+
+	if err := m.syncIngressIfaceMapLocked(ingressSnapshot(10)); err == nil {
+		t.Fatal("sync unexpectedly succeeded with the domain map closed")
+	}
+	var flags uint8
+	if err := ifaceMap.Lookup(uint32(10), &flags); err != nil {
+		t.Fatalf("ingress row was not installed before the domain update failure: %v", err)
+	}
+	if !slices.Contains(m.lastIngressIfaces, uint32(10)) {
+		t.Fatalf("inventory %v omitted live ingress row 10 after domain-map failure", m.lastIngressIfaces)
+	}
+
+	replacement, err := ebpf.NewMap(&ebpf.MapSpec{
+		Type: ebpf.Hash, KeySize: 4, ValueSize: 4, MaxEntries: 16,
+	})
+	if err != nil {
+		skipIfBPFMapUnavailable(t, "replacement userspace_ingress_domains map", err)
+	}
+	t.Cleanup(func() { replacement.Close() })
+	injectShimMap(t, m.bpfShim, mapNameUserspaceIngressDomains, replacement)
+	if err := m.syncIngressIfaceMapLocked(ingressSnapshot()); err != nil {
+		t.Fatalf("retry after restoring domain map: %v", err)
+	}
+	if err := ifaceMap.Lookup(uint32(10), &flags); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("retry did not reap orphaned ingress row 10: lookup error = %v", err)
 	}
 }

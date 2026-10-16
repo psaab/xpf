@@ -151,13 +151,14 @@ var userspaceShimAllowedMapTypes = map[string]ebpf.MapType{
 	// CPU's fragment sighting decide another CPU's packet.
 	"userspace_v6frag_scratch": ebpf.PerCPUArray,
 
-	"userspace_heartbeat":        ebpf.Array,
-	"userspace_ingress_ifaces":   ebpf.Hash,
-	"userspace_interface_nat_v4": ebpf.Hash,
-	"userspace_interface_nat_v6": ebpf.Hash,
-	"userspace_local_v4":         ebpf.Hash,
-	"userspace_local_v6":         ebpf.Hash,
-	"userspace_sessions":         ebpf.Hash,
+	"userspace_heartbeat":         ebpf.Array,
+	"userspace_ingress_ifaces":    ebpf.Hash,
+	"userspace_ingress_domains":   ebpf.Hash,
+	"userspace_interface_nat_v4":  ebpf.Hash,
+	"userspace_interface_nat_v6":  ebpf.Hash,
+	"userspace_local_v4_domain":   ebpf.Hash,
+	"userspace_local_v6_domain":   ebpf.Hash,
+	"userspace_sessions":          ebpf.Hash,
 	"userspace_trace":            ebpf.Hash,
 	// #12119: separate ingress-zone identity from exact listener destination
 	// admission; both are pinned shared maps consumed by the XDP shim.

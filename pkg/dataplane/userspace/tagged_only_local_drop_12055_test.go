@@ -104,7 +104,7 @@ func TestUserspaceXDPTaggedOnlyIngressMapPublishesFlag12055(t *testing.T) {
 			t.Fatalf("lookup userspace_ingress_ifaces[%d]: %v", ifindex, err)
 		}
 		if got != want {
-			t.Errorf("userspace_ingress_ifaces[%d] = %#02x, want %#02x", ifindex, got, want)
+			t.Errorf("userspace_ingress_ifaces[%d].flags = %#02x, want %#02x", ifindex, got, want)
 		}
 	}
 }

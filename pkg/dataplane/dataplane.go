@@ -136,11 +136,11 @@ func UserspaceXSKMapPinPath() string {
 }
 
 func UserspaceLocalV4PinPath() string {
-	return filepath.Join(bpfPinPath, "userspace_local_v4")
+	return filepath.Join(bpfPinPath, "userspace_local_v4_domain")
 }
 
 func UserspaceLocalV6PinPath() string {
-	return filepath.Join(bpfPinPath, "userspace_local_v6")
+	return filepath.Join(bpfPinPath, "userspace_local_v6_domain")
 }
 
 func UserspaceCPUMapPinPath() string {
