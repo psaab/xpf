@@ -691,9 +691,10 @@ fn guard_p12_allows_bounded_stale_overcount() {
 fn rss_expectation_uses_observed_distribution_not_cstruct_normalized_copy() {
     // Deliberate observed-vs-trimmed contract, first pinned by 66bd82e28
     // ("Preserve observed RSS expectation input"): stale-count normalization
-    // is used only for Gate 2's structural Cstruct. RSS expectations answer
-    // what the observed RSS assignment did, and must not let the trimmed
-    // copy conceal a worker that actually owned more than 25% of flows.
+    // supplies the selected Cstruct for Gate 2 and `cstruct-max`, but
+    // distribution-based RSS expectations still judge actual RSS placement.
+    // They must not let the trimmed copy conceal a worker that actually
+    // owned more than 25% of observed flows.
     let tmp = TempGuard::new("rss_observed_not_normalized");
     let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
     let tsv_str = make_distribution_tsv(&[4, 4, 4, 3, 0, 0], &timestamps_for(60), "ge-0-0-2");
