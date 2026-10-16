@@ -626,16 +626,14 @@ pub(super) fn flush_session_deltas(
             match crate::afxdp::bpf_map::global_tuple_gate().try_acquire_installs(close_keys) {
                 Ok(permits) => permits,
                 Err(_) => {
-                    let requeued = if let Some(sessions) = current_sessions.as_deref_mut() {
-                        sessions.requeue_deltas_front(&deltas[delta_index..]);
-                        true
+                    let fully_requeued = if let Some(sessions) = current_sessions.as_deref_mut() {
+                        sessions.requeue_deltas_front(&deltas[delta_index..])
                     } else {
                         false
                     };
-                    // A retry slot preserves this suffix. Only a caller with
-                    // no place to retain it has lost the event-stream delta
-                    // and requires the owner-RG resync.
-                    event_stream_out_of_sync |= !requeued;
+                    // A retry slot only preserves the suffix if it retains
+                    // every delta. Overflow drops still require LossResync.
+                    event_stream_out_of_sync |= !fully_requeued;
                     break;
                 }
             }
