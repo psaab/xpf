@@ -138,6 +138,17 @@ func (vi *vrrpInstance) becomeMaster() bool {
 		return false
 	}
 	vi.garpEpoch.Add(1)
+	// Record the actuated set as pending BEFORE releasing vipMu (#14155).
+	// The deferred sendGARP goroutine has not yet reserved or announced
+	// anything; if a concurrent updateVIPs publishes a new epoch first, it
+	// carries these still-unannounced VIPs forward into its bounded
+	// announcement instead of seeing an empty pending set and announcing
+	// only the added VIPs (whose reservation then epoch-dedupes the
+	// failover sender and strands the pre-existing VIPs unannounced).
+	// res.applied is canonical kernel truth, including EEXIST actuation.
+	// Unconditional of suppressGARP: a suppressed tenure that is later
+	// unsuppressed while MASTER is then entitled to announce the full set.
+	vi.addPendingGARPVIPsLocked(res.applied)
 	vi.vipMu.Unlock()
 
 	vi.sendAdvert(pri)
