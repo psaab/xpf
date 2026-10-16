@@ -125,48 +125,34 @@ pub(crate) enum SnapshotIntegrityError {
     /// literal path is fixed by the sibling `UnrepresentableV3Address` reject
     /// (#3711); this is the analogous backstop for the legacy field, which
     /// carries raw literals with no sentinel. A normal Go snapshot only ever
-    /// emits parseable literals / `any` / family wildcards, so this guards
-    /// against a corrupt / hand-built / version-drifted snapshot. Rejecting the
-    /// WHOLE snapshot (the preflight keeps the previous good state) is
-    /// action-agnostic.
+    /// emits parseable literals / `any` / family wildcards, never empty tokens,
+    /// so this guards against a corrupt / hand-built / version-drifted snapshot.
+    /// Rejecting the WHOLE snapshot (the preflight keeps the previous good
+    /// state) is action-agnostic.
     UnrepresentableLegacyAddress {
         rule_id: String,
         address: String,
     },
-    /// #3711: a policy rule's V3-shaped (`source_literals` /
-    /// `destination_literals`) address field carried a token that is non-empty,
-    /// not `any` / `any4` / `any6` / `any-ipv4` / `any-ipv6`, not the
-    /// `__unsupported_address__` sentinel, and does NOT parse as an IP/CIDR
-    /// literal. The pre-fix `parse_v3_literal_set` used a non-reporting
-    /// family-agnostic parser, whose `Err(_)` arm silently DROPPED such a
-    /// token. Because a v3-shaped side uses the `from_v3_literals` factory
-    /// (empty -> MatchNone, NOT MatchAny), an all-dropped side collapsed to
-    /// MatchNone: a `deny <malformed-literal>` rule then matched nothing and
-    /// fell through to a later permit / default-permit — a deny fail-OPEN. This
-    /// is the v3 sibling of `UnrepresentableLegacyAddress` (#3367): the sentinel
-    /// preflight (`UnrepresentableAddress`, #3261) only catches the exact
-    /// `__unsupported_address__` token the Go gate emits, NOT an arbitrary
-    /// malformed literal on a corrupt / hand-built / mixed-version HA peer-sync
-    /// snapshot. Rejecting the WHOLE snapshot (the preflight keeps the previous
-    /// good state) is action-agnostic.
+    /// #3711/#13702: a policy rule's V3-shaped (`source_literals` /
+    /// `destination_literals`) address field carried an empty token, or a
+    /// non-`any` / non-family-wildcard / non-sentinel token that does NOT parse
+    /// as an IP/CIDR literal. Without this check, a v3-shaped side uses the
+    /// `from_v3_literals` factory (empty -> MatchNone), so dropped material can
+    /// let a deny fall through to a later permit / default-permit — fail-OPEN.
+    /// Rejecting the WHOLE snapshot (the preflight keeps the previous good
+    /// state) is action-agnostic.
     UnrepresentableV3Address {
         rule_id: String,
         address: String,
     },
-    /// #3711 (M02): an address-book row carried a token in its `prefixes_v4` /
-    /// `prefixes_v6` array that is not a parseable IP/CIDR literal OF THE
-    /// DECLARED FAMILY. The pre-fix book builder parsed BOTH family arrays with
-    /// one family-agnostic non-reporting parser, so (a) a malformed token
-    /// was silently dropped (an all-dropped family collapsed to MatchNone —
-    /// same deny fall-through fail-OPEN as the rule-literal path), and (b) a
-    /// wrong-family token (an IPv6 CIDR placed in `prefixes_v4` by a corrupt /
-    /// mixed-version producer) was accepted into the opposite family's set,
-    /// contradicting the wire contract. The reporting builder now rejects the
-    /// whole snapshot naming the book id/name, the offending token, and the
-    /// declared family. The Go side only ever emits family-separated parseable
-    /// CIDRs, so this guards against a corrupt / hand-built / version-drifted
-    /// snapshot. `family` is the STATIC declared array (`"v4"` / `"v6"`), not
-    /// the token's actual family.
+    /// #3711/#13702: an address-book row carried a token in its `prefixes_v4` /
+    /// `prefixes_v6` array that is empty, bare `any` (family-ambiguous), not a
+    /// parseable IP/CIDR literal OF THE DECLARED FAMILY, or is a
+    /// wrong-family token. The Go side emits only family-separated parseable
+    /// CIDRs (including normalized `/0` values for `any`), so these violations
+    /// indicate corrupt / hand-built / version-drifted input. The reporting
+    /// builder rejects the whole snapshot naming the book id/name, token, and
+    /// declared family. `family` is the static declared array (`"v4"` / `"v6"`).
     UnrepresentableAddressBookPrefix {
         book_id: u32,
         book_name: String,
@@ -981,12 +967,12 @@ impl std::fmt::Display for SnapshotIntegrityError {
             ),
             Self::UnrepresentableLegacyAddress { rule_id, address } => write!(
                 f,
-                "rule {:?} has an unparseable legacy address literal {:?} (not an IP/CIDR, `any`, or family wildcard) — refusing to fail open by dropping it (which on the empty->match-any legacy path widens a deny to match everything)",
+                "rule {:?} has an invalid legacy address literal {:?} (empty, unparseable, not `any`, or not a family wildcard) — refusing to fail open by dropping it (which on the empty->match-any legacy path widens a deny to match everything)",
                 rule_id, address
             ),
             Self::UnrepresentableV3Address { rule_id, address } => write!(
                 f,
-                "rule {:?} has an unparseable v3 address literal {:?} (not an IP/CIDR, `any`, or family wildcard, and not the unrepresentable-address sentinel) — refusing to fail open by dropping it (which collapses the side to match-none and lets a deny fall through to a later permit / default-permit)",
+                "rule {:?} has an invalid v3 address literal {:?} (empty, unparseable, not `any`, or not a family wildcard, and not the unrepresentable-address sentinel) — refusing to fail open by dropping it (which collapses the side to match-none and lets a deny fall through to a later permit / default-permit)",
                 rule_id, address
             ),
             Self::UnrepresentableAddressBookPrefix {
@@ -996,8 +982,8 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 address,
             } => write!(
                 f,
-                "address book id={} ({:?}) has prefixes_{} entry {:?} that is not a parseable {} IP/CIDR literal (malformed, or a wrong-family token in the {} array) — refusing to fail open by dropping it (which collapses a book-backed deny to match-none) or by silently routing it to the other family",
-                book_id, book_name, family, address, family, family
+                "address book id={} ({:?}) has invalid prefixes_{} entry {:?} (empty, bare-any, malformed, or a wrong-family token in the {} array) — refusing to fail open by dropping it (which collapses a book-backed deny to match-none) or by silently routing it to the other family",
+                book_id, book_name, family, address, family
             ),
             Self::Nptv6UnparseableRule { rule_name, field } => write!(
                 f,
