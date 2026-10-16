@@ -761,7 +761,19 @@ func (c *CLI) clearPersistentNAT() error {
 		return nil
 	}
 	count := uint64(table.Len())
+	clearOrigin := ""
+	var clearGeneration uint64
+	generationCapable := false
 	if clearer, ok := backend.(interface {
+		ClearPersistentNATLeasesWithGeneration(string, uint64) (uint64, string, uint64, error)
+	}); ok {
+		generationCapable = true
+		var err error
+		count, clearOrigin, clearGeneration, err = clearer.ClearPersistentNATLeasesWithGeneration("", 0)
+		if err != nil {
+			return fmt.Errorf("clear persistent NAT leases: %w", err)
+		}
+	} else if clearer, ok := backend.(interface {
 		ClearPersistentNATLeases() (uint64, error)
 	}); ok {
 		var err error
@@ -775,7 +787,14 @@ func (c *CLI) clearPersistentNAT() error {
 	}
 	fmt.Printf("Cleared %d persistent NAT bindings\n", count)
 	if c.cluster != nil {
-		if peerMessage, err := c.requestPeerSystemAction(context.Background(), "clear-persistent-nat"); err != nil {
+		var peerMessage string
+		var err error
+		if generationCapable {
+			peerMessage, err = c.requestPeerSystemActionWithPersistentNatGeneration(context.Background(), "clear-persistent-nat", clearOrigin, clearGeneration)
+		} else {
+			peerMessage, err = c.requestPeerSystemAction(context.Background(), "clear-persistent-nat")
+		}
+		if err != nil {
 			fmt.Printf("WARNING: peer persistent NAT clear failed: %v\n", err)
 		} else if peerMessage != "" {
 			fmt.Printf("Peer: %s\n", peerMessage)
