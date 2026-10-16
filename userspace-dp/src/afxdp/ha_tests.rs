@@ -11543,21 +11543,37 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
         1,
         "the refusal must be counted as a reserve refusal (#14084)"
     );
-    // Register a worker after the zero-worker import. Bring-up replay derives
-    // its queue entirely from the shared snapshot, which must still be empty.
-    let commands = Arc::new(Mutex::new(VecDeque::new()));
-    coordinator.workers.register(
+    // Restore forwarding and execute the coordinator replay path that feeds
+    // late workers. A refused import must leave no entry to replay or install.
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    let replay_entries = coordinator.snapshot_shared_session_entries();
+    assert!(
+        replay_entries.is_empty(),
+        "refused forward and reverse authorities must not enter the replay snapshot (#14084)"
+    );
+    let queues = WorkerCommandQueues::new(BTreeMap::from([(
+        0u32,
+        Arc::new(Mutex::new(VecDeque::new())),
+    )]));
+    assert_eq!(
+        coordinator.replay_synced_sessions(
+            &replay_entries,
+            &queues,
+            SteeringMap::unshared_for_test(-1),
+        ),
         0,
-        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
-        None,
+        "restored-forwarding replay must not process the refused tuple (#14084)"
     );
     assert!(
-        coordinator.snapshot_shared_session_entries().is_empty(),
-        "bring-up replay must have no forbidden forward or reverse authority to install (#14084)"
-    );
-    assert!(
-        commands.lock().expect("worker commands").is_empty(),
-        "the rejected import must not have queued a worker upsert (#14084)"
+        queues
+            .get(&0)
+            .expect("worker queue")
+            .lock()
+            .expect("queue")
+            .iter()
+            .all(|cmd| !matches!(cmd, WorkerCommand::UpsertSynced(entry)
+                if entry.key == key || entry.key == reverse_key)),
+        "replay must not queue either forbidden direction for worker installation (#14084)"
     );
 
 
