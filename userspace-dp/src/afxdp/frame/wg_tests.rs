@@ -1133,6 +1133,179 @@ fn wg_transit_egress_dispatch_follows_post_nat_peer_6308() {
     );
 }
 
+/// #14117: a NAT64 forward (v6->v4) packet routed through WireGuard must be
+/// DISPATCHED to the physical underlay of the peer selected by the TRANSLATED
+/// IPv4 destination — the same peer `build_nat64_forwarded_frame` encapsulates
+/// toward — not to the logical wgN ifindex or an unrelated default-route NIC.
+/// Before the fix `wg_transit_egress_physical_egress_ifindex` returned `None`
+/// for every NAT64 decision, so dispatch fell back to the pre-translation
+/// resolution while the bytes were encapsulated for the translated peer.
+#[test]
+fn nat64_wg_dispatch_follows_translated_peer_14117() {
+    let mut state = build_forwarding_state(&wg_two_peer_dnat_snapshot());
+    state
+        .wg_engines
+        .insert(1, Arc::new(two_peer_config_engine()));
+    // Peer B's underlay next hop must resolve a neighbor, exactly as the
+    // encap builder requires; peer A's is installed by the sibling helper.
+    state.neighbors.insert(
+        (13, IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 50, 1))),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x50],
+        },
+    );
+    install_v4_peer_next_hop_neighbor(&mut state);
+
+    let peer_a_egress = 12;
+    let peer_b_egress = 13;
+    let bind_a = state
+        .egress
+        .get(&peer_a_egress)
+        .map(|e| e.bind_ifindex)
+        .expect("peer A egress row present");
+    let bind_b = state
+        .egress
+        .get(&peer_b_egress)
+        .map(|e| e.bind_ifindex)
+        .expect("peer B egress row present");
+    assert_ne!(bind_a, bind_b, "peers must live on distinct physical NICs");
+
+    // Pre-translation frame: an IPv6 packet whose synthetic NAT64 destination
+    // embeds peer B's translated IPv4 destination (10.200.0.9, peer B's
+    // AllowedIPs). The frame's own IPv6 destination must never select a peer.
+    let frame = inner_v6_frame();
+    let meta = inner_v6_meta();
+    let peer_b_dst = std::net::Ipv4Addr::new(10, 200, 0, 9);
+    let mut decision = wg_tunnel_decision(400, 1);
+    // The stored resolution carries a mismatching default-route NIC, as a
+    // transport table with an unrelated default would produce.
+    decision.resolution.tx_ifindex = bind_a;
+    decision.resolution.neighbor_mac = Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    decision.resolution.src_mac = Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
+    decision.nat.nat64 = true;
+    decision.nat.rewrite_src = Some(IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1)));
+    decision.nat.rewrite_dst = Some(IpAddr::V4(peer_b_dst));
+
+    assert_eq!(
+        wg_transit_egress_physical_egress_ifindex(
+            &decision,
+            &state,
+            &frame,
+            meta.addr_family,
+            meta.l3_offset,
+        ),
+        Some(peer_b_egress),
+        "NAT64 dispatch must resolve the translated destination's peer-B \
+         physical egress (reth0.50 ifindex 13), not the logical wgN fallback"
+    );
+    let target = crate::afxdp::forward_request::resolve_forward_target_ifindex(
+        &decision,
+        &state,
+        &frame,
+        meta.addr_family,
+        meta.l3_offset,
+    );
+    assert_eq!(
+        target, bind_b,
+        "NAT64 dispatch must target peer B's physical bind ({bind_b})"
+    );
+    assert_ne!(
+        target, bind_a,
+        "NAT64 dispatch must NOT target the mismatching default-route NIC ({bind_a})"
+    );
+    assert_ne!(target, 400, "NAT64 dispatch must NOT target the logical wgN ifindex");
+
+    // The encapsulated bytes agree: the same decision builds a frame whose
+    // outer header is peer B's endpoint, sourced from peer B's underlay.
+    let nat64_meta = ForwardPacketMeta {
+        l3_offset: 14,
+        l4_offset: 54,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        ..ForwardPacketMeta::default()
+    };
+    let mut nat64_frame = inner_v6_frame();
+    let mut synthetic_dst = "64:ff9b::".parse::<std::net::Ipv6Addr>().unwrap().octets();
+    synthetic_dst[12..].copy_from_slice(&peer_b_dst.octets());
+    nat64_frame[38..54].copy_from_slice(&synthetic_dst);
+    // The encapsulator needs an established session for peer B; install one
+    // and assert on the outer identity it emits.
+    let peer_b_ep: std::net::SocketAddr = "198.51.100.7:51820".parse().unwrap();
+    state.wg_engines.insert(
+        1,
+        Arc::new(established_initiator_engine(peer_b_ep, "10.200.0.0/24")),
+    );
+    let built = crate::afxdp::frame::build_nat64_forwarded_frame(
+        &nat64_frame,
+        nat64_meta,
+        &decision,
+        None,
+        false,
+        &state,
+    )
+    .expect("NAT64->WG encapsulation must build for the translated peer");
+    // Peer B egresses reth0.50 (VLAN 50), so the outer carries its 802.1Q tag.
+    let outer_l3 = if &built[12..14] == [0x81, 0x00] { 18 } else { 14 };
+    assert_eq!(built[outer_l3] >> 4, 4, "encapsulated outer must be IPv4");
+    assert_eq!(
+        &built[0..6],
+        &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x50],
+        "encapsulated outer dst MAC must be peer B's underlay next hop — \
+         the same underlay dispatch targets"
+    );
+    assert_eq!(
+        &built[outer_l3 + 16..outer_l3 + 20],
+        &[198, 51, 100, 7],
+        "encapsulated outer destination must be peer B's endpoint"
+    );
+}
+
+#[test]
+fn nat64_wg_dispatch_reverse_keeps_logical_fallback_14117() {
+    // The reverse (v4->v6) translated destination lives only in
+    // Nat64ReverseInfo, which the dispatch helper does not receive. It must
+    // keep the logical fallback rather than select a peer from the
+    // pre-translation IPv4 destination (fail-closed, never mis-selected).
+    let mut state = build_forwarding_state(&wg_two_peer_dnat_snapshot());
+    state
+        .wg_engines
+        .insert(1, Arc::new(two_peer_config_engine()));
+    let frame = inner_v4_frame();
+    let meta = inner_v4_meta();
+    let mut decision = wg_tunnel_decision(400, 1);
+    decision.nat.nat64 = true;
+    decision.nat.rewrite_dst = Some(IpAddr::V6("2001:db8::1".parse().unwrap()));
+    assert_eq!(
+        wg_transit_egress_physical_egress_ifindex(
+            &decision,
+            &state,
+            &frame,
+            meta.addr_family,
+            meta.l3_offset,
+        ),
+        None,
+        "reverse NAT64 must not guess a peer from the pre-translation destination"
+    );
+
+    // A forward NAT64 decision without a translated destination likewise
+    // fails closed instead of LPM-ing the pre-translation IPv6 destination.
+    let mut missing = decision;
+    missing.nat.rewrite_dst = None;
+    let v6frame = inner_v6_frame();
+    let v6meta = inner_v6_meta();
+    assert_eq!(
+        wg_transit_egress_physical_egress_ifindex(
+            &missing,
+            &state,
+            &v6frame,
+            v6meta.addr_family,
+            v6meta.l3_offset,
+        ),
+        None,
+        "forward NAT64 without rewrite_dst must fail closed to the logical fallback"
+    );
+}
+
 /// Minimal L2/IPv6/UDP inner frame with dst in `fd00:123::/64` so
 /// `peer_for_dest` selects the v6-endpoint peer.
 fn inner_v6_frame() -> Vec<u8> {
