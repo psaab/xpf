@@ -599,11 +599,13 @@ func (m *Manager) applyHelperStatusLocked(status *ProcessStatus) error {
 	newBindingIndices, err := m.applyPrimaryBindingRowsLocked(
 		status, ctrlMap, bindingsMap, ctrl, deadWorkers, newBindingIndices, newBindingIndexSet)
 	if err != nil {
+		m.lastBindingIndices = mergeBindingIndices(m.lastBindingIndices, newBindingIndices)
 		return err
 	}
 	newBindingIndices, err = m.applyAliasBindingRowsLocked(
 		status, ctrlMap, bindingsMap, ctrl, deadWorkers, newBindingIndices, newBindingIndexSet)
 	if err != nil {
+		m.lastBindingIndices = mergeBindingIndices(m.lastBindingIndices, newBindingIndices)
 		return err
 	}
 	m.lastBindingIndices = m.clearStaleBindingRowsLocked(bindingsMap, newBindingIndices, newBindingIndexSet)
@@ -684,6 +686,29 @@ func (m *Manager) clearStaleBindingRowsLocked(bindingsMap ctrlMapUpdater, newBin
 	return newBindingIndices
 }
 
+// mergeBindingIndices preserves the previous retry inventory and records rows
+// written before an apply error. A failed status pass cannot safely clear old
+// rows, while successful partial writes must remain addressable for teardown.
+func mergeBindingIndices(previous, current []uint32) []uint32 {
+	seen := make(map[uint32]struct{}, len(previous)+len(current))
+	merged := make([]uint32, 0, len(previous)+len(current))
+	for _, idx := range previous {
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		merged = append(merged, idx)
+	}
+	for _, idx := range current {
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		merged = append(merged, idx)
+	}
+	return merged
+}
+
 // clearAllBindingRowsLocked zeroes every userspace_bindings row recorded in
 // m.lastBindingIndices and forgets the inventory. It is the fail-closed
 // teardown primitive (#5486): when ctrl-disable cannot be verified before
@@ -703,6 +728,14 @@ func (m *Manager) clearAllBindingRowsLocked() {
 		_ = bindingsMap.Update(idx, zeroBinding, ebpf.UpdateAny)
 	}
 	m.lastBindingIndices = nil
+}
+func appendBindingIndex(indices []uint32, idx uint32) []uint32 {
+	for _, existing := range indices {
+		if existing == idx {
+			return indices
+		}
+	}
+	return append(indices, idx)
 }
 
 // userspaceCounterSnapshot holds cumulative counter totals from the helper,
@@ -1307,7 +1340,12 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 	if len(bindings) == 0 {
 		return false
 	}
-	bindingsMap := m.bpfShim.Map(mapNameUserspaceBindings)
+	bindingsMap := m.helperStatusBindingsMapHook
+	if bindingsMap == nil {
+		if m.bpfShim != nil {
+			bindingsMap = m.bpfShim.Map(mapNameUserspaceBindings)
+		}
+	}
 	if bindingsMap == nil {
 		return false
 	}
@@ -1345,6 +1383,7 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 				"slot", binding.Slot, "err", err)
 			continue
 		}
+		m.lastBindingIndices = appendBindingIndex(m.lastBindingIndices, idx)
 		repaired++
 		m.mapsSyncTelemetry.bindingsWatchdogRepairs.Add(1)
 	}
@@ -1381,6 +1420,7 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 						"queue", binding.QueueID, "slot", binding.Slot, "err", err)
 					continue
 				}
+				m.lastBindingIndices = appendBindingIndex(m.lastBindingIndices, idx)
 				repaired++
 				m.mapsSyncTelemetry.bindingsWatchdogRepairs.Add(1)
 			}

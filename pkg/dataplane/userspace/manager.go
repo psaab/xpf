@@ -610,8 +610,9 @@ type Manager struct {
 	// it nil.
 	disableCtrlMapHook ctrlMapUpdater
 	// helperStatusCtrlMapHook / helperStatusBindingsMapHook, when non-nil,
-	// replace the two bpfShim maps applyHelperStatusLocked operates on, so its
-	// ctrl-gate decision is reachable without a privileged BPF map (#6994).
+	// replace the two bpfShim maps applyHelperStatusLocked operates on. The
+	// bindings hook is also consumed by verifyBindingsMapLocked so both status
+	// apply and watchdog repairs are testable without privileged BPF maps.
 	// Production leaves both nil. This is the SAME map-free seam
 	// disableCtrlMapHook establishes for the disable path (#5486); #6994 exists
 	// because applyHelperStatusLocked lacked it, which made its whole body —
