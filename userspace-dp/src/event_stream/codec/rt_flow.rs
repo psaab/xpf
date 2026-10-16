@@ -240,6 +240,8 @@ impl EventFrame {
         // SESSION_CREATE record and (b) disambiguates a reused 5-tuple. 0 stays
         // the "unknown" sentinel (a synthesized close with no live entry).
         session_id: u64,
+        // #13971: Junos RT_FLOW_SESSION_CLOSE close reason at payload [134].
+        close_reason: u8,
     ) -> Self {
         let mut buf = [0u8; super::EVENT_FRAME_CAPACITY];
         let base = FRAME_HEADER_SIZE;
@@ -319,7 +321,7 @@ impl EventFrame {
         // delta (type 2) already carries owner_rg_id for session sync.
         let _ = owner_rg_id;
         // [134] close reason.
-        buf[base + 134] = RT_FLOW_CLOSE_REASON_NONE;
+        buf[base + 134] = close_reason;
         // [135] #2508 per-policy SYSLOG log gate.
         buf[base + 135] = if log_syslog { RT_FLOW_LOG_SYSLOG } else { 0 };
         // [136:140] policy_id — #3056: the admitting policy's ID (LITTLE-endian

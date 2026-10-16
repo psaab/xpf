@@ -429,7 +429,9 @@ impl SessionTable {
                             // SESSION_CREATE did — the correlatable key.
                             session_id: removed.session_id,
                             bulk_resync: false,
-                            tcp_close_class: 0,
+                            // #13971: preserve the TCP terminal class for the
+                            // RT_FLOW close-reason projection.
+                            tcp_close_class: close_class,
                             tcp_handshake_state: 0,
                             purge_retirement: false, source_nat_static: None };
                             (!self.push_expiry_close_delta(close.clone())).then_some(close)

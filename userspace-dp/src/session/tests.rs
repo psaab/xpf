@@ -1961,6 +1961,7 @@ fn tcp_fin_keeps_session_until_closing_timeout() {
     assert_eq!(deltas.len(), 1);
     assert_eq!(deltas[0].kind, SessionDeltaKind::Close);
     assert_eq!(deltas[0].key, key);
+    assert_eq!(deltas[0].tcp_close_class, 1);
 }
 
 #[test]

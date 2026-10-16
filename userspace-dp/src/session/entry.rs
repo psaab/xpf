@@ -791,13 +791,13 @@ pub(crate) struct SessionDelta {
     /// caller is the worker loop's chunked export), and a new call site cannot
     /// get it wrong because it does not choose.
     pub(crate) bulk_resync: bool,
-    /// #9412: the session's TCP close class on the HA wire when this delta was
-    /// produced. `0` means open or not carried; otherwise it is
+    /// #9412: the session's TCP close class at delta production.
+    /// `0` means no class is carried; otherwise the value is
     /// `TcpCloseClass::to_wire`.
     ///
-    /// Open and Update deltas take it from the live entry. That lets the #2442
-    /// loss-of-sync resync, which is an Open re-export, also restore a dropped
-    /// Update. Close deltas carry `0`.
+    /// Open and Update deltas take it from the live entry. An expiry Close
+    /// snapshots the removed entry's class for the RT_FLOW reason field;
+    /// synthesized closes with no entry carry `0`.
     pub(crate) tcp_close_class: u8,
     /// #10888: TCP handshake state at delta production. 0 is absent/legacy
     /// (established behavior); nonzero values use `TcpHandshakeState::to_wire`.

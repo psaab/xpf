@@ -54,6 +54,40 @@ fn test_emit_session_close_rt_flow_pairs_with_ha_delta() {
 }
 
 #[test]
+fn test_emit_session_close_rt_flow_carries_close_reason_13971() {
+    // #13971 fail-on-revert: every close event needs a usable Junos reason.
+    // Idle/unknown expiry, FIN completion and RST abort are distinguishable
+    // in the payload consumed by Go's RT_FLOW_SESSION_CLOSE renderer.
+    for (close_class, reason) in [
+        (0, codec::RT_FLOW_CLOSE_REASON_TIMEOUT),
+        (1, codec::RT_FLOW_CLOSE_REASON_TCP_FIN),
+        (2, codec::RT_FLOW_CLOSE_REASON_TCP_FIN),
+        (3, codec::RT_FLOW_CLOSE_REASON_TCP_RST),
+    ] {
+        let (handle, rx) = test_worker_handle(
+            8,
+            DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+            },
+        );
+        let mut delta = test_close_delta(crate::session::SessionDeltaKind::Close);
+        delta.tcp_close_class = close_class;
+        handle.emit_session_close_rt_flow(
+            &delta,
+            0,
+            0,
+            delta.metadata.policy_id,
+            delta.policy_generation,
+        );
+        let frame = rx.try_recv().expect("RT_FLOW close frame").data;
+        let p = &frame[FRAME_HEADER_SIZE..];
+        assert_eq!(p[134], reason, "close class {close_class} reason");
+        assert_ne!(p[134], codec::RT_FLOW_CLOSE_REASON_NONE);
+    }
+}
+
+#[test]
 fn test_monotonic_ns_to_unix_conversions() {
     // #2465: pure-function contract for the monotonic→wall-clock conversion
     // used by emit_session_close_rt_flow. Anchored against a (mono, wall)
