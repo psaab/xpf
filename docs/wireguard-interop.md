@@ -748,31 +748,7 @@ is exactly that layer.
   XChaCha20-Poly1305 is a NEW primitive vs snow's transport ChaChaPoly (24-
   vs 12-byte nonce); the `chacha20poly1305` crate was already transitive via
   snow (0.10.1) and is promoted to a direct, `default-features = false` dep.
-- **Reply budget** — a per-window cap (`COOKIE_REPLY_BUDGET_PER_WINDOW`, 40)
-  on emitted cookie replies so a heavy valid-MAC1 flood cannot make the
-  generated replies themselves a CPU/socket sink (the WG analog of the
-  syn-cookie reply-budget discipline). WG cookie replies leave via the
-  tunnel's UDP socket, not the AF_XDP TX ring.
-- **Per-source reply bucket (#4332)** — the reply budget above is GLOBAL per
-  tunnel, so a determined valid-MAC1 flood from ONE source could drain the
-  shared budget and budget-suppress a legit peer's FIRST cookie challenge from a
-  DIFFERENT source. `CookieChecker::source_reply_allowed(src_ip, now)` adds a
-  small per-SOURCE token bucket (`SOURCE_REPLIES_PER_SEC` 20/s sustained,
-  `SOURCE_REPLY_BURST` 5 burst, `PACKET_COST_NS`/`MAX_TOKENS_NS` accrued-time
-  credit), mirroring wireguard-go `device/ratelimiter.go`. It is layered BEFORE
-  the global budget in `classify_initiation` — **both** gates must pass — so a
-  flood from one source throttles only its own bucket and cannot starve another
-  source's challenge. The table is GC-swept every `SOURCE_GC_INTERVAL_NS` (1 s;
-  idle buckets dropped) and hard-capped at `SOURCE_TABLE_MAX` (2048): a NEW
-  source that would overflow the cap is DENIED (fail CLOSED, no reply), never
-  inserted, bounding the map against the spoofed-source-IP memory-amplification
-  vector this hardening could otherwise introduce. The refill obeys the same
-  monotonic-clock discipline as the SYN-cookie token bucket (#4330/#4321): a
-  backwards `now_ns` credits nothing (`saturating_sub`) and never lowers a
-  bucket's `last_ns` high-water mark, so a clock glitch cannot be replayed
-  into an over-credit. Per-source throttle drops (and the full-table
-  fail-closed) are counted with the global-budget family under
-  `hs_cookie_reply_budget_drops`.
+- **Per-source reply bucket (#4332, #13958)** — `CookieChecker::source_reply_allowed(src_ip, now)` enforces a small per-source token bucket (`SOURCE_REPLIES_PER_SEC` 20/s sustained, `SOURCE_REPLY_BURST` 5 burst, `PACKET_COST_NS`/`MAX_TOKENS_NS` accrued-time credit), mirroring wireguard-go `device/ratelimiter.go`. It runs for under-load cookie challenges after the MAC1/MAC2 checks; there is no tunnel-global reply cap, so fresh source addresses cannot consume a shared reply budget and starve another peer's first challenge. The bucket table is GC-swept every `SOURCE_GC_INTERVAL_NS` (1 s; idle buckets dropped) and capped at `SOURCE_TABLE_MAX` (2048); when full, a new source replaces the least-recently-refilled bucket to remain eligible while keeping memory bounded. The refill obeys the same monotonic-clock discipline as the SYN-cookie token bucket (#4330/#4321): a backwards `now_ns` credits nothing (`saturating_sub`) and never lowers a bucket's `last_ns` high-water mark. Per-source throttle drops (and cookie-reply construction failures) are counted by `hs_cookie_reply_budget_drops`.
 - **Valid-MAC2 handshake admission (#9908)** — a non-spoofed source can
   legitimately obtain a cookie and replay the same valid-MAC2 initiation.
   Under load, after MAC1/MAC2 verification and BEFORE the responder Noise
