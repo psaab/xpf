@@ -3342,50 +3342,23 @@ fn test_policy_destination_address_excluded_inverts_match() {
     );
 }
 
-// #2008 fail-open hardening: an `*-excluded` side whose configured
-// address set is legitimately EMPTY must fail CLOSED — it must NOT
-// invert into match-ALL.
-//
-// #3711: a MALFORMED literal no longer reaches this branch — it now
-// rejects the whole snapshot at parse (see
-// test_malformed_v3_literal_rejected_*). So this test exercises the
-// residual legit-empty path: an empty-string literal token is a valid
-// no-op that yields a fully-empty set. The fail-closed evaluation branch
-// (source_v4_empty + excluded → deny, never match-all) must still hold.
+// #2008 fail-open hardening: an empty excluded set must fail CLOSED. A truly
+// empty set is represented by an empty address book, not an empty-string
+// literal (which is corrupt wire input and rejected by #13702).
 #[test]
 fn test_empty_excluded_source_fails_closed_v4() {
-    // source_literals=[""] is a valid no-op token → both families empty →
-    // source_v4_empty == true. With source_address_excluded, the side
-    // must NOT match any v4 source (fail-closed), not match-all.
-    let mut snap = v3_rule("r-empty-excl-src", &[], &[""]);
+    let mut snap = v3_rule("r-empty-excl-src", &[91], &[]);
     snap.source_address_excluded = true;
     let counter_store = PolicyCounterStore::default();
+    let books = [book(91, "empty-src", &[], &[])];
     let state = parse_policy_state_with_counters(
-        "deny",
-        std::slice::from_ref(&snap),
-        &test_zone_name_to_id(),
-        &[],
-        &counter_store,
-    )
-    .expect("parse");
-    // The empty-token set leaves the side empty; confirm the
-    // precomputed flag agrees so the fail-closed branch is exercised.
-    assert!(
-        state.rules[0].source_v4_empty,
-        "a legitimately empty excluded source set must be flagged empty"
-    );
-    // Any v4 source → fail-closed → default-deny (NOT match-all).
+        "deny", std::slice::from_ref(&snap), &test_zone_name_to_id(), &books, &counter_store,
+    ).expect("parse");
+    assert!(state.rules[0].source_v4_empty);
     assert_eq!(
-        evaluate_policy(
-            &state,
-            TEST_LAN_ZONE_ID,
-            TEST_WAN_ZONE_ID,
-            "8.8.8.8".parse().expect("src"),
-            "1.1.1.1".parse().expect("dst"),
-            PROTO_TCP,
-            12345,
-            5201,
-        ),
+        evaluate_policy(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID,
+            "8.8.8.8".parse().expect("src"), "1.1.1.1".parse().expect("dst"),
+            PROTO_TCP, 12345, 5201),
         PolicyAction::Deny,
         "an empty excluded source set must fail-closed, not match-all"
     );
@@ -3393,36 +3366,18 @@ fn test_empty_excluded_source_fails_closed_v4() {
 
 #[test]
 fn test_empty_excluded_destination_fails_closed_v6() {
-    // #3711: an empty-string literal is a valid no-op that yields a
-    // fully-empty destination set (a malformed token would now reject the
-    // snapshot outright). The fail-closed branch must still hold.
-    let mut snap = v3_rule("r-empty-excl-dst", &[], &["any"]);
-    snap.destination_literals = vec!["".to_string()];
+    let mut snap = v3_rule("r-empty-excl-dst", &[92], &[]);
     snap.destination_address_excluded = true;
     let counter_store = PolicyCounterStore::default();
+    let books = [book(92, "empty-dst", &[], &[])];
     let state = parse_policy_state_with_counters(
-        "deny",
-        std::slice::from_ref(&snap),
-        &test_zone_name_to_id(),
-        &[],
-        &counter_store,
-    )
-    .expect("parse");
-    assert!(
-        state.rules[0].destination_v6_empty,
-        "a legitimately empty excluded destination set must be flagged empty (v6)"
-    );
+        "deny", std::slice::from_ref(&snap), &test_zone_name_to_id(), &books, &counter_store,
+    ).expect("parse");
+    assert!(state.rules[0].destination_v6_empty);
     assert_eq!(
-        evaluate_policy(
-            &state,
-            TEST_LAN_ZONE_ID,
-            TEST_WAN_ZONE_ID,
-            "2001:db8::1".parse().expect("src"),
-            "2001:db8::2".parse().expect("dst"),
-            PROTO_TCP,
-            12345,
-            5201,
-        ),
+        evaluate_policy(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID,
+            "2001:db8::1".parse().expect("src"), "2001:db8::2".parse().expect("dst"),
+            PROTO_TCP, 12345, 5201),
         PolicyAction::Deny,
         "an empty excluded destination set must fail-closed, not match-all"
     );
@@ -3700,6 +3655,114 @@ fn test_valid_book_prefixes_still_enforce_deny() {
     );
 }
 
+// #13702 (D15-02): empty elements and a bare `any` in a family-named
+// address-book array are corrupt wire values. Go strips blanks and lowers
+// book `any` to family-split /0 CIDRs; accepting these values silently
+// collapsed v3 sides/books to MatchNone and let deny rules fall through.
+#[test]
+fn test_empty_v3_literal_rejected_source_13702() {
+    let mut snap = v3_rule("deny-empty-src", &[], &[""]);
+    snap.rule_id = "deny-empty-src".to_string();
+    snap.action = "deny".to_string();
+    let counter_store = PolicyCounterStore::default();
+    let result = parse_policy_state_with_counters(
+        "permit",
+        std::slice::from_ref(&snap),
+        &test_zone_name_to_id(),
+        &[],
+        &counter_store,
+    );
+    assert!(matches!(
+        result,
+        Err(SnapshotIntegrityError::UnrepresentableV3Address { ref rule_id, ref address })
+            if rule_id == "deny-empty-src" && address.is_empty()
+    ));
+}
+
+#[test]
+fn test_empty_v3_literal_rejected_destination_13702() {
+    let mut snap = v3_rule("deny-empty-dst", &[], &["any"]);
+    snap.rule_id = "deny-empty-dst".to_string();
+    snap.destination_literals = vec!["".to_string()];
+    snap.action = "deny".to_string();
+    let counter_store = PolicyCounterStore::default();
+    let result = parse_policy_state_with_counters(
+        "permit",
+        std::slice::from_ref(&snap),
+        &test_zone_name_to_id(),
+        &[],
+        &counter_store,
+    );
+    assert!(matches!(
+        result,
+        Err(SnapshotIntegrityError::UnrepresentableV3Address { ref rule_id, ref address })
+            if rule_id == "deny-empty-dst" && address.is_empty()
+    ));
+}
+
+#[test]
+fn test_empty_book_prefix_rejected_13702() {
+    for (id, v4, v6, family) in [
+        (81u32, &[""][..], &[][..], "v4"),
+        (82, &[][..], &[""][..], "v6"),
+    ] {
+        let books = [book(id, "empty-tok", v4, v6)];
+        let counter_store = PolicyCounterStore::default();
+        let result = parse_policy_state_with_counters(
+            "permit", &[], &test_zone_name_to_id(), &books, &counter_store,
+        );
+        assert!(matches!(
+            result,
+            Err(SnapshotIntegrityError::UnrepresentableAddressBookPrefix {
+                book_id, family: got_family, ref address, ..
+            }) if book_id == id && got_family == family && address.is_empty()
+        ));
+    }
+}
+
+#[test]
+fn test_bare_any_book_prefix_rejected_13702() {
+    // A bare `any` is family-ambiguous here. Go lowers a book `any` to
+    // 0.0.0.0/0 and ::/0 in their respective arrays.
+    for (id, v4, v6, family) in [
+        (83u32, &["any"][..], &[][..], "v4"),
+        (84, &[][..], &["any"][..], "v6"),
+    ] {
+        let books = [book(id, "any-tok", v4, v6)];
+        let counter_store = PolicyCounterStore::default();
+        let result = parse_policy_state_with_counters(
+            "permit", &[], &test_zone_name_to_id(), &books, &counter_store,
+        );
+        assert!(matches!(
+            result,
+            Err(SnapshotIntegrityError::UnrepresentableAddressBookPrefix {
+                book_id, family: got_family, ref address, ..
+            }) if book_id == id && got_family == family && address == "any"
+        ));
+    }
+}
+
+#[test]
+fn test_empty_legacy_address_rejected_13702() {
+    let mut snap = permit_snapshot("deny-empty-legacy", 7);
+    snap.rule_id = "deny-empty-legacy".to_string();
+    snap.source_addresses = vec!["".to_string()];
+    snap.action = "deny".to_string();
+    let counter_store = PolicyCounterStore::default();
+    let result = parse_policy_state_with_counters(
+        "permit",
+        std::slice::from_ref(&snap),
+        &test_zone_name_to_id(),
+        &[],
+        &counter_store,
+    );
+    assert!(matches!(
+        result,
+        Err(SnapshotIntegrityError::UnrepresentableLegacyAddress { ref rule_id, ref address })
+            if rule_id == "deny-empty-legacy" && address.is_empty()
+    ));
+}
+
 // #3023: a `*-excluded` set that legitimately lists only ONE address
 // family must NOT fail-closed for the OTHER family. A v6-only excluded
 // source has an empty v4 family but a populated v6 family — a v4 source
@@ -3851,57 +3914,32 @@ fn test_excluded_destination_v4_only_permits_v6_3023() {
 // across BOTH families, it must STILL fail-closed for v4 AND v6. The
 // one-family relief must not relax the true empty-set case.
 //
-// #3711: a malformed token (the former "genuine typo/parse-drop") now
-// rejects the whole snapshot at parse, so this uses a valid empty-string
-// literal (a no-op token that yields a fully-empty set) to still exercise
-// the both-families fail-closed evaluation branch.
+// An empty excluded set is represented by an empty book, not an empty-string
+// literal (corrupt wire input rejected by #13702).
 #[test]
 fn test_fully_empty_excluded_source_fails_closed_both_families_3023() {
-    let mut snap = v3_rule("r-fully-empty-excl-src", &[], &[""]);
+    let mut snap = v3_rule("r-fully-empty-excl-src", &[93], &[]);
     snap.source_address_excluded = true;
     let counter_store = PolicyCounterStore::default();
+    let books = [book(93, "empty-src", &[], &[])];
     let state = parse_policy_state_with_counters(
-        "deny",
-        std::slice::from_ref(&snap),
-        &test_zone_name_to_id(),
-        &[],
-        &counter_store,
-    )
-    .expect("parse");
-    assert!(
-        state.rules[0].source_v4_empty && state.rules[0].source_v6_empty,
-        "a fully-empty excluded source set is empty across both families"
-    );
-    // v4 packet → fail-closed.
-    assert_eq!(
-        evaluate_policy(
-            &state,
-            TEST_LAN_ZONE_ID,
-            TEST_WAN_ZONE_ID,
-            "8.8.8.8".parse().expect("v4 src"),
-            "1.1.1.1".parse().expect("v4 dst"),
-            PROTO_TCP,
-            12345,
-            5201,
-        ),
-        PolicyAction::Deny,
-        "a fully-empty excluded source must fail-closed for v4 (#2008)"
-    );
-    // v6 packet → fail-closed.
-    assert_eq!(
-        evaluate_policy(
-            &state,
-            TEST_LAN_ZONE_ID,
-            TEST_WAN_ZONE_ID,
-            "2001:db8::1".parse().expect("v6 src"),
-            "2001:db8::2".parse().expect("v6 dst"),
-            PROTO_TCP,
-            12345,
-            5201,
-        ),
-        PolicyAction::Deny,
-        "a fully-empty excluded source must fail-closed for v6 (#2008)"
-    );
+        "deny", std::slice::from_ref(&snap), &test_zone_name_to_id(), &books, &counter_store,
+    ).expect("parse");
+    assert!(state.rules[0].source_v4_empty && state.rules[0].source_v6_empty);
+    for (src, dst) in [
+        ("8.8.8.8", "1.1.1.1"),
+        ("2001:db8::1", "2001:db8::2"),
+    ] {
+        assert_eq!(
+            evaluate_policy(
+                &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID,
+                src.parse().expect("src"), dst.parse().expect("dst"),
+                PROTO_TCP, 12345, 5201,
+            ),
+            PolicyAction::Deny,
+            "a fully-empty excluded source must fail-closed for both families"
+        );
+    }
 }
 
 // Mutation sentinel for the fail-closed change: a NON-empty excluded
@@ -8258,46 +8296,28 @@ fn nat64_inbound_source_excluded_denies_listed_permits_other() {
 
 #[test]
 fn nat64_inbound_empty_excluded_destination_fails_closed() {
-    // An empty-string destination literal is a valid no-op token that yields
-    // a fully-empty destination set (both families empty). On the NAT64 arm
-    // the `destination_excluded` branch must fail CLOSED via the
-    // `!(destination_v4_empty && destination_v6_empty)` guard — inverting an
-    // empty excluded set into match-all would be a security fail-OPEN.
-    let state = parse_policy_state(
-        "deny",
-        &[PolicyRuleSnapshot {
-            name: "deny-nat64-empty-dst-excluded".to_string(),
-            from_zone: "wan".to_string(),
-            to_zone: "lan".to_string(),
-            source_literals: vec!["2001:559:8585:ef00::/64".to_string()],
-            destination_literals: vec!["".to_string()],
-            destination_address_excluded: true,
-            applications: vec!["any".to_string()],
-            application_terms: Vec::new(),
-            action: "permit".to_string(),
-            ..Default::default()
-        }],
-        &test_zone_name_to_id(),
-    );
-    // Confirm the empty flags are set so the fail-closed guard is genuinely
-    // exercised (not a source mismatch).
-    assert!(
-        state.rules[0].destination_v4_empty && state.rules[0].destination_v6_empty,
-        "an empty excluded destination set must be flagged empty on both families"
-    );
-    // Source matches; the ONLY reason for deny is the empty-excluded-dst
-    // fail-closed guard. FAIL-ON-REVERT: drop the `!(v4_empty && v6_empty)`
-    // guard from the arm's `dst_ok` and this returns Permit (match-all).
+    let snap = PolicyRuleSnapshot {
+        name: "deny-nat64-empty-dst-excluded".to_string(),
+        from_zone: "wan".to_string(),
+        to_zone: "lan".to_string(),
+        source_literals: vec!["2001:559:8585:ef00::/64".to_string()],
+        destination_book_ids: vec![94],
+        destination_address_excluded: true,
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    };
+    let counter_store = PolicyCounterStore::default();
+    let books = [book(94, "empty-dst", &[], &[])];
+    let state = parse_policy_state_with_counters(
+        "deny", &[snap], &test_zone_name_to_id(), &books, &counter_store,
+    ).expect("parse");
+    assert!(state.rules[0].destination_v4_empty && state.rules[0].destination_v6_empty);
     assert_eq!(
         evaluate_policy(
-            &state,
-            TEST_WAN_ZONE_ID,
-            TEST_LAN_ZONE_ID,
+            &state, TEST_WAN_ZONE_ID, TEST_LAN_ZONE_ID,
             "2001:559:8585:ef00::100".parse().expect("v6 src"),
-            "172.16.80.200".parse().expect("v4 dst"),
-            PROTO_TCP,
-            12345,
-            5201,
+            "172.16.80.200".parse().expect("v4 dst"), PROTO_TCP, 12345, 5201,
         ),
         PolicyAction::Deny,
         "an empty excluded destination set must fail-closed on the NAT64 arm"
@@ -8306,43 +8326,28 @@ fn nat64_inbound_empty_excluded_destination_fails_closed() {
 
 #[test]
 fn nat64_inbound_empty_excluded_source_fails_closed() {
-    // The source-side mirror: an empty-string source literal yields a
-    // fully-empty source set (both families empty). On the NAT64 arm the
-    // `source_excluded` branch must fail CLOSED via the
-    // `!(source_v4_empty && source_v6_empty)` guard.
-    let state = parse_policy_state(
-        "deny",
-        &[PolicyRuleSnapshot {
-            name: "deny-nat64-empty-src-excluded".to_string(),
-            from_zone: "wan".to_string(),
-            to_zone: "lan".to_string(),
-            source_literals: vec!["".to_string()],
-            source_address_excluded: true,
-            destination_literals: vec!["172.16.80.200/32".to_string()],
-            applications: vec!["any".to_string()],
-            application_terms: Vec::new(),
-            action: "permit".to_string(),
-            ..Default::default()
-        }],
-        &test_zone_name_to_id(),
-    );
-    assert!(
-        state.rules[0].source_v4_empty && state.rules[0].source_v6_empty,
-        "an empty excluded source set must be flagged empty on both families"
-    );
-    // Destination matches; the ONLY reason for deny is the empty-excluded-src
-    // fail-closed guard. FAIL-ON-REVERT: drop the `!(v4_empty && v6_empty)`
-    // guard from the arm's `src_ok` and this returns Permit (match-all).
+    let snap = PolicyRuleSnapshot {
+        name: "deny-nat64-empty-src-excluded".to_string(),
+        from_zone: "wan".to_string(),
+        to_zone: "lan".to_string(),
+        source_book_ids: vec![95],
+        source_address_excluded: true,
+        destination_literals: vec!["172.16.80.200/32".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    };
+    let counter_store = PolicyCounterStore::default();
+    let books = [book(95, "empty-src", &[], &[])];
+    let state = parse_policy_state_with_counters(
+        "deny", &[snap], &test_zone_name_to_id(), &books, &counter_store,
+    ).expect("parse");
+    assert!(state.rules[0].source_v4_empty && state.rules[0].source_v6_empty);
     assert_eq!(
         evaluate_policy(
-            &state,
-            TEST_WAN_ZONE_ID,
-            TEST_LAN_ZONE_ID,
+            &state, TEST_WAN_ZONE_ID, TEST_LAN_ZONE_ID,
             "2001:559:8585:ef00::100".parse().expect("v6 src"),
-            "172.16.80.200".parse().expect("v4 dst"),
-            PROTO_TCP,
-            12345,
-            5201,
+            "172.16.80.200".parse().expect("v4 dst"), PROTO_TCP, 12345, 5201,
         ),
         PolicyAction::Deny,
         "an empty excluded source set must fail-closed on the NAT64 arm"

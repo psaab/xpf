@@ -2890,11 +2890,9 @@ pub(crate) fn parse_policy_state_with_counters(
 /// anywhere in the list is match-all for both families regardless of
 /// any accompanying literals or family-scoped wildcards.
 ///
-/// #3367: the returned `Option<String>` carries the FIRST token that was
-/// non-empty, non-`any`, non-family-wildcard, and unparseable as an IP/CIDR.
-/// The pre-fix code silently dropped such a token, so an all-malformed list on
-/// the empty→MatchAny path collapsed to an unconstrained MatchAny (broadening a
-/// deny). The caller fails the whole snapshot closed when this is `Some`.
+/// #3367/#13702: the returned `Option<String>` carries the FIRST token that
+/// was empty, non-`any`, non-family-wildcard and unparseable as an IP/CIDR.
+/// The caller fails the whole snapshot closed when this is `Some`.
 fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
     let mut any_v4 = false;
     let mut any_v6 = false;
@@ -2917,12 +2915,13 @@ fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, 
                 any_v4 = true;
                 any_v6 = true;
             }
-            // The empty token contributes nothing to either family; it stays a
-            // no-op (matches `parse_v3_literal_set`). It is NOT `any`: an
-            // otherwise-empty list still collapses to MatchAny via the legacy
-            // `from_prefixes` convention below, but a mixed `[ "" 10.0.0.0/8 ]`
-            // keeps the literal scoping rather than widening to match-all.
-            "" => {}
+            // Empty elements are not a supported wildcard or literal. The
+            // producer strips them; treat one as corrupt snapshot input.
+            "" => {
+                if malformed.is_none() {
+                    malformed = Some(String::new());
+                }
+            }
             "any-ipv4" => any_v4 = true,
             "any-ipv6" => any_v6 = true,
             s => {
@@ -2960,18 +2959,13 @@ fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, 
 /// F-r5-1 fix); empty input or no-any → MatchNone (via
 /// `from_v3_literals`).
 ///
-/// #3711: the returned `Option<String>` carries the FIRST token that was
-/// non-empty, non-`any`/`any4`/`any6`/`any-ipv4`/`any-ipv6`, and unparseable
-/// as an IP/CIDR. The pre-fix code called a non-reporting family-agnostic
-/// parser, which silently DROPPED such a token; because the v3 side uses
-/// `from_v3_literals` (empty -> MatchNone), an all-dropped side collapsed to
-/// MatchNone and a `deny <malformed>` rule fell through to a later permit /
-/// default-permit (fail-OPEN). The caller fails the whole snapshot closed when
-/// this is `Some`. Mirrors the #3367 legacy path exactly, reusing the reporting
-/// `parse_address` helper (whose per-token semantics — empty / `any` / family
-/// wildcard = OK, everything else must parse — match the pre-fix drop set). The
-/// `__unsupported_address__` sentinel is caught earlier by the caller's
-/// sentinel preflight, so it never reaches here.
+/// #3711/#13702: the returned `Option<String>` carries the FIRST token that
+/// was empty, non-`any`/`any4`/`any6`/`any-ipv4`/`any-ipv6`, or unparseable
+/// as an IP/CIDR. Without this reporting, an all-dropped side collapsed to
+/// MatchNone and a deny could fall through to default-permit. The caller fails
+/// the whole snapshot closed when this is `Some`. Mirrors the legacy path,
+/// reusing `parse_address` for valid non-empty tokens. The
+/// `__unsupported_address__` sentinel is caught earlier.
 fn parse_v3_literal_set(literals: &[String]) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
     let mut any_v4 = false;
     let mut any_v6 = false;
@@ -2991,7 +2985,11 @@ fn parse_v3_literal_set(literals: &[String]) -> (PrefixSetV4, PrefixSetV6, Optio
             // normalization still matches (#2008 H11).
             "any4" | "any-ipv4" => any_v4 = true,
             "any6" | "any-ipv6" => any_v6 = true,
-            "" => {}
+            "" => {
+                if malformed.is_none() {
+                    malformed = Some(String::new());
+                }
+            }
             s => {
                 if !parse_address(s, &mut v4, &mut v6) && malformed.is_none() {
                     malformed = Some(s.to_string());
@@ -3014,29 +3012,26 @@ fn parse_v3_literal_set(literals: &[String]) -> (PrefixSetV4, PrefixSetV6, Optio
 
 /// #3711: parse an address-book prefix token that MUST belong to the declared
 /// family (`expect_v4` selects the `prefixes_v4` vs `prefixes_v6` array).
-/// Returns `true` if the token parsed into the EXPECTED family or is a legit
-/// empty / bare-`any` placeholder; `false` if it is malformed OR belongs to the
-/// WRONG family (M02: an IPv6 token in `prefixes_v4` is rejected, not silently
-/// routed into the v6 set — and vice versa). This is the reporting,
-/// family-enforcing replacement for the pre-fix family-agnostic parser: the
-/// book builder fails the whole snapshot CLOSED on `false` rather than dropping
-/// the token (which collapsed a book-backed deny to match-none — a fail-OPEN).
-/// The per-token acceptance set (empty / `any` no-op; `any-ipv4`/`any-ipv6`
-/// same-family wildcards; IP/CIDR of the expected family) matches what the Go
-/// side emits after its family split; a wrong-family wildcard or literal is a
-/// wire-contract violation and is rejected.
+/// Returns `true` if the token parsed into the EXPECTED family or is a
+/// same-family wildcard; `false` if it is empty, malformed, family-ambiguous,
+/// OR belongs to the WRONG family (M02: an IPv6 token in `prefixes_v4` is
+/// rejected, not silently routed into the v6 set — and vice versa). This is
+/// the reporting, family-enforcing replacement for the pre-fix
+/// family-agnostic parser: the book builder fails the whole snapshot CLOSED
+/// on `false` rather than dropping the token (which collapsed a book-backed
+/// deny to match-none — a fail-OPEN). The Go side emits only concrete
+/// family-split CIDRs, so an empty token or bare `any` is a wire-contract
+/// violation.
 fn parse_book_prefix_into(
     prefix: &str,
     expect_v4: bool,
     out_v4: &mut Vec<PrefixV4>,
     out_v6: &mut Vec<PrefixV6>,
 ) -> bool {
-    // Legit no-op placeholders contribute nothing to either family. The Go side
-    // never emits them into a family array (it emits concrete family-split
-    // CIDRs), but accept them so a degenerate snapshot does not hard-fail on a
-    // semantically empty token.
+    // The Go side emits concrete family-split CIDRs and never empty strings
+    // or a family-ambiguous bare `any` in these arrays.
     if prefix.is_empty() || prefix == "any" {
-        return true;
+        return false;
     }
     // #2008 H11: the Junos family-scoped wildcards expand to the concrete
     // all-addresses prefix of their family. Only the wildcard MATCHING the
