@@ -792,13 +792,20 @@ pub(super) fn parse_neighbor_msg(
                 // solicited-preference CAS as the XSK ARP arm, rather than
                 // blindly trusting a kernel-accepted gratuitous reply.
                 let now_ns = monotonic_nanos();
-                let solicited = dynamic_neighbors.take_arp_reply_solicited(&key, now_ns)
+                // #13661: leave probe evidence available through no-op
+                // refreshes and first learns. Peek before the insert, then
+                // consume only when this update actually replaces a different
+                // existing MAC.
+                let solicited = dynamic_neighbors.peek_arp_reply_solicited(&key, now_ns)
                     || (state & NUD_PERMANENT) != 0;
                 let result = dynamic_neighbors.insert_arp_reply_if_solicited_allows(
                     key,
                     NeighborEntry { mac },
                     solicited,
                 );
+                if matches!(result, Some(true)) {
+                    dynamic_neighbors.take_arp_reply_solicited(&key, now_ns);
+                }
                 // The kernel's own NUD_PROBE notification is evidence of an
                 // actual probe for the next matching ARP update. Do not let
                 // this notification itself authorize a MAC change.
@@ -2691,6 +2698,63 @@ mod noarp_listener_10690_tests {
         assert_eq!(neighbors.mac_change_epoch_for(&key), epoch + 1);
         assert_eq!(neighbors.arp_overwrite_refusals(), refusals + 1);
     }
+    /// #13661 fail-on-revert: a same-MAC NUD state refresh inside the
+    /// solicitation window must NOT consume the one-shot probe token.
+    /// The intermediate kernel notification needs no authorization (it
+    /// changes nothing), so the token must survive for the genuine
+    /// MAC move that follows; consuming it makes that move look
+    /// unsolicited and blackholes the failover until the next probe.
+    #[test]
+    fn same_mac_nud_delay_refresh_preserves_solicitation_token_13661() {
+        const NUD_REACHABLE: u16 = 0x02;
+        const NUD_DELAY: u16 = 0x08;
+        let ip = Ipv4Addr::new(10, 0, 61, 50);
+        let monitored = FastSet::from_iter([7]);
+        let key = (7, IpAddr::V4(ip));
+        let live_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
+        let failover_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02];
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        assert!(neighbors.insert_if_changed(key, NeighborEntry { mac: live_mac }));
+        let epoch = neighbors.mac_change_epoch_for(&key);
+        let refusals = neighbors.arp_overwrite_refusals();
+        neighbors.record_neighbor_probe(key, monotonic_nanos());
+
+        // Intermediate kernel state refresh carrying the SAME MAC.
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_body(7, ip, live_mac, NUD_DELAY),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::None,
+            "a same-MAC NUD_DELAY refresh changes nothing"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(live_mac));
+        assert_eq!(neighbors.mac_change_epoch_for(&key), epoch);
+        assert_eq!(neighbors.arp_overwrite_refusals(), refusals);
+
+        // The genuine MAC move inside the same window must still be
+        // authorized by the surviving probe token.
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_body(7, ip, failover_mac, NUD_REACHABLE),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::Upserted,
+            "the token surviving the same-MAC refresh must authorize the failover"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(failover_mac));
+        assert_eq!(neighbors.mac_change_epoch_for(&key), epoch + 1);
+        assert_eq!(
+            neighbors.arp_overwrite_refusals(),
+            refusals,
+            "a solicited failover must not count as an unsolicited refusal"
+        );
+    }
+
 }
 #[cfg(test)]
 mod monitored_neighbor_import_tests_11457 {

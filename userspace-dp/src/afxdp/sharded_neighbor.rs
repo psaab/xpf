@@ -329,6 +329,24 @@ impl ShardedNeighborMap {
         shard.insert(key, now_ns);
     }
 
+    /// #13661: peek at recent-probe evidence WITHOUT consuming it.
+    /// Authorization is only needed for accepted updates (a first learn or a
+    /// differing-MAC replacement); a same-MAC refresh needs no authorization,
+    /// so burning the token there makes a genuine MAC move milliseconds later
+    /// look unsolicited. Callers peek before insertion and consume the token
+    /// only when the insert changed the map.
+    pub(crate) fn peek_arp_reply_solicited(&self, key: &(i32, IpAddr), now_ns: u64) -> bool {
+        let idx = shard_idx(key);
+        let shard = self.arp_solicited_at[idx]
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match shard.get(key) {
+            Some(probed_at) => now_ns.saturating_sub(*probed_at) <= ARP_SOLICITED_WINDOW_NS,
+            None => false,
+        }
+    }
+
     /// #10704: consume the recent-probe evidence for one ARP reply.
     pub(crate) fn take_arp_reply_solicited(&self, key: &(i32, IpAddr), now_ns: u64) -> bool {
         let idx = shard_idx(key);
