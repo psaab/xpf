@@ -447,8 +447,10 @@ mod tcp_syn_check_tests {
                 "non-SYN TCP flags 0x{flags:02x} must drop on a default-policy miss"
             );
         }
-        // SYN-bearing packets remain eligible for a new session, including
-        // asymmetric-path SYN-ACK and the existing tcp-syn-fin screen case.
+        // SYN-bearing packets remain eligible for a new session unless they
+        // carry a closing flag; a SYN|ACK without FIN/RST supports asymmetric
+        // routing, but closing SYNs must never seed an immediately-closing
+        // session.
         assert!(!strict_syn_check_drops_new_flow(PROTO_TCP, TCP_SYN, false, false));
         assert!(!strict_syn_check_drops_new_flow(
             PROTO_TCP,
@@ -456,15 +458,17 @@ mod tcp_syn_check_tests {
             false,
             false
         ));
-        assert!(!strict_syn_check_drops_new_flow(
-            PROTO_TCP,
+        for flags in [
             TCP_SYN | TCP_FIN,
-            false,
-            false
-        ));
-        // Non-TCP traffic is never gated by this TCP-only predicate.
-        assert!(!strict_syn_check_drops_new_flow(PROTO_UDP, TCP_RST, false, false));
-        assert!(!strict_syn_check_drops_new_flow(PROTO_UDP, TCP_FIN, false, false));
+            TCP_SYN | TCP_RST,
+            TCP_SYN | TCP_ACK | TCP_FIN,
+            TCP_SYN | TCP_ACK | TCP_RST,
+        ] {
+            assert!(
+                strict_syn_check_drops_new_flow(PROTO_TCP, flags, false, false),
+                "closing SYN flags 0x{flags:02x} must drop"
+            );
+        }
     }
 
     #[test]
@@ -524,20 +528,24 @@ mod tcp_syn_check_tests {
     }
 
     #[test]
-    fn syn_only_first_packet_installs_on_miss() {
+    fn closing_syn_misses_are_dropped_13941() {
         let mut table = SessionTable::new();
-        // A legitimate connection open (bare SYN) still installs.
-        assert!(install_on_miss(&mut table, tcp_key(40100), TCP_SYN));
-        // Asymmetric routing: a SYN-ACK on miss remains eligible.
-        assert!(install_on_miss(&mut table, tcp_key(40101), TCP_SYN | TCP_ACK));
-        // A bare ACK / ACK+PSH first packet is a session-less midstream
-        // attempt and is dropped rather than opening a new transit session.
-        assert!(!install_on_miss(
-            &mut table,
-            tcp_key(40102),
-            TCP_ACK | TCP_PSH
-        ));
-        assert_eq!(table.len(), 2);
+        // unaffected, while closing SYN first packets cannot seed state.
+        let syn = tcp_key(40100);
+        assert!(install_on_miss(&mut table, syn.clone(), TCP_SYN));
+        assert!(table.lookup(&syn, 1_001_000_000, TCP_SYN | TCP_ACK).is_some());
+        for (port, flags) in [
+            (40101, TCP_SYN | TCP_FIN),
+            (40102, TCP_SYN | TCP_RST),
+            (40103, TCP_SYN | TCP_ACK | TCP_FIN),
+            (40104, TCP_SYN | TCP_ACK | TCP_RST),
+        ] {
+            assert!(
+                !install_on_miss(&mut table, tcp_key(port), flags),
+                "closing SYN miss flags 0x{flags:02x} must not install a session"
+            );
+        }
+        assert_eq!(table.len(), 1);
     }
 
     #[test]

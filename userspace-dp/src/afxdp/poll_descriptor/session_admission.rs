@@ -72,10 +72,16 @@ pub(super) fn strict_syn_check_drops_new_flow(
     no_syn_check: bool,
     strict_syn_check: bool,
 ) -> bool {
-    if !matches!(protocol, crate::ip_proto::PROTO_TCP) || crate::tcp_flags::has_syn(tcp_flags) {
+    if !matches!(protocol, crate::ip_proto::PROTO_TCP) {
         return false;
     }
-    crate::tcp_flags::is_closing(tcp_flags) || !no_syn_check || strict_syn_check
+    if crate::tcp_flags::is_closing(tcp_flags) {
+        return true;
+    }
+    if crate::tcp_flags::has_syn(tcp_flags) {
+        return false;
+    }
+    !no_syn_check || strict_syn_check
 }
 
 #[cfg(test)]
