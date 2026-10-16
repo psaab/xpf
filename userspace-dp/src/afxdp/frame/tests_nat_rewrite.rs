@@ -2150,6 +2150,73 @@ fn nat64_v4_reply_fragments_at_ipv6_egress_mtu_13943() {
     }
 }
 
+#[test]
+fn nat64_v4_fragment_accounts_for_ipv6_fragment_header_budget_13943() {
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let mut reply = build_ipv4_tcp_frame(server, pool, 443, 40001, 1, 1, 0x10);
+    reply.resize(14 + 1476, 0x5a);
+    reply[16..18].copy_from_slice(&1476u16.to_be_bytes());
+    reply[18..20].copy_from_slice(&0x4242u16.to_be_bytes());
+    reply[20..22].copy_from_slice(&0x2000u16.to_be_bytes());
+    reply[24..26].fill(0);
+    let ip_sum = checksum16(&reply[14..34]);
+    reply[24..26].copy_from_slice(&ip_sum.to_be_bytes());
+
+    let forward = Nat64State::forward_decision(pool, server, 40001);
+    let decision = icmp_test_decision(
+        forward.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443),
+    );
+    let reverse = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    let full = build_nat64_forwarded_frame(
+        &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
+        &ForwardingState::default(),
+    ).expect("single translated IPv6 fragment before MTU split");
+    assert_eq!(full[20], 44, "IPv4 first fragment must translate with Fragment Header");
+    assert_eq!(u32::from_be_bytes(full[58..62].try_into().unwrap()), 0x4242);
+    let frames = build_nat64_forwarded_frames(
+        &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
+        &ForwardingState::default(), 0, 1500,
+    ).expect("re-fragmented translated IPv6 frames");
+    assert_eq!(frames.len(), 2, "a 1476-byte IPv4 fragment grows to 1504 bytes");
+
+    let mut reassembled = Vec::new();
+    for (index, frame) in frames.iter().enumerate() {
+        let ip = &frame[14..];
+        let total = 40 + u16::from_be_bytes([ip[4], ip[5]]) as usize;
+        assert!(total <= 1500, "translated fragment exceeds IPv6 egress MTU");
+        assert_eq!(ip[6], 44);
+        let frag = &ip[40..48];
+        assert_eq!(frag[0], crate::ip_proto::PROTO_TCP);
+        assert_eq!(u32::from_be_bytes(frag[4..8].try_into().unwrap()), 0x4242);
+        let word = u16::from_be_bytes([frag[2], frag[3]]);
+        assert_eq!(usize::from(word >> 3) * 8, index * 1448);
+        assert!(word & 1 != 0, "both outputs continue the original datagram");
+        reassembled.extend_from_slice(&ip[48..total]);
+    }
+    assert_eq!(reassembled, full[62..], "fragments reassemble exactly");
+    let mut fitting = reply.clone();
+    fitting.resize(14 + 1480, 0x5a);
+    fitting[16..18].copy_from_slice(&1480u16.to_be_bytes());
+    fitting[20..22].copy_from_slice(&0u16.to_be_bytes());
+    fitting[24..26].fill(0);
+    let ip_sum = checksum16(&fitting[14..34]);
+    fitting[24..26].copy_from_slice(&ip_sum.to_be_bytes());
+    let fitting_frames = build_nat64_forwarded_frames(
+        &fitting, nat64_reverse_meta(), &decision, Some(&reverse), false,
+        &ForwardingState::default(), 0, 1500,
+    ).expect("within-budget translated reply");
+    assert_eq!(fitting_frames.len(), 1);
+    assert_eq!(fitting_frames[0][20], crate::ip_proto::PROTO_TCP);
+    assert_eq!(
+        40 + u16::from_be_bytes([fitting_frames[0][18], fitting_frames[0][19]]) as usize,
+        1500,
+        "within-budget control exactly fills the IPv6 MTU"
+    );
+}
+
 // #10729 X2-F6 RED cell 6: MSS clamp must not rewrite through AH. A v6+AH+TCP
 // SYN carrying MSS 1460 with selected MSS 536 must keep its MSS bytes after
 // the in-place rewrite (any rewrite breaks the AH ICV). Pre-fix the inner

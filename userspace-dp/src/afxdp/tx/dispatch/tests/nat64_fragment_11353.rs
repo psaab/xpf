@@ -438,3 +438,50 @@ fn nat64_wg_fragment_budget_uses_translated_allowedips_peer_11722() {
         "PTB budget must use peer B's 1400-byte underlay, not peer A's 1500"
     );
 }
+
+#[test]
+fn nat64_reverse_df_oversize_still_emits_ipv4_ptb_13943() {
+    let _rate_limit = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let mut frame = build_ipv4_test_packet(0);
+    frame.resize(14 + 1500, 0x5a);
+    frame[16..18].copy_from_slice(&1500u16.to_be_bytes());
+    frame[20..22].copy_from_slice(&0x4000u16.to_be_bytes());
+    frame[24..26].fill(0);
+    let sum = crate::afxdp::frame::checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&sum.to_be_bytes());
+
+    let mut forwarding = test_forwarding_with_egress_mtu(1500);
+    forwarding.egress.insert(
+        11,
+        EgressInterface {
+            bind_ifindex: 11,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0, 1],
+            zone_id: TEST_TRUST_ZONE_ID,
+            redundancy_group: 0,
+            primary_v4: Some(Ipv4Addr::new(192, 0, 2, 1)),
+            primary_v6: Some("2001:db8::1".parse().unwrap()),
+        },
+    );
+    let mut decision = test_forwarding_decision_to_bound_ifindex(22);
+    decision.nat.nat64 = true;
+    decision.nat.rewrite_src = Some(IpAddr::V6("2001:db8::1".parse().unwrap()));
+    decision.nat.rewrite_dst = Some(IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()));
+    let mut request = test_live_forward_request_for_frame(frame.len(), decision);
+    request.meta.addr_family = libc::AF_INET as u8;
+    request.meta.protocol = PROTO_TCP;
+    request.meta.l3_offset = 14;
+    let ingress = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let (ptb, mtu_signalled) = compute_forwarded_egress_ptb(
+        &frame, request.meta, &request.decision, &forwarding, true, false,
+        &ingress.identity(), &recent_exceptions,
+    );
+    assert!(mtu_signalled, "DF-set oversized reply must not be fragmented");
+    let ptb = ptb.expect("DF-set reverse NAT64 must emit IPv4 Fragmentation Needed");
+    assert_eq!(ptb[23], PROTO_ICMP);
+    assert_eq!(ptb[34], 3);
+    assert_eq!(ptb[35], 4);
+    assert_eq!(u16::from_be_bytes([ptb[40], ptb[41]]), 1480);
+}
