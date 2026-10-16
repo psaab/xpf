@@ -147,12 +147,13 @@
 //! (1:N reverse index → v4→v6 reply mis-demux).
 //!
 //! [`reserve_synced_nat64_allocation`] applies the source-NAT synchronization
-//! path to NAT64: the standby reserves the translated tuple through
-//! `reserve_nat64_pool_port` and joins the same `AnyRemoteHost` persistent BIB
-//! lease as local allocations. Normal teardown drops the session's active
-//! reference but retains the BIB for 300 seconds, so a new remote endpoint
-//! cannot receive a different mapping during that idle interval. Pinned by
-//! `nat64_4512_synced_session_reserves_translated_port`.
+//! path to the standard round-robin NAT64 allocator: the standby reserves the
+//! translated tuple through `reserve_nat64_pool_port` and joins the same
+//! `AnyRemoteHost` persistent BIB lease as local allocations. Normal teardown
+//! drops the active session reference but retains the BIB for 300 seconds, so
+//! a new remote endpoint cannot receive a different mapping during that idle
+//! interval. Deterministic NAPT64 remains a separate per-flow path; #14091
+//! tracks bringing its block-constrained allocator into the same contract.
 //!
 //! Scope: this closes the port-COLLISION harm. Reverse-TRANSLATION of a
 //! promoted synced NAT64 session (restoring the original client v6 address)

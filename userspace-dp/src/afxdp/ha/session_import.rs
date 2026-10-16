@@ -511,14 +511,13 @@ impl crate::afxdp::ha::SessionDomain {
         let now_ns = monotonic_nanos();
         // Reserve order is SNAT then NAT64; roll back in reverse order so an
         // unaccepted import's coordinator-only reservations unwind LIFO.
-        let current_nat64_rolled_back =
-            crate::nat64::rollback_synced_nat64_allocation_untracked(
-                &forwarding.nat64,
-                &entry.key,
-                entry.decision.nat,
-                entry.metadata.is_reverse,
-                now_ns,
-            );
+        let current_nat64_rolled_back = crate::nat64::rollback_synced_nat64_allocation_untracked(
+            &forwarding.nat64,
+            &entry.key,
+            entry.decision.nat,
+            entry.metadata.is_reverse,
+            now_ns,
+        );
         let current_snat_released = crate::nat::release_synced_source_nat_allocation_untracked(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,

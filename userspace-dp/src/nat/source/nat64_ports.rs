@@ -10,12 +10,14 @@
 
 use super::*;
 
-/// RFC 6146 §3.5.2 binding-independent mapping: NAT64 pools allocate one
-/// translated tuple per IPv6 transport address (protocol, source IPv6, source
-/// port), not per remote endpoint. Reuse the source-NAT allocator's persistent
-/// lease table with `AnyRemoteHost`; its active-flow refcount keeps the binding
-/// reserved until every session using it closes, then the 300-second idle lease
-/// lifetime preserves the BIB as required by RFC 6146.
+/// RFC 6146 §3.5.2 binding-independent mapping for the standard round-robin
+/// NAT64 pool path: allocate one translated tuple per IPv6 transport address
+/// (protocol, source IPv6, source port), not per remote endpoint. Reuse the
+/// source-NAT allocator's persistent lease table with `AnyRemoteHost`; its
+/// active-flow refcount keeps the binding reserved until every session using
+/// it closes, then the 300-second idle lease preserves the BIB as required by
+/// RFC 6146. Deterministic NAPT64 uses a separate block allocator; its
+/// per-remote allocation residual is tracked by #14091.
 ///
 /// This thin wrapper keeps the module-private `TranslatedTuple` /
 /// `PoolAddressFamily` types out of `nat64.rs`. NAT64 uses no address stickiness.
