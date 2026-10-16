@@ -130,6 +130,39 @@ func loginUserShell(name string) (string, bool, error) {
 
 func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 	fail := func(e error) { err = errors.Join(err, e) }
+	var releaseApply func()
+	defer func() {
+		if releaseApply != nil {
+			releaseApply()
+		}
+	}()
+	acquireApply := func() error {
+		if releaseApply != nil || d == nil || d.applySem == nil {
+			return nil
+		}
+		// A normal apply holds applySem and runs cfg == live, so a keyed user
+		// takes the write path and cannot reach this restore. Only a stale
+		// owner blocks here; it cannot re-enter the permit.
+		if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+			return err
+		}
+		releaseApply = func() { d.applySem.Release(1) }
+		return nil
+	}
+	restoreLiveLoginKeys := func(name string) error {
+		if err := acquireApply(); err != nil {
+			return err
+		}
+		live, ok := d.liveDesiredLoginUser12169(name)
+		if !ok || len(live.SSHKeys) == 0 {
+			return nil
+		}
+		liveCfg := d.liveConfig12169()
+		if liveCfg == nil {
+			return nil
+		}
+		return d.applySystemLogin(liveCfg)
+	}
 	if cfg.System.Login == nil || len(cfg.System.Login.Users) == 0 {
 		return nil
 	}
@@ -362,21 +395,46 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 				fail(fmt.Errorf("determine key ownership for %s: %w", user.Name, ownErr))
 			}
 			if uidOK && ownsKeys {
-				keysFile := managedAuthorizedKeysPath(user.Name)
-				switch err := os.Remove(keysFile); {
-				case err == nil:
-					slog.Info("revoked SSH keys (last key removed from config)",
-						"user", user.Name)
-					// Key file gone → drop the key marker; xpf no longer owns a
-					// key file for this user.
-					_ = removeProvenanceMarker(provisionedKeysDir(), user.Name)
-				case os.IsNotExist(err):
-					// Already absent (idempotent) — drop the stale key marker.
-					_ = removeProvenanceMarker(provisionedKeysDir(), user.Name)
-				default:
-					slog.Warn("failed to remove authorized_keys after key list emptied",
-						"user", user.Name, "file", keysFile, "err", err)
-					fail(fmt.Errorf("revoke authorized_keys for %s: %w", user.Name, err))
+				// #14112: a timed-out closeout owner can resume after a newer
+				// commit re-presented this retained user WITH keys. Consult
+				// the LIVE config before revoking, and repair after the
+				// unlink/marker cleanup if a promotion raced them — the same
+				// #12169 fence deprovisionLoginUser and applyRootAuth apply.
+				if liveUser, liveDesired := d.liveDesiredLoginUser12169(user.Name); liveDesired && len(liveUser.SSHKeys) > 0 {
+					staleRevocationSuperseded12169("remove-retained-user-keys", user.Name)
+					fail(restoreLiveLoginKeys(user.Name))
+				} else {
+					keysFile := managedAuthorizedKeysPath(user.Name)
+					switch err := os.Remove(keysFile); {
+					case err == nil:
+						slog.Info("revoked SSH keys (last key removed from config)",
+							"user", user.Name)
+						if liveUser, liveDesired := d.liveDesiredLoginUser12169(user.Name); liveDesired && len(liveUser.SSHKeys) > 0 {
+							staleRevocationSuperseded12169("repair-retained-user-keys", user.Name)
+							fail(restoreLiveLoginKeys(user.Name))
+						} else if err := removeProvenanceMarker(provisionedKeysDir(), user.Name); err != nil {
+							fail(fmt.Errorf("remove key marker for %s: %w", user.Name, err))
+						} else if liveUser, liveDesired := d.liveDesiredLoginUser12169(user.Name); liveDesired && len(liveUser.SSHKeys) > 0 {
+							staleRevocationSuperseded12169("restore-retained-user-keys-after-marker-cleanup", user.Name)
+							fail(restoreLiveLoginKeys(user.Name))
+						}
+					case os.IsNotExist(err):
+						// Already absent (idempotent) — drop the stale key marker,
+						// unless a promotion re-presented keys in the meantime.
+						if liveUser, liveDesired := d.liveDesiredLoginUser12169(user.Name); liveDesired && len(liveUser.SSHKeys) > 0 {
+							staleRevocationSuperseded12169("repair-retained-user-keys", user.Name)
+							fail(restoreLiveLoginKeys(user.Name))
+						} else if err := removeProvenanceMarker(provisionedKeysDir(), user.Name); err != nil {
+							fail(fmt.Errorf("remove key marker for %s: %w", user.Name, err))
+						} else if liveUser, liveDesired := d.liveDesiredLoginUser12169(user.Name); liveDesired && len(liveUser.SSHKeys) > 0 {
+							staleRevocationSuperseded12169("restore-retained-user-keys-after-marker-cleanup", user.Name)
+							fail(restoreLiveLoginKeys(user.Name))
+						}
+					default:
+						slog.Warn("failed to remove authorized_keys after key list emptied",
+							"user", user.Name, "file", keysFile, "err", err)
+						fail(fmt.Errorf("revoke authorized_keys for %s: %w", user.Name, err))
+					}
 				}
 			}
 		}
