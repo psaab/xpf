@@ -55,8 +55,10 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   not dropped from the PBR RT_FLOW path. The no-count log-only helper
   (`evaluate_filter_ref_log_match`) accumulates the LATEST matched logging
   term — sharing the full evaluator's semantics (#2618) instead of
-  returning on the first one — while still skipping routing-instance terms
-  so PBR logs are emitted only on the PBR path. TX-selection evaluation meters
+  returning on the first one. For the cache-seed capture it also freezes a
+  matched routing-instance term's own `then log` (#14121) so flow-cache
+  hits replay it; the cold PBR packet still emits via the routing
+  evaluator. TX-selection evaluation meters
   three-color policers, carries output filter-log identity through live
   forwarding and cached flow-cache hits, and preserves terminal
   `discard`/`reject` actions so output filters cannot log deny while
