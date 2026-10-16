@@ -838,9 +838,23 @@ func forwardingGatewayInterface(riName, family string, gateway net.IP, interface
 		// same-instance candidate to a default-instance candidate. Unlike
 		// global gateways, multiple links at the winning rank are ambiguous
 		// and must not be resolved by interface name or input order.
+		// A non-VLAN unit 0 shares its base row's live netdev. Count that
+		// Linux link once, retaining the unit row as its Junos identity.
+		hasUnitZeroAlias := func(iface InterfaceSnapshot) bool {
+			if iface.IsUnit || iface.Name == "" || iface.LinuxName == "" || iface.Ifindex <= 0 {
+				return false
+			}
+			for _, candidate := range interfaces {
+				if candidate.IsUnit && candidate.Name == iface.Name+".0" &&
+					candidate.LinuxName == iface.LinuxName && candidate.Ifindex == iface.Ifindex {
+					return true
+				}
+			}
+			return false
+		}
 		bestRank, bestName, candidates := 3, "", 0
 		for _, iface := range interfaces {
-			if iface.AdminDisabled {
+			if iface.AdminDisabled || iface.Ifindex <= 0 || hasUnitZeroAlias(iface) {
 				continue
 			}
 			rank := 2
@@ -890,7 +904,7 @@ func forwardingGatewayInterface(riName, family string, gateway net.IP, interface
 	bestRank := 3
 	bestName := ""
 	for _, iface := range interfaces {
-		if iface.AdminDisabled {
+		if iface.AdminDisabled || iface.Ifindex <= 0 {
 			continue
 		}
 		rank := 2
@@ -898,6 +912,9 @@ func forwardingGatewayInterface(riName, family string, gateway net.IP, interface
 		case riName:
 			rank = 0
 		case "":
+			if iface.RoutingDomain != 0 {
+				continue
+			}
 			rank = 1
 		default:
 			continue

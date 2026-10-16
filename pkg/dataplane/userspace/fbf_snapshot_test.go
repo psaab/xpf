@@ -264,7 +264,8 @@ func TestFBFQualifiesUniqueDefaultLinkLocalGateway11420(t *testing.T) {
 		}},
 	}
 	interfaces := []InterfaceSnapshot{{
-		Name: "reth0.80",
+		Name:    "reth0.80",
+		Ifindex: 80,
 		Addresses: []InterfaceAddressSnapshot{
 			{Family: "inet6", Address: "fe80::8/64"},
 		},
@@ -297,7 +298,8 @@ func TestFBFLinkLocalGatewayKeepsSameInstanceScope11420(t *testing.T) {
 	}
 	interfaces := []InterfaceSnapshot{
 		{
-			Name: "reth0.80",
+			Name:    "reth0.80",
+			Ifindex: 80,
 			Addresses: []InterfaceAddressSnapshot{
 				{Family: "inet6", Address: "fe80::8/64"},
 			},
@@ -305,6 +307,7 @@ func TestFBFLinkLocalGatewayKeepsSameInstanceScope11420(t *testing.T) {
 		{
 			Name:            "ge-0-0-4.0",
 			RoutingInstance: "ISP-B",
+			Ifindex:         84,
 			Addresses: []InterfaceAddressSnapshot{
 				{Family: "inet6", Address: "fe80::4/64"},
 			},
@@ -340,13 +343,15 @@ func TestFBFLinkLocalGatewayRequiresUniqueDefaultInterface11420(t *testing.T) {
 	}
 	interfaces := []InterfaceSnapshot{
 		{
-			Name: "reth0.80",
+			Name:    "reth0.80",
+			Ifindex: 80,
 			Addresses: []InterfaceAddressSnapshot{
 				{Family: "inet6", Address: "fe80::8/64"},
 			},
 		},
 		{
-			Name: "reth0.81",
+			Name:    "reth0.81",
+			Ifindex: 81,
 			Addresses: []InterfaceAddressSnapshot{
 				{Family: "inet6", Address: "fe80::9/64"},
 			},
@@ -377,6 +382,7 @@ func TestFBFLinkLocalGatewayRejectsQuarantinedDefaultInterface11420(t *testing.T
 	interfaces := []InterfaceSnapshot{{
 		Name:          "reth0.80",
 		RoutingDomain: 2, // Go's quarantine-only interface row has no instance name.
+		Ifindex:       80,
 		Addresses: []InterfaceAddressSnapshot{
 			{Family: "inet6", Address: "fe80::8/64"},
 		},
