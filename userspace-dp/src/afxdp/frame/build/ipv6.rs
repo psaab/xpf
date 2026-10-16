@@ -7,7 +7,7 @@
 
 use super::super::tcp::clamp_tcp_mss_frame;
 use super::super::{
-    apply_nat_ipv6, enforce_expected_ports_at, ipv6_is_any_fragment,
+    apply_nat_ipv6, enforce_expected_ports_at, ipv6_is_nonatomically_fragmented,
     ipv6_is_non_first_fragment, recompute_l4_checksum_ipv6,
     restore_l4_tuple_from_meta, v6_rel_l4_offset,
 };
@@ -73,9 +73,10 @@ pub(in crate::afxdp::frame) fn build_forwarded_frame_into_ipv6(
     if selected_tcp_mss > 0 {
         let _ = clamp_tcp_mss_frame(out, ip_start, selected_tcp_mss);
     }
-    // #13934: first fragments have an L4 header but lack the complete
-    // datagram checksum input; preserve the sender checksum for reassembly.
-    if !ipv6_is_any_fragment(&out[ip_start..])
+    // #13934: non-atomic fragments have only partial L4 checksum input;
+    // preserve their sender checksum. Atomic Fragment headers contain the
+    // complete datagram and still take the recompute path.
+    if !ipv6_is_nonatomically_fragmented(&out[ip_start..])
         && (force_tunnel_l4_recompute || (repaired_ports && !enforced))
     {
         recompute_l4_checksum_ipv6(&mut out[ip_start..], rel_l4, meta.protocol)?;

@@ -799,23 +799,25 @@ fn build_tunnel_egress_non_first_fragment_skips_forced_l4_recompute() {
 // checksum bytes differ from the sender's.
 #[test]
 fn build_tunnel_egress_first_fragment_preserves_inner_l4_checksum() {
-    // Complete TCP datagram has 12 payload bytes, but the FIRST fragment
-    // contains only 4. The L4 checksum thus covers bytes unavailable in the
-    // fragment and is changed by any recompute over the fragment alone.
+    // The complete TCP datagram has 16 payload bytes, but the FIRST
+    // fragment contains only 8 (24-byte TCP header + 8 is 32, aligned
+    // to RFC 791's 8-byte fragment boundary). The L4 checksum therefore
+    // covers bytes unavailable in the fragment.
     let mut complete_tcp = vec![0x04u8; 24];
     complete_tcp[0..2].copy_from_slice(&12345u16.to_be_bytes());
     complete_tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
     complete_tcp[12] = 6 << 4;
     complete_tcp[13] = 0x10;
     complete_tcp.extend_from_slice(&[
-        0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
     ]);
     let mut complete_ip = frag_v4_packet(PROTO_TCP, 0x0000, &complete_tcp);
     crate::afxdp::frame::checksum::recompute_l4_checksum_ipv4(
         &mut complete_ip, 20, PROTO_TCP, false,
     )
     .expect("seed complete-datagram TCP checksum");
-    let mut first_fragment = complete_tcp[..28].to_vec();
+    let mut first_fragment = complete_tcp[..32].to_vec();
     first_fragment[16..18].copy_from_slice(&complete_ip[36..38]);
     let ip = frag_v4_packet(PROTO_TCP, 0x2000, &first_fragment);
     let mut frame = vec![0u8; 14];
@@ -839,8 +841,14 @@ fn build_tunnel_egress_first_fragment_preserves_inner_l4_checksum() {
     assert_eq!(
         [egress[14 + 20 + 16], egress[14 + 20 + 17]],
         sender_csum,
-        "forced tunnel L4 recompute must not touch a FIRST fragment's \
-         inner checksum (it covers only this fragment's bytes)"
+        "forced tunnel L4 recompute must preserve the sender checksum"
+    );
+    let mut reassembled_tcp = egress[14 + 20..written].to_vec();
+    reassembled_tcp.extend_from_slice(&complete_tcp[32..]);
+    let reassembled = frag_v4_packet(PROTO_TCP, 0, &reassembled_tcp);
+    assert!(
+        tcp_checksum_ok_ipv4(&reassembled),
+        "preserved first-fragment checksum verifies after reassembly"
     );
 }
 
@@ -891,14 +899,15 @@ fn build_tunnel_egress_v6_first_fragment_preserves_inner_l4_checksum() {
     complete_tcp[12] = 6 << 4;
     complete_tcp[13] = 0x10;
     complete_tcp.extend_from_slice(&[
-        0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC,
     ]);
     let mut complete_ip = frag_v6_packet(PROTO_TCP, None, &complete_tcp);
     crate::afxdp::frame::checksum::recompute_l4_checksum_ipv6(
         &mut complete_ip, 40, PROTO_TCP,
     )
     .expect("seed complete-datagram TCP checksum");
-    let mut first_fragment = complete_tcp[..28].to_vec();
+    let mut first_fragment = complete_tcp[..32].to_vec();
     first_fragment[16..18].copy_from_slice(&complete_ip[56..58]);
     let ip = frag_v6_packet(PROTO_TCP, Some(0x0001), &first_fragment);
     let mut frame = vec![0u8; 14];
@@ -949,9 +958,46 @@ fn build_tunnel_egress_v6_first_fragment_preserves_inner_l4_checksum() {
     assert_eq!(
         [egress[14 + 48 + 16], egress[14 + 48 + 17]],
         sender_csum,
-        "forced tunnel L4 recompute must not touch a v6 FIRST fragment's \
-         inner checksum"
+        "forced tunnel L4 recompute must preserve a v6 FIRST fragment checksum"
     );
+    let mut reassembled_tcp = egress[14 + 48..].to_vec();
+    reassembled_tcp.extend_from_slice(&complete_tcp[32..]);
+    let reassembled = frag_v6_packet(PROTO_TCP, None, &reassembled_tcp);
+    assert!(
+        tcp_checksum_ok_ipv6(&reassembled),
+        "preserved v6 first-fragment checksum verifies after reassembly"
+    );
+    // Atomic Fragment headers contain a complete datagram, so retain the
+    // forced checksum-repair behavior for this IPv6 control.
+    let mut atomic_tcp = complete_tcp.clone();
+    atomic_tcp[16..18].copy_from_slice(&[0x12, 0x34]);
+    let atomic_ip = frag_v6_packet(PROTO_TCP, Some(0x0000), &atomic_tcp);
+    let mut expected_ip = atomic_ip.clone();
+    crate::afxdp::frame::checksum::recompute_l4_checksum_ipv6(
+        &mut expected_ip,
+        48,
+        PROTO_TCP,
+    )
+    .expect("oracle recompute for atomic fragment");
+    let mut atomic_frame = vec![0u8; 14];
+    atomic_frame.extend_from_slice(&atomic_ip);
+    let mut atomic_egress = vec![0u8; atomic_frame.len()];
+    build_forwarded_frame_into_from_frame(
+        &mut atomic_egress,
+        &atomic_frame,
+        meta,
+        &decision,
+        &ForwardingState::default(),
+        false,
+        None,
+    )
+    .expect("atomic fragment build");
+    assert_eq!(
+        &atomic_egress[14 + 48 + 16..14 + 48 + 18],
+        &expected_ip[48 + 16..48 + 18],
+        "IPv6 atomic-fragment checksum must still be recomputed"
+    );
+
 }
 
 // Shared IPv4 tunnel-egress meta/decision (tunnel_endpoint_id != 0 drives
