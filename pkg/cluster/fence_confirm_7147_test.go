@@ -353,7 +353,9 @@ func TestPolicyConstantsAreCommittable7147(t *testing.T) {
 // so a heartbeat landing inside that window re-arms the gate and the election
 // declines to promote — after the peer has already been fenced dark. Peer dark
 // plus local node passive is a total outage, produced by the very policy that
-// exists to prevent split-brain.
+// exists to prevent split-brain. This cell covers the CONFIRMED arm of that
+// window; the unconfirmed arm is #14158 (a heartbeat plus a failed fence must
+// abort the takeover instead) — see fence_heartbeat_race_14158_test.go.
 //
 // Every other test in this file is STRUCTURALLY BLIND to it: confirmFenceManager
 // builds its config with makeConfig, which never sets ControlInterface, so

@@ -941,13 +941,21 @@ func (m *Manager) handlePeerTimeout() {
 	// and this node waits, bounded, for the peer to confirm it relinquished
 	// its redundancy groups. That ordering is the entire point of the policy —
 	// see awaitPeerFenceLocked for why it cannot stall a takeover.
+	//
+	// #14158: if a peer heartbeat arrived during the fence wait and the fence
+	// did not confirm, awaitPeerFenceLocked aborts the takeover — the peer is
+	// alive and never relinquished, so electSingleNode here would promote
+	// this node alongside a live primary (dual-active). The heartbeat's peer
+	// state and peer-aware election outcome stand; do not run the peer-loss
+	// election or the (disable-rg-only) fence tail.
 	if m.peerFencing == PeerFencingDisableRGConfirmed {
-		m.awaitPeerFenceLocked()
+		if !m.awaitPeerFenceLocked() {
+			return
+		}
 	}
 
 	// Peer lost: re-run single-node election.
 	m.electSingleNode()
-
 	// Attempt peer fencing if configured.
 	//
 	// Ordering note (#72): under `disable-rg` the election above runs BEFORE

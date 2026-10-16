@@ -85,7 +85,15 @@ func formatFenceUnconfirmedStatus(reason string, at time.Time) string {
 // handlePeerTimeout does. handlePeerTimeout holds m.mu via defer, so the caller
 // keeps the lock afterwards either way.
 //
-// IT ALWAYS RETURNS AND NEVER BLOCKS THE TAKEOVER INDEFINITELY. That is the
+// It reports whether handlePeerTimeout may proceed with the peer-loss
+// takeover. It returns false only when a peer heartbeat arrived during the
+// wait AND the fence did not confirm (#14158): the peer proved itself alive
+// on the control link but was never told to relinquish, so promoting here
+// would be dual-active. Every other outcome returns true.
+//
+// IT ALWAYS RETURNS AND NEVER BLOCKS THE TAKEOVER INDEFINITELY (the single
+// abort above is not a block: it defers to the live peer, whose next
+// heartbeat timeout re-runs this path if it then goes silent). That is the
 // central safety property, so it is worth stating what each path costs:
 //
 //   - no confirm function armed: returns immediately.
@@ -98,6 +106,8 @@ func formatFenceUnconfirmedStatus(reason string, at time.Time) string {
 //   - peer answered: the common reachable-peer case, one fabric round trip.
 //   - peer silent with a live socket: bounded by FenceConfirmTimeout, then
 //     proceeds anyway.
+//   - heartbeat arrived during the wait and the fence did NOT confirm:
+//     abort the takeover (#14158, below).
 //
 // A takeover that proceeded WITHOUT confirmation is recorded to the EventFence
 // history with the reason and rendered as degraded in both status views. Even
@@ -105,19 +115,29 @@ func formatFenceUnconfirmedStatus(reason string, at time.Time) string {
 // not dual-primary exclusion or proof that the peer released its VIPs. Timeout
 // outcomes are also counted in SyncStats.FenceAcksTimedOut.
 //
-// TWO CONSEQUENCES OF RELEASING m.mu HERE, both deliberate.
+// TWO CONSEQUENCES OF RELEASING m.mu HERE.
 //
 // First, this widens a window that `disable-rg` does not have. Under
 // `disable-rg` the peer-loss decision and electSingleNode run under one
 // unbroken hold of m.mu; here the lock is released between them, so a peer
-// heartbeat can land during the wait and set peerAlive back to true before the
-// election runs. This function does NOT abort on that: the bounded policy is
-// fail-open, so it commits to the peer-loss takeover whether the result was a
-// complete point-in-time suppression, a partial fence, or no confirmation.
-// Unconfirmed outcomes are explicitly marked degraded. A later heartbeat
-// rebuilds the peer state and normal election reconverges. (The #2080 pre-guard
-// re-check at the top of handlePeerTimeout still applies; it runs BEFORE a
-// fence attempt and the takeover decision.)
+// heartbeat can land during the wait and set peerAlive back to true before
+// the election runs. What happens then depends on the fence outcome
+// (#14158):
+//
+//   - Fence CONFIRMED: the peer has relinquished, so the takeover commits
+//     (and must, or the readiness gate strands both nodes secondary — see
+//     the re-assertion comment in the body).
+//   - Fence NOT confirmed (error or negative ack) and a heartbeat landed:
+//     the peer is alive and was never told to relinquish. Committing to
+//     the takeover would promote this node alongside a live primary —
+//     transient dual-active. So this aborts: the heartbeat's peer state
+//     stands, its election already ran, and no electSingleNode follows.
+//     If the peer then truly dies, the next heartbeat timeout re-runs the
+//     whole path. Unconfirmed outcomes are still marked degraded.
+//   - Fence not confirmed and NO heartbeat landed: fail open as before —
+//     the peer is silent, so there is no live primary to collide with.
+//     (The #2080 pre-guard re-check at the top of handlePeerTimeout still
+//     applies; it runs BEFORE a fence attempt and the takeover decision.)
 //
 // Second, on WHICH goroutine this blocks — the answer matters, because
 // believing it was the receive path is what made the hazard above look
@@ -131,20 +151,44 @@ func formatFenceUnconfirmedStatus(reason string, at time.Time) string {
 // which is harmless: the re-entry hits handlePeerTimeout's `!m.peerAlive`
 // early return. The wait is not moved to a goroutine because a fence that
 // completed asynchronously could not gate the election it exists to precede.
-func (m *Manager) awaitPeerFenceLocked() {
+func (m *Manager) awaitPeerFenceLocked() bool {
 	fn := m.peerFenceConfirmFn
 	if fn == nil {
 		reason := "sync not available"
 		slog.Warn("cluster: fence: sync not available, taking over without peer confirmation")
 		m.history.Record(EventFence, -1, "Fence skipped: sync not available")
 		m.markFenceUnconfirmedLocked(reason)
-		return
+		return true
 	}
 
 	// Release the lock for the network call + bounded wait.
 	m.mu.Unlock()
 	ack, err := fn(FenceConfirmTimeout)
 	m.mu.Lock()
+	// THE SAME WINDOW, READ IN THE OPPOSITE DIRECTION (#14158).
+	//
+	// A heartbeat that landed during the wait set peerAlive=true and rebuilt
+	// peerGroups for a live peer, and handlePeerHeartbeat already ran the
+	// peer-aware election against it. If the fence did NOT confirm — it
+	// errored (e.g. fabric sync down while the control link lives) or the
+	// peer reported an incomplete fence — the peer was never told to
+	// relinquish and may still be primary. Re-asserting peerAlive=false and
+	// electing single-node would promote this node alongside it:
+	// transient dual-active. So detection is peerAlive ITSELF: it was false
+	// when the wait was entered (handlePeerTimeout cleared it) and only
+	// handlePeerHeartbeat sets it, so peerAlive==true on re-lock means
+	// exactly "a heartbeat landed during the wait". Abort the takeover:
+	// leave the heartbeat's state and election outcome standing.
+	if m.peerAlive && (err != nil || !ack.Confirmed()) {
+		if err != nil {
+			m.markFenceUnconfirmedLocked(err.Error())
+		} else {
+			m.markFenceUnconfirmedLocked(ack.Reason())
+		}
+		slog.Warn("cluster: fence: aborting takeover, peer heartbeat arrived during fence wait and fence was not confirmed")
+		m.history.Record(EventFence, -1, "Fence not confirmed and peer heartbeat arrived during wait, takeover aborted")
+		return false
+	}
 	// RE-ESTABLISH THE PEER-LOST DECISION. This is not defensive tidying; it
 	// repairs an atomicity that releasing m.mu above breaks, and getting it
 	// wrong strands the cluster with NO primary.
@@ -165,12 +209,14 @@ func (m *Manager) awaitPeerFenceLocked() {
 	// rg_active=false. Peer dark, this node passive: the total outage this
 	// policy exists to avoid, produced by the policy itself.
 	//
-	// So the peer-loss decision, which was made and acted on before the fence
-	// went out, is re-asserted here. It is honest as well as necessary: we have
-	// just told the peer to relinquish everything, so "the peer does not own
-	// its groups" is exactly the state we created. A genuinely-recovered peer
-	// re-establishes peerAlive on its next heartbeat (<= one interval) and the
-	// normal election reconverges — the same recovery path as before #7147.
+	// So when the fence CONFIRMED (the only way to reach here with
+	// peerAlive set), the peer-loss decision, which was made and acted on
+	// before the fence went out, is re-asserted. It is honest as well as
+	// necessary: we have just told the peer to relinquish everything, so
+	// "the peer does not own its groups" is exactly the state we created. A
+	// genuinely-recovered peer re-establishes peerAlive on its next
+	// heartbeat (<= one interval) and the normal election reconverges — the
+	// same recovery path as before #7147.
 	//
 	// Only peerAlive is restored: it is the sole field in the peer-loss block
 	// that electSingleNode's promotion decision reads. peerGroups/peerMonitors
@@ -182,15 +228,16 @@ func (m *Manager) awaitPeerFenceLocked() {
 		m.markFenceUnconfirmedLocked(err.Error())
 		slog.Warn("cluster: fence: taking over WITHOUT peer confirmation", "err", err)
 		m.history.Record(EventFence, -1, fmt.Sprintf("Fence unconfirmed, took over anyway: %v", err))
-		return
+		return true
 	}
 	if ack.Confirmed() {
 		m.clearFenceUnconfirmedLocked()
 		slog.Info("cluster: fence: peer confirmed fence",
 			"rgs_fenced", ack.RGsFenced, "rgs_total", ack.RGsTotal)
 		m.history.Record(EventFence, -1, fmt.Sprintf("Fence confirmed by peer (%s)", ack.Reason()))
-		return
+		return true
 	}
+
 	// A negative ack is not retried: the peer has already told us it could not
 	// fully comply, and repeating the request cannot change that within the
 	// takeover window. Fail open, loudly.
@@ -199,4 +246,5 @@ func (m *Manager) awaitPeerFenceLocked() {
 	slog.Warn("cluster: fence: peer reported an INCOMPLETE fence, taking over anyway",
 		"status", ack.Status, "rgs_fenced", ack.RGsFenced, "rgs_total", ack.RGsTotal)
 	m.history.Record(EventFence, -1, fmt.Sprintf("Fence NOT confirmed (%s), took over anyway", reason))
+	return true
 }
