@@ -177,7 +177,14 @@ func (s *Store) Load() error {
 	// gets nil active config, and bootstraps blind. Rewriting the
 	// leaf to absent (defaults to userspace) lets the daemon come
 	// up so the operator can fix the config from CLI.
+	// #14168: capture the RAW on-disk hash BEFORE the tolerant-load repairs
+	// below normalize the tree. Pending-confirm records armed by an older
+	// build bind this raw generation; recovery must evaluate them against
+	// it (and against the effective hash) rather than the normalized tree
+	// alone, or a guarded generation that needed a rewrite is misread as
+	// superseded.
 	activeHashOnDisk := guardedConfigHash(tree)
+	rawActiveHashOnDisk := activeHashOnDisk
 	s.discardSupersededFirstCommitTeardownLocked(activeHashOnDisk)
 
 	rewriteRetiredDataplaneType(tree, LoadCaller)
@@ -273,7 +280,7 @@ func (s *Store) Load() error {
 		// recovery error) so the #1960/#1922 fail-closed boot class is
 		// preserved even when the rollback healed the store.
 		origErr := fmt.Errorf("compile config: %w: %w", ErrConfigCompile, err)
-		if recErr := s.recoverPendingConfirmLocked(); recErr != nil {
+		if recErr := s.recoverPendingConfirmLocked(rawActiveHashOnDisk); recErr != nil {
 			return errors.Join(origErr, recErr)
 		}
 		return origErr
@@ -286,7 +293,7 @@ func (s *Store) Load() error {
 	// rollback target failed even the lenient compile). Load MUST NOT report
 	// success in that state — see recoverPendingConfirmLocked.
 	s.loadUnsharedMarkLocked() // #9530
-	if err := s.recoverPendingConfirmLocked(); err != nil {
+	if err := s.recoverPendingConfirmLocked(rawActiveHashOnDisk); err != nil {
 		return err
 	}
 	// A first-commit timeout can leave a committed=0 empty active DB. A valid
@@ -750,6 +757,24 @@ func recoveredConfirmDelay(deadline, now, armedAt time.Time) time.Duration {
 	return remaining
 }
 
+// normalizePendingConfirmTree applies the same tolerant-load repairs
+// Store.Load applies to the active tree (retired dataplane-type rewrite,
+// #1798 control-character scrub) to a pending-confirm rollback target.
+// It returns true when it changed the tree. A first-commit empty target
+// is untouched in practice: neither repair fires on an empty tree.
+func normalizePendingConfirmTree(tree *config.ConfigTree) bool {
+	if tree == nil {
+		return false
+	}
+	changed := rewriteRetiredDataplaneType(tree, LoadCaller) > 0
+	for _, p := range config.SanitizeTreeControlChars(tree) {
+		slog.Warn("sanitized control characters in pending commit-confirmed rollback target",
+			"path", p, "issue", "#14168")
+		changed = true
+	}
+	return changed
+}
+
 // recoverPendingConfirmLocked restores a commit-confirmed window that was
 // still pending when the daemon last stopped (#4577). The in-memory
 // time.AfterFunc rollback timer does not survive a process restart, so without
@@ -782,7 +807,7 @@ func recoveredConfirmDelay(deadline, now, armedAt time.Time) time.Duration {
 // rollback itself still runs to completion first — reverting the unconfirmed
 // config is the safety property, and the operator needs the reverted tree
 // reachable to fix it from the CLI.
-func (s *Store) recoverPendingConfirmLocked() error {
+func (s *Store) recoverPendingConfirmLocked(rawActiveHash string) error {
 	if s.db == nil {
 		return nil
 	}
@@ -861,6 +886,16 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	// window or a prior rollback persistence is being superseded. Until the new
 	// active file is durable, recovery accepts the previous disk generation.
 	activeHash := guardedConfigHash(s.active)
+	// #14168: Load normalized s.active (retired dataplane-type rewrite and
+	// control-character scrub) after capturing rawActiveHash from the bytes
+	// actually on disk. A record armed by an older build binds that raw
+	// generation, so the generation checks below accept EITHER hash of the
+	// same on-disk config. This is deliberately a second hash of the same
+	// tree, not a normalization of the record's hashes: an unrelated
+	// generation matches neither and is still stale (#5835).
+	matchesActive := func(h string) bool {
+		return h != "" && (h == activeHash || h == rawActiveHash)
+	}
 	// A FIRST rollback may have written the active rollback marker and died
 	// before publishing the teardown marker. The retained expired confirm
 	// record is the recovery evidence; committed=0 plus a different guarded
@@ -881,7 +916,7 @@ func (s *Store) recoverPendingConfirmLocked() error {
 		s.resolveConfirmRemovalLocked("first_commit_teardown_marker_recovery")
 		return nil
 	}
-	if rec.GuardedHash != "" && rec.GuardedHash != activeHash && rec.PreviousHash != activeHash {
+	if rec.GuardedHash != "" && !matchesActive(rec.GuardedHash) && !matchesActive(rec.PreviousHash) {
 		slog.Warn("ignoring a stale pending commit-confirmed record on boot: it guards a config "+
 			"that is no longer active (a later commit/confirm superseded it); not resurrecting its "+
 			"rollback", "issue", "#5835")
@@ -899,12 +934,48 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	// window's (possibly expired) deadline must govern — crash recovery then
 	// re-armed an expired window on the candidate's future deadline instead
 	// of rolling back to Base.
-	if rec.PreviousHash == activeHash && !rec.PreviousDeadline.IsZero() {
+	if matchesActive(rec.PreviousHash) && !rec.PreviousDeadline.IsZero() {
 		deadline = rec.PreviousDeadline
 	}
 	prevTree := rec.PrevTree
 	if prevTree == nil {
 		prevTree = &config.ConfigTree{}
+	}
+	// #14168: normalize the rollback target exactly as Load normalized the
+	// active tree. Without this a target committed on an older build — a
+	// retired dataplane-type leaf is the concrete case — reached the
+	// lenient compile below unrepaired and failed even though the same
+	// bytes in active.json would have booted. prevChanged records whether
+	// recovery actually rewrote the persisted target; the rebind below
+	// persists that repair so a still-live record does not re-carry the
+	// raw target (a raw target that later becomes active through a plain
+	// commit would otherwise never see Load's rewrite).
+	prevChanged := normalizePendingConfirmTree(prevTree)
+	// #14168: rebind a live record recognized only through the raw on-disk
+	// hash to the effective generation before any other durable write of
+	// this record (notably the #12167 FIRST sentinel). Bound to the same
+	// raw/effective pair the staleness check accepted; an unrelated
+	// generation never reaches here, and a record already binding the
+	// effective hash is untouched. Best-effort by design: on write failure
+	// the original record remains valid recovery evidence under the raw
+	// alias, so recovery proceeds and the next boot re-attempts the rebind.
+	guardedNeedsRebind := rec.GuardedHash != "" && rec.GuardedHash != activeHash && matchesActive(rec.GuardedHash)
+	previousNeedsRebind := rec.PreviousHash != "" && rec.PreviousHash != activeHash && matchesActive(rec.PreviousHash)
+	if (prevChanged || guardedNeedsRebind || previousNeedsRebind) && !rec.Resolved {
+		rebound := *rec
+		rebound.PrevTree = prevTree
+		if guardedNeedsRebind {
+			rebound.GuardedHash = activeHash
+		}
+		if previousNeedsRebind {
+			rebound.PreviousHash = activeHash
+		}
+		if err := s.writeConfirmState(&rebound); err != nil {
+			slog.Warn("could not persist the normalized pending commit-confirmed record; "+
+				"continuing recovery with the original record", "err", err, "issue", "#14168")
+		} else {
+			rec = &rebound
+		}
 	}
 
 	recoveryNow := confirmWallNow()
