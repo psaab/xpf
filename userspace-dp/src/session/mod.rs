@@ -4196,15 +4196,25 @@ impl SessionTable {
     /// Requeue drained deltas at the front when a tuple gate could not be
     /// acquired for their binding-queue cleanup. Reversing preserves the
     /// original FIFO order when pushing each item to the front.
-    pub(crate) fn requeue_deltas_front(&mut self, deltas: &[SessionDelta]) {
+    ///
+    /// Returns true only when every delta was requeued. On ring overflow
+    /// the unretained deltas are counted in `delta_drops` and latch
+    /// `delta_loss_pending` (as in `push_delta`); the false return lets
+    /// callers that own an out-of-sync signal (e.g. `flush_session_deltas`)
+    /// raise it immediately instead of claiming a dropped suffix was
+    /// preserved (#13767).
+    pub(crate) fn requeue_deltas_front(&mut self, deltas: &[SessionDelta]) -> bool {
+        let mut fully_preserved = true;
         for delta in deltas.iter().rev() {
             if self.deltas.len() >= MAX_SESSION_DELTAS {
                 self.delta_drops = self.delta_drops.saturating_add(1);
                 self.delta_loss_pending = true;
+                fully_preserved = false;
                 continue;
             }
             self.deltas.push_front(delta.clone());
         }
+        fully_preserved
     }
     /// #9856: drain tombstones harvested by terminal removals for an active
     /// owner-RG export. Entries outside this window are discarded because a
