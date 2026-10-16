@@ -3,6 +3,7 @@ package userspace
 import (
 	"encoding/json"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -277,5 +278,40 @@ func TestLocalClearEqualGenerationFence13867(t *testing.T) {
 	}
 	if req := <-restartHelper.requests; req.Type != "import_idle_leases" {
 		t.Fatalf("post-clear equal-generation request = %+v, want additive import", req)
+	}
+}
+
+func TestLegacyPersistentNatGenerationStateLoads13867(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nat-generation.json")
+	const origin = "0123456789abcdef0123456789abcdef"
+	const remote = "fedcba9876543210fedcba9876543210"
+	// This is the pre-#13867 durable shape: the new clear watermark field is
+	// absent and must decode as an empty map, not invalidate existing state.
+	legacy, err := json.Marshal(struct {
+		OriginID          string            `json:"origin_id"`
+		Generation        uint64            `json:"generation"`
+		RemoteGenerations map[string]uint64 `json:"remote_generations,omitempty"`
+		PendingLocalClear bool              `json:"pending_local_clear,omitempty"`
+		PendingRemote     map[string]bool   `json:"pending_remote,omitempty"`
+	}{
+		OriginID: origin, Generation: 4,
+		RemoteGenerations: map[string]uint64{remote: 0},
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy state: %v", err)
+	}
+	if err := os.WriteFile(path, legacy, 0600); err != nil {
+		t.Fatalf("write legacy state: %v", err)
+	}
+	m := New()
+	m.persistentNatLeaseGenerationPath = path
+	if err := m.loadPersistentNatLeaseGenerationLocked(); err != nil {
+		t.Fatalf("load legacy state: %v", err)
+	}
+	state := m.persistentNatLeaseGeneration
+	if state.OriginID != origin || state.Generation != 4 ||
+		state.RemoteGenerations[remote] != 0 ||
+		len(state.LocalClearRemoteGenerations) != 0 {
+		t.Fatalf("loaded legacy state = %+v", state)
 	}
 }
