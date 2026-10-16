@@ -29,18 +29,17 @@ type userspaceEventStreamProvider interface {
 // authority over the flow, and the authoritative session lives on the other
 // node.
 //
-// The helper already suppresses the Open delta for these origins at install
-// (the explicit `!origin.is_transient_local_seed()` conjunct at `install.rs:442`
-// — NOT the `counted` gate: seeds ARE quota-counted since #12179), so nothing
-// here should ever see one. This
-// filter is the belt to that suspenders, and the reason it is worth having is
-// recorded directly below in the fabric-redirect branch: #6599 measured what a
-// FabricRedirect-disposition Open delta does when it reaches the peer, which is
-// to overwrite the owner's authoritative session family under
-// latest-generation-wins. A #7770 punt seed has exactly that disposition and is
-// NAT-free by construction, so a regression in the helper's suppression would
-// land the worst shape of that class on the wire. Filtering by origin costs one
-// string compare and removes the whole class from this path's reach.
+// Missing-neighbor seeds now produce local telemetry deltas (#13974), so
+// fallback session-delta drains can reach this guard. The Rust event-stream
+// producer suppresses their HA session-sync leg; this Go filter remains a
+// second fence for fallback and any future producers.
+//
+// The reason for the filter is especially important for FabricPuntSeed:
+// #6599 measured what a FabricRedirect-disposition Open delta does when it
+// reaches the peer — it can overwrite the owner's authoritative session family
+// under latest-generation-wins. A #7770 punt seed has exactly that disposition
+// and is NAT-free by construction, so a regression in the helper's suppression
+// would land the worst shape of that class on the wire.
 //
 // It is a LIST rather than two `EqualFold` calls so the pair cannot drift apart
 // as the helper's set grows; `TestShouldSyncUserspaceDeltaSkipsTransientLocalSeeds`

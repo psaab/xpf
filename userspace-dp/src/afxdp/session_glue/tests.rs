@@ -14710,10 +14710,10 @@ fn publish8586(
 /// be the bug, and this cell is what makes the choice explicit rather than an
 /// implicit consequence of which predicate got typed.
 ///
-/// `FabricPuntSeed` and `MissingNeighborSeed` are transient-local by
-/// construction — never HA-exported, never Open-delta'd — so they are live
-/// local sessions that are absent from the shared map BY DESIGN. They are the
-/// population #8586 named as the reason not to build a naive sweep.
+/// `FabricPuntSeed` and `MissingNeighborSeed` remain transient-local and
+/// absent from the shared map/HA authority by design. Missing-neighbor seeds
+/// may carry telemetry-only deltas (#13974); neither is peer-synced state.
+/// They are the population #8586 named as the reason not to build a naive sweep.
 ///
 /// Fail-on-revert: scope the walk with `is_promotable_synced()`, or with
 /// `!matches!(origin, ForwardFlow | ReverseFlow | LocalMiss)`, or drop the

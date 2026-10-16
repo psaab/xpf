@@ -15,9 +15,10 @@
 use super::*;
 
 /// #10419: retire a missing-neighbor seed's shared publication when its local
-/// session expires. Seeds intentionally do not emit Close deltas, so they need
-/// this separate path; the origin and stable session id fence the removal to
-/// the exact expired incarnation and preserve a same-key replacement.
+/// session expires. The local Close delta is telemetry-only (#13974), so this
+/// separate path remains responsible for removing the shared snapshot; origin
+/// and stable session id fence removal to the exact expired incarnation and
+/// preserve a same-key replacement.
 pub(super) fn retire_expired_missing_neighbor_seeds(
     expired_entries: &[crate::session::ExpiredSession],
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
