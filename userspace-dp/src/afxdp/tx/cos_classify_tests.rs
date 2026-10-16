@@ -8274,3 +8274,76 @@ fn h18_13966_flowless_fragment_uses_native_ingress_protocol() {
     assert_eq!(cached.filter_dscp_rewrite, Some(46));
     assert_eq!(cached.three_color_policers.len(), 1);
 }
+#[test]
+fn egress_dscp_rewrite_unmaterialized_fc_does_not_bleach_and_no_unmaterialized_guard() {
+    // #13968: egress scheduler map materializes only BE/bulk. Ingress EF->voice q5,
+    // BE->q0. Rewrite only at WAN: voice/low=46, voice/high=46, best-effort/low=0.
+    // Fresh/cached seed/cached hit must return rewrite by original FC:
+    // EF=>Some(46) (queue may clamp to 0, packet must not be re-marked BE).
+    // BE=>Some(0). Control egress materializing voice returns Some(42) with queue 5.
+    let mut s = locus_split_snapshot_11679();
+    if let Some(cos) = s.class_of_service.as_mut() {
+        cos.scheduler_maps[0]
+            .entries
+            .retain(|e| e.forwarding_class != "voice");
+        cos.dscp_rewrite_rules[0] = CoSDSCPRewriteRuleSnapshot {
+            name: "wan-rw".into(),
+            entries: vec![
+                CoSDSCPRewriteRuleEntrySnapshot {
+                    forwarding_class: "voice".into(),
+                    loss_priority: "low".into(),
+                    dscp_value: 46,
+                },
+                CoSDSCPRewriteRuleEntrySnapshot {
+                    forwarding_class: "voice".into(),
+                    loss_priority: "high".into(),
+                    dscp_value: 46,
+                },
+                CoSDSCPRewriteRuleEntrySnapshot {
+                    forwarding_class: "best-effort".into(),
+                    loss_priority: "low".into(),
+                    dscp_value: 0,
+                },
+            ],
+        };
+    }
+    let f = build_forwarding_state(&s);
+    let key = inet_precedence_test_key();
+    let meta46 = UserspaceDpMeta {
+        ingress_ifindex: 5,
+        addr_family: libc::AF_INET as u8,
+        dscp: 46,
+        ..Default::default()
+    };
+    let fresh = resolve_cos_tx_selection(&f, 202, meta46, Some(&key), TermMatchExtra::default());
+    assert_eq!(
+        fresh.dscp_rewrite,
+        Some(46),
+        "fresh rewrite must key original voice FC, not clamped queue"
+    );
+    assert!(
+        fresh.queue_id == Some(0) || fresh.queue_id == Some(5),
+        "queue stays clamped/default or EF"
+    );
+    let cached = resolve_cached_cos_tx_selection(&f, 202, meta46, &key);
+    assert_eq!(
+        cached.dscp_rewrite,
+        Some(46),
+        "cached seed rewrite must key original voice FC"
+    );
+    let hit = reclassify_cached_ba_queue_and_lp_rewrite(&f, 202, 46, 0, false, 5, 0, 0)
+        .expect("cached BA hit must resolve");
+    assert_eq!(
+        hit.1,
+        Some(46),
+        "cached hit rewrite must key original voice FC"
+    );
+    let meta_be = UserspaceDpMeta { dscp: 0, ..meta46 };
+    let fresh_be = resolve_cos_tx_selection(&f, 202, meta_be, Some(&key), TermMatchExtra::default());
+    assert_eq!(fresh_be.dscp_rewrite, Some(0), "BE class must stay DSCP 0");
+    // Control: materialized voice egress.
+    let fc = build_forwarding_state(&locus_split_snapshot_11679());
+    let ctrl = resolve_cos_tx_selection(&fc, 202, meta46, Some(&key), TermMatchExtra::default());
+    assert_eq!(ctrl.queue_id, Some(5));
+    assert_eq!(ctrl.dscp_rewrite, Some(42), "control (materialized) unchanged");
+}
