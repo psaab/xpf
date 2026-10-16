@@ -1271,7 +1271,10 @@ sync.
   generations, RG epoch/lease, and scheduler lease. Policy-deny hits replay the
   policy hit counter, accepted INPUT `then count` / `then log`, RT_FLOW event,
   and exception accounting; an explicit `reject` reports REJECT only when its
-  reply was actually enqueued. `DiscardRoute` stays a silent route drop.
+  reply was actually enqueued. `DiscardRoute` stays a silent route drop;
+  `RejectRoute` emits an ICMPv4/ICMPv6 Destination Unreachable through the
+  shared generated-reject suppression, output-classification, TX-budget, and
+  per-zone rate-limit gates, including for flowless and TCP packets.
   Transient `NoRoute` / `MissingNeighbor` dispositions, flowless packets,
   control traffic, and flows with DSCP- or per-packet-L4-sensitive INPUT
   filters remain uncached.
