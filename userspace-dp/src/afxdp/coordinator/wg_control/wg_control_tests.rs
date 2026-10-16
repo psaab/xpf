@@ -2733,3 +2733,109 @@ fn wg_socket_v6_capability_fallback_predicate_is_stage_aware_10196() {
         &missing_device
     ));
 }
+
+// ===== #13665 D10-08: handshake state must not advance on send failure =====
+
+/// #13665: a failed Type-2 send must not report CompletedResponder (which
+/// drains rekey/handshake request edges at the caller) — the msg1 still
+/// authenticated, so the outcome degrades to Authenticated and the armed
+/// edges survive for the retry the peer's retransmitted msg1 will drive.
+/// The v4 socket sending to an IPv6 target fails deterministically
+/// (EADDRNOTAVAIL-class, counted either way).
+#[test]
+fn failed_response_send_is_not_a_responder_completion_13665() {
+    use std::sync::atomic::Ordering;
+    let allowed: Vec<ipnet::IpNet> = vec!["10.136.65.0/24".parse().unwrap()];
+    let (init, resp, init_pub, resp_pub) =
+        crate::afxdp::wg::tests::established_pair(allowed.clone(), allowed);
+    // Build a FRESH msg1 against the responder (the established_pair helper
+    // already consumed one handshake; a new Noise initiation is required).
+    let mut msg1 = [0u8; crate::afxdp::wg::WG_MSG_INIT_LEN];
+    init.create_initiation(&resp_pub, &mut msg1).expect("build msg1");
+
+    // Arm both request edges on the responder for the initiator peer.
+    resp.request_rekey(&init_pub);
+    assert!(resp.request_handshake(&init_pub, 1));
+
+    // v4 socket + IPv6 target: every send fails deterministically.
+    let dead = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let v6_from: SocketAddr = "[::1]:51820".parse().unwrap();
+    let (mut tun, _tun_test) = super::tun_standin_pair_9521();
+    let exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let view = super::kernel_path::UncoveredKernelPathView;
+    let mut decap_buf = vec![0u8; 4096];
+    let mut response_buf = vec![0u8; 4096];
+    let hs_err_before = resp.counters().hs_send_errors.load(Ordering::Relaxed);
+    let outcome = dispatch_inbound(
+        &resp,
+        &dead,
+        false,
+        &mut tun,
+        &msg1,
+        v6_from,
+        None,
+        &mut decap_buf,
+        &mut response_buf,
+        "wg-test-13665",
+        &exceptions,
+        crate::afxdp::types::WgKernelTransport::Deliver,
+        None,
+        &view,
+        None,
+        1,
+        400,
+        false,
+        0,
+        0,
+    );
+    assert!(
+        !matches!(outcome, InboundOutcome::CompletedResponder(_)),
+        "failed msg2 send must not report CompletedResponder, got authenticated={} peer={:?}",
+        outcome.authenticated(),
+        outcome.peer().map(|p| p == init_pub),
+    );
+    assert_eq!(
+        outcome.peer(),
+        Some(init_pub),
+        "authenticated msg1 must still learn the endpoint (Authenticated parity)"
+    );
+    assert!(
+        resp.counters().hs_send_errors.load(Ordering::Relaxed) > hs_err_before,
+        "failed send must be counted"
+    );
+    // The caller drains these ONLY on CompletedResponder; they must survive.
+    assert!(resp.take_rekey_request(&init_pub), "rekey edge must survive failed msg2 send");
+    assert!(resp.take_handshake_request(&init_pub), "handshake edge must survive failed msg2 send");
+}
+
+/// #13665 narrowing: Type-1 send failure retains the existing pending
+/// reservation; retries/give-up remain governed by the handshake attempt
+/// state machine. The responder completion report is the affected leg.
+#[test]
+fn failed_initiation_send_retains_pending_13665() {
+    use std::sync::atomic::Ordering;
+    let allowed: Vec<ipnet::IpNet> = vec!["10.136.65.0/24".parse().unwrap()];
+    let (init, _resp, _init_pub, resp_pub) =
+        crate::afxdp::wg::tests::established_pair(allowed.clone(), allowed);
+    assert_eq!(init.pending_count(), 0);
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let mut out = vec![0u8; 2048];
+    let v6_ep: SocketAddr = "[::1]:51820".parse().unwrap();
+    let hs_err_before = init.counters().hs_send_errors.load(Ordering::Relaxed);
+    super::attempt::drive_initiation(&init, &socket, false, &resp_pub, v6_ep, &mut out, "wg-test-13665", &exceptions);
+    assert!(
+        init.counters().hs_send_errors.load(Ordering::Relaxed) > hs_err_before,
+        "failed send must be counted"
+    );
+    assert_eq!(
+        init.pending_count(),
+        1,
+        "failed msg1 send must RETAIN the pending reservation for retry (narrowed acceptance; no nonce rollback)"
+    );
+    // Success parity: a deliverable initiation keeps its reservation.
+    let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let ep = rx.local_addr().unwrap();
+    super::attempt::drive_initiation(&init, &socket, false, &resp_pub, ep, &mut out, "wg-test-13665", &exceptions);
+    assert_eq!(init.pending_count(), 1, "sent msg1 must keep its pending reservation");
+}
