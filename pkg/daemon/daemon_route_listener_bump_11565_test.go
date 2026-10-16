@@ -74,6 +74,31 @@ func TestRouteListenerCarriesSchedulerFailClosedLatch12273(t *testing.T) {
 	}
 }
 
+func TestRouteListenerKeepsScheduledDenyEligibleDuringRecoveryHold13919(t *testing.T) {
+	now := time.Now()
+	defs := map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours", AllDay: true},
+	}
+	noop := func(context.Context, map[string]bool) error { return nil }
+	stepped, _ := scheduler.NewPrimed(defs, noop, now.Add(time.Hour))
+	held, _ := scheduler.NewPrimed(defs, noop, now)
+	held.CarryRecoveryStateFrom(stepped, now)
+	if !held.PolicyFailClosed(now) || held.ActiveState()["workhours"] {
+		t.Fatal("test precondition: expected recovery hold with inactive schedule map")
+	}
+
+	dp := &fakeOverlayDP{}
+	d := routeListenerBumpDaemon11565(t, dp)
+	d.scheduler.Store(held)
+	if !d.actuateLearnedRouteRefresh(context.Background()) {
+		t.Fatal("route-only publication did not converge")
+	}
+	if !dp.lastFailClosed || dp.lastSchedulerState["workhours"] {
+		t.Fatalf("route-only publish lost recovery disposition: failClosed=%v activeState=%v",
+			dp.lastFailClosed, dp.lastSchedulerState)
+	}
+}
+
 func TestRouteListenerRetriesPendingBumpAfterDuplicatePublish11565(t *testing.T) {
 	dp := &fakeOverlayDP{publishErr: errors.New("snapshot unavailable")}
 	d := routeListenerBumpDaemon11565(t, dp)

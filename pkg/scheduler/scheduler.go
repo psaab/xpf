@@ -254,11 +254,13 @@ func (s *Scheduler) SetHeartbeatFn(fn func(ctx context.Context)) {
 }
 
 // evaluate checks each scheduler against the current time and fires the
-// callback if any state changed.
+// callback when active state or its action-aware fail-closed disposition changes.
 func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
 	now = now.In(s.loc)
 	s.mu.Lock()
 
+	policyFailClosedBefore := s.republishFailClosed || s.zoneUnavailable ||
+		(!s.unsafeUntil.IsZero() && s.lastEval.Before(s.unsafeUntil))
 	changed := false
 	newActive := make(map[string]bool, len(s.schedulers))
 	wallClockDiscontinuous := s.wallClockDiscontinuousLocked(now)
@@ -311,6 +313,11 @@ func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
 	s.active = newActive
 	if wallClockDiscontinuous {
 		s.unsafeUntil = now.Add(wallClockRecoveryHold)
+	}
+	policyFailClosedAfter := s.republishFailClosed || s.zoneUnavailable ||
+		(!s.unsafeUntil.IsZero() && now.Before(s.unsafeUntil))
+	if policyFailClosedBefore != policyFailClosedAfter {
+		changed = true
 	}
 	s.lastEval = now
 	s.lastWallUnixNano = now.UnixNano()

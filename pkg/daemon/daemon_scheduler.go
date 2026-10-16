@@ -104,6 +104,11 @@ func (d *Daemon) policySchedulerActiveStateAndFailClosedForApplyLocked(cfg *conf
 			failClosed = true
 		}
 		if hash == d.policySchedulerConfigHash {
+			if failClosed {
+				for name := range previousState {
+					previousState[name] = false
+				}
+			}
 			return previousState, failClosed
 		}
 	}
@@ -133,6 +138,23 @@ func policySchedulerLocation(cfg *config.Config, now time.Time) *time.Location {
 		return nil
 	}
 	return loc
+}
+
+// policySchedulerPublicationState includes the action-aware fail-closed
+// disposition on every partial snapshot path. During recovery, no scheduled
+// permit may be active, while scheduled DENY/REJECT remain eligible.
+func policySchedulerPublicationState(sched *scheduler.Scheduler, now time.Time) (map[string]bool, bool) {
+	if sched == nil {
+		return nil, false
+	}
+	activeState, failClosed := sched.ActiveStateWithFailClosed()
+	failClosed = failClosed || sched.PolicyFailClosed(now)
+	if failClosed {
+		for name := range activeState {
+			activeState[name] = false
+		}
+	}
+	return activeState, failClosed
 }
 
 func policySchedulerConfigHash(cfg *config.Config) ([32]byte, bool) {
