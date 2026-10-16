@@ -141,6 +141,152 @@ fn cached_flow_decision_invalidates_when_owner_rg_is_demoted() {
     ));
 }
 
+
+/// #13980: a tunnel resolution is HA-gated on BOTH the tunnel endpoint's RG
+/// (its source RETH — the GRE endpoint here sits on reth0.80/RG1) and the
+/// OUTER egress RETH that transmits the encapsulated frame. Moving the outer
+/// route to reth1.0/RG2 while this node owns RG1 but NOT RG2 must not leave
+/// the tunnel ForwardCandidate — the same outer egress plain-routed is
+/// HAInactive (control).
+#[test]
+fn tunnel_outer_egress_rg_must_be_forwarding_active_13980() {
+    use crate::{InterfaceAddressSnapshot, InterfaceSnapshot};
+    let mut snap = native_gre_snapshot(true);
+    snap.interfaces.push(InterfaceSnapshot {
+        name: "reth1.0".to_string(),
+        zone: "wan".to_string(),
+        linux_name: "ge-0-0-1".to_string(),
+        ifindex: 20,
+        parent_ifindex: 0,
+        mtu: 1500,
+        redundancy_group: 2,
+        hardware_addr: "02:bf:72:01:00:02".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "2001:db8:1::8/64".to_string(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    for r in snap.routes.iter_mut() {
+        if r.destination == "2602:ffd3:0:2::/64" {
+            r.next_hops = vec!["2001:db8:1::1@reth1.0".to_string()];
+        }
+    }
+    snap.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 20,
+        family: "inet6".to_string(),
+        ip: "2001:db8:1::1".to_string(),
+        mac: "00:11:22:33:44:66".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snap);
+    let now = monotonic_nanos() / 1_000_000_000;
+    let tunnel = resolve_tunnel_forwarding_resolution(&state, None, 1, 0);
+    assert_eq!(
+        tunnel.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "fixture: tunnel outer resolves"
+    );
+    assert_eq!(tunnel.tx_ifindex, 20, "fixture: outer TX is reth1.0/RG2");
+    assert_eq!(owner_rg_for_flow(&state, 20), 2, "fixture: outer egress is RG2");
+
+    // Control: a plain route out of reth1.0 (RG2) is HAInactive while RG2 is
+    // peer-owned.
+    let plain = lookup_forwarding_resolution(&state, "2001:db8:1::99".parse().unwrap()).resolution;
+    let rg2_inactive = BTreeMap::from([
+        (1, active_ha_runtime(now)),
+        (2, inactive_ha_runtime(now)),
+    ]);
+    assert_eq!(
+        enforce_ha_resolution_snapshot(&state, &rg2_inactive, now, plain).disposition,
+        ForwardingDisposition::HAInactive,
+        "control: plain egress on peer-owned RG2 is gated"
+    );
+    // Defect (RED pre-fix): tunnel encap transmitting on the same RG2 member
+    // stays ForwardCandidate.
+    assert_eq!(
+        enforce_ha_resolution_snapshot(&state, &rg2_inactive, now, tunnel).disposition,
+        ForwardingDisposition::HAInactive,
+        "tunnel encap on a member of peer-owned outer RG2 must be HAInactive"
+    );
+    // Both-active: the tunnel forwards normally.
+    let both_active = BTreeMap::from([
+        (1, active_ha_runtime(now)),
+        (2, active_ha_runtime(now)),
+    ]);
+    assert_eq!(
+        enforce_ha_resolution_snapshot(&state, &both_active, now, tunnel).disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "tunnel forwards when endpoint RG1 and outer RG2 are both active"
+    );
+    // Endpoint-inactive is still gated (endpoint gate must not regress).
+    let rg1_inactive = BTreeMap::from([
+        (1, inactive_ha_runtime(now)),
+        (2, active_ha_runtime(now)),
+    ]);
+    assert_eq!(
+        enforce_ha_resolution_snapshot(&state, &rg1_inactive, now, tunnel).disposition,
+        ForwardingDisposition::HAInactive,
+        "tunnel stays gated when the endpoint RG1 is peer-owned"
+    );
+    // A non-RETH outer egress has no RG ownership to gate. Preserve tunnel
+    // forwarding there while still requiring the endpoint RG to be active.
+    let mut non_reth_snap = snap.clone();
+    non_reth_snap.interfaces[2].name = "ge-0-0-1.0".to_string();
+    non_reth_snap.interfaces[2].redundancy_group = 0;
+    for route in non_reth_snap.routes.iter_mut() {
+        if route.destination == "2602:ffd3:0:2::/64" {
+            route.next_hops = vec!["2001:db8:1::1@ge-0-0-1.0".to_string()];
+        }
+    }
+    let non_reth_state = build_forwarding_state(&non_reth_snap);
+    let non_reth_tunnel =
+        resolve_tunnel_forwarding_resolution(&non_reth_state, None, 1, 0);
+    assert_eq!(
+        enforce_ha_resolution_snapshot(&non_reth_state, &rg2_inactive, now, non_reth_tunnel)
+            .disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "non-RETH outer egress has no RG ownership gate"
+    );
+}
+/// using TunnelEndpoint.destination. Its materialized resolution carries the
+/// outer next-hop; HA must check that route's RETH RG too, while using the
+/// L3 egress (12), not the VLAN parent TX (6).
+#[test]
+fn wireguard_peer_outer_egress_rg_is_gated_13980() {
+    let mut snap = wg_outer_mtu_snapshot();
+    snap.interfaces[0].redundancy_group = 2;
+    let state = build_forwarding_state(&snap);
+    let now = monotonic_nanos() / 1_000_000_000;
+    let resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 400,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 1,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+        neighbor_mac: Some([0, 0, 0, 0, 0, 1]),
+        src_mac: None,
+        tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    assert_eq!(owner_rg_for_flow(&state, 12), 2, "outer L3 egress is RG2");
+    let ha = BTreeMap::from([
+        (1, active_ha_runtime(now)),
+        (2, inactive_ha_runtime(now)),
+    ]);
+    assert_eq!(
+        enforce_ha_resolution_snapshot(&state, &ha, now, resolution).disposition,
+        ForwardingDisposition::HAInactive,
+        "WireGuard TX on the peer-owned outer RETH must be gated"
+    );
+}
 #[test]
 fn cached_flow_decision_invalidates_fabric_redirect_on_fabric_ingress_when_local_owner_active() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
