@@ -1012,6 +1012,8 @@ type ConfigSnapshot struct {
 	// survives partial snapshot copies that change only non-policy sections.
 	policySnapshotIdentity      [32]byte
 	policySnapshotIdentityValid bool
+	pmechInventoryConfig        *config.Config
+	pmechInventoryRows          []IpsecTunnelRowSnapshot
 }
 
 // AddressBookSnapshot is #1606: one row of the deduplicated address-book

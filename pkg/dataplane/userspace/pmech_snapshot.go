@@ -48,25 +48,28 @@ func pmechMainRouteSourceSelectorRequest() *nl.NetlinkRequest {
 	return request
 }
 
-func pmechMainRouteHasSourceSelector() (bool, error) {
-	request := pmechMainRouteSourceSelectorRequest()
+var pmechMainRouteSourceRequestIterFn = func(request *nl.NetlinkRequest, visit func([]byte) bool) error {
 	socket, err := nl.GetNetlinkSocketAt(netns.None(), netns.None(), unix.NETLINK_ROUTE)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer socket.Close()
 	if err := unix.SetsockoptInt(socket.GetFd(), unix.SOL_NETLINK, unix.NETLINK_GET_STRICT_CHK, 1); err != nil {
-		return false, err
+		return err
 	}
 	request.Sockets = map[int]*nl.SocketHandle{
 		unix.NETLINK_ROUTE: {Socket: socket},
 	}
+	return request.ExecuteIter(unix.NETLINK_ROUTE, unix.RTM_NEWROUTE, visit)
+}
 
+func pmechMainRouteHasSourceSelector() (bool, error) {
+	request := pmechMainRouteSourceSelectorRequest()
 	var (
 		sourceSpecific bool
 		parseErr       error
 	)
-	err = request.ExecuteIter(unix.NETLINK_ROUTE, unix.RTM_NEWROUTE, func(raw []byte) bool {
+	err := pmechMainRouteSourceRequestIterFn(request, func(raw []byte) bool {
 		table, hasSelector, err := pmechRawRouteSourceSelector(raw)
 		if err != nil {
 			parseErr = err
@@ -153,9 +156,8 @@ func stampPMechInventory(snap *ConfigSnapshot) {
 	stampPMechInventoryWithPrefetch(snap, nil)
 }
 
-// stampPMechInventoryWithPrefetch stamps snap from prefetch when that dump was
-// filtered for snap's own config and tunnel rows, and dumps the main table
-// itself otherwise.
+// stampPMechInventoryWithPrefetch stamps snap from a matching prefetch, or
+// obtains one when called outside a manager lock.
 func stampPMechInventoryWithPrefetch(snap *ConfigSnapshot, prefetch *pmechRoutePrefetch) {
 	if snap == nil {
 		return
@@ -165,6 +167,7 @@ func stampPMechInventoryWithPrefetch(snap *ConfigSnapshot, prefetch *pmechRouteP
 			Generation:    snap.Generation,
 			FIBGeneration: snap.FIBGeneration,
 		}
+		markPMechInventorySource(snap)
 		return
 	}
 	if !prefetch.matches(snap) {
@@ -172,6 +175,73 @@ func stampPMechInventoryWithPrefetch(snap *ConfigSnapshot, prefetch *pmechRouteP
 	}
 	selectorsBySTN, selectorErrors := pmechSelectorsBySTN(snap.Config)
 	prefetch.collector.stamp(snap, selectorsBySTN, selectorErrors, prefetch.err, prefetch.sourceSpecific)
+	markPMechInventorySource(snap)
+}
+
+func markPMechInventorySource(snap *ConfigSnapshot) {
+	snap.pmechInventoryConfig = snap.Config
+	snap.pmechInventoryRows = append([]IpsecTunnelRowSnapshot(nil), snap.IpsecTunnelRows...)
+}
+
+func pmechInventoryMatchesCurrentSource(snap *ConfigSnapshot) bool {
+	if snap == nil || snap.PMechInventory == nil || snap.pmechInventoryConfig != snap.Config ||
+		snap.PMechInventory.FIBGeneration != snap.FIBGeneration ||
+		len(snap.pmechInventoryRows) != len(snap.IpsecTunnelRows) {
+		return false
+	}
+	for i, row := range snap.IpsecTunnelRows {
+		source := snap.pmechInventoryRows[i]
+		if row.STN != source.STN || row.IfID != source.IfID || row.LogicalIfindex != source.LogicalIfindex {
+			return false
+		}
+	}
+	return true
+}
+
+// refreshPMechInventoryLocked reuses the already collected FIB snapshot when
+// its config, tunnel identities, and FIB generation are unchanged. A locked
+// refresh that cannot prove reuse fails closed instead of doing netlink I/O
+// while Manager.mu is held.
+func refreshPMechInventoryLocked(snap *ConfigSnapshot) {
+	if snap == nil {
+		return
+	}
+	if len(snap.IpsecTunnelRows) == 0 {
+		stampPMechInventoryWithPrefetch(snap, nil)
+		return
+	}
+	if !pmechInventoryMatchesCurrentSource(snap) {
+		stampPMechInventoryWithoutRouteDump(snap,
+			fmt.Errorf("P-MECH route inventory cannot be refreshed under manager lock"))
+		return
+	}
+	inventoryCopy := *snap.PMechInventory
+	inventoryCopy.TunnelRows = append([]IpsecPMechTunnelRowSnapshot(nil), inventoryCopy.TunnelRows...)
+	snap.PMechInventory = &inventoryCopy
+	inventory := snap.PMechInventory
+	inventory.Generation = snap.Generation
+	inventory.PolicyIdentity = pmechPolicyIdentity(snap)
+	for i := range inventory.TunnelRows {
+		inventory.TunnelRows[i].InventoryGeneration = snap.Generation
+		inventory.TunnelRows[i].FIBGeneration = snap.FIBGeneration
+		if inventory.PolicyIdentity == "" {
+			inventory.TunnelRows[i].InventoryValid = false
+			inventory.TunnelRows[i].InventoryReason = "POLICY_IDENTITY_UNAVAILABLE"
+		}
+	}
+}
+
+func stampPMechInventoryWithoutRouteDump(snap *ConfigSnapshot, routeErr error) {
+	selectorsBySTN, selectorErrors := pmechSelectorsBySTN(snap.Config)
+	collector := newPMechRouteCollector(snap.IpsecTunnelRows, selectorsBySTN)
+	collector.stamp(snap, selectorsBySTN, selectorErrors, routeErr, false)
+	for i := range snap.PMechInventory.TunnelRows {
+		row := &snap.PMechInventory.TunnelRows[i]
+		if row.InventoryReason == "MAIN_ROUTE_DUMP_FAILED" {
+			row.InventoryReason = "MAIN_ROUTE_INVENTORY_STALE"
+		}
+	}
+	markPMechInventorySource(snap)
 }
 
 // pmechRoutePrefetch is one streamed main-table dump, filtered for a config
@@ -296,6 +366,7 @@ func stampPMechInventoryFromRoutesAndSelectors(snap *ConfigSnapshot, routes []ne
 		collector.add(route)
 	}
 	collector.stamp(snap, selectorsBySTN, selectorErrors, routeErr, sourceSpecificRoutes)
+	markPMechInventorySource(snap)
 }
 
 // pmechKeyedRoutes sorts retained rows by their precomputed canonical key.
