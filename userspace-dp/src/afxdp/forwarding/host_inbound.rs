@@ -547,9 +547,10 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         }
         // #3225/#10859: IGMP is IPv4 group membership; the IPv6 equivalent is
         // MLD over ICMPv6 (types 130-132 and 143), none of which are in the
-        // always-accepted ND set (types 133-137). Queries target multicast
-        // destinations, so XDP passes them to the kernel and daddr-scoped
-        // INPUT denies miss; Reports egress through OUTPUT. Neither is a global
+        // always-accepted ND set (types 133-136; Redirect 137 is excluded).
+        // Queries target multicast destinations, so XDP passes them to the
+        // kernel and daddr-scoped INPUT denies miss. Reports egress through
+        // OUTPUT. Neither is a global
         // host-inbound exception, so igmp stays IPv4-only here.
         "igmp" => {
             hi.ip_protocols_v4.insert(2);
@@ -617,7 +618,7 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         // #3201/#3240: router-discovery admits ICMPv4 router-advertisement (9)
         // and router-solicitation (10) ONLY — matching the nft chain
         // (`hostInboundProtocolMatches`: `icmp type { 9, 10 }`). On v6, RS/RA
-        // are part of the always-accepted ND set (types 133-137) handled
+        // are part of the always-accepted ND set (types 133-136) handled
         // globally by `is_icmp_host_inbound_global_accept`, so router-discovery
         // contributes nothing per-zone on v6 — exactly as the nft chain returns
         // nil for v6 router-discovery and relies on the global ND accept.
@@ -635,9 +636,8 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
 /// UNCONDITIONALLY — regardless of which services/protocols the ingress zone
 /// lists — so the userspace LocalDelivery classifier matches the kernel
 /// host-inbound chain's GLOBAL accepts at the top of the chain
-/// (`pkg/daemon/daemon_nft.go` `buildHostInboundFilterPayload`):
 /// `icmp type { destination-unreachable, time-exceeded, parameter-problem }`
-/// and `icmpv6 type { 1, 2, 3, 4, 133, 134, 135, 136, 137 }`.
+/// and `icmpv6 type { 1, 2, 3, 4, 133, 134, 135, 136 }`.
 ///
 /// Two categories ride this global accept:
 ///   1. ERROR / PMTUD control messages (#3171) — destination-unreachable,
@@ -646,11 +646,9 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
 ///      firewall-local address (e.g. a DNAT-to-self embedded ICMP error landing
 ///      on the XSK) even on a configured ping-less zone.
 ///   2. IPv6 Neighbor Discovery (#3201/#3240) — RS (133), RA (134), NS (135),
-///      NA (136), Redirect (137). ND is core L3 operation, accepted globally by
-///      the nft chain (never a per-service exposure). Admitting it here is what
-///      lets the per-zone `router-discovery` token carry NOTHING on v6 while
-///      still matching nft — i.e. v6 RS/RA reach the host via this global ND
-///      accept on any host-inbound-configured zone, exactly as nft does.
+///      NA (136). These core link operations are globally accepted by the nft
+///      chain. Redirect (137) is intentionally excluded because it can install
+///      route exceptions affecting firewall-originated traffic.
 ///
 /// The ICMPv4 set is deliberately NARROWER than `icmp::is_icmp_error` (the
 /// embedded-NAT reversal set, which also includes v4 Source Quench (4) and
@@ -683,7 +681,7 @@ fn is_icmp_host_inbound_global_accept(protocol: u8, is_v6: bool, icmp_type: u8) 
     // Switching on `protocol` by itself is family-blind, and the two arms mean
     // different things on different families. An IPv4 packet whose protocol
     // byte is 58 took the ICMPv6 arm and was globally admitted for type 1/2/3/4
-    // or 133..137 — bypassing zone admission entirely — even though 58 is not
+    // or 133..136 — bypassing zone admission entirely — even though 58 is not
     // ICMPv6 on IPv4. Symmetrically an IPv6 packet with next-header 1 took the
     // ICMPv4 arm. Both are fail-OPEN: this predicate returns early, BEFORE the
     // zone lookup, so a match here admits a packet the zone's
@@ -703,10 +701,9 @@ fn is_icmp_host_inbound_global_accept(protocol: u8, is_v6: bool, icmp_type: u8) 
         // "fragmentation needed" as code 4), time-exceeded (11),
         // parameter-problem (12).
         (1, false) => matches!(icmp_type, 3 | 11 | 12),
-        // ICMPv6 on IPv6 errors: destination-unreachable (1), packet-too-big
-        // (2, PMTUD), time-exceeded (3), parameter-problem (4); PLUS the ND
-        // set: RS (133), RA (134), NS (135), NA (136), Redirect (137).
-        (58, true) => matches!(icmp_type, 1 | 2 | 3 | 4 | 133 | 134 | 135 | 136 | 137),
+        // IPv6 errors 1-4 and Neighbor Discovery 133-136; Redirect 137 is
+        // deliberately excluded: accepting it can change firewall routing.
+        (58, true) => matches!(icmp_type, 1 | 2 | 3 | 4 | 133 | 134 | 135 | 136),
         _ => false,
     }
 }
