@@ -201,7 +201,7 @@ struct HelperMutationRecord {
 #[derive(Default)]
 pub(crate) struct HelperMutationStore {
     records: std::collections::HashMap<(u64, String), HelperMutationRecord>,
-    in_flight: std::collections::HashSet<(u64, String)>,
+    in_flight: std::collections::HashMap<(u64, String), String>,
     seq: u64,
 }
 
@@ -239,7 +239,7 @@ impl HelperMutationLease {
             let victim = store
                 .records
                 .iter()
-                .filter(|(key, _)| !store.in_flight.contains(*key))
+                .filter(|(key, _)| !store.in_flight.contains_key(*key))
                 .min_by_key(|((epoch, _), record)| (*epoch, record.last_used))
                 .map(|(key, _)| key.clone());
             if let Some(victim) = victim {
@@ -324,6 +324,13 @@ impl SessionDomain {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (epoch, operation_id.to_string());
+        if let Some(in_flight_mutation_id) = store.in_flight.get(&key) {
+            return if in_flight_mutation_id == mutation_id {
+                Err("operation-in-flight")
+            } else {
+                Err("operation-id-reused")
+            };
+        }
         let replay = store
             .records
             .get(&key)
@@ -339,7 +346,7 @@ impl SessionDomain {
             }
             return Ok(HelperMutationBegin::Replay(outcome));
         }
-        store.in_flight.insert(key.clone());
+        store.in_flight.insert(key.clone(), mutation_id.to_string());
         Ok(HelperMutationBegin::Proceed(HelperMutationLease {
             mutations: Arc::clone(&self.helper_mutations),
             key,
@@ -1942,6 +1949,91 @@ mod session_domain_tests_7209 {
             !domain.accepts_helper_epoch(8),
             "zero bypass must not reset the latch"
         );
+    }
+
+    /// #13708 (D16-03): a key held by an uncompleted lease is in flight.
+    /// A concurrent begin for the same key must be refused — with
+    /// "operation-id-reused" when the mutation id differs (the reuse
+    /// guard must not be bypassable by racing the first execution)
+    /// and "operation-in-flight" for the exact same triple — never
+    /// handed a second lease that executes the mutation twice.
+    ///
+    /// FAIL-ON-REVERT: drop the `in_flight` check in
+    /// `helper_mutation_begin` and both refusals below become a second
+    /// `Proceed` lease.
+    #[test]
+    fn helper_mutation_begin_refuses_concurrent_duplicate_13708() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        let first = match domain.helper_mutation_begin(7, "op-1", "mut-A") {
+            Ok(super::HelperMutationBegin::Proceed(lease)) => lease,
+            Ok(super::HelperMutationBegin::Replay(_)) => {
+                panic!("a fresh key must proceed, not replay")
+            }
+            Err(reason) => panic!("a fresh key must proceed, got Err({reason})"),
+        };
+        match domain.helper_mutation_begin(7, "op-1", "mut-A") {
+            Err("operation-in-flight") => {}
+            Err(reason) => {
+                panic!("same triple in flight must be operation-in-flight, got Err({reason})")
+            }
+            Ok(super::HelperMutationBegin::Replay(_)) => {
+                panic!("an in-flight op has no outcome to replay yet")
+            }
+            Ok(super::HelperMutationBegin::Proceed(_)) => {
+                panic!("a concurrent duplicate must not receive a second lease")
+            }
+        }
+        match domain.helper_mutation_begin(7, "op-1", "mut-B") {
+            Err("operation-id-reused") => {}
+            Err(reason) => {
+                panic!("different mutation id in flight must be operation-id-reused, got Err({reason})")
+            }
+            Ok(_) => {
+                panic!("a concurrent different-mutation begin must not proceed or replay")
+            }
+        }
+        // A different operation id is a distinct mutation and proceeds.
+        match domain.helper_mutation_begin(7, "op-2", "mut-A") {
+            Ok(super::HelperMutationBegin::Proceed(_lease)) => {}
+            Ok(super::HelperMutationBegin::Replay(_)) => {
+                panic!("a distinct operation id must proceed, not replay")
+            }
+            Err(reason) => panic!("a distinct operation id must proceed, got Err({reason})"),
+        }
+        // Dropping the lease uncompleted releases the mark: the failed
+        // op stays retryable under the same ids.
+        drop(first);
+        let retry = match domain.helper_mutation_begin(7, "op-1", "mut-A") {
+            Ok(super::HelperMutationBegin::Proceed(lease)) => lease,
+            Ok(super::HelperMutationBegin::Replay(_)) => {
+                panic!("an uncompleted op recorded no outcome to replay")
+            }
+            Err(reason) => {
+                panic!("a dropped lease must release its key for retry, got Err({reason})")
+            }
+        };
+        // Completing records the outcome: the exact triple replays and
+        // a different mutation id under the same operation id is still
+        // refused, exactly as before this fix.
+        retry.complete(super::HelperMutationOutcome {
+            ok: true,
+            ..Default::default()
+        });
+        match domain.helper_mutation_begin(7, "op-1", "mut-A") {
+            Ok(super::HelperMutationBegin::Replay(outcome)) => assert!(outcome.ok),
+            Ok(super::HelperMutationBegin::Proceed(_)) => {
+                panic!("a completed triple must replay, not re-execute")
+            }
+            Err(reason) => panic!("a completed triple must replay, got Err({reason})"),
+        }
+        match domain.helper_mutation_begin(7, "op-1", "mut-B") {
+            Err("operation-id-reused") => {}
+            Err(reason) => {
+                panic!("completed op with different mutation id must be operation-id-reused, got Err({reason})")
+            }
+            Ok(_) => panic!("a completed op must not re-execute under a new mutation id"),
+        }
     }
 }
 
