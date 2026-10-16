@@ -3084,6 +3084,16 @@ impl SessionTable {
             .unwrap_or(0)
     }
 
+    /// #13965: the live PPTP call-id pair for this key's handle.
+    pub(crate) fn pptp_call_ids_wire_for(&self, key: &SessionKey) -> u64 {
+        match key.discriminator {
+            crate::session::TunnelDiscriminator::Pptp(handle) => {
+                self.pptp().wire_call_ids_for_handle(handle)
+            }
+            _ => crate::session::pptp::PPTP_CALL_IDS_ABSENT,
+        }
+    }
+
     /// #8125: the session's OWN inactivity window, in whole seconds, for the
     /// `Timeout:` column of `show security flow session`.
     ///
@@ -3346,6 +3356,7 @@ impl SessionTable {
         // The metadata clone bumps the bound policy-counter Arc (#5445). That is
         // acceptable here only because this runs on a class transition, never
         // on the per-packet path.
+        let pptp_call_ids = self.pptp_call_ids_wire_for(&forward_key);
         let delta = SessionDelta {
             provenance: crate::session::ExportProvenance::Incremental,
             kind: SessionDeltaKind::Update,
@@ -3365,6 +3376,7 @@ impl SessionTable {
             tcp_close_class: forward.tcp_close_class_wire(),
             purge_retirement: false,
             tcp_handshake_state: forward.tcp_handshake_state_wire(forward_key.protocol),
+            pptp_call_ids,
             source_nat_static: forward.source_nat_static,
         };
         self.push_delta(delta);
@@ -3845,6 +3857,7 @@ impl SessionTable {
             // handshake states rather than resetting the peer to legacy defaults.
             let tcp_close_class = self.close_class_wire_for(key);
             let tcp_handshake_state = self.handshake_state_wire_for(key);
+            let pptp_call_ids = self.pptp_call_ids_wire_for(key);
             let policy_generation = self.entry_by_key(key).map(|e| e.policy_generation).unwrap_or(0);
             let source_nat_static = self.source_nat_static_for(key);
             self.push_delta(SessionDelta {
@@ -3866,6 +3879,7 @@ impl SessionTable {
                 observed_tcp_flags,
                 session_id,
                 bulk_resync: false,
+                pptp_call_ids,
                 source_nat_static,
             });
         }
@@ -5098,3 +5112,8 @@ mod explicit_close_harvest_13973_tests;
 #[cfg(test)]
 #[path = "closing_pair_reserved_slots_14126_tests.rs"]
 mod closing_pair_reserved_slots_14126_tests;
+
+// #13965: live PPTP open and bulk export carry the call-id pair.
+#[cfg(test)]
+#[path = "pptp_ha_sync_13965_tests.rs"]
+mod pptp_ha_sync_13965_tests;

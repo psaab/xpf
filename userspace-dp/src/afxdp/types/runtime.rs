@@ -732,6 +732,7 @@ impl PolicyReadCollector {
 #[derive(Clone, Debug)]
 pub(in crate::afxdp) enum WorkerCommand {
     UpsertSynced(SyncedSessionEntry),
+    InstallPptpAssociation(crate::session::pptp::PptpCall),
     UpsertLocal(SyncedSessionEntry),
     DeleteSynced(SessionKey),
     /// Locally initiated clear/delete; the worker harvests a local Close.

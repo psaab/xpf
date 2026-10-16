@@ -37,6 +37,7 @@ impl EventFrame {
             tcp_close_class,
             0,
             None,
+            0,
         )
     }
 
@@ -52,6 +53,7 @@ impl EventFrame {
         tcp_close_class: u8,
         tcp_handshake_state: u8,
         source_nat_static: Option<bool>,
+        pptp_call_ids: u64,
     ) -> Self {
         Self::encode_session_record(
             MSG_SESSION_OPEN,
@@ -65,6 +67,7 @@ impl EventFrame {
             tcp_close_class,
             tcp_handshake_state,
             source_nat_static,
+            pptp_call_ids,
         )
     }
 
@@ -91,6 +94,7 @@ impl EventFrame {
             tcp_close_class,
             0,
             None,
+            0,
         )
     }
 
@@ -106,6 +110,7 @@ impl EventFrame {
         tcp_close_class: u8,
         tcp_handshake_state: u8,
         source_nat_static: Option<bool>,
+        pptp_call_ids: u64,
     ) -> Self {
         Self::encode_session_record(
             MSG_SESSION_UPDATE,
@@ -119,6 +124,7 @@ impl EventFrame {
             tcp_close_class,
             tcp_handshake_state,
             source_nat_static,
+            pptp_call_ids,
         )
     }
 
@@ -136,6 +142,7 @@ impl EventFrame {
         tcp_close_class: u8,
         tcp_handshake_state: u8,
         source_nat_static: Option<bool>,
+        pptp_call_ids: u64,
     ) -> Self {
         let mut buf = [0u8; EVENT_FRAME_CAPACITY];
         let mut pos = FRAME_HEADER_SIZE; // skip header, fill later
@@ -426,6 +433,10 @@ impl EventFrame {
         // 1 dynamic, 2 static. The absent-byte legacy default is unknown.
         buf[pos] = source_nat_provenance_to_wire(source_nat_static);
         pos += 1;
+        // #13965: append the PPTP call-id pair used to derive the discriminator.
+        // Zero means absent, preserving fail-closed behavior on old producers.
+        buf[pos..pos + 8].copy_from_slice(&pptp_call_ids.to_le_bytes());
+        pos += 8;
 
         // Write header
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;

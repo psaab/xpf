@@ -127,6 +127,7 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 		// A keyed-GRE synced session is retracted by its idle timeout rather
 		// than by an explicit delete.
 		req.TunnelDiscriminator = val.TunnelDiscriminator
+		req.PptpCallIDs = val.PptpCallIDs
 		// #9412: forward the close class so the standby imports the close state.
 		req.TCPCloseClass = val.TCPCloseClass
 		// #10888: forward handshake state separately from the close class.
@@ -246,6 +247,7 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 		}
 		// #7188: carry the tunnel session-identity discriminator (see V4).
 		req.TunnelDiscriminator = val.TunnelDiscriminator
+		req.PptpCallIDs = val.PptpCallIDs
 		// #9412: forward the close class so the standby imports the close state.
 		req.TCPCloseClass = val.TCPCloseClass
 		// #10888: v6 handshake state is independent from the close class.

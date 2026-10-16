@@ -818,6 +818,9 @@ pub(crate) struct SessionDelta {
     /// producer (`InstallTablePurge` teardown, the only setter) decides, and
     /// no drain call site can get it wrong because none chooses.
     pub(crate) purge_retirement: bool,
+    /// #13965: the PPTP call-id pair for a `Pptp(handle)` key, retrieved from
+    /// the live association table at delta construction; ABSENT (0) otherwise.
+    pub(crate) pptp_call_ids: u64,
 }
 
 /// A session that went away with its close identity harvested.

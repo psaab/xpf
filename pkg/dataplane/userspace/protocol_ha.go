@@ -220,6 +220,9 @@ type SessionSyncRequest struct {
 	// WITHHOLDS a protocol-47 session rather than importing it aliased (#7188
 	// decision 2); every other protocol imports unchanged.
 	TunnelDiscriminator uint64 `json:"tunnel_discriminator"`
+	// #13965: the packed canonical call-id pair used to reconstruct the PPTP association.
+	// Zero means the sender did not carry the pair; the helper refuses PPTP imports then.
+	PptpCallIDs uint64 `json:"pptp_call_ids,omitempty"`
 	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN,
 	// carried on both delta transports so a peer-imported session is keyed in
 	// the domain the flow ACTUALLY arrived in.
@@ -440,6 +443,8 @@ type SessionDeltaInfo struct {
 	// None class), which makes the peer helper withhold a protocol-47 session
 	// instead of aliasing it (#7188 decision 2, rolling-upgrade safe).
 	TunnelDiscriminator uint64 `json:"tunnel_discriminator,omitempty"`
+	// #13965: PPTP call-id pair, opaque to Go and forwarded to SessionSyncRequest.
+	PptpCallIDs uint64 `json:"pptp_call_ids,omitempty"`
 	// RoutingDomain is the #7239 (#7160/#2387) session-key ROUTING DOMAIN, on
 	// both delta transports (the binary open/close frames and the JSON
 	// RPC-fallback delta). Stamped at INSTALL from the interface the flow

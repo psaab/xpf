@@ -359,6 +359,7 @@ pub(in crate::afxdp) fn session_delta_info(
         }
         .to_string(),
         origin: delta.origin.as_str().to_string(),
+        pptp_call_ids: delta.pptp_call_ids,
         egress_ifindex: delta.decision.resolution.egress_ifindex,
         tx_ifindex: delta.decision.resolution.tx_ifindex,
         tunnel_endpoint_id: delta.decision.resolution.tunnel_endpoint_id,
@@ -515,6 +516,7 @@ pub(in crate::afxdp) fn export_close_direct(
         bulk_resync: true,
         tcp_close_class: tombstone.close_class,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         purge_retirement: false,
         source_nat_static: None,
     };

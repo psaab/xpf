@@ -859,20 +859,29 @@ impl crate::afxdp::ha::SessionDomain {
     }
 
     pub fn upsert_synced_session(&self, entry: SyncedSessionEntry) -> SyncedImportOutcome {
-        self.upsert_synced_session_with_policy(entry, false)
+        self.upsert_synced_session_with_pptp(entry, None)
+    }
+
+    pub(crate) fn upsert_synced_session_with_pptp(
+        &self,
+        entry: SyncedSessionEntry,
+        pptp_call: Option<crate::session::pptp::PptpCall>,
+    ) -> SyncedImportOutcome {
+        self.upsert_synced_session_with_policy(entry, false, pptp_call)
     }
 
     pub(crate) fn upsert_synced_session_mirror(
         &self,
         entry: SyncedSessionEntry,
     ) -> SyncedImportOutcome {
-        self.upsert_synced_session_with_policy(entry, true)
+        self.upsert_synced_session_with_policy(entry, true, None)
     }
 
     fn upsert_synced_session_with_policy(
         &self,
         mut entry: SyncedSessionEntry,
         strict_mirror: bool,
+        pptp_call: Option<crate::session::pptp::PptpCall>,
     ) -> SyncedImportOutcome {
         // #8015: refuse a STANDALONE reverse. This runs before every other
         // decision below because none of them apply to an entry that must not
@@ -1430,6 +1439,14 @@ impl crate::afxdp::ha::SessionDomain {
             {
                 reverse_position =
                     Some(worker_queue::session_import_repair_position(worker_id, pending.len()));
+            }
+            if let Some(call) = pptp_call {
+                // Queue after the session replica so the worker first has the
+                // discriminator-bearing session that this call resolves.
+                worker_queue::push_bounded(
+                    &mut pending,
+                    WorkerCommand::InstallPptpAssociation(call),
+                );
             }
             // #11718: publish positional repair debt before releasing `pending`;
             // otherwise repeated drains can cross the refused-import boundary

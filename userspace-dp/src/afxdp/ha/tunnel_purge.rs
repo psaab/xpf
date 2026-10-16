@@ -82,41 +82,33 @@ impl crate::afxdp::Coordinator {
                 keys.push(entry.key.clone());
                 if !entry.metadata.is_reverse {
                     reservations.push((entry.key.clone(), entry.decision.nat));
-                    deltas.push(crate::session::SessionDelta {
-                        provenance: crate::session::ExportProvenance::Incremental,
-                        kind: crate::session::SessionDeltaKind::Close,
-                        key: entry.key.clone(),
-                        decision: entry.decision,
-                        metadata: entry.metadata.clone(),
-                        source_nat_static: None,
-                        policy_generation: 0,
-                        origin: entry.origin,
-                        fabric_redirect_sync: false,
-                        // #2465: the shared SyncedSessionEntry carries no
-                        // creation instant, and this purge path uses
-                        // push_delta_lossless (NOT emit_session_close_rt_flow),
-                        // so these are 0/unknown.
-                        created_ns: 0,
-                        last_seen_ns: 0,
-                        // #2501: the shared SyncedSessionEntry carries no
-                        // per-direction counters, and this purge uses
-                        // push_delta_lossless (not the RT_FLOW exporter), so
-                        // volume is 0/unknown here.
-                        counters: crate::session::SessionCounters::default(),
-                        // #2749: shared purge path; no observed ToS / TCP
-                        // flags in hand (and not routed through the RT_FLOW
-                        // exporter).
-                        observed_tos: 0,
-                        observed_tcp_flags: 0,
-                        // #4915: HA purge close delta — feeds push_purge_close_
-                        // deltas (session-sync), NOT the RT_FLOW exporter, and the
-                        // SyncedSessionEntry carries no session id. 0 (unknown).
-                        session_id: 0,
-                        bulk_resync: false,
-                        tcp_close_class: 0,
-                        tcp_handshake_state: 0,
-                        purge_retirement: false,
-                    });
+                    deltas.push(crate::session::SessionDelta { provenance: crate::session::ExportProvenance::Incremental, bulk_resync: false, session_id: entry.session_id, kind: crate::session::SessionDeltaKind::Close, key: entry.key.clone(),
+                    decision: entry.decision,
+                    metadata: entry.metadata.clone(),
+                    source_nat_static: None,
+                    policy_generation: 0,
+                    origin: entry.origin,
+                    fabric_redirect_sync: false,
+                    // #2465: the shared SyncedSessionEntry carries no
+                    // creation instant, and this purge path uses
+                    // push_delta_lossless (NOT emit_session_close_rt_flow),
+                    // so these are 0/unknown.
+                    created_ns: 0,
+                    last_seen_ns: 0,
+                    // #2501: the shared SyncedSessionEntry carries no
+                    // per-direction counters, and this purge uses
+                    // push_delta_lossless (not the RT_FLOW exporter), so
+                    // volume is 0/unknown here.
+                    counters: crate::session::SessionCounters::default(),
+                    // #2749: shared purge path; no observed ToS / TCP
+                    // flags in hand (and not routed through the RT_FLOW
+                    // exporter).
+                    observed_tos: 0,
+                    observed_tcp_flags: 0,
+                    tcp_close_class: entry.tcp_close_class,
+                    tcp_handshake_state: entry.tcp_handshake_state,
+                    pptp_call_ids: 0,
+                    purge_retirement: false, });
                 }
             }
         }
