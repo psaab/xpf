@@ -34,14 +34,14 @@ func TestBumpFIBGenerationPublishesRouteOnlyGenerationToUserspaceCtrl13933(t *te
 		if req.Type != "bump_fib_generation" {
 			return nil
 		}
-		// Rust snapshots response status before updating last_fib_generation.
+		// The helper's response reflects the accepted bump's generation.
 		*status = ProcessStatus{
 			Enabled:                true,
 			Workers:                1,
 			Bindings:               readyHelperStatus().Bindings,
 			NeighborGeneration:     1,
 			LastSnapshotGeneration: req.Snapshot.Generation,
-			LastFIBGeneration:      0,
+			LastFIBGeneration:      req.Snapshot.FIBGeneration,
 		}
 		return nil
 	}
@@ -53,7 +53,7 @@ func TestBumpFIBGenerationPublishesRouteOnlyGenerationToUserspaceCtrl13933(t *te
 		t.Fatal("successful route-only bump wrote nothing to userspace_ctrl")
 	}
 	if ctrl.stored.FIBGeneration != m.lastSnapshot.FIBGeneration {
-		t.Fatalf("userspace_ctrl FIBGeneration = %d after route-only bump, want manager-confirmed %d (helper response reports old 0); shim stamps redirected packets with ctrl.fib_generation, so stale ctrl drops them as FibGenerationMismatch", ctrl.stored.FIBGeneration, m.lastSnapshot.FIBGeneration)
+		t.Fatalf("userspace_ctrl FIBGeneration = %d after route-only bump, want confirmed helper generation %d; the shim stamps redirected packets with ctrl.fib_generation, so a missing ctrl publication leaves its packet stamp stale and causes FibGenerationMismatch", ctrl.stored.FIBGeneration, m.lastSnapshot.FIBGeneration)
 	}
 }
 
