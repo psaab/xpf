@@ -3,6 +3,8 @@ package userspace
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/vishvananda/netlink"
 )
 
 func TestDegradedPathReasonNamesCoverRetainedShimActions(t *testing.T) {
@@ -170,8 +173,7 @@ func TestApplyHelperStatusDisablesLiveCtrlOnPublicationFailure(t *testing.T) {
 		t.Fatal("ctrlWasEnabled = true after fail-closed publication failure, want false")
 	}
 }
-
-func TestSyncLocalAddressMapsAddsBeforeRemovingStale(t *testing.T) {
+func TestSyncLocalAddressMapsDeletesStaleBeforeAddingReplacement13724(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("RemoveMemlock: %v", err)
 	}
@@ -188,96 +190,156 @@ func TestSyncLocalAddressMapsAddsBeforeRemovingStale(t *testing.T) {
 	t.Cleanup(func() { localV4Map.Close() })
 	injectShimMap(t, m.bpfShim, "userspace_local_v4", localV4Map)
 	injectShimMapSpec(t, m.bpfShim, "userspace_local_v6", &ebpf.MapSpec{
-		Type:       ebpf.Hash,
-		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
-		ValueSize:  1,
-		MaxEntries: 16,
+		Type: ebpf.Hash, KeySize: uint32(unsafe.Sizeof(userspaceLocalV6Key{})), ValueSize: 1, MaxEntries: 16,
 	})
+	m.addrListForLocalSyncHook = func(_ netlink.Link, _ int) ([]netlink.Addr, error) { return nil, nil }
 
 	oldLocal := binary.BigEndian.Uint32([]byte{192, 0, 2, 1})
 	newLocal := binary.BigEndian.Uint32([]byte{198, 51, 100, 1})
 	if err := localV4Map.Update(oldLocal, uint8(1), ebpf.UpdateAny); err != nil {
 		t.Fatalf("seed userspace_local_v4: %v", err)
 	}
-
-	err = m.syncLocalAddressMapsLocked(&ConfigSnapshot{
-		Interfaces: []InterfaceSnapshot{{
-			Name: "reth0.0",
-			Addresses: []InterfaceAddressSnapshot{{
-				Family:  "inet",
-				Address: "198.51.100.1/24",
-			}},
-		}},
-	})
-	if err == nil {
-		t.Fatal("syncLocalAddressMapsLocked succeeded despite full map, want add-before-remove failure")
+	snapshot := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{{
+		Name: "reth0.0", Addresses: []InterfaceAddressSnapshot{{Family: "inet", Address: "198.51.100.1/24"}},
+	}}}
+	if err := m.syncLocalAddressMapsLocked(snapshot); err != nil {
+		t.Fatalf("syncLocalAddressMapsLocked with stale full map: %v", err)
 	}
-
 	var got uint8
-	if err := localV4Map.Lookup(oldLocal, &got); err != nil {
-		t.Fatalf("old local address was removed before replacement published: %v", err)
+	if err := localV4Map.Lookup(newLocal, &got); err != nil {
+		t.Fatalf("new local address missing after replacement: %v", err)
 	}
-	if err := localV4Map.Lookup(newLocal, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
-		t.Fatalf("new local address lookup err = %v, want ErrKeyNotExist after failed add", err)
+	if err := localV4Map.Lookup(oldLocal, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("old local address lookup err = %v, want ErrKeyNotExist", err)
 	}
 }
 
-func TestSyncInterfaceNATAddressMapsAddsBeforeRemovingStale(t *testing.T) {
+func TestSyncInterfaceNATAddressMapsDeletesStaleBeforeAddingReplacement13724(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("RemoveMemlock: %v", err)
 	}
 	m := New()
-	natV4Map, err := ebpf.NewMap(&ebpf.MapSpec{
-		Type:       ebpf.Hash,
-		KeySize:    4,
-		ValueSize:  1,
-		MaxEntries: 1,
-	})
+	natV4Map, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Hash, KeySize: 4, ValueSize: 1, MaxEntries: 1})
 	if err != nil {
 		t.Fatalf("new userspace_interface_nat_v4 map: %v", err)
 	}
 	t.Cleanup(func() { natV4Map.Close() })
 	injectShimMap(t, m.bpfShim, "userspace_interface_nat_v4", natV4Map)
 	injectShimMapSpec(t, m.bpfShim, "userspace_interface_nat_v6", &ebpf.MapSpec{
-		Type:       ebpf.Hash,
-		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
-		ValueSize:  1,
-		MaxEntries: 16,
+		Type: ebpf.Hash, KeySize: uint32(unsafe.Sizeof(userspaceLocalV6Key{})), ValueSize: 1, MaxEntries: 16,
 	})
-
 	oldNAT := binary.BigEndian.Uint32([]byte{203, 0, 113, 1})
-	newNAT := binary.BigEndian.Uint32([]byte{198, 51, 100, 1})
 	if err := natV4Map.Update(oldNAT, uint8(1), ebpf.UpdateAny); err != nil {
 		t.Fatalf("seed userspace_interface_nat_v4: %v", err)
 	}
-
-	err = m.syncInterfaceNATAddressMapsLocked(&ConfigSnapshot{
-		Interfaces: []InterfaceSnapshot{{
-			Name:       "reth1.0",
-			Zone:       "untrust",
-			EgressZone: "untrust",
-			Ifindex:    5,
-			Addresses: []InterfaceAddressSnapshot{{
-				Family:  "inet",
-				Address: "198.51.100.1/24",
-			}},
-		}},
-		SourceNAT: []SourceNATRuleSnapshot{{
-			Name:          "snat-out",
-			ToZone:        "untrust",
-			InterfaceMode: true,
-		}},
-	})
-	if err == nil {
-		t.Fatal("syncInterfaceNATAddressMapsLocked succeeded despite full map, want add-before-remove failure")
+	snapshot := &ConfigSnapshot{
+		Interfaces: []InterfaceSnapshot{{Name: "reth1.0", Zone: "untrust", EgressZone: "untrust", Ifindex: 5,
+			Addresses: []InterfaceAddressSnapshot{{Family: "inet", Address: "198.51.100.1/24"}}}},
+		SourceNAT: []SourceNATRuleSnapshot{{Name: "snat-out", ToZone: "untrust", InterfaceMode: true}},
 	}
-
+	if err := m.syncInterfaceNATAddressMapsLocked(snapshot); err != nil {
+		t.Fatalf("syncInterfaceNATAddressMapsLocked with stale full map: %v", err)
+	}
+	newNAT := binary.BigEndian.Uint32([]byte{198, 51, 100, 1})
 	var got uint8
-	if err := natV4Map.Lookup(oldNAT, &got); err != nil {
-		t.Fatalf("old NAT address was removed before replacement published: %v", err)
+	if err := natV4Map.Lookup(newNAT, &got); err != nil {
+		t.Fatalf("new NAT address missing after replacement: %v", err)
 	}
-	if err := natV4Map.Lookup(newNAT, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
-		t.Fatalf("new NAT address lookup err = %v, want ErrKeyNotExist after failed add", err)
+	if err := natV4Map.Lookup(oldNAT, &got); !errors.Is(err, ebpf.ErrKeyNotExist) {
+		t.Fatalf("old NAT address lookup err = %v, want ErrKeyNotExist", err)
+	}
+}
+
+func TestBuildDesiredLocalAddressSetsExcludesKernelNATAddresses13724(t *testing.T) {
+	m := New()
+	ipv4 := net.ParseIP("198.51.100.8").To4()
+	ipv6 := net.ParseIP("2001:db8::8").To16()
+	m.addrListForLocalSyncHook = func(_ netlink.Link, family int) ([]netlink.Addr, error) {
+		if family == netlink.FAMILY_V4 {
+			return []netlink.Addr{{IPNet: &net.IPNet{IP: ipv4, Mask: net.CIDRMask(32, 32)}}}, nil
+		}
+		return []netlink.Addr{{IPNet: &net.IPNet{IP: ipv6, Mask: net.CIDRMask(128, 128)}}}, nil
+	}
+	excludedV4 := map[uint32]bool{binary.BigEndian.Uint32(ipv4): true}
+	var key6 [16]byte
+	copy(key6[:], ipv6)
+	excludedV6 := map[[16]byte]bool{key6: true}
+	gotV4, gotV6, complete := m.buildDesiredLocalAddressSetsWithExclusions(&ConfigSnapshot{}, excludedV4, excludedV6)
+	if !complete {
+		t.Fatal("address enumeration unexpectedly incomplete")
+	}
+	if _, found := gotV4[binary.BigEndian.Uint32(ipv4)]; found {
+		t.Fatal("excluded kernel IPv4 interface-NAT address was added to userspace_local_v4")
+	}
+	if _, found := gotV6[userspaceLocalV6Key{Addr: key6}]; found {
+		t.Fatal("excluded kernel IPv6 interface-NAT address was added to userspace_local_v6")
+	}
+}
+
+func TestInterfaceNATAddressCapacityPreflight13724(t *testing.T) {
+	if err := checkInterfaceNATAddressCapacity(userspaceLocalAddressMapCapacity+1, 0); !isLocalAddressCapacityError(err) {
+		t.Fatalf("oversized interface-NAT v4 set error = %v, want named capacity refusal", err)
+	}
+	if err := checkInterfaceNATAddressCapacity(0, userspaceLocalAddressMapCapacity+1); !isLocalAddressCapacityError(err) {
+		t.Fatalf("oversized interface-NAT v6 set error = %v, want named capacity refusal", err)
+	}
+	if err := checkInterfaceNATAddressCapacity(userspaceLocalAddressMapCapacity, userspaceLocalAddressMapCapacity); err != nil {
+		t.Fatalf("interface-NAT set at capacity rejected: %v", err)
+	}
+}
+func TestReconcileAddressMapKeysReplacesStaleAtCapacity13724(t *testing.T) {
+	for _, path := range []string{"local", "interface-nat"} {
+		t.Run(path, func(t *testing.T) {
+			const capacity = 1
+			current := map[uint32]struct{}{1: {}}
+			desired := map[uint32]struct{}{2: {}}
+			err := reconcileAddressMapKeys([]uint32{1}, desired,
+				func(key uint32) error {
+					delete(current, key)
+					return nil
+				},
+				func(key uint32) error {
+					if _, present := current[key]; !present && len(current) == capacity {
+						return fmt.Errorf("map capacity %d exceeded", capacity)
+					}
+					current[key] = struct{}{}
+					return nil
+				})
+			if err != nil {
+				t.Fatalf("stale-to-new replacement rejected at capacity: %v", err)
+			}
+			if len(current) != 1 {
+				t.Fatalf("map contains %d keys after replacement, want one", len(current))
+			}
+			if _, exists := current[2]; !exists {
+				t.Fatal("new key missing after replacement")
+			}
+			if _, exists := current[1]; exists {
+				t.Fatal("stale key remains after replacement")
+			}
+		})
+	}
+}
+
+func TestReconcileAddressMapKeysDeleteAndNoOp13724(t *testing.T) {
+	current := map[uint32]struct{}{1: {}}
+	if err := reconcileAddressMapKeys([]uint32{1}, map[uint32]struct{}{},
+		func(key uint32) error { delete(current, key); return nil },
+		func(key uint32) error { current[key] = struct{}{}; return nil }); err != nil {
+		t.Fatalf("pure stale-key deletion failed: %v", err)
+	}
+	if len(current) != 0 {
+		t.Fatalf("map after pure deletion contains %d keys, want zero", len(current))
+	}
+
+	current[1] = struct{}{}
+	if err := reconcileAddressMapKeys(nil, map[uint32]struct{}{1: {}},
+		func(key uint32) error { delete(current, key); return nil },
+		func(key uint32) error { current[key] = struct{}{}; return nil }); err != nil {
+		t.Fatalf("no-op sync at capacity failed: %v", err)
+	}
+	if len(current) != 1 {
+		t.Fatalf("map after no-op contains %d keys, want one", len(current))
 	}
 }
 
@@ -337,10 +399,8 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 	}
 	m.ctrlWasEnabled = true
 
-	oldNAT := binary.BigEndian.Uint32([]byte{203, 0, 113, 1})
-	newNAT := binary.BigEndian.Uint32([]byte{198, 51, 100, 1})
-	if err := natV4Map.Update(oldNAT, uint8(1), ebpf.UpdateAny); err != nil {
-		t.Fatalf("seed userspace_interface_nat_v4: %v", err)
+	if err := natV4Map.Close(); err != nil {
+		t.Fatalf("close userspace_interface_nat_v4 to force a sync iteration failure: %v", err)
 	}
 
 	err = m.syncUserspaceClassifierMapsFailClosedLocked(&ConfigSnapshot{
@@ -361,7 +421,7 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 		}},
 	})
 	if err == nil {
-		t.Fatal("classifier-map refresh succeeded despite full NAT map, want error")
+		t.Fatal("classifier-map refresh succeeded despite closed NAT map, want error")
 	}
 	if !strings.Contains(err.Error(), "userspace_interface_nat_v4") {
 		t.Fatalf("refresh failed before interface-NAT sync: %v", err)
@@ -378,13 +438,6 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 		t.Fatal("ctrlWasEnabled = true after refresh failure, want false")
 	}
 
-	var got uint8
-	if lookupErr := natV4Map.Lookup(oldNAT, &got); lookupErr != nil {
-		t.Fatalf("old NAT address missing after failed refresh: %v", lookupErr)
-	}
-	if lookupErr := natV4Map.Lookup(newNAT, &got); !errors.Is(lookupErr, ebpf.ErrKeyNotExist) {
-		t.Fatalf("new NAT address lookup err = %v, want ErrKeyNotExist", lookupErr)
-	}
 }
 
 func TestBlindFailClosedUserspaceCtrlAfterLookupFailure(t *testing.T) {
@@ -403,7 +456,10 @@ func TestBlindFailClosedUserspaceCtrlAfterLookupFailure(t *testing.T) {
 			m := New()
 			m.configuredMode = tc.mode
 			ctrlMap, _ := injectCtrlAndBindingMaps(t, m)
-			injectClassifierRefreshMapsWithFullNATV4(t, m)
+			natV4Map := injectClassifierRefreshMapsWithNATV4(t, m)
+			if err := natV4Map.Close(); err != nil {
+				t.Fatalf("close userspace_interface_nat_v4 to force a sync iteration failure: %v", err)
+			}
 			m.ctrlWasEnabled = true
 
 			zero := uint32(0)
@@ -424,7 +480,7 @@ func TestBlindFailClosedUserspaceCtrlAfterLookupFailure(t *testing.T) {
 
 			err := m.syncUserspaceClassifierMapsFailClosedLocked(classifierRefreshFailureSnapshot())
 			if err == nil {
-				t.Fatal("classifier-map refresh succeeded despite full NAT map, want error")
+				t.Fatal("classifier-map refresh succeeded despite closed NAT map, want error")
 			}
 			if !strings.Contains(err.Error(), "userspace_interface_nat_v4") {
 				t.Fatalf("refresh failed before interface-NAT sync: %v", err)
@@ -466,11 +522,14 @@ func TestClassifierMapRefreshMissingCtrlRowReturnsClassifierError(t *testing.T) 
 	}
 	m := New()
 	ctrlMap, _ := injectCtrlAndBindingMaps(t, m)
-	injectClassifierRefreshMapsWithFullNATV4(t, m)
+	natV4Map := injectClassifierRefreshMapsWithNATV4(t, m)
+	if err := natV4Map.Close(); err != nil {
+		t.Fatalf("close userspace_interface_nat_v4 to force a sync iteration failure: %v", err)
+	}
 
 	err := m.syncUserspaceClassifierMapsFailClosedLocked(classifierRefreshFailureSnapshot())
 	if err == nil {
-		t.Fatal("classifier-map refresh succeeded despite full NAT map, want error")
+		t.Fatal("classifier-map refresh succeeded despite closed NAT map, want error")
 	}
 	if !strings.Contains(err.Error(), "userspace_interface_nat_v4") {
 		t.Fatalf("refresh failed before interface-NAT sync: %v", err)
@@ -484,7 +543,7 @@ func TestClassifierMapRefreshMissingCtrlRowReturnsClassifierError(t *testing.T) 
 	}
 }
 
-func injectClassifierRefreshMapsWithFullNATV4(t *testing.T, m *Manager) {
+func injectClassifierRefreshMapsWithNATV4(t *testing.T, m *Manager) *ebpf.Map {
 	t.Helper()
 	injectShimMapSpec(t, m.bpfShim, "userspace_ingress_ifaces", &ebpf.MapSpec{
 		Type:       ebpf.Hash,
@@ -523,10 +582,7 @@ func injectClassifierRefreshMapsWithFullNATV4(t *testing.T, m *Manager) {
 	})
 
 	injectUserspaceWGZoneMaps(t, m)
-	oldNAT := binary.BigEndian.Uint32([]byte{203, 0, 113, 1})
-	if err := natV4Map.Update(oldNAT, uint8(1), ebpf.UpdateAny); err != nil {
-		t.Fatalf("seed userspace_interface_nat_v4: %v", err)
-	}
+	return natV4Map
 }
 
 func classifierRefreshFailureSnapshot() *ConfigSnapshot {
