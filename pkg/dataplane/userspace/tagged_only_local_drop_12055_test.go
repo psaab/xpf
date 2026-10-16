@@ -114,15 +114,30 @@ func TestUserspaceXDPTaggedOnlyVID0LocalDropsAndControls12055(t *testing.T) {
 	localV6 := [16]byte{0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
 	srcV4 := [4]byte{198, 51, 100, 10}
 	srcV6 := [16]byte{0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10}
+	taggedPacket := func(packet []byte) []byte {
+		tagged := make([]byte, len(packet)+4)
+		copy(tagged[:12], packet[:12])
+		binary.BigEndian.PutUint16(tagged[12:14], 0x8100)
+		binary.BigEndian.PutUint16(tagged[14:16], 50)
+		copy(tagged[16:], packet[12:])
+		return tagged
+	}
+	icmpv4EchoPacket := func() []byte {
+		pkt := ipv4TestPacket(srcV4, localV4, 1, 8)
+		pkt[34] = 8
+		return pkt
+	}
 	tests := []struct {
-		name         string
-		flags        uint8
-		packet       func() []byte
-		localV4      bool
-		localV6      bool
-		ctrlDisabled bool
-		wantAction   uint32
-		wantTagged   bool
+		name           string
+		flags          uint8
+		packet         func() []byte
+		localV4        bool
+		localV6        bool
+		interfaceNatV4 bool
+		interfaceNatV6 bool
+		ctrlDisabled   bool
+		wantAction     uint32
+		wantTagged     bool
 	}{
 		{
 			name:    "untagged local ipv4 drops",
@@ -148,6 +163,101 @@ func TestUserspaceXDPTaggedOnlyVID0LocalDropsAndControls12055(t *testing.T) {
 			ctrlDisabled: true,
 			wantAction:   xdpActionDrop,
 			wantTagged:   true,
+		},
+		{
+			name:  "untagged interface-nat ipv4 echo drops",
+			flags: userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet: func() []byte {
+				pkt := ipv4TestPacket(srcV4, localV4, 1, 8)
+				pkt[34] = 8
+				return pkt
+			},
+			interfaceNatV4: true, wantAction: xdpActionDrop, wantTagged: true,
+		},
+		{
+			name:           "untagged interface-nat ipv6 echo drops",
+			flags:          userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet:         func() []byte { return icmpv6TestPacket(srcV6, localV6, 128) },
+			interfaceNatV6: true, wantAction: xdpActionDrop, wantTagged: true,
+		},
+		{
+			name:           "untagged interface-nat ipv4 ESP drops",
+			flags:          userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet:         func() []byte { return espIPv4TestPacket(srcV4, localV4) },
+			interfaceNatV4: true, wantAction: xdpActionDrop, wantTagged: true,
+		},
+		{
+			name:  "untagged interface-nat ipv6 ESP drops",
+			flags: userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet: func() []byte {
+				pkt := icmpv6TestPacket(srcV6, localV6, 0)
+				pkt[20] = 50
+				return pkt
+			},
+			interfaceNatV6: true, wantAction: xdpActionDrop, wantTagged: true,
+		},
+		{
+			name:           "tagged interface-nat ipv6 echo remains local",
+			flags:          userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet:         func() []byte { return taggedPacket(icmpv6TestPacket(srcV6, localV6, 128)) },
+			interfaceNatV6: true, wantAction: xdpActionPass,
+		},
+		{
+			name:           "untagged child interface-nat ipv6 echo remains local",
+			flags:          userspaceIngressIfaceFlagAdjudicated,
+			packet:         func() []byte { return icmpv6TestPacket(srcV6, localV6, 128) },
+			interfaceNatV6: true, wantAction: xdpActionPass,
+		},
+		{
+			name:           "tagged interface-nat ipv4 echo remains local",
+			flags:          userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet:         func() []byte { return taggedPacket(icmpv4EchoPacket()) },
+			interfaceNatV4: true, wantAction: xdpActionPass,
+		},
+		{
+			name:           "tagged interface-nat ipv4 ESP remains local",
+			flags:          userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet:         func() []byte { return taggedPacket(espIPv4TestPacket(srcV4, localV4)) },
+			interfaceNatV4: true, wantAction: xdpActionPass,
+		},
+		{
+			name:  "tagged interface-nat ipv6 ESP remains local",
+			flags: userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet: func() []byte {
+				pkt := icmpv6TestPacket(srcV6, localV6, 0)
+				pkt[20] = 50
+				return taggedPacket(pkt)
+			},
+			interfaceNatV6: true, wantAction: xdpActionPass,
+		},
+		{
+			name:           "untagged child interface-nat ipv4 echo remains local",
+			flags:          userspaceIngressIfaceFlagAdjudicated,
+			packet:         icmpv4EchoPacket,
+			interfaceNatV4: true, wantAction: xdpActionPass,
+		},
+		{
+			name:           "untagged child interface-nat ipv4 ESP remains local",
+			flags:          userspaceIngressIfaceFlagAdjudicated,
+			packet:         func() []byte { return espIPv4TestPacket(srcV4, localV4) },
+			interfaceNatV4: true, wantAction: xdpActionPass,
+		},
+		{
+			name:  "untagged child interface-nat ipv6 ESP remains local",
+			flags: userspaceIngressIfaceFlagAdjudicated,
+			packet: func() []byte {
+				pkt := icmpv6TestPacket(srcV6, localV6, 0)
+				pkt[20] = 50
+				return pkt
+			},
+			interfaceNatV6: true, wantAction: xdpActionPass,
+		},
+		{
+			name:           "untagged interface-nat ipv6 echo drops while ctrl disabled",
+			flags:          userspaceIngressIfaceFlagAdjudicated | userspaceIngressIfaceFlagTaggedOnly,
+			packet:         func() []byte { return icmpv6TestPacket(srcV6, localV6, 128) },
+			interfaceNatV6: true, ctrlDisabled: true,
+			wantAction: xdpActionDrop, wantTagged: true,
 		},
 		{
 			name:    "untagged local ipv6 drops",
@@ -199,6 +309,12 @@ func TestUserspaceXDPTaggedOnlyVID0LocalDropsAndControls12055(t *testing.T) {
 			}
 			if tc.localV6 {
 				updateUserspaceXDPTestLocalV6(t, coll, localV6)
+			}
+			if tc.interfaceNatV4 {
+				updateUserspaceXDPTestInterfaceNATV4(t, coll, localV4)
+			}
+			if tc.interfaceNatV6 {
+				updateUserspaceXDPTestMap(t, coll, mapNameUserspaceInterfaceNATv6, userspaceLocalV6Key{Addr: localV6}, uint8(1))
 			}
 			ret := runUserspaceXDPTestPacket(t, coll, tc.packet())
 			if ret != tc.wantAction {

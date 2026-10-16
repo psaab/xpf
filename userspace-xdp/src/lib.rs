@@ -666,12 +666,12 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_PARSE_FAIL);
     };
 
-    // #12055: the worker's VID-0 guard runs after this shim has already
-    // returned firewall-local traffic to the kernel. Carry the tagged-only
-    // ingress classification in the existing userspace_ingress_ifaces value
-    // and reject local-destination VID-0 frames here, before any local PASS
-    // path (including session hits and degraded/control fallbacks).
-    if is_tagged_only_vid0_local_destination(ingress_iface_flags, &parsed) {
+    // #12055/#13932: the worker's VID-0 guard runs after this shim has
+    // already returned firewall-owned traffic to the kernel. Carry the
+    // tagged-only ingress classification in userspace_ingress_ifaces and
+    // reject VID-0 frames to local or interface-NAT addresses before any
+    // local PASS path (including session hits and degraded/control fallbacks).
+    if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
     let native_gre =
@@ -1474,7 +1474,7 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     let Some(parsed) = parsed else {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     };
-    if is_tagged_only_vid0_local_destination(ingress_iface_flags, &parsed) {
+    if is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags, &parsed) {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
     }
     let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed);
@@ -1499,10 +1499,26 @@ fn userspace_ingress_metadata(ctx: &XdpContext) -> (u32, u8) {
 }
 
 #[inline(always)]
-fn is_tagged_only_vid0_local_destination(ingress_iface_flags: u8, pkt: &ParsedPacket) -> bool {
+fn is_tagged_only_vid0_firewall_owned_destination(ingress_iface_flags: u8, pkt: &ParsedPacket) -> bool {
     ingress_iface_flags & USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY != 0
         && pkt.vlan_id == 0
-        && is_local_destination(pkt)
+        && is_firewall_owned_destination(pkt)
+}
+
+#[inline(never)]
+fn is_firewall_owned_destination(pkt: &ParsedPacket) -> bool {
+    match pkt.addr_family {
+        AF_INET => {
+            unsafe { USERSPACE_LOCAL_V4.get(&pkt.dst_v4) }.is_some()
+                || unsafe { USERSPACE_INTERFACE_NAT_V4.get(&pkt.dst_v4) }.is_some()
+        }
+        AF_INET6 => {
+            let key = UserspaceLocalV6Key { addr: pkt.dst_addr };
+            unsafe { USERSPACE_LOCAL_V6.get(&key) }.is_some()
+                || unsafe { USERSPACE_INTERFACE_NAT_V6.get(&key) }.is_some()
+        }
+        _ => false,
+    }
 }
 
 fn pass_non_ip_l2_control_direct(reason: u32) -> Result<u32, i64> {
