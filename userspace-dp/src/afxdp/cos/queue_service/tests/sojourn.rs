@@ -330,7 +330,12 @@ fn sojourn_recorded_end_to_end_via_submit_local() {
 
     let mut expected = CoSQueueSojourn::default();
     expected.record(enq, now_ns);
-    let queue = &binding.cos.cos_interfaces.get(&42).expect("cos root").queues[0];
+    let queue = &binding
+        .cos
+        .cos_interfaces
+        .get(&42)
+        .expect("cos root")
+        .queues[0];
     assert_eq!(
         queue.telemetry.sojourn, expected,
         "committed send through submit_local must sample exactly once",
@@ -371,6 +376,9 @@ fn submit_local_publishes_committed_vtime_on_settle() {
     root.queues[0].hot.tokens = 1500;
     // shared_exact flow-fair queue with a V_min floor for worker 0 of 2.
     let floor = attach_test_vtime_floor(&mut root.queues[0], 2, 0);
+    // Model a worker that owns an active flow bucket. The settle publish
+    // intentionally skips workers with no active buckets (#13657).
+    cos_queue_push_back(&mut root.queues[0], test_flow_cos_item(1234, 1500));
     // Pretend a drain has already advanced this queue's committed vtime.
     test_flow_fair_state_mut(&mut root.queues[0]).queue_vtime = 54_321;
 
@@ -385,7 +393,11 @@ fn submit_local_publishes_committed_vtime_on_settle() {
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
 
-    assert_eq!(floor.slots[0].read(), None, "test premise: slot starts unpublished");
+    assert_eq!(
+        floor.slots[0].read(),
+        None,
+        "test premise: slot starts unpublished"
+    );
 
     let items = VecDeque::from([TxRequest {
         bytes: vec![0u8; 128],
@@ -460,4 +472,3 @@ fn sojourn_zero_stamp_items_record_nothing_end_to_end() {
         "enqueue_ns == 0 must be treated as no-data, never a sample",
     );
 }
-
