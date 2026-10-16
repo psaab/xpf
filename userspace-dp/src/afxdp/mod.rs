@@ -244,6 +244,11 @@ use self::mpsc_inbox::MpscInbox;
 use self::neighbor::*;
 pub use self::neighbor::{neighbor_state_usable_str, parse_mac_str};
 pub(crate) use self::neighbor::monotonic_nanos;
+#[cfg(test)]
+pub(crate) use self::neighbor::{
+    kernel_arp_probe_test_capture_count, start_kernel_arp_probe_test_capture,
+    stop_kernel_arp_probe_test_capture,
+};
 pub(crate) use self::rst::remove_kernel_rst_suppression;
 use self::rst::*;
 use self::session_glue::*;

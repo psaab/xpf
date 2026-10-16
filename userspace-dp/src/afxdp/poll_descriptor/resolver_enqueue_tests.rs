@@ -113,32 +113,121 @@ mod try_enqueue_resolver_tests {
         assert!(probe_throttled(&throttle, &new_key, 1_002));
     }
 
+    // #13762: behavioral poll-loop coverage for the capacity/NAT64
+    // MissingNeighbor probe bound. Two identical permitted NAT64 packets
+    // whose extracted-IPv4 next-hop (172.16.80.1 on ifindex 12) is
+    // unresolved are driven through the real descriptor path within one
+    // frozen 100ms window. The NAT64 fail-closed arm records the probe
+    // attempt via note_kernel_probe instead of buffering the frame, so
+    // the first packet must consume exactly one throttle window and the
+    // second must observe that same window without adding another entry.
+    // The probe-call capture makes an inverted gate fail; the throttle
+    // assertions fail if capacity/NAT64 no longer records the attempt.
     #[test]
-    fn missing_neighbor_probe_path_is_globally_throttled_and_borrows_name() {
-        let poll = include_str!("mod.rs");
-        let start = poll
-            .find("let throttle_key = (neigh_if, next_hop);")
-            .expect("MissingNeighbor probe key");
-        let end = poll[start..]
-            .find("// #5174: NAT64 MissingNeighbor fail-closed.")
-            .map(|offset| start + offset)
-            .expect("end of probe block");
-        let probe = &poll[start..end];
-        assert!(
-            probe.contains("let is_probe_throttled = probe_throttled("),
-            "native, NAT64, capacity-drop, and tunnel probes share the per-key window"
+    fn nat64_missing_neighbor_poll_path_consumes_one_throttle_window() {
+        use crate::afxdp::tests_support::{
+            build_txn_tcp_syn_frame_v6, lan_to_wan_permit, nat64_snapshot, txn_ha_state,
+            txn_run_descriptor_checked,
+        };
+        use crate::afxdp::build_forwarding_state;
+        use crate::afxdp::{
+            kernel_arp_probe_test_capture_count, start_kernel_arp_probe_test_capture,
+            stop_kernel_arp_probe_test_capture, TCP_FLAG_SYN, USERSPACE_META_MAGIC,
+            USERSPACE_META_VERSION,
+        };
+        use crate::ip_proto::PROTO_TCP;
+        use crate::session::SessionTable;
+        use std::net::Ipv6Addr;
+
+        let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4-13762"));
+        snapshot.neighbors.clear();
+        let forwarding = build_forwarding_state(&snapshot);
+        let ha_state = txn_ha_state();
+        let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = std::sync::Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+
+        let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("src v6");
+        let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 dst");
+        let frame = build_txn_tcp_syn_frame_v6(
+            src,
+            dst,
+            12345,
+            443,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
         );
-        assert!(
-            probe.contains(".map(String::as_str)"),
-            "poll-loop probe borrows interface name rather than allocating a String"
+        let meta = crate::afxdp::types::UserspaceDpMeta {
+            flow_src_addr: src.octets(),
+            flow_dst_addr: dst.octets(),
+            magic: USERSPACE_META_MAGIC,
+            version: USERSPACE_META_VERSION,
+            length: std::mem::size_of::<crate::afxdp::types::UserspaceDpMeta>() as u16,
+            ingress_ifindex: 24,
+            l3_offset: 14,
+            l4_offset: 54,
+            payload_offset: 74,
+            pkt_len: (frame.len() - 14) as u16,
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_SYN,
+            config_generation: 7,
+            fib_generation: 9,
+            ..crate::afxdp::types::UserspaceDpMeta::default()
+        };
+        let throttle_key = (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1)));
+
+        start_kernel_arp_probe_test_capture();
+        let (_batch1, dbg1) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
         );
-        assert!(
-            !probe.contains(".cloned()"),
-            "poll-loop probe must not clone the interface name"
+        assert_eq!(dbg1.nat64_missing_neigh_drop, 1);
+        assert_eq!(
+            kernel_arp_probe_test_capture_count(),
+            1,
+            "first unthrottled NAT64 miss must invoke one kernel probe"
         );
-        assert!(
-            !probe.contains("throttle.clear()"),
-            "probe overflow must preserve other keys' rate-limit windows"
+        let first_probe_at = *binding
+            .resolver_enqueue_throttle
+            .get(&throttle_key)
+            .expect("first NAT64 miss must consume the kernel-probe throttle window");
+        assert_eq!(binding.resolver_enqueue_throttle.len(), 1);
+
+        let (_batch2, dbg2) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            crate::afxdp::types::UserspaceDpMeta { ..meta },
+            true,
         );
+        assert_eq!(dbg2.nat64_missing_neigh_drop, 1);
+        assert_eq!(
+            kernel_arp_probe_test_capture_count(),
+            1,
+            "second same-key NAT64 miss must not invoke another kernel probe"
+        );
+        stop_kernel_arp_probe_test_capture();
+        assert_eq!(
+            binding.resolver_enqueue_throttle.len(),
+            1,
+            "second same-key NAT64 miss within the window must not consume another probe window"
+        );
+        assert_eq!(
+            binding.resolver_enqueue_throttle.get(&throttle_key),
+            Some(&first_probe_at),
+            "second same-key NAT64 miss must preserve the first probe timestamp"
+        );
+        assert!(probe_throttled(
+            &binding.resolver_enqueue_throttle,
+            &throttle_key,
+            first_probe_at,
+        ));
     }
 }

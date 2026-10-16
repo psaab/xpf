@@ -233,7 +233,37 @@ pub(super) fn build_solicit_sockaddr_in6(v6: Ipv6Addr, ifindex: i32) -> libc::so
 /// in both families and a failure is logged (it fires rarely — only on a
 /// probe send error — so this does not violate the per-tick logging rules)
 /// instead of being swallowed, which previously hid a never-sent solicit.
+#[cfg(test)]
+thread_local! {
+    static KERNEL_ARP_PROBE_TEST_CAPTURE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn start_kernel_arp_probe_test_capture() {
+    KERNEL_ARP_PROBE_TEST_CAPTURE.with(|capture| capture.set(Some(0)));
+}
+
+#[cfg(test)]
+pub(crate) fn kernel_arp_probe_test_capture_count() -> usize {
+    KERNEL_ARP_PROBE_TEST_CAPTURE.with(|capture| capture.get().unwrap_or(0))
+}
+
+#[cfg(test)]
+pub(crate) fn stop_kernel_arp_probe_test_capture() {
+    KERNEL_ARP_PROBE_TEST_CAPTURE.with(|capture| capture.set(None));
+}
+
 pub(super) fn trigger_kernel_arp_probe(iface_name: &str, ifindex: i32, target: IpAddr) -> bool {
+    #[cfg(test)]
+    if KERNEL_ARP_PROBE_TEST_CAPTURE.with(|capture| {
+        capture.get().is_some_and(|count| {
+            capture.set(Some(count.saturating_add(1)));
+            true
+        })
+    }) {
+        return true;
+    }
     let name_c = std::ffi::CString::new(iface_name).unwrap_or_default();
     match target {
         IpAddr::V4(v4) => {
