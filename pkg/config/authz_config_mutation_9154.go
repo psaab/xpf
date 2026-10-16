@@ -241,7 +241,7 @@ func authorizeConfigMutationDepth9939(cfg *Config, class string, editPath []stri
 	// quarantines the payload rather than executing it with root authority.
 	// The line that PLANTS it is therefore still the first adjudication point,
 	// while fire-time revalidation closes the persistence and policy-churn gap.
-	return authorizeEmbeddedChangeConfig9939(cfg, class, parts, quoted, depth)
+	return authorizeEmbeddedChangeConfig9939(cfg, class, editPath, parts, quoted, depth)
 }
 
 // configAuditRoot renders only the first element of a configuration path.
