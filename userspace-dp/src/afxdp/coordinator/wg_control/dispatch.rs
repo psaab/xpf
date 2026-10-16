@@ -438,6 +438,7 @@ pub(super) fn encap_and_send(
                 );
                 EncapOutcome::SendFailed
             } else {
+                engine.note_encap_sent(peer_pubkey, outcome);
                 EncapOutcome::Sent
             }
         }

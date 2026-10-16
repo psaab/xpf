@@ -59,7 +59,7 @@ use super::framing::{encode_data_header, parse_data_header};
 // handshake_session.rs (same `wg` module); the engine struct holds a map of
 // them, so it imports the type here.
 use super::handshake_session::PendingHandshake;
-use super::peer::{encode_roam_endpoint, Peer, PeerConfig};
+use super::peer::{Peer, PeerConfig, encode_roam_endpoint};
 use super::session::{REJECT_AFTER_MESSAGES, ReplayDecision, WgSession};
 use super::tai64n::Tai64nClock;
 use super::{
@@ -101,6 +101,12 @@ pub(crate) struct EncapOutcome {
     pub(crate) receiver_index: u32,
     /// The counter value used (engine-chosen). Useful for tracing.
     pub(crate) counter: u64,
+    /// Whether this record is an empty keepalive (#13667).
+    /// `note_encap_sent` must receive this verbatim.
+    pub(crate) is_keepalive: bool,
+    /// Inner (un-padded) packet length in bytes (#13667): zero for a
+    /// keepalive. Fed to `encap_bytes` only on confirmed delivery.
+    pub(crate) inner_len: usize,
 }
 
 /// What the coordinator should do with an inbound WG type-1 initiation,
@@ -614,7 +620,8 @@ impl WgEngine {
         {
             return false;
         }
-        peer.handshake_request_pending.store(true, Ordering::Relaxed);
+        peer.handshake_request_pending
+            .store(true, Ordering::Relaxed);
         WgCounters::bump(&self.counters.hs_requests_armed);
         true
     }
@@ -879,7 +886,10 @@ impl WgEngine {
     pub(crate) fn take_handshake_request(&self, peer_pubkey: &[u8; WG_KEY_LEN]) -> bool {
         use std::sync::atomic::Ordering;
         self.peer_arc(peer_pubkey)
-            .map(|peer| peer.handshake_request_pending.swap(false, Ordering::Relaxed))
+            .map(|peer| {
+                peer.handshake_request_pending
+                    .swap(false, Ordering::Relaxed)
+            })
             .unwrap_or(false)
     }
 
@@ -894,7 +904,11 @@ impl WgEngine {
     /// order (#1434). Used by the control thread's per-peer egress +
     /// timer iteration. Slow path (1s tick / TUN-read fallback).
     pub(crate) fn peer_pubkeys(&self) -> Vec<[u8; WG_KEY_LEN]> {
-        self.load_table().peers.iter().map(|e| e.peer.pubkey).collect()
+        self.load_table()
+            .peers
+            .iter()
+            .map(|e| e.peer.pubkey)
+            .collect()
     }
 
     /// Each peer's (pubkey, configured-or-learned endpoint), in table
@@ -907,7 +921,6 @@ impl WgEngine {
             .map(|e| (e.peer.pubkey, e.config.endpoint))
             .collect()
     }
-
 
     /// #1434 B1b cryptokey routing on EGRESS: longest-prefix-match the
     /// inner destination IP against the AllowedIPs trie and return the
@@ -977,10 +990,7 @@ impl WgEngine {
     /// snapshot so a fresh engine built on a config change does not
     /// regress the initiator timestamp the peer last accepted (#1432
     /// S2a reload stability, §4.2). Slow path / build-time only.
-    pub(crate) fn seed_tai64n_high_water(
-        &self,
-        hw: [u8; super::tai64n::TAI64N_LEN],
-    ) {
+    pub(crate) fn seed_tai64n_high_water(&self, hw: [u8; super::tai64n::TAI64N_LEN]) {
         self.tai64n_clock.seed_high_water(hw);
     }
 
@@ -1062,7 +1072,10 @@ impl WgEngine {
     pub(crate) fn reconcile_peers(&self, configs: &[WgPeerConfig]) {
         // Serialize concurrent reconciles. The lock does NOT gate the
         // hot path (readers take only the ArcSwap load).
-        let _guard = self.reconcile_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self
+            .reconcile_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let old = self.table.load_full();
         let mut new_peers: Vec<PeerEntry> = Vec::with_capacity(configs.len());
         let mut new_index: FxHashMap<[u8; 32], u32> = FxHashMap::default();
@@ -1128,10 +1141,20 @@ impl WgEngine {
                 continue;
             };
             let peer = &entry.peer;
-            if let Some(cur) = peer.current.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if let Some(cur) = peer
+                .current
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
                 dropped_indices.push(cur.local_index);
             }
-            if let Some(prev) = peer.previous.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if let Some(prev) = peer
+                .previous
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
                 dropped_indices.push(prev.local_index);
             }
             // #3882: the pending `next` (unconfirmed responder) keypair
@@ -1161,7 +1184,10 @@ impl WgEngine {
         // `reconcile_lock`, consistent with `reserve_pending`/`release_pending`.
         {
             let mut pending = self.pending.write().unwrap_or_else(|e| e.into_inner());
-            let mut by_peer = self.pending_by_peer.write().unwrap_or_else(|e| e.into_inner());
+            let mut by_peer = self
+                .pending_by_peer
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             for pubkey in old.peer_index_by_pubkey.keys() {
                 if new_index.contains_key(pubkey) {
                     continue;
@@ -1340,7 +1366,10 @@ impl WgEngine {
         // future reconciles because the peer pubkey no longer exists
         // in published tables. This is slow path, so mutex cost is
         // acceptable and keeps install/reconcile linearizable.
-        let _reconcile_guard = self.reconcile_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _reconcile_guard = self
+            .reconcile_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         self.install_session_locked(pubkey, session)
     }
 
@@ -1379,7 +1408,10 @@ impl WgEngine {
         // pattern keeps the (demux, current, previous, next) tuple
         // visible together to any subsequent decap.
         let new_local_index = session.local_index;
-        let mut by_index = self.sessions_by_local_index.write().unwrap_or_else(|e| e.into_inner());
+        let mut by_index = self
+            .sessions_by_local_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if by_index.contains_key(&new_local_index) {
             return Err(InstallSessionError::LocalIndexCollision);
         }
@@ -1417,7 +1449,10 @@ impl WgEngine {
                 _ => return,
             }
         }
-        let _guard = self.reconcile_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self
+            .reconcile_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(dropped_previous) = peer.promote_next(session) {
             self.sessions_by_local_index
                 .write()
@@ -1470,7 +1505,12 @@ impl WgEngine {
         let peer = self
             .peer_arc(peer_pubkey)
             .ok_or_else(|| self.counters.count_encap_err(EncapError::UnknownPeer))?;
-        let Some(session) = peer.current.read().unwrap_or_else(|e| e.into_inner()).clone() else {
+        let Some(session) = peer
+            .current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
             // #1865: the no-current-session arm — distinct from the
             // unconfirmed gate below (same wire error, different
             // counter; AGY r2 #1736 mandated the split be visible).
@@ -1539,9 +1579,16 @@ impl WgEngine {
         if padded_len > PADDED_PLAINTEXT_MAX {
             return Err(self.counters.count_encap_err(EncapError::BufferTooSmall));
         }
+        // Serialize counter reservation through AEAD so a failed
+        // encryption can leave the nonce available without allowing a
+        // concurrent sender to reuse it.
+        let _tx_guard = session.tx_lock.lock().unwrap_or_else(|e| e.into_inner());
         let counter = session
-            .next_tx_counter()
-            .ok_or_else(|| self.counters.count_encap_err(EncapError::RekeyRequired))?;
+            .tx_counter
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if counter >= super::session::REJECT_AFTER_MESSAGES {
+            return Err(self.counters.count_encap_err(EncapError::RekeyRequired));
+        }
         let _ = encode_data_header(out, session.peer_index, counter)
             .ok_or_else(|| self.counters.count_encap_err(EncapError::BufferTooSmall))?;
         // Stage the padded plaintext on the stack. We use
@@ -1608,27 +1655,38 @@ impl WgEngine {
             .transport
             .write_message(counter, plaintext, payload)
             .map_err(|_| self.counters.count_encap_err(EncapError::CryptoFailed))?;
-        // #1888 S5 activity stamps (§3 of the plan): any authenticated
-        // send clears the T6 passive-keepalive arm; a non-empty DATA
-        // send additionally arms (if unarmed) the T7 no-reply
-        // detector. Keepalives must not arm T7 — they are not data.
-        if is_keepalive {
-            peer.note_authenticated_send(now_ns);
-        } else {
-            peer.note_data_send(now_ns);
-            // #1865: success accounting — inner-IP (un-padded) bytes,
-            // symmetric with the decap side. Keepalives are counted by
-            // the caller under keepalives_tx_*, not as data packets.
-            WgCounters::bump(&self.counters.encap_packets);
-            self.counters
-                .encap_bytes
-                .fetch_add(inner_ip.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
+        session
+            .tx_counter
+            .store(counter + 1, std::sync::atomic::Ordering::Relaxed);
+        drop(_tx_guard);
         Ok(EncapOutcome {
             len: WG_DATA_HEADER_LEN + n,
             receiver_index: session.peer_index,
             counter,
+            is_keepalive,
+            inner_len: inner_ip.len(),
         })
+    }
+
+    /// Commit send-side effects only after the caller confirms that the
+    /// encrypted record was actually transmitted (#13667). Building an
+    /// encrypted record is not evidence of transmission: outer-header
+    /// construction or socket/TX submission may still fail.
+    pub(crate) fn note_encap_sent(&self, peer_pubkey: &[u8; 32], outcome: EncapOutcome) {
+        let Some(peer) = self.peer_arc(peer_pubkey) else {
+            return;
+        };
+        let now_ns = self.now_ns();
+        if outcome.is_keepalive {
+            peer.note_authenticated_send(now_ns);
+        } else {
+            peer.note_data_send(now_ns);
+            WgCounters::bump(&self.counters.encap_packets);
+            self.counters.encap_bytes.fetch_add(
+                outcome.inner_len as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
     }
 
     /// Hot-path decap.
@@ -1828,8 +1886,8 @@ impl WgEngine {
         // `total_length` / IPv6 `payload_length` math. The caller
         // sees only the un-padded inner-IP packet.
         let outcome = (|| -> Result<(IpAddr, u32, usize), DecapError> {
-            let inner_src = inner_src_ip(&out[..n])
-                .ok_or(DecapError::MalformedInner(session.peer_pubkey))?;
+            let inner_src =
+                inner_src_ip(&out[..n]).ok_or(DecapError::MalformedInner(session.peer_pubkey))?;
             // Single atomic snapshot for both peer-index lookup and
             // AllowedIPs gate. Taking these from separate ArcSwap
             // loads would re-introduce the reconcile race window

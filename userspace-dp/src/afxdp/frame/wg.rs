@@ -21,7 +21,9 @@
 use super::super::wg::{EncapError, POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, pad_to_16};
 use super::super::*;
 use super::checksum::checksum16_ipv6;
-use super::headers::{write_eth_header_slice, write_ipv4_header, write_ipv6_header, write_udp_header};
+use super::headers::{
+    write_eth_header_slice, write_ipv4_header, write_ipv6_header, write_udp_header,
+};
 use std::net::IpAddr;
 
 /// The exact pad-aware encapped wire size for an `inner_len`-byte inner
@@ -191,12 +193,24 @@ fn outer_physical_egress_resolution(
     // #2734: WG outer underlay resolution is per-tunnel-endpoint, not
     // per-inner-flow — pass None (per-destination ECMP spread).
     match outer_dst {
-        IpAddr::V4(ip) => {
-            lookup_forwarding_resolution_v4(forwarding, None, ip, &endpoint.transport_table, 1, false, None)
-        }
-        IpAddr::V6(ip) => {
-            lookup_forwarding_resolution_v6(forwarding, None, ip, &endpoint.transport_table, 1, false, None)
-        }
+        IpAddr::V4(ip) => lookup_forwarding_resolution_v4(
+            forwarding,
+            None,
+            ip,
+            &endpoint.transport_table,
+            1,
+            false,
+            None,
+        ),
+        IpAddr::V6(ip) => lookup_forwarding_resolution_v6(
+            forwarding,
+            None,
+            ip,
+            &endpoint.transport_table,
+            1,
+            false,
+            None,
+        ),
     }
 }
 
@@ -247,7 +261,6 @@ fn outer_physical_egress_mtu(
         .filter(|m| *m > 0)
         .unwrap_or(1500);
     crate::afxdp::forwarding::min_nonzero_mtu(interface_mtu, outer.resolution.route_mtu as usize)
-
 }
 /// The peer-endpoint outer destination whose underlay MTU the PTB must
 /// derive from, for a given inner destination (#2845).
@@ -471,7 +484,14 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex(
     });
     let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst)?;
     let outer = outer_physical_egress_resolution(forwarding, endpoint, outer_dst);
-    Some(outer_egress_ifindex_or_fallback(decision, forwarding, &outer))
+    Some(outer_egress_ifindex_or_fallback(
+        decision, forwarding, &outer,
+    ))
+}
+
+pub(in crate::afxdp) struct WgEncapCommit {
+    pub(in crate::afxdp) peer_pubkey: [u8; 32],
+    pub(in crate::afxdp) outcome: crate::afxdp::wg::EncapOutcome,
 }
 
 pub(super) fn wg_encap_frame(
@@ -480,6 +500,16 @@ pub(super) fn wg_encap_frame(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
 ) -> Option<Vec<u8>> {
+    wg_encap_frame_with_commit(inner_frame, inner_meta, decision, forwarding)
+        .map(|(frame, _)| frame)
+}
+
+pub(super) fn wg_encap_frame_with_commit(
+    inner_frame: &[u8],
+    inner_meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+) -> Option<(Vec<u8>, WgEncapCommit)> {
     let inner_meta = inner_meta.into();
     let id = decision.resolution.tunnel_endpoint_id;
     let endpoint = forwarding.tunnel_endpoints.get(&id)?;
@@ -744,8 +774,13 @@ pub(super) fn wg_encap_frame(
         }
         _ => return None,
     }
-
-    Some(out)
+    Some((
+        out,
+        WgEncapCommit {
+            peer_pubkey,
+            outcome,
+        },
+    ))
 }
 
 /// RFC 768 / RFC 8200 IPv6 UDP checksum over the pseudo-header + UDP
@@ -798,11 +833,7 @@ fn udp6_checksum_scalar_reference(
 /// canonicalization applied. Mirrors the call site so tests exercise the
 /// exact production formula. `udp` is the full UDP header+payload
 /// (checksum field 0).
-fn udp6_checksum_optimized(
-    src: std::net::Ipv6Addr,
-    dst: std::net::Ipv6Addr,
-    udp: &[u8],
-) -> u16 {
+fn udp6_checksum_optimized(src: std::net::Ipv6Addr, dst: std::net::Ipv6Addr, udp: &[u8]) -> u16 {
     let csum = checksum16_ipv6(src, dst, PROTO_UDP, udp);
     if csum == 0 { 0xffff } else { csum }
 }

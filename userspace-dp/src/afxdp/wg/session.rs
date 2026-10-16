@@ -130,11 +130,13 @@ pub(crate) struct WgSession {
     /// Receiver index that *we* put in the WG data header when
     /// sending to the peer. Peer-chosen at handshake time.
     pub(crate) peer_index: u32,
-    /// Monotonic outbound counter.
+    /// Monotonic outbound counter. The transmit lock serializes
+    /// reservation through successful AEAD so failed encryption does
+    /// not consume a nonce and concurrent workers never reuse one.
     pub(crate) tx_counter: AtomicU64,
+    pub(crate) tx_lock: Mutex<()>,
     /// Replay tracker for inbound packets.
     pub(crate) replay: Mutex<ReplayState>,
-    /// Identifier of the peer this session belongs to (peer pubkey).
     /// Stored so the engine can route demuxed packets back through
     /// the peer's AllowedIPs gate.
     pub(crate) peer_pubkey: [u8; 32],
@@ -239,6 +241,7 @@ impl WgSession {
             local_index,
             peer_index,
             tx_counter: AtomicU64::new(0),
+            tx_lock: Mutex::new(()),
             replay: Mutex::new(ReplayState::default()),
             peer_pubkey,
             confirmed: AtomicBool::new(confirmed),
@@ -439,7 +442,10 @@ mod session_tests {
         assert_eq!(r.check_and_update(REPLAY_WINDOW), ReplayDecision::Accept);
         assert_eq!(r.check_and_update(0), ReplayDecision::Repeat);
         // One more step pushes 0 out: highest = 8129, age = 8129 > window.
-        assert_eq!(r.check_and_update(REPLAY_WINDOW + 1), ReplayDecision::Accept);
+        assert_eq!(
+            r.check_and_update(REPLAY_WINDOW + 1),
+            ReplayDecision::Accept
+        );
         assert_eq!(r.check_and_update(0), ReplayDecision::OutOfWindow);
     }
 

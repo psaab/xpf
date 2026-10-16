@@ -33,6 +33,7 @@ use super::*;
 use smallvec::SmallVec;
 
 use super::tcp_segmentation::segment_forwarded_tcp_frames_into_prepared;
+use crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame_with_commit;
 
 mod cos;
 mod shared_recycle;
@@ -52,13 +53,11 @@ pub(in crate::afxdp) use shared_recycle::{
 // tests (the `tests/` submodule under this `mod.rs`, reached via `use
 // super::*`).
 #[cfg(test)]
-use shared_recycle::{
-    shared_recycle_target_index, shared_recycle_target_index_for_split,
-};
+use shared_recycle::{shared_recycle_target_index, shared_recycle_target_index_for_split};
 pub(in crate::afxdp) use slow_path::{
-    extract_l3_packet_with_nat, handle_forward_build_failure, maybe_reinject_slow_path,
-    maybe_reinject_slow_path_from_frame, maybe_reinject_slow_path_from_frame_with_outlet,
-    reinject_host_authorized, slow_path_admit, SlowPathOutlet,
+    SlowPathOutlet, extract_l3_packet_with_nat, handle_forward_build_failure,
+    maybe_reinject_slow_path, maybe_reinject_slow_path_from_frame,
+    maybe_reinject_slow_path_from_frame_with_outlet, reinject_host_authorized, slow_path_admit,
 };
 // pub(in crate::afxdp::tx) was previously pub(super) on the
 // extract_l3_packet[_from_frame] family; the re-export keeps the
@@ -264,10 +263,7 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
         let egress_decision = match egress_decision {
             EgressMtuDecision::ForwardOversizeNoDf if uses_native_tunnel && mtu != 0 => {
                 EgressMtuDecision::EmitPacketTooBig {
-                    next_hop_mtu: crate::afxdp::icmp_ptb::clamp_next_hop_mtu(
-                        mtu,
-                        meta.addr_family,
-                    ),
+                    next_hop_mtu: crate::afxdp::icmp_ptb::clamp_next_hop_mtu(mtu, meta.addr_family),
                 }
             }
             d => d,
@@ -447,12 +443,9 @@ pub(in crate::afxdp) fn enqueue_forwarded_ptb_reply(
     dbg: &mut DebugPollCounters,
     counters: &mut BatchCounters,
 ) {
-    let logical_ingress = resolve_ingress_logical_ifindex(
-        forwarding,
-        ingress_ident.ifindex,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(ingress_ident.ifindex);
+    let logical_ingress =
+        resolve_ingress_logical_ifindex(forwarding, ingress_ident.ifindex, meta.ingress_vlan_id)
+            .unwrap_or(ingress_ident.ifindex);
     let verdict = classify_generated_reply(forwarding, logical_ingress, &ptb_bytes, now_ns);
     if verdict.drop {
         counters.touched = true;
@@ -504,8 +497,7 @@ pub(in crate::afxdp) fn enqueue_forwarded_ptb_reply(
 struct CopyFallbackInputs<'a> {
     source_frame: &'a [u8],
     request: &'a PendingForwardRequest,
-    overlap_admissions:
-        Option<crate::fragment_overlap::OverlapAdmissionTokens>,
+    overlap_admissions: Option<crate::fragment_overlap::OverlapAdmissionTokens>,
     expected_ports: Option<(u16, u16)>,
     is_nat64: bool,
     forwarding: &'a ForwardingState,
@@ -569,7 +561,7 @@ fn enqueue_copy_fallback_frame(
         } else {
             0
         };
-        crate::afxdp::frame::build_nat64_forwarded_frames(
+        crate::afxdp::frame::build_nat64_forwarded_frames_with_commit(
             source_frame,
             request.meta,
             &request.decision,
@@ -579,7 +571,7 @@ fn enqueue_copy_fallback_frame(
             v4_egress_mtu,
         )
     } else {
-        build_forwarded_frame_from_frame(
+        crate::afxdp::frame::build_forwarded_frame_from_frame_with_commit(
             source_frame,
             request.meta,
             &request.decision,
@@ -587,19 +579,18 @@ fn enqueue_copy_fallback_frame(
             request.apply_nat_on_fabric,
             expected_ports,
         )
-        .map(|frame| {
+        .map(|built| {
             let mut frames = SmallVec::new();
-            frames.push(frame);
+            frames.push(built);
             frames
         })
     };
     match built_frames {
         Some(frames) => {
             let mut enqueued = 0usize;
-            for frame in frames {
+            for (frame, wg_commit) in frames {
                 if cfg!(feature = "debug-log") && enqueued == 0 {
-                    let source_ports =
-                        live_frame_ports_from_meta_bytes(source_frame, request.meta);
+                    let source_ports = live_frame_ports_from_meta_bytes(source_frame, request.meta);
                     // #9782: compare against the POST-NAT tuple — built output
                     // carries translations. nat_applied mirrors the builders'
                     // fabric gate (build/mod.rs).
@@ -658,11 +649,7 @@ fn enqueue_copy_fallback_frame(
                         expected_ports,
                         expected_addr_family: request.meta.addr_family,
                         expected_protocol: request.meta.protocol,
-                        flow_key: if enqueued == 0 {
-                            flow_key.take()
-                        } else {
-                            None
-                        },
+                        flow_key: if enqueued == 0 { flow_key.take() } else { None },
                         egress_ifindex: request.decision.resolution.egress_ifindex,
                         cos_queue_id: request.cos_queue_id,
                         dscp_rewrite: request.dscp_rewrite,
@@ -674,7 +661,9 @@ fn enqueue_copy_fallback_frame(
                         },
                         enqueue_ns: 0,
                     };
-                    if let Err(rejected) = enqueue_local_request_to_target_or_owner(target_binding, req) {
+                    if let Err(rejected) =
+                        enqueue_local_request_to_target_or_owner(target_binding, req)
+                    {
                         crate::afxdp::cos::redirect_pool::recycle(rejected.bytes);
                         // #2208: cross-binding CoS-owner queue
                         // full (TX congestion). Set the
@@ -689,6 +678,14 @@ fn enqueue_copy_fallback_frame(
                         fallback_to_slow_path = enqueued == 0;
                         break;
                     } else {
+                        if let Some(commit) = wg_commit {
+                            if let Some(engine) = forwarding
+                                .wg_engines
+                                .get(&request.decision.resolution.tunnel_endpoint_id)
+                            {
+                                engine.note_encap_sent(&commit.peer_pubkey, commit.outcome);
+                            }
+                        }
                         dbg.enqueue_ok += 1;
                         dbg.enqueue_copy += 1;
                         target_binding.tx_counters.pending_copy_tx_packets += 1;
@@ -761,7 +758,6 @@ fn enqueue_copy_fallback_frame(
     (build_failed, fallback_to_slow_path)
 }
 
-
 pub(in crate::afxdp) fn enqueue_pending_forwards(
     left: &mut [BindingWorker],
     ingress_index: usize,
@@ -801,11 +797,16 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             request.decision.resolution.disposition,
             ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
         ) && matches!(&request.frame, PendingForwardFrame::Live)
-            && request.meta.l3_addrs_unfiltered().is_some_and(|(source, destination)| {
-                forwarding
-                    .bindless_ipsec_selector_fence
-                    .matches_with_nat(source, destination, request.decision.nat)
-            })
+            && request
+                .meta
+                .l3_addrs_unfiltered()
+                .is_some_and(|(source, destination)| {
+                    forwarding.bindless_ipsec_selector_fence.matches_with_nat(
+                        source,
+                        destination,
+                        request.decision.nat,
+                    )
+                })
         {
             dbg.policy_deny += 1;
             counters.touched = true;
@@ -816,16 +817,22 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
         // queue while the forwarding snapshot changes. Recheck the source
         // against the current domain-scoped martian index before final TX.
         if !matches!(&request.frame, PendingForwardFrame::Prebuilt(_))
-            && request.meta.l3_addrs_unfiltered().is_some_and(|(source, _)| {
-                crate::afxdp::poll_descriptor::transit_source_class_drop(
-                    forwarding,
-                    request.decision.resolution.disposition,
-                    source,
-                    request.flow_key.as_ref().map_or(0, |flow| flow.routing_domain),
-                    request.meta,
-                    None,
-                )
-            })
+            && request
+                .meta
+                .l3_addrs_unfiltered()
+                .is_some_and(|(source, _)| {
+                    crate::afxdp::poll_descriptor::transit_source_class_drop(
+                        forwarding,
+                        request.decision.resolution.disposition,
+                        source,
+                        request
+                            .flow_key
+                            .as_ref()
+                            .map_or(0, |flow| flow.routing_domain),
+                        request.meta,
+                        None,
+                    )
+                })
         {
             dbg.policy_deny += 1;
             counters.touched = true;
@@ -885,8 +892,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             // invariant as the desc-frame no-binding / build-failure
             // paths. (Non-FabricRedirect Prebuilt drops keep their prior
             // silent recycle+continue.)
-            let prebuilt_is_fabric_redirect = request.decision.resolution.disposition
-                == ForwardingDisposition::FabricRedirect;
+            let prebuilt_is_fabric_redirect =
+                request.decision.resolution.disposition == ForwardingDisposition::FabricRedirect;
             let Some(target_binding) = resolve_pending_forward_target_binding(
                 left,
                 ingress_index,
@@ -1108,7 +1115,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                             worker_commands_by_id,
                         );
                     }
-                } else if let Some(segmented) = segment_forwarded_tcp_frames_from_frame(
+                } else if let Some(segmented) = segment_forwarded_tcp_frames_from_frame_with_commit(
                     source_frame,
                     request.meta,
                     &request.decision,
@@ -1117,11 +1124,10 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                     expected_ports,
                 ) {
                     drop(overlap_admissions.take());
-                    for frame in segmented {
+                    for (frame, wg_commit) in segmented {
                         if cfg!(feature = "debug-log") {
-                            let source_ports = live_frame_ports_from_meta_bytes(
-                                source_frame, request.meta,
-                            );
+                            let source_ports =
+                                live_frame_ports_from_meta_bytes(source_frame, request.meta);
                             // #9782: compare against the POST-NAT tuple (see
                             // the copy-fallback site above for the gate).
                             let nat_applied = request.decision.resolution.disposition
@@ -1170,6 +1176,14 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                                 overlap_admissions: None,
                                 enqueue_ns: 0,
                             });
+                        if let Some(commit) = wg_commit {
+                            if let Some(engine) = forwarding
+                                .wg_engines
+                                .get(&request.decision.resolution.tunnel_endpoint_id)
+                            {
+                                engine.note_encap_sent(&commit.peer_pubkey, commit.outcome);
+                            }
+                        }
                         bound_pending_tx_local(target_binding);
                         dbg.enqueue_ok += 1;
                         dbg.enqueue_copy += 1;
@@ -1238,85 +1252,325 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 // egress-MTU PTB was signalled; the finalizer enqueues
                 // `ptb_reply` (if any) and recycles the ingress descriptor.
                 if !mtu_signalled {
-                // #1598 secondary fix: gate on `shared_exact` policy
-                // (not on `shared_queue_lease.is_some()`), see the
-                // doc comment on `request_runs_under_shared_exact_policy`
-                // in dispatch/cos.rs. Non-exact uncapped queues now
-                // qualify for the local in-place rewrite path.
-                let owner_matches_target = request_runs_under_shared_exact_policy(
-                    &target_binding.cos.cos_fast_interfaces,
-                    request.decision.resolution.egress_ifindex,
-                    request.cos_queue_id,
-                ) || cos_owner_live_for_request(
-                    &target_binding.cos.cos_fast_interfaces,
-                    request.decision.resolution.egress_ifindex,
-                    request.cos_queue_id,
-                )
-                .is_none_or(|live| Arc::ptr_eq(live, &target_binding.live));
+                    // #1598 secondary fix: gate on `shared_exact` policy
+                    // (not on `shared_queue_lease.is_some()`), see the
+                    // doc comment on `request_runs_under_shared_exact_policy`
+                    // in dispatch/cos.rs. Non-exact uncapped queues now
+                    // qualify for the local in-place rewrite path.
+                    let owner_matches_target = request_runs_under_shared_exact_policy(
+                        &target_binding.cos.cos_fast_interfaces,
+                        request.decision.resolution.egress_ifindex,
+                        request.cos_queue_id,
+                    ) || cos_owner_live_for_request(
+                        &target_binding.cos.cos_fast_interfaces,
+                        request.decision.resolution.egress_ifindex,
+                        request.cos_queue_id,
+                    )
+                    .is_none_or(|live| Arc::ptr_eq(live, &target_binding.live));
 
-                /*
-                 * In-place TX optimization: rewrite the ingress frame directly in UMEM
-                 * and submit it to the target binding's TX ring without copying.
-                 * This is valid whenever ingress and egress bindings share the same
-                 * UMEM allocation. That includes same-binding hairpin and the narrow
-                 * shared-UMEM groups.
-                 */
-                let can_rewrite_in_place = target_binding.umem.allocation_ptr() == ingress_umem_ptr
-                    && !is_nat64
-                    && !uses_native_tunnel
-                    && owner_matches_target
-                    && matches!(request.frame, PendingForwardFrame::Live);
-                if can_rewrite_in_place {
-                    let selected_tcp_mss =
-                        select_tcp_mss(forwarding, &request.decision, &request.meta);
-                    if let Some(staged) = staged_mirror.as_mut() {
-                        snapshot_staged_mirror_clone(staged, source_frame);
-                    }
-                    match rewrite_forwarded_frame_in_place(
-                        unsafe { &*ingress_area },
-                        request.desc,
-                        request.meta,
-                        &request.decision,
-                        request.apply_nat_on_fabric,
-                        expected_ports,
-                        selected_tcp_mss,
-                    ) {
-                        Some(rewrite_result) => {
-                            target_binding.tx_pipeline.pending_tx_prepared.push_back(
-                                PreparedTxRequest {
-                                    offset: rewrite_result.offset,
-                                    len: rewrite_result.len,
-                                    recycle: PreparedTxRecycle::fill_on_slot(
-                                        ingress_slot,
-                                        rewrite_result.offset,
-                                        source_offset,
-                                    ),
-                                    expected_ports,
-                                    expected_addr_family: request.meta.addr_family,
-                                    expected_protocol: request.meta.protocol,
-                                    flow_key: flow_key.take(),
-                                    overlap_admissions: overlap_admissions.take(),
-                                    egress_ifindex: request.decision.resolution.egress_ifindex,
-                                    cos_queue_id: request.cos_queue_id,
-                                    dscp_rewrite: request.dscp_rewrite,
-                                    mirror_clone: false,
-                                    enqueue_ns: 0,
-                                },
-                            );
-                            bound_pending_tx_prepared(target_binding, Some(post_recycles));
-                            target_binding.tx_counters.pending_in_place_tx_packets += 1;
-                            target_binding
-                                .tx_counters
-                                .record_in_place_l2_rewrite(rewrite_result.l2_rewrite);
-                            dbg.enqueue_ok += 1;
-                            dbg.enqueue_inplace += 1;
-                            dbg.tx_bytes_total += rewrite_result.len as u64;
-                            if rewrite_result.len > dbg.tx_max_frame {
-                                dbg.tx_max_frame = rewrite_result.len;
-                            }
-                            retained_source_frame = true;
+                    /*
+                     * In-place TX optimization: rewrite the ingress frame directly in UMEM
+                     * and submit it to the target binding's TX ring without copying.
+                     * This is valid whenever ingress and egress bindings share the same
+                     * UMEM allocation. That includes same-binding hairpin and the narrow
+                     * shared-UMEM groups.
+                     */
+                    let can_rewrite_in_place = target_binding.umem.allocation_ptr()
+                        == ingress_umem_ptr
+                        && !is_nat64
+                        && !uses_native_tunnel
+                        && owner_matches_target
+                        && matches!(request.frame, PendingForwardFrame::Live);
+                    if can_rewrite_in_place {
+                        let selected_tcp_mss =
+                            select_tcp_mss(forwarding, &request.decision, &request.meta);
+                        if let Some(staged) = staged_mirror.as_mut() {
+                            snapshot_staged_mirror_clone(staged, source_frame);
                         }
-                        None => {
+                        match rewrite_forwarded_frame_in_place(
+                            unsafe { &*ingress_area },
+                            request.desc,
+                            request.meta,
+                            &request.decision,
+                            request.apply_nat_on_fabric,
+                            expected_ports,
+                            selected_tcp_mss,
+                        ) {
+                            Some(rewrite_result) => {
+                                target_binding.tx_pipeline.pending_tx_prepared.push_back(
+                                    PreparedTxRequest {
+                                        offset: rewrite_result.offset,
+                                        len: rewrite_result.len,
+                                        recycle: PreparedTxRecycle::fill_on_slot(
+                                            ingress_slot,
+                                            rewrite_result.offset,
+                                            source_offset,
+                                        ),
+                                        expected_ports,
+                                        expected_addr_family: request.meta.addr_family,
+                                        expected_protocol: request.meta.protocol,
+                                        flow_key: flow_key.take(),
+                                        overlap_admissions: overlap_admissions.take(),
+                                        egress_ifindex: request.decision.resolution.egress_ifindex,
+                                        cos_queue_id: request.cos_queue_id,
+                                        dscp_rewrite: request.dscp_rewrite,
+                                        mirror_clone: false,
+                                        enqueue_ns: 0,
+                                    },
+                                );
+                                bound_pending_tx_prepared(target_binding, Some(post_recycles));
+                                target_binding.tx_counters.pending_in_place_tx_packets += 1;
+                                target_binding
+                                    .tx_counters
+                                    .record_in_place_l2_rewrite(rewrite_result.l2_rewrite);
+                                dbg.enqueue_ok += 1;
+                                dbg.enqueue_inplace += 1;
+                                dbg.tx_bytes_total += rewrite_result.len as u64;
+                                if rewrite_result.len > dbg.tx_max_frame {
+                                    dbg.tx_max_frame = rewrite_result.len;
+                                }
+                                retained_source_frame = true;
+                            }
+                            None => {
+                                let mut fallback_inputs = CopyFallbackInputs {
+                                    source_frame,
+                                    request,
+                                    overlap_admissions: overlap_admissions.take(),
+                                    expected_ports,
+                                    is_nat64,
+                                    forwarding,
+                                    ingress_ident,
+                                    recent_exceptions,
+                                };
+                                let (bf, fs) = enqueue_copy_fallback_frame(
+                                    &mut fallback_inputs,
+                                    target_binding,
+                                    &mut flow_key,
+                                    dbg,
+                                    counters,
+                                );
+                                build_failed |= bf;
+                                fallback_to_slow_path |= fs;
+                            }
+                        }
+                    } else {
+                        enum DirectTxFallbackReason {
+                            NoFreeTxFrame,
+                            BuildReturnedNone,
+                            DisallowedByRewriteMode,
+                        }
+                        // Direct TX build: write the forwarded frame directly into
+                        // the target binding's UMEM TX frame, eliminating the
+                        // intermediate Vec allocation and one memcpy.
+                        // NAT64 cannot use direct TX (header size changes), so
+                        // it falls through to the copy path below.
+                        let mut direct_tx_offset =
+                            target_binding.tx_pipeline.free_tx_frames.pop_front();
+                        if direct_tx_offset.is_none()
+                            && (target_binding.tx_pipeline.outstanding_tx > 0
+                                || !target_binding.tx_pipeline.pending_tx_prepared.is_empty()
+                                || !target_binding.tx_pipeline.pending_tx_local.is_empty())
+                        {
+                            let _ = drain_pending_tx_local_owner(
+                                target_binding,
+                                now_ns,
+                                post_recycles,
+                                forwarding,
+                                worker_id,
+                                worker_commands_by_id,
+                            );
+                            direct_tx_offset =
+                                target_binding.tx_pipeline.free_tx_frames.pop_front();
+                        }
+                        let mut direct_tx_fallback_reason = None;
+                        let direct_built = if is_nat64 || uses_native_tunnel {
+                            // NAT64 can't use direct TX — return the frame if we popped one.
+                            if let Some(off) = direct_tx_offset {
+                                target_binding.tx_pipeline.free_tx_frames.push_front(off);
+                            }
+                            direct_tx_fallback_reason =
+                                Some(DirectTxFallbackReason::DisallowedByRewriteMode);
+                            false
+                        } else if !owner_matches_target {
+                            if let Some(off) = direct_tx_offset {
+                                target_binding.tx_pipeline.free_tx_frames.push_front(off);
+                            }
+                            // A prepared/direct frame on a non-owner binding would be
+                            // cloned back into a local Vec during CoS owner redirection.
+                            // Skip that waste and fall back to the single-copy local path.
+                            direct_tx_fallback_reason =
+                                Some(DirectTxFallbackReason::DisallowedByRewriteMode);
+                            false
+                        } else if let Some(tx_offset) = direct_tx_offset {
+                            let target_area = target_binding.umem.area();
+                            // Prefetch target frame to warm cache before copy.
+                            #[cfg(target_arch = "x86_64")]
+                            if let Some(pf) = target_area.slice(tx_offset as usize, 64) {
+                                unsafe {
+                                    core::arch::x86_64::_mm_prefetch(
+                                        pf.as_ptr() as *const i8,
+                                        core::arch::x86_64::_MM_HINT_T0,
+                                    );
+                                }
+                            }
+                            let written = unsafe {
+                                target_area
+                                    .slice_mut_unchecked(tx_offset as usize, tx_frame_capacity())
+                            }
+                            .and_then(|out| {
+                                build_forwarded_frame_into_from_frame(
+                                    out,
+                                    source_frame,
+                                    request.meta,
+                                    &request.decision,
+                                    forwarding,
+                                    request.apply_nat_on_fabric,
+                                    expected_ports,
+                                )
+                            });
+                            if let Some(written) = written {
+                                // Debug-only: validate built frame ports match the
+                                // POST-NAT expectation (a correct translation must
+                                // match after #9782 moved enforcement pre-NAT);
+                                // this catches builder bugs.
+                                if cfg!(feature = "debug-log") {
+                                    let built_ports = unsafe {
+                                        target_area.slice_mut_unchecked(tx_offset as usize, written)
+                                    }
+                                    .and_then(|f| {
+                                        live_frame_ports_bytes(
+                                            f,
+                                            request.meta.addr_family,
+                                            request.meta.protocol,
+                                        )
+                                    });
+                                    let source_ports = live_frame_ports_from_meta_bytes(
+                                        source_frame,
+                                        request.meta,
+                                    );
+                                    // #9782: compare against the POST-NAT tuple (see
+                                    // the copy-fallback site above for the gate).
+                                    let nat_applied = request.decision.resolution.disposition
+                                        != ForwardingDisposition::FabricRedirect
+                                        || request.apply_nat_on_fabric;
+                                    if let Some(reason) = direct_tx_tuple_mismatch_reason(
+                                        source_ports,
+                                        post_nat_expected_ports(
+                                            expected_ports,
+                                            source_ports,
+                                            request.decision.nat,
+                                            nat_applied,
+                                        ),
+                                        built_ports,
+                                    ) {
+                                        // #4041: DO NOT recycle `tx_offset` here.
+                                        // Setting `build_failed` routes this frame
+                                        // through the single `if build_failed`
+                                        // recycle below, which pushes the offset
+                                        // back onto `free_tx_frames` exactly once.
+                                        // Pushing it in this diagnostic branch too
+                                        // double-recycled the offset — it would be
+                                        // handed out twice on a later TX and alias
+                                        // an in-flight frame (on-wire corruption /
+                                        // double-free on the debug-log build). The
+                                        // `record_exception` below still surfaces
+                                        // the mismatch to operators.
+                                        record_exception_owned(
+                                            recent_exceptions,
+                                            ingress_ident,
+                                            &reason,
+                                            written as u32,
+                                            Some(request.meta.into()),
+                                            None,
+                                        );
+                                        build_failed = true;
+                                    }
+                                }
+                                if build_failed {
+                                    target_binding
+                                        .tx_pipeline
+                                        .free_tx_frames
+                                        .push_front(tx_offset);
+                                    true
+                                } else if written > tx_frame_capacity() {
+                                    target_binding
+                                        .tx_pipeline
+                                        .free_tx_frames
+                                        .push_front(tx_offset);
+                                    record_exception(
+                                        recent_exceptions,
+                                        ingress_ident,
+                                        "oversized_forward_frame",
+                                        written as u32,
+                                        Some(request.meta.into()),
+                                        None,
+                                        forwarding,
+                                    );
+                                    true
+                                } else {
+                                    target_binding.tx_pipeline.pending_tx_prepared.push_back(
+                                        PreparedTxRequest {
+                                            offset: tx_offset,
+                                            len: written as u32,
+                                            recycle: PreparedTxRecycle::FreeTxFrame,
+                                            expected_ports,
+                                            expected_addr_family: request.meta.addr_family,
+                                            expected_protocol: request.meta.protocol,
+                                            flow_key: flow_key.take(),
+                                            overlap_admissions: overlap_admissions.take(),
+                                            egress_ifindex: request
+                                                .decision
+                                                .resolution
+                                                .egress_ifindex,
+                                            cos_queue_id: request.cos_queue_id,
+                                            dscp_rewrite: request.dscp_rewrite,
+                                            mirror_clone: false,
+                                            enqueue_ns: 0,
+                                        },
+                                    );
+                                    bound_pending_tx_prepared(target_binding, Some(post_recycles));
+                                    dbg.enqueue_ok += 1;
+                                    dbg.enqueue_direct += 1;
+                                    target_binding.tx_counters.pending_direct_tx_packets += 1;
+                                    dbg.tx_bytes_total += written as u64;
+                                    if (written as u32) > dbg.tx_max_frame {
+                                        dbg.tx_max_frame = written as u32;
+                                    }
+                                    true
+                                }
+                            } else {
+                                target_binding
+                                    .tx_pipeline
+                                    .free_tx_frames
+                                    .push_front(tx_offset);
+                                direct_tx_fallback_reason =
+                                    Some(DirectTxFallbackReason::BuildReturnedNone);
+                                false
+                            }
+                        } else {
+                            direct_tx_fallback_reason = Some(DirectTxFallbackReason::NoFreeTxFrame);
+                            false
+                        };
+                        // Fallback: Vec copy path when direct build unavailable.
+                        if !direct_built {
+                            match direct_tx_fallback_reason {
+                                Some(DirectTxFallbackReason::NoFreeTxFrame) => {
+                                    target_binding
+                                        .tx_counters
+                                        .pending_direct_tx_no_frame_fallback_packets += 1;
+                                }
+                                Some(DirectTxFallbackReason::BuildReturnedNone) => {
+                                    target_binding
+                                        .tx_counters
+                                        .pending_direct_tx_build_fallback_packets += 1;
+                                }
+                                Some(DirectTxFallbackReason::DisallowedByRewriteMode) => {
+                                    target_binding
+                                        .tx_counters
+                                        .pending_direct_tx_disallowed_fallback_packets += 1;
+                                }
+                                None => {}
+                            }
                             let mut fallback_inputs = CopyFallbackInputs {
                                 source_frame,
                                 request,
@@ -1338,239 +1592,6 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                             fallback_to_slow_path |= fs;
                         }
                     }
-                } else {
-                    enum DirectTxFallbackReason {
-                        NoFreeTxFrame,
-                        BuildReturnedNone,
-                        DisallowedByRewriteMode,
-                    }
-                    // Direct TX build: write the forwarded frame directly into
-                    // the target binding's UMEM TX frame, eliminating the
-                    // intermediate Vec allocation and one memcpy.
-                    // NAT64 cannot use direct TX (header size changes), so
-                    // it falls through to the copy path below.
-                    let mut direct_tx_offset =
-                        target_binding.tx_pipeline.free_tx_frames.pop_front();
-                    if direct_tx_offset.is_none()
-                        && (target_binding.tx_pipeline.outstanding_tx > 0
-                            || !target_binding.tx_pipeline.pending_tx_prepared.is_empty()
-                            || !target_binding.tx_pipeline.pending_tx_local.is_empty())
-                    {
-                        let _ = drain_pending_tx_local_owner(
-                            target_binding,
-                            now_ns,
-                            post_recycles,
-                            forwarding,
-                            worker_id,
-                            worker_commands_by_id,
-                        );
-                        direct_tx_offset = target_binding.tx_pipeline.free_tx_frames.pop_front();
-                    }
-                    let mut direct_tx_fallback_reason = None;
-                    let direct_built = if is_nat64 || uses_native_tunnel {
-                        // NAT64 can't use direct TX — return the frame if we popped one.
-                        if let Some(off) = direct_tx_offset {
-                            target_binding.tx_pipeline.free_tx_frames.push_front(off);
-                        }
-                        direct_tx_fallback_reason =
-                            Some(DirectTxFallbackReason::DisallowedByRewriteMode);
-                        false
-                    } else if !owner_matches_target {
-                        if let Some(off) = direct_tx_offset {
-                            target_binding.tx_pipeline.free_tx_frames.push_front(off);
-                        }
-                        // A prepared/direct frame on a non-owner binding would be
-                        // cloned back into a local Vec during CoS owner redirection.
-                        // Skip that waste and fall back to the single-copy local path.
-                        direct_tx_fallback_reason =
-                            Some(DirectTxFallbackReason::DisallowedByRewriteMode);
-                        false
-                    } else if let Some(tx_offset) = direct_tx_offset {
-                        let target_area = target_binding.umem.area();
-                        // Prefetch target frame to warm cache before copy.
-                        #[cfg(target_arch = "x86_64")]
-                        if let Some(pf) = target_area.slice(tx_offset as usize, 64) {
-                            unsafe {
-                                core::arch::x86_64::_mm_prefetch(
-                                    pf.as_ptr() as *const i8,
-                                    core::arch::x86_64::_MM_HINT_T0,
-                                );
-                            }
-                        }
-                        let written = unsafe {
-                            target_area.slice_mut_unchecked(tx_offset as usize, tx_frame_capacity())
-                        }
-                        .and_then(|out| {
-                            build_forwarded_frame_into_from_frame(
-                                out,
-                                source_frame,
-                                request.meta,
-                                &request.decision,
-                                forwarding,
-                                request.apply_nat_on_fabric,
-                                expected_ports,
-                            )
-                        });
-                        if let Some(written) = written {
-                            // Debug-only: validate built frame ports match the
-                            // POST-NAT expectation (a correct translation must
-                            // match after #9782 moved enforcement pre-NAT);
-                            // this catches builder bugs.
-                            if cfg!(feature = "debug-log") {
-                                let built_ports = unsafe {
-                                    target_area.slice_mut_unchecked(tx_offset as usize, written)
-                                }
-                                .and_then(|f| {
-                                    live_frame_ports_bytes(
-                                        f,
-                                        request.meta.addr_family,
-                                        request.meta.protocol,
-                                    )
-                                });
-                                let source_ports = live_frame_ports_from_meta_bytes(
-                                    source_frame, request.meta,
-                                );
-                                // #9782: compare against the POST-NAT tuple (see
-                                // the copy-fallback site above for the gate).
-                                let nat_applied = request.decision.resolution.disposition
-                                    != ForwardingDisposition::FabricRedirect
-                                    || request.apply_nat_on_fabric;
-                                if let Some(reason) = direct_tx_tuple_mismatch_reason(
-                                    source_ports,
-                                    post_nat_expected_ports(
-                                        expected_ports,
-                                        source_ports,
-                                        request.decision.nat,
-                                        nat_applied,
-                                    ),
-                                    built_ports,
-                                ) {
-                                    // #4041: DO NOT recycle `tx_offset` here.
-                                    // Setting `build_failed` routes this frame
-                                    // through the single `if build_failed`
-                                    // recycle below, which pushes the offset
-                                    // back onto `free_tx_frames` exactly once.
-                                    // Pushing it in this diagnostic branch too
-                                    // double-recycled the offset — it would be
-                                    // handed out twice on a later TX and alias
-                                    // an in-flight frame (on-wire corruption /
-                                    // double-free on the debug-log build). The
-                                    // `record_exception` below still surfaces
-                                    // the mismatch to operators.
-                                    record_exception_owned(
-                                    recent_exceptions,
-                                    ingress_ident,
-                                    &reason,
-                                    written as u32,
-                                    Some(request.meta.into()),
-                                    None,
-                                );
-                                    build_failed = true;
-                                }
-                            }
-                            if build_failed {
-                                target_binding
-                                    .tx_pipeline
-                                    .free_tx_frames
-                                    .push_front(tx_offset);
-                                true
-                            } else if written > tx_frame_capacity() {
-                                target_binding
-                                    .tx_pipeline
-                                    .free_tx_frames
-                                    .push_front(tx_offset);
-                                record_exception(
-                                    recent_exceptions,
-                                    ingress_ident,
-                                    "oversized_forward_frame",
-                                    written as u32,
-                                    Some(request.meta.into()),
-                                    None,
-                                    forwarding,
-                                );
-                                true
-                            } else {
-                                target_binding.tx_pipeline.pending_tx_prepared.push_back(
-                                    PreparedTxRequest {
-                                        offset: tx_offset,
-                                        len: written as u32,
-                                        recycle: PreparedTxRecycle::FreeTxFrame,
-                                        expected_ports,
-                                        expected_addr_family: request.meta.addr_family,
-                                        expected_protocol: request.meta.protocol,
-                                        flow_key: flow_key.take(),
-                                        overlap_admissions: overlap_admissions.take(),
-                                        egress_ifindex: request.decision.resolution.egress_ifindex,
-                                        cos_queue_id: request.cos_queue_id,
-                                        dscp_rewrite: request.dscp_rewrite,
-                                        mirror_clone: false,
-                                        enqueue_ns: 0,
-                                    },
-                                );
-                                bound_pending_tx_prepared(target_binding, Some(post_recycles));
-                                dbg.enqueue_ok += 1;
-                                dbg.enqueue_direct += 1;
-                                target_binding.tx_counters.pending_direct_tx_packets += 1;
-                                dbg.tx_bytes_total += written as u64;
-                                if (written as u32) > dbg.tx_max_frame {
-                                    dbg.tx_max_frame = written as u32;
-                                }
-                                true
-                            }
-                        } else {
-                            target_binding
-                                .tx_pipeline
-                                .free_tx_frames
-                                .push_front(tx_offset);
-                            direct_tx_fallback_reason =
-                                Some(DirectTxFallbackReason::BuildReturnedNone);
-                            false
-                        }
-                    } else {
-                        direct_tx_fallback_reason = Some(DirectTxFallbackReason::NoFreeTxFrame);
-                        false
-                    };
-                    // Fallback: Vec copy path when direct build unavailable.
-                    if !direct_built {
-                        match direct_tx_fallback_reason {
-                            Some(DirectTxFallbackReason::NoFreeTxFrame) => {
-                                target_binding
-                                    .tx_counters
-                                    .pending_direct_tx_no_frame_fallback_packets += 1;
-                            }
-                            Some(DirectTxFallbackReason::BuildReturnedNone) => {
-                                target_binding
-                                    .tx_counters
-                                    .pending_direct_tx_build_fallback_packets += 1;
-                            }
-                            Some(DirectTxFallbackReason::DisallowedByRewriteMode) => {
-                                target_binding
-                                    .tx_counters
-                                    .pending_direct_tx_disallowed_fallback_packets += 1;
-                            }
-                            None => {}
-                        }
-                        let mut fallback_inputs = CopyFallbackInputs {
-                            source_frame,
-                            request,
-                            overlap_admissions: overlap_admissions.take(),
-                            expected_ports,
-                            is_nat64,
-                            forwarding,
-                            ingress_ident,
-                            recent_exceptions,
-                        };
-                        let (bf, fs) = enqueue_copy_fallback_frame(
-                            &mut fallback_inputs,
-                            target_binding,
-                            &mut flow_key,
-                            dbg,
-                            counters,
-                        );
-                        build_failed |= bf;
-                        fallback_to_slow_path |= fs;
-                    }
-                }
                 } // close `if !mtu_signalled` (#2301 egress-MTU PTB)
             }
             if target_binding.tx_pipeline.pending_tx_prepared.len() >= TX_BATCH_SIZE
@@ -1800,11 +1821,7 @@ fn forwarded_egress_mtu(decision: &SessionDecision, forwarding: &ForwardingState
     if decision.resolution.tunnel_endpoint_id != 0 {
         return interface_mtu;
     }
-    crate::afxdp::forwarding::min_nonzero_mtu(
-        interface_mtu,
-        decision.resolution.route_mtu as usize,
-    )
-
+    crate::afxdp::forwarding::min_nonzero_mtu(interface_mtu, decision.resolution.route_mtu as usize)
 }
 
 #[inline(always)]

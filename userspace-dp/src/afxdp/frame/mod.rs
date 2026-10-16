@@ -1,11 +1,11 @@
 use super::*;
 use smallvec::SmallVec;
 
+mod addr_class;
 mod byte_writes;
 pub(crate) mod checksum;
 mod generated;
 mod headers;
-mod addr_class;
 mod inspect;
 mod tcp;
 mod wg;
@@ -36,8 +36,8 @@ pub(in crate::afxdp) use wg::wg_transit_egress_physical_egress_ifindex;
 // paths. The previous in-place definitions in this file were
 // moved verbatim into headers.rs.
 pub(in crate::afxdp) use headers::{
-    TPID_8021AD, TPID_8021Q, TxVlanTag, eth_header_len, write_eth_header,
-    write_eth_header_tagged, write_ipv4_header, write_ipv6_header, write_udp_header,
+    TPID_8021AD, TPID_8021Q, TxVlanTag, eth_header_len, write_eth_header, write_eth_header_tagged,
+    write_ipv4_header, write_ipv6_header, write_udp_header,
 };
 // #2844: re-exported `pub(crate)` so the top-level `crate::nat64`
 // module (outside `crate::afxdp`) can use the one SSOT Ethernet writer.
@@ -62,8 +62,8 @@ pub(in crate::afxdp) use checksum::{
     adjust_ipv4_header_checksum, adjust_l4_checksum_ipv4, adjust_l4_checksum_ipv4_dst,
     adjust_l4_checksum_ipv4_src, adjust_l4_checksum_ipv4_words, adjust_l4_checksum_ipv6_words,
     checksum16, checksum16_add_bytes, checksum16_adjust, checksum16_finish, checksum16_ipv4,
-    checksum16_ipv6, ipv6_words_from_octets, ipv6_words_from_slice,
-    recompute_l4_checksum_ipv4, recompute_l4_checksum_ipv6, saturate_len16,
+    checksum16_ipv6, ipv6_words_from_octets, ipv6_words_from_slice, recompute_l4_checksum_ipv4,
+    recompute_l4_checksum_ipv6, saturate_len16,
 };
 
 // Phase 2: header inspection / parsing helpers extracted to `inspect`.
@@ -84,37 +84,35 @@ pub(crate) use inspect::MAX_IPV6_EXT_HEADERS;
 // `crate::afxdp` re-export + `use super::*` chain. The `ExtChainWalk` /
 // `ExtChainFragment` container types stay inspect-local — callers read
 // their fields, never name them.
+pub(in crate::afxdp) use inspect::IPV6_AH_FLOWLESS_TOTAL;
 pub(crate) use inspect::{
     ExtChainOutcome, IPV6_GENERIC_EXT_HEADERS, ipv6_ah_sighted, ipv6_ext_header_is_traversable,
     walk_ipv6_ext_chain,
 };
-pub(in crate::afxdp) use inspect::IPV6_AH_FLOWLESS_TOTAL;
-pub(super) use inspect::{
-    frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset, live_frame_ports,
-    live_frame_ports_bytes, live_frame_ports_from_meta_bytes, metadata_tuple_complete,
-    nibble_checked_l3, nibble_trusted_stamp, packet_rel_l4_offset,
-    packet_rel_l4_offset_and_protocol, parse_flow_ports, parse_ipv4_session_flow_from_frame,
-    parse_packet_destination_from_frame, parse_packet_source_from_frame, parse_session_flow_from_bytes,
-    parse_session_flow_from_frame, parse_session_flow_from_meta, parse_zone_encoded_fabric_ingress,
-    parse_zone_encoded_fabric_ingress_from_frame, verified_l3_or_stamp,
-    ZoneEncodedFabricStamp,
-};
 pub(in crate::afxdp) use inspect::{
-    authoritative_forward_ports, decode_frame_summary, declared_l3_end, dest_is_directed_broadcast,
-    dest_is_multicast_or_broadcast, flowless_effective_protocol, fragment_protocol_from_frame,
-    forward_tuple_mismatch_reason, icmp_reply_type,
-    ipv4_is_any_fragment, ipv4_is_non_first_fragment, ipv6_ext_chain_over_limit,
-    ipv6_addr_is_v4_mapped_or_compat, ipv6_frame_has_v4_mapped_or_compat, ipv6_is_any_fragment,
-    ipv6_is_non_first_fragment, ipv6_is_nonatomically_fragmented, is_any_fragment,
-    L3_CTX_NONE_UNSPECIFIED_ADDR, is_non_first_fragment, l3_enforcement_flow_from_meta,
-    l3_enforcement_flow_from_frame, l3_session_flow_from_meta,
-    l2_dst_is_group_or_broadcast, meta_icmp_identifier_bearing, meta_l4_ports_in_declared_end,
-    neighbor_ip_is_learnable, neighbor_mac_is_learnable,
-    parse_session_flow, post_nat_expected_ports,
-    source_is_invalid_for_icmp_error,
-    src_is_directed_broadcast, term_match_extra_from_frame,
-    term_match_extra_from_meta, transit_dst_is_martian, transit_src_is_martian,
-    try_parse_metadata,
+    L3_CTX_NONE_UNSPECIFIED_ADDR, authoritative_forward_ports, declared_l3_end,
+    decode_frame_summary, dest_is_directed_broadcast, dest_is_multicast_or_broadcast,
+    flowless_effective_protocol, forward_tuple_mismatch_reason, fragment_protocol_from_frame,
+    icmp_reply_type, ipv4_is_any_fragment, ipv4_is_non_first_fragment,
+    ipv6_addr_is_v4_mapped_or_compat, ipv6_ext_chain_over_limit,
+    ipv6_frame_has_v4_mapped_or_compat, ipv6_is_any_fragment, ipv6_is_non_first_fragment,
+    ipv6_is_nonatomically_fragmented, is_any_fragment, is_non_first_fragment,
+    l2_dst_is_group_or_broadcast, l3_enforcement_flow_from_frame, l3_enforcement_flow_from_meta,
+    l3_session_flow_from_meta, meta_icmp_identifier_bearing, meta_l4_ports_in_declared_end,
+    neighbor_ip_is_learnable, neighbor_mac_is_learnable, parse_session_flow,
+    post_nat_expected_ports, source_is_invalid_for_icmp_error, src_is_directed_broadcast,
+    term_match_extra_from_frame, term_match_extra_from_meta, transit_dst_is_martian,
+    transit_src_is_martian, try_parse_metadata,
+};
+pub(super) use inspect::{
+    ZoneEncodedFabricStamp, frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset,
+    live_frame_ports, live_frame_ports_bytes, live_frame_ports_from_meta_bytes,
+    metadata_tuple_complete, nibble_checked_l3, nibble_trusted_stamp, packet_rel_l4_offset,
+    packet_rel_l4_offset_and_protocol, parse_flow_ports, parse_ipv4_session_flow_from_frame,
+    parse_packet_destination_from_frame, parse_packet_source_from_frame,
+    parse_session_flow_from_bytes, parse_session_flow_from_frame, parse_session_flow_from_meta,
+    parse_zone_encoded_fabric_ingress, parse_zone_encoded_fabric_ingress_from_frame,
+    verified_l3_or_stamp,
 };
 
 // #989: TCP-specific inspection + mutation kernels relocated from
@@ -143,7 +141,7 @@ pub(in crate::afxdp) use inspect::icmp_identifier_bearing;
 mod tcp_segmentation;
 pub(in crate::afxdp) use tcp_segmentation::{
     finalize_tcp_segment_headers, segment_forwarded_tcp_frames,
-    segment_forwarded_tcp_frames_from_frame,
+    segment_forwarded_tcp_frames_from_frame, segment_forwarded_tcp_frames_from_frame_with_commit,
 };
 
 // #1352 — extracted build orchestrator + per-address-family helpers.
@@ -336,6 +334,27 @@ pub(super) fn build_nat64_forwarded_frames(
     forwarding: &ForwardingState,
     v4_egress_mtu: usize,
 ) -> Option<SmallVec<[Vec<u8>; 1]>> {
+    build_nat64_forwarded_frames_with_commit(
+        frame,
+        meta,
+        decision,
+        nat64_reverse,
+        no_v6_frag_header,
+        forwarding,
+        v4_egress_mtu,
+    )
+    .map(|frames| frames.into_iter().map(|(frame, _)| frame).collect())
+}
+
+pub(super) fn build_nat64_forwarded_frames_with_commit(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    nat64_reverse: Option<&Nat64ReverseInfo>,
+    no_v6_frag_header: bool,
+    forwarding: &ForwardingState,
+    v4_egress_mtu: usize,
+) -> Option<SmallVec<[(Vec<u8>, Option<wg::WgEncapCommit>); 1]>> {
     let meta = meta.into();
     let inner = build_nat64_inner_frame(frame, meta, decision, nat64_reverse, no_v6_frag_header)?;
     let inner_frames = if meta.addr_family as i32 == libc::AF_INET6 {
@@ -346,7 +365,12 @@ pub(super) fn build_nat64_forwarded_frames(
         frames
     };
     if decision.resolution.tunnel_endpoint_id == 0 {
-        return Some(inner_frames);
+        return Some(
+            inner_frames
+                .into_iter()
+                .map(|frame| (frame, None))
+                .collect(),
+        );
     }
     // §8896: the inner frame's family is the TRANSLATED one, not the ingress
     // family `meta` still describes. Passing `meta` through unchanged is the
@@ -364,10 +388,12 @@ pub(super) fn build_nat64_forwarded_frames(
     for inner in inner_frames {
         let encapsulated = match kind {
             Some(TunnelKind::WireGuard) => {
-                wg::wg_encap_frame(&inner, inner_meta, decision, forwarding)
+                wg::wg_encap_frame_with_commit(&inner, inner_meta, decision, forwarding)
+                    .map(|(frame, commit)| (frame, Some(commit)))
             }
             Some(TunnelKind::Gre) => {
                 encapsulate_native_gre_frame(&inner, inner_meta, decision, forwarding)
+                    .map(|frame| (frame, None))
             }
             Some(TunnelKind::Unknown) | None => None,
         };
@@ -381,10 +407,7 @@ pub(super) fn build_nat64_forwarded_frames(
 /// translator emits a fixed 20-byte IPv4 header; preserving its Identification
 /// and adding offsets to an existing fragment's offset permits correct
 /// re-fragmentation of IPv6 fragments as well as ordinary datagrams.
-fn fragment_nat64_ipv4_frame(
-    frame: Vec<u8>,
-    mtu: usize,
-) -> Option<SmallVec<[Vec<u8>; 1]>> {
+fn fragment_nat64_ipv4_frame(frame: Vec<u8>, mtu: usize) -> Option<SmallVec<[Vec<u8>; 1]>> {
     let l3 = frame_l3_offset(&frame)?;
     let ip = frame.get(l3..)?;
     if ip.len() < 20 || ip[0] != 0x45 {
@@ -457,52 +480,51 @@ pub(super) fn build_nat64_l3_packet_for_slow_path(
     }
     let l3_offset = frame_l3_offset(frame)?;
     let packet = frame.get(l3_offset..)?;
-    let (translated_family, translated_protocol, mut out) =
-        match meta.addr_family as i32 {
-            libc::AF_INET6 => {
-                let src_v4 = match decision.nat.rewrite_src {
-                    Some(IpAddr::V4(address)) => address,
-                    _ => return None,
-                };
-                let dst_v4 = match decision.nat.rewrite_dst {
-                    Some(IpAddr::V4(address)) => address,
-                    _ => return None,
-                };
-                let mut out = vec![0; packet.len()];
-                let written = crate::nat64::write_v6_to_v4_into_preserve_ttl(
-                    &mut out,
-                    packet,
-                    src_v4,
-                    dst_v4,
-                    no_v6_frag_header,
-                )?;
-                out.truncate(written);
-                let protocol = if meta.protocol == PROTO_ICMPV6 {
-                    PROTO_ICMP
-                } else {
-                    meta.protocol
-                };
-                (libc::AF_INET as u8, protocol, out)
-            }
-            libc::AF_INET => {
-                let reverse = nat64_reverse?;
-                let mut out = vec![0; packet.len().saturating_add(40)];
-                let written = crate::nat64::write_v4_to_v6_into_preserve_ttl(
-                    &mut out,
-                    packet,
-                    reverse.orig_dst_v6,
-                    reverse.orig_src_v6,
-                )?;
-                out.truncate(written);
-                let protocol = if meta.protocol == PROTO_ICMP {
-                    PROTO_ICMPV6
-                } else {
-                    meta.protocol
-                };
-                (libc::AF_INET6 as u8, protocol, out)
-            }
-            _ => return None,
-        };
+    let (translated_family, translated_protocol, mut out) = match meta.addr_family as i32 {
+        libc::AF_INET6 => {
+            let src_v4 = match decision.nat.rewrite_src {
+                Some(IpAddr::V4(address)) => address,
+                _ => return None,
+            };
+            let dst_v4 = match decision.nat.rewrite_dst {
+                Some(IpAddr::V4(address)) => address,
+                _ => return None,
+            };
+            let mut out = vec![0; packet.len()];
+            let written = crate::nat64::write_v6_to_v4_into_preserve_ttl(
+                &mut out,
+                packet,
+                src_v4,
+                dst_v4,
+                no_v6_frag_header,
+            )?;
+            out.truncate(written);
+            let protocol = if meta.protocol == PROTO_ICMPV6 {
+                PROTO_ICMP
+            } else {
+                meta.protocol
+            };
+            (libc::AF_INET as u8, protocol, out)
+        }
+        libc::AF_INET => {
+            let reverse = nat64_reverse?;
+            let mut out = vec![0; packet.len().saturating_add(40)];
+            let written = crate::nat64::write_v4_to_v6_into_preserve_ttl(
+                &mut out,
+                packet,
+                reverse.orig_dst_v6,
+                reverse.orig_src_v6,
+            )?;
+            out.truncate(written);
+            let protocol = if meta.protocol == PROTO_ICMP {
+                PROTO_ICMPV6
+            } else {
+                meta.protocol
+            };
+            (libc::AF_INET6 as u8, protocol, out)
+        }
+        _ => return None,
+    };
     let l4_offset = packet_rel_l4_offset(&out, translated_family)?;
     apply_nat64_port_translation_at(
         &mut out,
@@ -533,7 +555,11 @@ fn nat64_translated_meta(
     out.addr_family = translated_family;
     // The built frame carries its own ethernet header, sized by the egress
     // VLAN rather than by the ingress one `meta.l3_offset` describes.
-    out.l3_offset = if decision.resolution.tx_vlan_id > 0 { 18 } else { 14 };
+    out.l3_offset = if decision.resolution.tx_vlan_id > 0 {
+        18
+    } else {
+        14
+    };
     Some(out)
 }
 
@@ -585,7 +611,13 @@ fn build_nat64_inner_frame(
             let mut out = crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
             out.resize(capacity, 0);
             let Some(written) = crate::nat64::build_nat64_v6_to_v4_frame_into(
-                &mut out, frame, snat_v4, dst_v4, dst_mac, src_mac, vlan_id,
+                &mut out,
+                frame,
+                snat_v4,
+                dst_v4,
+                dst_mac,
+                src_mac,
+                vlan_id,
                 no_v6_frag_header,
             ) else {
                 crate::afxdp::cos::redirect_pool::recycle(out);
@@ -600,7 +632,14 @@ fn build_nat64_inner_frame(
             // #4381: rewrite the L4 SOURCE port / ICMP identifier to the unique
             // translated value the forward decision carries in `rewrite_src_port`
             // (RFC 6146 BIB). The output is IPv4; ICMPv6 mapped to ICMPv4.
-            if apply_nat64_port_translation(&mut out, libc::AF_INET as u8, out_protocol, decision.nat).is_none() {
+            if apply_nat64_port_translation(
+                &mut out,
+                libc::AF_INET as u8,
+                out_protocol,
+                decision.nat,
+            )
+            .is_none()
+            {
                 crate::afxdp::cos::redirect_pool::recycle(out);
                 return None;
             }
@@ -621,13 +660,23 @@ fn build_nat64_inner_frame(
                 && is_non_first_fragment(frame.get(l3..)?, libc::AF_INET as u8)
             {
                 crate::nat64::build_nat64_v4_to_v6_nonfirst_frame_into(
-                    &mut out, frame, info.orig_dst_v6, info.orig_src_v6,
-                    dst_mac, src_mac, vlan_id,
+                    &mut out,
+                    frame,
+                    info.orig_dst_v6,
+                    info.orig_src_v6,
+                    dst_mac,
+                    src_mac,
+                    vlan_id,
                 )
             } else {
                 crate::nat64::build_nat64_v4_to_v6_frame_into(
-                    &mut out, frame, info.orig_dst_v6, info.orig_src_v6,
-                    dst_mac, src_mac, vlan_id,
+                    &mut out,
+                    frame,
+                    info.orig_dst_v6,
+                    info.orig_src_v6,
+                    dst_mac,
+                    src_mac,
+                    vlan_id,
                 )
             };
             let Some(written) = written else {
@@ -646,7 +695,14 @@ fn build_nat64_inner_frame(
             } else {
                 meta.protocol
             };
-            if apply_nat64_port_translation(&mut out, libc::AF_INET6 as u8, out_protocol, decision.nat).is_none() {
+            if apply_nat64_port_translation(
+                &mut out,
+                libc::AF_INET6 as u8,
+                out_protocol,
+                decision.nat,
+            )
+            .is_none()
+            {
                 crate::afxdp::cos::redirect_pool::recycle(out);
                 return None;
             }
@@ -700,6 +756,25 @@ pub(super) fn build_forwarded_frame_from_frame(
     apply_nat_on_fabric: bool,
     expected_ports: Option<(u16, u16)>,
 ) -> Option<Vec<u8>> {
+    build_forwarded_frame_from_frame_with_commit(
+        frame,
+        meta,
+        decision,
+        forwarding,
+        apply_nat_on_fabric,
+        expected_ports,
+    )
+    .map(|(frame, _)| frame)
+}
+
+pub(super) fn build_forwarded_frame_from_frame_with_commit(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    apply_nat_on_fabric: bool,
+    expected_ports: Option<(u16, u16)>,
+) -> Option<(Vec<u8>, Option<wg::WgEncapCommit>)> {
     let meta = meta.into();
     let mut out = vec![0u8; frame.len().saturating_add(4)];
     let written = build_forwarded_frame_into_from_frame(
@@ -729,13 +804,17 @@ pub(super) fn build_forwarded_frame_from_frame(
             .get(&decision.resolution.tunnel_endpoint_id)
             .map(|e| tunnel_mode_kind(&e.mode));
         return match kind {
-            Some(TunnelKind::WireGuard) => wg::wg_encap_frame(&out, meta, decision, forwarding),
-            Some(TunnelKind::Gre) => encapsulate_native_gre_frame(&out, meta, decision, forwarding),
+            Some(TunnelKind::WireGuard) => {
+                wg::wg_encap_frame_with_commit(&out, meta, decision, forwarding)
+                    .map(|(frame, commit)| (frame, Some(commit)))
+            }
+            Some(TunnelKind::Gre) => encapsulate_native_gre_frame(&out, meta, decision, forwarding)
+                .map(|frame| (frame, None)),
             // Unknown mode or missing endpoint row: fail closed.
             Some(TunnelKind::Unknown) | None => None,
         };
     }
-    Some(out)
+    Some((out, None))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1113,12 +1192,7 @@ fn validate_generic_rewrite_v6(
     if !skip_ttl && l3_payload[7] <= 1 {
         return None; // hop limit expired
     }
-    let rel_l4 = v6_rel_l4_offset(
-        l3_payload,
-        meta.l3_offset,
-        meta.l4_offset,
-        meta.addr_family,
-    )?;
+    let rel_l4 = v6_rel_l4_offset(l3_payload, meta.l3_offset, meta.l4_offset, meta.addr_family)?;
     if apply_nat && nat != NatDecision::default() && !ipv6_is_non_first_fragment(l3_payload) {
         if let Some(delta) = l4_checksum_field_delta_v6(meta.protocol) {
             if l3_payload.len() < rel_l4 + delta + 2 {
@@ -1611,7 +1685,11 @@ pub(super) fn apply_nat_ipv6(
     // the existing flowless-NAT rules. `packet` is the L3 slice (v6 addrs at
     // +8), so the sighting walks from 0.
     let nat = if ipv6_ah_sighted(packet, libc::AF_INET6 as u8, 0) {
-        NatDecision { rewrite_src_port: None, rewrite_dst_port: None, ..nat }
+        NatDecision {
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            ..nat
+        }
     } else {
         nat
     };
@@ -2195,8 +2273,12 @@ pub(super) fn build_injected_ipv6(
 
     // #2443: the IPv6 payload-length field is u16; REJECT rather than
     // emit a wrapped on-wire length.
-    let plen = u16::try_from(8 + payload_len)
-        .map_err(|_| format!("injected IPv6 payload length {} exceeds u16", 8 + payload_len))?;
+    let plen = u16::try_from(8 + payload_len).map_err(|_| {
+        format!(
+            "injected IPv6 payload length {} exceeds u16",
+            8 + payload_len
+        )
+    })?;
 
     let mut frame = Vec::with_capacity(target_len);
     write_eth_header(&mut frame, dst_mac, egress.src_mac, egress.vlan_id, 0x86dd);
@@ -2423,27 +2505,6 @@ pub(super) fn verify_built_frame_checksums(frame: &[u8]) -> (bool, bool) {
 // shared fixtures through `super::super::test_fixtures::*`, identical to the
 // pre-split single module.
 #[cfg(test)]
-#[path = "tests_support.rs"]
-mod tests_support;
-#[cfg(test)]
-#[path = "tests_parse_forward_pbr.rs"]
-mod tests_parse_forward_pbr;
-#[cfg(test)]
-#[path = "tests_native_gre_ecn.rs"]
-mod tests_native_gre_ecn;
-#[cfg(test)]
-#[path = "tests_nat_rewrite.rs"]
-mod tests_nat_rewrite;
-#[cfg(test)]
-#[path = "tests_ports_live_forward.rs"]
-mod tests_ports_live_forward;
-#[cfg(test)]
-#[path = "tests_segment_tcp.rs"]
-mod tests_segment_tcp;
-#[cfg(test)]
-#[path = "tests_ttl_descriptor_dscp.rs"]
-mod tests_ttl_descriptor_dscp;
-#[cfg(test)]
 #[path = "tests_fragment_term_extra.rs"]
 mod tests_fragment_term_extra;
 #[cfg(test)]
@@ -2452,6 +2513,27 @@ mod tests_ipv6_ext_walk;
 #[cfg(test)]
 #[path = "tests_mss_inject_inspect.rs"]
 mod tests_mss_inject_inspect;
+#[cfg(test)]
+#[path = "tests_nat_rewrite.rs"]
+mod tests_nat_rewrite;
+#[cfg(test)]
+#[path = "tests_native_gre_ecn.rs"]
+mod tests_native_gre_ecn;
+#[cfg(test)]
+#[path = "tests_parse_forward_pbr.rs"]
+mod tests_parse_forward_pbr;
+#[cfg(test)]
+#[path = "tests_ports_live_forward.rs"]
+mod tests_ports_live_forward;
+#[cfg(test)]
+#[path = "tests_segment_tcp.rs"]
+mod tests_segment_tcp;
+#[cfg(test)]
+#[path = "tests_support.rs"]
+mod tests_support;
+#[cfg(test)]
+#[path = "tests_ttl_descriptor_dscp.rs"]
+mod tests_ttl_descriptor_dscp;
 // #4555: parity guard between the AF_XDP shim's parse_ipv6 extension-header
 // walk (userspace-xdp/src/lib.rs) and walk_ipv6_ext_chain above.
 #[cfg(test)]
@@ -2480,11 +2562,11 @@ mod tests_shim_degraded_ndp_10863;
 mod tests_shim_gre_classify_10651;
 // #10677: interface-NAT tunnel-fragment disposition at the shim boundary.
 #[cfg(test)]
-#[path = "tests_shim_tunnel_frag_10677.rs"]
-mod tests_shim_tunnel_frag_10677;
-#[cfg(test)]
 #[path = "tests_9782_copy.rs"]
 mod tests_9782_copy;
+#[cfg(test)]
+#[path = "tests_shim_tunnel_frag_10677.rs"]
+mod tests_shim_tunnel_frag_10677;
 // #10661: ATOMIC+real Fragment chain consistency cells (tracker/shim/screens).
 #[cfg(test)]
 #[path = "tests_10661_atomic_chain.rs"]
@@ -2566,9 +2648,6 @@ mod rewrite_plan_nibble_tests_9900 {
     /// well-formed frame), and a truncated frame fails closed.
     #[test]
     fn rewrite_plan_derives_on_unknown_family_9900() {
-        assert_eq!(
-            plan_l3_for_stamp_9900(14, libc::AF_UNIX as u8),
-            Some(14)
-        );
+        assert_eq!(plan_l3_for_stamp_9900(14, libc::AF_UNIX as u8), Some(14));
     }
 }

@@ -198,9 +198,7 @@ pub(super) fn drive_attempt_machine(
     } else {
         match actions.initiate {
             Some(InitiateReason::DeadPeer) => Some(AttemptTrigger::DeadPeer),
-            Some(InitiateReason::KeepaliveNoSession) => {
-                Some(AttemptTrigger::KeepaliveNoSession)
-            }
+            Some(InitiateReason::KeepaliveNoSession) => Some(AttemptTrigger::KeepaliveNoSession),
             None => None,
         }
     };
@@ -250,11 +248,10 @@ pub(super) fn send_keepalive(
                 None,
             ) {
                 Ok(_) => {
+                    engine.note_encap_sent(peer_pubkey, outcome);
                     let counters = engine.counters();
                     match kind {
-                        KeepaliveKind::Passive => {
-                            WgCounters::bump(&counters.keepalives_tx_passive)
-                        }
+                        KeepaliveKind::Passive => WgCounters::bump(&counters.keepalives_tx_passive),
                         KeepaliveKind::Persistent => {
                             WgCounters::bump(&counters.keepalives_tx_persistent);
                             engine.note_t8_attempt(peer_pubkey, now_ns);
