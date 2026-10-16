@@ -569,6 +569,13 @@
   "display_lease_wire": {
     "active_flows": 4,
     "address_only": true,
+    "permit_any_remote": true,
+    "permitted_remotes": [
+      {
+        "ip": "8.8.8.8",
+        "port": 0
+      }
+    ],
     "pool": "p1",
     "protocol": 6,
     "remaining_ns": 123,
@@ -755,6 +762,13 @@
   },
   "idle_lease_wire": {
     "address_only": true,
+    "permit_any_remote": true,
+    "permitted_remotes": [
+      {
+        "ip": "8.8.8.8",
+        "port": 0
+      }
+    ],
     "pool": "p1",
     "protocol": 6,
     "remaining_ns": 123,

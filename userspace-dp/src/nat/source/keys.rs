@@ -47,34 +47,18 @@ pub(crate) struct SourceNatFlowKey {
 }
 
 impl SourceNatFlowKey {
-    /// #2397: build the persistent-NAT lease key for this flow.
+    /// Build the persistent-NAT lease key for this flow.
     ///
-    /// #2823: the scope is selected by the three-way `permit` enum:
-    ///   - `AnyRemoteHost`   -> `remote = None`: source-tuple-only key, any
-    ///     remote host reuses the mapping.
-    ///   - `TargetHost`      -> `remote = Some((dst_ip, 0))`: the destination
-    ///     IP is folded in but the port is dropped, so a second flow from the
-    ///     same source to a NEW port on the SAME remote host keys to the same
-    ///     lease and reuses the mapping.
-    ///   - `TargetHostPort`  -> `remote = Some((dst_ip, dst_port))`: the full
-    ///     remote endpoint is folded in, so a different remote port keys to a
-    ///     distinct lease and gets a fresh mapping (the pre-#2823 behavior).
-    pub(in crate::nat) fn persistent_source_key(self, permit: PersistentNatPermit) -> PersistentSourceKey {
+    /// Persistent NAT is endpoint-independent: the permit mode governs which
+    /// remote endpoints may initiate inbound traffic to this mapping, not
+    /// whether a new outbound remote destination receives a different mapping.
+    pub(in crate::nat) fn persistent_source_key(self, _permit: PersistentNatPermit) -> PersistentSourceKey {
         PersistentSourceKey {
             protocol: self.protocol,
             src_ip: self.src_ip,
             src_port: self.src_port,
-            // #10018: retain the exact routing domain that already
-            // distinguishes `SourceNatFlowKey`. The allocator remains shared
-            // for wire-identity occupancy (#9389); lease reuse alone is
-            // partitioned so overlapping subscribers in different VRFs cannot
-            // receive one another's persistent translation.
             routing_scope: self.routing_scope,
-            remote: match permit {
-                PersistentNatPermit::AnyRemoteHost => None,
-                PersistentNatPermit::TargetHost => Some((self.dst_ip, 0)),
-                PersistentNatPermit::TargetHostPort => Some((self.dst_ip, self.dst_port)),
-            },
+            remote: None,
         }
     }
 }

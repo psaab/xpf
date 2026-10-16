@@ -57,7 +57,7 @@ func persistentNatGenerationManager11486(t *testing.T, path string) (*Manager, *
 	m.cfg.ControlSocket = filepath.Join(t.TempDir(), "control.sock")
 	m.persistentNatLeaseGenerationPath = path
 	m.helperStatusObserved = true
-	m.lastStatus.ConfigSnapshotProtocolVersion = MinProtocolPersistentNatLeaseScope
+	m.lastStatus.ConfigSnapshotProtocolVersion = MinProtocolPersistentNatLeasePermissions
 	return m, startPersistentNatGenerationHelper11486(t, m.cfg.ControlSocket)
 }
 

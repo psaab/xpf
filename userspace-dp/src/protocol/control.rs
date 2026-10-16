@@ -247,7 +247,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v45 -> v46 (#9506 P2): tunnel-relevant main-table route inventory, the
 // explicit terminal FIB-table identity map for E19/E22, selector
 // intersections, and the dedicated P-MECH identity/view guards.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 47;
+// v46 -> v47 (#13949): route snapshots carry `reject` so reject routes keep
+// their distinct terminal FIB disposition instead of discard.
+// v47 -> v48 (#13945): persistent-NAT lease permissions cross idle/display
+// wire records so endpoint-independent mappings retain inbound admission scope.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 48;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -1463,6 +1467,19 @@ pub(crate) struct SessionDeltaDrainRequest {
     pub max: u32,
 }
 
+/// One remote endpoint whose traffic is permitted by an endpoint-independent lease.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct PermittedRemoteWire {
+    #[serde(default)]
+    pub ip: String,
+    #[serde(default)]
+    pub port: u16,
+}
+
+fn is_empty_permitted_remotes(v: &Vec<PermittedRemoteWire>) -> bool {
+    v.is_empty()
+}
+
 /// #8121: one idle persistent-NAT lease on the wire.
 ///
 /// Addresses are strings and the lifetime is REMAINING, not a deadline —
@@ -1486,7 +1503,7 @@ pub(crate) struct IdleLeaseWire {
     /// than interpreting it as domain 0.
     #[serde(rename = "routing_scope", default)]
     pub routing_scope: Option<u32>,
-    /// Empty => `permit-any-remote-host`.
+    /// Retained legacy scope fields; current permission grants are below.
     #[serde(
         rename = "remote_ip",
         default,
@@ -1495,6 +1512,10 @@ pub(crate) struct IdleLeaseWire {
     pub remote_ip: String,
     #[serde(rename = "remote_port", default, skip_serializing_if = "is_zero_u16")]
     pub remote_port: u16,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub permit_any_remote: bool,
+    #[serde(default, skip_serializing_if = "is_empty_permitted_remotes")]
+    pub permitted_remotes: Vec<PermittedRemoteWire>,
     #[serde(rename = "translated_ip", default)]
     pub translated_ip: String,
     #[serde(rename = "translated_port", default)]
@@ -1533,7 +1554,7 @@ pub(crate) struct DisplayLeaseWire {
     /// subscriber identities are distinguishable in the SHOW output.
     #[serde(rename = "routing_scope", default)]
     pub routing_scope: Option<u32>,
-    /// Empty => `permit-any-remote-host`.
+    /// Retained legacy scope fields; current permission grants are below.
     #[serde(
         rename = "remote_ip",
         default,
@@ -1542,6 +1563,10 @@ pub(crate) struct DisplayLeaseWire {
     pub remote_ip: String,
     #[serde(rename = "remote_port", default, skip_serializing_if = "is_zero_u16")]
     pub remote_port: u16,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub permit_any_remote: bool,
+    #[serde(default, skip_serializing_if = "is_empty_permitted_remotes")]
+    pub permitted_remotes: Vec<PermittedRemoteWire>,
     #[serde(rename = "translated_ip", default)]
     pub translated_ip: String,
     #[serde(rename = "translated_port", default)]

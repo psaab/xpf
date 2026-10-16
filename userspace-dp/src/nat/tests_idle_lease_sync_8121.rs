@@ -153,12 +153,20 @@ fn idle_record_for(
         src_port: flow.src_port,
         routing_scope: flow.routing_scope,
         remote,
+        permit_any_remote: remote.is_none(),
+        permitted_remotes: remote.into_iter().collect(),
         translated_ip,
         translated_port,
         address_only,
         remaining_ns: TIMEOUT_NS,
         timeout_ns: TIMEOUT_NS,
     }
+}
+
+fn set_remote_scope(rec: &mut IdleLeaseRecord, remote: Option<(IpAddr, u16)>) {
+    rec.remote = remote;
+    rec.permit_any_remote = remote.is_none();
+    rec.permitted_remotes = remote.into_iter().collect();
 }
 
 /// The acceptance criterion: a client whose flows all closed shortly BEFORE the
@@ -423,6 +431,8 @@ fn a_full_imported_table_refuses_local_mints_11475() {
             src_port,
             routing_scope: 0,
             remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+            permit_any_remote: false,
+            permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
             translated_ip: IpAddr::V4(addrs[0]),
             translated_port,
             address_only,
@@ -499,6 +509,8 @@ fn synced_persistent_mints_refuse_a_full_lease_table_11495() {
         src_port,
         routing_scope: 0,
         remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+        permit_any_remote: false,
+        permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
         translated_ip: IpAddr::V4(addrs[0]),
         translated_port: src_port,
         address_only: true,
@@ -576,6 +588,8 @@ fn an_idle_import_pressure_pass_reclaims_expired_capacity_11475() {
         src_port: 40_000,
         routing_scope: 0,
         remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+        permit_any_remote: false,
+        permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
         translated_ip: IpAddr::V4(addrs[0]),
         translated_port: 20_000,
         address_only: false,
@@ -612,6 +626,8 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         src_port: 20_000,
         routing_scope: 0,
         remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+        permit_any_remote: false,
+        permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
         translated_ip: IpAddr::V4(addrs[0]),
         translated_port: 20_000,
         address_only: true,
@@ -638,19 +654,19 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         IdleLeaseImport::SkippedIdentityBusy,
         "a live PAT reverse identity must block an address-only lease import"
     );
-    rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 0)));
     assert_eq!(
         pat_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::SkippedIdentityBusy,
         "target-host imports overlap every live PAT owner port on that host"
     );
-    rec.remote = None;
+    set_remote_scope(&mut rec, None);
     assert_eq!(
         pat_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::SkippedIdentityBusy,
         "any-remote imports overlap live PAT owners at the translated tuple"
     );
-    rec.remote = Some(("8.8.8.8".parse().unwrap(), 444));
+    set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 444)));
     assert_eq!(
         pat_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::Installed,
@@ -659,7 +675,7 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
     assert!(pat_allocator.rollback_idle_lease_import(&rec));
     assert!(pat_allocator.release_flow(pat_owner, translated, 2_500, NatHolder::Untracked));
     rec.src_ip = "10.0.61.51".parse().unwrap();
-    rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 0)));
     assert_eq!(
         pat_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
         IdleLeaseImport::Installed,
@@ -672,25 +688,25 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         .reserve_address_only(address_only_owner, rec.translated_ip, NatHolder::Untracked)
         .unwrap();
     rec.src_ip = "10.0.61.50".parse().unwrap();
-    rec.remote = Some(("8.8.8.8".parse().unwrap(), 443));
+    set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 443)));
     assert_eq!(
         address_only_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::SkippedIdentityBusy,
         "a live address-only reverse identity must block a duplicate lease import"
     );
-    rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 0)));
     assert_eq!(
         address_only_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::SkippedIdentityBusy,
         "target-host imports overlap every live address-only owner port on that host"
     );
-    rec.remote = None;
+    set_remote_scope(&mut rec, None);
     assert_eq!(
         address_only_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::SkippedIdentityBusy,
         "any-remote imports overlap live address-only owners at the translated tuple"
     );
-    rec.remote = Some(("8.8.8.8".parse().unwrap(), 444));
+    set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 444)));
     assert_eq!(
         address_only_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::Installed,
@@ -704,21 +720,21 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         NatHolder::Untracked
     ));
     rec.src_ip = "10.0.61.51".parse().unwrap();
-    rec.remote = None;
+    set_remote_scope(&mut rec, None);
     assert_eq!(
         address_only_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
         IdleLeaseImport::Installed,
         "releasing the address-only owner must clear the any-remote prefix index"
     );
     assert!(address_only_allocator.rollback_idle_lease_import(&rec));
-    rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 0)));
     assert_eq!(
         address_only_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
         IdleLeaseImport::Installed,
         "releasing the address-only owner must clear the host-scope index"
     );
 
-    rec.remote = None;
+    set_remote_scope(&mut rec, None);
     let unscoped_allocator = PortAllocator::new(1, 20_000, 20_001);
     assert_eq!(
         unscoped_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
@@ -903,6 +919,8 @@ fn a_pat_import_refuses_live_address_only_reverse_identity_11475() {
         src_port: 40_000,
         routing_scope: 0,
         remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+        permit_any_remote: false,
+        permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
         translated_ip: translated.ip,
         translated_port: translated.port,
         address_only: false,
@@ -925,19 +943,19 @@ fn a_pat_import_refuses_live_address_only_reverse_identity_11475() {
         IdleLeaseImport::SkippedIdentityBusy,
         "a PAT import must match the synced reserve's same-allocator refusal"
     );
-    rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 0)));
     assert_eq!(
         allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::SkippedIdentityBusy,
         "target-host imports overlap address-only owners at every destination port"
     );
-    rec.remote = None;
+    set_remote_scope(&mut rec, None);
     assert_eq!(
         allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::SkippedIdentityBusy,
         "any-remote imports overlap address-only owners at the translated tuple"
     );
-    rec.remote = Some(("9.9.9.9".parse().unwrap(), 443));
+    set_remote_scope(&mut rec, Some(("9.9.9.9".parse().unwrap(), 443)));
     assert_eq!(
         allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::Installed,
@@ -947,14 +965,14 @@ fn a_pat_import_refuses_live_address_only_reverse_identity_11475() {
 
     assert!(allocator.release_flow(address_only_owner, translated, 2_500, NatHolder::Untracked));
     rec.src_ip = "10.0.61.51".parse().unwrap();
-    rec.remote = None;
+    set_remote_scope(&mut rec, None);
     assert_eq!(
         allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
         IdleLeaseImport::SkippedPortBusy,
         "after owner teardown, the same tuple reaches PAT occupancy (the \
          9.9.9.9 lease holds the bit) instead of a stale identity prefix"
     );
-    rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    set_remote_scope(&mut rec, Some(("8.8.8.8".parse().unwrap(), 0)));
     rec.translated_port = 20_001;
     assert_eq!(
         allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
@@ -962,7 +980,7 @@ fn a_pat_import_refuses_live_address_only_reverse_identity_11475() {
         "releasing the address-only owner must clear the host-scope index"
     );
     rec.src_ip = "10.0.61.52".parse().unwrap();
-    rec.remote = None;
+    set_remote_scope(&mut rec, None);
     rec.translated_port = 20_002;
     assert_eq!(
         allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
@@ -3361,5 +3379,107 @@ fn stale_tuple_admissible_replacement_still_replaces_13691() {
             ip: moved_ip,
             port: 30_005
         })
+    );
+}
+#[test]
+fn idle_lease_permissions_round_trip_and_merge_safely_13945() {
+    let addrs = pool();
+    let pool_addrs = ipv4_pool(&addrs);
+    let allocator = PortAllocator::new(1, 20_000, 20_010);
+    let source = flow("10.0.61.50", 40_000);
+    let key = source.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let mut rec = idle_record_for(
+        source,
+        IpAddr::V4(addrs[0]),
+        20_000,
+        false,
+        Some(("8.8.8.8".parse().unwrap(), 443)),
+    );
+    rec.permit_any_remote = true;
+    rec.permitted_remotes = vec![
+        ("1.1.1.1".parse().unwrap(), 53),
+        ("8.8.8.8".parse().unwrap(), 443),
+    ];
+    assert_eq!(
+        allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    allocator
+        .lock_live()
+        .persistent_by_source
+        .get_mut(&key)
+        .unwrap()
+        .imported = false;
+    let exported = allocator.export_idle_leases(2_000);
+    assert_eq!(exported.len(), 1);
+    assert_eq!(exported[0].remote, None);
+    assert!(exported[0].permit_any_remote);
+    assert_eq!(exported[0].permitted_remotes, rec.permitted_remotes);
+    let display = allocator.export_display_leases(2_000);
+    assert_eq!(display[0].permitted_remotes, rec.permitted_remotes);
+
+    let mut same_binding = rec.clone();
+    same_binding.permit_any_remote = false;
+    same_binding.permitted_remotes = vec![("9.9.9.9".parse().unwrap(), 9)];
+    assert_eq!(
+        allocator.import_idle_lease(&same_binding, &pool_addrs, TIMEOUT_NS, 2_000),
+        IdleLeaseImport::SkippedExisting
+    );
+    {
+        let live = allocator.lock_live();
+        let permissions = live.persistent_permissions.get(&key).unwrap();
+        assert!(permissions.any_remote);
+        assert_eq!(permissions.remotes.len(), 3);
+    }
+
+    let mut many = rec.clone();
+    many.permit_any_remote = false;
+    many.permitted_remotes = (0..super::allocator::MAX_PERSISTENT_PERMITTED_REMOTES - 3)
+        .map(|i| (IpAddr::V4(Ipv4Addr::from(0x0a01_0001u32 + i as u32)), i as u16))
+        .collect();
+    assert_eq!(
+        allocator.import_idle_lease(&many, &pool_addrs, TIMEOUT_NS, 2_500),
+        IdleLeaseImport::SkippedExisting
+    );
+    let mut overflow = same_binding.clone();
+    overflow.permitted_remotes = vec![("10.2.0.1".parse().unwrap(), 1)];
+    assert_eq!(
+        allocator.import_idle_lease(&overflow, &pool_addrs, TIMEOUT_NS, 2_600),
+        IdleLeaseImport::SkippedExisting
+    );
+    assert_eq!(
+        allocator
+            .lock_live()
+            .persistent_permissions
+            .get(&key)
+            .unwrap()
+            .remotes
+            .len(),
+        super::allocator::MAX_PERSISTENT_PERMITTED_REMOTES,
+        "repeated same-lease imports must not grow permissions beyond their bound"
+    );
+
+    let mut different_binding = same_binding;
+    different_binding.translated_port += 1;
+    different_binding.permitted_remotes = vec![("4.4.4.4".parse().unwrap(), 4)];
+    assert_eq!(
+        allocator.import_idle_lease(&different_binding, &pool_addrs, TIMEOUT_NS, 3_000),
+        IdleLeaseImport::SkippedExisting
+    );
+    assert_eq!(
+        allocator.export_idle_leases(3_000)[0].translated_port,
+        20_000,
+        "existing local binding remains authoritative"
+    );
+    assert_eq!(
+        allocator
+            .lock_live()
+            .persistent_permissions
+            .get(&key)
+            .unwrap()
+            .remotes
+            .len(),
+        super::allocator::MAX_PERSISTENT_PERMITTED_REMOTES,
+        "a mismatched binding must not widen the local permit set"
     );
 }

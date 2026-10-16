@@ -15,7 +15,7 @@ use crate::afxdp::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
 use crate::nat::{
     IdleLeaseRecord, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS, MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS,
 };
-use crate::protocol::{DisplayLeaseWire, IdleLeaseWire};
+use crate::protocol::{DisplayLeaseWire, IdleLeaseWire, PermittedRemoteWire};
 use std::net::IpAddr;
 
 /// Whether an idle-lease import batch is worth a journald line.
@@ -68,6 +68,16 @@ fn to_wire(rec: &PoolIdleLease) -> IdleLeaseWire {
         routing_scope: Some(rec.lease.routing_scope),
         remote_ip,
         remote_port,
+        permit_any_remote: rec.lease.permit_any_remote,
+        permitted_remotes: rec
+            .lease
+            .permitted_remotes
+            .iter()
+            .map(|(ip, port)| PermittedRemoteWire {
+                ip: ip.to_string(),
+                port: *port,
+            })
+            .collect(),
         translated_ip: rec.lease.translated_ip.to_string(),
         translated_port: rec.lease.translated_port,
         address_only: rec.lease.address_only,
@@ -100,15 +110,18 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
     let routing_scope = w.routing_scope?;
     let src_ip: IpAddr = w.src_ip.parse().ok()?;
     let translated_ip: IpAddr = w.translated_ip.parse().ok()?;
-    // An empty remote is `permit-any-remote-host`; a NON-empty one that does not
-    // parse is a malformed record, NOT "any remote". Collapsing those two would
-    // widen a lease's reuse scope on the standby — a different lease than the
-    // active holds, wearing the same key.
+    // These legacy fields remain parse-validated for wire compatibility; the
+    // endpoint-independent key and inbound admission use the permission set.
     let remote = if w.remote_ip.is_empty() {
         None
     } else {
         Some((w.remote_ip.parse::<IpAddr>().ok()?, w.remote_port))
     };
+    let permitted_remotes = w
+        .permitted_remotes
+        .iter()
+        .map(|remote| Some((remote.ip.parse::<IpAddr>().ok()?, remote.port)))
+        .collect::<Option<Vec<_>>>()?;
     Some(PoolIdleLease {
         pool_name: w.pool_name.clone(),
         lease: IdleLeaseRecord {
@@ -117,6 +130,8 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
             src_port: w.src_port,
             routing_scope,
             remote,
+            permit_any_remote: w.permit_any_remote,
+            permitted_remotes,
             translated_ip,
             translated_port: w.translated_port,
             address_only: w.address_only,
@@ -186,11 +201,22 @@ mod tests {
         IdleLeaseWire {
             pool_name: "P".to_string(),
             protocol: 6,
+            routing_scope: Some(0),
             src_ip: "10.0.61.50".to_string(),
             src_port: 40000,
-            routing_scope: Some(0),
             remote_ip: "8.8.8.8".to_string(),
             remote_port: 443,
+            permit_any_remote: false,
+            permitted_remotes: vec![
+                PermittedRemoteWire {
+                    ip: "8.8.8.8".to_string(),
+                    port: 0,
+                },
+                PermittedRemoteWire {
+                    ip: "1.1.1.1".to_string(),
+                    port: 443,
+                },
+            ],
             translated_ip: "203.0.113.1".to_string(),
             translated_port: 1024,
             address_only: false,
@@ -380,6 +406,12 @@ mod tests {
                 Box::new(|w: &mut IdleLeaseWire| w.translated_ip = "x".to_string()),
             ),
             (
+                "malformed permitted remote",
+                Box::new(|w: &mut IdleLeaseWire| {
+                    w.permitted_remotes[0].ip = "not-an-address".to_string()
+                }),
+            ),
+            (
                 "missing routing scope",
                 Box::new(|w: &mut IdleLeaseWire| w.routing_scope = None)
                     as Box<dyn Fn(&mut IdleLeaseWire)>,
@@ -446,6 +478,16 @@ fn to_display_wire(rec: &PoolDisplayLease) -> DisplayLeaseWire {
         routing_scope: Some(rec.lease.routing_scope),
         remote_ip,
         remote_port,
+        permit_any_remote: rec.lease.permit_any_remote,
+        permitted_remotes: rec
+            .lease
+            .permitted_remotes
+            .iter()
+            .map(|(ip, port)| PermittedRemoteWire {
+                ip: ip.to_string(),
+                port: *port,
+            })
+            .collect(),
         translated_ip: rec.lease.translated_ip.to_string(),
         translated_port: rec.lease.translated_port,
         address_only: rec.lease.address_only,

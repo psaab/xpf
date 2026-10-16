@@ -48,17 +48,20 @@
 //!    free a bit belonging to that other flow. So the import claims the bit and
 //!    REFUSES the lease if it cannot.
 //!
-//!    Imports check remote scopes against both live address-only and PAT
-//!    owners: `Some((host, port))` is an exact endpoint, `Some((host, 0))` is a
-//!    target-host wildcard, and `None` covers any remote. Every address-only
-//!    import also counts against the shared `max_tracked_flows` lease-table cap.
+//!    Imports check every permitted remote against live address-only and PAT
+//!    owners: `(host, port)` is exact, `(host, 0)` is a target-host wildcard,
+//!    and `permit_any_remote` covers every remote. Every address-only import
+//!    also counts against the shared `max_tracked_flows` lease-table cap.
 
 #![allow(dead_code)]
 
-use super::allocator::{PersistentLease, PersistentSourceKey, PortAllocator, TranslatedTuple};
+use super::allocator::{
+    MAX_PERSISTENT_PERMITTED_REMOTES, PersistentLease, PersistentPermissions,
+    PersistentSourceKey, PortAllocator, TranslatedTuple,
+};
 use std::net::IpAddr;
 
-/// One idle lease, in the shape a peer can act on: identity and lifetime only.
+/// One idle lease in the shape a peer can act on: identity, permissions, and lifetime.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct IdleLeaseRecord {
     pub(crate) protocol: u8,
@@ -69,8 +72,10 @@ pub(crate) struct IdleLeaseRecord {
     /// shared across tenants. This value must cross the idle-lease channel;
     /// dropping it would make the standby merge two VRFs back into one lease.
     pub(crate) routing_scope: u32,
-    /// `None` => `permit-any-remote-host`; `Some` => bound to that remote.
+    /// Legacy in-process field; endpoint-independent lease keys never use it.
     pub(crate) remote: Option<(IpAddr, u16)>,
+    pub(crate) permit_any_remote: bool,
+    pub(crate) permitted_remotes: Vec<(IpAddr, u16)>,
     /// The translated ADDRESS, never the pool index (see module note 3).
     pub(crate) translated_ip: IpAddr,
     pub(crate) translated_port: u16,
@@ -98,8 +103,10 @@ pub(crate) struct DisplayLeaseRecord {
     /// #10018: display rows retain the lease's routing domain too, so the
     /// operator can distinguish overlapping subscriber identities.
     pub(crate) routing_scope: u32,
-    /// `None` => `permit-any-remote-host`; `Some` => bound to that remote.
+    /// Legacy in-process field; endpoint-independent lease keys never use it.
     pub(crate) remote: Option<(IpAddr, u16)>,
+    pub(crate) permit_any_remote: bool,
+    pub(crate) permitted_remotes: Vec<(IpAddr, u16)>,
     pub(crate) translated_ip: IpAddr,
     pub(crate) translated_port: u16,
     pub(crate) address_only: bool,
@@ -160,17 +167,27 @@ impl PortAllocator {
                     && lease.expires_at_ns > now_ns
                     && !lease.imported
             })
-            .map(|(key, lease)| IdleLeaseRecord {
-                protocol: key.protocol,
-                src_ip: key.src_ip,
-                src_port: key.src_port,
-                routing_scope: key.routing_scope,
-                remote: key.remote,
-                translated_ip: lease.translated.ip,
-                translated_port: lease.translated.port,
-                address_only: lease.address_only,
-                remaining_ns: lease.expires_at_ns.saturating_sub(now_ns),
-                timeout_ns: lease.timeout_ns,
+            .map(|(key, lease)| {
+                let permissions = live.persistent_permissions.get(key);
+                let permit_any_remote = permissions.is_some_and(|set| set.any_remote);
+                let mut permitted_remotes: Vec<(IpAddr, u16)> = permissions
+                    .map(|set| set.remotes.iter().copied().collect())
+                    .unwrap_or_default();
+                permitted_remotes.sort_unstable();
+                IdleLeaseRecord {
+                    protocol: key.protocol,
+                    src_ip: key.src_ip,
+                    src_port: key.src_port,
+                    routing_scope: key.routing_scope,
+                    remote: None,
+                    permit_any_remote,
+                    permitted_remotes,
+                    translated_ip: lease.translated.ip,
+                    translated_port: lease.translated.port,
+                    address_only: lease.address_only,
+                    remaining_ns: lease.expires_at_ns.saturating_sub(now_ns),
+                    timeout_ns: lease.timeout_ns,
+                }
             })
             .collect()
     }
@@ -201,27 +218,37 @@ impl PortAllocator {
             .filter(|(_, lease)| {
                 !lease.revoked && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
             })
-            .map(|(key, lease)| DisplayLeaseRecord {
-                protocol: key.protocol,
-                src_ip: key.src_ip,
-                src_port: key.src_port,
-                routing_scope: key.routing_scope,
-                remote: key.remote,
-                translated_ip: lease.translated.ip,
-                translated_port: lease.translated.port,
-                address_only: lease.address_only,
-                // RAW remaining, not a display decision. While
-                // `active_flows > 0` this is routinely 0 or negative-clamped,
-                // because `expires_at_ns` was last written at the most recent
-                // reuse and is NOT refreshed per packet — the countdown only
-                // (re)starts when the last flow closes
-                // (`allocator.rs:2246-2250`). Interpreting that is the
-                // presentation layer's job and is done there; carrying a
-                // pre-interpreted number would make the wire disagree with the
-                // allocator it is reporting on.
-                remaining_ns: lease.expires_at_ns.saturating_sub(now_ns),
-                timeout_ns: lease.timeout_ns,
-                active_flows: lease.active_flows,
+            .map(|(key, lease)| {
+                let permissions = live.persistent_permissions.get(key);
+                let permit_any_remote = permissions.is_some_and(|set| set.any_remote);
+                let mut permitted_remotes: Vec<(IpAddr, u16)> = permissions
+                    .map(|set| set.remotes.iter().copied().collect())
+                    .unwrap_or_default();
+                permitted_remotes.sort_unstable();
+                DisplayLeaseRecord {
+                    protocol: key.protocol,
+                    src_ip: key.src_ip,
+                    src_port: key.src_port,
+                    routing_scope: key.routing_scope,
+                    remote: None,
+                    permit_any_remote,
+                    permitted_remotes,
+                    translated_ip: lease.translated.ip,
+                    translated_port: lease.translated.port,
+                    address_only: lease.address_only,
+                    // RAW remaining, not a display decision. While
+                    // `active_flows > 0` this is routinely 0 or negative-clamped,
+                    // because `expires_at_ns` was last written at the most recent
+                    // reuse and is NOT refreshed per packet — the countdown only
+                    // (re)starts when the last flow closes
+                    // (`allocator.rs:2246-2250`). Interpreting that is the
+                    // presentation layer's job and is done there; carrying a
+                    // pre-interpreted number would make the wire disagree with the
+                    // allocator it is reporting on.
+                    remaining_ns: lease.expires_at_ns.saturating_sub(now_ns),
+                    timeout_ns: lease.timeout_ns,
+                    active_flows: lease.active_flows,
+                }
             })
             .collect()
     }
@@ -287,6 +314,9 @@ impl PortAllocator {
         {
             return IdleLeaseImport::SkippedExpired;
         }
+        if rec.permitted_remotes.len() > MAX_PERSISTENT_PERMITTED_REMOTES {
+            return IdleLeaseImport::SkippedCapacity;
+        }
         let timeout_ns = super::allocator::bounded_persistent_nat_timeout_ns(
             local_timeout_ns.min(rec.timeout_ns),
         );
@@ -302,7 +332,7 @@ impl PortAllocator {
             src_ip: rec.src_ip,
             src_port: rec.src_port,
             routing_scope: rec.routing_scope,
-            remote: rec.remote,
+            remote: None,
         };
         let mut live = self.lock_live();
         let fenced = if generation_validated {
@@ -315,8 +345,24 @@ impl PortAllocator {
         if fenced {
             return IdleLeaseImport::SkippedClearFenced;
         }
-        self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
-        if live.persistent_by_source.contains_key(&key) {
+        if let Some(existing) = live.persistent_by_source.get(&key).copied() {
+            if existing.translated.ip == rec.translated_ip
+                && existing.translated.port == rec.translated_port
+                && existing.address_only == rec.address_only
+            {
+                let current = live.persistent_permissions.entry(key).or_default();
+                let additions = rec
+                    .permitted_remotes
+                    .iter()
+                    .filter(|remote| !current.remotes.contains(remote))
+                    .count();
+                if current.remotes.len().saturating_add(additions)
+                    <= MAX_PERSISTENT_PERMITTED_REMOTES
+                {
+                    current.any_remote |= rec.permit_any_remote;
+                    current.remotes.extend(rec.permitted_remotes.iter().copied());
+                }
+            }
             return IdleLeaseImport::SkippedExisting;
         }
         // Imports and synced-session mints share the persistent-table cap.
@@ -330,10 +376,28 @@ impl PortAllocator {
             ip: rec.translated_ip,
             port: rec.translated_port,
         };
-        let identity_busy = if rec.address_only {
-            live.import_idle_address_only_contended(rec.protocol, translated, rec.remote)
+        let identity_busy = if rec.permit_any_remote {
+            if rec.address_only {
+                live.import_idle_address_only_contended(rec.protocol, translated, None)
+            } else {
+                live.import_idle_pat_address_only_contended(rec.protocol, translated, None)
+            }
         } else {
-            live.import_idle_pat_address_only_contended(rec.protocol, translated, rec.remote)
+            rec.permitted_remotes.iter().any(|remote| {
+                if rec.address_only {
+                    live.import_idle_address_only_contended(
+                        rec.protocol,
+                        translated,
+                        Some(*remote),
+                    )
+                } else {
+                    live.import_idle_pat_address_only_contended(
+                        rec.protocol,
+                        translated,
+                        Some(*remote),
+                    )
+                }
+            })
         };
         if identity_busy {
             return IdleLeaseImport::SkippedIdentityBusy;
@@ -369,6 +433,13 @@ impl PortAllocator {
                 // rollback alone never transfer peer ownership.
                 imported: true,
                 revoked: false,
+            },
+        );
+        live.persistent_permissions.insert(
+            key,
+            PersistentPermissions {
+                any_remote: rec.permit_any_remote,
+                remotes: rec.permitted_remotes.iter().copied().collect(),
             },
         );
         // Without this the lease is invisible to GC and outlives what the

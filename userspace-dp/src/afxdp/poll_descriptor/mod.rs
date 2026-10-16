@@ -69,6 +69,7 @@ mod pmech_replay;
 #[path = "poll_descriptor_structure_13081_tests.rs"]
 mod poll_descriptor_structure_13081_tests;
 
+use crate::nat::PersistentInbound;
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
 pub(in crate::afxdp) use embedded_icmp::{
     EmbeddedIcmpReversal, enforce_queued_embedded_icmp_policy, related_forward_zones,
@@ -3415,7 +3416,59 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ingress_ifname_dnat,
                                 ingress_ri_dnat,
                             );
+                        let mut persistent_dnat = None;
+                        let mut persistent_dnat_denied = false;
+                        if static_dnat_decision.is_none() {
+                            for rule in &worker_ctx.forwarding.source_nat_rules {
+                                if !rule.persistent_nat || !rule.pool_mode {
+                                    continue;
+                                }
+                                let pool_contains_target = match resolution_target {
+                                    IpAddr::V4(ip) => rule.pool_index_v4.contains_key(&ip),
+                                    IpAddr::V6(ip) => rule.pool_index_v6.contains_key(&ip),
+                                };
+                                if !pool_contains_target {
+                                    continue;
+                                }
+                                match rule.pool_allocator.persistent_inbound_lookup(
+                                    meta.protocol,
+                                    resolution_target,
+                                    flow.forward_key.dst_port,
+                                    flow.forward_key.src_ip,
+                                    flow.forward_key.src_port,
+                                    now_ns,
+                                ) {
+                                    PersistentInbound::Miss => {}
+                                    PersistentInbound::Denied => {
+                                        persistent_dnat_denied = true;
+                                    }
+                                    PersistentInbound::Permitted {
+                                        internal_ip,
+                                        internal_port,
+                                        address_only,
+                                    } => {
+                                        let candidate = NatDecision {
+                                            rewrite_dst: Some(internal_ip),
+                                            rewrite_dst_port: (!address_only).then_some(internal_port),
+                                            ..NatDecision::default()
+                                        };
+                                        if persistent_dnat
+                                            .is_some_and(|previous| previous != candidate)
+                                        {
+                                            persistent_dnat_denied = true;
+                                        } else {
+                                            persistent_dnat = Some(candidate);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if persistent_dnat_denied {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         let dnat_decision = if static_dnat_decision.is_none()
+                            && persistent_dnat.is_none()
                             && !worker_ctx.forwarding.dnat_table.is_empty()
                         {
                             worker_ctx.forwarding.dnat_table.lookup_with_counter_scoped(
@@ -3440,7 +3493,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // `pre_routing_dnat_counter` and incremented only at a
                         // committed session install (here or the later
                         // MissingNeighbor seed path).
-                        let pre_routing_dnat = match static_dnat_decision.or(dnat_decision) {
+                        let pre_routing_dnat = match static_dnat_decision
+                            .or_else(|| persistent_dnat.map(|decision| (decision, None)))
+                            .or(dnat_decision)
+                        {
                             Some((decision, counter)) => {
                                 pre_routing_dnat_counter = counter;
                                 Some(decision)
