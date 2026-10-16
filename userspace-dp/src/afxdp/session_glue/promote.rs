@@ -319,12 +319,11 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
 /// the BPF conntrack mirror — the plain
 /// `delete_session_map_entry_for_removed_session` hardcodes `-1,-1`
 /// conntrack fds, leaving a stale kernel row the next packet would hit;
-/// (b) fan `DeleteSynced` to sibling workers (via the repairing helper, so
-/// a refused queue's NAT holder teardown still runs) when the shared entry
-/// was actually removed — otherwise siblings serve local replicas until
-/// idle timeout; and (c) push the key into `evicted_keys` so the caller
-/// invalidates per-binding flow-cache slots. Returns whether the purge
-/// fired (guard passed), so callers can gate follow-up work.
+/// (b) fan `DeleteSynced` to sibling workers only if the shared session
+/// captured by the lookup still has the same identity, so a replacement
+/// under the key cannot be revoked by this stale hit; and (c) push the key
+/// into `evicted_keys` so the worker invalidates flow-cache slots on every
+/// binding. Sibling workers evict through their delete-sync teardown.
 ///
 /// `key` identifies the stored session and is the tuple tested by the
 /// translated-forward guard. `forwarding`, `now_ns`, and `worker_id` scope
@@ -342,6 +341,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
     decision: SessionDecision,
     metadata: &SessionMetadata,
     origin: SessionOrigin,
+    shared_identity: Option<(u64, u64)>,
     forwarding: &ForwardingState,
     now_ns: u64,
     // #6211 F2: THIS worker's id. This purge tears down a PEER-SYNCED forward
@@ -353,14 +353,18 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
     if !origin.is_peer_synced() || !is_translated_forward_session_key(key, decision, metadata) {
         return false;
     }
-    let removed = remove_shared_session_if(
-        shared.sessions,
-        shared.nat_sessions,
-        shared.forward_wire_sessions,
-        shared.owner_rg_indexes,
-        key,
-        |_| true,
-    );
+    let removed = if let Some((session_id, generation)) = shared_identity {
+        remove_shared_session_if(
+            shared.sessions,
+            shared.nat_sessions,
+            shared.forward_wire_sessions,
+            shared.owner_rg_indexes,
+            key,
+            |entry| entry.session_id == session_id && entry.generation == generation,
+        )
+    } else {
+        SharedRemoval::Absent
+    };
     delete_session_map_entry_for_removed_session_with_origin(
         session_map,
         key,
@@ -372,8 +376,8 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
     );
     sessions.delete(key);
     evicted_keys.push(key.clone());
-    if matches!(removed, SharedRemoval::Removed(_)) {
-        replicate_session_delete_repairing(
+    if let (SharedRemoval::Removed(_), Some((session_id, _))) = (removed, shared_identity) {
+        replicate_session_delete_conditional(
             peer_worker_commands,
             worker_commands_by_id,
             forwarding,
@@ -381,6 +385,8 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
             decision.nat,
             metadata.is_reverse,
             now_ns,
+            session_id,
+            None,
         );
     }
     // #5295: return the pool reservation to the local allocator, exactly as
@@ -434,6 +440,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
         decision,
         metadata,
         origin,
+        None,
         forwarding,
         now_ns,
         worker_id,
@@ -473,6 +480,7 @@ fn apply_deferred_synced_purge(
         purge.decision,
         &purge.metadata,
         purge.origin,
+        purge.shared_identity,
         forwarding,
         now_ns,
         worker_id,

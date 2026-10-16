@@ -12156,6 +12156,7 @@ fn purge_translated_synced_hit_full_teardown_13674() {
             decision,
             metadata: metadata.clone(),
             origin: SessionOrigin::SyncImport,
+            shared_identity: Some((1, 0)),
         }),
     };
     maybe_promote_synced_session_with_conntrack(
@@ -12184,8 +12185,12 @@ fn purge_translated_synced_hit_full_teardown_13674() {
     {
         let pending = peer_queue.lock().unwrap();
         assert!(
-            pending.iter().any(|cmd| matches!(cmd, WorkerCommand::DeleteSynced(k) if *k == wire_key)),
-            "purge that removes the shared entry must queue DeleteSynced to siblings, got {pending:?}",
+            pending.iter().any(|cmd| matches!(
+                cmd,
+                WorkerCommand::DeleteSyncedConditional { key, expected_id, companion: None }
+                    if *key == wire_key && *expected_id == 1
+            )),
+            "purge that removes the captured shared entry must queue an identity-conditional delete to siblings, got {pending:?}",
         );
     }
     // (3) flow-cache eviction recorded

@@ -285,6 +285,10 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
         // its entry out of `hit`; local-only hits read it from the table below.
         let shared_session_id = hit.shared_entry.as_ref().map(|entry| entry.session_id);
         let shared_leak_incarnation = hit.shared_entry.as_ref().map(|entry| entry.leak_incarnation);
+        let shared_identity = hit
+            .shared_entry
+            .as_ref()
+            .map(|entry| (entry.session_id, entry.generation));
         let source_nat_static = match hit.shared_entry.as_ref() {
             Some(entry) => entry.source_nat_static,
             // #13079: reuse the lookup's aux snapshot, no re-probe.
@@ -317,6 +321,7 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
                 decision,
                 metadata: metadata.clone(),
                 origin,
+                shared_identity,
             })
         } else {
             None

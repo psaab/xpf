@@ -373,6 +373,7 @@ pub(in crate::afxdp) struct DeferredSyncedPurge {
     pub(in crate::afxdp) decision: SessionDecision,
     pub(in crate::afxdp) metadata: SessionMetadata,
     pub(in crate::afxdp) origin: SessionOrigin,
+    pub(in crate::afxdp) shared_identity: Option<(u64, u64)>,
 }
 
 /// #12265: the #11373 re-resolve a stale hit computed, held for the #9519
