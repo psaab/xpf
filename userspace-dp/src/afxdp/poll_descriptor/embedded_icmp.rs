@@ -237,6 +237,12 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
             return EmbeddedIcmpReversal::Dropped;
         };
         Some(policy_flow.src_ip)
+    } else if (meta.meta_flags & FABRIC_INGRESS_FLAG) != 0
+        && icmp_match.nat.rewrite_dst.is_some()
+        && queued_embedded_icmp_identity(packet_frame)
+            .is_some_and(|(flow, _)| icmp_match.original_dst == flow.src_ip)
+    {
+        icmp_match.nat.rewrite_dst
     } else {
         None
     };
