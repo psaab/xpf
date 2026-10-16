@@ -562,8 +562,8 @@ mod flow_cache_invalidation_tests {
             );
             let mut sessions = SessionTable::new();
             sessions.defer_conntrack_deletes(std::mem::take(&mut deferred));
-            let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
-            shared_sessions.lock().unwrap().insert(
+            let mut shared_sessions_map = FastMap::default();
+            shared_sessions_map.insert(
                 key.clone(),
                 SyncedSessionEntry {
                     key: key.clone(),
@@ -580,6 +580,7 @@ mod flow_cache_invalidation_tests {
                     tcp_handshake_state: 0,
                 },
             );
+            let shared_sessions = Arc::new(Mutex::new(shared_sessions_map));
             let unrelated_key = if replacement_id.is_none() {
                 let unrelated_key = reap_key(port + 100);
                 assert_eq!(
