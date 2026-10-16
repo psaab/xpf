@@ -2734,7 +2734,7 @@ fn wg_socket_v6_capability_fallback_predicate_is_stage_aware_10196() {
     ));
 }
 
-// ===== #13665 D10-08: handshake state must not advance on send failure =====
+// ===== #13665 D10-08: report send completion accurately =====
 
 /// #13665: a failed Type-2 send must not report CompletedResponder (which
 /// drains rekey/handshake request edges at the caller) — the msg1 still
