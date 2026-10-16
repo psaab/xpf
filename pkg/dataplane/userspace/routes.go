@@ -605,7 +605,7 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		out[index].MTU = mtu
 	}
 
-	out = applyRouteOverlay(out, overlay)
+	out = applyRouteOverlay(cfg, out, overlay)
 	// #12507: publish each non-excluded static route whose zero-padded
 	// destination mask the helper cannot parse ("/008", "/0032") AFTER every
 	// runtime filter above. The helper fails the whole snapshot closed on it
@@ -953,9 +953,12 @@ func forwardingGatewayInterface(riName, family string, gateway net.IP, interface
 // into the route set: for each entry, every existing ORDINARY snapshot for the
 // same (table, family, canonical prefix) is REMOVED (whole-entry replacement,
 // including all ECMP next-hops) and the single overlay route is appended.
-// NextTable snapshots are priority-ordered stage-1 leak rules and are retained
-// even when their prefix matches an overlay entry.
-func applyRouteOverlay(routes []RouteSnapshot, overlay []config.RouteOverlayEntry) []RouteSnapshot {
+// A positive route MTU is retained only from same-path rows for the exact
+// (table, family, canonical prefix), because an unrelated next hop's MTU is
+// not a constraint on the overlay path. NextTable snapshots are priority-
+// ordered stage-1 leak rules and are retained even when their prefix matches
+// an overlay entry.
+func applyRouteOverlay(cfg *config.Config, routes []RouteSnapshot, overlay []config.RouteOverlayEntry) []RouteSnapshot {
 	if len(overlay) == 0 {
 		return routes
 	}
@@ -967,11 +970,25 @@ func applyRouteOverlay(routes []RouteSnapshot, overlay []config.RouteOverlayEntr
 		if dest == "" {
 			continue
 		}
+		nextHop := []string{entry.NextHop}
+		var mtu int
+		for _, snap := range routes {
+			if snap.NextTable != "" || snap.Discard ||
+				snap.Table != table || snap.Family != family ||
+				canonicalRoutePrefix(snap.Destination) != dest ||
+				!routeNextHopsMatchByMeaning(cfg, snap.NextHops, nextHop) {
+				continue
+			}
+			if snap.MTU > 0 && (mtu == 0 || snap.MTU < mtu) {
+				mtu = snap.MTU
+			}
+		}
 		replaced[key{table, family, dest}] = RouteSnapshot{
 			Table:       table,
 			Family:      family,
 			Destination: dest,
-			NextHops:    []string{entry.NextHop},
+			NextHops:    nextHop,
+			MTU:         mtu,
 			// #3770 (M7): the ip-monitoring overlay injects the documented
 			// Static/1 route (route preference 1, PreferredRoute contract in
 			// pkg/config/types_system.go). Leaving it at 0 made the Rust FIB
