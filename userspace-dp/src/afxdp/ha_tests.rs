@@ -6598,6 +6598,91 @@ fn an_accepted_removal_still_removes_and_unfiles_9714() {
          session behind it survives for the life of the process"
     );
 }
+/// #13672 (D11-06): cleanup must serialize with republishing a live session.
+///
+/// The removal blocks on the reverse-prewarm index after taking the shared
+/// sessions lock. Publishing the replacement while cleanup is blocked must
+/// not be able to interleave between the shared-map removal and index
+/// un-file; otherwise the live replacement is left without its failover
+/// candidate filing.
+#[test]
+fn remove_shared_session_if_serializes_prewarm_cleanup_with_republish_13672() {
+    let fixture = fixture_9714(false);
+    let key = fixture.forward.key.clone();
+    let indexes = fixture.coordinator.sessions.owner_rg_indexes.clone();
+    let synced = fixture.coordinator.sessions.synced.clone();
+    let nat = fixture.coordinator.sessions.nat.clone();
+    let forward_wire = fixture.coordinator.sessions.forward_wire.clone();
+    let index_guard = indexes
+        .reverse_prewarm_sessions
+        .lock()
+        .expect("prewarm index");
+    let remove_fixture = fixture.forward.clone();
+    let remove_indexes = indexes.clone();
+    let remove_synced = synced.clone();
+    let remove_nat = nat.clone();
+    let remove_forward_wire = forward_wire.clone();
+    let remove_key = key.clone();
+    let remover = std::thread::spawn(move || {
+        remove_shared_session_if(
+            &remove_synced,
+            &remove_nat,
+            &remove_forward_wire,
+            &remove_indexes,
+            &remove_key,
+            |_| true,
+        )
+    });
+
+    // Pre-fix, removal dropped `shared_sessions` before blocking here, so
+    // another publisher could install the replacement. With the fix, that
+    // lock remains held until the index cleanup also completes.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut published_during_cleanup = false;
+    loop {
+        if let Ok(sessions) = synced.try_lock()
+            && !sessions.contains_key(&key)
+        {
+            drop(sessions);
+            let mut replacement = remove_fixture.clone();
+            replacement.origin = SessionOrigin::SyncImport;
+            replacement.generation = 88;
+            publish_shared_session(&synced, &nat, &forward_wire, &indexes, &replacement);
+            published_during_cleanup = true;
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    drop(index_guard);
+    assert!(
+        matches!(remover.join().expect("remover"), SharedRemoval::Removed(_)),
+        "the remover must complete its accepted removal"
+    );
+    let mut replacement = remove_fixture;
+    replacement.origin = SessionOrigin::SyncImport;
+    replacement.generation = 88;
+    if !published_during_cleanup {
+        publish_shared_session(&synced, &nat, &forward_wire, &indexes, &replacement);
+        refresh_reverse_prewarm_owner_rg_indexes(
+            &indexes.reverse_prewarm_sessions,
+            &fixture.coordinator.forwarding,
+            fixture.coordinator.dynamic_neighbors_ref(),
+            None,
+            Some(&replacement),
+        );
+    }
+    assert!(
+        fixture.shared_has(&key),
+        "republishing must leave the replacement in the shared map"
+    );
+    assert!(
+        prewarm_filed_9714(&fixture, &key),
+        "an interleaved publish lost its reverse-prewarm filing during cleanup (#13672)"
+    );
+}
 
 /// #9714 review round 2, finding 7: the stale-generation refusal is a DISTINCT
 /// outcome from an applied delete, and this pair is the only thing that reaches it.
