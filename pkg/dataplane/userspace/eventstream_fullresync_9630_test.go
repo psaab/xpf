@@ -90,7 +90,7 @@ func TestEventStreamFullResyncReaderProgressWhileExportBlocked9630(t *testing.T)
 		"FullResync barrier was not applied after export completed")
 }
 
-func TestEventStreamFullResyncCoalescesConcurrentBarriers9630(t *testing.T) {
+func TestEventStreamFullResyncDuringInFlightExportRunsAnotherExport9630(t *testing.T) {
 	es := NewEventStream(filepath.Join(t.TempDir(), "events.sock"))
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -122,15 +122,18 @@ func TestEventStreamFullResyncCoalescesConcurrentBarriers9630(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("first FullResync dispatch did not return after export completed")
 	}
-	if got := exports.Load(); got != 1 {
-		t.Fatalf("FullResync exports = %d, want one coalesced export", got)
+	wait9630(t, 2*time.Second,
+		func() bool { return exports.Load() == 2 },
+		"post-barrier FullResync export did not start")
+	if got := exports.Load(); got != 2 {
+		t.Fatalf("FullResync exports = %d, want one export per in-flight barrier", got)
 	}
 	wait9630(t, 2*time.Second,
 		func() bool { return es.lastAppliedSeq.Load() == 8 },
-		"coalesced FullResync marker did not retire in FIFO order")
+		"second FullResync marker did not retire after its own export")
 }
 
-func TestEventStreamFullResyncCoalescesPendingBeforeCallback9630(t *testing.T) {
+func TestEventStreamFullResyncBarriersQueuedBeforeCallbackEachExport9630(t *testing.T) {
 	es := NewEventStream(filepath.Join(t.TempDir(), "events.sock"))
 	first := es.dispatchOrQueueFullResyncFrame(7)
 	second := es.dispatchOrQueueFullResyncFrame(8)
@@ -145,13 +148,13 @@ func TestEventStreamFullResyncCoalescesPendingBeforeCallback9630(t *testing.T) {
 		return true
 	})
 	wait9630(t, 2*time.Second,
-		func() bool { return exports.Load() == 1 },
-		"queued FullResync export did not start after callback registration")
+		func() bool { return exports.Load() == 2 },
+		"queued FullResync exports did not both start after callback registration")
 	wait9630(t, 2*time.Second,
 		func() bool { return es.lastAppliedSeq.Load() == 8 },
-		"queued FullResync markers did not coalesce and retire in FIFO order")
-	if got := exports.Load(); got != 1 {
-		t.Fatalf("queued FullResync exports = %d, want one coalesced export", got)
+		"queued FullResync barriers did not retire in FIFO order")
+	if got := exports.Load(); got != 2 {
+		t.Fatalf("queued FullResync exports = %d, want one export per barrier", got)
 	}
 }
 

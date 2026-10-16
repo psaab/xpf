@@ -45,10 +45,6 @@ type pendingCallbackFrame struct {
 	// has to enter the queue at all.
 	dropped bool
 
-	// resyncCoalesced marks a FullResync barrier whose export work is covered by
-	// the preceding in-flight barrier. The marker remains in the FIFO so its
-	// sequence can be acknowledged only after all earlier frames have applied.
-	resyncCoalesced bool
 }
 
 // EventStream manages the daemon-side event socket for receiving session events
@@ -118,20 +114,19 @@ type EventStream struct {
 	pendingMu             sync.Mutex
 	pendingCallbackFrames []pendingCallbackFrame
 
-	// #9630: single coalescing FullResync worker. The callback performs a
-	// complete owner-RG export through many bounded helper passes (1024-slot
-	// scans, 256-emission caps, and 500us slices); it must not run inline on
-	// the reader goroutine:
-	// while it runs no frame is read, the helper's write backlog fills, and
-	// the reconnect replays past the 4096-frame window, requesting the next
-	// FullResync. The worker runs the export off-reader; the reader keeps
-	// reading bytes and queues followers behind the barrier. The barrier's
-	// markFrameApplied (and therefore the cumulative ACK) happens only when
-	// the export reports success, preserving #9767 fail-closed semantics.
-	// A second barrier arriving while one runs coalesces (updates no sequence
-	// watermark); its own queue marker is retained and is retired in FIFO order
-	// after the one export completes. resyncGen invalidates a worker whose
-	// callback was swapped (SetOnFullResync), whose queue was discarded
+	// #9630: a single FullResync worker runs at a time. The callback performs
+	// a complete owner-RG export through many bounded helper passes
+	// (1024-slot scans, 256-emission caps, and 500us slices); it must not run
+	// inline on the reader goroutine: while it runs no frame is read, the
+	// helper's write backlog fills, and the reconnect replays past the
+	// 4096-frame window, requesting the next FullResync. The worker runs the
+	// export off-reader; the reader keeps reading bytes and queues followers
+	// behind the barrier. Each FullResync barrier has its own export because
+	// the preceding paged scan may already have passed shards affected by its
+	// drops. markFrameApplied (and therefore the cumulative ACK) happens only
+	// when the corresponding export reports success, preserving #9767
+	// fail-closed semantics. resyncGen invalidates a worker whose callback was
+	// swapped (SetOnFullResync), whose queue was discarded
 	// (clearPendingCallbackFrames on reconnect), or whose stream closed: its
 	// completion is ignored and the still-queued barrier retries with the new
 	// generation. Lock order: pendingFlushMu -> resyncMu -> pendingMu
@@ -1245,43 +1240,30 @@ func (es *EventStream) dispatchOrQueueFullResyncFrame(seq uint64) bool {
 		return false
 	}
 	// #9630: never call the potentially minutes-long paged export on this
-	// reader goroutine. flushPendingCallbackFrames starts one coalescing worker
-	// and leaves this barrier at the FIFO head until that worker completes.
+	// reader goroutine. flushPendingCallbackFrames starts one worker for each
+	// FullResync marker and leaves the barrier at the FIFO head until success.
 	es.flushPendingCallbackFrames()
 	return true
 }
 
 // enqueueFullResyncFrame appends a FullResync marker without invoking its
-// callback. A marker arriving while another marker is pending or its export is
-// running shares that export, but remains in the FIFO so no cumulative ACK can
-// jump over session frames between the two barriers.
+// callback. Every barrier gets its own export: a later barrier may follow
+// drops in shards that an earlier paged export already scanned, so the earlier
+// export cannot cover it. Keeping every marker in the FIFO also prevents a
+// cumulative ACK from advancing past a barrier before its export succeeds.
 func (es *EventStream) enqueueFullResyncFrame(seq uint64) bool {
-	es.resyncMu.Lock()
-	coalesced := es.resyncInFlight
 	es.pendingMu.Lock()
-	if !coalesced {
-		for _, pending := range es.pendingCallbackFrames {
-			if pending.typ == EventTypeFullResync {
-				coalesced = true
-				break
-			}
-		}
-	}
+	defer es.pendingMu.Unlock()
 	if len(es.pendingCallbackFrames) >= pendingCallbackFramesLimit {
-		es.pendingMu.Unlock()
-		es.resyncMu.Unlock()
 		es.pendingOverflowDisconnects.Add(1)
 		slog.Error("event stream: pending callback queue full; closing helper stream to force replay",
 			"limit", pendingCallbackFramesLimit, "type", EventTypeFullResync, "seq", seq)
 		return false
 	}
 	es.pendingCallbackFrames = append(es.pendingCallbackFrames, pendingCallbackFrame{
-		typ:             EventTypeFullResync,
-		seq:             seq,
-		resyncCoalesced: coalesced,
+		typ: EventTypeFullResync,
+		seq: seq,
 	})
-	es.pendingMu.Unlock()
-	es.resyncMu.Unlock()
 	return true
 }
 
@@ -1336,14 +1318,6 @@ func (es *EventStream) completeFullResyncWorker(
 	workerClosed := es.resyncWorkerClosed
 	es.resyncInFlight = false
 	if stale || !ok {
-		es.pendingMu.Lock()
-		for i := range es.pendingCallbackFrames {
-			if es.pendingCallbackFrames[i].typ == EventTypeFullResync &&
-				es.pendingCallbackFrames[i].resyncCoalesced {
-				es.pendingCallbackFrames[i].resyncCoalesced = false
-			}
-		}
-		es.pendingMu.Unlock()
 		es.resyncMu.Unlock()
 		es.pendingFlushMu.Unlock()
 		if stale && !workerClosed {
@@ -1355,7 +1329,7 @@ func (es *EventStream) completeFullResyncWorker(
 	es.pendingMu.Lock()
 	if len(es.pendingCallbackFrames) > 0 {
 		head := &es.pendingCallbackFrames[0]
-		if head.typ == EventTypeFullResync && !head.resyncCoalesced && head.seq == seq {
+		if head.typ == EventTypeFullResync && head.seq == seq {
 			copy(es.pendingCallbackFrames, es.pendingCallbackFrames[1:])
 			es.pendingCallbackFrames = es.pendingCallbackFrames[:len(es.pendingCallbackFrames)-1]
 			removed = true
@@ -1477,28 +1451,6 @@ func (es *EventStream) flushPendingCallbackFrames() {
 				return
 			}
 		case EventTypeFullResync:
-			if frame.resyncCoalesced {
-				// The preceding export owns the callback. Its completion will
-				// re-enter this flush; never retire this marker while that
-				// export is still running.
-				es.resyncMu.Lock()
-				running := es.resyncInFlight
-				es.resyncMu.Unlock()
-				if running {
-					return
-				}
-				es.markFrameApplied(frame.seq)
-				es.pendingMu.Lock()
-				if len(es.pendingCallbackFrames) > 0 &&
-					es.pendingCallbackFrames[0].typ == EventTypeFullResync &&
-					es.pendingCallbackFrames[0].seq == frame.seq &&
-					es.pendingCallbackFrames[0].resyncCoalesced {
-					copy(es.pendingCallbackFrames, es.pendingCallbackFrames[1:])
-					es.pendingCallbackFrames = es.pendingCallbackFrames[:len(es.pendingCallbackFrames)-1]
-				}
-				es.pendingMu.Unlock()
-				continue
-			}
 			// #9630: start the potentially long paged export away from the
 			// reader. The barrier stays at the FIFO head and therefore keeps
 			// the ACK watermark honest while followers are read and queued.
