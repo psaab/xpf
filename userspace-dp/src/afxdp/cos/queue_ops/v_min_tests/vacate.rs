@@ -41,7 +41,7 @@ fn vmin_demote_no_drain_all_leak() {
             surplus_weight: 1,
             buffer_bytes: 4 * 1024 * 1024,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     let queue = &mut root.queues[0];
@@ -126,21 +126,25 @@ fn vmin_vacate_on_bucket_empty() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 1);
 
-    // Establish participation: enqueue + drain + publish so slot
-    // has a non-NOT_PARTICIPATING value.
+    // Establish participation while a bucket is active, then drain it.
+    // Commit-boundary publish must not reintroduce an empty worker.
     let item = test_flow_cos_item(1234, 1500);
     cos_queue_push_back(queue, item);
-    let _ = cos_queue_pop_front(queue);
     publish_committed_queue_vtime(Some(&*queue));
     assert!(
         floor.slots[1].read().is_some(),
-        "slot should be participating after publish",
+        "active bucket should participate after publish",
+    );
+    let _ = cos_queue_pop_front(queue);
+    assert!(
+        floor.slots[1].read().is_none(),
+        "draining the last bucket must vacate the slot",
     );
 
     // active_flow_buckets is now 0 because pop drained the only bucket.
@@ -184,7 +188,7 @@ fn vmin_vacate_only_when_last_bucket_empties() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     let queue = &mut root.queues[0];
@@ -226,4 +230,61 @@ fn vmin_vacate_only_when_last_bucket_empties() {
         "vacate must fire when the last bucket empties",
     );
 }
+/// #13657 (D8-04): a post-settle publish after the last bucket
+/// drained must NOT resurrect the slot. The pop-time vacate in
+/// `account_cos_queue_flow_dequeue` emptied the slot during drain;
+/// an unconditional `slot.publish(ff.queue_vtime)` at the commit
+/// boundary would overwrite NOT_PARTICIPATING with the frozen
+/// queue_vtime and leave this idle worker phantom-participating
+/// in peers' V_min reduction. The commit-boundary publish must
+/// re-vacate when `active_flow_buckets == 0`.
+#[test]
+fn vmin_publish_after_settle_keeps_vacated_slot_empty() {
+    let mut root = test_cos_runtime_with_queues(
+        10_000_000_000 / 8,
+        vec![CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "iperf-c".into(),
+            priority: 5,
+            transmit_rate_bytes: 10_000_000_000 / 8,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    let queue = &mut root.queues[0];
+    let floor = attach_test_vtime_floor(queue, 4, 1);
 
+    // Drain the only bucket (pop vacates the slot via #941 A), then
+    // run the exact post-settle publish the service sites call.
+    let item = test_flow_cos_item(1234, 1500);
+    cos_queue_push_back(queue, item);
+    let _ = cos_queue_pop_front(queue);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 0);
+    // Give queue_vtime a non-zero frozen value so a clobbering
+    // publish is observable as Some(stale), not Some(0).
+    test_flow_fair_state_mut(queue).queue_vtime = 42_424;
+    publish_committed_queue_vtime(Some(&*queue));
+    assert!(
+        floor.slots[1].read().is_none(),
+        "publish after drain-to-empty must keep slot NOT_PARTICIPATING (D8-04)",
+    );
+
+    // Positive control: with an active bucket, the same publish
+    // must broadcast the committed queue_vtime (no over-vacate on
+    // the non-empty path).
+    account_cos_queue_flow_enqueue(queue, Some(&test_session_key(1234, 5201)), 1500);
+    assert_eq!(test_flow_fair_state(queue).active_flow_buckets, 1);
+    publish_committed_queue_vtime(Some(&*queue));
+    assert_eq!(
+        floor.slots[1].read(),
+        Some(42_424),
+        "publish with active buckets must broadcast queue_vtime",
+    );
+}

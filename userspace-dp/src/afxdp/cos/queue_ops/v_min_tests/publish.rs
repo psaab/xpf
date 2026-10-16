@@ -21,7 +21,7 @@ fn vmin_pop_snapshot_does_not_publish() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     let queue = &mut root.queues[0];
@@ -85,13 +85,15 @@ fn vmin_post_settle_publish_writes_committed_vtime() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     let queue = &mut root.queues[0];
     let floor = attach_test_vtime_floor(queue, 4, 2);
 
     // Set queue_vtime as if a drain has just committed.
+    // #13657: publish only broadcasts with an active bucket; enqueue one.
+    account_cos_queue_flow_enqueue(queue, Some(&test_session_key(1234, 5201)), 1500);
     test_flow_fair_state_mut(queue).queue_vtime = 12345;
     publish_committed_queue_vtime(Some(&*queue));
     assert_eq!(
@@ -131,7 +133,7 @@ fn vmin_publish_helper_noop_when_floor_none() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     let queue = &mut root.queues[0];
@@ -144,4 +146,3 @@ fn vmin_publish_helper_noop_when_floor_none() {
     // Sanity: still no floor, no observable effect.
     assert!(queue.v_min.vtime_floor.is_none());
 }
-
