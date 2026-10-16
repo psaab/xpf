@@ -81,30 +81,16 @@ var nftDeleteTable = func(family, name string) ([]byte, error) {
 // (nft_chain_priority_test.go) pins nftLo0FilterPriority < nftHostInboundPriority
 // so the spread cannot silently regress back to a shared priority.
 const (
-	// nftLo0FilterPriority is the `hook input` priority of the xpf_lo0 loopback
-	// input-filter base chain. 0 is the conventional `filter` priority (the lo0
-	// chain IS the operator's firewall filter); it is STRICTLY LESS THAN
-	// nftHostInboundPriority so lo0 evaluates first.
+	// nftLo0FilterPriority is the `hook input` priority of xpf_lo0. It evaluates
+	// before host-inbound filtering.
 	nftLo0FilterPriority = 0
-	// nftHostInboundPriority is the `hook input` priority of the xpf_hostinbound
-	// base chain. It is STRICTLY GREATER THAN nftLo0FilterPriority so the zone
-	// host-inbound default-deny backstop runs AFTER the lo0 input filter, and is
-	// kept well below the conventional `security` (50) / `srcnat` (100)
-	// priorities so it stays within the input-filter band.
+	// nftHostInboundPriority is the `hook input` priority of xpf_hostinbound.
 	nftHostInboundPriority = 10
-	// nftHostInboundGapPriority is the `hook input` priority of the ADDITIVE
-	// xpf_hostinbound_gap fence (#5789). It is STRICTLY GREATER THAN
-	// nftHostInboundPriority so it evaluates AFTER the main host-inbound table:
-	// the gap only denies destinations the retained main table does NOT cover
-	// (they fall through the main chain's `policy accept`), while an address the
-	// main table already handles is either service-accepted (non-terminal, reaches
-	// the gap but is not in its drop set) or catch-all DROPped (terminal at prio
-	// 10, never reaches the gap). Running last makes the gap a pure backstop for
-	// newly-appeared addresses without altering the retained table's verdicts —
-	// the same three-way distinct-priority discipline as xpf_lo0 (0) <
-	// xpf_hostinbound (10) < xpf_hostinbound_gap (11), pinned by
-	// nft_chain_priority_test.go. Still well below security (50).
+	// nftHostInboundGapPriority is the additive coverage-gap table priority.
 	nftHostInboundGapPriority = 11
+	// nftHostInboundPreActivationPriority keeps temporary address drops last,
+	// after the early barrier at 12.
+	nftHostInboundPreActivationPriority = 13
 )
 
 // applyLo0Filter applies loopback filter rules for host-bound traffic.
@@ -581,7 +567,8 @@ func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
 // locally deliverable under the previous nft generation in between. The
 // config-backed snapshot includes static unit addresses before networkd brings
 // them up. Install only additive drops for destinations the retained table
-// does not cover; the normal successful host-inbound install retires the gap.
+// does not cover; the normal successful host-inbound install retires this
+// separate temporary table without replacing an active coverage-gap fence.
 func (d *Daemon) applyHostInboundPreNetworkdAddressFence(cfg *config.Config) error {
 	if cfg == nil {
 		return nil
@@ -590,38 +577,57 @@ func (d *Daemon) applyHostInboundPreNetworkdAddressFence(cfg *config.Config) err
 	views := dpuserspace.BuildZoneHostInboundViewsFromSnapshots(cfg, snaps)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps)
 	uncoveredV4, uncoveredV6 := hostInboundUncoveredDropAddrs(views, unzonedV4, unzonedV6, d.hostInboundCoveredAddrs)
+	withheld := dpuserspace.BuildFenceAddrSetsFromSnapshots(cfg, snaps, views)
+	sharedV4 := intersectHostInboundAddresses(uncoveredV4, withheld.WithheldV4)
+	sharedV6 := intersectHostInboundAddresses(uncoveredV6, withheld.WithheldV6)
+	lifelines := dpuserspace.HostInboundLifelineIngressNetdevs(cfg)
+	if previous := d.hostInboundPreActivationFence; previous != nil {
+		uncoveredV4 = mergeHostInboundAddressLists(uncoveredV4, previous.UncoveredV4)
+		uncoveredV6 = mergeHostInboundAddressLists(uncoveredV6, previous.UncoveredV6)
+		sharedV4 = mergeHostInboundAddressLists(sharedV4, previous.SharedV4)
+		sharedV6 = mergeHostInboundAddressLists(sharedV6, previous.SharedV6)
+		lifelines = mergeHostInboundAddressLists(lifelines, previous.LifelineNetdevs)
+	}
 	if len(uncoveredV4)+len(uncoveredV6) == 0 {
 		return nil
 	}
-	dhcpBackstops := dpuserspace.BuildDHCPHostInboundBackstopNetdevs(cfg, snaps)
-	withheld := dpuserspace.BuildFenceAddrSetsFromSnapshots(cfg, snaps, views)
-
-	sharedV4 := intersectHostInboundAddresses(uncoveredV4, withheld.WithheldV4)
-	sharedV6 := intersectHostInboundAddresses(uncoveredV6, withheld.WithheldV6)
 	spec := xnft.GapFenceSpec{
-		// The pre-activation fence closes host services except mandatory protocol
-		// and DHCP backstop handling; the full policy render follows networkd.
-		// Preserve DHCP protocol backstops when replacing an already-active gap
-		// table; DHCP intent is independent of the destination-address delta.
-		UnleasedV4:           dhcpBackstops.V4,
-		UnleasedV6:           dhcpBackstops.V6,
-		UnleasedVRFSlavesV4:  dhcpBackstops.VRFSlavesV4,
-		UnleasedVRFSlavesV6:  dhcpBackstops.VRFSlavesV6,
-		DHCPv6Admit:          dhcpBackstops.AdmitV6,
-		DHCPv6AdmitVRFSlaves: dhcpBackstops.AdmitVRFSlavesV6,
-		UncoveredV4:          uncoveredV4,
-		UncoveredV6:          uncoveredV6,
-		SharedV4:             sharedV4,
-		SharedV6:             sharedV6,
-		LifelineNetdevs:      dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
+		PreActivation:   true,
+		UncoveredV4:     uncoveredV4,
+		UncoveredV6:     uncoveredV6,
+		SharedV4:        sharedV4,
+		SharedV6:        sharedV6,
+		LifelineNetdevs: lifelines,
 	}
 	if err := d.installHostInboundGapFence(spec); err != nil {
 		d.noteHostInboundGapApplyResult(err)
 		d.noteHostInboundApplyFailed(time.Now())
 		return err
 	}
+	d.hostInboundPreActivationFence = &spec
 	d.hostInboundGapFenceActive.Store(true)
 	return nil
+}
+
+func mergeHostInboundAddressLists(first, second []string) []string {
+	if len(second) == 0 {
+		return first
+	}
+	seen := make(map[string]struct{}, len(first)+len(second))
+	out := make([]string, 0, len(first)+len(second))
+	add := func(values []string) {
+		for _, value := range values {
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	add(first)
+	add(second)
+	sort.Strings(out)
+	return out
 }
 
 func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *xnft.HostInputFenceOverlay) error {
@@ -735,6 +741,13 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			slog.Warn("failed to delete stale host-inbound gap fence table", "err", err)
 			return fmt.Errorf("delete stale host-inbound gap fence nftables table: %w", err)
 		}
+		d.hostInboundGapFenceSpec = nil
+		if err := nftInstaller.DeleteTable(xnft.HostInboundPreActivationTableName); err != nil {
+			err = tagNftInstallErr(err)
+			slog.Warn("failed to delete stale host-inbound preactivation fence table", "err", err)
+			return fmt.Errorf("delete stale host-inbound preactivation fence nftables table: %w", err)
+		}
+		d.hostInboundPreActivationFence = nil
 		// Teardown SUCCEEDED: no xpf_hostinbound (or gap) table is installed now.
 		// Clear the historical gate (#5790) AND the coverage set (#5789): with no
 		// table installed nothing is covered. Leaving hostInboundEnforced sticky-true
@@ -1067,12 +1080,19 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// fence from a prior failed rerender is obsolete — a lingering gap would keep
 	// denying an address the real table now serves. Best effort: nftDeleteTable is
 	// idempotent (a no-op when absent, the common case), so a delete error here is
-	// a rare real kernel fault; log it but do NOT fail the successful commit (the
-	// enforcement is correct and the next apply retries the delete — a lingering
-	// gap fences only, never opens).
 	if err := nftInstaller.DeleteTable(xnft.HostInboundGapTableName); err != nil {
 		slog.Warn("failed to delete obsolete host-inbound gap fence after successful real install",
 			"err", err)
+	} else {
+		d.hostInboundGapFenceSpec = nil
+	}
+	preActivationFenceRetained := false
+	if err := nftInstaller.DeleteTable(xnft.HostInboundPreActivationTableName); err != nil {
+		slog.Warn("failed to delete obsolete host-inbound preactivation fence after successful real install",
+			"err", err)
+		preActivationFenceRetained = true
+	} else {
+		d.hostInboundPreActivationFence = nil
 	}
 	// #10751/B9: hand the early barrier off BEFORE recording applied-success.
 	// The recorded generation and the commit result must agree: recording
@@ -1151,7 +1171,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		d.hostInboundEnforced.Store(true)
 		d.hostInboundCoveredAddrs = desiredDrop
 		d.hostInboundDHCPRetainedAddrs = hostInboundDestinationWideDropAddrs(views, unzonedV4, unzonedV6)
-		d.hostInboundGapFenceActive.Store(false)
+		d.hostInboundGapFenceActive.Store(preActivationFenceRetained)
 		d.noteHostInboundApplyFailed(time.Now())
 		return barrierHandoffErr
 	}
@@ -1165,6 +1185,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	d.noteHostInboundApplySucceeded()
 	// A successful real ruleset supersedes any prior failed gap-only attempt.
 	d.noteHostInboundGapApplyResult(nil)
+	d.hostInboundGapFenceActive.Store(preActivationFenceRetained)
 	// #5789: the retained generation now covers EXACTLY this desired drop set.
 	// Record it so a later failed rerender can tell which destinations a
 	// subsequently-appeared address left uncovered.
@@ -1205,6 +1226,9 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 // without host-inbound protection. Caller guarantees an uncovered address or
 // DHCP backstop target.
 func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
+	if !spec.PreActivation {
+		spec = mergeHostInboundGapFenceSpecs(d.hostInboundGapFenceSpec, spec)
+	}
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundGapFencePayload oracle).
 	if err := nftInstaller.InstallGapFence(spec); err != nil {
@@ -1216,10 +1240,31 @@ func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 			"uncovered_v4", len(spec.UncoveredV4), "uncovered_v6", len(spec.UncoveredV6))
 		return fmt.Errorf("install host-inbound coverage-gap fence: %w", err)
 	}
+	if !spec.PreActivation {
+		d.hostInboundGapFenceSpec = &spec
+	}
 	slog.Warn("host-inbound real install failed; retained generation does not cover newly-appeared "+
 		"local addresses — installed an additive gap fence denying them (retained accepts preserved)",
 		"gap_v4", len(spec.UncoveredV4), "gap_v6", len(spec.UncoveredV6))
 	return nil
+}
+
+func mergeHostInboundGapFenceSpecs(previous *xnft.GapFenceSpec, next xnft.GapFenceSpec) xnft.GapFenceSpec {
+	if previous == nil {
+		return next
+	}
+	next.UncoveredV4 = mergeHostInboundAddressLists(next.UncoveredV4, previous.UncoveredV4)
+	next.UncoveredV6 = mergeHostInboundAddressLists(next.UncoveredV6, previous.UncoveredV6)
+	next.UnleasedV4 = mergeHostInboundAddressLists(next.UnleasedV4, previous.UnleasedV4)
+	next.UnleasedV6 = mergeHostInboundAddressLists(next.UnleasedV6, previous.UnleasedV6)
+	next.UnleasedVRFSlavesV4 = mergeHostInboundAddressLists(next.UnleasedVRFSlavesV4, previous.UnleasedVRFSlavesV4)
+	next.UnleasedVRFSlavesV6 = mergeHostInboundAddressLists(next.UnleasedVRFSlavesV6, previous.UnleasedVRFSlavesV6)
+	next.DHCPv6Admit = mergeHostInboundAddressLists(next.DHCPv6Admit, previous.DHCPv6Admit)
+	next.DHCPv6AdmitVRFSlaves = mergeHostInboundAddressLists(next.DHCPv6AdmitVRFSlaves, previous.DHCPv6AdmitVRFSlaves)
+	next.SharedV4 = mergeHostInboundAddressLists(next.SharedV4, previous.SharedV4)
+	next.SharedV6 = mergeHostInboundAddressLists(next.SharedV6, previous.SharedV6)
+	next.LifelineNetdevs = mergeHostInboundAddressLists(next.LifelineNetdevs, previous.LifelineNetdevs)
+	return next
 }
 
 // installHostInboundColdBootFence installs the #5644 (M37) cold-boot
@@ -1720,12 +1765,30 @@ func intersectHostInboundAddresses(addrs, candidates []string) []string {
 // this with a non-empty uncovered set (an all-empty payload would be a pointless
 // zero-drop shell); an empty set instead deletes the table.
 func buildHostInboundGapFencePayload(views []dpuserspace.ZoneHostInboundView, uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6, sharedV4, sharedV6, lifelineNetdevs []string, vrfBackstop dhcpBackstopLists, retainedV4, retainedV6 []string) string {
+	return buildHostInboundGapFencePayloadForTable(
+		xnft.HostInboundGapTableName, nftHostInboundGapPriority,
+		views, uncoveredV4, uncoveredV6, wgListenPorts, wgZonePorts,
+		unleasedV4, unleasedV6, sharedV4, sharedV6, lifelineNetdevs,
+		vrfBackstop, retainedV4, retainedV6,
+	)
+}
+
+func buildHostInboundPreActivationFencePayload(spec xnft.GapFenceSpec) string {
+	return buildHostInboundGapFencePayloadForTable(
+		xnft.HostInboundPreActivationTableName, nftHostInboundPreActivationPriority,
+		nil, spec.UncoveredV4, spec.UncoveredV6, nil, nil,
+		nil, nil, spec.SharedV4, spec.SharedV6, spec.LifelineNetdevs,
+		dhcpBackstopLists{}, nil, nil,
+	)
+}
+
+func buildHostInboundGapFencePayloadForTable(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6, sharedV4, sharedV6, lifelineNetdevs []string, vrfBackstop dhcpBackstopLists, retainedV4, retainedV6 []string) string {
 	var rules []string
-	rules = append(rules, "add table inet xpf_hostinbound_gap")
-	rules = append(rules, "delete table inet xpf_hostinbound_gap")
-	rules = append(rules, "table inet xpf_hostinbound_gap {")
+	rules = append(rules, "add table inet "+tableName)
+	rules = append(rules, "delete table inet "+tableName)
+	rules = append(rules, "table inet "+tableName+" {")
 	rules = append(rules, "  chain input {")
-	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", nftHostInboundGapPriority))
+	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", priority))
 	rules = append(rules, hostInboundStaleReplyGuardText(
 		xnft.HostInboundStaleReplyGuardRules(nil, uncoveredV4, uncoveredV6, wgListenPorts, false),
 	)...)

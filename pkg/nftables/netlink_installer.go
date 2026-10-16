@@ -27,15 +27,20 @@ import (
 // the main host-inbound table).
 const HostInboundGapTableName = "xpf_hostinbound_gap"
 
+// HostInboundPreActivationTableName carries only temporary drops for newly
+// activated local addresses. Keeping it separate means replacing it cannot
+// erase an existing coverage-gap fence with DHCP or other backstop rules.
+const HostInboundPreActivationTableName = "xpf_hostinbound_preactivation"
+
 // Base-chain hook-input priorities, mirroring the pkg/daemon constants
 // nftLo0FilterPriority (0) < nftHostInboundPriority (10) <
-// nftHostInboundGapPriority (11). The spread is a determinism invariant
-// (nft_chain_priority_test.go): the operator's explicit lo0 filter evaluates
-// before the zone default-deny backstop, and the coverage-gap fence last.
+// nftHostInboundGapPriority (11) < early input barrier (12) <
+// nftHostInboundPreActivationPriority (13).
 const (
-	lo0FilterPriority      = 0
-	hostInboundPriority    = 10
-	hostInboundGapPriority = 11
+	lo0FilterPriority                = 0
+	hostInboundPriority              = 10
+	hostInboundGapPriority           = 11
+	hostInboundPreActivationPriority = 13
 )
 
 type Installer interface {
@@ -284,7 +289,11 @@ func (in *netlinkInstaller) InstallLo0ColdBootFence(spec FenceSpec) error {
 }
 
 func (in *netlinkInstaller) InstallGapFence(spec GapFenceSpec) error {
-	_, err := in.replaceTable(HostInboundGapTableName, hostInboundGapPriority, func(p *nlPlan) {
+	tableName, priority := HostInboundGapTableName, hostInboundGapPriority
+	if spec.PreActivation {
+		tableName, priority = HostInboundPreActivationTableName, hostInboundPreActivationPriority
+	}
+	_, err := in.replaceTable(tableName, nftables.ChainPriority(priority), func(p *nlPlan) {
 		buildHostInboundGapFenceNetlink(p, spec)
 	})
 	return err

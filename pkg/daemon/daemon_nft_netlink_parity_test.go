@@ -174,6 +174,19 @@ func runNftNetlinkParityInner(t *testing.T) {
 		spec := xnft.GapFenceSpec{Views: toNftViews(views), UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wg, WGZonePorts: wgZones}
 		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
 	})
+	t.Run("preactivation_address_fence", func(t *testing.T) {
+		spec := xnft.GapFenceSpec{
+			PreActivation:   true,
+			UncoveredV4:     []string{"10.0.1.2"},
+			UncoveredV6:     []string{"2001:db8:1::2"},
+			SharedV4:        []string{"10.0.1.2"},
+			LifelineNetdevs: []string{"fxp0"},
+		}
+		oracle := buildHostInboundPreActivationFencePayload(spec)
+		parityCheck(t, xnft.HostInboundPreActivationTableName, oracle, func() error {
+			return inst.InstallGapFence(spec)
+		})
+	})
 
 	t.Run("unleased_backstop", func(t *testing.T) {
 		// Persistent backstops need no DHCPv4 ACCEPT: the in-tree client
