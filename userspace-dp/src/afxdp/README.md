@@ -809,9 +809,10 @@ sync.
     true`) was already declined by the historical `rewrite_src.is_none()`
     gate into clean untranslated flowless forwarding. Both directions ride
     the admitted session like the #5690 inbound reversal (prebuilt forward,
-    `flow_key = None`). Session-matched same-family errors are reversed even
-    when `allow_embedded_icmp` is disabled; misses continue through ordinary
-    flowless policy enforcement.
+    `flow_key = None`). Session-matched same-family errors are reversed
+    regardless of `allow_embedded_icmp`; the option is a legacy no-op in the
+    userspace dataplane. Misses continue through ordinary flowless policy
+    enforcement.
     The untranslated RELATED shortcut is zone-scoped (#10671) and type-scoped
     (#10684). Only a resolved, nonzero quoted-session arrival zone that matches
     the packet's actual zone can bypass the reverse flowless policy pair, and

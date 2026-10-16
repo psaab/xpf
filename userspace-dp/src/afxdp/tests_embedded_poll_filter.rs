@@ -4004,7 +4004,8 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_6474() {
     frame[l4 + 2..l4 + 4].copy_from_slice(&icmp6_csum.to_be_bytes());
 
     let mut snapshot = nat_snapshot();
-    snapshot.flow.allow_embedded_icmp = true;
+    // #13935: session-matched same-family ICMPv6 is independent of the
+    // currently no-op allow-embedded-icmp setting.
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
@@ -9274,7 +9275,9 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
     }
 
     let mut snapshot = nat_snapshot();
-    snapshot.flow.allow_embedded_icmp = true;
+    // #13935: same-family errors do not use this option; verify unmatched
+    // quotes still face normal zone policy when the option is disabled.
+    snapshot.flow.allow_embedded_icmp = false;
     // Default-deny arrival-to-egress: no WAN->LAN or LAN->LAN permit. The
     // fixture's LAN->WAN allow-all stays (the forward session's own permit).
     let mut forwarding = build_forwarding_state(&snapshot);
@@ -9668,6 +9671,13 @@ fn poll_descriptor_untranslated_frag_needed_admitted_10286() {
 }
 #[test]
 fn poll_descriptor_unsolicited_icmp_still_denied_10286() {
+    poll_descriptor_untranslated_v4_error_admission_impl(false, false, false, false, 3, false);
+}
+
+/// #13935 control: no-session ICMP errors remain policy-denied with the
+/// optional knob disabled.
+#[test]
+fn poll_descriptor_unsolicited_icmp_still_denied_with_knob_off_13935() {
     poll_descriptor_untranslated_v4_error_admission_impl(false, false, false, false, 3, false);
 }
 /// #10671 fail-on-revert: a live un-NAT'd session must not authorize an
