@@ -414,6 +414,87 @@ fn complete_conn_streams_completions() {
     let _ = MSG_CANCEL;
 }
 
+fn make_completion_ready_13715(core: &Arc<ReinjectCore>, id: u64) {
+    let mut f = frame(id, id);
+    f.flags = 0;
+    assert!(core.admit(&f).admitted);
+    assert_eq!(
+        core.pre_write_check(&frame(id, id).lease),
+        crate::slowpath_reinject_9506::PreWrite::Proceed
+    );
+    assert!(core.resolve_write(
+        &frame(id, id).lease,
+        crate::slowpath_reinject_9506::TransferVerdict::Written { bytes: 1 }
+    ));
+}
+
+#[test]
+fn complete_conn_exits_on_peer_eof_while_idle_13715() {
+    let core = open_core();
+    let running = Arc::new(AtomicBool::new(true));
+    let (client, server) = UnixStream::pair().unwrap();
+    let worker_core = core.clone();
+    let worker_running = running.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        serve_complete_conn(server, &worker_core, &worker_running);
+        let _ = done_tx.send(());
+    });
+    drop(client);
+    done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("serve_complete_conn did not exit after idle peer EOF");
+    handle.join().unwrap();
+}
+
+
+#[test]
+fn complete_conn_stops_on_shutdown_with_live_entries_13715() {
+    let core = open_core();
+    let running = Arc::new(AtomicBool::new(true));
+    let (client, server) = UnixStream::pair().unwrap();
+    let worker_core = core.clone();
+    let worker_running = running.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        serve_complete_conn(server, &worker_core, &worker_running);
+        let _ = done_tx.send(());
+    });
+    let mut f = frame(9, 9);
+    f.flags = 0;
+    assert!(core.admit(&f).admitted);
+    assert_eq!(core.live_count(), 1);
+    running.store(false, Ordering::SeqCst);
+    done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("serve_complete_conn did not stop with a live entry on shutdown");
+    drop(client);
+    handle.join().unwrap();
+}
+
+#[test]
+fn complete_conn_delivers_after_idle_13715() {
+    let core = open_core();
+    let running = Arc::new(AtomicBool::new(true));
+    let (mut client, server) = UnixStream::pair().unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let worker_core = core.clone();
+    let worker_running = running.clone();
+    let handle = std::thread::spawn(move || {
+        serve_complete_conn(server, &worker_core, &worker_running);
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    make_completion_ready_13715(&core, 21);
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_COMPLETE);
+    let completions = crate::slowpath_reinject_9506::decode_complete(&payload).unwrap();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].request_id, 21);
+    running.store(false, Ordering::SeqCst);
+    core.ack_ready(&[21]);
+    drop(client);
+    handle.join().unwrap();
+}
 #[test]
 fn tempdir_sockets_bind_and_accept() {
     let dir = std::env::temp_dir().join(format!("xpf-reinject-9506-{}", std::process::id()));
