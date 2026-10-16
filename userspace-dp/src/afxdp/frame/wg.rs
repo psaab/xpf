@@ -374,6 +374,53 @@ pub(in crate::afxdp) fn wg_endpoint_physical_outer_mtu(
     }
 }
 
+/// #14118: the (outer family, physical outer MTU) of the peer the encap
+/// path will SELECT for `inner_dst` — the family/MTU pair a pre-encap
+/// inner-size budget (TCP segmentation, PTB) must subtract WG overhead
+/// against. The family follows the SELECTED peer endpoint address
+/// (canonicalized, so a v4-mapped learned endpoint charges the v4
+/// overhead), NOT `endpoint.outer_family`: a WG row's outer family
+/// describes its placeholder transport, while peers of one interface may
+/// mix v4 and v6 endpoints on different underlays. The MTU is the same
+/// `wg_endpoint_physical_outer_mtu` the PTB path uses (per-peer route MTU
+/// included). When no peer endpoint resolves, the family falls back to
+/// the endpoint row's and the MTU to the logical fallback inside
+/// `wg_endpoint_physical_outer_mtu` — the encap path drops such a packet
+/// anyway, so the budget value is moot beyond staying conservative.
+#[inline]
+pub(in crate::afxdp) fn wg_selected_peer_outer(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    inner_dst: Option<IpAddr>,
+) -> (i32, usize) {
+    // Resolve the selected peer ONCE: with an engine present the LPM
+    // answer (including a covering peer with NO endpoint, which must
+    // NOT borrow another peer) mirrors `wg_peer_outer_dst`; without an
+    // engine answer, fall back to its first-peer rule.
+    let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst);
+    let outer_mtu = match outer_dst {
+        Some(dst) => outer_physical_egress_mtu(decision, forwarding, endpoint, dst),
+        None => forwarding
+            .egress
+            .get(&decision.resolution.egress_ifindex)
+            .map(|e| e.mtu)
+            .filter(|m| *m > 0)
+            .unwrap_or(1500),
+    };
+    let outer_family = outer_dst
+        .map(|dst| match crate::afxdp::wg::canonicalize_endpoint(
+            std::net::SocketAddr::new(dst, 0),
+        )
+        .ip()
+        {
+            IpAddr::V6(_) => libc::AF_INET6,
+            IpAddr::V4(_) => libc::AF_INET,
+        })
+        .unwrap_or(endpoint.outer_family);
+    (outer_family, outer_mtu)
+}
+
 /// #6308: the PHYSICAL underlay egress ifindex a WG transit-egress frame must
 /// be DISPATCHED to — resolved against the SAME selected-peer route #5292 uses
 /// for the frame BYTES, so the dispatch SSOT and the frame-bytes SSOT agree on
