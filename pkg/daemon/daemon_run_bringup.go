@@ -814,9 +814,18 @@ func (d *Daemon) armBootDataplane(rt dataplane.RuntimeDataPlane) {
 // hostForwardingPostureSysctls is the host posture required whether or not
 // kernel transit is open. These values do not admit forwarded packets; the
 // transit knobs remain exclusively owned by daemon_transit_gate.go.
+// Interface-scoped ARP ownership: without arp_ignore, Linux replies for any
+// local address on any interface in the same routing instance. The `all`
+// values constrain existing links, while `default` seeds links created later.
+// arp_announce=2 also prevents kernel ARP probes/replies from selecting a
+// local sender address from another interface.
 var hostForwardingPostureSysctls = map[string]string{
-	"/proc/sys/net/ipv6/conf/all/accept_ra":     "0",
-	"/proc/sys/net/ipv6/conf/default/accept_ra": "0",
+	"/proc/sys/net/ipv4/conf/all/arp_ignore":       "1",
+	"/proc/sys/net/ipv4/conf/default/arp_ignore":   "1",
+	"/proc/sys/net/ipv4/conf/all/arp_announce":     "2",
+	"/proc/sys/net/ipv4/conf/default/arp_announce": "2",
+	"/proc/sys/net/ipv6/conf/all/accept_ra":        "0",
+	"/proc/sys/net/ipv6/conf/default/accept_ra":    "0",
 	// Disable loose mid-stream TCP pickup. Otherwise a firewall-originated
 	// packet can recreate a revoked host-inbound conntrack entry box-oriented,
 	// whose peer packets would bypass zone judgement via the reply accept.
