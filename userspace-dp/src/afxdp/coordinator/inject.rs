@@ -110,7 +110,7 @@ pub(super) fn stamp_injected_packet_tuple(
 ) -> Result<(), String> {
     meta.pkt_len = frame_len.min(u16::MAX as usize) as u16;
     let l3_offset = if tx_vlan_id > 0 { 18 } else { 14 };
-    meta.flow_src_addr = [0; 16];
+    meta.l3_offset = l3_offset;
     meta.flow_dst_addr = [0; 16];
     meta.flow_src_port = tuple.source_port;
     meta.flow_dst_port = tuple.destination_port;
