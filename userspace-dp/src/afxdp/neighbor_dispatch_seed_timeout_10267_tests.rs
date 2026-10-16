@@ -88,6 +88,7 @@ fn seed_builder_stamps_app_timeout_10267() {
         false,
         seed_decision_10267(),
         Some(APP_SECS_10267),
+        None,
     );
     assert_eq!(
         meta.inactivity_timeout_ns,
@@ -109,6 +110,7 @@ fn seed_builder_zero_and_unset_use_global_10267() {
             false,
             seed_decision_10267(),
             timeout,
+            None,
         );
         assert_eq!(
             meta.inactivity_timeout_ns, None,
@@ -140,6 +142,7 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
         false,
         seed_decision_10267(),
         Some(APP_SECS_10267),
+        None,
     );
     assert!(table.install_with_protocol(
         fwd.clone(),
@@ -158,6 +161,7 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
         false,
         seed_decision_10267(),
         Some(APP_SECS_10267),
+        None,
     );
     rev_meta.is_reverse = true;
     assert!(table.install_with_protocol(
@@ -193,6 +197,7 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
         false,
         seed_decision_10267(),
         None,
+        None,
     );
     assert!(table.install_with_protocol(
         ctl_fwd.clone(),
@@ -210,6 +215,7 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
         0,
         false,
         seed_decision_10267(),
+        None,
         None,
     );
     ctl_rev_meta.is_reverse = true;
@@ -252,4 +258,89 @@ fn seed_lifecycle_expires_on_app_window_not_default_10267() {
         table.probe_with_origin_at(&fwd, past_app).is_none(),
         "app-timeout seed must reap on the app window"
     );
+}
+
+// #13974 (H20-07): the seed must carry the admitting policy's log flags
+// and hit-counter handle so RT_FLOW create/close and flow export fire.
+
+#[test]
+fn seed_builder_does_not_drop_policy_log_flags_13974() {
+    let forwarding = seed_forwarding_10267();
+    let meta = build_missing_neighbor_session_metadata(
+        &forwarding,
+        1,
+        2,
+        11,
+        0,
+        false,
+        seed_decision_10267(),
+        None,
+        Some(crate::policy::PolicyEvaluationResult {
+            action: crate::policy::PolicyAction::Permit,
+            policy_id: 7,
+            log_session_init: true,
+            log_session_close: true,
+            inactivity_timeout: None,
+            policy_counter_idx: crate::policy::DEFAULT_POLICY_COUNTER_IDX,
+        }),
+    );
+    assert!(
+        meta.log_session_init && meta.log_session_close,
+        "a permitted then-log policy must not lose its log flags on the seed (#13974)"
+    );
+    assert_eq!(meta.policy_id, 7, "policy attribution must survive seed install");
+    assert_eq!(
+        meta.policy_counter_idx,
+        crate::policy::DEFAULT_POLICY_COUNTER_IDX,
+        "counter handle index must survive seed install"
+    );
+    assert!(
+        meta.policy_counter.is_some(),
+        "the bound hit-counter handle must survive seed install (#13974)"
+    );
+}
+
+#[test]
+fn missing_neighbor_seed_emits_open_and_close_deltas_13974() {
+    let forwarding = seed_forwarding_10267();
+    let result = crate::policy::PolicyEvaluationResult {
+        action: crate::policy::PolicyAction::Permit,
+        policy_id: 7,
+        log_session_init: true,
+        log_session_close: true,
+        inactivity_timeout: None,
+        policy_counter_idx: crate::policy::DEFAULT_POLICY_COUNTER_IDX,
+    };
+    let metadata = build_missing_neighbor_session_metadata(
+        &forwarding,
+        1,
+        2,
+        11,
+        0,
+        false,
+        seed_decision_10267(),
+        None,
+        Some(result),
+    );
+    let mut sessions = SessionTable::new();
+    let key = seed_key_10267(40011);
+    let now = 1_000_000_000u64;
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        seed_decision_10267(),
+        metadata,
+        crate::session::SessionOrigin::MissingNeighborSeed,
+        now,
+        PROTO_TCP,
+        TCP_SYN,
+    ));
+    let open = sessions.drain_deltas(16);
+    assert_eq!(open.len(), 1, "one local Open delta is required for RT_FLOW");
+    assert_eq!(open[0].kind, crate::session::SessionDeltaKind::Open);
+    assert_eq!(open[0].origin, crate::session::SessionOrigin::MissingNeighborSeed);
+    let _ = sessions.expire_stale_entries(now + 400_000_000_000);
+    let close = sessions.drain_deltas(16);
+    assert_eq!(close.len(), 1, "one local Close delta is required for flow export");
+    assert_eq!(close[0].kind, crate::session::SessionDeltaKind::Close);
+    assert_eq!(close[0].origin, crate::session::SessionOrigin::MissingNeighborSeed);
 }

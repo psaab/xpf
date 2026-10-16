@@ -1286,12 +1286,12 @@ companion: Option<SessionKey>,) -> DeleteReplicationOutcome {
 ///   "synced-derived, never create-counted" arm DOES include `SharedPromote`;
 ///   it asks a different question and is correct for it. Using that
 ///   classification here would be the bug.)
-/// - `FabricPuntSeed` and `MissingNeighborSeed` are transient-local by
-///   construction — never HA-exported, never Open-delta'd — so they are live
-///   local sessions that are ABSENT from the shared map by design. A naive
+/// - `FabricPuntSeed` and `MissingNeighborSeed` are transient-local and
+///   remain absent from owner-RG HA export. Missing-neighbor seeds may emit
+///   telemetry-only deltas (#13974); neither origin represents peer authority.
+///   They are live local sessions ABSENT from the shared map by design. A naive
 ///   "drop what the shared map does not have" sweep deletes them on its first
-///   pass. That is the worse-failure-mode #8586 declined to build against an
-///   unestablished premise, and `is_peer_synced()` excludes them.
+///   pass, and `is_peer_synced()` excludes them.
 ///
 /// The worker-loop path uses [`DeleteDropSweep::step_with_nat`], which also
 /// drops this worker's source-NAT and NAT64 holder bits before deleting the

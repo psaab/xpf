@@ -731,13 +731,15 @@ impl SessionTable {
             // install.
             self.session_limit_inc(session_limit_zone, key.src_ip, key.dst_ip);
         }
-        // #10038/#12179: node-local TUN origins and transient seeds never
-        // emit Open deltas. Their independent quota accounting still charges
-        // the forward session classes above.
+        // #10038/#12179: node-local TUN origins never emit Open deltas. A
+        // MissingNeighborSeed also stays local-only, but its delta is consumed
+        // for RT_FLOW/flow export; the drain suppresses its HA event-stream leg.
+        // FabricPuntSeed remains excluded because the peer owns the authoritative
+        // flow and this local punt record must never reach HA or RT_FLOW.
         if counted
             && !origin.is_peer_synced()
             && !origin.is_local_tun_origin()
-            && !origin.is_transient_local_seed()
+            && origin != crate::session::SessionOrigin::FabricPuntSeed
         {
             let tcp_handshake_state = self.handshake_state_wire_for(&key);
             self.push_delta(SessionDelta {

@@ -9191,12 +9191,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         IpAddr::V4(_) => None,
                                     }
                                 });
-                                // #10267: retain the matched application's idle
-                                // timeout until the seed install below. The
-                                // flow-backed policy result is scoped to its
-                                // deny gate, but the MissingNeighbor seed is
-                                // created later in this same arm.
+                                // #10267/#13974: preserve the complete admitted
+                                // policy result until the MissingNeighbor seed
+                                // is installed; retry never re-installs it.
                                 let mut seed_inactivity_timeout = None;
+                                let mut seed_policy_result = None;
                                 // #1913 (Codex r2/r3): evaluate policy for the
                                 // MissingNeighbor cold path BEFORE any forwarding
                                 // OR neighbor-resolution side-effect. The
@@ -9288,6 +9287,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         desc.len as u64,
                                         now_ns,
                                     );
+                                    seed_policy_result = Some(policy_result);
                                     seed_inactivity_timeout = policy_result.inactivity_timeout;
                                     if cp_sample_tag {
                                         let t_out = crate::afxdp::cold_path_hist::sample_tsc_end();
@@ -10173,6 +10173,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // #10267: preserve the policy-matched
                                         // application timeout on the seed.
                                         seed_inactivity_timeout,
+                                        seed_policy_result,
                                     );
                                     let reuse_fits =
                                         if let Some(reuse_key) = owner_syn_reuse_key.as_ref() {

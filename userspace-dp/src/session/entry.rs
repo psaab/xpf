@@ -645,18 +645,14 @@ impl SessionOrigin {
         }
     }
 
-    /// Transient LOCAL seeds: installed by this node's own cold path, never
-    /// exported to the peer and never Open-delta'd. The explicit
-    /// `!origin.is_transient_local_seed()` conjunct at `install.rs:442` suppresses
-    /// Open deltas — NOT the `counted` gate, since seeds ARE quota-counted since
-    /// #12179. Removing that conjunct would expose a seed delta on the helper's
-    /// event stream; the Go HA belt also filters seed origins before
-    /// `QueueSessionV4`, but that downstream guard is no reason to remove the Rust
-    /// exclusion. `forward_export_candidates_for_owner_rgs` separately excludes
-    /// seeds from bulk export. #7770 adds `FabricPuntSeed` for the same reason
-    /// `MissingNeighborSeed` is here: the entry is a local artefact of a decision
-    /// this node made, not a claim of authority over the flow, and syncing it would
-    /// put a NAT-free duplicate of the peer's authoritative session on the wire.
+    /// Transient LOCAL seeds: never exported as authoritative session state.
+    /// FabricPuntSeed emits no deltas; MissingNeighborSeed emits a local Open
+    /// and Close solely so RT_FLOW/flow-export consumers can observe a real
+    /// policy-admitted flow. `flush_session_deltas` suppresses its HA
+    /// event-stream leg, and owner-RG bulk export excludes both seed origins.
+    /// The Go stream filter is a second HA belt, not the local telemetry path.
+    /// #7770 adds `FabricPuntSeed` because it is a local record of a decision
+    /// this node made, not authority over the peer's flow.
     pub(crate) fn is_transient_local_seed(self) -> bool {
         matches!(self, Self::MissingNeighborSeed | Self::FabricPuntSeed)
     }

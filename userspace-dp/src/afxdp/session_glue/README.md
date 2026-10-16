@@ -192,11 +192,12 @@ the exclusions are the safety property:
   `loop_body`'s "synced-derived, never create-counted" arm DOES include
   it; that classification answers a different question and using it here
   would be the bug.
-- `FabricPuntSeed` and `MissingNeighborSeed` are transient-local by
-  construction (never HA-exported, never Open-delta'd), so they are live
-  local sessions ABSENT from the shared map by design. The naive "drop
-  what the shared map does not have" sweep deletes them on its first
-  pass; `is_peer_synced()` excludes them.
+- `FabricPuntSeed` and `MissingNeighborSeed` remain transient-local and
+  absent from owner-RG HA export. Missing-neighbor seeds emit local-only
+  telemetry deltas (#13974); neither seed may be interpreted as peer
+  authority. They are live local sessions ABSENT from the shared map by
+  design. The naive "drop what the shared map does not have" sweep deletes
+  them on its first pass; `is_peer_synced()` excludes them.
 
 The worker-loop sweep still removes no shared state and replicates no delete:
 the deleting worker already did both (#8576). Its production

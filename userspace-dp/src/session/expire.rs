@@ -385,17 +385,13 @@ impl SessionTable {
                                 decision.nat.rewrite_dst,
                             );
                         }
-                        // #10038 item 5: TUN-origin never Closes (it never
-                        // Opened — node-local, bounded by the publisher sweep).
-                        // #10309: if the bounded incremental ring is full,
-                        // retain the exact Close on the returned expiry record
-                        // instead of dropping it. The worker flushes that
-                        // returned overflow in fixed-size chunks before this
-                        // GC iteration finishes.
+                        // #13974: a MissingNeighborSeed is local-only for HA,
+                        // but must produce the close delta consumed by RT_FLOW
+                        // and flow export. Fabric punt and TUN origins stay silent.
                         let overflow_close = if !metadata.is_reverse
                             && !removed.origin.is_peer_synced()
-                            && !removed.origin.is_transient_local_seed()
                             && !removed.origin.is_local_tun_origin()
+                            && removed.origin != crate::session::SessionOrigin::FabricPuntSeed
                         {
                             let close = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
                             key: key.clone(),

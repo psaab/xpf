@@ -919,7 +919,13 @@ pub(super) fn flush_session_deltas(
                 // fire. On the bounded timeout we latch out-of-sync exactly as on any
                 // other lossless failure — deliver-or-resync, never a silent drop, so
                 // the #2874 losslessness contract holds.
-                if !event_stream_out_of_sync {
+                // #13974: a MissingNeighborSeed delta exists to drive local
+                // RT_FLOW and flow export, not to claim HA authority. Keep it
+                // out of the lossless session-sync stream while letting the
+                // producer-gated telemetry frames below run normally.
+                if !event_stream_out_of_sync
+                    && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed
+                {
                     if let Err(err) = es.push_delta_lossless_within(
                         delta,
                         zone_name_to_id,

@@ -1551,13 +1551,10 @@ pub(super) fn build_missing_neighbor_session_metadata(
     ingress_vlan_id: u16,
     fabric_ingress: bool,
     decision: SessionDecision,
-    // #10267: the policy result is already available on the flow-backed
-    // MissingNeighbor path. Preserve its matched application timeout on the
-    // seed; the retry sweep never reinstalls this entry, so dropping the value
-    // here silently falls back to the global per-protocol timeout for the
-    // flow's entire lifetime. `None`/0 keeps the global-timeout sentinel for
-    // default-timeout and flowless paths.
+    // #10267/#13974: preserve both the evaluated timeout and policy-derived
+    // logging/counter attribution; seeds are local-only but remain real flows.
     inactivity_timeout: Option<u32>,
+    policy_result: Option<crate::policy::PolicyEvaluationResult>,
 ) -> SessionMetadata {
     SessionMetadata {
         ingress_ifindex,
@@ -1577,20 +1574,17 @@ pub(super) fn build_missing_neighbor_session_metadata(
         fabric_ingress,
         is_reverse: false,
         nat64_reverse: None,
-        // #2508: neighbor-seed sessions carry no per-policy `then log`.
-        log_session_init: false,
-        log_session_close: false,
-        // #3056: a neighbor-seed session is a transient pre-resolution stub,
-        // not a policy-admitted flow, so it carries no admitting policy ID.
-        policy_id: 0,
-        // #10267: a permitted flow-backed seed may be admitted by an
-        // application with its own idle window. Convert through the shared
-        // authority so zero stays the use-global sentinel and corrupt wire
-        // values remain bounded by the commit-time maximum.
+        // #13974: retain per-policy logging and hit-counter attribution on
+        // the local seed; its RT_FLOW delta is not an HA ownership claim.
+        log_session_init: policy_result.is_some_and(|r| r.log_session_init),
+        log_session_close: policy_result.is_some_and(|r| r.log_session_close),
+        policy_id: policy_result.map_or(0, |r| r.policy_id),
+        // #10267: keep the app timeout under the shared authority.
         inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(inactivity_timeout),
-        // #3073: a neighbor-seed stub is not policy-admitted; no hit counter.
-        policy_counter_idx: 0,
-        policy_counter: None,
+        policy_counter_idx: policy_result.map_or(0, |r| r.policy_counter_idx),
+        policy_counter: policy_result.and_then(|r| {
+            forwarding.policy.hit_counter_by_idx(r.policy_counter_idx).cloned()
+        }),
     }
 }
 
