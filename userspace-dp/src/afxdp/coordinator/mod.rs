@@ -1394,19 +1394,32 @@ impl Coordinator {
             // authority a later prewarm, export or replay reads. Repairing only
             // one of the two would leave the stale value to be re-adopted.
             let entry = rebuilt.get(&entry.key).unwrap_or(entry);
-            // #1789: a failed replay publish silently loses an arbitrary
-            // prefix of synced state after reconcile (was `let _ =`). No
-            // binding context here — shared counter.
-            if publish_live_session_entry(
+            // #13675 (D11-09): publish through the worker twin, not the
+            // unconditional live publisher. A peer-synced LocalDelivery
+            // entry whose owner RG is locally active must land as
+            // PASS_TO_KERNEL (plus only its SNAT reverse-wire REDIRECT);
+            // publish_live_session_entry wrote forward REDIRECT instead,
+            // steering host-bound packets at userspace and claiming the
+            // reverse NAT rows under the coordinator holder, orphaning
+            // that ownership from the workers that must tear it down.
+            // allow_replace_local mirrors upsert/refresh: standby-owned
+            // entries keep the live REDIRECT (force-live arm), active-owned
+            // entries take the kernel-local arm.
+            let now_secs = monotonic_nanos() / 1_000_000_000;
+            let allow_replace_local = synced_entry_allows_local_replace(
+                self.ha.rg_runtime.load().as_ref(),
+                entry.metadata.owner_rg_id,
+                now_secs,
+            );
+            publish_worker_session_map_entry(
                 session_map,
+                &self.forwarding,
                 &entry.key,
-                entry.decision.nat,
-                entry.metadata.is_reverse,
-            )
-            .is_err()
-            {
-                SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
-            }
+                entry.decision,
+                &entry.metadata,
+                entry.origin,
+                allow_replace_local,
+            );
             replicate_session_upsert(&worker_queues, worker_command_queues, entry);
         }
         entries.len()
