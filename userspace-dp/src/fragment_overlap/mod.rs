@@ -31,15 +31,15 @@
 //! 8 incomplete entries per shard; a routing domain holds at most 32 incomplete
 //! entries per shard. Completed entries remain overlap anchors and do not
 //! consume a sender's incomplete-datagram quota, avoiding modest-rate refusal
-//! of conformant completed traffic. Completed entries may use spare shard
-//! slots, but are reclaimed oldest-first under pressure when needed to restore
-//! another routing domain's 32-slot reserve. All entries remain subject to the
-//! fixed 64-entry shard cap.
+//! of conformant completed traffic. All entries count toward the domain's
+//! 32-entry reserve; at the bound, the oldest completed anchor may be reclaimed
+//! to admit a new key. Incomplete anchors are not reclaimed, and all entries
+//! remain subject to the fixed 64-entry shard cap.
 //!
 //! Failure directions (explicit — they differ from `fragment_assoc`):
-//!   * Overlap/empty/overflow/capacity all fail CLOSED (drop). Sender/domain
-//!     quotas apply to incomplete entries; completed anchors can be reclaimed
-//!     only under shard pressure to preserve the cross-domain reserve.
+//!   * Overlap/empty/overflow/capacity all fail CLOSED (drop). Sender quota
+//!     applies to incomplete entries; the domain cap counts all entries and
+//!     reclaims completed anchors only at that cap.
 //!   * Check/record SPLIT (no refused-traffic planting): the early hook only CHECKS
 //!     (pure — drops overlaps before enforcement verdicts are earned); recording happens
 //!     post-commit at the TX site, so only ADMITTED fragments plant ranges. A refused
@@ -115,7 +115,8 @@ const _: () = assert!(OVERLAP_SHARDS >= 2 && OVERLAP_SHARDS.is_power_of_two());
 pub(crate) const OVERLAP_CAP_PER_SHARD: usize = 64;
 /// Max entries one sender holds per shard (#10658).
 pub(crate) const OVERLAP_CAP_PER_SENDER_PER_SHARD: usize = 8;
-/// A routing domain can use at most half a shard, preserving capacity for other domains.
+/// A routing domain can use at most half a shard; completed entries may be
+/// reclaimed at this limit.
 pub(crate) const OVERLAP_CAP_PER_DOMAIN_PER_SHARD: usize = OVERLAP_CAP_PER_SHARD / 2;
 /// 30s idle TTL — covers the Linux `ipfrag_time` reassembly window (see docs).
 pub(crate) const OVERLAP_TTL_NS: u64 = 30_000_000_000;
@@ -772,25 +773,23 @@ impl OverlapTracker {
                 }
             }
         }
-        // #10658: incomplete entries consume sender/domain fairness quotas.
-        // Completed anchors may temporarily use spare shard slots for #13937,
-        // but reclaim under shard pressure restores each overrepresented
-        // domain's 32-slot reserve for a competing domain.
+        // #10658: incomplete entries consume sender fairness quotas, and all
+        // entries count against the routing-domain reserve. Reclaiming the
+        // oldest completed anchor at that limit lets #13937 conformant traffic
+        // continue without allowing completions to bypass domain fairness.
         let sender = overlap_sender(&key);
         let mut sender_entries = 0usize;
-        let mut domain_incomplete_entries = 0usize;
+        let mut domain_entries = 0usize;
         for e in shard.iter() {
             let complete = overlap_entry_complete(e);
             if !complete && overlap_sender(&e.key) == sender {
                 sender_entries += 1;
             }
-            if !complete && e.key.routing_domain == key.routing_domain {
-                domain_incomplete_entries += 1;
+            if e.key.routing_domain == key.routing_domain {
+                domain_entries += 1;
             }
         }
-        if sender_entries >= OVERLAP_CAP_PER_SENDER_PER_SHARD
-            || domain_incomplete_entries >= OVERLAP_CAP_PER_DOMAIN_PER_SHARD
-        {
+        if sender_entries >= OVERLAP_CAP_PER_SENDER_PER_SHARD {
             FRAG_OVERLAP_SHARD_FULL_DROPPED.fetch_add(1, Ordering::Relaxed);
             return OverlapCheckResult {
                 dropped: true,
@@ -801,23 +800,14 @@ impl OverlapTracker {
                 tracker: None,
             };
         }
-        while shard.len() >= OVERLAP_CAP_PER_SHARD {
+        if domain_entries >= OVERLAP_CAP_PER_DOMAIN_PER_SHARD {
             let mut reclaim_pos = None;
             let mut oldest_created_ns = u64::MAX;
             for (pos, entry) in shard.iter().enumerate() {
-                if !overlap_entry_complete(entry) {
-                    continue;
-                }
-                let domain_entries = shard
-                    .iter()
-                    .filter(|candidate| candidate.key.routing_domain == entry.key.routing_domain)
-                    .count();
-                let domain_reserve = if entry.key.routing_domain == key.routing_domain {
-                    OVERLAP_CAP_PER_DOMAIN_PER_SHARD - 1
-                } else {
-                    OVERLAP_CAP_PER_DOMAIN_PER_SHARD
-                };
-                if domain_entries > domain_reserve && entry.created_ns < oldest_created_ns {
+                if entry.key.routing_domain == key.routing_domain
+                    && overlap_entry_complete(entry)
+                    && entry.created_ns < oldest_created_ns
+                {
                     reclaim_pos = Some(pos);
                     oldest_created_ns = entry.created_ns;
                 }
@@ -834,6 +824,17 @@ impl OverlapTracker {
                 };
             };
             shard.remove(pos);
+        }
+        if shard.len() >= OVERLAP_CAP_PER_SHARD {
+            FRAG_OVERLAP_SHARD_FULL_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return OverlapCheckResult {
+                dropped: true,
+                reason: Some(OverlapDropReason::ShardFull),
+                lifetime_evictions,
+                completion: None,
+                admission: None,
+                tracker: None,
+            };
         }
         let mut ranges = [(0u32, 0u32); OVERLAP_MAX_RANGES];
         ranges[0] = (start, end);
@@ -875,9 +876,9 @@ impl OverlapTracker {
     /// completed ranges are held as overlap anchors until the idle TTL
     /// (`OVERLAP_TTL_NS`, refreshed by each recorded fragment) or the
     /// 60s absolute lifetime expires them via the usual liveness sweep.
-    /// Completed anchors do not consume sender quotas; under shard pressure,
-    /// oldest completed anchors from over-reserve domains may be reclaimed to
-    /// admit another domain. Incomplete anchors are never evicted for capacity.
+    /// Completed anchors do not consume sender quotas, but count toward the
+    /// domain reserve and may be reclaimed there. Incomplete anchors are never
+    /// evicted for capacity.
     ///
     /// Returns `true` when this settlement completes the datagram
     /// (all settled, no failure, ranges cover the terminal end); the
@@ -2207,8 +2208,8 @@ mod tests {
         attacker.routing_domain = 7;
         let mut ident = 0u32;
 
-        // Without competing domains, a single tenant may use completed
-        // anchors beyond its 32-entry reserve, up to the physical shard cap.
+        // Completed entries cannot let one tenant exceed its 32-entry reserve:
+        // arrivals beyond that point replace its oldest completed anchor.
         for _ in 0..OVERLAP_CAP_PER_SHARD {
             let key = loop {
                 attacker.ident = ident;
@@ -2228,10 +2229,9 @@ mod tests {
             assert!(!admission.dropped, "completed anchor {ident} is admitted");
             assert!(tracker.commit_admission(admission.admission.take().unwrap()));
         }
-        assert_eq!(tracker.len(), OVERLAP_CAP_PER_SHARD);
+        assert_eq!(tracker.len(), OVERLAP_CAP_PER_DOMAIN_PER_SHARD);
 
-        // A competing routing domain must recover the reserved half, by
-        // reclaiming only completed anchors from the overrepresented domain.
+        // A competing routing domain can use the other half of the shard.
         let mut victim = v4_key();
         victim.routing_domain = 8;
         victim.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101));
