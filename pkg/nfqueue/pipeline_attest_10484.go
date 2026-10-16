@@ -981,10 +981,12 @@ func (p *CapturePipeline) deadlineFailedState(item *pendingReinject) bool {
 		return false
 	}
 	delete(p.pending, item.lease.RequestID)
-	if flow := p.flows[item.frame.FlowKey]; flow != nil && flow.pending == item {
-		flow.pending = nil
-	}
 	early := item.earlyCompletion
+	if early == nil {
+		if flow := p.flows[item.frame.FlowKey]; flow != nil && flow.pending == item {
+			flow.pending = nil
+		}
+	}
 	item.earlyCompletion = nil
 	item.admissionPending = false
 	p.stats.Refused++
@@ -1006,7 +1008,7 @@ func (p *CapturePipeline) deadlineFailedState(item *pendingReinject) bool {
 	}
 	p.finishFrame(item.frame, VerdictDrop)
 	if early != nil {
-		p.retireFlow(item.frame.FlowKey)
+		p.retirePendingFlow(item)
 		return true
 	}
 	return false
@@ -1022,9 +1024,6 @@ func (p *CapturePipeline) admissionFailedState(item *pendingReinject, code strin
 		return false
 	}
 	delete(p.pending, item.lease.RequestID)
-	if flow := p.flows[item.frame.FlowKey]; flow != nil && flow.pending == item {
-		flow.pending = nil
-	}
 	early := item.earlyCompletion
 	item.earlyCompletion = nil
 	item.admissionPending = false
@@ -1043,7 +1042,7 @@ func (p *CapturePipeline) admissionFailedState(item *pendingReinject, code strin
 		}
 	}
 	p.finishFrame(item.frame, VerdictDrop)
-	p.retireFlow(item.frame.FlowKey)
+	p.retirePendingFlow(item)
 	return true
 }
 
@@ -1071,10 +1070,12 @@ func (p *CapturePipeline) applyAdmission(item *pendingReinject, admission Reinje
 			return nil
 		}
 		delete(p.pending, item.lease.RequestID)
-		if flow := p.flows[item.frame.FlowKey]; flow != nil && flow.pending == item {
-			flow.pending = nil
-		}
 		early := item.earlyCompletion
+		if early == nil {
+			if flow := p.flows[item.frame.FlowKey]; flow != nil && flow.pending == item {
+				flow.pending = nil
+			}
+		}
 		item.earlyCompletion = nil
 		item.admissionPending = false
 		p.stats.Refused++
@@ -1096,7 +1097,7 @@ func (p *CapturePipeline) applyAdmission(item *pendingReinject, admission Reinje
 		}
 		p.finishFrame(item.frame, VerdictDrop)
 		if early != nil {
-			p.retireFlow(item.frame.FlowKey)
+			p.retirePendingFlow(item)
 		}
 		return nil
 	}
