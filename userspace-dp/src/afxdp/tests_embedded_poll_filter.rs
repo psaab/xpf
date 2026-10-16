@@ -2814,6 +2814,201 @@ fn poll_descriptor_nat64_v6_to_v4_pmtud_from_wrong_zone_denied_10666() {
         true, false, 32, true,
     );
 }
+/// #14123 helper: one V6ToV4 NAT64 error (Time-Exceeded, not PMTUD, so the
+/// queued prebuilt faces the zone-policy gate) from `router` quoting the
+/// translated reply, driven on the real flowless poll path under
+/// `lan -> wan` policies `deny_src` then `permit_src`, in that order.
+/// Returns whether the translated error queued.
+fn n14123_run_v6_to_v4(router: Ipv6Addr, deny_src: IpAddr, permit_src: IpAddr) -> bool {
+    let frame = build_icmpv6_te_frame_with_mac(
+        router,
+        n6472_pref64_server(),
+        n6472_client_v6(),
+        N6472_SERVER_PORT,
+        N6472_CLIENT_PORT,
+        PROTO_TCP,
+        TEST_LAN_MAC,
+    );
+    let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
+    snapshot.default_policy = "deny".to_string();
+    let addr = |ip: IpAddr| match ip {
+        IpAddr::V6(v6) => format!("{v6}/128"),
+        IpAddr::V4(v4) => format!("{v4}/32"),
+    };
+    snapshot.policies = vec![
+        PolicyRuleSnapshot {
+            name: "deny-error-src-14123".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec![addr(deny_src)],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["icmpv6".to_string()],
+            application_terms: Vec::new(),
+            action: "deny".to_string(),
+            ..Default::default()
+        },
+        PolicyRuleSnapshot {
+            name: "permit-error-src-14123".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec![addr(permit_src)],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["icmpv6".to_string()],
+            application_terms: Vec::new(),
+            action: "permit".to_string(),
+            ..Default::default()
+        },
+    ];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    n6472_install_sessions(&mut sessions, 123_000_000_000 - 1);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 24,
+        l3_offset: 14,
+        l4_offset: 54,
+        payload_offset: 62,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let (_batch, _dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    !binding.scratch.scratch_forwards.is_empty()
+}
+
+/// #14123 FAIL-ON-REVERT (policy source): a V6ToV4 NAT64 error's queued
+/// policy gate must judge the ORIGINAL IPv6 error sender, matching
+/// `rule_l3_matches`'s #2358 cross-family (V6 src, V4 dst) arm — not the
+/// RFC 7915 §5.2 pool source the builder writes into the translated
+/// frame. RED on master: the deny leg still queues (the gate judged
+/// `pool_v4`, which the pool-permit rule matches), and the mirror leg
+/// (deny pool / permit original sender) drops.
+#[test]
+fn poll_descriptor_nat64_v6_to_v4_policy_judges_original_sender_14123() {
+    let router: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("lan v6 router");
+    // A second IPv6 sender the error does NOT come from. Neither rule
+    // names the pool address: under the pre-fix gate (pool source,
+    // same-family arm) both rules' IPv4 source sets are match-any, so
+    // the first (deny) rule matches the pool in BOTH legs — the mirror
+    // leg is RED on master and GREEN only when the gate judges the
+    // original sender through the cross-family arm.
+    let other: Ipv6Addr = "2001:db8::99".parse().expect("other v6 sender");
+    assert!(
+        !n14123_run_v6_to_v4(router, IpAddr::V6(router), IpAddr::V6(other)),
+        "#14123: a lan->wan deny on the original IPv6 error sender must refuse the translated error (RED on master: gate judged the pool source)"
+    );
+    assert!(
+        n14123_run_v6_to_v4(router, IpAddr::V6(other), IpAddr::V6(router)),
+        "#14123: policy permitting the original IPv6 sender must deliver the translated error"
+    );
+}
+
+/// #14123 FAIL-ON-REVERT (undelivered budget): a NAT64 match charged by
+/// `note_icmp_error_delivered` whose translation then cannot be built
+/// (outer hop-limit 1 — the RFC 7915 translator refuses TTL-expired
+/// errors) must REFUND the F-077 token. After 64 such failures the 65th,
+/// deliverable error must still be admitted; RED on master it is
+/// BudgetDenied and nothing queues.
+#[test]
+fn poll_descriptor_nat64_undelivered_errors_refund_budget_14123() {
+    let router: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("lan v6 router");
+    let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
+    snapshot.default_policy = "deny".to_string();
+    permit_wan_to_lan_flowless_icmp(&mut snapshot);
+    // Deliver V6ToV4 (lan -> wan) under an explicit any-source permit for
+    // the original sender (cross-family rule: V6 src, V4 dst any).
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "permit-nat64-v6-to-v4-14123".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "permit".to_string(),
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    n6472_install_sessions(&mut sessions, 123_000_000_000 - 1);
+    let meta = |frame: &[u8]| UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 24,
+        l3_offset: 14,
+        l4_offset: 54,
+        payload_offset: 62,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let good = build_icmpv6_te_frame_with_mac(
+        router,
+        n6472_pref64_server(),
+        n6472_client_v6(),
+        N6472_SERVER_PORT,
+        N6472_CLIENT_PORT,
+        PROTO_TCP,
+        TEST_LAN_MAC,
+    );
+    // Same quote, hop-limit 1: matches + charges, then the translator
+    // refuses (hop_limit <= 1) and the arm declines.
+    let mut bad = good.clone();
+    bad[21] = 1;
+    for i in 0..64 {
+        txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &bad,
+            meta(&bad),
+            true,
+        );
+        assert!(
+            binding.scratch.scratch_forwards.is_empty(),
+            "#14123: TTL-expired error {i} must not queue a translated frame"
+        );
+        binding.scratch.scratch_recycle.clear();
+    }
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &good,
+        meta(&good),
+        true,
+    );
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "#14123: 64 undelivered errors must not starve the 65th deliverable error (RED on master: F-077 token leaked on build failure)"
+    );
+}
 
 /// #14122: attach an egress output filter to the WAN unit (reth0.80,
 /// ifindex 12) — the egress of the V6->V4 NAT64 translated error.

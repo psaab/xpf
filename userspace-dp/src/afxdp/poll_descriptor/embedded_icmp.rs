@@ -39,8 +39,9 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
     /// prebuilt against zone policy.
     Queued {
         related_admit: bool,
-        /// #13649: outbound SNAT builders rewrite the outer source before the
-        /// queued policy gate; retain the actual ingress source for policy.
+        /// #13649/#14123: builders rewrite the outer source before the
+        /// queued policy gate (outbound SNAT re-NAT; NAT64 V6→V4 pool
+        /// rewrite); retain the actual ingress source for policy.
         policy_src_ip: Option<IpAddr>,
         /// #10667: the F-077 gating key the matcher charged — the caller
         /// refunds it via `SessionTable::refund_icmp_error_not_delivered`
@@ -514,7 +515,17 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     );
     // #10729 X2-F6: same effective-proto-51 substitution as the transit
     // flowless arms (identity today: prebuilts carry no AH).
-    let policy_proto = crate::afxdp::frame::flowless_effective_protocol(queued_frame, policy_meta);
+    // #14123: a policy source override carries the ORIGINAL packet's
+    // family; the queued frame is its translation, so the original
+    // packet's protocol (read from its family) is the policy protocol.
+    // Without this a V6→V4 override would evaluate an ICMPv6 sender
+    // under the translated frame's ICMPv4 protocol and no
+    // ICMPv6-application rule could ever match it.
+    let policy_proto = match policy_src_ip {
+        Some(IpAddr::V6(_)) if policy_flow.dst_ip.is_ipv4() => PROTO_ICMPV6,
+        Some(IpAddr::V4(_)) if policy_flow.dst_ip.is_ipv6() => PROTO_ICMP,
+        _ => crate::afxdp::frame::flowless_effective_protocol(queued_frame, policy_meta),
+    };
     let policy_result = crate::policy::evaluate_policy_result_l3_aware_at(
         &worker_ctx.forwarding.policy,
         from_zone_id,
@@ -688,8 +699,10 @@ mod tests_12866 {
 
 /// Recover the outer L3 identity from the actual prebuilt wire frame. The
 /// queued frame can be cross-family (NAT64), so the original ingress metadata
-/// is not authoritative for policy addresses or ICMP type/code.
-fn queued_embedded_icmp_identity(frame: &[u8]) -> Option<(SessionFlow, UserspaceDpMeta)> {
+/// is not authoritative for policy addresses or ICMP type/code. Also used
+/// by the NAT64 arm (#14123) to read the original error sender from the
+/// arriving frame before translation.
+pub(super) fn queued_embedded_icmp_identity(frame: &[u8]) -> Option<(SessionFlow, UserspaceDpMeta)> {
     let l3 = crate::afxdp::frame::frame_l3_offset(frame)?;
     let version = frame.get(l3).map(|byte| byte >> 4)?;
     let (addr_family, protocol, src_ip, dst_ip) = match version {

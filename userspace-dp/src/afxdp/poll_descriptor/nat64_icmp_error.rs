@@ -23,8 +23,8 @@
 // then normal flowless enforcement, both unchanged.
 
 use super::embedded_icmp::{
-    actual_embedded_icmp_ingress_zone, outer_is_pmtud_error, related_forward_zones,
-    EmbeddedIcmpReversal, queue_prebuilt_embedded_icmp_error,
+    actual_embedded_icmp_ingress_zone, outer_is_pmtud_error, queued_embedded_icmp_identity,
+    related_forward_zones, EmbeddedIcmpReversal, queue_prebuilt_embedded_icmp_error,
 };
 use super::*;
 
@@ -93,6 +93,10 @@ pub(super) fn try_translate_nat64_icmp_error(
             // prefixes here are /96-only (config gate in `from_snapshots`),
             // so the split is exact.
             let Some(router_v4) = packet_frame.get(l3 + 12..l3 + 16) else {
+                // #14123: the matcher already charged the F-077 token; a
+                // matched-but-unbuildable arm must refund before declining,
+                // or a transient failure starves later valid errors.
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::NotHandled;
             };
             let mut src_v6_octets = [0u8; 16];
@@ -119,9 +123,12 @@ pub(super) fn try_translate_nat64_icmp_error(
             let (Some(dst_mac), Some(src_mac)) =
                 (icmp_resolution.neighbor_mac, icmp_resolution.src_mac)
             else {
+                // #14123: missing neighbor after a charged match — refund.
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::NotHandled;
             };
             let Some(capacity) = packet_frame.len().checked_add(44) else {
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::NotHandled;
             };
             let mut rewritten_frame =
@@ -138,6 +145,8 @@ pub(super) fn try_translate_nat64_icmp_error(
                 icmp_resolution.tx_vlan_id,
             ) else {
                 crate::afxdp::cos::redirect_pool::recycle(rewritten_frame);
+                // #14123: frame-build failure after a charged match — refund.
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::NotHandled;
             };
             rewritten_frame.truncate(written);
@@ -182,6 +191,18 @@ pub(super) fn try_translate_nat64_icmp_error(
             metadata,
             budget_key,
         } => {
+            // #14123: the original IPv6 error sender (outer source of the
+            // arriving frame, before the RFC 7915 §5.2 pool rewrite writes
+            // `pool_v4`). Retained so the queued policy gate judges the
+            // original sender in the #2358 cross-family (V6 src, V4 dst)
+            // form. Fail closed (refund + drop) if it cannot be read — never
+            // silently fall back to judging the rewritten pool source.
+            let Some(original_src) =
+                queued_embedded_icmp_identity(packet_frame).map(|(flow, _)| flow.src_ip)
+            else {
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
+                return EmbeddedIcmpReversal::Dropped;
+            };
             let arrival_zone = actual_embedded_icmp_ingress_zone(
                 worker_ctx.forwarding,
                 meta,
@@ -198,9 +219,12 @@ pub(super) fn try_translate_nat64_icmp_error(
             let (Some(dst_mac), Some(src_mac)) =
                 (icmp_resolution.neighbor_mac, icmp_resolution.src_mac)
             else {
+                // #14123: missing neighbor after a charged match — refund.
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::NotHandled;
             };
             let Some(capacity) = packet_frame.len().checked_add(4) else {
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::NotHandled;
             };
             let mut rewritten_frame =
@@ -218,6 +242,8 @@ pub(super) fn try_translate_nat64_icmp_error(
                 worker_ctx.forwarding.nat64.no_v6_frag_header,
             ) else {
                 crate::afxdp::cos::redirect_pool::recycle(rewritten_frame);
+                // #14123: frame-build failure after a charged match — refund.
+                sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
                 return EmbeddedIcmpReversal::NotHandled;
             };
             rewritten_frame.truncate(written);
@@ -245,7 +271,7 @@ pub(super) fn try_translate_nat64_icmp_error(
                         related_admit: fwd_ingress_zone != 0
                             && arrival_zone == fwd_ingress_zone
                             && outer_is_pmtud_error(packet_frame, meta),
-                        policy_src_ip: None,
+                        policy_src_ip: Some(original_src),
                         budget_key,
                     }
                 }
