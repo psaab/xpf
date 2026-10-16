@@ -398,6 +398,114 @@ fn local_origin_tunnel_tx_request_encapsulates_raw_ip_for_active_owner() {
         PROTO_ICMP
     );
 }
+fn local_origin_udp_fragments_14119() -> (Vec<u8>, Vec<u8>) {
+    let src = Ipv4Addr::new(10, 255, 192, 42);
+    let dst = Ipv4Addr::new(10, 255, 192, 41);
+    let mut l4 = Vec::new();
+    l4.extend_from_slice(&49152u16.to_be_bytes());
+    l4.extend_from_slice(&53u16.to_be_bytes());
+    l4.extend_from_slice(&24u16.to_be_bytes());
+    l4.extend_from_slice(&0u16.to_be_bytes());
+    l4.extend_from_slice(&[0xA1; 16]);
+    let mk = |frag_field: u16, chunk: &[u8]| -> Vec<u8> {
+        let total = (20 + chunk.len()) as u16;
+        let mut pkt = Vec::new();
+        pkt.push(0x45);
+        pkt.push(0);
+        pkt.extend_from_slice(&total.to_be_bytes());
+        pkt.extend_from_slice(&0x1a2bu16.to_be_bytes());
+        pkt.extend_from_slice(&frag_field.to_be_bytes());
+        pkt.push(64);
+        pkt.push(PROTO_UDP);
+        pkt.extend_from_slice(&[0, 0]);
+        pkt.extend_from_slice(&src.octets());
+        pkt.extend_from_slice(&dst.octets());
+        let csum = checksum16(&pkt[..20]);
+        pkt[10..12].copy_from_slice(&csum.to_be_bytes());
+        pkt.extend_from_slice(chunk);
+        pkt
+    };
+    let first = mk(0x2000, &l4[..16]);
+    let second = mk(0x0002, &l4[16..]);
+    (first, second)
+}
+
+#[test]
+fn local_origin_tunnel_nonfirst_fragment_transmits_without_session_14119() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let (first, second) = local_origin_udp_fragments_14119();
+    let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let first_plan = build_local_origin_tunnel_tx_request(
+        &first, 1, &state, &ha_state, &dynamic_neighbors, &ike,
+    )
+    .expect("first fragment must transmit with its session");
+    assert!(first_plan.session_entry.is_some());
+    assert_eq!(first_plan.session_entry.as_ref().unwrap().key.src_port, 49152);
+    let second_plan = build_local_origin_tunnel_tx_request(
+        &second, 1, &state, &ha_state, &dynamic_neighbors, &ike,
+    )
+    .expect("#14119: owned non-first fragment must be GRE-encapsulated, not dropped");
+    assert!(second_plan.session_entry.is_none(), "non-first fragment must not mint a TunOrigin session");
+    assert!(second_plan.reverse_session_entry.is_none());
+    assert!(second_plan.tx_request.flow_key.is_none(), "payload bytes must not be fabricated into a flow key");
+    let bytes = &second_plan.tx_request.bytes;
+    assert_eq!(bytes[24], PROTO_GRE);
+    let inner = &bytes[bytes.len() - second.len()..];
+    assert_eq!(inner, second.as_slice(), "fragment must be carried verbatim");
+}
+
+#[test]
+fn local_origin_tunnel_nonfirst_fragment_nonlocal_source_fails_closed_14119() {
+    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let (_first, mut second) = local_origin_udp_fragments_14119();
+    second[12..16].copy_from_slice(&Ipv4Addr::new(10, 123, 0, 5).octets());
+    second[10..12].copy_from_slice(&[0, 0]);
+    let csum = checksum16(&second[..20]);
+    second[10..12].copy_from_slice(&csum.to_be_bytes());
+    let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let err = build_local_origin_tunnel_tx_request(
+        &second, 1, &state, &ha_state, &dynamic_neighbors, &ike,
+    )
+    .expect_err("#14119: nonlocal non-first fragment must fail closed");
+    assert!(err.contains("local_tunnel_source_not_owned_in_routing_instance"), "got: {err}");
+    assert_eq!(ike.len(), 0);
+}
+
+#[test]
+fn local_origin_tunnel_ipv6_nonfirst_fragment_transmits_without_session_14119() {
+    let mut snapshot = native_gre_snapshot(true);
+    let gre = snapshot.interfaces.iter_mut().find(|iface| iface.name == "gr-0/0/0.0").expect("GRE interface");
+    gre.addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:db8:255:192::42/64".to_string(), scope: 0 });
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(), family: "inet6".to_string(), destination: "::/0".to_string(), next_hop_weights: vec![], next_hops: vec!["2001:db8:255:192::41".to_string()], discard: false, next_table: String::new(), preference: 0, rule_priority: 0, mtu: 0 });
+    let state = build_forwarding_state(&snapshot);
+    let src: Ipv6Addr = "2001:db8:255:192::42".parse().unwrap();
+    let dst: Ipv6Addr = "2001:db8:255:192::41".parse().unwrap();
+    let mut pkt = Vec::new();
+    pkt.extend_from_slice(&[0x60, 0, 0, 0]);
+    pkt.extend_from_slice(&16u16.to_be_bytes());
+    pkt.push(44);
+    pkt.push(64);
+    pkt.extend_from_slice(&src.octets());
+    pkt.extend_from_slice(&dst.octets());
+    pkt.push(PROTO_UDP);
+    pkt.push(0);
+    pkt.extend_from_slice(&0x0010u16.to_be_bytes());
+    pkt.extend_from_slice(&0x1a2b3c4du32.to_be_bytes());
+    pkt.extend_from_slice(&[0xB2; 8]);
+    let ha_state = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ike = crate::afxdp::forwarding::IkeExchangeTable::new();
+    let plan = build_local_origin_tunnel_tx_request(&pkt, 1, &state, &ha_state, &dynamic_neighbors, &ike).expect("#14119: owned IPv6 non-first fragment must be GRE-encapsulated");
+    assert!(plan.session_entry.is_none(), "v6 non-first fragment must not mint a session");
+    assert!(plan.tx_request.flow_key.is_none());
+    let bytes = &plan.tx_request.bytes;
+    let inner = &bytes[bytes.len() - pkt.len()..];
+    assert_eq!(inner, pkt.as_slice(), "v6 fragment must be carried verbatim");
+}
 
 #[test]
 fn local_origin_tunnel_tx_request_accepts_owned_ipv6_in_tunnel_instance() {

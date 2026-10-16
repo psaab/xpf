@@ -594,8 +594,30 @@ pub(super) fn build_local_origin_tunnel_tx_request(
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let mut flow = parse_session_flow_from_bytes(&inner_frame, meta)
-        .ok_or_else(|| "parse_local_origin_session_flow_failed".to_string())?;
+    // #14119: a non-first fragment has no L4 header, so
+    // `parse_session_flow_from_bytes` correctly returns `None` (#2344 —
+    // payload must never be parsed as ports). That must not drop locally
+    // originated traffic: the wire path forwards such packets flowless.
+    // Recover only the L3 identity from the IP header — never ports — so
+    // the zone/source-ownership authority gates below apply before any
+    // transmission, exactly as for a flow-bearing packet. A packet that
+    // is flowless for any other reason (truncated, uninspectable, or a
+    // non-first fragment whose L3 header cannot be read) still fails
+    // closed with the same error as before.
+    let non_first_fragment = crate::afxdp::frame::frame_is_non_first_fragment(&inner_frame, meta);
+    let flow = parse_session_flow_from_bytes(&inner_frame, meta);
+    let (flow, src_ip) = match flow {
+        Some(flow) => {
+            let src = flow.forward_key.src_ip;
+            (Some(flow), src)
+        }
+        None if non_first_fragment => {
+            let src = crate::afxdp::frame::parse_packet_source_from_frame(&inner_frame, meta)
+                .ok_or_else(|| "parse_local_origin_session_flow_failed".to_string())?;
+            (None, src)
+        }
+        None => return Err("parse_local_origin_session_flow_failed".to_string()),
+    };
     // #9032: STAMP THE ROUTING DOMAIN. #7160 made `routing_domain` part of
     // session identity and stamped it at what its own comment calls "THE single
     // site that populates `SessionKey.routing_domain` for a received frame"
@@ -615,12 +637,15 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     // spelling of the same map probe, so this cannot drift from the wire path;
     // it short-circuits to 0 on `!has_routing_domains`, keeping a deployment
     // with no routing instances bit-identical to pre-#7160.
-    flow.forward_key.routing_domain = crate::afxdp::forwarding::ingress_routing_domain(
-        forwarding,
-        decision.resolution.egress_ifindex,
-        0,
-        None,
-    );
+    let flow = flow.map(|mut flow| {
+        flow.forward_key.routing_domain = crate::afxdp::forwarding::ingress_routing_domain(
+            forwarding,
+            decision.resolution.egress_ifindex,
+            0,
+            None,
+        );
+        flow
+    });
     // #13179: this transmitter has no policy/screen adjudication for
     // non-local TUN input. Only an address owned by this firewall in the
     // tunnel's routing table may be emitted or receive a TunOrigin exemption.
@@ -637,7 +662,7 @@ pub(super) fn build_local_origin_tunnel_tx_request(
         .get(&decision.resolution.egress_ifindex)
         .map(|instance| crate::afxdp::forwarding_build::connected_route_tables(instance).1)
         .unwrap_or_else(|| "inet6.0".to_string());
-    let firewall_self_originated = match flow.forward_key.src_ip {
+    let firewall_self_originated = match src_ip {
         IpAddr::V4(ip) => {
             forwarding.configured_iface_v4.contains(&ip)
                 && (forwarding
@@ -666,17 +691,20 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     }
     // #6471: seed only after the zone and source-ownership gates above, so an
     // unzoned or cross-VRF packet cannot create the host-inbound IKE exemption.
-    crate::afxdp::forwarding::maybe_seed_local_origin_ike(
-        ike_exchanges,
-        &inner_frame,
-        meta.l4_offset as usize,
-        &flow,
-        monotonic_nanos(),
-    );
+    // A non-first fragment carries no IKE header, so there is nothing to seed.
+    if let Some(flow) = flow.as_ref() {
+        crate::afxdp::forwarding::maybe_seed_local_origin_ike(
+            ike_exchanges,
+            &inner_frame,
+            meta.l4_offset as usize,
+            flow,
+            monotonic_nanos(),
+        );
+    }
     let bytes = encapsulate_native_gre_frame(&inner_frame, meta, &decision, forwarding)
         .ok_or_else(|| "encapsulate_native_gre_frame_failed".to_string())?;
-    let session_entry = if firewall_self_originated {
-        Some(SyncedSessionEntry {
+    let session_entry = match (firewall_self_originated, flow.as_ref()) {
+        (true, Some(flow)) => Some(SyncedSessionEntry {
             key: flow.forward_key.clone(),
             decision,
             metadata: SessionMetadata {
@@ -743,9 +771,10 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             tcp_close_class: 0,
             tcp_handshake_state: 0,
             source_nat_static: None,
-        })
-    } else {
-        None
+        }),
+        // #14119: flowless (non-first fragment) or non-owned traffic mints
+        // no TunOrigin session — payload bytes are not a flow identity.
+        _ => None,
     };
     // Table-scoped synthesis (#10038 item 6, the WG twin): VRF reverses
     // resolve against the tunnel's instance table instead of NoRoute-ing
@@ -754,15 +783,14 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     // above ensure only authorized local traffic reaches this point.
     let reverse_session_entry = session_entry.as_ref().and_then(|entry| {
         let (install_table_domain, install_table_check) = table_identity;
-        let mut reverse =
-            crate::afxdp::shared_ops::synthesized_synced_reverse_entry_in_table(
-                forwarding,
-                ha_runtime,
-                dynamic_neighbors,
-                entry,
-                monotonic_nanos() / 1_000_000_000,
-                Some(table.as_str()),
-            );
+        let mut reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry_in_table(
+            forwarding,
+            ha_runtime,
+            dynamic_neighbors,
+            entry,
+            monotonic_nanos() / 1_000_000_000,
+            Some(table.as_str()),
+        );
         if let Some(rev) = reverse.as_mut() {
             rev.origin = SessionOrigin::TunOrigin;
             rev.decision.install_table_domain = install_table_domain;
@@ -780,7 +808,7 @@ pub(super) fn build_local_origin_tunnel_tx_request(
         forwarding,
         decision.resolution.egress_ifindex,
         meta,
-        Some(&flow.forward_key),
+        flow.as_ref().map(|f| &f.forward_key),
         cos_extra,
         now_ns,
     );
@@ -794,7 +822,7 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             expected_ports: None,
             expected_addr_family: meta.addr_family,
             expected_protocol: meta.protocol,
-            flow_key: Some(flow.forward_key.clone()),
+            flow_key: flow.as_ref().map(|f| f.forward_key.clone()),
             egress_ifindex: decision.resolution.egress_ifindex,
             cos_queue_id: cos.queue_id,
             dscp_rewrite: cos.dscp_rewrite,
@@ -894,7 +922,10 @@ pub(super) fn maybe_enqueue_local_tunnel_session(
             let mut pending = worker_queue::lock_recover(pending);
             worker_queue::push_bounded(&mut pending, WorkerCommand::UpsertLocal(entry.clone()));
             if let Some(reverse) = &plan.reverse_session_entry {
-                worker_queue::push_bounded(&mut pending, WorkerCommand::UpsertLocal(reverse.clone()));
+                worker_queue::push_bounded(
+                    &mut pending,
+                    WorkerCommand::UpsertLocal(reverse.clone()),
+                );
             }
         }
     }
