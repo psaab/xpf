@@ -1127,6 +1127,13 @@ type Daemon struct {
 	// readiness reader. nft success and the following Store are ordered
 	// operations in separate state domains, not one atomic publication.
 	hostInboundEnforced atomic.Bool
+	// hostInboundPreActivationFence retains temporary address drops across
+	// consecutive applies until a successful full host-inbound render retires
+	// the dedicated preactivation nftables table. applySem serializes access.
+	hostInboundPreActivationFence *xnft.GapFenceSpec
+	// hostInboundGapFenceSpec retains fail-closed gap inputs until a successful
+	// real render removes the independent coverage-gap table.
+	hostInboundGapFenceSpec *xnft.GapFenceSpec
 
 	// earlyInputHandoffDone reports that the #10751 pre-networkd input barrier
 	// has been handed off (removed after host-inbound enforcement, a scoped

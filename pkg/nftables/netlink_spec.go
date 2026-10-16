@@ -351,6 +351,7 @@ type FenceSpec struct {
 // stands behind the gap).
 type GapFenceSpec struct {
 	Views         []HostInboundZoneView // WG accepts intersect these addresses with Uncovered.
+	PreActivation bool                  // installs into the separate address-activation fence table.
 	UncoveredV4   []string
 	UncoveredV6   []string
 	WGListenPorts []uint16            // stale-reply guard only; WG accepts use WGZonePorts.

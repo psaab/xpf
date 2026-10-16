@@ -104,6 +104,11 @@ func TestNftLocalDeliveryPriorityConstantsOrdered(t *testing.T) {
 			"must carry distinct hook-input priorities",
 			nftHostInboundPriority, nftHostInboundGapPriority)
 	}
+	if nftHostInboundGapPriority >= nftHostInboundPreActivationPriority {
+		t.Fatalf("nftHostInboundGapPriority (%d) must be < nftHostInboundPreActivationPriority (%d): "+
+			"the temporary address-activation fence must run after both persistent tables",
+			nftHostInboundGapPriority, nftHostInboundPreActivationPriority)
+	}
 }
 
 // TestNftHostInboundGapFenceChainPriority pins the rendered gap-fence payload's
