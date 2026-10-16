@@ -657,6 +657,13 @@ type compileOpts struct {
 	// render (pkg/ipsec), so the other tunnels keep loading.
 	lenientIPsecSectionName bool
 
+	// lenientIPsecPSKPresence (#14139) downgrades the missing-PSK reject
+	// (validateIPsecPSKPresenceStrict) to a warning on the tolerant load /
+	// peer-sync paths, so a persisted or synced config still boots. The
+	// pkg/ipsec render belt skips the uncredentialed PSK connection, so no
+	// auth=psk connection loads without a secret of its own.
+	lenientIPsecPSKPresence bool
+
 	// lenientLogProfileStreamRef (#2008 H7) downgrades the
 	// `security log profile <name> stream-name <stream>` cross-reference
 	// from a hard error to a warning on the tolerant load / peer-sync
@@ -3222,6 +3229,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecManualKey:                  true,
 		lenientIPsecSANameDisplay:              true,
 		lenientIPsecSectionName:                true,
+		lenientIPsecPSKPresence:                true,
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,
 		lenientMultiLeafSelfRepeat:             true,
