@@ -236,6 +236,60 @@ func TestUpdateHAWatchdogEntryPointNeverWaitsOnManagerMu9629(t *testing.T) {
 	}
 }
 
+// #13716: a pending demotion for an RG other than the tick's RG must force an
+// immediate inactive publish and be recorded inactive in the degraded
+// baseline. The snapshot predates the pending set (demotion queued after the
+// snapshot publish), so the due-check and baseline must apply the override.
+func TestDegradedWatchdogPendingDemotionForOtherRGForcesSend13716(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{
+		1: {Active: true, WatchdogTimestamp: 90},
+		2: {Active: true, WatchdogTimestamp: 100},
+	})
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 90},
+		{RGID: 2, Active: true, WatchdogTimestamp: 100},
+	}
+	m.publishHAWatchdogSnapshotLocked()
+	m.mu.Unlock()
+
+	// Baseline: both RGs previously sent active at t=100 (no send due now).
+	m.haDegradedCurrent = map[int]haWatchdogIPCSyncState{
+		1: {timestamp: 100, active: true},
+		2: {timestamp: 100, active: true},
+	}
+	m.haDegradedLastSent = map[int]haWatchdogIPCSyncState{
+		1: {timestamp: 100, active: true},
+		2: {timestamp: 100, active: true},
+	}
+	m.haDegradedLastSentAt = 100
+	m.haDegradedHaveLastSent = true
+
+	// RG1 demotion queued after the snapshot publish; tick arrives for RG2.
+	m.haWatchdogPendingDemotions.add(1)
+
+	var sent []HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append([]HAGroupStatus{}, req.HAState.Groups...)
+		}
+		return nil
+	}
+	handled, err := m.tryUpdateHAWatchdogWhileManagerMuHeld(2, 100)
+	if !handled || err != nil {
+		t.Fatalf("degraded tick returned handled=%v err=%v, want handled success", handled, err)
+	}
+	if len(sent) != 2 || sent[0].RGID != 1 || sent[0].Active || sent[1].RGID != 2 || !sent[1].Active {
+		t.Fatalf("sent groups = %+v, want RG1 inactive + RG2 active full set", sent)
+	}
+	if last, ok := m.haDegradedLastSent[1]; !ok || last.active {
+		t.Fatalf("haDegradedLastSent[1] = %+v ok=%v, want recorded inactive baseline", last, ok)
+	}
+}
+
 // Config applies publish the control-socket path under m.mu while watchdog
 // calls send after releasing it. This cell exercises those operations together
 // so -race catches any sender that reads m.cfg after the unlock.
