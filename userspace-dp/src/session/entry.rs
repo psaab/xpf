@@ -725,9 +725,8 @@ pub(crate) struct SessionDelta {
     /// session was first installed, copied from the `SessionEntry.created_ns`.
     /// Carried so the RT_FLOW SESSION_CLOSE frame can report a real flow
     /// StartTime instead of the packet-count heuristic. `0` means "unknown"
-    /// (e.g. an explicit delete path that no longer has the entry, or an
-    /// HA-synced delta that never had a local install) — the exporter falls
-    /// back to `estimateSessionDuration` in that case.
+    /// (e.g. an HA-synced delta or an explicit close with no local entry
+    /// snapshot) — the exporter falls back to `estimateSessionDuration`.
     pub(crate) created_ns: u64,
     /// #2465: monotonic nanosecond timestamp of the session's last activity
     /// (`SessionEntry.last_seen_ns`) at close time. Used together with
@@ -738,23 +737,21 @@ pub(crate) struct SessionDelta {
     /// #2501: the session's per-direction byte/packet counters at the moment
     /// this delta was produced. Snapshotted from `SessionEntry.counters` so
     /// the SESSION_CLOSE RT_FLOW frame (#2460) reports real NetFlow/IPFIX
-    /// volume in its already-reserved wire slots. Meaningful only on a Close
-    /// delta sourced from a live local entry; an Open delta and a
-    /// synthesized close that no longer has the entry carry the
-    /// `Default` (all-zero) value, which keeps the prior on-wire behavior.
+    /// volume in its already-reserved wire slots. Meaningful on a Close delta
+    /// with a local-entry snapshot; an Open delta and a synthesized Close
+    /// without such a snapshot carry the `Default` (all-zero) value.
     pub(crate) counters: SessionCounters,
     /// #2749: the IP ToS byte (DSCP in the high 6 bits, ECN cleared) observed
     /// on the forward direction of the session, snapshotted from
     /// `SessionEntry.observed_tos` when this delta is produced. Drives the
     /// re-introduced NetFlow v9 `srcTos` (IE 5) / IPFIX `ipClassOfService`
-    /// close-record field. Meaningful only on a Close delta sourced from a
-    /// live local entry; Open / synced / synthesized-close deltas carry 0
-    /// (the prior on-wire behavior).
+    /// close-record field. Meaningful on a Close with a local-entry snapshot;
+    /// Open / synced / synthesized-close deltas without one carry 0.
     pub(crate) observed_tos: u8,
     /// #2749: the OR of every TCP control-flag byte seen over the flow's
     /// lifetime (`SessionEntry.observed_tcp_flags`). Drives the re-introduced
     /// NetFlow v9 `tcpFlags` (IE 6) / IPFIX `tcpControlBits` close-record
-    /// field. 0 for non-TCP flows and for deltas with no live entry in hand.
+    /// field. 0 for non-TCP flows and for deltas without a local entry snapshot.
     pub(crate) observed_tcp_flags: u8,
     /// #4915: the dataplane's STABLE session id, copied from
     /// `SessionEntry.session_id`. Carried on BOTH the Open and Close delta so the
@@ -791,9 +788,11 @@ pub(crate) struct SessionDelta {
     /// `0` means no class is carried; otherwise the value is
     /// `TcpCloseClass::to_wire`.
     ///
-    /// Open and Update deltas take it from the live entry. An expiry Close
-    /// snapshots the removed entry's class for the RT_FLOW reason field;
-    /// synthesized closes with no entry carry `0`.
+    /// Open and Update deltas take it from the live entry. That lets the #2442
+    /// loss-of-sync resync, which is an Open re-export, also restore a dropped
+    /// Update. A Close delta carries the class harvested from its local entry
+    /// snapshot, or `0` when no local entry was available; expiry and explicit
+    /// closes both capture that state before removing the entry.
     pub(crate) tcp_close_class: u8,
     /// #10888: TCP handshake state at delta production. 0 is absent/legacy
     /// (established behavior); nonzero values use `TcpHandshakeState::to_wire`.

@@ -1197,6 +1197,20 @@ pub(crate) struct PolicyRebindEntry {
     pub(crate) tcp_close_class: u8,
 }
 
+/// Accounting and close-state fields harvested before an explicit removal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionCloseSnapshot {
+    pub(crate) policy_generation: u64,
+    pub(crate) created_ns: u64,
+    pub(crate) last_seen_ns: u64,
+    pub(crate) counters: SessionCounters,
+    pub(crate) observed_tos: u8,
+    pub(crate) observed_tcp_flags: u8,
+    pub(crate) session_id: u64,
+    pub(crate) tcp_close_class: u8,
+    pub(crate) tcp_handshake_state: u8,
+}
+
 /// #2501: per-session traffic accounting, split by direction. A `Copy`
 /// snapshot type so callers can read the four counters out of a session
 /// entry in one move (the BPF-map refresh and the close-delta harvest both
@@ -2965,6 +2979,21 @@ impl SessionTable {
     #[inline]
     fn entry_by_key_mut(&mut self, key: &SessionKey) -> Option<&mut SessionEntry> {
         self.record_by_key_mut(key).map(|r| &mut r.entry)
+    }
+
+    /// Copy the close fields from a live entry before explicit teardown removes it.
+    pub(crate) fn close_snapshot_for(&self, key: &SessionKey) -> Option<SessionCloseSnapshot> {
+        self.entry_by_key(key).map(|entry| SessionCloseSnapshot {
+            policy_generation: entry.policy_generation,
+            created_ns: entry.created_ns,
+            last_seen_ns: entry.last_seen_ns,
+            counters: entry.counters,
+            observed_tos: entry.observed_tos,
+            observed_tcp_flags: entry.observed_tcp_flags,
+            session_id: entry.session_id,
+            tcp_close_class: entry.tcp_close_class_wire(),
+            tcp_handshake_state: entry.tcp_handshake_state_wire(key.protocol),
+        })
     }
 
     /// #5213: the STABLE session id (`SessionEntry.session_id`, #4915) for the
@@ -5059,3 +5088,8 @@ mod datagram_reply_promotion_10889_tests;
 #[cfg(test)]
 #[path = "companion_established_13679_tests.rs"]
 mod companion_established_13679_tests;
+
+// #13973 (H20-05): explicit-close deltas harvest the removed entry.
+#[cfg(test)]
+#[path = "explicit_close_harvest_13973_tests.rs"]
+mod explicit_close_harvest_13973_tests;

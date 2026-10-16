@@ -599,6 +599,7 @@ fn delete_terminal_half(
         now_ns,
         worker_id,
     );
+    let close_snapshot = sessions.close_snapshot_for(key).unwrap_or_default();
     let closed_id = sessions.session_id_for(key);
     let delete_result =
         delete_session_map_entry_for_removed_session_with_origin_and_id(
@@ -639,7 +640,15 @@ fn delete_terminal_half(
         metadata.is_reverse,
         now_ns,
     );
-    sessions.emit_close_delta_with_origin(key.clone(), decision, metadata.clone(), origin, false, closed_id);
+    sessions.emit_close_delta_with_snapshot(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        origin,
+        false,
+        closed_id,
+        close_snapshot,
+    );
 }
 
 /// #9856: slice size for the collecting export-candidate walk below. The

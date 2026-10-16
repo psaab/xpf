@@ -2374,6 +2374,8 @@ fn purge_close_without_reinstall_flushes_through_flush() {
         0x18,
     ));
     sessions.drain_deltas(64);
+    sessions.account_packet(&key, 321, 0x10, 12);
+    sessions.account_packet(&key, 654, 0x18, 20);
     let shared = shared_maps();
     publish_shared_session(
         &shared.sessions,
@@ -2411,6 +2413,10 @@ fn purge_close_without_reinstall_flushes_through_flush() {
         1
     );
     let deltas = sessions.drain_deltas(64);
+    assert_eq!(deltas[0].counters.fwd_packets, 2);
+    assert_eq!(deltas[0].counters.fwd_bytes, 975);
+    assert_eq!(deltas[0].created_ns, NOW_NS);
+    assert_eq!(deltas[0].last_seen_ns, NOW_NS);
     assert_eq!(deltas.len(), 1);
     let (handle, rx) = crate::event_stream::test_worker_handle_connected(
         8,
