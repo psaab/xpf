@@ -291,19 +291,24 @@ fn metadata() -> SessionMetadata {
 }
 
 fn decision() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 12,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-        src_mac: None,
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// Install `flow` as an established session stamped under generation
@@ -350,7 +355,9 @@ fn table_with_session(
 /// that has nothing to do with the code under test. Using one real frame
 /// everywhere removes that class of fixture lie.
 fn frame() -> Vec<u8> {
-    crate::afxdp::tests_support::build_policy_deny_tcp_syn_frame(crate::afxdp::tests_support::TEST_LAN_MAC)
+    crate::afxdp::tests_support::build_policy_deny_tcp_syn_frame(
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    )
 }
 
 /// A static `then discard` attached after the session was established revokes
@@ -371,6 +378,8 @@ fn static_discard_revokes_a_stale_stamped_session_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     let hit = hit.expect("a newly-denied stale session must produce a verdict");
     assert!(
@@ -426,6 +435,8 @@ fn a_still_permitted_session_keeps_its_snat_translation_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     assert!(
         hit.is_none(),
@@ -477,20 +488,26 @@ fn a_fresh_stamp_skips_the_revalidation_entirely_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     assert!(
         hit.is_none(),
         "a session already revalidated under the live generation must not be \
          re-derived"
     );
-    assert!(!already_counted, "Fresh static ACCEPT has no counted evaluator");
+    assert!(
+        !already_counted,
+        "Fresh static ACCEPT has no counted evaluator"
+    );
 }
 
 /// inet6 parity. The family selects a different fast map, and a v4-only
 /// implementation would leave every IPv6 session unrevoked.
 #[test]
 fn static_discard_revokes_an_ipv6_session_7212() {
-    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, true, vec![deny_term("no-5201", "5201")]);
+    let forwarding =
+        forwarding_with_input_filter(LAN_IFINDEX, true, vec![deny_term("no-5201", "5201")]);
     let flow = v6_flow(5201);
     let mut sessions = table_with_session(&flow, 7, None);
 
@@ -502,6 +519,8 @@ fn static_discard_revokes_an_ipv6_session_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, true),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("v6 verdict");
@@ -528,6 +547,8 @@ fn static_discard_resolves_through_the_vlan_logical_unit_7212() {
         Some(&flow),
         meta(VLAN_PARENT_IFINDEX as u32, VLAN_ID as u16, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("the VLAN unit's own filter must be found");
@@ -557,6 +578,8 @@ fn term_order_decides_the_static_verdict_7212() {
             Some(&flow),
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            0,
         );
         assert_eq!(
             hit.is_some_and(|h| h.revoked_key.is_some()),
@@ -585,6 +608,8 @@ fn source_address_except_inverts_the_static_verdict_7212() {
             Some(&flow),
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            0,
         );
         assert_eq!(
             hit.is_some_and(|h| h.revoked_key.is_some()),
@@ -612,6 +637,8 @@ fn detaching_the_filter_revokes_nothing_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     assert!(hit.is_none());
     assert!(
@@ -634,8 +661,13 @@ fn no_flow_hit_reports_no_counted_evaluator_10566() {
         None,
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
-    assert!(hit.is_none(), "no-flow input cannot produce a filter verdict");
+    assert!(
+        hit.is_none(),
+        "no-flow input cannot produce a filter verdict"
+    );
     assert!(
         !already_counted,
         "no-flow session hit must report no counted evaluator"
@@ -665,6 +697,8 @@ fn a_per_packet_filter_drops_the_packet_without_revoking_the_session_7212() {
         Some(&flow),
         m,
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     let hit = hit.expect("a per-packet filter is re-evaluated on every hit");
     assert!(
@@ -710,6 +744,8 @@ fn mixed_filter_static_discard_revokes_the_session_13651() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     let hit = hit.expect("the static deny must produce a verdict");
     assert!(already_counted, "the counted per-packet evaluator ran");
@@ -750,6 +786,8 @@ fn mixed_filter_dscp_discard_does_not_revoke_the_session_13651() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     let hit = hit.expect("the per-packet DSCP discard drops this packet");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
@@ -783,6 +821,8 @@ fn mixed_filter_static_discard_does_not_revoke_a_fresh_session_13651() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     let hit = hit.expect("the per-packet deny still drops this packet");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
@@ -817,6 +857,8 @@ fn mixed_filter_static_discard_without_local_entry_revokes_nothing_13651() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     let hit = hit.expect("the per-packet deny still drops this packet");
     assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
@@ -924,6 +966,8 @@ fn a_snat_reply_reached_through_the_nat_alias_is_revalidated_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("the reply half must be revalidated through the alias index");
@@ -996,6 +1040,8 @@ fn a_permitted_snat_reply_through_the_nat_alias_is_untouched_7212() {
             Some(&flow),
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            0,
         )
         .0
         .is_none(),
@@ -1064,6 +1110,8 @@ fn a_non_first_fragment_of_a_permitted_flow_does_not_revoke_it_7212() {
             Some(&flow),
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            0,
         )
         .0
         .is_none(),
@@ -1105,6 +1153,8 @@ fn a_non_first_fragment_still_revokes_a_denied_flow_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("a denied flow must still be revoked when a fragment triggers it");
@@ -1151,6 +1201,8 @@ fn a_deny_verdict_does_not_re_stamp_the_session_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("first packet: the session is newly denied");
@@ -1171,6 +1223,8 @@ fn a_deny_verdict_does_not_re_stamp_the_session_7212() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("second packet: still denied, not forwarded under a stale-clean stamp");
@@ -1221,12 +1275,9 @@ fn a_route_lookup_affecting_filter_is_revalidated_off_its_non_pbr_terms_8114() {
     // Fixture liveness: the filter really is route-lookup-affecting, and the
     // deny term really does match this flow — so the decline is what produces
     // the `None`, not a non-matching filter.
-    let filter = crate::filter::interface_input_filter(
-        &forwarding.filter_state,
-        LAN_IFINDEX,
-        false,
-    )
-    .expect("the filter is attached");
+    let filter =
+        crate::filter::interface_input_filter(&forwarding.filter_state, LAN_IFINDEX, false)
+            .expect("the filter is attached");
     assert!(
         filter.affects_route_lookup,
         "fixture liveness: without a routing-instance term the decline is never \
@@ -1258,6 +1309,8 @@ fn a_route_lookup_affecting_filter_is_revalidated_off_its_non_pbr_terms_8114() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect(
@@ -1383,6 +1436,8 @@ fn a_verdict_on_one_interface_does_not_judge_another_7212() {
             Some(&flow),
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            0,
         )
         .0
         .is_none(),
@@ -1399,6 +1454,8 @@ fn a_verdict_on_one_interface_does_not_judge_another_7212() {
         Some(&flow),
         meta(IF_B as u32, 0, false),
         Some(TEST_WAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("B's filter must be evaluated — A's verdict says nothing about B");
@@ -1454,6 +1511,8 @@ fn a_sessionless_resolved_decision_still_applies_a_static_deny_8114() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     let hit = hit.expect(
         "a resolved decision with no local entry must still be judged by the \
@@ -1507,6 +1566,8 @@ fn a_sessionless_resolved_decision_is_forwarded_when_permitted_8114() {
             Some(&flow),
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            0,
         )
         .0
         .is_none(),
@@ -1545,6 +1606,8 @@ fn a_fresh_stamp_is_not_re_derived_by_the_8114_sessionless_arm_8114() {
             Some(&flow),
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            0,
         )
         .0
         .is_none(),
@@ -1639,6 +1702,8 @@ fn a_pbr_term_that_discards_revokes_the_session_8114() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("a PBR term that discards must produce a verdict, not a decline");
@@ -1698,6 +1763,8 @@ fn a_plain_pbr_term_does_not_revoke_the_session_8114() {
             Some(&flow),
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            0,
         )
         .0
         .is_none(),
@@ -2130,6 +2197,8 @@ fn a_pbr_term_that_rejects_keeps_its_reject_action_8114() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("a PBR term that rejects must produce a verdict");
@@ -2750,49 +2819,158 @@ fn a_tunneled_steer_with_unresolvable_native_fallback_revokes_10630() {
 #[test]
 fn tunneled_hit_stays_pinned_truth_table_10630() {
     use ForwardingDisposition::*;
-    let res = |id: u16, disposition: ForwardingDisposition, egress: i32| ForwardingResolution { disposition,
-    local_ifindex: 0,
-    egress_ifindex: egress,
-    tx_ifindex: 12,
-    tunnel_endpoint_id: id,
-    next_hop: None,
-    neighbor_mac: None,
-    src_mac: None,
-    tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 };
+    let res = |id: u16, disposition: ForwardingDisposition, egress: i32| ForwardingResolution {
+        disposition,
+        local_ifindex: 0,
+        egress_ifindex: egress,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: id,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
     // Steady egress is the tunnel netdev on both sides (77); rows that vary
     // it pin the #10793 egress-identity arm.
     let cases = [
         // (stored, fresh, pinned, why)
-        (res(824, ForwardCandidate, 77), res(824, ForwardCandidate, 77), true, "steady state pins"),
-        (res(824, ForwardCandidate, 77), res(824, MissingNeighbor, 77), true, "transient outer ARP/NDP pins"),
-        (res(824, MissingNeighbor, 77), res(824, ForwardCandidate, 77), true, "ARP resolution heals without teardown"),
-        (res(824, MissingNeighbor, 77), res(824, MissingNeighbor, 77), true, "unresolved outer still pins"),
-        (res(824, LocalDelivery, 77), res(824, LocalDelivery, 77), true, "symmetric served-local pins"),
+        (
+            res(824, ForwardCandidate, 77),
+            res(824, ForwardCandidate, 77),
+            true,
+            "steady state pins",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(824, MissingNeighbor, 77),
+            true,
+            "transient outer ARP/NDP pins",
+        ),
+        (
+            res(824, MissingNeighbor, 77),
+            res(824, ForwardCandidate, 77),
+            true,
+            "ARP resolution heals without teardown",
+        ),
+        (
+            res(824, MissingNeighbor, 77),
+            res(824, MissingNeighbor, 77),
+            true,
+            "unresolved outer still pins",
+        ),
+        (
+            res(824, LocalDelivery, 77),
+            res(824, LocalDelivery, 77),
+            true,
+            "symmetric served-local pins",
+        ),
         // The REAL served-local shape: fresh local arms hard-stamp id 0, so
         // a same-id-only row would be green-but-vacuous. Local pins local
         // regardless of id — the id is meaningless on a LocalDelivery.
-        (res(824, LocalDelivery, 77), res(0, LocalDelivery, 12), true, "served-local pins across the id-0 fresh stamp"),
-        (res(824, ForwardCandidate, 77), res(824, LocalDelivery, 77), false, "asymmetric local must not pin"),
-        (res(824, LocalDelivery, 77), res(824, ForwardCandidate, 77), false, "asymmetric local must not pin"),
-        (res(824, ForwardCandidate, 77), res(824, NoRoute, 77), false, "dead underlay carries the id but must revoke"),
+        (
+            res(824, LocalDelivery, 77),
+            res(0, LocalDelivery, 12),
+            true,
+            "served-local pins across the id-0 fresh stamp",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(824, LocalDelivery, 77),
+            false,
+            "asymmetric local must not pin",
+        ),
+        (
+            res(824, LocalDelivery, 77),
+            res(824, ForwardCandidate, 77),
+            false,
+            "asymmetric local must not pin",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(824, NoRoute, 77),
+            false,
+            "dead underlay carries the id but must revoke",
+        ),
         // Healing is the one stored-NoRoute shape that pins: the underlay is
         // live again and the hit path re-resolves the outer per packet, so
         // tearing down would churn for no behavior gain (native parity).
-        (res(824, NoRoute, 77), res(824, ForwardCandidate, 77), true, "dead-underlay healing pins without teardown"),
-        (res(824, NoRoute, 77), res(824, NoRoute, 77), false, "a still-dead underlay keeps revoking"),
-        (res(824, ForwardCandidate, 77), res(825, ForwardCandidate, 78), false, "tunnel retarget revokes"),
-        (res(824, ForwardCandidate, 77), res(0, ForwardCandidate, 12), false, "tunnel->native revokes"),
-        (res(824, ForwardCandidate, 77), res(0, NoRoute, 0), false, "route loss revokes"),
+        (
+            res(824, NoRoute, 77),
+            res(824, ForwardCandidate, 77),
+            true,
+            "dead-underlay healing pins without teardown",
+        ),
+        (
+            res(824, NoRoute, 77),
+            res(824, NoRoute, 77),
+            false,
+            "a still-dead underlay keeps revoking",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(825, ForwardCandidate, 78),
+            false,
+            "tunnel retarget revokes",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(0, ForwardCandidate, 12),
+            false,
+            "tunnel->native revokes",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(0, NoRoute, 0),
+            false,
+            "route loss revokes",
+        ),
         // #10793: same id, re-homed egress — a temporally re-owned id, not a
         // steady state. Either side unnamed (0) skips the check (#1873 arm).
-        (res(824, ForwardCandidate, 77), res(824, ForwardCandidate, 79), false, "same-id re-homing revokes"),
-        (res(824, ForwardCandidate, 77), res(824, ForwardCandidate, 0), true, "unnamed fresh egress skips the check"),
-        (res(824, ForwardCandidate, 0), res(824, ForwardCandidate, 77), true, "unnamed stored egress skips the check"),
+        (
+            res(824, ForwardCandidate, 77),
+            res(824, ForwardCandidate, 79),
+            false,
+            "same-id re-homing revokes",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(824, ForwardCandidate, 0),
+            true,
+            "unnamed fresh egress skips the check",
+        ),
+        (
+            res(824, ForwardCandidate, 0),
+            res(824, ForwardCandidate, 77),
+            true,
+            "unnamed stored egress skips the check",
+        ),
         // Default-revoke: unlisted fresh dispositions fail closed.
-        (res(824, ForwardCandidate, 77), res(0, DiscardRoute, 0), false, "fresh DiscardRoute revokes"),
-        (res(824, ForwardCandidate, 77), res(0, HAInactive, 0), false, "fresh HAInactive revokes"),
-        (res(824, ForwardCandidate, 77), res(0, TableUnavailable, 0), false, "fresh TableUnavailable revokes"),
-        (res(824, ForwardCandidate, 77), res(0, FabricRedirect, 0), false, "fresh FabricRedirect revokes"),
+        (
+            res(824, ForwardCandidate, 77),
+            res(0, DiscardRoute, 0),
+            false,
+            "fresh DiscardRoute revokes",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(0, HAInactive, 0),
+            false,
+            "fresh HAInactive revokes",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(0, TableUnavailable, 0),
+            false,
+            "fresh TableUnavailable revokes",
+        ),
+        (
+            res(824, ForwardCandidate, 77),
+            res(0, FabricRedirect, 0),
+            false,
+            "fresh FabricRedirect revokes",
+        ),
     ];
     for (stored, fresh, pinned, why) in cases {
         assert_eq!(tunneled_hit_stays_pinned(stored, fresh), pinned, "{why}");
@@ -2868,6 +3046,8 @@ fn a_tunneled_pbr_drop_still_denies_via_the_ordinary_evaluator_10605() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     )
     .0
     .expect("the Drop term must still produce a deny verdict for tunnels");
@@ -3568,10 +3748,15 @@ fn per_packet_shape_preserves_pbr_discard_on_hit_13648() {
             Some(&flow),
             meta(LAN_IFINDEX as u32, 0, v6),
             Some(TEST_LAN_ZONE_ID),
+            crate::afxdp::ForwardingDisposition::ForwardCandidate,
+            0,
         );
         let hit = hit.expect("PBR discard must produce a session-hit verdict");
         assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
-        assert_eq!(hit.log_source, crate::afxdp::event_emit::FilterLogSource::Pbr);
+        assert_eq!(
+            hit.log_source,
+            crate::afxdp::event_emit::FilterLogSource::Pbr
+        );
         assert!(already_counted, "PBR deny replay must be counted");
         assert_eq!(
             filter.terms[2]
@@ -3625,11 +3810,176 @@ fn per_packet_shape_preserves_pbr_reject_on_hit_13648() {
         Some(&flow),
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
+        crate::afxdp::ForwardingDisposition::ForwardCandidate,
+        0,
     );
     let hit = hit.expect("PBR reject must produce a session-hit verdict");
     assert!(matches!(
         hit.eval.action,
         crate::filter::FilterAction::Reject(_)
     ));
-    assert_eq!(hit.log_source, crate::afxdp::event_emit::FilterLogSource::Pbr);
+    assert_eq!(
+        hit.log_source,
+        crate::afxdp::event_emit::FilterLogSource::Pbr
+    );
+}
+
+/// #14120: a host-bound (LocalDelivery) established flow's input policer has
+/// no TX-selection leg and no flow cache, so its stored handles must meter
+/// EVERY hit. First (stale) hit captures + meters; subsequent Fresh hits
+/// replay the stored handles. A transit (ForwardCandidate) hit must NOT
+/// meter here — its TX-selection leg owns the charge exactly once.
+///
+/// Fail-on-revert: metering on Fresh hits removed -> second packet passes;
+/// disposition gate removed -> the transit control also drops.
+#[test]
+fn local_delivery_hit_replays_input_policer_14120() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police".into(),
+            protocols: vec!["tcp".into()],
+            destination_ports: vec!["5201".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![crate::ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let flow = v4_flow(5201);
+    let local_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            ..decision().resolution
+        },
+        ..decision()
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        flow.forward_key.clone(),
+        local_decision,
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    // Hit 1 (stale stamp): captures handles, meters conforming packet, passes.
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    assert!(
+        hit.is_none(),
+        "conforming host-bound hit must pass: {hit:?}"
+    );
+    assert_eq!(
+        forwarding.filter_state.three_color_policer_statuses()[0].green_packets,
+        1,
+        "first host-bound hit charged exactly once",
+    );
+    // Hit 2 (now Fresh): stored handles replay — over-rate packet drops.
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::LocalDelivery,
+        1_000,
+    );
+    let hit = hit.expect("over-rate host-bound hit must produce a policer verdict");
+    assert_eq!(hit.eval.action, crate::filter::FilterAction::Discard);
+    assert!(
+        forwarding.filter_state.three_color_policer_statuses()[0].drop_packets >= 1,
+        "red hit must be charged",
+    );
+}
+
+/// #14120 control: the SAME policed filter on a transit disposition must not
+/// be charged by the session-hit evaluator (TX-selection owns it once).
+#[test]
+fn transit_hit_defers_input_policer_to_tx_selection_14120() {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "edge-in".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "police".into(),
+            protocols: vec!["tcp".into()],
+            destination_ports: vec!["5201".into()],
+            policer: "host-pol".into(),
+            action: "accept".into(),
+            ..Default::default()
+        }],
+    }];
+    snapshot.three_color_policers = vec![crate::ThreeColorPolicerSnapshot {
+        name: "host-pol".into(),
+        mode: "single-rate".into(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 1_000,
+        peak_or_excess_burst_bytes: 50,
+        then_action: "discard".into(),
+        ..Default::default()
+    }];
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.filter_input_v4 = "edge-in".into();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let flow = v4_flow(5201);
+    let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
+    let mut m = meta(LAN_IFINDEX as u32, 0, false);
+    m.pkt_len = 900;
+    for _ in 0..3 {
+        let (hit, _) = evaluate_input_filter_on_session_hit(
+            &forwarding,
+            &mut sessions,
+            &flow.forward_key,
+            &frame(),
+            Some(&flow),
+            m,
+            Some(TEST_LAN_ZONE_ID),
+            ForwardingDisposition::ForwardCandidate,
+            1_000,
+        );
+        assert!(hit.is_none(), "transit hit passes regardless of policer");
+    }
+    let status = forwarding.filter_state.three_color_policer_statuses();
+    assert_eq!(
+        status[0].green_packets, 0,
+        "transit hits must not charge here"
+    );
+    assert_eq!(status[0].drop_packets, 0);
 }

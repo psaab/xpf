@@ -1,7 +1,4 @@
-fn decrement_reserved_count(
-    counts: &mut SeededZoneIpMap<u32>,
-    key: (u16, IpAddr),
-) {
+fn decrement_reserved_count(counts: &mut SeededZoneIpMap<u32>, key: (u16, IpAddr)) {
     let Some(count) = counts.get_mut(&key) else {
         return;
     };
@@ -159,7 +156,11 @@ impl SessionTable {
             PMechDirection::Reverse,
         )?;
         for alias in ipsec_reply_alias_keys(&forward_key, nat) {
-            add_spec(alias, PMechClaimKind::PendingPlainAlias, PMechDirection::Reverse)?;
+            add_spec(
+                alias,
+                PMechClaimKind::PendingPlainAlias,
+                PMechDirection::Reverse,
+            )?;
         }
 
         let token = PMechSessionDirectory::global().reserve_claims(
@@ -330,20 +331,13 @@ impl SessionTable {
     pub(crate) fn defer_conntrack_delete(&mut self, delete: DeferredConntrackDelete) {
         self.deferred_conntrack_deletes.push(delete);
     }
-    pub(crate) fn defer_conntrack_deletes(
-        &mut self,
-        mut deletes: DeferredConntrackDeletes,
-    ) {
+    pub(crate) fn defer_conntrack_deletes(&mut self, mut deletes: DeferredConntrackDeletes) {
         self.deferred_conntrack_deletes.append(&mut deletes);
     }
 
-
     /// Remove one indexed local opening flow (both halves when the matching
     /// reverse companion is present). Returns false when no safe victim remains.
-    fn shed_one_opening_flow(
-        &mut self,
-        shed_sessions: &mut PressureShedSessions,
-    ) -> bool {
+    fn shed_one_opening_flow(&mut self, shed_sessions: &mut PressureShedSessions) -> bool {
         loop {
             let Some(key) = self.pressure_shed_openings.keys().next().cloned() else {
                 return false;
@@ -368,14 +362,9 @@ impl SessionTable {
                 None
             } else {
                 self.entry_by_key(&companion_key).and_then(|companion| {
-                    (reverse_session_key(&companion_key, companion.decision.nat) == key)
-                        .then(|| {
-                            SessionTable::is_pressure_shed_opening(
-                                &companion_key,
-                                companion,
-                                true,
-                            )
-                        })
+                    (reverse_session_key(&companion_key, companion.decision.nat) == key).then(
+                        || SessionTable::is_pressure_shed_opening(&companion_key, companion, true),
+                    )
                 })
             };
             if companion_is_opening == Some(false) {
@@ -643,6 +632,9 @@ impl SessionTable {
                 // `UNVALIDATED`, so the first packet of each direction derives
                 // its own verdict against the interface it actually arrived on.
                 filter_revalidated: FilterRevalidationStamp::UNVALIDATED,
+                // #14120: no policer handles until the LocalDelivery install
+                // site captures them (transit entries stay empty forever).
+                input_policers: crate::filter::CachedThreeColorPolicers::default(),
                 // #8356: UNVALIDATED at install, matching `filter_revalidated`
                 // beside it. The session exists because the session-MISS path
                 // just evaluated zone policy, so a live stamp would be TRUE —
@@ -1027,6 +1019,11 @@ impl SessionTable {
                 // flow the primary revoked, because the promoted copy
                 // revalidates before it forwards.
                 filter_revalidated: FilterRevalidationStamp::UNVALIDATED,
+                // #14120: a peer-synced import carries no locally captured
+                // policer handles; the first LocalDelivery hit re-derives
+                // them via the stale-input-filter arm (its stamp is
+                // UNVALIDATED, so that arm runs before any replay).
+                input_policers: crate::filter::CachedThreeColorPolicers::default(),
                 // #8356: the peer adjudicated this flow against the PEER's
                 // zone policy. `0` makes the first packet this node forwards
                 // re-derive against THIS node's policy — the same failover fence
@@ -1166,34 +1163,40 @@ impl SessionTable {
             .unwrap_or(0);
         let source_nat_static = self.source_nat_static_for(&key);
         let pptp_call_ids = self.pptp_call_ids_wire_for(&key);
-        Some(SessionDelta { provenance, tcp_close_class: self.close_class_wire_for(&key), tcp_handshake_state: self.handshake_state_wire_for(&key), pptp_call_ids,
-        purge_retirement: false,
-        kind: SessionDeltaKind::Open,
-        key,
-        decision,
-        policy_generation,
-        metadata,
-        origin,
-        fabric_redirect_sync,
-        // #2465: an explicit Open-delta emit (no entry in hand). The
-        // SESSION_CREATE frame reports no duration, so 0/unknown is fine.
-        created_ns: 0,
-        last_seen_ns: 0,
-        // #2501: an open carries no volume yet.
-        counters: SessionCounters::default(),
-        // #2749: explicit Open-delta emit, no entry in hand.
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        // #5212: the stable id of the exported entry (0 if absent), so the
-        // peer adopts it rather than minting a fresh node-local id.
-        session_id,
-        // #8593: the ONLY producer of bulk-export deltas. Its production
-        // callers are the worker loop's owner-RG exports: the chunked
-        // resync macro (`chunked_drain_as_you_export!`, LossResync) and
-        // the #9856 multi-pass cursor slice (CommandExport); the other
-        // caller is a `#[cfg(test)]` fixture. A drop of one of these
-        // must not arm the loss-of-sync latch that TRIGGERS that export.
-        bulk_resync: true, source_nat_static })
+        Some(SessionDelta {
+            provenance,
+            tcp_close_class: self.close_class_wire_for(&key),
+            tcp_handshake_state: self.handshake_state_wire_for(&key),
+            pptp_call_ids,
+            purge_retirement: false,
+            kind: SessionDeltaKind::Open,
+            key,
+            decision,
+            policy_generation,
+            metadata,
+            origin,
+            fabric_redirect_sync,
+            // #2465: an explicit Open-delta emit (no entry in hand). The
+            // SESSION_CREATE frame reports no duration, so 0/unknown is fine.
+            created_ns: 0,
+            last_seen_ns: 0,
+            // #2501: an open carries no volume yet.
+            counters: SessionCounters::default(),
+            // #2749: explicit Open-delta emit, no entry in hand.
+            observed_tos: 0,
+            observed_tcp_flags: 0,
+            // #5212: the stable id of the exported entry (0 if absent), so the
+            // peer adopts it rather than minting a fresh node-local id.
+            session_id,
+            // #8593: the ONLY producer of bulk-export deltas. Its production
+            // callers are the worker loop's owner-RG exports: the chunked
+            // resync macro (`chunked_drain_as_you_export!`, LossResync) and
+            // the #9856 multi-pass cursor slice (CommandExport); the other
+            // caller is a `#[cfg(test)]` fixture. A drop of one of these
+            // must not arm the loss-of-sync latch that TRIGGERS that export.
+            bulk_resync: true,
+            source_nat_static,
+        })
     }
 
     pub fn emit_open_delta_with_origin(

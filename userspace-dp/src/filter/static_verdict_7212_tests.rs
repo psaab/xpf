@@ -176,6 +176,7 @@ fn static_verdict_agrees_with_the_counted_walk_on_every_exit_7212() {
             TermMatchExtra::default(),
             1500,
             NonRoutingCountPolicy::Always,
+            None,
         )
         .action;
         let never = filter_ref_static_verdict(
@@ -221,6 +222,7 @@ fn static_verdict_charges_no_counter_on_any_exit_7212() {
             TermMatchExtra::default(),
             1500,
             NonRoutingCountPolicy::Always,
+            None,
         );
         let _ = filter_ref_static_verdict(
             &never_state.iface_filter_v4_fast[&7],
@@ -318,6 +320,7 @@ fn only_terminal_non_accept_still_replays_after_the_never_split_7212() {
         TermMatchExtra::default(),
         1500,
         NonRoutingCountPolicy::OnlyTerminalNonAccept,
+        None,
     );
     assert_eq!(result.action, FilterAction::Discard);
     assert_eq!(

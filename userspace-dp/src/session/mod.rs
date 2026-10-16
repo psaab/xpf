@@ -56,7 +56,10 @@ pub(crate) fn normalized_reply_alias_key(key: &SessionKey) -> SessionKey {
     }
 }
 
-pub(crate) fn ipsec_reply_alias_keys(key: &SessionKey, nat: NatDecision) -> SmallVec<[SessionKey; 2]> {
+pub(crate) fn ipsec_reply_alias_keys(
+    key: &SessionKey,
+    nat: NatDecision,
+) -> SmallVec<[SessionKey; 2]> {
     let mut aliases = SmallVec::new();
     aliases.push(normalized_reply_alias_key(&reverse_wire_key(key, nat)));
     let canonical = normalized_reply_alias_key(&reverse_canonical_key(key, nat));
@@ -1058,6 +1061,15 @@ struct SessionEntry {
     /// `SessionEntry` carries no serde, so this is on no wire and is not part of
     /// session identity.
     filter_revalidated: FilterRevalidationStamp,
+    /// #14120: matched INPUT-filter three-color policer handles for a
+    /// host-bound (LocalDelivery) entry, captured at install. Host-bound
+    /// flows never take the TX-selection leg that meters transit input
+    /// policers and are never flow-cached, so the session entry is the only
+    /// per-flow replay state: each LocalDelivery HIT re-meters these handles
+    /// (mirrors the flow cache's `three_color_policers` replay). Empty for
+    /// transit entries and for policer-free input filters. Node-local
+    /// derived state — no serde, no wire.
+    input_policers: crate::filter::CachedThreeColorPolicers,
     /// #8356: the `config_generation` this entry's ZONE-POLICY verdict was last
     /// derived under. `0` is UNVALIDATED and can never collide with a live
     /// generation, for the same reason `FilterRevalidationStamp::UNVALIDATED`
@@ -2115,11 +2127,7 @@ impl SessionTable {
         if let Some(new_owner_rg_id) = owner_rg_id
             && new_owner_rg_id != old_owner_rg_id
         {
-            remove_owner_rg_index_entry(
-                &mut self.owner_rg_sessions,
-                old_owner_rg_id,
-                handle,
-            );
+            remove_owner_rg_index_entry(&mut self.owner_rg_sessions, old_owner_rg_id, handle);
             if new_owner_rg_id > 0 {
                 self.owner_rg_sessions
                     .entry(new_owner_rg_id)
@@ -2265,6 +2273,36 @@ impl SessionTable {
         {
             record.entry.filter_revalidated = stamp;
         }
+    }
+
+    /// #14120: store the INPUT-filter policer handles captured for a
+    /// host-bound entry at install (canonical key, primary-index write like
+    /// `mark_filter_revalidated`). A miss is a no-op — the entry was torn
+    /// down between adjudication and capture, and its next packet re-misses.
+    pub(crate) fn set_input_policers(
+        &mut self,
+        key: &SessionKey,
+        policers: crate::filter::CachedThreeColorPolicers,
+    ) {
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+        {
+            record.entry.input_policers = policers;
+        }
+    }
+
+    /// #14120: the stored INPUT-filter policer handles a WIRE tuple resolves
+    /// to, through the same resolution the revalidation probes use (a
+    /// reverse-translated alias names a different stored key). `None` when
+    /// the tuple names no live local entry; an empty set when the entry
+    /// carries no policed input term.
+    pub(crate) fn input_policers_for(
+        &self,
+        key: &SessionKey,
+    ) -> Option<crate::filter::CachedThreeColorPolicers> {
+        self.revalidation_record(key)
+            .map(|record| record.entry.input_policers.clone())
     }
     /// #11324: persist a reverse-direction route selected from the reply's
     /// ingress filter without replacing or revoking the session pair.
@@ -2513,10 +2551,7 @@ impl SessionTable {
     /// which names a DIFFERENT key and therefore costs its own hash by
     /// necessity, not a double hash. A missing entry is conservatively
     /// unvalidated.
-    pub(crate) fn policy_revalidation_kind(
-        &self,
-        key: &SessionKey,
-    ) -> PolicyRevalidationKind {
+    pub(crate) fn policy_revalidation_kind(&self, key: &SessionKey) -> PolicyRevalidationKind {
         self.revalidation_record(key)
             .map(|record| record.entry.policy_revalidation_kind)
             .unwrap_or(PolicyRevalidationKind::Unvalidated)
@@ -3011,10 +3046,7 @@ impl SessionTable {
     /// Callers that need the conntrack mirror and replication payload should
     /// perform this one primary-key probe rather than re-hashing per field.
     #[inline]
-    pub(crate) fn installed_session_info(
-        &self,
-        key: &SessionKey,
-    ) -> Option<SessionInstallInfo> {
+    pub(crate) fn installed_session_info(&self, key: &SessionKey) -> Option<SessionInstallInfo> {
         self.entry_by_key(key).map(|entry| SessionInstallInfo {
             session_id: entry.session_id,
             source_nat_static: entry.source_nat_static,

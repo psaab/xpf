@@ -6633,6 +6633,7 @@ fn count4085_action_eval(
         TermMatchExtra::default(),
         pkt_len,
         crate::filter::NonRoutingCountPolicy::Always,
+        None,
     );
 }
 
@@ -7290,8 +7291,12 @@ fn inet_precedence_classifier_steers_packet_into_its_forwarding_class_queue() {
 /// binding as direct ingress.
 #[test]
 fn fabric_scoped_ingress_preserves_ba_queue_and_rewrite_across_selection_paths_13967() {
-    let mut snapshot =
-        inet_precedence_fixture("", "prec-cl", vec![], vec![prec_entry("voice", "high", vec![7])]);
+    let mut snapshot = inet_precedence_fixture(
+        "",
+        "prec-cl",
+        vec![],
+        vec![prec_entry("voice", "high", vec![7])],
+    );
     let egress = snapshot
         .interfaces
         .iter_mut()
@@ -8005,17 +8010,9 @@ fn compiled_cos_wire_fixture_drives_queue_and_loss_priority_11808() {
         (48, 5, 54), // voice / medium-high
         (50, 0, 1),  // undefined FC was skipped; unclassified default is BE / low
     ] {
-        let (queue, rewrite) = reclassify_cached_ba_queue_and_lp_rewrite(
-            &forwarding,
-            42,
-            dscp,
-            0,
-            false,
-            0,
-            0,
-            0,
-        )
-        .unwrap_or_else(|| panic!("DSCP {dscp} has no CoS queue verdict"));
+        let (queue, rewrite) =
+            reclassify_cached_ba_queue_and_lp_rewrite(&forwarding, 42, dscp, 0, false, 0, 0, 0)
+                .unwrap_or_else(|| panic!("DSCP {dscp} has no CoS queue verdict"));
         assert_eq!(
             (queue, rewrite),
             (want_queue, Some(want_rewrite)),

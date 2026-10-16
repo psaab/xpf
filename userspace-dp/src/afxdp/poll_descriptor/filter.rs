@@ -190,6 +190,10 @@ pub(super) enum TunnelOuterInputFilterOutcome {
 pub(super) struct NonPbrInputFilterEval {
     pub(super) action: crate::filter::FilterAction,
     pub(super) cached_log: Option<CachedInputFilterLog>,
+    /// #14120: an inline-metered input policer marked this packet red. The
+    /// caller downgrades an `Accept` verdict to a silent `Discard` (policer
+    /// drops never synthesize a reply), exactly like the lo0 path (#5857).
+    pub(super) policer_drop: bool,
 }
 
 #[cold]
@@ -201,11 +205,17 @@ pub(super) fn evaluate_non_pbr_input_filter(
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
     routing_eval_follows: bool,
+    // #14120: `Inline` when this packet will not take a TX-selection leg
+    // (host-bound / Stage-11 reinjection) so the input policer meters here;
+    // `DeferToTxSelection` on transit paths, which meter there exactly once.
+    meter: crate::filter::InputPolicerMeter,
+    now_ns: u64,
 ) -> NonPbrInputFilterEval {
     let Some(flow) = flow else {
         return NonPbrInputFilterEval {
             action: crate::filter::FilterAction::Accept,
             cached_log: None,
+            policer_drop: false,
         };
     };
     let ingress_ifindex = resolve_ingress_logical_ifindex(
@@ -253,15 +263,98 @@ pub(super) fn evaluate_non_pbr_input_filter(
         extra,
         meta.pkt_len as u64,
         count_policy,
+        meter.now_ns(now_ns),
     );
+    // #14120: the non-routing walk defers at a routing-instance term BEFORE
+    // merging that term's modifiers, so a policer on (or only reachable past)
+    // such a term meters nowhere in the walk above. On the inline-metered
+    // paths no TX-selection leg follows to cover it, so when the walk
+    // already went red, confirm the routing-bearing remainder also meters
+    // (its drop folds in below; when the walk stayed green the remainder
+    // cannot be red without charging, so it is not run — see the condition). Counters stay with
+    // the walks above / the routing evaluator (this walk is
+    // counter-suppressed); only the drop (and the already-applied color
+    // rewrite on the delivered frame's DSCP, where a consumer exists) is
+    // consumed. Transit (`DeferToTxSelection`) skips this: its TX-selection
+    // walk is routing-bearing and meters the whole term list once.
+    let routing_policer_drop = if meter == crate::filter::InputPolicerMeter::Inline
+        && (result.policer_drop
+            || forwarding
+                .filter_state
+                .iface_filter_v4_fast
+                .get(&ingress_ifindex)
+                .map(Arc::as_ref)
+                .filter(|_| !is_v6)
+                .or_else(|| {
+                    forwarding
+                        .filter_state
+                        .iface_filter_v6_fast
+                        .get(&ingress_ifindex)
+                        .map(Arc::as_ref)
+                        .filter(|_| is_v6)
+                })
+                .is_some_and(|filter| filter.affects_route_lookup))
+        && crate::filter::filter_state_has_input_three_color_policer(
+            &forwarding.filter_state,
+            is_v6,
+        ) {
+        forwarding
+            .filter_state
+            .iface_filter_v4_fast
+            .get(&ingress_ifindex)
+            .map(Arc::as_ref)
+            .filter(|_| !is_v6)
+            .or_else(|| {
+                forwarding
+                    .filter_state
+                    .iface_filter_v6_fast
+                    .get(&ingress_ifindex)
+                    .map(Arc::as_ref)
+                    .filter(|_| is_v6)
+            })
+            .is_some_and(|filter| {
+                crate::filter::evaluate_filter_ref_tx_selection_runtime_routing_bearing(
+                    filter,
+                    flow.src_ip,
+                    flow.dst_ip,
+                    flow.forward_key.protocol,
+                    flow.forward_key.src_port,
+                    flow.forward_key.dst_port,
+                    meta.dscp,
+                    extra,
+                    meta.pkt_len as u64,
+                    now_ns,
+                )
+                .policer_drop
+            })
+    } else {
+        false
+    };
     let ingress_zone_id =
         filter_log_ingress_zone_id(forwarding, meta, ingress_zone_override, ingress_ifindex);
     NonPbrInputFilterEval {
         action: result.action,
+        // #14120: a policer-red packet is silently discarded even when the
+        // matched term's verdict was Accept (Junos policer semantics, #5857).
+        policer_drop: result.policer_drop || routing_policer_drop,
         cached_log: result.log_match.map(|log_match| CachedInputFilterLog {
             log_match,
             ingress_zone_id,
         }),
+    }
+}
+
+/// #14120: fold an inline-metered policer drop into an input-filter verdict:
+/// red + Accept is a silent `Discard`; an already-terminal verdict is left
+/// intact (the packet drops either way and the term governs reply semantics).
+pub(super) fn policer_drop_action(
+    action: crate::filter::FilterAction,
+    policer_drop: bool,
+) -> crate::filter::FilterAction {
+    if policer_drop && matches!(action, crate::filter::FilterAction::Accept) {
+        crate::filter::FilterAction::Discard
+    } else {
+        action
     }
 }
 
@@ -271,6 +364,21 @@ pub(super) fn evaluate_non_pbr_input_filter(
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
+/// #14120: does any FIB row deliver `dst` locally? The tunnel gate runs
+/// before route lookup, so this mirrors the miss path's local-delivery
+/// arms with the state available here (interface primaries are covered by
+/// `ingress_interface_local_resolution` and interface-NAT claims by its
+/// sibling above; a plain FIB local route is the remaining arm).
+fn routing_instance_local_delivery_expected(
+    forwarding: &ForwardingState,
+    dst: IpAddr,
+) -> bool {
+    crate::afxdp::forwarding::lookup_forwarding_resolution(forwarding, dst)
+        .resolution
+        .disposition
+        == crate::afxdp::ForwardingDisposition::LocalDelivery
+}
+
 pub(super) fn enforce_tunnel_outer_input_filter(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
@@ -304,8 +412,16 @@ pub(super) fn enforce_tunnel_outer_input_filter(
     if flow.forward_key.protocol == crate::afxdp::PROTO_GRE {
         extra.ports_unknown = true;
     }
-    let input_eval =
-        evaluate_non_pbr_input_filter(forwarding, extra, Some(&flow), meta, None, true);
+    let input_eval = evaluate_non_pbr_input_filter(
+        forwarding,
+        extra,
+        Some(&flow),
+        meta,
+        None,
+        true,
+        crate::filter::InputPolicerMeter::DeferToTxSelection,
+        now_ns,
+    );
     let reject_reply_enqueued =
         if let crate::filter::FilterAction::Reject(reject_msg) = input_eval.action {
             enqueue_filter_reject_reply(
@@ -336,7 +452,47 @@ pub(super) fn enforce_tunnel_outer_input_filter(
     if input_eval.action != crate::filter::FilterAction::Accept {
         return TunnelOuterInputFilterOutcome::Rejected;
     }
-    let tx_selection = crate::filter::evaluate_filter_ref_tx_selection_runtime_uncounted(
+    // #14120: this gate's decapsulated packet may still take the transit
+    // TX-selection leg (ordinary decap forwarding), which meters through a
+    // routing-instance term — so the gate must defer there (`false`). A
+    // tunnel-to-self packet instead reinjects to the host and never takes
+    // that leg, so its PBR-term policer meters here (`true`) — before
+    // #14120 the unconditional non-routing deferral plus this walk's
+    // PBR stop left it uncharged, which the #12289 underlay test pins.
+    // The outer tunnel packet has no L4 flow, so `flow.dst_ip` is the
+    // zero placeholder from the L3-only enforcement context — read the
+    // real outer destination from the frame's L3 header.
+    let outer_dst = packet_frame
+        .get(meta.l3_offset as usize..)
+        .and_then(|l3| {
+            if meta.addr_family as i32 == libc::AF_INET6 {
+                l3.get(24..40).map(|b| {
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(b);
+                    IpAddr::V6(std::net::Ipv6Addr::from(a))
+                })
+            } else {
+                l3.get(16..20)
+                    .map(|b| IpAddr::V4(std::net::Ipv4Addr::new(b[0], b[1], b[2], b[3])))
+            }
+        })
+        .unwrap_or(flow.dst_ip);
+    let routing_bearing = crate::afxdp::forwarding::ingress_interface_local_resolution(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        outer_dst,
+    )
+    .is_some()
+        || crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+            forwarding,
+            outer_dst,
+            meta.protocol,
+            None,
+        )
+        .is_some()
+        || routing_instance_local_delivery_expected(forwarding, outer_dst);
+    let tx_selection = crate::filter::evaluate_filter_ref_tx_selection_runtime_uncounted_bearing(
         filter,
         flow.src_ip,
         flow.dst_ip,
@@ -347,6 +503,7 @@ pub(super) fn enforce_tunnel_outer_input_filter(
         extra,
         meta.pkt_len as u64,
         now_ns,
+        routing_bearing,
     );
     if tx_selection.policer_drop {
         return TunnelOuterInputFilterOutcome::Rejected;
@@ -541,6 +698,44 @@ pub(super) fn evaluate_non_pbr_input_filter_counters_cached(
     )
 }
 
+/// #14120: capture this host-bound flow's interface INPUT filter policer
+/// handles for per-packet replay on LocalDelivery session HITs. Host-bound
+/// flows never take the TX-selection leg and are never flow-cached, so the
+/// handles are re-captured on the (cold) miss/install path and replayed with
+/// `apply_cached_three_color_policers` on each hit — the input-filter twin
+/// of `evaluate_non_pbr_input_filter_counters_cached`.
+#[cold]
+#[inline(never)]
+pub(super) fn evaluate_non_pbr_input_filter_policers_cached(
+    forwarding: &ForwardingState,
+    extra: TermMatchExtra<'_>,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+) -> crate::filter::CachedThreeColorPolicers {
+    let Some(flow) = flow else {
+        return crate::filter::CachedThreeColorPolicers::default();
+    };
+    let ingress_ifindex = resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    crate::filter::evaluate_interface_input_filter_policers_cached(
+        &forwarding.filter_state,
+        ingress_ifindex,
+        is_v6,
+        flow.src_ip,
+        flow.dst_ip,
+        flow.forward_key.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        extra,
+    )
+}
+
 /// #7212: what an established-session HIT owes the ingress interface's INPUT
 /// filter, after the ONE `iface_filter_v{4,6}_fast` lookup that decides it.
 #[derive(Clone, Debug)]
@@ -678,10 +873,7 @@ pub(super) struct SessionHitPbrRouteRevalidation {
 /// the `MissingNeighbor`-healing precedent and the native path (which never
 /// revokes on underlay flaps) — only healing pins, a fresh `NoRoute` still
 /// revokes. Pure so the matrix is unit-testable.
-fn tunneled_hit_stays_pinned(
-    stored: ForwardingResolution,
-    fresh: ForwardingResolution,
-) -> bool {
+fn tunneled_hit_stays_pinned(stored: ForwardingResolution, fresh: ForwardingResolution) -> bool {
     // Symmetric served-local pins regardless of id (see doc above): the
     // fresh local arms cannot produce a tunnel id, so any stored id beside a
     // fresh local is a steady tunnel-interface local, not a retarget.
@@ -826,74 +1018,67 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
         )
     };
     let (desired_identity, table, native_unresolvable) = match route_filter {
-            None => match native_route_table() {
-                crate::afxdp::forwarding::NativeRouteTable::Default => ((0, 0), None, false),
-                crate::afxdp::forwarding::NativeRouteTable::Table {
-                    table,
-                    domain,
-                    check,
-                } => ((domain, check), Some(table), false),
-                crate::afxdp::forwarding::NativeRouteTable::Unresolvable { .. } => {
-                    ((0, 0), None, true)
-                }
-            },
-            Some(filter) => {
-                // #8114: every `None` exit must state why the route identity
-                // is not being revalidated. Per-packet fields are available on
-                // the established HIT just as on MISS, so evaluate these
-                // filters against this frame instead of declining the route
-                // transition. Static filters keep the tuple-only fast shape.
-                let mut extra = if filter.varies_per_packet_within_flow() {
-                    crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta)
-                } else {
-                    crate::filter::TermMatchExtra::default()
-                };
-                // #9894: keyed-GRE and other L3-only flows use (0,0) as a
-                // synthetic tuple. Port-constrained PBR terms must fail closed
-                // on both HIT and MISS, including except/negated-port terms.
-                if flow.forward_key.src_port == 0 && flow.forward_key.dst_port == 0 {
-                    extra.ports_unknown = true;
-                }
-                match crate::filter::evaluate_filter_ref_routing_instance_uncounted(
-                    filter,
-                    flow.src_ip,
-                    flow.dst_ip,
-                    flow.forward_key.protocol,
-                    flow.forward_key.src_port,
-                    flow.forward_key.dst_port,
-                    meta.dscp,
-                    extra,
-                ) {
-                    Some(pbr) if pbr.action == crate::filter::FilterAction::Accept => {
-                        let (table, identity) =
-                            crate::afxdp::forwarding::pbr_table_target(
-                                pbr.routing_instance,
-                                is_v6,
-                            );
-                        (identity, Some(table), false)
-                    }
-                    Some(_) => {
-                        // Drop/reject terms remain owned by the composed static
-                        // evaluator below, which preserves its counted deny
-                        // semantics.
-                        return None;
-                    }
-                    None => match native_route_table() {
-                        crate::afxdp::forwarding::NativeRouteTable::Default => {
-                            ((0, 0), None, false)
-                        }
-                        crate::afxdp::forwarding::NativeRouteTable::Table {
-                            table,
-                            domain,
-                            check,
-                        } => ((domain, check), Some(table), false),
-                        crate::afxdp::forwarding::NativeRouteTable::Unresolvable { .. } => {
-                            ((0, 0), None, true)
-                        }
-                    },
-                }
+        None => match native_route_table() {
+            crate::afxdp::forwarding::NativeRouteTable::Default => ((0, 0), None, false),
+            crate::afxdp::forwarding::NativeRouteTable::Table {
+                table,
+                domain,
+                check,
+            } => ((domain, check), Some(table), false),
+            crate::afxdp::forwarding::NativeRouteTable::Unresolvable { .. } => ((0, 0), None, true),
+        },
+        Some(filter) => {
+            // #8114: every `None` exit must state why the route identity
+            // is not being revalidated. Per-packet fields are available on
+            // the established HIT just as on MISS, so evaluate these
+            // filters against this frame instead of declining the route
+            // transition. Static filters keep the tuple-only fast shape.
+            let mut extra = if filter.varies_per_packet_within_flow() {
+                crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta)
+            } else {
+                crate::filter::TermMatchExtra::default()
+            };
+            // #9894: keyed-GRE and other L3-only flows use (0,0) as a
+            // synthetic tuple. Port-constrained PBR terms must fail closed
+            // on both HIT and MISS, including except/negated-port terms.
+            if flow.forward_key.src_port == 0 && flow.forward_key.dst_port == 0 {
+                extra.ports_unknown = true;
             }
-        };
+            match crate::filter::evaluate_filter_ref_routing_instance_uncounted(
+                filter,
+                flow.src_ip,
+                flow.dst_ip,
+                flow.forward_key.protocol,
+                flow.forward_key.src_port,
+                flow.forward_key.dst_port,
+                meta.dscp,
+                extra,
+            ) {
+                Some(pbr) if pbr.action == crate::filter::FilterAction::Accept => {
+                    let (table, identity) =
+                        crate::afxdp::forwarding::pbr_table_target(pbr.routing_instance, is_v6);
+                    (identity, Some(table), false)
+                }
+                Some(_) => {
+                    // Drop/reject terms remain owned by the composed static
+                    // evaluator below, which preserves its counted deny
+                    // semantics.
+                    return None;
+                }
+                None => match native_route_table() {
+                    crate::afxdp::forwarding::NativeRouteTable::Default => ((0, 0), None, false),
+                    crate::afxdp::forwarding::NativeRouteTable::Table {
+                        table,
+                        domain,
+                        check,
+                    } => ((domain, check), Some(table), false),
+                    crate::afxdp::forwarding::NativeRouteTable::Unresolvable { .. } => {
+                        ((0, 0), None, true)
+                    }
+                },
+            }
+        }
+    };
     // #10630: a TUNNELED stored decision is endpoint-pinned and table-free —
     // the miss path stamped it (0,0) by rule (`install_table_stamp_for_miss`),
     // so the install stamp carries no PBR identity to compare. Re-deriving
@@ -987,22 +1172,21 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
     {
         return None;
     }
-    let resolution =
-        crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+    let resolution = crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+        forwarding,
+        target,
+        flow.forward_key.protocol,
+        table.as_deref(),
+    )
+    .unwrap_or_else(|| {
+        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
             forwarding,
+            dynamic_neighbors,
             target,
-            flow.forward_key.protocol,
             table.as_deref(),
         )
-        .unwrap_or_else(|| {
-            crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-                forwarding,
-                dynamic_neighbors,
-                target,
-                table.as_deref(),
-            )
-            .resolution
-        });
+        .resolution
+    });
     // #12056 follow-up: this resolution re-runs ONLY the interface-NAT and
     // FIB arms, never the ordered ingress-local arm (that arm, with its
     // interface-NAT fallback, was already checked above via
@@ -1117,6 +1301,11 @@ pub(super) fn evaluate_input_filter_on_session_hit(
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    // #14120: the stored decision's disposition decides who owns the input
+    // policer meter on this hit: LocalDelivery (host-bound) meters inline —
+    // no TX-selection leg follows — transit defers to that leg.
+    disposition: crate::afxdp::ForwardingDisposition,
+    now_ns: u64,
 ) -> (Option<SessionHitInputFilterEval>, bool) {
     let Some(flow) = flow else {
         // No flow: no lookup ran, nothing counted.
@@ -1135,6 +1324,13 @@ pub(super) fn evaluate_input_filter_on_session_hit(
     else {
         // No filter: nothing to count, nothing counted.
         return (None, false);
+    };
+    // #14120: host-bound hits meter the input policer in the counted walk
+    // below; transit hits defer to the TX-selection leg (exactly once).
+    let meter = if disposition == crate::afxdp::ForwardingDisposition::LocalDelivery {
+        crate::filter::InputPolicerMeter::Inline
+    } else {
+        crate::filter::InputPolicerMeter::DeferToTxSelection
     };
     if filter.varies_per_packet_within_flow() {
         // #1430/#2362 — derive the PBR verdict before either counted walk.
@@ -1177,6 +1373,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
             return (
                 Some(SessionHitInputFilterEval {
                     eval: NonPbrInputFilterEval {
+                        policer_drop: false,
                         action: counted.action,
                         cached_log: counted.log_match.map(|log_match| CachedInputFilterLog {
                             log_match,
@@ -1202,6 +1399,8 @@ pub(super) fn evaluate_input_filter_on_session_hit(
             meta,
             ingress_zone_override,
             false,
+            meter,
+            now_ns,
         );
         let mut log_source = FilterLogSource::Input;
         // A mixed filter still has packet-varying decisions; revoke only when
@@ -1281,20 +1480,93 @@ pub(super) fn evaluate_input_filter_on_session_hit(
         // ingress): a single hash and a compare, which is what keeps this
         // affordable on the entire population the feature serves.
         crate::session::FilterRevalidationTarget::Fresh => {
+            // #14120: already judged — nothing counted. But a host-bound
+            // flow's input policer has no TX-selection leg and no flow
+            // cache, so its stored handles must STILL meter every hit or
+            // the rate limit applies only to the first packet. Replay is
+            // meter-only (no verdict re-derivation): red drops this packet.
+            if meter == crate::filter::InputPolicerMeter::Inline
+                && let Some(policers) = sessions.input_policers_for(session_key)
+                && !policers.is_empty()
+            {
+                let action = crate::filter::apply_cached_three_color_policers(
+                    &policers,
+                    now_ns,
+                    meta.pkt_len as u64,
+                );
+                if action.drop {
+                    return (
+                        Some(SessionHitInputFilterEval {
+                            eval: NonPbrInputFilterEval {
+                                action: crate::filter::FilterAction::Discard,
+                                cached_log: None,
+                                policer_drop: true,
+                            },
+                            revoked_key: None,
+                            log_source: FilterLogSource::Input,
+                        }),
+                        true,
+                    );
+                }
+            }
             // #10566: already judged under the live pair — nothing counted.
             (None, false)
         }
         crate::session::FilterRevalidationTarget::Stale(canonical_key) => {
-            revalidate_static_input_filter_on_session_hit(
+            let result = revalidate_static_input_filter_on_session_hit(
                 forwarding,
                 sessions,
-                canonical_key,
+                canonical_key.clone(),
                 ingress_ifindex,
                 filter,
                 flow,
                 meta,
                 ingress_zone_override,
-            )
+            );
+            // #14120: the static revalidation walk is side-effect-free, so an
+            // ACCEPTED host-bound packet was never metered. Capture (or
+            // refresh) its policer handles, store them for Fresh-hit replay,
+            // and meter this packet exactly once.
+            if result.0.is_none()
+                && meter == crate::filter::InputPolicerMeter::Inline
+                && filter.has_three_color_policer_terms
+            {
+                let policers = crate::filter::evaluate_interface_input_filter_policers_cached(
+                    &forwarding.filter_state,
+                    ingress_ifindex,
+                    is_v6,
+                    flow.src_ip,
+                    flow.dst_ip,
+                    flow.forward_key.protocol,
+                    flow.forward_key.src_port,
+                    flow.forward_key.dst_port,
+                    meta.dscp,
+                    TermMatchExtra::default(),
+                );
+                if !policers.is_empty() {
+                    sessions.set_input_policers(&canonical_key, policers.clone());
+                    let action = crate::filter::apply_cached_three_color_policers(
+                        &policers,
+                        now_ns,
+                        meta.pkt_len as u64,
+                    );
+                    if action.drop {
+                        return (
+                            Some(SessionHitInputFilterEval {
+                                eval: NonPbrInputFilterEval {
+                                    action: crate::filter::FilterAction::Discard,
+                                    cached_log: None,
+                                    policer_drop: true,
+                                },
+                                revoked_key: None,
+                                log_source: FilterLogSource::Input,
+                            }),
+                            true,
+                        );
+                    }
+                }
+            }
+            result
         }
         // #8114 item 2: a RESOLVED decision with no local entry to name — the
         // #2120 transient peer-synced hit, a reverse-NAT repair refused at
@@ -1432,6 +1704,7 @@ fn static_input_filter_deny_eval(
         );
         return Some((
             NonPbrInputFilterEval {
+                policer_drop: false,
                 action: counted.action,
                 cached_log: counted.log_match.map(|log_match| CachedInputFilterLog {
                     log_match,
@@ -1462,6 +1735,13 @@ fn static_input_filter_deny_eval(
             meta,
             ingress_zone_override,
             false,
+            // #14120: this replay runs only on a static DENY (the caller drops
+            // the packet and revokes); metering here would charge a policer
+            // for a packet the counted walk already adjudicated. The live
+            // per-packet owner is evaluate_input_filter_on_session_hit's
+            // meter, threaded by disposition.
+            crate::filter::InputPolicerMeter::DeferToTxSelection,
+            0,
         ),
         FilterLogSource::Input,
     ))
@@ -1585,11 +1865,14 @@ fn revalidate_static_input_filter_on_session_hit(
     // session; if that ever fails to take, the next packet must re-derive this
     // same DENY and drop, not be forwarded under a "judged" stamp.
     // #10566: DENY ran the counted evaluator — this packet is charged.
-    (Some(SessionHitInputFilterEval {
-        eval,
-        revoked_key: Some(canonical_key),
-        log_source,
-    }), true)
+    (
+        Some(SessionHitInputFilterEval {
+            eval,
+            revoked_key: Some(canonical_key),
+            log_source,
+        }),
+        true,
+    )
 }
 
 #[cold]
@@ -1832,6 +2115,9 @@ pub(super) fn stage11_input_filter_terminal(
     flow: Option<&SessionFlow>,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    // #14120: Stage-11 packets reinject to the host and never take a
+    // TX-selection leg, so the input policer meters inline here.
+    now_ns: u64,
 ) -> Option<(crate::filter::FilterAction, Option<PendingFilterLog>)> {
     let flow = flow?;
     let eval = evaluate_non_pbr_input_filter(
@@ -1841,6 +2127,8 @@ pub(super) fn stage11_input_filter_terminal(
         meta,
         ingress_zone_override,
         true,
+        crate::filter::InputPolicerMeter::Inline,
+        now_ns,
     );
     let pending = eval.cached_log.map(|log| PendingFilterLog {
         ingress_zone_id: log.ingress_zone_id,
@@ -1851,7 +2139,7 @@ pub(super) fn stage11_input_filter_terminal(
         source: FilterLogSource::Input,
         app_id: resolve_flow_app_id(&forwarding.app_catalog, flow),
     });
-    Some((eval.action, pending))
+    Some((policer_drop_action(eval.action, eval.policer_drop), pending))
 }
 
 /// #3485: host-inbound zone admission MUST gate the lo0 (host-bound) firewall
@@ -2122,7 +2410,7 @@ mod lo0_gate_tests {
         };
 
         let denied = flow_for(Ipv4Addr::new(198, 51, 100, 99));
-        let (action, _) = stage11_input_filter_terminal(&fw, extra, Some(&denied), meta, None)
+        let (action, _) = stage11_input_filter_terminal(&fw, extra, Some(&denied), meta, None, 0)
             .expect("flow-backed IKE candidate is evaluated");
         assert_eq!(
             action,
@@ -2131,7 +2419,7 @@ mod lo0_gate_tests {
         );
 
         let allowed = flow_for(Ipv4Addr::new(198, 51, 100, 100));
-        let (action, _) = stage11_input_filter_terminal(&fw, extra, Some(&allowed), meta, None)
+        let (action, _) = stage11_input_filter_terminal(&fw, extra, Some(&allowed), meta, None, 0)
             .expect("flow-backed IKE candidate is evaluated");
         assert_eq!(
             action,
@@ -2164,7 +2452,7 @@ mod lo0_gate_tests {
             ..UserspaceDpMeta::default()
         };
         let (action, _) =
-            stage11_input_filter_terminal(&fw, extra, Some(&denied_v6), meta_v6, None)
+            stage11_input_filter_terminal(&fw, extra, Some(&denied_v6), meta_v6, None, 0)
                 .expect("flow-backed IPv6 IKE candidate is evaluated");
         assert_eq!(
             action,
@@ -2307,8 +2595,10 @@ mod lo0_gate_tests {
         // The LOGICAL VLAN unit's per-interface override admits nothing
         // (present-but-empty => deny-all). Keyed by the logical unit ifindex,
         // exactly as `forwarding_build::interfaces` populates it.
-        fw.ifindex_host_inbound
-            .insert(LOGICAL_IFINDEX, crate::afxdp::types::ZoneHostInbound::default());
+        fw.ifindex_host_inbound.insert(
+            LOGICAL_IFINDEX,
+            crate::afxdp::types::ZoneHostInbound::default(),
+        );
 
         let (flow, mut meta) = tcp_443_flow_and_meta();
         // The frame arrives on the PHYSICAL bind port; the physical ifindex has
@@ -2430,8 +2720,10 @@ mod lo0_gate_tests {
                 None,
                 0,
             )
-            .expect("ADMIT_ZONE is absent from zone_host_inbound (admit-all), so the \
-                     host-inbound gate must admit and the lo0 filter must run");
+            .expect(
+                "ADMIT_ZONE is absent from zone_host_inbound (admit-all), so the \
+                     host-inbound gate must admit and the lo0 filter must run",
+            );
             pending
                 .expect("the logging lo0 term must produce a filter-log record")
                 .ingress_zone_id
@@ -2615,6 +2907,179 @@ mod lo0_gate_tests {
         assert!(
             status[0].drop_packets >= 1,
             "the lo0 policer must record the host-bound drop",
+        );
+    }
+
+    /// #14120: an interface INPUT three-color policer must meter host-bound
+    /// and Stage-11 passthrough packets, which reinject to the host and never
+    /// take the TX-selection leg that meters transit input policers. Before
+    /// the fix both evaluators below passed `now_ns = None`, so a burst over
+    /// CIR/CBS was delivered unpoliced (no token charge, no red drop).
+    ///
+    /// Fail-on-revert: passing `DeferToTxSelection` (or `None` in the
+    /// non-routing walk) at either site leaves every packet ACCEPTED and the
+    /// policer status at zero — RED on both assertions.
+    fn forwarding_with_input_policer() -> ForwardingState {
+        let mut fw = ForwardingState::default();
+        fw.filter_state = crate::filter::parse_filter_state_with_three_color(
+            &[crate::FirewallFilterSnapshot {
+                name: "edge-in".into(),
+                family: "inet".into(),
+                terms: vec![crate::FirewallTermSnapshot {
+                    name: "police-ike".into(),
+                    protocols: vec!["udp".into()],
+                    destination_ports: vec!["500".into()],
+                    policer: "host-pol".into(),
+                    action: "accept".into(),
+                    ..Default::default()
+                }],
+            }],
+            &[],
+            &[crate::ThreeColorPolicerSnapshot {
+                name: "host-pol".into(),
+                mode: "single-rate".into(),
+                color_blind: true,
+                committed_rate_bytes_per_sec: 1,
+                committed_burst_bytes: 1_000,
+                peak_or_excess_burst_bytes: 50,
+                then_action: "discard".into(),
+                ..Default::default()
+            }],
+            &[crate::InterfaceSnapshot {
+                name: "ge-0/0/0.0".into(),
+                ifindex: 5,
+                filter_input_v4: "edge-in".into(),
+                ..Default::default()
+            }],
+            "",
+            "",
+        )
+        .expect("input policer filter compiles");
+        fw
+    }
+
+    fn ike_flow_and_meta(pkt_len: u16) -> (SessionFlow, UserspaceDpMeta) {
+        let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let dst = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let flow = SessionFlow {
+            src_ip: src,
+            dst_ip: dst,
+            forward_key: SessionKey {
+                addr_family: libc::AF_INET as u8,
+                protocol: crate::ip_proto::PROTO_UDP,
+                src_ip: src,
+                dst_ip: dst,
+                src_port: 500,
+                dst_port: 500,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+        };
+        let meta = UserspaceDpMeta {
+            ingress_ifindex: 5,
+            l3_offset: 14,
+            l4_offset: 34,
+            protocol: crate::ip_proto::PROTO_UDP,
+            addr_family: libc::AF_INET as u8,
+            pkt_len,
+            ..UserspaceDpMeta::default()
+        };
+        (flow, meta)
+    }
+
+    #[test]
+    fn stage11_input_policer_meters_and_drops_over_rate_ike_14120() {
+        let fw = forwarding_with_input_policer();
+        let extra = TermMatchExtra {
+            l4_present: true,
+            ..Default::default()
+        };
+        // now_ns fixed: no refill between packets.
+        let (flow1, meta1) = ike_flow_and_meta(900);
+        let (action, _) =
+            stage11_input_filter_terminal(&fw, extra, Some(&flow1), meta1, None, 1_000)
+                .expect("flow evaluated");
+        assert_eq!(
+            action,
+            FilterAction::Accept,
+            "conforming Stage-11 packet must pass",
+        );
+        let (flow2, meta2) = ike_flow_and_meta(900);
+        let (action, _) =
+            stage11_input_filter_terminal(&fw, extra, Some(&flow2), meta2, None, 1_000)
+                .expect("flow evaluated");
+        assert_eq!(
+            action,
+            FilterAction::Discard,
+            "over-rate Stage-11 packet must drop on its input policer (#14120)",
+        );
+        let status = fw.filter_state.three_color_policer_statuses();
+        assert_eq!(status.len(), 1);
+        assert!(status[0].drop_packets >= 1, "red drop must be charged");
+    }
+
+    #[test]
+    fn local_delivery_input_policer_meters_inline_without_double_charge_14120() {
+        let fw = forwarding_with_input_policer();
+        let extra = TermMatchExtra {
+            l4_present: true,
+            ..Default::default()
+        };
+        // Host-bound (LocalDelivery) first packet meters INLINE exactly once.
+        let (flow1, meta1) = ike_flow_and_meta(900);
+        let first = evaluate_non_pbr_input_filter(
+            &fw,
+            extra,
+            Some(&flow1),
+            meta1,
+            None,
+            true,
+            crate::filter::InputPolicerMeter::Inline,
+            1_000,
+        );
+        assert_eq!(first.action, FilterAction::Accept);
+        assert!(!first.policer_drop, "conforming packet is not red");
+        let after_first = fw.filter_state.three_color_policer_statuses()[0].green_packets;
+        assert_eq!(after_first, 1, "exactly one charge for the first packet");
+
+        // Second over-rate packet: red -> silent Discard via the fold.
+        let (flow2, meta2) = ike_flow_and_meta(900);
+        let second = evaluate_non_pbr_input_filter(
+            &fw,
+            extra,
+            Some(&flow2),
+            meta2,
+            None,
+            true,
+            crate::filter::InputPolicerMeter::Inline,
+            1_000,
+        );
+        assert!(second.policer_drop, "over-rate packet must be red");
+        assert_eq!(
+            policer_drop_action(second.action, second.policer_drop),
+            FilterAction::Discard,
+        );
+
+        // Transit deferral charges NOTHING here (the TX-selection leg owns
+        // it) — proving the inline path cannot double-charge a forwarded
+        // packet that later takes that leg.
+        let fw2 = forwarding_with_input_policer();
+        let (flow3, meta3) = ike_flow_and_meta(900);
+        let deferred = evaluate_non_pbr_input_filter(
+            &fw2,
+            extra,
+            Some(&flow3),
+            meta3,
+            None,
+            true,
+            crate::filter::InputPolicerMeter::DeferToTxSelection,
+            1_000,
+        );
+        assert!(!deferred.policer_drop);
+        assert_eq!(
+            fw2.filter_state.three_color_policer_statuses()[0].green_packets,
+            0,
+            "deferred (transit) evaluation must not charge the input policer",
         );
     }
 }
