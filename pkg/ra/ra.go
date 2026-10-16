@@ -1503,7 +1503,60 @@ func configEqual(a, b *config.RAInterfaceConfig) bool {
 		}
 	}
 
+	// #14153: ProtectedPrefixes is NOT stamped onto the wire directly, but
+	// it GATES wire emission: buildRA refuses a delegated PIO overlapping
+	// any entry (sender.go delegatedOverlapsProtected). It is stamped
+	// box-wide by daemon buildRAConfigs, not inside Apply, so a day-2
+	// commit that only changes configured IPv6 space (new interface
+	// address, RA/NAT64 prefix) changes ONLY this field. Omitting it left
+	// configEqual==true, Apply kept the running sender, and delegated
+	// filtering used the stale set until an unrelated RA edit or restart.
+	// The wire consumer parses each entry and uses only its masked
+	// IPv6 prefix, skipping unparseable/non-v6 entries, so comparison
+	// must be set equality over those effective prefixes: order,
+	// duplicates, textual form/host bits, and skipped entries are not
+	// wire-affecting. Do NOT raw-compare the slice here -- ConfiguredIPv6
+	// Prefixes derives order from Go map iteration, so raw/order compare
+	// would spurious-restart senders on every no-op reconcile.
+	if !protectedPrefixesEqual(a.ProtectedPrefixes, b.ProtectedPrefixes) {
+		return false
+	}
+
 	return true
+}
+
+// protectedPrefixesEqual reports whether two ProtectedPrefixes slices
+// denote the same effective set for delegatedOverlapsProtected: the set
+// of masked IPv6 prefixes obtained by parsing each entry and skipping
+// entries that do not parse or are not IPv6 (including 4-in-6, matching
+// ConfiguredIPv6Prefixes; note delegatedOverlapsProtected itself would
+// parse a 4-in-6 entry as Is6, but IPv6PrefixesOverlap then rejects it
+// as non-v6, so it is equally inert there). Masking matches both the
+// producer (ConfiguredIPv6Prefixes masks) and the consumer (it returns
+// protected.Masked() and overlaps on masked forms).
+func protectedPrefixesEqual(a, b []string) bool {
+	ea, eb := effectiveProtectedPrefixes(a), effectiveProtectedPrefixes(b)
+	if len(ea) != len(eb) {
+		return false
+	}
+	for p := range ea {
+		if !eb[p] {
+			return false
+		}
+	}
+	return true
+}
+
+func effectiveProtectedPrefixes(in []string) map[netip.Prefix]bool {
+	out := make(map[netip.Prefix]bool, len(in))
+	for _, raw := range in {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil || !p.Addr().Is6() || p.Addr().Is4In6() {
+			continue
+		}
+		out[p.Masked()] = true
+	}
+	return out
 }
 
 // prefixEqual reports whether two CIDR strings denote the same prefix,

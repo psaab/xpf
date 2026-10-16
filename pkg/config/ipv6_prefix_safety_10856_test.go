@@ -83,13 +83,16 @@ func TestConfiguredIPv6Prefixes10856(t *testing.T) {
 		}}},
 	}
 	got := ConfiguredIPv6Prefixes(cfg)
+	// Sorted + deduped (#14153): order is deterministic despite the
+	// interface-map iteration above; fe80::/64 sorts after the 2xxx
+	// entries and 64:ff9b::/96 before them under string order.
 	want := []netip.Prefix{
 		netip.MustParsePrefix("2606:4700:1111::/64"),
-		netip.MustParsePrefix("fe80::/64"),
 		netip.MustParsePrefix("2606:4700:2222::2/128"),
 		netip.MustParsePrefix("2606:4700:3333::/64"),
-		netip.MustParsePrefix("64:ff9b::/96"),
 		netip.MustParsePrefix("64:ff9b:1::/96"),
+		netip.MustParsePrefix("64:ff9b::/96"),
+		netip.MustParsePrefix("fe80::/64"),
 	}
 	if len(got) != len(want) {
 		t.Fatalf("ConfiguredIPv6Prefixes = %v, want %v", got, want)
@@ -101,5 +104,44 @@ func TestConfiguredIPv6Prefixes10856(t *testing.T) {
 	}
 	if ConfiguredIPv6Prefixes(nil) != nil {
 		t.Fatal("nil config must yield nil")
+	}
+}
+
+// #14153: the protected set feeds the daemon's RA stamp and the cluster
+// RA digest (JSON marshal), so rebuilds of the same config must return
+// byte-identical order despite interface-map iteration, and a prefix
+// collected from two sources must appear once.
+func TestConfiguredIPv6PrefixesDeterministic14153(t *testing.T) {
+	cfg := &Config{
+		Interfaces: InterfacesConfig{
+			Interfaces: map[string]*InterfaceConfig{
+				"ge-0/0/0": {Units: map[int]*InterfaceUnit{
+					0: {Addresses: []string{"2606:4700:1111::1/64", "2606:4700:3333::1/64"}},
+				}},
+				"ge-0/0/1": {Units: map[int]*InterfaceUnit{
+					0: {Addresses: []string{"2606:4700:2222::2/64"}},
+				}},
+			},
+		},
+		Protocols: ProtocolsConfig{
+			RouterAdvertisement: []*RAInterfaceConfig{
+				{Interface: "ge-0/0/2", Prefixes: []*RAPrefix{{Prefix: "2606:4700:3333::/64"}}},
+			},
+		},
+	}
+	first := ConfiguredIPv6Prefixes(cfg)
+	if len(first) != 3 {
+		t.Fatalf("ConfiguredIPv6Prefixes = %v, want 3 deduped entries", first)
+	}
+	for i := range 20 {
+		got := ConfiguredIPv6Prefixes(cfg)
+		if len(got) != len(first) {
+			t.Fatalf("run %d: %v, want %v", i, got, first)
+		}
+		for j := range first {
+			if got[j] != first[j] {
+				t.Fatalf("run %d: %v, want deterministic %v", i, got, first)
+			}
+		}
 	}
 }
