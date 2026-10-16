@@ -161,7 +161,13 @@ type plannedOp struct {
 	setInput string
 	// parsed delete path for store.Delete.
 	delPath []string
-	raw     string // original command text, for logging
+	// per-token bracket grouping for delPath (#14174): whether each token
+	// was authored inside a `[ ... ]` list, from ParseSetCommandGrouped.
+	// Without it DeleteAsGroupedPlantClass re-splits a bracketed container
+	// key group at schema arity, misses the configured node, and the
+	// tolerated-missing-delete carve-out swallows the intended delete.
+	delGrouped []bool
+	raw        string // original command text, for logging
 }
 
 // plannedAction is a fully pre-classified remediation enqueued for the worker.
@@ -1026,7 +1032,7 @@ func (e *Engine) applyOnce(ctx context.Context, a plannedAction) error {
 	}
 	for _, op := range a.ops {
 		if op.isDelete {
-			if err := e.store.DeleteAsGroupedPlantClass("", a.plantClass, op.delPath, nil); err != nil {
+			if err := e.store.DeleteAsGroupedPlantClass("", a.plantClass, op.delPath, op.delGrouped); err != nil {
 				// A delete of a missing path is a TOLERATED exception (Junos
 				// change-configuration semantics; #2139 documented carve-out):
 				// it is not a half-applied batch. Any other delete error

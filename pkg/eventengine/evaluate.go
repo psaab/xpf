@@ -55,13 +55,20 @@ func (e *Engine) classifyPlan(pol *config.EventPolicy) ([]plannedOp, bool) {
 			ops = append(ops, plannedOp{setInput: input, critical: criticalConfigPath(path), raw: cmd})
 		case strings.HasPrefix(cmd, "delete "):
 			input := strings.TrimPrefix(cmd, "delete ")
-			path, err := config.ParseSetCommand("set " + input)
+			// #14174: parse with the grouped pair, as the interactive
+			// delete (DeleteFromInputAsPlantClass) does. ParseSetCommand
+			// discards bracket grouping, so a delete naming a bracketed
+			// container group re-split the wide node at schema arity,
+			// missed the configured node, and was swallowed by the
+			// tolerated-missing-delete carve-out — the batch committed
+			// with no deletion.
+			path, _, grouped, err := config.ParseSetCommandGrouped("set " + input)
 			if err != nil {
 				slog.Warn("event-options: delete parse failed (batch rejected)",
 					"policy", pol.Name, "cmd", cmd, "err", err)
 				return nil, false
 			}
-			ops = append(ops, plannedOp{isDelete: true, delPath: path, critical: criticalConfigPath(path), raw: cmd})
+			ops = append(ops, plannedOp{isDelete: true, delPath: path, delGrouped: grouped, critical: criticalConfigPath(path), raw: cmd})
 		default:
 			slog.Warn("event-options: unsupported command type (batch rejected)",
 				"policy", pol.Name, "cmd", cmd)
