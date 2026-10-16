@@ -2571,6 +2571,16 @@ impl SessionTable {
             record.entry.source_nat_static = static_nat;
         }
     }
+    /// Carry the forward session's ordinary SNAT provenance onto its reverse
+    /// companion without marking the translation as revalidated locally.
+    pub(crate) fn set_source_nat_static(&mut self, key: &SessionKey, static_nat: Option<bool>) {
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+        {
+            record.entry.source_nat_static = static_nat;
+        }
+    }
 
     /// #3527: install the per-screened-zone half-open (`tcp_opening_ns`)
     /// timeout overrides (zone id → ns), driven from each zone's `syn-flood

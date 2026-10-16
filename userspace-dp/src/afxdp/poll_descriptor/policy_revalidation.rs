@@ -476,6 +476,35 @@ pub(super) fn source_nat_revocation_on_session_hit(
     source_nat_static: Option<bool>,
     source_nat_validation_key: Option<&SessionKey>,
 ) -> Option<PolicyRevocation> {
+    source_nat_revocation_on_session_hit_with_ingress(
+        forwarding,
+        sessions,
+        session_key,
+        metadata,
+        metadata.ingress_ifindex,
+        metadata.ingress_vlan_id,
+        decision,
+        flow,
+        origin,
+        source_nat_static,
+        source_nat_validation_key,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    session_key: &SessionKey,
+    metadata: &SessionMetadata,
+    arrival_ingress_ifindex: u32,
+    arrival_ingress_vlan_id: u16,
+    decision: SessionDecision,
+    flow: &SessionFlow,
+    origin: SessionOrigin,
+    source_nat_static: Option<bool>,
+    source_nat_validation_key: Option<&SessionKey>,
+) -> Option<PolicyRevocation> {
     let (
         forward_key,
         forward_decision,
@@ -505,7 +534,22 @@ pub(super) fn source_nat_revocation_on_session_hit(
                 // failed check drops this packet but claims no session to
                 // tear down; absent NAT provenance deliberately fails closed
                 // for translated source-NAT state.
+                // Normalize the interface pair into forward direction:
+                // the reverse decision's egress predicts the original LAN
+                // ingress, while this packet's observed ingress is the
+                // original WAN egress. Reverse metadata intentionally stores
+                // no predicted ingress (see SessionMetadata), so use the
+                // packet observation rather than copying the zero sentinel.
+                // These identities live only on the read-only validation
+                // copies; the reverse row remains truthful about its own
+                // unobserved ingress.
+                let reverse_ingress_ifindex = arrival_ingress_ifindex as i32;
+                let forward_ingress_ifindex = reverse_decision.resolution.egress_ifindex;
                 let forward_decision = SessionDecision {
+                    resolution: crate::afxdp::ForwardingResolution {
+                        egress_ifindex: reverse_ingress_ifindex,
+                        ..reverse_decision.resolution
+                    },
                     nat: reverse_decision.nat.reverse(
                         reverse_key.src_ip,
                         reverse_key.dst_ip,
@@ -516,6 +560,8 @@ pub(super) fn source_nat_revocation_on_session_hit(
                 };
                 let mut forward_metadata = metadata.clone();
                 forward_metadata.is_reverse = false;
+                forward_metadata.ingress_ifindex = forward_ingress_ifindex as u32;
+                forward_metadata.ingress_vlan_id = arrival_ingress_vlan_id;
                 std::mem::swap(
                     &mut forward_metadata.ingress_zone,
                     &mut forward_metadata.egress_zone,

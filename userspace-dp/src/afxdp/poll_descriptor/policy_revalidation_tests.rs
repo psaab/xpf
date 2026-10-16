@@ -2734,11 +2734,15 @@ fn reverse_snat_hit_13652(
         dst_ip: case.1.dst_ip,
         forward_key: case.1.clone(),
     };
+    let mut observed_metadata = case.5.clone();
+    // Reverse session metadata has no guessed ingress identity; the
+    // production poll path supplies the current frame's observed ifindex.
+    observed_metadata.ingress_ifindex = 12;
     source_nat_revocation_on_session_hit(
         forwarding,
         sessions,
         &case.1,
-        &case.5,
+        &observed_metadata,
         case.4,
         &flow,
         case.6,
@@ -2874,4 +2878,196 @@ fn reverse_installed_pair_revokes_when_snat_rule_withdrawn_13652() {
     let revocation = reverse_snat_hit_13652(&no_rules, &mut sessions, &case)
         .expect("an installed reverse hit must revoke when the SNAT rule is withdrawn");
     assert_eq!(revocation.canonical_key.as_ref(), Some(&case.0));
+}
+
+/// #13771 regression fixture: no reverse row retained. The synthesized
+/// reverse metadata deliberately has no observed ingress interface, as in
+/// production, and its resolution is for traffic back toward the client.
+fn reverse_snat_case_from_production_13771(
+    forwarding: &ForwardingState,
+) -> (
+    SessionKey,
+    SessionKey,
+    SessionDecision,
+    SessionMetadata,
+    SessionDecision,
+    SessionMetadata,
+    SessionOrigin,
+    Option<bool>,
+) {
+    let (forward_key, _reverse_key, forward_decision, forward_metadata, _reverse_decision, _reverse_metadata, origin, provenance) =
+        reverse_snat_case_13652();
+    let forward_match = crate::session::ForwardSessionMatch {
+        key: forward_key.clone(),
+        decision: forward_decision,
+        metadata: SessionMetadata {
+            ingress_ifindex: 11,
+            ingress_vlan_id: 0,
+            ..forward_metadata.clone()
+        },
+        forwarding_generation: crate::session::ForwardingGenerationStamp::default(),
+        aux: crate::session::SessionLookupAux {
+            session_id: 0,
+            source_nat_static: provenance,
+            leak_incarnation: 0,
+        },
+    };
+    let reverse = crate::afxdp::shared_ops::build_reverse_session_from_forward_match(
+        forwarding,
+        &BTreeMap::new(),
+        &Arc::new(crate::afxdp::ShardedNeighborMap::new()),
+        forward_match,
+        0,
+        0,
+    );
+    let reverse_key =
+        crate::session::reverse_session_key(&forward_key, forward_decision.nat);
+    assert_eq!(reverse.aux.source_nat_static, Some(false));
+    assert_eq!(
+        reverse.decision.resolution.egress_ifindex, 11,
+        "production reverse synthesis resolves toward the client-side LAN"
+    );
+    (
+        forward_key,
+        reverse_key,
+        forward_decision,
+        forward_metadata,
+        reverse.decision,
+        reverse.metadata,
+        origin,
+        reverse.aux.source_nat_static,
+    )
+}
+
+/// #13771 fixture: distinct LAN (11) and WAN (12) interfaces, with an
+/// unchanged interface-SNAT rule and optionally an interface-scoped pool.
+fn reverse_snat_forwarding_13771(with_pool: bool) -> ForwardingState {
+    let mut forwarding = imported_snat_forwarding(false);
+    forwarding.ifindex_to_zone_id.insert(11, 1);
+    forwarding.ifindex_to_zone_id.insert(12, 2);
+    forwarding
+        .ifindex_to_config_name
+        .insert(11, "ge-0/0/0.0".to_string());
+    forwarding
+        .ifindex_to_config_name
+        .insert(12, "ge-0/0/1.0".to_string());
+    forwarding.egress.insert(
+        11,
+        EgressInterface {
+            bind_ifindex: 11,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0; 6],
+            zone_id: 1,
+            redundancy_group: 0,
+            primary_v4: Some("10.0.0.254".parse().expect("LAN IPv4")),
+            primary_v6: None,
+        },
+    );
+    forwarding.egress.get_mut(&12).expect("WAN interface").primary_v4 =
+        Some("203.0.113.10".parse().expect("WAN IPv4"));
+    let next_hop = Ipv4Addr::new(10, 0, 0, 254);
+    forwarding.routes_v4.insert(
+        "inet.0".to_string(),
+        vec![RouteEntryV4 {
+            prefix: PrefixV4::from_net(
+                Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect("LAN route"),
+            ),
+            next_hops: vec![RouteNextHopV4 {
+                next_hop: Some(next_hop),
+                ifindex: 11,
+                logical_interface_id: 0,
+                tunnel_endpoint_id: 0,
+                weight: 1,
+            }],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            mtu: 1500,
+            rule_priority: 0,
+        }],
+    );
+    forwarding.neighbors.insert(
+        (11, IpAddr::V4(next_hop)),
+        NeighborEntry { mac: [0; 6] },
+    );
+    let rules = if with_pool {
+        vec![crate::protocol::SourceNATRuleSnapshot {
+            name: "scoped-pool".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            from_interface: "ge-0/0/0.0".to_string(),
+            to_interface: "ge-0/0/1.0".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            ..Default::default()
+        }]
+    } else {
+        vec![crate::protocol::SourceNATRuleSnapshot {
+            name: "iface-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            interface_mode: true,
+            ..Default::default()
+        }]
+    };
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&rules);
+    forwarding
+}
+
+/// #13771: unchanged interface-SNAT must survive a reverse hit without a
+/// local forward companion. The companion resolution points toward LAN, but
+/// the source-NAT validator must use the original forward LAN->WAN context.
+#[test]
+fn reverse_without_companion_unchanged_interface_snat_survives_13771() {
+    for with_pool in [false, true] {
+        let forwarding = reverse_snat_forwarding_13771(with_pool);
+        let case = reverse_snat_case_from_production_13771(&forwarding);
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(1, 1);
+        assert!(
+            reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
+            "unchanged interface-SNAT must survive (pool={with_pool})"
+        );
+    }
+}
+
+/// #13771 negative control: withdrawing SNAT still revokes a
+/// companion-less reverse hit.
+#[test]
+fn reverse_without_companion_withdrawn_snat_revokes_13771() {
+    let forwarding = reverse_snat_forwarding_13771(false);
+    let case = reverse_snat_case_from_production_13771(&forwarding);
+    let mut no_rules = forwarding.clone();
+    no_rules.source_nat_rules = crate::nat::parse_source_nat_rules(&[]);
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    let revocation = reverse_snat_hit_13652(&no_rules, &mut sessions, &case)
+        .expect("withdrawn SNAT must revoke a companion-less reverse hit");
+    assert!(revocation.canonical_key.is_none());
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+/// #13771: when local-only SNAT provenance is missing, unchanged rules must
+/// not validate a synthesized reverse row by guessing dynamic vs static.
+#[test]
+fn reverse_without_companion_missing_snat_provenance_fails_closed_13771() {
+    let forwarding = reverse_snat_forwarding_13771(false);
+    let mut case = reverse_snat_case_from_production_13771(&forwarding);
+    case.7 = None;
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    let revocation = reverse_snat_hit_13652(&forwarding, &mut sessions, &case)
+        .expect("missing SNAT provenance remains fail-closed");
+    assert!(revocation.canonical_key.is_none());
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
 }

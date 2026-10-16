@@ -171,7 +171,10 @@ table: Option<&str>,) -> SessionLookup {
         install_table_check: 0,
     };
     SessionLookup {
-        aux: SessionLookupAux::default(),
+        aux: SessionLookupAux {
+            source_nat_static: forward_match.aux.source_nat_static,
+            ..SessionLookupAux::default()
+        },
         decision,
         metadata,
         forwarding_generation: ForwardingGenerationStamp::default(),
@@ -270,7 +273,7 @@ table: Option<&str>,) -> Option<SyncedSessionEntry> {
         // `companion_keeps_alive` then held the closing forward alive with it.
         tcp_close_class: entry.tcp_close_class,
         tcp_handshake_state: entry.tcp_handshake_state,
-        source_nat_static: None,
+        source_nat_static: entry.source_nat_static,
     })
 }
 
@@ -498,6 +501,7 @@ tcp_flags: u8,) -> (SessionLookup, bool) {
         tcp_flags,
     );
     if installed {
+        sessions.set_source_nat_static(reverse_key, reverse.aux.source_nat_static);
         if reverse_leak_incarnation != 0 {
             sessions.stamp_leak_incarnation(reverse_key, reverse_leak_incarnation);
         }
@@ -520,7 +524,7 @@ tcp_flags: u8,) -> (SessionLookup, bool) {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key),
-            source_nat_static: None,
+            source_nat_static: reverse.aux.source_nat_static,
         };
         publish_shared_session(
             shared_sessions,
