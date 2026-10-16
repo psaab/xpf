@@ -3312,12 +3312,19 @@ fn purge_fence_decline_preserves_nat_and_bpf_state_13670() {
         &key,
         &decision,
     ));
+    let session_map =
+        SteeringMap::unshared_for_test(crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD);
+    crate::afxdp::bpf_map::publish_live_session_entry(session_map, &key, nat, false)
+        .expect("seed live steering rows");
+    let seeded_writes = crate::afxdp::bpf_map::session_map_writes();
+    assert!(!seeded_writes.is_empty(), "precondition: steering rows were seeded");
+    let seeded_row_count = seeded_writes.len();
     let mut purge = super::install_table_purge::InstallTablePurge::default();
     purge.arm(8);
     let mut evicted = Vec::new();
     let purged = purge.step(
         &mut sessions,
-        SteeringMap::unshared_for_test(crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD),
+        session_map,
         crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
         crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
         &shared.sessions,
@@ -3339,10 +3346,71 @@ fn purge_fence_decline_preserves_nat_and_bpf_state_13670() {
         1,
         "fence decline must not release the live session's NAT port"
     );
+    let writes = crate::afxdp::bpf_map::session_map_writes();
+    assert_eq!(
+        writes.len(),
+        seeded_row_count,
+        "a declined fence must preserve seeded steering rows without deletes"
+    );
+    assert!(
+        writes.iter().all(|write| write.value.is_some()),
+        "fence decline must not delete the live session's BPF steering rows"
+    );
+
+    // The same teardown still cleans resources when its shared fence accepts.
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        pbr_metadata(),
+        SessionOrigin::SyncImport,
+        NOW_NS,
+        PROTO_TCP,
+        0x18,
+    ));
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&key, decision, pbr_metadata()),
+    );
+    crate::afxdp::bpf_map::clear_session_map_writes();
+    crate::afxdp::bpf_map::publish_live_session_entry(session_map, &key, nat, false)
+        .expect("seed accepted-removal steering rows");
+    let mut accepted_purge = super::install_table_purge::InstallTablePurge::default();
+    accepted_purge.arm(8);
+    let mut accepted_evictions = Vec::new();
+    assert_eq!(
+        accepted_purge.step(
+            &mut sessions,
+            session_map,
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            &shared.sessions,
+            &shared.nat_sessions,
+            &shared.forward_wire_sessions,
+            &shared.owner_rg_indexes,
+            &shared.peer_worker_commands,
+            &rotated,
+            &reader,
+            8,
+            NOW_NS,
+            0,
+            &mut accepted_evictions,
+        ),
+        1,
+        "an accepted fence should purge the stale session"
+    );
+    assert!(!shared.sessions.lock().expect("lock").contains_key(&key));
+    assert_eq!(
+        crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports,
+        0,
+        "accepted removal must release the NAT port"
+    );
     assert!(
         crate::afxdp::bpf_map::session_map_writes()
             .iter()
-            .all(|write| write.value.is_some()),
-        "fence decline must not delete the live session's BPF steering rows"
+            .any(|write| write.value.is_none()),
+        "accepted removal must delete the seeded BPF steering rows"
     );
 }
