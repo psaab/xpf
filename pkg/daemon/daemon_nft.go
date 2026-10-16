@@ -1487,7 +1487,7 @@ func hostInboundFenceMandatoryAdmits() []string {
 		"    ct state established,related accept",
 		// IPv6 ND + v4/v6 PMTUD/error control messages — mandatory link operation.
 		"    icmpv6 type { 1, 2, 3, 4 } accept",
-		"    icmpv6 type { 133, 134, 135, 136, 137 } accept",
+		"    icmpv6 type { 133, 134, 135, 136 } accept",
 		"    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept",
 	}
 }
@@ -2393,18 +2393,19 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 // here MUST stay in lock-step with the userspace host-inbound exemption
 // (`is_icmp_host_inbound_global_accept` in
 // userspace-dp/.../forwarding/host_inbound.rs, #3171) so the kernel chain and
-// the XSK LocalDelivery classifier agree on a configured ping-less zone. icmpv6
-// type 1 (destination-unreachable), 2 (packet-too-big, PMTUD), 3 (time-exceeded),
-// 4 (parameter-problem); 133-137 are Neighbor Discovery. ICMPv4
-// destination-unreachable (3, PMTUD frag-needed code 4), time-exceeded (11) and
-// parameter-problem (12). Echo-request is NOT here — it stays gated on the
+// the XSK LocalDelivery classifier agree on a configured ping-less zone.
+// ICMPv6 error types 1-4 and Neighbor Discovery types 133-136 are accepted;
+// Redirect 137 is intentionally excluded because it can install a route
+// exception for firewall-originated traffic.
+// ICMPv4 destination-unreachable (3, PMTUD frag-needed code 4), time-exceeded
+// (11), and parameter-problem (12). Echo-request is NOT here — it stays gated
 // per-zone `ping` system-service. #4759: each accept carries a named AGGREGATE
 // counter (global rules, not per-zone). Factored out (#4146) so the payload
 // builder can place it either before the per-zone rules (no junos-host program)
 // or AFTER the fine junos-host DROP (coarse-then-fine order).
 func emitHostInboundICMPAccepts(rules *[]string) {
 	*rules = append(*rules, "    icmpv6 type { 1, 2, 3, 4 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6Error)+"\" accept")
-	*rules = append(*rules, "    icmpv6 type { 133, 134, 135, 136, 137 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6ND)+"\" accept")
+	*rules = append(*rules, "    icmpv6 type { 133, 134, 135, 136 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6ND)+"\" accept")
 	*rules = append(*rules, "    icmp type { destination-unreachable, time-exceeded, parameter-problem } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP4Error)+"\" accept")
 }
 

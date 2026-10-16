@@ -24,7 +24,8 @@ import (
 // config.HostInboundProtocolMatch, #3627 B1a) and mirrors the global pre-accepts
 // the nft chain applies at the top of `chain input`
 // (buildHostInboundFilterPayload) and the Rust is_icmp_host_inbound_global_accept
-// (#3171): ESP/AH raw data plane, ICMP error/PMTUD, and the IPv6 ND set.
+// (#3171): ESP/AH raw data plane, ICMP error/PMTUD, and IPv6 Neighbor Discovery
+// types 133-136 (not Redirect 137).
 //
 // Faithful to the enforcement paths (plan §5): a zone can carry MULTIPLE
 // per-interface effective views (#3362). A zone-scoped query (no ingress
@@ -500,10 +501,12 @@ func l4MatchAdmits(m config.L4Match, proto uint8, dstPort int, icmpType *uint8) 
 
 // hostInboundGlobalAccept mirrors the top-of-chain nft global accepts
 // (buildHostInboundFilterPayload) and the Rust is_icmp_host_inbound_global_accept
-// (#3171): the raw ESP (50) / AH (51) data plane, and the ICMP error/PMTUD +
-// IPv6 ND subtypes, are admitted regardless of the zone's host-inbound-traffic
-// set. Echo-request (v4 8 / v6 128) and IPv4 router-advert/solicit (9/10) are
-// NOT global — they stay gated on the `ping` / `router-discovery` tokens.
+// (#3171): the raw ESP (50) / AH (51) data plane, ICMP error/PMTUD, and IPv6
+// Neighbor Discovery types 133-136 are admitted regardless of the zone's
+// host-inbound-traffic set. Redirect 137 is deliberately excluded because it
+// can install routes for traffic originated by the firewall. Echo-request
+// (v4 8 / v6 128) and IPv4 router-advert/solicit (9/10) are NOT global — they
+// stay gated on the `ping` / `router-discovery` tokens.
 func hostInboundGlobalAccept(proto uint8, icmpType *uint8, family string) bool {
 	if proto == 50 || proto == 51 {
 		return true
@@ -523,7 +526,7 @@ func hostInboundGlobalAccept(proto uint8, icmpType *uint8, family string) bool {
 		return t == 3 || t == 11 || t == 12
 	case config.HostInboundProtoICMPv6:
 		switch t {
-		case 1, 2, 3, 4, 133, 134, 135, 136, 137:
+		case 1, 2, 3, 4, 133, 134, 135, 136:
 			return true
 		}
 	}

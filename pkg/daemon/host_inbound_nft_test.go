@@ -194,19 +194,18 @@ func TestHostInboundFilterExemptsIPsecAndV6Errors(t *testing.T) {
 	if !strings.Contains(payload, espAH) {
 		t.Errorf("payload missing raw ESP/AH exemption %q\n---\n%s", espAH, payload)
 	}
-	// #4759: the single ICMPv6 accept was SPLIT into error (1-4) and ND (133-137)
-	// so each type-class counts separately, and each accept now carries a named
-	// nft counter. The split is verdict-preserving — the union {1,2,3,4} ∪
-	// {133,134,135,136,137} is the exact pre-#4759 accepted set, and `counter name
-	// "<n>" accept` counts then accepts (identical terminal verdict to a bare
-	// accept). Assert BOTH split rules carry their counter AND still end in
-	// `accept` (fail-on-revert: dropping a class, dropping the counter, or
-	// changing the verdict turns this RED).
+	// #13982: ICMPv6 Redirect (137) must not be a global admit. A redirect
+	// received while transit forwarding is gated off can install a route
+	// exception for firewall-originated traffic, so only ND messages 133-136
+	// and the separate error/PMTUD class are admitted globally.
 	if !strings.Contains(payload, "icmpv6 type { 1, 2, 3, 4 } counter name \"xpfhia_icmp6_error\" accept") {
 		t.Errorf("payload missing icmpv6 error/PMTUD (1-4) counted accept:\n%s", payload)
 	}
-	if !strings.Contains(payload, "icmpv6 type { 133, 134, 135, 136, 137 } counter name \"xpfhia_icmp6_nd\" accept") {
-		t.Errorf("payload missing icmpv6 ND (133-137) counted accept:\n%s", payload)
+	if !strings.Contains(payload, "icmpv6 type { 133, 134, 135, 136 } counter name \"xpfhia_icmp6_nd\" accept") {
+		t.Errorf("payload missing ICMPv6 ND-only counted accept (Redirect 137 must not be global):\n%s", payload)
+	}
+	if strings.Contains(payload, "icmpv6 type { 133, 134, 135, 136, 137 }") {
+		t.Errorf("payload must not globally accept ICMPv6 Redirect (137):\n%s", payload)
 	}
 	// #3171: the ICMPv4 error/PMTUD set must agree with the userspace
 	// host-inbound exemption (is_icmp_host_inbound_error) so the kernel chain and

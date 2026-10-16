@@ -952,23 +952,12 @@ func (d *Daemon) applySystemNTP(cfg *config.Config) {
 // applyKernelTuning sets kernel sysctl parameters from config.
 // Handles system { no-redirects } and system { internet-options }.
 func (d *Daemon) applyKernelTuning(cfg *config.Config) {
-	// Disable ICMP redirects (send + accept) on all interfaces
-	// system { no-redirects; }
-	if cfg.System.NoRedirects {
-		sysctls := []string{
-			"/proc/sys/net/ipv4/conf/all/send_redirects",
-			"/proc/sys/net/ipv4/conf/all/accept_redirects",
-			"/proc/sys/net/ipv6/conf/all/accept_redirects",
-		}
-		for _, path := range sysctls {
-			current, _ := os.ReadFile(path)
-			if strings.TrimSpace(string(current)) != "0" {
-				if err := os.WriteFile(path, []byte("0\n"), 0644); err != nil {
-					slog.Warn("failed to set sysctl", "path", path, "err", err)
-				}
-			}
-		}
-	}
+	// Linux's `all` setting does not disable IPv6 Redirect acceptance on
+	// existing interfaces. Apply the posture to every current sysctl
+	// interface, and remember it so transit-gate ip_forward writes can
+	// re-assert it after Linux resets the IPv4 defaults.
+	noRedirectsActive.Store(cfg.System.NoRedirects)
+	applyNoRedirectsPosture()
 
 	// system { internet-options { no-ipv6-reject-zero-hop-limit; } }
 	// Normally Linux drops IPv6 packets with hop-limit=0 and sends ICMPv6

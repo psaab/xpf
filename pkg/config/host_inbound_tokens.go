@@ -562,7 +562,8 @@ func HostInboundServiceTokenExpansion(token string) []string {
 // OSPFv2 (IPv4) while `ospf3` is OSPFv3 (IPv6) — both ride IP protocol 89 but on
 // different families; `igmp` is IPv4 group membership. MLD, the IPv6 equivalent,
 // uses ICMPv6 types 130-132 and 143, none of which are in the always-accepted
-// ND set (types 133-137). Queries target multicast destinations, so XDP passes
+// ND set (types 133-136; Redirect 137 is intentionally excluded). Queries
+// target multicast destinations, so XDP passes
 // them to the kernel and daddr-scoped INPUT denies miss; Reports egress through
 // OUTPUT. Neither is a global host-inbound exception, #10859.
 //

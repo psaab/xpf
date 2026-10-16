@@ -115,8 +115,8 @@ func TestHostInboundNonUnicastIsScopedByIngressZone13925(t *testing.T) {
 	}
 	// ND keeps its existing global accept; link-scope MLD retains the prior
 	// base-chain fall-through without introducing a global ACCEPT.
-	if !strings.Contains(payload, "icmpv6 type { 133, 134, 135, 136, 137 }") {
-		t.Fatalf("global ND accept missing:\n%s", payload)
+	if !strings.Contains(payload, "icmpv6 type { 133, 134, 135, 136 }") {
+		t.Fatalf("global ND-only accept missing (Redirect 137 must not be global):\n%s", payload)
 	}
 	if !strings.Contains(payload, "ip6 daddr ff02::/16 icmpv6 type { 130, 131, 132, 143 } return") {
 		t.Fatalf("link-scope MLD must retain fall-through before the ff02 gate:\n%s", payload)
@@ -164,7 +164,7 @@ func TestHostInboundNonUnicastUnzonedAndAnyService13925(t *testing.T) {
 		t.Fatalf("cold-boot fence must deny both non-unicast classes:\n%s", fence)
 	}
 	mld := strings.Index(fence, "ip6 daddr ff02::/16 icmpv6 type { 130, 131, 132, 143 } return")
-	nd := strings.Index(fence, "icmpv6 type { 133, 134, 135, 136, 137 } accept")
+	nd := strings.Index(fence, "icmpv6 type { 133, 134, 135, 136 } accept")
 	guard := strings.Index(fence, "ff02::/16 drop")
 	established := strings.Index(fence, "ct state established,related accept")
 	if mld < 0 || nd < 0 || guard < 0 || established < 0 ||
