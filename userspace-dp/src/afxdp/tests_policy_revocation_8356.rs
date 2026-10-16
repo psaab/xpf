@@ -1974,6 +1974,17 @@ fn typeblind_reverse_icmp_request_is_judged_by_reverse_policy_13940() {
         "a type-blind reverse request must take the denied reverse-policy path"
     );
 
+    let timestamp_request = drive_reverse_icmp_type_10637(&forwarding, &mut sessions, 13);
+    assert_eq!(
+        timestamp_request.session_hit, 1,
+        "reverse timestamp request hits the same query companion"
+    );
+    assert_eq!(
+        (timestamp_request.tx, timestamp_request.policy_deny),
+        (0, 1),
+        "type-blind reverse policy must also deny timestamp requests"
+    );
+
     let reply = drive_reverse_icmp_type_10637(&forwarding, &mut sessions, 0);
     assert_eq!(
         (reply.session_hit, reply.tx, reply.policy_deny),
