@@ -1154,6 +1154,35 @@ impl crate::afxdp::ha::SessionDomain {
         {
             return SyncedImportOutcome::Applied;
         }
+        // #14084: the worker set may be empty during boot/reconcile, so the
+        // reservation below is intentionally skipped in that window. Still
+        // reject a peer translation that aliases a fixed local IKE/NAT-T tuple
+        // before any shared or mirror authority is published.
+        if entry.origin.is_peer_synced()
+            && !entry.metadata.is_reverse
+            && entry.decision.nat.rewrite_src.is_some_and(|translated_ip| {
+                let translated_port = entry
+                    .decision
+                    .nat
+                    .rewrite_src_port
+                    .unwrap_or(entry.key.src_port);
+                let is_local_egress = forwarding.egress.values().any(|egress| {
+                    egress.primary_v4.map(IpAddr::V4) == Some(translated_ip)
+                        || egress.primary_v6.map(IpAddr::V6) == Some(translated_ip)
+                });
+                is_local_egress
+                    && crate::nat::conflicts_with_local_control_tuple(
+                        entry.key.protocol,
+                        translated_port,
+                        entry.decision.nat.rewrite_dst_port.unwrap_or(entry.key.dst_port),
+                    )
+            })
+        {
+            self.sessions
+                .import_reserve_refused
+                .fetch_add(1, Ordering::Relaxed);
+            return SyncedImportOutcome::RejectedReserve;
+        }
         let translation_reserved = entry.origin.is_peer_synced()
             && !entry.metadata.is_reverse
             && !worker_records.is_empty();
