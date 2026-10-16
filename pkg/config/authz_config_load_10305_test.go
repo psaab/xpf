@@ -73,7 +73,11 @@ func TestLoadMergeDivergentBodyIsDenied10305(t *testing.T) {
 			// The gate must adjudicate the STORE-ROUTED form: a hierarchical
 			// rendering names the denied leaf, so its presence proves the
 			// body was not taken as flat verb-led lines.
-			rendered := strings.Join(LoadMutationLines(body), "\n")
+			renderedLines, renderedErr := LoadMutationLines(body)
+			if renderedErr != nil {
+				t.Fatalf("LoadMutationLines error = %v", renderedErr)
+			}
+			rendered := strings.Join(renderedLines, "\n")
 			if !strings.Contains(rendered, "system root-authentication") {
 				t.Errorf("the gate did not render the hierarchical form: %q — "+
 					"the denied leaf was never adjudicated (#10305)", rendered)
