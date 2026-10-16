@@ -1967,8 +1967,8 @@ fn unknown_tunnel_mode_classifies_as_unknown_not_gre() {
 ///
 /// - FIXED (`packet_frame[34]` = inner type 8 = echo): NOT globally accepted →
 ///   empty zone set → DENIED → `host_inbound_denied_packets == 1`.
-/// - BUGGY (`raw_frame[34]` = outer GRE flags 0x0B = 11 = time-exceeded): the
-///   #3171 `is_icmp_host_inbound_global_accept` exemption ADMITS it before the
+/// - BUGGY (`raw_frame[34]` = outer GRE flags `0x03` = 3 = destination-unreachable):
+///   the #3171 `is_icmp_host_inbound_global_accept` exemption ADMITS it before the
 ///   zone lookup → `host_inbound_denied_packets == 0` — an ordinary echo bypasses
 ///   host-inbound admission (the security misclassification #5140 fixes).
 ///
@@ -2007,7 +2007,7 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
         frame[34], 0x00,
         "untagged frame[34] is the GRE flags byte (eth14 + outerIP20)"
     );
-    frame[34] = 0x0B; // ICMPv4 time-exceeded (11) — an error type in the #3171 set
+    frame[34] = 0x03; // IPv4 destination-unreachable (type 3), globally admitted error
     let meta = gre_to_self_outer_meta(0, frame.len());
     let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
         &forwarding,
@@ -2081,7 +2081,7 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
 /// - FIXED (`packet_frame[34]` = inner type 8 = echo): NOT globally accepted →
 ///   empty zone set → DENY on the hit → `host_inbound_denied_packets == 1`,
 ///   the cached session is torn down.
-/// - REVERTED (`raw_frame[34]` = outer GRE flags `0x0B` = 11 = time-exceeded):
+/// - REVERTED (`raw_frame[34]` = outer GRE flags `0x03` = 3 = destination-unreachable):
 ///   the #3171 `is_icmp_host_inbound_global_accept` exemption ADMITS the echo →
 ///   `host_inbound_denied_packets == 0` and the session survives.
 ///
@@ -2106,7 +2106,7 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
         frame[34], 0x00,
         "untagged frame[34] is the GRE flags byte (eth14 + outerIP20)"
     );
-    frame[34] = 0x0B; // ICMPv4 time-exceeded (11) — an error type in the #3171 set
+    frame[34] = 0x03; // IPv4 destination-unreachable (type 3), globally admitted error
     let meta = gre_to_self_outer_meta(0, frame.len());
     let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
         &forwarding,

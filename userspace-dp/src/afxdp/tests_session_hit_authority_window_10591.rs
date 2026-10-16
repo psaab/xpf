@@ -622,6 +622,53 @@ fn c2_revoke_window_has_per_shape_bound_10591() {
     }
 }
 
+fn establish_matrix_pair(sessions: &mut SessionTable) {
+    let mut forward = None;
+    let mut reverse = None;
+    sessions.iter_with_origin(|key, decision, metadata, origin| {
+        let row = (key.clone(), decision, metadata.clone(), origin);
+        if metadata.is_reverse {
+            reverse = Some(row);
+        } else {
+            forward = Some(row);
+        }
+    });
+    let (reverse_key, reverse_decision, reverse_metadata, reverse_origin) =
+        reverse.expect("matrix reverse half");
+    assert!(
+        sessions.update_session(
+            crate::session::SessionUpdate {
+                key: &reverse_key,
+                decision: reverse_decision,
+                metadata: reverse_metadata,
+                origin: reverse_origin,
+                now_ns: T0_NS,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_SYN | TCP_ACK,
+            },
+            false,
+        ),
+        "matrix reverse SYN-ACK must promote the opening pair to handshake-pending"
+    );
+    let (forward_key, forward_decision, forward_metadata, forward_origin) =
+        forward.expect("matrix forward half");
+    assert!(
+        sessions.update_session(
+            crate::session::SessionUpdate {
+                key: &forward_key,
+                decision: forward_decision,
+                metadata: forward_metadata,
+                origin: forward_origin,
+                now_ns: T0_NS,
+                protocol: PROTO_TCP,
+                tcp_flags: TCP_ACK,
+            },
+            false,
+        ),
+        "matrix final ACK must complete the admitted handshake"
+    );
+}
+
 #[test]
 fn c3_forward_control_survives_full_window_per_permit_shape_10591() {
     for shape in MATRIX_SHAPES {
@@ -633,6 +680,7 @@ fn c3_forward_control_survives_full_window_per_permit_shape_10591() {
         let mut sessions = SessionTable::new();
         let mut binding = binding(LAN_IFINDEX);
         admit_local_pair(&install, &mut sessions, &mut binding, 0, T0_NS);
+        establish_matrix_pair(&mut sessions);
         let (drops, revokes, forwards, packets, _terminal_purged) = run_ticks(
             &mut sessions,
             &mut binding,
