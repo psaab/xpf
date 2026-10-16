@@ -23,37 +23,55 @@ func TestBumpFIBGenerationPublishesRouteOnlyGenerationToUserspaceCtrl13933(t *te
 		t.Fatalf("FindProcess: %v", err)
 	}
 	m.proc = &exec.Cmd{Process: proc}
+	const priorFIB, bumpedFIB = 41, 42
 	m.lastSnapshot = &ConfigSnapshot{
 		Version:       ProtocolVersion,
 		Generation:    4,
-		FIBGeneration: 0,
+		FIBGeneration: priorFIB,
 		Config:        &config.Config{},
 	}
 	m.generation = 4
+	ctrl.haveStored = true
+	ctrl.stored = userspaceCtrlValue{
+		Enabled: 1, MetadataVersion: userspaceMetadataVersion,
+		ConfigGeneration: 4, FIBGeneration: priorFIB,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
+	}
+	m.ctrlWasEnabled = true
+	m.bumpFIBGenerationHook = func() (uint32, error) { return bumpedFIB, nil }
 	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
 		if req.Type != "bump_fib_generation" {
 			return nil
 		}
-		// The helper's response reflects the accepted bump's generation.
+		// The helper response reflects the accepted bump's generation.
 		*status = ProcessStatus{
 			Enabled:                true,
 			Workers:                1,
 			Bindings:               readyHelperStatus().Bindings,
 			NeighborGeneration:     1,
-			LastSnapshotGeneration: req.Snapshot.Generation,
+			LastSnapshotGeneration: 4,
 			LastFIBGeneration:      req.Snapshot.FIBGeneration,
 		}
 		return nil
 	}
 
-	_, _ = m.BumpFIBGeneration()
+	gotGen, err := m.BumpFIBGeneration()
+	if err != nil {
+		t.Fatalf("BumpFIBGeneration: %v", err)
+	}
+	if gotGen <= priorFIB {
+		t.Fatalf("BumpFIBGeneration returned %d, want generation > prior %d", gotGen, priorFIB)
+	}
+	if gotGen != bumpedFIB {
+		t.Fatalf("BumpFIBGeneration returned %d, want injected generation %d", gotGen, bumpedFIB)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !ctrl.haveStored {
-		t.Fatal("successful route-only bump wrote nothing to userspace_ctrl")
+	if ctrl.stored.FIBGeneration == priorFIB {
+		t.Fatalf("userspace_ctrl retained prior FIBGeneration %d after bump to %d", priorFIB, gotGen)
 	}
-	if ctrl.stored.FIBGeneration != m.lastSnapshot.FIBGeneration {
-		t.Fatalf("userspace_ctrl FIBGeneration = %d after route-only bump, want confirmed helper generation %d; the shim stamps redirected packets with ctrl.fib_generation, so a missing ctrl publication leaves its packet stamp stale and causes FibGenerationMismatch", ctrl.stored.FIBGeneration, m.lastSnapshot.FIBGeneration)
+	if ctrl.stored.FIBGeneration != gotGen {
+		t.Fatalf("userspace_ctrl FIBGeneration = %d after route-only bump, want confirmed helper generation %d; shim stamps redirected packets with ctrl.fib_generation, so mismatch drops transit", ctrl.stored.FIBGeneration, gotGen)
 	}
 }
 
