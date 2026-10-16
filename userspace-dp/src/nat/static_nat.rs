@@ -799,6 +799,7 @@ impl StaticNatTable {
         // static-NAT checksum fixup path applies unchanged.
         let mut best: Option<(&StaticNatBlock, IpAddr)> = None;
         let mut best_tier = u8::MAX;
+        let mut best_prefix_len = 0;
         for blk in &self.blocks {
             if static_scope_ok(
                 &blk.from_zone,
@@ -816,9 +817,11 @@ impl StaticNatTable {
                     &blk.from_interface,
                     &blk.from_routing_instance,
                 );
-                if tier < best_tier {
+                let prefix_len = blk.external.len;
+                if tier < best_tier || (tier == best_tier && prefix_len > best_prefix_len) {
                     best = Some((blk, translated));
                     best_tier = tier;
+                    best_prefix_len = prefix_len;
                 }
             }
         }
@@ -950,6 +953,7 @@ impl StaticNatTable {
         // un-NAT'd to the public block and the reverse session key matches.
         let mut best: Option<(&StaticNatBlock, IpAddr)> = None;
         let mut best_tier = u8::MAX;
+        let mut best_prefix_len = 0;
         for blk in &self.blocks {
             if static_scope_ok(
                 &blk.from_zone,
@@ -967,9 +971,11 @@ impl StaticNatTable {
                     &blk.from_interface,
                     &blk.from_routing_instance,
                 );
-                if tier < best_tier {
+                let prefix_len = blk.internal.len;
+                if tier < best_tier || (tier == best_tier && prefix_len > best_prefix_len) {
                     best = Some((blk, translated));
                     best_tier = tier;
+                    best_prefix_len = prefix_len;
                 }
             }
         }
