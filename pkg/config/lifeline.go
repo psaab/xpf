@@ -39,7 +39,7 @@ func LifelineBaseName(name string) string {
 // cluster role and are not implicit lifelines (#11068). A standalone config
 // therefore contributes only fxp0.
 func HostInboundLifelineSet(cfg *Config) map[string]bool {
-	set := map[string]bool{"fxp0": true}
+	set := map[string]bool{"fxp0": true, "fxp0.0": true}
 	if cfg == nil {
 		return set
 	}
@@ -54,14 +54,45 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 		if _, known := set[name]; !known {
 			set[name] = false
 		}
+		// #14192: register every DECLARED unit as ordinary too. A bare
+		// control/fabric lifeline base (e.g. control-interface ge-0/0/0)
+		// must not cover a declared transit VLAN unit (ge-0/0/0.100) that
+		// has its own kernel netdev. Without these keys the matcher's
+		// numeric-suffix fallback returned the parent's true. Unit 0 is
+		// registered false here and re-marked true below only when it is
+		// itself the designated lifeline.
+		for unit := range ifc.Units {
+			key := name + "." + strconv.Itoa(unit)
+			if _, known := set[key]; !known {
+				set[key] = false
+			}
+		}
+		// #14192: a role name spelled with a unit (control-interface hb.1,
+		// fabric-interface ge-0/0/0.100) declares that UNIT as the lifeline,
+		// not a new interface. Its declared key must read true.
+		if cfg.Chassis.Cluster != nil {
+			cc := cfg.Chassis.Cluster
+			for _, role := range []string{cc.ControlInterface, cc.FabricInterface, cc.Fabric1Interface} {
+				if role = strings.TrimSpace(role); role == name {
+					set[name] = true
+				}
+			}
+		}
 	}
 	if cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
 		markBaseLifeline := func(base string) {
 			set[base] = true
 			if iface := cfg.Interfaces.Interfaces[base]; iface != nil {
-				for unit := range iface.Units {
-					set[base+"."+strconv.Itoa(unit)] = unit == 0
+				for unit, u := range iface.Units {
+					// #14192: a VLAN-tagged unit has a distinct netdev
+					// and never inherits a bare parent lifeline; an
+					// untagged unit keeps the prior unit==0 rule.
+					if u != nil && u.VlanID != 0 {
+						set[base+"."+strconv.Itoa(unit)] = false
+					} else {
+						set[base+"."+strconv.Itoa(unit)] = unit == 0
+					}
 				}
 			}
 		}
@@ -71,12 +102,34 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 				continue
 			}
 			set[name] = true
+			// #14192: the lifeline's own unit 0 shares the parent netdev;
+			// register it explicitly so the declared-unit false above does
+			// not strand it (ge-0/0/0.0, hb.1.0, ge-0/0/0.100.0).
+			set[name+".0"] = true
+			// #14192: a role spelled at a non-zero unit (fabric-interface
+			// ge-0/0/0.100) designates that unit only; never promote its
+			// bare parent, whose netdev is shared with other units.
+			if base, suf, hasSuffix := strings.Cut(name, "."); hasSuffix {
+				if _, unit, err := CanonicalLogicalUnit(suf); err == nil && unit != "0" {
+					if _, declared := set[base]; declared {
+						set[base] = false
+					}
+				}
+			}
 			// An untagged unit 0 shares the parent kernel netdev. Mark
 			// that netdev as a lifeline too; do not promote non-zero units.
 			split := cfg.SplitInterfaceUnitRef(name)
 			if split.HasUnit {
-				if _, unit, err := CanonicalLogicalUnit(split.UnitTok); err == nil && unit == "0" {
-					markBaseLifeline(split.Base)
+				if _, unit, err := CanonicalLogicalUnit(split.UnitTok); err == nil {
+					if unit == "0" {
+						markBaseLifeline(split.Base)
+					} else {
+						// #14192: role at a non-zero unit of a DECLARED
+						// bare parent: the parent stays ordinary.
+						if _, declared := set[split.Base]; declared {
+							set[split.Base] = false
+						}
+					}
 				}
 			}
 		}
@@ -89,6 +142,7 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 			// Keep the fabric interface itself exempt as before; its
 			// member links are independent lifelines as well.
 			set[strings.TrimSpace(name)] = true
+			set[strings.TrimSpace(name)+".0"] = true
 			for _, member := range ifc.FabricMembers {
 				member = strings.TrimSpace(member)
 				if member != "" {
@@ -119,8 +173,18 @@ func HostInboundLifelineInterface(name string, lifelines map[string]bool) bool {
 		}
 		prefix = prefix[:dot]
 		if isLifeline, declared := lifelines[prefix]; declared {
-			if _, _, err := CanonicalLogicalUnit(name[len(prefix)+1:]); err != nil {
+			_, unit, err := CanonicalLogicalUnit(name[len(prefix)+1:])
+			if err != nil {
 				return false
+			}
+			// #14192: unit 0 is decided decisively when the stripped prefix
+			// is itself a lifeline (set true): then .0 is that lifeline's own
+			// netdev view and wins over a registered sibling's false
+			// (ge-0/0/0.0, hb.1.0, ge-0/0/0.100.0). When the prefix verdict
+			// is false — a dotted declared sibling under a lifeline parent
+			// (hb under hb.1.0) — the registered verdict governs.
+			if unit == "0" && isLifeline {
+				return true
 			}
 			return isLifeline
 		}
