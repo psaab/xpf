@@ -67,7 +67,7 @@ func TestDisplayLeaseWireAgreesWithTheHelperSpelling8615(t *testing.T) {
 			{IP: "8.8.8.8", Port: 0},
 		},
 		TranslatedIP: "172.16.80.7", TranslatedPort: 51400,
-		AddressOnly: true, RemainingNs: 123, TimeoutNs: 300_000_000_000,
+		AddressOnly: true, Deterministic: true, DeterministicMode: 2, DeterministicBlockSize: 32, DeterministicBlocksPerIP: 2, DeterministicHostPrefixLen: 32, DeterministicHostBase: "2001:db8::", DeterministicHostCount: 2, RemainingNs: 123, TimeoutNs: 300_000_000_000,
 		ActiveFlows: 4,
 	})
 	if err != nil {
@@ -119,7 +119,7 @@ func TestTheSyncLeaseRecordStillCarriesNoFlowCount8615(t *testing.T) {
 		SrcIP: "10.0.61.102", SrcPort: 40000,
 		RemoteIP: "8.8.8.8", RemotePort: 443,
 		TranslatedIP: "172.16.80.7", TranslatedPort: 51400,
-		AddressOnly: true, RemainingNs: 123, TimeoutNs: 300_000_000_000,
+		AddressOnly: true, Deterministic: true, DeterministicMode: 2, DeterministicBlockSize: 32, DeterministicBlocksPerIP: 2, DeterministicHostPrefixLen: 32, DeterministicHostBase: "2001:db8::", DeterministicHostCount: 2, RemainingNs: 123, TimeoutNs: 300_000_000_000,
 	})
 	if err != nil {
 		t.Fatalf("marshal IdleLeaseWire: %v", err)

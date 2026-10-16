@@ -61,11 +61,12 @@ pub(crate) fn allocate_nat64_pool_port_deterministic_v6(
     pool_v4: &[Ipv4Addr],
     params: DeterministicV6,
     src_v6: Ipv6Addr,
+    now_ns: u64,
     // #6522: the allocating worker — see `match_source_nat_result_for_tuple`.
     holder: NatHolder,
 ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
     let translated =
-        allocator.allocate_deterministic_v6(flow, pool_v4, params, src_v6, holder)?;
+        allocator.allocate_deterministic_v6_at(flow, pool_v4, params, src_v6, now_ns, holder)?;
     match translated.ip {
         IpAddr::V4(v4) => Ok((v4, translated.port)),
         IpAddr::V6(_) => Err(SourceNatFailureReason::WrongAddressFamily),

@@ -569,6 +569,13 @@
   "display_lease_wire": {
     "active_flows": 4,
     "address_only": true,
+    "deterministic": true,
+    "deterministic_block_size": 32,
+    "deterministic_blocks_per_ip": 2,
+    "deterministic_host_base": "2001:db8::",
+    "deterministic_host_count": 2,
+    "deterministic_host_prefix_len": 32,
+    "deterministic_mode": 2,
     "permit_any_remote": true,
     "permitted_remotes": [
       {
@@ -762,6 +769,13 @@
   },
   "idle_lease_wire": {
     "address_only": true,
+    "deterministic": true,
+    "deterministic_block_size": 32,
+    "deterministic_blocks_per_ip": 2,
+    "deterministic_host_base": "2001:db8::",
+    "deterministic_host_count": 2,
+    "deterministic_host_prefix_len": 32,
+    "deterministic_mode": 2,
     "permit_any_remote": true,
     "permitted_remotes": [
       {
@@ -1985,6 +1999,7 @@
     "policy_counter_idx": 0,
     "policy_id": 0,
     "policy_rule_id": "",
+    "pptp_call_ids": 0,
     "protocol": 0,
     "purge_retirement": false,
     "queue_id": 0,

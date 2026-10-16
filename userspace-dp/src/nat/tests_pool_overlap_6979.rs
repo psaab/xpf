@@ -233,6 +233,8 @@ fn peer_overlap_rollback_restores_imported_lease_origin_10789_f4() {
         translated_ip: first_identity.0,
         translated_port: first_identity.1.unwrap(),
         address_only: false,
+        deterministic: false,
+        deterministic_identity: None,
         remaining_ns,
         timeout_ns: imported_timeout_ns,
     };
@@ -955,6 +957,8 @@ fn idle_import_post_claim_peer_conflict_rolls_back_pat_claim_11496() {
         translated_ip: SHARED.parse().expect("shared address"),
         translated_port: 20_000,
         address_only: false,
+        deterministic: false,
+        deterministic_identity: None,
         remaining_ns: 60_000_000_000,
         timeout_ns: 60_000_000_000,
     };

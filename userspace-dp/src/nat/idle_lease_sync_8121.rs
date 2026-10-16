@@ -56,9 +56,15 @@
 #![allow(dead_code)]
 
 use super::allocator::{
-    MAX_PERSISTENT_PERMITTED_REMOTES, PersistentLease, PersistentPermissions,
-    PersistentSourceKey, PortAllocator, TranslatedTuple,
+    DeterministicV4, DeterministicV6, MAX_PERSISTENT_PERMITTED_REMOTES, PersistentLease,
+    PersistentPermissions, PersistentSourceKey, PortAllocator, TranslatedTuple,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeterministicPortedIdentity {
+    V4(DeterministicV4),
+    V6(DeterministicV6),
+}
 use std::net::IpAddr;
 
 /// One idle lease in the shape a peer can act on: identity, permissions, and lifetime.
@@ -81,6 +87,8 @@ pub(crate) struct IdleLeaseRecord {
     pub(crate) translated_port: u16,
     /// #6041: an address-only lease owns no occupancy bit.
     pub(crate) address_only: bool,
+    pub(crate) deterministic: bool,
+    pub(crate) deterministic_identity: Option<DeterministicPortedIdentity>,
     /// REMAINING lifetime, never an absolute deadline (see module note 2).
     pub(crate) remaining_ns: u64,
     pub(crate) timeout_ns: u64,
@@ -110,6 +118,8 @@ pub(crate) struct DisplayLeaseRecord {
     pub(crate) translated_ip: IpAddr,
     pub(crate) translated_port: u16,
     pub(crate) address_only: bool,
+    pub(crate) deterministic: bool,
+    pub(crate) deterministic_identity: Option<DeterministicPortedIdentity>,
     /// RAW remaining lifetime. Meaningful only when `active_flows == 0`; see
     /// `export_display_leases`.
     pub(crate) remaining_ns: u64,
@@ -185,6 +195,8 @@ impl PortAllocator {
                     translated_ip: lease.translated.ip,
                     translated_port: lease.translated.port,
                     address_only: lease.address_only,
+                    deterministic: lease.deterministic,
+                    deterministic_identity: lease.deterministic_identity,
                     remaining_ns: lease.expires_at_ns.saturating_sub(now_ns),
                     timeout_ns: lease.timeout_ns,
                 }
@@ -236,6 +248,8 @@ impl PortAllocator {
                     translated_ip: lease.translated.ip,
                     translated_port: lease.translated.port,
                     address_only: lease.address_only,
+                    deterministic: lease.deterministic,
+                    deterministic_identity: lease.deterministic_identity,
                     // RAW remaining, not a display decision. While
                     // `active_flows > 0` this is routinely 0 or negative-clamped,
                     // because `expires_at_ns` was last written at the most recent
@@ -349,6 +363,8 @@ impl PortAllocator {
             if existing.translated.ip == rec.translated_ip
                 && existing.translated.port == rec.translated_port
                 && existing.address_only == rec.address_only
+                && existing.deterministic == rec.deterministic
+                && existing.deterministic_identity == rec.deterministic_identity
             {
                 let current = live.persistent_permissions.entry(key).or_default();
                 let additions = rec
@@ -427,6 +443,8 @@ impl PortAllocator {
                 activation_previous_expires_at_ns: 0,
                 activation_had_previous_lease: false,
                 activation_previous_timeout_ns: 0,
+                deterministic: rec.deterministic,
+                deterministic_identity: rec.deterministic_identity,
                 address_only: rec.address_only,
                 // Imported state remains non-exportable until a local flow
                 // successfully completes its marked release; reserve and

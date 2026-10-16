@@ -158,6 +158,8 @@ fn idle_record_for(
         translated_ip,
         translated_port,
         address_only,
+        deterministic: false,
+        deterministic_identity: None,
         remaining_ns: TIMEOUT_NS,
         timeout_ns: TIMEOUT_NS,
     }
@@ -436,6 +438,8 @@ fn a_full_imported_table_refuses_local_mints_11475() {
             translated_ip: IpAddr::V4(addrs[0]),
             translated_port,
             address_only,
+            deterministic: false,
+            deterministic_identity: None,
             remaining_ns: TIMEOUT_NS,
             timeout_ns: TIMEOUT_NS,
         };
@@ -514,6 +518,8 @@ fn synced_persistent_mints_refuse_a_full_lease_table_11495() {
         translated_ip: IpAddr::V4(addrs[0]),
         translated_port: src_port,
         address_only: true,
+        deterministic: false,
+        deterministic_identity: None,
         remaining_ns: TIMEOUT_NS,
         timeout_ns: TIMEOUT_NS,
     };
@@ -593,6 +599,8 @@ fn an_idle_import_pressure_pass_reclaims_expired_capacity_11475() {
         translated_ip: IpAddr::V4(addrs[0]),
         translated_port: 20_000,
         address_only: false,
+        deterministic: false,
+        deterministic_identity: None,
         remaining_ns: 100,
         timeout_ns: TIMEOUT_NS,
     };
@@ -631,6 +639,8 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         translated_ip: IpAddr::V4(addrs[0]),
         translated_port: 20_000,
         address_only: true,
+        deterministic: false,
+        deterministic_identity: None,
         remaining_ns: TIMEOUT_NS,
         timeout_ns: TIMEOUT_NS,
     };
@@ -924,6 +934,8 @@ fn a_pat_import_refuses_live_address_only_reverse_identity_11475() {
         translated_ip: translated.ip,
         translated_port: translated.port,
         address_only: false,
+        deterministic: false,
+        deterministic_identity: None,
         remaining_ns: TIMEOUT_NS,
         timeout_ns: TIMEOUT_NS,
     };
@@ -1508,6 +1520,7 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
     // Both the generation-less direct helper and the durably validated cluster
     // batch share one insertion implementation (#13693).
     ("import_idle_lease_inner", "#8121, from the idle-lease sync"),
+    ("allocate_deterministic_v6_at", "#14091 deterministic NAT64 BIB mint; idle route is #8121 via coordinator nat64 export"),
 ];
 
 /// The census. Reds when a lease is created somewhere the three-route argument
@@ -1589,7 +1602,7 @@ fn every_persistent_lease_creation_site_has_a_sync_route_8121() {
 fn the_lease_census_actually_finds_its_population_8121() {
     assert_eq!(
         LEASE_CREATION_SITES_8121.len(),
-        5,
+        6,
         "the expected-site list is empty or has been trimmed to nothing, which \
          would make the census compare empty to empty"
     );

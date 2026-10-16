@@ -2968,6 +2968,8 @@ mod rejected_mirror_reservation_10790_tests {
                             translated_ip: peer_ip,
                             translated_port: peer_port,
                             address_only,
+                            deterministic: false,
+                            deterministic_identity: None,
                             remaining_ns: PEER_REMAINING_NS,
                             timeout_ns: PEER_TIMEOUT_NS,
                         },
