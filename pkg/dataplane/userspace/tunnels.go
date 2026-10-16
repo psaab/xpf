@@ -223,6 +223,7 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 			TTL:             ttl,
 			TransportTable:  transportTable,
 			LinkUp:          iface.LinkUp,
+			ClearDontFragmentBit: tunnel.ClearDontFragmentBit,
 		}
 		if isWireguard {
 			snap.WgListenPort = tunnel.WgListenPort

@@ -1569,7 +1569,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		),
 		userspaceGreEncapDfOversizeDrops: prometheus.NewDesc(
 			"xpf_userspace_gre_encap_df_oversize_drops_total",
-			"gre encap df-set oversized-outer drops",
+			"gre encap local-MTU oversize drops",
 			nil,
 			nil,
 		),
@@ -1763,7 +1763,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #2317: WG-decap RFC 6040 §4.2 illegal-combo drop counter
 		// emitted unconditionally.
 		WgDecapEcnIllegalDropsTotal: 5,
-		// #2331: GRE-encap DF-set oversized-outer drop counter emitted
+		// #2331: GRE-encap local-MTU oversize drop counter emitted
 		// unconditionally.
 		GreEncapDfOversizeDropsTotal: 6,
 		// #2782: GRE-decap checksum-present invalid drop counter emitted
@@ -2097,7 +2097,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// #2317: WG-decap RFC 6040 §4.2 illegal-combo drop counter emitted
 	// unconditionally.
 	assertCounterClose(t, got, c.userspaceWgDecapEcnIllegalDrops, nil, 5)
-	// #2331: GRE-encap DF-set oversized-outer drop counter emitted
+	// #2331: GRE-encap local-MTU oversize drop counter emitted
 	// unconditionally.
 	assertCounterClose(t, got, c.userspaceGreEncapDfOversizeDrops, nil, 6)
 	// #2782: GRE-decap checksum-present invalid drop counter emitted

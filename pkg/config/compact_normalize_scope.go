@@ -713,6 +713,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"tunnel mode",
 		"tunnel ttl",
 		"tunnel keepalive-retry",
+		"tunnel clear-dont-fragment-bit",
 		"wireguard listen-port",
 		"wireguard peer",
 		"peer allowed-ips",

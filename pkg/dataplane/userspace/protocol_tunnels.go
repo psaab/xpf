@@ -1,20 +1,22 @@
 package userspace
 
 type TunnelEndpointSnapshot struct {
-	ID              uint16 `json:"id,omitempty"`
-	Interface       string `json:"interface,omitempty"`
-	LinuxName       string `json:"linux_name,omitempty"`
-	Ifindex         int    `json:"ifindex,omitempty"`
-	Zone            string `json:"zone,omitempty"`
-	RedundancyGroup int    `json:"redundancy_group,omitempty"`
-	MTU             int    `json:"mtu,omitempty"`
-	Mode            string `json:"mode,omitempty"`
-	OuterFamily     string `json:"outer_family,omitempty"`
-	Source          string `json:"source,omitempty"`
-	Destination     string `json:"destination,omitempty"`
-	Key             uint32 `json:"key,omitempty"`
-	TTL             int    `json:"ttl,omitempty"`
-	TransportTable  string `json:"transport_table,omitempty"`
+	ID                  uint16 `json:"id,omitempty"`
+	Interface           string `json:"interface,omitempty"`
+	LinuxName           string `json:"linux_name,omitempty"`
+	Ifindex             int    `json:"ifindex,omitempty"`
+	Zone                string `json:"zone,omitempty"`
+	RedundancyGroup     int    `json:"redundancy_group,omitempty"`
+	MTU                 int    `json:"mtu,omitempty"`
+	Mode                string `json:"mode,omitempty"`
+	OuterFamily         string `json:"outer_family,omitempty"`
+	Source              string `json:"source,omitempty"`
+	Destination         string `json:"destination,omitempty"`
+	Key                 uint32 `json:"key,omitempty"`
+	TTL                 int    `json:"ttl,omitempty"`
+	TransportTable      string `json:"transport_table,omitempty"`
+	// ClearDontFragmentBit clears DF on a GRE outer; false copies inner DF.
+	ClearDontFragmentBit bool `json:"clear_dont_fragment_bit,omitempty"`
 	// LinkUp reports whether the tunnel netdev is usable for forwarding:
 	// administratively up and not in a definite-down oper state (#11423).
 	// The interface snapshot's liveness sample uses the same kernel verdict

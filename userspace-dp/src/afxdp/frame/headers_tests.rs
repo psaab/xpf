@@ -136,6 +136,26 @@ fn ipv4_header_short_buffer_returns_none() {
     assert!(r.is_none(), "short buffer must return None, not panic");
 }
 
+#[test]
+fn ipv4_tunnel_header_honors_selected_df_policy() {
+    for (df, expected) in [(false, [0x00, 0x00]), (true, [0x40, 0x00])] {
+        let mut buf = [0xffu8; 20];
+        write_ipv4_tunnel_header(
+            &mut buf,
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            47,
+            0,
+            64,
+            120,
+            df,
+        )
+        .expect("write_ipv4_tunnel_header");
+        assert_eq!(&buf[6..8], &expected, "wrong DF policy for df={df}");
+        assert_eq!(checksum16(&buf), 0, "header checksum must remain valid");
+    }
+}
+
 // ---- IPv6 outer / GRE pattern ----
 
 #[test]

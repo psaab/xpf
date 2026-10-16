@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "6a28a69e6b92cc114c5078c14d9efe1d6d6e15fa21bdb5eef5f251dddd2b8c92"
+	snapshotShapeGolden8892 = "b7c584320ed0b8ce21c4f0e772363f900a87bd10e3e9b8cc7639ab1a78fad4c1"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -538,16 +538,12 @@ const (
 	// fields themselves, both tagged "-", with no reachable element fields),
 	// the parent walk hashes to the previous golden c31d169a, and the HEAD
 	// walk hashes to the new golden below.
-	// Rust models `config` as one opaque serde_json::Value
-	// (userspace-dp/src/protocol/snapshot.rs:798), names no field inside
-	// it, and `grep -rn EnforcementPolicies userspace-dp/src/` returns
-	// zero hits; every consumer is in pkg/config. Nothing transmits the
-	// fields, so no helper of any vintage can observe them; bumping the
-	// protocol for these invisible fields would spend the signal that the wire
-	// shape really changed.
-	// ProtocolVersion is 48 because persistent-NAT lease permissions travel
-	// on control/HA lease records; this ConfigSnapshot shape remains unchanged.
-	snapshotShapeVersion8892 = 48
+	// Rust models `config` as one opaque serde_json.Value and does not read
+	// these compile-time diagnostics, so they do not change the config snapshot
+	// contract. ProtocolVersion 48 was instead used for persistent-lease
+	// permissions carried on control/HA records. Version 49 adds the GRE
+	// endpoint's clear_dont_fragment_bit setting to the snapshot shape.
+	snapshotShapeVersion8892 = 49
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

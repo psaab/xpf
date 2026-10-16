@@ -1032,6 +1032,8 @@ pub(crate) struct TunnelEndpointSnapshot {
     pub ttl: i32,
     #[serde(rename = "transport_table", default)]
     pub transport_table: String,
+    #[serde(rename = "clear_dont_fragment_bit", default)]
+    pub clear_dont_fragment_bit: bool,
     /// #11423: explicit tunnel-netdev liveness, sampled alongside the
     /// interface LinkUp verdict. GRE keepalive down/up transitions drive
     /// LinkSetDown/LinkSetUp on this TUN; Missing means a legacy sender or
@@ -1142,6 +1144,7 @@ impl std::fmt::Debug for TunnelEndpointSnapshot {
             .field("destination", &self.destination)
             .field("key", &self.key)
             .field("ttl", &self.ttl)
+            .field("clear_dont_fragment_bit", &self.clear_dont_fragment_bit)
             .field("transport_table", &self.transport_table)
             .field("link_up", &self.link_up)
             .field("wg_listen_port", &self.wg_listen_port)

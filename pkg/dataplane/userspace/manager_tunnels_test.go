@@ -19,10 +19,11 @@ func TestBuildTunnelEndpointSnapshotsBuildsUnitEndpoint(t *testing.T) {
 				},
 			},
 			Tunnel: &config.TunnelConfig{
-				Name:        "gr-0-0-0",
-				Mode:        "gre",
-				Source:      "2001:559:8585:80::8",
-				Destination: "2602:ffd3:0:2::7",
+				Name:                 "gr-0-0-0",
+				Mode:                 "gre",
+				Source:               "2001:559:8585:80::8",
+				Destination:          "2602:ffd3:0:2::7",
+				ClearDontFragmentBit: true,
 			},
 		},
 	}
@@ -50,6 +51,9 @@ func TestBuildTunnelEndpointSnapshotsBuildsUnitEndpoint(t *testing.T) {
 	}
 	if endpoints[0].OuterFamily != "inet6" {
 		t.Fatalf("endpoint outer family = %q, want inet6", endpoints[0].OuterFamily)
+	}
+	if !endpoints[0].ClearDontFragmentBit {
+		t.Fatal("explicit GRE clear-dont-fragment-bit setting was not carried to the endpoint snapshot")
 	}
 }
 

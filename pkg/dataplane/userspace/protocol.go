@@ -398,7 +398,10 @@ const (
 	// permission scope (`permit_any_remote` and `permitted_remotes`). An older
 	// helper can import a lease without its inbound permissions, so lease
 	// synchronization is fenced at this version.
-	ProtocolVersion = 48
+	// v48 -> v49 (#13957): GRE tunnel endpoint snapshots carry the explicit
+	// clear-dont-fragment-bit option; an older helper cannot honor the configured
+	// copy/clear behavior, so mixed-version pairs must not silently disagree.
+	ProtocolVersion = 49
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

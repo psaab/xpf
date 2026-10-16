@@ -756,6 +756,9 @@ type TunnelConfig struct {
 	// repair). Populated by collectAppliedTunnels; the legacy
 	// standalone-CLI apply path leaves it 0.
 	MTU int
+	// ClearDontFragmentBit clears DF in a native GRE IPv4 outer.
+	// When false, GRE copies DF from an IPv4 inner (IPv6 inner => DF set).
+	ClearDontFragmentBit bool
 
 	// RIListMember is the routing-instance whose `interface` LIST names
 	// this tunnel (after the daemon step-0a name normalization), or ""

@@ -715,6 +715,7 @@ pub(super) fn wg_encap_frame_with_commit(
                 outer_tos,
                 endpoint.ttl,
                 total_len,
+                false,
             )?;
             // UDP checksum is optional over IPv4; leave 0 (disabled).
             write_udp_header(
