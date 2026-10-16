@@ -4078,11 +4078,12 @@ fn adjust_l4_checksum_v4_to_v6_incremental(
 /// reassemble. Fragmented ICMPv6 is NOT handled here (the ICMP checksum covers
 /// the whole datagram and cannot be recomputed from a fragment) — it stays the
 /// #4617 fail-closed drop, so only TCP/UDP are accepted.
-pub(crate) fn write_v6_to_v4_nonfirst_into(
+fn write_v6_to_v4_nonfirst_translate(
     dst: &mut [u8],
     packet: &[u8],
     snat_v4: Ipv4Addr,
     dst_v4: Ipv4Addr,
+    preserve_ttl: bool,
 ) -> Option<usize> {
     if packet.len() < 40 {
         return None;
@@ -4098,8 +4099,8 @@ pub(crate) fn write_v6_to_v4_nonfirst_into(
     let traffic_class = ((packet[0] & 0x0f) << 4) | (packet[1] >> 4);
     let payload_len = u16::from_be_bytes([packet[4], packet[5]]) as usize;
     let hop_limit = packet[7];
-    if hop_limit <= 1 {
-        return None; // TTL expired
+    if !preserve_ttl && hop_limit <= 1 {
+        return None; // TTL expired for forwarding; slow path preserves it for the kernel
     }
     // `ipv6_l4_offset_and_protocol` walks the chain and, for a non-first
     // fragment, returns the offset of the byte AFTER the Fragment Header (where
@@ -4135,7 +4136,11 @@ pub(crate) fn write_v6_to_v4_nonfirst_into(
     let mf = if frag.more { 0x2000u16 } else { 0 };
     let frag_word = mf | (frag.offset_units & 0x1FFF);
     out[6..8].copy_from_slice(&frag_word.to_be_bytes());
-    out[8] = hop_limit - 1;
+    out[8] = if preserve_ttl {
+        hop_limit
+    } else {
+        hop_limit - 1
+    };
     out[9] = ipv4_protocol;
     out[10..12].copy_from_slice(&[0, 0]); // header checksum (computed below)
     out[12..16].copy_from_slice(&snat_v4.octets());
@@ -4144,6 +4149,30 @@ pub(crate) fn write_v6_to_v4_nonfirst_into(
     let hdr_sum = checksum16(&out[..20]);
     out[10..12].copy_from_slice(&hdr_sum.to_be_bytes());
     Some(total_len)
+}
+
+/// Allocation-free entry point for the decrementing translator.
+pub(crate) fn write_v6_to_v4_nonfirst_into(
+    dst: &mut [u8],
+    packet: &[u8],
+    snat_v4: Ipv4Addr,
+    dst_v4: Ipv4Addr,
+) -> Option<usize> {
+    write_v6_to_v4_nonfirst_translate(dst, packet, snat_v4, dst_v4, false)
+}
+
+/// #14114: slow-path twin of [`write_v6_to_v4_nonfirst_into`] that preserves
+/// the ingress Hop Limit. The delegated kernel FIB performs the single
+/// forwarding decrement (or emits Time Exceeded), so the translator must
+/// not decrement first — the same contract as
+/// [`write_v6_to_v4_into_preserve_ttl`] for whole packets.
+pub(crate) fn write_v6_to_v4_nonfirst_into_preserve_ttl(
+    dst: &mut [u8],
+    packet: &[u8],
+    snat_v4: Ipv4Addr,
+    dst_v4: Ipv4Addr,
+) -> Option<usize> {
+    write_v6_to_v4_nonfirst_translate(dst, packet, snat_v4, dst_v4, true)
 }
 
 /// #2562: translate a NON-first IPv4 fragment to IPv6, L3-only.
@@ -4156,11 +4185,12 @@ pub(crate) fn write_v6_to_v4_nonfirst_into(
 /// touches NO L4 checksum (there is no L4 header). `src_v6`/`dst_v6` come from
 /// the first fragment's cached reverse association. TCP/UDP only — a fragmented
 /// ICMP stays the #4617 fail-closed drop.
-pub(crate) fn write_v4_to_v6_nonfirst_into(
+fn write_v4_to_v6_nonfirst_translate(
     dst: &mut [u8],
     packet: &[u8],
     src_v6: Ipv6Addr,
     dst_v6: Ipv6Addr,
+    preserve_ttl: bool,
 ) -> Option<usize> {
     if packet.len() < 20 {
         return None;
@@ -4171,8 +4201,8 @@ pub(crate) fn write_v4_to_v6_nonfirst_into(
     }
     let tos = packet[1];
     let ttl = packet[8];
-    if ttl <= 1 {
-        return None; // TTL expired
+    if !preserve_ttl && ttl <= 1 {
+        return None; // TTL expired for forwarding; slow path preserves it for the kernel
     }
     let protocol = packet[9];
     let ipv4_total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
@@ -4202,7 +4232,7 @@ pub(crate) fn write_v4_to_v6_nonfirst_into(
     out[3] = 0; // flow label
     out[4..6].copy_from_slice(&ipv6_payload_len.to_be_bytes());
     out[6] = 44; // next header = Fragment
-    out[7] = ttl - 1;
+    out[7] = if preserve_ttl { ttl } else { ttl - 1 };
     out[8..24].copy_from_slice(&src_v6.octets());
     out[24..40].copy_from_slice(&dst_v6.octets());
     // 8-byte IPv6 Fragment Header (RFC 8200 §4.5).
@@ -4215,6 +4245,28 @@ pub(crate) fn write_v4_to_v6_nonfirst_into(
     Some(total_len)
 }
 
+/// Allocation-free entry point for the decrementing translator.
+pub(crate) fn write_v4_to_v6_nonfirst_into(
+    dst: &mut [u8],
+    packet: &[u8],
+    src_v6: Ipv6Addr,
+    dst_v6: Ipv6Addr,
+) -> Option<usize> {
+    write_v4_to_v6_nonfirst_translate(dst, packet, src_v6, dst_v6, false)
+}
+
+/// #14114: slow-path twin of [`write_v4_to_v6_nonfirst_into`] that preserves
+/// the ingress TTL for the delegated kernel FIB, mirroring
+/// [`write_v4_to_v6_into_preserve_ttl`] for whole packets.
+pub(crate) fn write_v4_to_v6_nonfirst_into_preserve_ttl(
+    dst: &mut [u8],
+    packet: &[u8],
+    src_v6: Ipv6Addr,
+    dst_v6: Ipv6Addr,
+) -> Option<usize> {
+    write_v4_to_v6_nonfirst_translate(dst, packet, src_v6, dst_v6, true)
+}
+
 /// #2562: Ethernet + IPv4 frame for a NON-first IPv6 fragment (forward NAT64).
 /// Mirrors [`build_nat64_v6_to_v4_frame`] but calls the L3-only non-first
 /// translator (no L4 header, no `no_v6_frag_header` policy — the fragmentation
@@ -4222,8 +4274,13 @@ pub(crate) fn write_v4_to_v6_nonfirst_into(
 /// Write a non-first IPv6 fragment's translated Ethernet frame into a caller
 /// buffer. `out` must hold the input frame length (the translation shrinks).
 pub(crate) fn build_nat64_v6_to_v4_nonfirst_frame_into(
-    out: &mut [u8], frame: &[u8], snat_v4: Ipv4Addr, dst_v4: Ipv4Addr,
-    eth_dst: [u8; 6], eth_src: [u8; 6], vlan_id: u16,
+    out: &mut [u8],
+    frame: &[u8],
+    snat_v4: Ipv4Addr,
+    dst_v4: Ipv4Addr,
+    eth_dst: [u8; 6],
+    eth_src: [u8; 6],
+    vlan_id: u16,
 ) -> Option<usize> {
     let l3 = frame_l3_offset(frame)?;
     let ipv6_packet = frame.get(l3..)?;
