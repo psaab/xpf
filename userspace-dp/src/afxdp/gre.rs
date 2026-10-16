@@ -173,20 +173,17 @@ pub(in crate::afxdp) static GRE_DECAP_ECN_ILLEGAL_DROPS: AtomicU64 = AtomicU64::
 /// WG ingress / congested path CE-marked the outer of a Not-ECT inner.
 pub(in crate::afxdp) static WG_DECAP_ECN_ILLEGAL_DROPS: AtomicU64 = AtomicU64::new(0);
 
-/// #2331: count of native-GRE encap frames DROPPED because the fully
+/// #2331: count of native-GRE encap frames dropped because the fully
 /// built outer datagram (outer IP + GRE header[+key] + inner packet)
-/// exceeded the resolved transport/egress MTU while the IPv4 outer
-/// carries DF=1 (the only outer the native encap builder emits — see
-/// `encapsulate_native_gre_frame`). A DF-set outer larger than the path
-/// MTU cannot be fragmented downstream and would be silently dropped by
-/// the egress NIC or an intermediate router with no PMTUD signal back to
-/// the inner source — a blackhole for every inner flow whose encapped
-/// size exceeds the path MTU. We refuse to EMIT that frame (drop +
-/// bump). Surfaced via `coordinator/status.rs` as
+/// exceeds the resolved local transport/egress MTU. GRE IPv4 outers
+/// now leave DF clear for smaller downstream path MTUs, but the local
+/// link still cannot transmit an oversized frame. Surfaced via
+/// `coordinator/status.rs` as
 /// `xpf_userspace_gre_encap_df_oversize_drops_total`. A nonzero value
-/// flags inner flows whose encapped size exceeds the tunnel path MTU —
-/// most often a missing/too-high inner MSS clamp (`native_gre_tcp_mss`)
-/// or a non-TCP inner (UDP/ICMP/ESP) with no segmentation lever.
+/// flags inner flows whose encapped size exceeds the local tunnel
+/// transport MTU — most often a missing/too-high inner MSS clamp
+/// (`native_gre_tcp_mss`) or a non-TCP inner (UDP/ICMP/ESP) with no
+/// segmentation lever.
 ///
 /// PMTUD (ICMP Frag-Needed / PTB) signalling back to the inner source is
 /// NOT generated at THIS site — it lives in the TX dispatcher
@@ -1327,25 +1324,15 @@ pub(super) fn encapsulate_native_gre_frame(
         _ => return None,
     };
 
-    // #2331: refuse to EMIT an oversized DF-set outer. The IPv4 outer
-    // this builder writes always carries DF=1 (#1440), and the IPv6
-    // outer cannot be fragmented in-path either — so an outer L3
-    // datagram larger than the transport/egress MTU is a downstream
-    // blackhole (NIC/router drop, no PMTUD back to the inner source).
-    // Compare the built outer L3 length (outer IP + GRE[+key] + inner;
-    // the L2 eth/VLAN header is NOT part of the MTU budget) against the
-    // SAME resolved outer MTU the rest of the tunnel path uses
-    // (`tunnel_outer_mtu`, #2300 SSOT — the real transport ifindex, not
-    // the logical tunnel ifindex). The 4-byte GRE key, when present, is
-    // already folded into `gre_len`, so a key-present endpoint's extra
-    // 4 bytes are counted. Drop + bump rather than emit; PMTUD/PTB
-    // signalling from this site is deferred to #2330 (see the
-    // GRE_ENCAP_DF_OVERSIZE_DROPS doc comment, which is the authority on
-    // the ordering: #2330 LANDED the signalling in the TX dispatcher, whose
-    // pre-build post_transform_inner_mtu decision fires first and skips this
-    // build whenever a PTB is emitted (#10705 extended that to DF-clear
-    // inners). What reaches this drop is the residual backstop: a
-    // suppressed/unbuildable PTB or an unknown inner MTU (fail-open).
+    // #2331: refuse to emit an outer datagram larger than the local
+    // transport/egress MTU. IPv4 tunnel outers leave DF clear for downstream
+    // path fragmentation, but a local NIC cannot transmit a frame larger
+    // than its own MTU; IPv6 routers also cannot fragment in-path. Compare
+    // the built outer L3 length (outer IP + GRE[+key] + inner; L2 is not
+    // part of the MTU budget) against the same resolved outer MTU used by
+    // the rest of the tunnel path. GRE key bytes are already included in
+    // `gre_len`. Drop + bump is a final backstop; PTB signalling is handled
+    // by the TX dispatcher before this builder is called.
     let outer_l3_len = gre_encapped_outer_len(outer_ip_len, gre_len, inner_packet.len());
     let outer_mtu = tunnel_outer_mtu(forwarding, decision, endpoint);
     if outer_l3_len > outer_mtu {
@@ -1399,13 +1386,9 @@ pub(super) fn encapsulate_native_gre_frame(
                 _ => return None,
             };
             let total_len = u16::try_from(outer_ip_len + gre_len + inner_packet.len()).ok()?;
-            // #1440: consolidated IPv4 outer builder. Sets DF=1
-            // (RFC 791 §3.1 / RFC 6864 §3 compliance) and computes
-            // the header checksum via the shared `checksum16`.
-            // Wire-byte change vs the previous open-code:
-            // ip[6..8] = 0x4000 (was 0x0000); IPv4 header checksum
-            // recomputes accordingly.
-            write_ipv4_header(
+            // Clear DF for underlay fragmentation; PMTUD feedback is not
+            // consumed by this userspace tunnel endpoint.
+            write_ipv4_tunnel_header(
                 out.get_mut(outer_ip_start..outer_ip_start + 20)?,
                 src,
                 dst,

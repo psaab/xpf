@@ -178,24 +178,26 @@ slow-path because tunnel AF_XDP TX does not exist”.
 #### Outer MTU / DF guard (#2331)
 
 `encapsulate_native_gre_frame` (userspace-dp/src/afxdp/gre.rs) writes
-the IPv4 outer with `DF=1` (#1440), and the IPv6 outer cannot be
-fragmented in-path either. So once the full outer datagram is sized —
+the IPv4 outer with DF clear, allowing downstream fragmentation when an
+underlay path is smaller than the local egress. IPv6 outers remain
+unfragmentable in-path. The builder still sizes the full outer datagram —
 `outer IP + GRE header (incl. the optional 4-byte key) + inner packet`
 (the `gre_encapped_outer_len` helper; the L2 eth/VLAN header is NOT part
-of the MTU budget) — the builder compares it against the resolved
-transport/egress MTU via `tunnel_outer_mtu` (forwarding/mss.rs, the
-#2300 SSOT used by the inner MSS clamp and `native_gre_inner_mtu`: real
-transport ifindex → stored-resolution egress → endpoint logical ifindex,
-`unwrap_or(1500)`). If the outer exceeds that MTU the frame is **not
-emitted**: it would be a downstream blackhole (NIC/router drop, no PMTUD
-signal back to the inner source). The drop bumps
+of the MTU budget) — against the resolved transport/egress MTU via
+`tunnel_outer_mtu` (forwarding/mss.rs, the #2300 SSOT used by the inner
+MSS clamp and `native_gre_inner_mtu`: real transport ifindex →
+stored-resolution egress → endpoint logical ifindex, `unwrap_or(1500)`).
+If the outer exceeds that MTU the frame is **not emitted**, because the
+local egress cannot transmit an oversized frame. The drop bumps
 `GRE_ENCAP_DF_OVERSIZE_DROPS`, surfaced as the Prometheus counter
 `xpf_userspace_gre_encap_df_oversize_drops_total`.
 
 A nonzero counter flags inner flows whose encapped size exceeds the
-tunnel path MTU — typically a missing/too-high inner MSS clamp
-(`native_gre_tcp_mss`), or a non-TCP inner (UDP/ICMP/ESP) with no
-segmentation lever.
+tunnel's local transport MTU — typically a missing/too-high inner MSS
+clamp (`native_gre_tcp_mss`), or a non-TCP inner (UDP/ICMP/ESP) with no
+segmentation lever. Clearing DF addresses a smaller *downstream* path;
+it does not change local-MTU sizing or provide endpoint PMTU learning.
+
 
 #### Post-transform PMTUD (#2330, closes the #2331-deferred signal)
 
