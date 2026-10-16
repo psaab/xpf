@@ -4395,7 +4395,10 @@ fn t7_natt_4500_dnat_gre_and_esp_controls_10585() {
     assert!(queues.is_empty());
     assert_eq!(recycled, 1);
     assert_eq!(esp_ike.len(), 0);
-    assert_eq!(dbg.local, 0, "ESP-in-UDP must bypass junos-host IKE gating");
+    assert_eq!(
+        dbg.local, 0,
+        "ESP-in-UDP with no loaded SA must drop at the SA gate, before the fine gates"
+    );
     assert_eq!(dbg.policy_deny, 0);
     assert_eq!(batch.host_inbound_denied_packets, 0);
     let (_, delegated, sa_counters, recycled, queues, _forwarded) =
@@ -4510,4 +4513,161 @@ fn t9_gre_inner_coarse_deny_remains_first_10585() {
     assert_eq!(dbg.policy_deny, 0);
     assert_eq!(dbg.local, 0);
     assert_eq!(batch.host_inbound_denied_packets, 1);
+}
+
+// #14125: SA-checked ESP-in-UDP must pay the same fine lo0 / to-zone
+// junos-host gates as positive IKE before delegated reinject. Raw ESP/AH
+// is hard-dropped earlier and never reaches these gates; these cells use
+// a loaded SA so the packet WOULD delegate without the fix.
+fn esp_in_udp_snapshot_14125() -> ConfigSnapshot {
+    nat_snapshot()
+}
+
+fn esp_in_udp_sa_key_14125(spi: u32) -> crate::afxdp::forwarding::IpsecSaKey {
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1));
+    crate::afxdp::forwarding::ipsec_sa_key(dst, spi, src).expect("same-family SA fixture")
+}
+
+fn esp_in_udp_junos_host_deny_14125() -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        name: "no-esp-to-host".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "junos-host".to_string(),
+        source_addresses: vec!["10.0.61.102/32".to_string()],
+        destination_addresses: vec!["10.0.61.1/32".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "deny".to_string(),
+        ..Default::default()
+    }
+}
+
+fn esp_in_udp_lo0_discard_snapshot_14125() -> ConfigSnapshot {
+    let mut snapshot = esp_in_udp_snapshot_14125();
+    snapshot.flow.lo0_filter_input_v4 = "protect-re".to_string();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "protect-re".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "drop-esp-in-udp".to_string(),
+            destination_addresses: vec!["10.0.61.1/32".to_string()],
+            protocols: vec!["udp".to_string()],
+            destination_ports: vec!["4500".to_string()],
+            action: "discard".to_string(),
+            ..Default::default()
+        }],
+    }];
+    snapshot
+}
+
+#[test]
+// RED-on-revert: without the #14125 gate extension the SA-hit packet
+// delegates (queued_packets == 1) instead of dropping at junos-host.
+fn stage11_esp_in_udp_sa_hit_junos_host_deny_drops_14125() {
+    let spi = 0x1412_5001;
+    let mut snapshot = esp_in_udp_snapshot_14125();
+    snapshot.policies.push(esp_in_udp_junos_host_deny_14125());
+    let frame = build_stage11_esp_udp_frame_10516(spi);
+    let meta = stage11_esp_udp_meta_10516(&frame);
+    let (trusted, delegated, counters, recycled, queues, _forwarded) =
+        run_stage11_frame_poll_on_snapshot_with_options_10516(
+            &snapshot,
+            &frame,
+            meta,
+            Some(esp_in_udp_sa_key_14125(spi)),
+            false,
+            false,
+        );
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(
+        delegated.queued_packets, 0,
+        "a to-zone junos-host DENY covering SA-checked ESP-in-UDP must drop it before \
+         Stage-11 reinject (#14125 confirmed bypass)"
+    );
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(counters.sa_miss_dropped_packets, 0);
+}
+
+#[test]
+// RED-on-revert: without the #14125 gate extension the SA-hit packet
+// delegates instead of dropping at the lo0 filter.
+fn stage11_esp_in_udp_sa_hit_lo0_discard_drops_14125() {
+    let spi = 0x1412_5002;
+    let snapshot = esp_in_udp_lo0_discard_snapshot_14125();
+    let frame = build_stage11_esp_udp_frame_10516(spi);
+    let meta = stage11_esp_udp_meta_10516(&frame);
+    let (trusted, delegated, counters, recycled, queues, _forwarded) =
+        run_stage11_frame_poll_on_snapshot_with_options_10516(
+            &snapshot,
+            &frame,
+            meta,
+            Some(esp_in_udp_sa_key_14125(spi)),
+            false,
+            false,
+        );
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(
+        delegated.queued_packets, 0,
+        "an lo0 filter-input discard covering SA-checked ESP-in-UDP must drop it before \
+         Stage-11 reinject (#14125 skipped userspace lo0 eval)"
+    );
+    assert!(queues.is_empty());
+    assert_eq!(recycled, 1);
+    assert_eq!(counters.sa_miss_dropped_packets, 0);
+}
+
+#[test]
+// Control: SA-checked ESP-in-UDP with no fine/lo0 match still delegates
+// byte-identically (the fix must not break the data plane).
+fn stage11_esp_in_udp_sa_hit_no_fine_match_delegates_14125() {
+    let spi = 0x1412_5003;
+    let snapshot = esp_in_udp_snapshot_14125();
+    let frame = build_stage11_esp_udp_frame_10516(spi);
+    let meta = stage11_esp_udp_meta_10516(&frame);
+    let (trusted, delegated, counters, recycled, queues, _forwarded) =
+        run_stage11_frame_poll_on_snapshot_with_options_10516(
+            &snapshot,
+            &frame,
+            meta,
+            Some(esp_in_udp_sa_key_14125(spi)),
+            false,
+            false,
+        );
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(
+        delegated.queued_packets, 1,
+        "control: SA-checked ESP-in-UDP with no fine/lo0 deny must still delegate"
+    );
+    assert_eq!(queues, vec![true]);
+    assert_eq!(recycled, 1);
+    assert_eq!(counters.sa_miss_dropped_packets, 0);
+}
+
+#[test]
+// Control: a fine deny written for a DIFFERENT source must not drop this
+// SA's ESP-in-UDP (no over-matching from widening the gate).
+fn stage11_esp_in_udp_sa_hit_other_source_deny_still_delegates_14125() {
+    let spi = 0x1412_5004;
+    let mut snapshot = esp_in_udp_snapshot_14125();
+    let mut deny = esp_in_udp_junos_host_deny_14125();
+    deny.source_addresses = vec!["10.0.61.200/32".to_string()];
+    snapshot.policies.push(deny);
+    let frame = build_stage11_esp_udp_frame_10516(spi);
+    let meta = stage11_esp_udp_meta_10516(&frame);
+    let (trusted, delegated, counters, recycled, queues, _forwarded) =
+        run_stage11_frame_poll_on_snapshot_with_options_10516(
+            &snapshot,
+            &frame,
+            meta,
+            Some(esp_in_udp_sa_key_14125(spi)),
+            false,
+            false,
+        );
+    assert_eq!(trusted.queued_packets, 0);
+    assert_eq!(delegated.queued_packets, 1);
+    assert_eq!(queues, vec![true]);
+    assert_eq!(recycled, 1);
+    assert_eq!(counters.sa_miss_dropped_packets, 0);
 }

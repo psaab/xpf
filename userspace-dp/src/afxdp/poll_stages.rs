@@ -1399,9 +1399,13 @@ fn ike_host_inbound_deny_zone(
 /// the ingress zone's host-inbound `ike`/`ipsec` admission. A zone that omits
 /// `ike` drops the unsolicited inbound IKE (`Denied`) so it never reaches the
 /// local IKE daemon; a zone that lists `ike`/`ipsec` admits it. ESP/AH, the
-/// IPsec data plane (ESP-in-UDP / NAT-T keepalive) stay EXEMPT (unconditional
-/// passthrough) — the SA is the authorization, mirroring the kernel chain's
-/// global ESP/AH accept.
+/// IPsec data plane (ESP-in-UDP / NAT-T keepalive) stay EXEMPT from this
+/// COARSE host-inbound check (unconditional passthrough) — the SA is the
+/// authorization, mirroring the kernel chain's global ESP/AH accept.
+/// #14125: that coarse exemption does NOT exempt SA-checked ESP-in-UDP
+/// from the FINE lo0 / `to-zone junos-host` gates the poll-loop caller
+/// re-runs for every reinjected packet (raw ESP/AH is hard-dropped in
+/// the caller and never reinjected, so it needs no fine gate there).
 ///
 /// #6471: a Responder-SPI-nonzero IKE packet is NOT automatically
 /// "established" — the SPI bytes are attacker-controlled, so a forged
