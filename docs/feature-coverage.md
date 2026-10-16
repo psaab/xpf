@@ -28,7 +28,7 @@ the userspace dataplane admission boundary is in
   the AF_XDP TX path). **SYN-flood sub-thresholds (#3315)**:
   `source-threshold` / `destination-threshold` are per-source-IP /
   per-destination-IP SYN/s caps enforced by a per-zone count-min sketch of
-  `RateCounter`s (no eviction, fail-closed over-count). The per-destination
+  `TokenBucket`s (no eviction, fail-closed over-count; #13954, ex-`RateCounter`). The per-destination
   cap is primary and spoof-resistant (all SYNs to a victim land in the same
   sketch cells) and runs even when the zone is SYN-cookie active; the
   per-source cap is secondary and skipped while the zone is cookie-active

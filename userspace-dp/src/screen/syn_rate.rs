@@ -1,4 +1,4 @@
-//! Per-zone per-key flood rate limiter — a count-min sketch of `RateCounter`s
+//! Per-zone per-key flood rate limiter — a count-min sketch of limiter cells
 //! (#3315 SYN-flood per-source/per-destination; #4112 ICMP/UDP per-destination).
 //!
 //! `source-threshold` and `destination-threshold` cap the SYN/s rate for a
@@ -21,19 +21,22 @@
 //! The sketch is parameterized over its per-cell limiter so the SAME count-min
 //! structure serves two consumers with different admission semantics:
 //!
-//! - The #3315 SYN per-source / per-destination sketches use `RateCounter`
-//!   cells (the DEFAULT `SynRateSketch<RateCounter>` — `for_dst` / `for_src`).
-//!   There "admitted" means "skip a recoverable security response", so the
-//!   count-all sustained-at-threshold over-throttle is deliberate.
-//! - The #4112 / #5805 ICMP/UDP per-destination flood sketches use `TokenBucket`
-//!   cells (`SynRateSketch<TokenBucket>` — `for_flood_dst`). A flood cap is a
-//!   pure rate gate: a destination parked at exactly `threshold` events/second
-//!   must stay admitted STEADILY. `RateCounter` collapsed it to ~0 after the
-//!   first second (count-all whole-second window, #5805); the token bucket
-//!   refills continuously so the configured rate is honoured, while a
+//! - The #3315 SYN per-source / per-destination sketches (`for_dst` /
+//!   `for_src`) and the #4112 / #5805 ICMP/UDP per-destination flood sketches
+//!   (`for_flood_dst`) all use `TokenBucket` cells
+//!   (`SynRateSketch<TokenBucket>`). A flood cap is a pure rate gate: a
+//!   destination or source parked at exactly `threshold` events/second must
+//!   stay admitted STEADILY. `RateCounter` collapsed it to ~0 after the first
+//!   second (count-all whole-second window, #5805; SYN sketches #13954 — a
+//!   dst/src trip is a HARD drop, not a recoverable response, so the
+//!   count-all over-throttle was not defensible there either); the token
+//!   bucket refills continuously so the configured rate is honoured, while a
 //!   sub-millisecond boundary straddle still sees at most `threshold` tokens
 //!   (#2937 preserved) and an over-threshold destination is still limited DOWN
-//!   to the rate.
+//!   to the rate. The SYN sketches admit via the same all-row
+//!   prepare/commit transaction as the flood sketch, so phase-staggered rows
+//!   cannot multiply the sustained rate (#10319). `RateCounter` cells remain
+//!   available for deliberate count-all consumers (SYN aggregate / alarm).
 //!
 //! ## Substrate — count-min sketch of `SketchCell`s, NO eviction
 //!
@@ -42,14 +45,29 @@
 //! one cell per row. `increment` advances and counts the key in all `ROWS`
 //! cells and reports whether it is over the threshold.
 //!
-//! Trip ⟺ EVERY one of the `ROWS` cells reports over-threshold. Because the
-//! smallest over-threshold cell implies all cells exceed it, this is exactly
-//! the classic CMS `min`-read (`min_i(trailing_sum_i) > threshold`). It is
-//! implemented as the logical **AND** of the per-row `increment` results — and
-//! it MUST be AND/MIN, never OR/MAX: an OR/MAX inversion would blow the
-//! false-positive rate from `(load)^ROWS` to `~ROWS*load`, and the "victim
-//! always trips" test cannot catch that inversion (the victim trips under both).
-//! A dedicated test (`some_but_not_all_rows_does_not_trip`) pins the AND.
+//! Trip semantics depend on the cell type, and the two MUST NOT be conflated:
+//!
+//! - Count-all `RateCounter` cells (retained only for test seams now): trip
+//!   ⟺ EVERY row reports over-threshold — the classic CMS `min`-read
+//!   (`min_i(trailing_sum_i) > threshold`), implemented as the logical **AND**
+//!   of the per-row results. It MUST be AND/MIN, never OR/MAX: an OR/MAX
+//!   inversion would blow the false-positive rate from `(load)^ROWS` to
+//!   `~ROWS*load`. Pinned by `some_but_not_all_rows_does_not_trip` on an
+//!   explicit `RateCounter` sketch.
+//! - `TokenBucket` cells (ALL production sketches since #13954: SYN dst/src
+//!   and ICMP/UDP flood): admission is an all-row prepare/commit transaction
+//!   (#10319) — an event is admitted only when EVERY selected row holds a
+//!   token, then every row consumes one. A single drained row therefore
+//!   blocks admission. This is DELIBERATELY stricter than AND/MIN counting:
+//!   it is what bounds the sustained admitted rate to the configured
+//!   threshold even when rows are phase-staggered (a min-read token sketch
+//!   would let staggered rows multiply the rate, #10319). The tradeoff is
+//!   accepted and explicit: the `(load)^ROWS` CMS false-positive bound does
+//!   NOT apply to token sketches — a key colliding with a hot key in ANY
+//!   one row is throttled at that row's rate (false-positive ~`ROWS*load`,
+//!   still fail-closed: collisions never admit an over-threshold key).
+//!   Pinned on the production SYN constructors by
+//!   `syn_sketch_one_drained_row_blocks_admission_13954`.
 //!
 //! ### Why a count-min sketch and not an eviction cache
 //!
@@ -59,9 +77,9 @@
 //! never tracked, so it never trips) and a **Cold-Start Eviction Race** (a
 //! victim ramping 0→threshold is the coldest entry and gets evicted/reset
 //! before it can cross). The CMS has NO eviction and NO per-key slot: every key
-//! is ALWAYS mapped to its `ROWS` cells. `RateCounter` cells retain their
-//! count-all sliding-window semantics, so their event counts only increase
-//! during a window and a victim's own flood drives all rows over threshold.
+//! is ALWAYS mapped to its `ROWS` cells. `TokenBucket` cells refill
+//! continuously, so a victim's own over-threshold flood still drives all
+//! rows over threshold (each row must hold a token for admission).
 //! Flood `TokenBucket` cells are different: refill makes their state decrease,
 //! and the flood sketch therefore uses an all-row prepare/commit transaction.
 //! A flood event is admitted only when EVERY selected row has a token, then
@@ -94,7 +112,7 @@
 //!
 //! Per non-validated initial SYN with the feature enabled: `ROWS` cell
 //! `increment`s per consulted sketch (each an integer add + compare; one cache
-//! line of `RateCounter`s per row) plus the AND. No allocation, no rehash, no
+//! line of cells per row) plus the all-row reduction. No allocation, no rehash, no
 //! eviction scan — steady-state AND under a spoofed flood. Allocated once at
 //! config for zones that configure a threshold; freed when disabled.
 //!
@@ -115,21 +133,22 @@ use std::net::IpAddr;
 /// can carry so the count-min structure (rows, seeded hashing, all-row update,
 /// AND/MIN reduction) is written ONCE and shared:
 ///
-/// - [`RateCounter`] — the count-all two-bucket sliding window. Used by the
-///   #3315 SYN per-source / per-destination sketches, where "admitted" means
-///   "skip a recoverable security response" (activate SYN cookies / raise the
-///   alarm) and the sustained-at-threshold over-throttle is DELIBERATE.
+/// - [`RateCounter`] — the count-all two-bucket sliding window. Retained for
+///   deliberate count-all consumers where "admitted" means "skip a recoverable
+///   security response" (the SYN-flood aggregate that activates SYN cookies /
+///   raises the alarm).
 /// - [`TokenBucket`] — the monotonic-nanosecond shaper (#3607). Used by the
-///   #4112 / #5805 ICMP/UDP per-destination FLOOD sketches, a pure rate gate
-///   that MUST admit a destination parked at exactly `threshold` events/second
-///   without collapsing after the first second (the #5805 fix).
+///   #4112 / #5805 ICMP/UDP per-destination FLOOD sketches and, since #13954,
+///   the #3315 SYN per-source / per-destination sketches: pure rate gates that
+///   MUST admit a key parked at exactly `threshold` events/second without
+///   collapsing after the first second (the #5805 / #13954 fix), because a
+///   dst/src trip is a hard drop.
 ///
 /// Both cells are 16 bytes, so the sketch's `ROWS*cols*16` memory bound is
 /// identical for either. `now` is a monotonic time value whose UNIT is defined
 /// by the impl — wall/monotonic SECONDS for `RateCounter`, monotonic
 /// NANOSECONDS for `TokenBucket` — and the caller passes the matching clock
-/// (`now_secs` for the SYN sketches, the batch-cached `loop_now_ns` for the
-/// flood sketches).
+/// (the batch-cached `loop_now_ns` for every `TokenBucket` sketch).
 pub(super) trait SketchCell: Clone + Default {
     /// Charge one event against this cell; return `true` when the key is
     /// OVER LIMIT (drop) and `false` when admitted.
@@ -214,11 +233,11 @@ const ROW_SEEDS: [u64; ROWS] = [
 
 /// Count-min sketch of [`SketchCell`]s with no eviction. See module docs.
 ///
-/// Generic over the per-cell limiter `C`. The DEFAULT `RateCounter` keeps the
-/// SYN per-source / per-destination sketches (#3315) bit-identical; the
-/// ICMP/UDP per-destination flood sketches use `SynRateSketch<TokenBucket>`
-/// (#5805) so a sustained-at-threshold destination is admitted at the
-/// configured rate rather than collapsing after the first second.
+/// Generic over the per-cell limiter `C`. The SYN per-source /
+/// per-destination sketches (#3315, #13954) and the ICMP/UDP per-destination
+/// flood sketches (#5805) use `SynRateSketch<TokenBucket>` so a
+/// sustained-at-threshold key is admitted at the configured rate rather than
+/// collapsing after the first second.
 pub(super) struct SynRateSketch<C = RateCounter> {
     /// `ROWS` rows of `cols` cells. `Box<[Box<[C]>]>` is allocated once at
     /// construction and never resized — the hot path only indexes.
@@ -385,36 +404,46 @@ impl<C: SketchCell> SynRateSketch<C> {
 }
 
 impl SynRateSketch<RateCounter> {
+    /// Seed-pinned `RateCounter` constructor (test seam). Production SYN
+    /// sketches are `TokenBucket` since #13954; this remains for the
+    /// count-all cell-mapping / hash-vector tests.
+    fn with_cols_seeded(cols: usize, seed: u64) -> Self {
+        Self::build_seeded(cols, seed)
+    }
+}
+
+impl SynRateSketch<TokenBucket> {
     fn with_cols(cols: usize) -> Self {
-        Self::with_cols_seeded(cols, crate::hot_hash_seed::hot_path_hash_seed())
+        Self::build_seeded(cols, crate::hot_hash_seed::hot_path_hash_seed())
     }
 
-    /// Seed-pinned `RateCounter` constructor. Production calls through
-    /// `with_cols`; adversarial tests pin the seed to assert key→cell mapping
-    /// stability and cross-seed reshuffling.
+    /// Seed-pinned `TokenBucket` constructor. Production calls through
+    /// `with_cols` / `for_dst` / `for_src` / `for_flood_dst`; adversarial
+    /// tests pin the seed to assert key->cell mapping stability and
+    /// cross-seed reshuffling.
     fn with_cols_seeded(cols: usize, seed: u64) -> Self {
         Self::build_seeded(cols, seed)
     }
 
     /// Allocate the per-DESTINATION SYN sketch (`DST_COLS` columns) with
-    /// count-all `RateCounter` cells (#3315). Deliberately NOT `TokenBucket`:
-    /// "admitted" here means "skip a recoverable security response".
+    /// monotonic-ns `TokenBucket` cells (#13954, ex-#3315 `RateCounter`).
+    /// A dst trip is a hard drop, so the configured rate must be honoured
+    /// steadily; the all-row transaction bounds sustained admission to the
+    /// rate (plus the cold-start burst capacity = threshold, #2937).
     pub(super) fn for_dst() -> Self {
         Self::with_cols(DST_COLS)
     }
 
-    /// Allocate the per-SOURCE SYN sketch (`SRC_COLS` columns), `RateCounter`
-    /// cells (#3315).
+    /// Allocate the per-SOURCE SYN sketch (`SRC_COLS` columns), `TokenBucket`
+    /// cells (#13954, ex-#3315 `RateCounter`).
     pub(super) fn for_src() -> Self {
         Self::with_cols(SRC_COLS)
     }
-}
 
-impl SynRateSketch<TokenBucket> {
     /// Allocate the per-DESTINATION ICMP/UDP FLOOD sketch (`DST_COLS` columns)
     /// with monotonic-ns `TokenBucket` cells (#5805). A distinct constructor
-    /// name (not `for_dst`) keeps the SYN-path `SynRateSketch::for_dst()`
-    /// unambiguously the `RateCounter` variant. The token bucket admits a
+    /// name (not `for_dst`) keeps the flood-path sketch unambiguously separate
+    /// from the SYN-path `SynRateSketch::for_dst()`. The token bucket admits a
     /// destination parked at exactly `threshold` events/second steadily (the
     /// #5805 fix) while still bounding a burst to capacity (#2937) and limiting
     /// an over-threshold destination down to the configured rate.

@@ -5025,11 +5025,11 @@ fn syn_cookie_attack_threshold_raise_releases_active_latch_12876() {
     );
 
     // (b) The configured per-SOURCE sketch must run again immediately. At
-    // t=129 the source's trailing window is 1 (the first flood SYN) + n;
-    // with src threshold 4 the 4th SYN is over. The aggregate stays under
-    // the new threshold 10 (trailing 2 + 4 = 6), so only the source cap can
-    // fire. A stale latch would skip it and admit all four.
-    for _ in 0..3 {
+    // t=129 the source's TokenBucket (src threshold 4, #13954) has refilled
+    // a full second to capacity 4, so the next 4 SYNs are admitted and the
+    // 5th is over. The aggregate stays under the new threshold 10, so only
+    // the source cap can fire. A stale latch would skip it and admit all.
+    for _ in 0..4 {
         assert_eq!(
             state.check_packet_with_zone_id("trust", 7, &syn, 129),
             ScreenVerdict::Pass

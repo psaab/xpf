@@ -191,16 +191,25 @@ distinguished by separate per-worker counters.
 Substrate (`userspace-dp/src/screen/syn_rate.rs`): a per-zone **count-min sketch**
 generic over its per-cell limiter (`SynRateSketch<C>`) — `ROWS=4` independent
 seeded-hash rows × `DST_COLS=1024` / `SRC_COLS=2048` columns — with **no
-eviction**. The SYN per-source/per-destination sketches use count-all
-`RateCounter` cells (this section); the #5805 ICMP/UDP per-destination flood
+eviction**. The SYN per-source/per-destination sketches use `TokenBucket`
+cells since #13954 (a dst/src trip is a hard drop, so the count-all
+`RateCounter` sustained-at-threshold collapse was not defensible there);
+the #5805 ICMP/UDP per-destination flood
 sketches use monotonic-ns `TokenBucket` cells (see the #4112 section above). A
-key always counts in its
-`ROWS` cells and trips ⟺ ALL cells are over threshold (the CMS `min` read,
-implemented as the AND of the per-row results, never OR/MAX). No eviction means
-no Hot-Set-Lockout / Cold-Start-Eviction-Race starvation (a victim is always
-tracked and its cells only increase within the sliding window). Collisions can
-only OVER-count (fail-closed: never a false-negative; the only error is a
-false-positive bounded by `~(load)^ROWS`).
+key charges its
+`ROWS` cells. Since #13954 every production sketch (SYN dst/src and ICMP/UDP
+flood) carries `TokenBucket` cells and admits via an all-row prepare/commit
+transaction: admission requires a token in EVERY selected row, so a single
+row drained by a colliding hot key throttles the key — deliberately stricter
+than the count-all CMS `min` read, because it bounds the sustained admitted
+rate to the configured threshold even for phase-staggered rows (#10319).
+(The `min`-read AND semantics and the `~(load)^ROWS` false-positive bound now
+apply only to the retained count-all `RateCounter` test seam, NOT to the
+production token sketches, whose collision false-positive is `~ROWS*load`.)
+No eviction means no Hot-Set-Lockout / Cold-Start-Eviction-Race starvation (a
+victim is always tracked; an over-threshold victim drains all its rows and
+trips). Collisions can only OVER-count (fail-closed: never a false-negative —
+an over-threshold key can never be admitted by a collision).
 
 **Per-boot seeded cell hash (#4382).** The `ROWS` row hashes fold in a per-boot
 secret seed (`SynRateSketch::seed`, drawn once from
