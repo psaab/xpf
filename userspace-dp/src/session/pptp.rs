@@ -965,7 +965,8 @@ fn a_pptp_session_reverse_companion_keeps_the_handle_7699() {
          transforms, a reply is looked up under a key the stored companion \
          does not equal and matches no session at all"
     );
-} #[path = "pptp_ha_sync_13965_tests.rs"] mod ha_sync_13965_tests; }
+}
+}
 
 #[cfg(test)]
 mod routing_domain_13681_tests {

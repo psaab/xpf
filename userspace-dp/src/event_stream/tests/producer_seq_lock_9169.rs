@@ -72,6 +72,58 @@ fn every_session_delta_counts_a_producer_seq_acquisition_9169() {
     );
 }
 
+/// #13965: the binary SessionOpen frame must carry the PPTP call-id pair as
+/// its final 8 bytes, or the Go decoder leaves it absent and the standby
+/// import gate withholds the session.
+#[test]
+fn pptp_open_frame_carries_the_call_id_pair_13965() {
+    let (sender, rx) = EventStreamSender::test_sender(true, 16);
+    let handle = sender.worker_handle();
+    let zones = rustc_hash::FxHashMap::default();
+    let src: IpAddr = "198.51.100.7".parse().unwrap();
+    let dst: IpAddr = "203.0.113.9".parse().unwrap();
+    let call = crate::session::pptp::PptpCall::new(src, 0x1111, dst, 0x2222);
+    let now_ns = 1_000_000_000;
+    let mut table = crate::session::SessionTable::new();
+    table
+        .pptp_mut()
+        .install(
+            call,
+            crate::session::pptp::ControlChannelId::new(src, 1723, dst, 49152),
+            now_ns,
+        )
+        .expect("install call association");
+    let seed = test_close_delta(crate::session::SessionDeltaKind::Open);
+    let key = crate::session::SessionKey {
+        protocol: crate::ip_proto::PROTO_GRE,
+        src_ip: src,
+        dst_ip: dst,
+        discriminator: crate::session::TunnelDiscriminator::Pptp(call.handle()),
+        ..seed.key
+    };
+    assert!(table.install_with_protocol(
+        key,
+        seed.decision,
+        seed.metadata,
+        now_ns,
+        crate::ip_proto::PROTO_GRE,
+        0
+    ));
+    let mut deltas = table.drain_deltas(1);
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].pptp_call_ids, call.to_wire_call_ids());
+    handle.push_delta(&deltas.remove(0), &zones);
+    let frames: Vec<_> = rx.try_iter().collect();
+    let frame = frames.last().expect("PPTP open frame queued");
+    let bytes = frame.as_bytes();
+    let actual = u64::from_le_bytes(bytes[bytes.len() - 8..].try_into().unwrap());
+    assert_eq!(
+        actual,
+        call.to_wire_call_ids(),
+        "the emitted PPTP SessionOpen must carry both directional call IDs, or the standby import gate withholds the session"
+    );
+}
+
 /// THE NUMERATOR, and the cell that says the two counters are not the same
 /// number under a different name.
 ///

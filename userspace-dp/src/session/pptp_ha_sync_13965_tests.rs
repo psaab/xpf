@@ -1,6 +1,7 @@
+use crate::ip_proto::PROTO_GRE;
 use crate::session::tests::{decision, key_v4, metadata};
 use crate::session::{
-    ExportProvenance, PROTO_GRE, SessionDeltaKind, SessionKey, SessionOrigin, SessionTable,
+    ExportProvenance, SessionDeltaKind, SessionKey, SessionOrigin, SessionTable,
     TunnelDiscriminator,
 };
 use std::net::IpAddr;
@@ -14,22 +15,19 @@ fn live_pptp_open_and_bulk_export_carry_the_call_id_pair_13965() {
     let mut table = SessionTable::new();
     table
         .pptp_mut()
-        .install_synced_association(call, now_ns);
+        .install_synced_association(call, now_ns)
+        .expect("install synced association");
 
     let key = SessionKey {
+        protocol: PROTO_GRE,
         discriminator: TunnelDiscriminator::Pptp(call.handle()),
         src_ip: src,
         dst_ip: dst,
         ..key_v4()
     };
-    assert!(table.install_with_protocol(
-        key.clone(),
-        decision(),
-        metadata(),
-        now_ns,
-        PROTO_GRE,
-        0,
-    ));
+    assert!(
+        table.install_with_protocol(key.clone(), decision(), metadata(), now_ns, PROTO_GRE, 0,)
+    );
 
     let expected = call.to_wire_call_ids();
     let incremental = table.drain_deltas(8);

@@ -5112,3 +5112,8 @@ mod explicit_close_harvest_13973_tests;
 #[cfg(test)]
 #[path = "closing_pair_reserved_slots_14126_tests.rs"]
 mod closing_pair_reserved_slots_14126_tests;
+
+// #13965: live PPTP open and bulk export carry the call-id pair.
+#[cfg(test)]
+#[path = "pptp_ha_sync_13965_tests.rs"]
+mod pptp_ha_sync_13965_tests;

@@ -1335,6 +1335,7 @@ impl SessionTable {
             bulk_resync: false,
             tcp_close_class: reason,
             tcp_handshake_state: 0,
+            pptp_call_ids: self.pptp_call_ids_wire_for(key),
             purge_retirement: false,
         });
     }
