@@ -1,11 +1,22 @@
+//! #14130: a FAILED bring-up must leave the coordinator in the same
+//! observable state as a completed teardown: no planned-but-never-spawned
+//! `workers.live`/`identities` slots, no published runtime for a rejected
+//! snapshot, and no surviving half-cohort of workers running that snapshot.
+//! `plan_workers` therefore REGISTERS NOTHING; the live/identity slots are
+//! inserted only by `spawn_workers` on successful spawn (see
+//! `register_planned_slots`). Every post-plan failure arm in the shell
+//! (`IpsecSaNotReady`, `SpawnFailed`, `BindIncomplete`) runs
+//! `stop_inner(false)`, so `live_count`/`planned_counts` can never report a
+//! phantom fleet and a same-plan retry re-enters bring-up.
+//!
 //! #1328 Phase 2 — worker bringup phase.
 //!
 //! #6240: the bring-up transaction is decomposed into cohesive phase
 //! helpers, all kept in THIS module (no one-file-per-phase). `bring_up_workers`
 //! is now a short shell that sequences them and — critically — keeps the
-//! two-armed #4952 rollback DECISION visible and distinct in the shell
-//! (spawn-fail returns WITHOUT `stop_inner`; bind-incomplete calls
-//! `stop_inner(false)`); no helper ever calls `stop_inner`. The phase order is
+//! failure-rollback DECISION visible and distinct in the shell
+//! (every post-plan failure arm calls `stop_inner(false)`); no helper ever
+//! calls `stop_inner`. The phase order is
 //! preserved verbatim: clamp the ring depth ([`clamp_ring_entries`]),
 //! [`plan_workers`] (build per-worker `BindingPlan` lists + live/identities +
 //! sizing + the `Planned` stage), [`publish_runtime`] (move the BPF map FDs onto
@@ -64,15 +75,15 @@ pub(super) enum WorkerBringUpError {
 }
 
 /// #6240: the outcome of the per-worker spawn loop ([`spawn_workers`]),
-/// returned to the [`bring_up_workers`] shell so the two-armed #4952 rollback
+/// returned to the [`bring_up_workers`] shell so the #14130 rollback
 /// DECISION stays in the shell — `spawn_workers` itself NEVER calls
 /// `stop_inner`.
 enum LaunchOutcome {
-    /// #4952 ARM 1: a worker thread failed to SPAWN. Carries the preserved typed
+    /// #4952: a worker thread failed to SPAWN. Carries the preserved typed
     /// [`ReconcileStage::SpawnWorkerFailed`] identity (already recorded on
-    /// `coord.last_reconcile_stage` by the loop). The launched workers `0..N-1`
-    /// KEEP their records — a failed worker never registered one (post-spawn
-    /// insert) — so the shell returns `Err(Spawn)` WITHOUT `stop_inner`.
+    /// `coord.last_reconcile_stage` by the loop). #14130: the shell runs
+    /// `stop_inner(false)` so the already-launched workers do NOT keep
+    /// forwarding the rejected snapshot while its baseline is rolled back.
     SpawnFailed(ReconcileStage),
     /// Every planned worker spawned. Carries the set of spawned worker ids and
     /// the per-worker DISPATCHED planned-slot sets the #5143 readiness barrier
@@ -191,7 +202,11 @@ pub(super) fn bring_up_workers(
     // remains defense-in-depth on every worker, but it must not report a
     // ready dataplane before the monitor has established its baseline.
     #[cfg(test)]
-    let ipsec_sa_ready = if coord.force_ipsec_sa_ready {
+    let ipsec_sa_ready = if coord.force_ipsec_sa_not_ready {
+        // #14130: forced not-ready so the unwinding below is verifiable
+        // without a privileged monitor. Production retains the gate.
+        false
+    } else if coord.force_ipsec_sa_ready {
         // #10694: explicit empty baseline pin for worker bring-up seam tests.
         // Production retains the mandatory monitor gate below.
         coord
@@ -223,7 +238,11 @@ pub(super) fn bring_up_workers(
             .wait_ready(Duration::from_secs(5))
     };
     if !ipsec_sa_ready {
-        coord.neighbors.stop_and_join_ipsec_sa_monitor();
+        // #14130: unwind the plan/publish/replay phases. `stop_inner` joins
+        // any aux threads, defaults the just-published runtime, and clears
+        // the sizing counters, so status cannot report a phantom fleet.
+        // It also stops the SA monitor; the explicit stop above is gone.
+        coord.stop_inner(false);
         let stage = ReconcileStage::IpsecSaNotReady;
         coord.last_reconcile_stage = stage.clone();
         return Err(WorkerBringUpError::IpsecSaNotReady(stage));
@@ -254,15 +273,18 @@ pub(super) fn bring_up_workers(
         dnat_fds,
         &startup_report_tx,
     ) {
-        // #4952 differential ARM 1 (stays in the shell): a spawn failed on the
-        // post-teardown path. Return WITHOUT `stop_inner` — the already-launched
-        // workers KEEP their records (reclaimed by the next reconcile's
-        // teardown); the failed worker never registered one.
+        // #14130 (supersedes the #4952 differential for the spawn arm): a
+        // spawn failed on the post-teardown path. Run `stop_inner(false)`
+        // so the already-launched workers are stopped+joined and do NOT
+        // keep forwarding the rejected snapshot while the handler rolls
+        // its baseline back. The failed worker never registered a record.
         LaunchOutcome::SpawnFailed(stage) => {
             eprintln!(
                 "xpf-userspace-dp: worker bring-up FAILED ({stage}); a queue set has no \
                  XSK-bound worker after teardown — failing reconcile closed"
             );
+            coord.stop_inner(false);
+            coord.last_reconcile_stage = stage.clone();
             return Err(WorkerBringUpError::Spawn(stage));
         }
         LaunchOutcome::AllSpawned {
@@ -365,11 +387,16 @@ fn clamp_ring_entries(ring_entries: usize) -> u32 {
 /// #6240 phase: PLAN. Build the per-worker `BindingPlan` lists from the
 /// registered bindings and the just-opened BPF map FDs (read by RAW descriptor
 /// — the `OwnedFd`s stay owned by `fds`, which `publish_runtime` moves onto
-/// `coord.bpf_maps` next), insert the per-slot live-state + identity, apply the
-/// shared-UMEM policy, project the resulting shared-UMEM status back onto
-/// `bindings`, record the sizing values, and set the `Planned` stage. Returns
-/// the worker->plans map the rest of the transaction consumes. Verbatim move of
-/// the pre-#6240 inline block.
+/// `coord.bpf_maps` next), apply the shared-UMEM policy, project the resulting
+/// shared-UMEM status back onto `bindings`, record the sizing values, and set
+/// the `Planned` stage. Returns the worker->plans map the rest of the
+/// transaction consumes.
+///
+/// #14130: this phase REGISTERS NOTHING. The per-slot `live`/`identities`
+/// entries are inserted only by `spawn_workers` on successful spawn
+/// (`register_planned_slots`), so a plan that never launches — the
+/// `IpsecSaNotReady` gate below, or a spawn failure — leaves no phantom
+/// live slots for `live_count`/`refresh_bindings` to report.
 fn plan_workers(
     coord: &mut Coordinator,
     snapshot: &ConfigSnapshot,
@@ -391,16 +418,11 @@ fn plan_workers(
             binding.ready = false;
             continue;
         }
+        // #14130: the live state is created here (the plan carries the Arc
+        // the worker will publish into) but NOT registered on the
+        // coordinator. Registration happens in `spawn_workers` only after
+        // the thread exists.
         let live = Arc::new(BindingLiveState::new());
-        coord.workers.live.insert(binding.slot, live.clone());
-        let identity = BindingIdentity {
-            slot: binding.slot,
-            queue_id: binding.queue_id,
-            worker_id: binding.worker_id,
-            interface: Arc::<str>::from(binding.interface.as_str()),
-            ifindex: binding.ifindex,
-        };
-        coord.workers.identities.insert(binding.slot, identity);
         workers
             .entry(binding.worker_id)
             .or_default()
@@ -461,10 +483,13 @@ fn plan_workers(
     // rotation scratch / V_min floors from workers.len() would put
     // that worker out of range (acquire_v8 returns 0 + debug-panics).
     coord.workers.last_planned_worker_slots = planned_worker_slots(&workers);
+    // #14130: `live` counts only spawned workers' slots. Nothing has
+    // spawned yet, so the stage reports the PLANNED slot count here; the
+    // terminal `Spawned` stage reports the true live count.
     coord.last_reconcile_stage = ReconcileStage::Planned {
         workers: coord.workers.last_planned_workers(),
         bindings: coord.workers.last_planned_bindings(),
-        live: coord.workers.live.len(),
+        live: planned_bindings,
     };
     eprintln!(
         "xpf-userspace-dp: reconcile planned_workers={} planned_bindings={} live_slots={}",
@@ -526,11 +551,15 @@ fn publish_runtime(
         })
         .collect::<BTreeMap<_, _>>();
     let owner_map = super::super::build_cos_owner_worker_by_queue(&coord.forwarding, workers);
+    // #14130: the mirror map is built from the PLANNED slots, not from
+    // `coord.workers` — planning registered nothing, and the map must
+    // describe the full plan by the time the first worker reads it.
+    let (planned_identities, planned_live) = planned_slot_maps(workers);
     coord
         .mirror_targets
         .store(Arc::new(super::super::build_mirror_target_map(
-            &coord.workers.identities,
-            &coord.workers.live,
+            &planned_identities,
+            &planned_live,
         )));
     let active_shards_by_egress_ifindex =
         super::super::build_cos_active_shards_by_egress_ifindex_with_fallback_ifindexes(
@@ -539,6 +568,62 @@ fn publish_runtime(
             &worker_binding_ifindexes,
         );
     coord.refresh_cos_runtime_maps(owner_map, active_shards_by_egress_ifindex);
+}
+
+/// #14130: the per-slot identity/live maps for a plan, built WITHOUT
+/// touching the coordinator. `publish_runtime` feeds these to the mirror
+/// map builder (which needs the full plan before any worker exists);
+/// `spawn_workers` registers the SAME entries on the coordinator, one
+/// worker at a time, only after that worker's thread spawned.
+fn planned_slot_maps(
+    workers: &BTreeMap<u32, Vec<BindingPlan>>,
+) -> (
+    BTreeMap<u32, BindingIdentity>,
+    BTreeMap<u32, Arc<BindingLiveState>>,
+) {
+    let mut identities = BTreeMap::new();
+    let mut live = BTreeMap::new();
+    for plans in workers.values() {
+        for plan in plans {
+            identities.insert(
+                plan.status.slot,
+                BindingIdentity {
+                    slot: plan.status.slot,
+                    queue_id: plan.status.queue_id,
+                    worker_id: plan.status.worker_id,
+                    interface: Arc::<str>::from(plan.status.interface.as_str()),
+                    ifindex: plan.status.ifindex,
+                },
+            );
+            live.insert(plan.status.slot, Arc::clone(&plan.live));
+        }
+    }
+    (identities, live)
+}
+
+/// #14130: register ONE spawned worker's planned slots on the coordinator.
+/// Called by `spawn_workers` only in its post-spawn-success arm, alongside
+/// the #6242 record insert, so `workers.live`/`identities` contain exactly
+/// the slots of threads that exist. Takes the pre-captured rows because
+/// the `BindingPlan`s themselves have moved into the worker body.
+fn register_planned_slots(
+    coord: &mut Coordinator,
+    worker_id: u32,
+    spawn_slots: &[(u32, u32, Arc<str>, i32, Arc<BindingLiveState>)],
+) {
+    for (slot, queue_id, interface, ifindex, live) in spawn_slots {
+        coord.workers.live.insert(*slot, Arc::clone(live));
+        coord.workers.identities.insert(
+            *slot,
+            BindingIdentity {
+                slot: *slot,
+                queue_id: *queue_id,
+                worker_id,
+                interface: Arc::clone(interface),
+                ifindex: *ifindex,
+            },
+        );
+    }
 }
 
 /// #6240 phase: REPLAY. Build the per-worker command queues and replay the
@@ -771,14 +856,15 @@ pub(in crate::afxdp) fn ensure_resolver(coord: &mut Coordinator) -> Option<Arc<N
 /// #6240 phase: SPAWN. The per-worker spawn loop — build the five typed #6241
 /// launch bundles, spawn the worker thread (with the #925 panic slot + the
 /// `#[cfg(test)]` force-failure seams), and on success register ONE #6242
-/// post-spawn `WorkerRuntimeRecord`. Returns a typed [`LaunchOutcome`]:
+/// post-spawn `WorkerRuntimeRecord` plus the worker's #14130 live/identity
+/// slots. Returns a typed [`LaunchOutcome`]:
 /// `SpawnFailed` on the FIRST spawn failure (its stage already recorded on
-/// `coord.last_reconcile_stage`; launched records left INTACT), else
+/// `coord.last_reconcile_stage`; the shell stops the launched workers), else
 /// `AllSpawned` with the spawned ids + dispatched planned-slot sets for the
 /// readiness barrier.
 ///
-/// #4952 (non-negotiable): this NEVER calls `stop_inner`. The two-armed rollback
-/// DECISION lives in the [`bring_up_workers`] shell. The startup-report SENDER is
+/// This NEVER calls `stop_inner`. The rollback DECISION lives in the
+/// [`bring_up_workers`] shell. The startup-report SENDER is
 /// owned by the shell and passed BY REFERENCE (`startup_report_tx`); each worker
 /// clones it. Verbatim move of the pre-#6240 inline spawn loop.
 fn spawn_workers(
@@ -808,6 +894,22 @@ fn spawn_workers(
         // compare it against the worker's reported bound set.
         let planned_slots: std::collections::BTreeSet<u32> =
             binding_plans.iter().map(|plan| plan.status.slot).collect();
+        // #14130: the (slot, queue, interface, ifindex, live) rows to
+        // register if this worker spawns. Captured before `binding_plans`
+        // moves into the launch plan; the live `Arc`s are the same
+        // allocations the plan carries.
+        let spawn_slots: Vec<(u32, u32, Arc<str>, i32, Arc<BindingLiveState>)> = binding_plans
+            .iter()
+            .map(|plan| {
+                (
+                    plan.status.slot,
+                    plan.status.queue_id,
+                    Arc::<str>::from(plan.status.interface.as_str()),
+                    plan.status.ifindex,
+                    Arc::clone(&plan.live),
+                )
+            })
+            .collect();
         // #8388: the per-slot `BindingLiveState` handles dispatched to this
         // worker, captured here because `binding_plans` is moved into the
         // launch plan below. Used ONLY by the `#[cfg(test)]` stub arms, which
@@ -1139,6 +1241,11 @@ busy — forced private bind failure (test seam #6245)"
                 // being publishable behind an `Arc` for the off-lock import
                 // path. `WorkerManager::stop_and_clear` still joins it, in the
                 // same signal-all-then-join-all order.
+                // #14130: register this worker's planned live/identity
+                // slots NOW — the thread exists, so its slots are real.
+                // Workers that never spawn never register (see
+                // `plan_workers`).
+                register_planned_slots(coord, worker_id, &spawn_slots);
                 coord.workers.register(
                     worker_id,
                     WorkerRuntimeRecord {
@@ -1172,15 +1279,10 @@ busy — forced private bind failure (test seam #6245)"
                 };
                 coord.last_reconcile_stage = stage.clone();
                 // #6242: registration is POST-spawn-success, so a FAILED worker
-                // never had a record — there is nothing to unwind. The
-                // pre-#6242 layout inserted the panic slot (#925) + exception
-                // ring / last-resolution slot (#5289) BEFORE spawn and had to
-                // `.remove(&worker_id)` all three here; those removes are gone.
-                // The record's `Arc` locals (`record_panic` /
-                // `record_exception_ring` / `record_last_resolution`) simply
-                // drop at end of this loop iteration. LAUNCHED workers' records
-                // are untouched (the #4952 differential — they are reclaimed by
-                // the next reconcile's teardown).
+                // never had a record (or #14130 live/identity slots) — there
+                // is nothing to unwind. The record's `Arc` locals simply drop
+                // at end of this loop iteration. #14130: the already-launched
+                // workers ARE stopped by the shell's `stop_inner(false)`.
                 if let Ok(mut recent) = coord.recent_exceptions.lock() {
                     // #6244: the control notice still carries the byte-identical
                     // legacy stage string (rendered from the typed stage), so
@@ -1195,9 +1297,8 @@ busy — forced private bind failure (test seam #6245)"
                 // and only compounds the resource pressure) and return the
                 // preserved stage so the shell returns Err and the caller
                 // fails closed instead of persisting a broken snapshot.
-                // #4952/#6240: NEVER `stop_inner` here — the launched workers'
-                // records are left INTACT; the two-armed rollback decision is
-                // made by the shell.
+                // NEVER `stop_inner` here — the rollback decision is made
+                // by the shell.
                 return LaunchOutcome::SpawnFailed(stage);
             }
         }

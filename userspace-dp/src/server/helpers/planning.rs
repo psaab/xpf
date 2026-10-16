@@ -50,13 +50,19 @@ pub(crate) fn same_plan_apply_needs_binding_reconcile(
         return true;
     }
 
+    // #14130: a shortfall against the plan is itself the recovery signal.
+    // The previous form ALSO required an eligible binding with an empty
+    // `last_error`, so a failed bring-up that recorded a cause (the
+    // #8558 bind-failure map, or a live slot's bind error) suppressed the
+    // identical-plan retry forever — the wedge this issue removes. Any
+    // unbound/unregistered runnable slot suffices now; the reconcile
+    // itself re-validates and fails closed again if the fault persists.
     let (_, planned_bindings) = state.afxdp.planned_counts();
     let live_bindings = state.afxdp.live_count();
     (planned_bindings < runnable_bindings || live_bindings < runnable_bindings)
         && state.status.bindings.iter().any(|binding| {
             binding.registered
                 && binding.ifindex > 0
-                && binding.last_error.is_empty()
                 && (!binding.bound || !binding.xsk_registered)
         })
 }

@@ -461,18 +461,18 @@ Differences that matter (#1881):
   drives the regression tests (coordinator-level
   `reconcile_post_teardown_worker_spawn_failure_fails_closed_4952` +
   handler-level `post_teardown_spawn_failure_fails_closed_no_persist_4952`).
-  **#6242 makes the DIFFERENTIAL structural.** The launched workers
-  `0..K-1` stay live because their `WorkerRuntimeRecord`s are registered
-  ONLY on spawn-success (`records.insert` in the `Ok` arm) — the failed
-  worker `K` never inserted a record, so the spawn-Err arm has NOTHING to
-  unwind (the pre-#6242 three `.remove(&worker_id)` calls are gone) and
-  never touches the launched records. The `force_worker_spawn_fail_skip`
-  (fail the Kth, not the 1st) + `force_worker_healthy_stub` seams drive the
-  PARTIAL-success test
-  (`reconcile_partial_spawn_failure_preserves_launched_records_6242`), which
-  asserts workers 0..K-1 keep their records and worker K has none; the
+  **#6242 registration is post-spawn-success; #14130 stops the launched
+  workers.** A failed worker never registers a record (or, since #14130,
+  live/identity slots — planning registers nothing and `spawn_workers`
+  registers a worker's slots only in its success arm). Pre-#14130 the
+  launched workers `0..K-1` were left running the rejected snapshot while
+  the handler rolled its baseline back; #14130's `SpawnFailed` arm runs
+  `stop_inner(false)` like the bind-incomplete arm, so NO worker forwards
+  a rejected snapshot. The `force_worker_spawn_fail_skip` +
+  `force_worker_healthy_stub` seams drive
+  `reconcile_partial_spawn_failure_stops_launched_workers_14130`; the
   symmetric `reconcile_bind_incomplete_clears_all_records_6242` pins the
-  other side (bind-incomplete → `stop_inner` clears ALL).
+  bind side.
 - **A POST-SPAWN in-thread worker bind failure fails closed via the
   startup readiness barrier (#5143). HEARTBEAT != READINESS.** #4952 above
   catches only the SPAWN failure — the thread that never starts. But a
@@ -524,17 +524,14 @@ Differences that matter (#1881):
     — a THREE-worker fixture, two of which bind fully; the one-worker shape
     `post_spawn_inthread_bind_failure_fails_closed_5143` uses satisfies it
     vacuously.
-  - **Spawn-failure (#4952) IS partial**, by design: the arm returns without
-    `stop_inner`, `workers.live` survives, and the launched workers' slots keep
-    reporting bound while the unspawned worker's slots are registered, armed and
-    unbound. This is the one reachable mixed shape — and what is missing at those
-    slots is a worker THREAD, not a socket, so a targeted socket rebind could not
-    repair it; the global rebind re-runs the whole plan and spawns the missing
-    worker. Measured by `spawn_failure_does_leave_bound_siblings_8388`, which is
-    also the POSITIVE CONTROL for the cell above: it proves the same instrument
-    reads back a partial set when one exists, so the empty bound set in the
-    bind-incomplete cell is a property of the reconcile and not of the test
-    scaffolding.
+  - **Spawn-failure is all-or-nothing too (#14130).** Pre-#14130 the arm
+    returned without `stop_inner`, so the launched workers kept reporting
+    bound while the unspawned worker's slots were wedged — a mixed shape
+    forwarding a snapshot the handler had just rolled back. #14130 stops
+    the launched workers, so the reported set is empty exactly as in the
+    bind case. Measured by `spawn_failure_leaves_no_bound_sibling_14130`
+    (which replaces the pre-#14130 positive-control cell
+    `spawn_failure_does_leave_bound_siblings_8388`).
   - Both cells depend on the `#[cfg(test)]` stub workers publishing
     `BindingLiveState::set_bound` for every slot they REPORT bound (the publish a
     real `worker_loop` makes from `BindingWorker::create`). Without it a
@@ -579,6 +576,25 @@ Differences that matter (#1881):
     Widening the Go predicate to act on a wedge whose cause is unknown is a
     separate decision: the `maxConsecutiveAutoRebinds` derivation assumes the
     rebind is being fired for a teardown race.
+
+- **A failed bring-up leaves no phantom fleet and no mixed snapshot
+  (#14130).** `plan_workers` registers nothing: `workers.live`/`identities`
+  gain a slot only when its worker thread actually spawned
+  (`register_planned_slots` in the spawn-success arm), and
+  `publish_runtime` builds the mirror map from the plan rather than from
+  the coordinator maps. Every post-plan failure arm in the
+  `bring_up_workers` shell — `IpsecSaNotReady`, `SpawnFailed`,
+  `BindIncomplete` — runs `stop_inner(false)`, which also zeroes the
+  planned counters, so `live_count`/`planned_counts` can never report
+  threads that do not exist and a rejected snapshot is forwarded by
+  nobody. The same-plan retry wedge is gone with it:
+  `same_plan_apply_needs_binding_reconcile` no longer requires an
+  eligible binding with an empty `last_error` (a recorded #8558 cause used
+  to suppress the retry forever). Cells:
+  `ipsec_sa_not_ready_unwinds_plan_and_same_plan_retries_14130`,
+  `spawn_failure_same_plan_retry_recovers_14130`,
+  `bind_incomplete_same_plan_retry_recovers_14130` (coordinator) and
+  `same_plan_retry_after_bind_failure_reconciles_14130` (handler).
 
 - **Explicit binding-setup failures in the startup report (#6245).** #5143
   reported a bind failure ONLY by OMISSION — the failed slot was simply absent
@@ -633,14 +649,13 @@ Differences that matter (#1881):
   exactly: FD ownership transfer BEFORE any launch; mirror/CoS publication
   BEFORE replay/launch; sessions/queues BEFORE launch; resolver ATTEMPT BEFORE
   worker launch; ALL launches BEFORE the readiness barrier.
-  **The #4952 two-armed rollback DECISION stays in the SHELL, distinct and
-  visible — `spawn_workers` NEVER calls `stop_inner`.** `LaunchOutcome::SpawnFailed`
-  → the shell returns `Err(Spawn)` WITHOUT `stop_inner` (launched records
-  survive — structural via #6242's post-spawn-success insert);
-  `LaunchOutcome::AllSpawned` → the shell runs the barrier and, on a shortfall,
-  calls `stop_inner(false)` (clears ALL). Unifying the arms or moving
-  `stop_inner` into a helper REDs
-  `reconcile_partial_spawn_failure_preserves_launched_records_6242`. The
+  **The failure-rollback DECISION stays in the SHELL — `spawn_workers`
+  NEVER calls `stop_inner`.** Since #14130 every post-plan failure arm
+  (`IpsecSaNotReady`, `SpawnFailed`, bind-incomplete) runs
+  `stop_inner(false)` in the shell; `LaunchOutcome::AllSpawned` → the shell
+  runs the barrier and, on a shortfall, does the same. Moving `stop_inner`
+  into a helper REDs
+  `reconcile_partial_spawn_failure_stops_launched_workers_14130`. The
   resolver is BEST-EFFORT: `ensure_resolver` returns the installed handle as an
   `Option` (`None` on a spawn failure) and is NOT threaded into `spawn_workers`
   as a required input — the invariant is attempt-before-launch, NOT
