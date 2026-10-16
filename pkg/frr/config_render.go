@@ -123,13 +123,19 @@ func (m *Manager) generateInterfaceSettings(fc *FullConfig) string {
 	}
 
 	// Build the explicit-network-type set from OSPF fragments that survive the
-	// same first-area rule as protocol rendering. Equivalent-area fragments
-	// union their settings; later fragments assigned to another area are
-	// dropped and must not suppress the generated point-to-point line.
+	// same first-area rule as protocol rendering — across the global OSPF
+	// config and every routing instance (#14138: an explicit type authored
+	// only under a VRF instance is the same authority and must suppress the
+	// generated point-to-point line). Equivalent-area fragments union their
+	// settings; later fragments assigned to another area are dropped and
+	// must not suppress the generated point-to-point line.
 	ospfNetworkType := make(map[string]bool)
-	if fc.OSPF != nil {
+	collectNetworkTypes := func(ospf *config.OSPFConfig) {
+		if ospf == nil {
+			return
+		}
 		firstAreaByInterface := make(map[string]string)
-		for _, area := range fc.OSPF.Areas {
+		for _, area := range ospf.Areas {
 			areaKey := ospfAreaIdentity11400(area.ID)
 			for _, iface := range area.Interfaces {
 				firstArea, seen := firstAreaByInterface[iface.Name]
@@ -144,6 +150,10 @@ func (m *Manager) generateInterfaceSettings(fc *FullConfig) string {
 				}
 			}
 		}
+	}
+	collectNetworkTypes(fc.OSPF)
+	for i := range fc.Instances {
+		collectNetworkTypes(fc.Instances[i].OSPF)
 	}
 
 	// Collect all interface names that need settings.
