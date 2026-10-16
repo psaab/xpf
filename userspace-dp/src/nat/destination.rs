@@ -1492,14 +1492,16 @@ impl DnatTable {
                 }
                 match (slot.v4, slot.v6) {
                     (Some(p), _) => {
-                        let hosts = host_count_v4(p.prefix_len());
-                        if hosts <= Self::MAX_LOCAL_PREFIX_HOSTS {
-                            if let Ok(net) = Ipv4Net::new(p.addr(), p.prefix_len()) {
-                                for host in net.hosts() {
-                                    let ip = IpAddr::V4(host);
-                                    if !shadowed(ip) {
-                                        out.push((ip, instance, slot.entry.value.new_dst_ip));
-                                    }
+                        let count = host_count_v4(p.prefix_len());
+                        if count <= Self::MAX_LOCAL_PREFIX_HOSTS {
+                            let base = u32::from(p.addr());
+                            // The base is handled above for both bounded and
+                            // unbounded prefixes; begin at offset one to avoid
+                            // duplicating it for v4 /31-/32 and every v6 prefix.
+                            for offset in 1..count {
+                                let ip = IpAddr::V4(std::net::Ipv4Addr::from(base + offset));
+                                if !shadowed(ip) {
+                                    out.push((ip, instance, slot.entry.value.new_dst_ip));
                                 }
                             }
                         }
@@ -1507,14 +1509,16 @@ impl DnatTable {
                     (_, Some(p)) => {
                         // Only expand a v6 block that is itself host-scale;
                         // anything shorter is astronomically large.
-                        let hosts = host_count_v6(p.prefix_len());
-                        if hosts.is_some_and(|h| h <= u128::from(Self::MAX_LOCAL_PREFIX_HOSTS)) {
-                            if let Ok(net) = Ipv6Net::new(p.addr(), p.prefix_len()) {
-                                for host in net.hosts() {
-                                    let ip = IpAddr::V6(host);
-                                    if !shadowed(ip) {
-                                        out.push((ip, instance, slot.entry.value.new_dst_ip));
-                                    }
+                        let count = host_count_v6(p.prefix_len());
+                        if let Some(count) =
+                            count.filter(|h| *h <= u128::from(Self::MAX_LOCAL_PREFIX_HOSTS))
+                        {
+                            let base = u128::from(p.addr());
+                            // As above, the network base was already considered.
+                            for offset in 1..count {
+                                let ip = IpAddr::V6(std::net::Ipv6Addr::from(base + offset));
+                                if !shadowed(ip) {
+                                    out.push((ip, instance, slot.entry.value.new_dst_ip));
                                 }
                             }
                         }
