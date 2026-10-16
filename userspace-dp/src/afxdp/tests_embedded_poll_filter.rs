@@ -3524,6 +3524,230 @@ fn poll_descriptor_snat_outbound_icmp_error_policy_judges_pre_snat_src_13649() {
         }
     }
 }
+/// #13772 FAIL-ON-REVERT: the local RG redirects an outbound SNAT error
+/// to the owning peer; peer policy must still use the original internal
+/// sender, rather than the public source written into the re-NAT'd frame.
+/// The two-pass mirror verifies both a real denial and the inverse permit.
+#[test]
+fn poll_descriptor_snat_outbound_icmp_error_fabric_redirect_judges_pre_snat_src_13772() {
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    for (deny_src, permit_src, expect_permit) in [
+        (client_ip, snat_ip, false),
+        (snat_ip, client_ip, true),
+    ] {
+        let mut frame = build_icmp_te_frame_v4_with_mac(
+            client_ip,
+            server_ip,
+            client_ip,
+            80,
+            12345,
+            PROTO_TCP,
+            TEST_LAN_MAC,
+        );
+        frame[34] = 3;
+        frame[35] = 3;
+        frame[36] = 0;
+        frame[37] = 0;
+        let icmp_csum = checksum16(&frame[34..]);
+        frame[36..38].copy_from_slice(&icmp_csum.to_be_bytes());
+        let mut snapshot = nat_snapshot_with_fabric();
+        snapshot.flow.allow_embedded_icmp = true;
+        snapshot.default_policy = "deny".to_string();
+        snapshot.policies = vec![
+            PolicyRuleSnapshot {
+                name: "deny-outbound-icmp-error-src".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec![format!("{deny_src}/32")],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                application_terms: Vec::new(),
+                action: "deny".to_string(),
+                ..Default::default()
+            },
+            PolicyRuleSnapshot {
+                name: "permit-outbound-icmp-error-src".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec![format!("{permit_src}/32")],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                application_terms: Vec::new(),
+                action: "permit".to_string(),
+                ..Default::default()
+            },
+        ];
+        snapshot.interfaces.iter_mut().for_each(|iface| {
+            if iface.name == "reth1.0" {
+                iface.redundancy_group = 2;
+            } else if iface.name == "reth0.80" {
+                iface.redundancy_group = 1;
+            }
+        });
+        let forwarding = build_forwarding_state(&snapshot);
+        // First pass: LAN RG is active here, while WAN RG belongs to peer.
+        let mut local_binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        local_binding.interface = Arc::<str>::from("reth1.0");
+        let mut local_sessions = SessionTable::new();
+        n6474_install_snat_session(
+            &mut local_sessions,
+            IpAddr::V4(client_ip),
+            IpAddr::V4(server_ip),
+            IpAddr::V4(snat_ip),
+            libc::AF_INET as u8,
+            0,
+        );
+        let meta = n6474_meta(24, libc::AF_INET as u8, PROTO_ICMP, frame.len());
+        txn_run_descriptor_checked(
+            &mut local_binding,
+            &mut local_sessions,
+            &forwarding,
+            &fabric_redirect_peer_ha_state(),
+            &frame,
+            meta,
+            true,
+        );
+        assert_eq!(local_binding.scratch.scratch_forwards.len(), 1);
+        let local_forward = &local_binding.scratch.scratch_forwards[0];
+        assert_eq!(local_forward.decision.resolution.disposition, ForwardingDisposition::FabricRedirect);
+        let fabric_frame = match &local_forward.frame {
+            PendingForwardFrame::Prebuilt(bytes) => bytes.clone(),
+            _ => panic!("#13772: first pass must hand off a prebuilt frame"),
+        };
+        let fabric_meta = local_forward.meta;
+        assert_eq!(fabric_meta.ingress_ifindex, 24);
+        let wire_l3 = if fabric_frame[12..14] == [0x08, 0x00] { 14 } else { 18 };
+        assert_eq!(
+            &fabric_frame[wire_l3 + 12..wire_l3 + 16],
+            &snat_ip.octets(),
+            "#13772: the first pass preserves the re-NAT'd public wire identity"
+        );
+
+        // Second pass: reverse the fabric MACs and run the owning peer's
+        // normal descriptor adjudication against its copy of the session.
+        let mut peer_snapshot = snapshot.clone();
+        peer_snapshot.fabrics[0].local_mac = "00:aa:bb:cc:dd:ee".to_string();
+        peer_snapshot.fabrics[0].peer_mac = "02:bf:72:ff:00:01".to_string();
+        peer_snapshot.interfaces.iter_mut().for_each(|iface| {
+            if iface.ifindex == 21 {
+                iface.hardware_addr = "00:aa:bb:cc:dd:ee".to_string();
+            }
+        });
+        let peer_forwarding = build_forwarding_state(&peer_snapshot);
+        let mut peer_binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+        peer_binding.interface = Arc::<str>::from("fab0");
+        let mut peer_sessions = SessionTable::new();
+        n6474_install_snat_session(
+            &mut peer_sessions,
+            IpAddr::V4(client_ip),
+            IpAddr::V4(server_ip),
+            IpAddr::V4(snat_ip),
+            libc::AF_INET as u8,
+            0,
+        );
+        let forward_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(client_ip),
+            dst_ip: IpAddr::V4(server_ip),
+            src_port: 12345,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let forward_nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(snat_ip)),
+            rewrite_dst: None,
+            rewrite_src_port: Some(40000),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: false,
+        };
+        assert!(peer_sessions.install_with_protocol_with_origin(
+            crate::session::reverse_session_key(&forward_key, forward_nat),
+            SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 24,
+                    tx_ifindex: 24,
+                    tunnel_endpoint_id: 0,
+                    next_hop: Some(IpAddr::V4(client_ip)),
+                    neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                    src_mac: Some(TEST_LAN_MAC),
+                    tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: forward_nat.reverse(
+                    IpAddr::V4(client_ip),
+                    IpAddr::V4(server_ip),
+                    12345,
+                    80,
+                ),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            SessionMetadata {
+                ingress_zone: TEST_WAN_ZONE_ID,
+                egress_zone: TEST_LAN_ZONE_ID,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                owner_rg_id: 0,
+                fabric_ingress: false,
+                is_reverse: true,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+            },
+            crate::session::SessionOrigin::ReverseFlow,
+            123_000_000_000,
+            PROTO_TCP,
+            0x18,
+        ));
+        let mut peer_meta = n6474_meta(21, libc::AF_INET as u8, PROTO_ICMP, fabric_frame.len());
+        peer_meta.l3_offset = wire_l3 as u16;
+        peer_meta.l4_offset = (wire_l3 + 20) as u16;
+        peer_meta.payload_offset = (wire_l3 + 28) as u16;
+        let (peer_batch, peer_dbg) = txn_run_descriptor(
+            &mut peer_binding,
+            &mut peer_sessions,
+            &peer_forwarding,
+            &fabric_redirect_local_ha_state(),
+            &fabric_frame,
+            peer_meta,
+        );
+        assert_eq!(
+            peer_batch.validated_packets,
+            1,
+            "#13772: peer fixture reaches policy adjudication (rx={}, metadata={})",
+            peer_dbg.rx,
+            peer_batch.metadata_packets
+        );
+        if expect_permit {
+            assert_eq!(
+                peer_binding.scratch.scratch_forwards.len(),
+                1,
+                "#13772: an internal-source permit must pass peer adjudication even when the public source is denied"
+            );
+        } else {
+            assert!(
+                peer_binding.scratch.scratch_forwards.is_empty(),
+                "#13772: an internal-source deny must refuse at the peer despite a public-source permit (RED on master)"
+            );
+            assert_eq!(peer_binding.scratch.scratch_recycle.len(), 1);
+        }
+    }
+}
 
 /// #6474 FAIL-ON-REVERT (v6): the SNAT66 twin — an internal v6 host emits
 /// an ICMPv6 Destination-Unreachable about the session's reply; the wire
