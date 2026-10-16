@@ -57,16 +57,31 @@ func newDHCPV6BindingMessage(t *testing.T, xid dhcpv6.TransactionID) *dhcpv6.Mes
 	return message
 }
 
+// armDHCPV6Reply records a pending binding as if message (a client request,
+// normally Solicit) had been forwarded from the default test client
+// fe80::99 — matching the PeerAddr the #10198 dispatcher fixtures use.
+// (It was ::1 before #14181; loopback is no longer a legitimate client
+// peer.) Tests that need a different soliciting client use
+// armDHCPV6ReplyFrom.
 func armDHCPV6Reply(t *testing.T, relay *dhcpV6Relay, message dhcpv6.DHCPv6) {
 	t.Helper()
+	armDHCPV6ReplyFrom(t, relay, message, net.ParseIP("fe80::99"))
+}
+
+// armDHCPV6ReplyFrom records a pending binding for message forwarded from
+// clientAddr. message must be the client request (its type selects which
+// server inner types are legitimate answers, #14181); pass the request, not
+// the server reply.
+func armDHCPV6ReplyFrom(t *testing.T, relay *dhcpV6Relay, message dhcpv6.DHCPv6, clientAddr net.IP) {
+	t.Helper()
 	if relay.pending == nil {
-		relay.pending = newPendingTableOf[pending6Key](64, pendingTTL, time.Now)
+		relay.pending = newPendingTableOf[pending6Key, pending6Entry](64, pendingTTL, time.Now)
 	}
 	key, ok := pending6KeyFor(message)
 	if !ok {
 		t.Fatal("failed to create DHCPv6 pending key")
 	}
-	relay.pending.insert(key)
+	relay.pending.insertValue(key, pending6EntryFor(clientAddr, message.Type()))
 }
 
 func TestBuildRelayForwardV6RFC8415(t *testing.T) {

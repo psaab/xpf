@@ -406,6 +406,21 @@ Bindings remain live for the same 30-second TTL, are bounded with the v6
 default ingress rate, and are carried across relay reconfiguration; the match
 is not consumed, so both multi-server Advertises and later replies can use it.
 
+Client-identity binding (#14181): the pending entry also records the
+soliciting client's address and request type. A Relay-Reply is forwarded
+only when its outer peer-address equals the recorded client address (so a
+forged reply cannot redirect a pending transaction to loopback — loopback
+peer-addresses are rejected outright — or to a third party) and its inner
+type is a legitimate server answer to the recorded request
+(`Solicit`->`Advertise`; `Request`/`Renew`/`Rebind`/`Confirm`/`Decline`/
+`Release`/`Information-request`->`Reply`; `RECONFIGURE` and all other
+client-direction inners are dropped as `RepliesDroppedInvalid`). A
+Relay-Reply arriving on a client-facing socket may select only that
+receiving interface's own dispatcher target; cross-interface selection is
+dropped as `RepliesDroppedDispatcherLocal` on the synthetic dispatcher row.
+The legitimate link-local shared-socket return (outer peer = the soliciting
+link-local client) is unaffected.
+
 
 **Bounded — capacity is derived from `maximum-packet-rate`, evict-oldest.**
 Steady-state occupancy is `rate × TTL`, and the fill rate is the configurable
@@ -753,7 +768,8 @@ packet, source port/address, nested trust boundary, and build validation are
 visible in the per-interface `inet6` row returned by `Manager.Stats`; reply
 source, parse, Interface-ID, nested-chain, and validation drops are visible
 there too. Shared dispatcher pre-dispatch drops (parse, empty/unknown
-Interface-ID, and ambiguous duplicate matches) appear once in the synthetic
+Interface-ID, ambiguous duplicate matches, and client-socket
+cross-interface selections) appear once in the synthetic
 `inet6` row whose Interface is `<dhcpv6-reply-dispatcher>`.
 
 The link resolver uses the first usable global address returned by

@@ -2,6 +2,7 @@ package dhcprelay
 
 import (
 	"encoding/binary"
+	"net"
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
 )
@@ -19,6 +20,82 @@ type pending6Key struct {
 	duidLen uint8
 	iaType  uint16
 	iaid    [4]byte
+}
+
+// pending6Entry is the payload bound to a pending6Key (#14181): the address
+// of the client (or downstream relay) whose packet the relay forwarded
+// upstream. A Relay-Reply is forwarded only when its outer peer-address
+// equals this recorded address, so a forged reply cannot redirect a pending
+// transaction to loopback or a third party. Stored as a fixed 16-byte array
+// (plus a presence flag) so the pending ring stays allocation-free; the
+// empty payload (unknown client — entries adopted from a pre-#14181 table
+// shape in tests, which never happens in production where insert always
+// carries the peer) fails closed on the reply path.
+type pending6Entry struct {
+	clientAddr     [16]byte
+	hasClientAddr  bool
+	requestType    dhcpv6.MessageType
+	hasRequestType bool
+}
+
+func pending6EntryFor(clientAddr net.IP, requestType dhcpv6.MessageType) pending6Entry {
+	entry := pending6Entry{requestType: requestType, hasRequestType: requestType != dhcpv6.MessageTypeNone}
+	if clientAddr != nil {
+		if ip16 := clientAddr.To16(); ip16 != nil {
+			copy(entry.clientAddr[:], ip16)
+			entry.hasClientAddr = true
+		}
+	}
+	return entry
+}
+
+// clientIP returns the recorded soliciting-client address, or nil when the
+// entry carries none (which the reply path treats as unbound/fail-closed).
+func (e pending6Entry) clientIP() net.IP {
+	if !e.hasClientAddr {
+		return nil
+	}
+	return net.IP(e.clientAddr[:])
+}
+
+// serverReplyTypeAllowed reports whether innerType is a legitimate
+// server-to-client answer to the recorded client request type. RFC 8415:
+// Solicit->Advertise; Request/Renew/Rebind/Confirm/Decline/Release/
+// Information-request->Reply. RECONFIGURE (type 10) is server-initiated,
+// is never an answer to a relayed request, and must carry its own
+// authentication (RFC 8415 sections 20-21); it is therefore never allowed
+// through the relay-reply path. A recorded request of any other type fails
+// closed. The zero payload (no recorded request type, only the #10198
+// fixture shape) uses the transitional floor in dhcpv6ServerReplyTypeAllowed.
+func (e pending6Entry) serverReplyTypeAllowed(innerType dhcpv6.MessageType) bool {
+	if !e.hasRequestType {
+		return innerType == dhcpv6.MessageTypeSolicit ||
+			innerType == dhcpv6.MessageTypeAdvertise ||
+			innerType == dhcpv6.MessageTypeReply
+	}
+	switch e.requestType {
+	case dhcpv6.MessageTypeSolicit:
+		return innerType == dhcpv6.MessageTypeAdvertise
+	case dhcpv6.MessageTypeRequest, dhcpv6.MessageTypeConfirm,
+		dhcpv6.MessageTypeRenew, dhcpv6.MessageTypeRebind,
+		dhcpv6.MessageTypeRelease, dhcpv6.MessageTypeDecline,
+		dhcpv6.MessageTypeInformationRequest:
+		return innerType == dhcpv6.MessageTypeReply
+	default:
+		return false
+	}
+}
+
+// dhcpv6ServerReplyTypeAllowed is the request-independent floor. Solicit is
+// included only as the transitional inner type of the #10198 dispatcher
+// fixtures (NewMessage defaults to Solicit); production bindings always
+// carry a recorded request type and the stricter per-request check above
+// rejects a Solicit inner for every recorded request. RECONFIGURE and all
+// other client-direction types are rejected here for every caller.
+func dhcpv6ServerReplyTypeAllowed(innerType dhcpv6.MessageType) bool {
+	return innerType == dhcpv6.MessageTypeSolicit ||
+		innerType == dhcpv6.MessageTypeAdvertise ||
+		innerType == dhcpv6.MessageTypeReply
 }
 
 // pending6KeyFor extracts only values the DHCPv6 server is required to echo:

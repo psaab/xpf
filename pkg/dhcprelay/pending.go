@@ -64,8 +64,8 @@ import (
 //
 // SHARED CORE (#10699). The table is generic over its key: v4 instantiates
 // pendingTable (pendingKey: xid+chaddr, below) and DHCPv6 instantiates
-// pendingTableOf[pending6Key] (xid+DUID+IAID, see pending6.go). One ring, one
-// expiry/eviction discipline, one set of O(1) pins — a second copy would
+// pendingTableOf[pending6Key, pending6Entry] (xid+DUID+IAID key, soliciting
+// client address payload, see pending6.go). One ring, one
 // re-learn every lesson in these comments the hard way.
 
 const (
@@ -221,10 +221,11 @@ func pendingKeyFor(pkt *dhcpv4.DHCPv4) pendingKey {
 }
 
 // pendingSlotOf is one insertion in the expiry-ordered ring. pendingSlot is
-// the v4 instantiation; the v6 relay uses pendingSlotOf[pending6Key].
-type pendingSlotOf[K comparable] struct {
-	key K
-	exp time.Time
+// the v4 instantiation; the v6 relay uses a pendingSlotOf alias (see below).
+type pendingSlotOf[K comparable, V any] struct {
+	key   K
+	value V
+	exp   time.Time
 	// gen identifies WHICH insertion of this key the slot represents. When a
 	// key is re-inserted, the map moves to the new generation and every older
 	// slot becomes stale. See pendingEntry.gen.
@@ -236,24 +237,25 @@ type pendingSlotOf[K comparable] struct {
 }
 
 // pendingSlot is the v4 pending key's ring slot. Alias, not a copy: every
-// method below is defined once on pendingTableOf[K].
-type pendingSlot = pendingSlotOf[pendingKey]
+// method below is defined once on pendingTableOf[K, V].
+type pendingSlot = pendingSlotOf[pendingKey, struct{}]
 
-// pendingEntry is the live state for one key: its expiry, and the generation
-// of the ring slot that owns it.
-type pendingEntry struct {
-	exp time.Time
-	gen uint64
+// pendingEntry is the live state for one key: its payload, expiry, and the
+// generation of the ring slot that owns it.
+type pendingEntry[V any] struct {
+	value V
+	exp   time.Time
+	gen   uint64
 	// ciaddr is the request ciaddr for the v4 ciaddr-unicast check (#14188);
 	// zero/unused for v6.
 	ciaddr net.IP
 }
 
 // pendingTableOf is a bounded, expiring set of outstanding relayed requests,
-// generic over the key so the v4 and DHCPv6 relays share one ring, one
+// generic over key and payload so the v4 and DHCPv6 relays share one ring, one
 // expiry/eviction discipline, and one set of O(1) pins. pendingTable is the
-// v4 instantiation (key pendingKey, below); the v6 relay instantiates
-// pendingTableOf[pending6Key] (see pending6.go).
+// v4 instantiation (key pendingKey, empty payload); the v6 relay instantiates
+// pendingTableOf[pending6Key, pending6Entry] (see pending6.go).
 //
 // It is written by the client-facing read loop and read by the server-facing
 // reply loop — two different goroutines within one relay session — so it is
@@ -279,12 +281,12 @@ type pendingEntry struct {
 // the capacity and a slot is always freed before a push, len(entries) <= count
 // <= capacity holds — the ring bounds the map, so duplicate inserts cannot grow
 // either structure past the cap.
-type pendingTableOf[K comparable] struct {
+type pendingTableOf[K comparable, V any] struct {
 	mu      sync.Mutex
-	entries map[K]pendingEntry // key -> expiry + owning generation
-	ring    []pendingSlotOf[K] // fixed length == capacity; expiry-ordered
-	head    int                // index of the oldest slot
-	count   int                // slots in use
+	entries map[K]pendingEntry[V] // key -> payload, expiry + owning generation
+	ring    []pendingSlotOf[K, V] // fixed length == capacity; expiry-ordered
+	head    int                   // index of the oldest slot
+	count   int                   // slots in use
 	ttl     time.Duration
 	now     func() time.Time
 
@@ -311,13 +313,13 @@ type pendingTableOf[K comparable] struct {
 }
 
 // pendingTable is the v4 instantiation of pendingTableOf. Alias, not a copy.
-type pendingTable = pendingTableOf[pendingKey]
+type pendingTable = pendingTableOf[pendingKey, struct{}]
 
 // newPendingTableOf builds a table for any comparable key. A nil clock
 // defaults to time.Now; a non-positive capacity or ttl falls back to the
 // package defaults so a mis-wired caller cannot silently create an unbounded
 // or never-expiring table. Production sizes capacity with pendingCapacityFor.
-func newPendingTableOf[K comparable](capacity int, ttl time.Duration, now func() time.Time) *pendingTableOf[K] {
+func newPendingTableOf[K comparable, V any](capacity int, ttl time.Duration, now func() time.Time) *pendingTableOf[K, V] {
 	if now == nil {
 		now = time.Now
 	}
@@ -327,18 +329,19 @@ func newPendingTableOf[K comparable](capacity int, ttl time.Duration, now func()
 	if ttl <= 0 {
 		ttl = pendingTTL
 	}
-	return &pendingTableOf[K]{
-		entries: make(map[K]pendingEntry),
-		ring:    make([]pendingSlotOf[K], capacity),
+	return &pendingTableOf[K, V]{
+		entries: make(map[K]pendingEntry[V]),
+		ring:    make([]pendingSlotOf[K, V], capacity),
 		ttl:     ttl,
 		now:     now,
 	}
 }
 
-// newPendingTable builds the v4 table. It is newPendingTableOf[pendingKey],
-// kept so every v4 caller and test reads unchanged.
+// newPendingTable builds the v4 table. It is
+// newPendingTableOf[pendingKey, struct{}], kept so every v4 caller and test
+// reads unchanged.
 func newPendingTable(capacity int, ttl time.Duration, now func() time.Time) *pendingTable {
-	return newPendingTableOf[pendingKey](capacity, ttl, now)
+	return newPendingTableOf[pendingKey, struct{}](capacity, ttl, now)
 }
 
 // insert records a forwarded request as bindable for ttl.
@@ -349,7 +352,12 @@ func newPendingTable(capacity int, ttl time.Duration, now func() time.Time) *pen
 // legitimate first reply of every exchange.
 //
 // A nil receiver is a no-op (see matches for the fail-closed rationale).
-func (t *pendingTableOf[K]) insert(k K) {
+func (t *pendingTableOf[K, V]) insert(k K) {
+	t.insertValue(k, *new(V))
+}
+
+// insertValue is insert with an attached payload (the DHCPv6 client identity).
+func (t *pendingTableOf[K, V]) insertValue(k K, value V) {
 	if t == nil {
 		return
 	}
@@ -374,7 +382,7 @@ func (t *pendingTableOf[K]) insert(k K) {
 		t.slotScans++ // the one probe read above
 		t.head = 0
 		t.count = 0
-		t.entries = make(map[K]pendingEntry)
+		t.entries = make(map[K]pendingEntry[V])
 	}
 
 	// Reclaim expired slots from the head, BOUNDED. The ring is expiry-ordered,
@@ -437,13 +445,13 @@ func (t *pendingTableOf[K]) insert(k K) {
 		}
 	}
 
-	t.pushLocked(k, now.Add(t.ttl))
+	t.pushLocked(k, value, now.Add(t.ttl))
 }
 
 // insertCiaddr is insert plus the request ciaddr recorded beside the entry.
 // It inserts normally (identical expiry/eviction discipline) then stamps
 // the ciaddr onto the live entry and its owning ring slot.
-func (t *pendingTableOf[K]) insertCiaddr(k K, ciaddr net.IP) {
+func (t *pendingTableOf[K, V]) insertCiaddr(k K, ciaddr net.IP) {
 	if t == nil {
 		return
 	}
@@ -505,19 +513,19 @@ func matchesPending(t *pendingTable, k pendingKey) (net.IP, bool) {
 // pushLocked records one key with an explicit expiry, assigning it a fresh
 // generation. Callers MUST push in non-decreasing expiry order so the ring
 // stays expiry-ordered, and MUST have already made room. Caller holds mu.
-func (t *pendingTableOf[K]) pushLocked(k K, exp time.Time) {
-	t.pushLockedCiaddr(k, exp, nil)
+func (t *pendingTableOf[K, V]) pushLocked(k K, value V, exp time.Time) {
+	t.pushLockedCiaddr(k, value, exp, nil)
 }
 
-func (t *pendingTableOf[K]) pushLockedCiaddr(k K, exp time.Time, ciaddr net.IP) {
+func (t *pendingTableOf[K, V]) pushLockedCiaddr(k K, value V, exp time.Time, ciaddr net.IP) {
 	gen := t.nextGen
 	t.nextGen++
 	var ci4 net.IP
 	if ciaddr != nil {
 		ci4 = append(net.IP(nil), ciaddr.To4()...)
 	}
-	t.entries[k] = pendingEntry{exp: exp, gen: gen, ciaddr: ci4}
-	t.ring[(t.head+t.count)%len(t.ring)] = pendingSlotOf[K]{key: k, exp: exp, gen: gen, ciaddr: ci4}
+	t.entries[k] = pendingEntry[V]{value: value, exp: exp, gen: gen, ciaddr: ci4}
+	t.ring[(t.head+t.count)%len(t.ring)] = pendingSlotOf[K, V]{key: k, value: value, exp: exp, gen: gen, ciaddr: ci4}
 	t.count++
 }
 
@@ -531,9 +539,9 @@ func (t *pendingTableOf[K]) pushLockedCiaddr(k K, exp time.Time, ciaddr net.IP) 
 // calls, and a frozen test clock never does); comparing expiries would then
 // match the OLDER slot and delete a binding the newer slot still owns — a
 // silently lost reply. Caller holds mu.
-func (t *pendingTableOf[K]) popHeadLocked() bool {
+func (t *pendingTableOf[K, V]) popHeadLocked() bool {
 	s := t.ring[t.head]
-	t.ring[t.head] = pendingSlotOf[K]{} // drop the time.Time reference
+	t.ring[t.head] = pendingSlotOf[K, V]{} // drop the payload/time references
 	t.head = (t.head + 1) % len(t.ring)
 	t.count--
 	t.slotScans++
@@ -561,7 +569,7 @@ func (t *pendingTableOf[K]) popHeadLocked() bool {
 // caller was mis-wired; failing closed makes that a loud, counted, immediately
 // visible outage rather than a silent loss of the binding this file exists to
 // enforce — the same posture as the #4163 empty-allow-set rule.
-func (t *pendingTableOf[K]) matches(k K) bool {
+func (t *pendingTableOf[K, V]) matches(k K) bool {
 	if t == nil {
 		return false
 	}
@@ -594,14 +602,14 @@ func (t *pendingTableOf[K]) matches(k K) bool {
 // Expired entries are excluded, and each entry keeps its ORIGINAL expiry when
 // adopted — a config reload must not extend the binding window, which would
 // hand an attacker a longer guessing window for free.
-func (t *pendingTableOf[K]) snapshot() []pendingSlotOf[K] {
+func (t *pendingTableOf[K, V]) snapshot() []pendingSlotOf[K, V] {
 	if t == nil {
 		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
-	live := make([]pendingSlotOf[K], 0, t.count)
+	live := make([]pendingSlotOf[K, V], 0, t.count)
 	for i := 0; i < t.count; i++ {
 		s := t.ring[(t.head+i)%len(t.ring)]
 		// Skip stale slots (a newer generation owns the key) and expired ones.
@@ -629,7 +637,7 @@ func (t *pendingTableOf[K]) snapshot() []pendingSlotOf[K] {
 // The destination MUST be empty — see the assertion in the body. adopt appends
 // rather than merging, so it cannot preserve expiry ordering against
 // pre-existing entries, and every other operation depends on that ordering.
-func (t *pendingTableOf[K]) adopt(slots []pendingSlotOf[K]) {
+func (t *pendingTableOf[K, V]) adopt(slots []pendingSlotOf[K, V]) {
 	if t == nil || len(slots) == 0 {
 		return
 	}
@@ -661,12 +669,28 @@ func (t *pendingTableOf[K]) adopt(slots []pendingSlotOf[K]) {
 		slots = slots[len(slots)-capacity:] // keep the NEWEST (longest-lived)
 	}
 	for _, s := range slots {
-		t.pushLockedCiaddr(s.key, s.exp, s.ciaddr)
+		t.pushLockedCiaddr(s.key, s.value, s.exp, s.ciaddr)
 	}
 }
 
+// lookup returns the live payload for k, or false if absent/expired. Like
+// matches it does not consume the entry (multi-server replies share it).
+func (t *pendingTableOf[K, V]) lookup(k K) (V, bool) {
+	var zero V
+	if t == nil {
+		return zero, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.entries[k]
+	if !ok || !t.now().Before(e.exp) {
+		return zero, false
+	}
+	return e.value, true
+}
+
 // evictions returns the cap-pressure eviction count.
-func (t *pendingTableOf[K]) evictions() uint64 {
+func (t *pendingTableOf[K, V]) evictions() uint64 {
 	if t == nil {
 		return 0
 	}
@@ -678,7 +702,7 @@ func (t *pendingTableOf[K]) evictions() uint64 {
 // addEvictions adds a prior table's cumulative count after its live bindings
 // have been adopted. The table is otherwise newly initialized, but its
 // evictions counter belongs to the interface lifetime.
-func (t *pendingTableOf[K]) addEvictions(n uint64) {
+func (t *pendingTableOf[K, V]) addEvictions(n uint64) {
 	if t == nil || n == 0 {
 		return
 	}
@@ -713,7 +737,7 @@ func (t *pendingTableOf[K]) addEvictions(n uint64) {
 // Stats() while the packet path is running.
 //
 // Use liveEntries for the count of distinct bindable keys.
-func (t *pendingTableOf[K]) occupancy() int {
+func (t *pendingTableOf[K, V]) occupancy() int {
 	if t == nil {
 		return 0
 	}
@@ -725,7 +749,7 @@ func (t *pendingTableOf[K]) occupancy() int {
 // expiredPrefixLocked returns how many slots at the head have expired. The ring
 // is expiry-ordered, so expired slots are a contiguous prefix and the first
 // unexpired index can be found by binary search. Caller holds mu.
-func (t *pendingTableOf[K]) expiredPrefixLocked(now time.Time) int {
+func (t *pendingTableOf[K, V]) expiredPrefixLocked(now time.Time) int {
 	lo, hi := 0, t.count
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
@@ -743,7 +767,7 @@ func (t *pendingTableOf[K]) expiredPrefixLocked(now time.Time) int {
 // can include entries past their expiry; they are inert either way because
 // matches re-checks the expiry. Diagnostic/test accessor — the operator-facing
 // gauge is occupancy.
-func (t *pendingTableOf[K]) liveEntries() int {
+func (t *pendingTableOf[K, V]) liveEntries() int {
 	if t == nil {
 		return 0
 	}
@@ -753,7 +777,7 @@ func (t *pendingTableOf[K]) liveEntries() int {
 }
 
 // capacity returns the table's fixed entry ceiling.
-func (t *pendingTableOf[K]) capacity() int {
+func (t *pendingTableOf[K, V]) capacity() int {
 	if t == nil {
 		return 0
 	}
@@ -764,7 +788,7 @@ func (t *pendingTableOf[K]) capacity() int {
 
 // scans returns the number of ring slots examined by the expiry/eviction path.
 // Test probe for the O(1) invariant; see slotScans.
-func (t *pendingTableOf[K]) scans() uint64 {
+func (t *pendingTableOf[K, V]) scans() uint64 {
 	if t == nil {
 		return 0
 	}

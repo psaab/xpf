@@ -55,7 +55,7 @@ func TestPending6KeyBindsXIDDUIDAndIAType(t *testing.T) {
 
 func TestPending6TableBoundedAndExpires(t *testing.T) {
 	now := time.Unix(100, 0)
-	table := newPendingTableOf[pending6Key](1, time.Second, func() time.Time { return now })
+	table := newPendingTableOf[pending6Key, pending6Entry](1, time.Second, func() time.Time { return now })
 	first := pending6Key{xid: dhcpv6.TransactionID{1, 0, 0}}
 	second := pending6Key{xid: dhcpv6.TransactionID{2, 0, 0}}
 	table.insert(first)
@@ -79,11 +79,12 @@ func TestPending6TableBoundedAndExpires(t *testing.T) {
 func TestDHCPV6RelayDropsUnboundServerReply(t *testing.T) {
 	relay := &dhcpV6Relay{
 		ifaceName: "wan0",
-		pending:   newPendingTableOf[pending6Key](4, pendingTTL, time.Now),
+		pending:   newPendingTableOf[pending6Key, pending6Entry](4, pendingTTL, time.Now),
 	}
 	client := newFakeConn()
 	defer client.Close()
 	inner := newDHCPV6BindingMessage(t, dhcpv6.TransactionID{7, 8, 9})
+	inner.MessageType = dhcpv6.MessageTypeAdvertise
 	reply := &dhcpv6.RelayMessage{
 		MessageType: dhcpv6.MessageTypeRelayReply,
 		HopCount:    1,
@@ -94,7 +95,7 @@ func TestDHCPV6RelayDropsUnboundServerReply(t *testing.T) {
 	reply.AddOption(dhcpv6.OptRelayMessage(inner))
 	server := &net.UDPAddr{IP: net.ParseIP("2001:db8::5"), Port: dhcpv6RelayPort}
 	processDHCPV6ServerPacket(relay, client, reply, server,
-		[]*net.UDPAddr{server}, []byte("wan0"))
+		[]*net.UDPAddr{server}, []byte("wan0"), false)
 	if client.writeCount() != 0 || relay.repliesForwarded.Load() != 0 {
 		t.Fatalf("unbound reply reached client: writes=%d forwarded=%d",
 			client.writeCount(), relay.repliesForwarded.Load())
@@ -108,7 +109,7 @@ func TestDHCPV6RelayPassesSolicitAdvertiseRequestReplyBindings(t *testing.T) {
 	relay := &dhcpV6Relay{
 		ifaceName:  "wan0",
 		kernelName: "wan0",
-		pending:    newPendingTableOf[pending6Key](8, pendingTTL, time.Now),
+		pending:    newPendingTableOf[pending6Key, pending6Entry](8, pendingTTL, time.Now),
 	}
 	client := newFakeDHCPV6Conn()
 	serverConn := newFakeConn()
@@ -164,7 +165,7 @@ func TestDHCPV6RelayPassesSolicitAdvertiseRequestReplyBindings(t *testing.T) {
 		outer.AddOption(dhcpv6.OptInterfaceID([]byte("wan0")))
 		outer.AddOption(dhcpv6.OptRelayMessage(message))
 		processDHCPV6ServerPacket(relay, client, outer, server,
-			[]*net.UDPAddr{server}, []byte("wan0"))
+			[]*net.UDPAddr{server}, []byte("wan0"), false)
 	}
 
 	solicit := newDHCPV6BindingMessage(t, dhcpv6.TransactionID{1, 2, 3})

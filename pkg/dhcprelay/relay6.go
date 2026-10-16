@@ -64,6 +64,7 @@ type dhcpV6ReplyDispatcher struct {
 	droppedEmptyIID  atomic.Uint64
 	droppedUnknown   atomic.Uint64
 	droppedAmbiguous atomic.Uint64
+	droppedLocal     atomic.Uint64
 }
 
 func newDHCPV6ReplyDispatcher() *dhcpV6ReplyDispatcher {
@@ -78,6 +79,7 @@ type dhcpV6ReplyDispatcherStats struct {
 	emptyIID  uint64
 	unknown   uint64
 	ambiguous uint64
+	local     uint64
 }
 
 func (d *dhcpV6ReplyDispatcher) stats() dhcpV6ReplyDispatcherStats {
@@ -89,6 +91,7 @@ func (d *dhcpV6ReplyDispatcher) stats() dhcpV6ReplyDispatcherStats {
 		emptyIID:  d.droppedEmptyIID.Load(),
 		unknown:   d.droppedUnknown.Load(),
 		ambiguous: d.droppedAmbiguous.Load(),
+		local:     d.droppedLocal.Load(),
 	}
 }
 
@@ -256,7 +259,7 @@ type dhcpV6Relay struct {
 	repliesDroppedParse      atomic.Uint64
 	repliesDroppedInvalid    atomic.Uint64
 	repliesDroppedNested     atomic.Uint64
-	pending                  *pendingTableOf[pending6Key]
+	pending                  *pendingTableOf[pending6Key, pending6Entry]
 	repliesDroppedNoRequest  atomic.Uint64
 	warnedNoRequest          atomic.Bool
 }
@@ -365,7 +368,7 @@ func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config
 			kernelName:    d.kernelName,
 			spec:          d.spec,
 			maxPacketRate: defaultMaxPacketRate,
-			pending:       newPendingTableOf[pending6Key](pendingCapacity, pendingTTL, m.now),
+			pending:       newPendingTableOf[pending6Key, pending6Entry](pendingCapacity, pendingTTL, m.now),
 			cancel:        cancel,
 			done:          make(chan struct{}),
 		}
@@ -714,7 +717,48 @@ func (d *dhcpV6ReplyDispatcher) restart(failed net.PacketConn) net.PacketConn {
 	}
 }
 
+// dispatch routes a Relay-Reply received on the shared upstream (server)
+// socket to the target selected by Interface-ID/LinkAddr. receivedOnLocal
+// must be false here: only the shared socket is a legitimate upstream path.
 func (d *dhcpV6ReplyDispatcher) dispatch(packet dhcpv6.DHCPv6, source net.Addr) bool {
+	return d.dispatchReceived(packet, source, false)
+}
+
+// dispatchFromClientSocket handles a Relay-Reply that arrived on a
+// client-facing socket (#14181). Such a packet is legitimate only for a
+// link-local relay whose return path is this interface's own shared-socket
+// target: the target must be the receiving relay itself, so an attacker on
+// interface A cannot select interface B. All other client-socket
+// Relay-Replies are dropped (and counted) before any cross-interface
+// routing. Source/pending/peer/type checks still run in
+// processDHCPV6ServerPacket.
+func (d *dhcpV6ReplyDispatcher) dispatchFromClientSocket(packet dhcpv6.DHCPv6, source net.Addr, receiving *dhcpV6Relay) bool {
+	if d == nil || receiving == nil {
+		return false
+	}
+	interfaceID := dhcpV6RelayReplyInterfaceID(packet)
+	if len(interfaceID) == 0 {
+		d.droppedEmptyIID.Add(1)
+		return false
+	}
+	d.mu.Lock()
+	targets := d.targets[string(interfaceID)]
+	target := dhcpV6ReplyTargetForPacket(packet, targets)
+	d.mu.Unlock()
+	if target == nil || target.relay != receiving {
+		if target != nil {
+			d.droppedLocal.Add(1)
+		} else if len(targets) > 1 {
+			d.droppedAmbiguous.Add(1)
+		} else {
+			d.droppedUnknown.Add(1)
+		}
+		return false
+	}
+	return d.dispatchReceived(packet, source, true)
+}
+
+func (d *dhcpV6ReplyDispatcher) dispatchReceived(packet dhcpv6.DHCPv6, source net.Addr, receivedOnLocal bool) bool {
 	if d == nil {
 		return false
 	}
@@ -735,7 +779,7 @@ func (d *dhcpV6ReplyDispatcher) dispatch(packet dhcpv6.DHCPv6, source net.Addr) 
 		}
 		return false
 	}
-	processDHCPV6ServerPacket(target.relay, target.client, packet, source, target.servers, target.interfaceID)
+	processDHCPV6ServerPacket(target.relay, target.client, packet, source, target.servers, target.interfaceID, receivedOnLocal)
 	return true
 }
 
@@ -968,7 +1012,7 @@ func decapsulateRelayReplyV6(packet dhcpv6.DHCPv6, expectedInterfaceID []byte) (
 		return nil, nil, fmt.Errorf("DHCPv6 Relay-Reply missing or mismatched Interface-ID")
 	}
 	inner := relay.Options.RelayMessage()
-	if relay.PeerAddr == nil || relay.PeerAddr.To16() == nil || relay.PeerAddr.To4() != nil || relay.PeerAddr.IsUnspecified() || relay.PeerAddr.IsMulticast() {
+	if relay.PeerAddr == nil || relay.PeerAddr.To16() == nil || relay.PeerAddr.To4() != nil || relay.PeerAddr.IsUnspecified() || relay.PeerAddr.IsMulticast() || relay.PeerAddr.IsLoopback() {
 		return nil, nil, fmt.Errorf("DHCPv6 Relay-Reply has invalid peer-address")
 	}
 	peer := append(net.IP(nil), relay.PeerAddr.To16()...)
@@ -1198,7 +1242,7 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 				continue
 			}
 			if dispatcher := m.replyDispatcherSnapshot(); dispatcher != nil {
-				dispatcher.dispatch(packet, source)
+				dispatcher.dispatchFromClientSocket(packet, source, relay)
 			}
 			continue
 		}
@@ -1250,7 +1294,7 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 		}
 		// Insert before sending; the server read loop can receive a fast reply
 		// concurrently with this client loop.
-		relay.pending.insert(key)
+		relay.pending.insertValue(key, pending6EntryFor(peer, packet.Type()))
 		data := forward.ToBytes()
 		for _, destination := range servers {
 			if _, err := server.WriteTo(data, destination); err == nil {
@@ -1298,7 +1342,7 @@ func (m *dhcpV6Manager) runDHCPV6ServerLoop(ctx context.Context, relay *dhcpV6Re
 				}
 			}
 		}
-		processDHCPV6ServerPacket(relay, client, packet, source, allowed, expectedInterfaceID)
+		processDHCPV6ServerPacket(relay, client, packet, source, allowed, expectedInterfaceID, false)
 		select {
 		case <-ctx.Done():
 			return
@@ -1307,7 +1351,7 @@ func (m *dhcpV6Manager) runDHCPV6ServerLoop(ctx context.Context, relay *dhcpV6Re
 	}
 }
 
-func processDHCPV6ServerPacket(relay *dhcpV6Relay, client net.PacketConn, packet dhcpv6.DHCPv6, source net.Addr, allowed []*net.UDPAddr, expectedInterfaceID []byte) {
+func processDHCPV6ServerPacket(relay *dhcpV6Relay, client net.PacketConn, packet dhcpv6.DHCPv6, source net.Addr, allowed []*net.UDPAddr, expectedInterfaceID []byte, _ bool) {
 	if !dhcpv6SourceAllowed(source, allowed) {
 		relay.repliesDroppedUnknownSrv.Add(1)
 		return
@@ -1340,8 +1384,26 @@ func processDHCPV6ServerPacket(relay *dhcpV6Relay, client net.PacketConn, packet
 		return
 	}
 
+	if !dhcpv6ServerReplyTypeAllowed(inner.Type()) {
+		relay.repliesDroppedInvalid.Add(1)
+		slog.Debug("dhcpv6-relay: dropping server reply with non-server inner type",
+			"interface", relay.ifaceName, "src", source, "inner_type", inner.Type())
+		return
+	}
+	// #14181: the pending key alone does not authenticate delivery. Bind the
+	// reply to the recorded soliciting client: the outer peer-address must
+	// equal the address whose request created the binding, and the inner
+	// type must be a legitimate server answer to that request (never
+	// RECONFIGURE or another client-direction type). Entries with no
+	// recorded client/request (only constructible by mis-wired callers)
+	// fail closed.
 	key, ok := pending6KeyFor(inner)
-	if !ok || !relay.pending.matches(key) {
+	if !ok {
+		relay.repliesDroppedNoRequest.Add(1)
+		return
+	}
+	entry, bound := relay.pending.lookup(key)
+	if !bound || !entry.hasClientAddr {
 		relay.repliesDroppedNoRequest.Add(1)
 		if !relay.warnedNoRequest.Swap(true) {
 			slog.Warn("dhcpv6-relay: dropping server reply with no outstanding request",
@@ -1350,6 +1412,18 @@ func processDHCPV6ServerPacket(relay *dhcpV6Relay, client net.PacketConn, packet
 			slog.Debug("dhcpv6-relay: dropping server reply with no outstanding request",
 				"interface", relay.ifaceName, "src", source)
 		}
+		return
+	}
+	if !destination.IP.Equal(entry.clientIP()) {
+		relay.repliesDroppedNoRequest.Add(1)
+		slog.Debug("dhcpv6-relay: dropping server reply whose peer-address does not match the requesting client",
+			"interface", relay.ifaceName, "src", source, "peer", destination.IP, "client", entry.clientIP())
+		return
+	}
+	if !entry.serverReplyTypeAllowed(inner.Type()) {
+		relay.repliesDroppedInvalid.Add(1)
+		slog.Debug("dhcpv6-relay: dropping server reply with inner type not answering the pending request",
+			"interface", relay.ifaceName, "src", source, "inner_type", inner.Type(), "request_type", entry.requestType)
 		return
 	}
 	if destination.IP.IsLinkLocalUnicast() {
