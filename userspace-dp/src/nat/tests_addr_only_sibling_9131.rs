@@ -416,3 +416,150 @@ fn address_only_persistent_sibling_fallback_end_to_end_9131() {
     assert_eq!(source_nat_pool_statuses(&rules)[0].used_ports, 0);
     assert_eq!(source_nat_pool_statuses(&rules)[0].live_flows, 2);
 }
+
+/// #13684 (D13-01): the address-only arm must not consume the round-robin
+/// counter before the `persistent_nat` branch. Pre-fix, the caller called
+/// `address_index` unconditionally and discarded the result for persistent
+/// flows while `reserve_address_only_persistent` called `address_index`
+/// again for a fresh lease — two counter advances per subscriber. On a
+/// two-address pool every subscriber therefore landed on the odd index and
+/// the even address was stranded (RED at master: `d1 == A2`, never `A1`).
+///
+/// This cell is distinct from the #9131 cells above: those bind collision
+/// probing and lease placement, this one binds the FIRST-allocation
+/// distribution of fresh persistent leases driven end-to-end through the
+/// match path, for both address families.
+#[test]
+fn persistent_addr_only_fresh_subscribers_use_both_pool_addresses_13684() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "notrans-persist-dist".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "np-pool-dist".to_string(),
+        pool_addresses: vec![
+            "203.0.113.10/32".to_string(),
+            "203.0.113.11/32".to_string(),
+        ],
+        port_low: 1024,
+        port_high: 65535,
+        pool_no_translation: true,
+        persistent_nat: true,
+        persistent_nat_permit: "any-remote-host".to_string(),
+        persistent_nat_inactivity_timeout: 300,
+        address_persistent: false,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let lookup = |src: &str, sport: u16| -> IpAddr {
+        let mut counter = None;
+        match match_source_nat_result_for_tuple(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &NatScopeCtx::default(),
+            "lan",
+            "wan",
+            src.parse().expect("src"),
+            REMOTE_R.parse().expect("dst"),
+            Some(6), // PROTO_TCP: port-bearing, address-only via no-translation
+            sport,
+            80,
+            None,
+            None,
+            NS_PER_SEC,
+            false,
+            false,
+            NatHolder::Untracked,
+            &mut counter,
+        ) {
+            SourceNatLookup::Matched(d) => d.rewrite_src.expect("address-only rewrite"),
+            other => panic!("{src} must be translated, got {other:?}"),
+        }
+    };
+
+    let d1 = lookup("10.0.0.1", 10001);
+    let d2 = lookup("10.0.0.2", 10002);
+    assert_eq!(
+        d1,
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+        "first fresh persistent subscriber must take pool index 0 — the \
+         discarded pre-branch address_index call must not strand it (#13684)"
+    );
+    assert_eq!(
+        d2,
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11)),
+        "second fresh persistent subscriber must take pool index 1"
+    );
+    // Both subscribers hold address-only persistent leases (persistent path,
+    // not the #6226 round-robin one).
+    let live = rules[0].pool_allocator.debug_live();
+    assert_eq!(live.persistent_by_source.len(), 2);
+    assert!(live.persistent_by_source.values().all(|l| l.address_only));
+}
+
+/// #13684 v6 twin: the unconditional pre-branch `address_index` call exists
+/// in the v6 arm too, so the distribution guarantee must hold there as well.
+#[test]
+fn persistent_addr_only_fresh_subscribers_use_both_pool_addresses_v6_13684() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "notrans-persist-dist6".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["::/0".to_string()],
+        pool_name: "np-pool-dist6".to_string(),
+        pool_addresses: vec![
+            "2001:db8:1::10/128".to_string(),
+            "2001:db8:1::11/128".to_string(),
+        ],
+        port_low: 1024,
+        port_high: 65535,
+        pool_no_translation: true,
+        persistent_nat: true,
+        persistent_nat_permit: "any-remote-host".to_string(),
+        persistent_nat_inactivity_timeout: 300,
+        address_persistent: false,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+
+    let lookup = |src: &str, sport: u16| -> IpAddr {
+        let mut counter = None;
+        match match_source_nat_result_for_tuple(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &NatScopeCtx::default(),
+            "lan",
+            "wan",
+            src.parse().expect("src"),
+            "2001:db8:ffff::1".parse().expect("dst"),
+            Some(6),
+            sport,
+            80,
+            None,
+            None,
+            NS_PER_SEC,
+            false,
+            false,
+            NatHolder::Untracked,
+            &mut counter,
+        ) {
+            SourceNatLookup::Matched(d) => d.rewrite_src.expect("address-only rewrite"),
+            other => panic!("{src} must be translated, got {other:?}"),
+        }
+    };
+
+    let d1 = lookup("fd00::1", 10001);
+    let d2 = lookup("fd00::2", 10002);
+    assert_eq!(
+        d1,
+        "2001:db8:1::10".parse::<IpAddr>().expect("pool addr"),
+        "first fresh v6 persistent subscriber must take pool index 0 (#13684)"
+    );
+    assert_eq!(
+        d2,
+        "2001:db8:1::11".parse::<IpAddr>().expect("pool addr"),
+        "second fresh v6 persistent subscriber must take pool index 1"
+    );
+    let live = rules[0].pool_allocator.debug_live();
+    assert_eq!(live.persistent_by_source.len(), 2);
+    assert!(live.persistent_by_source.values().all(|l| l.address_only));
+}
