@@ -517,36 +517,27 @@ impl RotationHarness {
     /// the post-failover SharedPromote origin because SharedPromote is
     /// intentionally excluded from `is_peer_synced`.
     fn query_worker_presence(&self, key: &SessionKey, sequence: u64) -> (bool, bool) {
+        let reply = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.commands
             .lock()
             .expect("worker command queue")
             .push_back(WorkerCommand::QuerySessionCounters {
                 sequence,
                 key: key.clone(),
+                reply: reply.clone(),
             });
         let deadline = Instant::now() + Duration::from_secs(30);
-        while self
-            .runtime_atomics
-            .counter_query_seq
-            .load(Ordering::Acquire)
-            != sequence
-        {
+        loop {
+            if let Some(answer) = *reply.lock().unwrap_or_else(|e| e.into_inner()) {
+                assert_eq!(answer.sequence, sequence);
+                return (answer.found, answer.replica);
+            }
             assert!(
                 Instant::now() < deadline,
                 "the worker never answered the session presence query"
             );
             std::thread::sleep(Duration::from_millis(1));
         }
-        (
-            self.runtime_atomics
-                .counter_query_found
-                .load(Ordering::Acquire)
-                != 0,
-            self.runtime_atomics
-                .counter_query_replica
-                .load(Ordering::Acquire)
-                != 0,
-        )
     }
 
     /// Model a late bulk/incremental replay: reinsert the stale authoritative

@@ -244,38 +244,6 @@ pub(crate) struct WorkerRuntimeAtomics {
     /// walk. Relaxed cumulative slot like the CoS counters; NOT part of the
     /// seqlock rolling-window tuple.
     pub session_volume_high_water: AtomicU64,
-    // ---------------------------------------------------------------------
-    // #7919 per-session counter QUERY scratch. Not telemetry: these are the
-    // reply slots for a diagnostic request/response, written by this worker
-    // when it answers one and read by the control thread that asked.
-    //
-    // They live here rather than in a new per-worker Arc because this struct is
-    // ALREADY Arc-shared per worker and already reachable from both sides —
-    // adding a second channel for six u64s would be plumbing without a
-    // property. They are declared DELIBERATELY_OFF_WIRE in the #6961 guard for
-    // exactly the reason that guard exists: they are not a series, and mapping
-    // them onto one would report a diagnostic reply as a metric.
-    //
-    // PUBLICATION ORDER IS THE CONTRACT. The answer fields are written FIRST,
-    // then `counter_query_seq` with Release; the reader loads the seq with
-    // Acquire and only then reads the answers. The sequence IS the ack — there
-    // is no separate completion flag to disagree with it.
-    /// Sequence of the query this worker has ANSWERED. 0 = never answered.
-    pub counter_query_seq: AtomicU64,
-    /// 1 when the queried key was present in this worker's table, else 0.
-    /// Distinguishes "this worker holds the session and it has no traffic"
-    /// from "this worker does not hold it" — the two are different facts and
-    /// collapsing them would answer the question this query exists to ask.
-    pub counter_query_found: AtomicU64,
-    pub counter_query_fwd_packets: AtomicU64,
-    pub counter_query_fwd_bytes: AtomicU64,
-    pub counter_query_rev_packets: AtomicU64,
-    pub counter_query_rev_bytes: AtomicU64,
-    /// 1 when the found entry is a peer-synced/replica origin (`is_peer_synced`),
-    /// else 0. A replica that reports volume would falsify the premise behind
-    /// the whole investigation (replicas are created at zero and cannot
-    /// advance), so the answer carries what it would take to notice.
-    pub counter_query_replica: AtomicU64,
     pub cos_queue_lease_acquire_v8_calls: AtomicU64,
     pub cos_queue_lease_acquire_v8_granted_bytes: AtomicU64,
     /// #1782 Step-1 (i): timer-wheel tick-advance sum + single-call
@@ -387,13 +355,6 @@ impl WorkerRuntimeAtomics {
             work_loops: AtomicU64::new(0),
             idle_loops: AtomicU64::new(0),
             session_volume_high_water: AtomicU64::new(0),
-            counter_query_seq: AtomicU64::new(0),
-            counter_query_found: AtomicU64::new(0),
-            counter_query_fwd_packets: AtomicU64::new(0),
-            counter_query_fwd_bytes: AtomicU64::new(0),
-            counter_query_rev_packets: AtomicU64::new(0),
-            counter_query_rev_bytes: AtomicU64::new(0),
-            counter_query_replica: AtomicU64::new(0),
             cos_queue_lease_acquire_v8_calls: AtomicU64::new(0),
             cos_queue_lease_acquire_v8_granted_bytes: AtomicU64::new(0),
             cos_wheel_ticks_advanced_total: AtomicU64::new(0),

@@ -20,13 +20,13 @@
 //! attribution are different properties, and only this supplies the second.
 //!
 //! TWO-PHASE, mirroring `kick_owner_rg_export` (#2962): the kick runs under the
-//! `ServerState` lock and returns immediately; the bounded wait runs lock-free
+//! `ServerState` lock and returns immediately; the bounded wait runs off-lock
 //! afterwards, so a slow or stalled worker cannot freeze the control plane.
 //!
-//! THE SEQUENCE IS THE ACK. A worker writes its answer fields and then its
-//! sequence with Release; this side loads the sequence with Acquire and only
-//! then reads the answers. There is no second completion flag that could
-//! disagree with the sequence.
+//! EACH REQUEST OWNS ITS REPLY SLOT. A worker publishes a complete snapshot
+//! under the slot's mutex, and its waiter reads the same snapshot under that
+//! mutex. A later query cannot overwrite or tear an earlier response. The
+//! sequence remains a sanity check that the slot contains the intended reply.
 //!
 //! NOT PERIODIC AND NOT ON THE HOT PATH. It is issued by an operator-driven
 //! diagnostic, never by a poll. The control socket is shared with the status
@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 /// persisted, compared across restarts, or put on the wire.
 static COUNTER_QUERY_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// How long the lock-free wait gives the workers. A worker that does not answer
+/// How long the off-lock wait gives the workers. A worker that does not answer
 /// within this is reported as `answered: false` rather than waited on forever —
 /// an unanswered worker is a fact about the reading, and silently dropping it
 /// would turn a partial answer into one that looks complete.
@@ -64,7 +64,10 @@ pub(crate) struct WorkerSessionCounters {
 
 pub(crate) struct SessionCounterQueryWait {
     sequence: u64,
-    slots: Vec<(u32, Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>)>,
+    slots: Vec<(
+        u32,
+        Arc<Mutex<Option<crate::afxdp::session_glue::SessionCounterAnswer>>>,
+    )>,
     /// Workers whose query could not be queued and therefore cannot answer.
     refused: Vec<u32>,
     /// #9900 F-093: workers shed at kick time; the wait reports them as
@@ -96,17 +99,19 @@ impl crate::afxdp::Coordinator {
             // is refused is reported unanswered immediately; waiting for an
             // ack to a command that was never queued would impose the whole
             // timeout without any possibility of success.
+            let reply = Arc::new(Mutex::new(None));
             let mut pending = worker_queue::lock_recover(&handle.commands);
             let queued = worker_queue::push_bounded(
                 &mut pending,
                 WorkerCommand::QuerySessionCounters {
                     sequence,
                     key: key.clone(),
+                    reply: reply.clone(),
                 },
             );
             drop(pending);
             if queued {
-                slots.push((*worker_id, handle.runtime_atomics.clone()));
+                slots.push((*worker_id, reply));
             } else {
                 refused.push(*worker_id);
             }
@@ -121,49 +126,43 @@ impl crate::afxdp::Coordinator {
 }
 
 impl SessionCounterQueryWait {
-    /// Lock-free phase: wait (bounded) for each queued worker's exact sequence
-    /// to publish, then read its answer. A later sequence means the single
-    /// response slot was overwritten by another session query and is reported
-    /// unanswered rather than cross-attributed. Run with the `ServerState` lock
-    /// RELEASED.
+    /// Off-lock bounded phase: wait for each worker's independent reply slot,
+    /// then read its answer. Run with the `ServerState` lock RELEASED.
     pub(crate) fn wait_and_collect(self) -> Vec<WorkerSessionCounters> {
         let deadline = Instant::now() + COUNTER_QUERY_TIMEOUT;
         let mut out = Vec::with_capacity(self.slots.len() + self.refused.len() + self.dead.len());
-        for (worker_id, atomics) in self.slots {
-            let mut answered = false;
+        for (worker_id, reply) in self.slots {
+            let mut answer = None;
             loop {
-                // Acquire pairs with the worker's Release store of the sequence,
-                // so every answer field written before it is visible here. The
-                // slot holds only the latest answer: an LATER sequence means
-                // this query was overwritten and must not borrow that session's
-                // counters.
-                let published = atomics.counter_query_seq.load(Ordering::Acquire);
-                if published == self.sequence {
-                    answered = true;
+                let published = *reply.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(published) = published {
+                    if published.sequence == self.sequence {
+                        answer = Some(published);
+                    }
                     break;
                 }
-                if published > self.sequence || Instant::now() >= deadline {
+                if Instant::now() >= deadline {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
-            if !answered {
+            if let Some(answer) = answer {
+                out.push(WorkerSessionCounters {
+                    worker_id,
+                    answered: true,
+                    found: answer.found,
+                    replica: answer.replica,
+                    fwd_packets: answer.fwd_packets,
+                    fwd_bytes: answer.fwd_bytes,
+                    rev_packets: answer.rev_packets,
+                    rev_bytes: answer.rev_bytes,
+                });
+            } else {
                 out.push(WorkerSessionCounters {
                     worker_id,
                     ..Default::default()
                 });
-                continue;
             }
-            out.push(WorkerSessionCounters {
-                worker_id,
-                answered: true,
-                found: atomics.counter_query_found.load(Ordering::Relaxed) != 0,
-                replica: atomics.counter_query_replica.load(Ordering::Relaxed) != 0,
-                fwd_packets: atomics.counter_query_fwd_packets.load(Ordering::Relaxed),
-                fwd_bytes: atomics.counter_query_fwd_bytes.load(Ordering::Relaxed),
-                rev_packets: atomics.counter_query_rev_packets.load(Ordering::Relaxed),
-                rev_bytes: atomics.counter_query_rev_bytes.load(Ordering::Relaxed),
-            });
         }
         for worker_id in self.refused {
             out.push(WorkerSessionCounters {

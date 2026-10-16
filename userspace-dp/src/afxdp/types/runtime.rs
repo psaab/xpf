@@ -801,21 +801,12 @@ pub(in crate::afxdp) enum WorkerCommand {
         sequence: u64,
         owner_rgs: Vec<i32>,
     },
-    /// #7919: READ-ONLY diagnostic. Report what THIS worker's own session table
-    /// holds for one 5-tuple, into the worker's `counter_query_*` reply slots.
-    ///
-    /// Broadcast to every worker, because the question is precisely "what does
-    /// EACH worker's copy say": every worker holds a copy of every session
-    /// (measured), but only the worker whose packets land accounts for one, so
-    /// a per-flow answer needs all of them, not just the owner.
-    ///
-    /// It mutates nothing. The session table is read, never touched — a
-    /// diagnostic that perturbs the state it reports would be worse than no
-    /// diagnostic, and this one exists to adjudicate between two explanations
-    /// that differ only in what the table holds.
+    /// #7919: READ-ONLY diagnostic. The request owns an independent reply
+    /// slot so overlapping queries cannot overwrite one another's snapshots.
     QuerySessionCounters {
         sequence: u64,
         key: SessionKey,
+        reply: Arc<Mutex<Option<crate::afxdp::session_glue::SessionCounterAnswer>>>,
     },
 
     /// #10512: read the policy-tagged rows in THIS worker's table. The
