@@ -2568,11 +2568,24 @@ fn set_ipv4_sysctl(iface: &str, key: &str, value: &str) -> Result<(), String> {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct IfMap {
+    mem_start: libc::c_ulong,
+    mem_end: libc::c_ulong,
+    base_addr: libc::c_ushort,
+    irq: libc::c_uchar,
+    dma: libc::c_uchar,
+    port: libc::c_uchar,
+    _pad: [libc::c_uchar; 3],
+}
+
+#[repr(C)]
 union Ifru {
     flags: libc::c_short,
     _addr: libc::sockaddr,
     _ifindex: libc::c_int,
     mtu: libc::c_int,
+    _map: IfMap,
 }
 
 #[repr(C)]
