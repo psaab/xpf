@@ -20,11 +20,11 @@ func driftConfig9624() *config.IPsecConfig {
 		return &config.IPsecTrafficSelector{Name: name, LocalIP: l, RemoteIP: r}
 	}
 	return &config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{
-		"a":        {Name: "a", Gateway: "198.51.100.1", TrafficSelectors: map[string]*config.IPsecTrafficSelector{"b-c": ts("b-c", "10.0.1.0/24", "10.9.1.0/24")}},
-		"a-b":      {Name: "a-b", Gateway: "198.51.100.2", TrafficSelectors: map[string]*config.IPsecTrafficSelector{"c": ts("c", "10.0.2.0/24", "10.9.2.0/24")}},
-		"blue":     {Name: "blue", Gateway: "198.51.100.3", TrafficSelectors: map[string]*config.IPsecTrafficSelector{"red": ts("red", "10.0.3.0/24", "10.9.3.0/24")}},
-		"blue-red": {Name: "blue-red", Gateway: "198.51.100.4"},
-		"site": {Name: "site", Gateway: "198.51.100.5", TrafficSelectors: map[string]*config.IPsecTrafficSelector{
+		"a":        {PSK: "fixture-secret", Name: "a", Gateway: "198.51.100.1", TrafficSelectors: map[string]*config.IPsecTrafficSelector{"b-c": ts("b-c", "10.0.1.0/24", "10.9.1.0/24")}},
+		"a-b":      {PSK: "fixture-secret", Name: "a-b", Gateway: "198.51.100.2", TrafficSelectors: map[string]*config.IPsecTrafficSelector{"c": ts("c", "10.0.2.0/24", "10.9.2.0/24")}},
+		"blue":     {PSK: "fixture-secret", Name: "blue", Gateway: "198.51.100.3", TrafficSelectors: map[string]*config.IPsecTrafficSelector{"red": ts("red", "10.0.3.0/24", "10.9.3.0/24")}},
+		"blue-red": {PSK: "fixture-secret", Name: "blue-red", Gateway: "198.51.100.4"},
+		"site": {PSK: "fixture-secret", Name: "site", Gateway: "198.51.100.5", TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 			"x/a": ts("x/a", "10.0.5.0/24", "10.9.5.0/24"), "x:a": ts("x:a", "10.0.6.0/24", "10.9.6.0/24")}},
 	}}
 }

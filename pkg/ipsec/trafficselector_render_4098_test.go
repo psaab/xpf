@@ -22,7 +22,7 @@ func TestRenderTrafficSelectorRejectsInjectionShape10884(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {
+			"tun1": {PSK: "fixture-secret",
 				Name:        "tun1",
 				Gateway:     "172.16.0.1",
 				IPsecPolicy: "ipsec-pol",
@@ -56,7 +56,7 @@ func TestRenderTrafficSelectorNormalUnchanged(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {
+			"tun1": {PSK: "fixture-secret",
 				Name:        "tun1",
 				Gateway:     "172.16.0.1",
 				IPsecPolicy: "ipsec-pol",

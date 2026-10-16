@@ -113,8 +113,8 @@ func TestRenderConfig_BrokenChainSkipsVPN_HealthyTunnelSurvives(t *testing.T) {
 			"gw-bad":  {Name: "gw-bad", Address: "192.0.2.2", IKEPolicy: "missing-pol"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun-good": {Name: "tun-good", Gateway: "gw-good"},
-			"tun-bad":  {Name: "tun-bad", Gateway: "gw-bad"},
+			"tun-good": {PSK: "fixture-secret", Name: "tun-good", Gateway: "gw-good"},
+			"tun-bad":  {PSK: "fixture-secret", Name: "tun-bad", Gateway: "gw-bad"},
 		},
 	}
 
@@ -152,7 +152,7 @@ func TestRenderConfig_NoPolicyGatewayRendersWithoutProposalsLine(t *testing.T) {
 			"gw1": {Name: "gw1", Address: "192.0.2.1"},
 		},
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {Name: "tun1", Gateway: "gw1"},
+			"tun1": {PSK: "fixture-secret", Name: "tun1", Gateway: "gw1"},
 		},
 	}
 	m := New()

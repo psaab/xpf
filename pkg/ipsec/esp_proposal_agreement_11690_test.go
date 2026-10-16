@@ -59,7 +59,7 @@ func TestResolveESPSettingsRejectsDivergentLifetimes_11690(t *testing.T) {
 					"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{tc.first, tc.second}},
 				},
 			}
-			_, _, err := resolveESPSettings(cfg, &config.IPsecVPN{IPsecPolicy: "ipsec-pol"})
+			_, _, err := resolveESPSettings(cfg, &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "ipsec-pol"})
 			if !errors.Is(err, errProposalUnresolved) {
 				t.Fatalf("resolveESPSettings error = %v, want errProposalUnresolved", err)
 			}
@@ -103,7 +103,7 @@ func TestResolveESPSettingsFilteringFirstDivergence_11690(t *testing.T) {
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-bad", "esp-short", "esp-long"}},
 		},
 	}
-	_, _, err := resolveESPSettings(cfg, &config.IPsecVPN{IPsecPolicy: "ipsec-pol"})
+	_, _, err := resolveESPSettings(cfg, &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "ipsec-pol"})
 	if !errors.Is(err, errProposalUnresolved) {
 		t.Fatalf("resolveESPSettings error = %v, want errProposalUnresolved", err)
 	}
@@ -152,7 +152,7 @@ func TestResolveESPSettingsAgreeingSurvivorsRender_11690(t *testing.T) {
 			"ipsec-pol": {Name: "ipsec-pol", Proposals: []string{"esp-bad", "esp-a", "esp-b"}},
 		},
 	}
-	got, lifetime, err := resolveESPSettings(cfg, &config.IPsecVPN{IPsecPolicy: "ipsec-pol"})
+	got, lifetime, err := resolveESPSettings(cfg, &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "ipsec-pol"})
 	if err != nil {
 		t.Fatalf("agreeing survivors must render, got error %v", err)
 	}

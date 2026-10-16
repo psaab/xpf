@@ -285,7 +285,7 @@ func TestProposalBuilders_ECPGroupAcrossAllSites(t *testing.T) {
 				"esp1": {Name: "esp1", EncryptionAlg: "aes-256-cbc", AuthAlg: "hmac-sha-256"},
 			},
 		}
-		vpn := &config.IPsecVPN{IPsecPolicy: "pol1"}
+		vpn := &config.IPsecVPN{PSK: "fixture-secret", IPsecPolicy: "pol1"}
 		if got, _, err := resolveESPSettings(cfg, vpn); err != nil || got != "aes256-sha256-"+gc.suffix {
 			t.Errorf("resolveESPSettings PFS override (group %d) = (%q, %v), want %q",
 				gc.group, got, err, "aes256-sha256-"+gc.suffix)
@@ -300,7 +300,7 @@ func TestGenerateConfig_JunosGCM(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "gcm"},
+			"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "gcm"},
 		},
 		Proposals: map[string]*config.IPsecProposal{
 			"gcm": {Name: "gcm", EncryptionAlg: "aes-256-gcm", DHGroup: 14},

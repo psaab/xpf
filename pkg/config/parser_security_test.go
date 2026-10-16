@@ -1523,6 +1523,7 @@ func TestIPsecBindInterface(t *testing.T) {
         }
         vpn site-a {
             bind-interface st0.0;
+            pre-shared-key fixture-secret;
             gateway 203.0.113.1;
             local-address 198.51.100.1;
             ipsec-policy aes256gcm;
@@ -1746,6 +1747,7 @@ func TestIKEAdvancedFeatures(t *testing.T) {
         }
         vpn site-a {
             bind-interface st0.0;
+            pre-shared-key fixture-secret;
             df-bit copy;
             ike {
                 gateway remote-gw;
@@ -1904,6 +1906,7 @@ func TestIPsecTrafficSelectorSyntax(t *testing.T) {
     ipsec {
         vpn site-a {
             bind-interface st0.0;
+            pre-shared-key fixture-secret;
             traffic-selector corp-a {
                 local-ip 10.0.1.0/24;
                 remote-ip 10.10.1.0/24;
@@ -5770,6 +5773,7 @@ func TestIPsecDFBitSetSyntaxCompile(t *testing.T) {
 		tree := &ConfigTree{}
 		cmds := []string{
 			"set security ipsec vpn tun bind-interface st0.0",
+			"set security ipsec vpn tun pre-shared-key fixture-secret",
 			"set security ipsec vpn tun df-bit " + mode,
 		}
 		for _, cmd := range cmds {

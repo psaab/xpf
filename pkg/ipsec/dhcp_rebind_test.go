@@ -37,7 +37,7 @@ func dhcpBoundConfig(extIface, localAddr, addr string, dhcp bool) *config.Config
 					},
 				},
 				VPNs: map[string]*config.IPsecVPN{
-					"tun": {Gateway: "gw"},
+					"tun": {PSK: "fixture-secret", Gateway: "gw"},
 				},
 			},
 		},

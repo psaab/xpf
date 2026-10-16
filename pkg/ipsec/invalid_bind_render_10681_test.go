@@ -21,10 +21,12 @@ func TestLenientInvalidBindInterfaceSkipsLiveSA10681(t *testing.T) {
 	tree := &config.ConfigTree{}
 	for _, cmd := range []string{
 		"set security ipsec vpn bad gateway 192.0.2.1",
+		"set security ipsec vpn bad pre-shared-key fixture-secret",
 		"set security ipsec vpn bad bind-interface secure0",
 		"set security ipsec vpn bad traffic-selector ts1 local-ip 10.0.0.0/24",
 		"set security ipsec vpn bad traffic-selector ts1 remote-ip 10.1.0.0/24",
 		"set security ipsec vpn good gateway 192.0.2.2",
+		"set security ipsec vpn good pre-shared-key fixture-secret",
 		"set security ipsec vpn good bind-interface st0.1",
 	} {
 		path, err := config.ParseSetCommand(cmd)

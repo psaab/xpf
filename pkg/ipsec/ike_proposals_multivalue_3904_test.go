@@ -25,7 +25,7 @@ func TestGenerateConfig_MultiIKEProposals(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {Gateway: "gw1", IPsecPolicy: "esp-pol"},
+			"tun1": {PSK: "fixture-secret", Gateway: "gw1", IPsecPolicy: "esp-pol"},
 		},
 		Gateways: map[string]*config.IPsecGateway{
 			"gw1": {Name: "gw1", Address: "172.16.0.1", IKEPolicy: "ike-pol"},
@@ -59,7 +59,7 @@ func TestGenerateConfig_MultiESPProposals(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "esp-pol"},
+			"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "esp-pol"},
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
 			"esp-pol": {Name: "esp-pol", Proposals: []string{"esp-a", "esp-b"}},
@@ -82,7 +82,7 @@ func TestGenerateConfig_MultiESPProposalsPFS(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"tun1": {Gateway: "172.16.0.1", IPsecPolicy: "esp-pol"},
+			"tun1": {PSK: "fixture-secret", Gateway: "172.16.0.1", IPsecPolicy: "esp-pol"},
 		},
 		Policies: map[string]*config.IPsecPolicyDef{
 			"esp-pol": {Name: "esp-pol", PFSGroup: 19, Proposals: []string{"esp-a", "esp-b"}},

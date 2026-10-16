@@ -45,7 +45,7 @@ func TestEffectiveTrafficSelectorsIdentityBelt(t *testing.T) {
 		{"both empty", "", "", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			vpn := &config.IPsecVPN{LocalID: tc.localID, RemoteID: tc.remoteID}
+			vpn := &config.IPsecVPN{PSK: "fixture-secret", LocalID: tc.localID, RemoteID: tc.remoteID}
 			got := effectiveTrafficSelectors("v1", vpn)
 			if len(got) != 1 {
 				t.Fatalf("effectiveTrafficSelectors returned %d children, want 1", len(got))
@@ -67,7 +67,7 @@ func TestEffectiveTrafficSelectorsIdentityBelt(t *testing.T) {
 // `local_ts = ` is itself a parse error, so "cleared the field" and "omitted
 // the key" are different outcomes and only one of them loads.
 func TestIdentityBeltRendersNoSelectorKey(t *testing.T) {
-	vpn := &config.IPsecVPN{LocalID: "vpn.example.com", RemoteID: "peer.example.com"}
+	vpn := &config.IPsecVPN{PSK: "fixture-secret", LocalID: "vpn.example.com", RemoteID: "peer.example.com"}
 	sels := effectiveTrafficSelectors("v1", vpn)
 	if sels[0].LocalTS != "" || sels[0].RemoteTS != "" {
 		t.Fatalf("belt did not clear the identity selectors: %+v", sels[0])
@@ -124,7 +124,7 @@ func TestRouteBasedDefaultTrafficSelector(t *testing.T) {
 		{"fqdn identity falls through to default", "st0.0", "vpn.example.com", "peer.example.com", config.IPsecRouteBasedDefaultTrafficSelector, config.IPsecRouteBasedDefaultTrafficSelector},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			vpn := &config.IPsecVPN{
+			vpn := &config.IPsecVPN{PSK: "fixture-secret",
 				BindInterface: tc.bindIface,
 				LocalID:       tc.localID,
 				RemoteID:      tc.remoteID,
@@ -147,7 +147,7 @@ func TestRouteBasedDefaultTrafficSelector(t *testing.T) {
 // a VPN that declares a traffic-selector never reaches the fallback at all, so
 // the route-based default must not appear anywhere in its rendered children.
 func TestRouteBasedDefaultNotAppliedWithExplicitSelectors(t *testing.T) {
-	vpn := &config.IPsecVPN{
+	vpn := &config.IPsecVPN{PSK: "fixture-secret",
 		BindInterface: "st0.0",
 		TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 			"ts1": {LocalIP: "10.0.0.0/24", RemoteIP: "10.1.0.0/24"},
