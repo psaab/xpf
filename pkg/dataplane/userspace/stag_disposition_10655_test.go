@@ -279,6 +279,13 @@ func TestUserspaceXDPSTagDegradedPathDrops_10655(t *testing.T) {
 				QueueCount:         1,
 				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
+			// #13768: since #13632 the ctrl-disabled path refuses to
+			// parse frames from an ingress the shim does not adjudicate
+			// (ctrl_disabled, returned before parse_l2). Seed the
+			// adjudicated ingress row so these cells reach the S-tag
+			// arms; the unadjudicated disposition is pinned separately
+			// by TestUserspaceXDPSTagUnadjudicatedDegradedIngress_13768.
+			updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 
 			ret := runUserspaceXDPTestPacket(t, coll, tc.pkt())
 			if ret != xdpActionDrop {
@@ -289,6 +296,33 @@ func TestUserspaceXDPSTagDegradedPathDrops_10655(t *testing.T) {
 			assertUserspaceXDPDegradedPathStatAbsent(t, coll, "pass_to_kernel")
 		})
 	}
+}
+
+// #13768/#13632: with ctrl disabled and NO adjudicated ingress row, the
+// shim returns ctrl_disabled before parse_l2 — a degraded S-tag frame must
+// never reach the stag_drop arm or be counted as one. This is the fixture
+// state the degraded cells above accidentally started in before #13768
+// seeded their ingress; pinned separately so the gate stays covered.
+func TestUserspaceXDPSTagUnadjudicatedDegradedIngress_13768(t *testing.T) {
+	coll := loadUserspaceXDPTestCollection(t)
+	updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
+		Enabled:            0,
+		MetadataVersion:    userspaceMetadataVersion,
+		Workers:            1,
+		QueueCount:         1,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
+	})
+	// Deliberately no updateUserspaceXDPTestIngress: the arrival
+	// interface is absent from userspace_ingress_ifaces.
+
+	ret := runUserspaceXDPTestPacket(t, coll, singleTagTestPacket(0x88a8, 0x0806))
+	if ret != xdpActionDrop {
+		t.Fatalf("unadjudicated degraded single-S-tag ARP: action = %d, want XDP_DROP(%d)", ret, xdpActionDrop)
+	}
+	assertUserspaceXDPDegradedPathStat(t, coll, "ctrl_disabled")
+	assertUserspaceXDPDegradedPathStat(t, coll, "transit_drop")
+	assertUserspaceXDPDegradedPathStatAbsent(t, coll, "stag_drop")
+	assertUserspaceXDPDegradedPathStatAbsent(t, coll, "pass_to_kernel")
 }
 
 func TestUserspaceXDPSTagOuterDoubleTagStaysQinQ_10655(t *testing.T) {

@@ -325,6 +325,13 @@ func TestUserspaceXDPQinQDegradedPathDrops_9888(t *testing.T) {
 				QueueCount:         1,
 				HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 			})
+			// #13768: since #13632 the ctrl-disabled path refuses to
+			// parse frames from an ingress the shim does not adjudicate
+			// (ctrl_disabled, returned before parse_l2). Seed the
+			// adjudicated ingress row so these cells reach the VLAN
+			// arms; the unadjudicated disposition is pinned separately
+			// by TestUserspaceXDPQinQUnadjudicatedDegradedIngress_13768.
+			updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
 
 			var pkt []byte
 			if sh.singleTagOnly {
@@ -341,4 +348,29 @@ func TestUserspaceXDPQinQDegradedPathDrops_9888(t *testing.T) {
 			assertUserspaceXDPDegradedPathStatAbsent(t, coll, "pass_to_kernel")
 		})
 	}
+}
+
+// #13768/#13632: with ctrl disabled and NO adjudicated ingress row, the
+// shim returns ctrl_disabled before parse_l2 — a degraded QinQ frame must
+// never reach the qinq_drop arm or be counted as one. This is the fixture
+// state the degraded cells above accidentally started in before #13768
+// seeded their ingress; pinned separately so the gate stays covered.
+func TestUserspaceXDPQinQUnadjudicatedDegradedIngress_13768(t *testing.T) {
+	coll := loadUserspaceXDPTestCollection(t)
+	updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
+		Enabled:            0,
+		QueueCount:         1,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
+	})
+	// Deliberately no updateUserspaceXDPTestIngress: the arrival
+	// interface is absent from userspace_ingress_ifaces.
+
+	ret := runUserspaceXDPTestPacket(t, coll, qinqTestPacket(0x8100, 0x8100, 0x0800))
+	if ret != xdpActionDrop {
+		t.Fatalf("unadjudicated degraded q-in-q: action = %d, want XDP_DROP(%d)", ret, xdpActionDrop)
+	}
+	assertUserspaceXDPDegradedPathStat(t, coll, "ctrl_disabled")
+	assertUserspaceXDPDegradedPathStat(t, coll, "transit_drop")
+	assertUserspaceXDPDegradedPathStatAbsent(t, coll, "qinq_drop")
+	assertUserspaceXDPDegradedPathStatAbsent(t, coll, "pass_to_kernel")
 }
