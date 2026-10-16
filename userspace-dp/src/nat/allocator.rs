@@ -5432,7 +5432,10 @@ impl PortAllocator {
                     translated,
                     persistent_key: None,
                     // No pool-port bit is claimed for an address-only token.
-                    addr_index: 0,
+                    // Address-only allocations still retain the selected pool
+                    // index for pool-reseed remapping; this is an absolute index
+                    // across the combined v4/v6 address family.
+                    addr_index: family_offset + rel,
                     deterministic: false,
                     address_only: true,
                     // #6522: the ALLOCATING worker's holder bit. A locally-born session is
@@ -5880,6 +5883,12 @@ impl PortAllocator {
     ) -> Option<TranslatedTuple> {
         let live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
         live.live_by_flow.get(flow).map(|rec| rec.translated)
+    }
+    /// Test-only: the absolute pool index recorded for a live flow.
+    #[cfg(test)]
+    pub(super) fn debug_live_flow_addr_index(&self, flow: &SourceNatFlowKey) -> Option<usize> {
+        let live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.live_by_flow.get(flow).map(|rec| rec.addr_index)
     }
 
     /// Test-only: snapshot the address-only reverse-identity ownership map so a
