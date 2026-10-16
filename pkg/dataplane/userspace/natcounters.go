@@ -49,10 +49,14 @@ func (m *Manager) ClearNATRuleCounters() error {
 // userspace-only / pre-start state (parity with the bpfShim offset clear).
 func (m *Manager) clearHelperNATCountersLocked() error {
 	if m.proc == nil || m.proc.Process == nil {
-		for i := range m.lastStatus.NATRuleCounters {
-			m.lastStatus.NATRuleCounters[i].Packets = 0
-			m.lastStatus.NATRuleCounters[i].Bytes = 0
+		// Preserve previously published status snapshots: callers retain
+		// shallow copies of these slices.
+		counters := append([]NATRuleCounterStatus(nil), m.lastStatus.NATRuleCounters...)
+		for i := range counters {
+			counters[i].Packets = 0
+			counters[i].Bytes = 0
 		}
+		m.lastStatus.NATRuleCounters = counters
 		m.republishLastStatusLocked()
 		return nil
 	}
