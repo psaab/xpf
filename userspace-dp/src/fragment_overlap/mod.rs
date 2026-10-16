@@ -269,7 +269,7 @@ fn ranges_cover_terminal(e: &OverlapEntry, terminal_end: u32) -> bool {
 /// terminal fragment itself may end exactly there. When terminal is first
 /// observed, existing ranges may not extend past its end.
 #[inline]
-fn terminal_conflict(e: &OverlapEntry, start: u32, end: u32, is_last: bool) -> bool {
+fn terminal_conflict(e: &OverlapEntry, end: u32, is_last: bool) -> bool {
     if let Some(terminal_end) = e.terminal_end {
         end > terminal_end || (is_last && end != terminal_end) || (!is_last && end == terminal_end)
     } else {
@@ -568,7 +568,7 @@ impl OverlapTracker {
                 tracker: None,
             };
         };
-        if terminal_conflict(&shard[pos], start, end, is_last) {
+        if terminal_conflict(&shard[pos], end, is_last) {
             drop_counter.fetch_add(1, Ordering::Relaxed);
             return OverlapCheckResult {
                 dropped: true,
@@ -695,7 +695,7 @@ impl OverlapTracker {
         let mut lifetime_evictions = 0;
         shard.retain(|e| overlap_entry_live(e, now_ns, &mut lifetime_evictions));
         if let Some(pos) = shard.iter().position(|e| e.key == key) {
-            if terminal_conflict(&shard[pos], start, end, is_last) {
+            if terminal_conflict(&shard[pos], end, is_last) {
                 drop_counter.fetch_add(1, Ordering::Relaxed);
                 return OverlapCheckResult {
                     dropped: true,
