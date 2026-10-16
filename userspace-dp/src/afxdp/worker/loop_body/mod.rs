@@ -1270,7 +1270,6 @@ pub(crate) fn worker_loop(
             mut stale_replay_dropped_keys,
             session_import_repairs,
             exported_sequences,
-            session_counter_answers,
             export_owner_rgs,
             export_kick_epoch,
             shaped_tx_requests,
@@ -1651,34 +1650,6 @@ pub(crate) fn worker_loop(
             &mut flush_deltas,
         ) {
             continue;
-        }
-        // #7919: publish this tick's per-session counter answers into the
-        // worker's reply slots. Answer fields FIRST, then the sequence with
-        // Release — the reader loads the sequence with Acquire and only then
-        // reads the answers, so the sequence IS the ack and there is no second
-        // completion flag to disagree with it.
-        for answer in &session_counter_answers {
-            runtime_atomics
-                .counter_query_found
-                .store(u64::from(answer.found), Ordering::Relaxed);
-            runtime_atomics
-                .counter_query_replica
-                .store(u64::from(answer.replica), Ordering::Relaxed);
-            runtime_atomics
-                .counter_query_fwd_packets
-                .store(answer.fwd_packets, Ordering::Relaxed);
-            runtime_atomics
-                .counter_query_fwd_bytes
-                .store(answer.fwd_bytes, Ordering::Relaxed);
-            runtime_atomics
-                .counter_query_rev_packets
-                .store(answer.rev_packets, Ordering::Relaxed);
-            runtime_atomics
-                .counter_query_rev_bytes
-                .store(answer.rev_bytes, Ordering::Relaxed);
-            runtime_atomics
-                .counter_query_seq
-                .store(answer.sequence, Ordering::Release);
         }
         // #9856 M2c: multi-pass resumable CommandExport. New commands adopt
         // (overwrite: single-window invariant — concurrent kicks never reach

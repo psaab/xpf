@@ -136,19 +136,6 @@ macro_rules! shared_scalar_names {
 /// lets the ratchet below say "every atomic is either bound or knowingly
 /// excluded" instead of silently tolerating an unbound one.
 const DELIBERATELY_OFF_WIRE: &[&str] = &[
-    // #7919: reply slots for the per-session counter QUERY, not a series. They
-    // carry one diagnostic answer for one requested 5-tuple; mapping them onto
-    // the per-worker status would publish a request/response payload as
-    // telemetry, and the value would be whatever the last query happened to
-    // ask. The guard's whole point is that this choice is written down rather
-    // than left to a reader of the mapping literal.
-    "counter_query_seq",
-    "counter_query_found",
-    "counter_query_fwd_packets",
-    "counter_query_fwd_bytes",
-    "counter_query_rev_packets",
-    "counter_query_rev_bytes",
-    "counter_query_replica",
     "wall_ns_window_base",
     "active_ns_window_base",
     "thread_cpu_ns_window_base",

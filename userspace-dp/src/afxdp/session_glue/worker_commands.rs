@@ -28,12 +28,6 @@ pub(in crate::afxdp) struct WorkerCommandResults {
     /// The worker loop applies them before later queued commands.
     pub session_import_repairs: Vec<worker_queue::SessionImportRepair>,
     pub exported_sequences: Vec<u64>,
-    /// #7919: answers to `QuerySessionCounters` processed this tick. The
-    /// command handler reads the table (it has `sessions` in scope); the WORKER
-    /// LOOP publishes into the per-worker reply atomics, because that is where
-    /// `runtime_atomics` lives. Same split as the export: decide here, publish
-    /// where the handles are.
-    pub session_counter_answers: Vec<SessionCounterAnswer>,
     /// #2653: the union of owner RGs requested by every
     /// `ExportOwnerRGSessions` command processed this tick. The command
     /// handler NO LONGER emits the open deltas itself — doing so pushed the
@@ -96,7 +90,6 @@ impl WorkerCommandResults {
             stale_replay_dropped_keys: Vec::new(),
             session_import_repairs: Vec::new(),
             exported_sequences: Vec::new(),
-            session_counter_answers: Vec::new(),
             export_owner_rgs: Vec::new(),
             export_kick_epoch: None,
             shaped_tx_requests: Vec::new(),
@@ -159,7 +152,6 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
     let mut cancelled_keys_seen: rustc_hash::FxHashSet<SessionKey> =
         rustc_hash::FxHashSet::default();
     let mut exported_sequences = Vec::new();
-    let mut session_counter_answers: Vec<SessionCounterAnswer> = Vec::new();
     let mut export_owner_rgs: Vec<i32> = Vec::new();
     // #9856: first-accept-wins kick epoch for this tick's export (None when
     // no Export command accepted). Kept out of the debt-step/gate regions.
@@ -294,7 +286,11 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                     owner_rgs,
                 );
             }
-            WorkerCommand::QuerySessionCounters { sequence, key } => {
+            WorkerCommand::QuerySessionCounters {
+                sequence,
+                key,
+                reply,
+            } => {
                 // READ-ONLY. `counters_with_replica_flag` looks the key up
                 // without touching the table; nothing here installs, refreshes
                 // or expires anything. A diagnostic that perturbed the state it
@@ -319,7 +315,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                         rev_bytes: 0,
                     },
                 };
-                session_counter_answers.push(answer);
+                *reply.lock().unwrap_or_else(|e| e.into_inner()) = Some(answer);
             }
             WorkerCommand::ListSessionsByPolicy {
                 request,
@@ -744,7 +740,6 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
         stale_replay_dropped_keys,
         session_import_repairs,
         exported_sequences,
-        session_counter_answers,
         export_owner_rgs,
         export_kick_epoch,
         shaped_tx_requests,

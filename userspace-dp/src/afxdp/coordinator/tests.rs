@@ -11958,7 +11958,6 @@ fn record_keyed_fan_out_sheds_dead_workers_9900() {
     let mut coordinator = Coordinator::new();
     let live_rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
     let live_commands = live_rec.handle.commands.clone();
-    let live_atomics = live_rec.handle.runtime_atomics.clone();
     coordinator.workers.register(6, live_rec, None);
     let dead_rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
     let dead_commands = dead_rec.handle.commands.clone();
@@ -11969,13 +11968,16 @@ fn record_keyed_fan_out_sheds_dead_workers_9900() {
     let shed_before =
         crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed);
     let wait = coordinator.kick_session_counter_query(&f4_key());
-    let sequence = match live_commands.lock().unwrap().front() {
-        Some(WorkerCommand::QuerySessionCounters { sequence, .. }) => *sequence,
+    let (sequence, reply) = match live_commands.lock().unwrap().front() {
+        Some(WorkerCommand::QuerySessionCounters {
+            sequence, reply, ..
+        }) => (*sequence, reply.clone()),
         other => panic!("expected counter query, got {other:?}"),
     };
-    live_atomics
-        .counter_query_seq
-        .store(sequence, Ordering::Release);
+    *reply.lock().unwrap() = Some(crate::afxdp::session_glue::SessionCounterAnswer {
+        sequence,
+        ..Default::default()
+    });
     assert_eq!(
         live_commands.lock().unwrap().len(),
         1,
@@ -12025,42 +12027,68 @@ fn counter_query_queue_full_does_not_wait_13711() {
     assert!(!rows[0].answered);
 }
 
-/// #13711: a later query overwrites the single per-worker reply slot. Its
-/// sequence must not acknowledge an earlier session query or cross-attribute
-/// the later session's counters.
+/// #13711: a second query's publication cannot overwrite the first query's
+/// reply, even when the first waiter is blocked reading its own slot.
 #[test]
-fn counter_query_later_session_reply_does_not_answer_earlier_13711() {
-    use std::sync::atomic::Ordering;
+fn counter_query_concurrent_replies_keep_snapshots_separate_13711() {
+    use std::sync::Barrier;
     use std::time::Instant;
+
     let mut coordinator = Coordinator::new();
     let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
-    let atomics = rec.handle.runtime_atomics.clone();
     coordinator.workers.register(8, rec, None);
     let wait_a = coordinator.kick_session_counter_query(&f4_key());
     let mut key_b = f4_key();
     key_b.src_port += 1;
     let wait_b = coordinator.kick_session_counter_query(&key_b);
-    let seq_b = {
+    let (seq_a, reply_a, seq_b, reply_b) = {
         let records = coordinator.workers.records();
         let q = records[&8].handle.commands.lock().unwrap();
-        let sequences: Vec<_> = q
+        let queries: Vec<_> = q
             .iter()
             .filter_map(|command| match command {
-                WorkerCommand::QuerySessionCounters { sequence, .. } => Some(*sequence),
+                WorkerCommand::QuerySessionCounters {
+                    sequence, reply, ..
+                } => Some((*sequence, reply.clone())),
                 _ => None,
             })
             .collect();
-        assert_eq!(sequences.len(), 2);
-        sequences[1]
+        assert_eq!(queries.len(), 2);
+        (queries[0].0, queries[0].1.clone(), queries[1].0, queries[1].1.clone())
     };
-    atomics.counter_query_found.store(1, Ordering::Relaxed);
-    atomics.counter_query_fwd_packets.store(999, Ordering::Relaxed);
-    atomics.counter_query_seq.store(seq_b, Ordering::Release);
-    let started = Instant::now();
-    let rows_a = wait_a.wait_and_collect();
-    assert!(started.elapsed() < Duration::from_secs(1));
+
+    // Hold A's reply slot while its waiter starts, then publish B before
+    // releasing A. This deterministically overlaps A's read attempt with B's
+    // publication; per-request slots preserve both snapshots.
+    let reply_a_guard = reply_a.lock().unwrap();
+    let started = Arc::new(Barrier::new(2));
+    let waiter_started = started.clone();
+    let started_at = Instant::now();
+    let waiter = std::thread::spawn(move || {
+        waiter_started.wait();
+        wait_a.wait_and_collect()
+    });
+    started.wait();
+    *reply_b.lock().unwrap() = Some(crate::afxdp::session_glue::SessionCounterAnswer {
+        sequence: seq_b,
+        found: true,
+        fwd_packets: 999,
+        ..Default::default()
+    });
+    drop(reply_a_guard);
+    // A's own answer was held until after B's publication.
+    *reply_a.lock().unwrap() = Some(crate::afxdp::session_glue::SessionCounterAnswer {
+        sequence: seq_a,
+        found: true,
+        fwd_packets: 111,
+        ..Default::default()
+    });
+    let rows_a = waiter.join().expect("counter query waiter");
+    assert!(started_at.elapsed() < Duration::from_secs(1));
     assert_eq!(rows_a.len(), 1);
-    assert!(!rows_a[0].answered, "B's reply must not satisfy A: {rows_a:?}");
+    assert!(rows_a[0].answered);
+    assert_eq!(rows_a[0].fwd_packets, 111, "A must retain its snapshot");
+
     let rows_b = wait_b.wait_and_collect();
     assert_eq!(rows_b.len(), 1);
     assert!(rows_b[0].answered);
