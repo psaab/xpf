@@ -805,13 +805,23 @@ fn match_source_nat_result_for_tuple_inner(
                     });
                 }
                 if address_only {
-                    let addr_idx = rule.pool_allocator.address_index(
-                        src_ip,
-                        0,
-                        rule.pool_addresses_v4.len(),
-                        rule.address_persistent,
-                    );
-                    let pool_addr = rule.pool_addresses_v4[addr_idx];
+                    // #13684: choose the round-robin address here ONLY for paths
+                    // that consume it. `reserve_address_only_persistent` picks
+                    // its own fresh-lease address via `address_index`, so an
+                    // unconditional call here would advance the counter a
+                    // second time for every fresh persistent subscriber and
+                    // skew/strip-mine the pool distribution.
+                    let addr_idx = if rule.persistent_nat && !tuple_unknown {
+                        None
+                    } else {
+                        Some(rule.pool_allocator.address_index(
+                            src_ip,
+                            0,
+                            rule.pool_addresses_v4.len(),
+                            rule.address_persistent,
+                        ))
+                    };
+                    let pool_addr = addr_idx.map(|idx| rule.pool_addresses_v4[idx]);
                     if tuple_unknown {
                         // Synthetic address-only wrapper (protocol == 0, never a
                         // framed packet): keep the historical round-robin port for
@@ -822,7 +832,9 @@ fn match_source_nat_result_for_tuple_inner(
                         let port = if rule.no_translation {
                             None
                         } else {
-                            match rule.pool_allocator.try_next_port(addr_idx) {
+                            match rule.pool_allocator.try_next_port(
+                                addr_idx.expect("synthetic address-only path selects an address"),
+                            ) {
                                 Ok(port) => Some(port),
                                 Err(reason) => {
                                     return SourceNatLookup::Unavailable(
@@ -832,7 +844,9 @@ fn match_source_nat_result_for_tuple_inner(
                             }
                         };
                         return SourceNatLookup::Matched(NatDecision {
-                            rewrite_src: Some(IpAddr::V4(pool_addr)),
+                            rewrite_src: Some(IpAddr::V4(
+                                pool_addr.expect("synthetic address-only path selects an address"),
+                            )),
                             rewrite_dst: None,
                             rewrite_src_port: port,
                             rewrite_dst_port: None,
@@ -852,9 +866,9 @@ fn match_source_nat_result_for_tuple_inner(
                     // #6041: when the pool also configures `persistent-nat`, pin a
                     // public ADDRESS across the configured permit scope via an
                     // address-only persistent LEASE (the lease picks/reuses the
-                    // address itself, so the round-robin `pool_addr` chosen above
-                    // is bypassed — persistence no longer depends on the global
-                    // `address-persistent` hash). The per-flow reverse-identity
+                    // address itself; the lease path selects a fresh address
+                    // with its own single `address_index` call, while a reused
+                    // lease consumes no round-robin choice. The per-flow reverse-identity
                     // token is still minted for the #5269 collision guard.
                     let reserved = if rule.persistent_nat {
                         rule.pool_allocator.reserve_address_only_persistent(
@@ -880,7 +894,7 @@ fn match_source_nat_result_for_tuple_inner(
                             flow,
                             PoolAddressFamily::V4(&rule.pool_addresses_v4),
                             0,
-                            addr_idx,
+                            addr_idx.expect("non-persistent path selects round-robin start"),
                             rule.address_persistent,
                             holder,
                         )
@@ -946,14 +960,21 @@ fn match_source_nat_result_for_tuple_inner(
             IpAddr::V6(_) if !rule.pool_addresses_v6.is_empty() => {
                 let v6_offset = rule.pool_addresses_v4.len();
                 if address_only {
-                    let addr_idx = rule.pool_allocator.address_index(
-                        src_ip,
-                        v6_offset,
-                        rule.pool_addresses_v6.len(),
-                        rule.address_persistent,
-                    );
-                    let v6_idx = addr_idx - v6_offset;
-                    let pool_addr = rule.pool_addresses_v6[v6_idx];
+                    // #13684: persistent reservation selects its own fresh lease
+                    // address. Avoid advancing this family's round-robin counter
+                    // before that selection; preserve the chosen index for the
+                    // synthetic and non-persistent paths that consume it.
+                    let addr_idx = if rule.persistent_nat && !tuple_unknown {
+                        None
+                    } else {
+                        Some(rule.pool_allocator.address_index(
+                            src_ip,
+                            v6_offset,
+                            rule.pool_addresses_v6.len(),
+                            rule.address_persistent,
+                        ))
+                    };
+                    let pool_addr = addr_idx.map(|idx| rule.pool_addresses_v6[idx - v6_offset]);
                     if tuple_unknown {
                         // Synthetic address-only wrapper (protocol == 0): historical
                         // round-robin port (non-no-translation) or preserve (None).
@@ -961,7 +982,9 @@ fn match_source_nat_result_for_tuple_inner(
                         let port = if rule.no_translation {
                             None
                         } else {
-                            match rule.pool_allocator.try_next_port(addr_idx) {
+                            match rule.pool_allocator.try_next_port(
+                                addr_idx.expect("synthetic address-only path selects an address"),
+                            ) {
                                 Ok(port) => Some(port),
                                 Err(reason) => {
                                     return SourceNatLookup::Unavailable(
@@ -971,7 +994,9 @@ fn match_source_nat_result_for_tuple_inner(
                             }
                         };
                         return SourceNatLookup::Matched(NatDecision {
-                            rewrite_src: Some(IpAddr::V6(pool_addr)),
+                            rewrite_src: Some(IpAddr::V6(
+                                pool_addr.expect("synthetic address-only path selects an address"),
+                            )),
                             rewrite_dst: None,
                             rewrite_src_port: port,
                             rewrite_dst_port: None,
@@ -983,8 +1008,8 @@ fn match_source_nat_result_for_tuple_inner(
                     // symmetric with the v4 branch above. #6041: route the
                     // `persistent-nat` combination through the address-only
                     // persistent lease so the public address is pinned across the
-                    // permit scope (the lease selects the address; the round-robin
-                    // `pool_addr` above is bypassed).
+                    // permit scope (the lease selects the address itself; its
+                    // fresh-lease selection owns the sole `address_index` call).
                     let reserved = if rule.persistent_nat {
                         rule.pool_allocator.reserve_address_only_persistent(
                             flow,
@@ -1001,13 +1026,14 @@ fn match_source_nat_result_for_tuple_inner(
                         // (`addr_idx`, absolute over the combined v4+v6 index
                         // space) so a colliding reverse identity on the chosen
                         // address rotates to a FREE sibling instead of falsely
-                        // exhausting. `addr_idx` already advanced the round-robin
-                        // counter above; the loop does not advance it again.
+                        // exhausting. `addr_idx` already advanced the
+                        // round-robin counter above; the loop does not advance it
+                        // again.
                         rule.pool_allocator.reserve_address_only_roundrobin(
                             flow,
                             PoolAddressFamily::V6(&rule.pool_addresses_v6),
                             v6_offset,
-                            addr_idx,
+                            addr_idx.expect("non-persistent path selects round-robin start"),
                             rule.address_persistent,
                             holder,
                         )
