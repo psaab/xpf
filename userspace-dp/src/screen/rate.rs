@@ -46,8 +46,10 @@
 //! deliberately retained) for the consumers where "admitted" means "skip a
 //! security response" — the SYN-flood aggregate that activates SYN cookies
 //! when `syn-cookie` is ON (a challenge is a recoverable extra RTT), the
-//! alarm-threshold arrival-rate measurement, and the #3315 per-source /
-//! per-destination sketch. Consumers where "admitted" is a pure shaper /
+//! alarm-threshold arrival-rate measurement. (The #3315 per-source /
+//! per-destination sketch migrated to `TokenBucket` in #13954: a dst/src
+//! trip is a hard drop, not a recoverable response.) Consumers where
+//! "admitted" is a pure shaper /
 //! validate-budget decision (ICMP/UDP flood aggregate, the standby
 //! SYN-cookie ACK validation budget, and the SYN-flood aggregate drop path
 //! when `syn-cookie` is OFF) instead use [`TokenBucket`] below, which admits

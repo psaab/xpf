@@ -1,6 +1,8 @@
 use super::*;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+const NS: u64 = 1_000_000_000;
+
 fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(a, b, c, d))
 }
@@ -21,9 +23,9 @@ fn single_key_trips_above_threshold() {
     const T: u32 = 5;
     // First T are admitted; the (T+1)th trips.
     for _ in 0..T {
-        assert!(!s.increment(&victim, 100, T), "first {T} SYNs admitted");
+        assert!(!s.increment(&victim, 100 * NS, T), "first {T} SYNs admitted");
     }
-    assert!(s.increment(&victim, 100, T), "over-threshold SYN trips");
+    assert!(s.increment(&victim, 100 * NS, T), "over-threshold SYN trips");
 }
 
 /// D1 (required): a victim ALWAYS trips regardless of arrival order or
@@ -41,14 +43,14 @@ fn victim_always_trips_despite_busy_table_and_late_arrival() {
     for k in 0..500u32 {
         let other = v4(172, 16, (k >> 8) as u8, (k & 0xff) as u8);
         for _ in 0..(T + 2) {
-            s.increment(&other, 100, T);
+            s.increment(&other, 100 * NS, T);
         }
     }
     // The victim arrives LATE into a busy table and floods.
     let victim = v4(10, 9, 9, 9);
     let mut tripped = false;
     for _ in 0..(T + 1) {
-        tripped |= s.increment(&victim, 100, T);
+        tripped |= s.increment(&victim, 100 * NS, T);
     }
     assert!(
         tripped,
@@ -62,25 +64,28 @@ fn victim_always_trips_despite_busy_table_and_late_arrival() {
 /// cell-index + saturate-cell seams (no collider search).
 #[test]
 fn some_but_not_all_rows_does_not_trip() {
-    let mut s = SynRateSketch::for_dst();
+    // Count-all cells retain AND/MIN semantics (pinned here on an explicit
+    // RateCounter sketch); TokenBucket sketches use the all-row transaction
+    // (#10319), where any drained row blocks admission fail-closed.
+    let mut s = SynRateSketch::<RateCounter>::with_cols_seeded(DST_COLS, 42);
     const T: u32 = 10;
     let key = v4(192, 168, 1, 1);
     let idx = s.cell_indices(&key);
     // Saturate ALL BUT ONE of the key's rows with colliding traffic.
     for (row, &col) in idx.iter().enumerate().take(ROWS - 1) {
-        s.saturate_cell(row, col, 100, T);
+        s.saturate_cell(row, col, 100 * NS, T);
     }
     // The key sends ONE SYN: ROWS-1 rows are over threshold but the last is
     // not → AND is false → no trip. (An OR/MAX sketch would trip here.)
     assert!(
-        !s.increment(&key, 100, T),
+        !s.increment(&key, 100 * NS, T),
         "a key over threshold in only ROWS-1 rows must NOT trip (AND/MIN)"
     );
     // Now saturate the final row too: every row over threshold → trips.
     let final_idx = s.cell_indices(&key)[ROWS - 1];
-    s.saturate_cell(ROWS - 1, final_idx, 100, T);
+    s.saturate_cell(ROWS - 1, final_idx, 100 * NS, T);
     assert!(
-        s.increment(&key, 100, T),
+        s.increment(&key, 100 * NS, T),
         "once ALL rows are over threshold the key trips"
     );
 }
@@ -92,7 +97,7 @@ fn some_but_not_all_rows_does_not_trip() {
 /// independence still comes from the per-row `ROW_SEEDS`).
 #[test]
 fn rows_use_independent_seeds() {
-    let s = SynRateSketch::with_cols_seeded(SRC_COLS, 0x1234_5678_9ABC_DEF0);
+    let s = SynRateSketch::<TokenBucket>::with_cols_seeded(SRC_COLS, 0x1234_5678_9ABC_DEF0);
     let idx = s.cell_indices(&v4(203, 0, 113, 7));
     let all_same = idx.iter().all(|&c| c == idx[0]);
     assert!(
@@ -109,7 +114,7 @@ fn no_growth_under_spoofed_flood() {
     let before = s.capacity();
     for k in 0..50_000u32 {
         let spoofed = v4((k >> 24) as u8, (k >> 16) as u8, (k >> 8) as u8, k as u8);
-        s.increment(&spoofed, 100, 20);
+        s.increment(&spoofed, 100 * NS, 20);
     }
     assert_eq!(
         s.capacity(),
@@ -131,7 +136,7 @@ fn many_sources_one_dest_trips_per_dest() {
     let mut tripped = false;
     for _ in 0..(T + 5) {
         // Same destination every time (the per-dest sketch keys on dst).
-        tripped |= s.increment(&victim, 100, T);
+        tripped |= s.increment(&victim, 100 * NS, T);
     }
     assert!(
         tripped,
@@ -149,7 +154,7 @@ fn sample_ips(n: u32) -> Vec<IpAddr> {
 /// The `ROWS` cell indices each IP maps to, under a pinned seed. Equal
 /// vectors ⇒ identical key→cell mapping.
 fn cell_distribution(seed: u64, ips: &[IpAddr]) -> Vec<[usize; ROWS]> {
-    let s = SynRateSketch::with_cols_seeded(SRC_COLS, seed);
+    let s = SynRateSketch::<TokenBucket>::with_cols_seeded(SRC_COLS, seed);
     ips.iter().map(|ip| s.cell_indices(ip)).collect()
 }
 
@@ -218,7 +223,7 @@ fn cell_v6_s3_sample_spreads_for_every_pinned_seed_12789() {
         42,
         u64::MAX,
     ] {
-        let s = SynRateSketch::with_cols_seeded(SRC_COLS, seed);
+        let s = SynRateSketch::<TokenBucket>::with_cols_seeded(SRC_COLS, seed);
         for row in 0..ROWS {
             let distinct: std::collections::BTreeSet<usize> = ips
                 .iter()
@@ -244,7 +249,7 @@ fn cell_ip_port_v6_s3_sample_spreads_for_every_pinned_seed_12789() {
         42,
         u64::MAX,
     ] {
-        let s = SynRateSketch::with_cols_seeded(DST_COLS, seed);
+        let s = SynRateSketch::<TokenBucket>::with_cols_seeded(DST_COLS, seed);
         for row in 0..ROWS {
             let distinct: std::collections::BTreeSet<usize> = ips
                 .iter()
@@ -276,7 +281,7 @@ fn cell_ip_port_mapping_is_stable_and_depends_on_per_boot_seed_12789() {
 #[test]
 fn keyed_hash_bucket_vectors_12789() {
     let ip = v6_s3_ips(1)[0];
-    let src = SynRateSketch::with_cols_seeded(SRC_COLS, 42);
+    let src = SynRateSketch::<TokenBucket>::with_cols_seeded(SRC_COLS, 42);
     let dst = SynRateSketch::<RateCounter>::with_cols_seeded(DST_COLS, 42);
     assert_eq!(src.cell_indices(&ip), [1010, 1935, 1290, 1309]);
     assert_eq!(
@@ -292,17 +297,17 @@ fn keyed_hash_bucket_vectors_12789() {
 #[test]
 fn single_source_flood_trips_under_pinned_seed() {
     for &seed in &[1u64, 0xDEAD_BEEF_CAFE_F00D, u64::MAX] {
-        let mut s = SynRateSketch::with_cols_seeded(SRC_COLS, seed);
+        let mut s = SynRateSketch::<TokenBucket>::with_cols_seeded(SRC_COLS, seed);
         let attacker = v4(198, 51, 100, 7);
         const T: u32 = 5;
         for _ in 0..T {
             assert!(
-                !s.increment(&attacker, 100, T),
+                !s.increment(&attacker, 100 * NS, T),
                 "first {T} SYNs admitted (seed {seed:#x})"
             );
         }
         assert!(
-            s.increment(&attacker, 100, T),
+            s.increment(&attacker, 100 * NS, T),
             "over-threshold SYN trips (seed {seed:#x})"
         );
     }
@@ -314,9 +319,7 @@ fn single_source_flood_trips_under_pinned_seed() {
 // NOT `now_secs`. These pin the token-bucket sketch invariants directly.
 // ================================================================
 
-/// One whole nanosecond-second for readable `now_ns` arithmetic.
-const NS: u64 = 1_000_000_000;
-
+/// (`NS` is defined at the top of this file.)
 /// #5805: the flood sketch is still fixed at `ROWS * DST_COLS` cells and does
 /// NOT grow under a flood of distinct destinations — the token-bucket cell is
 /// the same 16 bytes as `RateCounter`, so the operator memory advisory bound is
@@ -475,6 +478,91 @@ fn flood_sketch_sustained_over_threshold_trips() {
         assert!(
             admitted_ip_port <= max_sustained_with_initial_burst,
             "IP+port flood cap admitted {admitted_ip_port} at {rate_multiplier}x threshold; cap is phase-skewed"
+        );
+    }
+}
+
+/// #13954 RED-on-revert: the SYN per-destination (for_dst) and per-source
+/// (for_src) sketches must honour the configured rate STEADILY like the
+/// #5805 flood sketch: a destination/source parked at 0.6*threshold and at
+/// exactly threshold SYN/s stays admitted, an over-threshold stream is
+/// limited to ~ the rate, and a hard DropDst/drop recovers without an idle
+/// second once the rate falls below threshold. On RateCounter cells the
+/// count-all window collapses at-threshold traffic after the first second.
+/// `now` is monotonic ns post-migration (was seconds pre-migration).
+#[test]
+fn syn_dst_src_sketches_sustained_at_threshold_stay_admitted_13954() {
+    const T: u32 = 100;
+    for (label, dst) in [("dst", true), ("src", false)] {
+        let key = v4(10, 0, 9, 1);
+        // 0.6T and 1.0T sustained across 20s: >=99% admitted.
+        for frac in [60u64, 100] {
+            let mut s = if dst { SynRateSketch::for_dst() } else { SynRateSketch::for_src() };
+            let rate = T as u64 * frac / 100;
+            let interval = NS / rate;
+            let mut now_ns = 4 * NS;
+            let total = rate * 20;
+            let mut admitted = 0u64;
+            for _ in 0..total {
+                if !s.increment(&key, now_ns, T) { admitted += 1; }
+                now_ns += interval;
+            }
+            assert!(admitted as f64 >= 0.99 * total as f64,
+                "{label} at {frac}% of threshold must stay admitted (#13954): {admitted}/{total}");
+        }
+        // 2T sustained over 8s: admitted <= initial burst + rate*seconds.
+        let mut s = if dst { SynRateSketch::for_dst() } else { SynRateSketch::for_src() };
+        let mut now_ns = 4 * NS;
+        let interval = NS / (2 * T as u64);
+        let total = 2 * T as u64 * 8;
+        let mut admitted = 0u64;
+        for _ in 0..total {
+            if !s.increment(&key, now_ns, T) { admitted += 1; }
+            now_ns += interval;
+        }
+        assert!(admitted <= (T + T * 8) as u64,
+            "{label} over-threshold admitted {admitted}, cap {}", T + T * 8);
+        // Recovery: drain, then at-threshold trickle admits without idle second.
+        let mut s = if dst { SynRateSketch::for_dst() } else { SynRateSketch::for_src() };
+        let mut now_ns = 4 * NS;
+        for _ in 0..T { assert!(!s.increment(&key, now_ns, T)); }
+        assert!(s.increment(&key, now_ns, T), "{label} burst over capacity trips");
+        now_ns += NS / 2;
+        let mut admitted = 0u64;
+        for _ in 0..(T as u64 / 2) {
+            if !s.increment(&key, now_ns, T) { admitted += 1; }
+            now_ns += NS / T as u64;
+        }
+        assert!(admitted >= T as u64 / 4, "{label} must recover mid-rate without idle second: {admitted}");
+    }
+}
+
+/// #13954 (collision tradeoff, production SYN path): the TokenBucket SYN
+/// sketches (for_dst/for_src) admit via the all-row transaction, so draining
+/// ONE of a key's rows (a colliding hot key) blocks that key's admission
+/// fail-closed — even though the count-all CMS would not trip until ALL
+/// rows were over. This is the deliberate #10319 tradeoff (bounds the
+/// sustained rate under phase-staggered rows); collisions can never ADMIT
+/// an over-threshold key, and the key recovers as the drained row refills.
+#[test]
+fn syn_sketch_one_drained_row_blocks_admission_13954() {
+    const T: u32 = 10;
+    for (label, dst) in [("dst", true), ("src", false)] {
+        let mut s = if dst { SynRateSketch::for_dst() } else { SynRateSketch::for_src() };
+        let key = v4(192, 0, 2, 77);
+        let idx = s.cell_indices(&key);
+        let now_ns = 100 * NS;
+        // Drain ONLY row 0's cell for this key (simulated colliding hot key).
+        s.saturate_cell(0, idx[0], now_ns, T);
+        assert!(
+            s.increment(&key, now_ns, T),
+            "{label}: one drained row must block admission on the production SYN sketch (#13954)"
+        );
+        // After refill (1s at T/s refills the drained capacity) the key is
+        // admitted again — collision throttling is rate-shaped, not latched.
+        assert!(
+            !s.increment(&key, now_ns + NS, T),
+            "{label}: key must be admitted again once the drained row refills (#13954)"
         );
     }
 }

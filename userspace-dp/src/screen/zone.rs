@@ -97,11 +97,11 @@ pub(super) struct ZoneScreenState {
     pub(super) udp_dst_sketch: Option<SynRateSketch<TokenBucket>>,
     /// #3315 per-DESTINATION SYN-flood rate sketch (PRIMARY, spoof-resistant).
     /// `Some` iff `syn_flood_dst_threshold > 0`; runs even when cookie-active.
-    pub(super) syn_dst_sketch: Option<SynRateSketch>,
+    pub(super) syn_dst_sketch: Option<SynRateSketch<TokenBucket>>,
     /// #3315 per-SOURCE SYN-flood rate sketch (SECONDARY/best-effort). `Some`
     /// iff `syn_flood_src_threshold > 0`; SKIPPED while the zone is
     /// SYN-cookie active.
-    pub(super) syn_src_sketch: Option<SynRateSketch>,
+    pub(super) syn_src_sketch: Option<SynRateSketch<TokenBucket>>,
     /// Monotonic seconds until which the zone is SYN-cookie active (0 = never).
     pub(super) syn_cookie_active_until_secs: u64,
     /// #3607 standby SYN-cookie ACK validation budget (`TokenBucket`).
@@ -469,7 +469,7 @@ impl ZoneScreenState {
         // when the zone is cookie-active.
         if syn_dst_threshold > 0
             && let Some(sketch) = self.syn_dst_sketch.as_mut()
-            && sketch.increment(&pkt.dst_ip, now_secs, syn_dst_threshold)
+            && sketch.increment(&pkt.dst_ip, now_ns, syn_dst_threshold)
         {
             return SynFloodGate::DropDst;
         }
@@ -568,7 +568,7 @@ impl ZoneScreenState {
             && !validated_client
             && !cookie_active
             && let Some(sketch) = self.syn_src_sketch.as_mut()
-            && sketch.increment(&pkt.src_ip, now_secs, syn_src_threshold)
+            && sketch.increment(&pkt.src_ip, now_ns, syn_src_threshold)
         {
             return SynFloodGate::DropSrc {
                 alarm: alarm_raised,
