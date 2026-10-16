@@ -368,7 +368,6 @@ fn live_mirror_admission_reserves_slot_against_interleaving_producer() {
 
     let result = enqueue_admitted_mirror_clone_to_live(
         admission,
-        &ForwardingState::default(),
         config,
         vec![0x22; 64],
         test_meta(),
@@ -1487,4 +1486,120 @@ fn mirror_clone_obeys_analyzer_output_filter_and_filter_removal_restores_it() {
         "removing the output filter restores mirror delivery"
     );
     assert_eq!(bindings[1].tx_pipeline.pending_tx_prepared.len(), 1);
+}
+
+fn accepting_counted_mirror_filter_forwarding() -> ForwardingState {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 22,
+            filter_output_v4: "analyzer-accept".into(),
+            ..InterfaceSnapshot::default()
+        }],
+        filters: vec![crate::protocol::FirewallFilterSnapshot {
+            name: "analyzer-accept".into(),
+            family: "inet".into(),
+            terms: vec![crate::protocol::FirewallTermSnapshot {
+                name: "count-analyzer".into(),
+                action: "accept".into(),
+                count: "accept-only".into(),
+                ..Default::default()
+            }],
+        }],
+        ..ConfigSnapshot::default()
+    };
+    build_forwarding_state(&snapshot)
+}
+
+fn accepting_analyzer_counter_packets(forwarding: &ForwardingState) -> u64 {
+    forwarding
+        .filter_state
+        .filters
+        .get("inet:analyzer-accept")
+        .and_then(|filter| filter.terms.first())
+        .map(|term| term.counter.packets.load(Ordering::Relaxed))
+        .expect("analyzer-accept term counter")
+}
+
+/// #13656: both the cross-worker live queue and same-worker binding path
+/// evaluate an accepting output filter exactly once for each mirror clone.
+#[test]
+fn mirror_output_filter_accept_counter_counts_once_13656() {
+    let frame = crate::afxdp::tx::test_support::build_ipv4_test_packet(0);
+    let mut forwarding = accepting_counted_mirror_filter_forwarding();
+    let meta = ForwardPacketMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        l3_offset: 14,
+        l4_offset: 34,
+        pkt_len: frame.len() as u16,
+        ..ForwardPacketMeta::default()
+    };
+    let key = crate::afxdp::tx::test_support::test_session_key(12345, 443);
+    let config = MirrorRuntimeConfig {
+        output_ifindex: 22,
+        rate: 0,
+    };
+    let target_live = Arc::new(BindingLiveState::new());
+    let mut mirror_targets = MirrorTargetMap::default();
+    mirror_targets.insert(
+        &BindingIdentity {
+            slot: 9,
+            queue_id: 0,
+            worker_id: 1,
+            interface: Arc::<str>::from("mirror-out"),
+            ifindex: 22,
+        },
+        target_live.clone(),
+    );
+    assert_eq!(
+        enqueue_mirror_clone_to_live(
+            &mirror_targets,
+            &forwarding,
+            config,
+            22,
+            0,
+            &frame,
+            meta,
+            Some(&key),
+            None,
+            0,
+        ),
+        MirrorCloneResult::Enqueued
+    );
+    assert_eq!(accepting_analyzer_counter_packets(&forwarding), 1);
+    let mut queued = VecDeque::new();
+    unsafe { target_live.take_pending_tx_into(&mut queued) };
+    assert_eq!(queued.len(), 1, "accepted clone must be queued");
+
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let empty_targets = MirrorTargetMap::default();
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    assert_eq!(
+        enqueue_mirror_clone(
+            left,
+            0,
+            ingress,
+            right,
+            &lookup,
+            &empty_targets,
+            &forwarding,
+            config,
+            0,
+            &frame,
+            meta,
+            Some(&key),
+            0,
+        ),
+        MirrorCloneResult::Enqueued
+    );
+    assert_eq!(
+        accepting_analyzer_counter_packets(&forwarding),
+        2,
+        "same-worker clone must add exactly one filter count"
+    );
 }
