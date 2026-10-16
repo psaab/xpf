@@ -1186,6 +1186,18 @@ fn learn_dynamic_neighbor_from_frame(
     }
     let mut src_mac = [0u8; 6];
     src_mac.copy_from_slice(&frame[6..12]);
+    // #13948: keep the pre-policy learn in parity with the post-admission
+    // twin, but preserve synthetic fabric source handling (#12051). This
+    // rejects routed sources before any dynamic-neighbor map access.
+    if !crate::afxdp::forwarding::is_synthetic_fabric_source_mac(&src_mac)
+        && !forwarding.src_ip_on_link_for_ingress(
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            src_ip,
+        )
+    {
+        return;
+    }
     learn_dynamic_neighbor_with_mac(
         meta,
         src_ip,

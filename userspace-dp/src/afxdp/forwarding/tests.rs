@@ -1017,6 +1017,10 @@ fn v2_fabric_source_mac_for_test(forwarding: &mut ForwardingState) -> [u8; 6] {
 fn v2_stamped_fabric_ingress_skips_dynamic_neighbor_learning_12051() {
     let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
     let stamp = v2_fabric_source_mac_for_test(&mut forwarding);
+    forwarding.connected_v4_by_ifindex.insert(
+        21,
+        vec![PrefixV4::from_net("198.18.0.0/24".parse().expect("connected prefix"))],
+    );
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let control_ip = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 10));
     let stamp_ip = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 11));
@@ -1048,6 +1052,10 @@ fn v2_stamped_fabric_ingress_skips_dynamic_neighbor_learning_12051() {
 fn stamped_native_ingress_skips_dynamic_neighbor_learning_12051() {
     let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
     let v2_stamp = v2_fabric_source_mac_for_test(&mut forwarding);
+    forwarding.connected_v4_by_ifindex.insert(
+        5,
+        vec![PrefixV4::from_net("198.18.0.0/24".parse().expect("connected prefix"))],
+    );
     let v1_stamp = [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01];
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let control_ip = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 20));
@@ -3863,6 +3871,65 @@ fn post_admission_neighbor_learn_rejects_off_link_and_fabric_sources_13644() {
         fabric_meta, fabric_src, attacker, 600, &mut d6, &state, &dynamic_neighbors,
     );
     assert_eq!(dynamic_neighbors.get(&(99, fabric_src)), None, "fabric ingress must not seed local neighbor identity");
+}
+/// #13948: the pre-policy RX learn (`stage_parse_flow_and_learn` ->
+/// `learn_dynamic_neighbor_from_packet`) had no on-link gate, so routed
+/// sources received through an upstream router were installed as neighbors.
+#[test]
+fn pre_policy_neighbor_learn_rejects_off_link_sources_13948() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let ingress = 24;
+    let off4 = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42));
+    learn_source_mac_for_test(&state, &neighbors, ingress, off4, LEARN_MAC_A);
+    assert_eq!(neighbors.get(&(ingress, off4)), None, "off-link v4 source");
+    let off6: IpAddr = "2001:db8::42".parse().expect("v6 off-link");
+    learn_source_mac_for_test(&state, &neighbors, ingress, off6, LEARN_MAC_A);
+    assert_eq!(neighbors.get(&(ingress, off6)), None, "off-link v6 source");
+    // A different ingress without this connected prefix cannot learn it.
+    let lan_src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 90));
+    learn_source_mac_for_test(&state, &neighbors, 99, lan_src, LEARN_MAC_A);
+    assert_eq!(neighbors.get(&(99, lan_src)), None, "unrelated ingress");
+    // On-link hosts of both families remain learnable.
+    let on4 = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 42));
+    learn_source_mac_for_test(&state, &neighbors, ingress, on4, LEARN_MAC_A);
+    assert_eq!(neighbors.get(&(ingress, on4)).map(|e| e.mac), Some(LEARN_MAC_A));
+    let on6: IpAddr = "2001:559:8585:ef00::42".parse().expect("v6 on-link");
+    learn_source_mac_for_test(&state, &neighbors, ingress, on6, LEARN_MAC_A);
+    assert_eq!(neighbors.get(&(ingress, on6)).map(|e| e.mac), Some(LEARN_MAC_A));
+}
+
+/// #13948: 10k distinct off-link sources must not grow the pre-policy
+/// learn map or consume shard-cap drops before policy adjudication.
+#[test]
+fn pre_policy_off_link_spoof_flood_leaves_capacity_untouched_13948() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let ingress = 24;
+    let router_mac = [0x02, 0x00, 0x5e, 0x10, 0x00, 0x01];
+    let mut frame = vec![0u8; 64];
+    frame[6..12].copy_from_slice(&router_mac);
+    let mut area = MmapArea::new(4096).expect("mmap");
+    area.slice_mut(0, frame.len()).expect("slice").copy_from_slice(&frame);
+    let desc = XdpDesc { addr: 0, len: frame.len() as u32, options: 0 };
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: ingress as u32,
+        ..Default::default()
+    };
+    let mut dedup = LearnedNeighborDedup::default();
+    for i in 0..10_000u32 {
+        let src = IpAddr::V4(Ipv4Addr::new(
+            198,
+            51,
+            (i >> 16) as u8,
+            (i >> 8) as u8,
+        ));
+        super::super::neighbor_dispatch::learn_dynamic_neighbor_from_packet(
+            &area, desc, meta, src, i as u64 + 1, &mut dedup, &state, &neighbors,
+        );
+    }
+    assert_eq!(neighbors.len(), 0, "off-link flood must install no neighbors");
+    assert_eq!(neighbors.learn_cap_drops(), 0, "off-link flood must not hit cap");
 }
 
 
