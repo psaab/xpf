@@ -345,23 +345,31 @@ pub(in crate::afxdp) fn transit_src_is_martian(
     }
 }
 
-/// #11413: transit destination-class gate — special destination ranges that
-/// routers must not forward as ordinary unicast transit. LocalDelivery remains
-/// outside the caller-side gate so traffic received by the firewall is intact.
+/// #11413/#13960/#13981: transit destination-class gate for special addresses
+/// that routers must not forward as ordinary unicast. LocalDelivery remains
+/// outside the caller-side gate so firewall-local traffic is intact.
 ///
-/// IPv4 covers multicast (224/4), limited broadcast, loopback (127/8), and
-/// reserved (240/4). IPv6 covers multicast (ff00::/8); IPv6 has no broadcast.
+/// IPv4 covers this-network (`0/8`), multicast (224/4), limited broadcast,
+/// loopback (127/8), link-local (169.254/16), and reserved (240/4). IPv6
+/// covers unspecified (`::`), loopback (`::1`), multicast (ff00::/8), and
+/// link-local (fe80::/10); IPv6 has no broadcast.
 #[inline]
 pub(in crate::afxdp) fn transit_dst_is_martian(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            v4.is_multicast()
+            o[0] == 0
+                || v4.is_multicast()
                 || v4.is_broadcast()
                 || v4.is_loopback()
                 || v4.is_link_local()
                 || o[0] >= 240
         }
-        IpAddr::V6(v6) => v6.is_multicast() || v6.is_unicast_link_local(),
+        IpAddr::V6(v6) => {
+            v6.is_unspecified()
+                || v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unicast_link_local()
+        }
     }
 }
