@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -99,7 +100,11 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 
 	// Always rebuild from the desired config. Cloning current.Interfaces would
 	// make a row removed by #11086 unrecoverable when its netdev is recreated.
-	liveXfrm, _ := sampleLiveXfrmNetdevs()
+	// Capture the fresh xfrm dump status exactly as the full build does
+	// (builder.go): retaining the previous snapshot's stale value would grant
+	// or withhold the NIC-tuning allowlist on old evidence (#14133).
+	liveXfrm, xfrmDumpFailed := sampleLiveXfrmNetdevs()
+	next.xfrmDumpFailed = xfrmDumpFailed
 	next.Interfaces = buildInterfaceSnapshotsFrom(cfg, liveXfrm)
 	// Rows are freshly built here, so revalidate their owned backing once before
 	// deriving routes and other interface-dependent sections. The prepared send
@@ -116,6 +121,27 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	next.Fabrics = buildFabricSnapshotsFrom(cfg, liveXfrm)
 	next.TunnelEndpoints = buildTunnelEndpointSnapshots(cfg, next.Interfaces)
 	next.MirrorConfigs, next.MirrorExclusions = buildMirrorConfigSnapshots(cfg, next.Interfaces)
+	// #14133: re-establish the full-build zone-isolation invariant on the
+	// freshly rebuilt rows. builder.go runs quarantineCollidingZones after
+	// every full build; without it a recreated interface in a quarantined
+	// (StableZoneID-colliding / poisoned / reserved) zone would be published
+	// zoned, resurrecting the merged-zone hazard and dangling policy/zone
+	// references. quarantineCollidingZones is idempotent on an already
+	// reduced snapshot (survivor policies/zones stay reduced), so applying
+	// it here mirrors the full build. Carry the diagnostic forward and
+	// recompute ZoneSetValidated and the summary counts exactly as builder.go.
+	next.zoneIDCollisions = quarantineCollidingZones(&next)
+	next.ZoneSetValidated = len(next.Zones) > 0 && len(next.zoneIDCollisions) == 0
+	if len(next.zoneIDCollisions) > 0 {
+		next.Summary.ZoneCount = len(next.Zones)
+		next.Summary.PolicyCount = len(next.Policies)
+	}
+	// Policy refusal reasons must name the exact post-quarantine policy/zone
+	// sets this refresh publishes (builder.go recomputes them the same way);
+	// otherwise a refresh that newly quarantines a zone keeps stale reasons
+	// and one that clears it keeps phantom refusals.
+	m.recordPolicyContentRejectionLocked(next.Capabilities.PolicyContentRejected)
+	m.recordZoneIDCollisionsLocked(next.zoneIDCollisions)
 	generation := m.generation
 	if generation < current.Generation {
 		generation = current.Generation
@@ -148,6 +174,15 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 		return false, err
 	}
 
+	// #14133: reconcile the kernel XDP attachment set against the snapshot
+	// being published. A recreated link carries a new ifindex with no shim,
+	// and the Rust helper never attaches XDP itself (it only binds AF_XDP
+	// sockets to interfaces the shim already covers), so without this the
+	// published interface would have no tracked XDP ingress until the next
+	// full Compile. Runs BEFORE publish (the helper cannot bind a socket to
+	// an unshimmed interface; the attach failure mode is an extra fail-closed
+	// drop, not a bypass — Compile's documented rationale).
+	m.reconcileInterfaceAttachmentsForRefreshLocked(&next)
 	publishSnap := next
 	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
@@ -176,6 +211,83 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	slog.Info("userspace: interface rows refreshed after link change", "generation", next.Generation,
 		"linux_name", linuxName)
 	return true, nil
+}
+
+// reconcileInterfaceAttachmentsForRefreshLocked brings the kernel XDP
+// attachment set in line with next before next is published (#14133).
+// Caller holds m.mu.
+//
+// Attach half: every ingress ifindex in next that is not already tracked is
+// attached now. A recreated link has a new ifindex, so it lands here; an
+// unchanged link keeps its existing tracked link. The forceGeneric
+// classification mirrors Compile's attachUserspaceShimXDP: a tunnel netdev
+// (SecureTunnel row) or a VLAN child (ParentIfindex > 0) goes generic,
+// everything else tries native first with a generic fallback. An attach
+// failure is logged and left for the next refresh/full apply to retry — it
+// must not fail this publish, because the helper's snapshot update is still
+// correct and the unshimmed interface is fail-closed (no program,
+// fence-dropped transit), never fail-open.
+//
+// Detach half is intentionally NOT done here: detaching an obsolete ifindex
+// before the helper accepts next would repeat the #5485 bypass if the
+// publish then failed and the retained snapshot still adjudicated it. The
+// obsolete attachment is reaped by the next full Compile's post-acceptance
+// syncInterfaceAttachments; the lingering shim is the bounded mirror
+// transient documented in applyCompiledSnapshot (#10642).
+func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnapshot) {
+	if m == nil || next == nil {
+		return
+	}
+	tracked := m.bpfShim.XDPLinks()
+	for _, ifindex := range buildUserspaceIngressIfindexes(next) {
+		if ifindex == 0 {
+			continue
+		}
+		if _, ok := tracked[int(ifindex)]; ok {
+			continue
+		}
+		row := interfaceRowForIfindex(next, ifindex)
+		forceGeneric := row != nil && (row.SecureTunnel || row.ParentIfindex > 0 || row.Tunnel)
+		attach := m.bpfShim.AttachXDP
+		if m.attachInterfaceXDPHook != nil {
+			attach = m.attachInterfaceXDPHook
+		}
+		if err := attach(int(ifindex), forceGeneric); err != nil {
+			if attachErrIsAlreadyAttached(err) {
+				continue
+			}
+			if !forceGeneric {
+				if gerr := attach(int(ifindex), true); gerr == nil || attachErrIsAlreadyAttached(gerr) {
+					continue
+				} else {
+					err = gerr
+				}
+			}
+			slog.Warn("userspace: failed to attach XDP shim during interface-link refresh; interface remains fail-closed until the next apply",
+				"ifindex", ifindex, "err", err, "issue", "#14133")
+		}
+	}
+}
+
+// attachErrIsAlreadyAttached reports whether an AttachXDP error is the
+// benign "already attached" short-circuit (dataplane.Manager.AttachXDP).
+func attachErrIsAlreadyAttached(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "already attached")
+}
+
+// interfaceRowForIfindex returns the snapshot row that contributes ifindex
+// to the ingress set (its own ifindex or, for a parent contribution, the row
+// whose ParentIfindex matches), or nil when no row matches.
+func interfaceRowForIfindex(snap *ConfigSnapshot, ifindex uint32) *InterfaceSnapshot {
+	if snap == nil {
+		return nil
+	}
+	for i := range snap.Interfaces {
+		if uint32(snap.Interfaces[i].Ifindex) == ifindex || uint32(snap.Interfaces[i].ParentIfindex) == ifindex {
+			return &snap.Interfaces[i]
+		}
+	}
+	return nil
 }
 
 func configuredInterfaceLinkName(cfg *config.Config, linuxName string) bool {

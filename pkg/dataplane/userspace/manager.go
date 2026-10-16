@@ -94,6 +94,10 @@ type Manager struct {
 	// the privileged XDP compile/attach leg while exercising pre-mutation
 	// snapshot validation and apply_snapshot publication.
 	compileUserspaceShimHook func(*config.Config, func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error)
+	// attachInterfaceXDPHook, when non-nil, replaces bpfShim.AttachXDP in the
+	// interface-link refresh reconciliation (#14133) so tests can observe the
+	// attach attempt without privileged BPF state. Production leaves it nil.
+	attachInterfaceXDPHook func(ifindex int, forceGeneric bool) error
 
 	mu           sync.Mutex
 	sessionMu    sync.Mutex // separate lock for session sync requests (Phase 3)
