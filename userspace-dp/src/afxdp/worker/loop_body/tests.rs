@@ -506,6 +506,107 @@ mod flow_cache_invalidation_tests {
             "#12042: the revoked tunnel flow's cache slot must be evicted"
         );
     }
+    #[test]
+    fn conntrack_delete_refusal_is_retained_and_revalidated_13671() {
+        use crate::afxdp::bpf_map::{
+            CONNTRACK_TEST_MAP_FD, conntrack_row_for_test,
+            publish_bpf_conntrack_entry_with_source_nat,
+        };
+        use crate::afxdp::bpf_map::global_tuple_gate;
+        use crate::session::SessionTable;
+        use std::sync::{Arc, Mutex};
+
+        for (port, old_id, replacement_id) in [(62001, 71001, None), (62002, 71002, Some(71003))] {
+            crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+            let key = reap_key(port);
+            assert_eq!(
+                publish_bpf_conntrack_entry_with_source_nat(
+                    CONNTRACK_TEST_MAP_FD,
+                    CONNTRACK_TEST_MAP_FD,
+                    &key,
+                    reap_decision(None),
+                    &reap_metadata(),
+                    &FastMap::default(),
+                    0,
+                    0,
+                    old_id,
+                    300,
+                    SessionOrigin::ForwardFlow,
+                    None,
+                ),
+                crate::afxdp::bpf_map::ConntrackPublishResult::Written
+            );
+            let held = global_tuple_gate()
+                .try_acquire_install(&key)
+                .expect("test holds exclusive same-bare-tuple admission");
+            let mut expired = expired(key.clone(), None);
+            expired.key.routing_domain = 77;
+            expired.session_id = old_id;
+            let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+            let mut deferred = reap_expired_sessions(
+                std::slice::from_mut(&mut binding),
+                &[expired],
+                &ForwardingState::default(),
+                SteeringMap::unshared_for_test(-1),
+                CONNTRACK_TEST_MAP_FD,
+                CONNTRACK_TEST_MAP_FD,
+                1_000_000_000,
+                0,
+            );
+            assert_eq!(deferred.len(), 1, "GateBusy must retain the delete");
+            assert_eq!(
+                conntrack_row_for_test(&key).unwrap().session_id,
+                old_id,
+                "the held row must remain untouched"
+            );
+            let mut sessions = SessionTable::new();
+            sessions.defer_conntrack_deletes(std::mem::take(&mut deferred));
+            drop(held);
+            if let Some(replacement_id) = replacement_id {
+                let mut replacement_key = key.clone();
+                replacement_key.routing_domain = 99;
+                assert_eq!(
+                    publish_bpf_conntrack_entry_with_source_nat(
+                        CONNTRACK_TEST_MAP_FD,
+                        CONNTRACK_TEST_MAP_FD,
+                        &replacement_key,
+                        reap_decision(None),
+                        &reap_metadata(),
+                        &FastMap::default(),
+                        0,
+                        0,
+                        replacement_id,
+                        300,
+                        SessionOrigin::ForwardFlow,
+                        None,
+                    ),
+                    crate::afxdp::bpf_map::ConntrackPublishResult::Written
+                );
+            }
+            crate::afxdp::worker::retry_deferred_conntrack_deletes(
+                &mut sessions,
+                CONNTRACK_TEST_MAP_FD,
+                CONNTRACK_TEST_MAP_FD,
+                &Arc::new(Mutex::new(FastMap::default())),
+            );
+            assert!(
+                sessions.take_deferred_conntrack_deletes().is_empty(),
+                "completed or superseded deletes clear their retained work"
+            );
+            match replacement_id {
+                Some(replacement_id) => assert_eq!(
+                    conntrack_row_for_test(&key).unwrap().session_id,
+                    replacement_id,
+                    "retry must not delete a replacement incarnation"
+                ),
+                None => assert!(
+                    conntrack_row_for_test(&key).is_none(),
+                    "retry removes the original conntrack row after admission"
+                ),
+            }
+        }
+        crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    }
 }
 
 mod expiry_count_tests {

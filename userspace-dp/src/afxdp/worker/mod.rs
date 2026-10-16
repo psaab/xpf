@@ -91,7 +91,9 @@ use cos::{
 // `coordinator/mod.rs`, `afxdp/mod.rs`) keep working unchanged.
 mod loop_body;
 pub(crate) use loop_body::worker_loop;
-pub(in crate::afxdp) use loop_body::retry_deferred_pressure_sheds;
+pub(in crate::afxdp) use loop_body::{
+    retry_deferred_conntrack_deletes, retry_deferred_pressure_sheds,
+};
 #[cfg(test)]
 pub(in crate::afxdp) use loop_body::{
     production_rotation_purge_for_test, production_sweep_for_test,

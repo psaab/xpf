@@ -102,7 +102,8 @@ pub(super) fn reap_expired_sessions(
     // with nothing refreshing them. Whichever expires first must NOT free a
     // `(pool_addr, port)` the still-forwarding worker is using.
     worker_id: u32,
-) {
+) -> crate::session::DeferredConntrackDeletes {
+    let mut deferred = crate::session::DeferredConntrackDeletes::new();
     for expired_entry in expired_entries {
         release_source_nat_allocation_for_worker(
             &forwarding.iface_nat_allocators,
@@ -123,15 +124,23 @@ pub(super) fn reap_expired_sessions(
             now_ns,
             worker_id,
         );
-        delete_session_map_entry_for_removed_session_with_origin(
-            session_map,
-            &expired_entry.key,
-            expired_entry.decision,
-            &expired_entry.metadata,
-            expired_entry.origin,
-            conntrack_v4_fd,
-            conntrack_v6_fd,
-        );
+        let result =
+            crate::afxdp::bpf_map::delete_session_map_entry_for_removed_session_with_origin_and_id(
+                session_map,
+                &expired_entry.key,
+                expired_entry.decision,
+                &expired_entry.metadata,
+                expired_entry.origin,
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                expired_entry.session_id,
+            );
+        if result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {
+            deferred.push(crate::session::DeferredConntrackDelete {
+                key: expired_entry.key.clone(),
+                session_id: expired_entry.session_id,
+            });
+        }
         for binding in bindings.iter_mut() {
             binding
                 .flow
@@ -139,6 +148,7 @@ pub(super) fn reap_expired_sessions(
                 .invalidate_slot(&expired_entry.key, binding.ifindex);
         }
     }
+    deferred
 }
 /// #10591 test seam: execute the production expire+reap pair in one call.
 ///
@@ -168,7 +178,7 @@ pub(in crate::afxdp) fn production_sweep_for_test(
 ) -> Vec<crate::session::ExpiredSession> {
     let expired_entries = sessions.expire_stale_entries_ha(now_ns, ha);
     let session_map = crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1);
-    reap_expired_sessions(
+    let deferred = reap_expired_sessions(
         bindings,
         &expired_entries,
         forwarding,
@@ -178,6 +188,7 @@ pub(in crate::afxdp) fn production_sweep_for_test(
         now_ns,
         0,
     );
+    sessions.defer_conntrack_deletes(deferred);
     expired_entries
 }
 /// #10591 test seam: execute the production commit-time zone purge at the
@@ -446,4 +457,49 @@ pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
             now_ns,
         );
     }
+}
+pub(in crate::afxdp) fn retry_deferred_conntrack_deletes(
+    sessions: &mut crate::session::SessionTable,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+) {
+    let pending = sessions.take_deferred_conntrack_deletes();
+    if pending.is_empty() {
+        return;
+    }
+    let keys = pending.iter().map(|delete| delete.key.clone()).collect::<Vec<_>>();
+    let Ok(_lease) = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease(keys) else {
+        sessions.defer_conntrack_deletes(pending);
+        return;
+    };
+    let mut retry = crate::session::DeferredConntrackDeletes::new();
+    for delete in pending {
+        let local_id = sessions.session_id_for_bare_tuple(&delete.key);
+        let shared_id = shared_sessions
+            .lock()
+            .expect("shared sessions poisoned")
+            .values()
+            .find(|entry| entry.key.bare_tuple() == delete.key.bare_tuple())
+            .map(|entry| entry.session_id);
+        if local_id.is_some_and(|session_id| {
+            delete.session_id == 0 || session_id != delete.session_id
+        }) || shared_id.is_some_and(|session_id| {
+            delete.session_id == 0 || session_id != delete.session_id
+        }) {
+            continue;
+        }
+        match crate::afxdp::bpf_map::delete_bpf_conntrack_entry_for_session_under_gate(
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            &delete.key,
+            delete.session_id,
+        ) {
+            crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy => retry.push(delete),
+            crate::afxdp::bpf_map::ConntrackDeleteResult::Deleted
+            | crate::afxdp::bpf_map::ConntrackDeleteResult::KernelError
+            | crate::afxdp::bpf_map::ConntrackDeleteResult::Superseded => {}
+        }
+    }
+    sessions.defer_conntrack_deletes(retry);
 }

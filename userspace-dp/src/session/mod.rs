@@ -1357,6 +1357,17 @@ pub(crate) struct PressureShedSession {
 }
 
 pub(crate) type PressureShedSessions = SmallVec<[PressureShedSession; 2]>;
+/// A conntrack row whose teardown lost exclusive tuple admission.
+///
+/// Retried under a bounded tuple lease; `session_id` fences a replacement
+/// incarnation from a delayed key-only deletion.
+pub(crate) struct DeferredConntrackDelete {
+    pub(crate) key: SessionKey,
+    pub(crate) session_id: u64,
+}
+
+pub(crate) type DeferredConntrackDeletes = SmallVec<[DeferredConntrackDelete; 2]>;
+
 
 #[derive(Clone)]
 struct PMechReservationRecord {
@@ -1426,6 +1437,7 @@ pub(crate) struct SessionTable {
     /// contention. Replayed at the next admission point to avoid orphaning
     /// allocator holds and kernel/shared rows indefinitely.
     deferred_pressure_shed: PressureShedSessions,
+    deferred_conntrack_deletes: DeferredConntrackDeletes,
     /// #9951: per-session inter-VRF leak incarnation, kept outside
     /// `SessionDecision` so the WAN-pinning decision and its wire shape remain
     /// unchanged. Only sessions created on this worker are stamped; peer
@@ -1790,6 +1802,7 @@ impl SessionTable {
             bare_tuple_index: HashMap::with_hasher(state.clone()),
             pressure_shed_openings: HashMap::with_hasher(state.clone()),
             deferred_pressure_shed: PressureShedSessions::new(),
+            deferred_conntrack_deletes: DeferredConntrackDeletes::new(),
             nat_reverse_index: HashMap::with_hasher(state.clone()),
             forward_wire_index: HashMap::with_hasher(state.clone()),
             reverse_translated_index: HashMap::with_hasher(state.clone()),

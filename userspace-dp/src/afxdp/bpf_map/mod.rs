@@ -540,9 +540,9 @@ struct BpfSessionKeyV6 {
 /// SINGLE SOURCE (#7743). The conntrack map is written by three separate
 /// operations — publish (`publish_conntrack`), refresh (the lookup+`BPF_EXIST`
 /// update in `refresh_bpf_conntrack_entry`), and delete
-/// (`delete_bpf_conntrack_entry`). A BPF hash map is keyed on the raw key
-/// BYTES, so all three must produce a byte-identical key or the operations
-/// stop addressing the same row: a publish that encodes ports differently from
+/// (`delete_bpf_conntrack_entry_for_session_result`). A BPF hash map is keyed on the raw key
+/// BYTES, so all three operations must produce the same encoding or they stop
+/// addressing the same row: a publish that encodes ports differently from
 /// the delete writes an entry the delete can never remove, leaking a conntrack
 /// row for the life of the map. Before #7743 each of the eight sites
 /// hand-rolled this literal, so the `to_be()` and the zeroed `pad` were
@@ -1335,6 +1335,7 @@ pub(crate) enum ConntrackDeleteResult {
     Deleted,
     GateBusy,
     KernelError,
+    Superseded,
 }
 
 /// Delete a session entry from the BPF conntrack map and retain gate refusal.
@@ -1352,17 +1353,105 @@ pub(crate) fn delete_bpf_conntrack_entry_result(
     }
 }
 
-/// Delete a session entry from the BPF conntrack map.
-pub(crate) fn delete_bpf_conntrack_entry(
+fn conntrack_maps_unavailable(conntrack_v4_fd: c_int, conntrack_v6_fd: c_int) -> bool {
+    #[cfg(test)]
+    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+        return false;
+    }
+    conntrack_v4_fd < 0 && conntrack_v6_fd < 0
+}
+
+/// Delete only the conntrack incarnation that the teardown removed.
+pub(crate) fn delete_bpf_conntrack_entry_for_session_result(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     key: &SessionKey,
-) -> bool {
-    matches!(
-        delete_bpf_conntrack_entry_result(conntrack_v4_fd, conntrack_v6_fd, key),
-        ConntrackDeleteResult::Deleted
-    )
+    expected_session_id: u64,
+) -> ConntrackDeleteResult {
+    if conntrack_maps_unavailable(conntrack_v4_fd, conntrack_v6_fd) {
+        return ConntrackDeleteResult::Deleted;
+    }
+    match crate::afxdp::bpf_map::global_tuple_gate().with_publish(key, || {
+        match conntrack_entry_session_id(conntrack_v4_fd, conntrack_v6_fd, key) {
+            Ok(None) => ConntrackDeleteResult::Deleted,
+            Ok(Some(_)) if expected_session_id == 0 => ConntrackDeleteResult::Superseded,
+            Ok(Some(session_id)) if session_id != expected_session_id => {
+                ConntrackDeleteResult::Superseded
+            }
+            Ok(Some(_)) if delete_bpf_conntrack_entry_raw(conntrack_v4_fd, conntrack_v6_fd, key) => {
+                ConntrackDeleteResult::Deleted
+            }
+            Ok(Some(_)) => ConntrackDeleteResult::KernelError,
+            Err(()) => ConntrackDeleteResult::KernelError,
+        }
+    }) {
+        Ok(result) => result,
+        Err(_) => ConntrackDeleteResult::GateBusy,
+    }
 }
+
+fn conntrack_entry_session_id(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+) -> Result<Option<u64>, ()> {
+    #[cfg(test)]
+    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+        return Ok(conntrack_row_for_test(key).map(|row| row.session_id));
+    }
+    match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
+        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
+            let bpf_key = bpf_session_key_v4(
+                src.octets(),
+                dst.octets(),
+                key.src_port,
+                key.dst_port,
+                key.protocol,
+            );
+            let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                libbpf_sys::bpf_map_lookup_elem(
+                    conntrack_v4_fd,
+                    (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                    (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
+                )
+            };
+            if rc == 0 {
+                Ok(Some(value.session_id))
+            } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                Ok(None)
+            } else {
+                Err(())
+            }
+        }
+        (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
+            let bpf_key = bpf_session_key_v6(
+                src.octets(),
+                dst.octets(),
+                key.src_port,
+                key.dst_port,
+                key.protocol,
+            );
+            let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                libbpf_sys::bpf_map_lookup_elem(
+                    conntrack_v6_fd,
+                    (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                    (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
+                )
+            };
+            if rc == 0 {
+                Ok(Some(value.session_id))
+            } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                Ok(None)
+            } else {
+                Err(())
+            }
+        }
+        _ => Err(()),
+    }
+}
+
 
 fn delete_bpf_conntrack_entry_raw(
     conntrack_v4_fd: c_int,
@@ -1419,6 +1508,27 @@ pub(crate) fn delete_bpf_conntrack_entry_under_gate(
     key: &SessionKey,
 ) -> bool {
     delete_bpf_conntrack_entry_raw(conntrack_v4_fd, conntrack_v6_fd, key)
+}
+
+/// Delete while the caller owns the tuple admission lease, if the row still
+/// belongs to the removed incarnation. A replacement is never key-only deleted.
+pub(crate) fn delete_bpf_conntrack_entry_for_session_under_gate(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    expected_session_id: u64,
+) -> ConntrackDeleteResult {
+    match conntrack_entry_session_id(conntrack_v4_fd, conntrack_v6_fd, key) {
+        Ok(None) => ConntrackDeleteResult::Deleted,
+        Ok(Some(_)) if expected_session_id == 0 => ConntrackDeleteResult::Superseded,
+        Ok(Some(session_id)) if session_id != expected_session_id => {
+            ConntrackDeleteResult::Superseded
+        }
+        Ok(Some(_)) if delete_bpf_conntrack_entry_raw(conntrack_v4_fd, conntrack_v6_fd, key) => {
+            ConntrackDeleteResult::Deleted
+        }
+        Ok(Some(_)) | Err(()) => ConntrackDeleteResult::KernelError,
+    }
 }
 
 pub(crate) fn clear_bpf_conntrack_maps(
@@ -2515,7 +2625,7 @@ pub(super) fn delete_session_map_entry_for_removed_session(
 ) {
     // Default to SyncImport for backwards-compatible callers where
     // the session being deleted is always from a sync path.
-    delete_session_map_entry_for_removed_session_with_origin(
+    let _ = delete_session_map_entry_for_removed_session_with_origin_and_id(
         map,
         key,
         decision,
@@ -2523,10 +2633,12 @@ pub(super) fn delete_session_map_entry_for_removed_session(
         SessionOrigin::SyncImport,
         -1,
         -1,
+        0,
     );
 }
 
-pub(super) fn delete_session_map_entry_for_removed_session_with_origin(
+
+pub(super) fn delete_session_map_entry_for_removed_session_with_origin_and_id(
     map: SteeringMap<'_>,
     key: &SessionKey,
     decision: SessionDecision,
@@ -2534,7 +2646,8 @@ pub(super) fn delete_session_map_entry_for_removed_session_with_origin(
     origin: SessionOrigin,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
-) {
+    session_id: u64,
+) -> ConntrackDeleteResult {
     // #7743: the conntrack mirror is deleted unconditionally. This was written
     // as an `if uses_kernel_local_session_map_entry(..) { delete; return } delete`
     // whose two arms called the SAME function with the SAME arguments, so the
@@ -2545,7 +2658,15 @@ pub(super) fn delete_session_map_entry_for_removed_session_with_origin(
     // and a BPF delete addresses the row by KEY, so the redirect walk below
     // removes the kernel-local row and the live row alike.
     delete_session_map_redirect_for_session(map, key, decision, metadata, origin);
-    delete_bpf_conntrack_entry(conntrack_v4_fd, conntrack_v6_fd, key);
+    if conntrack_maps_unavailable(conntrack_v4_fd, conntrack_v6_fd) {
+        return ConntrackDeleteResult::Deleted;
+    }
+    delete_bpf_conntrack_entry_for_session_result(
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        key,
+        session_id,
+    )
 }
 
 #[cfg(test)]

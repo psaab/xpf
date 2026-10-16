@@ -323,6 +323,19 @@ impl SessionTable {
     pub(crate) fn defer_pressure_shed(&mut self, mut shed: PressureShedSessions) {
         self.deferred_pressure_shed.append(&mut shed);
     }
+    pub(crate) fn take_deferred_conntrack_deletes(&mut self) -> DeferredConntrackDeletes {
+        std::mem::take(&mut self.deferred_conntrack_deletes)
+    }
+
+    pub(crate) fn defer_conntrack_delete(&mut self, delete: DeferredConntrackDelete) {
+        self.deferred_conntrack_deletes.push(delete);
+    }
+    pub(crate) fn defer_conntrack_deletes(
+        &mut self,
+        mut deletes: DeferredConntrackDeletes,
+    ) {
+        self.deferred_conntrack_deletes.append(&mut deletes);
+    }
 
 
     /// Remove one indexed local opening flow (both halves when the matching

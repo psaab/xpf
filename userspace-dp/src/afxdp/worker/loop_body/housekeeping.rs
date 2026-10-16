@@ -144,6 +144,12 @@ pub(super) fn run_session_housekeeping(
         shared_owner_rg_indexes,
         loop_now_ns,
     );
+    retry_deferred_conntrack_deletes(
+        &mut sessions,
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        shared_sessions,
+    );
     let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns, Some(&ha_ctx));
     // #11053: if the control TCP session idles out, forget its PPTP calls
     // and replicate the exact control tuple to peer workers. The delete
@@ -184,7 +190,7 @@ pub(super) fn run_session_housekeeping(
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
     );
-    reap_expired_sessions(
+    let deferred_conntrack_deletes = reap_expired_sessions(
         bindings,
         &expired_entries,
         forwarding,
@@ -194,6 +200,7 @@ pub(super) fn run_session_housekeeping(
         loop_now_ns,
         worker_id,
     );
+    sessions.defer_conntrack_deletes(deferred_conntrack_deletes);
     if local_expired > 0 {
         if let Some(binding) = bindings.first() {
             binding

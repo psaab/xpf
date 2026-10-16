@@ -599,16 +599,24 @@ fn delete_terminal_half(
         now_ns,
         worker_id,
     );
-    delete_session_map_entry_for_removed_session_with_origin(
-        session_map,
-        key,
-        decision,
-        metadata,
-        origin,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
-    );
     let closed_id = sessions.session_id_for(key);
+    let delete_result =
+        delete_session_map_entry_for_removed_session_with_origin_and_id(
+            session_map,
+            key,
+            decision,
+            metadata,
+            origin,
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            closed_id,
+        );
+    if delete_result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {
+        sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+            key: key.clone(),
+            session_id: closed_id,
+        });
+    }
     sessions.delete(key);
     remove_shared_session(
         shared_sessions,
