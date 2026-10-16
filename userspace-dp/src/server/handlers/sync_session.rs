@@ -623,5 +623,49 @@ mod tests {
             );
         }
     }
+
+    /// #13886: handler-level pin for the #13708 in-flight duplicate refusal.
+    /// The domain unit test covers `helper_mutation_begin` in isolation; this
+    /// covers its sole production caller, so a regression that maps `Err` to a
+    /// success (or executes the verb before checking) fails here.
+    ///
+    /// FAIL-ON-REVERT: drop `response.ok = false;` in handle's `Err(reason)`
+    /// arm and the `!response.ok` assertion fails (error would carry the token
+    /// on a success response); drop the whole `Err` arm's early return and the
+    /// `session_mirror_complete` assertion fails (clear_mirror would run).
+    #[test]
+    fn sync_session_refuses_in_flight_duplicate_at_handler_13886() {
+        let coordinator = crate::afxdp::Coordinator::new();
+        let domain = coordinator.session_domain();
+        // Hold an uncompleted lease for the exact triple the request carries.
+        let _in_flight = match domain.helper_mutation_begin(7, "op-1", "mut-A") {
+            Ok(crate::afxdp::HelperMutationBegin::Proceed(lease)) => lease,
+            Ok(crate::afxdp::HelperMutationBegin::Replay(_)) => {
+                panic!("a fresh triple must proceed, not replay")
+            }
+            Err(reason) => panic!("a fresh triple must begin, got Err({reason})"),
+        };
+        let request = SessionSyncRequest {
+            operation: "mirror_clear_chunk".to_string(),
+            helper_epoch: 7,
+            operation_id: "op-1".to_string(),
+            mutation_id: "mut-A".to_string(),
+            ..SessionSyncRequest::default()
+        };
+        let mut response = ControlResponse {
+            ok: true,
+            ..ControlResponse::default()
+        };
+        handle(domain, Some(request), &mut response);
+        assert!(!response.ok, "in-flight duplicate must not report success");
+        assert_eq!(
+            response.error, "operation-in-flight",
+            "the domain refusal token must reach the wire verbatim"
+        );
+        assert!(
+            !response.session_mirror_complete,
+            "no mutation may execute for a refused duplicate (clear_mirror would stamp complete)"
+        );
+    }
 }
 
