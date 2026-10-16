@@ -373,6 +373,7 @@
   },
   "control_request": {
     "binding": null,
+    "clear_generation_validated": false,
     "fabrics": null,
     "forwarding": null,
     "ha_state": null,

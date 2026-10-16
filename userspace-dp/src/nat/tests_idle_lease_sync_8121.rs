@@ -1486,9 +1486,10 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
         "reserve_address_only_maybe_persistent",
         "#8132, from synced sessions",
     ),
-    // INSTALLED ON THE STANDBY from an exported lease — the IDLE population,
-    // which has no session to be rebuilt from and is exactly why #8121 exists.
-    ("import_idle_lease_at", "#8121, from the idle-lease sync"),
+    // INSTALLED ON THE STANDBY from an exported lease — the IDLE population.
+    // Both the generation-less direct helper and the durably validated cluster
+    // batch share one insertion implementation (#13693).
+    ("import_idle_lease_inner", "#8121, from the idle-lease sync"),
 ];
 
 /// The census. Reds when a lease is created somewhere the three-route argument
@@ -1577,7 +1578,7 @@ fn the_lease_census_actually_finds_its_population_8121() {
     assert!(
         LEASE_CREATION_SITES_8121
             .iter()
-            .any(|(f, _)| *f == "import_idle_lease_at"),
+            .any(|(f, _)| *f == "import_idle_lease_inner"),
         "the idle-lease import is not in the census, so #8121's own route is \
          unpinned by the guard that exists to pin the routes"
     );
@@ -2714,24 +2715,60 @@ fn clearing_address_only_lease_blocks_reuse_and_stale_import_10784() {
 }
 
 #[test]
-fn clearing_idle_address_only_lease_rejects_stale_import_10784() {
+fn clearing_idle_address_only_key_fences_only_that_key_13693() {
     let addrs = pool();
     let allocator = PortAllocator::new(addrs.len(), 1024, 65535);
     let client = flow("10.0.61.50", 40000);
     let translated = mint_persistent_address_only_any_remote(&allocator, &addrs, client, 1_000);
     assert!(allocator.release_flow(client, translated, 2_000, NatHolder::Untracked));
+
     let stale = allocator
         .export_idle_leases(3_000)
         .into_iter()
-        .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
-        .expect("address-only lease must be exportable before clear");
-
+        .next()
+        .expect("control: idle lease must be exportable before clear");
     assert_eq!(allocator.clear_persistent_leases(3_000), 1);
     assert_eq!(
-        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, 3_001),
-        IdleLeaseImport::SkippedClearFenced
+        allocator
+            .import_idle_lease_after_generation(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, 3_001,),
+        IdleLeaseImport::SkippedClearFenced,
+        "the cleared source key remains fenced for delayed HA data"
     );
-    assert!(allocator.export_display_leases(3_001).is_empty());
+
+    let new_client = flow("10.0.61.99", 42000);
+    let new_subscriber = idle_record_for(
+        new_client,
+        IpAddr::V4(addrs[1]),
+        new_client.src_port,
+        true,
+        None,
+    );
+    assert_eq!(
+        allocator.import_idle_lease_after_generation(
+            &new_subscriber,
+            &ipv4_pool(&addrs),
+            TIMEOUT_NS,
+            3_001,
+        ),
+        IdleLeaseImport::Installed,
+        "a clear must not fence a subscriber that was never cleared"
+    );
+    assert_eq!(
+        allocator.debug_persistent_address_only_owner_count(),
+        2,
+        "one address-only lease must contribute exactly one indexed owner per scope"
+    );
+    assert_eq!(allocator.clear_persistent_leases(4_000), 1);
+    assert_eq!(
+        allocator.debug_persistent_address_only_owner_count(),
+        0,
+        "clearing an idle lease removes its reverse-identity index exactly once"
+    );
+    assert_eq!(
+        allocator.clear_persistent_leases(4_001),
+        0,
+        "repeated clear must not decrement the lease's owner index again"
+    );
 }
 
 #[test]

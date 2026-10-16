@@ -13,8 +13,7 @@ use super::super::ServerState;
 use crate::ControlResponse;
 use crate::afxdp::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
 use crate::nat::{
-    IdleLeaseRecord, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
-    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS,
+    IdleLeaseRecord, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS, MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS,
 };
 use crate::protocol::{DisplayLeaseWire, IdleLeaseWire};
 use std::net::IpAddr;
@@ -139,6 +138,7 @@ pub(super) fn export(guard: &mut ServerState, response: &mut ControlResponse) {
 pub(super) fn import(
     guard: &mut ServerState,
     wire: &[IdleLeaseWire],
+    generation_validated: bool,
     response: &mut ControlResponse,
 ) {
     let mut malformed = 0u32;
@@ -152,7 +152,13 @@ pub(super) fn import(
             parsed
         })
         .collect();
-    let counts = guard.afxdp.import_idle_persistent_leases_now(&records);
+    let counts = if generation_validated {
+        guard
+            .afxdp
+            .import_idle_persistent_leases_after_generation_now(&records)
+    } else {
+        guard.afxdp.import_idle_persistent_leases_now(&records)
+    };
     if idle_lease_import_is_notable(&counts, malformed) {
         eprintln!(
             "xpf-dp: idle-lease import installed={} existing={} clear_fenced={} expired={} \

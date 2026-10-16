@@ -91,7 +91,7 @@ func TestPersistentNatClearGenerationSurvivesManagerRestart11486(t *testing.T) {
 	}
 }
 
-func TestPersistentNatGenerationRejectsDelayedImportsAfterRestart11486(t *testing.T) {
+func TestPersistentNatDelayedImportRejected11486(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nat-generation.json")
 	m, helper := persistentNatGenerationManager11486(t, path)
 	batch := PersistentNatLeaseBatch{
@@ -102,10 +102,11 @@ func TestPersistentNatGenerationRejectsDelayedImportsAfterRestart11486(t *testin
 	if err := m.ImportPersistentNatLeaseBatch(batch); err != nil {
 		t.Fatalf("import generation 8: %v", err)
 	}
-	for _, want := range []string{"clear_persistent_nat_leases", "import_idle_leases"} {
-		if got := (<-helper.requests).Type; got != want {
-			t.Fatalf("generation 8 helper request = %q, want %q", got, want)
-		}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("generation 8 helper request = %q, want clear_persistent_nat_leases", got)
+	}
+	if req := <-helper.requests; req.Type != "import_idle_leases" || !req.ClearGenerationValidated {
+		t.Fatalf("generation 8 helper import = %+v, want generation-validated import_idle_leases", req)
 	}
 
 	restarted, staleHelper := persistentNatGenerationManager11486(t, path)
@@ -123,8 +124,8 @@ func TestPersistentNatGenerationRejectsDelayedImportsAfterRestart11486(t *testin
 	if err := restarted.ImportPersistentNatLeaseBatch(batch); err != nil {
 		t.Fatalf("same-generation additive import: %v", err)
 	}
-	if got := (<-staleHelper.requests).Type; got != "import_idle_leases" {
-		t.Fatalf("same-generation helper request = %q, want import_idle_leases", got)
+	if req := <-staleHelper.requests; req.Type != "import_idle_leases" || !req.ClearGenerationValidated {
+		t.Fatalf("same-generation helper import = %+v, want generation-validated import_idle_leases", req)
 	}
 }
 

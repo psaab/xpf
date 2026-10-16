@@ -565,6 +565,10 @@ type ControlRequest struct {
 	// before — the control socket is shared with the 1/s status poll and with
 	// session installs, and an empty array on every request is waste there.
 	IdleLeases []IdleLeaseWire `json:"idle_leases,omitempty"`
+	// ClearGenerationValidated is set only after the manager's durable remote
+	// generation check, allowing current batches past the helper's
+	// generation-less replay fence.
+	ClearGenerationValidated bool `json:"clear_generation_validated,omitempty"`
 	// Neighbors carries the manager-neighbor set for an update_neighbors
 	// request. It deliberately does NOT use omitempty (#5864): when the
 	// authoritative publishable set transitions to EMPTY, the send path

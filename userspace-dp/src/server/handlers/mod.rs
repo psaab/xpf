@@ -539,9 +539,12 @@ pub(crate) fn handle_stream(
             "clear_persistent_nat_leases" => {
                 idle_leases::clear(&mut guard, &mut response)
             }
-            "import_idle_leases" => {
-                idle_leases::import(&mut guard, &request.idle_leases, &mut response)
-            }
+            "import_idle_leases" => idle_leases::import(
+                &mut guard,
+                &request.idle_leases,
+                request.clear_generation_validated,
+                &mut response,
+            ),
             "drain_session_deltas" => session_deltas::drain(
                 &mut guard,
                 request.session_deltas.as_ref(),

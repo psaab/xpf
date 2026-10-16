@@ -431,6 +431,10 @@ pub(crate) struct ControlRequest {
     /// verb). Absent for every other verb.
     #[serde(rename = "idle_leases", default, skip_serializing_if = "Vec::is_empty")]
     pub idle_leases: Vec<IdleLeaseWire>,
+    /// True only when the Go manager has durably validated the origin's
+    /// persistent-NAT clear generation for this import batch.
+    #[serde(rename = "clear_generation_validated", default)]
+    pub clear_generation_validated: bool,
     #[serde(default)]
     pub neighbors: Option<Vec<NeighborSnapshot>>,
     #[serde(rename = "neighbor_generation", default)]

@@ -923,7 +923,8 @@ pub(super) struct PortAllocatorLiveState {
     pub(super) revoked_persistent: BTreeMap<PersistentSourceKey, u64>,
     // Per-allocator barrier for pre-clear records whose key was not installed
     // when clear ran. The Go cluster envelope carries durable generations;
-    // this short fence still protects generation-less direct helper imports.
+    // only its validated import path bypasses this generation-less helper
+    // barrier, while the per-key markers remain authoritative.
     last_persistent_nat_clear_ns: Option<u64>,
     // #5269: address-only occupancy tokens — the translated reverse identity of a
     // `port no-translation` / port-less flow mapped to its owning FORWARD flow.
@@ -1095,7 +1096,7 @@ impl PortAllocatorLiveState {
             self.last_persistent_nat_clear_ns = None;
         }
     }
-    pub(super) fn persistent_nat_import_is_clear_fenced(
+    pub(super) fn persistent_nat_import_is_key_clear_fenced(
         &self,
         key: &PersistentSourceKey,
         now_ns: u64,
@@ -1103,6 +1104,13 @@ impl PortAllocatorLiveState {
         self.revoked_persistent
             .get(key)
             .is_some_and(|until_ns| *until_ns > now_ns)
+    }
+    pub(super) fn persistent_nat_import_is_clear_fenced(
+        &self,
+        key: &PersistentSourceKey,
+        now_ns: u64,
+    ) -> bool {
+        self.persistent_nat_import_is_key_clear_fenced(key, now_ns)
             || self.last_persistent_nat_clear_ns.is_some_and(|clear_ns| {
                 now_ns < clear_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
             })
@@ -2215,15 +2223,14 @@ impl PortAllocator {
     ///
     /// Idle leases are removed and their PAT occupancy is released. Leases
     /// with live flows become revoked draining shells; the returned count is
-    /// only newly revoked leases, not shells from an earlier clear. Both the
-    /// per-key fence and the batch fence cover delayed pre-clear imports for
-    /// two full-set sync ticks.
+    /// only newly revoked leases, not shells from an earlier clear. Per-key
+    /// tombstones fence known cleared leases; the batch fence protects
+    /// generation-less records whose key was not installed at clear time.
     pub(crate) fn clear_persistent_leases(&self, now_ns: u64) -> usize {
         let replay_until_ns = now_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
         let (count, freed) = {
             let mut live = self.lock_live();
-            live.revoked_persistent
-                .retain(|_, expires_at_ns| *expires_at_ns > now_ns);
+            live.prune_expired_persistent_nat_clear_fences(now_ns);
             live.last_persistent_nat_clear_ns = Some(
                 live.last_persistent_nat_clear_ns
                     .map_or(now_ns, |last_ns| last_ns.max(now_ns)),
@@ -2235,14 +2242,11 @@ impl PortAllocator {
                 .collect();
             let mut count = 0;
             let mut freed = Vec::new();
-            for (key, mut lease) in leases {
-                if !lease.revoked {
+            for (key, lease) in leases {
+                let newly_revoked = !lease.revoked;
+                if newly_revoked {
                     count += 1;
                 }
-                if !lease.revoked {
-                    live.remove_persistent_address_only_owner(key, lease);
-                }
-                lease.revoked = true;
                 let revoked_until_ns = if lease.active_flows == 0 {
                     replay_until_ns
                 } else {
@@ -2250,12 +2254,16 @@ impl PortAllocator {
                 };
                 live.revoked_persistent.insert(key, revoked_until_ns);
                 if lease.active_flows != 0 {
-                    // The key already exists; revoke the shell in place.
-                    if let Some(stored_lease) = live.persistent_by_source.get_mut(&key) {
-                        stored_lease.revoked = true;
+                    if newly_revoked {
+                        live.remove_persistent_address_only_owner(key, lease);
+                        if let Some(stored_lease) = live.persistent_by_source.get_mut(&key) {
+                            stored_lease.revoked = true;
+                        }
                     }
                     continue;
                 }
+                // Removing the lease de-indexes its address-only ownership;
+                // do not decrement it separately here.
                 live.remove_persistent_lease(&key);
                 Self::remove_lease_expiration_locked(
                     &mut live,
@@ -2294,6 +2302,15 @@ impl PortAllocator {
     #[cfg(test)]
     pub(super) fn debug_live(&self) -> MutexGuard<'_, PortAllocatorLiveState> {
         self.shared.live.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Test-only: total persistent address-only identity reference count.
+    #[cfg(test)]
+    pub(super) fn debug_persistent_address_only_owner_count(&self) -> u32 {
+        self.lock_live()
+            .persistent_address_only_owner_counts
+            .values()
+            .copied()
+            .sum()
     }
 
     /// Test-only: total occupancy-bitmap WORDS across every pool address.
@@ -4573,6 +4590,7 @@ impl PortAllocator {
                 self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
             }
         }
+        // Session sync has no durable batch-generation proof, so retain the global clear fence.
         let persistent = persistent.filter(|(key, _)| {
             match live.persistent_by_source.get(key) {
                 // #10784 R2B1: a synced session may join a LIVE lease only. An
@@ -4924,6 +4942,7 @@ impl PortAllocator {
                 self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
             }
         }
+        // Session sync likewise has no durable batch-generation proof; keep the global clear fence.
         let persistent = persistent.filter(|(key, _)| {
             match live.persistent_by_source.get(key) {
                 // #10784 R2B1: address-only twin of the PAT liveness gate above.

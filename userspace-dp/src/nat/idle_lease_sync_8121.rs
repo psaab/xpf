@@ -226,8 +226,9 @@ impl PortAllocator {
             .collect()
     }
 
-    /// Test-only wrapper. Production resolves the pool index through the
-    /// owning rule's O(1) address map before calling `import_idle_lease_at`.
+    /// Test-only wrapper for the generation-less helper API. Production resolves the pool
+    /// index through the owning rule's O(1) address map; this caller cannot distinguish a
+    /// delayed pre-clear record from a current batch.
     #[cfg(test)]
     pub(crate) fn import_idle_lease(
         &self,
@@ -237,7 +238,7 @@ impl PortAllocator {
         now_ns: u64,
     ) -> IdleLeaseImport {
         let addr_index = pool_addresses.iter().position(|a| *a == rec.translated_ip);
-        self.import_idle_lease_at(rec, addr_index, local_timeout_ns, now_ns)
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, false)
     }
 
     pub(crate) fn import_idle_lease_at(
@@ -246,6 +247,39 @@ impl PortAllocator {
         addr_index: Option<usize>,
         local_timeout_ns: u64,
         now_ns: u64,
+    ) -> IdleLeaseImport {
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, false)
+    }
+
+    pub(crate) fn import_idle_lease_at_after_generation(
+        &self,
+        rec: &IdleLeaseRecord,
+        addr_index: Option<usize>,
+        local_timeout_ns: u64,
+        now_ns: u64,
+    ) -> IdleLeaseImport {
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn import_idle_lease_after_generation(
+        &self,
+        rec: &IdleLeaseRecord,
+        pool_addresses: &[IpAddr],
+        local_timeout_ns: u64,
+        now_ns: u64,
+    ) -> IdleLeaseImport {
+        let addr_index = pool_addresses.iter().position(|a| *a == rec.translated_ip);
+        self.import_idle_lease_inner(rec, addr_index, local_timeout_ns, now_ns, true)
+    }
+
+    fn import_idle_lease_inner(
+        &self,
+        rec: &IdleLeaseRecord,
+        addr_index: Option<usize>,
+        local_timeout_ns: u64,
+        now_ns: u64,
+        generation_validated: bool,
     ) -> IdleLeaseImport {
         if local_timeout_ns < super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
             || rec.remaining_ns == 0
@@ -271,7 +305,14 @@ impl PortAllocator {
             remote: rec.remote,
         };
         let mut live = self.lock_live();
-        if live.persistent_nat_import_is_clear_fenced(&key, now_ns) {
+        let fenced = if generation_validated {
+            live.revoked_persistent
+                .get(&key)
+                .is_some_and(|until_ns| *until_ns > now_ns)
+        } else {
+            live.persistent_nat_import_is_clear_fenced(&key, now_ns)
+        };
+        if fenced {
             return IdleLeaseImport::SkippedClearFenced;
         }
         self.reclaim_expired_idle_lease_locked(&mut live, key, now_ns);
