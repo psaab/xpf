@@ -292,12 +292,12 @@ Differences that matter (#1881):
   from the 1 Hz `refresh_status` path. It reclaims the three NAT allocator
   families for every worker the predicate selects and — since #9367 — calls
   `vacate_worker_v_min_slots` for those whose `atomics.dead` is set, releasing
-  the worker's slot in every `cos.queue_vtime_floors` entry. The `dead` gate is
-  load-bearing: `retire_all_worker_holders` selects `|_| true` for the #7092
-  teardown reclaim and runs BEFORE `workers.stop_and_clear`, i.e. while those
-  workers are still running, so an ungated vacate would race a live `publish()`
-  — and it would buy nothing, because that same teardown stores an empty
-  `queue_vtime_floors` a few statements later.
+  the worker's slot in every `cos.queue_vtime_floors` entry. The `dead` gate
+  keeps this repair limited to panicked workers. The teardown-wide
+  `retire_all_worker_holders` sweep runs after `workers.stop_and_clear` has
+  joined its workers; vacating non-dead slots during teardown remains
+  redundant because teardown stores an empty `queue_vtime_floors` immediately
+  afterward.
   Without it a PANICKED worker's frozen `queue_vtime` pins the cross-worker
   V_min indefinitely and taxes every survivor on that shared_exact queue about
   11% of drain opportunities (see `cos/README.md`). The vacate is safe from

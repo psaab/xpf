@@ -10902,18 +10902,15 @@ fn dead_worker_v_min_vacate_is_one_shot_9367() {
 
 /// The vacate is gated on `dead`, NOT on the sweep's own predicate.
 ///
-/// `retire_all_worker_holders` passes `|_| true`: it retires every registered
-/// worker id, LIVE ones included, because the #7092 teardown reclaim has to
-/// name them before `stop_and_clear` drops the records. At that moment those
-/// workers are still RUNNING, so an ungated vacate would make the coordinator a
-/// SECOND writer to a slot whose documented contract is single-writer — racing
-/// a live `publish()` — and it would buy nothing, because the same teardown
-/// discards `cos.queue_vtime_floors` outright a few statements later.
+/// `retire_all_worker_holders` passes `|_| true` and retires every registered
+/// worker id, LIVE ones included. The production teardown calls it after
+/// `stop_and_clear` joins workers, then discards `cos.queue_vtime_floors`; there
+/// is no value in vacating non-dead slots in that teardown. This direct helper
+/// test also preserves the existing dead-worker-only V_min repair policy.
 ///
 /// This is the cell the first draft of #9367 would have failed: the vacate call
-/// sat unconditionally in the shared body, and the prose on it claimed the
-/// single-writer contract held "because the sweep runs only for a dead worker",
-/// which is true of `retire_dead_worker_holders` and false of its sibling.
+/// sat unconditionally in the shared body, clearing slots for workers that
+/// were not marked dead.
 #[test]
 fn retire_all_worker_holders_does_not_vacate_a_live_workers_v_min_slot_9367() {
     let mut coordinator = Coordinator::new();
@@ -10925,6 +10922,16 @@ fn retire_all_worker_holders_does_not_vacate_a_live_workers_v_min_slot_9367() {
     let floor = floors.get(&(7, 3u8)).expect("fixture floor").clone();
     coordinator.cos.queue_vtime_floors.store(Arc::new(floors));
     floor.slots[5].publish(31_337);
+    let steering_key = f4_key();
+    coordinator
+        .steering_owners
+        .publish_row(
+            &crate::afxdp::bpf_map::session_map_row(&steering_key),
+            &steering_key,
+            crate::afxdp::bpf_map::SteeringHolder::Worker(5),
+            || Ok(()),
+        )
+        .expect("live worker steering claim");
 
     // The all-ids sweep DOES do its NAT work for this live worker — that is the
     // #7092 contract and this cell must not weaken it.
@@ -10937,15 +10944,98 @@ fn retire_all_worker_holders_does_not_vacate_a_live_workers_v_min_slot_9367() {
          this cell constrains the V_min vacate only",
     );
     assert_eq!(
+        coordinator.steering_owners.owner_count(
+            &crate::afxdp::bpf_map::session_map_row(&steering_key),
+        ),
+        1,
+        "teardown holder sweep must not delete rows for a normally stopped worker",
+    );
+    assert_eq!(
         floor.slots[5].read(),
         Some(31_337),
-        "a LIVE worker's V_min slot must survive the all-ids teardown sweep. \
-         The worker is still running there (stop_and_clear has not been called), \
-         so vacating makes the coordinator a second writer to a single-writer \
-         slot, and the teardown discards the floors map moments later anyway \
-         (#9367)",
+        "a worker not marked dead must keep its V_min slot when the all-ids \
+         holder sweep runs; production teardown does not need to vacate it \
+         before discarding the floors map (#9367)",
     );
 }
+/// #13669 (D11-03): `stop_inner` must join its workers before retiring their
+/// holders. An exiting worker can finish in-flight NAT/steering work after
+/// shutdown is signalled; the holder sweep must run after that final work.
+#[test]
+fn stop_inner_joins_workers_before_retiring_holders_13669() {
+    use crate::nat::NatHolder;
+    use std::sync::atomic::Ordering;
+
+    let mut coordinator = Coordinator::new();
+    let egress: std::net::IpAddr = "192.0.2.136".parse().unwrap();
+    let alloc = coordinator
+        .forwarding
+        .iface_nat_allocators
+        .allocator_for(egress)
+        .expect("allocator");
+    let alloc_worker = alloc.clone();
+    let owners_worker = coordinator.steering_owners.clone();
+    let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    let stop = rec.handle.stop.clone();
+    let atomics = rec.handle.runtime_atomics.clone();
+    let join = std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            std::hint::spin_loop();
+        }
+        let flow = crate::nat::SourceNatFlowKey {
+            protocol: 6,
+            src_ip: "10.0.0.136".parse().unwrap(),
+            dst_ip: "198.51.100.136".parse().unwrap(),
+            src_port: 4136,
+            dst_port: 443,
+            routing_scope: 0,
+        };
+        assert!(alloc_worker.reserve_flow(
+            flow,
+            crate::nat::TranslatedTuple {
+                ip: egress,
+                port: 41360,
+            },
+            0,
+            false,
+            1_000,
+            NatHolder::Worker(7),
+        ));
+        let key = f4_key();
+        owners_worker
+            .publish_row(
+                &crate::afxdp::bpf_map::session_map_row(&key),
+                &key,
+                crate::afxdp::bpf_map::SteeringHolder::Worker(7),
+                || Ok(()),
+            )
+            .expect("late steering claim");
+    });
+    coordinator.workers.register(
+        7,
+        rec,
+        Some(join),
+    );
+
+    coordinator.stop_inner(false);
+
+    assert!(
+        atomics.holders_retired.load(Ordering::Relaxed),
+        "stop_inner must retire the joined worker's holders"
+    );
+    assert!(
+        !alloc.debug_is_port_occupied(0, 41360),
+        "late NAT reservation must be reclaimed by stop_inner (#13669)"
+    );
+    assert_eq!(
+        coordinator.steering_owners.owner_count(
+            &crate::afxdp::bpf_map::session_map_row(&f4_key()),
+        ),
+        0,
+        "late steering claim must be reclaimed by stop_inner (#13669)"
+    );
+}
+
 
 // ---------------------------------------------------------------------
 // #9521: the steered-port decision made at spawn reaches the thread.

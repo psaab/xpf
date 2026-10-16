@@ -1070,11 +1070,14 @@ impl Coordinator {
             }
         }
         self.wg_control_threads.clear();
-        // #7092: reclaim the outgoing generation's NAT holder bits BEFORE
-        // `stop_and_clear` drops the records — after it the ids are gone and
-        // nothing can name them again. Why all ids, and why this is not the
-        // `dead`-keyed sweep, is on `retire_all_worker_holders`.
-        self.retire_all_worker_holders();
+        // #13669 (D11-03): snapshot worker identity and shared atomics so
+        // holder retirement can happen after `stop_and_clear` removes records.
+        let holder_snapshots: Vec<_> = self
+            .workers
+            .records_snapshot()
+            .iter()
+            .map(|(worker_id, rec)| (*worker_id, Arc::clone(&rec.handle.runtime_atomics)))
+            .collect();
         // #9506: retire the outgoing D11 worker set before signalling worker
         // threads. This drains ENQUEUED descriptors and fences new admits;
         // WORKER_OWNED descriptors remain pinned until the corresponding
@@ -1101,6 +1104,9 @@ impl Coordinator {
                 let _ = transport.join_worker_after_termination(*worker_id);
             }
         }
+        // Retire holders only after all worker threads are joined. Their final
+        // in-flight reservations and steering claims are now visible to sweep.
+        self.retire_worker_holders(&holder_snapshots);
         // #9560: every worker is now joined, so none can claim a steering row. Retire their
         // claims WITHOUT BPF deletes: those sessions died with their workers and their rows
         // linger unowned, as before #9560. The registry itself is kept, so an HA delete
