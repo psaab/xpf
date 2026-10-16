@@ -349,7 +349,8 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
         0xB8,                      // #2749: src ToS (DSCP EF=46 << 2)
         0x13,                      // #2749: TCP control bits (SYN|FIN|ACK)
         9,                         // #2749: egress ifindex
-        0xA1B2_C3D4_E5F6_0708,     // #4915: stable session id (rides [152:160])
+        0xA1B2_C3D4_E5F6_0708, // #4915: stable session id (rides [152:160])
+        RT_FLOW_CLOSE_REASON_NONE,
     );
 
     assert_eq!(frame.data[4], MSG_SESSION_CLOSE_RT_FLOW);
@@ -433,7 +434,8 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
         u64::from_le_bytes(p[0..8].try_into().unwrap()),
         1_700_000_123_000_000_000
     ); // close instant Unix ns
-    // close reason — none (the delta carries no idle/FIN/RST discriminator).
+    // Legacy fixture deliberately passes NONE; active session-close emitters
+    // supply the reason derived from the terminal session state (#13971).
     assert_eq!(p[134], RT_FLOW_CLOSE_REASON_NONE);
     // #2520 fail-on-revert: the application id rides the [132:134] slot
     // (little-endian), the same slot the deny/screen/filter frames use and the
@@ -470,6 +472,54 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
         123_456_789
     );
 }
+#[test]
+fn test_encode_session_close_rt_flow_carries_close_reason_13971() {
+    // #13971: the RT_FLOW SESSION_CLOSE [134] byte carries the Go
+    // closeReasonName code; a zero renders as reason="N/A".
+    let reasons: [(u8, &str); 3] = [
+        (RT_FLOW_CLOSE_REASON_TIMEOUT, "idle Timeout"),
+        (RT_FLOW_CLOSE_REASON_TCP_FIN, "TCP FIN"),
+        (RT_FLOW_CLOSE_REASON_TCP_RST, "TCP RST"),
+    ];
+    for (reason, name) in reasons {
+        let frame = EventFrame::encode_session_close_rt_flow(
+            7,
+            libc::AF_INET as u8,
+            6,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 1, 102)),
+            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            12345,
+            443,
+            None,
+            None,
+            0,
+            0,
+            TEST_TRUST_ZONE_ID,
+            TEST_UNTRUST_ZONE_ID,
+            0,
+            0,
+            0,
+            false,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            reason,
+        );
+        let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+        assert_eq!(p[134], reason, "close reason {name} must ride [134]");
+        assert_ne!(p[134], RT_FLOW_CLOSE_REASON_NONE);
+    }
+}
 
 #[test]
 fn test_encode_session_close_rt_flow_v6() {
@@ -504,6 +554,7 @@ fn test_encode_session_close_rt_flow_v6() {
         0,     // #2749: TCP control bits
         0,     // #2749: egress ifindex
         0,     // #4915: stable session id
+        RT_FLOW_CLOSE_REASON_NONE,
     );
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     assert_eq!(p[52], RT_FLOW_EVENT_SESSION_CLOSE);
@@ -555,6 +606,7 @@ fn test_session_close_rt_flow_log_gate_byte() {
             0, // #2749: TCP control bits
             0, // #2749: egress ifindex
             0, // #4915: stable session id
+            RT_FLOW_CLOSE_REASON_NONE,
         )
     };
     let gated_off = mk(false);

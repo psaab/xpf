@@ -110,12 +110,15 @@ pub(super) const RT_FLOW_LOG_SYSLOG: u8 = 1;
 pub(super) const RT_FLOW_EVENT_POLICY_DENY: u8 = 3;
 pub(super) const RT_FLOW_EVENT_SCREEN_DROP: u8 = 4;
 pub(super) const RT_FLOW_EVENT_FILTER_LOG: u8 = 6;
-// #2460: SESSION_CLOSE reason byte. The HA close delta carries no
-// idle/FIN/RST/age discriminator, so the RT_FLOW close reports "none" (0).
-// A real close-reason (and the byte/packet counters + session duration this
-// frame currently reports as 0) is the per-session accounting work tracked
-// in #2501.
-pub(super) const RT_FLOW_CLOSE_REASON_NONE: u8 = 0;
+// RT_FLOW SESSION_CLOSE reason bytes mirror Go's closeReasonName values in
+// pkg/logging/ringbuf.go. 0 is reserved for legacy frames with no reason;
+// active session-close producers write a nonzero reason in payload byte [134].
+pub(crate) const RT_FLOW_CLOSE_REASON_NONE: u8 = 0;
+pub(crate) const RT_FLOW_CLOSE_REASON_TIMEOUT: u8 = 1;
+pub(crate) const RT_FLOW_CLOSE_REASON_TCP_FIN: u8 = 2;
+pub(crate) const RT_FLOW_CLOSE_REASON_TCP_RST: u8 = 3;
+pub(crate) const RT_FLOW_CLOSE_REASON_AGE_OUT: u8 = 4;
+pub(crate) const RT_FLOW_CLOSE_REASON_POLICY: u8 = 5;
 // DENY/PERMIT are wire-format documentation pinned by codec_tests;
 // like REJECT below they have no non-test reader (#1826: exposed when
 // the stale module-level allow was removed).
