@@ -820,6 +820,30 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	if rec == nil {
 		return nil
 	}
+	// #14172: guarded-tree second opinion on unexpected plaintext.
+	// ReadConfirm warned when the rollback target (PrevTree) declares a
+	// master-password; the GUARDED tree never reaches the record (only its
+	// hash does), so recovery judges the same plaintext body against the
+	// active tree it just loaded. A legacy plaintext record whose guarded
+	// (active) config declares a master-password — the pre-#14172 shape
+	// when a master-password was ADDED by the guarded commit over a
+	// plaintext rollback target — warns here even though PrevTree is
+	// plaintext. The record stays READABLE and recoverable: rejecting it
+	// would strand the window across upgrade, and the GuardedHash /
+	// PreviousHash / Resolved / deadline checks below contain a tampered
+	// record (a record that no longer binds the active config is
+	// stale-dropped, never rolled back). Encrypted records never reach
+	// this warn: ReadConfirm decrypted them and PrevTree's declaration
+	// already matched the envelope. The warn is suppressed when PrevTree
+	// already declared, so one plaintext record warns once per boot.
+	if masterPasswordPRF(rec.PrevTree) == "" && masterPasswordPRF(s.active) != "" {
+		slog.Warn("pending commit-confirmed record was read as UNENCRYPTED plaintext "+
+			"but the active config it guards declares a master-password (expected an "+
+			"AES-GCM envelope) — the record may have been written before the guarded-tree "+
+			"cover, downgraded, restored from an unencrypted backup, or tampered with; "+
+			"its secrets are exposed at rest",
+			"issue", "#14172")
+	}
 	// #8565: a RESOLUTION TOMBSTONE. The window was confirmed, superseded or
 	// rolled back and only the durable deletion was still owed, so there is
 	// nothing to re-arm and nothing to revert to — finish the deletion and move

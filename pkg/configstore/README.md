@@ -963,6 +963,39 @@ per-path:
   degenerate record can no longer drive a bogus empty rollback. A
   genuinely ABSENT `confirm.json` is still the no-confirm-pending path
   (`(nil, nil)`), not an error.
+- **`confirm.json` encryption keys off BOTH trees, and plaintext reads
+  warn (#14172 D8-05).** The record serializes the whole `confirmRecord`
+  (deadline, `PrevTree` rollback target with its secret leaves, hashes,
+  flags) but carries no field for the guarded (newly committed) tree —
+  it reaches the record only as `GuardedHash`. `encodeConfirm` keyed the
+  profile off `PrevTree` alone, so `commit confirmed` ADDING a
+  master-password over a previous plaintext config wrote `confirm.json`
+  in cleartext while `active.json` from the same commit was AES-GCM
+  encrypted, and `ReadConfirm` discarded the `decrypted` flag so the
+  exposure was silent. Now `commitConfirmedLocked` carries the guarded
+  tree's profile (`masterPasswordPRF(committedTree)`) on the DB
+  (`writeConfirmCover`) for the provisional/final arm writes, and
+  `encodeConfirm` seals under `confirmEncryptionPRF(PrevTree, cover)`:
+  the rollback target's own profile when it has one (a nested re-arm
+  over an encrypted config keeps the profile it was armed under),
+  else the guarded tree's. Every other `WriteConfirm` path (tombstones,
+  migration rewrites, retries, the FIRST sentinel) leaves the cover
+  empty and keeps the `PrevTree` profile, so public `WriteConfirm`
+  compat and pre-fix readers are unchanged: the envelope is
+  self-describing (`env.PRF`) and the key comes from `master.key`, not
+  from either tree. `ReadConfirm` now retains `decrypted` and logs the
+  #4579-style unexpected-plaintext warning when a plaintext record's
+  `PrevTree` declares a master-password; recovery adds the guarded
+  (loaded active) tree as a second opinion. Legacy plaintext records
+  stay READABLE — rejecting them would strand pending windows across
+  upgrade — and a tampered plaintext record is contained by the
+  existing `GuardedHash`/`PreviousHash`/`Resolved`/deadline checks
+  (stale-dropped, never rolled back). An unkeyed hash or MAC alone was
+  deliberately NOT added: a writer who can rewrite this root-owned
+  0600 file (inside the 0700 dir, key in the same dir, no TPM/HSM
+  sealing — the #6856 threat table) can recompute it; the encrypted
+  form's integrity comes from AES-GCM. Tests:
+  `confirm_encryption_guarded_14172_test.go`.
 - **`confirm.json` has strict outer version and field gates (#10723 F3).** New
   records carry a `#xpf-confirm-envelope v=1` prefix outside plaintext or
   encrypted JSON; readers reject unsupported versions and JSON fields they do

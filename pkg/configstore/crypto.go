@@ -294,6 +294,67 @@ func nodeValue(n *config.Node) string {
 	return ""
 }
 
+// confirmEncryptionCover is the encryption profile a commit-confirmed record
+// is persisted under (#14172 D8-05). The record serializes its whole
+// confirmRecord JSON — Deadline, the PrevTree rollback target, hashes and
+// flags — but carries no field for the guarded (newly committed) tree: the
+// guarded tree reaches the record only as GuardedHash. Before #14172 the
+// profile keyed off rec.PrevTree alone (masterPasswordPRF(PrevTree)),
+// so `commit confirmed` ADDING a master-password over a previous plaintext
+// config wrote confirm.json — including every secret leaf in PrevTree and
+// the record's safety fields themselves — in CLEARTEXT, even though the
+// guarded active.json from the same commit was AES-GCM encrypted. The
+// exposure is visible only by reading the raw file: ReadConfirm accepted
+// the plaintext record with no signal.
+//
+// Accounting for both trees requires the guarded tree explicitly. Store
+// arm paths know it (the committed tree / the loaded active tree); the
+// record does not. The public WriteConfirm signature cannot change (it is
+// the persistence boundary used across the package and by the #4577 test
+// fixtures), so the guarded profile is carried on the DB as a DB-scoped
+// field set by commitConfirmedLocked next to writeConfirmState. It stays
+// "" on every other WriteConfirm path (tombstones, migration rewrites,
+// retries, the FIRST sentinel), which keeps those records exactly under
+// the PrevTree profile they were armed with — the recovery-compatible
+// default.
+//
+// A non-empty cover means: encrypt the confirm body even when the
+// PrevTree has no master-password, sealing under the guarded tree's PRF
+// (the same resolution active.json uses). ReadConfirm stays able to open
+// any envelope the writer can emit because the envelope is
+// self-describing (env.PRF) and the master key comes from master.key, not
+// from either tree. When BOTH trees declare a master-password (a nested
+// re-arm over an already-encrypted config) the PrevTree profile wins, so
+// an existing window's record keeps the profile it was armed under and a
+// pre-fix reader still opens it; only records whose rollback target is
+// plaintext but whose guarded tree declares a master-password move to
+// ciphertext. Legacy plaintext records (a plaintext rollback target that
+// no longer matches the active config's declaration) stay READABLE — a
+// global plaintext ban would strand pending windows across upgrade — and
+// ReadConfirm warns about them instead (#4579 A4-06 parity).
+//
+// writeConfirmCover is deliberately a plain string profile, not a tree:
+// it is set to masterPasswordPRF(guardedTree) by the caller, so nothing
+// here re-scans or retains the guarded tree.
+type confirmEncryptionCover struct {
+	// profile is masterPasswordPRF(guardedTree) at arm time, or "" when
+	// the guarded tree declares no master-password (or no cover was set).
+	profile string
+}
+
+// confirmEncryptionPRF resolves the PRF profile confirm.json is written
+// under: the rollback target's own profile when it has one, else the
+// guarded tree's cover profile, else "" (plaintext). It mirrors
+// masterPasswordPRF's two-question split (configured-belt first, supported
+// selector second) — the cover profile is produced by that same function
+// on the guarded tree, so an unsupported selector can never arrive here.
+func confirmEncryptionPRF(prevTree *config.ConfigTree, cover confirmEncryptionCover) string {
+	if prf := masterPasswordPRF(prevTree); prf != "" {
+		return prf
+	}
+	return cover.profile
+}
+
 // aad is the AES-GCM additional authenticated data. The envelope write path
 // passes the header line so the plaintext header — including the #1922
 // committed= marker — is bound to the ciphertext and cannot be edited in place
@@ -305,7 +366,14 @@ func (db *DB) maybeEncryptTreeJSON(data []byte, tree *config.ConfigTree, aad []b
 	if prf == "" {
 		return data, nil
 	}
+	return db.encryptTreeJSON(data, prf, aad)
+}
 
+// encryptTreeJSON seals data under an already-resolved PRF profile. Split
+// from maybeEncryptTreeJSON so the confirm path can seal under a profile
+// resolved from TWO trees (confirmEncryptionPRF) without widening the
+// tree-taking signature every active/rollback caller shares.
+func (db *DB) encryptTreeJSON(data []byte, prf string, aad []byte) ([]byte, error) {
 	keyMaterial, err := db.readOrCreateMasterKey()
 	if err != nil {
 		return nil, err
@@ -337,6 +405,26 @@ func (db *DB) maybeEncryptTreeJSON(data []byte, tree *config.ConfigTree, aad []b
 		Data:   base64.StdEncoding.EncodeToString(gcm.Seal(nil, nonce, data, aad)),
 	}
 	return marshalEnvelope(env)
+}
+
+// confirmNeedsEncryption reports whether a plaintext confirm body must be
+// treated as an unexpected-plaintext downgrade (#14172). The record's own
+// rollback target declaring a master-password is the #4579 case; the
+// guarded tree NEVER reaching the record (only GuardedHash does) is the
+// new case — recovery knows the guarded tree as the active config it just
+// loaded, so ReadConfirm judges a plaintext record against the rollback
+// target it carries, and recoverPendingConfirmLocked adds the guarded
+// (active) tree as a second opinion. Either tree declaring a
+// master-password while the body was plaintext means the file was written
+// without the envelope this build would have used.
+func confirmNeedsEncryption(rec *confirmRecord, guardedTree *config.ConfigTree) bool {
+	if rec == nil {
+		return false
+	}
+	if masterPasswordPRF(rec.PrevTree) != "" {
+		return true
+	}
+	return masterPasswordPRF(guardedTree) != ""
 }
 
 // maybeDecryptTreeJSON returns the plaintext body of a stored config.

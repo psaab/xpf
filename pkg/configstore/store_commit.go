@@ -629,6 +629,14 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 		}
 	}
 	if s.db != nil {
+		// #14172: the confirm record carries no guarded tree, so the DB
+		// carries its encryption profile for this arm. A guarded tree that
+		// ADDS a master-password over a plaintext rollback target must
+		// seal confirm.json (see confirmEncryptionCover). Armed under
+		// s.mu like every other record write below; cleared on return so
+		// no later tombstone/migration/retry write silently inherits it.
+		s.db.writeConfirmCover = confirmEncryptionCover{profile: masterPasswordPRF(committedTree)}
+		defer func() { s.db.writeConfirmCover = confirmEncryptionCover{} }()
 		if _, err := s.db.encodeConfirm(&confirmRecord{
 			Deadline:         widestConfirmDeadline,
 			ArmedAt:          widestConfirmDeadline,
