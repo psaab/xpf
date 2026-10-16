@@ -872,13 +872,16 @@ pub(super) fn parse_neighbor_msg(
                 // update, exactly as on the v4 arm; refusals are counted via
                 // the NA report (single counting point, mirroring #11069).
                 let now_ns = monotonic_nanos();
-                let solicited = dynamic_neighbors.take_arp_reply_solicited(&key, now_ns)
+                let solicited = dynamic_neighbors.peek_arp_reply_solicited(&key, now_ns)
                     || (state & NUD_PERMANENT) != 0;
                 let result = dynamic_neighbors.insert_arp_reply_if_solicited_allows(
                     key,
                     NeighborEntry { mac },
                     solicited,
                 );
+                if matches!(result, Some(true)) {
+                    dynamic_neighbors.take_arp_reply_solicited(&key, now_ns);
+                }
                 if (state & NUD_PROBE) != 0 {
                     dynamic_neighbors.record_neighbor_probe(key, now_ns);
                 }
@@ -3166,5 +3169,60 @@ mod kernel_neighbor_v6_unsolicited_13660_tests {
             );
         }
         assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(LIVE_MAC));
+    }
+    /// #13898 fail-on-revert: a same-MAC NUD state refresh inside the
+    /// solicitation window must NOT consume the one-shot probe token,
+    /// mirroring the IPv4 #13661 fix. The intermediate kernel
+    /// notification needs no authorization (it changes nothing), so
+    /// the token must survive for the genuine MAC move that follows;
+    /// consuming it makes that move look unsolicited and blackholes
+    /// the IPv6 failover until the next probe.
+    #[test]
+    fn same_mac_nud_delay_refresh_preserves_solicitation_token_13898() {
+        const NUD_REACHABLE: u16 = 0x02;
+        const NUD_DELAY: u16 = 0x08;
+        let monitored = monitored_ifindexes();
+        let (neighbors, key, ip6) = seeded();
+        let epoch = neighbors.mac_change_epoch_for(&key);
+        let refusals = neighbors.na_unsolicited_override_refusals();
+        neighbors.record_neighbor_probe(key, monotonic_nanos());
+
+        // Intermediate kernel state refresh carrying the SAME MAC.
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(LIVE_MAC), NUD_DELAY, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::None,
+            "a same-MAC NUD_DELAY refresh changes nothing"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(LIVE_MAC));
+        assert_eq!(neighbors.mac_change_epoch_for(&key), epoch);
+        assert_eq!(neighbors.na_unsolicited_override_refusals(), refusals);
+
+        // The genuine MAC move inside the same window must still be
+        // authorized by the surviving probe token.
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(FAILOVER_MAC), NUD_REACHABLE, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::Upserted,
+            "the token surviving the same-MAC refresh must authorize the failover"
+        );
+        assert_eq!(
+            neighbors.get(&key).map(|entry| entry.mac),
+            Some(FAILOVER_MAC)
+        );
+        assert_eq!(neighbors.mac_change_epoch_for(&key), epoch + 1);
+        assert_eq!(
+            neighbors.na_unsolicited_override_refusals(),
+            refusals,
+            "a solicited failover must not count as an unsolicited refusal"
+        );
     }
 }
