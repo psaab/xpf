@@ -1,21 +1,14 @@
 // Token-bucket and three-color policer state for the userspace filter path.
 //
-// #5390: the metered hot path is LOCK-FREE. `ThreeColorPolicerState` splits
-// into an immutable `ThreeColorPolicerConfig` (mode/rates/bursts/treatments,
-// set once at compile) and a cache-line-isolated `ThreeColorPolicerHot`
-// carrying only atomics: the two token buckets packed into ONE `AtomicU64`
-// (committed in the high 32 bits, peak/excess in the low 32) plus per-rate
-// `last_refill_ns` `AtomicU64`s. `meter()` is `&self` and mutates state through
-// bounded `compare_exchange_weak` retry loops — the RSS-spread flow aggregate
-// (6 workers on the mlx5 VF) no longer serializes on a per-packet
-// `Mutex<ThreeColorPolicerState>` futex. Both buckets live in the same atomic
-// word so a green consume (which debits committed AND peak in trTCM) commits
-// atomically; the shared-lease v8 pattern (afxdp/types/shared_cos_lease) is the
-// precedent. The aggregate CIR/PIR/CBS/PBS contract is preserved EXACTLY (all
-// workers still meter one shared bucket) — only the synchronization primitive
-// changed from a Mutex to lock-free CAS.
+// #5390: metering avoids the per-packet Mutex. `ThreeColorPolicerState` splits
+// into immutable configuration and cache-line-isolated atomic hot state. The
+// two token buckets are packed in one `AtomicU64`, while each rate has a
+// `last_refill_ns` `AtomicU64`. `meter()` mutates state through bounded
+// compare-exchange loops. #13704 adds a short atomic gate around timestamp and
+// credit updates so another worker cannot consume a refill before its grant is
+// posted; the gate is released before token consumption.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // #5390: token buckets are byte-granular u32 counts packed two-per-`AtomicU64`.
 // A Junos policer burst-size is bounded far below 4 GiB; clamp to the packed
@@ -186,6 +179,13 @@ pub(crate) struct ThreeColorPolicerHot {
     credits: AtomicU64,
     committed_last_refill_ns: AtomicU64,
     peak_last_refill_ns: AtomicU64,
+    refill_gate: AtomicBool,
+    #[cfg(test)]
+    pause_refill_claim: AtomicBool,
+    #[cfg(test)]
+    refill_claim_paused: AtomicBool,
+    #[cfg(test)]
+    release_refill_claim: AtomicBool,
 }
 
 impl ThreeColorPolicerHot {
@@ -194,15 +194,45 @@ impl ThreeColorPolicerHot {
             // Start both buckets at their burst caps (a freshly-installed
             // policer admits a full burst) — matches the pre-#5390 constructor
             // that seeded `committed_tokens = scaled(committed_burst)`.
-            credits: AtomicU64::new(pack_tokens(committed_burst_bytes, peak_or_excess_burst_bytes)),
+            credits: AtomicU64::new(pack_tokens(
+                committed_burst_bytes,
+                peak_or_excess_burst_bytes,
+            )),
             committed_last_refill_ns: AtomicU64::new(UNINITIALIZED_NS),
             peak_last_refill_ns: AtomicU64::new(UNINITIALIZED_NS),
+            refill_gate: AtomicBool::new(false),
+            #[cfg(test)]
+            pause_refill_claim: AtomicBool::new(false),
+            #[cfg(test)]
+            refill_claim_paused: AtomicBool::new(false),
+            #[cfg(test)]
+            release_refill_claim: AtomicBool::new(false),
         }
     }
 }
+impl ThreeColorPolicerHot {
+    /// Pause a test winner after its timestamp claim but before credit is
+    /// posted. Production has no hook or waiting path.
+    #[inline]
+    fn test_pause_after_claim(&self) {
+        #[cfg(test)]
+        if self.pause_refill_claim.load(Ordering::Acquire) {
+            self.refill_claim_paused.store(true, Ordering::Release);
+            while !self.release_refill_claim.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+struct RefillGateGuard<'a>(&'a AtomicBool);
 
-/// Compact RFC 2697/2698 policer. Metering is lock-free (`meter(&self)` via CAS
-/// over `hot`); the shape lives in `config`.
+impl Drop for RefillGateGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+/// Compact RFC 2697/2698 policer. Metering uses atomic CAS for bucket updates
+/// and serializes the timestamp/credit refill transaction through a short gate.
 #[derive(Debug)]
 pub(crate) struct ThreeColorPolicerState {
     config: ThreeColorPolicerConfig,
@@ -326,11 +356,11 @@ impl ThreeColorPolicerState {
         })
     }
 
-    /// Meter one packet. Lock-free: refills through per-rate timestamp CAS then
-    /// consumes tokens through a bounded `compare_exchange_weak` loop over the
-    /// packed `credits` word. `&self` (not `&mut self`): the state is shared
-    /// across all workers behind an `Arc` and metered concurrently — the
-    /// #5390 fix that removed the per-packet `Mutex`.
+    /// Meter one packet. Refill is serialized through a short atomic gate so
+    /// timestamp advancement and token credit become visible together; token
+    /// consumption remains a bounded `compare_exchange_weak` loop over the
+    /// packed `credits` word. `&self` (not `&mut self`): state is shared across
+    /// all workers behind an `Arc`, replacing the previous per-packet Mutex.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn meter(
         &self,
@@ -390,7 +420,20 @@ impl ThreeColorPolicerState {
         self.config == other.config
     }
 
+    /// Refill the coupled timestamp/credit state under one atomic spin gate.
+    /// Advancing the timestamp and posting its earned bytes are one logical
+    /// transaction: otherwise a concurrent meter can observe the advanced
+    /// timestamp and consume before the winning thread posts those bytes.
     fn refill(&self, now_ns: u64) {
+        while self
+            .hot
+            .refill_gate
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        let _gate = RefillGateGuard(&self.hot.refill_gate);
         match self.config.mode {
             ThreeColorMode::SingleRate => self.refill_sr_tcm(now_ns),
             ThreeColorMode::TwoRate => self.refill_tr_tcm(now_ns),
@@ -407,7 +450,12 @@ impl ThreeColorPolicerState {
                 if self
                     .hot
                     .committed_last_refill_ns
-                    .compare_exchange(UNINITIALIZED_NS, now_ns, Ordering::AcqRel, Ordering::Acquire)
+                    .compare_exchange(
+                        UNINITIALIZED_NS,
+                        now_ns,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
                     .is_ok()
                 {
                     return;
@@ -429,6 +477,7 @@ impl ThreeColorPolicerState {
                 // window's credit add. Re-observe; no double refill.
                 continue;
             }
+            self.hot.test_pause_after_claim();
             // Won the window: add `added` bytes, committed-first, overflow to
             // excess. Retry the packed-credits CAS until it lands.
             loop {
@@ -437,16 +486,20 @@ impl ThreeColorPolicerState {
                 let committed_space = self.config.committed_burst_bytes.saturating_sub(committed);
                 let committed_add = added.min(committed_space);
                 let excess_add = added - committed_add;
-                let excess_space = self
-                    .config
-                    .peak_or_excess_burst_bytes
-                    .saturating_sub(peak);
-                let new_credits =
-                    pack_tokens(committed + committed_add, peak + excess_add.min(excess_space));
+                let excess_space = self.config.peak_or_excess_burst_bytes.saturating_sub(peak);
+                let new_credits = pack_tokens(
+                    committed + committed_add,
+                    peak + excess_add.min(excess_space),
+                );
                 if self
                     .hot
                     .credits
-                    .compare_exchange_weak(credits, new_credits, Ordering::AcqRel, Ordering::Acquire)
+                    .compare_exchange_weak(
+                        credits,
+                        new_credits,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
                     .is_ok()
                 {
                     return;
@@ -486,7 +539,12 @@ impl ThreeColorPolicerState {
             let last = ts.load(Ordering::Acquire);
             if last == UNINITIALIZED_NS {
                 if ts
-                    .compare_exchange(UNINITIALIZED_NS, now_ns, Ordering::AcqRel, Ordering::Acquire)
+                    .compare_exchange(
+                        UNINITIALIZED_NS,
+                        now_ns,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
                     .is_ok()
                 {
                     return;
@@ -503,6 +561,7 @@ impl ThreeColorPolicerState {
             {
                 continue;
             }
+            self.hot.test_pause_after_claim();
             loop {
                 let credits = self.hot.credits.load(Ordering::Acquire);
                 let (committed, peak) = unpack_tokens(credits);
@@ -516,7 +575,12 @@ impl ThreeColorPolicerState {
                 if self
                     .hot
                     .credits
-                    .compare_exchange_weak(credits, new_credits, Ordering::AcqRel, Ordering::Acquire)
+                    .compare_exchange_weak(
+                        credits,
+                        new_credits,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
                     .is_ok()
                 {
                     return;
@@ -524,7 +588,6 @@ impl ThreeColorPolicerState {
             }
         }
     }
-
     /// Classify + debit one packet against the (already refilled) buckets via a
     /// bounded CAS loop. Byte-granular thresholds are identical to the pre-#5390
     /// scaled-`u128` decision (the `× 1e9` scale cancels in every comparison). A
@@ -849,12 +912,9 @@ mod tests {
     fn concurrent_refill_under_contention_neither_over_nor_under_grants_6307() {
         // #6307 fail-on-revert: the bundled
         // `concurrent_meter_is_lock_free_and_preserves_trTCM_thresholds` pins
-        // `now_ns = 0`, so it exercises only the consume `compare_exchange_weak`
-        // under contention — the REFILL path (the win-the-window timestamp CAS
-        // plus the #4261 sub-byte rewind composing across concurrent partial
-        // windows) never runs there, and that is the actual over-grant hazard
-        // of the lock-free design. This test advances the clock while N threads
-        // meter, so refills and consumes race.
+        // `now_ns = 0`, so it exercises only consume CAS under contention; the
+        // refill race needs advancing timestamps. This test advances the clock
+        // while N threads meter, exercising concurrent refill and consume.
         //
         // SHARED-BUDGET LOOP (not equal per-thread iteration counts): every op
         // claims its timestamp from one `fetch_add` clock and threads race until
@@ -914,118 +974,118 @@ mod tests {
         const MAX_ATTEMPTS: usize = 5;
         let mut attempt_rates: Vec<f64> = Vec::new();
         for attempt in 1..=MAX_ATTEMPTS {
-        let policer = Arc::new(tr_tcm(CIR, CBS, PIR, PBS, true));
-        // Prime both refill clocks at t=0 from ONE thread. Without this the
-        // first thread to reach `refill()` stamps `last_refill_ns` at ITS
-        // timestamp and the window [0, that timestamp) is never granted, which
-        // would make the ceiling scheduler-dependent. Priming also opens PKT
-        // bytes of headroom in the committed bucket so the very first
-        // concurrent refill has somewhere to land (no start-of-run saturation
-        // loss). Its 100 green bytes are counted in the total below.
-        assert_eq!(
-            policer.meter(0, PKT, PacketColor::Green).color,
-            PacketColor::Green,
-            "the priming meter must be Green (the bucket starts at CBS)"
-        );
+            let policer = Arc::new(tr_tcm(CIR, CBS, PIR, PBS, true));
+            // Prime both refill clocks at t=0 from ONE thread. Without this the
+            // first thread to reach `refill()` stamps `last_refill_ns` at ITS
+            // timestamp and the window [0, that timestamp) is never granted, which
+            // would make the ceiling scheduler-dependent. Priming also opens PKT
+            // bytes of headroom in the committed bucket so the very first
+            // concurrent refill has somewhere to land (no start-of-run saturation
+            // loss). Its 100 green bytes are counted in the total below.
+            assert_eq!(
+                policer.meter(0, PKT, PacketColor::Green).color,
+                PacketColor::Green,
+                "the priming meter must be Green (the bucket starts at CBS)"
+            );
 
-        let clock = Arc::new(AtomicU64::new(0));
-        let barrier = Arc::new(Barrier::new(THREADS));
-        let mut handles = Vec::new();
-        for _ in 0..THREADS {
-            let p = Arc::clone(&policer);
-            let clock = Arc::clone(&clock);
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
-                let mut green_bytes = 0u64;
-                let mut ops = 0u64;
-                // How many of this thread's ops saw the shared clock move by
-                // more than its own step since its previous op — i.e. observed
-                // another thread's advance. This is the achieved-contention
-                // RATE, reported below; 0 means the run degenerated to serial
-                // execution and the race was never exercised.
-                let mut interleaved = 0u64;
-                let mut prev_ns = 0u64;
-                barrier.wait();
-                loop {
-                    let now_ns = clock.fetch_add(STEP_NS, Ordering::Relaxed) + STEP_NS;
-                    if now_ns > T_MAX_NS {
-                        break;
+            let clock = Arc::new(AtomicU64::new(0));
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let mut handles = Vec::new();
+            for _ in 0..THREADS {
+                let p = Arc::clone(&policer);
+                let clock = Arc::clone(&clock);
+                let barrier = Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    let mut green_bytes = 0u64;
+                    let mut ops = 0u64;
+                    // How many of this thread's ops saw the shared clock move by
+                    // more than its own step since its previous op — i.e. observed
+                    // another thread's advance. This is the achieved-contention
+                    // RATE, reported below; 0 means the run degenerated to serial
+                    // execution and the race was never exercised.
+                    let mut interleaved = 0u64;
+                    let mut prev_ns = 0u64;
+                    barrier.wait();
+                    loop {
+                        let now_ns = clock.fetch_add(STEP_NS, Ordering::Relaxed) + STEP_NS;
+                        if now_ns > T_MAX_NS {
+                            break;
+                        }
+                        if ops > 0 && now_ns != prev_ns + STEP_NS {
+                            interleaved += 1;
+                        }
+                        prev_ns = now_ns;
+                        ops += 1;
+                        if p.meter(now_ns, PKT, PacketColor::Green).color == PacketColor::Green {
+                            green_bytes += PKT;
+                        }
                     }
-                    if ops > 0 && now_ns != prev_ns + STEP_NS {
-                        interleaved += 1;
-                    }
-                    prev_ns = now_ns;
-                    ops += 1;
-                    if p.meter(now_ns, PKT, PacketColor::Green).color == PacketColor::Green {
-                        green_bytes += PKT;
-                    }
-                }
-                (green_bytes, ops, interleaved)
-            }));
-        }
-        let results: Vec<(u64, u64, u64)> =
-            handles.into_iter().map(|h| h.join().unwrap()).collect();
-        let total_green: u64 = PKT + results.iter().map(|r| r.0).sum::<u64>();
-        let total_ops: u64 = results.iter().map(|r| r.1).sum();
-        let interleaved: u64 = results.iter().map(|r| r.2).sum();
+                    (green_bytes, ops, interleaved)
+                }));
+            }
+            let results: Vec<(u64, u64, u64)> =
+                handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let total_green: u64 = PKT + results.iter().map(|r| r.0).sum::<u64>();
+            let total_ops: u64 = results.iter().map(|r| r.1).sum();
+            let interleaved: u64 = results.iter().map(|r| r.2).sum();
 
-        // The shared-budget loop must have consumed exactly the budget — this
-        // pins T_MAX_NS as the real elapsed window the ceiling is computed from.
-        assert_eq!(
-            total_ops, OPS,
-            "the shared timestamp budget must be fully consumed exactly once"
-        );
-        eprintln!(
-            "#6307 refill-under-contention: {total_ops} ops / {THREADS} threads, \
+            // The shared-budget loop must have consumed exactly the budget — this
+            // pins T_MAX_NS as the real elapsed window the ceiling is computed from.
+            assert_eq!(
+                total_ops, OPS,
+                "the shared timestamp budget must be fully consumed exactly once"
+            );
+            eprintln!(
+                "#6307 refill-under-contention: {total_ops} ops / {THREADS} threads, \
              per-thread ops {:?}, {interleaved} ops ({:.1}%) observed a foreign \
              clock advance, {total_green} B green admitted",
-            results.iter().map(|r| r.1).collect::<Vec<_>>(),
-            100.0 * interleaved as f64 / total_ops as f64,
-        );
+                results.iter().map(|r| r.1).collect::<Vec<_>>(),
+                100.0 * interleaved as f64 / total_ops as f64,
+            );
 
-        let refilled = CIR * T_MAX_NS / 1_000_000_000;
-        let ceiling = CBS + refilled;
+            let refilled = CIR * T_MAX_NS / 1_000_000_000;
+            let ceiling = CBS + refilled;
 
-        // NO OVER-GRANT. A refill window credited twice (the losing side of the
-        // `last_refill_ns` compare_exchange adding tokens anyway) admits green
-        // bytes the aggregate CIR/CBS contract never issued.
-        assert!(
-            total_green <= ceiling,
-            "over-grant under concurrent refill: admitted {total_green} B green \
+            // NO OVER-GRANT. A refill window credited twice (the losing side of the
+            // `last_refill_ns` compare_exchange adding tokens anyway) admits green
+            // bytes the aggregate CIR/CBS contract never issued.
+            assert!(
+                total_green <= ceiling,
+                "over-grant under concurrent refill: admitted {total_green} B green \
              but the CBS + CIR*T budget is only {ceiling} B \
              (CBS {CBS} + {refilled} refilled over {T_MAX_NS} ns)"
-        );
+            );
 
-        // NO LOST REFILL. Demand is ~100x supply, so a correct meter ends with
-        // less than one packet of committed credit unspent. Slack accounts for
-        // that residue (<PKT), the at-most-one-byte of sub-byte dust still owed
-        // at T_MAX_NS, and one packet of margin. A dropped refill (e.g. the
-        // window winner abandoning its credit add when the packed-credits CAS
-        // loses) starves the policer by far more than this.
-        const SLACK: u64 = 3 * PKT;
-        assert!(
-            total_green + SLACK >= ceiling,
-            "starved under concurrent refill: admitted only {total_green} B \
+            // NO LOST REFILL. Demand is ~100x supply, so a correct meter ends with
+            // less than one packet of committed credit unspent. Slack accounts for
+            // that residue (<PKT), the at-most-one-byte of sub-byte dust still owed
+            // at T_MAX_NS, and one packet of margin. A dropped refill (e.g. the
+            // window winner abandoning its credit add when the packed-credits CAS
+            // loses) starves the policer by far more than this.
+            const SLACK: u64 = 3 * PKT;
+            assert!(
+                total_green + SLACK >= ceiling,
+                "starved under concurrent refill: admitted only {total_green} B \
              green against a {ceiling} B budget (CBS {CBS} + {refilled} \
              refilled over {T_MAX_NS} ns) — a refill was lost"
-        );
+            );
 
-        // Non-vacuity, checked LAST so a real over/under-grant is reported
-        // first: with 8 threads over 250_000 ops this floor of ONE observed
-        // foreign advance is many orders of magnitude below the measured
-        // 99.4-99.7%, so it fires only if the run degenerated to strictly
-        // serial execution — in which case the two assertions above proved
-        // nothing about the refill race and the result must not read as
-        // covered.
-        attempt_rates.push(100.0 * interleaved as f64 / total_ops as f64);
-        if interleaved > 0 {
-            return;
-        }
-        eprintln!(
-            "#7841: attempt {attempt}/{MAX_ATTEMPTS} degenerated to serial \
+            // Non-vacuity, checked LAST so a real over/under-grant is reported
+            // first: with 8 threads over 250_000 ops this floor of ONE observed
+            // foreign advance is many orders of magnitude below the measured
+            // 99.4-99.7%, so it fires only if the run degenerated to strictly
+            // serial execution — in which case the two assertions above proved
+            // nothing about the refill race and the result must not read as
+            // covered.
+            attempt_rates.push(100.0 * interleaved as f64 / total_ops as f64);
+            if interleaved > 0 {
+                return;
+            }
+            eprintln!(
+                "#7841: attempt {attempt}/{MAX_ATTEMPTS} degenerated to serial \
              execution (0 interleaved ops); the over/under-grant assertions \
              passed, retrying for a contended run"
-        );
+            );
         }
         panic!(
             "no op observed another thread's clock advance in {MAX_ATTEMPTS} \
@@ -1070,5 +1130,63 @@ mod tests {
             !mod_rs.contains("self.state.lock()"),
             "the meter path must not take a per-packet lock (#5390 futex convoy)"
         );
+    }
+    #[test]
+    fn timestamp_claim_and_credit_are_atomic_for_sr_tcm_13704() {
+        refill_claim_credit_is_atomic_13704(sr_tcm(100, 64, 1, true));
+    }
+
+    #[test]
+    fn timestamp_claim_and_credit_are_atomic_for_tr_tcm_13704() {
+        refill_claim_credit_is_atomic_13704(tr_tcm(100, 64, 200, 64, true));
+    }
+
+    fn refill_claim_credit_is_atomic_13704(policer: ThreeColorPolicerState) {
+        use std::time::Duration;
+
+        let policer = Arc::new(policer);
+        assert_eq!(
+            policer.meter(0, 64, PacketColor::Green).color,
+            PacketColor::Green
+        );
+        if policer.mode_name() == "single-rate" {
+            assert_eq!(
+                policer.meter(0, 1, PacketColor::Green).color,
+                PacketColor::Yellow
+            );
+        }
+        assert_eq!(
+            policer.meter(0, 1, PacketColor::Green).color,
+            PacketColor::Red
+        );
+        policer
+            .hot
+            .pause_refill_claim
+            .store(true, Ordering::Release);
+
+        std::thread::scope(|scope| {
+            let winner_policer = Arc::clone(&policer);
+            let winner = scope.spawn(move || winner_policer.refill(1_000_000_000));
+            while !policer.hot.refill_claim_paused.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+
+            // Timestamp claim has won but the grant is not posted. Before #13704,
+            // a same-time meter skips refill and spuriously returns Red.
+            let loser_policer = Arc::clone(&policer);
+            let loser =
+                scope.spawn(move || loser_policer.meter(1_000_000_000, 64, PacketColor::Green));
+            std::thread::sleep(Duration::from_millis(10));
+            policer
+                .hot
+                .release_refill_claim
+                .store(true, Ordering::Release);
+            winner.join().unwrap();
+            assert_eq!(
+                loser.join().unwrap().color,
+                PacketColor::Green,
+                "meter at the claimed timestamp must observe its earned credit (#13704)"
+            );
+        });
     }
 }
