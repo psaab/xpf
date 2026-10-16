@@ -195,8 +195,8 @@ func captureFlowKey(c CaptureClassification) string {
 
 // scopedCaptureFlowKey separates otherwise-identical inner flows admitted
 // through different tunnel, routing, queue, or capture-generation scopes.
-// The per-flow pipeline FIFO is lifecycle state, so its key must use the same
-// queue authority dimensions already carried by FragmentKey.
+// The per-flow pipeline FIFO is lifecycle state; fragment state retains its
+// separate FragmentKey identity.
 func scopedCaptureFlowKey(flow string, tunnel, vrf uint32, generation uint64, queue uint16) string {
 	if tunnel == 0 && vrf == 0 && generation == 0 && queue == 0 {
 		return flow

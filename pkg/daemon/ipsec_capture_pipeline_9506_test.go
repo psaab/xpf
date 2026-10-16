@@ -6,6 +6,20 @@ import (
 	"github.com/psaab/xpf/pkg/nfqueue"
 )
 
+func TestCaptureFrameForQueueCarriesFlowScope13977(t *testing.T) {
+	packet := &nfqueue.Packet{}
+	queue := IpsecCaptureQueue{
+		QueueNumber: 91, Tunnel: 17, VRF: 42, Generation: 3,
+		SnapshotGeneration: 5, QueueEpoch: 11,
+	}
+	frame := captureFrameForQueue(packet, queue, 7, 8)
+	if frame.Packet != packet || frame.Tunnel != queue.Tunnel || frame.VRF != queue.VRF ||
+		frame.QueueNumber != queue.QueueNumber || frame.QueueEpoch != queue.QueueEpoch ||
+		frame.Generation != queue.Generation || frame.SnapshotGeneration != queue.SnapshotGeneration ||
+		frame.ConfigGeneration != 7 || frame.FIBGeneration != 8 {
+		t.Fatalf("capture frame metadata = %+v, want queue scope and authority copied", frame)
+	}
+}
 func TestIpsecCapturePipelineDefaultInactive9506(t *testing.T) {
 	registry := new(nfqueue.OriginRegistry)
 	if err := registry.Register(1000, nfqueue.CaptureOrigin{Family: nfqueue.CaptureFamilyInet, Hook: nfqueue.CaptureHookForward, Owner: "owner-a", STN: "st0", OwnedIfindex: 7}); err != nil {
