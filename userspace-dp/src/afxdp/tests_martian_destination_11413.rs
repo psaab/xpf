@@ -155,9 +155,50 @@ v4_martian_destination_cell_11413!(
     Ipv4Addr::new(240, 0, 0, 1)
 );
 
+// #13981: link-local destinations are single-link scope (RFC 3927 section 2.1
+// for 169.254/16, RFC 4291 section 2.5.6 for fe80::/10) — a router MUST NOT
+// forward them as transit even under an application-any permit with a live
+// default route. Same cells as the other martian destinations above.
+v4_martian_destination_cell_11413!(
+    transit_drops_ipv4_link_local_destination_13981,
+    Ipv4Addr::new(169, 254, 0, 1)
+);
+v4_martian_destination_cell_11413!(
+    transit_drops_ipv4_link_local_upper_boundary_destination_13981,
+    Ipv4Addr::new(169, 254, 255, 255)
+);
+
 #[test]
 fn transit_drops_ipv6_multicast_destination_11413() {
     run_v6_destination_11413("ff02::1".parse().unwrap());
+}
+
+#[test]
+fn transit_drops_ipv6_link_local_destination_13981() {
+    run_v6_destination_11413("fe80::1".parse().unwrap());
+}
+
+#[test]
+fn transit_drops_ipv6_link_local_upper_boundary_destination_13981() {
+    // fe80::/10 upper edge: febf:ffff:... stays link-local; fec0:: is not.
+    run_v6_destination_11413("febf:ffff::1".parse().unwrap());
+}
+
+#[test]
+fn transit_dst_gate_covers_link_local_ranges_13981() {
+    use crate::afxdp::frame::transit_dst_is_martian;
+    // IPv4 169.254/16 inclusive, both boundaries.
+    assert!(transit_dst_is_martian(IpAddr::V4(Ipv4Addr::new(169, 254, 0, 0))));
+    assert!(transit_dst_is_martian(IpAddr::V4(Ipv4Addr::new(169, 254, 255, 255))));
+    assert!(!transit_dst_is_martian(IpAddr::V4(Ipv4Addr::new(169, 253, 0, 1))));
+    assert!(!transit_dst_is_martian(IpAddr::V4(Ipv4Addr::new(169, 255, 0, 1))));
+    // IPv6 fe80::/10 inclusive: fe80..=febf, both boundaries.
+    assert!(transit_dst_is_martian(IpAddr::V6("fe80::".parse().unwrap())));
+    assert!(transit_dst_is_martian(IpAddr::V6(
+        "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()
+    )));
+    assert!(!transit_dst_is_martian(IpAddr::V6("fe7f:ffff::1".parse().unwrap())));
+    assert!(!transit_dst_is_martian(IpAddr::V6("fec0::1".parse().unwrap())));
 }
 
 #[test]

@@ -356,8 +356,12 @@ pub(in crate::afxdp) fn transit_dst_is_martian(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            v4.is_multicast() || v4.is_broadcast() || v4.is_loopback() || o[0] >= 240
+            v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || o[0] >= 240
         }
-        IpAddr::V6(v6) => v6.is_multicast(),
+        IpAddr::V6(v6) => v6.is_multicast() || v6.is_unicast_link_local(),
     }
 }

@@ -4,6 +4,10 @@ xpf (0.0.0) unstable; urgency=medium
     each IPv6 protocol/source-address/source-port binding (RFC 6146 endpoint-
     independent mapping). Keep the binding while any associated session is
     active and for 300 seconds after its last session closes (#13946).
+  * Reject IPv4 169.254/16 and IPv6 fe80::/10 transit destinations before
+    policy, session creation, neighbor retry or transmission, matching the
+    existing transit destination-class gate. LocalDelivery is unaffected
+    (#13981).
   * Resolve REST operational command regexes before reading request bodies and
     reject body-independent command denials before buffering (#13249).
 
