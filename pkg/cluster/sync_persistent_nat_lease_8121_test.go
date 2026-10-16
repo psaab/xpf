@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,24 +19,36 @@ func equalIdleLeaseWire(a, b userspace.IdleLeaseWire) bool {
 		return a.RoutingScope == b.RoutingScope && a.Pool == b.Pool &&
 			a.Protocol == b.Protocol && a.SrcIP == b.SrcIP &&
 			a.SrcPort == b.SrcPort && a.RemoteIP == b.RemoteIP &&
-			a.RemotePort == b.RemotePort && a.TranslatedIP == b.TranslatedIP &&
+			a.RemotePort == b.RemotePort && a.PermitAnyRemote == b.PermitAnyRemote &&
+			slices.Equal(a.PermittedRemotes, b.PermittedRemotes) &&
+			a.TranslatedIP == b.TranslatedIP &&
 			a.TranslatedPort == b.TranslatedPort && a.AddressOnly == b.AddressOnly &&
 			a.RemainingNs == b.RemainingNs && a.TimeoutNs == b.TimeoutNs
 	}
 	as, bs := *a.RoutingScope, *b.RoutingScope
 	a.RoutingScope, b.RoutingScope = nil, nil
-	return as == bs && a == b
+	return as == bs && a.Pool == b.Pool && a.Protocol == b.Protocol &&
+		a.SrcIP == b.SrcIP && a.SrcPort == b.SrcPort &&
+		a.RemoteIP == b.RemoteIP && a.RemotePort == b.RemotePort &&
+		a.PermitAnyRemote == b.PermitAnyRemote &&
+		slices.Equal(a.PermittedRemotes, b.PermittedRemotes) &&
+		a.TranslatedIP == b.TranslatedIP && a.TranslatedPort == b.TranslatedPort &&
+		a.AddressOnly == b.AddressOnly && a.RemainingNs == b.RemainingNs &&
+		a.TimeoutNs == b.TimeoutNs
 }
 
 func sampleIdleLease() userspace.IdleLeaseWire {
 	return userspace.IdleLeaseWire{
-		Pool:           "P",
-		Protocol:       6,
-		SrcIP:          "10.0.61.50",
-		SrcPort:        40000,
-		RoutingScope:   persistentNatLeaseScope(7),
-		RemoteIP:       "8.8.8.8",
-		RemotePort:     443,
+		Pool:         "P",
+		Protocol:     6,
+		SrcIP:        "10.0.61.50",
+		SrcPort:      40000,
+		RoutingScope: persistentNatLeaseScope(7),
+		RemoteIP:     "8.8.8.8",
+		RemotePort:   443,
+		PermittedRemotes: []userspace.PersistentNatRemote{
+			{IP: "8.8.8.8", Port: 0},
+		},
 		TranslatedIP:   "203.0.113.1",
 		TranslatedPort: 1024,
 		AddressOnly:    false,
@@ -97,16 +111,17 @@ func TestPersistentNatLeasePayload_RoundTrip(t *testing.T) {
 		{
 			// permit-any-remote-host: an EMPTY remote must stay empty rather
 			// than round-tripping into an address.
-			Pool:           "Q",
-			Protocol:       17,
-			SrcIP:          "2001:db8::1",
-			SrcPort:        5000,
-			RoutingScope:   persistentNatLeaseScope(0),
-			TranslatedIP:   "203.0.113.9",
-			TranslatedPort: 2048,
-			AddressOnly:    true,
-			RemainingNs:    1,
-			TimeoutNs:      60_000_000_000,
+			Pool:            "Q",
+			Protocol:        17,
+			SrcIP:           "2001:db8::1",
+			SrcPort:         5000,
+			RoutingScope:    persistentNatLeaseScope(0),
+			PermitAnyRemote: true,
+			TranslatedIP:    "203.0.113.9",
+			TranslatedPort:  2048,
+			AddressOnly:     true,
+			RemainingNs:     1,
+			TimeoutNs:       60_000_000_000,
 		},
 	}
 	out, ok := decodePersistentNatLeasePayload(encodePersistentNatLeasePayload(in))
@@ -121,6 +136,56 @@ func TestPersistentNatLeasePayload_RoundTrip(t *testing.T) {
 			t.Errorf("record %d round-trip mismatch:\n got %+v\nwant %+v", i, out[i], in[i])
 		}
 	}
+}
+func TestPersistentNatLeasePermissionsAreBoundedAndValidated(t *testing.T) {
+	atLimit := sampleIdleLease()
+	atLimit.PermittedRemotes = make([]userspace.PersistentNatRemote, userspace.MaxPersistentNatLeaseRemotes)
+	for i := range atLimit.PermittedRemotes {
+		atLimit.PermittedRemotes[i] = userspace.PersistentNatRemote{
+			IP: "203.0.113.9", Port: uint16(i),
+		}
+	}
+	record, err := encodeOnePersistentNatLease(atLimit)
+	if err != nil {
+		t.Fatalf("encoder rejected exactly %d permissions: %v",
+			userspace.MaxPersistentNatLeaseRemotes, err)
+	}
+	got, ok := decodeOnePersistentNatLease(record)
+	if !ok || len(got.PermittedRemotes) != userspace.MaxPersistentNatLeaseRemotes {
+		t.Fatalf("decoder rejected exactly %d permissions: count=%d ok=%v",
+			userspace.MaxPersistentNatLeaseRemotes, len(got.PermittedRemotes), ok)
+	}
+	if got.PermittedRemotes[0].Port != 0 ||
+		got.PermittedRemotes[len(got.PermittedRemotes)-1].Port != uint16(userspace.MaxPersistentNatLeaseRemotes-1) {
+		t.Fatalf("permission port boundary did not round-trip: first=%d last=%d",
+			got.PermittedRemotes[0].Port, got.PermittedRemotes[len(got.PermittedRemotes)-1].Port)
+	}
+
+	tooMany := sampleIdleLease()
+	tooMany.PermittedRemotes = make([]userspace.PersistentNatRemote, userspace.MaxPersistentNatLeaseRemotes+1)
+	if _, err := encodeOnePersistentNatLease(tooMany); err == nil {
+		t.Fatal("encoder accepted a permission list above the configured cap")
+	}
+
+	invalid := sampleIdleLease()
+	invalid.PermittedRemotes = []userspace.PersistentNatRemote{{IP: "not-an-ip", Port: 0}}
+	if _, err := encodeOnePersistentNatLease(invalid); err == nil {
+		t.Fatal("encoder accepted an invalid permission IP")
+	}
+
+	lease := sampleIdleLease()
+	record, err = encodeOnePersistentNatLease(lease)
+	if err != nil {
+		t.Fatalf("encode permission fixture: %v", err)
+	}
+	permissionCountOffset := 2 + len(lease.Pool) + 1 + 4 +
+		2 + len(lease.SrcIP) + 2 + 2 + len(lease.RemoteIP) + 2 + 1
+	binary.LittleEndian.PutUint16(record[permissionCountOffset:],
+		userspace.MaxPersistentNatLeaseRemotes+1)
+	if _, ok := decodeOnePersistentNatLease(record); ok {
+		t.Fatal("decoder accepted a permission count above the configured cap")
+	}
+
 }
 func TestPersistentNatLeaseDecodeRejectsInvalidLifetimes(t *testing.T) {
 	for _, tc := range []struct {

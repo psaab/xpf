@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -19,30 +20,18 @@ import (
 // whose flows all closed within the persistence timeout keeps its translated
 // port there and loses it across a failover. This carries that population.
 //
-// WHY THIS IS ADDITIVE — NO SessionSyncWireVersion / CurrentHAProtocolVersion
-// BUMP. The same three reasons #7147 records for syncMsgFenceAck, re-verified
-// against this tree:
-//
-//  1. handleMessage's `switch msgType` (sync_conn_read.go) has NO default arm
-//     and framing is length-prefixed, so a peer that predates this type skips
-//     the frame without desyncing the stream. #2239 (syncMsgDHCPLease*) and
-//     #6650 (syncMsgPeerCapabilities) both relied on this and both declined to
-//     bump.
-//  2. Nothing existing changes shape. This is a new type carrying a new record;
-//     no field on any current message is redefined.
-//  3. Bumping would be actively harmful. MinCompatHAProtocolVersion ==
-//     CurrentHAProtocolVersion, so the accepted window is a single point and a
-//     bump makes it [N+1, N+1], refusing a peer at N — the bump itself would
-//     break the rolling upgrade this feature has to survive.
-//
-// A mixed-version pair degrades exactly to pre-#8121 behaviour: the old node
-// ignores the frame, the new node receives nothing, and idle leases are simply
-// not rebuilt — which is the state before this landed, not a broken one.
+// The generation-bearing message type and replay semantics remain unchanged;
+// only its self-contained lease record gains permission fields. Do not bump
+// SessionSyncWireVersion / CurrentHAProtocolVersion: the message is length
+// framed, and a receiver with the old record layout rejects the mismatched
+// record instead of installing a permission-less lease. During version skew
+// the safe degradation is loss of the idle lease until a compatible push.
 const (
 	// The config schema permits persistent NAT inactivity timeouts up to 24h.
 	// Refuse larger peer lifetimes before handing the record to the dataplane.
-	maxPersistentNatLeaseLifetimeNS uint64 = 86_400_000_000_000
-	minPersistentNatLeaseTimeoutNS  uint64 = 1_000_000_000
+	maxPersistentNatLeaseLifetimeNS  uint64 = 86_400_000_000_000
+	minPersistentNatLeaseTimeoutNS   uint64 = 1_000_000_000
+	maxPersistentNatLeaseRemoteCount        = userspace.MaxPersistentNatLeaseRemotes
 	// syncMsgPersistentNatLease is the RETIRED pre-#10018 lease set. It stays
 	// reserved so a new receiver can explicitly ignore an old sender's
 	// unscoped records rather than decoding them as domain 0.
@@ -56,8 +45,8 @@ const (
 	syncMsgPersistentNatLeaseGeneration = 41
 )
 
-// encodePersistentNatLeasePayload serializes the v25 idle-lease set inside the
-// generation-bearing envelope. Records are additive within one generation;
+// encodePersistentNatLeasePayload serializes the scoped idle-lease set inside
+// the generation-bearing envelope. Records are additive within one generation;
 // advancing the envelope generation clears the receiver before import.
 //
 // Records are encoded FIRST so an unencodable one drops individually while the
@@ -86,7 +75,11 @@ func encodePersistentNatLeasePayload(leases []userspace.IdleLeaseWire) []byte {
 }
 
 func encodeOnePersistentNatLease(l userspace.IdleLeaseWire) ([]byte, error) {
-	b := make([]byte, 0, 100)
+	if len(l.PermittedRemotes) > maxPersistentNatLeaseRemoteCount {
+		return nil, fmt.Errorf("encode idle lease permissions: %d remotes exceeds maximum %d",
+			len(l.PermittedRemotes), maxPersistentNatLeaseRemoteCount)
+	}
+	b := make([]byte, 0, 100+len(l.PermittedRemotes)*19)
 	var err error
 	if b, err = putLeaseString(b, l.Pool); err != nil {
 		return nil, fmt.Errorf("encode idle lease Pool: %w", err)
@@ -104,6 +97,29 @@ func encodeOnePersistentNatLease(l userspace.IdleLeaseWire) ([]byte, error) {
 		return nil, fmt.Errorf("encode idle lease RemoteIP: %w", err)
 	}
 	b = binary.LittleEndian.AppendUint16(b, l.RemotePort)
+	var permitAnyRemote byte
+	if l.PermitAnyRemote {
+		permitAnyRemote = 1
+	}
+	b = append(b, permitAnyRemote)
+	b = binary.LittleEndian.AppendUint16(b, uint16(len(l.PermittedRemotes)))
+	for i := range l.PermittedRemotes {
+		remote := l.PermittedRemotes[i]
+		addr, err := netip.ParseAddr(remote.IP)
+		if err != nil || addr.Zone() != "" {
+			return nil, fmt.Errorf("encode idle lease permission %d IP: invalid address %q", i, remote.IP)
+		}
+		if addr.Is4() {
+			b = append(b, 4)
+			v := addr.As4()
+			b = append(b, v[:]...)
+		} else {
+			b = append(b, 6)
+			v := addr.As16()
+			b = append(b, v[:]...)
+		}
+		b = binary.LittleEndian.AppendUint16(b, remote.Port)
+	}
 	if b, err = putLeaseString(b, l.TranslatedIP); err != nil {
 		return nil, fmt.Errorf("encode idle lease TranslatedIP: %w", err)
 	}
@@ -263,6 +279,52 @@ func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	}
 	l.RemotePort = binary.LittleEndian.Uint16(buf[off:])
 	off += 2
+	if off >= len(buf) || buf[off] > 1 {
+		return l, false
+	}
+	l.PermitAnyRemote = buf[off] == 1
+	off++
+	if len(buf)-off < 2 {
+		return l, false
+	}
+	remoteCount := int(binary.LittleEndian.Uint16(buf[off:]))
+	off += 2
+	if remoteCount > maxPersistentNatLeaseRemoteCount {
+		return l, false
+	}
+	l.PermittedRemotes = make([]userspace.PersistentNatRemote, 0, remoteCount)
+	for range remoteCount {
+		if off >= len(buf) {
+			return l, false
+		}
+		family := buf[off]
+		off++
+		addressBytes := 4
+		if family == 6 {
+			addressBytes = 16
+		} else if family != 4 {
+			return l, false
+		}
+		if len(buf)-off < addressBytes+2 {
+			return l, false
+		}
+		var addr netip.Addr
+		if family == 4 {
+			var raw [4]byte
+			copy(raw[:], buf[off:off+4])
+			addr = netip.AddrFrom4(raw)
+		} else {
+			var raw [16]byte
+			copy(raw[:], buf[off:off+16])
+			addr = netip.AddrFrom16(raw)
+		}
+		off += addressBytes
+		port := binary.LittleEndian.Uint16(buf[off:])
+		off += 2
+		l.PermittedRemotes = append(l.PermittedRemotes,
+			userspace.PersistentNatRemote{IP: addr.String(), Port: port})
+	}
+
 	if l.TranslatedIP, off, ok = getLeaseString(buf, off); !ok {
 		return l, false
 	}
@@ -294,8 +356,8 @@ func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	if l.RemainingNs > l.TimeoutNs {
 		l.RemainingNs = l.TimeoutNs
 	}
-	// A v25 record is self-contained: trailing bytes are not an append-only
-	// extension because they could be a legacy sender's unscoped payload.
+	// The permission-bearing record is self-contained: trailing bytes are not
+	// an append-only extension because they could hide a layout mismatch.
 	return l, off == len(buf)
 }
 

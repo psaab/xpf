@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -391,7 +392,13 @@ const (
 	// selector intersections, and a dedicated zone/policy identity for the
 	// P-MECH worker/view commit guard. Older helpers cannot validate this
 	// authority.
-	ProtocolVersion = 47
+	// v46 -> v47 (#13949): route snapshots carry `reject` so reject routes
+	// keep their distinct terminal FIB disposition instead of discard.
+	// v47 -> v48 (#13945): persistent-NAT lease records carry explicit
+	// permission scope (`permit_any_remote` and `permitted_remotes`). An older
+	// helper can import a lease without its inbound permissions, so lease
+	// synchronization is fenced at this version.
+	ProtocolVersion = 48
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -443,11 +450,14 @@ const (
 	// v3 bump (c0a047ea2, #1377).
 	MinProtocolPersistentSourceNAT = 3
 	// MinProtocolPersistentNatLeaseScope is the FIRST protocol version whose
-	// control-socket lease records carry a routing domain. Unlike the historical
-	// persistent-SNAT feature floor above, this gate is used at runtime by both
-	// lease-control verbs: an unobserved or older helper is not allowed to
-	// ignore the scope and import a lease as domain 0.
+	// control-socket lease records carry a routing domain. It is an immutable
+	// historical wire floor; current lease synchronization uses the stricter
+	// permission floor below.
 	MinProtocolPersistentNatLeaseScope = 25
+	// MinProtocolPersistentNatLeasePermissions is the first protocol version
+	// whose helper lease records preserve inbound permission scopes. A helper
+	// below this version can silently import permission-less leases.
+	MinProtocolPersistentNatLeasePermissions = 48
 
 	// MinProtocolSecureTunnelRefusal: the device-level AF_XDP binding refusal
 	// contract spans THREE bumps on the #5619/#6691 branch — v5 added
@@ -494,21 +504,31 @@ const (
 //     address only while both sides agree on the pool ordering.
 //   - Pool is a name, not a rule index, for that same reason one level up.
 //
-// Go never interprets these beyond carrying them; the meanings live in the
+// Go bounds the list and checks IP syntax; permission semantics live in the
 // helper (userspace-dp nat/idle_lease_sync_8121.rs).
+type PersistentNatRemote struct {
+	IP string `json:"ip"`
+	// Port zero is a wildcard for every port on this host.
+	Port uint16 `json:"port"`
+}
+
+const MaxPersistentNatLeaseRemotes = 1024
+
 type IdleLeaseWire struct {
-	Pool           string  `json:"pool"`
-	Protocol       uint8   `json:"protocol"`
-	SrcIP          string  `json:"src_ip"`
-	SrcPort        uint16  `json:"src_port"`
-	RoutingScope   *uint32 `json:"routing_scope"`
-	RemoteIP       string  `json:"remote_ip,omitempty"`
-	RemotePort     uint16  `json:"remote_port,omitempty"`
-	TranslatedIP   string  `json:"translated_ip"`
-	TranslatedPort uint16  `json:"translated_port"`
-	AddressOnly    bool    `json:"address_only,omitempty"`
-	RemainingNs    uint64  `json:"remaining_ns"`
-	TimeoutNs      uint64  `json:"timeout_ns"`
+	Pool             string                `json:"pool"`
+	Protocol         uint8                 `json:"protocol"`
+	SrcIP            string                `json:"src_ip"`
+	SrcPort          uint16                `json:"src_port"`
+	RoutingScope     *uint32               `json:"routing_scope"`
+	RemoteIP         string                `json:"remote_ip,omitempty"`
+	RemotePort       uint16                `json:"remote_port,omitempty"`
+	PermitAnyRemote  bool                  `json:"permit_any_remote"`
+	PermittedRemotes []PersistentNatRemote `json:"permitted_remotes"`
+	TranslatedIP     string                `json:"translated_ip"`
+	TranslatedPort   uint16                `json:"translated_port"`
+	AddressOnly      bool                  `json:"address_only,omitempty"`
+	RemainingNs      uint64                `json:"remaining_ns"`
+	TimeoutNs        uint64                `json:"timeout_ns"`
 }
 
 // DisplayLeaseWire is the export_persistent_lease_display result (#8615): one
@@ -522,16 +542,18 @@ type IdleLeaseWire struct {
 // never reaches zero, and no GC path reclaims it. Keeping the display record
 // distinct means that rule cannot be undone by a later edit to a shared struct.
 type DisplayLeaseWire struct {
-	Pool           string  `json:"pool"`
-	Protocol       uint8   `json:"protocol"`
-	SrcIP          string  `json:"src_ip"`
-	SrcPort        uint16  `json:"src_port"`
-	RoutingScope   *uint32 `json:"routing_scope"`
-	RemoteIP       string  `json:"remote_ip,omitempty"`
-	RemotePort     uint16  `json:"remote_port,omitempty"`
-	TranslatedIP   string  `json:"translated_ip"`
-	TranslatedPort uint16  `json:"translated_port"`
-	AddressOnly    bool    `json:"address_only,omitempty"`
+	Pool             string                `json:"pool"`
+	Protocol         uint8                 `json:"protocol"`
+	SrcIP            string                `json:"src_ip"`
+	SrcPort          uint16                `json:"src_port"`
+	RoutingScope     *uint32               `json:"routing_scope"`
+	RemoteIP         string                `json:"remote_ip,omitempty"`
+	RemotePort       uint16                `json:"remote_port,omitempty"`
+	PermitAnyRemote  bool                  `json:"permit_any_remote"`
+	PermittedRemotes []PersistentNatRemote `json:"permitted_remotes"`
+	TranslatedIP     string                `json:"translated_ip"`
+	TranslatedPort   uint16                `json:"translated_port"`
+	AddressOnly      bool                  `json:"address_only,omitempty"`
 	// RemainingNs is RAW and is meaningful only when ActiveFlows == 0. While
 	// flows are live the allocator does not refresh the deadline (it is
 	// rewritten when the last flow closes), so this is routinely 0 for a
@@ -539,6 +561,22 @@ type DisplayLeaseWire struct {
 	RemainingNs uint64 `json:"remaining_ns"`
 	TimeoutNs   uint64 `json:"timeout_ns"`
 	ActiveFlows uint32 `json:"active_flows,omitempty"`
+}
+
+func (lease IdleLeaseWire) MarshalJSON() ([]byte, error) {
+	type wire IdleLeaseWire
+	if lease.PermittedRemotes == nil {
+		lease.PermittedRemotes = []PersistentNatRemote{}
+	}
+	return json.Marshal(wire(lease))
+}
+
+func (lease DisplayLeaseWire) MarshalJSON() ([]byte, error) {
+	type wire DisplayLeaseWire
+	if lease.PermittedRemotes == nil {
+		lease.PermittedRemotes = []PersistentNatRemote{}
+	}
+	return json.Marshal(wire(lease))
 }
 
 type ControlRequest struct {

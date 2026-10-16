@@ -88,8 +88,8 @@
 //   and its private fields, GC constants, capacity/sticky helpers) stay
 //   fully private to this file.
 
-use super::source::SourceNatFlowKey;
-use rustc_hash::FxHashMap;
+use super::source::{PersistentNatPermit, SourceNatFlowKey};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::Hasher;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -133,13 +133,59 @@ pub(super) struct PersistentSourceKey {
     /// is scoped. A scope omitted here lets overlapping subscribers in
     /// different VRFs share one lease and one translated tuple.
     pub(super) routing_scope: u32,
-    /// #2397: remote (destination) endpoint scope. `None` => the lease is
-    /// reusable by ANY remote host (`persistent-nat permit-any-remote-host`).
-    /// `Some((dst_ip, dst_port))` => the lease is bound to the original remote
-    /// endpoint (the disabled-flag / Junos target-host[-port] mode): a second
-    /// flow from the same local source to a DIFFERENT remote 5-tuple keys to a
-    /// distinct lease and therefore gets a distinct translated mapping.
+    /// Retained as an always-`None` compatibility field while the peer record
+    /// schema is migrated. Permit-scoped remote grants live separately in
+    /// `PortAllocatorLiveState::persistent_permissions`; they never alter the
+    /// endpoint-independent lease identity.
     pub(super) remote: Option<(IpAddr, u16)>,
+}
+
+/// Remote destinations that have used an endpoint-independent lease. Port 0
+/// represents a target-host grant; `any_remote` represents unrestricted inbound.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct PersistentPermissions {
+    pub(super) any_remote: bool,
+    pub(super) remotes: FxHashSet<(IpAddr, u16)>,
+}
+
+pub(super) const MAX_PERSISTENT_PERMITTED_REMOTES: usize = 1024;
+impl PersistentPermissions {
+
+    fn can_record(&self, permit: PersistentNatPermit, flow: SourceNatFlowKey) -> bool {
+        match permit {
+            PersistentNatPermit::AnyRemoteHost => true,
+            PersistentNatPermit::TargetHost => {
+                self.remotes.contains(&(flow.dst_ip, 0))
+                    || self.remotes.len() < MAX_PERSISTENT_PERMITTED_REMOTES
+            }
+            PersistentNatPermit::TargetHostPort => {
+                self.remotes.contains(&(flow.dst_ip, flow.dst_port))
+                    || self.remotes.len() < MAX_PERSISTENT_PERMITTED_REMOTES
+            }
+        }
+    }
+
+    fn record(&mut self, permit: PersistentNatPermit, flow: SourceNatFlowKey) -> bool {
+        if !self.can_record(permit, flow) {
+            return false;
+        }
+        match permit {
+            PersistentNatPermit::AnyRemoteHost => self.any_remote = true,
+            PersistentNatPermit::TargetHost => {
+                self.remotes.insert((flow.dst_ip, 0));
+            }
+            PersistentNatPermit::TargetHostPort => {
+                self.remotes.insert((flow.dst_ip, flow.dst_port));
+            }
+        }
+        true
+    }
+
+    pub(super) fn permits(&self, remote_ip: IpAddr, remote_port: u16) -> bool {
+        self.any_remote
+            || self.remotes.contains(&(remote_ip, 0))
+            || self.remotes.contains(&(remote_ip, remote_port))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -916,6 +962,8 @@ pub(super) struct PortAllocatorLiveState {
     live_by_flow: FxHashMap<SourceNatFlowKey, LiveAllocation>,
     pub(super) persistent_by_source: FxHashMap<PersistentSourceKey, PersistentLease>,
     pub(super) lease_expirations: BTreeSet<(u64, PersistentSourceKey)>,
+    pub(super) persistent_permissions: FxHashMap<PersistentSourceKey, PersistentPermissions>,
+    pub(super) persistent_by_translated: FxHashMap<ReverseIdentityBaseKey, PersistentSourceKey>,
     pub(super) lease_expirations_by_addr: Vec<BTreeSet<(u64, PersistentSourceKey)>>,
     // #10784: time-bounded per-key fence for cleared lease imports. Entries
     // survive local replacement until their deadline; the live marker is also
@@ -1072,7 +1120,21 @@ impl PortAllocatorLiveState {
         let previous = self.persistent_by_source.insert(key, lease);
         if let Some(previous) = previous {
             self.remove_persistent_address_only_owner(key, previous);
+            self.persistent_permissions.remove(&key);
+            self.persistent_by_translated.remove(&ReverseIdentityBaseKey {
+                protocol: key.protocol,
+                translated_ip: previous.translated.ip,
+                translated_port: previous.translated.port,
+            });
         }
+        self.persistent_by_translated.insert(
+            ReverseIdentityBaseKey {
+                protocol: key.protocol,
+                translated_ip: lease.translated.ip,
+                translated_port: lease.translated.port,
+            },
+            key,
+        );
         self.add_persistent_address_only_owner(key, lease);
         previous
     }
@@ -1083,7 +1145,24 @@ impl PortAllocatorLiveState {
     ) -> Option<PersistentLease> {
         let lease = self.persistent_by_source.remove(key)?;
         self.remove_persistent_address_only_owner(*key, lease);
+        self.persistent_by_translated.remove(&ReverseIdentityBaseKey {
+            protocol: key.protocol,
+            translated_ip: lease.translated.ip,
+            translated_port: lease.translated.port,
+        });
         Some(lease)
+    }
+
+    fn record_persistent_permission(
+        &mut self,
+        key: PersistentSourceKey,
+        permit: PersistentNatPermit,
+        flow: SourceNatFlowKey,
+    ) -> bool {
+        self.persistent_permissions
+            .entry(key)
+            .or_default()
+            .record(permit, flow)
     }
     /// Drop expired clear fences during the cold-path lease snapshot refresh.
     /// This keeps the replay guard bounded even when no later clear occurs.
@@ -2106,6 +2185,16 @@ enum LeaseReuse {
     WireIdentityConflict,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PersistentInbound {
+    Miss,
+    Denied,
+    Permitted {
+        internal_ip: IpAddr,
+        internal_port: u16,
+        address_only: bool,
+    },
+}
 impl PortAllocator {
     pub(crate) fn new(num_addresses: usize, port_low: u16, port_high: u16) -> Self {
         #[cfg(test)]
@@ -2181,6 +2270,56 @@ impl PortAllocator {
             .live_lock_contended
             .fetch_add(1, Ordering::Relaxed);
         self.shared.live.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Resolve an unsolicited packet addressed to a persistent NAT tuple.
+    /// A leased tuple with no matching remote permission is terminally denied.
+    pub(crate) fn persistent_inbound_lookup(
+        &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote_ip: IpAddr,
+        remote_port: u16,
+        now_ns: u64,
+    ) -> PersistentInbound {
+        let reverse = ReverseIdentityBaseKey {
+            protocol,
+            translated_ip,
+            translated_port,
+        };
+        let live = self.lock_live();
+        let Some(key) = live.persistent_by_translated.get(&reverse).copied() else {
+            return PersistentInbound::Miss;
+        };
+        let Some(lease) = live.persistent_by_source.get(&key) else {
+            return PersistentInbound::Denied;
+        };
+        if lease.revoked || (lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
+            return PersistentInbound::Denied;
+        }
+        let permitted = live
+            .persistent_permissions
+            .get(&key)
+            .is_some_and(|permissions| permissions.permits(remote_ip, remote_port));
+        if !permitted {
+            return PersistentInbound::Denied;
+        }
+        PersistentInbound::Permitted {
+            internal_ip: key.src_ip,
+            internal_port: key.src_port,
+            address_only: lease.address_only,
+        }
+    }
+    pub(super) fn record_synced_persistent_permission(
+        &self,
+        flow: SourceNatFlowKey,
+        permit: PersistentNatPermit,
+    ) {
+        let key = flow.persistent_source_key(permit);
+        let mut live = self.lock_live();
+        if live.persistent_by_source.contains_key(&key) {
+            live.record_persistent_permission(key, permit, flow);
+        }
     }
     /// Atomically capture a flow's complete incumbent snapshot and retain the
     /// live guard for the caller's replacement operation.
@@ -2969,20 +3108,6 @@ impl PortAllocator {
         self.gc_expired_locked(&mut live, now_ns, ALLOCATION_GC_BUDGET);
 
         if let Some(slot) = live.live_by_flow.get_mut(&flow) {
-            // #9145: record this worker as a HOLDER on the idempotent-reuse
-            // return. `reserve_flow_maybe_persistent` and
-            // `reserve_address_only_maybe_persistent` already do it here
-            // and say why (#6211 F2): this early return is where workers
-            // 2..N land, so it is exactly where a new holder must be
-            // recorded. Without it a worker-0 `release_flow` clears the
-            // occupancy bit for a translation worker 1 still holds --
-            // the NAT source collision the mask exists to prevent.
-            //
-            // OR is idempotent, so a refresh cannot inflate the mask;
-            // that is why this is a bitmask and not a counter. The
-            // direction is the safe one `drop_holder_locked`'s own doc
-            // prefers: this can only ever cause an UNDER-release, never
-            // an over-release.
             slot.holders |= holder.bit();
             let existing = slot.translated;
             self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
@@ -2996,6 +3121,22 @@ impl PortAllocator {
         let mut persistent_key =
             persistent_nat.then(|| flow.persistent_source_key(persistent_nat_permit));
         if let Some(key) = persistent_key {
+            if live
+                .persistent_by_source
+                .get(&key)
+                .is_some_and(|lease| {
+                    !lease.revoked
+                        && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+                        && live.persistent_permissions.get(&key).is_some_and(|permissions| {
+                            !permissions.can_record(persistent_nat_permit, flow)
+                        })
+                })
+            {
+                self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+                return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+            }
+        }
+        if let Some(key) = persistent_key {
             match self.reuse_existing_lease_locked(
                 &mut live,
                 key,
@@ -3004,7 +3145,10 @@ impl PortAllocator {
                 now_ns,
                 holder,
             ) {
-                LeaseReuse::Reused(translated) => return Ok(translated),
+                LeaseReuse::Reused(translated) => {
+                    live.record_persistent_permission(key, persistent_nat_permit, flow);
+                    return Ok(translated);
+                }
                 LeaseReuse::NoLease => {}
                 // #9536: an ADDRESS-ONLY lease is LIVE for this source -- a
                 // `port no-translation` flip under a flow that is still using it.
@@ -3103,6 +3247,7 @@ impl PortAllocator {
                             revoked: false,
                         },
                     );
+                    live.record_persistent_permission(key, persistent_nat_permit, flow);
                 }
                 live.live_by_flow.insert(
                     flow,
@@ -5732,6 +5877,15 @@ impl PortAllocator {
         }
 
         let reusing = reuse_addr.is_some();
+        if reusing
+            && live
+                .persistent_permissions
+                .get(&key)
+                .is_some_and(|permissions| !permissions.can_record(persistent_nat_permit, flow))
+        {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+        }
 
         // #5269 reverse-identity collision guard for THIS flow, checked BEFORE any
         // lease mutation so a denied flow leaves the lease untouched. The
@@ -5902,6 +6056,9 @@ impl PortAllocator {
                 .fetch_add(1, Ordering::Relaxed);
         }
 
+        if !live_mode_mismatch {
+            live.record_persistent_permission(key, persistent_nat_permit, flow);
+        }
         live.live_by_flow.insert(
             flow,
             LiveAllocation {

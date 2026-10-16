@@ -152,36 +152,24 @@ fn persistent_source_key_separates_routing_scopes_10018() {
 #[test]
 fn same_scope_keeps_permit_sharing_10018() {
     let base = tcp_flow("10.0.0.1", 1234, "8.8.8.8", 443, 1);
-    // `AnyRemoteHost`: any remote reuses the mapping.
-    let other_remote = tcp_flow("10.0.0.1", 1234, "9.9.9.9", 53, 1);
-    assert_eq!(
-        base.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
-        other_remote.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
-        "any-remote-host must still share across remote hosts in one scope"
-    );
-    // `TargetHost`: the remote IP is folded in, the port is dropped.
     let other_port = tcp_flow("10.0.0.1", 1234, "8.8.8.8", 80, 1);
-    assert_eq!(
-        base.persistent_source_key(PersistentNatPermit::TargetHost),
-        other_port.persistent_source_key(PersistentNatPermit::TargetHost),
-        "target-host must still share across remote ports on one host"
-    );
-    assert_ne!(
-        base.persistent_source_key(PersistentNatPermit::TargetHost),
-        other_remote.persistent_source_key(PersistentNatPermit::TargetHost),
-        "target-host must still separate remote hosts"
-    );
-    // `TargetHostPort`: the full remote endpoint is folded in.
-    assert_ne!(
-        base.persistent_source_key(PersistentNatPermit::TargetHostPort),
-        other_port.persistent_source_key(PersistentNatPermit::TargetHostPort),
-        "target-host-port must still separate remote ports"
-    );
-    assert_ne!(
-        base.persistent_source_key(PersistentNatPermit::TargetHostPort),
-        other_remote.persistent_source_key(PersistentNatPermit::TargetHostPort),
-        "target-host-port must still separate remote hosts"
-    );
+    let other_remote = tcp_flow("10.0.0.1", 1234, "9.9.9.9", 53, 1);
+    for permit in [
+        PersistentNatPermit::AnyRemoteHost,
+        PersistentNatPermit::TargetHost,
+        PersistentNatPermit::TargetHostPort,
+    ] {
+        assert_eq!(
+            base.persistent_source_key(permit),
+            other_port.persistent_source_key(permit),
+            "permit {permit:?} must share the mapping across remote ports"
+        );
+        assert_eq!(
+            base.persistent_source_key(permit),
+            other_remote.persistent_source_key(permit),
+            "permit {permit:?} must share the mapping across remote hosts"
+        );
+    }
 }
 
 /// VRFs, one shared single-address pool, `permit any-remote-host`: two leases,

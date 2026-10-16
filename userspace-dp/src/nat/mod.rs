@@ -236,8 +236,8 @@ pub(crate) struct NatScopeCtx<'a> {
 
 pub(crate) use allocator::{
     DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
-    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PortAllocator, PortAllocatorSnapshot,
-    SourceNatReservationSnapshot,
+    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PortAllocator,
+    PortAllocatorSnapshot, SourceNatReservationSnapshot,
 };
 #[cfg(test)]
 pub(crate) use allocator::PersistentLeaseDebugState;

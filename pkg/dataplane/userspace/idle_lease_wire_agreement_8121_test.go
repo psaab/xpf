@@ -64,6 +64,10 @@ func TestIdleLeaseWireAgreesWithTheHelperSpelling8121(t *testing.T) {
 		SrcIP: "10.0.61.102", SrcPort: 40000,
 		RoutingScope: userspaceLeaseScope(7),
 		RemoteIP:     "8.8.8.8", RemotePort: 443,
+		PermitAnyRemote: true,
+		PermittedRemotes: []PersistentNatRemote{
+			{IP: "8.8.8.8", Port: 0},
+		},
 		TranslatedIP: "172.16.80.7", TranslatedPort: 51400,
 		AddressOnly: true, RemainingNs: 123, TimeoutNs: 300_000_000_000,
 	})

@@ -2446,6 +2446,11 @@ fn wire_invariant_default_specimens() {
             routing_scope: Some(7),
             remote_ip: "8.8.8.8".into(),
             remote_port: 443,
+            permit_any_remote: true,
+            permitted_remotes: vec![PermittedRemoteWire {
+                ip: "8.8.8.8".into(),
+                port: 0,
+            }],
             translated_ip: "172.16.80.7".into(),
             translated_port: 51400,
             address_only: true,
@@ -2466,6 +2471,11 @@ fn wire_invariant_default_specimens() {
             src_port: 40000,
             remote_ip: "8.8.8.8".into(),
             remote_port: 443,
+            permit_any_remote: true,
+            permitted_remotes: vec![PermittedRemoteWire {
+                ip: "8.8.8.8".into(),
+                port: 0,
+            }],
             translated_ip: "172.16.80.7".into(),
             translated_port: 51400,
             address_only: true,

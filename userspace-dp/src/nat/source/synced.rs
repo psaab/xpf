@@ -724,6 +724,12 @@ fn reserve_synced_on_first_pool_owner<'a>(
                         .rollback_flow(flow, translated, now_ns, holder);
                     return SyncedReserveOutcome::Refused;
                 }
+                if rule.persistent_nat {
+                    rule.pool_allocator.record_synced_persistent_permission(
+                        flow,
+                        rule.persistent_nat_permit,
+                    );
+                }
                 return SyncedReserveOutcome::Reserved;
             }
             // #6979 F1: the active's rule declined. Under `stop_at_first_owner`
@@ -807,6 +813,12 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 rule.pool_allocator
                     .rollback_flow(flow, translated, now_ns, holder);
                 return SyncedReserveOutcome::Refused;
+            }
+            if rule.persistent_nat {
+                rule.pool_allocator.record_synced_persistent_permission(
+                    flow,
+                    rule.persistent_nat_permit,
+                );
             }
             return SyncedReserveOutcome::Reserved;
         }
