@@ -14,6 +14,34 @@ import (
 	"github.com/psaab/xpf/pkg/grpcapi"
 )
 
+// consolePowerAction runs systemctl for console reboot/halt/power-off; a var
+// so tests can stub it without taking the host down (gRPC twin:
+// schedulePowerAction). #14152
+var consolePowerAction = func(systemctlArg string) error {
+	return exec.Command("systemctl", systemctlArg).Run()
+}
+
+// confirmSystemAction prompts via readLine (test seam) and reports whether
+// the operator typed "yes". Restores the operational prompt when readline
+// is present; nil-safe for tests that only wire readLineFn.
+func (c *CLI) confirmSystemAction() bool {
+	if c.rl != nil {
+		c.rl.SetPrompt("")
+		defer c.rl.SetPrompt(c.operationalPrompt())
+	}
+	line, err := c.readLine()
+	return err == nil && strings.TrimSpace(strings.ToLower(line)) == "yes"
+}
+
+// logSystemAction journals a destructive console action BEFORE it executes
+// (#14152, twin of grpcapi logSystemAction #4108). Best-effort via store.
+func (c *CLI) logSystemAction(action string) {
+	if c.store == nil {
+		return
+	}
+	c.store.LogSystemActionAs(action, c.journalPrincipal())
+}
+
 func (c *CLI) handleRequestSystem(args []string) error {
 	if len(args) == 0 {
 		fmt.Println("request system:")
@@ -24,53 +52,42 @@ func (c *CLI) handleRequestSystem(args []string) error {
 	switch args[0] {
 	case "reboot":
 		fmt.Print("Reboot the system? [yes,no] (no) ")
-		c.rl.SetPrompt("")
-		line, err := c.rl.Readline()
-		c.rl.SetPrompt(c.operationalPrompt())
-		if err != nil || strings.TrimSpace(strings.ToLower(line)) != "yes" {
+		if !c.confirmSystemAction() {
 			fmt.Println("Reboot cancelled")
 			return nil
 		}
+		c.logSystemAction("reboot")
 		fmt.Println("System going down for reboot NOW!")
-		cmd := exec.Command("systemctl", "reboot")
-		return cmd.Run()
+		return consolePowerAction("reboot")
 
 	case "halt":
 		fmt.Print("Halt the system? [yes,no] (no) ")
-		c.rl.SetPrompt("")
-		line, err := c.rl.Readline()
-		c.rl.SetPrompt(c.operationalPrompt())
-		if err != nil || strings.TrimSpace(strings.ToLower(line)) != "yes" {
+		if !c.confirmSystemAction() {
 			fmt.Println("Halt cancelled")
 			return nil
 		}
+		c.logSystemAction("halt")
 		fmt.Println("System halting NOW!")
-		cmd := exec.Command("systemctl", "halt")
-		return cmd.Run()
+		return consolePowerAction("halt")
 
 	case "power-off":
 		fmt.Print("Power off the system? [yes,no] (no) ")
-		c.rl.SetPrompt("")
-		line, err := c.rl.Readline()
-		c.rl.SetPrompt(c.operationalPrompt())
-		if err != nil || strings.TrimSpace(strings.ToLower(line)) != "yes" {
+		if !c.confirmSystemAction() {
 			fmt.Println("Power-off cancelled")
 			return nil
 		}
+		c.logSystemAction("power-off")
 		fmt.Println("System powering off NOW!")
-		cmd := exec.Command("systemctl", "poweroff")
-		return cmd.Run()
+		return consolePowerAction("poweroff")
 
 	case "zeroize":
 		fmt.Println("WARNING: This will erase all configuration and return to factory defaults.")
 		fmt.Print("Zeroize the system? [yes,no] (no) ")
-		c.rl.SetPrompt("")
-		line, err := c.rl.Readline()
-		c.rl.SetPrompt(c.operationalPrompt())
-		if err != nil || strings.TrimSpace(strings.ToLower(line)) != "yes" {
+		if !c.confirmSystemAction() {
 			fmt.Println("Zeroize cancelled")
 			return nil
 		}
+		c.logSystemAction("zeroize")
 
 		// #5890: run the FULL factory-reset wipe by delegating to the shared
 		// grpcapi.PerformZeroizeWipe primitive (see performConsoleZeroize). The

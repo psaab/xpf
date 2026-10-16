@@ -95,6 +95,10 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 
 	case clusterfailover.KindRGFailoverNode:
 		if op.Node == c.cluster.NodeID() {
+			if c.cluster.IsLocalPrimary(op.RG) {
+				fmt.Printf("Redundancy group %d is already primary on node %d\n", op.RG, op.Node)
+				return nil
+			}
 			if err := c.cluster.RequestPeerFailover(op.RG); err != nil {
 				return err
 			}

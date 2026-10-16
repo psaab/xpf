@@ -52,8 +52,8 @@ type forkExemption struct {
 // that fork on a display path.
 var declaredUnsanitizedForks = []forkExemption{
 	// ---- no output is consumed at all ----
-	{"../cli", "cli_request_system.go", "handleRequestSystem",
-		"systemctl reboot/halt/poweroff — no output is read"},
+	{"../cli", "cli_request_system.go", "<package-scope>",
+		"consolePowerAction systemctl reboot/halt/poweroff — no output is read"},
 	{"../cli", "cli_request_system.go", "<package-scope>",
 		"deferred power-action goroutine — no output is read"},
 	{"../grpcapi", "server_diag_system_action.go", "<package-scope>",

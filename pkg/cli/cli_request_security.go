@@ -99,6 +99,11 @@ func (c *CLI) handleRequestSecurityDynamicAddress(args []string) error {
 	if len(reason) > 512 {
 		return fmt.Errorf("%s: reason exceeds 512 bytes", usage)
 	}
+	for _, r := range reason {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%s: reason must not contain control characters", usage)
+		}
+	}
 	if c.feedsFn == nil || c.feedsAckFn == nil || c.store == nil {
 		return fmt.Errorf("dynamic-address feed acknowledgement unavailable")
 	}
