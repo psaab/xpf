@@ -5,7 +5,6 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"net"
-	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -493,69 +492,56 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 						poolID = nextSourceNATPoolID(poolID, pool.Name)
 					}
 
-					// Parse pool addresses. They no longer reach nat_pool_ips_*,
-					// but the persistent-NAT table below is registered from them.
-					var v4IPs []net.IP
-					var v6IPs []net.IP
-					for _, addr := range pool.Addresses {
-						cidr := addr
-						if !strings.Contains(cidr, "/") {
-							if strings.Contains(cidr, ":") {
-								cidr += "/128"
-							} else {
-								cidr += "/32"
-							}
-						}
-						ip, _, err := net.ParseCIDR(cidr)
-						if err != nil {
-							compileWarn(dp, "invalid pool address", "addr", addr, "err", err)
-							continue
-						}
-						if ip.To4() != nil {
-							v4IPs = append(v4IPs, ip.To4())
-						} else {
-							v6IPs = append(v6IPs, ip)
-						}
-					}
-
-					// Register persistent NAT pool config and IPs
+					// Register persistent NAT pool config and IPs.
+					// #14110: registration must cover exactly the set the
+					// userspace SNAT allocator can allocate from —
+					// config.SourceNATPoolMembers (singular Address plus
+					// Addresses) with every CIDR member expanded over its
+					// full masked prefix, not only pool.Addresses and not
+					// only a CIDR's base IP. Otherwise preservePersistent-
+					// NATV4/V6 LookupPool misses a translated IP and the
+					// binding is silently not preserved on session deletion.
+					// An unusable pool (any member the expander cannot
+					// honor, or over the aggregate budget) installs no
+					// allocator in the dataplane, so it registers nothing —
+					// fail-closed rather than a narrowed subset.
 					if pool.PersistentNAT != nil {
 						pnat := dp.GetPersistentNAT()
 						if pnat != nil {
-							// #8642: assessed — the `== 0` guard is weaker than
-							// the `> 0` ones elsewhere in this family. A wrapped
-							// value is non-zero, so it does not even fall back to
-							// the 300s default; the lease inactivity window
-							// collapses to ~512ns and every persistent lease
-							// expires immediately.
-							timeout := config.SecondsToDuration(pool.PersistentNAT.InactivityTimeout, 0)
-							if timeout == 0 {
-								timeout = 300 * time.Second
+							expanded, usable := config.SourceNATPoolExpandedAddresses(pool)
+							if usable && config.SourceNATAggregateOverBudgetPools(cfg)[pool.Name] {
+								usable = false
 							}
-							// #2823/#3193: carry the full three-way permit enum
-							// through the persistent NAT table so the operator
-							// SHOW path can distinguish target-host from
-							// target-host-port (was a binary any-remote-host flag).
-							pnat.SetPoolConfig(pool.Name, PersistentNATPoolInfo{
-								Timeout: timeout,
-								Permit:  pool.PersistentNAT.Permit,
-							})
-							for _, ip := range v4IPs {
-								addr, ok := netip.AddrFromSlice(ip.To4())
-								if ok {
+							if !usable {
+								compileWarn(dp, "persistent NAT pool not registered: pool installs no dataplane allocator",
+									"pool", pool.Name)
+							} else {
+								// #8642: assessed — the `== 0` guard is weaker than
+								// the `> 0` ones elsewhere in this family. A wrapped
+								// value is non-zero, so it does not even fall back to
+								// the 300s default; the lease inactivity window
+								// collapses to ~512ns and every persistent lease
+								// expires immediately.
+								timeout := config.SecondsToDuration(pool.PersistentNAT.InactivityTimeout, 0)
+								if timeout == 0 {
+									timeout = 300 * time.Second
+								}
+								// #2823/#3193: carry the full three-way permit enum
+								// through the persistent NAT table so the operator
+								// SHOW path can distinguish target-host from
+								// target-host-port (was a binary any-remote-host flag).
+								pnat.SetPoolConfig(pool.Name, PersistentNATPoolInfo{
+									Timeout: timeout,
+									Permit:  pool.PersistentNAT.Permit,
+								})
+								for _, addr := range expanded {
 									pnat.RegisterNATIP(addr, pool.Name)
 								}
+								compileInfo(dp, "persistent NAT pool registered",
+									"pool", pool.Name,
+									"timeout", timeout,
+									"permit", string(pool.PersistentNAT.Permit))
 							}
-							for _, ip := range v6IPs {
-								addr, ok := netip.AddrFromSlice(ip.To16())
-								if ok {
-									pnat.RegisterNATIP(addr, pool.Name)
-								}
-							}
-							compileInfo(dp, "persistent NAT pool registered",
-								"pool", pool.Name,
-								"timeout", timeout,
-								"permit", string(pool.PersistentNAT.Permit))
 						}
 					}
 

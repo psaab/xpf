@@ -82,6 +82,55 @@ func SourceNATPoolReportablePorts(pool *NATPool, poolName string, portLow, portH
 	return NATPoolTotalPorts(portLow, portHigh, addrs), ""
 }
 
+// SourceNATPoolExpandedAddresses returns every unique address the dataplane
+// allocator installs for a source-NAT pool, in member order: the singular
+// Address first, then Addresses, each CIDR member expanded over its full
+// masked prefix range (the Rust expand_pool_address semantics). It reports
+// ok=false when the pool installs nothing — nil, empty, or any member the
+// expander cannot honor (SourceNATPoolUnusableReason, which is
+// all-or-nothing like the runtime) — so a caller registering the expanded
+// set never registers a narrowed subset of an unusable pool (#14110).
+//
+// Expansion is bounded by MaxSourceNATPoolPrefixHosts per member; callers
+// that also enforce the aggregate budget should consult
+// SourceNATAggregateOverBudgetPools separately, as
+// SourceNATPoolDisarmedReason composes the two.
+func SourceNATPoolExpandedAddresses(pool *NATPool) ([]netip.Addr, bool) {
+	if SourceNATPoolUnusableReason(pool) != "" {
+		return nil, false
+	}
+	members := SourceNATPoolMembers(pool)
+	seen := make(map[netip.Addr]struct{})
+	var out []netip.Addr
+	for _, member := range members {
+		interval, ok := sourceNATPoolAddressIntervalOf(member)
+		if !ok {
+			return nil, false
+		}
+		// interval is masked lo..hi inclusive; walk it. Host count is
+		// capped per member, so this terminates within the cap.
+		var cur, last netip.Addr
+		if interval.width == 4 {
+			cur = netip.AddrFrom4([4]byte(interval.lo[:4]))
+			last = netip.AddrFrom4([4]byte(interval.hi[:4]))
+		} else {
+			cur = netip.AddrFrom16(interval.lo)
+			last = netip.AddrFrom16(interval.hi)
+		}
+		for {
+			if _, dup := seen[cur]; !dup {
+				seen[cur] = struct{}{}
+				out = append(out, cur)
+			}
+			if cur == last {
+				break
+			}
+			cur = cur.Next()
+		}
+	}
+	return out, true
+}
+
 // sourceNATPoolAddressInterval is one member's inclusive address range after
 // the same prefix expansion the dataplane performs. Merging these intervals
 // counts overlap without materializing every address in a large pool.
