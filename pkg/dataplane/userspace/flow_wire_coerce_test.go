@@ -210,6 +210,51 @@ func TestFlowExportSkipsInvalidPortContinuesToValid_1977(t *testing.T) {
 	}
 }
 
+// TestBuildFlowExportSnapshotDeterministicInstanceSelection_13722 pins the
+// lexical first-instance precedence that pkg/flowexport already uses
+// (#2462). The previous bare map range made identical configs publish
+// different snapshots depending on runtime map order, defeating the
+// snapshot content hash and repeatedly replacing the same dataplane state.
+func TestBuildFlowExportSnapshotDeterministicInstanceSelection_13722(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Services.FlowMonitoring = &config.FlowMonitoringConfig{
+		Version9: &config.NetFlowV9Config{
+			Templates: map[string]*config.NetFlowV9Template{
+				"t1": {Name: "t1", FlowActiveTimeout: 60, FlowInactiveTimeout: 15},
+			},
+		},
+	}
+	cfg.ForwardingOptions.Sampling = &config.SamplingConfig{Instances: map[string]*config.SamplingInstance{}}
+
+	// Insert the lexical winner last so a map-order winner is directly
+	// observable from the returned snapshot.
+	for i := range 32 {
+		name := "instance-" + string(rune('B'+i))
+		cfg.ForwardingOptions.Sampling.Instances[name] = &config.SamplingInstance{
+			Name:      name,
+			InputRate: 100 + i,
+			FamilyInet: &config.SamplingFamily{FlowServers: []*config.FlowServer{
+				{Address: "10.0.1.1", Port: 3000 + i, Version9Template: "t1"},
+			}},
+		}
+	}
+	cfg.ForwardingOptions.Sampling.Instances["instance-A"] = &config.SamplingInstance{
+		Name:      "instance-A",
+		InputRate: 7,
+		FamilyInet: &config.SamplingFamily{FlowServers: []*config.FlowServer{
+			{Address: "10.0.0.1", Port: 2055, Version9Template: "t1"},
+		}},
+	}
+
+	want := &FlowExportSnapshot{CollectorAddress: "10.0.0.1", CollectorPort: 2055, SamplingRate: 7, ActiveTimeout: 60, InactiveTimeout: 15}
+	for range 64 {
+		got := buildFlowExportSnapshot(cfg)
+		if got == nil || *got != *want {
+			t.Fatalf("build = %+v, want lexical-first snapshot %+v", got, want)
+		}
+	}
+}
+
 // TestBuildFlowSnapshotThreadsPowerModeDisable pins the #2008 H14 thread-through:
 // `security flow power-mode-disable` (cfg.Security.Flow.PowerModeDisable) must
 // reach FlowSnapshot.PowerModeDisable, mirroring the GREAcceleration plumbing.

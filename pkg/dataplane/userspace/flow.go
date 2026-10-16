@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 
 	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
@@ -217,11 +218,19 @@ func buildFlowExportSnapshot(cfg *config.Config) *FlowExportSnapshot {
 	if fm.Version9 == nil || len(fm.Version9.Templates) == 0 {
 		return nil
 	}
-	// Find sampling config for flow server
 	if cfg.ForwardingOptions.Sampling == nil {
 		return nil
 	}
-	for _, inst := range cfg.ForwardingOptions.Sampling.Instances {
+	// Match pkg/flowexport's lexical first-instance precedence (#2462).
+	// This field participates in the snapshot content hash, so map iteration
+	// here would make identical configurations produce different snapshots.
+	instanceNames := make([]string, 0, len(cfg.ForwardingOptions.Sampling.Instances))
+	for name := range cfg.ForwardingOptions.Sampling.Instances {
+		instanceNames = append(instanceNames, name)
+	}
+	sort.Strings(instanceNames)
+	for _, instanceName := range instanceNames {
+		inst := cfg.ForwardingOptions.Sampling.Instances[instanceName]
 		if inst == nil {
 			continue
 		}
