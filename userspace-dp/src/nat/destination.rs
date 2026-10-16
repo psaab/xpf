@@ -1633,13 +1633,15 @@ fn off_scope_superset_common(
 /// Only an `off` that WINS may withdraw an address from firewall-local
 /// registration. Withdrawing one it loses is the opposite defect: the address is
 /// genuinely translated, and dropping its proxy-ARP/ND registration breaks the
-/// DNAT it was configured for. `match_prefix_slots` selects the most-specific
-/// eligible context tier (interface > zone > routing-instance > unscoped), then
-/// the longest matching prefix within that tier. This predicate mirrors both:
+/// DNAT it was configured for. The lookup probes protocol/port buckets before
+/// comparing prefix scope and length; an entry in a wildcard bucket cannot win
+/// against a matching slot in an earlier, more-specific bucket. This predicate
+/// mirrors the packet lookup and withdraws only on a proven win.
 ///
-///   * SAME TIER. The scope-superset checks below require the `off` to cover
-///     every context eligible for the translate. A less-specific wildcard `off`
-///     loses to a more-specific translate even when its prefix is longer.
+///   * SAME BUCKET AND CONTEXT TIER. Protocol/port buckets are probed in order,
+///     so the `off` and translate must share the same key before prefix
+///     precedence applies. The scope checks then require the `off` to cover
+///     every context eligible for the translate.
 ///   * STRICTLY LONGER. Within the same tier, longest prefix wins and
 ///     `match_prefix_slots` keeps the FIRST slot among equal lengths. An `off`
 ///     of equal length therefore may or may not win, depending on insertion
@@ -1653,7 +1655,12 @@ fn off_prefix_scope_superset(
     slot_key: &DnatProtoPortKey,
     slot: &DnatPrefixSlot,
 ) -> bool {
-    off_slot.entry.from_zone == slot.entry.from_zone
+    // #13686: exact protocol/port buckets are probed before wildcard buckets.
+    // A wildcard `off` may match the translate's traffic, but cannot override
+    // the earlier translate bucket; it must not withdraw that address.
+    off_key.protocol == slot_key.protocol
+        && off_key.dst_port == slot_key.dst_port
+        && off_slot.entry.from_zone == slot.entry.from_zone
         && off_slot.entry.scope_tier() == slot.entry.scope_tier()
         && off_slot.prefix_len() > slot.prefix_len()
         && off_scope_superset_common(

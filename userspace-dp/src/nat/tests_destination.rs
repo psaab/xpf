@@ -2939,6 +2939,136 @@ fn lower_tier_prefix_off_does_not_withdraw_interface_translate_11351() {
     }
 }
 
+// #13686 - precedence INVERSION between the LPM lookup and the proxy-ARP
+// withdrawal predicate for prefix rules in DIFFERENT proto/port tiers.
+//
+// `match_prefix_lpm` probes the (proto, exact-port) bucket first and returns
+// immediately, so a `/24` TCP:443 translate wins the packet match even when a
+// longer `/26` PROTO_ANY (any-protocol, any-port) `off` covers the address.
+// The Go #9879 gate models prefix specificity AFTER port/proto specificity,
+// so this is by design. `off_prefix_scope_superset`, however, says the `/26`
+// off withdraws those hosts from `destination_ips_scoped` (wildcard-or-equal
+// protocol/port + strictly longer prefix). The two views disagree: the
+// addresses are translated AND de-registered - no proxy-ARP, and the `off`
+// exemption is silently bypassed for TCP:443.
+//
+// The fix must make the withdrawal predicate tier-aware: an `off` may only
+// withdraw from a translate slot when it would actually WIN the prefix match
+// for the shared flows - same port tier (exact > wildcard) and proto tier
+// (pinned > PROTO_ANY) classes, then strictly longer prefix. The packet
+// lookup itself (documented port/proto-first specificity, #9879) is
+// deliberately unchanged.
+#[test]
+fn dnat_prefix_off_any_proto_does_not_withdraw_tcp_port_translate_13686() {
+    for off_first in [false, true] {
+        let off = DestinationNATRuleSnapshot {
+            name: "exempt-subnet-any".to_string(),
+            destination_prefix: "203.0.113.64/26".to_string(),
+            // protocol "" + no port = PROTO_ANY wildcard row.
+            protocol: String::new(),
+            destination_port: 0,
+            off: true,
+            ..DestinationNATRuleSnapshot::default()
+        };
+        let translate = DestinationNATRuleSnapshot {
+            name: "web-pool".to_string(),
+            destination_prefix: "203.0.113.0/24".to_string(),
+            protocol: "tcp".to_string(),
+            destination_port: 443,
+            pool_address: "192.168.1.10".to_string(),
+            pool_port: 443,
+            ..DestinationNATRuleSnapshot::default()
+        };
+        let rows = if off_first {
+            vec![off, translate]
+        } else {
+            vec![translate, off]
+        };
+        let table = DnatTable::from_snapshots(&rows, &crate::nat::NatCounterStore::default());
+        // PINNED (by design): the exact-port TCP tier is probed before the
+        // PROTO_ANY tier, so the /24 translate wins TCP:443 even though the
+        // /26 off is the longer prefix.
+        assert!(
+            table
+                .lookup(
+                    PROTO_TCP,
+                    "198.51.100.1".parse().unwrap(),
+                    "203.0.113.65".parse().unwrap(),
+                    443,
+                    "",
+                )
+                .is_some(),
+            "pin: TCP:443 must translate via the /24 (exact-port tier first)"
+        );
+        // The /26 off still exempts the traffic it actually wins: UDP.
+        assert_eq!(
+            table.lookup(
+                PROTO_UDP,
+                "198.51.100.1".parse().unwrap(),
+                "203.0.113.65".parse().unwrap(),
+                53,
+                "",
+            ),
+            None,
+            "the /26 PROTO_ANY off must exempt UDP (it wins that tier)"
+        );
+        let registered = table.destination_ips_scoped();
+        assert!(
+            registered.iter().any(|(ip, _, _)| {
+                *ip == "203.0.113.65".parse::<IpAddr>().unwrap()
+            }),
+            "203.0.113.65 is TRANSLATED for TCP:443, so it must stay firewall-local; \
+             withdrawing it breaks proxy-ARP for the working DNAT (off_first={off_first})"
+        );
+    }
+}
+
+// #13686 control: for matching protocol/port keys, a strictly longer prefix
+// `off` still wins and still withdraws its hosts from firewall-local addresses.
+#[test]
+fn dnat_prefix_off_same_proto_port_bucket_still_withdraws_13686() {
+    let table = DnatTable::from_snapshots(
+        &[
+            DestinationNATRuleSnapshot {
+                name: "exempt-subnet".to_string(),
+                destination_prefix: "203.0.113.64/26".to_string(),
+                protocol: "tcp".to_string(),
+                destination_port: 443,
+                off: true,
+                ..DestinationNATRuleSnapshot::default()
+            },
+            DestinationNATRuleSnapshot {
+                name: "web-pool".to_string(),
+                destination_prefix: "203.0.113.0/24".to_string(),
+                protocol: "tcp".to_string(),
+                destination_port: 443,
+                pool_address: "192.168.1.10".to_string(),
+                pool_port: 443,
+                ..DestinationNATRuleSnapshot::default()
+            },
+        ],
+        &crate::nat::NatCounterStore::default(),
+    );
+    assert_eq!(
+        table.lookup(
+            PROTO_TCP,
+            "198.51.100.1".parse().unwrap(),
+            "203.0.113.65".parse().unwrap(),
+            443,
+            "",
+        ),
+        None,
+        "same-bucket /26 off must exempt TCP:443"
+    );
+    let registered = table.destination_ips_scoped();
+    assert!(
+        !registered
+            .iter()
+            .any(|(ip, _, _)| *ip == "203.0.113.65".parse::<IpAddr>().unwrap()),
+        "a winning same-bucket off must keep withdrawing its hosts"
+    );
+}
+
 // #9879 PIN — most-specific-wins across tiers, dataplane intentionally
 // UNCHANGED (HPC: the tiered hash buys O(1) DNAT lookup; the fix is the
 // commit-time gate in pkg/config, not a dataplane reordering). A BROADER `off`
