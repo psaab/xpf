@@ -60,6 +60,23 @@ use std::sync::{Arc, RwLock};
 pub(crate) const IFACE_PAT_PORT_LOW: u16 = 1024;
 pub(crate) const IFACE_PAT_PORT_HIGH: u16 = 65535;
 
+/// IKE/NAT-T ports that interface-NAT must not mint on the firewall's own
+/// egress address. The value is shared with the IPsec classifier/admission.
+pub(crate) const IFACE_RESERVED_UDP_PORTS: [u16; 2] = crate::ip_proto::IKE_UDP_PORTS;
+
+/// Whether preserving this interface-SNAT tuple would alias the firewall's
+/// own fixed-port IKE/NAT-T reverse identity.
+#[inline]
+pub(crate) fn conflicts_with_local_control_tuple(
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+) -> bool {
+    protocol == crate::ip_proto::PROTO_UDP
+        && src_port == dst_port
+        && IFACE_RESERVED_UDP_PORTS.contains(&src_port)
+}
+
 /// Retained-allocator cap. This bounds RETAINED cardinality, not
 /// ever-created: an allocator whose live set has drained is reclaimable, so a
 /// node that cycles egress addresses does not accumulate. Hitting the cap with

@@ -13,6 +13,9 @@ pub(crate) const PROTO_IPIP: u8 = 4;
 pub(crate) const PROTO_TCP: u8 = 6;
 pub(crate) const PROTO_EGP: u8 = 8;
 pub(crate) const PROTO_UDP: u8 = 17;
+
+/// Fixed UDP ports used by the IKE / NAT-T control plane.
+pub(crate) const IKE_UDP_PORTS: [u16; 2] = [500, 4500];
 pub(crate) const PROTO_IPV6: u8 = 41;
 pub(crate) const PROTO_GRE: u8 = 47;
 pub(crate) const PROTO_ESP: u8 = 50;

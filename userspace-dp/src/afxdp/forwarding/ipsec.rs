@@ -32,7 +32,7 @@ use super::*;
 pub(in crate::afxdp) fn is_ipsec_traffic(protocol: u8, dst_port: u16) -> bool {
     protocol == PROTO_ESP
         || protocol == PROTO_AH
-        || (protocol == PROTO_UDP && (dst_port == 500 || dst_port == 4500))
+        || (protocol == PROTO_UDP && crate::ip_proto::IKE_UDP_PORTS.contains(&dst_port))
 }
 
 /// #4323: the Stage-11 admission class of an IPsec packet that `is_ipsec_traffic`
