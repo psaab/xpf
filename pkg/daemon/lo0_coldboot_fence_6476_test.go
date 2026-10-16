@@ -171,7 +171,7 @@ func TestColdBootLo0FenceAdmitsMandatoryL3(t *testing.T) {
 	for _, want := range []string{
 		"ct state established,related accept",
 		"meta l4proto { 50, 51 } accept",
-		"icmpv6 type { 133, 134, 135, 136, 137 } accept",
+		"icmpv6 type { 133, 134, 135, 136 } accept",
 		"icmp type { destination-unreachable, time-exceeded, parameter-problem } accept",
 		"ip daddr 172.16.50.8 udp dport 51820 accept",
 		"ip6 daddr 2001:db8:50::8 udp dport 51820 accept",

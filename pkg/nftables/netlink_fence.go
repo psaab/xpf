@@ -26,7 +26,7 @@ func emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p *nlPlan) {
 
 func emitHostInboundFenceL3AdmitsNetlink(p *nlPlan) {
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).emit(verdictAccept()...)
-	p.rule().icmpType(famV6, []uint8{133, 134, 135, 136, 137}).emit(verdictAccept()...)
+	p.rule().icmpType(famV6, []uint8{133, 134, 135, 136}).emit(verdictAccept()...)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).emit(verdictAccept()...)
 }
 

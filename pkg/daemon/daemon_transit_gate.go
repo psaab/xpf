@@ -261,8 +261,8 @@ func writeTransitForwardSysctls(on bool) {
 				"path", path, "value", want, "err", err)
 		}
 	}
+	applyNoRedirectsPosture()
 }
-
 // DataplaneArmed reports whether the runtime dataplane has been successfully
 // started in this daemon's lifetime. Kernel transit additionally requires a
 // kernel-truth XDP-link count and, for userspace runtimes, a live helper

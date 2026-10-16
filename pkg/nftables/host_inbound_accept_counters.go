@@ -32,7 +32,7 @@ const hostInboundAcceptCounterPrefix = "xpfhia_"
 // (a larger ruleset change, #4759 caveat).
 const (
 	// HostInboundAcceptICMP6ND counts ICMPv6 Neighbor Discovery accepts
-	// (types 133-137: router/neighbor solicit+advert, redirect).
+	// (types 133-136: router/neighbor solicit+advert; excludes Redirect 137).
 	HostInboundAcceptICMP6ND = "icmp6_nd"
 	// HostInboundAcceptICMP6Error counts ICMPv6 error / PMTUD accepts
 	// (types 1-4: destination-unreachable, packet-too-big, time-exceeded,

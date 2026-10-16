@@ -861,7 +861,7 @@ Gap audit: `docs/archived/userspace-forwarding-and-failover-gap-audit.md` (PR #3
 - **Host-inbound router-discovery:** New `HostInboundRouterDiscovery` flag (bit 20) for `protocols router-discovery`; BPF `host_inbound_flag()` checks ICMP type 9/10 (IRDP Router Advertisement/Solicitation); both eBPF + DPDK parity
 - **Host-inbound vrrp:** Added to `HostInboundProtocolFlags` map
 - **lo0 filter input:** `Lo0FilterInputV4`/`Lo0FilterInputV6` extracted from lo0 interface config; `applyLo0Filter()` generates nftables rules from firewall filter terms; `nftRuleFromTerm()` maps source/dest addresses, protocols, ports, actions to nft syntax; atomic apply via `nft -f -`; cleanup on empty config
-- **system no-redirects:** Sysctl `net.ipv4.conf.all.send_redirects=0` + `accept_redirects=0`
+- **system no-redirects:** Sysctl posture for IPv4 send/accept and IPv6 accept_redirects is applied to `conf/all`, `conf/default`, and each current interface; transit-gate forwarding writes reassert it after Linux resets IPv4 defaults. ICMPv6 Redirect (137) is excluded from global host-inbound admits.
 - **system backup-router:** Parsed and stored
 
 ### Test Coverage (20+ new test functions)

@@ -44,13 +44,14 @@ func (c *xpfCollector) initHostInboundDescriptors() {
 			"the userspace-dp xpf_host_inbound_denies_total paths).",
 		[]string{"scope", "family"}, nil,
 	)
-	// #4759: per-type-class hit counters for the GLOBAL ICMP-error / ND accept
-	// rules on the same kernel `inet xpf_hostinbound` chain. Those rules admit
-	// ICMPv6 Neighbor Discovery (types 133-137), ICMPv6 error/PMTUD (types
-	// 1-4), and ICMPv4 error/PMTUD (destination-unreachable, time-exceeded,
-	// parameter-problem) regardless of any per-zone host-inbound service set,
-	// so core L3 operation is never black-holed; before #4759 those accepts
-	// were UNCOUNTED. The counts are AGGREGATE — the accept rules are GLOBAL,
+	// #4759/#13982: per-type-class hit counters for the GLOBAL
+	// ICMP-error / ND accept rules on the same kernel `inet xpf_hostinbound`
+	// chain. Those rules admit ICMPv6 Neighbor Discovery (types 133-136),
+	// ICMPv6 error/PMTUD (types 1-4), and ICMPv4 error/PMTUD
+	// (destination-unreachable, time-exceeded, parameter-problem) regardless of
+	// any per-zone host-inbound service set, so core L3 operation is never
+	// black-holed; redirects are excluded to prevent route changes. Before
+	// #4759 these accepts were UNCOUNTED. The counts are AGGREGATE — the
 	// not per-zone, so there is no per-zone `type` breakdown (a per-zone split
 	// would need per-zone rule duplication, the #4759 Low-severity caveat).
 	// The counter resets when the daemon rebuilds the table (every commit /
