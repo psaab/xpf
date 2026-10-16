@@ -432,6 +432,7 @@ func TestApplyRethServicesForRGRespectsSASyncFlag9139(t *testing.T) {
 		"set security ike gateway gw-rg1 address 198.51.100.1",
 		"set security ike gateway gw-rg1 external-interface reth1.0",
 		"set security ipsec vpn vpn-rg1 ike gateway gw-rg1",
+		"set security ipsec vpn vpn-rg1 pre-shared-key fixture-secret",
 		"set security ipsec vpn vpn-rg1 bind-interface st0",
 	})
 	cfg := store.ActiveConfig()

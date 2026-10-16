@@ -292,10 +292,12 @@ func TestAmbiguousSANameNeedsDeclaredRG0_9511(t *testing.T) {
 		"set security ike gateway gw-plain address 198.51.100.3",
 		"set security ike gateway gw-plain external-interface ge-0/0/3.0",
 		"set security ipsec vpn blue ike gateway gw-rg1",
+		"set security ipsec vpn blue pre-shared-key fixture-secret",
 		"set security ipsec vpn blue bind-interface st0",
 		"set security ipsec vpn blue traffic-selector red local-ip 10.0.1.0/24",
 		"set security ipsec vpn blue traffic-selector red remote-ip 10.9.1.0/24",
 		"set security ipsec vpn blue-red ike gateway gw-plain",
+		"set security ipsec vpn blue-red pre-shared-key fixture-secret",
 		"set security ipsec vpn blue-red bind-interface st1",
 		"set security ipsec vpn lone ike gateway gw-plain",
 		"set security ipsec vpn lone pre-shared-key fixture-secret",
@@ -475,6 +477,7 @@ func syncedStore9511(t *testing.T, lines []string) *configstore.Store {
 
 var blueOnRG1_9511 = []string{
 	"set security ipsec vpn blue ike gateway gw-rg1",
+	"set security ipsec vpn blue pre-shared-key fixture-secret",
 	// #11380: blue keeps st1 so every blue+X same-config pair spans binds;
 	// extras below stay on st0 and the selector gate stays silent.
 	"set security ipsec vpn blue bind-interface st1",
@@ -493,13 +496,23 @@ func reinitiatesFor9511(t *testing.T, promoted, loaded *configstore.Store, name 
 }
 
 // S1, failed addition: C1 adds VPN blue-red on RG2, but the loaded generation C0 has
-// only blue, so blue-red is blue's RG1 child.
+// only blue, so blue-red is blue's RG1 child. The child-name premise is the whole
+// cell: blue renders blue-red in BOTH generations (blue itself is unchanged and
+// credentialed, #14139), while the standalone blue-red connection renders it in
+// C1 only — a VPN whose failed apply charon never loaded. Asserting both index
+// shapes up front keeps a fixture that stops rendering blue from passing silently.
 func TestIPsecAttributionFollowsLoadedGenerationOnFailedAddition9511(t *testing.T) {
 	c0 := storeWith9511(t, blueOnRG1_9511...)
 	c1 := storeWith9511(t, append(append([]string{}, blueOnRG1_9511...),
 		"set security ipsec vpn blue-red ike gateway gw-rg2",
 		"set security ipsec vpn blue-red bind-interface st0",
 		"set security ipsec vpn blue-red pre-shared-key fixture-secret")...)
+	if got := strings.Join(ipsecSANameIndex(c0.ActiveConfig()).VPNs("blue-red"), ","); got != "blue" {
+		t.Fatalf("FIXTURE: in loaded C0 blue-red must be rendered only as blue's child, got [%s]", got)
+	}
+	if got := strings.Join(ipsecSANameIndex(c1.ActiveConfig()).VPNs("blue-red"), ","); got != "blue,blue-red" {
+		t.Fatalf("FIXTURE: in promoted C1 blue-red must be rendered by blue's child and the new RG2 VPN, got [%s]", got)
+	}
 	if !reinitiatesFor9511(t, c1, c0, "blue-red", 1) {
 		t.Error("S1: owning RG1 with C0 loaded, blue-red is blue's RG1 child and must be " +
 			"re-initiated; the promoted C1 made it ambiguous with a VPN charon never loaded")
