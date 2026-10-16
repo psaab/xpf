@@ -823,6 +823,31 @@ fn general_case_still_folds_0xffff_to_0x0000() {
     assert!(state.translate_outbound(&mut src, ""));
     assert_ne!(ipv6_to_words(&src)[3], 0xFFFF, "adjusted word must never be 0xFFFF");
 }
+// #13695: RFC 6296 §3.5 forbids the external /48 subnet word 0xFFFF on a
+// non-neutral mapping. It would otherwise collapse onto external subnet 0.
+#[test]
+fn inbound_non_neutral_48_rejects_ffff_subnet_word_13695() {
+    let state = Nptv6State::from_snapshots(&[Nptv6RuleSnapshot {
+        name: "general".to_string(),
+        from_zone: String::new(),
+        internal_prefix: "fd00:1::/48".to_string(),
+        external_prefix: "2001:db8:1::/48".to_string(),
+    }]);
+    let internal = [0xfd00u16, 0x0001, 0x0000];
+    let external = [0x2001u16, 0x0db8, 0x0001];
+    assert!(
+        !is_zero_adjustment(compute_adjustment(&internal, &external, 3)),
+        "test pair must exercise a non-neutral /48 adjustment"
+    );
+    let mut dst: Ipv6Addr = "2001:db8:1:ffff::1".parse().unwrap();
+    let original = dst;
+    assert_eq!(
+        state.translate_inbound_result(&mut dst, ""),
+        Nptv6Translation::Untranslatable,
+        "inbound external subnet 0xFFFF must not alias subnet 0"
+    );
+    assert_eq!(dst, original, "rejected destination must remain unchanged");
+}
 
 // #5176 fail-on-revert: a static-NAT rule-set scoped `from zone untrust` must
 // translate NPTv6 INBOUND traffic ONLY when it ingresses on zone untrust. A

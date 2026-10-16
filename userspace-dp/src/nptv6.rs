@@ -515,10 +515,14 @@ impl Nptv6State {
             if rule.zone_matches(ingress_zone)
                 && prefix_matches(&words, &rule.external_prefix, rule.prefix_words)
             {
-                // RFC 6296 §3.7 explicitly says an all-zero IID MUST be
-                // dropped. The all-ones/no-available-word refusal is the
-                // scoped reviewer edge, not an RFC2119 MUST.
-                if iid_is_all_zero(&words, rule.prefix_words) {
+                // RFC 6296 §3.5 forbids the /48 0xFFFF subnet on a
+                // non-neutral mapping; §3.7 explicitly says an all-zero IID
+                // MUST be dropped. An all-ones /64 IID has no adjustment word.
+                if (rule.prefix_words == 3
+                    && words[3] == 0xFFFF
+                    && !is_zero_adjustment(rule.adjustment))
+                    || iid_is_all_zero(&words, rule.prefix_words)
+                {
                     return Nptv6Translation::Untranslatable;
                 }
                 let adj_word = match first_non_ffff_iid_word(&words, rule.prefix_words) {
