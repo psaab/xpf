@@ -81,6 +81,18 @@ thread_local! {
             Option<Box<dyn FnOnce(&crate::afxdp::ha::SessionDomain, &SessionKey)>>,
         > = std::cell::RefCell::new(None);
 }
+/// Test-only seam for the #13709 race. The hook fires after the candidate
+/// previous-entry snapshot, before the tuple lease is acquired. A test can
+/// publish an intervening replacement deterministically instead of relying on
+/// scheduler timing. Thread-local storage isolates concurrent tests and adds
+/// no release-build state or call.
+#[cfg(test)]
+thread_local! {
+    static SYNCED_UPSERT_AFTER_SNAPSHOT_HOOK:
+        std::cell::RefCell<
+            Option<Box<dyn FnOnce(&crate::afxdp::ha::SessionDomain, &SessionKey)>>,
+        > = std::cell::RefCell::new(None);
+}
 
 /// The outcome of an HA synced-session import (#6785).
 ///
@@ -266,6 +278,23 @@ impl crate::afxdp::ha::SessionDomain {
     #[cfg(test)]
     fn run_synced_delete_after_clone_hook(&self, key: &SessionKey) {
         let hook = SYNCED_DELETE_AFTER_CLONE_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook(self, key);
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn set_synced_upsert_after_snapshot_hook_for_test<F>(&self, hook: F)
+    where
+        F: FnOnce(&Self, &SessionKey) + 'static,
+    {
+        SYNCED_UPSERT_AFTER_SNAPSHOT_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(hook));
+        });
+    }
+
+    #[cfg(test)]
+    fn run_synced_upsert_after_snapshot_hook(&self, key: &SessionKey) {
+        let hook = SYNCED_UPSERT_AFTER_SNAPSHOT_HOOK.with(|slot| slot.borrow_mut().take());
         if let Some(hook) = hook {
             hook(self, key);
         }
@@ -911,51 +940,30 @@ impl crate::afxdp::ha::SessionDomain {
         let worker_records = Arc::clone(&self.workers.load());
         let now_secs = monotonic_nanos() / 1_000_000_000;
         let ha_state = self.rg_runtime.load();
-        // #5154: read the stored entry AND the map length under ONE RECOVERED
-        // critical section. Both reads feed a REFUSAL decision (the #2170
-        // generation guard and the #5674 admission bound), and every write
-        // below commits through `lock_shared_recover`. Reading with
-        // `.lock().ok()` / `.lock().map(..).unwrap_or(0)` applied the OPPOSITE
-        // poison policy to the validation half: after a contained worker panic
-        // (#925 supervisor) poisoned this mutex, the stored entry read as None
-        // and the length read as 0, so BOTH guards silently evaluated
-        // "no previous entry, empty map" and fell through — while the
-        // recovering write then committed the very install they exist to
-        // refuse. A stale-generation import regressed the stored generation and
-        // an over-ceiling import bypassed the aggregate bound, on a code path
-        // the system is explicitly designed to SURVIVE. Recovering here (the
-        // #2402 / #1807 module policy, `lock_shared_recover`: keep the
-        // committed map, clear the poison, count + log the recovery) makes
-        // validation and mutation agree. Refusing the WRITE on poison instead
-        // is not a coherent alternative: `lock_shared_recover` CLEARS poison,
-        // so the poisoned window closes the instant any other shared-session
-        // path (publish, lookup, remove, prewarm) touches this mutex — a
-        // refuse-on-poison write would fire or not fire depending on which
-        // thread locked first, and would wedge HA session sync after a panic
-        // the supervisor already contained. Folding the two reads into one
-        // guard also removes a real TOCTOU: they were separate locks, so the
-        // ceiling could be evaluated against a map that changed (including one
-        // that had gained this very key) between them.
-        let (previous_entry, synced_len) = {
+        // #13709: a previous reverse-companion key is needed to prepare the
+        // tuple lease, but the pre-lease entry is only a candidate. Read its
+        // key through the recovery policy (#5154) so poison cannot hide an
+        // existing incarnation; every refusal decision uses the authoritative
+        // post-lease re-read below.
+        let candidate_stale_reverse_key = {
             let sessions = lock_shared_recover(&self.sessions.synced);
-            (sessions.get(&entry.key).cloned(), sessions.len())
+            sessions.get(&entry.key).and_then(|previous| {
+                if previous.metadata.is_reverse {
+                    return None;
+                }
+                let old_key = reverse_session_key(&previous.key, previous.decision.nat);
+                let new_key = reverse_session_key(&entry.key, entry.decision.nat);
+                (old_key != new_key).then_some(old_key)
+            })
         };
-        // #2170 install-side guard (SMR C3): refuse a strictly-older-
-        // generation install so the per-key stored generation never
-        // regresses (closes the delayed-stale-install variant on the
-        // helper). Only acts when BOTH the stored and incoming generations
-        // are non-zero — local-origin entries (generation 0) and legacy
-        // peers fall back to today's unconditional upsert.
-        if let Some(previous) = previous_entry.as_ref()
-            && previous.generation != 0
-            && entry.generation != 0
-            && entry.generation < previous.generation
-        {
-            self.sessions
-                .install_stale_ignored
-                .fetch_add(1, Ordering::Relaxed);
-            return SyncedImportOutcome::RejectedStaleGeneration;
-        }
+        #[cfg(test)]
+        self.run_synced_upsert_after_snapshot_hook(&entry.key);
+        // #2170 install-side guard (SMR C3): the post-lease check below
+        // refuses a strictly-older generation so the per-key stored
+        // generation never regresses (closing delayed stale installs).
+        // Only acts when BOTH stored and incoming generations are non-zero;
+        // local-origin entries (generation 0) and legacy peers retain the
+        // existing unconditional-upsert behavior.
         // #5674: aggregate synced-import admission bound. Locally-created
         // sessions are capped per worker at `DEFAULT_MAX_SESSIONS`
         // (`install_with_protocol_with_origin`), but peer-synced sessions were
@@ -1011,15 +1019,6 @@ impl crate::afxdp::ha::SessionDomain {
         // would drop a legitimate failover session. A zero ceiling (no workers
         // registered yet — early boot / teardown) disables the bound so a
         // transient window never rejects legitimate imports.
-        if previous_entry.is_none() && !entry.metadata.is_reverse {
-            let synced_cap = self.synced_import_cap_for(&worker_records);
-            if synced_cap != 0 && synced_len >= synced_cap {
-                self.sessions
-                    .import_cap_drops
-                    .fetch_add(1, Ordering::Relaxed);
-                return SyncedImportOutcome::RejectedCapacity;
-            }
-        }
         let reverse_entry = if !entry.metadata.is_reverse {
             synthesized_synced_reverse_entry(
                 forwarding,
@@ -1031,24 +1030,64 @@ impl crate::afxdp::ha::SessionDomain {
         } else {
             None
         };
+        let mut gate_keys = vec![entry.key.clone()];
+        if let Some(reverse) = reverse_entry.as_ref() {
+            gate_keys.push(reverse.key.clone());
+        }
+        if let Some(old_reverse_key) = candidate_stale_reverse_key {
+            gate_keys.push(old_reverse_key);
+        }
+        let _tuple_lease = match crate::afxdp::bpf_map::global_tuple_gate()
+            .acquire_lease(gate_keys.iter().cloned())
+        {
+            Ok(lease) => lease,
+            Err(_) => return SyncedImportOutcome::RejectedGateBusy,
+        };
+        // The candidate snapshot above is only for lease-key preparation.
+        // Re-read all authoritative shared state while the lease excludes
+        // tuple writers; generation, capacity, ownership, and merge decisions
+        // below must use this current incarnation.
+        let (previous_entry, synced_len) = {
+            let sessions = lock_shared_recover(&self.sessions.synced);
+            (sessions.get(&entry.key).cloned(), sessions.len())
+        };
+        if previous_entry.as_ref().is_some_and(|previous| {
+            previous.generation != 0
+                && entry.generation != 0
+                && entry.generation < previous.generation
+        }) {
+            self.sessions
+                .install_stale_ignored
+                .fetch_add(1, Ordering::Relaxed);
+            return SyncedImportOutcome::RejectedStaleGeneration;
+        }
+        if previous_entry.as_ref().is_some_and(|current| {
+            !current.metadata.is_reverse
+                && !gate_keys.contains(&reverse_session_key(
+                    &current.key,
+                    current.decision.nat,
+                ))
+        }) {
+            // The replacement changed NAT while this call waited; its current
+            // companion is not covered by the candidate lease keys. Refuse
+            // safely so the peer's next retry can lease both.
+            return SyncedImportOutcome::RejectedGateBusy;
+        }
         let stale_reverse = previous_entry.as_ref().and_then(|previous| {
             let old_key = reverse_session_key(&previous.key, previous.decision.nat);
             let new_key = reverse_session_key(&entry.key, entry.decision.nat);
             (!previous.metadata.is_reverse && old_key != new_key)
                 .then(|| (old_key, previous.clone()))
         });
-        let mut gate_keys = vec![entry.key.clone()];
-        if let Some(reverse) = reverse_entry.as_ref() {
-            gate_keys.push(reverse.key.clone());
+        if previous_entry.is_none() && !entry.metadata.is_reverse {
+            let synced_cap = self.synced_import_cap_for(&worker_records);
+            if synced_cap != 0 && synced_len >= synced_cap {
+                self.sessions
+                    .import_cap_drops
+                    .fetch_add(1, Ordering::Relaxed);
+                return SyncedImportOutcome::RejectedCapacity;
+            }
         }
-        if let Some((old_reverse_key, _)) = stale_reverse.as_ref() {
-            gate_keys.push(old_reverse_key.clone());
-        }
-        let _tuple_lease = match crate::afxdp::bpf_map::global_tuple_gate().acquire_lease(gate_keys)
-        {
-            Ok(lease) => lease,
-            Err(_) => return SyncedImportOutcome::RejectedGateBusy,
-        };
         // #6600: RESERVE THE TRANSLATED NAT PORT BEFORE PUBLISHING.
         //
         // The publish below makes the entry visible on every packet-path lookup
