@@ -162,11 +162,16 @@ func (s *Server) Set(ctx context.Context, req *pb.SetRequest) (*pb.SetResponse, 
 		}
 		return &pb.SetResponse{}, nil
 	}
-	if strings.HasPrefix(input, "copy ") || strings.HasPrefix(input, "rename ") {
-		return s.handleCopyRename(sessionID, plantClass, input)
-	}
-	if strings.HasPrefix(input, "insert ") {
-		return s.handleInsert(sessionID, plantClass, input)
+	// #14147: route on the lexed verb, not a raw prefix/Fields split.
+	// A tab after the verb, a comment, or a quoted keyword must route
+	// (and split) exactly as the authorization gate adjudicated.
+	if verb, isMutation := config.ConfigMutationVerb(input); isMutation {
+		switch verb {
+		case "copy", "rename":
+			return s.handleCopyRename(sessionID, plantClass, input)
+		case "insert":
+			return s.handleInsert(sessionID, plantClass, input)
+		}
 	}
 	if fields := strings.Fields(input); len(fields) > 0 &&
 		(fields[0] == "deactivate" || fields[0] == "activate") {
@@ -194,22 +199,17 @@ func (s *Server) Set(ctx context.Context, req *pb.SetRequest) (*pb.SetResponse, 
 }
 
 func (s *Server) handleCopyRename(sessionID, plantClass, input string) (*pb.SetResponse, error) {
-	parts := strings.Fields(input)
-	isRename := parts[0] == "rename"
-	toIdx := -1
-	for i, p := range parts {
-		if p == "to" {
-			toIdx = i
-			break
-		}
+	// #14147: the canonical lexer split the gate adjudicated — only a
+	// bare `to` separates, quoted strings are unquoted, comments are
+	// stripped. strings.Fields here split at a different `to` than
+	// the gate and acted on endpoints nobody authorized.
+	verb, _ := config.ConfigMutationVerb(input)
+	srcPath, dstPath, ok := config.ParseCopyRenameCommand(input)
+	if !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "usage: %s <src> to <dst>", verb)
 	}
-	if toIdx < 2 || toIdx >= len(parts)-1 {
-		return nil, status.Errorf(codes.InvalidArgument, "usage: %s <src> to <dst>", parts[0])
-	}
-	srcPath := parts[1:toIdx]
-	dstPath := parts[toIdx+1:]
 	var err error
-	if isRename {
+	if verb == "rename" {
 		err = s.store.RenameAsPlantClass(sessionID, plantClass, srcPath, dstPath)
 	} else {
 		err = s.store.CopyAsPlantClass(sessionID, plantClass, srcPath, dstPath)
@@ -221,30 +221,13 @@ func (s *Server) handleCopyRename(sessionID, plantClass, input string) (*pb.SetR
 }
 
 func (s *Server) handleInsert(sessionID, plantClass, input string) (*pb.SetResponse, error) {
-	parts := strings.Fields(input)
-	kwIdx := -1
-	isBefore := false
-	for i, p := range parts {
-		if p == "before" {
-			kwIdx = i
-			isBefore = true
-			break
-		}
-		if p == "after" {
-			kwIdx = i
-			break
-		}
-	}
-	if kwIdx < 2 || kwIdx >= len(parts)-1 {
+	// #14147: canonical split, as in handleCopyRename. ParseInsertCommand
+	// returns the full reference path (element parent + ref tokens) and
+	// rejects a ref longer than the element, preserving the usage error.
+	elemPath, refPath, isBefore, ok := config.ParseInsertCommand(input)
+	if !ok {
 		return nil, status.Errorf(codes.InvalidArgument, "usage: insert <element-path> before|after <ref-identifier>")
 	}
-	elemPath := parts[1:kwIdx]
-	refTokens := parts[kwIdx+1:]
-	if len(refTokens) > len(elemPath) {
-		return nil, status.Errorf(codes.InvalidArgument, "reference identifier is longer than element path")
-	}
-	parentPath := elemPath[:len(elemPath)-len(refTokens)]
-	refPath := append(append([]string{}, parentPath...), refTokens...)
 	if err := s.store.InsertAsPlantClass(sessionID, plantClass, elemPath, refPath, isBefore); err != nil {
 		return nil, configMutationStatus(err)
 	}

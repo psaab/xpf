@@ -101,14 +101,14 @@ func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, boo
 	// hid the mechanism.
 	switch verb {
 	case "copy", "rename":
-		toIdx := -1
-		for i, p := range parts {
-			if p == "to" {
-				toIdx = i
-				break
-			}
-		}
-		if toIdx < 2 || toIdx >= len(parts)-1 {
+		// #14147: only a BARE `to` separates the endpoints. A quoted
+		// "to" is a path element (the lexer unquotes it to the same
+		// value), and the executors now split with the same canonical
+		// parser, so the endpoints adjudicated here are the endpoints
+		// acted on. Splitting at a quoted token adjudicated a source/
+		// destination pair no executor ever used.
+		src, dst, toOK := splitCopyRenameTokens(parts, quoted)
+		if !toOK {
 			// MALFORMED — and the answer is the WHOLE REMAINDER, not "ungated".
 			//
 			// The dispatcher does print its own usage and act on nothing, so
@@ -122,23 +122,19 @@ func configMutationPaths(editPath, parts []string, quoted []bool) ([]string, boo
 			// what that cell exists for.
 			break
 		}
-		return []string{resolve(parts[1:toIdx]), resolve(parts[toIdx+1:])}, true
+		return []string{resolve(src), resolve(dst)}, true
 
 	case "insert":
 		// `insert <element-path> before|after <ref>` moves the element; the ref
 		// is a SIBLING identifier that is not itself mutated, and it lives under
 		// the same parent, so a deny covering the element covers it.
-		kwIdx := -1
-		for i, p := range parts {
-			if p == "before" || p == "after" {
-				kwIdx = i
-				break
-			}
-		}
-		if kwIdx < 2 || kwIdx >= len(parts)-1 {
+		// #14147: only a BARE keyword separates, for the same reason as
+		// copy/rename above — a quoted "before" is an element token.
+		elem, _, _, kwOK := splitInsertTokens(parts, quoted)
+		if !kwOK {
 			break // malformed: fall back to the whole remainder, see above
 		}
-		return []string{resolve(parts[1:kwIdx])}, true
+		return []string{resolve(elem)}, true
 
 	case "annotate":
 		// `annotate <path> "comment"`. The comment is dropped from the path, but

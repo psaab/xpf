@@ -19,6 +19,7 @@ import (
 	"github.com/chzyer/readline"
 	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/cmdtree"
+	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -380,19 +381,16 @@ func (c *ctl) dispatchConfig(line string) error {
 		fmt.Println("annotation set")
 		return nil
 	case "copy", "rename":
-		toIdx := -1
-		for i, p := range parts {
-			if p == "to" {
-				toIdx = i
-				break
-			}
-		}
-		if toIdx < 2 || toIdx >= len(parts)-1 {
+		// #14147: split with the canonical lexer parser the server
+		// gate adjudicates (only a bare `to` separates), then re-join
+		// the lexed tokens for the wire. strings.Fields here split
+		// at a different `to` than the gate and sent endpoints
+		// nobody authorized.
+		srcParts, dstParts, ok := config.ParseCopyRenameCommand(line)
+		if !ok {
 			fmt.Printf("usage: %s <src-path> to <dst-path>\n", parts[0])
 			return nil
 		}
-		srcParts := parts[1:toIdx]
-		dstParts := parts[toIdx+1:]
 		if len(c.editPath) > 0 {
 			srcParts = append(append([]string{}, c.editPath...), srcParts...)
 			dstParts = append(append([]string{}, c.editPath...), dstParts...)
@@ -405,20 +403,16 @@ func (c *ctl) dispatchConfig(line string) error {
 		return nil
 
 	case "insert":
-		kwIdx := -1
-		for i, p := range parts {
-			if p == "before" || p == "after" {
-				kwIdx = i
-				break
-			}
-		}
-		if kwIdx < 2 || kwIdx >= len(parts)-1 {
+		// #14147: canonical split, as in copy/rename above.
+		elemParts, refTokens, isBefore, ok := config.ParseInsertCommandTokens(line)
+		if !ok {
 			fmt.Println("usage: insert <element-path> before|after <ref-identifier>")
 			return nil
 		}
-		elemParts := parts[1:kwIdx]
-		kw := parts[kwIdx]
-		refTokens := parts[kwIdx+1:]
+		kw := "after"
+		if isBefore {
+			kw = "before"
+		}
 		if len(c.editPath) > 0 {
 			elemParts = append(append([]string{}, c.editPath...), elemParts...)
 		}

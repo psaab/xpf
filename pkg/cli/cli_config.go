@@ -68,21 +68,18 @@ func mtuWarningsResponse9841(dp cliRuntime, compiled *config.Config, before uint
 	return dataplane.WithMTUWarningsForResponse9841(compiled, after.UnconvergedMTUs)
 }
 
-func (c *CLI) handleCopyRename(parts []string) error {
-	cmd := parts[0]
-	toIdx := -1
-	for i, p := range parts {
-		if p == "to" {
-			toIdx = i
-			break
-		}
-	}
-	if toIdx < 2 || toIdx >= len(parts)-1 {
+// handleCopyRename handles `copy|rename <src> to <dst>` from the raw
+// config-mode line. #14147: it splits with the canonical lexer parser
+// the authorization gate adjudicated (only a bare `to` separates,
+// quotes unquoted, comments stripped) — never strings.Fields, which
+// split at a different `to` and acted on unauthorized endpoints.
+func (c *CLI) handleCopyRename(line string) error {
+	cmd, _ := config.ConfigMutationVerb(line)
+	srcPath, dstPath, ok := config.ParseCopyRenameCommand(line)
+	if !ok {
 		fmt.Printf("usage: %s <src-path> to <dst-path>\n", cmd)
 		return nil
 	}
-	srcPath := parts[1:toIdx]
-	dstPath := parts[toIdx+1:]
 	editPath := c.store.GetEditPath()
 	if len(editPath) > 0 {
 		srcPath = append(append([]string{}, editPath...), srcPath...)
@@ -101,39 +98,22 @@ func (c *CLI) handleCopyRename(parts []string) error {
 // The ref-identifier (e.g., "policy allow-all") is relative to the same parent
 // as the element. The full reference path is constructed by replacing the
 // element's trailing identifier tokens with the ref-identifier tokens.
-func (c *CLI) handleInsert(parts []string) error {
-	// Find "before" or "after" keyword.
-	kwIdx := -1
-	isBefore := false
-	for i, p := range parts {
-		if p == "before" {
-			kwIdx = i
-			isBefore = true
-			break
-		}
-		if p == "after" {
-			kwIdx = i
-			break
-		}
-	}
-	if kwIdx < 2 || kwIdx >= len(parts)-1 {
+// #14147: split with the canonical parser, as in handleCopyRename.
+func (c *CLI) handleInsert(line string) error {
+	elemPath, refTokens, isBefore, ok := config.ParseInsertCommandTokens(line)
+	if !ok {
 		fmt.Println("usage: insert <element-path> before|after <ref-identifier>")
 		return nil
 	}
-	elemPath := parts[1:kwIdx]
-	refTokens := parts[kwIdx+1:]
 	editPath := c.store.GetEditPath()
 	if len(editPath) > 0 {
 		elemPath = append(append([]string{}, editPath...), elemPath...)
 	}
-	// Construct the full reference path: element's parent path + ref tokens.
-	// The ref tokens replace the element's trailing identifier (same keyword + name).
 	if len(refTokens) > len(elemPath) {
 		fmt.Println("error: reference identifier is longer than element path")
 		return nil
 	}
-	parentPath := elemPath[:len(elemPath)-len(refTokens)]
-	refPath := append(append([]string{}, parentPath...), refTokens...)
+	refPath := config.InsertRefPath(elemPath, refTokens)
 	return c.store.InsertAsPlantClass("", config.EventPlantClassForMutation(c.userClass), elemPath, refPath, isBefore)
 }
 
