@@ -403,6 +403,224 @@ fn txn_pressure_shed_releases_source_nat_pool_port_10890() {
 fn txn_pressure_shed_gate_failure_keeps_shared_row_and_nat_hold_12862() {
     txn_pressure_shed_nat_pool_hold_behavior(true);
 }
+/// #13764: the MissingNeighbor guarded-admission arm must defer a
+/// gate-contended pressure shed exactly like normal SYN admission. A
+/// deferred NAT64 victim keeps its translated-port hold and shared row
+/// until retry; both must then be removed.
+#[test]
+fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764() {
+    let mut snapshot = nat_snapshot();
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "permit-lan-to-lan".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "lan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    });
+    snapshot.nat64_rules = vec![crate::protocol::NAT64RuleSnapshot {
+        name: "nat64".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec!["172.16.80.50".to_string()],
+        no_v6_frag_header: false,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(10);
+
+    let victim_src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("victim src");
+    let victim_dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("victim nat64 dst");
+    let victim_frame = build_txn_tcp_syn_frame_v6(
+        victim_src,
+        victim_dst,
+        31_001,
+        443,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let victim_meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 24,
+        l3_offset: 14,
+        l4_offset: 54,
+        payload_offset: 74,
+        pkt_len: victim_frame.len() as u16,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_SYN,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let (victim_batch, victim_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &victim_frame,
+        victim_meta,
+        true,
+    );
+    assert_eq!(victim_dbg.tx, 1, "victim NAT64 SYN must be admitted");
+    assert_eq!(victim_batch.session_creates, 2);
+    let victim_key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V6(victim_src),
+        dst_ip: IpAddr::V6(victim_dst),
+        src_port: 31_001,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let (victim_entry, _) = sessions
+        .probe_with_origin(&victim_key)
+        .expect("victim NAT64 session");
+    assert!(victim_entry.decision.nat.nat64);
+    let nat64_before = forwarding.nat64.prefixes[0].port_allocator.snapshot();
+    assert_eq!(nat64_before.live_flows, 1);
+    assert_eq!(nat64_before.used_ports, 1);
+
+    fn metadata() -> SessionMetadata {
+        let mut metadata = icmp_err_metadata();
+        metadata.is_reverse = false;
+        metadata
+    }
+    let established = tunnel_marked_decision(ForwardingDisposition::ForwardCandidate);
+    for port in 31_002..31_009 {
+        assert!(sessions.install_with_protocol(
+            SessionKey {
+                addr_family: libc::AF_INET as u8,
+                protocol: PROTO_TCP,
+                src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+                dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                src_port: port,
+                dst_port: 443,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+            established,
+            metadata(),
+            1_001_000_000,
+            PROTO_TCP,
+            crate::tcp_flags::TCP_ACK,
+        ));
+    }
+    assert_eq!(sessions.len(), 9);
+    // Fill to nine entries with one spare slot, then tighten the cap so
+    // the missing-neighbor seed must shed an opening to fit.
+    sessions.set_max_sessions_for_test(8);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    shared_sessions.lock().expect("shared sessions").insert(
+        victim_key.clone(),
+        SyncedSessionEntry {
+            key: victim_key.clone(),
+            decision: victim_entry.decision,
+            metadata: victim_entry.metadata,
+            source_nat_static: None,
+            leak_incarnation: 0,
+            origin: crate::session::SessionOrigin::ForwardFlow,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_SYN,
+            generation: 0,
+            session_id: sessions.session_id_for(&victim_key),
+            tcp_close_class: 0,
+            tcp_handshake_state: 1,
+        },
+    );
+    let held_lease = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([victim_key.clone()])
+        .expect("victim gate lease");
+
+    // The second flow is deliberately routed to a connected LAN host with
+    // no neighbor. It is the only packet that reaches the guarded
+    // MissingNeighbor admission arm; normal SYN admission would resolve
+    // through the already-present WAN gateway instead.
+    let missing_frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 103),
+        Ipv4Addr::new(10, 0, 61, 102),
+        31_010,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let missing_meta = txn_meta_v4(24, TCP_FLAG_SYN, missing_frame.len() as u16);
+    let (_missing_batch, missing_dbg) = txn_run_descriptor_with_shared_sessions(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &missing_frame,
+        missing_meta,
+        &shared_sessions,
+    );
+    assert_eq!(
+        missing_dbg.missing_neigh, 1,
+        "the second flow must take the MissingNeighbor admission arm"
+    );
+    assert!(sessions.probe_with_origin(&victim_key).is_none());
+    assert!(
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .contains_key(&victim_key),
+        "gate contention must preserve the victim shared row for retry"
+    );
+    assert_eq!(
+        forwarding.nat64.prefixes[0]
+            .port_allocator
+            .snapshot()
+            .used_ports,
+        1,
+        "gate contention must preserve the victim NAT64 hold for retry"
+    );
+
+    drop(held_lease);
+    let session_map = crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1);
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    crate::afxdp::worker::retry_deferred_pressure_sheds(
+        &mut sessions,
+        std::slice::from_mut(&mut binding),
+        &forwarding,
+        session_map,
+        -1,
+        -1,
+        &crate::afxdp::checksum::DnatTableFds::default(),
+        0,
+        &[],
+        crate::afxdp::empty_worker_commands_by_id(),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        123_004_000_000,
+    );
+    assert!(
+        !shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .contains_key(&victim_key),
+        "retry must remove the deferred victim shared row"
+    );
+    assert_eq!(
+        forwarding.nat64.prefixes[0]
+            .port_allocator
+            .snapshot()
+            .used_ports,
+        0,
+        "retry must release the deferred victim NAT64 hold"
+    );
+}
 
 fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
     fn key(port: u16) -> SessionKey {

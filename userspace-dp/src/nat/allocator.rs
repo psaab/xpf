@@ -5959,7 +5959,7 @@ impl PortAllocator {
             .collect()
     }
 
-    pub(super) fn snapshot(&self) -> PortAllocatorSnapshot {
+    pub(crate) fn snapshot(&self) -> PortAllocatorSnapshot {
         let live = self.shared.live.lock().unwrap_or_else(|e| e.into_inner());
         let live_flows = live.live_by_flow.len() as u64;
         let persistent_leases = live.persistent_by_source.len() as u64;
