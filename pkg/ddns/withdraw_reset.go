@@ -78,7 +78,7 @@ func (m *Manager) WithdrawForReset(ctx context.Context, cfg *config.DHCPServerCo
 			}
 			continue
 		}
-		if err := m.deleteOwnedLocked(ctx, updater, owned); err != nil {
+		if err := m.deleteOwnedLocked(ctx, updater, owned, false); err != nil {
 			errs = append(errs, fmt.Errorf("ddns: factory-reset withdrawal for %s: %w", owned.FQDN, err))
 		}
 	}

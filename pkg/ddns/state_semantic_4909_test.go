@@ -76,7 +76,7 @@ func TestDeleteOwnedUnparseableAddrPersistsDrop(t *testing.T) {
 	st.put(bad)
 
 	m := &Manager{state: st}
-	if err := m.deleteOwnedLocked(context.Background(), nopUpdater{}, bad); err != nil {
+	if err := m.deleteOwnedLocked(context.Background(), nopUpdater{}, bad, false); err != nil {
 		t.Fatalf("deleteOwnedLocked: %v", err)
 	}
 	if len(st.records) != 0 {
