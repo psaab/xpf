@@ -181,6 +181,8 @@ pub(crate) struct ThreeColorPolicerHot {
     peak_last_refill_ns: AtomicU64,
     refill_gate: AtomicBool,
     #[cfg(test)]
+    refill_gate_contended: AtomicBool,
+    #[cfg(test)]
     pause_refill_claim: AtomicBool,
     #[cfg(test)]
     refill_claim_paused: AtomicBool,
@@ -201,6 +203,8 @@ impl ThreeColorPolicerHot {
             committed_last_refill_ns: AtomicU64::new(UNINITIALIZED_NS),
             peak_last_refill_ns: AtomicU64::new(UNINITIALIZED_NS),
             refill_gate: AtomicBool::new(false),
+            #[cfg(test)]
+            refill_gate_contended: AtomicBool::new(false),
             #[cfg(test)]
             pause_refill_claim: AtomicBool::new(false),
             #[cfg(test)]
@@ -431,6 +435,8 @@ impl ThreeColorPolicerState {
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            #[cfg(test)]
+            self.hot.refill_gate_contended.store(true, Ordering::Release);
             std::hint::spin_loop();
         }
         let _gate = RefillGateGuard(&self.hot.refill_gate);
@@ -1142,7 +1148,7 @@ mod tests {
     }
 
     fn refill_claim_credit_is_atomic_13704(policer: ThreeColorPolicerState) {
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         let policer = Arc::new(policer);
         assert_eq!(
@@ -1176,12 +1182,25 @@ mod tests {
             let loser_policer = Arc::clone(&policer);
             let loser =
                 scope.spawn(move || loser_policer.meter(1_000_000_000, 64, PacketColor::Green));
-            std::thread::sleep(Duration::from_millis(10));
+            // Observe actual contention at the refill gate, not merely that
+            // the contender was spawned. Without the gate the witness never
+            // fires, so removing serialization cannot pass this test.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !policer.hot.refill_gate_contended.load(Ordering::Acquire)
+                && Instant::now() < deadline
+            {
+                std::thread::yield_now();
+            }
+            let contender_reached_gate = policer.hot.refill_gate_contended.load(Ordering::Acquire);
             policer
                 .hot
                 .release_refill_claim
                 .store(true, Ordering::Release);
             winner.join().unwrap();
+            assert!(
+                contender_reached_gate,
+                "contender must reach the held refill gate before winner is released"
+            );
             assert_eq!(
                 loser.join().unwrap().color,
                 PacketColor::Green,
