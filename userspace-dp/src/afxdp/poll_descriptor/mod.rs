@@ -6776,13 +6776,48 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // session.
                     let mut hit = hit;
                     // #13926: a live session-bound fragment association for a
-                    // LocalDelivery decision is proof that its first fragment
-                    // passed host-inbound admission and host policy. This lets
-                    // the associated tail use the trusted reinject path without
-                    // rerunning port-based gates against its absent L4 header.
+                    // LocalDelivery decision proves that its first fragment
+                    // passed host-inbound admission and host policy. The tail
+                    // inherits that stateful authority without rerunning port-
+                    // based gates against its absent L4 header. Per-packet lo0
+                    // filtering still applies to the actual fragment.
                     if fragment_association_hit
                         && hit.resolution.disposition == ForwardingDisposition::LocalDelivery
                     {
+                        if let Some(l3_flow) = hit_l3_ctx.as_ref() {
+                            let ingress_logical = resolve_ingress_logical_ifindex(
+                                worker_ctx.forwarding,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                            )
+                            .unwrap_or(meta.ingress_ifindex as i32);
+                            let (action, pending_log) = lo0_action_for_solicited_reply(
+                                worker_ctx.forwarding,
+                                ingress_logical,
+                                crate::afxdp::frame::term_match_extra_from_frame(
+                                    packet_frame,
+                                    meta,
+                                ),
+                                l3_flow,
+                                meta,
+                                ingress_zone_override,
+                                now_ns,
+                            );
+                            if let Some(pending_log) = pending_log {
+                                filter::emit_pending_filter_log(
+                                    worker_ctx.event_stream,
+                                    l3_flow,
+                                    meta,
+                                    pending_log,
+                                    false,
+                                    now_ns,
+                                );
+                            }
+                            if !matches!(action, crate::filter::FilterAction::Accept) {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                        }
                         host_inbound_gate_proof = true;
                     }
                     // #13744: a first fragment admitted while its neighbor was
