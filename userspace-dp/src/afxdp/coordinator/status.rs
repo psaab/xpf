@@ -1448,15 +1448,15 @@ impl super::Coordinator {
     /// SINGLE-WRITER, still. `vacate()` is documented as owner-only because
     /// two writers racing on one slot could interleave a stale publish after a
     /// vacate. This call happens under the one-shot `holders_retired` CAS in
-    /// [`Self::retire_worker_holders_where`], and there it is gated on
-    /// `atomics.dead` rather than on that sweep's own predicate — a worker the
-    /// supervisor has already recorded as `dead` has exited and nothing
-    /// respawns it, so the owning writer is gone and this is the only writer
-    /// left. The gate is load-bearing and not belt-and-braces:
-    /// `retire_all_worker_holders` selects `|_| true` for the #7092 teardown
-    /// reclaim and runs while those workers are still RUNNING, so an ungated
-    /// vacate would race a live `publish()`. The Release store is unchanged, so
-    /// a peer's Acquire read still pairs.
+    /// [`Self::retire_worker_holders_where`], and it is gated on `atomics.dead`
+    /// rather than on that sweep's own predicate. A recorded-dead worker has
+    /// exited and nothing respawns it, so the owning writer is gone.
+    ///
+    /// The teardown-wide sweep runs after workers are joined. Retaining the
+    /// `dead` gate preserves the dead-worker-only recovery policy; vacating
+    /// non-dead slots would be redundant because teardown discards the floors
+    /// map immediately afterward. The Release store is unchanged, so a peer's
+    /// Acquire read still pairs.
     ///
     /// Reads the floors map through `load_full()`, so a concurrent
     /// `queue_vtime_floors.store(..)` from a reconcile cannot be torn by this
@@ -1500,11 +1500,34 @@ impl super::Coordinator {
         &self,
         select: impl Fn(&crate::afxdp::worker_runtime::WorkerRuntimeAtomics) -> bool,
     ) -> usize {
+        let snapshots: Vec<_> = self
+            .workers
+            .records_snapshot()
+            .iter()
+            .map(|(worker_id, rec)| (*worker_id, Arc::clone(&rec.handle.runtime_atomics)))
+            .collect();
+        self.retire_selected_worker_holders(&snapshots, select)
+    }
+
+    /// Retire a stable identity/atomics snapshot after the worker records have
+    /// been cleared. The atomics are shared with their workers and stay alive
+    /// until this sweep completes.
+    pub(super) fn retire_worker_holders(
+        &self,
+        snapshots: &[(u32, Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>)],
+    ) -> usize {
+        self.retire_selected_worker_holders(snapshots, |_| true)
+    }
+
+    fn retire_selected_worker_holders(
+        &self,
+        snapshots: &[(u32, Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>)],
+        select: impl Fn(&crate::afxdp::worker_runtime::WorkerRuntimeAtomics) -> bool,
+    ) -> usize {
         use std::sync::atomic::Ordering;
         let now_ns = crate::afxdp::wg::counters::monotonic_now_ns();
-        let mut freed = 0;
-        for (worker_id, rec) in self.workers.records().iter() {
-            let atomics = &rec.handle.runtime_atomics;
+        let mut total_freed = 0;
+        for (worker_id, atomics) in snapshots {
             if !select(atomics) {
                 continue;
             }
@@ -1518,69 +1541,59 @@ impl super::Coordinator {
                 continue;
             }
             let id = *worker_id;
-            freed += self
+            let worker_freed = self
                 .forwarding
                 .iface_nat_allocators
-                .retire_worker(id, now_ns);
-            freed += crate::nat::retire_worker_from_pool_rules(
-                &self.forwarding.source_nat_rules,
-                id,
-                now_ns,
-            );
-            freed += self.forwarding.nat64.retire_worker(id, now_ns);
-            // #9560 round 3: retire that worker's STEERING claims too. NAT and CoS were
-            // already reclaimed here; the steering registry was not, so a dead worker's
-            // bit kept suppressing every later delete of the rows it held — an aliased
-            // session's teardown found an owner that can never come back, and both the
-            // registry holding and the fixed-size BPF row leaked for the life of the
-            // process.
-            let steering_retired = {
-                let maps = self.bpf_maps.load();
-                crate::afxdp::bpf_map::retire_worker_steering_rows(
-                    crate::afxdp::bpf_map::SteeringMap {
-                        fd: maps.session_map_fd.as_ref().map(|fd| fd.fd).unwrap_or(-1),
-                        owners: &self.steering_owners,
-                        holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
-                    },
+                .retire_worker(id, now_ns)
+                + crate::nat::retire_worker_from_pool_rules(
+                    &self.forwarding.source_nat_rules,
                     id,
+                    now_ns,
                 )
-            };
-            if steering_retired > 0 {
-                eprintln!(
-                    "xpf-dp: retired {steering_retired} steering claim(s) stranded by dead \
-                     worker {id}"
-                );
-            }
-            // #9367: the V_min vacate is gated on the PANIC flag, not on this
-            // sweep's own `select`. `retire_all_worker_holders` passes
-            // `|_| true` — it retires every registered id, LIVE ones included,
-            // because the #7092 teardown reclaim has to name them before
-            // `stop_and_clear` drops the records. Those workers are still
-            // RUNNING at that point, so vacating their slots there would make
-            // the coordinator a SECOND writer to a slot whose contract is
-            // single-writer, and it would buy nothing: the same teardown
-            // discards `cos.queue_vtime_floors` outright a few statements
-            // later (`coordinator/mod.rs`). Only a worker the supervisor has
-            // already recorded as `dead` has no owning writer left, which is
-            // exactly the case #9367 is about.
-            let vacated = if atomics.dead.load(Ordering::Relaxed) {
-                self.vacate_worker_v_min_slots(id)
-            } else {
-                0
-            };
-            if freed > 0 {
-                eprintln!(
-                    "xpf-dp: reclaimed {freed} NAT reservation(s) stranded by dead worker {id}"
-                );
-            }
-            if vacated > 0 {
-                eprintln!(
-                    "xpf-dp: vacated {vacated} cross-worker CoS V_min slot(s) stranded by \
-                     dead worker {id}"
-                );
+                + self.forwarding.nat64.retire_worker(id, now_ns);
+            total_freed += worker_freed;
+            // A normally stopped worker's claims are cleared later by
+            // `steering_owners.retire_workers()` without deleting rows: live
+            // sessions outlast their worker and are cleaned up separately.
+            // A panic-dead worker never runs its session teardown, so its claims
+            // need this BPF delete sweep.
+            if atomics.dead.load(Ordering::Acquire) {
+                // #9560 round 3: a dead worker's STEERING claim could suppress
+                // later deletes of rows it held, leaking both registry claims
+                // and fixed-size BPF rows.
+                let steering_retired = {
+                    let maps = self.bpf_maps.load();
+                    crate::afxdp::bpf_map::retire_worker_steering_rows(
+                        crate::afxdp::bpf_map::SteeringMap {
+                            fd: maps.session_map_fd.as_ref().map(|fd| fd.fd).unwrap_or(-1),
+                            owners: &self.steering_owners,
+                            holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+                        },
+                        id,
+                    )
+                };
+                if steering_retired > 0 {
+                    eprintln!(
+                        "xpf-dp: retired {steering_retired} steering claim(s) stranded by dead \
+                         worker {id}"
+                    );
+                }
+                let vacated = self.vacate_worker_v_min_slots(id);
+                if worker_freed > 0 {
+                    eprintln!(
+                        "xpf-dp: reclaimed {worker_freed} NAT reservation(s) stranded by dead \
+                         worker {id}"
+                    );
+                }
+                if vacated > 0 {
+                    eprintln!(
+                        "xpf-dp: vacated {vacated} cross-worker CoS V_min slot(s) stranded by \
+                         dead worker {id}"
+                    );
+                }
             }
         }
-        freed
+        total_freed
     }
 
     pub fn worker_runtime_snapshots(&self) -> Vec<crate::protocol::WorkerRuntimeStatus> {

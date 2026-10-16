@@ -170,10 +170,11 @@ mod.rs for further file-level breakdown.
   same one-shot `holders_retired` CAS that reclaims NAT holder bits
   (`coordinator/status.rs`) and gated there on `atomics.dead`, releases the
   slot. It is then the only remaining writer — the owning thread has exited and
-  nothing respawns it — so the single-writer contract still holds. The gate is
-  not redundant with the sweep's own predicate: the sibling
-  `retire_all_worker_holders` selects every id, live ones included, and runs
-  while those workers are still publishing. #4254 (R-7) closed the sibling REJOIN
+  nothing respawns it — so the single-writer contract still holds. The sibling
+  `retire_all_worker_holders` selects every id, including non-dead workers, but
+  now runs only after they have been joined. It retains the dead-worker-only
+  V_min repair policy because teardown discards the floors map immediately
+  afterward. #4254 (R-7) closed the sibling REJOIN
   door by seeding a rebuilt worker to the peer frontier; the never-returning
   door reaches the identical state and is not closed by that fix. A worker
   that STALLS without panicking is NOT covered: the poison is a property of
