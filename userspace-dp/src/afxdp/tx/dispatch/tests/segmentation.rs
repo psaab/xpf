@@ -599,6 +599,114 @@ fn prepared_tx_segments_a_fin_bearing_oversized_frame_9116() {
         );
     }
 }
+
+/// #13634: production dispatch tries this PREPARED-TX builder before the
+/// copy-path builder, so bind its independent AH guard directly. Reverting
+/// that local guard makes the AH input enqueue segments while the copy-path
+/// regression still passes. The control is an equivalent oversized plain
+/// IPv6/TCP datagram and must produce multiple prepared segments.
+#[test]
+fn prepared_tx_declines_ipv6_ah_authenticated_packet_13634() {
+    const MTU: usize = 1280;
+    const DATA_LEN: usize = 1400;
+    const L3: usize = 14;
+
+    fn ipv6_tcp_frame(with_ah: bool) -> Vec<u8> {
+        let ext_len = if with_ah { 12 } else { 0 };
+        let payload_len = (ext_len + 20 + DATA_LEN) as u16;
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        frame.extend_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
+        frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+        frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+        frame.extend_from_slice(&payload_len.to_be_bytes());
+        frame.push(if with_ah { 51 } else { PROTO_TCP });
+        frame.push(64);
+        let mut src = [0u8; 16];
+        src[0] = 0x20;
+        src[1] = 0x01;
+        src[2] = 0x0d;
+        src[3] = 0xb8;
+        src[15] = 0x05;
+        let mut dst = src;
+        dst[15] = 0x09;
+        frame.extend_from_slice(&src);
+        frame.extend_from_slice(&dst);
+        if with_ah {
+            // AH: next=TCP, payload-len=1 ((1+2)*4=12B).
+            frame.extend_from_slice(&[PROTO_TCP, 0x01, 0x00, 0x00]);
+            frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+            frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        }
+        frame.extend_from_slice(&40000u16.to_be_bytes());
+        frame.extend_from_slice(&5201u16.to_be_bytes());
+        frame.extend_from_slice(&[
+            0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x10, 0x00, 0x3f, 0x00, 0x00,
+            0x00, 0x00,
+        ]);
+        frame.extend(std::iter::repeat(0x41u8).take(DATA_LEN));
+        frame
+    }
+
+    fn prepared_result(frame: &[u8], l4_offset: u16) -> (Option<(u32, u64, u32)>, usize) {
+        let forwarding = test_forwarding_with_egress_mtu(MTU);
+        let decision = test_forwarding_decision_to_bound_ifindex(11);
+        let meta = UserspaceDpMeta {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            l3_offset: L3 as u16,
+            l4_offset,
+            flow_src_port: 40000,
+            flow_dst_port: 5201,
+            ..UserspaceDpMeta::default()
+        };
+        let mut target_binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+        let mut post_recycles: Vec<(u32, u64)> = Vec::new();
+        let worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
+            BTreeMap::new();
+        let result = segment_forwarded_tcp_frames_into_prepared(
+            &mut target_binding,
+            frame,
+            meta,
+            &decision,
+            &forwarding,
+            false,
+            Some((40000, 5201)),
+            None,
+            None,
+            None,
+            1,
+            &mut post_recycles,
+            0,
+            &worker_commands_by_id,
+        );
+        (result, target_binding.tx_pipeline.pending_tx_prepared.len())
+    }
+
+    let ah_frame = ipv6_tcp_frame(true);
+    assert!(crate::afxdp::frame::ipv6_ah_sighted(
+        &ah_frame,
+        libc::AF_INET6 as u8,
+        L3
+    ));
+    let (ah_result, ah_prepared_count) = prepared_result(&ah_frame, (L3 + 40 + 12) as u16);
+    assert!(ah_result.is_none(), "prepared-TX must decline IPv6 AH");
+    assert_eq!(ah_prepared_count, 0, "AH must not queue prepared segments");
+
+    let control_frame = ipv6_tcp_frame(false);
+    assert!(!crate::afxdp::frame::ipv6_ah_sighted(
+        &control_frame,
+        libc::AF_INET6 as u8,
+        L3
+    ));
+    let (control_result, control_prepared_count) =
+        prepared_result(&control_frame, (L3 + 40) as u16);
+    let (segments, _bytes, _max_frame) =
+        control_result.expect("otherwise identical non-AH TCP must segment");
+    assert!(segments > 1, "positive control must produce >1 segment");
+    assert_eq!(control_prepared_count, segments as usize);
+}
+
 // #9782 F2b + tx-twin pin: an oversized PAT-translated TCP flow must
 // segment into frames that ALL carry the translated tuple with valid
 // checksums, and must NOT trip the debug-log tuple-mismatch diagnostic
