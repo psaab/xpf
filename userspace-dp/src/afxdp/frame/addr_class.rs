@@ -349,8 +349,9 @@ pub(in crate::afxdp) fn transit_src_is_martian(
 /// routers must not forward as ordinary unicast transit. LocalDelivery remains
 /// outside the caller-side gate so traffic received by the firewall is intact.
 ///
-/// IPv4 covers multicast (224/4), limited broadcast, loopback (127/8), and
-/// reserved (240/4). IPv6 covers multicast (ff00::/8); IPv6 has no broadcast.
+/// IPv4 covers multicast (224/4), limited broadcast, loopback (127/8), link-
+/// local (169.254/16), and reserved (240/4). IPv6 covers multicast (ff00::/8)
+/// and unicast link-local (fe80::/10); IPv6 has no broadcast.
 #[inline]
 pub(in crate::afxdp) fn transit_dst_is_martian(ip: IpAddr) -> bool {
     match ip {
