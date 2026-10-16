@@ -275,6 +275,26 @@ func (a *D11AttestationArmer) Matches(payload []byte) bool {
 	return d11MarkerMatches(payload, selector)
 }
 
+// MatchesDraining reports whether payload carries the D11 selector while
+// the run is draining. The selector itself is not cleared until Disarm,
+// so marker detection must ignore the armed gate in this state: a frame
+// selected for attestation may never be reclassified as ordinary traffic
+// once draining begins. Payloads are inspected with the same marker rule
+// as Matches, so non-marker traffic is never claimed by this check.
+func (a *D11AttestationArmer) MatchesDraining(payload []byte) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	draining := a.state == D11Draining
+	selector := a.selector
+	a.mu.Unlock()
+	if !draining {
+		return false
+	}
+	return d11MarkerMatches(payload, selector)
+}
+
 func (a *D11AttestationArmer) BeginDrain() bool {
 	if a == nil {
 		return false
@@ -776,7 +796,41 @@ func d11GoFrameDigest(payload []byte, lease ReinjectLease, origin CaptureOrigin,
 }
 
 func (p *CapturePipeline) dispatchAttestEligible(frames []CaptureFrame) {
-	if p == nil || p.attestation == nil || p.attestation.Armer == nil || p.attestation.Armer.State() != D11Armed {
+	if p == nil || p.attestation == nil || p.attestation.Armer == nil {
+		p.submitEligible(frames)
+		return
+	}
+	state := p.attestation.Armer.State()
+	if state == D11Draining {
+		// Draining is fail-closed for the attestation selector: a
+		// marker-carrying frame must go through the deny-only
+		// attestSubmit terminal (which refuses every frame once
+		// d11RevokedPermitEpoch is latched), never through the
+		// ordinary FORWARD arm. CancelForD11Drain latches the fence
+		// immediately after BeginDrain in the rollback sequence,
+		// and a frame dispatched in the narrow window before that
+		// latch is still refused here because state != D11Armed
+		// (attestLease requires D11Armed). Non-marker frames keep
+		// the ordinary path so unrelated capture stays live during
+		// rollback.
+		selected := make([]CaptureFrame, 0, len(frames))
+		ordinary := make([]CaptureFrame, 0, len(frames))
+		for _, frame := range frames {
+			if frame.Packet != nil && p.attestation.Armer.MatchesDraining(frame.Packet.Payload()) {
+				selected = append(selected, frame)
+			} else {
+				ordinary = append(ordinary, frame)
+			}
+		}
+		if len(selected) != 0 {
+			p.attestSubmit(selected)
+		}
+		if len(ordinary) != 0 {
+			p.submitEligible(ordinary)
+		}
+		return
+	}
+	if state != D11Armed {
 		p.submitEligible(frames)
 		return
 	}
