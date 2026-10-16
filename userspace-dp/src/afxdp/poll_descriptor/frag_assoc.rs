@@ -213,11 +213,13 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
 /// own tuple + authority — the "forward" in the name means "same-tuple".
 ///
 /// Only a first fragment (offset 0, MF=1) carrying either a same-family
-/// address rewrite or an exact-default no-NAT decision whose resolution is a
-/// ForwardCandidate with a resolved neighbor installs. NAT64, other decisions
-/// without an address rewrite, and decisions that will not forward are never
-/// cached; a plain fragment therefore receives an association only after its
-/// actual forwarding decision has committed.
+/// address rewrite or an exact-default no-NAT decision installs. Forwarded
+/// packets require a resolved neighbor; an admitted LocalDelivery can also
+/// install because reinjection to the host is its committed delivery decision.
+/// NAT64, metadata-only decisions, and other dispositions are never cached.
+/// The LocalDelivery entry is session-bound to the admitted first fragment, so
+/// an orphan tail or a tail whose head session is gone still misses and is
+/// handled by normal flowless host-inbound enforcement.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn same_family_or_plain_install_forward_fragment_assoc(
@@ -240,9 +242,17 @@ pub(super) fn same_family_or_plain_install_forward_fragment_assoc(
     if decision.nat.nat64 || (!plain && !same_family_address_rewrite) {
         return false;
     }
-    if decision.resolution.disposition != ForwardingDisposition::ForwardCandidate
-        || decision.resolution.neighbor_mac.is_none()
-    {
+    let forward_candidate = decision.resolution.disposition
+        == ForwardingDisposition::ForwardCandidate
+        && decision.resolution.neighbor_mac.is_some();
+    let local_delivery = decision.resolution.disposition == ForwardingDisposition::LocalDelivery;
+    if !forward_candidate && !local_delivery {
+        return false;
+    }
+    // LocalDelivery fragment association is specifically for host-bound
+    // service datagrams. It inherits no forwarding rewrite; any translation
+    // decision must continue through the established NAT fragment paths.
+    if local_delivery && !plain {
         return false;
     }
     if let Some(key) = crate::fragment_assoc::first_fragment_key(l3_packet, addr_family, authority)
@@ -261,16 +271,16 @@ pub(super) fn same_family_or_plain_install_forward_fragment_assoc(
     false
 }
 
-/// #5689/#11412: consult the fragment association for a NON-first same-family
-/// NAT / NPTv6 fragment or a plain no-NAT fragment (forward OR reply — #9950
-/// installs reply entries at the session-hit tail, keyed by the reply's own
-/// tuple + authority). Same-family address-rewrite decisions retain their
-/// existing behavior; an exact-default no-NAT decision is returned only when
-/// its reverse metadata is also `None`. NAT64 and port-only/other decisions
-/// are rejected. A hit gives the flowless arm the first fragment's committed
-/// verdict and egress resolution; the build path performs address-only L3
-/// translation for NAT fragments. A miss returns `None` for normal enforcement.
-/// Unlike the NAT64 forward consult (v6-only) this works for BOTH IPv4 and IPv6.
+/// #5689/#11412/#13926: consult the fragment association for a NON-first
+/// same-family NAT / NPTv6 fragment or a plain no-NAT fragment (forward, reply,
+/// or admitted host-bound LocalDelivery — #9950 installs replies at the
+/// session-hit tail, keyed by their own tuple + authority). Same-family
+/// address-rewrite decisions retain their existing behavior; an exact-default
+/// no-NAT decision is returned only when its reverse metadata is also `None`.
+/// NAT64 and port-only/other decisions are rejected. A LocalDelivery hit
+/// inherits the admitted first fragment's host delivery decision; a miss falls
+/// through to ordinary flowless host-inbound checks, where a port-only admit
+/// cannot accept a tail.
 /// FAIL-CLOSED MISS (#6122, closing the #5689 residual). On a consult MISS —
 /// fragment reorder (non-first before first), TTL straddle (> the ~2s
 /// `FragAssoc` TTL between first and non-first), shard-cap eviction under a
@@ -319,9 +329,12 @@ pub(super) fn same_family_or_plain_consult_forward_fragment_assoc(
     // existing same-family address rewrites, or exact-default no-NAT only if
     // no NAT64 reverse metadata was stored. This excludes port-only decisions.
     let plain = decision.nat == crate::nat::NatDecision::default() && _reverse.is_none();
-    let same_family_address_rewrite =
-        !decision.nat.nat64
-            && (decision.nat.rewrite_src.is_some() || decision.nat.rewrite_dst.is_some());
+    let local_delivery = decision.resolution.disposition == ForwardingDisposition::LocalDelivery;
+    if local_delivery && !plain {
+        return None;
+    }
+    let same_family_address_rewrite = !decision.nat.nat64
+        && (decision.nat.rewrite_src.is_some() || decision.nat.rewrite_dst.is_some());
     if !plain && !same_family_address_rewrite {
         return None;
     }
