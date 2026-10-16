@@ -443,8 +443,18 @@ impl SessionTable {
                 entry.handshake_pending = false;
                 entry.syn_ack_first = false;
             }
-            let refresh =
-                !was_closing || close_progress || (!do_close && !entry.reset && !entry.fin_own);
+            // #13682: a close-deferring hit runs before zone authority is
+            // known. Do not let a deferred FIN/RST slide an already-closing
+            // entry's deadline; an Owner applies actual close progress after
+            // the verdict, while a foreign packet is dropped. Ordinary hits
+            // from the non-FINed half still refresh the half-close window.
+            let deferred_close_segment = defer_close && is_tcp && is_closing(tcp_flags);
+            let refresh = !was_closing
+                || close_progress
+                || (!do_close
+                    && !deferred_close_segment
+                    && !entry.reset
+                    && !entry.fin_own);
             if refresh {
                 entry.last_seen_ns = now_ns;
                 entry.expires_after_ns = if is_tcp && entry.closing {
