@@ -2443,3 +2443,67 @@ fn nat64_14115_forward_nonfirst_and_slow_path_do_not_touch_payload() {
         "#14114: slow path still fails closed without Nat64ReverseInfo"
     );
 }
+
+// #14305: a non-first fragment whose meta.addr_family is neither AF_INET
+// nor AF_INET6 must fail closed via the slow-path builder's
+// `_ => return None` match arm. This pins the reachable fail-closed path
+// that the removed dead guard (non-IP family AND
+// `is_non_first_fragment(packet, meta.addr_family)`, which is always
+// `false` for non-IP families) falsely claimed to provide. Both wire
+// shapes are covered: a v6 Fragment-header packet and a v4 offset packet.
+#[test]
+fn nat64_14305_slow_path_nonfirst_non_ip_family_fails_closed() {
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let payload: &[u8] = &[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+    let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, 40001));
+    // IPv6 non-first fragment wire bytes (Fragment Header offset 100, MF=1),
+    // identical in shape to the #14114 slow-path fixture above.
+    let mut v6frame = vec![0u8; 14 + 40 + 8 + payload.len()];
+    v6frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+    v6frame[14] = 0x60;
+    v6frame[18..20].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    v6frame[20] = 44;
+    v6frame[21] = 64;
+    v6frame[22..38].copy_from_slice(&client.octets());
+    v6frame[38..54].copy_from_slice(&synthetic.octets());
+    v6frame[54] = PROTO_UDP;
+    v6frame[56..58].copy_from_slice(&((100u16 << 3) | 1).to_be_bytes());
+    v6frame[58..62].copy_from_slice(&0x1234u32.to_be_bytes());
+    v6frame[62..].copy_from_slice(payload);
+    let mut bad_meta = nat64_forward_meta();
+    bad_meta.addr_family = 0;
+    bad_meta.protocol = PROTO_UDP;
+    assert!(
+        build_nat64_l3_packet_for_slow_path(&v6frame, bad_meta, &decision, None, false).is_none(),
+        "#14305: v6 non-first fragment with non-IP meta family must fail closed"
+    );
+    // IPv4 non-first fragment wire bytes (frag word 0x00b9 = offset 185).
+    let mut v4frame = vec![0u8; 14 + 20 + payload.len()];
+    v4frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+    v4frame[14] = 0x45;
+    v4frame[16..18].copy_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+    v4frame[18..20].copy_from_slice(&0x4242u16.to_be_bytes());
+    v4frame[20..22].copy_from_slice(&0x00b9u16.to_be_bytes());
+    v4frame[22] = 64;
+    v4frame[23] = PROTO_UDP;
+    v4frame[26..30].copy_from_slice(&server.octets());
+    v4frame[30..34].copy_from_slice(&pool.octets());
+    let csum = checksum16(&v4frame[14..34]);
+    v4frame[24..26].copy_from_slice(&csum.to_be_bytes());
+    v4frame[34..].copy_from_slice(payload);
+    let fwd = Nat64State::forward_decision(pool, server, 40001);
+    let rev = fwd.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443);
+    let rdecision = icmp_test_decision(rev);
+    let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    let mut bad_rmeta = nat64_reverse_meta();
+    bad_rmeta.addr_family = 0;
+    bad_rmeta.protocol = PROTO_UDP;
+    assert!(
+        build_nat64_l3_packet_for_slow_path(&v4frame, bad_rmeta, &rdecision, Some(&info), false)
+            .is_none(),
+        "#14305: v4 non-first fragment with non-IP meta family must fail closed"
+    );
+}
