@@ -252,10 +252,14 @@ type authConn struct {
 	// retired process. A zero value means the peer announced nothing, so
 	// retirement falls back to the pre-#9818 stamp rule.
 	peerIdentity peerProcessIdentity
-	// peerSnapshotVersion is the snapshot protocol version advertised on this
-	// connection. Guarded by SessionSync.mu; retained so a boot-id switch on
-	// this same priming stream can restore its already-proven capability.
+	// peerSnapshotVersion, peerCapabilityFlags and peerSessionSyncWire are
+	// the capability set advertised on this connection (#6650/#7147/#7990).
+	// Guarded by SessionSync.mu; retained so a boot-id switch on this same
+	// priming stream can restore its already-proven capability set — and
+	// ONLY its set, never the retired incarnation's global observation.
 	peerSnapshotVersion uint16
+	peerCapabilityFlags uint8
+	peerSessionSyncWire uint16
 	// peerCapabilitiesSeen records that this connection delivered the
 	// capabilities frame, including a legacy/short frame. Retirement defers
 	// eviction while this is false because the other fabric's frame may arrive

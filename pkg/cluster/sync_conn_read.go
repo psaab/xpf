@@ -1214,6 +1214,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		}
 		if ac, ok := conn.(*authConn); ok {
 			ac.peerSnapshotVersion = peerProto
+			ac.peerCapabilityFlags = peerFlags
+			ac.peerSessionSyncWire = peerWire
 		}
 		s.peerSnapshotProtocolWriteMu.Lock()
 		if s.peerSnapshotProtocol.Load() != uint32(peerProto) {
