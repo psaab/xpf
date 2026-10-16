@@ -331,6 +331,8 @@ func (a *IpsecCapturePipeline) receiveQueue(ctx context.Context, captureQueue Ip
 			FIBGeneration:      fibGeneration,
 			QueueNumber:        captureQueue.QueueNumber,
 			QueueEpoch:         captureQueue.QueueEpoch,
+			Tunnel:             captureQueue.Tunnel,
+			VRF:                captureQueue.VRF,
 		}
 		classification, err := nfqueue.ClassifyCapturePayload(packet.Payload())
 		if err != nil {

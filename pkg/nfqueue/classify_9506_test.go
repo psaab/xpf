@@ -113,6 +113,83 @@ func TestClassifyV4DFWholeIsNotFragment9506(t *testing.T) {
 	}
 }
 
+// #13977: CaptureClassification.FlowKey carries only the inner 5-tuple, so
+// identical inner tuples arriving on different IPsec tunnel/VRF capture
+// queues (or a rotated queue generation) collapse into one per-flow FIFO in
+// CapturePipeline — cross-tunnel head-of-line blocking and retireFlow
+// cross-talk. FragmentKey already carries (tunnel, vrf, generation); the
+// flow-scope key must exist for BOTH fragments and whole packets (fragments
+// key the flow FIFO before reassembly) and must vary with every dimension.
+func TestClassifyFlowScopeKeySeparatesCaptureBoundaries13977(t *testing.T) {
+	pkt := classifyV4Packet(t, 0x2222, 0x4000, 6, net.ParseIP("10.3.0.1"), net.ParseIP("10.3.0.2"),
+		0x00, 0x50, 0x01, 0xbb, 0xde, 0xad, 0xbe, 0xef)
+	got, err := ClassifyCapturePayload(pkt)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	base := scopedCaptureFlowKey(got.FlowKey, 7, 0, 3, 9)
+	scopes := map[string]string{
+		"base":              base,
+		"different tunnel":  scopedCaptureFlowKey(got.FlowKey, 8, 0, 3, 9),
+		"different vrf":     scopedCaptureFlowKey(got.FlowKey, 7, 1, 3, 9),
+		"different queue":   scopedCaptureFlowKey(got.FlowKey, 7, 0, 3, 10),
+		"different gen":     scopedCaptureFlowKey(got.FlowKey, 7, 0, 4, 9),
+		"different queue#2": scopedCaptureFlowKey(got.FlowKey, 7, 0, 3, 11),
+	}
+	seen := make(map[string]string, len(scopes))
+	for name, key := range scopes {
+		if key == "" {
+			t.Fatalf("%s: empty scoped flow key", name)
+		}
+		if other, dup := seen[key]; dup {
+			t.Fatalf("scoped flow keys collide for %s and %s: %q", other, name, key)
+		}
+		seen[key] = name
+	}
+	if again := scopedCaptureFlowKey(got.FlowKey, 7, 0, 3, 9); again != base {
+		t.Fatalf("scoped flow key not stable: %q vs %q", base, again)
+	}
+	if q0 := scopedCaptureFlowKey(got.FlowKey, 7, 0, 3, 0); q0 == base {
+		t.Fatalf("queue-0 scoped key unexpectedly equals queue-9 key %q", base)
+	}
+	// Fragments key the flow FIFO too: a fragment's scoped key must separate
+	// by the same dimensions and must not equal the whole-packet key.
+	firstFrag := classifyV4Packet(t, 77, 0x2000, 17, net.ParseIP("10.3.0.1"), net.ParseIP("10.3.0.2"),
+		0x00, 0x35, 0x00, 0x35, 0xaa, 0xbb)
+	frag, err := ClassifyCapturePayload(firstFrag)
+	if err != nil {
+		t.Fatalf("Classify frag: %v", err)
+	}
+	if scopedCaptureFlowKey(frag.FlowKey, 7, 0, 3, 9) == scopedCaptureFlowKey(frag.FlowKey, 8, 0, 3, 9) {
+		t.Fatal("fragment scoped keys collide across tunnels")
+	}
+	if scopedCaptureFlowKey(frag.FlowKey, 7, 0, 3, 9) == base {
+		t.Fatal("fragment scoped key equals whole-packet scoped key")
+	}
+}
+
+func TestCapturePipelineFlowFIFOSeparatesCaptureScopes13977(t *testing.T) {
+	p := &CapturePipeline{flows: make(map[string]*flowState)}
+	base := CaptureFrame{FlowKey: "inner-flow", Tunnel: 7, Generation: 3, QueueNumber: 9}
+	otherTunnel := base
+	otherTunnel.Tunnel = 8
+	otherGeneration := base
+	otherGeneration.Generation = 4
+	otherQueue := base
+	otherQueue.QueueNumber = 10
+	for _, frame := range []CaptureFrame{base, otherTunnel, otherGeneration, otherQueue} {
+		p.enqueueFlowLocked(frame)
+	}
+	if len(p.flows) != 4 {
+		t.Fatalf("per-flow FIFOs = %d, want 4 for distinct tunnel/generation/queue scopes", len(p.flows))
+	}
+	for _, frame := range []CaptureFrame{base, otherTunnel, otherGeneration, otherQueue} {
+		key := scopedCaptureFlowKey(frame.FlowKey, frame.Tunnel, frame.VRF, frame.Generation, frame.QueueNumber)
+		if p.flows[key] == nil || len(p.flows[key].frames) != 1 {
+			t.Fatalf("capture scope (%d,%d,%d) does not own an independent FIFO", frame.Tunnel, frame.Generation, frame.QueueNumber)
+		}
+	}
+}
 func TestClassifyV6TCPWhole9506(t *testing.T) {
 	body := []byte{0x01, 0xbb, 0x00, 0x50, 0xde, 0xad, 0xbe, 0xef}
 	pkt := classifyV6Packet(t, 6, net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), body...)

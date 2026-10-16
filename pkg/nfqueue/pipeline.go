@@ -144,6 +144,8 @@ type CaptureFrame struct {
 	FlowKey     string
 	FragmentKey *FragmentKey
 	Fragment    *Fragment
+	Tunnel      uint32
+	VRF         uint32
 	// SnapshotGeneration is the immutable capture authority. ConfigGeneration
 	// and FIBGeneration are the accepted packet/config authority; the separate
 	// P-MECH inventory identity is frozen from that same accepted snapshot.
@@ -637,6 +639,10 @@ func (p *CapturePipeline) dispatchEligible() {
 
 func (p *CapturePipeline) enqueueFlowLocked(frame CaptureFrame) []CaptureFrame {
 	flowKey := frame.FlowKey
+	if flowKey != "" && (frame.Tunnel != 0 || frame.VRF != 0 || frame.QueueNumber != 0 || frame.Generation != 0) {
+		flowKey = scopedCaptureFlowKey(flowKey, frame.Tunnel, frame.VRF, frame.Generation, frame.QueueNumber)
+		frame.FlowKey = flowKey
+	}
 	if flowKey == "" {
 		flowKey = fmt.Sprintf("queue:%d/packet:%d", frame.Packet.QueueID(), frame.Packet.id)
 		frame.FlowKey = flowKey
