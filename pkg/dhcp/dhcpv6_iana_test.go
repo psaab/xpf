@@ -55,12 +55,12 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 		// not A's stale 200s.
 		adv := iaNAReply(t,
 			&dhcpv6.OptIAAddress{
-				IPv6Addr:          mustIP(t, "2001:db8::b"),
+				IPv6Addr:          mustIP(t, "2606:4700::b"),
 				PreferredLifetime: 300 * time.Second,
 				ValidLifetime:     600 * time.Second,
 			},
 			&dhcpv6.OptIAAddress{
-				IPv6Addr:          mustIP(t, "2001:db8::a"),
+				IPv6Addr:          mustIP(t, "2606:4700::a"),
 				PreferredLifetime: 100 * time.Second,
 				ValidLifetime:     200 * time.Second,
 			},
@@ -70,7 +70,7 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parseV6Reply: %v", err)
 		}
-		wantAddr := netip.MustParseAddr("2001:db8::b")
+		wantAddr := netip.MustParseAddr("2606:4700::b")
 		if got := res.lease.Address.Addr(); got != wantAddr {
 			t.Errorf("selected address = %v, want %v (longest preferred-lifetime)", got, wantAddr)
 		}
@@ -81,7 +81,7 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 
 	t.Run("single-address reply unchanged", func(t *testing.T) {
 		adv := iaNAReply(t, &dhcpv6.OptIAAddress{
-			IPv6Addr:          mustIP(t, "2001:db8::5"),
+			IPv6Addr:          mustIP(t, "2606:4700::5"),
 			PreferredLifetime: 100 * time.Second,
 			ValidLifetime:     500 * time.Second,
 		})
@@ -89,8 +89,8 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parseV6Reply: %v", err)
 		}
-		if got := res.lease.Address.Addr(); got != netip.MustParseAddr("2001:db8::5") {
-			t.Errorf("address = %v, want 2001:db8::5", got)
+		if got := res.lease.Address.Addr(); got != netip.MustParseAddr("2606:4700::5") {
+			t.Errorf("address = %v, want 2606:4700::5", got)
 		}
 		if got, want := res.lease.LeaseTime, 500*time.Second; got != want {
 			t.Errorf("lease time = %v, want %v", got, want)
@@ -104,12 +104,12 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 		// and must be skipped, leaving A the only usable choice.
 		adv := iaNAReply(t,
 			&dhcpv6.OptIAAddress{
-				IPv6Addr:          mustIP(t, "2001:db8::a"),
+				IPv6Addr:          mustIP(t, "2606:4700::a"),
 				PreferredLifetime: 50 * time.Second,
 				ValidLifetime:     400 * time.Second,
 			},
 			&dhcpv6.OptIAAddress{
-				IPv6Addr:          mustIP(t, "2001:db8::dead"),
+				IPv6Addr:          mustIP(t, "2606:4700::dead"),
 				PreferredLifetime: 999 * time.Second,
 				ValidLifetime:     0,
 			},
@@ -118,8 +118,8 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parseV6Reply: %v", err)
 		}
-		if got := res.lease.Address.Addr(); got != netip.MustParseAddr("2001:db8::a") {
-			t.Errorf("address = %v, want 2001:db8::a (valid-lifetime-0 must be skipped)", got)
+		if got := res.lease.Address.Addr(); got != netip.MustParseAddr("2606:4700::a") {
+			t.Errorf("address = %v, want 2606:4700::a (valid-lifetime-0 must be skipped)", got)
 		}
 		if got, want := res.lease.LeaseTime, 400*time.Second; got != want {
 			t.Errorf("lease time = %v, want %v", got, want)
@@ -128,7 +128,7 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 
 	t.Run("all addresses valid-lifetime-0 => no usable IA_NA", func(t *testing.T) {
 		adv := iaNAReply(t, &dhcpv6.OptIAAddress{
-			IPv6Addr:          mustIP(t, "2001:db8::dead"),
+			IPv6Addr:          mustIP(t, "2606:4700::dead"),
 			PreferredLifetime: 100 * time.Second,
 			ValidLifetime:     0,
 		})
@@ -143,19 +143,19 @@ func TestParseV6ReplyMultiIAAddrDeterministic(t *testing.T) {
 func TestSelectIANAAddressTieBreak(t *testing.T) {
 	adv := iaNAReply(t,
 		&dhcpv6.OptIAAddress{
-			IPv6Addr:          mustIP(t, "2001:db8::c"),
+			IPv6Addr:          mustIP(t, "2606:4700::c"),
 			PreferredLifetime: 300 * time.Second,
 			ValidLifetime:     700 * time.Second,
 		},
 		&dhcpv6.OptIAAddress{
-			IPv6Addr:          mustIP(t, "2001:db8::d"),
+			IPv6Addr:          mustIP(t, "2606:4700::d"),
 			PreferredLifetime: 300 * time.Second,
 			ValidLifetime:     800 * time.Second,
 		},
 	)
-	addr, validLT, _ := selectIANAAddress(adv)
-	if addr != netip.MustParseAddr("2001:db8::c") {
-		t.Errorf("tie-break address = %v, want 2001:db8::c (first-seen)", addr)
+	addr, validLT, _ := selectIANAAddress(adv, nil, nil)
+	if addr != netip.MustParseAddr("2606:4700::c") {
+		t.Errorf("tie-break address = %v, want 2606:4700::c (first-seen)", addr)
 	}
 	if validLT != 700*time.Second {
 		t.Errorf("tie-break valid-lifetime = %v, want 700s (first-seen address's own)", validLT)
@@ -173,22 +173,22 @@ func TestSelectIANAAddressMultipleIANA(t *testing.T) {
 
 	iana1 := &dhcpv6.OptIANA{IaId: [4]byte{0, 0, 0, 1}}
 	iana1.Options.Add(&dhcpv6.OptIAAddress{
-		IPv6Addr:          mustIP(t, "2001:db8::1"),
+		IPv6Addr:          mustIP(t, "2606:4700::1"),
 		PreferredLifetime: 100 * time.Second,
 		ValidLifetime:     200 * time.Second,
 	})
 	iana2 := &dhcpv6.OptIANA{IaId: [4]byte{0, 0, 0, 2}}
 	iana2.Options.Add(&dhcpv6.OptIAAddress{
-		IPv6Addr:          mustIP(t, "2001:db8::2"),
+		IPv6Addr:          mustIP(t, "2606:4700::2"),
 		PreferredLifetime: 500 * time.Second,
 		ValidLifetime:     900 * time.Second,
 	})
 	adv.AddOption(iana1)
 	adv.AddOption(iana2)
 
-	addr, validLT, _ := selectIANAAddress(adv)
-	if addr != netip.MustParseAddr("2001:db8::2") {
-		t.Errorf("address = %v, want 2001:db8::2 (longest preferred across IA_NA options)", addr)
+	addr, validLT, _ := selectIANAAddress(adv, nil, nil)
+	if addr != netip.MustParseAddr("2606:4700::2") {
+		t.Errorf("address = %v, want 2606:4700::2 (longest preferred across IA_NA options)", addr)
 	}
 	if validLT != 900*time.Second {
 		t.Errorf("valid-lifetime = %v, want 900s", validLT)

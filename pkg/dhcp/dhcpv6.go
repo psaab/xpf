@@ -773,8 +773,30 @@ func v6Acquire(ctx context.Context, client *nclient6.Client, modifiers []dhcpv6.
 // Selection is deterministic:
 //   - skip any IAADDR with valid-lifetime 0 — RFC 8415 §12.1 treats a
 //     zero valid-lifetime as an expired/declined address (F-264);
+//   - discard any IAADDR whose preferred-lifetime exceeds its
+//     valid-lifetime — RFC 8415 §21.6: "The client MUST discard any
+//     addresses for which the preferred lifetime is greater than the
+//     valid lifetime." Without this, ranking by preferred-lifetime lets
+//     a pref=0xFFFFFFFF/valid=1s candidate beat every usable sibling
+//     (#14185);
+//   - skip any IAADDR that is not acceptable as a host address on the
+//     interface: the same global-unicast-only class policy IA_PD already
+//     enforces via config.DelegatedIPv6PrefixRefusalReason on the /128
+//     (loopback, link-local, multicast, unspecified, ULA, documentation,
+//     IPv4-compatible/mapped, site-local are all refused) and any
+//     address overlapping a protected (configured interface / RA /
+//     NAT64) prefix in protected (#10856 parity, #14185). A rogue or
+//     buggy server must not make the firewall bind ::1, fe80::1, or a
+//     LAN/configured address on its WAN interface;
 //   - among the rest, prefer the longest preferred-lifetime;
 //   - ties are broken by first-seen (option order).
+//
+// Each refused IAADDR is skipped independently, so a usable sibling is
+// salvaged — the same per-element policy extractDelegatedPrefixes
+// applies to IAPREFIX options. A refused address is NOT a withdrawal:
+// it never sets sawZeroLifetime, so it cannot deconfigure a held
+// address; when every candidate is refused the caller sees the generic
+// absent/transient failure and keeps + retries.
 //
 // The returned valid-lifetime belongs to the CHOSEN address, so the
 // caller pairs lease.LeaseTime with the right lifetime rather than a
@@ -788,7 +810,11 @@ func v6Acquire(ctx context.Context, client *nclient6.Client, modifiers []dhcpv6.
 // (present-but-0 → discard the held address) from an ABSENT IA_NA (no IAADDR
 // at all → keep + retry). A reply with both a 0-lifetime and a positive IAADDR
 // still selects the positive one (valid Addr) — not an invalidation. (#5927)
-func selectIANAAddress(adv *dhcpv6.Message, expectedIAID ...*[4]byte) (addr netip.Addr, validLT time.Duration, sawZeroLifetime bool) {
+//
+// expectedIAID, when non-nil, restricts selection to that IA_NA.
+// protected is the snapshot from Manager.protectedIPv6Prefixes (nil
+// refuses nothing on overlap — the class policy still applies).
+func selectIANAAddress(adv *dhcpv6.Message, expectedIAID *[4]byte, protected []netip.Prefix) (addr netip.Addr, validLT time.Duration, sawZeroLifetime bool) {
 	var (
 		best      netip.Addr
 		bestValid time.Duration
@@ -801,7 +827,7 @@ func selectIANAAddress(adv *dhcpv6.Message, expectedIAID ...*[4]byte) (addr neti
 		if !ok {
 			continue
 		}
-		if len(expectedIAID) > 0 && expectedIAID[0] != nil && ianaOpt.IaId != *expectedIAID[0] {
+		if expectedIAID != nil && ianaOpt.IaId != *expectedIAID {
 			continue
 		}
 		if !v6StatusOK(ianaOpt.Options.Status()) {
@@ -819,8 +845,31 @@ func selectIANAAddress(adv *dhcpv6.Message, expectedIAID ...*[4]byte) (addr neti
 				sawZero = true
 				continue
 			}
+			// RFC 8415 §21.6: discard any address whose preferred lifetime
+			// exceeds its valid lifetime, before ranking (#14185).
+			if iaaddr.PreferredLifetime > iaaddr.ValidLifetime {
+				continue
+			}
 			a, ok := netip.AddrFromSlice(iaaddr.IPv6Addr)
-			if !ok {
+			if !ok || !a.Is6() || a.Is4In6() {
+				continue
+			}
+			// #14185: the IA_NA address is installed on the firewall
+			// itself, so it needs at least the validation IA_PD already
+			// gets (#10856): global-unicast-only class policy on the /128
+			// plus no overlap with protected configured space. Skip only
+			// the offending IAADDR; a usable sibling is salvaged.
+			candidate := netip.PrefixFrom(a, 128)
+			if reason := config.DelegatedIPv6PrefixRefusalReason(candidate); reason != "" {
+				slog.Warn("DHCPv6: refusing IA_NA address with blocked address class",
+					"address", a,
+					"reason", reason)
+				continue
+			}
+			if hit := overlappingProtectedPrefix(candidate, protected); hit.IsValid() {
+				slog.Warn("DHCPv6: refusing IA_NA address overlapping configured prefix",
+					"address", a,
+					"configured", hit)
 				continue
 			}
 			// Strict greater-than keeps the FIRST address at the maximum
@@ -887,7 +936,7 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 
 	if wantNA {
 		var sawZeroLifetime bool
-		addr, validLT, sawZeroLifetime = selectIANAAddress(adv, expectedNA)
+		addr, validLT, sawZeroLifetime = selectIANAAddress(adv, expectedNA, m.protectedIPv6Prefixes())
 		iaNAExplicitlyInvalidated = !addr.IsValid() && sawZeroLifetime
 	}
 

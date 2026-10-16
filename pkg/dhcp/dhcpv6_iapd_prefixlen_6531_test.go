@@ -350,7 +350,7 @@ func TestIAPDPrefixLen6531_BadWithdrawalIsDropped(t *testing.T) {
 // held /56.
 func TestIAPDPrefixLen6531_MixedIANAReplyStaysUsable(t *testing.T) {
 	msg := decodeReplyWire(t, 1,
-		iaNAWire(iaAddrWire("2001:db8:a::5", 3600, 7200)),
+		iaNAWire(iaAddrWire("2606:4700:a::5", 3600, 7200)),
 		iaPDWire(iaPrefixWire(200, "2606:4700:bad::", 3600, 7200)))
 
 	m := NewManagerForTesting(nil)
@@ -363,7 +363,7 @@ func TestIAPDPrefixLen6531_MixedIANAReplyStaysUsable(t *testing.T) {
 			"must still parse when every IAPREFIX was skipped — the rejection at "+
 			"parseV6Reply requires BOTH no address and no live PD", err)
 	}
-	if got, want := res.lease.Address, netip.MustParsePrefix("2001:db8:a::5/128"); got != want {
+	if got, want := res.lease.Address, netip.MustParsePrefix("2606:4700:a::5/128"); got != want {
 		t.Errorf("lease address = %s, want %s — the IA_NA must survive a "+
 			"skipped IAPREFIX", got, want)
 	}

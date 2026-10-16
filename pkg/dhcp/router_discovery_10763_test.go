@@ -34,7 +34,7 @@ func TestParseV6ReplyUsesSolicitedRouterAdvertisements10763(t *testing.T) {
 		},
 	}
 	adv := iaNAReply(t, &dhcpv6.OptIAAddress{
-		IPv6Addr:          mustIP(t, "2001:db8::10"),
+		IPv6Addr:          mustIP(t, "2606:4700::10"),
 		PreferredLifetime: time.Hour,
 		ValidLifetime:     2 * time.Hour,
 	})
@@ -57,7 +57,7 @@ func TestParseV6ReplyDoesNotUseLifetimeZeroRouter10763(t *testing.T) {
 		},
 	}
 	adv := iaNAReply(t, &dhcpv6.OptIAAddress{
-		IPv6Addr:          mustIP(t, "2001:db8::10"),
+		IPv6Addr:          mustIP(t, "2606:4700::10"),
 		PreferredLifetime: time.Hour,
 		ValidLifetime:     2 * time.Hour,
 	})

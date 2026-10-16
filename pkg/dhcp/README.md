@@ -315,13 +315,22 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
 - **DHCPv6 IA_NA holds one address, selected deterministically** (#4383):
   a reply may carry multiple IAADDR options within an IA_NA (and multiple
   IA_NA options), but xpf's `Lease` model installs a single `/128`.
-  `selectIANAAddress` (`dhcp.go`) chooses one — it skips any IAADDR whose
+  `selectIANAAddress` (`dhcpv6.go`) chooses one — it skips any IAADDR whose
   valid-lifetime is 0 (an expired/declined address, RFC 8415 §12.1;
-  ties into F-264), then prefers the longest preferred-lifetime,
+  ties into F-264), discards any IAADDR whose preferred-lifetime exceeds
+  its valid-lifetime (RFC 8415 §21.6 MUST), and skips any IAADDR failing
+  the IA_PD class/protected validation (#14185, #10856 parity): the
+  global-unicast-only `DelegatedIPv6PrefixRefusalReason` on the `/128`
+  plus no overlap with the protected configured-prefix set, so a rogue
+  server cannot make the firewall bind `::1`, `fe80::1`, a ULA/doc
+  address, or a configured LAN address on its WAN interface. Each refused
+  IAADDR is skipped independently (usable sibling salvaged; refusal is
+  never a withdrawal). It then prefers the longest preferred-lifetime,
   tie-broken by first-seen (option order). `lease.LeaseTime` is paired
   with the CHOSEN address's own valid-lifetime, never a stale value from
   a different IAADDR. This replaced a last-wins overwrite that installed
-  whichever address enumerated last. Pinned by `dhcpv6_iana_test.go`.
+  whichever address enumerated last. Pinned by `dhcpv6_iana_test.go` and
+  `dhcpv6_iana_validation_14185_test.go`.
 - **DHCPv6 zero-valid-lifetime IA_PD is a withdrawal, not a lease** (#4874
   B, RFC 8415 §12.1). Symmetric to the IA_NA skip above:
   `extractDelegatedPrefixes` partitions a reply's prefixes into *live*

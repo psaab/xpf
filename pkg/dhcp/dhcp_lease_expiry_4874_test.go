@@ -682,7 +682,7 @@ func TestParseV6ReplyWithdrawnPD(t *testing.T) {
 	t.Run("live IA_NA + withdrawn IA_PD populates withdrawnPDs", func(t *testing.T) {
 		opts := &DHCPv6Options{IATypes: []string{"ia-na", "ia-pd"}}
 		adv := iaNAReply(t, &dhcpv6.OptIAAddress{
-			IPv6Addr:          mustIP(t, "2001:db8::5"),
+			IPv6Addr:          mustIP(t, "2606:4700::5"),
 			PreferredLifetime: 100 * time.Second,
 			ValidLifetime:     500 * time.Second,
 		})

@@ -42,7 +42,7 @@ func acceptanceV6Reply(t *testing.T, opts ...dhcpv6.Option) *dhcpv6.Message {
 func TestV6AcquireRejectsWrongIAID10858(t *testing.T) {
 	wantIAID := [4]byte{0, 0, 0, 1}
 	wrongIA := &dhcpv6.OptIANA{IaId: [4]byte{0, 0, 0, 2}}
-	wrongIA.Options.Add(acceptanceV6Address("2001:db8::2"))
+	wrongIA.Options.Add(acceptanceV6Address("2606:4700::2"))
 	msg := acceptanceV6Reply(t, wrongIA)
 
 	got, err := (&Manager{}).parseV6ReplyChecked(context.Background(), "wan0", msg, nil, &wantIAID, nil)
@@ -76,7 +76,7 @@ func TestV6AcquireRejectsStatusWithStrayOptions10858(t *testing.T) {
 	wantPD := [4]byte{0, 0, 0, 1}
 	t.Run("message status", func(t *testing.T) {
 		ia := &dhcpv6.OptIANA{IaId: wantNA}
-		ia.Options.Add(acceptanceV6Address("2001:db8::3"))
+		ia.Options.Add(acceptanceV6Address("2606:4700::3"))
 		msg := acceptanceV6Reply(t,
 			&dhcpv6.OptStatusCode{StatusCode: iana.StatusUnspecFail, StatusMessage: "failed"},
 			ia,
@@ -90,7 +90,7 @@ func TestV6AcquireRejectsStatusWithStrayOptions10858(t *testing.T) {
 	t.Run("IA_NA status", func(t *testing.T) {
 		ia := &dhcpv6.OptIANA{IaId: wantNA}
 		ia.Options.Add(&dhcpv6.OptStatusCode{StatusCode: iana.StatusNoAddrsAvail, StatusMessage: "no addresses"})
-		ia.Options.Add(acceptanceV6Address("2001:db8::4"))
+		ia.Options.Add(acceptanceV6Address("2606:4700::4"))
 		msg := acceptanceV6Reply(t, ia)
 		got, err := (&Manager{}).parseV6ReplyChecked(context.Background(), "wan0", msg, nil, &wantNA, nil)
 		if err == nil || got != nil {
@@ -140,8 +140,8 @@ func TestV6AdvertiseSelectionHonorsPreference10858(t *testing.T) {
 		return msg
 	}
 
-	fastLow := newAdvertise(acceptanceV6DUID(2), 10, "2001:db8::10")
-	slowHigh := newAdvertise(acceptanceV6DUID(3), 200, "2001:db8::20")
+	fastLow := newAdvertise(acceptanceV6DUID(2), 10, "2606:4700::10")
+	slowHigh := newAdvertise(acceptanceV6DUID(3), 200, "2606:4700::20")
 	if !v6AdvertiseMatches(solicit, fastLow) || !v6AdvertiseMatches(solicit, slowHigh) {
 		t.Fatal("valid low- and high-preference Advertises must match the Solicit")
 	}
@@ -150,8 +150,8 @@ func TestV6AdvertiseSelectionHonorsPreference10858(t *testing.T) {
 		t.Fatalf("selected Server ID = %v, want slower Preference-200 server %v", selected.Options.ServerID(), slowHigh.Options.ServerID())
 	}
 	got, ok := netip.AddrFromSlice(selected.Options.IANA()[0].Options.OneAddress().IPv6Addr)
-	if !ok || got != netip.MustParseAddr("2001:db8::20") {
-		t.Errorf("selected offer address = %v, want high-preference offer 2001:db8::20", got)
+	if !ok || got != netip.MustParseAddr("2606:4700::20") {
+		t.Errorf("selected offer address = %v, want high-preference offer 2606:4700::20", got)
 	}
 }
 
@@ -169,7 +169,7 @@ func TestV6ReplyMatcherBindsClientServerIAIDAndStatus10858(t *testing.T) {
 		if status != nil {
 			ia.Options.Add(status)
 		}
-		ia.Options.Add(acceptanceV6Address("2001:db8::30"))
+		ia.Options.Add(acceptanceV6Address("2606:4700::30"))
 		msg, err := dhcpv6.NewMessage(dhcpv6.WithClientID(client), dhcpv6.WithServerID(server))
 		if err != nil {
 			t.Fatalf("create Reply: %v", err)
@@ -263,8 +263,8 @@ func (c *preferencePacketConn) WriteTo(data []byte, _ net.Addr) (int, error) {
 	switch msg.MessageType {
 	case dhcpv6.MessageTypeSolicit:
 		for _, offer := range []*dhcpv6.Message{
-			acceptanceAdvertise(msg, acceptanceV6DUID(2), 10, "2001:db8::10"),
-			acceptanceAdvertise(msg, acceptanceV6DUID(3), 200, "2001:db8::20"),
+			acceptanceAdvertise(msg, acceptanceV6DUID(2), 10, "2606:4700::10"),
+			acceptanceAdvertise(msg, acceptanceV6DUID(3), 200, "2606:4700::20"),
 		} {
 			c.incoming <- acceptanceV6Datagram{
 				data: offer.ToBytes(),
@@ -275,7 +275,7 @@ func (c *preferencePacketConn) WriteTo(data []byte, _ net.Addr) (int, error) {
 		reply, err := dhcpv6.NewMessage(
 			dhcpv6.WithClientID(msg.Options.ClientID()),
 			dhcpv6.WithServerID(msg.Options.ServerID()),
-			dhcpv6.WithIANA(*acceptanceV6Address("2001:db8::50")),
+			dhcpv6.WithIANA(*acceptanceV6Address("2606:4700::50")),
 			dhcpv6.WithIAID(msg.Options.OneIANA().IaId),
 		)
 		if err != nil {
@@ -349,8 +349,8 @@ func TestV6AcquireCollectsAdvertisesAndBindsSelectedServer10858(t *testing.T) {
 	if !sameDUID(request.Options.ServerID(), wantServer) {
 		t.Fatalf("REQUEST server DUID = %v, want higher-preference server %v", request.Options.ServerID(), wantServer)
 	}
-	if got, ok := netip.AddrFromSlice(request.Options.OneIANA().Options.OneAddress().IPv6Addr); !ok || got != netip.MustParseAddr("2001:db8::20") {
-		t.Errorf("REQUEST IAADDR = %v, want high-preference offer address 2001:db8::20", got)
+	if got, ok := netip.AddrFromSlice(request.Options.OneIANA().Options.OneAddress().IPv6Addr); !ok || got != netip.MustParseAddr("2606:4700::20") {
+		t.Errorf("REQUEST IAADDR = %v, want high-preference offer address 2606:4700::20", got)
 	}
 	if !sameDUID(result.Options.ServerID(), wantServer) {
 		t.Errorf("Reply server DUID = %v, want selected Advertise server %v", result.Options.ServerID(), wantServer)
