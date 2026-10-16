@@ -1428,6 +1428,26 @@ pub(crate) fn source_nat_translation_matches(
             {
                 return translated_src_port.is_none();
             }
+            if let Some(det) = rule.deterministic_v4 {
+                let IpAddr::V4(src_v4) = src_ip else {
+                    return false;
+                };
+                let (IpAddr::V4(translated_v4), Some(port)) = (translated_src, translated_src_port)
+                else {
+                    return false;
+                };
+                let Some((ip_idx, block_idx)) = deterministic_indices_v4(&det, src_v4) else {
+                    return false;
+                };
+                let Some(&expected_addr) = rule.pool_addresses_v4.get(ip_idx) else {
+                    return false;
+                };
+                let port_start = rule.pool_port_low as u32 + block_idx * det.block_size as u32;
+                let port_end =
+                    (port_start + det.block_size as u32 - 1).min(rule.pool_port_high as u32);
+                return translated_v4 == expected_addr
+                    && (port_start..=port_end).contains(&(port as u32));
+            }
             return translated_src_port.map_or(
                 (rule.pool_port_low..=rule.pool_port_high).contains(&src_port),
                 |port| (rule.pool_port_low..=rule.pool_port_high).contains(&port),

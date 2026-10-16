@@ -5833,6 +5833,64 @@ fn deterministic_cgnat_v4_fixed_block_per_subscriber_reversible() {
         "reverse must recover subscriber B"
     );
 }
+// #13687 (D13-07): deterministic CGNAT revalidation. An established session
+// translated before a config commit may keep its translation only when it is
+// still produced by the post-commit deterministic mapping. Merely belonging
+// to the pool and global port range is insufficient.
+#[test]
+fn deterministic_cgnat_translation_matches_only_own_block_13687() {
+    let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "cgnat-revalidation".to_string(),
+        from_zone: "subs".to_string(),
+        to_zone: "inet".to_string(),
+        source_addresses: vec!["100.64.0.0/22".to_string()],
+        pool_name: "cgn-pool".to_string(),
+        pool_addresses: vec![
+            "203.0.113.1/32".to_string(),
+            "203.0.113.2/32".to_string(),
+            "203.0.113.3/32".to_string(),
+            "203.0.113.4/32".to_string(),
+        ],
+        port_low: 1024,
+        port_high: 65535,
+        deterministic_mode: 1,
+        deterministic_block_size: 512,
+        deterministic_blocks_per_ip: 126,
+        deterministic_host_base: u32::from(Ipv4Addr::new(100, 64, 0, 0)),
+        deterministic_host_count: 8,
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    assert!(rules[0].deterministic_v4.is_some());
+
+    let matches = |src: &str, translated: &str, port: u16| {
+        source_nat_translation_matches(
+            &rules,
+            &NatScopeCtx::default(),
+            "subs",
+            "inet",
+            src.parse().unwrap(),
+            "8.8.8.8".parse().unwrap(),
+            PROTO_TCP,
+            40000,
+            443,
+            None,
+            translated.parse().unwrap(),
+            Some(port),
+            None,
+            None,
+        )
+    };
+
+    // Subscriber 100.64.0.5 owns pool[0] ports [3584, 4095].
+    assert!(matches("100.64.0.5", "203.0.113.1", 3584));
+    assert!(matches("100.64.0.5", "203.0.113.1", 4095));
+    // A port in subscriber 100.64.0.0's block and another deterministic pool
+    // address both fail for this subscriber.
+    assert!(!matches("100.64.0.5", "203.0.113.1", 1024));
+    assert!(!matches("100.64.0.5", "203.0.113.2", 3584));
+    assert!(!matches("100.64.0.99", "203.0.113.1", 3584));
+}
+
 
 // ---------------------------------------------------------------------------
 // #5341: address-only occupancy tokens on the DETERMINISTIC-CGNAT (mode 1)
