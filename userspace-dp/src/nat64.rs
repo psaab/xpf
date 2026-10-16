@@ -1413,6 +1413,7 @@ impl Nat64State {
                 &prefix.pool_v4,
                 det,
                 src_v6,
+                now_ns,
                 holder,
             )?
         } else {
@@ -1811,6 +1812,21 @@ fn reserve_synced_nat64_port_unless_peer_owns(
     capture_previous_holders: bool,
     previous_holders: &mut Option<u128>,
 ) -> bool {
+    if let Some(params) = prefix.deterministic_v6 {
+        let IpAddr::V6(source) = flow.src_ip else {
+            return false;
+        };
+        if !prefix.port_allocator.deterministic_v6_tuple_matches(
+            params,
+            source,
+            &prefix.pool_v4,
+            addr_index,
+            snat_v4,
+            port,
+        ) {
+            return false;
+        }
+    }
     let (reserved, captured_holders) = if capture_previous_holders {
         #[cfg(test)]
         crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);

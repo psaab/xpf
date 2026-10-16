@@ -15,6 +15,7 @@ use super::super::monotonic_nanos;
 use super::Coordinator;
 use crate::nat::{DisplayLeaseRecord, IdleLeaseImport, IdleLeaseRecord};
 use std::collections::HashSet;
+use std::net::IpAddr;
 
 /// One idle lease plus the pool it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,10 +90,10 @@ impl Coordinator {
     /// leases are not echoed; the coordinator neither retracts records missing
     /// from a later push nor carries tombstones for early retirement.
     pub(crate) fn export_idle_persistent_leases(&self, now_ns: u64) -> Vec<PoolIdleLease> {
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
         for rule in &self.forwarding.source_nat_rules {
-            if !rule.pool_mode || !seen.insert(rule.pool_name.as_str()) {
+            if !rule.pool_mode || !seen.insert(rule.pool_name.clone()) {
                 continue;
             }
             for lease in rule.pool_allocator.export_idle_leases(now_ns) {
@@ -100,6 +101,15 @@ impl Coordinator {
                     pool_name: rule.pool_name.clone(),
                     lease,
                 });
+            }
+        }
+        for (idx, prefix) in self.forwarding.nat64.prefixes.iter().enumerate() {
+            let Some(params) = prefix.deterministic_v6 else { continue };
+            let pool_name = format!("nat64-deterministic-{idx}");
+            for mut lease in prefix.port_allocator.export_idle_leases(now_ns) {
+                lease.deterministic = true;
+                lease.deterministic_identity = Some(crate::nat::DeterministicPortedIdentity::V6(params));
+                out.push(PoolIdleLease { pool_name: pool_name.clone(), lease });
             }
         }
         out
@@ -169,6 +179,18 @@ impl Coordinator {
     ) -> IdleLeaseImportCounts {
         let mut counts = IdleLeaseImportCounts::default();
         for rec in records {
+            if let Some(prefix_idx) = rec.pool_name.strip_prefix("nat64-deterministic-").and_then(|s| s.parse::<usize>().ok()) {
+                let Some(prefix) = self.forwarding.nat64.prefixes.get(prefix_idx) else { counts.skipped_unknown_pool += 1; continue; };
+                let Some(params) = prefix.deterministic_v6 else { counts.skipped_unknown_pool += 1; continue; };
+                if !rec.lease.deterministic || rec.lease.deterministic_identity != Some(crate::nat::DeterministicPortedIdentity::V6(params)) { counts.skipped_identity_busy += 1; continue; }
+                let (IpAddr::V6(src), IpAddr::V4(translated)) = (rec.lease.src_ip, rec.lease.translated_ip) else { counts.skipped_identity_busy += 1; continue; };
+                let addr_index = prefix.pool_v4.iter().position(|a| *a == translated);
+                let Some(idx) = addr_index else { counts.skipped_unknown_address += 1; continue; };
+                if !prefix.port_allocator.deterministic_v6_tuple_matches(params, src, &prefix.pool_v4, idx, translated, rec.lease.translated_port) { counts.skipped_identity_busy += 1; continue; }
+                let outcome = if generation_validated { prefix.port_allocator.import_idle_lease_at_after_generation(&rec.lease, addr_index, 300_000_000_000, now_ns) } else { prefix.port_allocator.import_idle_lease_at(&rec.lease, addr_index, 300_000_000_000, now_ns) };
+                match outcome { IdleLeaseImport::Installed => counts.installed += 1, IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1, IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1, IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1, IdleLeaseImport::SkippedUnknownAddress => counts.skipped_unknown_address += 1, IdleLeaseImport::SkippedPortBusy => counts.skipped_port_busy += 1, IdleLeaseImport::SkippedIdentityBusy => counts.skipped_identity_busy += 1, IdleLeaseImport::SkippedCapacity => counts.skipped_capacity += 1 }
+                continue;
+            }
             // The allocation-site ownership probes below are advisory fast
             // paths: they run BEFORE the allocator's claim/bit mutations, so
             // they cannot observe a racing peer mint. Mint-then-check closes

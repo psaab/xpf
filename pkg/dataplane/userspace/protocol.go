@@ -518,20 +518,27 @@ type PersistentNatRemote struct {
 const MaxPersistentNatLeaseRemotes = 1024
 
 type IdleLeaseWire struct {
-	Pool             string                `json:"pool"`
-	Protocol         uint8                 `json:"protocol"`
-	SrcIP            string                `json:"src_ip"`
-	SrcPort          uint16                `json:"src_port"`
-	RoutingScope     *uint32               `json:"routing_scope"`
-	RemoteIP         string                `json:"remote_ip,omitempty"`
-	RemotePort       uint16                `json:"remote_port,omitempty"`
-	PermitAnyRemote  bool                  `json:"permit_any_remote"`
-	PermittedRemotes []PersistentNatRemote `json:"permitted_remotes"`
-	TranslatedIP     string                `json:"translated_ip"`
-	TranslatedPort   uint16                `json:"translated_port"`
-	AddressOnly      bool                  `json:"address_only,omitempty"`
-	RemainingNs      uint64                `json:"remaining_ns"`
-	TimeoutNs        uint64                `json:"timeout_ns"`
+	Pool                       string                `json:"pool"`
+	Protocol                   uint8                 `json:"protocol"`
+	SrcIP                      string                `json:"src_ip"`
+	SrcPort                    uint16                `json:"src_port"`
+	RoutingScope               *uint32               `json:"routing_scope"`
+	RemoteIP                   string                `json:"remote_ip,omitempty"`
+	RemotePort                 uint16                `json:"remote_port,omitempty"`
+	PermitAnyRemote            bool                  `json:"permit_any_remote"`
+	PermittedRemotes           []PersistentNatRemote `json:"permitted_remotes"`
+	TranslatedIP               string                `json:"translated_ip"`
+	TranslatedPort             uint16                `json:"translated_port"`
+	AddressOnly                bool                  `json:"address_only,omitempty"`
+	Deterministic              bool                  `json:"deterministic,omitempty"`
+	DeterministicMode          uint8                 `json:"deterministic_mode,omitempty"`
+	DeterministicBlockSize     uint16                `json:"deterministic_block_size,omitempty"`
+	DeterministicBlocksPerIP   uint16                `json:"deterministic_blocks_per_ip,omitempty"`
+	DeterministicHostPrefixLen uint8                 `json:"deterministic_host_prefix_len,omitempty"`
+	DeterministicHostBase      string                `json:"deterministic_host_base,omitempty"`
+	DeterministicHostCount     uint32                `json:"deterministic_host_count,omitempty"`
+	RemainingNs                uint64                `json:"remaining_ns"`
+	TimeoutNs                  uint64                `json:"timeout_ns"`
 }
 
 // DisplayLeaseWire is the export_persistent_lease_display result (#8615): one
@@ -545,18 +552,25 @@ type IdleLeaseWire struct {
 // never reaches zero, and no GC path reclaims it. Keeping the display record
 // distinct means that rule cannot be undone by a later edit to a shared struct.
 type DisplayLeaseWire struct {
-	Pool             string                `json:"pool"`
-	Protocol         uint8                 `json:"protocol"`
-	SrcIP            string                `json:"src_ip"`
-	SrcPort          uint16                `json:"src_port"`
-	RoutingScope     *uint32               `json:"routing_scope"`
-	RemoteIP         string                `json:"remote_ip,omitempty"`
-	RemotePort       uint16                `json:"remote_port,omitempty"`
-	PermitAnyRemote  bool                  `json:"permit_any_remote"`
-	PermittedRemotes []PersistentNatRemote `json:"permitted_remotes"`
-	TranslatedIP     string                `json:"translated_ip"`
-	TranslatedPort   uint16                `json:"translated_port"`
-	AddressOnly      bool                  `json:"address_only,omitempty"`
+	Pool                       string                `json:"pool"`
+	Protocol                   uint8                 `json:"protocol"`
+	SrcIP                      string                `json:"src_ip"`
+	SrcPort                    uint16                `json:"src_port"`
+	RoutingScope               *uint32               `json:"routing_scope"`
+	RemoteIP                   string                `json:"remote_ip,omitempty"`
+	RemotePort                 uint16                `json:"remote_port,omitempty"`
+	PermitAnyRemote            bool                  `json:"permit_any_remote"`
+	PermittedRemotes           []PersistentNatRemote `json:"permitted_remotes"`
+	TranslatedIP               string                `json:"translated_ip"`
+	TranslatedPort             uint16                `json:"translated_port"`
+	AddressOnly                bool                  `json:"address_only,omitempty"`
+	Deterministic              bool                  `json:"deterministic,omitempty"`
+	DeterministicMode          uint8                 `json:"deterministic_mode,omitempty"`
+	DeterministicBlockSize     uint16                `json:"deterministic_block_size,omitempty"`
+	DeterministicBlocksPerIP   uint16                `json:"deterministic_blocks_per_ip,omitempty"`
+	DeterministicHostPrefixLen uint8                 `json:"deterministic_host_prefix_len,omitempty"`
+	DeterministicHostBase      string                `json:"deterministic_host_base,omitempty"`
+	DeterministicHostCount     uint32                `json:"deterministic_host_count,omitempty"`
 	// RemainingNs is RAW and is meaningful only when ActiveFlows == 0. While
 	// flows are live the allocator does not refresh the deadline (it is
 	// rewritten when the last flow closes), so this is routinely 0 for a

@@ -81,6 +81,13 @@ fn to_wire(rec: &PoolIdleLease) -> IdleLeaseWire {
         translated_ip: rec.lease.translated_ip.to_string(),
         translated_port: rec.lease.translated_port,
         address_only: rec.lease.address_only,
+        deterministic: rec.lease.deterministic,
+        deterministic_mode: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(_)) => 1, Some(crate::nat::DeterministicPortedIdentity::V6(_)) => 2, None => 0 },
+        deterministic_block_size: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(p)) => p.block_size, Some(crate::nat::DeterministicPortedIdentity::V6(p)) => p.block_size, None => 0 },
+        deterministic_blocks_per_ip: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(p)) => p.blocks_per_ip, Some(crate::nat::DeterministicPortedIdentity::V6(p)) => p.blocks_per_ip, None => 0 },
+        deterministic_host_prefix_len: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V6(p)) => p.host_prefix_len, _ => 0 },
+        deterministic_host_base: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(p)) => std::net::Ipv4Addr::from(p.host_base).to_string(), Some(crate::nat::DeterministicPortedIdentity::V6(p)) => std::net::Ipv6Addr::from(p.host_base).to_string(), None => String::new() },
+        deterministic_host_count: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(p)) => p.host_count, Some(crate::nat::DeterministicPortedIdentity::V6(p)) => p.host_count, None => 0 },
         remaining_ns: rec.lease.remaining_ns,
         timeout_ns: rec.lease.timeout_ns,
     }
@@ -88,6 +95,14 @@ fn to_wire(rec: &PoolIdleLease) -> IdleLeaseWire {
 
 /// `None` when the record cannot be understood. The caller counts these rather
 /// than substituting a default.
+fn deterministic_identity_from_wire(w: &IdleLeaseWire) -> Option<Option<crate::nat::DeterministicPortedIdentity>> {
+    if !w.deterministic { return Some(None); }
+    match w.deterministic_mode {
+        1 => { let base: std::net::Ipv4Addr = w.deterministic_host_base.parse().ok()?; Some(Some(crate::nat::DeterministicPortedIdentity::V4(crate::nat::DeterministicV4 { block_size: w.deterministic_block_size, blocks_per_ip: w.deterministic_blocks_per_ip, host_base: u32::from(base), host_count: w.deterministic_host_count }))) }
+        2 => { let base: std::net::Ipv6Addr = w.deterministic_host_base.parse().ok()?; Some(Some(crate::nat::DeterministicPortedIdentity::V6(crate::nat::DeterministicV6 { block_size: w.deterministic_block_size, blocks_per_ip: w.deterministic_blocks_per_ip, host_prefix_len: w.deterministic_host_prefix_len, host_base: base.octets(), host_count: w.deterministic_host_count }))) }
+        _ => None,
+    }
+}
 pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
     if w.pool_name.is_empty()
         || w.remaining_ns == 0
@@ -135,6 +150,8 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
             translated_ip,
             translated_port: w.translated_port,
             address_only: w.address_only,
+            deterministic: w.deterministic,
+            deterministic_identity: deterministic_identity_from_wire(w)?,
             remaining_ns,
             timeout_ns,
         },
@@ -220,6 +237,13 @@ mod tests {
             translated_ip: "203.0.113.1".to_string(),
             translated_port: 1024,
             address_only: false,
+            deterministic: false,
+            deterministic_mode: 0,
+            deterministic_block_size: 0,
+            deterministic_blocks_per_ip: 0,
+            deterministic_host_prefix_len: 0,
+            deterministic_host_base: String::new(),
+            deterministic_host_count: 0,
             remaining_ns: 5_000_000_000,
             timeout_ns: 300_000_000_000,
         }
@@ -491,6 +515,13 @@ fn to_display_wire(rec: &PoolDisplayLease) -> DisplayLeaseWire {
         translated_ip: rec.lease.translated_ip.to_string(),
         translated_port: rec.lease.translated_port,
         address_only: rec.lease.address_only,
+        deterministic: rec.lease.deterministic,
+        deterministic_mode: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(_)) => 1, Some(crate::nat::DeterministicPortedIdentity::V6(_)) => 2, None => 0 },
+        deterministic_block_size: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(p)) => p.block_size, Some(crate::nat::DeterministicPortedIdentity::V6(p)) => p.block_size, None => 0 },
+        deterministic_blocks_per_ip: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(p)) => p.blocks_per_ip, Some(crate::nat::DeterministicPortedIdentity::V6(p)) => p.blocks_per_ip, None => 0 },
+        deterministic_host_prefix_len: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V6(p)) => p.host_prefix_len, _ => 0 },
+        deterministic_host_base: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(p)) => std::net::Ipv4Addr::from(p.host_base).to_string(), Some(crate::nat::DeterministicPortedIdentity::V6(p)) => std::net::Ipv6Addr::from(p.host_base).to_string(), None => String::new() },
+        deterministic_host_count: match rec.lease.deterministic_identity { Some(crate::nat::DeterministicPortedIdentity::V4(p)) => p.host_count, Some(crate::nat::DeterministicPortedIdentity::V6(p)) => p.host_count, None => 0 },
         remaining_ns: rec.lease.remaining_ns,
         timeout_ns: rec.lease.timeout_ns,
         active_flows: rec.lease.active_flows,

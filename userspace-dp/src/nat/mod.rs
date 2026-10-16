@@ -45,7 +45,7 @@ mod destination;
 // #8121: idle persistent-NAT lease export/import — the population session
 // sync provably cannot reach (a lease with zero flows has no session).
 mod idle_lease_sync_8121;
-pub(crate) use idle_lease_sync_8121::{DisplayLeaseRecord, IdleLeaseImport, IdleLeaseRecord};
+pub(crate) use idle_lease_sync_8121::{DeterministicPortedIdentity, DisplayLeaseRecord, IdleLeaseImport, IdleLeaseRecord};
 // #6751 PR 2/3: the node-lifetime interface-mode translated-identity registry.
 mod iface_registry;
 mod source;
@@ -171,6 +171,10 @@ mod tests_det_lock_scope_9130;
 #[cfg(test)]
 #[path = "tests_deterministic_collision_10721.rs"]
 mod tests_deterministic_collision_10721;
+// #14091: deterministic NAPT64 BIB regression.
+#[cfg(test)]
+#[path = "tests_deterministic_bib_14091.rs"]
+mod tests_deterministic_bib_14091;
 
 // #9131: the address-only PERSISTENT allocator's sibling-address fallback.
 #[cfg(test)]
@@ -235,7 +239,7 @@ pub(crate) struct NatScopeCtx<'a> {
 }
 
 pub(crate) use allocator::{
-    DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
+    DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
     MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PortAllocator,
     PortAllocatorSnapshot, SourceNatReservationSnapshot,
 };

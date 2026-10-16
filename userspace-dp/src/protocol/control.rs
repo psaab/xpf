@@ -1524,6 +1524,20 @@ pub(crate) struct IdleLeaseWire {
     pub translated_port: u16,
     #[serde(rename = "address_only", default, skip_serializing_if = "is_false")]
     pub address_only: bool,
+    #[serde(rename = "deterministic", default, skip_serializing_if = "is_false")]
+    pub deterministic: bool,
+    #[serde(rename = "deterministic_mode", default, skip_serializing_if = "is_zero_u8")]
+    pub deterministic_mode: u8,
+    #[serde(rename = "deterministic_block_size", default, skip_serializing_if = "is_zero_u16")]
+    pub deterministic_block_size: u16,
+    #[serde(rename = "deterministic_blocks_per_ip", default, skip_serializing_if = "is_zero_u16")]
+    pub deterministic_blocks_per_ip: u16,
+    #[serde(rename = "deterministic_host_prefix_len", default, skip_serializing_if = "is_zero_u8")]
+    pub deterministic_host_prefix_len: u8,
+    #[serde(rename = "deterministic_host_base", default, skip_serializing_if = "String::is_empty")]
+    pub deterministic_host_base: String,
+    #[serde(rename = "deterministic_host_count", default, skip_serializing_if = "is_zero_u32")]
+    pub deterministic_host_count: u32,
     #[serde(rename = "remaining_ns", default)]
     pub remaining_ns: u64,
     #[serde(rename = "timeout_ns", default)]
@@ -1575,6 +1589,20 @@ pub(crate) struct DisplayLeaseWire {
     pub translated_port: u16,
     #[serde(rename = "address_only", default, skip_serializing_if = "is_false")]
     pub address_only: bool,
+    #[serde(rename = "deterministic", default, skip_serializing_if = "is_false")]
+    pub deterministic: bool,
+    #[serde(rename = "deterministic_mode", default, skip_serializing_if = "is_zero_u8")]
+    pub deterministic_mode: u8,
+    #[serde(rename = "deterministic_block_size", default, skip_serializing_if = "is_zero_u16")]
+    pub deterministic_block_size: u16,
+    #[serde(rename = "deterministic_blocks_per_ip", default, skip_serializing_if = "is_zero_u16")]
+    pub deterministic_blocks_per_ip: u16,
+    #[serde(rename = "deterministic_host_prefix_len", default, skip_serializing_if = "is_zero_u8")]
+    pub deterministic_host_prefix_len: u8,
+    #[serde(rename = "deterministic_host_base", default, skip_serializing_if = "String::is_empty")]
+    pub deterministic_host_base: String,
+    #[serde(rename = "deterministic_host_count", default, skip_serializing_if = "is_zero_u32")]
+    pub deterministic_host_count: u32,
     /// RAW remaining lifetime. Meaningful only when `active_flows == 0` — while
     /// flows are live the allocator does not refresh the deadline, so this is
     /// routinely 0. The presentation layer interprets it.
@@ -1591,6 +1619,8 @@ pub(crate) struct DisplayLeaseWire {
 fn is_zero_u16(v: &u16) -> bool {
     *v == 0
 }
+fn is_zero_u8(v: &u8) -> bool { *v == 0 }
+fn is_zero_u32(v: &u32) -> bool { *v == 0 }
 
 fn is_false(v: &bool) -> bool {
     !*v

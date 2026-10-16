@@ -69,7 +69,7 @@ func TestIdleLeaseWireAgreesWithTheHelperSpelling8121(t *testing.T) {
 			{IP: "8.8.8.8", Port: 0},
 		},
 		TranslatedIP: "172.16.80.7", TranslatedPort: 51400,
-		AddressOnly: true, RemainingNs: 123, TimeoutNs: 300_000_000_000,
+		AddressOnly: true, Deterministic: true, DeterministicMode: 2, DeterministicBlockSize: 32, DeterministicBlocksPerIP: 2, DeterministicHostPrefixLen: 32, DeterministicHostBase: "2001:db8::", DeterministicHostCount: 2, RemainingNs: 123, TimeoutNs: 300_000_000_000,
 	})
 	if err != nil {
 		t.Fatalf("marshal Go IdleLeaseWire: %v", err)
