@@ -1071,10 +1071,15 @@ fn select_v4_route<'a>(
             // row's next_hops remains ECMP; a later row is tried only when the
             // current tier has no live member.
             if route.discard {
-                return Some(ResolvedRouteV4::Static {
-                    route,
-                    selected: None,
-                });
+                // A later discard row must not replace a preferred gateway
+                // already retained as the cold-path fallback.
+                if fallback.is_none() {
+                    return Some(ResolvedRouteV4::Static {
+                        route,
+                        selected: None,
+                    });
+                }
+                continue;
             }
 
             let hash = *spread_hash.get_or_insert_with(|| ecmp_hash_v4(ip));
@@ -1178,10 +1183,14 @@ fn select_v6_route<'a>(
             // within a row, fall through to the next row only if all members
             // in the current tier are unavailable.
             if route.discard {
-                return Some(ResolvedRouteV6::Static {
-                    route,
-                    selected: None,
-                });
+                // Keep the v4 discard handling identical.
+                if fallback.is_none() {
+                    return Some(ResolvedRouteV6::Static {
+                        route,
+                        selected: None,
+                    });
+                }
+                continue;
             }
 
             let hash = *spread_hash.get_or_insert_with(|| ecmp_hash_v6(ip));
