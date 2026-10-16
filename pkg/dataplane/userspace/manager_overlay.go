@@ -138,6 +138,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	if schedulerState != nil {
 		m.policySchedulerDesired = schedulerCopy
 		m.policySchedulerDesiredSet = true
+		m.policySchedulerDesiredFailClosed = failClosed
 	}
 
 	if cfg == nil {
