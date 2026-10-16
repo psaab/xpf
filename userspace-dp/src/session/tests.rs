@@ -22,7 +22,7 @@ use super::wheel::{FAR_FUTURE_OFFSET, WHEEL_BUCKETS, WHEEL_TICK_NS};
 // #3152: TCP control bits used by the half-open / opening-state tests.
 // `TCP_FIN`/`TCP_RST` reach the test via `super::*` (mod.rs imports them);
 // SYN and ACK are not re-exported there, so bring them in explicitly.
-use crate::tcp_flags::{TCP_ACK, TCP_SYN};
+use crate::tcp_flags::{TCP_ACK, TCP_PSH, TCP_SYN, TCP_URG};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 pub(in crate::session) fn key_v4() -> SessionKey {
@@ -9305,6 +9305,118 @@ fn synack_without_final_ack_stays_on_the_opening_window_6752() {
         table.entry_by_key(&reverse).is_none(),
         "the reverse half survived past the opening window",
     );
+}
+
+/// #13676 (D12-01): a normal SYN-first handshake completes ONLY on an
+/// ACK-bearing, non-closing forward segment. A retransmitted SYN or a RST
+/// after the reverse SYN-ACK must not clear the pending-handshake gate that
+/// keeps both halves on the opening timeout; the RST still closes the flow.
+/// The legit final ACK (and PSH-ACK data) still completes.
+#[test]
+fn syn_first_completion_requires_valid_ack_13676() {
+    for (name, bad_flags) in [
+        ("retransmitted SYN", TCP_SYN),
+        ("SYN+ACK on forward", TCP_SYN | TCP_ACK),
+        ("RST", TCP_RST),
+        ("FIN|ACK close", TCP_FIN | TCP_ACK),
+        ("URG data, no ACK", TCP_PSH | TCP_URG),
+    ] {
+        let mut table = SessionTable::new();
+        let forward = key_v4();
+        let now = 1_000_000_000u64;
+        let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+        assert!(
+            table
+                .lookup(&reverse, now + 1_000_000, TCP_SYN | TCP_ACK)
+                .is_some(),
+            "{name}: SYN-ACK premise"
+        );
+        assert!(
+            table.entry_by_key(&forward).expect("fwd").handshake_pending,
+            "{name}: premise pending"
+        );
+        // Invalid completing segment on the forward half.
+        let _ = table.lookup(&forward, now + 2_000_000, bad_flags);
+        for key in [&forward, &reverse] {
+            let entry = table.entry_by_key(key).expect("half remains");
+            assert!(
+                entry.handshake_pending,
+                "#13676: {name} ({bad_flags:#x}) cleared the pending-handshake \
+                 gate (established={})",
+                entry.established
+            );
+        }
+        if bad_flags == TCP_RST || bad_flags == (TCP_FIN | TCP_ACK) {
+            let fwd = table.entry_by_key(&forward).expect("fwd");
+            assert!(fwd.closing, "{name}: close stamp must still apply");
+        } else {
+            // A subsequent legit ACK still completes (not latched broken).
+            assert!(
+                table.lookup(&forward, now + 3_000_000, TCP_ACK).is_some(),
+                "{name}"
+            );
+            for key in [&forward, &reverse] {
+                let entry = table.entry_by_key(key).expect("half");
+                assert!(
+                    entry.established && !entry.handshake_pending,
+                    "{name}: legit ACK must complete"
+                );
+            }
+        }
+    }
+    // Legit PSH|ACK data segment completes too (data implies completion).
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+    assert!(
+        table
+            .lookup(&reverse, now + 1_000_000, TCP_SYN | TCP_ACK)
+            .is_some()
+    );
+    assert!(
+        table
+            .lookup(&forward, now + 2_000_000, TCP_PSH | TCP_ACK)
+            .is_some()
+    );
+    let fwd = table.entry_by_key(&forward).expect("fwd");
+    assert!(
+        fwd.established && !fwd.handshake_pending,
+        "PSH|ACK must complete"
+    );
+}
+
+/// #13676: SYN-ACK-first pickup requires the same non-closing completion gate
+/// on its reverse ACK path; a closing ACK must not clear the opening state.
+#[test]
+fn syn_ack_first_completion_rejects_closing_ack_13676() {
+    for (name, bad_flags) in [
+        ("RST|ACK", TCP_RST | TCP_ACK),
+        ("FIN|ACK", TCP_FIN | TCP_ACK),
+    ] {
+        let mut table = SessionTable::new();
+        let forward = key_v4();
+        let now = 1_000_000_000u64;
+        let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN | TCP_ACK);
+
+        for key in [&forward, &reverse] {
+            let entry = table.entry_by_key(key).expect("opening half");
+            assert!(!entry.established, "{name}: premise established");
+            assert!(entry.handshake_pending, "{name}: premise pending");
+            assert!(entry.syn_ack_first, "{name}: premise asymmetry");
+        }
+        assert!(
+            table.lookup(&reverse, now + 1_000_000, bad_flags).is_some(),
+            "{name}: closing ACK lookup"
+        );
+        for key in [&forward, &reverse] {
+            let entry = table.entry_by_key(key).expect("opening half remains");
+            assert!(
+                !entry.established && entry.handshake_pending && entry.syn_ack_first,
+                "#13676: {name} completed a SYN-ACK-first handshake"
+            );
+        }
+    }
 }
 
 /// #6752 NEGATIVE CONTROL — the completed handshake must still get its full
