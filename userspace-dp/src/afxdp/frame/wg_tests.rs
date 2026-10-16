@@ -560,6 +560,7 @@ fn install_v6_peer_next_hop_neighbor(state: &mut ForwardingState) {
     );
 }
 
+#[test]
 fn wg_encap_frame_sources_outer_from_physical_wan_primary_v4() {
     // Build the real forwarding state from the shared #2680 fixture:
     // reth0.80 (ifindex 12, primary 172.16.80.8) is the physical egress
