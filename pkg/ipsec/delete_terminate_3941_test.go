@@ -233,12 +233,17 @@ func TestAddingVPNDoesNotTerminate(t *testing.T) {
 
 // TestChangedVPNSecurityTerminatesAndReinitiatesLiveSA proves a same-name
 // PSK rotation and narrowed traffic selector evict the established SA and
-// negotiate a replacement using the newly loaded settings.
+// negotiate a replacement using the newly loaded settings. #14140: the
+// reinitiation asserted here is the eager path, so the VPN runs
+// establish-tunnels=immediately — the only mode whose rendered policy
+// (start_action = start) eagerly initiates. The non-eager modes'
+// no-reinitiation behaviour is pinned in reinitiate_intent_14140_test.go.
 func TestChangedVPNSecurityTerminatesAndReinitiatesLiveSA(t *testing.T) {
 	rec := &swanctlRecorder{}
 	m := newRecordingManager(t, rec)
 
 	old := vpnCfg("site-a")
+	old.VPNs["site-a"].EstablishTunnels = "immediately"
 	old.VPNs["site-a"].LocalID = "10.10.0.0/24"
 	old.VPNs["site-a"].RemoteID = "10.20.0.0/24"
 	if err := m.Apply(old); err != nil {
@@ -247,6 +252,7 @@ func TestChangedVPNSecurityTerminatesAndReinitiatesLiveSA(t *testing.T) {
 
 	rec.listSAs = liveSA("site-a")
 	changed := vpnCfg("site-a")
+	changed.VPNs["site-a"].EstablishTunnels = "immediately"
 	changed.VPNs["site-a"].PSK = config.Secret("rotated-secret")
 	changed.VPNs["site-a"].LocalID = "10.10.0.0/25"
 	changed.VPNs["site-a"].RemoteID = "10.20.0.0/24"
@@ -281,6 +287,7 @@ func TestTrafficSelectorOnlyChangeTerminatesAndReinitiatesLiveSA(t *testing.T) {
 	m := newRecordingManager(t, rec)
 
 	old := vpnCfg("site-a")
+	old.VPNs["site-a"].EstablishTunnels = "immediately"
 	old.VPNs["site-a"].LocalID = "10.10.0.0/24"
 	old.VPNs["site-a"].RemoteID = "10.20.0.0/24"
 	if err := m.Apply(old); err != nil {
@@ -289,6 +296,7 @@ func TestTrafficSelectorOnlyChangeTerminatesAndReinitiatesLiveSA(t *testing.T) {
 
 	rec.listSAs = liveSA("site-a")
 	changed := vpnCfg("site-a")
+	changed.VPNs["site-a"].EstablishTunnels = "immediately"
 	changed.VPNs["site-a"].LocalID = "10.10.0.0/25"
 	changed.VPNs["site-a"].RemoteID = "10.20.0.0/24"
 	if err := m.Apply(changed); err != nil {
@@ -334,12 +342,14 @@ func TestChangedVPNTerminateDebtIsRetried(t *testing.T) {
 	rec := &swanctlRecorder{}
 	m := newRecordingManager(t, rec)
 	old := vpnCfg("site-a")
+	old.VPNs["site-a"].EstablishTunnels = "immediately"
 	if err := m.Apply(old); err != nil {
 		t.Fatalf("initial Apply: %v", err)
 	}
 	rec.listSAs = liveSA("site-a")
 	rec.terminateErr = map[string]error{"site-a": errTerminate}
 	changed := vpnCfg("site-a")
+	changed.VPNs["site-a"].EstablishTunnels = "immediately"
 	changed.VPNs["site-a"].PSK = config.Secret("rotated-secret")
 	if err := m.Apply(changed); err == nil {
 		t.Fatal("changed Apply must report a failed stale-SA termination")

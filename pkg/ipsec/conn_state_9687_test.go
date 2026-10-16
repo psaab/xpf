@@ -179,6 +179,7 @@ func TestRestartKeepsChangedConnectionDebt10878(t *testing.T) {
 	rec := &swanctlRecorder{}
 	m1 := persistentManager9687(t, rec.run, path)
 	old := vpnCfg("site-a")
+	old.VPNs["site-a"].EstablishTunnels = "immediately"
 	if err := m1.Apply(old); err != nil {
 		t.Fatalf("initial Apply: %v", err)
 	}
@@ -186,6 +187,7 @@ func TestRestartKeepsChangedConnectionDebt10878(t *testing.T) {
 	rec.listSAs = liveSA("site-a")
 	rec.terminateErr = map[string]error{"site-a": errTerminate}
 	changed := vpnCfg("site-a")
+	changed.VPNs["site-a"].EstablishTunnels = "immediately"
 	changed.VPNs["site-a"].PSK = config.Secret("rotated-secret")
 	changed.VPNs["site-a"].LocalID = "10.10.0.0/25"
 	if err := m1.Apply(changed); err == nil {
