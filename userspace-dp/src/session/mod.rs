@@ -5093,3 +5093,8 @@ mod companion_established_13679_tests;
 #[cfg(test)]
 #[path = "explicit_close_harvest_13973_tests.rs"]
 mod explicit_close_harvest_13973_tests;
+
+// #14126: closing-pair SYN reuse preflight must count reserved IPsec slots.
+#[cfg(test)]
+#[path = "closing_pair_reserved_slots_14126_tests.rs"]
+mod closing_pair_reserved_slots_14126_tests;
