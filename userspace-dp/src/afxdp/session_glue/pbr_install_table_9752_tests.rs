@@ -1154,7 +1154,7 @@ fn pbr_key_for(src_port: u16, dst: Ipv4Addr) -> SessionKey {
 #[test]
 fn ecmp_spread_preserved_within_installing_table() {
     let mut snapshot = pbr_snapshot();
-    snapshot.routes.push(RouteSnapshot { table: "blue.inet.0".to_string(),
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "blue.inet.0".to_string(),
     family: "inet".to_string(),
     destination: "9.9.9.9/32".to_string(),
     next_hops: vec![

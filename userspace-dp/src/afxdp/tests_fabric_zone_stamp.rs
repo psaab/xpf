@@ -303,7 +303,7 @@ fn established_ri_snat_forward_11061(
             interface.routing_domain = tenant_domain;
         }
     }
-    snapshot.routes.push(RouteSnapshot { table: "tenant-a.inet.0".to_string(),
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "tenant-a.inet.0".to_string(),
     family: "inet".to_string(),
     destination: "0.0.0.0/0".to_string(),
     next_hops: vec!["172.16.80.1@reth0.80".to_string()],

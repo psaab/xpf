@@ -4136,6 +4136,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
     let snapshot = ConfigSnapshot {
         routes: vec![
             crate::RouteSnapshot {
+                reject: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -4147,6 +4148,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 rule_priority: 0, mtu: 0,
             },
             crate::RouteSnapshot {
+                reject: false,
                 table: "red.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
@@ -5157,6 +5159,7 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
             },
         ],
         routes: vec![crate::RouteSnapshot {
+            reject: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
@@ -5285,6 +5288,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             },
         ],
         routes: vec![crate::RouteSnapshot {
+            reject: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
@@ -5438,6 +5442,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
         ],
         routes: vec![
             crate::RouteSnapshot {
+                reject: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -5450,6 +5455,7 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
                 mtu: 0,
             },
             crate::RouteSnapshot {
+                reject: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2001:db8:3::/64".to_string(),
@@ -5583,20 +5589,18 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         link_local: false,
     });
     // One sfmix.inet.0 ECMP prefix with a mixed direct + tunnel next-hop set.
-    snapshot.routes.push(crate::RouteSnapshot {
-        table: "sfmix.inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: "203.0.113.0/24".to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec![
-            "192.0.2.2@ge-0/0/1".to_string(), // direct
-            "@gr-0/0/0.0".to_string(),        // tunnel (endpoint id 1)
-        ],
-        discard: false,
-        next_table: String::new(),
-        preference: 5,
-        rule_priority: 0, mtu: 0,
-    });
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet.0".to_string(),
+    family: "inet".to_string(),
+    destination: "203.0.113.0/24".to_string(),
+    next_hop_weights: vec![],
+    next_hops: vec![
+        "192.0.2.2@ge-0/0/1".to_string(), // direct
+        "@gr-0/0/0.0".to_string(),        // tunnel (endpoint id 1)
+    ],
+    discard: false,
+    next_table: String::new(),
+    preference: 5,
+    rule_priority: 0, mtu: 0, });
     let state = build_forwarding_state(&snapshot);
 
     // The FIB retains BOTH next-hops, and exactly one carries a tunnel id.
@@ -5799,20 +5803,18 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
         router: true,
         link_local: false,
     });
-    snapshot.routes.push(crate::RouteSnapshot {
-        table: "inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: "203.0.113.0/24".to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec![
-            "192.0.2.2@ge-0/0/1".to_string(), // direct, live
-            "@gr-0/0/0.0".to_string(),        // tunnel, underlay WITHDRAWN
-        ],
-        discard: false,
-        next_table: String::new(),
-        preference: 5,
-        rule_priority: 0, mtu: 0,
-    });
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    family: "inet".to_string(),
+    destination: "203.0.113.0/24".to_string(),
+    next_hop_weights: vec![],
+    next_hops: vec![
+        "192.0.2.2@ge-0/0/1".to_string(), // direct, live
+        "@gr-0/0/0.0".to_string(),        // tunnel, underlay WITHDRAWN
+    ],
+    discard: false,
+    next_table: String::new(),
+    preference: 5,
+    rule_priority: 0, mtu: 0, });
     let state = build_forwarding_state(&snapshot);
 
     // Sweep the per-flow hash: EVERY flow must forward via the live direct hop
@@ -5890,20 +5892,18 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
     });
     // One sfmix.inet6.0 INNER ECMP prefix mixing a direct v6 hop + the tunnel hop.
     // (Disjoint from the GRE outer prefix 2602:ffd3:0:2::/64.)
-    snapshot.routes.push(crate::RouteSnapshot {
-        table: "sfmix.inet6.0".to_string(),
-        family: "inet6".to_string(),
-        destination: "2001:db8:dead::/48".to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec![
-            "2001:db8:ec::2@ge-0/0/1".to_string(), // direct
-            "@gr-0/0/0.0".to_string(),             // tunnel (endpoint id 1)
-        ],
-        discard: false,
-        next_table: String::new(),
-        preference: 5,
-        rule_priority: 0, mtu: 0,
-    });
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(),
+    family: "inet6".to_string(),
+    destination: "2001:db8:dead::/48".to_string(),
+    next_hop_weights: vec![],
+    next_hops: vec![
+        "2001:db8:ec::2@ge-0/0/1".to_string(), // direct
+        "@gr-0/0/0.0".to_string(),             // tunnel (endpoint id 1)
+    ],
+    discard: false,
+    next_table: String::new(),
+    preference: 5,
+    rule_priority: 0, mtu: 0, });
     let state = build_forwarding_state(&snapshot);
 
     // The sfmix.inet6.0 table also holds the GRE outer prefix; find OUR mixed prefix.
@@ -6063,6 +6063,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             },
         ],
         routes: vec![crate::RouteSnapshot {
+            reject: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
@@ -6376,6 +6377,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
         ],
         routes: vec![
             crate::RouteSnapshot {
+                reject: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -6391,6 +6393,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
                 mtu: 0,
             },
             crate::RouteSnapshot {
+                reject: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "198.51.100.0/24".to_string(),
@@ -6403,6 +6406,7 @@ fn ecmp_dual_enumeration_snapshot_11686(
                 mtu: 0,
             },
             crate::RouteSnapshot {
+                reject: false,
                 table: "inet6.0".to_string(),
                 family: "inet6".to_string(),
                 destination: "2001:db8:dead::/48".to_string(),
@@ -6686,6 +6690,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
         routes: vec![
             // WORSE route first (higher preference = less preferred).
             crate::RouteSnapshot {
+                reject: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -6698,6 +6703,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
             },
             // BETTER route second (lower preference).
             crate::RouteSnapshot {
+                reject: false,
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
@@ -7260,6 +7266,7 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
             },
         ],
         routes: vec![RouteSnapshot {
+            reject: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "192.168.99.0/24".to_string(),

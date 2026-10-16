@@ -372,14 +372,14 @@ fn next_hop_change_in_target_table_still_pins_9951() {
 fn unrelated_leak_removal_leaves_session_pinned_9951() {
     let mut snapshot = leak_snapshot();
     // A second, unrelated leak + its target route.
-    snapshot.routes.push(RouteSnapshot { table: "inet.0".to_string(),
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
     family: "inet".to_string(),
     destination: "9.9.9.0/24".to_string(),
     next_hops: vec![],
     next_table: "blue.inet.0".to_string(),
     rule_priority: 150,
     mtu: 0, ..Default::default() });
-    snapshot.routes.push(RouteSnapshot { table: "blue.inet.0".to_string(),
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "blue.inet.0".to_string(),
     family: "inet".to_string(),
     destination: "9.9.9.0/24".to_string(),
     next_hops: vec!["172.16.50.1@ge-0/0/0.50".to_string()],
@@ -1034,6 +1034,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
         ],
         routes: vec![
             RouteSnapshot {
+                reject: false,
                 table: "blue.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "8.8.8.0/24".to_string(),
@@ -1046,6 +1047,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
             },
             RouteSnapshot {
                 table: "red.inet.0".to_string(),
+                reject: false,
                 family: "inet".to_string(),
                 destination: "8.8.8.0/24".to_string(),
                 next_hop_weights: vec![],
@@ -1058,6 +1060,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
             RouteSnapshot {
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
+                reject: false,
                 destination: "9.9.9.0/24".to_string(),
                 next_hop_weights: vec![],
                 next_hops: vec![],
@@ -1070,6 +1073,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 table: "red.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "9.9.9.0/24".to_string(),
+                reject: false,
                 next_hop_weights: vec![],
                 next_hops: vec!["172.16.50.1@ge-0/0/0.51".to_string()],
                 discard: false,

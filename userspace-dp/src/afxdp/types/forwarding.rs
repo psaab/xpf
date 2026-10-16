@@ -1267,6 +1267,7 @@ pub(in crate::afxdp) struct RouteEntryV4 {
     /// slice.
     pub(in crate::afxdp) next_hops: Vec<RouteNextHopV4>,
     pub(in crate::afxdp) discard: bool,
+    pub(in crate::afxdp) reject: bool,
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
@@ -1283,6 +1284,7 @@ pub(in crate::afxdp) struct RouteEntryV6 {
     /// #2389: all resolved equal-cost next-hops. See `RouteEntryV4`.
     pub(in crate::afxdp) next_hops: Vec<RouteNextHopV6>,
     pub(in crate::afxdp) discard: bool,
+    pub(in crate::afxdp) reject: bool,
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
@@ -1350,6 +1352,7 @@ impl RouteEntryV4 {
                 weight: 1,
             }],
             discard,
+            reject: false,
             next_table,
             preference,
             mtu: 0,
@@ -1379,6 +1382,7 @@ impl RouteEntryV6 {
                 weight: 1,
             }],
             discard,
+            reject: false,
             next_table,
             preference,
             mtu: 0,
@@ -1637,6 +1641,7 @@ pub(crate) enum ForwardingDisposition {
     NoRoute,
     MissingNeighbor,
     DiscardRoute,
+    RejectRoute,
     NextTableUnsupported,
     TableUnavailable,
 }
@@ -1795,6 +1800,7 @@ impl ForwardingResolution {
                 ForwardingDisposition::NoRoute => "no_route",
                 ForwardingDisposition::MissingNeighbor => "missing_neighbor",
                 ForwardingDisposition::DiscardRoute => "discard_route",
+                ForwardingDisposition::RejectRoute => "reject_route",
                 ForwardingDisposition::NextTableUnsupported => "next_table_unsupported",
                 ForwardingDisposition::TableUnavailable => "table_unavailable",
             }

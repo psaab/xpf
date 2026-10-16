@@ -353,6 +353,7 @@ pub(in crate::afxdp) fn session_delta_info(
             ForwardingDisposition::FabricRedirect => "fabric_redirect",
             ForwardingDisposition::HAInactive => "ha_inactive",
             ForwardingDisposition::DiscardRoute => "discard_route",
+            ForwardingDisposition::RejectRoute => "reject_route",
             ForwardingDisposition::NextTableUnsupported => "next_table_unsupported",
             ForwardingDisposition::TableUnavailable => "table_unavailable",
         }

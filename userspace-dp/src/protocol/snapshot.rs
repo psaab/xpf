@@ -293,6 +293,8 @@ pub(crate) struct RouteSnapshot {
     pub next_hop_weights: Vec<u32>,
     #[serde(default)]
     pub discard: bool,
+    #[serde(default)]
+    pub reject: bool,
     #[serde(rename = "next_table", default)]
     pub next_table: String,
     /// #9955: kernel ip-rule priority for a synthetic next-table leak.
@@ -1408,10 +1410,8 @@ mod route_mtu_wire_tests {
 
     #[test]
     fn route_mtu_round_trips_and_zero_is_omitted() {
-        let route = RouteSnapshot {
-            mtu: 1400,
-            ..Default::default()
-        };
+        let route = RouteSnapshot { reject: false, mtu: 1400,
+        ..Default::default() };
         let value = serde_json::to_value(&route).expect("serialize route");
         assert_eq!(value["mtu"], 1400);
         let decoded: RouteSnapshot = serde_json::from_value(value).expect("deserialize route");

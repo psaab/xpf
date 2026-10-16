@@ -110,19 +110,17 @@ fn snapshot_with_lan_rule(lan_action: Option<&str>) -> crate::ConfigSnapshot {
         tunnel: true,
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot {
-        table: "inet.0".into(),
-        family: "inet".into(),
-        destination: "198.51.100.0/24".into(),
-        // #12036: interface-only next hops use `@interface`; a bare name is unresolved.
-        next_hops: vec!["@st0.0".into()],
-        next_hop_weights: vec![],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0,
-    });
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".into(),
+    family: "inet".into(),
+    destination: "198.51.100.0/24".into(),
+    // #12036: interface-only next hops use `@interface`; a bare name is unresolved.
+    next_hops: vec!["@st0.0".into()],
+    next_hop_weights: vec![],
+    discard: false,
+    next_table: String::new(),
+    preference: 0,
+    rule_priority: 0,
+    mtu: 0, });
     if let Some(action) = lan_action {
         snapshot.policies.push(PolicyRuleSnapshot {
             name: "lan-out".into(),
@@ -6530,18 +6528,16 @@ fn forwarding_with_fabric_dmz_10507() -> ForwardingState {
         }],
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot {
-        table: "inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: "203.0.113.0/24".to_string(),
-        next_hops: vec!["203.0.113.2@reth2.0".to_string()],
-        next_hop_weights: vec![],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0,
-    });
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    family: "inet".to_string(),
+    destination: "203.0.113.0/24".to_string(),
+    next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+    next_hop_weights: vec![],
+    discard: false,
+    next_table: String::new(),
+    preference: 0,
+    rule_priority: 0,
+    mtu: 0, });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
         ifindex: DMZ_IFINDEX,
@@ -6612,13 +6608,11 @@ fn forwarding_without_fabric_dmz_10507() -> ForwardingState {
         }],
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot {
-        table: "inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: "203.0.113.0/24".to_string(),
-        next_hops: vec!["203.0.113.2@reth2.0".to_string()],
-        ..Default::default()
-    });
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    family: "inet".to_string(),
+    destination: "203.0.113.0/24".to_string(),
+    next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+    ..Default::default() });
     snapshot.neighbors.extend([
         NeighborSnapshot {
             interface: "ge-0-0-2".to_string(),
@@ -6978,18 +6972,16 @@ fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
         }],
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot {
-        table: "inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: "203.0.113.0/24".to_string(),
-        next_hops: vec!["203.0.113.2@reth2.0".to_string()],
-        next_hop_weights: vec![],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0,
-    });
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    family: "inet".to_string(),
+    destination: "203.0.113.0/24".to_string(),
+    next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+    next_hop_weights: vec![],
+    discard: false,
+    next_table: String::new(),
+    preference: 0,
+    rule_priority: 0,
+    mtu: 0, });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
         ifindex: DMZ_IFINDEX,
@@ -9949,18 +9941,16 @@ fn add_fib_move_route_12074(
     gateway: &str,
     interface_name: &str,
 ) {
-    snapshot.routes.push(RouteSnapshot {
-        table: "inet.0".into(),
-        family: "inet".into(),
-        destination: format!("{destination}/32"),
-        next_hops: vec![format!("{gateway}@{interface_name}")],
-        next_hop_weights: vec![],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0,
-    });
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet.0".into(),
+    family: "inet".into(),
+    destination: format!("{destination}/32"),
+    next_hops: vec![format!("{gateway}@{interface_name}")],
+    next_hop_weights: vec![],
+    discard: false,
+    next_table: String::new(),
+    preference: 0,
+    rule_priority: 0,
+    mtu: 0, });
 }
 
 #[test]
@@ -10632,18 +10622,16 @@ fn fib_only_reply_nonforwarding_route_12074(
     }
     moved.fib_generation = 10;
     if discard {
-        moved.routes.push(RouteSnapshot {
-            table: "inet.0".into(),
-            family: "inet".into(),
-            destination: format!("{FIB_MOVE_DST_12074}/32"),
-            next_hops: vec![],
-            next_hop_weights: vec![],
-            discard: true,
-            next_table: String::new(),
-            preference: 0,
-            rule_priority: 0,
-            mtu: 0,
-        });
+        moved.routes.push(RouteSnapshot { reject: false, table: "inet.0".into(),
+        family: "inet".into(),
+        destination: format!("{FIB_MOVE_DST_12074}/32"),
+        next_hops: vec![],
+        next_hop_weights: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0, });
     } else {
         moved.routes.retain(|route| route.family != "inet");
     }
@@ -11035,18 +11023,16 @@ fn no_local_entry_current_route_12074(
                 link_local: false,
                 ..Default::default()
             });
-            current.routes.push(RouteSnapshot {
-                table: "inet.0".into(),
-                family: "inet".into(),
-                destination: format!("{FIB_MOVE_DST_12074}/32"),
-                next_hops: vec!["203.0.113.2@reth2.0".into()],
-                next_hop_weights: vec![],
-                discard: false,
-                next_table: String::new(),
-                preference: 0,
-                rule_priority: 0,
-                mtu: 0,
-            });
+            current.routes.push(RouteSnapshot { reject: false, table: "inet.0".into(),
+            family: "inet".into(),
+            destination: format!("{FIB_MOVE_DST_12074}/32"),
+            next_hops: vec!["203.0.113.2@reth2.0".into()],
+            next_hop_weights: vec![],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+            mtu: 0, });
             if permit_new_zone {
                 let mut permit = current
                     .policies

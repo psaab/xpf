@@ -1125,17 +1125,15 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v6() {
         scope: 0,
     });
     // v6 route to the peer endpoint prefix, egressing reth0.80.
-    snap.routes.push(crate::RouteSnapshot {
-        table: "inet6.0".to_string(),
-        family: "inet6".to_string(),
-        destination: "2001:db8:113::/48".to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0, mtu: 0,
-    });
+    snap.routes.push(crate::RouteSnapshot { reject: false, table: "inet6.0".to_string(),
+    family: "inet6".to_string(),
+    destination: "2001:db8:113::/48".to_string(),
+    next_hop_weights: vec![],
+    next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
+    discard: false,
+    next_table: String::new(),
+    preference: 0,
+    rule_priority: 0, mtu: 0, });
     // The WG endpoint's transport table follows the v6 outer family.
     snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
     snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();

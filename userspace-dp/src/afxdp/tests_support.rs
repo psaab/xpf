@@ -855,6 +855,7 @@ pub(super) fn run_input_filter_accept_log_poll(
     
     ..Default::default()}];
     snapshot.routes = vec![RouteSnapshot {
+        reject: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
@@ -3179,18 +3180,16 @@ pub(super) fn inbound_nptv6_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsh
     }];
     // Route the internal /48 toward the LAN host (reth1.0) so the
     // translated destination resolves on the inside.
-    snapshot.routes.push(RouteSnapshot {
-        table: "inet6.0".to_string(),
-        family: "inet6".to_string(),
-        destination: "fd35:1940:27::/48".to_string(),
-        next_hops: vec!["fd35:1940:27:100::102@reth1.0".to_string()],
-        next_hop_weights: vec![],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0,
-    });
+    snapshot.routes.push(RouteSnapshot { reject: false, table: "inet6.0".to_string(),
+    family: "inet6".to_string(),
+    destination: "fd35:1940:27::/48".to_string(),
+    next_hops: vec!["fd35:1940:27:100::102@reth1.0".to_string()],
+    next_hop_weights: vec![],
+    discard: false,
+    next_table: String::new(),
+    preference: 0,
+    rule_priority: 0,
+    mtu: 0, });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "reth1.0".to_string(),
         ifindex: 24,
