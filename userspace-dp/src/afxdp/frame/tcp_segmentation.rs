@@ -921,7 +921,12 @@ mod mode_aware_segmentation_tests {
             install_table_check: 0,
         };
         let frame = ipv4_tcp_frame(2000);
-        let segments = segment_forwarded_tcp_frames_from_frame(
+        let engine = state.wg_engines.get(&TUN_ID).unwrap();
+        let encap_packets_before = engine
+            .counters()
+            .encap_packets
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let segments = segment_forwarded_tcp_frames_from_frame_with_commit(
             &frame,
             meta_v4(),
             &decision,
@@ -930,13 +935,35 @@ mod mode_aware_segmentation_tests {
             None,
         )
         .expect("WG segmentation must produce frames");
+        assert_eq!(
+            engine
+                .counters()
+                .encap_packets
+                .load(std::sync::atomic::Ordering::Relaxed),
+            encap_packets_before,
+            "building WG segments alone must not commit send state"
+        );
         assert!(segments.len() > 1, "2000 inner must split at the WG budget");
+        let mut frames = Vec::with_capacity(segments.len());
+        for (segment, commit) in segments {
+            let commit = commit.expect("WG segment must carry send metadata");
+            engine.note_encap_sent(&commit.peer_pubkey, commit.outcome);
+            frames.push(segment);
+        }
+        assert_eq!(
+            engine
+                .counters()
+                .encap_packets
+                .load(std::sync::atomic::Ordering::Relaxed),
+            encap_packets_before + frames.len() as u64,
+            "each admitted WG segment commits exactly one encap packet"
+        );
 
         // Decrypt each segment back out of the WG outer ONCE (the WG engine
         // enforces anti-replay, so a segment may be decapped only once) and
         // collect the inner IPv4 total length. Confirm the UDP outer
         // (gate (b)) before measuring the inner size.
-        let inner_lens: Vec<usize> = segments
+        let inner_lens: Vec<usize> = frames
             .iter()
             .map(|seg| {
                 assert_eq!(seg[23], PROTO_UDP, "WG outer must be UDP, not GRE");

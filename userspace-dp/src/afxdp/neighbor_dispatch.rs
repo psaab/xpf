@@ -19,10 +19,8 @@
 // Pure relocation. `use super::*;` brings every type, helper,
 // and sibling-submodule item from afxdp.rs into scope.
 
-use crate::afxdp::neigh_schedule::{
-    next_due_for_pending, PENDING_NEIGH_SWEEP_BUDGET,
-};
 use super::*;
+use crate::afxdp::neigh_schedule::{PENDING_NEIGH_SWEEP_BUDGET, next_due_for_pending};
 
 /// GEMINI-NEXT.md Section 3 cold-start: re-fire ARP/NDP solicitation
 /// at exponential intervals after the initial probe in
@@ -527,10 +525,15 @@ pub(super) fn retry_pending_neigh(
         if let Some(flow_key) = pkt.flow_key.as_ref() {
             let target = decision.nat.rewrite_dst.unwrap_or(flow_key.dst_ip);
             if matches!(
-                super::session_glue::resolve_install_table_for_session(forwarding, decision, target),
+                super::session_glue::resolve_install_table_for_session(
+                    forwarding, decision, target
+                ),
                 super::session_glue::InstallTable::Unresolvable
             ) {
-                binding.live.table_unavailable_packets.fetch_add(1, Ordering::Relaxed);
+                binding
+                    .live
+                    .table_unavailable_packets
+                    .fetch_add(1, Ordering::Relaxed);
                 super::session_glue::flag_install_table_purge(binding.worker_id);
                 binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
                 continue;
@@ -880,17 +883,19 @@ pub(super) fn retry_pending_neigh(
         // without this deferred path submits the oversized whole frame even
         // when the ordinary dispatcher can split it to the egress MTU.
         if pkt.meta.protocol == PROTO_TCP && !decision.nat.nat64 {
-            if let Some(segments) = crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame(
-                source_frame,
-                pkt.meta,
-                &decision,
-                forwarding,
-                false,
-                None,
-            ) {
+            if let Some(segments) =
+                crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame_with_commit(
+                    source_frame,
+                    pkt.meta,
+                    &decision,
+                    forwarding,
+                    false,
+                    None,
+                )
+            {
                 let target = binding_by_index_mut(left, binding_index, binding, right, target_idx)
                     .expect("target index resolved from current binding set");
-                for bytes in segments {
+                for (bytes, wg_commit) in segments {
                     let len = bytes.len();
                     target.tx_pipeline.pending_tx_local.push_back(TxRequest {
                         bytes,
@@ -905,6 +910,14 @@ pub(super) fn retry_pending_neigh(
                         overlap_admissions: None,
                         enqueue_ns: 0,
                     });
+                    if let Some(commit) = wg_commit {
+                        if let Some(engine) = forwarding
+                            .wg_engines
+                            .get(&decision.resolution.tunnel_endpoint_id)
+                        {
+                            engine.note_encap_sent(&commit.peer_pubkey, commit.outcome);
+                        }
+                    }
                     bound_pending_tx_local(target);
                     target.tx_counters.pending_copy_tx_packets += 1;
                     dbg.enqueue_ok += 1;
@@ -937,17 +950,16 @@ pub(super) fn retry_pending_neigh(
         // discard/reject or missing target binding must not trigger a PTB.
         // Only permitted, deliverable candidates reach this PMTU decision.
         let ingress_ident = binding.identity();
-        let (ptb_reply, mtu_signalled) =
-            super::tx::dispatch::compute_forwarded_egress_ptb(
-                source_frame,
-                pkt.meta.into(),
-                &decision,
-                forwarding,
-                decision.nat.nat64,
-                decision.resolution.tunnel_endpoint_id != 0,
-                &ingress_ident,
-                recent_exceptions,
-            );
+        let (ptb_reply, mtu_signalled) = super::tx::dispatch::compute_forwarded_egress_ptb(
+            source_frame,
+            pkt.meta.into(),
+            &decision,
+            forwarding,
+            decision.nat.nat64,
+            decision.resolution.tunnel_endpoint_id != 0,
+            &ingress_ident,
+            recent_exceptions,
+        );
         if let Some(ptb_bytes) = ptb_reply {
             super::tx::dispatch::enqueue_forwarded_ptb_reply(
                 binding,
