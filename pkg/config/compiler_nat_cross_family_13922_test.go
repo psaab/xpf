@@ -23,6 +23,7 @@ func TestDNATCrossFamilyPoolRejected13922(t *testing.T) {
 	for _, tc := range []struct{ name, dst, pool string }{
 		{"v4 destination v6 pool", "203.0.113.10/32", "2001:db8::10/128"},
 		{"v6 destination v4 pool", "2001:db8::10/128", "10.0.0.10/32"},
+		{"IPv4-mapped IPv6 destination is v6", "::ffff:203.0.113.10/128", "10.0.0.10/32"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(buildTree(t, dnatFamilySet13922(tc.dst, tc.pool)))
@@ -70,6 +71,7 @@ func TestStaticNATCrossFamilyPairRejected13922(t *testing.T) {
 	for _, tc := range []struct{ name, match, prefix string }{
 		{"v4 external v6 internal", "203.0.113.5/32", "2001:db8::5/128"},
 		{"v6 external v4 internal", "2001:db8::5/128", "10.0.0.5/32"},
+		{"IPv4-mapped IPv6 external is v6", "::ffff:203.0.113.5/128", "10.0.0.5/32"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(buildTree(t, staticNATFamilySet13922(tc.match, tc.prefix)))
