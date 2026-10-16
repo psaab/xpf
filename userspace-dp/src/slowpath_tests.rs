@@ -824,6 +824,29 @@ fn ifreq_carries_mtu_value() {
     assert_eq!(ifr.name_string(), "xpf-usp0");
 }
 
+/// #13706: `IfReq` must match the kernel `struct ifreq` ABI (40 bytes:
+/// 16-byte name + 24-byte `ifr_ifru` union whose largest member is
+/// `struct ifmap`). A 32-byte struct under-allocates every ioctl buffer
+/// handed to the kernel.
+#[test]
+fn ifreq_layout_matches_kernel_ifreq() {
+    assert_eq!(
+        std::mem::size_of::<IfReq>(),
+        40,
+        "sizeof(IfReq) must equal kernel sizeof(struct ifreq)"
+    );
+    assert_eq!(
+        std::mem::align_of::<IfReq>(),
+        8,
+        "align(IfReq) must equal kernel _Alignof(struct ifreq)"
+    );
+    assert_eq!(
+        std::mem::size_of::<Ifru>(),
+        24,
+        "sizeof(Ifru) must equal kernel sizeof(ifr_ifru) (largest member: struct ifmap)"
+    );
+}
+
 use crate::io_uring_write::WriteResult;
 use std::cell::Cell;
 
