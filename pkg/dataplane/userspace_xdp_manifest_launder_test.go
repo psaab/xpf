@@ -55,7 +55,12 @@ func TestFreshnessGateRejectsHandRegeneratedManifest13963(t *testing.T) {
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
-	if err := cmd.Run(); err == nil {
+	err = cmd.Run()
+	if err == nil {
 		t.Fatalf("freshness gate accepted a hand-regenerated manifest for the stale object:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "--- FAIL: TestUserspaceXDPShimObjectMatchesSourceManifest") ||
+		!strings.Contains(output.String(), "no current verifier-gated build digest") {
+		t.Fatalf("nested go test failed for an unexpected reason, not the stale-digest gate:\n%s", output.String())
 	}
 }
