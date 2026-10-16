@@ -3,6 +3,7 @@ package userspace
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sort"
 	"time"
@@ -104,10 +105,22 @@ func stampCaptureAuthority(snap *ConfigSnapshot, provider CaptureEpochProvider) 
 }
 
 // stampCaptureAuthorityWithRoutes is stampCaptureAuthority with a main-table
-// dump taken earlier without the manager lock; a prefetch filtered for a
-// different config or tunnel row set is ignored and the table is dumped here.
+// dump taken earlier without the manager lock. Its ordinary builder callers
+// may fall back to a fresh dump when the prefetch is stale.
 func stampCaptureAuthorityWithRoutes(snap *ConfigSnapshot, provider CaptureEpochProvider,
 	prefetch *pmechRoutePrefetch) {
+	stampCaptureAuthorityWithRoutesMode(snap, provider, prefetch, true)
+}
+
+// stampCaptureAuthorityWithRoutesNoFallback consumes only a matching prefetch
+// and withholds authority on mismatch; it is for manager-locked callers.
+func stampCaptureAuthorityWithRoutesNoFallback(snap *ConfigSnapshot, provider CaptureEpochProvider,
+	prefetch *pmechRoutePrefetch) {
+	stampCaptureAuthorityWithRoutesMode(snap, provider, prefetch, false)
+}
+
+func stampCaptureAuthorityWithRoutesMode(snap *ConfigSnapshot, provider CaptureEpochProvider,
+	prefetch *pmechRoutePrefetch, allowRouteDump bool) {
 	if snap == nil || provider == nil {
 		return
 	}
@@ -117,19 +130,31 @@ func stampCaptureAuthorityWithRoutes(snap *ConfigSnapshot, provider CaptureEpoch
 	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
 	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
 	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
-	stampPMechInventoryWithPrefetch(snap, prefetch)
+	if allowRouteDump {
+		stampPMechInventoryWithPrefetch(snap, prefetch)
+	} else if len(snap.IpsecTunnelRows) == 0 || prefetch.matches(snap) {
+		stampPMechInventoryWithPrefetch(snap, prefetch)
+	} else {
+		stampPMechInventoryWithoutRouteDump(snap, fmt.Errorf("P-MECH route prefetch did not match locked snapshot"))
+	}
 }
 
-// refreshCaptureAuthorityLocked refreshes retained snapshots immediately
-// before a deferred/catch-up publish. The retained snapshot may have been
-// built from a staged runtime that an XSK deferral rolled back; asking the
-// current provider here prevents rows from retired NFQUEUE handles surviving
-// into the later apply_snapshot.
+// refreshCaptureAuthorityLocked refreshes capture epochs and tunnel identities
+// on a retained snapshot without issuing netlink requests under m.mu. Route
+// inventory is reused only when its config, tunnel identities, and FIB
+// generation still match; otherwise this refresh withholds P-MECH authority
+// until an unlocked full build or FIB prefetch can replace it.
 func (m *Manager) refreshCaptureAuthorityLocked(snap *ConfigSnapshot) {
-	if m == nil || snap == nil {
+	if m == nil || snap == nil || m.captureEpochProvider == nil {
 		return
 	}
-	stampCaptureAuthority(snap, m.captureEpochProvider)
+	permitEpoch, queueEpochs, tunnelSnapshotGeneration, tunnelRows :=
+		m.captureEpochProvider(snap.Generation, snap.FIBGeneration)
+	snap.PermitEpoch = permitEpoch
+	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
+	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
+	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
+	refreshPMechInventoryLocked(snap)
 }
 
 // buildSnapshotWithEpochProvider is the additive epoch-aware entry point.

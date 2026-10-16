@@ -103,7 +103,7 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 	m.lastSnapshot.FIBGeneration = newGen
 	m.incGenerationSaturatingLocked()
 	m.lastSnapshot.Generation = m.generation
-	stampCaptureAuthorityWithRoutes(m.lastSnapshot, m.captureEpochProvider, prefetch)
+	stampCaptureAuthorityWithRoutesNoFallback(m.lastSnapshot, m.captureEpochProvider, prefetch)
 
 	// #1197 v4 (Codex code-review v3 #1): refresh the monitored
 	// ifindex cache UNCONDITIONALLY — link recreation can happen
