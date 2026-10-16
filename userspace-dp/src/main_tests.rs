@@ -6054,6 +6054,23 @@ fn shim_and_helper_agree_on_binding_slot_capacity_7497() {
     );
 }
 
+/// #13931: keep the shim steering-map budget above the helper's live-session
+/// ceiling. The Go embedded-ELF ABI test binds the same capacity to the
+/// compiled map; this checks the authoritative Rust planner and session limits.
+#[test]
+fn userspace_session_steering_capacity_covers_rust_limits_13931() {
+    let required_rows = crate::server::helpers::BINDING_QUEUES_PER_IFACE
+        * crate::session::default_max_sessions()
+        * 4;
+    const SHIM_MAP_MAX_ENTRIES: usize = 8_388_608;
+    assert!(
+        required_rows <= SHIM_MAP_MAX_ENTRIES,
+        "userspace_sessions capacity {SHIM_MAP_MAX_ENTRIES} is below the \
+         Rust worker/session/row requirement {required_rows}; update the \
+         shim map and Go ABI expectation (#13931)"
+    );
+}
+
 /// The capacity of the slot-keyed maps is NOT the capacity of the binding array,
 /// and conflating them is the #7497 defect. Pinning the ratio keeps a future
 /// author from "unifying" the two constants: the write-side guards check the
