@@ -353,27 +353,36 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
     if !origin.is_peer_synced() || !is_translated_forward_session_key(key, decision, metadata) {
         return false;
     }
-    let removed = if let Some((session_id, generation)) = shared_identity {
+    let removed = if let Some((shared_session_id, generation)) = shared_identity {
         remove_shared_session_if(
             shared.sessions,
             shared.nat_sessions,
             shared.forward_wire_sessions,
             shared.owner_rg_indexes,
             key,
-            |entry| entry.session_id == session_id && entry.generation == generation,
+            |entry| entry.session_id == shared_session_id && entry.generation == generation,
         )
     } else {
         SharedRemoval::Absent
     };
-    delete_session_map_entry_for_removed_session_with_origin(
-        session_map,
-        key,
-        decision,
-        metadata,
-        origin,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
-    );
+    let session_id = sessions.session_id_for(key);
+    let delete_result =
+        delete_session_map_entry_for_removed_session_with_origin_and_id(
+            session_map,
+            key,
+            decision,
+            metadata,
+            origin,
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            session_id,
+        );
+    if delete_result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {
+        sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+            key: key.clone(),
+            session_id,
+        });
+    }
     sessions.delete(key);
     evicted_keys.push(key.clone());
     if let (SharedRemoval::Removed(_), Some((session_id, _))) = (removed, shared_identity) {

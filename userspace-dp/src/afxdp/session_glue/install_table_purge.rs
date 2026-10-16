@@ -378,15 +378,23 @@ fn teardown_purge_forward(
         now_ns,
         worker_id,
     );
-    delete_session_map_entry_for_removed_session_with_origin(
-        session_map,
-        key,
-        *decision,
-        metadata,
-        origin,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
-    );
+    let delete_result =
+        delete_session_map_entry_for_removed_session_with_origin_and_id(
+            session_map,
+            key,
+            *decision,
+            metadata,
+            origin,
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            closed_id,
+        );
+    if delete_result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {
+        sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+            key: key.clone(),
+            session_id: closed_id,
+        });
+    }
     release_coordinator_session_rows(session_map, key);
     sessions.emit_close_delta_with_origin(key.clone(), *decision, metadata.clone(), origin, true, closed_id);
     true
@@ -454,15 +462,23 @@ fn teardown_purge_companion(
         now_ns,
         worker_id,
     );
-    delete_session_map_entry_for_removed_session_with_origin(
-        session_map,
-        companion_key,
-        *companion_decision,
-        companion_metadata,
-        companion_origin,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
-    );
+    let delete_result =
+        delete_session_map_entry_for_removed_session_with_origin_and_id(
+            session_map,
+            companion_key,
+            *companion_decision,
+            companion_metadata,
+            companion_origin,
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            closed_companion_id,
+        );
+    if delete_result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {
+        sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+            key: companion_key.clone(),
+            session_id: closed_companion_id,
+        });
+    }
     release_coordinator_session_rows(session_map, companion_key);
     sessions.emit_close_delta_with_origin(
         companion_key.clone(),

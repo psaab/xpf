@@ -29,6 +29,8 @@ nat: NatDecision,
 pending_forwards: &mut Vec<PendingForwardRequest>,
 shared_recycles: &mut Vec<(u32, u64)>,) {
     let reverse_key = reverse_session_key(forward_key, nat);
+    let forward_session_id = sessions.session_id_for(forward_key);
+    let reverse_session_id = sessions.session_id_for(&reverse_key);
     sessions.delete(forward_key);
     sessions.delete(&reverse_key);
     delete_live_session_entry(
@@ -43,16 +45,23 @@ shared_recycles: &mut Vec<(u32, u64)>,) {
         nat,
         true,
     );
-    delete_bpf_conntrack_entry(
-        current.bpf_maps.conntrack_v4_fd,
-        current.bpf_maps.conntrack_v6_fd,
-        forward_key,
-    );
-    delete_bpf_conntrack_entry(
-        current.bpf_maps.conntrack_v4_fd,
-        current.bpf_maps.conntrack_v6_fd,
-        &reverse_key,
-    );
+    for (key, session_id) in [
+        (forward_key, forward_session_id),
+        (&reverse_key, reverse_session_id),
+    ] {
+        if crate::afxdp::bpf_map::delete_bpf_conntrack_entry_for_session_result(
+            current.bpf_maps.conntrack_v4_fd,
+            current.bpf_maps.conntrack_v6_fd,
+            key,
+            session_id,
+        ) == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy
+        {
+            sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+                key: key.clone(),
+                session_id,
+            });
+        }
+    }
     remove_shared_session(
         shared_sessions,
         shared_nat_sessions,
