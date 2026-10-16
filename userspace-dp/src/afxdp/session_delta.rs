@@ -679,14 +679,14 @@ pub(super) fn flush_session_deltas(
             event_stream_out_of_sync = true;
             continue;
         }
-        // From here on, `stale` == stale-ordinary-with-identity (purge
-        // continued above; non-Close deltas are never stale).
-        if delta.kind == SessionDeltaKind::Close {
-            // Stale-ordinary forward FIRST (under permits): exact-key +
-            // identity-conditional. ONLY Removed authorizes the destructive
-            // local ops below (Absent proves nothing about the derived rows;
-            // Declined means a live reincarnation). Conditional replicate +
-            // scoped emit run regardless — they no-op on mismatch.
+        // A MissingNeighborSeed's local Close is telemetry-only. Its expiry
+        // path already reaps local BPF/conntrack state and retires its local
+        // shared publication; running ordinary teardown here would derive a
+        // reverse-key delete and replicate it to workers that may own the real
+        // session. Keep this branch for authoritative session closes only.
+        if delta.kind == SessionDeltaKind::Close
+            && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed
+        {
             let teardown_ok = if stale {
                 matches!(
                     super::shared_ops::remove_shared_session_if(
@@ -867,20 +867,22 @@ pub(super) fn flush_session_deltas(
             delta
         };
         let info = session_delta_info(ident, delta, zone_id_to_name);
+        let telemetry_only_seed =
+            delta.origin == crate::session::SessionOrigin::MissingNeighborSeed;
         drop(_close_install_permits);
-        // #2669: per-binding RPC fallback push is the ONLY binding-dependent
-        // step. Skipped when no binding exists; every consumer below is
-        // binding-independent and runs regardless.
-        if let Some(live) = live {
-            // #8593: route on the DELTA, not on a flag the call site chose. A
-            // bulk owner-RG export delta whose push is refused must not arm the
-            // loss-of-sync latch — that latch triggers the export that produced
-            // it. Deciding here means a new drain call site cannot get it wrong,
-            // because it does not choose.
-            if delta.bulk_resync {
-                live.push_session_delta_bulk_export(info.clone());
-            } else {
-                live.push_session_delta(info.clone());
+        // #13974: seed deltas are only input to the local RT_FLOW/event
+        // channel below. They are never session-sync RPC or recent-delta
+        // records, which are consumed by HA/control-plane paths.
+        if !telemetry_only_seed {
+            if let Some(live) = live {
+                // #8593: route on the DELTA, not on a flag the call site chose.
+                // A bulk owner-RG export delta whose push is refused must not
+                // arm the loss-of-sync latch — that latch triggers its export.
+                if delta.bulk_resync {
+                    live.push_session_delta_bulk_export(info.clone());
+                } else {
+                    live.push_session_delta(info.clone());
+                }
             }
         }
         // Push to event stream (new path) alongside existing RPC fallback.
@@ -1029,7 +1031,9 @@ pub(super) fn flush_session_deltas(
                 }
             }
         }
-        if let Ok(mut recent) = recent_session_deltas.lock() {
+        if !telemetry_only_seed
+            && let Ok(mut recent) = recent_session_deltas.lock()
+        {
             push_recent_session_delta(&mut recent, info);
         }
     }
