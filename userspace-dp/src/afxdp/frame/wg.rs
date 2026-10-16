@@ -178,10 +178,8 @@ fn outer_physical_egress_ifindex(
 /// Bumps `OUTER_ROUTE_RESOLVE_COUNT` exactly once — the #3992 single-FIB-LPM-
 /// per-packet invariant. `dynamic_neighbors` is `None`: the egress ifindex is
 /// ROUTE-derived (a missing underlay neighbor resolves to `MissingNeighbor`
-/// with the physical egress still populated), so the static forwarding state
-/// suffices to pick the egress; the neighbor MAC read by the encap path falls
-/// back to the session's stored neighbor when the underlay next-hop is not
-/// statically known (see `wg_encap_frame`).
+/// with the physical egress still populated). The caller must not substitute
+/// a neighbor MAC from the session's unrelated resolution.
 #[inline]
 fn outer_physical_egress_resolution(
     forwarding: &ForwardingState,
@@ -594,15 +592,10 @@ pub(super) fn wg_encap_frame_with_commit(
         outer_resolution.resolution.route_mtu as usize,
     );
 
-    // #5292: the outer L2 header follows the resolved PHYSICAL egress —
-    // internally consistent with the outer IP source (#2701) — NOT
-    // `decision.resolution`. `src_mac` + VLAN come straight from the physical
-    // egress row; the outer next-hop neighbor MAC comes from the peer route's
-    // resolution, falling back to the session's stored neighbor ONLY when the
-    // underlay next-hop is not yet statically resolved (e.g. a dynamic-learned
-    // hop shared with the default route — the common single-underlay case).
-    // Reverting any of these three to `decision.resolution` reintroduces the
-    // zeroed-endpoint blackhole / wrong-adjacency bug.
+    // #13978: never borrow the session's neighbor for this outer route. The
+    // selected peer's underlay resolution is the only valid source of the
+    // destination MAC: if its next hop is unresolved, fail closed rather than
+    // emit a frame addressed to a potentially different adjacency.
     let src_mac = match egress {
         Some(e) => e.src_mac,
         None => decision.resolution.src_mac?,
@@ -611,10 +604,7 @@ pub(super) fn wg_encap_frame_with_commit(
         Some(e) => e.vlan_id,
         None => decision.resolution.tx_vlan_id,
     };
-    let dst_mac = outer_resolution
-        .resolution
-        .neighbor_mac
-        .or(decision.resolution.neighbor_mac)?;
+    let dst_mac = outer_resolution.resolution.neighbor_mac?;
     let outer_eth_len = if vlan_id > 0 { 18 } else { 14 };
     let wg_record_len = WG_DATA_HEADER_LEN + pad_to_16(inner_packet.len()) + POLY1305_TAG_LEN;
     if wg_encapped_size(inner_packet.len(), outer_v6) > outer_mtu {

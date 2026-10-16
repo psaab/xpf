@@ -542,13 +542,31 @@ fn inner_v4_meta() -> ForwardPacketMeta {
     }
 }
 
-#[test]
+fn install_v4_peer_next_hop_neighbor(state: &mut ForwardingState) {
+    state.neighbors.insert(
+        (12, IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 1))),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+}
+
+fn install_v6_peer_next_hop_neighbor(state: &mut ForwardingState) {
+    state.neighbors.insert(
+        (12, IpAddr::V6("2001:559:8585:80::1".parse().unwrap())),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+}
+
 fn wg_encap_frame_sources_outer_from_physical_wan_primary_v4() {
     // Build the real forwarding state from the shared #2680 fixture:
     // reth0.80 (ifindex 12, primary 172.16.80.8) is the physical egress
     // via the route to the peer endpoint (203.0.113.7); wg0.0
     // (ifindex 400, primary 10.123.0.1) is the LOGICAL tunnel iface.
     let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
+    install_v4_peer_next_hop_neighbor(&mut state);
     // Swap in an ESTABLISHED engine (the snapshot one has no session, so
     // try_encap would NoSession) whose peer endpoint == the fixture route
     // target so the FIB resolves to the physical egress (ifindex 12).
@@ -603,6 +621,7 @@ fn wg_encap_frame_resolves_outer_route_once_v4() {
     // counter can no longer corrupt the exact `== 1` assertion (this test no
     // longer relies on `--test-threads=1`). See the counter's doc in `wg.rs`.
     let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
+    install_v4_peer_next_hop_neighbor(&mut state);
     let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
     state
         .wg_engines
@@ -629,7 +648,7 @@ fn wg_encap_frame_resolves_outer_route_once_v4() {
     // layout is eth(18, 802.1Q) + IPv4(20); dst/src MAC in the eth header,
     // TPID @ 12..14, TCI @ 14..16, ethertype @ 16..18, outer src @ 30..34,
     // outer dst @ 34..38, outer UDP dst port @ 40..42.
-    assert_eq!(&out[0..6], &[0x00, 0x11, 0x22, 0x33, 0x44, 0x55], "outer dst MAC unchanged");
+    assert_eq!(&out[0..6], &[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], "outer dst MAC from resolved peer next hop");
     assert_eq!(&out[6..12], &[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08], "outer src MAC unchanged");
     assert_eq!(&out[12..14], &[0x81, 0x00], "outer 802.1Q TPID");
     assert_eq!(
@@ -812,6 +831,27 @@ fn wg_encap_builds_when_zeroed_decision_has_no_l2() {
         80,
         "VLAN recovered from the peer's physical egress (VID 80)"
     );
+}
+
+// === #13978 (H23-01): the outer dst MAC must never be borrowed from
+// `decision.resolution` when the SELECTED peer's underlay next hop is
+// unresolved. ===
+
+#[test]
+fn wg_encap_outer_dst_mac_never_borrows_unresolved_peer_nexthop_13978() {
+    // RED-on-revert: like the #5292 L2 test, but the static neighbor for the
+    // peer's outer next hop (172.16.80.1 on ifindex 12) is absent. Before the
+    // fix this emitted a frame addressed to the default adjacency MAC.
+    let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    state.wg_engines.insert(1, Arc::new(
+        established_initiator_engine(peer_ep, "10.123.0.0/24"),
+    ));
+    // No state.neighbors entry for (12, 172.16.80.1).
+    let decision = wg_decision_with_wrong_default_adjacency();
+    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state);
+    assert!(out.is_none(), "#13978: unresolved peer next hop must fail closed, \
+        not borrow the default adjacency's dst MAC onto the peer egress");
 }
 
 // === #6308: the WG transit-egress TX DISPATCH must target the SELECTED peer's
@@ -1143,6 +1183,7 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v6() {
     snap.tunnel_endpoints[0].wg_peers[0].wg_endpoint = "[2001:db8:113::7]:51820".to_string();
 
     let mut state = build_forwarding_state(&snap);
+    install_v6_peer_next_hop_neighbor(&mut state);
     let peer_ep: std::net::SocketAddr = "[2001:db8:113::7]:51820".parse().unwrap();
     state
         .wg_engines
@@ -1189,6 +1230,7 @@ fn wg_encap_in_place_matches_separate_buffer() {
     // that wrote the encrypt to the wrong offset, mis-sized the buffer, or
     // truncated incorrectly fails the decap (auth/length) → red.
     let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
+    install_v4_peer_next_hop_neighbor(&mut state);
     let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
     let (init_engine, resp_engine) = established_pair(peer_ep, "10.123.0.0/24");
     state.wg_engines.insert(1, Arc::new(init_engine));
@@ -1530,6 +1572,7 @@ fn non_wg_forward_keeps_the_tx_ifindex_fast_path_6345() {
 #[test]
 fn build_forwarded_frame_from_frame_encapsulates_wireguard_7167() {
     let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
+    install_v4_peer_next_hop_neighbor(&mut state);
     let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
     state
         .wg_engines
