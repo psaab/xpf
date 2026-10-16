@@ -7288,7 +7288,7 @@ fn inet_precedence_classifier_steers_packet_into_its_forwarding_class_queue() {
 #[test]
 fn fabric_scoped_ingress_preserves_ba_queue_and_rewrite_across_selection_paths_13967() {
     let mut snapshot =
-        inet_precedence_fixture("", "prec-cl", vec![], vec![prec_entry("voice", "high", vec![5])]);
+        inet_precedence_fixture("", "prec-cl", vec![], vec![prec_entry("voice", "high", vec![7])]);
     let egress = snapshot
         .interfaces
         .iter_mut()
@@ -7317,7 +7317,7 @@ fn fabric_scoped_ingress_preserves_ba_queue_and_rewrite_across_selection_paths_1
     }];
     let forwarding = build_forwarding_state(&snapshot);
     let key = inet_precedence_test_key();
-    let dscp = 46;
+    let dscp = 56; // CS7, as in the H18-02 acceptance probe.
     let direct_meta = UserspaceDpMeta {
         ingress_ifindex: 999,
         addr_family: libc::AF_INET as u8,
@@ -7329,6 +7329,7 @@ fn fabric_scoped_ingress_preserves_ba_queue_and_rewrite_across_selection_paths_1
     let fabric_meta = UserspaceDpMeta {
         ingress_ifindex: 4242,
         fabric_ingress_ifindex: 999,
+        meta_flags: crate::afxdp::icmp::FABRIC_INGRESS_FLAG,
         addr_family: libc::AF_INET as u8,
         dscp,
         ..Default::default()
