@@ -195,6 +195,18 @@
   sessions. `poll_descriptor/flow_cache_hit_tests.rs` verifies a consumed
   FlowCache hit is dropped before forwarding side effects.
 
+### Shim early-passes non-owned IPv6 link-local destinations (#13983)
+- The shim passed every IPv6 `fe80::/10` unicast destination to the kernel
+  before session lookup or userspace policy. A non-owned link-local could
+  therefore be kernel-forwarded and hairpinned between links.
+- **Fix:** Remove the scope-only IPv6 link-local early-pass. The packet now
+  reaches the ordinary session-miss locality check: exactly owned local
+  addresses still go to the kernel, while non-owned addresses continue to
+  AF_XDP policy. Multicast control traffic retains its early pass.
+- **Regression test:** `userspace-dp/src/afxdp/frame/tests_shim_early_filter_10640.rs`
+  executes the shim's actual `early_filter` module on `fe80::/10` addresses,
+  including the `febf::` upper boundary and adjacent non-link-local controls.
+
 ### Worker transit forwards special destination classes (#11413)
 - A WG/GRE-decapped or injected inner packet addressed to IPv4 multicast,
   limited broadcast, loopback, reserved space, or IPv6 multicast could match a

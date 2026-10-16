@@ -74,19 +74,17 @@ fn link_local_unicast_and_transit_ndp_do_not_pass_early_10640() {
             "fixture {dst:?} must be global/transit"
         );
         assert!(
-            !ipv6_early_pass_to_kernel(dst),
+            !ipv6_early_pass_to_kernel(dst, false),
             "a transit IPv6 destination must continue to the AF_XDP redirect \
              for adjudication, never pass early (#10640)"
         );
     }
 }
 
-/// THE PRESERVED HALF: limited broadcast, multicast, and IPv6
-/// link-local still pass early. Without this, deleting the verdict
-/// function (fail-everything-closed) would satisfy the cell above while
-/// breaking DHCP, multicast NDP, and link-local control plane.
+/// THE PRESERVED HALF: limited broadcast and multicast still pass early.
+/// Link-local unicast is checked for exact local ownership after this filter.
 #[test]
-fn broadcast_multicast_and_v6_link_local_still_pass_early_10640() {
+fn broadcast_multicast_and_v6_link_local_ownership_13983() {
     assert!(
         ipv4_early_pass_to_kernel(0xffff_ffff),
         "limited broadcast must still pass early"
@@ -113,33 +111,34 @@ fn broadcast_multicast_and_v6_link_local_still_pass_early_10640() {
             "fixture {dst:?} must really be multicast"
         );
         assert!(
-            ipv6_early_pass_to_kernel(dst),
+            ipv6_early_pass_to_kernel(dst, false),
             "multicast NDP must still pass early"
         );
     }
+    // Non-owned link-local unicast must not bypass the exact ownership
+    // check. Both fe80 and febf addresses are in fe80::/10.
     for dst in [
         [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
         [0xfe, 0xb0, 0, 0, 0, 0, 0, 0, 0x02, 0xbf, 0x72, 0x01, 0x00, 0x01, 0x00, 0x01],
+        [0xfe, 0xbf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
     ] {
+        assert!(is_ipv6_link_local(dst), "fixture {dst:?} must be link-local");
         assert!(
-            is_ipv6_link_local(dst),
-            "fixture {dst:?} must really be link-local"
+            !ipv6_early_pass_to_kernel(dst, false),
+            "non-owned link-local {dst:?} must reach exact ownership check, not pass early (#13983)"
         );
         assert!(
-            ipv6_early_pass_to_kernel(dst),
-            "IPv6 link-local must still pass early"
+            ipv6_early_pass_to_kernel(dst, true),
+            "owned link-local {dst:?} must retain local kernel delivery (#13983)"
         );
     }
-    // fe80::/10 boundary: febf:: is link-local, fec0:: is not (site-local
-    // range, must fall through).
-    assert!(
-        ipv6_early_pass_to_kernel([0xfe, 0xbf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
-        "febf::/10 edge must still pass early"
-    );
-    assert!(
-        !ipv6_early_pass_to_kernel([0xfe, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
-        "fec0:: is outside fe80::/10 and must fall through"
-    );
+    for dst in [
+        [0xfe, 0x7f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        [0xfe, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    ] {
+        assert!(!is_ipv6_link_local(dst), "fixture {dst:?} must be outside fe80::/10");
+        assert!(!ipv6_early_pass_to_kernel(dst, false));
+    }
 }
 
 /// MLD Queries target multicast (the general-query destination is ff02::1),
@@ -150,7 +149,7 @@ fn mld_general_query_to_kernel_10859() {
     let all_nodes = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01];
     assert!(is_ipv6_multicast(all_nodes), "ff02::1 must be multicast");
     assert!(
-        ipv6_early_pass_to_kernel(all_nodes),
+        ipv6_early_pass_to_kernel(all_nodes, false),
         "an MLD general query to ff02::1 must pass to the kernel before AF_XDP"
     );
 }
