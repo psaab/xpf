@@ -247,6 +247,21 @@ func validateDestinationNATAddressesStrict(cfg *Config) error {
 						rs.Name, rule.Name, raw, strings.Join(destAddrs, ", "))
 				}
 			}
+			// The destination table is keyed by the match family; a pool
+			// address from another family cannot be installed as that entry.
+			if !rule.Then.Off && rule.Then.PoolName != "" {
+				if pool := cfg.Security.NAT.Destination.Pools[rule.Then.PoolName]; pool != nil {
+					poolFamily := natAddrFamily(natCIDRIPPart(pool.Address))
+					for _, raw := range destAddrs {
+						destFamily := natAddrFamily(natCIDRIPPart(raw))
+						if poolFamily != "" && destFamily != "" && poolFamily != destFamily {
+							return fmt.Errorf(
+								"destination-nat rule-set %q rule %q: match destination-address %q and pool %q address %q have an address family mismatch",
+								rs.Name, rule.Name, raw, rule.Then.PoolName, pool.Address)
+						}
+					}
+				}
+			}
 			// #3164: a DNAT `match destination-address` that is a MULTI-HOST
 			// prefix (a CIDR with a non-host mask, e.g. 198.51.100.0/24) is now
 			// HONORED. The snapshot builder (buildDestinationNATSnapshots) carries
@@ -1796,6 +1811,24 @@ func validateNATHostMaskStrict(cfg *Config, lenient bool) ([]string, error) {
 					if err := emit(fmt.Sprintf(
 						"security nat static rule-set %q rule %q then static-nat prefix %q is not a valid IP address or CIDR prefix (static NAT requires a literal address or prefix, not an address-book name or a typo'd value)",
 						rs.Name, rule.Name, rule.Then)); err != nil {
+						return nil, err
+					}
+				}
+			}
+			// Static NAT is a single-family 1:1 mapping. Two otherwise-valid
+			// host endpoints from different families cannot form an installed
+			// mapping, so reject this before the block-pair/host-mask checks.
+			if rule.Then != "" {
+				matchFamily, _, matchHost, matchParsed := natStaticPrefixInfo(rule.Match)
+				thenFamily, _, thenHost, thenParsed := natStaticPrefixInfo(rule.Then)
+				// Restrict this targeted gate to two otherwise-valid host
+				// endpoints. Invalid host masks (notably mapped IPv6 /32)
+				// retain their existing, more precise diagnostics. Block pairs
+				// are handled by the existing static block/host-mask checks.
+				if matchParsed && thenParsed && matchHost && thenHost && matchFamily != thenFamily {
+					if err := emit(fmt.Sprintf(
+						"security nat static rule-set %q rule %q: match destination-address %q and then static-nat prefix %q have an address family mismatch",
+						rs.Name, rule.Name, rule.Match, rule.Then)); err != nil {
 						return nil, err
 					}
 				}

@@ -20,9 +20,13 @@ import (
 // destination-address (raw token) and a valid pool. The from-zone is defined
 // to avoid unrelated undefined-zone warnings.
 func dnatSet(matchDest string) []string {
+	poolAddress := "10.0.0.5"
+	if strings.Contains(matchDest, ":") {
+		poolAddress = "2001:db8::5"
+	}
 	return []string{
 		"set security zones security-zone untrust",
-		"set security nat destination pool dp address 10.0.0.5",
+		"set security nat destination pool dp address " + poolAddress,
 		"set security nat destination rule-set rs1 from zone untrust",
 		"set security nat destination rule-set rs1 rule r1 match destination-address " + matchDest,
 		"set security nat destination rule-set rs1 rule r1 then destination-nat pool dp",
