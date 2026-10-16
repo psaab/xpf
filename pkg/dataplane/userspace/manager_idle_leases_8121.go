@@ -175,9 +175,10 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 		return err
 	}
 	_, err := m.requestDetailedLocked(ControlRequest{
-		Type:           "import_idle_leases",
-		SuppressStatus: true,
-		IdleLeases:     batch.Leases,
+		Type:                     "import_idle_leases",
+		SuppressStatus:           true,
+		IdleLeases:               batch.Leases,
+		ClearGenerationValidated: true,
 	})
 	return err
 }

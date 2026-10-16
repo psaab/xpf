@@ -15,7 +15,6 @@ use super::super::monotonic_nanos;
 use super::Coordinator;
 use crate::nat::{DisplayLeaseRecord, IdleLeaseImport, IdleLeaseRecord};
 use std::collections::HashSet;
-use std::net::IpAddr;
 
 /// One idle lease plus the pool it belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +69,14 @@ impl Coordinator {
         records: &[PoolIdleLease],
     ) -> IdleLeaseImportCounts {
         self.import_idle_persistent_leases(records, monotonic_nanos())
+    }
+    /// Import a batch after the Go control plane has durably validated its
+    /// origin generation. Per-key clear tombstones still apply.
+    pub(crate) fn import_idle_persistent_leases_after_generation_now(
+        &self,
+        records: &[PoolIdleLease],
+    ) -> IdleLeaseImportCounts {
+        self.import_idle_persistent_leases_inner(records, monotonic_nanos(), true)
     }
 
     /// Every idle lease this node holds, tagged with its pool.
@@ -151,6 +158,15 @@ impl Coordinator {
         records: &[PoolIdleLease],
         now_ns: u64,
     ) -> IdleLeaseImportCounts {
+        self.import_idle_persistent_leases_inner(records, now_ns, false)
+    }
+
+    fn import_idle_persistent_leases_inner(
+        &self,
+        records: &[PoolIdleLease],
+        now_ns: u64,
+        generation_validated: bool,
+    ) -> IdleLeaseImportCounts {
         let mut counts = IdleLeaseImportCounts::default();
         for rec in records {
             // The allocation-site ownership probes below are advisory fast
@@ -182,12 +198,21 @@ impl Coordinator {
                 counts.skipped_identity_busy += 1;
                 continue;
             }
-            let outcome = rule.pool_allocator.import_idle_lease_at(
-                lease,
-                rule.pool_index_of(lease.translated_ip),
-                rule.persistent_nat_timeout_ns,
-                now_ns,
-            );
+            let outcome = if generation_validated {
+                rule.pool_allocator.import_idle_lease_at_after_generation(
+                    lease,
+                    rule.pool_index_of(lease.translated_ip),
+                    rule.persistent_nat_timeout_ns,
+                    now_ns,
+                )
+            } else {
+                rule.pool_allocator.import_idle_lease_at(
+                    lease,
+                    rule.pool_index_of(lease.translated_ip),
+                    rule.persistent_nat_timeout_ns,
+                    now_ns,
+                )
+            };
             if matches!(outcome, IdleLeaseImport::Installed)
                 && rule.peer_holds_idle_import_identity(
                     lease.protocol,
