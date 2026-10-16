@@ -1310,8 +1310,8 @@ fn ffff_subnet_dropped_48_10290() {
         "a /48 0xFFFF subnet is directed to discard by RFC 6296 §3.2 (not RFC2119 MUST)"
     );
     assert_eq!(src, original_src, "a refused address must be left untouched");
-    // §3.2 is an INTERNAL-subnet rule: inbound external 0xFFFF is not the
-    // prohibited internal subnet and is handled by the inverse arithmetic.
+    // Inbound external 0xFFFF on a non-neutral /48 is also refused under
+    // §3.5 (#13695).
 }
 
 // #10290 control: whichever IID word takes the adjustment, the
