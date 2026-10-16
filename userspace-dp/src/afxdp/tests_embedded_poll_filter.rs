@@ -872,6 +872,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         arrival_ifindex,
         expect_related_admit,
         quote_reply_reverse_half,
+        injected,
         initial_disposition,
         true,
     );
@@ -888,6 +889,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
     arrival_ifindex: u32,
     expect_related_admit: bool,
     quote_reply_reverse_half: bool,
+    injected: bool,
     initial_disposition: ForwardingDisposition,
     enable_allow_embedded_icmp: bool,
 ) {
@@ -1870,6 +1872,7 @@ fn poll_descriptor_snat_frag_needed_reversed_with_knob_off_13935() {
         true,
         12,
         true,
+        false,
         false,
         ForwardingDisposition::ForwardCandidate,
         false,
