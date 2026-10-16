@@ -940,6 +940,12 @@ LIST. The `rewrite-rules` families write exactly ONE code point per
 authored the first valid one is installed — but every value is still domain-
 checked, so a typo anywhere in the list is rejected at commit.
 
+Numeric code points may also use the field's exact-width bit-string spelling:
+six bits for DSCP (for example, `101110` is 46 / `ef`) and three bits for
+802.1p PCP or IP precedence (for example, `101` is 5). Only exact-width
+all-`0`/`1` tokens are interpreted as binary; shorter numeric forms such as
+`10` remain decimal.
+
 ### Example
 
 ```text
