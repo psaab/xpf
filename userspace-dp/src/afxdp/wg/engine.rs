@@ -1696,10 +1696,11 @@ impl WgEngine {
         })
     }
 
-    /// Commit send-side effects only after the caller confirms that the
-    /// encrypted record was actually transmitted (#13667). Building an
-    /// encrypted record is not evidence of transmission: outer-header
-    /// construction or socket/TX submission may still fail.
+    /// Commit send-side effects after the caller successfully hands the
+    /// encrypted record to its transport (#13667): a control-socket send
+    /// succeeds or the data TX pipeline admits the frame. Merely building
+    /// ciphertext does not establish either boundary; outer-header, route, or
+    /// queue admission may still fail.
     pub(crate) fn note_encap_sent(&self, peer_pubkey: &[u8; 32], outcome: EncapOutcome) {
         let Some(peer) = self.peer_arc(peer_pubkey) else {
             return;
