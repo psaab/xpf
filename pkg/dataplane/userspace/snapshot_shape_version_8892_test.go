@@ -542,10 +542,11 @@ const (
 	// (userspace-dp/src/protocol/snapshot.rs:798), names no field inside
 	// it, and `grep -rn EnforcementPolicies userspace-dp/src/` returns
 	// zero hits; every consumer is in pkg/config. Nothing transmits the
-	// fields, so no helper of any vintage can observe them, and bumping
-	// for them would spend the one signal that says the wire really
-	// ProtocolVersion is 48 because persistent-lease permission fields are
-	// carried on control/HA lease records; this ConfigSnapshot shape is unchanged.
+	// fields, so no helper of any vintage can observe them; bumping the
+	// protocol for these invisible fields would spend the signal that the wire
+	// shape really changed.
+	// ProtocolVersion is 48 because persistent-NAT lease permissions travel
+	// on control/HA lease records; this ConfigSnapshot shape remains unchanged.
 	snapshotShapeVersion8892 = 48
 )
 

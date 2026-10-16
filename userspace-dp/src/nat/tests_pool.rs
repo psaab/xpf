@@ -2077,13 +2077,10 @@ fn persistent_pool_rules_permit(
     parse_source_nat_rules(&[snapshot])
 }
 
-/// #2823 FAIL-ON-REVERT: `permit target-host` scopes the persistent lease
-/// to the remote HOST only (dst_ip), dropping the remote PORT from the key.
-/// A second flow from the same local source to a NEW remote PORT on the
-/// SAME remote host MUST reuse the first translated mapping. Reverting the
-/// target-host branch to (dst_ip, dst_port) keying makes the new-port flow
-/// allocate a distinct mapping and turns the reuse assertion RED — while the
-/// sibling `target-host-port` test (which expects no-reuse) stays GREEN.
+/// #13945 FAIL-ON-REVERT: `permit target-host` gates inbound admission but
+/// never partitions the outbound persistent mapping by remote endpoint.
+/// Flows from the same local source to different hosts and ports must reuse
+/// the same translated mapping; the permit scope is checked on inbound misses.
 #[test]
 fn pool_snat_persistent_target_host_reuses_across_remote_ports() {
     let rules = persistent_pool_rules_permit(300, 40000, 40010, "target-host");
