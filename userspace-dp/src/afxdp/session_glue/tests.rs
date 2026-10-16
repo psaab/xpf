@@ -10675,7 +10675,7 @@ mod flush_tuple_gate_contention_13654 {
     fn flush_gate_contention(
         deltas: &[SessionDelta],
         with_slot: bool,
-        full_slot: bool,
+        queued_slot_deltas: usize,
         worker_lossless_wedged: &mut bool,
     ) -> (bool, Option<SessionTable>) {
         let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -10696,9 +10696,11 @@ mod flush_tuple_gate_contention_13654 {
         let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
         let __r3_reader = __r3_channel.reader();
         let mut slot = SessionTable::new();
-        if full_slot {
-            let filler = close_delta(&test_key(), 0, false);
-            assert!(slot.requeue_deltas_front(&vec![filler; 4096]));
+        if queued_slot_deltas > 0 {
+            let fillers: Vec<_> = (0..queued_slot_deltas)
+                .map(|index| close_delta(&test_key(), 100_000 + index as u64, false))
+                .collect();
+            assert!(slot.requeue_deltas_front(&fillers));
         }
         let out_of_sync = flush_session_deltas(
             &ident,
@@ -10736,7 +10738,7 @@ mod flush_tuple_gate_contention_13654 {
             .expect("test holds the contending reverse-key permit");
         let deltas = [close_delta(&key, 41, false)];
         let mut wedged = false;
-        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, false, &mut wedged);
+        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, 0, &mut wedged);
         assert!(!out_of_sync, "#13654: a requeued close must not latch LossResync");
         assert!(!wedged, "#13654: a requeued close must not wedge the drain cycle");
         let mut slot = slot.expect("retry slot returned");
@@ -10757,7 +10759,7 @@ mod flush_tuple_gate_contention_13654 {
             .expect("test holds the contending install permit");
         let deltas = [close_delta(&key, 43, false)];
         let mut wedged = false;
-        let (out_of_sync, _) = flush_gate_contention(&deltas, false, false, &mut wedged);
+        let (out_of_sync, _) = flush_gate_contention(&deltas, false, 0, &mut wedged);
         assert!(
             out_of_sync,
             "#13654: with no retry slot the contended close is lost and must resync"
@@ -10767,7 +10769,7 @@ mod flush_tuple_gate_contention_13654 {
         // Monotonicity: an already-wedged cycle keeps its latch even when
         // this flush only requeues.
         let mut pre_wedged = true;
-        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, false, &mut pre_wedged);
+        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, 0, &mut pre_wedged);
         assert!(out_of_sync, "#13654: a prior wedge must remain latched");
         assert!(pre_wedged);
         drop(slot);
@@ -10787,7 +10789,7 @@ mod flush_tuple_gate_contention_13654 {
             close_delta(&key, 53, false),
         ];
         let mut wedged = false;
-        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, false, &mut wedged);
+        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, 0, &mut wedged);
         assert!(!out_of_sync, "#13654: a fully requeued suffix must stay in sync");
         let mut slot = slot.expect("retry slot returned");
         let retry = slot.drain_deltas(8);
@@ -10805,13 +10807,39 @@ mod flush_tuple_gate_contention_13654 {
             .expect("test holds the contending reverse-key permit");
         let deltas = [close_delta(&key, 57, false)];
         let mut wedged = false;
-        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, true, &mut wedged);
+        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, 4096, &mut wedged);
         assert!(out_of_sync, "#13767: a dropped retry delta must request LossResync");
         assert!(wedged, "#13767: a dropped retry delta must wedge this drain cycle");
         let mut slot = slot.expect("full retry slot returned");
         assert_eq!(slot.delta_drops(), 1, "#13767: count the unretained close");
         assert!(slot.take_delta_loss(), "#13767: latch requeue overflow loss");
         assert_eq!(slot.drain_deltas(4096).len(), 4096, "keep the existing full ring");
+    }
+
+    #[test]
+    fn tuple_gate_contention_preserves_retry_prefix_before_overflow_13767() {
+        let mut key = test_key();
+        key.src_port += 59;
+        let held_key = reverse_session_key(&key, crate::nat::NatDecision::default());
+        let _held = crate::afxdp::bpf_map::global_tuple_gate()
+            .try_acquire_installs([held_key])
+            .expect("test holds the contending reverse-key permit");
+        let deltas = [close_delta(&key, 59, false), close_delta(&key, 60, false)];
+        let mut wedged = false;
+        let (out_of_sync, slot) = flush_gate_contention(&deltas, true, 4095, &mut wedged);
+        assert!(out_of_sync, "#13767: a dropped retry suffix must request LossResync");
+        assert!(wedged, "#13767: a dropped retry suffix must wedge this drain cycle");
+        let mut slot = slot.expect("near-full retry slot returned");
+        assert_eq!(slot.delta_drops(), 1, "#13767: count only the unretained suffix");
+        assert!(slot.take_delta_loss(), "#13767: latch partial requeue overflow");
+        let retry = slot.drain_deltas(3);
+        let ids: Vec<u64> = retry.iter().map(|delta| delta.session_id).collect();
+        assert_eq!(
+            ids,
+            [59, 100_000, 100_001],
+            "#13767: preserve the earliest close ahead of the existing FIFO ring"
+        );
+        assert_eq!(slot.drain_deltas(4096).len(), 4093);
     }
 
     #[test]
