@@ -570,7 +570,48 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 // a historical fallback gate, not proof of current table presence or current-
 // address coverage (#5789, #5790).
 func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
+
 	return d.applyHostInboundFilterWithOverlay(cfg, d.activeHostInputFenceOverlay())
+}
+
+// applyHostInboundPreNetworkdAddressFence closes the day-2 publication window
+// for new static addresses. The dataplane snapshot is applied before
+// networkd activates interface addresses, while the normal host-inbound render
+// is in the apply tail; an address added by this config would otherwise be
+// locally deliverable under the previous nft generation in between. The
+// config-backed snapshot includes static unit addresses before networkd brings
+// them up. Install only additive drops for destinations the retained table
+// does not cover; the normal successful host-inbound install retires the gap.
+func (d *Daemon) applyHostInboundPreNetworkdAddressFence(cfg *config.Config) error {
+	if cfg == nil {
+		return nil
+	}
+	snaps := sampleHostInboundSnapshots(cfg)
+	views := dpuserspace.BuildZoneHostInboundViewsFromSnapshots(cfg, snaps)
+	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps)
+	uncoveredV4, uncoveredV6 := hostInboundUncoveredDropAddrs(views, unzonedV4, unzonedV6, d.hostInboundCoveredAddrs)
+	if len(uncoveredV4)+len(uncoveredV6) == 0 {
+		return nil
+	}
+	withheld := dpuserspace.BuildFenceAddrSetsFromSnapshots(cfg, snaps, views)
+	sharedV4 := intersectHostInboundAddresses(uncoveredV4, withheld.WithheldV4)
+	sharedV6 := intersectHostInboundAddresses(uncoveredV6, withheld.WithheldV6)
+	spec := xnft.GapFenceSpec{
+		// A temporary pre-activation fence denies host services uniformly;
+		// the full policy render follows once networkd activates addresses.
+		UncoveredV4:     uncoveredV4,
+		UncoveredV6:     uncoveredV6,
+		SharedV4:        sharedV4,
+		SharedV6:        sharedV6,
+		LifelineNetdevs: dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
+	}
+	if err := d.installHostInboundGapFence(spec); err != nil {
+		d.noteHostInboundGapApplyResult(err)
+		d.noteHostInboundApplyFailed(time.Now())
+		return err
+	}
+	d.hostInboundGapFenceActive.Store(true)
+	return nil
 }
 
 func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *xnft.HostInputFenceOverlay) error {
