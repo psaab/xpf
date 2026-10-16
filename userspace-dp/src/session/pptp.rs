@@ -253,7 +253,7 @@ pub(crate) struct PptpCallDisconnect {
 struct AssociationRecord {
     call: PptpCall,
     /// The channel that taught it. Removing the channel removes the call.
-    control: ControlChannelId,
+    control: Option<ControlChannelId>,
     /// Stable install time, used to keep a delayed close from deleting a call
     /// learned on a reused TCP tuple.
     learned_ns: u64,
@@ -350,13 +350,23 @@ impl PptpAssociations {
         control: ControlChannelId,
         now_ns: u64,
     ) -> Result<u32, PptpInstallError> {
+        self.install_with_control(call, Some(control), now_ns)
+    }
+
+    fn install_with_control(
+        &mut self,
+        call: PptpCall,
+        control: Option<ControlChannelId>,
+        now_ns: u64,
+    ) -> Result<u32, PptpInstallError> {
         let handle = call.handle();
         match self.by_handle.get(&handle) {
             Some(existing) if existing.call == call => {
-                // Idempotent re-learn (a retransmitted reply). Refresh rather
-                // than refuse: the call is real and this is evidence of it.
+                // An imported association has no local TCP channel. Refreshing
+                // an identical record must not erase an existing local binding:
+                // its FIN/RST still needs to clean up this association.
                 self.by_handle.entry(handle).and_modify(|r| {
-                    r.control = control;
+                    r.control = control.or(r.control);
                     r.learned_ns = now_ns;
                     r.last_seen_ns = now_ns;
                 });
@@ -474,6 +484,28 @@ impl PptpAssociations {
         rec.last_seen_ns = now_ns;
         Some(handle)
     }
+    /// The call behind this handle, for the HA sync producer (#13965).
+    pub(crate) fn call_for_handle(&self, handle: u32) -> Option<PptpCall> {
+        self.by_handle.get(&handle).map(|rec| rec.call)
+    }
+
+    /// The wire call-id pair behind this handle, or ABSENT when unknown.
+    pub(crate) fn wire_call_ids_for_handle(&self, handle: u32) -> u64 {
+        self.call_for_handle(handle)
+            .map_or(PPTP_CALL_IDS_ABSENT, |call| call.to_wire_call_ids())
+    }
+    /// #13965: install an association learned from an HA-synced session import.
+    /// No local TCP control-channel binding exists; the idle expiry remains the
+    /// lifetime bound. An identical already-learned association keeps its real
+    /// control binding so local FIN/RST cleanup is preserved.
+    pub(crate) fn install_synced_association(
+        &mut self,
+        call: PptpCall,
+        now_ns: u64,
+    ) -> Result<u32, PptpInstallError> {
+        self.install_with_control(call, None, now_ns)
+    }
+
 
     /// Drop every association idle longer than `timeout_ns`. Returns how many.
     ///
@@ -508,7 +540,7 @@ impl PptpAssociations {
         let doomed: Vec<u32> = self
             .by_handle
             .iter()
-            .filter(|(_, rec)| rec.control == control)
+            .filter(|(_, rec)| rec.control == Some(control))
             .map(|(handle, _)| *handle)
             .collect();
         for handle in &doomed {
@@ -529,7 +561,7 @@ impl PptpAssociations {
         let doomed: Vec<u32> = self
             .by_handle
             .iter()
-            .filter(|(_, rec)| rec.control == control && rec.learned_ns <= closed_ns)
+            .filter(|(_, rec)| rec.control == Some(control) && rec.learned_ns <= closed_ns)
             .map(|(handle, _)| *handle)
             .collect();
         for handle in &doomed {
@@ -564,7 +596,8 @@ impl PptpAssociations {
             return false;
         };
         let matches_notice = self.by_handle.get(&handle).is_some_and(|record| {
-            record.control == disconnect.control && record.learned_ns <= disconnect.disconnected_ns
+            record.control == Some(disconnect.control)
+                && record.learned_ns <= disconnect.disconnected_ns
         });
         matches_notice && self.remove(handle)
     }
@@ -602,13 +635,13 @@ impl PptpAssociations {
             handle,
             AssociationRecord {
                 call,
-                control: ControlChannelId::new_in_domain(
+                control: Some(ControlChannelId::new_in_domain(
                     call.routing_domain,
                     call.lo,
                     1723,
                     call.hi,
                     1723,
-                ),
+                )),
                 learned_ns: 0,
                 last_seen_ns: 0,
             },
@@ -621,320 +654,318 @@ impl PptpAssociations {
 }
 
 #[cfg(test)]
-mod tests_7699 {
-    use super::*;
-    use crate::session::TunnelDiscriminator;
+mod tests_7699 { use super::*;
+use crate::session::TunnelDiscriminator;
 
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
-    }
+fn ip(s: &str) -> IpAddr {
+    s.parse().unwrap()
+}
 
-    /// The control channel a fixture's calls are learned on. Stage-3 cells that
-    /// care about the channel build their own.
-    fn ctl(a: IpAddr, b: IpAddr) -> ControlChannelId {
-        ControlChannelId::new(a, 49152, b, 1723)
-    }
+/// The control channel a fixture's calls are learned on. Stage-3 cells that
+/// care about the channel build their own.
+fn ctl(a: IpAddr, b: IpAddr) -> ControlChannelId {
+    ControlChannelId::new(a, 49152, b, 1723)
+}
 
-    /// THE PROPERTY THE WHOLE DESIGN EXISTS FOR: both directions of one call
-    /// resolve to the SAME handle.
-    ///
-    /// A→B carries the call ID B allocated; B→A carries the one A allocated.
-    /// They are different values, and a discriminator built from either would
-    /// differ per direction — which is why #8382 was closed. Resolving through
-    /// the association makes the class direction-symmetric.
-    #[test]
-    fn both_directions_of_one_call_resolve_to_one_handle_7699() {
-        let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
-        let (a_id, b_id) = (0x1111u16, 0x2222u16);
-        let mut t = PptpAssociations::default();
-        let handle = t
-            .install(PptpCall::new(a, a_id, b, b_id), ctl(a, b), 0)
-            .expect("install");
+/// THE PROPERTY THE WHOLE DESIGN EXISTS FOR: both directions of one call
+/// resolve to the SAME handle.
+///
+/// A→B carries the call ID B allocated; B→A carries the one A allocated.
+/// They are different values, and a discriminator built from either would
+/// differ per direction — which is why #8382 was closed. Resolving through
+/// the association makes the class direction-symmetric.
+#[test]
+fn both_directions_of_one_call_resolve_to_one_handle_7699() {
+    let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
+    let (a_id, b_id) = (0x1111u16, 0x2222u16);
+    let mut t = PptpAssociations::default();
+    let handle = t
+        .install(PptpCall::new(a, a_id, b, b_id), ctl(a, b), 0)
+        .expect("install");
 
-        // A→B carries B's call id, so it is keyed on the destination B.
-        assert_eq!(
-            t.resolve(b, b_id),
-            Some(handle),
-            "the A->B direction must resolve to the call handle"
-        );
-        // B→A carries A's call id, keyed on destination A.
-        assert_eq!(
-            t.resolve(a, a_id),
-            Some(handle),
-            "the B->A direction must resolve to the SAME handle; if these two \
-             differ, the reply is looked up under a key the forward session's \
-             reverse companion does not equal and it matches NO session"
-        );
-    }
+    // A→B carries B's call id, so it is keyed on the destination B.
+    assert_eq!(
+        t.resolve(b, b_id),
+        Some(handle),
+        "the A->B direction must resolve to the call handle"
+    );
+    // B→A carries A's call id, keyed on destination A.
+    assert_eq!(
+        t.resolve(a, a_id),
+        Some(handle),
+        "the B->A direction must resolve to the SAME handle; if these two \
+         differ, the reply is looked up under a key the forward session's \
+         reverse companion does not equal and it matches NO session"
+    );
+}
 
-    /// Criterion 2: two simultaneous calls between the SAME endpoints must not
-    /// alias. This is the case that motivated the whole issue.
-    #[test]
-    fn two_calls_between_one_endpoint_pair_get_distinct_handles_7699() {
-        let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
-        let mut t = PptpAssociations::default();
-        let h1 = t
-            .install(PptpCall::new(a, 0x1001, b, 0x2001), ctl(a, b), 0)
-            .expect("call 1");
-        let h2 = t
-            .install(PptpCall::new(a, 0x1002, b, 0x2002), ctl(a, b), 0)
-            .expect("call 2");
+/// Criterion 2: two simultaneous calls between the SAME endpoints must not
+/// alias. This is the case that motivated the whole issue.
+#[test]
+fn two_calls_between_one_endpoint_pair_get_distinct_handles_7699() {
+    let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
+    let mut t = PptpAssociations::default();
+    let h1 = t
+        .install(PptpCall::new(a, 0x1001, b, 0x2001), ctl(a, b), 0)
+        .expect("call 1");
+    let h2 = t
+        .install(PptpCall::new(a, 0x1002, b, 0x2002), ctl(a, b), 0)
+        .expect("call 2");
+    assert_ne!(
+        h1, h2,
+        "two calls between one endpoint pair shared a handle, so they share \
+         a session: one policy decision, one NAT state, one counter set"
+    );
+    assert_eq!(t.resolve(b, 0x2001), Some(h1));
+    assert_eq!(t.resolve(b, 0x2002), Some(h2));
+}
+
+/// The handle must depend on EVERY component, varied ONE AT A TIME.
+///
+/// This cell exists because the two-calls cell below could not see it. That
+/// fixture varies both call IDs together, so a handle that ignored one of
+/// them still separated the two calls and the cell stayed green — an
+/// escaped mutation found by dropping `hi_call_id` from the derivation.
+///
+/// A handle blind to one component collides for every pair of calls that
+/// differ only in it, which is two calls sharing one session: the exact
+/// collapse this class exists to prevent. Varying one axis at a time is the
+/// only shape that catches it.
+#[test]
+fn the_handle_depends_on_every_component_7699() {
+    let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
+    let base = PptpCall::new(a, 0x1111, b, 0x2222);
+    let h = base.handle();
+
+    for (what, other) in [
+        (
+            "the call id allocated by A",
+            PptpCall::new(a, 0x9999, b, 0x2222),
+        ),
+        (
+            "the call id allocated by B",
+            PptpCall::new(a, 0x1111, b, 0x9999),
+        ),
+        (
+            "peer A's address",
+            PptpCall::new(ip("198.51.100.8"), 0x1111, b, 0x2222),
+        ),
+        (
+            "peer B's address",
+            PptpCall::new(a, 0x1111, ip("203.0.113.10"), 0x2222),
+        ),
+    ] {
         assert_ne!(
-            h1, h2,
-            "two calls between one endpoint pair shared a handle, so they share \
-             a session: one policy decision, one NAT state, one counter set"
-        );
-        assert_eq!(t.resolve(b, 0x2001), Some(h1));
-        assert_eq!(t.resolve(b, 0x2002), Some(h2));
-    }
-
-    /// The handle must depend on EVERY component, varied ONE AT A TIME.
-    ///
-    /// This cell exists because the two-calls cell below could not see it. That
-    /// fixture varies both call IDs together, so a handle that ignored one of
-    /// them still separated the two calls and the cell stayed green — an
-    /// escaped mutation found by dropping `hi_call_id` from the derivation.
-    ///
-    /// A handle blind to one component collides for every pair of calls that
-    /// differ only in it, which is two calls sharing one session: the exact
-    /// collapse this class exists to prevent. Varying one axis at a time is the
-    /// only shape that catches it.
-    #[test]
-    fn the_handle_depends_on_every_component_7699() {
-        let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
-        let base = PptpCall::new(a, 0x1111, b, 0x2222);
-        let h = base.handle();
-
-        for (what, other) in [
-            (
-                "the call id allocated by A",
-                PptpCall::new(a, 0x9999, b, 0x2222),
-            ),
-            (
-                "the call id allocated by B",
-                PptpCall::new(a, 0x1111, b, 0x9999),
-            ),
-            (
-                "peer A's address",
-                PptpCall::new(ip("198.51.100.8"), 0x1111, b, 0x2222),
-            ),
-            (
-                "peer B's address",
-                PptpCall::new(a, 0x1111, ip("203.0.113.10"), 0x2222),
-            ),
-        ] {
-            assert_ne!(
-                h,
-                other.handle(),
-                "the handle ignores {what}: two calls differing only in it would \
-                 share one handle, and therefore one session"
-            );
-        }
-    }
-
-    /// The handle must be a pure function of the association — same value from
-    /// either argument order, and from a freshly built table.
-    ///
-    /// This is what lets both HA nodes compute it without a translation table,
-    /// which is the reason it is derived rather than allocated.
-    #[test]
-    fn the_handle_is_deterministic_and_order_independent_7699() {
-        let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
-        let forward = PptpCall::new(a, 0x1111, b, 0x2222);
-        let reversed = PptpCall::new(b, 0x2222, a, 0x1111);
-        assert_eq!(
-            forward, reversed,
-            "the association must canonicalize, or the two peers store two rows \
-             for one call"
-        );
-        assert_eq!(
-            forward.handle(),
-            reversed.handle(),
-            "the handle must not depend on which peer's half was seen first — \
-             the standby derives it from the synced association, not from the \
-             order the active happened to learn it in"
-        );
-    }
-
-    /// FAIL CLOSED on a handle collision, matching #5277 / #5116 / #7625.
-    ///
-    /// Reached through a test seam because FNV-1a collisions are not
-    /// constructible by hand. Without the seam this arm would be untested, and
-    /// an untested fail-closed path is the one that quietly becomes fail-open.
-    #[test]
-    fn a_handle_collision_is_refused_not_merged_7699() {
-        let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
-        let squatter = PptpCall::new(a, 0x1001, b, 0x2001);
-        let victim = PptpCall::new(a, 0x3003, b, 0x4004);
-        let handle = victim.handle();
-
-        let mut t = PptpAssociations::default();
-        t.force_handle_for_test(squatter, handle);
-
-        match t.install(victim, ctl(a, b), 0) {
-            Err(PptpInstallError::HandleCollision {
-                existing,
-                handle: h,
-            }) => {
-                assert_eq!(existing, squatter);
-                assert_eq!(h, handle);
-            }
-            other => panic!(
-                "a colliding association must be REFUSED, not merged; two calls \
-                 sharing one handle share one session, which is the collapse \
-                 this class exists to prevent. Got {other:?}"
-            ),
-        }
-        // NEGATIVE CONTROL, on a CLEAN table: re-installing the identical
-        // association is idempotent, not a collision — otherwise a re-learn on
-        // a retransmitted control message would refuse a call that is already
-        // correct, and the guard would be indistinguishable from one that
-        // refuses everything.
-        //
-        // It must not reuse the forced table above: `squatter` was planted at
-        // VICTIM's handle there, so installing it would go to its own handle
-        // and the assertion would be about the seam rather than about
-        // idempotence.
-        let mut clean = PptpAssociations::default();
-        let first = clean
-            .install(squatter, ctl(a, b), 0)
-            .expect("first install");
-        assert_eq!(
-            clean.install(squatter, ctl(a, b), 0),
-            Ok(first),
-            "re-learning an identical association must be idempotent"
-        );
-        assert_eq!(clean.len(), 1, "idempotent re-install must not add a row");
-    }
-
-    /// A call cannot take over an `(allocator, call-id)` alias from another
-    /// handle: data lookup is indexed by this alias, not by the call record.
-    #[test]
-    fn an_allocator_alias_collision_is_refused_without_repointing_11053() {
-        let (a, b, c) = (ip("198.51.100.7"), ip("203.0.113.9"), ip("203.0.113.10"));
-        let original = PptpCall::new(a, 0x1111, b, 0x2222);
-        let colliding = PptpCall::new(a, 0x1111, c, 0x3333);
-        let mut table = PptpAssociations::default();
-        let original_handle = table.install(original, ctl(a, b), 10).expect("original");
-
-        assert_eq!(
-            table.install(colliding, ctl(a, c), 20),
-            Err(PptpInstallError::AllocatorCollision {
-                allocator: a,
-                call_id: 0x1111,
-                owner: original_handle,
-            }),
-            "a reused allocator alias must refuse the second association"
-        );
-        assert_eq!(table.resolve(a, 0x1111), Some(original_handle));
-        assert_eq!(table.resolve(b, 0x2222), Some(original_handle));
-        assert_eq!(table.resolve(c, 0x3333), None);
-        assert_eq!(table.len(), 1, "refusal must not leave a second handle");
-    }
-
-    /// The unassociated path: resolve to nothing, count, and do NOT drop.
-    ///
-    /// The counter is expected non-zero at startup and after a restart — data
-    /// packets legitimately precede the control channel — so it is a "running
-    /// unattributed" signal, not an error rate.
-    #[test]
-    fn an_unassociated_packet_resolves_to_none_and_is_counted_7699() {
-        let mut t = PptpAssociations::default();
-        assert_eq!(t.resolve(ip("203.0.113.9"), 0x2222), None);
-        assert_eq!(t.unassociated(), 0, "resolve must not itself count");
-        t.note_unassociated();
-        t.note_unassociated();
-        assert_eq!(t.unassociated(), 2);
-    }
-    /// #13282: counter snapshot must retain all PPTP lifecycle/failure signals.
-    #[test]
-    fn pptp_counters_report_unassociated_expiry_and_collisions_13282() {
-        let (a, b, c) = (ip("198.51.100.7"), ip("203.0.113.9"), ip("203.0.113.10"));
-        let mut table = PptpAssociations::default();
-        table.note_unassociated();
-        table.note_unassociated();
-        let first = PptpCall::new(a, 0x1111, b, 0x2222);
-        let second = PptpCall::new(a, 0x3333, c, 0x4444);
-        table.install(first, ctl(a, b), 0).expect("first");
-        table.install(second, ctl(a, c), 0).expect("second");
-        let same_handle_different_call = PptpCall::new(a, 0x5555, b, 0x6666);
-        let mut handle_collision = PptpAssociations::default();
-        handle_collision.force_handle_for_test(first, same_handle_different_call.handle());
-        assert!(matches!(
-            handle_collision.install(same_handle_different_call, ctl(a, b), 1),
-            Err(PptpInstallError::HandleCollision { .. })
-        ));
-        let alias_collision = PptpCall::new(a, 0x1111, c, 0x7777);
-        assert!(matches!(
-            table.install(alias_collision, ctl(a, c), 1),
-            Err(PptpInstallError::AllocatorCollision { .. })
-        ));
-        assert_eq!(
-            table.expire_idle(ASSOCIATION_IDLE_TIMEOUT_NS + 1, ASSOCIATION_IDLE_TIMEOUT_NS),
-            2
-        );
-        let counters = table.counters();
-        assert_eq!(counters.unassociated, 2);
-        assert_eq!(counters.expired_idle, 2);
-        assert_eq!(counters.allocator_collisions, 1);
-        assert_eq!(handle_collision.counters().handle_collisions, 1);
-        let mut sessions = crate::session::SessionTable::new();
-        sessions.pptp_mut().note_unassociated();
-        sessions
-            .pptp_mut()
-            .install(first, ctl(a, b), 0)
-            .expect("session-table call 1");
-        sessions
-            .pptp_mut()
-            .install(second, ctl(a, c), 0)
-            .expect("session-table call 2");
-        let _ = sessions.expire_stale_entries_ha(ASSOCIATION_IDLE_TIMEOUT_NS + 1, None);
-        assert_eq!(sessions.pptp().counters().expired_idle, 2);
-        assert_eq!(sessions.pptp().unassociated(), 1);
-    }
-
-    /// Teardown must remove BOTH allocator entries.
-    ///
-    /// Leaving one behind is the mis-attribution hazard: PPTP call IDs are
-    /// 16-bit and REUSED, so a stale half-entry pairs a future call onto a dead
-    /// handle. Asserted per direction, because removing only the direction the
-    /// teardown arrived on would pass a single-direction check.
-    #[test]
-    fn removing_a_call_clears_both_directions_7699() {
-        let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
-        let mut t = PptpAssociations::default();
-        let handle = t
-            .install(PptpCall::new(a, 0x1111, b, 0x2222), ctl(a, b), 0)
-            .expect("install");
-        assert!(t.remove(handle));
-        assert_eq!(t.resolve(a, 0x1111), None, "A-side entry survived teardown");
-        assert_eq!(t.resolve(b, 0x2222), None, "B-side entry survived teardown");
-        assert_eq!(t.len(), 0);
-        assert!(
-            !t.remove(handle),
-            "a second remove must report nothing removed"
-        );
-    }
-
-    /// The end-to-end property: a session keyed on a PPTP handle has a reverse
-    /// companion keyed on the SAME handle, so a reply matches it.
-    ///
-    /// This is the assertion #8382 could not make, and the reason that slice
-    /// was closed rather than landed.
-    #[test]
-    fn a_pptp_session_reverse_companion_keeps_the_handle_7699() {
-        let call = PptpCall::new(ip("198.51.100.7"), 0x1111, ip("203.0.113.9"), 0x2222);
-        let handle = call.handle();
-        let disc = TunnelDiscriminator::Pptp(handle);
-        assert_eq!(
-            crate::session::key::reverse_direction_discriminator_for_test(disc),
-            disc,
-            "the reverse companion must carry the same handle; if this ever \
-             transforms, a reply is looked up under a key the stored companion \
-             does not equal and matches no session at all"
+            h,
+            other.handle(),
+            "the handle ignores {what}: two calls differing only in it would \
+             share one handle, and therefore one session"
         );
     }
 }
+
+/// The handle must be a pure function of the association — same value from
+/// either argument order, and from a freshly built table.
+///
+/// This is what lets both HA nodes compute it without a translation table,
+/// which is the reason it is derived rather than allocated.
+#[test]
+fn the_handle_is_deterministic_and_order_independent_7699() {
+    let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
+    let forward = PptpCall::new(a, 0x1111, b, 0x2222);
+    let reversed = PptpCall::new(b, 0x2222, a, 0x1111);
+    assert_eq!(
+        forward, reversed,
+        "the association must canonicalize, or the two peers store two rows \
+         for one call"
+    );
+    assert_eq!(
+        forward.handle(),
+        reversed.handle(),
+        "the handle must not depend on which peer's half was seen first — \
+         the standby derives it from the synced association, not from the \
+         order the active happened to learn it in"
+    );
+}
+
+/// FAIL CLOSED on a handle collision, matching #5277 / #5116 / #7625.
+///
+/// Reached through a test seam because FNV-1a collisions are not
+/// constructible by hand. Without the seam this arm would be untested, and
+/// an untested fail-closed path is the one that quietly becomes fail-open.
+#[test]
+fn a_handle_collision_is_refused_not_merged_7699() {
+    let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
+    let squatter = PptpCall::new(a, 0x1001, b, 0x2001);
+    let victim = PptpCall::new(a, 0x3003, b, 0x4004);
+    let handle = victim.handle();
+
+    let mut t = PptpAssociations::default();
+    t.force_handle_for_test(squatter, handle);
+
+    match t.install(victim, ctl(a, b), 0) {
+        Err(PptpInstallError::HandleCollision {
+            existing,
+            handle: h,
+        }) => {
+            assert_eq!(existing, squatter);
+            assert_eq!(h, handle);
+        }
+        other => panic!(
+            "a colliding association must be REFUSED, not merged; two calls \
+             sharing one handle share one session, which is the collapse \
+             this class exists to prevent. Got {other:?}"
+        ),
+    }
+    // NEGATIVE CONTROL, on a CLEAN table: re-installing the identical
+    // association is idempotent, not a collision — otherwise a re-learn on
+    // a retransmitted control message would refuse a call that is already
+    // correct, and the guard would be indistinguishable from one that
+    // refuses everything.
+    //
+    // It must not reuse the forced table above: `squatter` was planted at
+    // VICTIM's handle there, so installing it would go to its own handle
+    // and the assertion would be about the seam rather than about
+    // idempotence.
+    let mut clean = PptpAssociations::default();
+    let first = clean
+        .install(squatter, ctl(a, b), 0)
+        .expect("first install");
+    assert_eq!(
+        clean.install(squatter, ctl(a, b), 0),
+        Ok(first),
+        "re-learning an identical association must be idempotent"
+    );
+    assert_eq!(clean.len(), 1, "idempotent re-install must not add a row");
+}
+
+/// A call cannot take over an `(allocator, call-id)` alias from another
+/// handle: data lookup is indexed by this alias, not by the call record.
+#[test]
+fn an_allocator_alias_collision_is_refused_without_repointing_11053() {
+    let (a, b, c) = (ip("198.51.100.7"), ip("203.0.113.9"), ip("203.0.113.10"));
+    let original = PptpCall::new(a, 0x1111, b, 0x2222);
+    let colliding = PptpCall::new(a, 0x1111, c, 0x3333);
+    let mut table = PptpAssociations::default();
+    let original_handle = table.install(original, ctl(a, b), 10).expect("original");
+
+    assert_eq!(
+        table.install(colliding, ctl(a, c), 20),
+        Err(PptpInstallError::AllocatorCollision {
+            allocator: a,
+            call_id: 0x1111,
+            owner: original_handle,
+        }),
+        "a reused allocator alias must refuse the second association"
+    );
+    assert_eq!(table.resolve(a, 0x1111), Some(original_handle));
+    assert_eq!(table.resolve(b, 0x2222), Some(original_handle));
+    assert_eq!(table.resolve(c, 0x3333), None);
+    assert_eq!(table.len(), 1, "refusal must not leave a second handle");
+}
+
+/// The unassociated path: resolve to nothing, count, and do NOT drop.
+///
+/// The counter is expected non-zero at startup and after a restart — data
+/// packets legitimately precede the control channel — so it is a "running
+/// unattributed" signal, not an error rate.
+#[test]
+fn an_unassociated_packet_resolves_to_none_and_is_counted_7699() {
+    let mut t = PptpAssociations::default();
+    assert_eq!(t.resolve(ip("203.0.113.9"), 0x2222), None);
+    assert_eq!(t.unassociated(), 0, "resolve must not itself count");
+    t.note_unassociated();
+    t.note_unassociated();
+    assert_eq!(t.unassociated(), 2);
+}
+/// #13282: counter snapshot must retain all PPTP lifecycle/failure signals.
+#[test]
+fn pptp_counters_report_unassociated_expiry_and_collisions_13282() {
+    let (a, b, c) = (ip("198.51.100.7"), ip("203.0.113.9"), ip("203.0.113.10"));
+    let mut table = PptpAssociations::default();
+    table.note_unassociated();
+    table.note_unassociated();
+    let first = PptpCall::new(a, 0x1111, b, 0x2222);
+    let second = PptpCall::new(a, 0x3333, c, 0x4444);
+    table.install(first, ctl(a, b), 0).expect("first");
+    table.install(second, ctl(a, c), 0).expect("second");
+    let same_handle_different_call = PptpCall::new(a, 0x5555, b, 0x6666);
+    let mut handle_collision = PptpAssociations::default();
+    handle_collision.force_handle_for_test(first, same_handle_different_call.handle());
+    assert!(matches!(
+        handle_collision.install(same_handle_different_call, ctl(a, b), 1),
+        Err(PptpInstallError::HandleCollision { .. })
+    ));
+    let alias_collision = PptpCall::new(a, 0x1111, c, 0x7777);
+    assert!(matches!(
+        table.install(alias_collision, ctl(a, c), 1),
+        Err(PptpInstallError::AllocatorCollision { .. })
+    ));
+    assert_eq!(
+        table.expire_idle(ASSOCIATION_IDLE_TIMEOUT_NS + 1, ASSOCIATION_IDLE_TIMEOUT_NS),
+        2
+    );
+    let counters = table.counters();
+    assert_eq!(counters.unassociated, 2);
+    assert_eq!(counters.expired_idle, 2);
+    assert_eq!(counters.allocator_collisions, 1);
+    assert_eq!(handle_collision.counters().handle_collisions, 1);
+    let mut sessions = crate::session::SessionTable::new();
+    sessions.pptp_mut().note_unassociated();
+    sessions
+        .pptp_mut()
+        .install(first, ctl(a, b), 0)
+        .expect("session-table call 1");
+    sessions
+        .pptp_mut()
+        .install(second, ctl(a, c), 0)
+        .expect("session-table call 2");
+    let _ = sessions.expire_stale_entries_ha(ASSOCIATION_IDLE_TIMEOUT_NS + 1, None);
+    assert_eq!(sessions.pptp().counters().expired_idle, 2);
+    assert_eq!(sessions.pptp().unassociated(), 1);
+}
+
+/// Teardown must remove BOTH allocator entries.
+///
+/// Leaving one behind is the mis-attribution hazard: PPTP call IDs are
+/// 16-bit and REUSED, so a stale half-entry pairs a future call onto a dead
+/// handle. Asserted per direction, because removing only the direction the
+/// teardown arrived on would pass a single-direction check.
+#[test]
+fn removing_a_call_clears_both_directions_7699() {
+    let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
+    let mut t = PptpAssociations::default();
+    let handle = t
+        .install(PptpCall::new(a, 0x1111, b, 0x2222), ctl(a, b), 0)
+        .expect("install");
+    assert!(t.remove(handle));
+    assert_eq!(t.resolve(a, 0x1111), None, "A-side entry survived teardown");
+    assert_eq!(t.resolve(b, 0x2222), None, "B-side entry survived teardown");
+    assert_eq!(t.len(), 0);
+    assert!(
+        !t.remove(handle),
+        "a second remove must report nothing removed"
+    );
+}
+
+/// The end-to-end property: a session keyed on a PPTP handle has a reverse
+/// companion keyed on the SAME handle, so a reply matches it.
+///
+/// This is the assertion #8382 could not make, and the reason that slice
+/// was closed rather than landed.
+#[test]
+fn a_pptp_session_reverse_companion_keeps_the_handle_7699() {
+    let call = PptpCall::new(ip("198.51.100.7"), 0x1111, ip("203.0.113.9"), 0x2222);
+    let handle = call.handle();
+    let disc = TunnelDiscriminator::Pptp(handle);
+    assert_eq!(
+        crate::session::key::reverse_direction_discriminator_for_test(disc),
+        disc,
+        "the reverse companion must carry the same handle; if this ever \
+         transforms, a reply is looked up under a key the stored companion \
+         does not equal and matches no session at all"
+    );
+} #[path = "pptp_ha_sync_13965_tests.rs"] mod ha_sync_13965_tests; }
 
 #[cfg(test)]
 mod routing_domain_13681_tests {

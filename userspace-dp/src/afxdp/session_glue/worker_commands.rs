@@ -453,8 +453,12 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                 }
                 pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             }
+            WorkerCommand::InstallPptpAssociation(call) => {
+                let _ = sessions
+                    .pptp_mut()
+                    .install_synced_association(call, now_ns);
+            }
             WorkerCommand::UpsertSynced(entry) => {
-                // #10612: fence a stale replay behind the rotation purge. A
                 // pre-purge snapshot re-published post-purge (backlog, late
                 // fan-out, re-import) must not reinstall the removed-zone row
                 // the purge deleted. Dropped here — before re-resolve, install,

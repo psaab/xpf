@@ -1879,9 +1879,15 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 				off++
 				// #12187: source-NAT provenance is appended after handshake
 				// state on open/update frames. Old frames omit it => unknown.
-				if off < len(payload) {
-					d.SourceNatProvenance = dataplane.NormalizeSourceNatProvenance(payload[off])
-				}
+                if off < len(payload) {
+                    d.SourceNatProvenance = dataplane.NormalizeSourceNatProvenance(payload[off])
+                    off++
+                    // #13965: PPTP call-id pair follows the additive session
+                    // fields; older peers omit it.
+                    if off+8 <= len(payload) {
+                        d.PptpCallIDs = binary.LittleEndian.Uint64(payload[off : off+8])
+                    }
+                }
 			}
 		}
 	}

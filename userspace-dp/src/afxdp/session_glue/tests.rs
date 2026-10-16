@@ -9909,6 +9909,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement: false, source_nat_static: None };
 
     // Synthesize a binding identity with labels only — exactly what the
@@ -10283,6 +10284,7 @@ fn flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191()
         bulk_resync: false,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         purge_retirement: false,
         source_nat_static: None,
     };
@@ -10474,6 +10476,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement: false, source_nat_static: None };
 
     let (handle, rx) = crate::event_stream::test_worker_handle(
@@ -10592,6 +10595,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement: false, source_nat_static: None };
 
     let ident = BindingIdentity {
@@ -10668,6 +10672,7 @@ mod flush_tuple_gate_contention_13654 {
         bulk_resync: false,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         purge_retirement, source_nat_static: None }
     }
 
@@ -10899,6 +10904,7 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             bulk_resync: false,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            pptp_call_ids: 0,
             purge_retirement: false,
             source_nat_static: None,
         }
@@ -11078,6 +11084,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement: false, source_nat_static: None };
 
     // Saturate the channel: fill every slot with a best-effort filler push so the
@@ -11209,6 +11216,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement: false, source_nat_static: None };
     for _ in 0..capacity {
         handle.push_delta(&open, &forwarding.zone_name_to_id);
@@ -11338,6 +11346,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
         bulk_resync: false,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         purge_retirement: false, source_nat_static: None }
     };
 
@@ -14575,6 +14584,7 @@ fn delta_8593(key: &SessionKey, bulk_resync: bool) -> SessionDelta {
     bulk_resync,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement: false, source_nat_static: None }
 }
 
@@ -15776,6 +15786,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     bulk_resync: false,
     tcp_close_class: 2,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement: false, source_nat_static: None };
     let flush = |delta: SessionDelta| {
         let (handle, rx) = // CONNECTED, so the lossless peer-sync push can queue; the unconnected handle

@@ -194,10 +194,23 @@ pub(super) fn handle(
                 // Keep the stable prefix so a healthy helper's response is
                 // distinguishable from transport failure, which gates
                 // takeover-readiness (#5247).
+                let pptp_call = if matches!(
+                    entry.key.discriminator,
+                    crate::session::TunnelDiscriminator::Pptp(_)
+                ) {
+                    crate::session::pptp::PptpCall::from_wire_call_ids_in_domain(
+                        entry.key.routing_domain,
+                        sync_req.pptp_call_ids,
+                        entry.key.src_ip,
+                        entry.key.dst_ip,
+                    )
+                } else {
+                    None
+                };
                 let outcome = if sync_req.operation == "mirror_upsert" {
                     domain.upsert_synced_session_mirror(entry)
                 } else {
-                    domain.upsert_synced_session(entry)
+                    domain.upsert_synced_session_with_pptp(entry, pptp_call)
                 };
                 apply_synced_import_outcome(response, outcome);
             }

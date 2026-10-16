@@ -1341,6 +1341,7 @@ fn test_close_flags() {
         bulk_resync: false,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        pptp_call_ids: 0,
         purge_retirement: false,
         source_nat_static: None,
     };
@@ -1586,6 +1587,7 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
         2,
         3,
         Some(true),
+        0,
     );
     assert_eq!(frame.data[4], MSG_SESSION_UPDATE);
     let bytes = &frame.data[..frame.len as usize];
@@ -1668,6 +1670,7 @@ fn session_update_carries_tcp_handshake_state_10888() {
         0,
         3,
         None,
+        0,
     );
     let bytes = &frame.data[..frame.len as usize];
     assert_eq!(bytes[4], MSG_SESSION_UPDATE);
@@ -1693,6 +1696,7 @@ fn session_open_and_update_carry_source_nat_provenance_12187() {
             0,
             3,
             source_nat_static,
+            0,
         );
         let update = EventFrame::encode_session_update_with_handshake_state(
             10,
@@ -1705,6 +1709,7 @@ fn session_open_and_update_carry_source_nat_provenance_12187() {
             0,
             3,
             source_nat_static,
+            0,
         );
         for frame in [&open, &update] {
             let bytes = &frame.data[..frame.len as usize];

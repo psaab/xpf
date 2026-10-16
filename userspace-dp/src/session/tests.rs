@@ -5276,6 +5276,7 @@ fn reference_update_session(
         bulk_resync: false,
         tcp_close_class,
         tcp_handshake_state,
+        pptp_call_ids: 0,
         purge_retirement: false, source_nat_static: None });
     }
     true
@@ -8870,6 +8871,7 @@ fn open_delta(key: SessionKey) -> SessionDelta {
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement: false, source_nat_static: None }
 }
 

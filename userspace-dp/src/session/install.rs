@@ -746,6 +746,7 @@ impl SessionTable {
             && origin != crate::session::SessionOrigin::FabricPuntSeed
         {
             let tcp_handshake_state = self.handshake_state_wire_for(&key);
+            let pptp_call_ids = self.pptp_call_ids_wire_for(&key);
             self.push_delta(SessionDelta {
                 provenance: crate::session::ExportProvenance::Incremental,
                 kind: SessionDeltaKind::Open,
@@ -769,6 +770,7 @@ impl SessionTable {
                 // (informational — Open deltas have no flowexport consumer).
                 observed_tos: 0,
                 observed_tcp_flags: tcp_flags,
+                pptp_call_ids,
                 // #4915: the stable session id assigned above, so the
                 // SESSION_CREATE RT_FLOW frame carries the id its eventual
                 // SESSION_CLOSE will.
@@ -1163,12 +1165,8 @@ impl SessionTable {
             .map(|entry| entry.policy_generation)
             .unwrap_or(0);
         let source_nat_static = self.source_nat_static_for(&key);
-        // #9412: the live entry's close class, so this re-export also restores a
-        // close-state Update the incremental stream dropped.
-        let tcp_close_class = self.close_class_wire_for(&key);
-        let tcp_handshake_state = self.handshake_state_wire_for(&key);
-        Some(SessionDelta { provenance, tcp_close_class,
-        tcp_handshake_state,
+        let pptp_call_ids = self.pptp_call_ids_wire_for(&key);
+        Some(SessionDelta { provenance, tcp_close_class: self.close_class_wire_for(&key), tcp_handshake_state: self.handshake_state_wire_for(&key), pptp_call_ids,
         purge_retirement: false,
         kind: SessionDeltaKind::Open,
         key,
@@ -1271,6 +1269,7 @@ impl SessionTable {
         if metadata.is_reverse {
             return;
         }
+        let pptp_call_ids = self.pptp_call_ids_wire_for(&key);
         self.push_delta(SessionDelta {
             provenance: crate::session::ExportProvenance::Incremental,
             kind: SessionDeltaKind::Close,
@@ -1293,6 +1292,7 @@ impl SessionTable {
             bulk_resync: false,
             tcp_close_class: snapshot.tcp_close_class,
             tcp_handshake_state: snapshot.tcp_handshake_state,
+            pptp_call_ids,
             purge_retirement,
             source_nat_static: None,
         });

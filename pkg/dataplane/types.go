@@ -428,6 +428,9 @@ type SessionValue struct {
 	// session it cannot express rather than importing it aliased (#7188
 	// decision 2). Every other protocol imports unchanged.
 	TunnelDiscriminator uint64
+	// PptpCallIDs (#13965) carries the learned call-id pair for the PPTP
+	// discriminator. Sync-only; never part of the BPF/C ABI.
+	PptpCallIDs uint64
 	// PLACEMENT: this sits after RTFlowSessionID, not before Generation.
 	// Generation must be the FIRST field past the on-map conntrack layout —
 	// TestSessionValueCarriesSyncOnlyGeneration asserts that offset exactly —
@@ -847,6 +850,8 @@ type SessionValueV6 struct {
 	// session it cannot express rather than importing it aliased (#7188
 	// decision 2). Every other protocol imports unchanged.
 	TunnelDiscriminator uint64
+	// PptpCallIDs is the sync-only association pair for a PPTP handle.
+	PptpCallIDs uint64
 	// PLACEMENT: this sits after RTFlowSessionID, not before Generation.
 	// Generation must be the FIRST field past the on-map conntrack layout —
 	// TestSessionValueCarriesSyncOnlyGeneration asserts that offset exactly —

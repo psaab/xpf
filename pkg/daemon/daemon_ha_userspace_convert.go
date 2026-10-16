@@ -685,6 +685,7 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	// two sessions on the standby. 0 = not carried by this helper, on which the
 	// peer withholds a protocol-47 session rather than aliasing it.
 	val.TunnelDiscriminator = delta.TunnelDiscriminator
+	val.PptpCallIDs = delta.PptpCallIDs
 	// #9412: the helper's close class rides the synced value to the peer.
 	val.TCPCloseClass = delta.TCPCloseClass
 	val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(delta.TCPHandshakeState)
@@ -845,6 +846,7 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	// two sessions on the standby. 0 = not carried by this helper, on which the
 	// peer withholds a protocol-47 session rather than aliasing it.
 	val.TunnelDiscriminator = delta.TunnelDiscriminator
+	val.PptpCallIDs = delta.PptpCallIDs
 	// #9412: the helper's close class rides the synced value to the peer.
 	val.TCPCloseClass = delta.TCPCloseClass
 	val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(delta.TCPHandshakeState)

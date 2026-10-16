@@ -1596,6 +1596,9 @@ pub(crate) struct SessionDeltaInfo {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
     #[serde(rename = "tunnel_discriminator", default)]
     pub tunnel_discriminator: u64,
+    /// #13965: PPTP call-id pair, as a tagged packed u64; zero for non-PPTP.
+    #[serde(rename = "pptp_call_ids", default)]
+    pub pptp_call_ids: u64,
     /// #9412: the session's TCP close class (`0` = open or not carried,
     /// 1 = CLOSING, 2 = TIME_WAIT, 3 = RST). Set on open and close-state
     /// "update" deltas. Additive: an old daemon ignores the key.

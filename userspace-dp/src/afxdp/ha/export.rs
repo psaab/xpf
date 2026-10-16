@@ -302,9 +302,9 @@ impl crate::afxdp::Coordinator {
                 // carries no session id. 0 (unknown).
                 session_id: 0,
                 bulk_resync: false,
-                // #9412: carry the synced entry's close class on the bulk export.
                 tcp_close_class: entry.tcp_close_class,
                 tcp_handshake_state: entry.tcp_handshake_state,
+                pptp_call_ids: 0,
                 purge_retirement: false,
             });
         }

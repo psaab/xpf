@@ -2462,6 +2462,7 @@ fn cancel_keys_test_delta(purge_retirement: bool) -> SessionDelta {
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement, source_nat_static: None }
 }
 

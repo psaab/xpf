@@ -429,6 +429,7 @@ impl SessionTable {
                             // RT_FLOW close-reason projection.
                             tcp_close_class: close_class,
                             tcp_handshake_state: 0,
+                            pptp_call_ids: self.pptp_call_ids_wire_for(&key),
                             purge_retirement: false, source_nat_static: None };
                             (!self.push_expiry_close_delta(close.clone())).then_some(close)
                         } else {

@@ -77,6 +77,7 @@ fn delta_with_session_id(session_id: u64) -> SessionDelta {
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
+    pptp_call_ids: 0,
     purge_retirement: false, source_nat_static: None }
 }
 
