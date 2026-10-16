@@ -3054,6 +3054,8 @@ fn expired_idle_lease_does_not_block_synced_address_only_13692() {
         .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
         .expect("synced address-only lease must remain persistent");
     assert_eq!(lease.active_flows, 1);
+
+}
 // #13691: a stale-tuple re-decision must not retire the incumbent until the
 // replacement tuple has cleared every admission check. Retiring first frees
 // the incumbent's port and completes its lease; a refused replacement then
