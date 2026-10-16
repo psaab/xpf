@@ -5269,10 +5269,10 @@ fn apply_worker_commands_does_not_export_missing_neighbor_seed_sessions() {
         PROTO_TCP,
         0x10,
     ));
-    assert!(
-        sessions.drain_deltas(16).is_empty(),
-        "missing-neighbor seed install should not emit open deltas"
-    );
+    let deltas = sessions.drain_deltas(16);
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].kind, SessionDeltaKind::Open);
+    assert_eq!(deltas[0].origin, SessionOrigin::MissingNeighborSeed);
     commands
         .lock()
         .expect("commands lock")
