@@ -539,6 +539,16 @@ pub(super) fn build_nat64_l3_packet_for_slow_path(
     }
     let l3_offset = frame_l3_offset(frame)?;
     let packet = frame.get(l3_offset..)?;
+    // #14114 supersedes the #14115 fail-closed guard for this builder: a
+    // non-first fragment with a recorded NAT64 decision is translated
+    // L3-only below and returns before the port rewrite, so its opaque
+    // payload bytes can never be read as L4. Fail closed if either arm
+    // declines to classify it as non-first.
+    if !matches!(meta.addr_family as i32, libc::AF_INET6 | libc::AF_INET)
+        && is_non_first_fragment(packet, meta.addr_family)
+    {
+        return None;
+    }
     let (translated_family, translated_protocol, mut out, non_first) = match meta.addr_family as i32
     {
         libc::AF_INET6 => {
@@ -744,9 +754,12 @@ fn build_nat64_inner_frame(
             let capacity = frame.len().checked_add(44)?;
             let mut out = crate::afxdp::cos::redirect_pool::checkout_with_capacity(capacity);
             out.resize(capacity, 0);
-            let written = if let Some(l3) = frame_l3_offset(frame)
-                && is_non_first_fragment(frame.get(l3..)?, libc::AF_INET as u8)
-            {
+            let reverse_non_first = frame_l3_offset(frame).is_some_and(|l3| {
+                frame
+                    .get(l3..)
+                    .is_some_and(|l3p| is_non_first_fragment(l3p, libc::AF_INET as u8))
+            });
+            let written = if reverse_non_first {
                 crate::nat64::build_nat64_v4_to_v6_nonfirst_frame_into(
                     &mut out,
                     frame,
@@ -772,6 +785,17 @@ fn build_nat64_inner_frame(
                 return None;
             };
             out.truncate(written);
+            // #14115: a non-first fragment has no L4 header — the bytes after
+            // the inserted IPv6 Fragment Header are opaque payload. Direct-XDP
+            // ingress masks this via the shim's 255 no-L4 sentinel (the port
+            // rewriter no-ops), but GRE/WG decap stamps the REAL protocol
+            // (parse_inner_protocol_and_offsets reads the IPv4 Protocol byte),
+            // so falling through would overwrite payload[0..4] as ports and
+            // payload[6..8] as a checksum. Skip, mirroring the forward arm's
+            // early return. The wire, not `meta.protocol`, is authoritative.
+            if reverse_non_first {
+                return Some(out);
+            }
             // #4381: restore the ORIGINAL client L4 field. The reply arrived with
             // the translated source port/id as its DESTINATION (that is what the
             // server replied to), so the reverse session's decision — produced by
@@ -819,6 +843,16 @@ fn apply_nat64_port_translation(
     out_protocol: u8,
     nat: NatDecision,
 ) -> Option<()> {
+    // #14115: never interpret a non-first fragment's payload as L4. The
+    // translated output carries the fragment header itself (v6 Fragment
+    // Header / v4 frag offset), so the wire — not caller-supplied meta
+    // protocol, which GRE/WG decap stamps with the real protocol — decides.
+    if let Some(l3) = frame_l3_offset(out)
+        && let Some(l3p) = out.get(l3..)
+        && is_non_first_fragment(l3p, out_addr_family)
+    {
+        return Some(());
+    }
     let l4_off = frame_l4_offset(out, out_addr_family)?;
     apply_nat64_port_translation_at(out, l4_off, out_addr_family, out_protocol, nat)
 }
