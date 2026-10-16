@@ -581,7 +581,14 @@ impl SessionTable {
                 // set and cleared on both halves together
                 // (`promote_from_reverse` plus
                 // `propagate_tcp_state_to_companion`).
-                if companion.handshake_pending {
+                // #13679 (D12-04): a companion that was never established —
+                // a bare-SYN install seeds both halves
+                // `established=false, handshake_pending=false`, and a UDP
+                // pair with no reply has the same shape — has seen no reply
+                // traffic at all, so its freshness must not hold its peer
+                // alive. Retain #6752's refusal of a SYN-ACK half still
+                // waiting for the completing segment.
+                if !companion.established || companion.handshake_pending {
                     return false;
                 }
                 // #10885: a reset or a FIN-owning companion cannot provide

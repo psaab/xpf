@@ -4944,3 +4944,8 @@ mod session_lifetime_9990_9991_tests;
 #[cfg(test)]
 #[path = "datagram_reply_promotion_10889_tests.rs"]
 mod datagram_reply_promotion_10889_tests;
+// #13679 (D12-04): an un-established, never-replied companion must not keep
+// its paired half alive past that half's own expiry window.
+#[cfg(test)]
+#[path = "companion_established_13679_tests.rs"]
+mod companion_established_13679_tests;
