@@ -5698,44 +5698,26 @@ fn six242_three_worker_bindings() -> Vec<BindingStatus> {
         .collect()
 }
 
-/// #6242 — THE DIFFERENTIAL ROLLBACK (the crux). A PARTIAL-success worker spawn
-/// on the POST-TEARDOWN path (workers `0..K-1` launched, worker `K` fails to
-/// spawn) must fail the reconcile closed WITHOUT tearing down the launched
-/// workers — their consolidated `WorkerRuntimeRecord`s SURVIVE (they are
-/// reclaimed by the next reconcile's teardown), and the failed worker never
-/// registered a record at all.
+/// #14130 (supersedes the #6242 differential for the spawn arm): a
+/// PARTIAL-success worker spawn on the POST-TEARDOWN path (workers
+/// `0..K-1` launched, worker `K` fails to spawn) must fail the reconcile
+/// closed AND stop the launched workers — their `WorkerRuntimeRecord`s do
+/// NOT survive, because the handler rolls the snapshot baseline back and
+/// a surviving half-cohort would keep forwarding the rejected snapshot.
+/// The failed worker never registered a record at all.
 ///
-/// The pre-existing #4952 test uses ONE worker, so partial-success cleanup was
-/// UNCHARACTERIZED — `force_worker_spawn_fail` alone always fails the FIRST
-/// worker. The #6242 `force_worker_spawn_fail_skip` seam lets the first K
-/// workers launch (as benign healthy stubs, `force_worker_healthy_stub`, so no
-/// real `worker_loop` runs in-process) before the (K+1)th spawn is forced to
-/// fail.
+/// The `force_worker_spawn_fail_skip` seam lets the first K workers launch
+/// (as benign healthy stubs, `force_worker_healthy_stub`) before the
+/// (K+1)th spawn is forced to fail.
 ///
-/// This pins the invariant the consolidation must preserve: because
-/// registration is now ONE `WorkerManager::register` POST-spawn-success, a
-/// failed worker has nothing to unwind and the launched records are NEVER
-/// touched on the spawn-fail arm. Fail-on-revert: make the spawn-fail arm also
-/// call `WorkerManager::stop_and_clear` (or move registration back pre-spawn)
-/// and the launched-records-survive assertions below flip RED.
-///
-/// #7209 note: the recipe above USED to say `coord.workers.records.clear()`,
-/// which no longer compiles — `records` is private and `clear_records` is too.
-/// A fail-on-revert recipe whose instructions do not build is a guard nobody
-/// can run, so it is respelled rather than left as archaeology.
+/// Fail-on-revert: drop `coord.stop_inner(false)` from the `SpawnFailed`
+/// arm of `bring_up_workers` and the records/live assertions below flip
+/// (the launched workers survive again).
 #[test]
-fn reconcile_partial_spawn_failure_preserves_launched_records_6242() {
-    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
-    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
-    // IpsecSaNotReady before this test's subject — skip explicitly (visible
-    // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
-        return;
-    }
+fn reconcile_partial_spawn_failure_stops_launched_workers_14130() {
     let mut coordinator = Coordinator::new();
+    coordinator.force_ipsec_sa_ready = true;
     let mut bindings = six242_three_worker_bindings();
-    // Fail the spawn of the THIRD worker (skip the first two), routing the first
-    // two through a benign healthy stub so no real dataplane body runs.
     coordinator.force_worker_spawn_fail = 1;
     coordinator.force_worker_spawn_fail_skip = 2;
     coordinator.force_worker_healthy_stub = true;
@@ -5743,7 +5725,6 @@ fn reconcile_partial_spawn_failure_preserves_launched_records_6242() {
     let snap = mandatory_ok_snapshot(5);
     let result = coordinator.reconcile(Some(&snap), &mut bindings, 64);
 
-    // (a) fail closed with the typed post-teardown spawn error.
     assert!(
         matches!(
             result,
@@ -5752,75 +5733,35 @@ fn reconcile_partial_spawn_failure_preserves_launched_records_6242() {
         "a partial-success spawn failure must surface as \
          Err(WorkerSpawn(SpawnWorkerFailed{{worker_id:2}})), got {result:?}"
     );
-
-    // (b) THE DIFFERENTIAL: workers 0 and 1 LAUNCHED — their records SURVIVE
-    // (no stop_inner ran); worker 2 (the failed spawn) has NO record.
-    assert_eq!(
-        coordinator.workers.records().len(),
-        2,
-        "launched workers 0 and 1 keep their records (differential rollback)"
-    );
-    assert!(
-        coordinator.workers.records().contains_key(&0)
-            && coordinator.workers.records().contains_key(&1),
-        "workers 0 and 1 launched before the failure and must still be registered"
-    );
-    assert!(
-        !coordinator.workers.records().contains_key(&2),
-        "the failed worker never registered a record (post-spawn insert)"
-    );
-
-    // (c) each surviving record carries ALL FOUR owners together — a live
-    // (joinable) handle AND its panic / exception-ring / last-resolution slots.
-    for wid in [0u32, 1] {
-        let records = coordinator.workers.records();
-        let rec = records.get(&wid).expect("launched worker record");
-        // #7209: the join handle moved from `rec.handle.join` into
-        // `WorkerManager::joins` so the record could be published behind an
-        // `Arc`. The property asserted is unchanged — a LAUNCHED worker is
-        // still joinable, which is the #4952 differential against a spawn
-        // failure — only its owner moved, so the assertion moved with it.
-        assert!(
-            coordinator.workers.has_join_handle(wid),
-            "launched worker {wid} keeps a joinable handle (still live)"
-        );
-        // The three observability Arcs are the SAME allocations registered with
-        // the handle in ONE op — the consolidation's point. They are readable
-        // (real slots, not phantoms).
-        assert!(rec.panic.lock().is_ok());
-        assert!(rec.exception_ring.lock().is_ok());
-        assert!(rec.last_resolution.lock().is_ok());
-    }
-
-    // (d) the seams consumed exactly their budget (no over-fire).
-    assert_eq!(coordinator.force_worker_spawn_fail, 0);
-    assert_eq!(coordinator.force_worker_spawn_fail_skip, 0);
-
-    // Clean up the two live healthy-stub threads (this is the NEXT reconcile's
-    // teardown that reclaims them). stop_inner clears ALL records in one step.
-    coordinator.stop_inner(false);
     assert!(
         coordinator.workers.records().is_empty(),
-        "teardown clears every launched record"
+        "#14130: launched workers must be stopped, not left forwarding \
+         the rejected snapshot, got {} records",
+        coordinator.workers.records().len()
     );
+    assert!(
+        coordinator.workers.live.is_empty(),
+        "#14130: no live slots may survive a failed bring-up"
+    );
+    assert!(
+        coordinator.workers.identities.is_empty(),
+        "#14130: no identities may survive a failed bring-up"
+    );
+    assert_eq!(coordinator.live_count(), 0);
+    assert_eq!(coordinator.planned_counts(), (0, 0));
+    assert_eq!(coordinator.force_worker_spawn_fail, 0);
+    assert_eq!(coordinator.force_worker_spawn_fail_skip, 0);
 }
 
-/// #6242 — the OTHER side of the differential (symmetric pin). A post-spawn
-/// BIND-INCOMPLETE failure (HEARTBEAT != READINESS) fails the reconcile closed
-/// via `stop_inner`, which tears down and clears ALL worker records — contrast
-/// the spawn-fail partial case above, where launched records survive. Uses
-/// THREE workers (worker 0 reports an incomplete bound set; 1 and 2 are healthy
-/// stubs) to prove the clear is fleet-wide, not just the one failing worker.
+/// #6242/#14130: a post-spawn BIND-INCOMPLETE failure (HEARTBEAT !=
+/// READINESS) fails the reconcile closed via `stop_inner`, which tears
+/// down and clears ALL worker records — the same posture the spawn arm
+/// now takes. Uses THREE workers (worker 0 reports an incomplete bound
+/// set; 1 and 2 are healthy stubs) to prove the clear is fleet-wide.
 #[test]
 fn reconcile_bind_incomplete_clears_all_records_6242() {
-    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
-    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
-    // IpsecSaNotReady before this test's subject — skip explicitly (visible
-    // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
-        return;
-    }
     let mut coordinator = Coordinator::new();
+    coordinator.force_ipsec_sa_ready = true;
     let mut bindings = six242_three_worker_bindings();
     // Worker 0 reports an INCOMPLETE bound set; workers 1 and 2 spawn as healthy
     // stubs (full bound set) so the barrier's verdict is driven solely by 0.
@@ -5910,16 +5851,15 @@ fn wedge8388_three_worker_bindings() -> Vec<BindingStatus> {
 /// "nothing is bound" vacuously — there is no sibling to spare — and would stay
 /// green against a per-worker-scoped fail-close.
 ///
-/// WHAT THE INSTRUMENT REPORTS IF THE PROPERTY IS FALSE: the sibling positive
-/// control `spawn_failure_does_leave_bound_siblings_8388` runs the SAME
-/// instrument over the OTHER post-teardown failure class (#4952 spawn failure,
-/// which deliberately does NOT `stop_inner`) and reads back a MIXED 2-of-3
-/// bound set. The instrument can see "partial"; this reconcile does not produce
-/// one.
+/// WHAT THE INSTRUMENT REPORTS IF THE PROPERTY IS FALSE: #14130's sibling
+/// `spawn_failure_leaves_no_bound_sibling_14130` runs the SAME instrument over
+/// the spawn-failure class, which now also stops every worker, and likewise
+/// reads back an empty bound set. (Pre-#14130 that cell was the positive
+/// control: the spawn arm left a MIXED 2-of-3 bound set.)
 ///
 /// Fail-on-revert / mutation: scope the fail-close to the failing worker — drop
 /// the `coord.stop_inner(false)` from the `BindIncomplete` arm of
-/// `bring_up_workers`, mirroring the #4952 spawn-fail arm — and workers 1 and 2
+/// `bring_up_workers` — and workers 1 and 2
 /// keep their published `live` state, so `refresh_bindings` takes
 /// `copy_live_snapshot` for their slots and this cell reds on `bound_slots`
 /// being `[2, 3]` instead of empty.
@@ -5989,40 +5929,19 @@ fn bind_incomplete_leaves_no_bound_sibling_8388() {
     );
 }
 
-/// #8388 — THE POSITIVE CONTROL for the cell above. The same instrument, run
-/// over the OTHER post-teardown failure class, DOES read back a partial set.
+/// #14130: a worker SPAWN failure now stops the launched workers too, so
+/// — like the bind-incomplete cell above — NO bound sibling survives.
+/// (Pre-#14130 this cell was the #8388 positive control asserting the
+/// launched workers kept reporting bound; that mixed state is exactly
+/// the rejected-snapshot forwarding #14130 removes.)
 ///
-/// A #4952 worker SPAWN failure (`pthread_create` EAGAIN/ENOMEM) at worker K
-/// deliberately returns WITHOUT `stop_inner`: workers `0..K-1` are already
-/// launched and keep running (#6242's differential rollback). So this is the
-/// one reachable state in which some slots report bound and others do not —
-/// and this cell proves the `bindings`-array instrument can see it. Without
-/// this control, `bind_incomplete_leaves_no_bound_sibling_8388` could be green
-/// merely because the instrument never reports `bound` for a stub worker.
-///
-/// It also settles the residual #8388 asks about. The partial state exists, but
-/// what is missing at the unbound slots is a WORKER THREAD, not a socket: a
-/// `rebind_slot` verb cannot `pthread_create`, so the targeted rebind #8388
-/// wants would not repair this either. The global rebind — which re-runs the
-/// whole plan, spawning the missing worker — is the proportionate response.
-///
-/// Fail-on-revert / mutation: make the spawn-fail arm ALSO call
-/// `coord.stop_inner(false)` and the surviving `[1, 2]` bound set collapses to
-/// empty, reding the assertion below (and, symmetrically, telling you the
-/// sibling cell above would then be green for the wrong reason).
+/// Fail-on-revert: drop `coord.stop_inner(false)` from the `SpawnFailed`
+/// arm and the `[1, 2]` bound set reappears, reding this cell.
 #[test]
-fn spawn_failure_does_leave_bound_siblings_8388() {
-    // #10647: worker bring-up waits for the IPsec SA monitor baseline, which
-    // needs a privileged NETLINK_XFRM bind. Unprivileged, bring-up aborts with
-    // IpsecSaNotReady before this test's subject — skip explicitly (visible
-    // with --nocapture) instead of failing on sandbox privilege.
-    if !crate::afxdp::forwarding::require_xfrm_monitor_for_lifecycle_test() {
-        return;
-    }
+fn spawn_failure_leaves_no_bound_sibling_14130() {
     let mut coordinator = Coordinator::new();
+    coordinator.force_ipsec_sa_ready = true;
     let mut bindings = wedge8388_three_worker_bindings();
-    // Workers 0 and 1 launch as healthy stubs (full bound set published);
-    // worker 2's spawn is forced to fail.
     coordinator.force_worker_spawn_fail = 1;
     coordinator.force_worker_spawn_fail_skip = 2;
     coordinator.force_worker_healthy_stub = true;
@@ -6040,35 +5959,24 @@ fn spawn_failure_does_leave_bound_siblings_8388() {
         "a partial-success spawn failure must surface as \
          Err(WorkerSpawn(SpawnWorkerFailed{{worker_id:2}})), got {result:?}"
     );
-
-    // THE CONTROL: a MIXED set — slots 1 and 2 (workers 0 and 1) bound, slot 3
-    // (the worker that never spawned) not.
     let bound_slots: Vec<u32> = bindings
         .iter()
         .filter(|binding| binding.bound)
         .map(|binding| binding.slot)
         .collect();
-    assert_eq!(
-        bound_slots,
-        vec![1, 2],
-        "the launched workers' slots must still report bound — otherwise the \
-         sibling #8388 cell's empty bound set proves nothing about the \
-         fail-close and only that the instrument never reports bound"
+    assert!(
+        bound_slots.is_empty(),
+        "#14130: no launched worker may keep reporting bound after a \
+         failed bring-up, got {bound_slots:?}"
     );
-    let wedged_slots: Vec<u32> = bindings
-        .iter()
-        .filter(|binding| binding.registered && binding.armed && !binding.bound)
-        .map(|binding| binding.slot)
-        .collect();
     assert_eq!(
-        wedged_slots,
-        vec![3],
-        "exactly the unspawned worker's slot is wedged — a MISSING THREAD, not \
-         a missing socket, so a per-slot socket rebind could not repair it"
+        bindings
+            .iter()
+            .filter(|binding| binding.registered && binding.armed && !binding.bound)
+            .count(),
+        bindings.len(),
+        "the wedge is fleet-wide after a failed bring-up"
     );
-
-    // Reclaim the two live healthy-stub threads (the next reconcile's teardown).
-    coordinator.stop_inner(false);
 }
 
 /// #8558 — THE WIRING CELL. The bind-failure cause must survive the fail-closed
@@ -6374,6 +6282,105 @@ fn stop_inner_drops_worker_record_owners_exactly_once_6242() {
         1,
         "the record's last-resolution Arc is dropped exactly once"
     );
+}
+
+/// #14130: the IPsec-SA gate fails AFTER planning/publishing. The failed
+/// bring-up must leave NO phantom fleet: no live/identity slots, no
+/// records, zeroed planned counters, and no bound slot reported. Clearing
+/// the fault (seam off) and re-applying the IDENTICAL snapshot must then
+/// succeed and spawn the full worker set.
+///
+/// Fail-on-revert: restore the pre-#14130 `IpsecSaNotReady` arm (return
+/// without `stop_inner`, with planning-time registration) and phase 1
+/// reports live/planned counts for threads that never existed.
+#[test]
+fn ipsec_sa_not_ready_unwinds_plan_and_same_plan_retries_14130() {
+    let mut coordinator = Coordinator::new();
+    coordinator.force_ipsec_sa_not_ready = true;
+    coordinator.force_worker_healthy_stub = true;
+    let mut bindings = wedge8388_three_worker_bindings();
+
+    let snap = mandatory_ok_snapshot(5);
+    let first = coordinator.reconcile(Some(&snap), &mut bindings, 64);
+    assert!(
+        matches!(first, Err(ReconcileError::IpsecSaNotReady(_))),
+        "phase 1 must fail at the SA gate, got {first:?}"
+    );
+    assert_eq!(coordinator.live_count(), 0, "no phantom live slots");
+    assert_eq!(coordinator.planned_counts(), (0, 0), "no phantom plan");
+    assert!(coordinator.workers.records().is_empty());
+    assert!(coordinator.workers.identities.is_empty());
+    assert!(
+        bindings.iter().all(|binding| !binding.bound && !binding.ready),
+        "no slot may report bound/ready after the SA gate failure"
+    );
+
+    // Fault clears; the identical plan must now bring the fleet up.
+    coordinator.force_ipsec_sa_not_ready = false;
+    coordinator.force_ipsec_sa_ready = true;
+    let second = coordinator.reconcile(Some(&snap), &mut bindings, 64);
+    assert!(second.is_ok(), "identical-plan retry must succeed, got {second:?}");
+    assert_eq!(coordinator.workers.records().len(), 3);
+    assert_eq!(coordinator.live_count(), 3);
+    assert!(bindings.iter().all(|binding| binding.bound));
+    coordinator.stop_inner(false);
+}
+
+/// #14130: a partial spawn failure stops the launched workers (see
+/// `reconcile_partial_spawn_failure_stops_launched_workers_14130`), and
+/// once the fault clears the IDENTICAL snapshot retries to a full fleet.
+#[test]
+fn spawn_failure_same_plan_retry_recovers_14130() {
+    let mut coordinator = Coordinator::new();
+    coordinator.force_ipsec_sa_ready = true;
+    coordinator.force_worker_healthy_stub = true;
+    coordinator.force_worker_spawn_fail = 1;
+    coordinator.force_worker_spawn_fail_skip = 2;
+    let mut bindings = wedge8388_three_worker_bindings();
+
+    let snap = mandatory_ok_snapshot(5);
+    let first = coordinator.reconcile(Some(&snap), &mut bindings, 64);
+    assert!(
+        matches!(first, Err(ReconcileError::WorkerSpawn(_))),
+        "phase 1 must fail at spawn, got {first:?}"
+    );
+    assert_eq!(coordinator.live_count(), 0);
+    assert!(coordinator.workers.records().is_empty());
+
+    let second = coordinator.reconcile(Some(&snap), &mut bindings, 64);
+    assert!(second.is_ok(), "identical-plan retry must succeed, got {second:?}");
+    assert_eq!(coordinator.workers.records().len(), 3);
+    assert_eq!(coordinator.live_count(), 3);
+    assert!(bindings.iter().all(|binding| binding.bound));
+    coordinator.stop_inner(false);
+}
+
+/// #14130: a bind-incomplete failure records its cause (which suppresses
+/// nothing now); once the fault clears the IDENTICAL snapshot retries to
+/// a full fleet and the recorded cause is gone.
+#[test]
+fn bind_incomplete_same_plan_retry_recovers_14130() {
+    let mut coordinator = Coordinator::new();
+    coordinator.force_ipsec_sa_ready = true;
+    coordinator.force_worker_healthy_stub = true;
+    coordinator.force_worker_bind_incomplete = 1;
+    let mut bindings = wedge8388_three_worker_bindings();
+
+    let snap = mandatory_ok_snapshot(5);
+    let first = coordinator.reconcile(Some(&snap), &mut bindings, 64);
+    assert!(
+        matches!(first, Err(ReconcileError::WorkerBindIncomplete(_))),
+        "phase 1 must fail at the readiness barrier, got {first:?}"
+    );
+    assert_eq!(coordinator.live_count(), 0);
+    assert!(!coordinator.last_bind_failures.is_empty());
+
+    let second = coordinator.reconcile(Some(&snap), &mut bindings, 64);
+    assert!(second.is_ok(), "identical-plan retry must succeed, got {second:?}");
+    assert_eq!(coordinator.workers.records().len(), 3);
+    assert!(bindings.iter().all(|binding| binding.bound));
+    assert!(coordinator.last_bind_failures.is_empty());
+    coordinator.stop_inner(false);
 }
 
 /// #6245: a post-spawn in-thread bind failure must now be reported EXPLICITLY.

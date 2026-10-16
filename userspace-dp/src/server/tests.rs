@@ -9430,3 +9430,92 @@ fn fib_dump_is_a_read_only_control_verb_11370() {
     assert_eq!(route.preference, 17);
     assert_eq!(route.mtu, 1400);
 }
+
+/// #14130 — THE SAME-PLAN WEDGE, at the handler. A failed bring-up records
+/// a per-slot bind cause (`last_error`); the pre-#14130
+/// `same_plan_apply_needs_binding_reconcile` ALSO required an eligible
+/// binding with an EMPTY `last_error`, so the identical-plan retry took
+/// the refresh leg (which cannot spawn workers) and never recovered.
+///
+/// Fail-on-revert: restore the `last_error.is_empty()` conjunct and the
+/// retry takes the refresh leg — the live slot never appears.
+#[test]
+fn same_plan_retry_after_bind_failure_reconciles_14130() {
+    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+
+    let snap = |generation: u64| ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation,
+        fib_generation: generation as u32,
+        generated_at: chrono::Utc::now(),
+        defer_workers: false,
+        capabilities: forwarding_caps(),
+        map_pins: ok_map_pins(),
+        interfaces: vec![data_iface_6140("ge-0/0/1", "ge-0-0-1", 11)],
+        zones: vec![trust_zone_6140()],
+        content_digest: "digest-14130".to_string(),
+        ..ConfigSnapshot::default()
+    };
+
+    let status = ProcessStatus {
+        forwarding_armed: true,
+        capabilities: forwarding_caps(),
+        last_snapshot_generation: 1,
+        last_fib_generation: 1,
+        bindings: vec![BindingStatus {
+            slot: 0,
+            worker_id: 0,
+            queue_id: 0,
+            interface: "ge-0-0-1".to_string(),
+            ifindex: 11,
+            registered: true,
+            armed: true,
+            ..BindingStatus::default()
+        }],
+        ..ProcessStatus::default()
+    };
+    let state = Arc::new(Mutex::new(ServerState {
+        status,
+        snapshot: Some(snap(1)),
+        afxdp: afxdp::Coordinator::new(),
+        state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
+    }));
+    {
+        let mut guard = state.lock().expect("state");
+        guard.afxdp.force_ipsec_sa_ready = true;
+        guard.afxdp.force_worker_healthy_stub = true;
+        // Simulate the post-failure reported state: the slot is unbound
+        // AND carries the bind cause that used to suppress the retry.
+        guard.status.bindings[0].last_error =
+            "libxdp xsk_socket__create_shared: Device or resource busy".to_string();
+    }
+
+    // Identical plan (same interface/worker/queues), next generation.
+    let mut request = req("apply_snapshot");
+    request.snapshot = Some(snap(2));
+    let response = run_request(state.clone(), request);
+    assert!(
+        response.ok,
+        "the identical-plan retry after a bind failure must reconcile \
+         and succeed, got error: {}",
+        response.error
+    );
+
+    let guard = state.lock().expect("state");
+    assert_eq!(
+        guard.afxdp.live_count(),
+        1,
+        "the retry must have spawned the missing worker (refresh cannot)"
+    );
+    assert!(
+        guard.status.bindings[0].bound,
+        "the retried slot must report bound, got {:?}",
+        guard.status.bindings[0]
+    );
+    assert!(
+        guard.status.bindings[0].last_error.is_empty(),
+        "a recovered slot must not keep the stale bind cause, got {:?}",
+        guard.status.bindings[0].last_error
+    );
+}

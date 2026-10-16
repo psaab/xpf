@@ -574,6 +574,13 @@ pub struct Coordinator {
     /// does not exist); per-instance so parallel tests never race.
     #[cfg(test)]
     pub(crate) force_ipsec_sa_ready: bool,
+    /// #14130 test seam (per-instance, NOT a process-global): when true,
+    /// `bring_up_workers` treats the #10516 SA gate as NOT ready without
+    /// spawning the monitor, so the `IpsecSaNotReady` unwinding is
+    /// unit-verifiable unprivileged. Production retains the mandatory
+    /// monitor gate. Always false in release builds.
+    #[cfg(test)]
+    pub(crate) force_ipsec_sa_not_ready: bool,
     /// #5674 test seam (per-instance, NOT a process-global): when nonzero,
     /// `synced_import_cap()` returns TWICE this value (the override expresses a
     /// LOGICAL ceiling; `synced_import_cap()` doubles it) instead of the real
@@ -736,6 +743,8 @@ impl Coordinator {
             force_worker_healthy_stub: false,
             #[cfg(test)]
             force_ipsec_sa_ready: false,
+            #[cfg(test)]
+            force_ipsec_sa_not_ready: false,
             #[cfg(test)]
             synced_import_cap_override: Arc::clone(&synced_import_cap_override),
             #[cfg(test)]
