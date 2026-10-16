@@ -847,6 +847,24 @@ fn ifreq_layout_matches_kernel_ifreq() {
     );
 }
 
+/// #13706: ioctl requests must not expose uninitialized bytes in the larger
+/// ifreq union after initialization through the flags arm.
+#[test]
+fn ifreq_initializes_full_ioctl_union() {
+    let ifr = IfReq::new("xpf-usp0", 0x1234).unwrap();
+    // SAFETY: IfMap's explicit padding makes the union's 24-byte object
+    // representation fully initialized by IfReq::new.
+    let union_bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&ifr.ifru as *const Ifru).cast::<u8>(),
+            std::mem::size_of::<Ifru>(),
+        )
+    };
+    let mut expected = [0; 24];
+    expected[..std::mem::size_of::<libc::c_short>()].copy_from_slice(&0x1234i16.to_ne_bytes());
+    assert_eq!(union_bytes, expected);
+}
+
 use crate::io_uring_write::WriteResult;
 use std::cell::Cell;
 

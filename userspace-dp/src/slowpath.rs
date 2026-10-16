@@ -2596,10 +2596,23 @@ struct IfReq {
 
 impl IfReq {
     fn new(name: &str, flags: libc::c_short) -> Result<Self, String> {
+        // Initialize every ioctl input byte, not just the flags field: the
+        // kernel ifreq union is 24 bytes because it includes struct ifmap.
         let mut ifr = Self {
             ifr_name: [0; libc::IFNAMSIZ],
-            ifru: Ifru { flags },
+            ifru: Ifru {
+                _map: IfMap {
+                    mem_start: 0,
+                    mem_end: 0,
+                    base_addr: 0,
+                    irq: 0,
+                    dma: 0,
+                    port: 0,
+                    _pad: [0; 3],
+                },
+            },
         };
+        ifr.ifru.flags = flags;
         let bytes = name.as_bytes();
         if bytes.is_empty() || bytes.len() >= libc::IFNAMSIZ {
             return Err(format!("invalid interface name {}", name));
