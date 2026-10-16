@@ -122,9 +122,10 @@ fn established_companion_still_keeps_quiet_half_alive_13679() {
     );
 }
 
-/// Non-TCP parity: a UDP flow whose reverse half saw a genuine reply is
-/// reply-promoted (`established=true`) and keeps its quiet forward half; an
-/// un-replied UDP pair (both halves `established=false`) must not.
+/// Non-TCP parity: an app-gated UDP pair whose halves start un-established
+/// must not retain a half after a synthetic keepalive refresh of its peer.
+/// This regression covers eviction only; the test does not exercise UDP reply
+/// promotion.
 #[test]
 fn unreplied_udp_companion_does_not_keep_half_alive_13679() {
     // Forward window: install both halves, give only the forward half a short
@@ -151,7 +152,8 @@ fn unreplied_udp_companion_does_not_keep_half_alive_13679() {
     );
     let _ = table.drain_deltas(8);
     let udp_window = table.entry_by_key(&forward).expect("forward").expires_after_ns;
-    // Reverse direction keeps receiving datagrams; forward stays frozen.
+    // Simulate a non-promoting keepalive refresh on the reverse half; the
+    // forward half remains frozen and neither half has observed a UDP reply.
     table.touch(&reverse, now + udp_window - SEC);
     let gc_now = now + udp_window + SEC;
     assert!(

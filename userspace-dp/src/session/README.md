@@ -229,8 +229,10 @@ the reverse half. The `syn_ack_first` marker prevents a retransmitted SYN-ACK
 in the installing direction from clearing that gap. The idle-window selection
 treats `established && !handshake_pending` as the established class, which
 closes the ~300 s hold: both halves reap at ~20 s on their own. The
-`companion_keeps_alive` probe additionally refuses to extend a half whose
-companion is still pending; this closes the smaller retransmission-driven leak
+`companion_keeps_alive` refuses to extend a half whose companion is either
+un-established or still handshake-pending. The former prevents an un-replied
+OPENING half from holding its peer past that peer's own (possibly per-zone)
+opening timeout; the latter closes the smaller retransmission-driven leak
 where a server retransmitting SYN-ACK slides the reverse window forward and
 the probe re-stamps the forward half off it. A completed handshake is
 unaffected — its completing segment reaches the slow path because
