@@ -4093,24 +4093,22 @@ fn lo0_protocol_filter_does_not_wildcard_unresolved_native_fragment_11338() {
             crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
             FilterAction::Accept,
         ),
-        ("decapped-tcp", crate::ip_proto::PROTO_TCP, FilterAction::Discard),
-        ("decapped-udp", crate::ip_proto::PROTO_UDP, FilterAction::Accept),
+        (
+            "decapped-tcp",
+            crate::ip_proto::PROTO_TCP,
+            FilterAction::Discard,
+        ),
+        (
+            "decapped-udp",
+            crate::ip_proto::PROTO_UDP,
+            FilterAction::Accept,
+        ),
     ] {
-        let result = evaluate_lo0_filter(
-            &state,
-            false,
-            src,
-            dst,
-            protocol,
-            0,
-            0,
-            0,
-            fragment_extra(),
-        );
+        let result =
+            evaluate_lo0_filter(&state, false, src, dst, protocol, 0, 0, 0, fragment_extra());
         assert_eq!(result.action, expected, "#10676 lo0 {label} protocol");
     }
 }
-
 
 #[test]
 fn dscp_match_in_term() {
@@ -4480,11 +4478,7 @@ fn lo0_filter_families_changed_ignores_fresh_identical_filters_and_positional_id
         "protect-v4",
         "protect-v6",
     );
-    let new = make_lo0_filter_state(
-        &[unrelated, v4, v6],
-        "protect-v4",
-        "protect-v6",
-    );
+    let new = make_lo0_filter_state(&[unrelated, v4, v6], "protect-v4", "protect-v6");
 
     assert_ne!(
         old.lo0_filter_v4_fast.as_ref().unwrap().id,
@@ -4519,21 +4513,9 @@ fn lo0_filter_families_changed_detects_semantic_content_changes_11330() {
     let v6 = lo0_test_filter("protect-v6", "inet6", "accept");
     let changed_v4 = lo0_test_filter("protect-v4", "inet", "discard");
     let changed_v6 = lo0_test_filter("protect-v6", "inet6", "discard");
-    let old = make_lo0_filter_state(
-        &[v4.clone(), v6.clone()],
-        "protect-v4",
-        "protect-v6",
-    );
-    let v4_changed = make_lo0_filter_state(
-        &[changed_v4, v6.clone()],
-        "protect-v4",
-        "protect-v6",
-    );
-    let v6_changed = make_lo0_filter_state(
-        &[v4, changed_v6],
-        "protect-v4",
-        "protect-v6",
-    );
+    let old = make_lo0_filter_state(&[v4.clone(), v6.clone()], "protect-v4", "protect-v6");
+    let v4_changed = make_lo0_filter_state(&[changed_v4, v6.clone()], "protect-v4", "protect-v6");
+    let v6_changed = make_lo0_filter_state(&[v4, changed_v6], "protect-v4", "protect-v6");
 
     assert_eq!(
         lo0_filter_families_changed(&old, &v4_changed),
@@ -5017,6 +4999,7 @@ fn interface_filter_non_routing_counted_defers_pbr_term() {
         TermMatchExtra::default(),
         1400,
         NonRoutingCountPolicy::Always,
+        None,
     );
     assert_eq!(pbr.action, FilterAction::Accept);
     // #5444: FilterResult.routing_instance is Option<Arc<str>>; the non-routing
@@ -5040,6 +5023,7 @@ fn interface_filter_non_routing_counted_defers_pbr_term() {
         TermMatchExtra::default(),
         500,
         NonRoutingCountPolicy::Always,
+        None,
     );
     assert_eq!(plain.action, FilterAction::Discard);
     assert_eq!(filter.terms[1].counter.packets.load(Ordering::Relaxed), 1);
@@ -9626,6 +9610,7 @@ fn pbr_miss_path_counts_fallthrough_term_exactly_once() {
         TermMatchExtra::default(),
         1400,
         policy,
+        None,
     );
     assert_eq!(precheck.action, FilterAction::Accept);
     // #5444: FilterResult.routing_instance is Option<Arc<str>>; None on the
@@ -9737,6 +9722,7 @@ fn pbr_miss_path_terminal_discard_before_routing_instance_counts_once() {
         TermMatchExtra::default(),
         1400,
         policy,
+        None,
     );
     // Terminal discard → non-Accept verdict. The poll path `continue`s here;
     // ingress_route_table_override is NEVER called for this packet.
@@ -9812,6 +9798,7 @@ fn non_pbr_miss_path_counts_fallthrough_term_once() {
         TermMatchExtra::default(),
         1400,
         policy,
+        None,
     );
     assert_eq!(precheck.action, FilterAction::Accept);
 
@@ -9886,6 +9873,7 @@ fn pbr_session_hit_path_counts_fallthrough_term_per_packet() {
             TermMatchExtra::default(),
             1400,
             policy,
+            None,
         );
         assert_eq!(eval.action, FilterAction::Accept);
     }
@@ -10694,7 +10682,9 @@ fn port_both_positive_and_except_positive_wins_3716() {
 
 /// Build a one-term filter whose `then policer` names `policer_name`, bound to
 /// an interface input hook so the term actually compiles.
-fn policer_ref_fixture_6540(policer_name: &str) -> (Vec<FirewallFilterSnapshot>, Vec<crate::InterfaceSnapshot>) {
+fn policer_ref_fixture_6540(
+    policer_name: &str,
+) -> (Vec<FirewallFilterSnapshot>, Vec<crate::InterfaceSnapshot>) {
     (
         vec![FirewallFilterSnapshot {
             name: "rl".into(),

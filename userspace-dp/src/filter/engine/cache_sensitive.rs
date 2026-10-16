@@ -256,6 +256,112 @@ fn capture_input_filter_counters_v4(
     }
     counters
 }
+/// #14120: capture the interface INPUT filter's matched three-color policer
+/// handles for a host-bound (LocalDelivery) flow, mirroring the counter
+/// capture above: every matched non-routing term up to and including the
+/// terminal one, deferring at a routing-instance term (its policer, like its
+/// counter, stays owned by the routing-instance evaluator's path). The
+/// LocalDelivery arms replay these per packet because such flows never take
+/// the TX-selection leg that meters transit input policers, and they are
+/// never flow-cached (LocalDelivery is not a cacheable disposition), so the
+/// session table is their only per-flow state. Handles only — metering is
+/// the replay site's `apply_cached_three_color_policers` call.
+pub(crate) fn evaluate_interface_input_filter_policers_cached(
+    state: &FilterState,
+    ifindex: i32,
+    is_v6: bool,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+) -> CachedThreeColorPolicers {
+    let filter = if is_v6 {
+        state.iface_filter_v6_fast.get(&ifindex).map(Arc::as_ref)
+    } else {
+        state.iface_filter_v4_fast.get(&ifindex).map(Arc::as_ref)
+    };
+    let Some(filter) = filter else {
+        return CachedThreeColorPolicers::default();
+    };
+    if !filter.has_three_color_policer_terms {
+        return CachedThreeColorPolicers::default();
+    }
+    match (src_ip, dst_ip) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => capture_input_filter_policers_v4(
+            filter, src, dst, protocol, src_port, dst_port, dscp, extra,
+        ),
+        (IpAddr::V6(src), IpAddr::V6(dst)) => capture_input_filter_policers_v6(
+            filter, src, dst, protocol, src_port, dst_port, dscp, extra,
+        ),
+        _ => CachedThreeColorPolicers::default(),
+    }
+}
+
+#[inline]
+fn capture_input_filter_policers_v4(
+    filter: &Filter,
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+) -> CachedThreeColorPolicers {
+    let mut policers = CachedThreeColorPolicers::default();
+    for term in &filter.terms {
+        if !term_matches_v4(
+            term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
+        ) {
+            continue;
+        }
+        if !term.routing_instance.is_empty() {
+            return policers;
+        }
+        policers.extend(CachedThreeColorPolicers::from_option(
+            term.three_color_policer.clone(),
+        ));
+        if !term.continue_term {
+            return policers;
+        }
+    }
+    policers
+}
+
+#[inline]
+fn capture_input_filter_policers_v6(
+    filter: &Filter,
+    src_ip: Ipv6Addr,
+    dst_ip: Ipv6Addr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    dscp: u8,
+    extra: TermMatchExtra<'_>,
+) -> CachedThreeColorPolicers {
+    let mut policers = CachedThreeColorPolicers::default();
+    for term in &filter.terms {
+        if !term_matches_v6(
+            term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra,
+        ) {
+            continue;
+        }
+        if !term.routing_instance.is_empty() {
+            return policers;
+        }
+        policers.extend(CachedThreeColorPolicers::from_option(
+            term.three_color_policer.clone(),
+        ));
+        if !term.continue_term {
+            return policers;
+        }
+    }
+    policers
+}
+
 /// #7992: the cache-replay evaluator for a caller that has NO PORTS AT ALL.
 ///
 /// It takes no port arguments, which is the point: the FLOWLESS arm of

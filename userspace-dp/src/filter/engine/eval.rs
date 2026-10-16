@@ -347,6 +347,32 @@ pub(crate) enum NonRoutingCountPolicy {
     Never,
 }
 
+/// #14120: who owns an interface INPUT filter's three-color policer meter for
+/// one packet. The non-routing walk meters inline exactly when the packet
+/// will NOT also take a TX-selection leg that re-walks the same input filter
+/// (transit forwarding): host-bound (LocalDelivery) and Stage-11 IPsec
+/// passthrough packets reinject to the host and never egress through
+/// `resolve_cos_tx_selection*`, so metering only in that leg left their
+/// configured ingress policer uncharged — no token charge, no red
+/// discard/remarking (#5857 fixed the same hole for the separate lo0 filter).
+/// `DeferToTxSelection` keeps the pre-#14120 behavior for transit: the
+/// TX-selection walk meters once, and metering here too would DOUBLE-charge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputPolicerMeter {
+    Inline,
+    DeferToTxSelection,
+}
+
+impl InputPolicerMeter {
+    #[inline]
+    pub(crate) fn now_ns(self, now_ns: u64) -> Option<u64> {
+        match self {
+            InputPolicerMeter::Inline => Some(now_ns),
+            InputPolicerMeter::DeferToTxSelection => None,
+        }
+    }
+}
+
 impl NonRoutingCountPolicy {
     /// `(count every matched term during the walk, replay the matched terms
     /// when the walk lands on a terminal non-Accept)`.
@@ -379,6 +405,9 @@ fn evaluate_filter_ref_non_routing_counted(
     extra: TermMatchExtra<'_>,
     packet_bytes: u64,
     count_policy: NonRoutingCountPolicy,
+    // #14120: `Some` meters the input policer inline (no TX-selection leg
+    // follows on this packet's path); `None` defers to that leg.
+    policer_now_ns: Option<u64>,
 ) -> FilterResult {
     match (src_ip, dst_ip) {
         (IpAddr::V4(src), IpAddr::V4(dst)) => evaluate_filter_ref_non_routing_counted_v4(
@@ -392,6 +421,7 @@ fn evaluate_filter_ref_non_routing_counted(
             extra,
             packet_bytes,
             count_policy,
+            policer_now_ns,
         ),
         (IpAddr::V6(src), IpAddr::V6(dst)) => evaluate_filter_ref_non_routing_counted_v6(
             filter,
@@ -404,6 +434,7 @@ fn evaluate_filter_ref_non_routing_counted(
             extra,
             packet_bytes,
             count_policy,
+            policer_now_ns,
         ),
         _ => FilterResult::default(),
     }
@@ -421,6 +452,7 @@ fn evaluate_filter_ref_non_routing_counted_v4(
     extra: TermMatchExtra<'_>,
     packet_bytes: u64,
     count_policy: NonRoutingCountPolicy,
+    policer_now_ns: Option<u64>,
 ) -> FilterResult {
     // #2544: accumulate fall-through modifiers (count/log/fc/dscp). A matched
     // term that points at a routing-instance defers to the routing-instance
@@ -449,9 +481,10 @@ fn evaluate_filter_ref_non_routing_counted_v4(
         if always_count && term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
         }
-        // #5857: the non-routing input-filter evaluator does NOT meter its
-        // policer here (it is metered in the tx-selection walk); pass None.
-        merge_matched_modifiers(&mut acc, filter, term, None, packet_bytes);
+        // #5857/#14120: meter inline only when the caller owns the meter
+        // (`policer_now_ns = Some`, host-bound / Stage-11 paths with no
+        // TX-selection leg); transit passes `None` and meters in that leg.
+        merge_matched_modifiers(&mut acc, filter, term, policer_now_ns, packet_bytes);
         // This loop variant never carries a routing-instance through the
         // result (it defers to the routing-instance evaluator); keep that.
         acc.routing_instance = None;
@@ -528,6 +561,7 @@ fn evaluate_filter_ref_non_routing_counted_v6(
     extra: TermMatchExtra<'_>,
     packet_bytes: u64,
     count_policy: NonRoutingCountPolicy,
+    policer_now_ns: Option<u64>,
 ) -> FilterResult {
     // #2544/#2620: see evaluate_filter_ref_non_routing_counted_v4.
     let (always_count, replay_on_terminal_deny) = count_policy.counting();
@@ -544,9 +578,10 @@ fn evaluate_filter_ref_non_routing_counted_v6(
         if always_count && term.has_count {
             record_filter_counter(&term.counter, packet_bytes);
         }
-        // #5857: the non-routing input-filter evaluator does NOT meter its
-        // policer here (it is metered in the tx-selection walk); pass None.
-        merge_matched_modifiers(&mut acc, filter, term, None, packet_bytes);
+        // #5857/#14120: meter inline only when the caller owns the meter
+        // (`policer_now_ns = Some`, host-bound / Stage-11 paths with no
+        // TX-selection leg); transit passes `None` and meters in that leg.
+        merge_matched_modifiers(&mut acc, filter, term, policer_now_ns, packet_bytes);
         acc.routing_instance = None;
         if !term.continue_term {
             acc.action = term.action;
@@ -884,6 +919,9 @@ pub(crate) fn evaluate_interface_filter_counted(
 ///   exit the routing evaluator can't reach), and
 /// * `Always` otherwise — a plain non-PBR filter, or the DSCP/L4 session-HIT
 ///   re-eval, where this evaluator is the SOLE counter.
+/// #14120: `policer_now_ns` is `Some(now_ns)` exactly when the caller knows
+/// no TX-selection leg will re-walk this input filter for the packet
+/// (host-bound / Stage-11 reinjection); transit callers pass `None`.
 pub(crate) fn evaluate_interface_filter_non_routing_counted(
     state: &FilterState,
     ifindex: i32,
@@ -897,6 +935,7 @@ pub(crate) fn evaluate_interface_filter_non_routing_counted(
     extra: TermMatchExtra<'_>,
     packet_bytes: u64,
     count_policy: NonRoutingCountPolicy,
+    policer_now_ns: Option<u64>,
 ) -> FilterResult {
     let filter = if is_v6 {
         state.iface_filter_v6_fast.get(&ifindex).map(Arc::as_ref)
@@ -917,6 +956,7 @@ pub(crate) fn evaluate_interface_filter_non_routing_counted(
         extra,
         packet_bytes,
         count_policy,
+        policer_now_ns,
     )
 }
 
@@ -964,10 +1004,11 @@ pub(crate) fn filter_ref_static_verdict(
         // unmetered `apply_term_three_color_policer(term, None, ..)`.
         0,
         NonRoutingCountPolicy::Never,
+        // Capture only: no packet is metered (verdict must stay pure).
+        None,
     )
     .action
 }
-
 
 /// Whether the current packet's terminal deny came from a flow-invariant term.
 ///

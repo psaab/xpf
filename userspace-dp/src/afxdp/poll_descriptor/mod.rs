@@ -358,9 +358,9 @@ use filter::{
     apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit, evaluate_non_pbr_input_filter,
     evaluate_non_pbr_input_filter_counters_cached, evaluate_non_pbr_input_filter_log_only,
-    filter_terminal, host_inbound_gated_lo0_action, input_filter_would_deny_before_screen,
-    lo0_action_for_solicited_reply, revalidate_static_pbr_route_on_session_hit,
-    stage11_input_filter_terminal,
+    evaluate_non_pbr_input_filter_policers_cached, filter_terminal, host_inbound_gated_lo0_action,
+    input_filter_would_deny_before_screen, lo0_action_for_solicited_reply, policer_drop_action,
+    revalidate_static_pbr_route_on_session_hit, stage11_input_filter_terminal,
 };
 use policy_revalidation::{
     revalidate_zone_policy_on_session_hit, source_nat_revocation_on_session_hit_with_ingress,
@@ -525,10 +525,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     // #11373: a session's cached route decision is valid only within the
     // current config/FIB pair. Publish the same validation read used by this
     // pass's metadata classifier before processing any descriptors.
-    sessions.set_forwarding_revalidation_gen(
-        validation.config_generation,
-        validation.fib_generation,
-    );
+    sessions
+        .set_forwarding_revalidation_gen(validation.config_generation, validation.fib_generation);
     // #8356: the zone-policy verdict's generation, published from the SAME
     // `ValidationState` in the SAME statement pair, so the two stamps can never
     // be compared against generations from different publishes. They stay
@@ -1225,6 +1223,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 Some(flow),
                                 meta,
                                 ingress_zone_override,
+                                now_ns,
                             )
                             .expect("Stage 11 input filter flow");
                             if filter_terminal(
@@ -2383,6 +2382,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 Some(flow),
                                 meta,
                                 Some(authority_zone),
+                                resolved.decision.resolution.disposition,
+                                now_ns,
                             );
                         let (input_filter_hit, input_already_counted) =
                             match ordinary_input_filter_hit {
@@ -2402,6 +2403,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 eval: NonPbrInputFilterEval {
                                                     action: crate::filter::FilterAction::Discard,
                                                     cached_log: None,
+                                                    policer_drop: false,
                                                 },
                                                 revoked_key: route.revoked_key.clone(),
                                                 log_source: FilterLogSource::Pbr,
@@ -2427,6 +2429,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 eval: NonPbrInputFilterEval {
                                                     action: crate::filter::FilterAction::Discard,
                                                     cached_log: None,
+                                                    policer_drop: false,
                                                 },
                                                 revoked_key: route.revoked_key.clone(),
                                                 log_source: FilterLogSource::Pbr,
@@ -2453,10 +2456,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                             )
                             .for_each(|counter| {
-                                crate::filter::record_filter_counter(
-                                    counter,
-                                    meta.pkt_len as u64,
-                                );
+                                crate::filter::record_filter_counter(counter, meta.pkt_len as u64);
                             });
                         }
                         // The cache seed must not be responsible for charging
@@ -2468,7 +2468,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // per-packet filter having counted.
                         seed_packet_already_counted = true;
                         if let Some(input_filter_hit) = input_filter_hit {
-                            let input_filter_eval = input_filter_hit.eval;
+                            // #14120: an inline-metered policer drop on a
+                            // host-bound hit is a silent Discard (never a
+                            // reject reply), folded before any consumer.
+                            let input_filter_eval = {
+                                let mut eval = input_filter_hit.eval;
+                                eval.action = policer_drop_action(eval.action, eval.policer_drop);
+                                eval
+                            };
                             let input_filter_revoked_key = input_filter_hit.revoked_key;
                             // #8114 item 1: a verdict that came from a matched
                             // `routing-instance` term is logged as PBR, the same
@@ -3730,6 +3737,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             NonPbrInputFilterEval {
                                 action: crate::filter::FilterAction::Accept,
                                 cached_log: None,
+                                policer_drop: false,
                             }
                         } else {
                             evaluate_non_pbr_input_filter(
@@ -3742,6 +3750,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                                 ingress_zone_override,
                                 true,
+                                // #14120: the disposition is not resolved
+                                // yet at this precheck. Transit meters in
+                                // its TX-selection leg; a LocalDelivery
+                                // verdict captures + meters the policer
+                                // handles at its install site below, so the
+                                // first host-bound packet is charged exactly
+                                // once and never twice.
+                                crate::filter::InputPolicerMeter::DeferToTxSelection,
+                                now_ns,
                             )
                         };
                         // #2617: emit the matched input-filter `then log` event
@@ -4745,6 +4762,36 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     meta.tcp_flags,
                                 );
                             }
+                            // #14120: a host-bound flow never takes the
+                            // TX-selection leg, so capture its input-filter
+                            // policer handles now: meter THIS first packet
+                            // and store the handles on the installed entry
+                            // for per-hit replay. A red first packet is
+                            // silently dropped and never installs.
+                            let local_input_policers =
+                                evaluate_non_pbr_input_filter_policers_cached(
+                                    worker_ctx.forwarding,
+                                    crate::afxdp::frame::term_match_extra_from_frame(
+                                        packet_frame,
+                                        meta,
+                                    ),
+                                    Some(flow),
+                                    meta,
+                                );
+                            if !local_input_policers.is_empty() {
+                                let first_action = crate::filter::apply_cached_three_color_policers(
+                                    &local_input_policers,
+                                    now_ns,
+                                    meta.pkt_len as u64,
+                                );
+                                if first_action.drop {
+                                    telemetry.dbg.local += 1;
+                                    telemetry.dbg.policy_deny += 1;
+                                    telemetry.counters.touched = true;
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
+                            }
                             if local_session_capacity_available
                                 && install_helper_local_session_on_miss(
                                     sessions,
@@ -4765,6 +4812,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             {
                                 telemetry.counters.session_creates += 1;
                                 telemetry.dbg.session_create += 1;
+                                // #14120: replay state for LocalDelivery
+                                // hits (see capture above).
+                                if !local_input_policers.is_empty() {
+                                    sessions.set_input_policers(
+                                        &flow.forward_key,
+                                        local_input_policers.clone(),
+                                    );
+                                }
                                 // #2218: a DNAT/static-DNAT to a firewall-
                                 // local service commits its translation
                                 // here. No SNAT is applied on the local-
@@ -6730,6 +6785,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             NonPbrInputFilterEval {
                                 action: crate::filter::FilterAction::Accept,
                                 cached_log: None,
+                                policer_drop: false,
                             }
                         } else {
                             let mut extra = crate::afxdp::frame::term_match_extra_from_frame(
@@ -6746,6 +6802,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // #2620 counter ownership: the routing evaluator
                                 // below owns the Accept/defer exit count.
                                 true,
+                                crate::filter::InputPolicerMeter::DeferToTxSelection,
+                                now_ns,
                             )
                         };
                         if let Some(cached_log) = input_eval.cached_log {
@@ -6981,6 +7039,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             NonPbrInputFilterEval {
                                 action: crate::filter::FilterAction::Accept,
                                 cached_log: None,
+                                policer_drop: false,
                             }
                         } else {
                             let mut extra = crate::afxdp::frame::term_match_extra_from_frame(
@@ -6995,6 +7054,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                                 ingress_zone_override,
                                 true,
+                                crate::filter::InputPolicerMeter::DeferToTxSelection,
+                                now_ns,
                             )
                         };
                         if let Some(cached_log) = input_eval.cached_log {
@@ -8961,11 +9022,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     decision.nat,
                                     flow.is_some(),
                                     adj_flow,
-                                    noroute_policy_protocol(
-                                        packet_frame,
-                                        meta,
-                                        flow.is_some(),
-                                    ),
+                                    noroute_policy_protocol(packet_frame, meta, flow.is_some()),
                                     l4_present,
                                     policy_icmp,
                                     meta.pkt_len as u64,

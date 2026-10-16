@@ -1336,6 +1336,40 @@ policed lo0 packet is not applied to the delivered frame (the lo0
 local-delivery path has no frame-DSCP-rewrite mechanism — even a term's
 plain `then dscp` is not applied on lo0); only the drop is enforced.
 
+### Interface input policers on host/passthrough packets (#14120)
+
+The lo0 fix above left the sibling hole in the *interface input* filter:
+its three-color policer was metered only in the TX-selection leg
+(`resolve_cos_tx_selection*`), which transit packets take at egress.
+Host-bound (LocalDelivery) packets reinject to the host and Stage-11 IPsec
+passthrough packets are claimed before ordinary forwarding — neither ever
+egresses, so a burst matching an ingress `then policer` was delivered with
+no token charge and no red discard/remarking.
+
+`evaluate_non_pbr_input_filter` now takes an `InputPolicerMeter`:
+`Inline` (Stage-11, and host-bound session hits via
+`evaluate_input_filter_on_session_hit`'s disposition gate) meters in the
+counted non-routing walk itself — the same `merge_matched_modifiers` seam
+#5857 used for lo0 — plus a routing-bearing metered walk for policers on or
+past a `routing-instance` term the non-routing walk defers at.
+`DeferToTxSelection` (transit miss/hit and flowless arms) keeps the old
+behavior exactly: the TX-selection leg meters once, so a forwarded packet
+is never double-charged. The session MISS cannot know its disposition at
+the input precheck (route lookup follows), so a LocalDelivery verdict
+captures the matched policer handles at its install site
+(`evaluate_non_pbr_input_filter_policers_cached`), meters the first packet
+there, and stores the handles on the session entry
+(`SessionEntry::input_policers`); LocalDelivery HITs replay them — Fresh
+hits directly, stale hits at capture/refresh — mirroring the flow cache's
+`apply_cached_three_color_policers` replay, since host-bound flows are
+never flow-cached. A red verdict folds to a silent `Discard`
+(`policer_drop_action`), never a synthesized reject reply. Tests:
+`stage11_input_policer_meters_and_drops_over_rate_ike_14120`,
+`local_delivery_input_policer_meters_inline_without_double_charge_14120`
+(`poll_descriptor/filter.rs`), `local_delivery_hit_replays_input_policer_14120`
+and `transit_hit_defers_input_policer_to_tx_selection_14120`
+(`filter_revalidation_7212_tests.rs`).
+
 ### `then reject` synthesizes an active reply (#2521)
 
 `FilterAction::Reject` (`then reject`) normally synthesizes an active reply:

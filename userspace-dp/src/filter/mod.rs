@@ -730,6 +730,11 @@ impl CachedThreeColorPolicers {
     }
 
     #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.policers.is_empty()
+    }
+
+    #[inline]
     pub(crate) fn for_each(&self, mut f: impl FnMut(&Arc<ThreeColorPolicerRuntime>)) {
         for policer in &self.policers {
             f(policer);
