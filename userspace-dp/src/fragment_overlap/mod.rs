@@ -28,16 +28,17 @@
 //! (16 shards × 64) ≈ 200KB fixed. The TTL only sets how long attack residue squats,
 //! which the absolute bound + shard caps contain.
 //! Fairness (#10658): one sender (`routing_domain`, family, `src`) holds at most
-//! 8 entries per shard; a routing domain holds at most 32 per shard. New keys over
-//! either cap fail closed without evicting live ranges, reserving at least half of
-//! every shard for other domains and preserving same-domain senders' overlap anchors.
-//! A sender's ninth key in a shard is dropped, not allowed to evict an older datagram.
+//! 8 incomplete entries per shard; a routing domain holds at most 32 incomplete
+//! entries per shard. Completed entries remain overlap anchors until expiry but
+//! do not consume these fairness quotas, so conformant completed datagrams do not
+//! exhaust the limits intended to constrain incomplete attack residue. New keys
+//! over either cap fail closed without evicting incomplete ranges; all entries
+//! remain subject to the fixed 64-entry shard capacity.
 //!
 //! Failure directions (explicit — they differ from `fragment_assoc`):
-//!   * Overlap/empty/overflow/capacity all fail CLOSED (drop). Sender/domain quota and
-//!     full-shard limits drop new keys without evicting live ranges, preserving every
-//!     admitted datagram's overlap anchor. Flood-time availability loss at the
-//!     sender/domain quota is the correct trade for a security control.
+//!   * Overlap/empty/overflow/capacity all fail CLOSED (drop). Sender/domain
+//!     quota applies to incomplete entries only; full-shard limits include all
+//!     entries and fail closed without evicting live overlap anchors.
 //!   * Check/record SPLIT (no refused-traffic planting): the early hook only CHECKS
 //!     (pure — drops overlaps before enforcement verdicts are earned); recording happens
 //!     post-commit at the TX site, so only ADMITTED fragments plant ranges. A refused
@@ -263,6 +264,14 @@ fn ranges_cover_terminal(e: &OverlapEntry, terminal_end: u32) -> bool {
         covered_end = covered_end.max(end);
     }
     covered_end == terminal_end
+}
+
+#[inline]
+fn overlap_entry_complete(e: &OverlapEntry) -> bool {
+    e.pending == 0
+        && !e.failed
+        && e.terminal_end
+            .is_some_and(|terminal_end| ranges_cover_terminal(e, terminal_end))
 }
 /// Reject ranges that conflict with an already observed terminal fragment.
 /// Once a terminal end is known, every range must end at/before it; only the
@@ -762,12 +771,13 @@ impl OverlapTracker {
                 }
             }
         }
-        // #10658: reserve shard capacity by routing domain and sender. Quota hits
-        // fail closed rather than evicting another datagram's live anchor ranges.
+        // #10658: reserve shard capacity by routing domain and sender. Completed
+        // entries remain overlap anchors but do not consume the fairness quotas:
+        // otherwise modest conformant fragment rates exhaust them.
         let sender = overlap_sender(&key);
         let mut sender_entries = 0usize;
         let mut domain_entries = 0usize;
-        for e in shard.iter() {
+        for e in shard.iter().filter(|e| !overlap_entry_complete(e)) {
             if overlap_sender(&e.key) == sender {
                 sender_entries += 1;
             }
@@ -830,8 +840,9 @@ impl OverlapTracker {
     /// (`OVERLAP_TTL_NS`, refreshed by each recorded fragment) or the
     /// 60s absolute lifetime expires them via the usual liveness sweep —
     /// the same retention `fail_admission` already applied to failed
-    /// datagrams. Live completed anchors are never evicted to free
-    /// shard capacity; a full shard fails closed instead.
+    /// datagrams. Completed anchors do not consume sender/domain fairness
+    /// quotas, but remain charged to the fixed per-shard storage cap; a full
+    /// shard fails closed instead of evicting a live anchor.
     ///
     /// Returns `true` when this settlement completes the datagram
     /// (all settled, no failure, ranges cover the terminal end); the
@@ -1707,6 +1718,51 @@ mod tests {
             assert!(t.check_overlap(v4_key(), 4, 12, 2_000, &FRAG_OVERLAP_DROPPED));
         });
         assert_eq!(d, 1);
+    }
+
+
+    #[test]
+    fn completed_datagram_rate_does_not_exhaust_sender_quota_13937() {
+        fn send_train(tracker: &OverlapTracker, mut key: OverlapKey) {
+            let full0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
+            // 10 complete 2-fragment datagrams per second for 60 seconds.
+            for ident in 0..600u32 {
+                key.ident = ident;
+                let now_ns = 1_000 + u64::from(ident) * 100_000_000;
+                let mut first = tracker.check_and_record_fragment_detailed(
+                    key,
+                    0,
+                    8,
+                    false,
+                    now_ns,
+                    &FRAG_OVERLAP_DROPPED,
+                );
+                assert!(!first.dropped, "head fragment {ident} is admitted");
+                let mut last = tracker.check_and_record_fragment_detailed(
+                    key,
+                    8,
+                    16,
+                    true,
+                    now_ns + 1,
+                    &FRAG_OVERLAP_DROPPED,
+                );
+                assert!(!last.dropped, "tail fragment {ident} is admitted");
+                assert!(!tracker.commit_admission(first.admission.take().unwrap()));
+                assert!(tracker.commit_admission(last.admission.take().unwrap()));
+            }
+            assert_eq!(
+                FRAG_OVERLAP_SHARD_FULL_DROPPED
+                    .load(Ordering::Relaxed)
+                    .wrapping_sub(full0),
+                0,
+                "completed datagrams do not consume sender/domain fairness quotas"
+            );
+        }
+
+        // Arrival-key and translated-key trackers both charge the stable
+        // sender identity; the translated path is the SNAT quota funnel.
+        send_train(&OverlapTracker::new(), v4_key());
+        send_train(&OverlapTracker::new(), v6_key());
     }
 
     #[test]
