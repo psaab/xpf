@@ -94,6 +94,28 @@ fn mint_persistent_any_remote(
         .expect("a fresh persistent allocation must succeed")
 }
 
+fn mint_persistent_any_remote_with_timeout(
+    alloc: &PortAllocator,
+    addrs: &[Ipv4Addr],
+    f: SourceNatFlowKey,
+    timeout_ns: u64,
+    now_ns: u64,
+) -> TranslatedTuple {
+    alloc
+        .allocate_translation(
+            f,
+            PoolAddressFamily::V4(addrs),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            timeout_ns,
+            now_ns,
+            NatHolder::Untracked,
+        )
+        .expect("a fresh persistent allocation must succeed")
+}
+
 fn mint_persistent_address_only_any_remote(
     alloc: &PortAllocator,
     addrs: &[Ipv4Addr],
@@ -1466,7 +1488,7 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
     ),
     // INSTALLED ON THE STANDBY from an exported lease — the IDLE population,
     // which has no session to be rebuilt from and is exactly why #8121 exists.
-    ("import_idle_lease", "#8121, from the idle-lease sync"),
+    ("import_idle_lease_at", "#8121, from the idle-lease sync"),
 ];
 
 /// The census. Reds when a lease is created somewhere the three-route argument
@@ -1555,7 +1577,7 @@ fn the_lease_census_actually_finds_its_population_8121() {
     assert!(
         LEASE_CREATION_SITES_8121
             .iter()
-            .any(|(f, _)| *f == "import_idle_lease"),
+            .any(|(f, _)| *f == "import_idle_lease_at"),
         "the idle-lease import is not in the census, so #8121's own route is \
          unpinned by the guard that exists to pin the routes"
     );
@@ -2900,4 +2922,136 @@ fn synced_pat_reserve_refuses_when_live_flow_cap_is_full_11692() {
     );
     assert_eq!(allocator.live_flow_count(), 2);
     assert_eq!(allocator.debug_occupied_count(), 0);
+}
+
+/// #13692 (D13-20): an expired idle lease still in the map must not block a
+/// fresh idle import for the same key. The new record replaces it and frees
+/// the old PAT port; a live existing lease still wins.
+#[test]
+fn expired_idle_lease_does_not_block_import_13692() {
+    let addrs = pool();
+    let standby = PortAllocator::new(1, 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let key = client.persistent_source_key(PersistentNatPermit::TargetHostPort);
+    let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
+    let old = mint_persistent_with_timeout(&standby, &addrs, client, min_timeout_ns, 1_000);
+    assert!(standby.release_flow(client, old, 2_000, NatHolder::Untracked));
+    let expiry = standby.debug_live().persistent_by_source.get(&key).unwrap().expires_at_ns;
+    let later = expiry + 1;
+    // No local allocation/release between expiry and import: lazy GC has not run.
+    let mut rec = idle_record_for(client, old.ip, old.port + 1, false, Some(("8.8.8.8".parse().unwrap(), 443)));
+    rec.remaining_ns = TIMEOUT_NS;
+    assert_eq!(
+        standby.import_idle_lease_at(&rec, Some(0), TIMEOUT_NS, later),
+        IdleLeaseImport::Installed,
+        "expired idle lease must be reclaimed inline, not SkippedExisting"
+    );
+    let live = standby.debug_live();
+    let lease = live.persistent_by_source.get(&key).unwrap();
+    assert_eq!(lease.translated.port, old.port + 1);
+    assert_eq!(lease.expires_at_ns, later + TIMEOUT_NS);
+    drop(live);
+    assert!(!standby.holds_port(0, old.port), "old expired port must be freed");
+    assert!(standby.holds_port(0, old.port + 1), "new imported port must be held");
+    // Live existing lease still wins.
+    assert_eq!(
+        standby.import_idle_lease_at(&rec, Some(0), TIMEOUT_NS, later + 1),
+        IdleLeaseImport::SkippedExisting
+    );
+}
+
+
+/// #13692: synced PAT reserve for same port as expired idle lease must succeed
+/// and mint a fresh active lease.
+#[test]
+fn expired_idle_lease_does_not_block_synced_pat_same_port_13692() {
+    let addrs = [pool()[0]];
+    let alloc = PortAllocator::new(1, 1024, 1024);
+    let client = flow("10.0.61.50", 40000);
+    let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
+    let old = mint_persistent_any_remote_with_timeout(
+        &alloc,
+        &addrs,
+        client,
+        min_timeout_ns,
+        1_000,
+    );
+    assert!(alloc.release_flow(client, old, 2_000, NatHolder::Untracked));
+    let expiry = alloc.debug_live().persistent_by_source.get(&key).unwrap().expires_at_ns;
+    let mut synced = client;
+    synced.dst_ip = "1.1.1.1".parse().unwrap();
+    let mut snap = None;
+    assert!(
+        alloc.reserve_flow_maybe_persistent(synced, old, 0, false, expiry + 1, NatHolder::Untracked, Some((key, TIMEOUT_NS)), false, &mut snap),
+        "same-port synced reserve must reclaim expired lease bit and succeed"
+    );
+    let lease = alloc
+        .export_display_leases(expiry + 1)
+        .into_iter()
+        .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
+        .expect("synced PAT lease must remain persistent");
+    assert_eq!(lease.active_flows, 1);
+    assert_eq!(lease.translated_port, old.port);
+}
+
+/// #13692: synced PAT reserve with a different port must reclaim old lease,
+/// free old port, and pin the new tuple (not strip persistence).
+#[test]
+fn expired_idle_lease_does_not_block_synced_pat_new_port_13692() {
+    let addrs = [pool()[0]];
+    let alloc = PortAllocator::new(1, 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
+    let old = mint_persistent_any_remote_with_timeout(
+        &alloc,
+        &addrs,
+        client,
+        min_timeout_ns,
+        1_000,
+    );
+    assert!(alloc.release_flow(client, old, 2_000, NatHolder::Untracked));
+    let expiry = alloc.debug_live().persistent_by_source.get(&key).unwrap().expires_at_ns;
+    let new_tuple = TranslatedTuple { ip: old.ip, port: old.port + 7 };
+    let mut synced = client;
+    synced.dst_ip = "1.1.1.1".parse().unwrap();
+    let mut snap = None;
+    assert!(alloc.reserve_flow_maybe_persistent(synced, new_tuple, 0, false, expiry + 1, NatHolder::Untracked, Some((key, TIMEOUT_NS)), false, &mut snap));
+    let lease = alloc
+        .export_display_leases(expiry + 1)
+        .into_iter()
+        .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
+        .expect("synced PAT lease must remain persistent");
+    assert_eq!(lease.active_flows, 1);
+    assert_eq!(lease.translated_port, new_tuple.port);
+    assert!(!alloc.holds_port(0, old.port), "old expired port freed");
+    assert!(alloc.holds_port(0, new_tuple.port));
+}
+
+/// #13692: synced address-only reserve must mint fresh lease over expired idle.
+#[test]
+fn expired_idle_lease_does_not_block_synced_address_only_13692() {
+    let addrs = [pool()[0]];
+    let alloc = PortAllocator::new(1, 1024, 1024);
+    let client = flow("10.0.61.50", 40000);
+    let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
+    // Mint address-only with min timeout via reserve_address_only_persistent directly.
+    let old = alloc.reserve_address_only_persistent(client, PoolAddressFamily::V4(&addrs), 0, false, PersistentNatPermit::AnyRemoteHost, min_timeout_ns, 1_000, NatHolder::Untracked).expect("mint");
+    assert!(alloc.release_flow(client, old, 2_000, NatHolder::Untracked));
+    let expiry = alloc.debug_live().persistent_by_source.get(&key).unwrap().expires_at_ns;
+    let mut synced = client;
+    synced.dst_ip = "1.1.1.1".parse().unwrap();
+    let mut snap = None;
+    assert_eq!(
+        alloc.reserve_address_only_maybe_persistent(synced, old.ip, 0, expiry + 1, NatHolder::Untracked, Some((key, TIMEOUT_NS)), false, &mut snap),
+        Ok(old)
+    );
+    let lease = alloc
+        .export_display_leases(expiry + 1)
+        .into_iter()
+        .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
+        .expect("synced address-only lease must remain persistent");
+    assert_eq!(lease.active_flows, 1);
 }
