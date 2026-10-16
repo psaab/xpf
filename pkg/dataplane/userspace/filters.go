@@ -201,22 +201,26 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		if len(term.UnknownAddresses) > 0 {
 			snap.AddressUnrepresentable = true
 		}
-		// #9875/#11334/#11451/#11896: refuse the whole snapshot when a `from`
-		// predicate is unenforced — either an unrecognized leaf
+		// #9875/#11334/#11451/#11896/#14132: refuse the whole snapshot when a
+		// `from` predicate is unenforced — either an unrecognized leaf
 		// (term.UnknownFrom, #3307), the recognized-but-unsupported
-		// literal-address `except` construct (#11334), an unresolved except
-		// prefix-list (#11451), or a value-bearing leaf written with NO operand
-		// (#8480) — OR the term has conflicting terminal actions (#11896; see
-		// TerminalActions). The strict commit gates reject each shape; on lenient
-		// load / peer-sync the marker makes the Rust filter compiler reject this
+		// literal-address `except` construct (#11334), ANY unresolved
+		// prefix-list reference (#11451 except; #14132 positive), or a
+		// value-bearing leaf written with NO operand (#8480) — OR the term
+		// has conflicting terminal actions (#11896; see TerminalActions).
+		// The strict commit gates reject each shape; on lenient load /
+		// peer-sync the marker makes the Rust filter compiler reject this
 		// candidate snapshot, so reconcile retains the previous good state.
-		// Action-agnostic whole-snapshot refusal is required here: changing a
-		// conflicting terminal to discard would install a new drop, while
-		// poisoning a discard/reject term to match-nothing would let its traffic
-		// fall through to implicit accept.
+		// Action-agnostic whole-snapshot refusal is required here: changing
+		// a conflicting terminal to discard would install a new drop, while
+		// poisoning a discard/reject term to match-nothing would let its
+		// traffic fall through to implicit accept. A positive unresolved
+		// reference is the same hazard in single-list form (the deny
+		// matches nothing and falls through) and in OR-list form (the deny
+		// silently narrows to the resolved members only).
 		if len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0 ||
-			hasUnresolvedPrefixListExcept(term.SourcePrefixLists, cfg) ||
-			hasUnresolvedPrefixListExcept(term.DestPrefixLists, cfg) ||
+			hasUnresolvedPrefixListRef(term.SourcePrefixLists, cfg) ||
+			hasUnresolvedPrefixListRef(term.DestPrefixLists, cfg) ||
 			config.FilterHasConflictingTerminalActions(term.TerminalActions) {
 			snap.FromUnrepresentable = true
 		}
@@ -500,8 +504,11 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 // match-any. An unresolved positive reference matches nothing. An unresolved
 // except reference is distinguished from a defined-empty one and lowered
 // fail-closed by action (non-deny matches nothing; deny matches all); the
-// snapshot builder also marks the candidate unrepresentable so the dataplane
-// keeps its previous good snapshot (#11451).
+// snapshot builder also marks the candidate unrepresentable for ANY
+// unresolved reference — positive (#14132) as well as except (#11451) — so
+// the dataplane keeps its previous good snapshot instead of installing a
+// deny that matches nothing (or only the resolved OR members) and falls
+// through to implicit accept.
 //
 // `action` is the term's terminating action ("accept"/"discard"/"reject"/"").
 // It controls unresolved-reference lowering and the #5225 action-aware handling
@@ -520,13 +527,13 @@ func resolvePrefixListAddrs(
 	return ResolveFilterPrefixListAddrs(literal, refs, prefixLists, filterName, termName, direction, action)
 }
 
-func hasUnresolvedPrefixListExcept(refs []config.PrefixListRef, cfg *config.Config) bool {
+func hasUnresolvedPrefixListRef(refs []config.PrefixListRef, cfg *config.Config) bool {
 	var prefixLists map[string]*config.PrefixList
 	if cfg != nil {
 		prefixLists = cfg.PolicyOptions.PrefixLists
 	}
 	for _, ref := range refs {
-		if ref.Except && prefixLists[ref.Name] == nil {
+		if prefixLists[ref.Name] == nil {
 			return true
 		}
 	}

@@ -1119,10 +1119,12 @@ over-dropped with no signal past the boot warning. One wire bool closes it,
 same shape as the family (Go builder sets, `parse_term` rejects the whole
 snapshot; strict commit gates are the primary defense):
 
-- **`from_unrepresentable` (#9875/#11334/#11896):** set for an unenforced
-  `from` leaf or literal-address `except` on `term.UnknownFrom`, a valueless
-  leaf on `term.ValuelessFrom`, OR conflicting terminal actions (#11896).
-  `parse_term` raises `SnapshotIntegrityError::UnrepresentableFilterFrom`.
+- **`from_unrepresentable` (#9875/#11334/#11896/#14132):** set for an
+  unenforced `from` leaf or literal-address `except` on
+  `term.UnknownFrom`, a valueless leaf on `term.ValuelessFrom`, ANY
+  unresolved prefix-list reference — except (#11451) or positive
+  (#14132) — OR conflicting terminal actions (#11896). `parse_term`
+  raises `SnapshotIntegrityError::UnrepresentableFilterFrom`.
 
 Whole-candidate-snapshot rejection (the reconcile preflight retains the
 previous good state) — not term poisoning — because poisoning a discard/reject
@@ -1137,6 +1139,8 @@ Tests: `from_unrepresentable_marker_*`,
 `TestFilterSnapshotFromUnrepresentable*`,
 `TestFilterSnapshotLiteralAddressExceptFailsClosed11334`,
 `TestFilterTerminalConflictSetsFromUnrepresentable11896`,
+`TestBuildFirewallFilterSnapshotsUnresolvedPositiveFailsClosed14132`,
+`TestLo0UnresolvedPositiveRefusesCandidate14132`,
 `TestFirewallTermSnapshotFromUnrepresentableWireKey_9875` (Go), plus strict /
 tolerant compiler diagnostics in `TestFirewallLiteralAddressExceptNamedUnsupported11334`
 (fail-on-revert).

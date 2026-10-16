@@ -67,22 +67,24 @@ func buildLo0FilterNetlink(p *nlPlan, spec Lo0FilterSpec) {
 // buildLo0TermNetlink lowers one filter term to 0, 1, or 2 kernel rules,
 // mirroring nftRulesFromTerm.
 func buildLo0TermNetlink(p *nlPlan, t Lo0FilterTerm, f nlFamily) {
-	// #9875/#11896: a `from` leaf the dataplane does not enforce
-	// (term.UnknownFrom, #3307, or term.ValuelessFrom, #8480), OR conflicting
-	// terminal actions (#11896), carried here as FromUnrepresentable by
-	// toNftLo0Term. This preflight runs FIRST, ahead of address elimination: a
-	// marked match-nothing term still refuses the whole plan, matching the Rust
-	// snapshot rejection so the two dataplanes cannot install different policy.
-	// A conflict's conservative Action="discard" is not installed as a fresh
-	// drop; an unenforced match is not silently widened. Fail the whole plan
-	// CLOSED (refuse-all, NOT term-skip: skipping would let traffic fall through
-	// to later terms and implicit accept, while a per-term drop cannot be scoped
-	// to unknown constraints). The install aborts and prior ruleset stands.
+	// #9875/#11896/#14132: a `from` leaf the dataplane does not enforce
+	// (term.UnknownFrom, #3307, or term.ValuelessFrom, #8480), conflicting
+	// terminal actions (#11896), or ANY unresolved prefix-list reference
+	// (except #11451, positive #14132), carried here as
+	// FromUnrepresentable by toNftLo0Term. This preflight runs FIRST,
+	// ahead of address elimination: a marked match-nothing term still
+	// refuses the whole plan, matching the Rust snapshot rejection so the
+	// two dataplanes cannot install different policy. A conflict's
+	// conservative Action="discard" is not installed as a fresh drop; an
+	// unenforced match is not silently widened. Fail the whole plan
+	// CLOSED (refuse-all, NOT term-skip: skipping would let traffic fall
+	// through to later terms and implicit accept, while a per-term drop
+	// cannot be scoped to unknown constraints). The install aborts and
+	// prior ruleset stands.
 	if t.FromUnrepresentable {
 		p.fail(fmt.Errorf("lo0 filter term %q: unrepresentable from leaf or conflicting terminal actions", t.Name))
 		return
 	}
-
 	// Resolve the address predicates first: a positive scope that resolves to no
 	// prefix of this family is a Junos match-nothing term (skip entirely).
 	// #6512: a malformed token in either direction fails the plan CLOSED. Never
