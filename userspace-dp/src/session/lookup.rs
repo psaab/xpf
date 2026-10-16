@@ -315,11 +315,11 @@ impl SessionTable {
     /// expiry to the 2s RST window, propagating to the companion (#4109),
     /// and emitting an HA close Update (#9412), all for a dropped packet.
     ///
-    /// This variant still refreshes `last_seen_ns` (a foreign packet keeps an
-    /// idle session alive per the #9519 contract) and still runs the
-    /// handshake state machine; it only skips the close stamp, the close
-    /// re-bucket, the companion close propagation, and the HA close emit.
-    /// The poll site applies the skipped close after an Owner verdict via
+    /// This variant refreshes `last_seen_ns` for ordinary traffic (so a
+    /// foreign packet can keep an idle session alive per the #9519 contract)
+    /// and still runs the handshake state machine. A deferred FIN/RST on an
+    /// already-closing entry does not refresh its deadline. The poll site
+    /// applies the skipped close after an Owner verdict via
     /// [`Self::apply_deferred_owner_close`]; a foreign arrival drops it with
     /// the packet. The result preserves stale-vs-absent classification from
     /// the same primary-index probe.

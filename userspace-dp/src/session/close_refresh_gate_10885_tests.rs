@@ -447,3 +447,38 @@ fn deferring_lookup_foreign_close_segments_do_not_slide_closing_13682() {
         "control: non-closing traffic still refreshes via the deferring lookup"
     );
 }
+
+/// The same deferred FIN that cannot extend a foreign entry's deadline must
+/// still be applied after an Owner verdict. This pins owner-path parity when
+/// close progress arrives on the non-FINed half of a half-closed pair.
+#[test]
+fn deferred_owner_fin_still_advances_half_close_to_time_wait_13682() {
+    let forward = key_v4();
+    let mut table = SessionTable::new();
+    table.set_timeouts(configured());
+    let t0 = 20_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, t0, TCP_ACK);
+
+    let first_fin_ns = t0 + 1_000_000_000;
+    assert!(table.lookup(&forward, first_fin_ns, TCP_FIN).is_some());
+    let second_fin_ns = t0 + 2_000_000_000;
+    assert!(matches!(
+        table.lookup_with_origin_deferring_close_expiry(&reverse, second_fin_ns, TCP_FIN),
+        SessionExpiryProbe::Live(_)
+    ));
+    let before_owner_apply = table.entry_by_key(&reverse).expect("deferred reverse");
+    assert!(!before_owner_apply.fin_own);
+    assert_eq!(before_owner_apply.last_seen_ns, first_fin_ns);
+
+    table.apply_deferred_owner_close(&reverse, second_fin_ns, TCP_FIN);
+
+    for (label, key) in [("forward", &forward), ("reverse", &reverse)] {
+        let entry = table.entry_by_key(key).expect("live time-wait half");
+        assert_eq!(entry.last_seen_ns, second_fin_ns, "{label}: owner FIN stamped");
+        assert_eq!(
+            entry.expires_after_ns,
+            TIME_WAIT_SECS * 1_000_000_000,
+            "{label}: owner FIN advanced both halves to TIME_WAIT"
+        );
+    }
+}
