@@ -33,6 +33,17 @@ func TestDNATCrossFamilyPoolRejected13922(t *testing.T) {
 	}
 }
 
+func TestDNATCrossFamilyPoolLenientWarns13922(t *testing.T) {
+	cfg, err := CompileConfigLenient(buildTree(t, dnatFamilySet13922(
+		"203.0.113.10/32", "2001:db8::10/128")))
+	if err != nil {
+		t.Fatalf("lenient compilation must not fail on cross-family DNAT: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "address family") {
+		t.Fatalf("lenient compilation must warn about the DNAT family mismatch: %v", cfg.Warnings)
+	}
+}
+
 func TestDNATSameFamilyPoolCompiles13922(t *testing.T) {
 	for _, tc := range []struct{ name, dst, pool string }{
 		{"v4 to v4", "203.0.113.10/32", "10.0.0.10/32"},
@@ -69,6 +80,17 @@ func TestStaticNATCrossFamilyPairRejected13922(t *testing.T) {
 				t.Fatalf("error must name the address-family mismatch, got: %v", err)
 			}
 		})
+	}
+}
+
+func TestStaticNATCrossFamilyPairLenientWarns13922(t *testing.T) {
+	cfg, err := CompileConfigLenient(buildTree(t, staticNATFamilySet13922(
+		"203.0.113.5/32", "2001:db8::5/128")))
+	if err != nil {
+		t.Fatalf("lenient compilation must not fail on cross-family static NAT: %v", err)
+	}
+	if !hasWarningContaining(cfg.Warnings, "address family") {
+		t.Fatalf("lenient compilation must warn about the static-NAT family mismatch: %v", cfg.Warnings)
 	}
 }
 
