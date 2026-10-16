@@ -1060,12 +1060,14 @@ impl StaticNatTable {
             }
             match base {
                 IpAddr::V4(addr) => {
-                    if static_block_host_count_v4(block.external.len)
-                        <= DnatTable::MAX_LOCAL_PREFIX_HOSTS
+                    let count = static_block_host_count_v4(block.external.len);
+                    if count <= DnatTable::MAX_LOCAL_PREFIX_HOSTS
                         && let Ok(net) = Ipv4Net::new(addr, block.external.len)
                     {
-                        for host in net.hosts() {
-                            let external = IpAddr::V4(host);
+                        let base = u32::from(net.network());
+                        // The base was added above; expand remaining addresses.
+                        for offset in 1..count {
+                            let external = IpAddr::V4(std::net::Ipv4Addr::from(base + offset));
                             if let Some(translated) =
                                 remap_addr(external, &block.external, &block.internal)
                             {
@@ -1090,12 +1092,15 @@ impl StaticNatTable {
                     // not a wrong answer. `static_nat_zero_length_block_is_
                     // rejected_before_expansion_7219` pins the invariant this
                     // relies on.
-                    if static_block_host_count_v6(block.external.len)
-                        .is_some_and(|h| h <= u128::from(DnatTable::MAX_LOCAL_PREFIX_HOSTS))
+                    let count = static_block_host_count_v6(block.external.len);
+                    if let Some(count) =
+                        count.filter(|h| *h <= u128::from(DnatTable::MAX_LOCAL_PREFIX_HOSTS))
                         && let Ok(net) = Ipv6Net::new(addr, block.external.len)
                     {
-                        for host in net.hosts() {
-                            let external = IpAddr::V6(host);
+                        let base = u128::from(net.network());
+                        // The base was added above; expand remaining addresses.
+                        for offset in 1..count {
+                            let external = IpAddr::V6(std::net::Ipv6Addr::from(base + offset));
                             if let Some(translated) =
                                 remap_addr(external, &block.external, &block.internal)
                             {

@@ -1563,6 +1563,81 @@ fn dnat_prefix_destination_ips_registers_small_block_base_only_for_large() {
 }
 
 #[test]
+fn dnat_prefix_scoped_registers_every_address_exactly_once_13688() {
+    // #13688 (D13-11): the scoped expansion must cover the WHOLE prefix exactly
+    // once — the DNAT match (`contains`) translates every address in the
+    // prefix, so every one must be registered for proxy-ARP/ND.
+    //
+    // FAIL-ON-REVERT: with `net.hosts()`, a v4 /30 yields base+{.1,.2} (the
+    // last address .3 missing) and a v6 /126 yields the base TWICE.
+    let v4 = dnat_row("v4", "198.51.100.0", "198.51.100.0/30", "10.0.0.5", 0);
+    let table = DnatTable::from_snapshots(&[v4], &crate::nat::NatCounterStore::default());
+    let scoped: Vec<IpAddr> = table
+        .destination_ips_scoped()
+        .into_iter()
+        .map(|(ip, _, _)| ip)
+        .collect();
+    let want_v4: Vec<IpAddr> = (0u32..4)
+        .map(|o| IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, o as u8)))
+        .collect();
+    let mut got = scoped.clone();
+    got.sort();
+    let mut want = want_v4.clone();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "#13688: /30 scoped expansion must be exactly the 4 prefix addresses"
+    );
+    assert_eq!(
+        scoped.len(),
+        4,
+        "#13688: /30 scoped expansion duplicated an address: {scoped:?}"
+    );
+    // The deduped twin must agree on the address set.
+    let deduped: std::collections::HashSet<IpAddr> = table.destination_ips().collect();
+    assert_eq!(deduped, want_v4.into_iter().collect());
+
+    // The expansion limit is inclusive: exactly 4096 addresses still expand.
+    let max = dnat_row("max", "198.51.96.0", "198.51.96.0/20", "10.0.0.5", 0);
+    let table = DnatTable::from_snapshots(&[max], &crate::nat::NatCounterStore::default());
+    let scoped = table.destination_ips_scoped();
+    assert_eq!(scoped.len(), DnatTable::MAX_LOCAL_PREFIX_HOSTS as usize);
+    assert!(
+        scoped
+            .iter()
+            .any(|(ip, _, _)| ip == &"198.51.111.255".parse::<IpAddr>().unwrap())
+    );
+
+}
+
+#[test]
+fn dnat_prefix_scoped_v6_registers_base_once_13688() {
+    // FAIL-ON-REVERT: `Ipv6Net::hosts()` includes its base, which the old
+    // manual-base-plus-hosts implementation emitted twice.
+    let v6 = dnat_row("v6", "2001:db8::", "2001:db8::/126", "fd00::5", 0);
+    let table = DnatTable::from_snapshots(&[v6], &crate::nat::NatCounterStore::default());
+    let scoped: Vec<IpAddr> = table
+        .destination_ips_scoped()
+        .into_iter()
+        .map(|(ip, _, _)| ip)
+        .collect();
+    assert_eq!(
+        scoped.len(),
+        4,
+        "#13688: /126 scoped expansion must have exactly 4 entries, got {scoped:?}"
+    );
+    for offset in 0u128..4 {
+        let addr = IpAddr::V6(std::net::Ipv6Addr::from(
+            0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + offset,
+        ));
+        assert!(
+            scoped.contains(&addr),
+            "#13688: /126 scoped expansion missing {addr}: {scoped:?}"
+        );
+    }
+}
+
+#[test]
 fn dnat_prefix_zero_length_does_not_register_unspecified_local_v4() {
     // #5658: a `/0` DNAT match prefix is a legitimate "all routed destinations"
     // rule — it must still MATCH routed traffic (the packet-path lookup keys on

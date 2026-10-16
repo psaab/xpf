@@ -1554,6 +1554,95 @@ fn static_nat_v6_block_expands_when_host_scale_7219() {
 }
 
 #[test]
+fn static_nat_block_scoped_registers_every_address_exactly_once_13688() {
+    // #13688 (D13-11): same inclusive-expansion contract as DNAT — the static
+    // match translates every address in the block, so the scoped view must
+    // register each exactly once, including the last address.
+    //
+    // FAIL-ON-REVERT: with `net.hosts()`, a v4 /30 omits .3 and a v6 /126
+    // duplicates the base (5 entries for 4 addresses).
+    let table = StaticNatTable::from_snapshots(
+        &[block_rule_7219("b30", "198.51.100.0/30", "10.0.0.0/30")],
+        &NatCounterStore::default(),
+    );
+    let scoped: Vec<IpAddr> = table
+        .external_ips_scoped()
+        .into_iter()
+        .map(|(ip, _, _)| ip)
+        .collect();
+    let mut got = scoped.clone();
+    got.sort();
+    let want: Vec<IpAddr> = (0u8..4)
+        .map(|o| IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, o)))
+        .collect();
+    assert_eq!(
+        got, want,
+        "#13688: /30 scoped expansion must be exactly the 4 block addresses"
+    );
+    assert_eq!(
+        scoped.len(),
+        4,
+        "#13688: /30 scoped expansion duplicated an address: {scoped:?}"
+    );
+    let deduped: std::collections::HashSet<IpAddr> = table.external_ips().collect();
+    assert_eq!(
+        deduped,
+        want.into_iter().collect(),
+        "#13688: external_ips() and external_ips_scoped() must agree"
+    );
+
+    let max = StaticNatTable::from_snapshots(
+        &[block_rule_7219(
+            "max",
+            "198.51.96.0/20",
+            "10.0.0.0/20",
+        )],
+        &NatCounterStore::default(),
+    );
+    let max_scoped = max.external_ips_scoped();
+    assert_eq!(
+        max_scoped.len(),
+        DnatTable::MAX_LOCAL_PREFIX_HOSTS as usize,
+        "#13688: static-NAT must expand a /20 exactly at the limit"
+    );
+    assert!(
+        max_scoped
+            .iter()
+            .any(|(ip, _, _)| ip == &"198.51.111.255".parse::<IpAddr>().unwrap())
+    );
+
+}
+
+#[test]
+fn static_nat_block_scoped_v6_registers_base_once_13688() {
+    // FAIL-ON-REVERT: `Ipv6Net::hosts()` includes its base, which the old
+    // manual-base-plus-hosts implementation emitted twice.
+    let table = StaticNatTable::from_snapshots(
+        &[block_rule_7219("b126", "2001:db8::/126", "fd00::/126")],
+        &NatCounterStore::default(),
+    );
+    let scoped: Vec<IpAddr> = table
+        .external_ips_scoped()
+        .into_iter()
+        .map(|(ip, _, _)| ip)
+        .collect();
+    assert_eq!(
+        scoped.len(),
+        4,
+        "#13688: /126 scoped expansion must have exactly 4 entries, got {scoped:?}"
+    );
+    for offset in 0u128..4 {
+        let addr = IpAddr::V6(std::net::Ipv6Addr::from(
+            0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + offset,
+        ));
+        assert!(
+            scoped.contains(&addr),
+            "#13688: /126 scoped expansion missing {addr}: {scoped:?}"
+        );
+    }
+}
+
+#[test]
 fn static_nat_v6_block_over_the_bound_registers_base_only_7219() {
     // A /64 is astronomically large; the v6 arm needs its own bound cell
     // because its host_count returns Option and a wrong `is_some_and` polarity
