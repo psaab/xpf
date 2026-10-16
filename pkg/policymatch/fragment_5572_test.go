@@ -286,19 +286,21 @@ func TestNonFirstFragmentDefaultPermitOverridden(t *testing.T) {
 	}
 }
 
-// TestNonFirstFragmentSkippedRejectReportedAsDeny is the reject→deny parity pin
-// (#5572 review fold). A non-first fragment that SKIPS a port-bearing REJECT
+// TestNonFirstFragmentSkippedRejectKeepsAction is the reject-preservation parity
+// pin (#13705). A non-first fragment that SKIPS a port-bearing REJECT
 // (isSkippedFragDeny accepts PolicyReject — a reject shadows the fragment
-// identically to a deny) and then lands on `permit any` must be reported with
-// Action=DENY, NOT reject. A non-first fragment has no L4 header, so the
-// dataplane cannot emit a RST/ICMP — it can only silently DROP — and the Rust
-// frag_associated_deny_result hardcodes PolicyAction::Deny. Reporting reject
-// would tell the operator a RST/ICMP is sent when the firewall silently drops.
+// identically to a deny) and then lands on `permit any` is reported with
+// Action=REJECT, matching the Rust dataplane, whose #13705 change carries the
+// skipped rule's action and logging metadata in SkippedFragDeny /
+// frag_associated_deny_result. The fragment still DROPs silently (no L4 header
+// → no RST/ICMP); only the reported verdict label preserves the configured rule
+// action, exactly as the dataplane's RT_FLOW emission downgrades a reply-free
+// Reject to a truthful DENY on the wire.
 //
-// FAIL-ON-REVERT: drop the `r.Action = config.PolicyDeny` force in fragDenyResult
-// and the verdict inherits the rule's PolicyReject action, flipping this red
-// (Action=reject), catching the simulator/dataplane label divergence.
-func TestNonFirstFragmentSkippedRejectReportedAsDeny(t *testing.T) {
+// FAIL-ON-REVERT: restore the `r.Action = config.PolicyDeny` force in
+// fragDenyResult and the verdict is normalized back to Deny, flipping this red
+// (Action=deny), catching the simulator/dataplane label divergence.
+func TestNonFirstFragmentSkippedRejectKeepsAction(t *testing.T) {
 	sec := config.SecurityConfig{
 		DefaultPolicy: config.PolicyDeny,
 		Zones:         zones("trust", "untrust"),
@@ -347,15 +349,15 @@ func TestNonFirstFragmentSkippedRejectReportedAsDeny(t *testing.T) {
 	if res.PolicyName != "reject-https" {
 		t.Fatalf("fragment verdict must name the enforcing rule reject-https; got %q", res.PolicyName)
 	}
-	// But the ACTION is normalized to deny — a fragment cannot be rejected
-	// (no L4 header → no RST/ICMP), matching the dataplane's hardcoded Deny.
-	if res.Action != config.PolicyDeny {
-		t.Fatalf("a fragment-associated verdict for a skipped REJECT must report Action=deny "+
-			"(no L4 header → silent drop, not RST/ICMP); got Action=%v", res.Action)
+	// The ACTION preserves the skipped rule's reject (#13705): the fragment
+	// drops silently (no RST/ICMP without an L4 header), but the verdict label
+	// names the configured disposition, matching the dataplane's result.
+	if res.Action != config.PolicyReject {
+		t.Fatalf("a fragment-associated verdict for a skipped REJECT must report Action=reject "+
+			"(configured disposition preserved; packet still drops silently); got Action=%v", res.Action)
 	}
 	// The positive control: a concrete TCP/443 packet still REJECTS directly
-	// (the reject label is preserved for a real L4 match — only the fragment
-	// override normalizes to deny).
+	// (the reject label is preserved for a real L4 match too).
 	direct := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.1.2.3"), DstIP: net.ParseIP("203.0.113.9"),
