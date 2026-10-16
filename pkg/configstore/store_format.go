@@ -487,7 +487,10 @@ func (s *Store) ShowCompareRedacted() string {
 }
 
 // ShowCompareRollbackRedacted returns a diff between rollback slot n and the
-// candidate with secrets masked on both sides.
+// candidate with secrets masked on both sides. It must use the fingerprint-
+// aware redacted compare (as ShowCompareRedacted does): constant-masking both
+// arms via forDisplay collapses distinct secrets to the same placeholder, so
+// a secret-only rollback difference would render as [no changes] (#14170).
 func (s *Store) ShowCompareRollbackRedacted(n int) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -498,7 +501,7 @@ func (s *Store) ShowCompareRollbackRedacted(n int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	diff := config.FormatCompare(forDisplay(entry.Config), forDisplay(s.candidate))
+	diff := config.FormatCompareRedacted(entry.Config, s.candidate)
 	if diff == "" {
 		return "[no changes]\n", nil
 	}
