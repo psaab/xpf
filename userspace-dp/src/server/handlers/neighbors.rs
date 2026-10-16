@@ -25,6 +25,7 @@ pub(super) fn update(
         None => return,
     };
     let mut resolved = Vec::with_capacity(neighbors.len());
+    let mut permanent_keys = Vec::new();
     for neigh in neighbors {
         if neigh.ifindex <= 0 || neigh.mac.is_empty() {
             continue;
@@ -39,6 +40,9 @@ pub(super) fn update(
             continue;
         }
         resolved.push((neigh.ifindex, ip, afxdp::NeighborEntry { mac }));
+        if neigh.state.split('|').any(|state| state == "permanent") {
+            permanent_keys.push((neigh.ifindex, ip));
+        }
     }
     // #6034/#10035: carry the replace-generation envelope. The helper fences
     // a stale / reordered replace (generation <= last applied) and returns
@@ -47,9 +51,12 @@ pub(super) fn update(
     // applied generation. The additive outcome bit distinguishes an
     // exact-match fence from a successful apply: both have the same ACK
     // generation, but only the latter reports `neighbor_replace_applied=true`.
-    let applied = guard
-        .afxdp
-        .apply_manager_neighbors(replace, generation, &resolved);
+    let applied = guard.afxdp.apply_manager_neighbors_with_permanent(
+        replace,
+        generation,
+        &resolved,
+        &permanent_keys,
+    );
     if replace {
         guard.status.neighbor_replace_applied = Some(applied);
     }

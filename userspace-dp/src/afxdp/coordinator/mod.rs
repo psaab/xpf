@@ -889,6 +889,19 @@ impl Coordinator {
         generation: u64,
         neighbors: &[(i32, IpAddr, NeighborEntry)],
     ) -> bool {
+        self.apply_manager_neighbors_with_permanent(replace, generation, neighbors, &[])
+    }
+
+    /// Apply a Go neighbor mirror without letting an unconfirmed kernel MAC
+    /// change replace a live binding. The monitor's matching dynamic entry is
+    /// probe-confirmation evidence; NUD_PERMANENT is the explicit exception.
+    pub fn apply_manager_neighbors_with_permanent(
+        &mut self,
+        replace: bool,
+        generation: u64,
+        neighbors: &[(i32, IpAddr, NeighborEntry)],
+        permanent_keys: &[(i32, IpAddr)],
+    ) -> bool {
         // #6034: replace-generation fence. Reject a stale / reordered
         // authoritative replace before mutating any neighbor state.
         if generation != 0
@@ -905,14 +918,29 @@ impl Coordinator {
         // route can still reach policy, but no neighbor entry may forward it.
         let accepted: Vec<_> = neighbors
             .iter()
-            .filter(|(ifindex, ip, _)| {
-                !crate::afxdp::forwarding::is_connected_v4_directed_broadcast(
+            .filter_map(|(ifindex, ip, entry)| {
+                if crate::afxdp::forwarding::is_connected_v4_directed_broadcast(
                     &self.forwarding,
                     *ifindex,
                     *ip,
-                )
+                ) {
+                    return None;
+                }
+                let key = (*ifindex, *ip);
+                let permanent = permanent_keys.contains(&key);
+                let dynamic = self.neighbors.dynamic.get(&key);
+                let prior_static = self.forwarding.neighbors.get(&key).copied();
+                let prior = prior_static.or(dynamic);
+                // The mirror is not evidence that a changed MAC was solicited.
+                // The monitor applies its CAS before the debounced replace;
+                // a matching dynamic entry is its probe-confirmed signal.
+                if !permanent && dynamic != Some(*entry)
+                    && prior.is_some_and(|prior| prior.mac != entry.mac)
+                {
+                    return prior_static.map(|prior| (*ifindex, *ip, prior));
+                }
+                Some((*ifindex, *ip, *entry))
             })
-            .copied()
             .collect();
         let neighbors = accepted.as_slice();
 

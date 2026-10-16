@@ -1209,6 +1209,62 @@ fn manager_neighbor_replace_filters_connected_directed_broadcast_11033() {
         "the replace must retain the ordinary unicast control neighbor"
     );
 }
+#[test]
+fn manager_neighbor_mirror_cannot_replace_live_mac_without_confirmation_13951() {
+    let mut coordinator = Coordinator::new();
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 50));
+    let original = NeighborEntry {
+        mac: [0x02, 0, 0, 0, 0, 1],
+    };
+    let spoofed = NeighborEntry {
+        mac: [0x02, 0, 0, 0, 0, 2],
+    };
+    assert!(coordinator.apply_manager_neighbors(true, 1, &[(7, target, original)]));
+    assert!(coordinator.apply_manager_neighbors(true, 2, &[(7, target, original)]));
+    assert!(coordinator.apply_manager_neighbors(true, 3, &[(7, target, spoofed)]));
+    assert_eq!(
+        lookup_neighbor_entry(
+            &coordinator.forwarding,
+            Some(coordinator.dynamic_neighbors_ref()),
+            7,
+            target,
+        )
+        .map(|entry| entry.mac),
+        Some(original.mac),
+        "an unconfirmed mirror MAC change must preserve the live binding"
+    );
+
+    coordinator
+        .dynamic_neighbors_ref()
+        .insert((7, target), spoofed);
+    assert!(coordinator.apply_manager_neighbors(true, 4, &[(7, target, spoofed)]));
+    assert_eq!(
+        lookup_neighbor_entry(
+            &coordinator.forwarding,
+            Some(coordinator.dynamic_neighbors_ref()),
+            7,
+            target,
+        )
+        .map(|entry| entry.mac),
+        Some(spoofed.mac),
+        "a matching monitor-confirmed binding must converge"
+    );
+
+    let permanent = NeighborEntry {
+        mac: [0x02, 0, 0, 0, 0, 3],
+    };
+    assert!(coordinator.apply_manager_neighbors_with_permanent(
+        true,
+        5,
+        &[(7, target, permanent)],
+        &[(7, target)],
+    ));
+    assert_eq!(
+        coordinator.forwarding.neighbors.get(&(7, target)).map(|entry| entry.mac),
+        Some(permanent.mac),
+        "a NUD_PERMANENT row may replace a live binding"
+    );
+}
 
 #[test]
 fn manager_neighbor_replace_preserves_packet_learned_entries() {
@@ -1275,7 +1331,7 @@ fn manager_neighbor_replace_overrides_snapshot_neighbor_entry() {
     .expect("snapshot neighbor");
     assert_eq!(before.mac, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
 
-    coordinator.apply_manager_neighbors(
+    coordinator.apply_manager_neighbors_with_permanent(
         true,
         0,
         &[(
@@ -1285,6 +1341,7 @@ fn manager_neighbor_replace_overrides_snapshot_neighbor_entry() {
                 mac: [0x56, 0x4a, 0xe8, 0x1e, 0xa8, 0x32],
             },
         )],
+        &[(13, target)],
     );
 
     let after = lookup_neighbor_entry(
@@ -1414,7 +1471,12 @@ fn manager_neighbor_replace_generation_fences_stale_and_reordered() {
     assert_eq!(lookup_mac(&coordinator), mac_a.mac);
 
     // A strictly higher generation 6 applies and advances the ACK.
-    assert!(coordinator.apply_manager_neighbors(true, 6, &[(13, target, mac_b)]));
+    assert!(coordinator.apply_manager_neighbors_with_permanent(
+        true,
+        6,
+        &[(13, target, mac_b)],
+        &[(13, target)],
+    ));
     assert_eq!(coordinator.last_applied_manager_neighbor_generation(), 6);
     assert_eq!(lookup_mac(&coordinator), mac_b.mac);
 }
@@ -1447,7 +1509,12 @@ fn manager_neighbor_unversioned_generation_bypasses_fence() {
     assert_eq!(coordinator.last_applied_manager_neighbor_generation(), 9);
 
     // Unversioned push (generation 0) applies regardless and leaves the fence.
-    assert!(coordinator.apply_manager_neighbors(true, 0, &[(13, target, mac_b)]));
+    assert!(coordinator.apply_manager_neighbors_with_permanent(
+        true,
+        0,
+        &[(13, target, mac_b)],
+        &[(13, target)],
+    ));
     assert_eq!(
         coordinator.last_applied_manager_neighbor_generation(),
         9,

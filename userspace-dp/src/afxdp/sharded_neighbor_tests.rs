@@ -465,8 +465,10 @@ fn mac_change_epoch_confirmed_resolver_bumps_on_change() {
     let generation = AtomicU64::new(5);
     assert!(map.insert_confirmed_if_unchanged(k, entry(0xAB), &generation, 5));
     assert_eq!(map.mac_change_epoch_for(&k), 0);
-    // A confirmed re-resolution observing a different MAC must bump,
-    // matching the monitor path. Fail-on-revert guard for the resolver.
+    // A confirmed GET alone cannot move a live binding without probe evidence.
+    assert!(!map.insert_confirmed_if_unchanged(k, entry(0xCD), &generation, 5));
+    assert_eq!(map.get(&k), Some(entry(0xAB)));
+    map.record_neighbor_probe(k, super::super::neighbor::monotonic_nanos());
     assert!(map.insert_confirmed_if_unchanged(k, entry(0xCD), &generation, 5));
     assert_eq!(map.mac_change_epoch_for(&k), 1);
     // Same MAC re-confirm does not bump.
