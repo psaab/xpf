@@ -168,6 +168,30 @@ v4_martian_destination_cell_11413!(
     Ipv4Addr::new(169, 254, 255, 255)
 );
 
+// #13960: the destination gate omitted 0.0.0.0/8, IPv6 unspecified, and IPv6
+// loopback from its transit martian classes.
+v4_martian_destination_cell_11413!(
+    transit_drops_ipv4_unspecified_destination_13960,
+    Ipv4Addr::UNSPECIFIED
+);
+v4_martian_destination_cell_11413!(
+    transit_drops_ipv4_this_network_destination_13960,
+    Ipv4Addr::new(0, 1, 2, 3)
+);
+v4_martian_destination_cell_11413!(
+    transit_drops_ipv4_this_network_broadcast_destination_13960,
+    Ipv4Addr::new(0, 255, 255, 255)
+);
+
+#[test]
+fn transit_drops_ipv6_unspecified_destination_13960() {
+    run_v6_destination_11413(Ipv6Addr::UNSPECIFIED);
+}
+
+#[test]
+fn transit_drops_ipv6_loopback_destination_13960() {
+    run_v6_destination_11413(Ipv6Addr::LOCALHOST);
+}
 #[test]
 fn transit_drops_ipv6_multicast_destination_11413() {
     run_v6_destination_11413("ff02::1".parse().unwrap());

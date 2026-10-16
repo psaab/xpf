@@ -3,8 +3,16 @@ use std::net::{IpAddr, Ipv4Addr};
 
 #[test]
 fn final_live_tx_dispatch_rechecks_martian_destination_11413() {
+    run_final_live_tx_destination_11413(Ipv4Addr::new(224, 0, 0, 1));
+}
+
+#[test]
+fn final_live_tx_dispatch_rechecks_this_network_destination_13960() {
+    run_final_live_tx_destination_11413(Ipv4Addr::new(0, 1, 2, 3));
+}
+
+fn run_final_live_tx_destination_11413(destination: Ipv4Addr) {
     let source = Ipv4Addr::new(10, 0, 61, 100);
-    let destination = Ipv4Addr::new(224, 0, 0, 1);
     let frame = crate::afxdp::tests_support::build_txn_tcp_syn_frame_v4(
         source,
         destination,
