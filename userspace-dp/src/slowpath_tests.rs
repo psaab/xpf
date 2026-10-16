@@ -1297,3 +1297,79 @@ fn handshake_step_staggered_start_waits_genuine_failure_fails() {
     assert_eq!(handshake_step(Starting, Starting, true), Ready);
     assert_eq!(handshake_step(Live, Starting, true), Ready);
 }
+
+/// #13707 cross-outlet starvation: flooding the delegated outlet must not
+/// consume the trusted outlet's rate-limit tokens. On the shared-limiter
+/// code every enqueue_* variant spends from one Mutex<RateLimiter>, so a
+/// delegated flood leaves the subsequent trusted (control-plane) punt
+/// refused RateLimited.
+#[test]
+fn delegated_flood_does_not_starve_trusted_control_punt_13707() {
+    let r = SlowPathReinjector::new_without_worker(1500);
+    // Give each outlet a small deterministic budget without waiting for the
+    // production defaults to drain.
+    for limiter in &r.limiters {
+        let mut limiter = limiter.lock().unwrap();
+        limiter.max_packets_per_sec = 1;
+        limiter.max_bytes_per_sec = 1500;
+        limiter.packet_tokens = 1.0;
+        limiter.byte_tokens = 1500.0;
+    }
+    // Spend the delegated outlet's entire initial allowance.
+    assert!(matches!(
+        r.enqueue_delegated(vec![0u8; 1500]).expect("enqueue delegated"),
+        EnqueueOutcome::Accepted
+    ));
+    assert!(matches!(
+        r.enqueue_delegated(vec![0u8; 1500]).expect("enqueue delegated"),
+        EnqueueOutcome::RateLimited
+    ));
+    // Trusted control-plane punt (e.g. a 64-byte BGP keepalive) must be
+    // admitted against the trusted outlet's untouched bucket.
+    let keepalive = r.enqueue(vec![0u8; 64]).expect("enqueue trusted");
+    assert!(
+        matches!(keepalive, EnqueueOutcome::Accepted),
+        "delegated flood must not starve a trusted control-plane punt"
+    );
+    // Adjudicated q0 admission shares the delegated TUN but not the
+    // delegated (queue-1) bucket: it must still be admitted.
+    let adjudicated = r
+        .enqueue_adjudicated(vec![0u8; 64])
+        .expect("enqueue adjudicated");
+    assert!(
+        matches!(adjudicated, EnqueueOutcome::Accepted),
+        "delegated flood must not starve adjudicated reinjects"
+    );
+}
+
+/// A token-bucket admission is provisional until its bounded queue accepts
+/// the packet. Queue-full refusal must refund both packet and byte tokens.
+#[test]
+fn queue_full_refunds_slowpath_rate_limit_tokens_13707() {
+    let r = SlowPathReinjector::new_without_worker(1500);
+    // Fill the trusted queue while the production bucket has ample tokens.
+    for _ in 0..DEFAULT_QUEUE_DEPTH {
+        assert!(matches!(
+            r.enqueue(vec![0u8; 64]).expect("fill queue"),
+            EnqueueOutcome::Accepted
+        ));
+    }
+    {
+        let mut limiter = r.limiters[rate_limiter_index(PacketQueue::Trusted)]
+            .lock()
+            .unwrap();
+        limiter.max_packets_per_sec = 1;
+        limiter.max_bytes_per_sec = 64;
+        limiter.packet_tokens = 1.0;
+        limiter.byte_tokens = 64.0;
+        limiter.last_refill = Instant::now();
+    }
+    // Both requests are refused by the full queue. The second must not become
+    // RateLimited, which would show the first queue failure consumed a token.
+    for _ in 0..2 {
+        assert!(matches!(
+            r.enqueue(vec![0u8; 64]).expect("queue-full enqueue"),
+            EnqueueOutcome::QueueFull
+        ));
+    }
+}

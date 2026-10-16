@@ -125,6 +125,13 @@ enum PacketQueue {
     /// Queue one of the xpf-usp1 multi-queue TUN; TC clears its mark.
     Delegated,
 }
+fn rate_limiter_index(queue: PacketQueue) -> usize {
+    match queue {
+        PacketQueue::Trusted => 0,
+        PacketQueue::Adjudicated => 1,
+        PacketQueue::Delegated => 2,
+    }
+}
 
 struct PacketRequest {
     bytes: Vec<u8>,
@@ -389,13 +396,8 @@ impl RateLimiter {
         self.allow_at(Instant::now(), packet_len)
     }
 
-    /// Clock-injectable core of [`Self::allow`]. `now` is the current instant
-    /// (the real clock in production; a controlled instant in tests so the
-    /// boundary behaviour is deterministic without sleeping). Accrues tokens for
-    /// the time since the last refill, then spends one packet token and
-    /// `packet_len` byte tokens iff BOTH buckets can pay — a refused frame
-    /// charges neither bucket.
-    fn allow_at(&mut self, now: Instant, packet_len: usize) -> bool {
+    /// Accrue elapsed time into both token buckets, capped at their capacities.
+    fn refill_at(&mut self, now: Instant) {
         let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
         self.last_refill = now;
 
@@ -412,6 +414,16 @@ impl RateLimiter {
         } else {
             self.byte_tokens = 0.0;
         }
+    }
+
+    /// Clock-injectable core of [`Self::allow`]. `now` is the current instant
+    /// (the real clock in production; a controlled instant in tests so the
+    /// boundary behaviour is deterministic without sleeping). Accrues tokens for
+    /// the time since the last refill, then spends one packet token and
+    /// `packet_len` byte tokens iff BOTH buckets can pay — a refused frame
+    /// charges neither bucket.
+    fn allow_at(&mut self, now: Instant, packet_len: usize) -> bool {
+        self.refill_at(now);
 
         let need_bytes = packet_len as f64;
         // Both buckets must have a token available; do not spend either unless
@@ -422,6 +434,15 @@ impl RateLimiter {
         self.packet_tokens -= 1.0;
         self.byte_tokens -= need_bytes;
         true
+    }
+
+    /// Return tokens when a successful rate admission cannot be enqueued.
+    /// The capacity clamp matters if time elapsed between admission and refund.
+    fn refund(&mut self, packet_len: usize) {
+        self.refill_at(Instant::now());
+        self.packet_tokens = (self.packet_tokens + 1.0).min(self.max_packets_per_sec as f64);
+        self.byte_tokens =
+            (self.byte_tokens + packet_len as f64).min(self.max_bytes_per_sec as f64);
     }
     fn would_allow(&self, packet_len: usize) -> bool {
         let elapsed = Instant::now()
@@ -670,7 +691,8 @@ pub struct SlowPathReinjector {
     /// this outlet. The armed fence has no device-wide xpf-usp1 accept: only
     /// exact-marked q0 traffic is admitted; unmarked delegated q1 stays DROP.
     tx_delegated: SyncSender<PacketRequest>,
-    limiter: Mutex<RateLimiter>,
+    /// Independent buckets prevent one outlet from starving its siblings.
+    limiters: [Mutex<RateLimiter>; 3],
     status: Arc<SharedStatus>,
     /// Per-outlet status for the delegated TUN (live MTU, degraded, active,
     /// counters). Admission and MTU gating read the outlet's own status.
@@ -916,10 +938,12 @@ impl SlowPathReinjector {
             ipsec_inner_transport: Arc::new(IpsecInnerWorkerTransport::new([])),
             tx,
             tx_delegated,
-            limiter: Mutex::new(RateLimiter::new(
-                DEFAULT_RATE_LIMIT_PACKETS_PER_SEC,
-                DEFAULT_RATE_LIMIT_BYTES_PER_SEC,
-            )),
+            limiters: std::array::from_fn(|_| {
+                Mutex::new(RateLimiter::new(
+                    DEFAULT_RATE_LIMIT_PACKETS_PER_SEC,
+                    DEFAULT_RATE_LIMIT_BYTES_PER_SEC,
+                ))
+            }),
             status,
             status_delegated,
             mtu_retry: Mutex::new(MtuRetryState::default()),
@@ -983,10 +1007,12 @@ impl SlowPathReinjector {
             ipsec_inner_transport: Arc::new(IpsecInnerWorkerTransport::new([])),
             tx,
             tx_delegated,
-            limiter: Mutex::new(RateLimiter::new(
-                DEFAULT_RATE_LIMIT_PACKETS_PER_SEC,
-                DEFAULT_RATE_LIMIT_BYTES_PER_SEC,
-            )),
+            limiters: std::array::from_fn(|_| {
+                Mutex::new(RateLimiter::new(
+                    DEFAULT_RATE_LIMIT_PACKETS_PER_SEC,
+                    DEFAULT_RATE_LIMIT_BYTES_PER_SEC,
+                ))
+            }),
             status,
             status_delegated,
             mtu_retry: Mutex::new(MtuRetryState::default()),
@@ -1282,8 +1308,8 @@ impl SlowPathReinjector {
             }
             return Ok(EnqueueOutcome::MtuExceeded);
         }
-        let allowed = self
-            .limiter
+        let limiter = &self.limiters[rate_limiter_index(queue)];
+        let allowed = limiter
             .lock()
             .map_err(|_| "slow-path limiter lock poisoned".to_string())?
             .allow(bytes.len());
@@ -1336,6 +1362,9 @@ impl SlowPathReinjector {
                 Ok(EnqueueOutcome::Accepted)
             }
             Err(TrySendError::Full(req)) => {
+                if let Ok(mut limiter) = limiter.lock() {
+                    limiter.refund(req.bytes.len());
+                }
                 status.queued_packets.fetch_sub(1, Ordering::Relaxed);
                 status.dropped_packets.fetch_add(1, Ordering::Relaxed);
                 status
@@ -1352,6 +1381,9 @@ impl SlowPathReinjector {
                 Ok(EnqueueOutcome::QueueFull)
             }
             Err(TrySendError::Disconnected(req)) => {
+                if let Ok(mut limiter) = limiter.lock() {
+                    limiter.refund(req.bytes.len());
+                }
                 status.queued_packets.fetch_sub(1, Ordering::Relaxed);
                 status.dropped_packets.fetch_add(1, Ordering::Relaxed);
                 status
@@ -1392,8 +1424,7 @@ impl SlowPathReinjector {
                 decision.admitted = false;
                 decision.reason = ADMIT_BAD_LEASE;
             } else {
-                let allowed = self
-                    .limiter
+                let allowed = self.limiters[rate_limiter_index(PacketQueue::Adjudicated)]
                     .lock()
                     .map(|limiter| limiter.would_allow(frame.bytes.len()))
                     .unwrap_or(false);
@@ -1524,7 +1555,9 @@ impl SlowPathReinjector {
         if !decision.admitted {
             return decision;
         }
-        let allowed = match self.limiter.lock() {
+        let adjudicated_limiter =
+            &self.limiters[rate_limiter_index(PacketQueue::Adjudicated)];
+        let allowed = match adjudicated_limiter.lock() {
             Ok(mut limiter) => limiter.allow(frame.bytes.len()),
             Err(_) => false,
         };
@@ -1560,6 +1593,9 @@ impl SlowPathReinjector {
         match self.tx_delegated.try_send(request) {
             Ok(()) => decision,
             Err(TrySendError::Full(req)) => {
+                if let Ok(mut limiter) = adjudicated_limiter.lock() {
+                    limiter.refund(req.bytes.len());
+                }
                 self.status_delegated
                     .queued_packets
                     .fetch_sub(1, Ordering::Relaxed);
@@ -1581,6 +1617,9 @@ impl SlowPathReinjector {
                 decision
             }
             Err(TrySendError::Disconnected(req)) => {
+                if let Ok(mut limiter) = adjudicated_limiter.lock() {
+                    limiter.refund(req.bytes.len());
+                }
                 self.status_delegated
                     .queued_packets
                     .fetch_sub(1, Ordering::Relaxed);
