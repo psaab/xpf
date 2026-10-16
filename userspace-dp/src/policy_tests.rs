@@ -6066,6 +6066,93 @@ fn junos_host_fragment_override_does_not_count_permit_rule_12226() {
     assert_eq!(deny_counter.test_packet_count(), 0);
 }
 
+#[test]
+fn flowless_fragment_preserves_skipped_reject_action_and_log_flags_13705() {
+    let reject = PolicyRuleSnapshot {
+        action: "reject".to_string(),
+        log_session_init: true,
+        log_session_close: true,
+        ..frag_deny_https_snapshot()
+    };
+    let state = parse_policy_state(
+        "deny",
+        &[reject, frag_permit_any_snapshot()],
+        &test_zone_name_to_id(),
+    );
+    let frag = evaluate_policy_result_l3_aware(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5)),
+        PROTO_TCP,
+        0,
+        0,
+        None,
+        64,
+        false,
+    );
+    assert_eq!(frag.action, PolicyAction::Reject);
+    assert!(frag.log_session_init);
+    assert!(frag.log_session_close);
+}
+
+#[test]
+fn junos_host_flowless_fragment_preserves_skipped_reject_action_and_log_flags_13705() {
+    let reject = PolicyRuleSnapshot {
+        action: "reject".to_string(),
+        log_session_init: true,
+        log_session_close: true,
+        ..junos_host_frag_deny_https_snapshot()
+    };
+    let state = parse_policy_state(
+        "permit",
+        &[reject, junos_host_frag_permit_any_snapshot()],
+        &test_zone_name_to_id(),
+    );
+    let frag = evaluate_junos_host_policy_l3_aware(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 1)),
+        PROTO_TCP,
+        0,
+        0,
+        None,
+        64,
+        false,
+    )
+    .expect("#13705: skipped host reject must fail closed");
+    assert_eq!(frag.action, PolicyAction::Reject);
+    assert!(frag.log_session_init);
+    assert!(frag.log_session_close);
+}
+
+#[test]
+fn flowless_fragment_unlogged_deny_keeps_log_flags_clear_13705() {
+    let state = parse_policy_state(
+        "deny",
+        &[frag_deny_https_snapshot(), frag_permit_any_snapshot()],
+        &test_zone_name_to_id(),
+    );
+    let frag = evaluate_policy_result_l3_aware(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5)),
+        PROTO_TCP,
+        0,
+        0,
+        None,
+        64,
+        false,
+    );
+    assert_eq!(frag.action, PolicyAction::Deny);
+    assert!(!frag.log_session_init);
+    assert!(!frag.log_session_close);
+}
+
 fn frag_override_tier_rule_12226(
     policy_id: u32,
     name: &str,
