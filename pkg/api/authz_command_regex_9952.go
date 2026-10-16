@@ -49,6 +49,18 @@ import (
 // census below turns that into a test failure at the first run, but the RUNTIME
 // answer is still deny, because a census is a build-time guard and this is the
 // request path.
+//
+// #14146: the declared-no-command arm used to be the exception to that rule —
+// a route listed in restRoutesNoCommand returned nil for a restricted class,
+// so `deny-commands ".*"` (or an allow-list that permits nothing here) read
+// six operational routes REST had decided not to charge. gRPC denies the same
+// shape (authorizeRPCCommand: resolved=false denies). The only routes that
+// still return nil for a restricted class are the ones with a DIFFERENT
+// authorization family in force — config-mode (the *-configuration pair) and
+// the genuinely unauthenticated / differently-gated probes (/health, /metrics,
+// whose handlers never see a login-class principal here) — and the
+// request-decoded routes resolve per-request or deny. Every other declared
+// route denies: its reason records why no command EXISTS, not an exemption.
 
 // restRouteCommand maps a registered REST route to the canonical operational
 // command it performs.
@@ -65,7 +77,6 @@ var restRouteCommand = map[string]string{
 	// the SAME STRING it charges, so the two surfaces cannot diverge on what an
 	// operator's regex means.
 	"GET /api/v1/status":                               "show version",
-	"GET /api/v1/system/info":                          "show version",
 	"GET /api/v1/statistics/global":                    "show security flow statistics",
 	"GET /api/v1/security/zones":                       "show security zones",
 	"GET /api/v1/security/policies":                    "show security policies",
@@ -114,9 +125,12 @@ var restRouteCommand = map[string]string{
 // no canonical operational command, so that "not in the command table" is a
 // decision somebody made rather than an omission nobody noticed.
 //
-// Being listed here does NOT mean unauthorized: the coarse permission bits and,
-// for the config routes, the `*-configuration` regexes still apply. It means the
-// `deny-commands` family has nothing to evaluate against this route.
+// Being listed here does NOT mean authorized for a restricted class (#14146):
+// for a class with operational regexes, authorizeRESTCommand DENIES every
+// route in this table except the routes named in restNoCommandExempt14146.
+// The reason records why no command EXISTS to evaluate; it is not an
+// exemption. The coarse permission bits and, for the config routes, the
+// *-configuration regexes still apply on their own paths.
 var restRoutesNoCommand = map[string]string{
 	"GET /health":  "unauthenticated liveness probe; authMiddleware exempts it unconditionally, so there is no principal to charge",
 	"GET /metrics": "Prometheus exposition, not an operational command; gated by the #4162 metrics auth rule",
@@ -146,17 +160,45 @@ var restRoutesNoCommand = map[string]string{
 	// route. They are listed here so the census sees a decision, not a gap.
 	"GET /api/v1/show-text":      "request-decoded: the command is the TOPIC's, resolved per request from cmdtree.ShowTextTopicCommands()",
 	"POST /api/v1/system/action": "request-decoded: the command is the VERB's, resolved per request from authz.SystemActionVerbCommand",
+	"GET /api/v1/system/info":    "request-decoded: the command is the TYPE's, resolved per request (show system uptime / show system memory, as gRPC charges GetSystemInfo)",
 
 	// Read endpoints with no argument-free operational twin. Each is charged
 	// nothing rather than charged a command an operator cannot type: an entry
 	// that does not resolve in cmdtree is a gate comparing against a string no
-	// deny regex will ever be written for.
+	// deny regex will ever be written for. #14146: charged nothing now means
+	// DENIED for a restricted class, not allowed — see authorizeRESTCommand.
 	"GET /api/v1/statistics/interfaces":   "no argument-free operational twin: `show interfaces statistics` takes an interface name",
 	"GET /api/v1/statistics/zones":        "no operational twin: per-zone counters are surfaced by `show security zones`, which is already charged on its own route",
 	"GET /api/v1/security/vrrp":           "no argument-free operational twin in the operational tree",
 	"GET /api/v1/routing/ospf":            "no argument-free operational twin in the operational tree",
 	"GET /api/v1/system/buffers":          "no argument-free operational twin in the operational tree",
 	"GET /api/v1/services/flow-exporters": "no operational twin: REST-only observability surface (#2464)",
+}
+
+// restNoCommandExempt14146 is the exhaustive set of restRoutesNoCommand routes
+// that still return nil for a class with operational regexes. Every member is
+// exempt because a DIFFERENT authorization decision governs it, never because
+// it is a read: /health and /metrics never carry a login-class principal on
+// this path (health is unauthenticated, metrics has its own #4162 rule), and
+// the config-mode routes are governed by the *-configuration pair (#9633).
+// TestNoCommandExemptSetIsExactlyTheOtherFamily14146 pins this set so a future
+// route cannot be exempted by adding it to restRoutesNoCommand alone.
+var restNoCommandExempt14146 = map[string]bool{
+	"GET /health":                          true,
+	"GET /metrics":                         true,
+	"POST /api/v1/config/set":              true,
+	"POST /api/v1/config/delete":           true,
+	"POST /api/v1/config/deactivate":       true,
+	"POST /api/v1/config/activate":         true,
+	"POST /api/v1/config/annotate":         true,
+	"POST /api/v1/config/load":             true,
+	"POST /api/v1/config/rollback":         true,
+	"POST /api/v1/config/commit":           true,
+	"POST /api/v1/config/commit-check":     true,
+	"POST /api/v1/config/commit-confirmed": true,
+	"POST /api/v1/config/confirm":          true,
+	"POST /api/v1/config/enter":            true,
+	"POST /api/v1/config/exit":             true,
 }
 
 // #11678: the commit-time deny advisory also needs the command set that the
@@ -170,6 +212,7 @@ var allRESTCanonicalCommands9952 = sync.OnceValue(func() []string {
 		restRouteCommand,
 		cmdtree.ShowTextTopicCommands(),
 		authz.SystemActionVerbCommand,
+		restSystemInfoCommands14146,
 	} {
 		for _, command := range commands {
 			seen[command] = true
@@ -187,8 +230,20 @@ func init() {
 	config.RegisterCommandSurface(restSurfaceName9952, allRESTCanonicalCommands9952)
 }
 
-// restRequestCommand9952 resolves the canonical command for the two
-// request-decoded routes.
+// restSystemInfoCommands14146 maps the REST system/info `type` selector to the
+// canonical command gRPC charges for the same GetSystemInfo type
+// (systemInfoCanonicalCommand in pkg/grpcapi). REST serves only uptime and
+// memory (systemInfoHandler's default arm rejects every other type), so those
+// are the only two entries; an unknown or missing type resolves to no command
+// and therefore denies for a restricted class, exactly as gRPC denies an
+// unknown GetSystemInfo type.
+var restSystemInfoCommands14146 = map[string]string{
+	"uptime": "show system uptime",
+	"memory": "show system memory",
+}
+
+// restRequestCommand9952 resolves the canonical command for the request-decoded
+// routes.
 //
 // UNMAPPED MEANS DENY, and the reason is the one the gRPC gate records for the
 // same shape: a topic or verb with no entry is a command we are holding and
@@ -201,6 +256,9 @@ func restRequestCommand9952(route string, r *http.Request, actionVerb string) (s
 		return cmd, ok
 	case "POST /api/v1/system/action":
 		cmd, ok := authz.SystemActionVerbCommand[actionVerb]
+		return cmd, ok
+	case "GET /api/v1/system/info":
+		cmd, ok := restSystemInfoCommands14146[r.URL.Query().Get("type")]
 		return cmd, ok
 	}
 	return "", false
@@ -234,18 +292,23 @@ func (s *Server) authorizeRESTCommand(r *http.Request, cfg *config.Config, p aut
 	if _, declared := restRoutesNoCommand[route]; declared {
 		cmd, resolved := restRequestCommand9952(route, r, actionVerb)
 		if !resolved {
-			// A DECLARED route with no per-request command is exempt only when
-			// it is not request-decoded. A request-decoded route whose topic or
-			// verb we cannot name denies, exactly as gRPC denies an unmapped
-			// SystemAction verb — including the PREFIX-FORM verbs, which are
-			// parsed out of a packed string by the handler's default branch and
-			// therefore cannot appear in any table.
-			if isRequestDecodedRoute9952(route) {
-				return fmt.Errorf("permission denied: login class %q restricts commands and this "+
-					"request has no canonical command to evaluate, so the restriction cannot be "+
-					"applied to it", class)
+			// #14146: a declared route is exempt only when it is in
+			// restNoCommandExempt14146 (a different authorization family
+			// governs it) — never merely because it was declared. A
+			// request-decoded route whose topic, verb, or type we cannot
+			// name denies, exactly as gRPC denies an unmapped SystemAction
+			// verb — including the PREFIX-FORM verbs, which are parsed out
+			// of a packed string by the handler's default branch and
+			// therefore cannot appear in any table. Every other declared
+			// route (the six operational reads with no canonical twin)
+			// denies too: we cannot know a deny regex fails to match a
+			// command we cannot name, and an allow-list cannot permit it.
+			if restNoCommandExempt14146[route] {
+				return nil
 			}
-			return nil
+			return fmt.Errorf("permission denied: login class %q restricts commands and this "+
+				"request has no canonical command to evaluate, so the restriction cannot be "+
+				"applied to it", class)
 		}
 		return evaluateCommand9952(rules, class, cmd)
 	}
@@ -287,7 +350,8 @@ func restActionVerb9952(r *http.Request) string {
 }
 
 func isRequestDecodedRoute9952(route string) bool {
-	return route == "GET /api/v1/show-text" || route == "POST /api/v1/system/action"
+	return route == "GET /api/v1/show-text" || route == "POST /api/v1/system/action" ||
+		route == "GET /api/v1/system/info"
 }
 
 func evaluateCommand9952(rules config.CompiledLoginRegexes, class, cmd string) error {
