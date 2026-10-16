@@ -5566,6 +5566,149 @@ fn expansion_does_not_overwrite_an_existing_slots_arm_state_6749() {
     );
     assert!(out[1].armed, "the new slot must inherit the armed box state");
 }
+/// #13714: bindings minted while the ifindex is unresolved stay
+/// unregistered/unarmed forever.
+///
+/// Mint loop: `if binding.ifindex <= 0 { registered=false; armed=false;
+/// ready=false } else if !had_existing { registered=true; armed=
+/// forwarding_armed }`. The `had_existing` sniff treats `last_change` as
+/// proof of pre-existence, but the mint loop ITSELF stamps
+/// `last_change=Some(now)` on every binding it mints — so on the NEXT replan
+/// (after the ifindex resolves, via the apply path's retry with the
+/// repaired ifindex map) the previously-failed binding presents as
+/// "existing" and never re-enters the `!had_existing` arm: it stays
+/// `registered=false, armed=false` permanently. Nothing re-arms it (the
+/// #6749 analysis: Go suppresses `set_forwarding_state` when the global
+/// arm state is unchanged), and `refresh_status`'s
+/// `all(registered && armed)` gate disables the WHOLE dataplane.
+#[test]
+fn replan_after_initial_ifindex_failure_arms_bindings_13714() {
+    // Plan 1: ifindex unresolved (<= 0) — minted unregistered/unarmed.
+    let no_ifindex: std::collections::BTreeMap<String, i32> =
+        std::collections::BTreeMap::new();
+    let failed = replan_bindings_from_candidates(
+        1,
+        &[],
+        vec![("ge-0-0-1".to_string(), 2)],
+        no_ifindex,
+        true,
+    )
+    .expect("plan");
+    assert_eq!(failed.len(), 2, "premise: two queues minted");
+    assert!(
+        failed
+            .iter()
+            .all(|b| b.ifindex <= 0 && !b.registered && !b.armed),
+        "premise: unresolved-ifindex bindings must mint unregistered/unarmed \
+         (fail-closed), got {:?}",
+        failed
+            .iter()
+            .map(|b| (b.ifindex, b.registered, b.armed))
+            .collect::<Vec<_>>()
+    );
+
+    // Plan 2: ifindex now resolves; `existing` is exactly what plan 1 minted.
+    // THIS is the application-level re-plan after the initial failure.
+    let mut resolved: std::collections::BTreeMap<String, i32> =
+        std::collections::BTreeMap::new();
+    resolved.insert("ge-0-0-1".to_string(), 11);
+    let recovered = replan_bindings_from_candidates(
+        1,
+        &failed,
+        vec![("ge-0-0-1".to_string(), 2)],
+        resolved.clone(),
+        true,
+    )
+    .expect("plan");
+    assert!(
+        recovered.iter().all(|b| b.ifindex == 11),
+        "premise: the replan must carry the resolved ifindex, got {:?}",
+        recovered.iter().map(|b| b.ifindex).collect::<Vec<_>>()
+    );
+    assert!(
+        recovered.iter().all(|b| b.registered && b.armed),
+        "#13714: bindings minted on a failed-ifindex plan NEVER recover: the \
+         failed mint stamps last_change, so the re-plan's had_existing sniff \
+         skips the !had_existing arm and registered/armed stay false forever. \
+         refresh_status then disables the whole dataplane and nothing re-arms \
+         them. Got {:?}",
+        recovered
+            .iter()
+            .map(|b| (b.slot, b.registered, b.armed))
+            .collect::<Vec<_>>()
+    );
+
+    // Plan 3 (idempotence): replanning the recovered state must not flip it.
+    let steady = replan_bindings_from_candidates(
+        1,
+        &recovered,
+        vec![("ge-0-0-1".to_string(), 2)],
+        resolved.clone(),
+        true,
+    )
+    .expect("plan");
+    assert!(
+        steady.iter().all(|b| b.registered && b.armed),
+        "a steady-state replan must preserve registered/armed, got {:?}",
+        steady
+            .iter()
+            .map(|b| (b.slot, b.registered, b.armed))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// #13714: a DISARMED box must not arm recovered bindings, and a binding
+/// whose ifindex NEVER resolves must stay fail-closed. The recovery in
+/// `replan_after_initial_ifindex_failure_arms_bindings_13714` inherits the
+/// global arm state (as #6749 requires of new slots) rather than hardcoding
+/// `armed = true`, and unresolved ifindexes stay unregistered — exactly as
+/// every other unresolvable binding in this planner behaves.
+#[test]
+fn replan_after_initial_ifindex_failure_respects_disarmed_box_13714() {
+    let no_ifindex: std::collections::BTreeMap<String, i32> =
+        std::collections::BTreeMap::new();
+    let failed = replan_bindings_from_candidates(
+        1,
+        &[],
+        vec![("ge-0-0-1".to_string(), 1), ("ge-0-0-2".to_string(), 1)],
+        no_ifindex,
+        false,
+    )
+    .expect("plan");
+    let mut resolved: std::collections::BTreeMap<String, i32> =
+        std::collections::BTreeMap::new();
+    resolved.insert("ge-0-0-1".to_string(), 11);
+    // ge-0-0-2 intentionally left unresolved.
+    let out = replan_bindings_from_candidates(
+        1,
+        &failed,
+        vec![("ge-0-0-1".to_string(), 1), ("ge-0-0-2".to_string(), 1)],
+        resolved,
+        false,
+    )
+    .expect("plan");
+    let recovered = out
+        .iter()
+        .find(|b| b.interface == "ge-0-0-1")
+        .expect("ge-0-0-1");
+    assert!(
+        recovered.registered && !recovered.armed,
+        "recovered binding on a DISARMED box must register but stay unarmed \
+         (fail-open otherwise), got registered={} armed={}",
+        recovered.registered, recovered.armed
+    );
+    let stuck = out
+        .iter()
+        .find(|b| b.interface == "ge-0-0-2")
+        .expect("ge-0-0-2");
+    assert!(
+        !stuck.registered && !stuck.armed && stuck.ifindex <= 0,
+        "a binding whose ifindex never resolves must stay unregistered/unarmed \
+         (fail-closed), got ifindex={} registered={} armed={}",
+        stuck.ifindex, stuck.registered, stuck.armed
+    );
+}
+
 
 /// #8279: the userspace-ingress test must precede the L3 PARSE, because the
 /// parse's failure arm is a DROP.
