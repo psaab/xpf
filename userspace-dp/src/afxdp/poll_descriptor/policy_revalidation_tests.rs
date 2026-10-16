@@ -3307,3 +3307,77 @@ fn established_session_is_revoked_when_its_dnat_rule_is_withdrawn_13923() {
         "withdrawing the destination-NAT rule must revoke the established session"
     );
 }
+#[test]
+fn companionless_reverse_dnat_hit_revokes_after_rule_withdrawal_13923() {
+    let (
+        forward_key,
+        _,
+        mut forward_decision,
+        forward_metadata,
+        _,
+        mut reverse_metadata,
+        origin,
+        _,
+    ) = reverse_snat_case_13652();
+    forward_decision.nat.rewrite_src = None;
+    forward_decision.nat.rewrite_src_port = None;
+    forward_decision.nat.rewrite_dst = Some("10.0.0.10".parse().expect("server address"));
+    forward_decision.nat.rewrite_dst_port = Some(8443);
+    let reverse_key = crate::session::reverse_session_key(&forward_key, forward_decision.nat);
+    let reverse_decision = SessionDecision {
+        nat: forward_decision.nat.reverse(
+            forward_key.src_ip,
+            forward_key.dst_ip,
+            forward_key.src_port,
+            forward_key.dst_port,
+        ),
+        ..forward_decision
+    };
+    reverse_metadata.forward_ingress_vlan_id = Some(0);
+    let case = (
+        forward_key,
+        reverse_key,
+        forward_decision,
+        forward_metadata,
+        reverse_decision,
+        reverse_metadata,
+        origin,
+        None,
+    );
+    let rule = crate::protocol::DestinationNATRuleSnapshot {
+        name: "web-forward".to_string(),
+        destination_address: "198.51.100.1".to_string(),
+        destination_port: 443,
+        protocol: "tcp".to_string(),
+        pool_address: "10.0.0.10".to_string(),
+        pool_port: 8443,
+        ..Default::default()
+    };
+    let mut configured = imported_snat_forwarding(false);
+    configured.dnat_table = crate::nat::DnatTable::from_snapshots(
+        &[rule],
+        &crate::nat::NatCounterStore::default(),
+    );
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    assert!(
+        reverse_snat_hit_13652(&configured, &mut sessions, &case).is_none(),
+        "the reverse-only hit survives while its port-forward remains configured"
+    );
+    let withdrawn = imported_snat_forwarding(false);
+    let revocation = reverse_snat_hit_13652(&withdrawn, &mut sessions, &case)
+        .expect("a reverse-only DNAT hit must be revoked after the rule is withdrawn");
+    assert!(
+        revocation.canonical_key.is_none(),
+        "sessionless revocation must not claim a forward row"
+    );
+}
