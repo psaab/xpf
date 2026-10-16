@@ -8795,7 +8795,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                         ForwardingDisposition::RejectRoute => {
                             telemetry.dbg.disposition_other += 1;
-                            let _ = reject_reply::enqueue_route_reject_reply(
+                            // #14237: seam in reject_reply so the physical
+                            // binding-ifindex wiring is unit-testable.
+                            let _ = reject_reply::handle_route_reject_disposition(
+                                decision.resolution.disposition,
                                 &mut binding.tx_pipeline,
                                 worker_ctx.forwarding,
                                 binding.ifindex,
