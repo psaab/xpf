@@ -3150,5 +3150,80 @@ fn close_check_and_publish_churn_11299() {
         elapsed < Duration::from_secs(30),
         "indexed close checks starved concurrent publishes: {elapsed:?}"
     );
+}
 
+/// #13673: a transition-debt op is the deferred replay of a refused
+/// Demote/Refresh worker command. If its re-resolve observes a terminal
+/// TableUnavailable outcome (here: a valid `blue` stamp whose check is
+/// corrupted), the deferred dispatch must arm this worker's install-table
+/// purge exactly as the in-band WorkerCommand arms do -- otherwise the
+/// stale entry is never purge-walked. Control: a live-table re-resolve
+/// through the same debt path must not arm the purge.
+#[test]
+fn transition_debt_terminal_observation_arms_purge_13673() {
+    const W_DEMOTE: u32 = 120;
+    const W_REFRESH: u32 = 121;
+    const W_CONTROL: u32 = 122;
+    let forwarding = pbr_state();
+
+    let run_debt = |worker_id: u32,
+                    demote: bool,
+                    ha: BTreeMap<i32, HAGroupRuntime>,
+                    terminal: bool|
+     -> SessionTable {
+        crate::afxdp::worker_queue::clear_transition_debt(worker_id);
+        let _ = super::take_install_table_purge_flag(worker_id);
+        let mut sessions = SessionTable::new();
+        let mut decision = stamped_decision(unusable_resolution());
+        if terminal {
+            decision.install_table_check = decision.install_table_check.wrapping_add(1);
+        }
+        assert!(sessions.install_with_protocol_with_origin(
+            pbr_key(),
+            decision,
+            pbr_metadata(),
+            SessionOrigin::SyncImport,
+            NOW_NS,
+            PROTO_TCP,
+            0x18,
+        ));
+        if demote {
+            crate::afxdp::worker_queue::record_transition_debt(worker_id, &[RG1], &[], false, 0);
+        } else {
+            crate::afxdp::worker_queue::record_transition_debt(worker_id, &[], &[RG1], false, 0);
+        }
+        let commands = Arc::new(Mutex::new(VecDeque::new()));
+        apply_worker_commands(
+            &commands,
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &forwarding,
+            &ha,
+            &Arc::new(ShardedNeighborMap::new()),
+            worker_id,
+            &mut VecDeque::new(),
+        );
+        sessions
+    };
+
+    // Demote arm: RG inactive so the demote survives the stale filter.
+    let _ = run_debt(W_DEMOTE, true, inactive_ha(), true);
+    assert!(
+        super::take_install_table_purge_flag(W_DEMOTE),
+        "terminal transition-debt Demote must arm the install-table purge (#13673)"
+    );
+    // Refresh arm: RG active so the refresh survives the stale filter.
+    let _ = run_debt(W_REFRESH, false, active_ha(), true);
+    assert!(
+        super::take_install_table_purge_flag(W_REFRESH),
+        "terminal transition-debt Refresh must arm the install-table purge (#13673)"
+    );
+    // Negative control: same debt demote, live `blue` table.
+    let _ = run_debt(W_CONTROL, true, inactive_ha(), false);
+    assert!(
+        !super::take_install_table_purge_flag(W_CONTROL),
+        "live-table transition-debt Demote must not arm the purge (#13673)"
+    );
 }

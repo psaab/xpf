@@ -725,6 +725,7 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
                 forwarding,
                 ha_state,
                 dynamic_neighbors,
+                worker_id,
                 op,
                 now_ns,
                 now_secs,
@@ -781,6 +782,7 @@ fn dispatch_transition_debt_op(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    worker_id: u32,
     op: worker_queue::TransitionDebtOp,
     now_ns: u64,
     now_secs: u64,
@@ -800,8 +802,8 @@ fn dispatch_transition_debt_op(
                 .collect();
             worker_queue::HA_TRANSITION_DEMOTE_STALE_SKIPPED
                 .fetch_add((op.rgs().len() - surviving.len()) as u64, Ordering::Relaxed);
-            if !surviving.is_empty() {
-                commands::handle_demote_owner_rgs(
+            if !surviving.is_empty()
+                && commands::handle_demote_owner_rgs(
                     sessions,
                     session_map,
                     conntrack_v4_fd,
@@ -814,15 +816,17 @@ fn dispatch_transition_debt_op(
                     now_secs,
                     cancelled_keys,
                     cancelled_keys_seen,
-                );
+                )
+            {
+                flag_install_table_purge(worker_id);
             }
         }
         TransitionDebtKind::Refresh => {
             let surviving: Vec<i32> = op.rgs().iter().copied().filter(rg_is_active).collect();
             worker_queue::HA_TRANSITION_REFRESH_STALE_SKIPPED
                 .fetch_add((op.rgs().len() - surviving.len()) as u64, Ordering::Relaxed);
-            if !surviving.is_empty() {
-                commands::handle_refresh_owner_rgs(
+            if !surviving.is_empty()
+                && commands::handle_refresh_owner_rgs(
                     sessions,
                     session_map,
                     forwarding,
@@ -831,7 +835,9 @@ fn dispatch_transition_debt_op(
                     surviving,
                     now_ns,
                     now_secs,
-                );
+                )
+            {
+                flag_install_table_purge(worker_id);
             }
         }
         TransitionDebtKind::Vacate => {
