@@ -6,16 +6,18 @@ import (
 	"sort"
 )
 
-// validateIPv6UnitMTUStrict rejects an IPv6-bearing unit whose configured
-// link MTU is below RFC 8200 §5's 1280-byte minimum (#13936). unit.MTU is
-// the order-independent minimum of its inet and inet6 family MTUs, so an
-// IPv4-only family mtu can lower the value ultimately written to the link.
-// An explicit unit MTU overrides the interface MTU; absent both, the live
-// MTU is unknown at commit and is not gated.
+// validateIPv6UnitMTUStrict rejects an IPv6-bearing unit whose effective
+// link MTU is below RFC 8200 §5's 1280-byte minimum (#13936). Untagged units
+// share the physical link: planPhysDesired writes the MTU of the lowest
+// referenced, untagged, non-tunnel sibling when one has an MTU, otherwise
+// the interface MTU. A tagged unit uses its own MTU, falling back to that
+// effective parent MTU. If no configured value exists, the live MTU is
+// unknown at commit and is not gated.
 func validateIPv6UnitMTUStrict(cfg *Config) error {
 	if cfg == nil || cfg.Interfaces.Interfaces == nil {
 		return nil
 	}
+	referenced := vlanUnitMTUReferencedUnits9837(cfg)
 	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
 	for name := range cfg.Interfaces.Interfaces {
 		ifNames = append(ifNames, name)
@@ -31,14 +33,34 @@ func validateIPv6UnitMTUStrict(cfg *Config) error {
 			unitNums = append(unitNums, n)
 		}
 		sort.Ints(unitNums)
+
+		parentMTU := ifc.MTU
+		for _, un := range unitNums {
+			sibling := ifc.Units[un]
+			if sibling == nil || sibling.VlanID > 0 || sibling.Tunnel != nil ||
+				sibling.MTU <= 0 || !referenced[ifName][un] {
+				continue
+			}
+			parentMTU = sibling.MTU
+			break
+		}
+
 		for _, un := range unitNums {
 			unit := ifc.Units[un]
 			if unit == nil || !interfaceUnitHasIPv6_13936(unit) {
 				continue
 			}
 			mtu := unit.MTU
-			if mtu <= 0 {
-				mtu = ifc.MTU
+			if unit.VlanID > 0 {
+				if mtu <= 0 {
+					mtu = parentMTU
+				}
+			} else if referenced[ifName][un] || mtu <= 0 {
+				// When this unit is actually planned, every untagged
+				// sibling shares the selected parent MTU. Without a zone
+				// reference, retain its explicit unit MTU as the
+				// configured effective value checked by the commit gate.
+				mtu = parentMTU
 			}
 			if mtu > 0 && mtu < RALinkMTUMin {
 				return fmt.Errorf("interfaces %s unit %d: effective mtu %d is below the IPv6 minimum %d (RFC 8200 §5); raise the interface or family mtu (#13936)",
