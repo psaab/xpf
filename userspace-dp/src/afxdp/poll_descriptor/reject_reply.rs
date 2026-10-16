@@ -31,14 +31,41 @@ use crate::policy::PolicyAction;
 /// Which source a generated reject/reset reply is attributed to.
 ///
 /// Policy and Filter replies select their per-source reject counters.
-/// SessionMiss reuses the same synthesis, output classification, budget, and
-/// rate-limit gates for a zone `tcp-rst` reset, but is not a policy/filter
-/// rejection and therefore does not increment either source's counters.
-#[derive(Clone, Copy)]
+/// SessionMiss and Route reuse the same synthesis, output classification,
+/// budget, and rate-limit gates but have no policy/filter counters.
 pub(super) enum RejectReplySource {
     Policy,
     Filter,
     SessionMiss,
+    Route,
+}
+
+/// #14021: route `reject` is protocol-independent and may have no session.
+/// Its reply is always ICMP Destination Unreachable (never a TCP RST), but
+/// shares the policy reject choke's suppression, classification, TX budget,
+/// and per-zone generated-error limiter.
+#[cold]
+#[inline(never)]
+pub(super) fn enqueue_route_reject_reply(
+    tx_pipeline: &mut WorkerTxPipeline,
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    flow: Option<&SessionFlow>,
+    counters: &mut BatchCounters,
+) -> bool {
+    enqueue_reject_reply(
+        tx_pipeline,
+        forwarding,
+        ingress_ifindex,
+        packet_frame,
+        meta,
+        flow,
+        counters,
+        RejectReplySource::Route,
+        crate::filter::resolve_reject_message("host-unreachable"),
+    )
 }
 
 #[cold]
@@ -64,7 +91,7 @@ pub(super) fn enqueue_policy_reject_reply(
         ingress_ifindex,
         packet_frame,
         meta,
-        flow,
+        Some(flow),
         counters,
         RejectReplySource::Policy,
         reject_message,
@@ -103,7 +130,7 @@ pub(in crate::afxdp) fn enqueue_filter_reject_reply(
         ingress_ifindex,
         packet_frame,
         meta,
-        flow,
+        Some(flow),
         counters,
         RejectReplySource::Filter,
         reject_message,
@@ -177,7 +204,7 @@ pub(super) fn enqueue_session_miss_rst(
         ingress_ifindex,
         packet_frame,
         meta,
-        flow,
+        Some(flow),
         counters,
         RejectReplySource::SessionMiss,
         crate::filter::RejectMessage::ADMIN_PROHIBITED,
@@ -249,7 +276,7 @@ fn enqueue_reject_reply(
     ingress_ifindex: i32,
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
-    flow: &SessionFlow,
+    flow: Option<&SessionFlow>,
     counters: &mut BatchCounters,
     source: RejectReplySource,
     reject_message: crate::filter::RejectMessage,
@@ -327,11 +354,10 @@ fn enqueue_reject_reply(
     // physical `ingress_ifindex` is still used for the
     // `TxRequest.egress_ifindex` (the XSK transmit device) below. For a
     // non-VLAN port the logical and physical indexes coincide, so this is a
-    // no-op there.
     let logical_ingress_ifindex =
         resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, meta.ingress_vlan_id)
             .unwrap_or(ingress_ifindex);
-    let bytes = if meta.protocol == PROTO_TCP {
+    let bytes = if !matches!(source, RejectReplySource::Route) && meta.protocol == PROTO_TCP {
         build_reject_rst_frame(packet_frame)
     } else {
         build_reject_icmp_unreachable(
@@ -360,7 +386,7 @@ fn enqueue_reject_reply(
         match source {
             RejectReplySource::Policy => counters.policy_reject_reply_budget_drops += 1,
             RejectReplySource::Filter => counters.filter_reject_reply_budget_drops += 1,
-            RejectReplySource::SessionMiss => {}
+            RejectReplySource::SessionMiss | RejectReplySource::Route => {}
         }
         return false;
     }
@@ -412,7 +438,7 @@ fn enqueue_reject_reply(
             match source {
                 RejectReplySource::Policy => counters.policy_reject_output_filter_drops += 1,
                 RejectReplySource::Filter => counters.filter_reject_output_filter_drops += 1,
-                RejectReplySource::SessionMiss => {}
+                RejectReplySource::SessionMiss | RejectReplySource::Route => {}
             }
         }
         // Fail-closed to the silent drop the caller already performs. #5569:
@@ -458,9 +484,12 @@ fn enqueue_reject_reply(
         .get(&logical_ingress_ifindex)
         .copied()
         .unwrap_or(0);
-    // #9901 (F-074): key the limiter's per-source tier on the trigger's
-    // source (`flow` is the pre-NAT session flow, so this is the true origin).
-    if !allow_generated_reject(forwarding, from_zone_id, Some(flow.src_ip)) {
+    let src_ip = flow.map(|flow| flow.src_ip).or_else(|| {
+        ForwardPacketMeta::from(meta)
+            .l3_addrs_unfiltered()
+            .map(|(src, _)| src)
+    });
+    if !allow_generated_reject(forwarding, from_zone_id, src_ip) {
         counters.touched = true;
         // #3661: keep explicit policy and filter rate-limit counters distinct.
         // Zone `tcp-rst` session misses share this per-zone bucket but stay out
@@ -470,7 +499,7 @@ fn enqueue_reject_reply(
         match source {
             RejectReplySource::Policy => counters.policy_reject_rate_limit_drops += 1,
             RejectReplySource::Filter => counters.filter_reject_rate_limit_drops += 1,
-            RejectReplySource::SessionMiss => {}
+            RejectReplySource::SessionMiss | RejectReplySource::Route => {}
         }
         return false;
     }
@@ -480,7 +509,7 @@ fn enqueue_reject_reply(
         expected_ports: None,
         expected_addr_family: meta.addr_family,
         expected_protocol: meta.protocol,
-        flow_key: Some(flow.forward_key.clone()),
+        flow_key: flow.map(|flow| flow.forward_key.clone()),
         egress_ifindex: logical_ingress_ifindex,
         cos_queue_id: verdict.cos_queue_id,
         dscp_rewrite: verdict.dscp_rewrite,
@@ -492,7 +521,7 @@ fn enqueue_reject_reply(
     match source {
         RejectReplySource::Policy => counters.policy_reject_sent += 1,
         RejectReplySource::Filter => counters.filter_reject_sent += 1,
-        RejectReplySource::SessionMiss => {}
+        RejectReplySource::SessionMiss | RejectReplySource::Route => {}
     }
     true
 }

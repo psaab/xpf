@@ -3416,3 +3416,151 @@ fn tunnel_decap_reject_suppresses_unencapsulated_replies_12864() {
         0,
     );
 }
+
+// #14021: route `reject` emits a flowless ICMP/ICMPv6 Destination
+// Unreachable for every protocol, including TCP. Discard routes stay silent.
+#[test]
+fn route_reject_tcp_and_udp_emit_icmp_unreachable_14021() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let forwarding = policy_reject_forwarding();
+    // IPv4 TCP: Destination Unreachable (type 3), not a TCP RST.
+    let (frame, meta, flow) = tcp_v4_syn();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(enqueue_route_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        Some(&flow),
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 0);
+    assert_eq!(counters.filter_reject_sent, 0);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("route reject reply");
+    assert_eq!(
+        &reply.bytes[34..36],
+        &[3, 1],
+        "TCP route reject must send ICMPv4 host-unreachable, not RST"
+    );
+
+    // IPv4 UDP with no session flow.
+    let (frame, meta, _flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(enqueue_route_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        None,
+        &mut counters,
+    ));
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("flowless route reject reply");
+    assert_eq!(&reply.bytes[34..36], &[3, 1]);
+    assert!(
+        reply.flow_key.is_none(),
+        "flowless reply must carry no flow key"
+    );
+
+    // IPv6 GRE with no session flow exercises protocol-independent parity.
+    let (frame, meta, _flow) = policy_reject_packet_v6(crate::ip_proto::PROTO_GRE);
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(enqueue_route_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        None,
+        &mut counters,
+    ));
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("v6 route reject reply");
+    assert_eq!(
+        &reply.bytes[54..56],
+        &[1, 3],
+        "route reject must return ICMPv6 destination-unreachable/address-unreachable"
+    );
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+}
+
+#[test]
+fn route_reject_suppressed_and_rate_limited_fail_closed_14021() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    use crate::afxdp::icmp_ratelimit::{
+        GeneratedErrorReason, allow_generated_error_at, global_bucket_test_lock,
+        rate_limited_count, reset_bucket_for_test,
+    };
+    let _g = global_bucket_test_lock();
+    // A multicast destination is suppressed before budget or token use.
+    let (frame, meta, _flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    let mut multicast = frame.clone();
+    multicast[30] = 224;
+    let forwarding = policy_reject_forwarding();
+    let mut pipeline = tx_pipeline(64, 64);
+    let mut counters = BatchCounters::default();
+    assert!(!enqueue_route_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &multicast,
+        meta,
+        None,
+        &mut counters,
+    ));
+    assert!(pipeline.pending_tx_local.is_empty());
+
+    // An empty shared Reject bucket fails closed without enqueuing a reply.
+    let far_future = u64::MAX / 2;
+    reset_bucket_for_test(GeneratedErrorReason::Reject, far_future);
+    while allow_generated_error_at(GeneratedErrorReason::Reject, far_future, 1000, 1000) {}
+    let before = rate_limited_count(GeneratedErrorReason::Reject);
+    let (frame, meta, _flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(!enqueue_route_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        None,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_rate_limit_drops, 0);
+    assert!(rate_limited_count(GeneratedErrorReason::Reject) > before);
+    assert!(pipeline.pending_tx_local.is_empty());
+    reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
+}
