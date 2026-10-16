@@ -354,6 +354,7 @@ fn teardown_purge_forward(
                 )
         },
     );
+    let close_snapshot = sessions.close_snapshot_for(key).unwrap_or_default();
     let closed_id = sessions.session_id_for(key);
     sessions.delete(key);
     // A declined fence preserves shared authority; do not release NAT or
@@ -396,7 +397,15 @@ fn teardown_purge_forward(
         });
     }
     release_coordinator_session_rows(session_map, key);
-    sessions.emit_close_delta_with_origin(key.clone(), *decision, metadata.clone(), origin, true, closed_id);
+    sessions.emit_close_delta_with_snapshot(
+        key.clone(),
+        *decision,
+        metadata.clone(),
+        origin,
+        true,
+        closed_id,
+        close_snapshot,
+    );
     true
 }
 
@@ -439,6 +448,7 @@ fn teardown_purge_companion(
             )
         },
     );
+    let close_snapshot = sessions.close_snapshot_for(companion_key).unwrap_or_default();
     let closed_companion_id = sessions.session_id_for(companion_key);
     sessions.delete(companion_key);
     // A declined linkage fence preserves a newer companion incarnation.
@@ -480,12 +490,13 @@ fn teardown_purge_companion(
         });
     }
     release_coordinator_session_rows(session_map, companion_key);
-    sessions.emit_close_delta_with_origin(
+    sessions.emit_close_delta_with_snapshot(
         companion_key.clone(),
         *companion_decision,
         companion_metadata.clone(),
         companion_origin,
         true,
         closed_companion_id,
+        close_snapshot,
     );
 }

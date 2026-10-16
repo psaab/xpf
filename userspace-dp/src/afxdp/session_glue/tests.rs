@@ -11705,6 +11705,8 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
         assert!(sessions.entry_with_origin(&fwd_key).is_some());
         assert!(sessions.entry_with_origin(&rev_key).is_some());
         let _ = sessions.drain_deltas(16);
+        sessions.account_packet(&fwd_key, 111, TCP_FLAG_ACK, 3);
+        sessions.account_packet(&rev_key, 222, TCP_FLAG_ACK, 0);
 
         let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
         let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -11779,6 +11781,12 @@ fn delete_terminal_filtered_session_releases_companion_and_allocator_5622() {
             closes[0].key, fwd_key,
             "hit_reverse={hit_reverse}: the Close delta is on the forward key",
         );
+        assert_eq!(closes[0].counters.fwd_packets, 1);
+        assert_eq!(closes[0].counters.fwd_bytes, 111);
+        assert_eq!(closes[0].counters.rev_packets, 1);
+        assert_eq!(closes[0].counters.rev_bytes, 222);
+        assert_eq!(closes[0].created_ns, 1);
+        assert_eq!(closes[0].last_seen_ns, 1);
     }
 }
 

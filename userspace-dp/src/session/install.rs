@@ -387,6 +387,9 @@ impl SessionTable {
                 continue;
             }
 
+            let Some(snapshot) = self.close_snapshot_for(&key) else {
+                continue;
+            };
             let Some(forward_entry) = self.remove_entry(&key, RemovalKind::Terminal) else {
                 continue;
             };
@@ -424,13 +427,14 @@ impl SessionTable {
                     });
                 }
             }
-            self.emit_close_delta_with_origin(
+            self.emit_close_delta_with_snapshot(
                 key,
                 decision,
                 metadata,
                 origin,
                 false,
                 session_id,
+                snapshot,
             );
             return true;
         }
@@ -1242,45 +1246,56 @@ impl SessionTable {
         purge_retirement: bool,
         session_id: u64,
     ) {
+        let snapshot = self.close_snapshot_for(&key).unwrap_or_default();
+        self.emit_close_delta_with_snapshot(
+            key,
+            decision,
+            metadata,
+            origin,
+            purge_retirement,
+            session_id,
+            snapshot,
+        );
+    }
+
+    pub(crate) fn emit_close_delta_with_snapshot(
+        &mut self,
+        key: SessionKey,
+        decision: SessionDecision,
+        metadata: SessionMetadata,
+        origin: SessionOrigin,
+        purge_retirement: bool,
+        session_id: u64,
+        snapshot: SessionCloseSnapshot,
+    ) {
         if metadata.is_reverse {
             return;
         }
-        // #2465: this explicit-close API (clear-session / NAT-remap delete
-        // glue) does not carry the originating entry's creation instant — the
-        // caller has typically already removed the entry. Emit 0/unknown so the
-        // exporter falls back to the packet-count estimate. The dominant close
-        // path (idle/age expiry in session/expire.rs) carries real timestamps.
-        self.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
-        key,
-        decision,
-        metadata,
-        policy_generation: 0,
-        origin,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        // #2501: the entry was already removed by the explicit-close
-        // caller, so its counters are no longer in hand — emit 0 (the
-        // same fallback as the timestamps above). The dominant close
-        // path (idle/age expiry) harvests the real counters.
-        counters: SessionCounters::default(),
-        // #2749: the entry was already removed by the explicit-close
-        // caller, so its observed ToS / TCP flags are no longer in hand —
-        // emit 0 (the dominant idle/age close path harvests the real
-        // values off the expiring entry).
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        // #4915: the caller captures the removed entry's stable id BEFORE
-        // deleting (it is no longer in hand here). The flush scopes stale
-        // ordinary teardown on this id; 0 (uncaptured — entry already
-        // gone at capture time) forces the fail-closed drop+resync floor.
-        // Never infer it from current rows at drain time: a same-key
-        // reincarnation would hand back the SURVIVOR's id.
-        session_id,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        purge_retirement, source_nat_static: None });
+        self.push_delta(SessionDelta {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Close,
+            key,
+            decision,
+            metadata,
+            policy_generation: snapshot.policy_generation,
+            origin,
+            fabric_redirect_sync: false,
+            created_ns: snapshot.created_ns,
+            last_seen_ns: snapshot.last_seen_ns,
+            counters: snapshot.counters,
+            observed_tos: snapshot.observed_tos,
+            observed_tcp_flags: snapshot.observed_tcp_flags,
+            session_id: if snapshot.session_id == 0 {
+                session_id
+            } else {
+                snapshot.session_id
+            },
+            bulk_resync: false,
+            tcp_close_class: snapshot.tcp_close_class,
+            tcp_handshake_state: snapshot.tcp_handshake_state,
+            purge_retirement,
+            source_nat_static: None,
+        });
     }
 
     pub fn delete(&mut self, key: &SessionKey) {
