@@ -184,6 +184,21 @@ func renderRouteFilterEntry(b *strings.Builder, plName string, idx int, rf *conf
 	return true
 }
 
+// routeFilterEntrySkipped reports whether renderRouteFilterEntry would
+// skip rf as INVALID (failClosedInheritedInvalidRouteFilters12687's set,
+// widened to bad prefixes): a malformed prefix, an unknown or `through`
+// match-type, a malformed / out-of-range / at-or-below-base
+// prefix-length-range, or an invalid upto. It is the single source of
+// truth for "this entry's match set is unknowable", shared by the config
+// quarantine and the FRR term rule (#14137) so the two cannot drift.
+// A max-length `longer` (or /128) is NOT skipped here: that entry is
+// valid with an honestly empty match set, so the term rule must not
+// broaden it to deny-all — renderRouteFilterEntry still writes no line
+// for it and the undefined-list match stays NOMATCH for both actions.
+func routeFilterEntrySkipped(rf *config.RouteFilter) bool {
+	return config.RouteFilterEntrySkipped(rf)
+}
+
 // renderFromPrefixListACL writes an FRR access-list DEFINITION mirroring the
 // matchKW-family entries of Junos from-prefix-list pl into access-list aclName,
 // so the caller can reference it with a `match ip|ipv6 address <aclName>`

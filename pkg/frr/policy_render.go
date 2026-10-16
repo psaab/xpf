@@ -697,6 +697,64 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				"route_map", routeMapName, "term", term.Name)
 		}
 
+		// #14137 fail-closed term rule, the route-filter sibling of
+		// #9881 / #10822 / #14136: renderRouteFilterEntry skips an
+		// INVALID entry (malformed prefix, unknown/through match-type,
+		// malformed prefix-length-range, bad upto) and writes no inline
+		// prefix-list definition, yet emitTermBody still emits
+		// `match ip|ipv6 address prefix-list <inline>` against the
+		// undefined list. FRR resolves that to NOMATCH, which is
+		// fail-closed for a permit term but fail-OPEN for a reject
+		// term: the deny never fires and the route falls through to a
+		// later accept or the BGP trailing permit. The tolerant path
+		// reaches this state directly, and
+		// failClosedInheritedInvalidRouteFilters12687 manufactures it
+		// by turning an inherited invalid term into Action="reject"
+		// without making its skipped filter match. Never emit a
+		// dangling inline route-filter match for an all-invalid family
+		// group:
+		//   - reject term → ONE bare deny-all sequence for that group
+		//     (the match set is unknowable; the superset is the only
+		//     sound fail-closed render for that family).
+		//   - accept / non-terminating / next-policy term → skip that
+		//     family group in the dispatch below (fine groups still
+		//     emit; a fully-invalid term emits nothing and falls
+		//     through, the fail-closed direction for accept).
+		// A group with at least one non-skipped entry keeps its match
+		// line — including a group whose only entry is a max-length
+		// `longer`, whose match set is legitimately EMPTY: RouteFilter-
+		// EntrySkipped does not flag it, so it is never broadened to
+		// deny-all and keeps the undefined-list NOMATCH behaviour
+		// (#2103). Route-filters within a term are OR'd, so a
+		// partially-rendered group renders its valid subset.
+		routeFilterGroupDangling := func(rfs []indexedRouteFilter) bool {
+			if len(rfs) == 0 {
+				return false
+			}
+			for _, irf := range rfs {
+				if !routeFilterEntrySkipped(irf.rf) {
+					return false
+				}
+			}
+			return true
+		}
+		v4Dangling := false
+		v6Dangling := false
+		singleDangling := false
+		if len(term.RouteFilters) > 0 {
+			v4rfCheck, v6rfCheck := partitionRouteFiltersByFamily(term.RouteFilters)
+			if len(v4rfCheck) > 0 && len(v6rfCheck) > 0 {
+				v4Dangling = routeFilterGroupDangling(v4rfCheck)
+				v6Dangling = routeFilterGroupDangling(v6rfCheck)
+			} else {
+				all := make([]indexedRouteFilter, len(term.RouteFilters))
+				for i, rf := range term.RouteFilters {
+					all[i] = indexedRouteFilter{i, rf}
+				}
+				singleDangling = routeFilterGroupDangling(all)
+			}
+		}
+
 		// emitTermBody renders one route-map SEQUENCE for this term: the
 		// header, this term's family-specific route-filter match line, the
 		// family-agnostic match clauses (source-protocol/community/as-path),
@@ -750,20 +808,22 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				// the first parseable route-filter (a #2103-skipped /32
 				// longer still names a real family), else v4 — mirroring
 				// the term.PrefixList branch's "unknown/empty defaults to
-				// IPv4". The match line is ALWAYS emitted (fail-closed
-				// against an undefined list, see below).
+				// IPv4". The match line is emitted whenever this sequence
+				// reaches here (see below).
 				matchV6 := seqFam == "v6"
 				matchFamilyKnown := seqFam != ""
 				// emitted counts the prefix-list entries actually written.
-				// A #2103-skipped (/32 longer, empty set) or #2105-malformed
-				// entry writes NO "ip prefix-list" line, so the list may end
-				// up with zero entries — and we intentionally never
-				// materialise a count==0 list (FRR treats a count==0
-				// prefix-list as PREFIX_PERMIT / match-ALL). The match line
-				// still references the (then-undefined) list name: FRR
-				// resolves an undefined prefix-list to NULL → RMAP_NOMATCH
-				// (DENY), so an all-skipped term matches NOTHING and stays
-				// fail-closed. Suppressing the match line would leave a bare
+				// A #2103-skipped (/32 longer, empty set) entry writes NO
+				// "ip prefix-list" line, so the list may end up with zero
+				// entries — and we intentionally never materialise a
+				// count==0 list (FRR treats a count==0 prefix-list as
+				// PREFIX_PERMIT / match-ALL). Sequences reaching here are
+				// never all-INVALID (#14137 diverts those groups to
+				// deny-all / skip in the dispatch), so a zero-entry list
+				// here is a legitimately empty set: the match line still
+				// references the (then-undefined) list name, which FRR
+				// resolves to NULL → RMAP_NOMATCH, so the term matches
+				// NOTHING. Suppressing the match line would leave a bare
 				// "route-map … permit <seq>" with no match clauses, which
 				// FRR treats as match-ALL — flipping "/32 longer" from the
 				// empty set to permit-everything (Copilot #2110).
@@ -1182,6 +1242,23 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				}
 			}
 		}
+		// emitDanglingGroup handles one all-invalid route-filter family
+		// group (#14137, see the term rule above): reject renders ONE
+		// bare deny-all sequence for the group; every other action skips
+		// the group so the term falls through (never a bare permit,
+		// which FRR reads as match-ALL).
+		emitDanglingGroup := func() {
+			if action == "deny" {
+				slog.Warn("frr: reject term route-filter absent from frr.conf; rendering deny-all",
+					"route_map", routeMapName, "term", term.Name)
+				fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(routeMapName), seq)
+				b.WriteString("exit\n")
+				seq += 10
+				return
+			}
+			slog.Warn("frr: term route-filter absent from frr.conf; skipping dangling match",
+				"route_map", routeMapName, "term", term.Name)
+		}
 		if mixedFamily {
 			// Mixed-family route-filters: split into a v4 group and a v6
 			// group (#2607), each carrying its own family's route-filter
@@ -1189,9 +1266,21 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// FRR `ip` vs `ipv6` prefix-lists are separate namespaces anyway,
 			// but the distinct NAME keeps the two match lines referencing
 			// disjoint single-family lists). Within each group the from-* OR
-			// cross-product is emitted; v4 first.
-			emitVariants("v4", v4rf, inlinePrefixListName(routeMapName, plPrefix, term.Name, "_v4"))
-			emitVariants("v6", v6rf, inlinePrefixListName(routeMapName, plPrefix, term.Name, "_v6"))
+			// cross-product is emitted; v4 first. An all-invalid group
+			// (#14137) renders deny-all (reject) or nothing instead of a
+			// dangling match against its undefined inline list.
+			if v4Dangling {
+				emitDanglingGroup()
+			} else {
+				emitVariants("v4", v4rf, inlinePrefixListName(routeMapName, plPrefix, term.Name, "_v4"))
+			}
+			if v6Dangling {
+				emitDanglingGroup()
+			} else {
+				emitVariants("v6", v6rf, inlinePrefixListName(routeMapName, plPrefix, term.Name, "_v6"))
+			}
+		} else if singleDangling {
+			emitDanglingGroup()
 		} else {
 			// Homogeneous or no route-filters: one family group. Pass the
 			// full (possibly empty) indexed route-filter set and the

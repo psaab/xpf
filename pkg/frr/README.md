@@ -1331,6 +1331,20 @@ step. Both are required — neither sees the other's case:
   keeps that family and drops only the dangling ref. No dangling
   `match ip|ipv6 address prefix-list` (or inline-ACL) line is emitted —
   the prefix-list sibling of the #9881 as-path and #10822 community rules.
+- **Route-filter terms with no rendered entry are fail-closed at the
+  term (#14137).** `config.RouteFilterEntrySkipped` is the shared
+  invalid-entry predicate (malformed prefix, unknown/`through`
+  match-type, malformed prefix-length-range, invalid `upto`); the
+  tolerant quarantine (#12687) turns inherited invalid terms into
+  `then reject`, so the renderer must not leave their deny carrying a
+  dangling inline `match ... prefix-list` against an undefined list —
+  FRR resolves that to NOMATCH and the route falls through to a later
+  permit. A family group whose entries are all invalid renders a bare
+  deny-all for a reject term and no sequence otherwise; a group with
+  any rendered entry keeps its match line. A max-length `longer` is
+  valid with an honestly empty set and is never broadened — it keeps
+  the undefined-list NOMATCH behaviour (#2103). The route-filter
+  sibling of the #9881/#10822/#14136 rules.
 - **The #4498 route-map sweep is now split between sanitization and semantic
   omission guards.** The sweep found `set ip/ipv6 next-hop <term.NextHop>`,
   `set origin <term.Origin>`, and `match source-protocol <proto>` still using
