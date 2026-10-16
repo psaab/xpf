@@ -334,8 +334,7 @@ fn classify_system_service(token: &str, hi: &mut ZoneHostInbound) {
         // live seeded exchange matches (#6471 secondary path, see
         // forwarding/ipsec.rs).
         "ike" | "ipsec" => {
-            hi.udp_ports.insert(500);
-            hi.udp_ports.insert(4500);
+            hi.udp_ports.extend(crate::ip_proto::IKE_UDP_PORTS);
         }
         "tftp" => {
             hi.udp_ports.insert(69);

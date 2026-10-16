@@ -841,3 +841,107 @@ fn interface_snat_9388_release_frees_a_post_dnat_port_identity() {
          translated identity for the node's lifetime"
     );
 }
+
+// #13944 (H10-02): an interface-mode preserve whose translated identity
+// equals the firewall's own fixed-port control-plane tuple must be PAT'd
+// off that port (or refused). An inside flow H:500->P:500 (and
+// H:4500->P:4500) through interface SNAT must NOT mint (E:500, P:500) /
+// (E:4500, P:4500), because that reverse identity is exactly the host-local
+// IKE/NAT-T session key, which reverse-NAT install would replace. RED on
+// base: UDP/500 and UDP/4500 are preserved.
+#[test]
+fn interface_snat_never_mints_own_fixed_control_ports_13944() {
+    use crate::ip_proto::PROTO_UDP;
+    for fixed in crate::nat::iface_registry::IFACE_RESERVED_UDP_PORTS {
+        let reg = InterfaceNatAllocators::default();
+        let rules = iface_rules();
+        let d = decision(admit(
+            &reg,
+            &rules,
+            "10.0.61.101",
+            fixed,
+            SERVER,
+            fixed,
+            PROTO_UDP,
+            false,
+        ));
+        assert_eq!(d.rewrite_src, Some(EGRESS.parse::<IpAddr>().unwrap()));
+        let port = d.rewrite_src_port.unwrap_or(fixed);
+        let forward_key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_UDP,
+            src_ip: "10.0.61.101".parse().expect("inside"),
+            dst_ip: SERVER.parse().expect("peer"),
+            src_port: fixed,
+            dst_port: fixed,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let local_delivery_key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_UDP,
+            src_ip: SERVER.parse().expect("peer"),
+            dst_ip: EGRESS.parse().expect("egress"),
+            src_port: fixed,
+            dst_port: fixed,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        assert_ne!(
+            crate::session::reverse_session_key(&forward_key, d),
+            local_delivery_key,
+            "the SNAT reverse companion must not alias the firewall's cached \
+             LocalDelivery key for UDP/{fixed}"
+        );
+        let allocator = reg
+            .allocator_for(EGRESS.parse().expect("egress"))
+            .expect("interface allocator");
+        let mut previous_snapshot = None;
+        assert_eq!(
+            allocator.reserve_interface_identity(
+                SourceNatFlowKey {
+                    protocol: PROTO_UDP,
+                    src_ip: "10.0.61.101".parse().expect("inside"),
+                    dst_ip: SERVER.parse().expect("peer"),
+                    src_port: fixed,
+                    dst_port: fixed,
+                    routing_scope: 0,
+                },
+                EGRESS.parse().expect("egress"),
+                fixed,
+                1_000,
+                NatHolder::Untracked,
+                false,
+                &mut previous_snapshot,
+            ),
+            super::allocator::InterfaceDomainReserve::IdentityConflict,
+            "peer-synced interface SNAT must refuse the same local tuple"
+        );
+        assert_ne!(
+            port, fixed,
+            "interface SNAT minted the firewall's own fixed control-plane \
+             identity (port {fixed}); it must be PAT'd off or refused"
+        );
+        assert!(
+            (1024..=65535).contains(&port),
+            "PAT'd control-plane flow must land in the ephemeral range, got {port}"
+        );
+    }
+    // POSITIVE CONTROL: a non-reserved UDP source port still preserves.
+    let reg = InterfaceNatAllocators::default();
+    let rules = iface_rules();
+    let ctrl = decision(admit(
+        &reg,
+        &rules,
+        "10.0.61.101",
+        54321,
+        SERVER,
+        54321,
+        PROTO_UDP,
+        false,
+    ));
+    assert_eq!(
+        ctrl.rewrite_src_port, None,
+        "non-reserved UDP/54321 must stay preserved (preserve-first unchanged)"
+    );
+}

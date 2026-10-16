@@ -5139,6 +5139,16 @@ impl PortAllocator {
     ) -> Result<InterfaceIdentity, super::source::SourceNatFailureReason> {
         let rkey_for = |port: u16| AddressOnlyReverseKey::for_flow(&flow, translated_ip, port);
         let preserved = flow.src_port;
+        // #13944: the reverse NAT key for UDP H:port -> P:port is
+        // P:port -> egress:port. For the firewall's fixed IKE/NAT-T ports
+        // this is also the host-local LocalDelivery key, which session
+        // install would replace. Force PAT before the allocator's ordinary
+        // preserve-first ownership check; the PAT range excludes both ports.
+        let reserved_local_tuple = crate::nat::iface_registry::conflicts_with_local_control_tuple(
+            flow.protocol,
+            flow.src_port,
+            flow.dst_port,
+        );
         {
             let mut live = self.lock_live();
             // Idempotent re-entry, and the point every already-holding worker
@@ -5154,7 +5164,9 @@ impl PortAllocator {
             }
             // PRESERVE-FIRST. Identity check and insert happen under ONE
             // acquisition, so two workers cannot both observe the port free.
-            if !live.address_only_owners.contains_key(&rkey_for(preserved)) {
+            if !reserved_local_tuple
+                && !live.address_only_owners.contains_key(&rkey_for(preserved))
+            {
                 self.insert_interface_record_locked(
                     &mut live,
                     flow,
@@ -5256,6 +5268,17 @@ impl PortAllocator {
         capture_previous_holders: bool,
         previous_snapshot: &mut Option<SourceNatReservationSnapshot>,
     ) -> InterfaceDomainReserve {
+        if crate::nat::iface_registry::conflicts_with_local_control_tuple(
+            flow.protocol,
+            flow.src_port,
+            flow.dst_port,
+        ) && translated_port == flow.src_port
+        {
+            // #13944: HA imports must obey the active node's local-service
+            // exclusion too; never publish an interface-SNAT identity that
+            // aliases the local IKE/NAT-T session.
+            return InterfaceDomainReserve::IdentityConflict;
+        }
         let rkey = AddressOnlyReverseKey::for_flow(&flow, translated_ip, translated_port);
         let mut live = self.capture_and_replace(&flow, capture_previous_holders);
         if let Some(existing) = live.live_by_flow.get(&flow).copied() {
