@@ -963,7 +963,7 @@ pub(super) struct PortAllocatorLiveState {
     pub(super) persistent_by_source: FxHashMap<PersistentSourceKey, PersistentLease>,
     pub(super) lease_expirations: BTreeSet<(u64, PersistentSourceKey)>,
     pub(super) persistent_permissions: FxHashMap<PersistentSourceKey, PersistentPermissions>,
-    pub(super) persistent_by_translated: FxHashMap<ReverseIdentityBaseKey, PersistentSourceKey>,
+    pub(super) persistent_by_translated: FxHashMap<ReverseIdentityBaseKey, FxHashSet<PersistentSourceKey>>,
     pub(super) lease_expirations_by_addr: Vec<BTreeSet<(u64, PersistentSourceKey)>>,
     // #10784: time-bounded per-key fence for cleared lease imports. Entries
     // survive local replacement until their deadline; the live marker is also
@@ -1112,6 +1112,19 @@ impl PortAllocatorLiveState {
         }
     }
 
+    fn remove_persistent_reverse_owner(
+        &mut self,
+        base: ReverseIdentityBaseKey,
+        key: &PersistentSourceKey,
+    ) {
+        if let Some(owners) = self.persistent_by_translated.get_mut(&base) {
+            owners.remove(key);
+            if owners.is_empty() {
+                self.persistent_by_translated.remove(&base);
+            }
+        }
+    }
+
     pub(super) fn insert_persistent_lease(
         &mut self,
         key: PersistentSourceKey,
@@ -1121,20 +1134,23 @@ impl PortAllocatorLiveState {
         if let Some(previous) = previous {
             self.remove_persistent_address_only_owner(key, previous);
             self.persistent_permissions.remove(&key);
-            self.persistent_by_translated.remove(&ReverseIdentityBaseKey {
-                protocol: key.protocol,
-                translated_ip: previous.translated.ip,
-                translated_port: previous.translated.port,
-            });
+            self.remove_persistent_reverse_owner(
+                ReverseIdentityBaseKey {
+                    protocol: key.protocol,
+                    translated_ip: previous.translated.ip,
+                    translated_port: previous.translated.port,
+                },
+                &key,
+            );
         }
-        self.persistent_by_translated.insert(
-            ReverseIdentityBaseKey {
+        self.persistent_by_translated
+            .entry(ReverseIdentityBaseKey {
                 protocol: key.protocol,
                 translated_ip: lease.translated.ip,
                 translated_port: lease.translated.port,
-            },
-            key,
-        );
+            })
+            .or_default()
+            .insert(key);
         self.add_persistent_address_only_owner(key, lease);
         previous
     }
@@ -1145,11 +1161,14 @@ impl PortAllocatorLiveState {
     ) -> Option<PersistentLease> {
         let lease = self.persistent_by_source.remove(key)?;
         self.remove_persistent_address_only_owner(*key, lease);
-        self.persistent_by_translated.remove(&ReverseIdentityBaseKey {
-            protocol: key.protocol,
-            translated_ip: lease.translated.ip,
-            translated_port: lease.translated.port,
-        });
+        self.remove_persistent_reverse_owner(
+            ReverseIdentityBaseKey {
+                protocol: key.protocol,
+                translated_ip: lease.translated.ip,
+                translated_port: lease.translated.port,
+            },
+            key,
+        );
         Some(lease)
     }
 
@@ -2288,28 +2307,37 @@ impl PortAllocator {
             translated_port,
         };
         let live = self.lock_live();
-        let Some(key) = live.persistent_by_translated.get(&reverse).copied() else {
+        let Some(keys) = live.persistent_by_translated.get(&reverse) else {
             return PersistentInbound::Miss;
         };
-        let Some(lease) = live.persistent_by_source.get(&key) else {
-            return PersistentInbound::Denied;
-        };
-        if lease.revoked || (lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
-            return PersistentInbound::Denied;
+        let mut matched = None;
+        for key in keys {
+            let Some(lease) = live.persistent_by_source.get(key) else {
+                continue;
+            };
+            if lease.revoked || (lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
+                continue;
+            }
+            let permitted = live
+                .persistent_permissions
+                .get(key)
+                .is_some_and(|permissions| permissions.permits(remote_ip, remote_port));
+            if !permitted {
+                continue;
+            }
+            let candidate = PersistentInbound::Permitted {
+                internal_ip: key.src_ip,
+                internal_port: key.src_port,
+                address_only: lease.address_only,
+            };
+            if matched.is_some_and(|previous| previous != candidate) {
+                return PersistentInbound::Denied;
+            }
+            matched = Some(candidate);
         }
-        let permitted = live
-            .persistent_permissions
-            .get(&key)
-            .is_some_and(|permissions| permissions.permits(remote_ip, remote_port));
-        if !permitted {
-            return PersistentInbound::Denied;
-        }
-        PersistentInbound::Permitted {
-            internal_ip: key.src_ip,
-            internal_port: key.src_port,
-            address_only: lease.address_only,
-        }
+        matched.unwrap_or(PersistentInbound::Denied)
     }
+
     pub(super) fn record_synced_persistent_permission(
         &self,
         flow: SourceNatFlowKey,
