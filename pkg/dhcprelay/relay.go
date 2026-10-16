@@ -311,6 +311,10 @@ type RelayStats struct {
 	RepliesBroadcastNoTarget   uint64 // no routable target (yiaddr==0,ciaddr==0)
 	RepliesBroadcastL2Fallback uint64 // raw-L2 path failed → degraded
 	RepliesBroadcastNak        uint64 // DHCPNAK force-broadcast (RFC 2131 §4.3.2)
+	// RepliesDroppedBadCiaddr counts flag-clear yiaddr==0 replies dropped
+	// because ciaddr was non-global-unicast or differed from the pending
+	// request ciaddr (#14188). Fail-closed, never broadcast fallback.
+	RepliesDroppedBadCiaddr uint64
 	// DHCPv6-specific per-reason counters (#9553). These are populated only
 	// on Family=="inet6" rows; the common rate-limit/unknown-server counters
 	// above remain shared field names for both families.
@@ -463,6 +467,20 @@ type interfaceRelay struct {
 	// it does not forward an unverifiable reconfigure command at its clients.
 	repliesDroppedForceRenew atomic.Uint64
 
+	// repliesDroppedBadCiaddr counts ciaddr-unicast replies dropped by the
+	// #14188 validation (non-global-unicast or pending-ciaddr mismatch).
+	repliesDroppedBadCiaddr atomic.Uint64
+	// warnedBadCiaddr is the warn-once latch for bad-ciaddr drops; only the
+	// server-reply goroutine touches it.
+	warnedBadCiaddr bool
+	// pendingRequestCiaddr is the request ciaddr recorded for the pending
+	// binding most recently matched on this relay, handed to deliverReply
+	// so it can compare the reply ciaddr without a second lookup. Written
+	// and read only by the server-reply goroutine (handleServerResponses
+	// -> deliverReply are sequential there). Direct deliverReply test
+	// callers set it explicitly; zero means no recorded ciaddr.
+	pendingRequestCiaddr net.IP
+
 	// spec is the desired-config snapshot this relay was started with. Apply
 	// (#2348) compares it against the new desired spec to detect a changed
 	// group (servers / always-broadcast) that requires a restart. Set once at
@@ -543,6 +561,7 @@ func (ir *interfaceRelay) adoptCountersFrom(old *interfaceRelay) {
 	ir.repliesBroadcastNoTarget.Store(old.repliesBroadcastNoTarget.Load())
 	ir.repliesBroadcastL2Fallback.Store(old.repliesBroadcastL2Fallback.Load())
 	ir.repliesBroadcastNak.Store(old.repliesBroadcastNak.Load())
+	ir.repliesDroppedBadCiaddr.Store(old.repliesDroppedBadCiaddr.Load())
 }
 
 // packetConnFactory creates a UDP packet connection with the relay's required
@@ -1195,6 +1214,7 @@ func (m *Manager) Stats() []RelayStats {
 			RepliesBroadcastNoTarget:     ir.repliesBroadcastNoTarget.Load(),
 			RepliesBroadcastL2Fallback:   ir.repliesBroadcastL2Fallback.Load(),
 			RepliesBroadcastNak:          ir.repliesBroadcastNak.Load(),
+			RepliesDroppedBadCiaddr:      ir.repliesDroppedBadCiaddr.Load(),
 		})
 	}
 	if m.v6 != nil {
@@ -1777,7 +1797,7 @@ func (m *Manager) runRelaySession(ctx context.Context,
 			// AFTER the rate limiter, the #2456 HA master gate and the #4309
 			// hop-limit drop, so a request the relay refused upstream never
 			// arms a binding for a reply it should not receive.
-			ir.pending.insert(pendingKeyFor(pkt))
+			insertPending(ir.pending, pkt)
 
 			// Unicast the modified packet to each server in the active group.
 			relayData := pkt.ToBytes()
@@ -2030,7 +2050,8 @@ func handleServerResponses(ctx context.Context, serverConn, clientConn net.Packe
 		// surfaced in `show services dhcp relay`) and logged warn-once-then-
 		// Debug, so an operator sees a mis-binding immediately instead of
 		// debugging an invisible black hole.
-		if !ir.pending.matches(pendingKeyFor(pkt)) {
+		pendingCiaddr, bound := matchesPending(ir.pending, pendingKeyFor(pkt))
+		if !bound {
 			ir.repliesDroppedNoRequest.Add(1)
 			if !warnedNoRequest {
 				slog.Warn("dhcp-relay: dropping server reply with no outstanding request",
@@ -2044,6 +2065,7 @@ func handleServerResponses(ctx context.Context, serverConn, clientConn net.Packe
 			}
 			continue
 		}
+		ir.pendingRequestCiaddr = pendingCiaddr
 
 		slog.Debug("dhcp-relay: received server reply",
 			"interface", ifaceName,
@@ -2109,6 +2131,23 @@ func udpAddrIP(addr net.Addr) net.IP {
 	}
 }
 
+// ciaddrMatchesRequest reports whether a reply ciaddr equals the ciaddr the
+// pending request carried (#14188). A recorded zero/nil request ciaddr (a
+// DISCOVER/SELECTING request, or a direct deliverReply caller that recorded
+// none) admits only a reply ciaddr that the request could have produced —
+// none for the yiaddr==0 unicast row — so any real reply ciaddr mismatches
+// and is dropped. Comparison is net.IP.Equal (form-agnostic).
+func ciaddrMatchesRequest(requestCiaddr, replyCiaddr net.IP) bool {
+	if requestCiaddr == nil {
+		return false
+	}
+	req4 := requestCiaddr.To4()
+	if req4 == nil || req4.Equal(net.IPv4zero) {
+		return false
+	}
+	return req4.Equal(replyCiaddr)
+}
+
 // deliverReply applies the #2076 reply-destination matrix and sends the reply.
 // It returns true if the reply was delivered (any path that issued a successful
 // send), false on a hard send failure. It increments the per-reason counters.
@@ -2159,8 +2198,32 @@ func deliverReply(ir *interfaceRelay, clientConn net.PacketConn, l2 l2Replier,
 
 	case ciaddrReal:
 		// Flag clear, no yiaddr, but the client already owns ciaddr
-		// (DHCPINFORM / REBINDING ACK) — it answers ARP, so a normal UDP
-		// unicast is deliverable.
+		// (DHCPINFORM / RENEW / REBINDING ACK) — it answers ARP, so a
+		// normal UDP unicast is deliverable, but ONLY to a validated
+		// destination (#14188). The reply ciaddr is server-controlled:
+		// pendingKey binds xid+chaddr only, so without this check a
+		// configured (or spoofed-source, xid-guessing) server could make
+		// the relay WriteTo loopback, multicast, broadcast, link-local,
+		// unspecified, or an unrelated off-LAN host on the
+		// SO_BINDTODEVICE client socket. Require global-unicast (which
+		// admits RFC1918 LAN addresses) AND equality with the ciaddr the
+		// pending request carried. On failure DROP (fail-closed, counted,
+		// warn-once) — never broadcast, which would still deliver the
+		// crafted payload on-LAN, and never unicast elsewhere.
+		if !ciaddr.IsGlobalUnicast() || !ciaddrMatchesRequest(ir.pendingRequestCiaddr, ciaddr) {
+			ir.repliesDroppedBadCiaddr.Add(1)
+			if !ir.warnedBadCiaddr {
+				slog.Warn("dhcp-relay: dropping reply with unvalidated ciaddr",
+					"interface", ir.ifaceName, "ciaddr", ciaddr,
+					"request_ciaddr", ir.pendingRequestCiaddr,
+					"client_mac", pkt.ClientHWAddr)
+				ir.warnedBadCiaddr = true
+			} else {
+				slog.Debug("dhcp-relay: dropping reply with unvalidated ciaddr",
+					"interface", ir.ifaceName, "ciaddr", ciaddr)
+			}
+			return false
+		}
 		dst := &net.UDPAddr{IP: ciaddr, Port: clientPort}
 		if _, err := clientConn.WriteTo(replyData, dst); err != nil {
 			slog.Warn("dhcp-relay: unicast to ciaddr failed",

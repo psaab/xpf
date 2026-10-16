@@ -117,7 +117,10 @@ func testServerSet(ips ...net.IP) []*net.UDPAddr {
 func armedRelay(name string, replies ...*dhcpv4.DHCPv4) *interfaceRelay {
 	ir := unarmedRelay(name)
 	for _, r := range replies {
-		ir.pending.insert(pendingKeyFor(r))
+		insertPending(ir.pending, r)
+		if r != nil {
+			ir.pendingRequestCiaddr = r.ClientIPAddr.To4()
+		}
 	}
 	return ir
 }
@@ -244,13 +247,13 @@ func TestDeliverReply_Matrix(t *testing.T) {
 				l2 = fl2
 			}
 			pkt := tc.pkt(t)
+			ir.pendingRequestCiaddr = pkt.ClientIPAddr.To4()
 			payload := pkt.ToBytes()
 
 			ok := deliverReply(ir, client, l2, testGiaddr, pkt, payload)
 			if !ok {
 				t.Fatalf("deliverReply returned false (delivery failed)")
 			}
-
 			if got := fl2.callCount(); got != tc.want.l2Calls {
 				t.Errorf("L2 sendReply calls = %d, want %d", got, tc.want.l2Calls)
 			}
@@ -384,6 +387,7 @@ func TestDeliverReply_ExactlyOneSend_NoDoubleDeliver(t *testing.T) {
 				fl2.failWith = errors.New("forced")
 			}
 			pkt := r.pkt(t)
+			ir.pendingRequestCiaddr = pkt.ClientIPAddr.To4()
 			if !deliverReply(ir, client, fl2, testGiaddr, pkt, pkt.ToBytes()) {
 				t.Fatal("deliverReply returned false")
 			}

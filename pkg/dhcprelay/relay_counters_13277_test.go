@@ -45,6 +45,7 @@ func TestApplyPreservesInterfaceRelayAndPendingEvictedCounters(t *testing.T) {
 	old4.repliesBroadcastNoTarget.Store(24)
 	old4.repliesBroadcastL2Fallback.Store(25)
 	old4.repliesBroadcastNak.Store(26)
+	old4.repliesDroppedBadCiaddr.Store(27)
 	// Seed PendingEvicted directly (plain uint64 under mu).
 	old4.pending.mu.Lock()
 	old4.pending.evicted = 7
@@ -73,6 +74,7 @@ func TestApplyPreservesInterfaceRelayAndPendingEvictedCounters(t *testing.T) {
 		"RepliesL2Unicast": 20, "RepliesUnicastCiaddr": 21, "RepliesBroadcastFlag1": 22,
 		"RepliesBroadcastForced": 23, "RepliesBroadcastNoTarget": 24,
 		"RepliesBroadcastL2Fallback": 25, "RepliesBroadcastNak": 26, "PendingEvicted": 7,
+		"RepliesDroppedBadCiaddr": 27,
 	}
 	got4 := map[string]uint64{
 		"RequestsRelayed": st4.RequestsRelayed, "RepliesForwarded": st4.RepliesForwarded,
@@ -90,6 +92,7 @@ func TestApplyPreservesInterfaceRelayAndPendingEvictedCounters(t *testing.T) {
 		"RepliesBroadcastNoTarget":     st4.RepliesBroadcastNoTarget,
 		"RepliesBroadcastL2Fallback":   st4.RepliesBroadcastL2Fallback,
 		"RepliesBroadcastNak":          st4.RepliesBroadcastNak,
+		"RepliesDroppedBadCiaddr":      st4.RepliesDroppedBadCiaddr,
 		"PendingEvicted":               st4.PendingEvicted,
 	}
 	for k, want := range want4 {

@@ -88,7 +88,7 @@ func TestWriteDHCPRelayStatsV4OnlyByteStable11694(t *testing.T) {
 		RepliesBroadcastNoTarget: 9, RepliesBroadcastL2Fallback: 10,
 		RepliesBroadcastNak: 11, RepliesDroppedUnknownServer: 12,
 		PendingSize: 13, PendingCapacity: 14, RepliesDroppedNoRequest: 15,
-		PendingEvicted: 16, RepliesDroppedForceRenew: 17,
+		PendingEvicted: 16, RepliesDroppedForceRenew: 17, RepliesDroppedBadCiaddr: 18,
 	}})
 	got := output.String()
 	want := "\nRelay statistics:\n" +
@@ -101,8 +101,8 @@ func TestWriteDHCPRelayStatsV4OnlyByteStable11694(t *testing.T) {
 		"  Interface        Dropped (unknown server)\n" +
 		"  lan              12\n" +
 		"\nReply request binding (#6562):\n" +
-		"  Interface        Pending        Dropped (no-request)   Pending evicted  Refused (forcerenew)\n" +
-		"  lan              13/14          15                     16               17\n"
+		"  Interface        Pending        Dropped (no-request)   Pending evicted  Refused (forcerenew)   Dropped (bad-ciaddr)\n" +
+		"  lan              13/14          15                     16               17                     18\n"
 	if got != want {
 		t.Fatalf("v4-only relay statistics output drifted\n got: %q\nwant: %q", got, want)
 	}
