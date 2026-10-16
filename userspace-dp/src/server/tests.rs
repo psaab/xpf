@@ -8364,6 +8364,20 @@ const PPTP_RESOLVE_NEEDLE: &str =
 fn pptp_drain_line(src: &str, needle: &str) -> Option<usize> {
     src.lines().position(|l| l.trim_start().starts_with(needle))
 }
+/// Match the resolver only when its result is assigned to `flow`. Rustfmt may
+/// put the call on the line after the assignment.
+fn pptp_resolve_assignment_line(src: &str) -> Option<usize> {
+    let lines: Vec<_> = src.lines().collect();
+    lines.iter().enumerate().find_map(|(i, line)| {
+        let line = line.trim();
+        let assigned_inline = line.starts_with("flow = ") && line.contains(PPTP_RESOLVE_NEEDLE);
+        let assigned_wrapped = line == "flow ="
+            && lines
+                .get(i + 1)
+                .is_some_and(|next| next.trim_start().starts_with(PPTP_RESOLVE_NEEDLE));
+        (assigned_inline || assigned_wrapped).then_some(i)
+    })
+}
 
 /// OVER-REACH CONTROL for `worker_loop_drains_the_pptp_control_inbox_7699`.
 ///
@@ -8531,7 +8545,7 @@ fn descriptor_loop_resolves_the_pptp_data_channel_7699() {
                  ordering claim is anchored to a line that no longer exists (#7699)"
             )
         });
-    let resolve_at = pptp_drain_line(src, PPTP_RESOLVE_NEEDLE).unwrap_or_else(|| {
+    let resolve_at = pptp_resolve_assignment_line(src).unwrap_or_else(|| {
         panic!(
             "the descriptor loop does not call pptp_data_session_flow: a GRE \
              version-1 data packet never consults the association table, so two \
@@ -8559,29 +8573,29 @@ fn pptp_resolve_guard_does_not_accept_a_mention_7699() {
     const PROSE: &str =
         "        // the resolve rides flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain( here\n";
     const REAL: &str =
+        "        flow =\n            crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n                packet_frame,\n";
+    const UNASSIGNED: &str =
         "        crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n            packet_frame,\n";
 
     assert!(
-        pptp_drain_line(COMMENTED_OUT, PPTP_RESOLVE_NEEDLE).is_none(),
-        "the guard accepts a COMMENTED-OUT resolve, so deleting the call by \
-         commenting it out would report the data channel as wired (#7699)"
+        pptp_resolve_assignment_line(COMMENTED_OUT).is_none(),
+        "the guard accepts a COMMENTED-OUT resolve"
     );
     assert!(
-        pptp_drain_line(PROSE, PPTP_RESOLVE_NEEDLE).is_none(),
-        "the guard accepts a PROSE mention, so a comment naming the function \
-         would report the data channel as wired (#7699)"
+        pptp_resolve_assignment_line(PROSE).is_none(),
+        "the guard accepts a PROSE mention"
     );
     assert!(
-        pptp_drain_line(REAL, PPTP_RESOLVE_NEEDLE).is_some(),
-        "the guard does not match a body that plainly contains the real call — \
-         it is searching for something unreachable and would pass nothing, \
-         ever (#7699)"
+        pptp_resolve_assignment_line(UNASSIGNED).is_none(),
+        "the guard accepts a resolver call that is not assigned to flow"
+    );
+    assert!(
+        pptp_resolve_assignment_line(REAL).is_some(),
+        "the guard does not match an assigned wrapped resolver call"
     );
     assert!(
         pptp_drain_line(REAL, PPTP_DRAIN_NEEDLE).is_none(),
-        "the resolve needle and the drain needle are not distinct, so one \
-         guard's body satisfies the other's and neither binds what it names \
-         (#7699)"
+        "the resolve needle and the drain needle are not distinct"
     );
 }
 
