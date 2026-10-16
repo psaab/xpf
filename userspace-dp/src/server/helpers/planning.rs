@@ -1094,12 +1094,19 @@ pub(crate) fn replan_bindings_from_candidates(
             let mut binding = existing_by_identity
                 .remove(&(iface.clone(), queue_id as u32))
                 .unwrap_or_default();
-            let had_existing = binding.last_change.is_some()
-                || binding.registered
-                || binding.armed
-                || binding.ready
-                || binding.bound
-                || binding.xsk_registered;
+            // A non-positive prior ifindex means the previous plan could not
+            // register this binding. Its stamped `last_change` is not evidence
+            // of an installed binding: when the ifindex later resolves, treat
+            // it as newly registered so it inherits the current global arm
+            // state. Otherwise it would remain permanently unregistered and
+            // unarmed because the caller suppresses unchanged arm-state RPCs.
+            let had_existing = binding.ifindex > 0
+                && (binding.last_change.is_some()
+                    || binding.registered
+                    || binding.armed
+                    || binding.ready
+                    || binding.bound
+                    || binding.xsk_registered);
             binding.slot = slot;
             binding.queue_id = queue_id as u32;
             binding.worker_id = (queue_id % workers.max(1)) as u32;
