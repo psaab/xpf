@@ -69,22 +69,56 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 		}
 		// #14192: a role name spelled with a unit (control-interface hb.1,
 		// fabric-interface ge-0/0/0.100) declares that UNIT as the lifeline,
-		// not a new interface. Its declared key must read true.
+		// not a new interface. Its declared key must read true. #14302:
+		// when that same DOTTED spelling is a DECLARED interface (hb.1
+		// declared with units hb.1.<unit>), it is an interface identity,
+		// not a unit of a shorter parent (hb is undeclared or a sibling),
+		// so its declared units are units OF the lifeline and must not
+		// stay registered false. A BARE designated name (ge-0/0/0) is the
+		// #14192 case instead: only its unit 0 shares its netdev, so its
+		// other declared units stay false below.
 		if cfg.Chassis.Cluster != nil {
 			cc := cfg.Chassis.Cluster
 			for _, role := range []string{cc.ControlInterface, cc.FabricInterface, cc.Fabric1Interface} {
 				if role = strings.TrimSpace(role); role == name {
 					set[name] = true
+					if strings.Contains(name, ".") {
+						for unit := range ifc.Units {
+							set[name+"."+strconv.Itoa(unit)] = true
+						}
+					}
 				}
 			}
 		}
 	}
 	if cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
+		// #14302: dotted role spellings that are themselves DECLARED
+		// interfaces (control-interface hb.1 with hb.1 declared) name an
+		// interface, not a unit of a shorter parent; their declared units
+		// are units OF the lifeline. Compute that set before the walks
+		// below so markBaseLifeline does not re-demote them.
+		dottedLifelineBases := map[string]bool{}
+		for _, role := range []string{cc.ControlInterface, cc.FabricInterface, cc.Fabric1Interface} {
+			role = strings.TrimSpace(role)
+			if role == "" || !strings.Contains(role, ".") {
+				continue
+			}
+			if ifc, declared := cfg.Interfaces.Interfaces[role]; declared && ifc != nil {
+				dottedLifelineBases[role] = true
+			}
+		}
 		markBaseLifeline := func(base string) {
 			set[base] = true
 			if iface := cfg.Interfaces.Interfaces[base]; iface != nil {
 				for unit, u := range iface.Units {
+					// #14302: a declared dotted lifeline owns every declared
+					// unit, VLAN-tagged or not (hb.1.7 is the lifeline's own
+					// netdev, not a transit VLAN of a bare parent).
+					if dottedLifelineBases[base] {
+						set[base+"."+strconv.Itoa(unit)] = true
+						continue
+					}
 					// #14192: a VLAN-tagged unit has a distinct netdev
 					// and never inherits a bare parent lifeline; an
 					// untagged unit keeps the prior unit==0 rule.
@@ -106,13 +140,18 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 			// register it explicitly so the declared-unit false above does
 			// not strand it (ge-0/0/0.0, hb.1.0, ge-0/0/0.100.0).
 			set[name+".0"] = true
-			// #14192: a role spelled at a non-zero unit (fabric-interface
-			// ge-0/0/0.100) designates that unit only; never promote its
-			// bare parent, whose netdev is shared with other units.
-			if base, suf, hasSuffix := strings.Cut(name, "."); hasSuffix {
-				if _, unit, err := CanonicalLogicalUnit(suf); err == nil && unit != "0" {
-					if _, declared := set[base]; declared {
-						set[base] = false
+			// #14302: when the role spelling is itself a DECLARED interface
+			// (hb.1 declared with units hb.1.<unit>) it names that interface,
+			// not a unit of a shorter parent, so the naive-cut demotion of its
+			// prefix (hb) must not run. For undeclared-parent spellings the
+			// #14192 rule stands: a role at a non-zero unit designates that
+			// unit only; never promote its bare parent.
+			if _, roleDeclared := cfg.Interfaces.Interfaces[name]; !roleDeclared {
+				if base, suf, hasSuffix := strings.Cut(name, "."); hasSuffix {
+					if _, unit, err := CanonicalLogicalUnit(suf); err == nil && unit != "0" {
+						if _, declared := set[base]; declared {
+							set[base] = false
+						}
 					}
 				}
 			}
