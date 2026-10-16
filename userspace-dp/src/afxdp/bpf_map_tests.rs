@@ -1787,7 +1787,7 @@ fn conntrack_rmw_refresh_declines_under_gate_lease_13668() {
     let policy = crate::policy::PolicyState::default();
     let _lease = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease([key.clone()]).expect("lease");
     let _ = refresh_bpf_conntrack_last_seen(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &table, &policy, 2_000_000_000, 0, 4096);
-    assert_eq!(crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(), 0, "#13668 refresh RMW must decline under lease");
+    { assert_eq!(crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(), 0, "#13668 refresh RMW must decline under lease"); drop(_lease); let _ = refresh_bpf_conntrack_last_seen(crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD, -1, &table, &policy, 2_000_000_000, 0, 4096); assert_eq!(crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(), 1, "#13668 unleased refresh must write"); };
 }
 
 #[test]
