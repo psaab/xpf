@@ -1991,6 +1991,77 @@ fn post_transform_wg_inner_mtu_is_per_peer_underlay() {
     );
 }
 
+#[test]
+fn post_transform_wg_inner_mtu_charges_selected_peer_family_14118() {
+    // #14118 family axis at the PTB seam: a single-peer v6-outer fixture
+    // whose endpoint ROW was built as v4 (the builder canonicalizes the
+    // transport table from the row family, so a mixed-family two-peer
+    // row cannot be expressed in one snapshot — that mixed case is
+    // covered end-to-end by the segmenter test, which flips the live
+    // engine peer). Here the row family is flipped to inet6 AFTER
+    // building the v4 state, leaving `endpoint.wg_peers` (the selected
+    // peer source) as built; the helper must charge the peer endpoint's
+    // family (v6), which the flipped row also reports — so instead pin
+    // the helper directly: construct the state, then set the ROW family
+    // back to v4 while keeping the v6 peer endpoint. `wg_peer_outer_dst`
+    // reads the engine/peer list, not the row, so the selected family
+    // stays v6 and the budget must be the v6 one.
+    let mut snap = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
+    {
+        let ep = &mut snap.tunnel_endpoints[0];
+        ep.outer_family = "inet6".to_string();
+        ep.source = "2001:559:8585:80::8".to_string();
+        ep.wg_peers[0].wg_endpoint = "[2001:db8:c0::7]:51820".to_string();
+        ep.transport_table = "inet6.0".to_string();
+    }
+    snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
+        family: "inet6".to_string(),
+        address: "2001:559:8585:80::8/64".to_string(),
+        scope: 0,
+    });
+    snap.routes = vec![crate::RouteSnapshot {
+        reject: false,
+        table: "inet6.0".to_string(),
+        family: "inet6".to_string(),
+        destination: "2001:db8:c0::/64".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    }];
+    let mut state = build_forwarding_state(&snap);
+    // Flip ONLY the row family back to v4: the selected peer (engine +
+    // wg_peers) still points at the v6 endpoint.
+    state
+        .tunnel_endpoints
+        .get_mut(&1)
+        .expect("wg endpoint")
+        .outer_family = libc::AF_INET;
+    let decision = wg_logical_tunnel_decision(400, 1);
+    let inner_dst = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 9));
+    let mtu = post_transform_inner_mtu(
+        &decision,
+        &state,
+        false,
+        libc::AF_INET as u8,
+        0,
+        Some(inner_dst),
+    );
+    assert_eq!(
+        mtu,
+        crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET6, 1500),
+        "selected v6 peer PTB must charge v6 overhead (1405), not the flipped row-family v4 value (1425)"
+    );
+    assert_ne!(
+        mtu,
+        crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET, 1500),
+        "fixture must separate selected-peer family from row family"
+    );
+}
+
 /// #8896: a NAT64 packet routed through a tunnel must have BOTH budgets
 /// applied — the tunnel's encapsulation overhead AND the RFC 7915 header
 /// delta. Before #8896 this function selected rather than composed: the

@@ -157,6 +157,49 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit(
     // overhead here. An unknown/missing tunnel mode yields a 0 budget,
     // which short-circuits to `None` below (fail-closed) and matches the
     // encap dispatch's Unknown-drop arm.
+    //
+    // #14118: for WireGuard the outer family and outer MTU MUST follow the
+    // SELECTED peer, not the endpoint row. `wg_encap_frame` picks the peer
+    // by cryptokey routing (AllowedIPs LPM on the inner destination) and
+    // derives the outer family from that peer endpoint's address
+    // (`peer_endpoint.is_ipv6()`, canonicalized) and its MTU guard from the
+    // physical route to that peer endpoint. `endpoint.outer_family` /
+    // `tunnel_outer_mtu` describe the endpoint row's placeholder transport
+    // (for WG the destination is zeroed), so sizing segments from them can
+    // exceed what the selected peer's underlay admits — the segmenter would
+    // build segments the encap guard then drops. Mirror the PTB SSOT
+    // (`icmp_ptb::tunnel_inner_mtu`, #2684/#2845): select the same peer from
+    // the frame's inner destination (post-NAT when the decision rewrites
+    // it — the encap builder LPMs the post-NAT frame) and size from
+    // `wg_endpoint_physical_outer_mtu` with that peer's family. No usable
+    // inner destination / no covering peer keeps the physical helper's
+    // first-peer/logical fallback, byte-identical in the single-underlay
+    // common case.
+    let inner_dst_for_wg = if decision.resolution.tunnel_endpoint_id != 0 {
+        // The encap path reads the POST-NAT inner frame; the decision's
+        // rewrite (when it applies to this packet) is therefore the key the
+        // encap peer LPM will see. NAT64 has already returned via the
+        // dispatcher gate, but a direct caller may carry it: the translated
+        // destination is `rewrite_dst` for the forward direction and is not
+        // recoverable for the reverse direction, so only trust `rewrite_dst`
+        // there when it is present.
+        if decision.nat.rewrite_dst.is_some() {
+            decision.nat.rewrite_dst
+        } else if decision.nat.nat64 {
+            // Reverse NAT64 (or a forward packet without a translated dst):
+            // the post-translation peer key is unavailable here; let the
+            // physical helper fall back instead of LPMing the
+            // pre-translation frame destination.
+            None
+        } else {
+            frame_l3_offset(frame)
+                .or_else(|| nibble_trusted_stamp(frame, meta.l3_offset, meta.addr_family))
+                .and_then(|l3| frame.get(l3..))
+                .and_then(|pkt| crate::afxdp::gre::inner_dst_ip(pkt, meta.addr_family))
+        }
+    } else {
+        None
+    };
     let mtu = if decision.resolution.tunnel_endpoint_id != 0 {
         // For a tunnel the inner-L3 budget is the encap-mode's exact inner
         // MTU, constrained further by the selected overlay route's MTU when
@@ -178,8 +221,10 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit(
                 let endpoint = forwarding
                     .tunnel_endpoints
                     .get(&decision.resolution.tunnel_endpoint_id)?;
-                let outer_mtu = tunnel_outer_mtu(forwarding, decision, endpoint);
-                crate::afxdp::wg::mss::wg_inner_mtu(endpoint.outer_family, outer_mtu)
+                let (outer_family, outer_mtu) = crate::afxdp::frame::wg_selected_peer_outer(
+                    decision, forwarding, endpoint, inner_dst_for_wg,
+                );
+                crate::afxdp::wg::mss::wg_inner_mtu(outer_family, outer_mtu)
             }
             // Unknown mode or missing endpoint row: 0 budget → None below.
             Some(TunnelKind::Unknown) | None => 0,
@@ -1745,6 +1790,212 @@ mod mode_aware_segmentation_tests {
             out.is_none(),
             "a v6 declaration shorter than the IP+TCP headers must fail closed (not segment)"
         );
+    }
+
+    // ------- (e) #14118 selected-peer outer family / route MTU -------
+
+    #[test]
+    fn wg_segmentation_sizes_to_selected_v6_peer_not_endpoint_v4_row_14118() {
+        // #14118 RED-on-revert: state from the realistic snapshot (logical
+        // wg0.0 MTU 1420, physical reth0.80 MTU 1500) with a v6 underlay
+        // route/primary added; the live engine's selected peer is a v6
+        // endpoint covering the inner dst. Pre-fix sizing read
+        // `tunnel_outer_mtu`, which for WG (destination zeroed) falls back
+        // to the LOGICAL 1420 — and charged the row family — yielding a
+        // budget that mismatches the selected peer's physical guard.
+        // Post-fix the largest inner must equal the selected-peer budget
+        // wg_inner_mtu(AF_INET6, 1500) = 1405. Reverting the segmenter to
+        // `tunnel_outer_mtu`+row family fails this exact-equality check.
+        let mut snap = crate::afxdp::test_fixtures::wg_outer_mtu_snapshot();
+        snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "2001:559:8585:80::8/64".to_string(),
+            scope: 0,
+        });
+        snap.routes.push(crate::RouteSnapshot {
+            reject: false,
+            table: "inet6.0".to_string(),
+            family: "inet6".to_string(),
+            destination: "2001:db8:c0::/48".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+            mtu: 0,
+        });
+        snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
+        snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
+        let mut state = crate::afxdp::forwarding_build::build_forwarding_state(&snap);
+        {
+            let nh: IpAddr = "2001:559:8585:80::1".parse().unwrap();
+            state.neighbors.insert(
+                (12, nh),
+                NeighborEntry { mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55] },
+            );
+        }
+        let (init_engine, resp_engine) = established_engine_pair_v6("10.123.0.0/24");
+        state.wg_engines.insert(TUN_ID, Arc::new(init_engine));
+        let decision = SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::MissingNeighbor,
+                local_ifindex: 0,
+                egress_ifindex: 400,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: TUN_ID,
+                next_hop: None,
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let frame = ipv4_tcp_frame_dst(2000, Ipv4Addr::new(10, 123, 0, 9));
+        let segments = segment_forwarded_tcp_frames_from_frame(
+            &frame,
+            meta_v4(),
+            &decision,
+            &state,
+            false,
+            None,
+        )
+        .expect("WG segmentation must produce frames for the selected v6 peer");
+        assert!(segments.len() > 1);
+        let want = crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET6, 1500);
+        assert_eq!(want, 1405);
+        let eth_len = if segments[0][12] == 0x81 { 18 } else { 14 };
+        let inner_lens: Vec<usize> = segments
+            .iter()
+            .map(|seg| wg_decap_inner_ipv4_total_len_any_outer(seg, eth_len, &resp_engine))
+            .collect();
+        assert!(
+            inner_lens.iter().all(|l| *l <= want),
+            "every inner must fit the selected v6 peer budget {want}: {inner_lens:?}"
+        );
+        assert_eq!(
+            inner_lens.iter().max().copied(),
+            Some(want),
+            "full segment must be sized to the SELECTED peer (v6/1405), not the endpoint row family (v4)"
+        );
+    }
+
+    fn established_engine_pair_v6(peer_cidr: &str) -> (WgEngine, WgEngine) {
+        let (init_priv, init_pub) = keypair();
+        let (resp_priv, resp_pub) = keypair();
+        let peer_ep: std::net::SocketAddr = "[2001:db8:c0::7]:51820".parse().unwrap();
+        let init_engine = WgEngine::new(WgEngineConfig {
+            local_private_key: init_priv.into(),
+            listen_port: 51820,
+            peers: vec![WgPeerConfig {
+                pubkey: resp_pub,
+                endpoint: Some(peer_ep),
+                persistent_keepalive: 0,
+                allowed_ips: vec![peer_cidr.parse().unwrap()],
+                preshared_key: [0u8; 32].into(),
+            }],
+        });
+        let resp_engine = WgEngine::new(WgEngineConfig {
+            local_private_key: resp_priv.into(),
+            listen_port: 51820,
+            peers: vec![WgPeerConfig {
+                pubkey: init_pub,
+                endpoint: None,
+                persistent_keepalive: 0,
+                allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
+                preshared_key: [0u8; 32].into(),
+            }],
+        });
+        let mut init_hs = init_engine.build_initiator_handshake(&resp_pub).unwrap();
+        let mut resp_hs = resp_engine.build_responder_handshake().unwrap();
+        let mut buf = [0u8; 1024];
+        let mut sink = [0u8; 1024];
+        let n1 = init_hs.write_message(&[], &mut buf).unwrap();
+        resp_hs.read_message(&buf[..n1], &mut sink).unwrap();
+        let n2 = resp_hs.write_message(&[], &mut buf).unwrap();
+        init_hs.read_message(&buf[..n2], &mut sink).unwrap();
+        let init_xport = init_hs.into_stateless_transport_mode().unwrap();
+        let resp_xport = resp_hs.into_stateless_transport_mode().unwrap();
+        let now = crate::afxdp::wg::counters::monotonic_now_ns();
+        let init_local = 0xaaaa_0002u32;
+        let resp_local = 0xbbbb_0002u32;
+        init_engine
+            .install_session(
+                &resp_pub,
+                Arc::new(WgSession::new_with_role(
+                    init_xport,
+                    init_local,
+                    resp_local,
+                    resp_pub,
+                    SessionRole::Initiator,
+                    now,
+                )),
+            )
+            .unwrap();
+        let resp_session = Arc::new(WgSession::new_with_role(
+            resp_xport,
+            resp_local,
+            init_local,
+            init_pub,
+            SessionRole::Responder,
+            now,
+        ));
+        resp_session.mark_confirmed();
+        resp_engine.install_session(&init_pub, resp_session).unwrap();
+        (init_engine, resp_engine)
+    }
+
+    fn ipv4_tcp_frame_dst(payload_len: usize, dst_ip: Ipv4Addr) -> Vec<u8> {
+        let src_ip = Ipv4Addr::new(10, 123, 0, 5);
+        let tcp_header_len = 20usize;
+        let total_len = (20 + tcp_header_len + payload_len) as u16;
+        let mut frame = Vec::new();
+        write_eth_header(
+            &mut frame,
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+            [0x02, 0xbf, 0x72, 0x00, 0x50, 0x08],
+            0,
+            0x0800,
+        );
+        frame.extend_from_slice(&[
+            0x45, 0x00, (total_len >> 8) as u8, total_len as u8, 0x00, 0x01, 0x40, 0x00, 64,
+            PROTO_TCP, 0x00, 0x00,
+        ]);
+        frame.extend_from_slice(&src_ip.octets());
+        frame.extend_from_slice(&dst_ip.octets());
+        frame.extend_from_slice(&40000u16.to_be_bytes());
+        frame.extend_from_slice(&5201u16.to_be_bytes());
+        frame.extend_from_slice(&[
+            0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x10, 0x00, 0x3f, 0x00, 0x00,
+            0x00, 0x00,
+        ]);
+        frame.extend((0..payload_len).map(|i| (i & 0xff) as u8));
+        let ip_sum = checksum16(&frame[14..34]);
+        frame[24] = (ip_sum >> 8) as u8;
+        frame[25] = ip_sum as u8;
+        recompute_l4_checksum_ipv4(&mut frame[14..], 20, PROTO_TCP, false).expect("tcp sum");
+        frame
+    }
+
+    fn wg_decap_inner_ipv4_total_len_any_outer(
+        seg: &[u8],
+        eth_len: usize,
+        engine: &WgEngine,
+    ) -> usize {
+        let ether = u16::from_be_bytes([seg[eth_len - 2], seg[eth_len - 1]]);
+        let outer_ip_len = if ether == 0x86dd { 40 } else { 20 };
+        let wg_record = &seg[eth_len + outer_ip_len + 8..];
+        let mut plain = [0u8; 4096];
+        let dec = engine
+            .try_decap(wg_record, &mut plain)
+            .expect("WG outer must decrypt");
+        let inner = &plain[..dec.len];
+        assert_eq!(inner[0] >> 4, 4, "decapped inner must be IPv4");
+        u16::from_be_bytes([inner[2], inner[3]]) as usize
     }
 
     // ------- decap helper -------------------------------------------

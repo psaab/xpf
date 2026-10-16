@@ -374,10 +374,16 @@ fn tunnel_inner_mtu(
             // derived from the SAME peer the encap path will select (per-peer
             // underlay), not an arbitrary first peer's. Two peers of one wg
             // interface can egress different underlays with different MTUs.
-            let outer_mtu = crate::afxdp::frame::wg_endpoint_physical_outer_mtu(
+            //
+            // #14118: the outer FAMILY must follow that same selected peer
+            // too. Peers of one interface may mix v4 and v6 endpoints; the
+            // endpoint row's `outer_family` (its placeholder transport)
+            // charges the wrong overhead (20B) for a peer of the other
+            // family, mis-sizing the advertised inner MTU.
+            let (outer_family, outer_mtu) = crate::afxdp::frame::wg_selected_peer_outer(
                 decision, forwarding, endpoint, inner_dst,
             );
-            crate::afxdp::wg::mss::wg_inner_mtu(endpoint.outer_family, outer_mtu)
+            crate::afxdp::wg::mss::wg_inner_mtu(outer_family, outer_mtu)
         }
         TunnelKind::Unknown => 0,
     }

@@ -19,7 +19,7 @@ pub(in crate::afxdp) use generated::generated_reply_session_key;
 // dispatcher's `post_transform_inner_mtu` (icmp_ptb.rs) derives the PTB
 // inner MTU from the SAME physical underlay the encap drop guard admits
 // against (the `mod wg` submodule itself is private to `frame`).
-pub(in crate::afxdp) use wg::wg_endpoint_physical_outer_mtu;
+pub(in crate::afxdp) use wg::{wg_endpoint_physical_outer_mtu, wg_selected_peer_outer};
 
 // #6308: the WG transit-egress DISPATCH physical-egress SSOT, re-exported so
 // the forward-request builder (`forward_request.rs`) selects the same physical
