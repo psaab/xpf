@@ -1541,10 +1541,10 @@ pub(super) fn populate_egress(
         let vlan_id =
             super::validated::VlanId::try_from_snapshot(iface.vlan_id, &iface.name)?.get();
         if iface.parent_ifindex > 0 && vlan_id > 0 {
-            // The physical parent is the normal bind target, but some XDP
-            // attachments can report the configured VLAN child directly.
+            // Generic XDP on a VLAN child runs after Linux strips the wire
+            // tag. VID 0 there is the child's configured VLAN, not untagged
+            // parent ingress, so only the bind parent is tagged-only.
             tagged_only_ingress_ifindexes.insert(bind_ifindex);
-            tagged_only_ingress_ifindexes.insert(iface.ifindex);
         }
         // The base interface row is not a logical untagged identity. Unit 0
         // without a VLAN id is explicit and keeps its existing VID-0 fallback.

@@ -1471,14 +1471,15 @@ Scope of the fallback:
 
   **#12055 shim local-delivery guard.** The AF_XDP worker's tagged-only VID-0
   check runs too late for packets the XDP shim already returns to the kernel as
-  firewall-local. The daemon therefore publishes two bits in the existing
-  `userspace_ingress_ifaces` byte: adjudicated ingress (bit 0) and tagged-only
-  VID-0 scope (bit 1), derived from tagged child, explicit unit-0, and native
-  VLAN ownership. Before either the healthy or degraded shim can take a local
-  PASS, an IP packet with VID 0 to an `is_local_destination` address on a
-  tagged-only ingress is dropped and counted as `tagged_only_local_drop`.
-  Tagged traffic and ordinary untagged ingress retain their prior local-delivery
-  behavior.
+  firewall-local. The daemon publishes adjudicated-ingress (bit 0) and
+  tagged-only VID-0 scope (bit 1) in `userspace_ingress_ifaces`. Tagged-only
+  scope is attached to the bind parent only; Linux strips the VLAN header
+  before generic XDP runs again on a VLAN child, where VID 0 represents the
+  child's configured VLAN rather than untagged wire ingress. Before either the
+  healthy or degraded shim can take a local PASS, an IP packet with VID 0 to an
+  `is_local_destination` address on a tagged-only parent is dropped and counted
+  as `tagged_only_local_drop`. Tagged frames received on the parent, including
+  local traffic passed to its VLAN child, retain their prior behavior.
 
 
   Junos zones logical UNITS, so a gap still runs the other way: `st0.0` and

@@ -3270,6 +3270,10 @@ fn tagged_only_ingress_respects_legacy_unit_metadata_11297() {
         !unknown_ingress_vlan(&legacy_unit_zero, 81, 0),
         "legacy snapshots must preserve an explicit untagged unit 0"
     );
+    assert!(
+        !unknown_ingress_vlan(&legacy_unit_zero, 82, 0),
+        "the VLAN child's generic-XDP hook sees the configured VLAN after kernel untagging"
+    );
 
     let dotted_base_unit_zero = build_forwarding_state(&ConfigSnapshot {
         interfaces: vec![
