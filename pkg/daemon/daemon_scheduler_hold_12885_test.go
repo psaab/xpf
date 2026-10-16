@@ -68,3 +68,29 @@ func TestApplySeedingFailsClosedForUnavailableZone13919(t *testing.T) {
 		t.Fatalf("unavailable zone staged = %v failClosed=%t, want inactive plus deny-eligible disposition", staged, failClosed)
 	}
 }
+
+func TestApplySeedingRecoversFromUnavailableTimezone13919(t *testing.T) {
+	now := time.Date(2026, 2, 12, 12, 0, 0, 0, time.UTC)
+	defs := map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours", AllDay: true},
+	}
+	oldCfg := &config.Config{
+		System:     config.SystemConfig{TimeZone: "America/Los_Angels"},
+		Schedulers: defs,
+	}
+	newCfg := &config.Config{
+		System:     config.SystemConfig{TimeZone: "UTC"},
+		Schedulers: defs,
+	}
+	oldHash, _ := policySchedulerConfigHash(oldCfg)
+	oldScheduler, _ := scheduler.NewPrimedInLocation(
+		defs, func(context.Context, map[string]bool) error { return nil }, now, nil,
+	)
+	d := &Daemon{policySchedulerConfigHash: oldHash}
+	d.scheduler.Store(oldScheduler)
+
+	staged, failClosed := d.policySchedulerActiveStateAndFailClosedForApplyLocked(newCfg, now)
+	if failClosed || !staged["workhours"] {
+		t.Fatalf("valid-zone generation staged = %v failClosed=%t, want active workhours without inherited old-zone failure", staged, failClosed)
+	}
+}
