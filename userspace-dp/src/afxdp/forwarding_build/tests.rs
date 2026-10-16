@@ -2020,6 +2020,59 @@ fn native_vlan_ambiguous_matching_units_reject_duplicate_ingress_key_11434_11461
     ));
 }
 
+#[test]
+fn native_vlan_native_unit_egress_is_untagged_13979() {
+    const PARENT: i32 = 10;
+    const NATIVE_UNIT: i32 = 100;
+    const TAGGED_UNIT: i32 = 200;
+
+    let state = build_forwarding_state(&ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0-0-1".into(),
+                ifindex: PARENT,
+                native_vlan_id: 100,
+                is_unit: Some(false),
+                hardware_addr: "02:bf:72:00:00:0a".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1.100".into(),
+                ifindex: NATIVE_UNIT,
+                parent_ifindex: PARENT,
+                vlan_id: 100,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1.200".into(),
+                ifindex: TAGGED_UNIT,
+                parent_ifindex: PARENT,
+                vlan_id: 200,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    assert_eq!(
+        state.egress_tx_vlan_id(NATIVE_UNIT),
+        0,
+        "frames toward the native unit must leave untagged"
+    );
+    assert_eq!(
+        state.egress_tx_vlan_id(TAGGED_UNIT),
+        200,
+        "non-native units keep their 802.1Q tag"
+    );
+    assert_eq!(
+        state.egress_tx_vlan_id(PARENT),
+        0,
+        "untagged/access egress stays untagged"
+    );
+    assert_eq!(state.egress_tx_vlan_id(999), 0, "unknown ifindex is untagged");
+}
+
 // #3070: host-inbound-traffic enforcement. A configured zone admits only its
 // listed system-services / protocols for host-bound (local-delivery) traffic;
 // an unconfigured zone admits everything (admit-all default). Reverting the

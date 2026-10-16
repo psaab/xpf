@@ -1468,6 +1468,13 @@ Scope of the fallback:
   #11297's tagged-only guard remains for VID 0 when there is no explicit unit 0
   or resolvable native mapping. Ordinary untagged ports without the knob retain
   their physical fallback; other contested parent identities remain fail-closed.
+  **#13979 native VLAN egress.** A native unit remains keyed by its configured
+  VID for ingress identity, but forwarding emits frames through that unit
+  untagged. `populate_egress` records the uniquely resolved native unit and
+  the shared egress-resolution path returns wire VID 0 for it; other VLAN
+  units retain their configured tag. Regression coverage is in
+  `forwarding_build/tests.rs::native_vlan_native_unit_egress_is_untagged_13979`.
+
 
   **#12055 shim local-delivery guard.** The AF_XDP worker's tagged-only VID-0
   check runs too late for packets the XDP shim already returns to the kernel as

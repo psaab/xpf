@@ -169,7 +169,7 @@ cached: ForwardingResolution,) -> Option<ForwardingResolution> {
             fallback.src_mac = Some(egress.src_mac);
         }
         if fallback.tx_vlan_id == 0 {
-            fallback.tx_vlan_id = egress.vlan_id;
+            fallback.tx_vlan_id = forwarding.egress_tx_vlan_id(fallback.egress_ifindex);
         }
     }
     Some(fallback)
@@ -188,7 +188,7 @@ resolution: &mut ForwardingResolution,) {
             egress_ifindex
         };
         resolution.src_mac = Some(egress.src_mac);
-        resolution.tx_vlan_id = egress.vlan_id;
+        resolution.tx_vlan_id = state.egress_tx_vlan_id(egress_ifindex);
     } else if resolution.tx_ifindex <= 0 {
         resolution.tx_ifindex = egress_ifindex;
     }

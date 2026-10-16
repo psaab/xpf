@@ -404,10 +404,14 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) packet_too_big_buckets:
         FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     pub(in crate::afxdp) egress: FastMap<i32, EgressInterface>,
+    /// Logical units whose configured VLAN is carried untagged on the wire
+    /// because their VLAN is the parent's native VLAN (#13979).
+    pub(in crate::afxdp) native_vlan_egress_ifindexes: FastSet<i32>,
     /// #11404: positive ifindexes whose snapshot rows explicitly report the
     /// egress link down. Missing state remains compatible with legacy snapshots.
     pub(in crate::afxdp) egress_link_down: FastSet<i32>,
     pub(in crate::afxdp) ingress_logical_ifindex: FastMap<(i32, u16), i32>,
+
     /// #11297/#11434: ifindexes where VID 0 is rejected: tagged-only physical
     /// bind targets and tagged VLAN children, plus native-VLAN parents without
     /// a unique matching unit. A valid native mapping or explicit unit 0
@@ -1039,6 +1043,17 @@ impl ForwardingState {
     /// every state and leaves no branch to mutate; the binder that survives is
     /// on the map this reads, not on the arm order (see that test's rewritten
     /// body).
+    /// Wire VID for an egress logical interface. Native-VLAN units map to
+    /// VID 0 on TX while retaining their configured VID for ingress lookup.
+    #[inline]
+    pub(in crate::afxdp) fn egress_tx_vlan_id(&self, ifindex: i32) -> u16 {
+        if self.native_vlan_egress_ifindexes.contains(&ifindex) {
+            0
+        } else {
+            self.egress.get(&ifindex).map(|iface| iface.vlan_id).unwrap_or(0)
+        }
+    }
+
     #[inline]
     pub(in crate::afxdp) fn egress_zone_id(&self, egress_ifindex: i32) -> u16 {
         self.ifindex_unambiguous_zone_id

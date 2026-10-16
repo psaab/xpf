@@ -11519,8 +11519,9 @@ reserved for whole-dataplane selection where a rewrite shim
   four still carry an accepted-only advisory:
   - `native-vlan-id <id>` (interface-level, `ValidateInteger(1, 4094)`) —
     untagged VID-0 ingress resolves to the logical unit whose `vlan-id`
-    matches the configured native VLAN. If that unit is absent or ambiguous,
-    VID 0 is rejected rather than assigned the parent/unit-0 zone (#11434).
+    matches the configured native VLAN; egress through that unit is untagged
+    (#13979). If the matching unit is absent or ambiguous, VID 0 is rejected
+    rather than assigned the parent/unit-0 zone (#11434).
     `commit` and `commit check` warn, naming the interface and VLAN, when
     no unit or more than one unit has that `vlan-id`; the configuration is
     still accepted (#12248).
