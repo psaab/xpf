@@ -2009,3 +2009,189 @@ fn an_owner_bare_syn_preserves_closing_pair_when_tuple_gate_busy_10886() {
     assert_eq!(copies[&forward].tcp_close_class, 1);
     assert_eq!(copies[&reverse].tcp_close_class, 1);
 }
+/// #13938 residual of #10636: the deferring lookup withheld only the
+/// FIN/RST close. Every other mutation inside
+/// `lookup_with_origin_deferring_close_expiry` still ran BEFORE the #9519
+/// authority verdict: a foreign SYN-ACK "reply" promoted the OPENING pair
+/// (forward+reverse), queued an HA Update, and let the client's following
+/// ACK complete the handshake onto the 300s established window — although
+/// the SYN-ACK was dropped (`foreign_authority_drops==1`) and the server
+/// never answered. Likewise a foreign non-closing ACK refreshed
+/// `last_seen_ns`. All pinned through the REAL poll path.
+/// Wire states: 1 = Opening, 2 = HandshakePending, 4 = Established.
+#[test]
+fn a_foreign_syn_ack_is_dropped_without_promoting_the_opening_pair_13938() {
+    let fw = forwarding(WAN_ONLY);
+    let mut sessions = admitted(&fw);
+    let _ = sessions.drain_deltas(16);
+    let (fwd_key, rev_key) = closing_pair_keys(&sessions);
+    assert_eq!(
+        sessions.handshake_state_wire_for(&fwd_key),
+        1,
+        "precondition: the admitted pair is still OPENING after the client SYN"
+    );
+    assert_eq!(
+        sessions.handshake_state_wire_for(&rev_key),
+        1,
+        "precondition: so is the reverse companion"
+    );
+    assert_eq!(
+        sessions.timeout_secs_for(&fwd_key),
+        20,
+        "precondition: on the 20s opening window"
+    );
+    let last_seen_before = sessions
+        .last_seen_ns(&rev_key)
+        .expect("reverse half must be installed");
+
+    // The foreign packet: the server's SYN-ACK "reply", arriving from dmz.
+    let foreign = drive(
+        &fw,
+        &mut sessions,
+        tcp(
+            REAL,
+            CLIENT,
+            REAL_PORT,
+            CLIENT_PORT,
+            TCP_SYN | TCP_ACK,
+            DMZ_IFINDEX,
+        ),
+    );
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz SYN-ACK must HIT the reverse companion, or this cell \
+         exercises the miss path"
+    );
+    assert_eq!(foreign.tx, 0, "the foreign SYN-ACK itself is dropped");
+    assert_eq!(foreign.foreign_authority_drops, 1);
+    assert_eq!(session_count(&sessions), 2, "the pair survives the drop");
+    assert_eq!(
+        sessions.handshake_state_wire_for(&rev_key),
+        1,
+        "a dropped foreign SYN-ACK must not promote the reverse half"
+    );
+    assert_eq!(
+        sessions.handshake_state_wire_for(&fwd_key),
+        1,
+        "nor propagate a promotion to the forward companion (#4109)"
+    );
+    assert_eq!(
+        sessions.timeout_secs_for(&fwd_key),
+        20,
+        "and it must not move the pair off the 20s opening window"
+    );
+    assert_eq!(
+        sessions.last_seen_ns(&rev_key),
+        Some(last_seen_before),
+        "and it must not refresh the reverse half's idle time"
+    );
+    assert!(
+        !sessions
+            .drain_deltas(16)
+            .iter()
+            .any(|d| matches!(d.kind, SessionDeltaKind::Update)),
+        "and it must not emit an HA state Update (#9412)"
+    );
+
+    // The payoff packet: the client's own ACK must NOT complete the
+    // handshake — the server never answered. Pre-fix the foreign promotion
+    // let this land the pair on the 300s established window (#6752).
+    let owner_ack = drive(&fw, &mut sessions, client_ack(WAN_IFINDEX));
+    assert_eq!(owner_ack.tx, 1, "control: the owner's ACK still forwards");
+    assert_eq!(
+        sessions.handshake_state_wire_for(&fwd_key),
+        1,
+        "the owner ACK must leave the pair OPENING: the foreign SYN-ACK was \
+         dropped, so no handshake completion may credit it"
+    );
+    assert_eq!(
+        sessions.timeout_secs_for(&fwd_key),
+        20,
+        "and the pair stays on the 20s opening window, not 300s"
+    );
+}
+
+/// CONTROL for the promotion cell: an OWNER SYN-ACK from the server's own
+/// zone still promotes the reverse half.
+#[test]
+fn an_owner_syn_ack_still_promotes_the_reverse_half_13938() {
+    let fw = forwarding(WAN_ONLY);
+    let mut sessions = admitted(&fw);
+    let (fwd_key, rev_key) = closing_pair_keys(&sessions);
+    let owner = drive(
+        &fw,
+        &mut sessions,
+        tcp(
+            REAL,
+            CLIENT,
+            REAL_PORT,
+            CLIENT_PORT,
+            TCP_SYN | TCP_ACK,
+            LAN_IFINDEX,
+        ),
+    );
+    assert_eq!(owner.session_hit, 1, "the owner SYN-ACK must HIT");
+    assert_eq!(owner.tx, 1, "and forwards");
+    assert_eq!(
+        sessions.handshake_state_wire_for(&rev_key),
+        2,
+        "control: an owner SYN-ACK promotes the reverse half to \
+         HandshakePending (2)"
+    );
+    assert_eq!(
+        sessions.handshake_state_wire_for(&fwd_key),
+        2,
+        "control: and propagates to the forward companion"
+    );
+    assert_eq!(
+        sessions.timeout_secs_for(&fwd_key),
+        20,
+        "promoted-but-uncompleted halves stay on the 20s opening window (#6752)"
+    );
+}
+
+/// Variant (b): a foreign non-closing ACK must not refresh `last_seen_ns`
+/// of an established session it is dropped for (#13938).
+#[test]
+fn a_foreign_ack_is_dropped_without_refreshing_the_session_13938() {
+    let fw = forwarding(WAN_ONLY);
+    let mut sessions = admitted(&fw);
+    let syn_ack = drive(
+        &fw,
+        &mut sessions,
+        tcp(
+            REAL,
+            CLIENT,
+            REAL_PORT,
+            CLIENT_PORT,
+            TCP_SYN | TCP_ACK,
+            LAN_IFINDEX,
+        ),
+    );
+    assert_eq!(syn_ack.session_hit, 1, "the owner SYN-ACK must hit");
+    let final_ack = drive(&fw, &mut sessions, client_ack(WAN_IFINDEX));
+    assert_eq!(final_ack.session_hit, 1, "the final ACK must hit");
+    let (fwd_key, _rev_key) = closing_pair_keys(&sessions);
+    assert_eq!(
+        sessions.handshake_state_wire_for(&fwd_key),
+        4,
+        "precondition: the owner handshake completed (Established)"
+    );
+    let last_seen_before = sessions
+        .last_seen_ns(&fwd_key)
+        .expect("forward half must be installed");
+
+    let foreign = drive(&fw, &mut sessions, client_ack(DMZ_IFINDEX));
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz ACK must HIT the wan session"
+    );
+    assert_eq!(foreign.tx, 0, "the foreign ACK is denied by its own zone");
+    assert_eq!(foreign.foreign_authority_drops, 1);
+    assert_eq!(
+        sessions.last_seen_ns(&fwd_key),
+        Some(last_seen_before),
+        "a dropped foreign ACK must not refresh last_seen_ns \
+         (#13938: dropped packets keep nothing alive)"
+    );
+}
