@@ -534,7 +534,7 @@ func (m *Manager) applyCompiledSnapshot(
 	m.seedHAGroupInventoryLocked(cfg)
 	// Plan classification and the eventual digest/send must observe one interface
 	// sample. Revalidation detaches snap.Interfaces before it compacts in place.
-	prepareSnapshotForApply(snap)
+	m.prepareSnapshotForApply(snap)
 	prevPlanKey := snapshotBindingPlanKey(m.lastSnapshot)
 	newPlanKey := snapshotBindingPlanKey(snap)
 	pendingXSKStartup := m.proc != nil &&

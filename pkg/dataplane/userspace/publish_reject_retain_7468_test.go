@@ -234,7 +234,7 @@ func TestRejectedPublishRollsMapsBackOnlyForAnInBandRefusal7468(t *testing.T) {
 			m.controlRequestHook = func(ControlRequest, *ProcessStatus) error { return tc.publishErr }
 
 			var status ProcessStatus
-			prepareSnapshotForApply(refused)
+			m.prepareSnapshotForApply(refused)
 			err := m.publishPreparedSnapshotFailClosedLocked(refused, &status, true)
 			if m.syncCancel != nil {
 				defer m.syncCancel()
@@ -291,7 +291,7 @@ func TestRollbackFailureFallsBackToTheCtrlDisable7468(t *testing.T) {
 
 	var status ProcessStatus
 	publishSnap := &ConfigSnapshot{Generation: 42}
-	prepareSnapshotForApply(publishSnap)
+	m.prepareSnapshotForApply(publishSnap)
 	err := m.publishPreparedSnapshotFailClosedLocked(publishSnap, &status, true)
 	if m.syncCancel != nil {
 		defer m.syncCancel()
@@ -337,7 +337,7 @@ func TestRejectedFirstPublishStartsTheReconcileWorker7468(t *testing.T) {
 			}
 			var status ProcessStatus
 			publishSnap := &ConfigSnapshot{Generation: 1}
-			prepareSnapshotForApply(publishSnap)
+			m.prepareSnapshotForApply(publishSnap)
 			if err := m.publishPreparedSnapshotFailClosedLocked(publishSnap, &status, mapsMutatedInPlace); err == nil {
 				t.Fatal("prepared fail-closed publish returned nil on a rejected publish")
 			}

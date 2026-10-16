@@ -21,6 +21,20 @@ func (m *Manager) routeOverlaySnapshot() []config.RouteOverlayEntry {
 	return cloneRouteOverlay(m.routeOverlay)
 }
 
+// routeOverlayForSnapshot returns the route overlay a snapshot built from
+// cfg was derived with, for the apply-time derived-section rebuild
+// (#14209). A snapshot whose Config is the retained applied config was
+// built with m.routeOverlay; any other snapshot (a fresh Compile build)
+// already carries routes built with the overlay its builder was given,
+// and m.routeOverlay may have moved since, so it must not be re-applied.
+// Caller holds m.mu (every prepareSnapshotForApply caller does).
+func (m *Manager) routeOverlayForSnapshot(snap *ConfigSnapshot) []config.RouteOverlayEntry {
+	if m == nil || snap == nil || m.lastSnapshot == nil || snap.Config != m.lastSnapshot.Config {
+		return nil
+	}
+	return cloneRouteOverlay(m.routeOverlay)
+}
+
 func cloneRouteOverlay(overlay []config.RouteOverlayEntry) []config.RouteOverlayEntry {
 	if overlay == nil {
 		return nil
@@ -215,7 +229,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	next.Config = cfg
 	// Revalidate once before route derivation and content dedup. This isolated
 	// sample is also the interface state sent if the snapshot is published.
-	prepareSnapshotForApply(&next)
+	m.prepareSnapshotForApply(&next)
 	// Tunnel endpoint link state also controls route-only ECMP liveness.
 	next.TunnelEndpoints = append([]TunnelEndpointSnapshot(nil), next.TunnelEndpoints...)
 	for i := range next.TunnelEndpoints {
@@ -349,7 +363,7 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	m.refreshCaptureAuthorityLocked(&next)
-	prepareSnapshotForApply(&next)
+	m.prepareSnapshotForApply(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next)
 	if hash, ok := snapshotContentHash(&next); ok &&
 		hash == m.lastSnapshotHash &&

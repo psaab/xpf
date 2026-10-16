@@ -156,7 +156,7 @@ func TestAddressOnlyCommitRejectedPublishFailsClosed4959(t *testing.T) {
 
 		var status ProcessStatus
 		m.mu.Lock()
-		prepareSnapshotForApply(&snap)
+		m.prepareSnapshotForApply(&snap)
 		err := m.publishPreparedSnapshotFailClosedLocked(&snap, &status, true /*mapsMutatedInPlace*/)
 		m.mu.Unlock()
 		if err == nil {
@@ -179,7 +179,7 @@ func TestAddressOnlyCommitRejectedPublishFailsClosed4959(t *testing.T) {
 
 		var status ProcessStatus
 		m.mu.Lock()
-		prepareSnapshotForApply(&snap)
+		m.prepareSnapshotForApply(&snap)
 		err := m.publishPreparedSnapshotFailClosedLocked(&snap, &status, true /*mapsMutatedInPlace*/)
 		m.mu.Unlock()
 		if err != nil {
@@ -201,7 +201,7 @@ func TestAddressOnlyCommitRejectedPublishFailsClosed4959(t *testing.T) {
 
 		var status ProcessStatus
 		m.mu.Lock()
-		prepareSnapshotForApply(&snap)
+		m.prepareSnapshotForApply(&snap)
 		err := m.publishPreparedSnapshotFailClosedLocked(&snap, &status, false /*mapsMutatedInPlace*/)
 		m.mu.Unlock()
 		if err == nil {

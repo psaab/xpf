@@ -237,7 +237,7 @@ func TestRetryDebtPlanChangingTransportFailureAdoptsDebt9642(t *testing.T) {
 
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, false /*mapsMutatedInPlace*/)
 	loopAlive := h.m.syncCancel != nil
 	h.m.mu.Unlock()
@@ -308,7 +308,7 @@ func TestRetryDebtSamePlanContentIdentity9642(t *testing.T) {
 
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true /*mapsMutatedInPlace*/)
 	h.m.mu.Unlock()
 
@@ -354,7 +354,7 @@ func TestRetryDebtRefusalAdoptsNothing9642(t *testing.T) {
 
 		h.m.mu.Lock()
 		var status ProcessStatus
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true)
 		h.m.mu.Unlock()
 
@@ -388,7 +388,7 @@ func TestRetryDebtRefusalAdoptsNothing9642(t *testing.T) {
 		h.mu.Unlock()
 		h.m.mu.Lock()
 		var status ProcessStatus
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 			h.m.mu.Unlock()
 			t.Fatal("premise: transport failure must fail the publish")
@@ -400,7 +400,7 @@ func TestRetryDebtRefusalAdoptsNothing9642(t *testing.T) {
 		h.applyErr = newHelperRejection("integrity preflight rejected")
 		h.mu.Unlock()
 		h.m.mu.Lock()
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 			h.m.mu.Unlock()
 			t.Fatal("refusal must fail the publish")
@@ -429,7 +429,7 @@ func TestRetryDebtTickHoldsCtrlAndSkipsResync9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, false); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -506,7 +506,7 @@ func TestRetryDebtRetryConvergesAndSteadies9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true /*mapsMutatedInPlace*/); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -585,7 +585,7 @@ func TestRetryDebtRefusalAfterDebtFailsClosed9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -634,7 +634,7 @@ func TestRetryDebtPartialUpdateHoldsPublication9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -678,7 +678,7 @@ func TestRetryDebtWorkerArmInferenceRequiresPublication9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -777,7 +777,7 @@ func TestRetryDebtChangedPlanRestartKeepsConsumer9642(t *testing.T) {
 		}
 		h.m.mu.Lock()
 		var status ProcessStatus
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, false); err == nil {
 			h.m.mu.Unlock()
 			t.Fatal("premise: transport failure must fail the publish")
@@ -901,7 +901,7 @@ func TestRetryDebtFirstApplyRecovers9642(t *testing.T) {
 
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, false); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("first-apply publish must fail on a transport error")
@@ -998,7 +998,7 @@ func TestRetryDebtOvertakenGenerationAdoptsAhead9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("publish must fail on a transport error")
@@ -1099,7 +1099,7 @@ func TestRetryDebtKnownUnsentClassification9642(t *testing.T) {
 		h.m.controlRequestHook = nil
 		h.m.cfg.ControlSocket = ""
 		var status ProcessStatus
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true)
 		h.m.mu.Unlock()
 		if err == nil {
@@ -1128,7 +1128,7 @@ func TestRetryDebtKnownUnsentClassification9642(t *testing.T) {
 		h.mu.Unlock()
 		h.m.mu.Lock()
 		var status ProcessStatus
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 			h.m.mu.Unlock()
 			t.Fatal("premise: transport failure must fail the publish")
@@ -1136,7 +1136,7 @@ func TestRetryDebtKnownUnsentClassification9642(t *testing.T) {
 		debt := h.m.lastSnapshot
 		h.m.controlRequestHook = nil
 		h.m.cfg.ControlSocket = ""
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 			h.m.mu.Unlock()
 			t.Fatal("unconfigured-socket publish must fail")
@@ -1183,7 +1183,7 @@ func TestRetryDebtStartupDeferralExemption9642(t *testing.T) {
 		h.mu.Unlock()
 		h.m.mu.Lock()
 		var status ProcessStatus
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, false); err == nil {
 			h.m.mu.Unlock()
 			t.Fatal("premise: transport failure must fail the publish")
@@ -1273,7 +1273,7 @@ func TestRetryDebtStandaloneHAClearDebt9642(t *testing.T) {
 		h.mu.Unlock()
 		h.m.mu.Lock()
 		var status ProcessStatus
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 			h.m.mu.Unlock()
 			t.Fatal("transport failure must fail the publish")
@@ -1336,7 +1336,7 @@ func TestRetryDebtClusteredAdoptSkipsHAClear9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("transport failure must fail the publish")
@@ -1372,7 +1372,7 @@ func TestRetryDebtHAPublishesDuringDebt9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -1496,7 +1496,7 @@ func TestRetryDebtNeighborProgressesDuringDebt9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -1558,7 +1558,7 @@ func TestRetryDebtLoggingContract9642(t *testing.T) {
 		t.Helper()
 		h.m.mu.Lock()
 		var status ProcessStatus
-		prepareSnapshotForApply(attempted)
+		h.m.prepareSnapshotForApply(attempted)
 		_ = h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true)
 		h.m.mu.Unlock()
 	}
@@ -1630,7 +1630,7 @@ func TestRetryDebtCompileRestartPathKeepsLoop9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(snap)
+	h.m.prepareSnapshotForApply(snap)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(snap, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -1745,7 +1745,7 @@ func TestRetryDebtHealthBesideMode9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, true); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")
@@ -1930,7 +1930,7 @@ func TestRetryDebtRespawnFailureWarns9642(t *testing.T) {
 	h.mu.Unlock()
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	if err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, false); err == nil {
 		h.m.mu.Unlock()
 		t.Fatal("premise: transport failure must fail the publish")

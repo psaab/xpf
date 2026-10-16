@@ -208,7 +208,7 @@ func TestCompileDifferStillAdoptsMcfg10066(t *testing.T) {
 
 	h.m.mu.Lock()
 	var status ProcessStatus
-	prepareSnapshotForApply(attempted)
+	h.m.prepareSnapshotForApply(attempted)
 	err := h.m.publishPreparedSnapshotFailClosedLocked(attempted, &status, false /*mapsMutatedInPlace*/)
 	h.m.mu.Unlock()
 	if err == nil {
