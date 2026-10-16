@@ -49,20 +49,18 @@ impl SchedulerHeartbeatLease {
         if version == 0 {
             return false;
         }
-        loop {
-            let current = self.version.load(Ordering::Acquire);
-            if version < current {
-                return false;
-            }
-            if self
-                .version
-                .compare_exchange(current, version, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.received_at_ns.store(received_at_ns, Ordering::Release);
-                return true;
-            }
+        // ServerState serializes control requests. Publish the receipt stamp
+        // before the version, which is the packet workers' indication that a
+        // lease exists. The Release/Acquire pair makes the timestamp visible
+        // to any reader that observes the newly-published version.
+        let current = self.version.load(Ordering::Acquire);
+        if version < current {
+            return false;
         }
+        self.received_at_ns
+            .store(received_at_ns, Ordering::Relaxed);
+        self.version.store(version, Ordering::Release);
+        true
     }
 
     #[inline]
@@ -72,6 +70,16 @@ impl SchedulerHeartbeatLease {
         }
         let received_at_ns = self.received_at_ns.load(Ordering::Acquire);
         now_ns < received_at_ns || now_ns - received_at_ns > SCHEDULER_HEARTBEAT_LEASE_NS
+    }
+
+    /// Test-only paired snapshot of the publication version and its receipt
+    /// stamp, for the #13703 torn-publication regression tests.
+    #[cfg(test)]
+    pub(crate) fn snapshot_for_test(&self) -> (u64, u64) {
+        (
+            self.version.load(Ordering::Acquire),
+            self.received_at_ns.load(Ordering::Acquire),
+        )
     }
 }
 

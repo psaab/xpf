@@ -756,6 +756,46 @@ fn scheduler_lease_ignores_version_zero_and_rejects_rollback() {
 }
 
 #[test]
+fn scheduler_lease_never_publishes_version_before_receipt_stamp_13703() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+
+    const ROUNDS: u64 = 100_000;
+    const STRIDE_NS: u64 = 1_000_000_000_000;
+    let lease = Arc::new(SchedulerHeartbeatLease::default());
+    let start = Arc::new(AtomicBool::new(false));
+    let violation = Arc::new(AtomicU64::new(0));
+
+    let reader = {
+        let lease = Arc::clone(&lease);
+        let start = Arc::clone(&start);
+        let violation = Arc::clone(&violation);
+        std::thread::spawn(move || {
+            while !start.load(AtomicOrdering::Acquire) {
+                std::hint::spin_loop();
+            }
+            for _ in 0..ROUNDS * 10 {
+                let (version, received_at_ns) = lease.snapshot_for_test();
+                if version > 0 && received_at_ns < version * STRIDE_NS {
+                    violation.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+            }
+        })
+    };
+
+    start.store(true, AtomicOrdering::Release);
+    for version in 1..=ROUNDS {
+        assert!(lease.apply(version, version * STRIDE_NS));
+    }
+    reader.join().expect("lease reader thread must finish");
+    assert_eq!(
+        violation.load(AtomicOrdering::Relaxed),
+        0,
+        "a visible scheduler version must never be paired with an older receipt timestamp"
+    );
+}
+
+#[test]
 fn inactive_rule_falls_through_to_next_match() {
     let state = parse_policy_state(
         "deny",
