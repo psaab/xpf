@@ -9283,3 +9283,91 @@ fn syn_cookie_active_budget_exhaustion_is_not_invalid_13286() {
         "the exhausted active failed-MAC budget keeps its distinct verdict"
     );
 }
+
+/// #13954 integration RED-on-baseline: a destination (and separately a
+/// source) sustained at 60% of its per-key SYN threshold — paced in real
+/// monotonic ns through the production gate — must see ZERO drops in every
+/// second, and at exactly threshold ~all admitted. On the pre-#13954
+/// RateCounter sketch (now_secs windows, rejected events counted) the same
+/// stream drops ~33% at 0.6T from second 2. Driven via
+/// `check_packet_with_zone_id_opts(pkt, now_ns, now_ns/NS)` so BOTH clocks
+/// advance together exactly as the production caller passes them.
+/// syn_flood_threshold (aggregate) is set huge so only the per-key cap can drop.
+#[test]
+fn syn_dst_src_sustained_below_threshold_zero_drops_13954() {
+    const T: u32 = 100;
+    // --- per-DESTINATION: many sources -> one victim at 0.6T for 5s ---
+    let mut profile = default_profile();
+    profile.syn_flood_threshold = 1_000_000;
+    profile.syn_flood_dst_threshold = T;
+    let mut state = make_state("trust", profile.clone());
+    let victim = IpAddr::V4(Ipv4Addr::new(10, 0, 7, 1));
+    let mut now_ns = 200 * NS;
+    let mut drops = 0u32;
+    for i in 0..(60 * 5) {
+        let src = IpAddr::V4(Ipv4Addr::new(10, 1, (i >> 8) as u8, (i & 0xff) as u8));
+        let pkt = tcp_pkt(src, victim, 40000, 443, TCP_SYN);
+        if state.check_packet_with_zone_id_opts("trust", 7, &pkt, now_ns, now_ns / NS, false)
+            == ScreenVerdict::Drop("syn-flood")
+        { drops += 1; }
+        now_ns += NS / 60;
+    }
+    assert_eq!(drops, 0, "dst at 0.6x destination-threshold must see zero drops (#13954)");
+    assert_eq!(state.syn_flood_dst_drops(), 0);
+    // --- per-SOURCE: one source -> rotating destinations at 0.6T for 5s ---
+    profile.syn_flood_dst_threshold = 0;
+    profile.syn_flood_src_threshold = T;
+    let mut state = make_state("trust", profile);
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 8, 1));
+    let mut now_ns = 200 * NS;
+    let mut drops = 0u32;
+    for i in 0..(60 * 5) {
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 2, (i >> 8) as u8, (i & 0xff) as u8));
+        let pkt = tcp_pkt(src, dst, 40000, 443, TCP_SYN);
+        if state.check_packet_with_zone_id_opts("trust", 7, &pkt, now_ns, now_ns / NS, false)
+            == ScreenVerdict::Drop("syn-flood")
+        { drops += 1; }
+        now_ns += NS / 60;
+    }
+    assert_eq!(drops, 0, "src at 0.6x source-threshold must see zero drops (#13954)");
+    assert_eq!(state.syn_flood_src_drops(), 0);
+}
+
+/// #13954 integration GREEN control: at exactly threshold both caps still
+/// admit ~the rate, and at 2x threshold they still drop (enforcement not
+/// weakened by the TokenBucket migration).
+#[test]
+fn syn_dst_src_at_and_over_threshold_enforced_13954() {
+    const T: u32 = 100;
+    for dst_mode in [true, false] {
+        let mut profile = default_profile();
+        profile.syn_flood_threshold = 1_000_000;
+        if dst_mode { profile.syn_flood_dst_threshold = T; } else { profile.syn_flood_src_threshold = T; }
+        // At threshold for 5s: admitted >= 90%.
+        let mut state = make_state("trust", profile.clone());
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 9, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 9, 2));
+        let mut now_ns = 200 * NS;
+        let (mut admitted, mut total) = (0u32, 0u32);
+        for i in 0..(T * 5) {
+            let (s, d) = if dst_mode { (IpAddr::V4(Ipv4Addr::new(10, 3, (i >> 8) as u8, (i & 0xff) as u8)), a) } else { (a, IpAddr::V4(Ipv4Addr::new(10, 3, (i >> 8) as u8, (i & 0xff) as u8))) };
+            let _ = b;
+            let pkt = tcp_pkt(s, d, 40000, 443, TCP_SYN);
+            total += 1;
+            if state.check_packet_with_zone_id_opts("trust", 7, &pkt, now_ns, now_ns / NS, false) != ScreenVerdict::Drop("syn-flood") { admitted += 1; }
+            now_ns += NS / T as u64;
+        }
+        assert!(admitted * 10 >= total * 9, "at-threshold admitted {admitted}/{total} (dst={dst_mode})");
+        // At 2x threshold for 5s: drops > 0 (cap still enforced).
+        let mut state = make_state("trust", profile);
+        let mut now_ns = 200 * NS;
+        let mut drops = 0u32;
+        for i in 0..(2 * T * 5) {
+            let (s, d) = if dst_mode { (IpAddr::V4(Ipv4Addr::new(10, 4, (i >> 8) as u8, (i & 0xff) as u8)), a) } else { (a, IpAddr::V4(Ipv4Addr::new(10, 4, (i >> 8) as u8, (i & 0xff) as u8))) };
+            let pkt = tcp_pkt(s, d, 40000, 443, TCP_SYN);
+            if state.check_packet_with_zone_id_opts("trust", 7, &pkt, now_ns, now_ns / NS, false) == ScreenVerdict::Drop("syn-flood") { drops += 1; }
+            now_ns += NS / (2 * T as u64);
+        }
+        assert!(drops > 0, "2x threshold must still drop (dst={dst_mode})");
+    }
+}
