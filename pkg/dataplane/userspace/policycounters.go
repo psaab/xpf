@@ -415,10 +415,14 @@ func (m *Manager) ClearAllCounters() error {
 
 func (m *Manager) clearHelperPolicyCountersLocked() error {
 	if m.proc == nil || m.proc.Process == nil {
-		for i := range m.lastStatus.PolicyRuleCounters {
-			m.lastStatus.PolicyRuleCounters[i].Packets = 0
-			m.lastStatus.PolicyRuleCounters[i].Bytes = 0
+		// Preserve previously published status snapshots: callers retain
+		// shallow copies of these slices.
+		counters := append([]PolicyRuleCounterStatus(nil), m.lastStatus.PolicyRuleCounters...)
+		for i := range counters {
+			counters[i].Packets = 0
+			counters[i].Bytes = 0
 		}
+		m.lastStatus.PolicyRuleCounters = counters
 		m.republishLastStatusLocked()
 		return nil
 	}
