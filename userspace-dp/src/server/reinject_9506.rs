@@ -13,10 +13,11 @@ use crate::slowpath_reinject_9506::{
 use arc_swap::ArcSwapOption;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 
 static NEXT_SUBMIT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -228,20 +229,46 @@ pub(crate) fn serve_complete_conn_with_target(
     running: &Arc<AtomicBool>,
 ) {
     let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+    let mut shutdown_deadline = None;
     loop {
-        let running_now = running.load(Ordering::Acquire);
+        if !running.load(Ordering::Acquire) {
+            shutdown_deadline.get_or_insert_with(|| Instant::now() + Duration::from_millis(500));
+        }
+        let mut probe = [0u8; 1];
+        let probe_rc = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                probe.as_mut_ptr().cast(),
+                probe.len(),
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+        if probe_rc == 0 {
+            break;
+        }
+        if probe_rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::WouldBlock
+                && err.kind() != std::io::ErrorKind::Interrupted
+            {
+                break;
+            }
+        } else {
+            // The completion protocol is server-to-client only. Unexpected
+            // client bytes are not consumed or allowed to pin the listener.
+            break;
+        }
         let target_reinjector = target.and_then(|slot| slot.load_full());
         let core = target_reinjector
             .as_ref()
             .map(|reinjector| reinjector.reinject_core())
             .unwrap_or_else(|| fallback_core.clone());
-        if !running_now && core.live_count() == 0 {
-            break;
-        }
         let completions = core.peek_ready(crate::slowpath_reinject_9506::SUBMIT_MAX_FRAMES);
         if completions.is_empty() {
-            if !running.load(Ordering::Acquire) && core.live_count() == 0 {
-                break;
+            if let Some(deadline) = shutdown_deadline {
+                if core.live_count() == 0 || Instant::now() >= deadline {
+                    break;
+                }
             }
             thread::sleep(Duration::from_millis(1));
             continue;
