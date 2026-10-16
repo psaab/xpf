@@ -143,16 +143,22 @@ func collectCoSINetPrecedenceCodePoints(node *Node) ([]uint8, error) {
 func collectCoS8021CodePoints(node *Node) ([]uint8, error) {
 	var values []uint8
 	seen := make(map[uint8]struct{})
-	// #2447: an 802.1p code-point is the 3-bit PCP field, domain 0..7. A
-	// numeric token outside that range is REJECTED at commit rather than
-	// silently dropped (pre-fix) or clamped to 7 by the dataplane builder —
-	// a clamp would install the classifier for a DIFFERENT traffic class.
+	// #2447: an 802.1p code-point is the 3-bit PCP field, domain 0..7. An
+	// exact-width all-[01] token is binary (for example, `101` is 5), while
+	// other tokens retain decimal parsing. A numeric token outside that range
+	// is REJECTED at commit rather than silently dropped (pre-fix) or clamped
+	// to 7 by the dataplane builder — a clamp would install a DIFFERENT class.
 	add := func(raw string) error {
 		raw = strings.TrimSpace(strings.ToLower(raw))
 		if raw == "" {
 			return nil
 		}
 		v, err := strconv.Atoi(raw)
+		if len(raw) == 3 && strings.Trim(raw, "01") == "" {
+			if binary, binaryErr := strconv.ParseUint(raw, 2, 3); binaryErr == nil {
+				v, err = int(binary), nil
+			}
+		}
 		if err != nil {
 			// #5194 A3-b2-F12: 802.1p has no symbolic aliases, so a non-numeric
 			// token is always a typo. The pre-fix code silently skipped it in
@@ -212,10 +218,11 @@ func collectCoS8021RewriteCodePoint(node *Node) (uint8, bool, error) {
 	return collectCoS3BitRewriteCodePoint(node, "ieee-802.1")
 }
 
-// collectCoS3BitRewriteCodePoint resolves a single numeric rewrite value in the
-// 0..7 domain. Both `code-point` and its `code-points` alias are read; the first
-// value wins, but every token is checked so an invalid later token cannot hide
-// behind a valid first one.
+// collectCoS3BitRewriteCodePoint resolves a single 0..7 rewrite value. Exact-
+// width three-bit strings containing only 0/1 are binary for 802.1p; the
+// other numeric families retain decimal parsing. Both `code-point` and its
+// `code-points` alias are read; the first value wins, but every token is
+// checked so an invalid later token cannot hide behind a valid first one.
 func collectCoS3BitRewriteCodePoint(node *Node, family string) (uint8, bool, error) {
 	parse := func(raw string) (uint8, bool, error) {
 		raw = strings.TrimSpace(strings.ToLower(raw))
@@ -223,6 +230,12 @@ func collectCoS3BitRewriteCodePoint(node *Node, family string) (uint8, bool, err
 			return 0, false, nil
 		}
 		v, err := strconv.Atoi(raw)
+		if family == "ieee-802.1" && len(raw) == 3 &&
+			strings.Trim(raw, "01") == "" {
+			if binary, binaryErr := strconv.ParseUint(raw, 2, 3); binaryErr == nil {
+				v, err = int(binary), nil
+			}
+		}
 		if err != nil {
 			return 0, false, newUnknownCodePointTokenError(
 				"class-of-service %s rewrite-rule code-point %q is not a valid 0..7 value",
@@ -252,8 +265,8 @@ func collectCoS3BitRewriteCodePoint(node *Node, family string) (uint8, bool, err
 }
 
 // expandCoSCodePointToken resolves a DSCP code-point token (a symbolic
-// alias such as `ef`/`af11`/`cs6` or a numeric value) to its 0..63 DSCP
-// value(s).
+// alias such as `ef`/`af11`/`cs6`, a six-bit binary string, or a numeric
+// value) to its 0..63 DSCP value(s).
 //
 // #2447: a NUMERIC token outside the 6-bit DSCP domain (0..63) is an
 // out-of-range error, REJECTED at commit. The pre-fix code silently
@@ -263,6 +276,14 @@ func collectCoS3BitRewriteCodePoint(node *Node, family string) (uint8, bool, err
 // error. A non-numeric, non-alias token (a typo) is NOT an error here —
 // it returns no values (the entry is skipped), preserving the pre-fix
 // Junos-compatibility behavior for unknown symbolic spellings.
+//
+// #13969: Junos also writes the DSCP field as exactly six bits. Only a
+// six-character all-[01] token is read as binary; shorter strings retain
+// their established decimal interpretation, and all other numeric tokens
+// retain decimal range checking. This intentionally corrects two valid but
+// misinterpreted decimal parses (`000010`/`000011` previously meant 10/11;
+// they now mean 2/3); the other six-bit patterns were rejected as decimal
+// out-of-range values.
 func expandCoSCodePointToken(raw string) ([]uint8, error) {
 	raw = strings.TrimSpace(strings.ToLower(raw))
 	if raw == "" {
@@ -270,6 +291,12 @@ func expandCoSCodePointToken(raw string) ([]uint8, error) {
 	}
 	if value, ok := coSDSCPValues[raw]; ok {
 		return []uint8{value}, nil
+	}
+	if len(raw) == 6 && strings.Trim(raw, "01") == "" {
+		v, err := strconv.ParseUint(raw, 2, 6)
+		if err == nil {
+			return []uint8{uint8(v)}, nil
+		}
 	}
 	if v, err := strconv.Atoi(raw); err == nil {
 		if v < 0 || v > 63 {
