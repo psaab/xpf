@@ -311,9 +311,8 @@ impl ShardedNeighborMap {
     /// #10704: record a successfully-issued neighbor-resolution probe so an
     /// ARP reply can be distinguished from a fire-and-forget advert.
     pub(crate) fn record_neighbor_probe(&self, key: (i32, IpAddr), now_ns: u64) {
-        if !matches!(key.1, IpAddr::V4(_)) {
-            return;
-        }
+        // Family-agnostic: IPv4 ARP (#10704) and IPv6 kernel-neighbor
+        // solicitation (#13660) share this one-shot evidence store.
         let idx = shard_idx(&key);
         let mut shard = self.arp_solicited_at[idx]
             .0

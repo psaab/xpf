@@ -822,7 +822,44 @@ pub(super) fn parse_neighbor_msg(
                     }
                 }
             } else {
-                update_dynamic_neighbor(dynamic_neighbors, ifindex, ip, NeighborEntry { mac })
+                // #13660 (D9-01): the IPv6 RTM_NEWNEIGH arm previously called
+                // update_dynamic_neighbor (unconditional insert_if_changed),
+                // bypassing the #10704 (ARP) / #11069 (direct XSK NA)
+                // solicitation gates — any usable-state kernel event, e.g. a
+                // spoofed NA the kernel NDP stack accepted, rewrote the
+                // dataplane's live IPv6 binding. Apply the identical
+                // solicited-preference CAS: a probe-solicited or
+                // NUD_PERMANENT update may replace a live differing MAC; an
+                // unsolicited one may only create a first binding or refresh
+                // the same MAC. NUD_PROBE records evidence for the NEXT
+                // update, exactly as on the v4 arm; refusals are counted via
+                // the NA report (single counting point, mirroring #11069).
+                let now_ns = monotonic_nanos();
+                let solicited = dynamic_neighbors.take_arp_reply_solicited(&key, now_ns)
+                    || (state & NUD_PERMANENT) != 0;
+                let result = dynamic_neighbors.insert_arp_reply_if_solicited_allows(
+                    key,
+                    NeighborEntry { mac },
+                    solicited,
+                );
+                if (state & NUD_PROBE) != 0 {
+                    dynamic_neighbors.record_neighbor_probe(key, now_ns);
+                }
+                match result {
+                    Some(changed) => {
+                        dynamic_neighbors.mark_kernel_backed_if_same(&key, mac);
+                        changed
+                    }
+                    None => {
+                        report_na_unsolicited_override_refusal(
+                            dynamic_neighbors.as_ref(),
+                            key,
+                            mac,
+                            now_ns,
+                        );
+                        return NeighborMsgEffect::None;
+                    }
+                }
             };
             if changed {
                 NeighborMsgEffect::Upserted
@@ -2730,5 +2767,310 @@ mod monitored_neighbor_import_tests_11457 {
             neighbors.get(&(2, IpAddr::V4(ip))).map(|entry| entry.mac),
             Some([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         );
+    }
+}
+#[cfg(test)]
+mod kernel_neighbor_v6_unsolicited_13660_tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+
+    /// Build the ndmsg body `parse_neighbor_msg` consumes for an IPv6
+    /// RTM_NEWNEIGH notification (same shape as the v4
+    /// `newneigh_body`; `build_newneigh_request` for v6 encodes an
+    /// OR'd NUD state, so state/flags combinations need this builder).
+    /// `flags` is the ndm_flags byte (body[10]); attr order follows the
+    /// kernel: NDA_DST first, then NDA_LLADDR.
+    fn newneigh_v6_body(
+        ifindex: i32,
+        ip: Ipv6Addr,
+        mac: Option<[u8; 6]>,
+        state: u16,
+        flags: u8,
+    ) -> Vec<u8> {
+        let mut body = vec![0u8; 12];
+        body[0] = libc::AF_INET6 as u8;
+        body[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+        body[8..10].copy_from_slice(&state.to_ne_bytes());
+        body[10] = flags;
+        body.extend_from_slice(&20u16.to_ne_bytes());
+        body.extend_from_slice(&1u16.to_ne_bytes());
+        body.extend_from_slice(&ip.octets());
+        if let Some(mac) = mac {
+            body.extend_from_slice(&10u16.to_ne_bytes());
+            body.extend_from_slice(&2u16.to_ne_bytes());
+            body.extend_from_slice(&mac);
+            body.extend_from_slice(&[0u8; 2]);
+        }
+        body
+    }
+
+    const IFINDEX: i32 = 7;
+    const LIVE_MAC: [u8; 6] = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
+    const ATTACK_MAC: [u8; 6] = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
+    const FAILOVER_MAC: [u8; 6] = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02];
+
+    fn v6_target() -> (IpAddr, Ipv6Addr) {
+        let ip = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x50);
+        (IpAddr::V6(ip), ip)
+    }
+
+    fn seeded() -> (Arc<ShardedNeighborMap>, (i32, IpAddr), Ipv6Addr) {
+        let (ip, ip6) = v6_target();
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let key = (IFINDEX, ip);
+        assert!(neighbors.insert_if_changed(key, NeighborEntry { mac: LIVE_MAC }));
+        (neighbors, key, ip6)
+    }
+
+    fn monitored_ifindexes() -> FastSet<i32> {
+        FastSet::from_iter([IFINDEX])
+    }
+
+    /// #13660 (D9-01): the IPv6 RTM_NEWNEIGH monitor arm bypassed the
+    /// #10704 (ARP) / #11069 (direct XSK NA) solicitation gates — any
+    /// usable-state kernel event rewrote the dataplane's IPv6 binding
+    /// via the unconditional `insert_if_changed`, so an unsolicited NA
+    /// accepted by the kernel (spoofed NA processed by the kernel NDP
+    /// stack) rewrote the gateway's MAC despite the direct-packet path
+    /// being gated. On a live binding an unsolicited differing MAC must
+    /// be refused exactly as the twin arms refuse it; a probe-solicited
+    /// or NUD_PROBE-authorized update must still converge failover.
+    /// RED on pristine master: the unsolicited arms return `Upserted`
+    /// and rewrite the map.
+    #[test]
+    fn unsolicited_kernel_ipv6_update_preserves_live_binding_13660() {
+        const NUD_REACHABLE: u16 = 0x02;
+        const NUD_STALE: u16 = 0x04;
+        const NUD_PROBE: u16 = 0x10;
+        const NUD_PERMANENT: u16 = 0x80;
+        const NTF_ROUTER: u8 = 0x80;
+        let monitored = monitored_ifindexes();
+
+        // Attack wave: an unsolicited differing MAC under every usable
+        // NUD state the kernel reports must never displace the live
+        // binding, bump its epoch, or report an effect.
+        for state in [NUD_REACHABLE, NUD_STALE] {
+            let (neighbors, key, ip6) = seeded();
+            let epoch = neighbors.mac_change_epoch_for(&key);
+            assert_eq!(
+                parse_neighbor_msg(
+                    28,
+                    &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), state, 0),
+                    &monitored,
+                    &neighbors,
+                ),
+                NeighborMsgEffect::None,
+                "unsolicited v6 kernel update (state {state:#04x}) must be refused"
+            );
+            // Kernel-side flags the attacker can also observe (NTF_ROUTER
+            // is a role flag, not solicitation evidence) must not bypass.
+            assert_eq!(
+                parse_neighbor_msg(
+                    28,
+                    &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), state, NTF_ROUTER),
+                    &monitored,
+                    &neighbors,
+                ),
+                NeighborMsgEffect::None,
+                "NTF_ROUTER must not authorize a v6 replacement (state {state:#04x})"
+            );
+            assert_eq!(
+                neighbors.get(&key).map(|entry| entry.mac),
+                Some(LIVE_MAC),
+                "live v6 binding must survive the unsolicited wave (state {state:#04x})"
+            );
+            assert_eq!(neighbors.mac_change_epoch_for(&key), epoch);
+            assert_eq!(
+                neighbors.na_unsolicited_override_refusals(),
+                2,
+                "each refused v6 replacement is counted once (state {state:#04x})"
+            );
+        }
+
+        // Duplicate unsolicited repeats never accumulate authorization.
+        let (neighbors, key, ip6) = seeded();
+        for _ in 0..3 {
+            assert_eq!(
+                parse_neighbor_msg(
+                    28,
+                    &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), NUD_REACHABLE, 0),
+                    &monitored,
+                    &neighbors,
+                ),
+                NeighborMsgEffect::None,
+            );
+        }
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(LIVE_MAC));
+        assert_eq!(neighbors.na_unsolicited_override_refusals(), 3);
+
+        // Same-MAC refresh needs no solicitation and is a no-change.
+        let (neighbors, key, ip6) = seeded();
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(LIVE_MAC), NUD_STALE, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::None,
+            "same-MAC refresh is a no-change, not an upsert"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(LIVE_MAC));
+        assert_eq!(neighbors.na_unsolicited_override_refusals(), 0);
+
+        // First sighting (no live binding) admits: gate narrows
+        // replacement only, exactly like the twin arms.
+        {
+            let (ip, ip6) = v6_target();
+            let neighbors = Arc::new(ShardedNeighborMap::new());
+            let key = (IFINDEX, ip);
+            assert_eq!(
+                parse_neighbor_msg(
+                    28,
+                    &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), NUD_REACHABLE, 0),
+                    &monitored,
+                    &neighbors,
+                ),
+                NeighborMsgEffect::Upserted,
+                "a first v6 binding must admit (no live entry to protect)"
+            );
+            assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(ATTACK_MAC));
+            assert_eq!(neighbors.na_unsolicited_override_refusals(), 0);
+        }
+
+        // Kernel NUD_PROBE authorizes the following update (the v4
+        // arm's production failover convergence).
+        let (neighbors, key, ip6) = seeded();
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(LIVE_MAC), NUD_PROBE, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::None,
+            "the NUD_PROBE notification itself must not replace the MAC"
+        );
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(FAILOVER_MAC), NUD_REACHABLE, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::Upserted,
+            "a differing MAC confirmed after a kernel probe must converge"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(FAILOVER_MAC));
+
+        // A recent local probe (warmer/resolver/dispatch) authorizes
+        // exactly one replacement, mirroring the ARP one-shot rule.
+        let (neighbors, key, ip6) = seeded();
+        neighbors.record_neighbor_probe(key, monotonic_nanos());
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(FAILOVER_MAC), NUD_REACHABLE, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::Upserted,
+            "a probe-solicited v6 update must converge failover"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(FAILOVER_MAC));
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), NUD_REACHABLE, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::None,
+            "one probe must not authorize a second, attacker replacement"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(FAILOVER_MAC));
+        assert_eq!(neighbors.na_unsolicited_override_refusals(), 1);
+
+        // Expired solicitation evidence (older than the 5s window)
+        // authorizes nothing, on a fresh map so no live evidence
+        // intervenes.
+        {
+            let (ip, ip6) = v6_target();
+            let neighbors = Arc::new(ShardedNeighborMap::new());
+            let key = (IFINDEX, ip);
+            neighbors.insert_if_changed(key, NeighborEntry { mac: LIVE_MAC });
+            let now_ns = monotonic_nanos();
+            // Backdate the evidence well past the window; entries are
+            // keyed by insertion and `take` compares against now.
+            neighbors.record_neighbor_probe(
+                key,
+                now_ns.saturating_sub(crate::afxdp::sharded_neighbor::ARP_SOLICITED_WINDOW_NS + 1),
+            );
+            assert_eq!(
+                parse_neighbor_msg(
+                    28,
+                    &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), NUD_REACHABLE, 0),
+                    &monitored,
+                    &neighbors,
+                ),
+                NeighborMsgEffect::None,
+                "expired solicitation must not authorize a v6 replacement"
+            );
+            assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(LIVE_MAC));
+        }
+
+        // Authoritative NUD_PERMANENT entries replace (v4 arm parity).
+        let (neighbors, key, ip6) = seeded();
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(FAILOVER_MAC), NUD_PERMANENT, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::Upserted,
+            "an authoritative NUD_PERMANENT entry must replace"
+        );
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(FAILOVER_MAC));
+
+        // Unusable-state removal and DELNEIGH stay ungated.
+        let (neighbors, key, ip6) = seeded();
+        assert_eq!(
+            parse_neighbor_msg(
+                28,
+                &newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), 0x20, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::Removed,
+            "NUD_FAILED must still remove the binding"
+        );
+        assert!(neighbors.get(&key).is_none());
+        let (neighbors, key, ip6) = seeded();
+        assert_eq!(
+            parse_neighbor_msg(
+                29,
+                &newneigh_v6_body(IFINDEX, ip6, None, 0, 0),
+                &monitored,
+                &neighbors,
+            ),
+            NeighborMsgEffect::Removed,
+            "RTM_DELNEIGH must still remove the binding"
+        );
+        assert!(neighbors.get(&key).is_none());
+
+        // Malformed / unusable payloads neither panic nor admit.
+        let (neighbors, key, ip6) = seeded();
+        for body in [
+            vec![0u8; 4],
+            newneigh_v6_body(IFINDEX, ip6, None, NUD_REACHABLE, 0),
+            newneigh_v6_body(IFINDEX, ip6, Some(ATTACK_MAC), 0, 0),
+        ] {
+            assert_eq!(
+                parse_neighbor_msg(28, &body, &monitored, &neighbors),
+                NeighborMsgEffect::None,
+            );
+        }
+        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(LIVE_MAC));
     }
 }
