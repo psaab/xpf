@@ -733,7 +733,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 							unit.DynamicDNSInet = ddns
 						}
 					case "inet6":
-						// #9424, the inet6 arm of the same loss.
+						unit.FamilyInet6 = true
 						inet6Addrs, inet6Bad := unitAddressInstances(afNode, "inet6")
 						ifaces.MalformedAddresses = append(ifaces.MalformedAddresses, inet6Bad...)
 						for _, addrInst := range inet6Addrs {

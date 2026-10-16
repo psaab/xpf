@@ -3092,6 +3092,10 @@ type compileOpts struct {
 	// be realised — the same silence the issue is about.
 	lenientVlanUnitMTU bool
 
+	// lenientIPv6UnitMTU13936 downgrades the RFC 8200 minimum-MTU gate on
+	// tolerant load / peer-sync paths so previously persisted state can boot.
+	lenientIPv6UnitMTU13936 bool
+
 	// lenientInterfaceNumericBounds (#9899 F030/F031) downgrades the
 	// interface tunnel/VLAN numeric gate — a tunnel key/TTL or vlan-id /
 	// inner-vlan-id token that is non-canonical (sign/whitespace/garbage) or
@@ -3412,6 +3416,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFabricMemberDefined:             true,
 		lenientInterfaceAddressList:            true,
 		lenientVlanUnitMTU:                     true,
+		lenientIPv6UnitMTU13936:                true,
 		lenientInterfaceBandwidth:              true,
 		lenientInterfaceDuplex:                 true,
 		lenientInterfaceSpeed:                  true,
