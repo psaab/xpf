@@ -298,6 +298,39 @@ func TestLocalClearFenceExpiresWithoutPeerClear13909(t *testing.T) {
 	}
 }
 
+func TestLocalClearFenceDoesNotBlockNewOrigin13909(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nat-generation.json")
+	const knownOrigin = "0123456789abcdef0123456789abcdef"
+	const newOrigin = "fedcba9876543210fedcba9876543210"
+	m, helper := persistentNatGenerationManager11486(t, path)
+	if err := m.ImportPersistentNatLeaseBatch(PersistentNatLeaseBatch{
+		OriginID: knownOrigin, Generation: 8,
+	}); err != nil {
+		t.Fatalf("import known peer: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("known peer barrier = %q, want clear", got)
+	}
+	if _, _, _, err := m.ClearPersistentNATLeasesWithGeneration("", 0); err != nil {
+		t.Fatalf("local clear: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("local clear helper request = %q, want clear", got)
+	}
+
+	if err := m.ImportPersistentNatLeaseBatch(PersistentNatLeaseBatch{
+		OriginID: newOrigin, Generation: 1, Leases: []IdleLeaseWire{scopedLease10018()},
+	}); err != nil {
+		t.Fatalf("import newly observed peer after local clear: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("new peer generation barrier = %q, want clear", got)
+	}
+	if req := <-helper.requests; req.Type != "import_idle_leases" {
+		t.Fatalf("new peer lease import = %+v, want import_idle_leases", req)
+	}
+}
+
 // #13867: a local clear revokes leases from every origin, so it must also
 // close the admission door to pre-clear equal-generation batches — including
 // leases whose key was not installed at clear time (therefore has no Rust
