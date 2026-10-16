@@ -8364,14 +8364,23 @@ const PPTP_RESOLVE_NEEDLE: &str =
 fn pptp_drain_line(src: &str, needle: &str) -> Option<usize> {
     src.lines().position(|l| l.trim_start().starts_with(needle))
 }
-/// Match the resolver only when its result is assigned to `flow`. Rustfmt may
-/// put the call on the line after the assignment.
+/// Match an actual resolver call only when it is the expression assigned to
+/// `flow`. Strip line comments first so a mention after another expression
+/// cannot satisfy the guard.
 fn pptp_resolve_assignment_line(src: &str) -> Option<usize> {
-    let lines: Vec<_> = src.lines().collect();
+    let lines: Vec<_> = src
+        .lines()
+        .map(|line| {
+            line.split_once("//")
+                .map_or(line, |(code, _)| code)
+                .trim()
+        })
+        .collect();
     lines.iter().enumerate().find_map(|(i, line)| {
-        let line = line.trim();
-        let assigned_inline = line.starts_with("flow = ") && line.contains(PPTP_RESOLVE_NEEDLE);
-        let assigned_wrapped = line == "flow ="
+        let assigned_inline = line
+            .strip_prefix("flow = ")
+            .is_some_and(|rhs| rhs.trim_start().starts_with(PPTP_RESOLVE_NEEDLE));
+        let assigned_wrapped = *line == "flow ="
             && lines
                 .get(i + 1)
                 .is_some_and(|next| next.trim_start().starts_with(PPTP_RESOLVE_NEEDLE));
@@ -8576,6 +8585,10 @@ fn pptp_resolve_guard_does_not_accept_a_mention_7699() {
         "        flow =\n            crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n                packet_frame,\n";
     const UNASSIGNED: &str =
         "        crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n            packet_frame,\n";
+    const INLINE_COMMENT_MENTION: &str =
+        "        flow = None; // crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n";
+    const INLINE_REAL: &str =
+        "        flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(packet_frame,\n";
 
     assert!(
         pptp_resolve_assignment_line(COMMENTED_OUT).is_none(),
@@ -8588,6 +8601,14 @@ fn pptp_resolve_guard_does_not_accept_a_mention_7699() {
     assert!(
         pptp_resolve_assignment_line(UNASSIGNED).is_none(),
         "the guard accepts a resolver call that is not assigned to flow"
+    );
+    assert!(
+        pptp_resolve_assignment_line(INLINE_COMMENT_MENTION).is_none(),
+        "the guard accepts a resolver mentioned only in a trailing comment after `flow = None;`"
+    );
+    assert!(
+        pptp_resolve_assignment_line(INLINE_REAL).is_some(),
+        "the guard does not match an assigned inline resolver call"
     );
     assert!(
         pptp_resolve_assignment_line(REAL).is_some(),
