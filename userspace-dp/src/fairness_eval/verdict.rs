@@ -125,10 +125,14 @@ pub(crate) fn evaluate(input: VerdictInput<'_>) -> VerdictDecision {
 
     let n_active: u32 = input.distribution_a_i.iter().filter(|&&a| a > 0).count() as u32;
     let max_worker_flow_share = max_worker_flow_share(input.distribution_a_i);
+    // Distribution-based RSS expectations describe actual RSS placement and
+    // therefore use observed `a_i`; `cstruct-max` is specifically a ceiling
+    // on Gate 2's selected, fail-closed Cstruct, not on a second raw-only
+    // Cstruct value hidden from the report (#13658).
     let (rss_expectation_pass, rss_expectation_reason) = evaluate_rss_expectation(
         input.rss_expectation,
         input.distribution_a_i,
-        cstruct_raw,
+        cstruct,
         input.n_total_workers,
     );
     let gap = input.observed_cov - cstruct;

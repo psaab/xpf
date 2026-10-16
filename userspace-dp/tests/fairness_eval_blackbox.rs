@@ -689,6 +689,11 @@ fn guard_p12_allows_bounded_stale_overcount() {
 
 #[test]
 fn rss_expectation_uses_observed_distribution_not_cstruct_normalized_copy() {
+    // Deliberate observed-vs-trimmed contract, first pinned by 66bd82e28
+    // ("Preserve observed RSS expectation input"): stale-count normalization
+    // is used only for Gate 2's structural Cstruct. RSS expectations answer
+    // what the observed RSS assignment did, and must not let the trimmed
+    // copy conceal a worker that actually owned more than 25% of flows.
     let tmp = TempGuard::new("rss_observed_not_normalized");
     let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
     let tsv_str = make_distribution_tsv(&[4, 4, 4, 3, 0, 0], &timestamps_for(60), "ge-0-0-2");
@@ -718,9 +723,10 @@ fn rss_expectation_uses_observed_distribution_not_cstruct_normalized_copy() {
         serde_json::json!([3, 3, 3, 3, 0, 0])
     );
     assert_eq!(v["cstruct_adjusted_for_a_i_overcount"], true);
-    assert!(
-        v["max_worker_flow_share"].as_f64().unwrap() > 0.25,
-        "max_worker_flow_share must reflect observed distribution: {v}"
+    assert_eq!(
+        v["max_worker_flow_share"].as_f64(),
+        Some(4.0 / 15.0),
+        "max_worker_flow_share must reflect observed [4,4,4,3,0,0], not normalized [3,3,3,3,0,0]: {v}"
     );
     let reasons = v["failure_reasons"].as_array().expect("failure_reasons array");
     assert!(
@@ -731,6 +737,36 @@ fn rss_expectation_uses_observed_distribution_not_cstruct_normalized_copy() {
         "failure_reasons must contain the observed RSS max-share failure; got: {:?}",
         reasons
     );
+}
+
+#[test]
+fn cstruct_max_expectation_uses_selected_gate2_cstruct() {
+    let tmp = TempGuard::new("rss_cstruct_max_uses_selected_cstruct");
+    let (_sockets, json_str) = make_balanced_pass_inputs(12, 60);
+    let tsv_str = make_distribution_tsv(&[4, 4, 4, 3, 0, 0], &timestamps_for(60), "ge-0-0-2");
+
+    let (output, verdict) = run_with_inputs(&tmp, &json_str, &tsv_str, &[
+        "--iface", "ge-0-0-2",
+        "--n-workers", "6",
+        "--warmup-secs", "0",
+        "--final-burst-secs", "0",
+        "--rss-expectation", "cstruct-max:1%",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "cstruct-max must use the selected Gate-2 Cstruct (0), not the raw observed Cstruct (~0.125); stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v = verdict.expect("verdict JSON on selected-Cstruct PASS");
+    assert_eq!(v["verdict"], "PASS");
+    assert_eq!(v["cstruct"], 0.0);
+    assert_eq!(
+        v["cstruct_distribution_a_i"],
+        serde_json::json!([3, 3, 3, 3, 0, 0])
+    );
+    assert_eq!(v["cstruct_adjusted_for_a_i_overcount"], true);
+    assert_eq!(v["rss_expectation_pass"], true);
 }
 
 #[test]
