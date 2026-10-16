@@ -1410,9 +1410,8 @@ fn notrans_persistent_idempotent_reentry_6041() {
     assert_eq!(rules[0].pool_allocator.debug_address_only_owners().len(), 1);
 }
 
-// #6041: the configured permit scope drives lease keying independent of the
-// global address-persistent flag. any-remote-host shares ONE lease across
-// remotes; target-host-port keys a DISTINCT lease per remote endpoint.
+// #6041: every permit mode uses one endpoint-independent lease; the mode
+// controls only the remote scope admitted on inbound session misses.
 #[test]
 fn notrans_persistent_permit_scope_keying_6041() {
     let now = NS_PER_SEC;
@@ -1440,8 +1439,8 @@ fn notrans_persistent_permit_scope_keying_6041() {
     let _ = notrans_persistent_lookup(&thp, "10.0.1.100", 40000, "9.9.9.9", 80, PROTO_TCP, now);
     assert_eq!(
         thp[0].pool_allocator.debug_live().persistent_by_source.len(),
-        2,
-        "target-host-port: distinct lease per remote endpoint",
+        1,
+        "target-host-port shares the endpoint-independent lease",
     );
 }
 
@@ -1975,49 +1974,65 @@ fn pool_snat_persistent_reuses_same_source_tuple() {
     assert_persistent_expiry_indexes_consistent(&rules[0]);
 }
 
-/// #2397 FAIL-ON-REVERT: with `permit-any-remote-host` DISABLED, the
-/// persistent mapping must be bound to the original remote endpoint. A second
-/// flow from the same local source to a DIFFERENT remote 5-tuple must NOT
-/// reuse the first translated mapping — it gets a distinct lease and a
-/// distinct port. The enabled-flag mode (asserted in the sibling test below
-/// and in `pool_snat_persistent_reuses_same_source_tuple`) keeps the historical
-/// any-remote reuse. Reverting the remote-scoping key change makes the
-/// disabled-flag branch reuse the mapping again and this assertion goes RED.
+/// #13945 FAIL-ON-REVERT: a disabled legacy any-remote flag decodes to
+/// target-host-port, but permit scope no longer splits outbound mapping keys.
 #[test]
-fn pool_snat_persistent_no_permit_any_remote_scopes_to_remote_host() {
+fn pool_snat_persistent_target_host_port_reuses_across_remotes() {
     let rules = persistent_pool_rules_remote_scope(300, 40000, 40010, false);
 
-    // First flow: same local source (10.0.1.100:12345) to remote 8.8.8.8:53.
     let first = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 1));
-    // Second flow: SAME local source, DIFFERENT remote (1.1.1.1:443).
     let second = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "1.1.1.1", 443, 2));
-
-    // permit-any-remote-host=false => the second remote must NOT inherit the
-    // first remote's persistent mapping.
-    assert_ne!(
-        (first.rewrite_src, first.rewrite_src_port),
-        (second.rewrite_src, second.rewrite_src_port),
-        "permit-any-remote-host=false must scope the persistent lease to the \
-         original remote host: a different remote 5-tuple must get a distinct \
-         translated mapping (issue #2397)"
-    );
-
-    // A THIRD flow back to the original remote 8.8.8.8:53 must reuse the first
-    // mapping (the lease is scoped TO that remote, not destroyed).
     let third = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 3));
     assert_eq!(
-        (third.rewrite_src, third.rewrite_src_port),
         (first.rewrite_src, first.rewrite_src_port),
-        "the same local source returning to the ORIGINAL remote must reuse its \
-         own remote-scoped persistent mapping"
+        (second.rewrite_src, second.rewrite_src_port)
     );
-
-    // Two distinct remotes => two distinct leases, both live.
+    assert_eq!(
+        (first.rewrite_src, first.rewrite_src_port),
+        (third.rewrite_src, third.rewrite_src_port)
+    );
     let status = source_nat_pool_statuses(&rules);
-    assert_eq!(status[0].persistent_leases, 2);
-    assert_eq!(status[0].allocations_total, 2);
-    assert_eq!(status[0].reuses_total, 1);
+    assert_eq!(status[0].persistent_leases, 1);
+    assert_eq!(status[0].allocations_total, 1);
+    assert_eq!(status[0].reuses_total, 2);
     assert_persistent_expiry_indexes_consistent(&rules[0]);
+}
+
+#[test]
+fn persistent_permission_cap_refuses_ungranted_remote() {
+    let rules = persistent_pool_rules_permit(300, 40000, 40010, "target-host-port");
+    for remote_port in 1..=1024 {
+        let translated = expect_snat_decision(tuple_snat_lookup(
+            &rules,
+            12345,
+            "8.8.8.8",
+            remote_port,
+            1,
+        ));
+        assert!(rules[0].pool_allocator.release_flow(
+            SourceNatFlowKey {
+                protocol: PROTO_TCP,
+                src_ip: "10.0.1.100".parse().unwrap(),
+                dst_ip: "8.8.8.8".parse().unwrap(),
+                src_port: 12345,
+                dst_port: remote_port,
+                routing_scope: 0,
+            },
+            TranslatedTuple {
+                ip: translated.rewrite_src.unwrap(),
+                port: translated.rewrite_src_port.unwrap(),
+            },
+            2,
+            NatHolder::Untracked,
+        ));
+    }
+    match tuple_snat_lookup(&rules, 12345, "8.8.8.8", 1025, 2) {
+        SourceNatLookup::Unavailable(failure) => assert_eq!(
+            failure.reason,
+            SourceNatFailureReason::AllocatorExhausted
+        ),
+        other => panic!("a full permission set admitted an unrecorded remote: {other:?}"),
+    }
 }
 
 /// #2397 control: with `permit-any-remote-host` ENABLED, the historical
@@ -2085,61 +2100,50 @@ fn pool_snat_persistent_target_host_reuses_across_remote_ports() {
          port on the SAME remote host (issue #2823)"
     );
 
-    // A DIFFERENT remote HOST must get a distinct lease (the scope is the
-    // remote host, not global).
+    // A DIFFERENT remote HOST shares the endpoint-independent mapping.
     let other_host = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "1.1.1.1", 53, 3));
-    assert_ne!(
+    assert_eq!(
         (first.rewrite_src, first.rewrite_src_port),
         (other_host.rewrite_src, other_host.rewrite_src_port),
-        "permit target-host must scope the lease to the remote host: a \
-         different remote host must get a distinct mapping"
+        "permit target-host must keep a single mapping per internal transport address"
     );
 
     let status = source_nat_pool_statuses(&rules);
-    // Two distinct remote HOSTS => two leases; the new-port reuse adds a reuse.
-    assert_eq!(status[0].persistent_leases, 2);
-    assert_eq!(status[0].allocations_total, 2);
-    assert_eq!(status[0].reuses_total, 1);
+    // All remote hosts share one endpoint-independent lease.
+    assert_eq!(status[0].persistent_leases, 1);
+    assert_eq!(status[0].allocations_total, 1);
+    assert_eq!(status[0].reuses_total, 2);
     assert_persistent_expiry_indexes_consistent(&rules[0]);
 }
 
-/// #2823: `permit target-host-port` keys the lease by the full remote
-/// endpoint (dst_ip + dst_port). A second flow from the same local source to
-/// the SAME remote host but a DIFFERENT remote PORT must NOT reuse the first
-/// mapping — it gets a distinct lease and port. This is the pre-#2823
-/// behavior and the back-compat default.
+/// Persistent NAT mapping is endpoint-independent even when the permit scope
+/// is target-host-port; that scope controls inbound admission, not mapping keys.
 #[test]
-fn pool_snat_persistent_target_host_port_distinct_per_remote_port() {
+fn pool_snat_persistent_target_host_port_reuses_across_remote_ports() {
     let rules = persistent_pool_rules_permit(300, 40000, 40010, "target-host-port");
 
     let first = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 1));
     let second = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 443, 2));
-
-    assert_ne!(
+    assert_eq!(
         (first.rewrite_src, first.rewrite_src_port),
         (second.rewrite_src, second.rewrite_src_port),
-        "permit target-host-port must scope the lease to the remote host:PORT: \
-         a different remote port must get a distinct mapping (issue #2823)"
+        "target-host-port scopes inbound admission, not mapping reuse"
     );
 
-    // Returning to the ORIGINAL remote host:port reuses its own lease.
-    let third = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 3));
+    let third = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "1.1.1.1", 53, 3));
     assert_eq!(
         (third.rewrite_src, third.rewrite_src_port),
-        (first.rewrite_src, first.rewrite_src_port),
-        "returning to the original remote host:port must reuse its lease"
+        (first.rewrite_src, first.rewrite_src_port)
     );
-
     let status = source_nat_pool_statuses(&rules);
-    assert_eq!(status[0].persistent_leases, 2);
-    assert_eq!(status[0].allocations_total, 2);
-    assert_eq!(status[0].reuses_total, 1);
+    assert_eq!(status[0].persistent_leases, 1);
+    assert_eq!(status[0].allocations_total, 1);
+    assert_eq!(status[0].reuses_total, 2);
     assert_persistent_expiry_indexes_consistent(&rules[0]);
 }
 
-/// #2823: `permit any-remote-host` keys the lease by the local source tuple
-/// only — ANY remote (different host AND/OR port) reuses the mapping. Driven
-/// through the enum string wire path.
+/// All permit modes share the same endpoint-independent mapping; `any-remote-host`
+/// broadens inbound admission rather than changing outbound mapping reuse.
 #[test]
 fn pool_snat_persistent_any_remote_host_reuses_everywhere() {
     let rules = persistent_pool_rules_permit(300, 40000, 40010, "any-remote-host");
@@ -2160,6 +2164,112 @@ fn pool_snat_persistent_any_remote_host_reuses_everywhere() {
     assert_eq!(status[0].allocations_total, 1);
     assert_eq!(status[0].reuses_total, 1);
     assert_persistent_expiry_indexes_consistent(&rules[0]);
+}
+
+#[test]
+fn persistent_inbound_permission_uses_remote_scope_not_mapping_key() {
+    for (permit, admitted_port, denied_port, admit_other_host) in [
+        ("target-host", 443, 8443, false),
+        ("target-host-port", 53, 443, false),
+        ("any-remote-host", 443, 443, true),
+    ] {
+        let rules = persistent_pool_rules_permit(300, 40000, 40010, permit);
+        let translated = expect_snat_decision(tuple_snat_lookup(
+            &rules,
+            12345,
+            "8.8.8.8",
+            53,
+            1,
+        ));
+        let public_ip = translated.rewrite_src.unwrap();
+        let public_port = translated.rewrite_src_port.unwrap();
+        let lookup = |remote_ip: &str, remote_port: u16| {
+            rules[0].pool_allocator.persistent_inbound_lookup(
+                6,
+                public_ip,
+                public_port,
+                remote_ip.parse().unwrap(),
+                remote_port,
+                2,
+            )
+        };
+        assert_eq!(
+            lookup("8.8.8.8", admitted_port),
+            PersistentInbound::Permitted {
+                internal_ip: "10.0.1.100".parse().unwrap(),
+                internal_port: 12345,
+                address_only: false,
+            },
+            "{permit} should admit its configured remote scope"
+        );
+        assert_eq!(
+            lookup("8.8.8.8", denied_port),
+            if permit != "target-host-port" {
+                PersistentInbound::Permitted {
+                    internal_ip: "10.0.1.100".parse().unwrap(),
+                    internal_port: 12345,
+                    address_only: false,
+                }
+            } else {
+                PersistentInbound::Denied
+            },
+            "{permit} must constrain the remote port as configured"
+        );
+        assert_eq!(
+            lookup("1.1.1.1", 53),
+            if admit_other_host {
+                PersistentInbound::Permitted {
+                    internal_ip: "10.0.1.100".parse().unwrap(),
+                    internal_port: 12345,
+                    address_only: false,
+                }
+            } else {
+                PersistentInbound::Denied
+            },
+            "{permit} must constrain the remote host as configured"
+        );
+    }
+}
+
+#[test]
+fn persistent_address_only_inbound_permission_is_checked() {
+    let rules = notrans_persistent_rules(
+        vec!["203.0.113.10/32"],
+        "target-host-port",
+        300,
+        false,
+    );
+    let outbound = expect_snat_decision(notrans_persistent_lookup(
+        &rules,
+        "10.0.1.100",
+        40_000,
+        "8.8.8.8",
+        443,
+        PROTO_TCP,
+        NS_PER_SEC,
+    ));
+    let public_ip = outbound.rewrite_src.unwrap();
+    assert_eq!(outbound.rewrite_src_port, None);
+    let lookup = |remote_ip: &str, remote_port| {
+        rules[0].pool_allocator.persistent_inbound_lookup(
+            PROTO_TCP,
+            public_ip,
+            40_000,
+            remote_ip.parse().unwrap(),
+            remote_port,
+            NS_PER_SEC + 1,
+        )
+    };
+    assert_eq!(
+        lookup("8.8.8.8", 443),
+        PersistentInbound::Permitted {
+            internal_ip: "10.0.1.100".parse().unwrap(),
+            internal_port: 40_000,
+            address_only: true,
+        }
+    );
+    assert_eq!(lookup("8.8.8.8", 8443), PersistentInbound::Denied);
+    assert_eq!(lookup("1.1.1.1", 443), PersistentInbound::Denied);
 }
 
 /// #3193 FAIL-ON-REVERT: the source-NAT pool STATUS surface must carry the
@@ -2207,23 +2317,20 @@ fn pool_status_reports_three_way_persistent_permit_mode() {
     );
 }
 
-/// #2823: an EMPTY wire `persistent_nat_permit` string (old control plane)
-/// falls back to the legacy bool. bool=false must mean target-host-port (the
-/// pre-#2823 (dst_ip, dst_port) keying), so a new remote port does NOT reuse.
+/// The legacy empty permit string still decodes from the bool, but the
+/// resulting target-host-port scope does not split endpoint-independent keys.
 #[test]
 fn pool_snat_persistent_permit_empty_string_falls_back_to_legacy_bool() {
-    // Empty string + bool=false => TargetHostPort.
     let mut snapshot = persistent_pool_snapshot(300, 40000, 40010, vec!["203.0.113.10"], false);
     snapshot.persistent_nat_permit_any_remote_host = false;
     snapshot.persistent_nat_permit = String::new();
     let rules = parse_source_nat_rules(&[snapshot]);
-
     let first = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 53, 1));
     let second = expect_snat_decision(tuple_snat_lookup(&rules, 12345, "8.8.8.8", 443, 2));
-    assert_ne!(
+    assert_eq!(
         (first.rewrite_src, first.rewrite_src_port),
         (second.rewrite_src, second.rewrite_src_port),
-        "empty permit string + legacy bool=false must behave as target-host-port"
+        "empty permit still defaults to target-host-port without splitting mappings"
     );
 }
 

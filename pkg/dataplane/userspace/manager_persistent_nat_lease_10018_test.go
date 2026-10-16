@@ -33,6 +33,7 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 		name      string
 		operation func(*Manager) error
 		old       bool
+		minimum   int
 		probeErr  error
 	}{
 		{
@@ -41,7 +42,8 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 				_, err := m.ExportIdleLeases()
 				return err
 			},
-			old: true,
+			old:     true,
+			minimum: MinProtocolPersistentNatLeasePermissions,
 		},
 		{
 			name: "display-old-helper",
@@ -49,14 +51,16 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 				_, err := m.ExportPersistentLeaseDisplay()
 				return err
 			},
-			old: true,
+			old:     true,
+			minimum: MinProtocolPersistentNatLeaseScope,
 		},
 		{
 			name: "import-old-helper",
 			operation: func(m *Manager) error {
 				return m.ImportIdleLeases([]IdleLeaseWire{scopedLease10018()})
 			},
-			old: true,
+			old:     true,
+			minimum: MinProtocolPersistentNatLeasePermissions,
 		},
 		{
 			name: "export-status-probe-failure",
@@ -88,7 +92,7 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 					return tc.probeErr
 				}
 				if tc.old {
-					status.ConfigSnapshotProtocolVersion = MinProtocolPersistentNatLeaseScope - 1
+					status.ConfigSnapshotProtocolVersion = tc.minimum - 1
 				} else {
 					status.ConfigSnapshotProtocolVersion = ProtocolVersion
 				}

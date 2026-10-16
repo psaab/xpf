@@ -2915,6 +2915,8 @@ mod rejected_mirror_reservation_10790_tests {
                             src_port: key.src_port,
                             routing_scope: key.routing_domain,
                             remote: None,
+                            permit_any_remote: false,
+                            permitted_remotes: Vec::new(),
                             translated_ip: peer_ip,
                             translated_port: peer_port,
                             address_only,

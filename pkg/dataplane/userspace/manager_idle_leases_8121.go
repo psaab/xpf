@@ -4,23 +4,20 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"time"
 )
 
 // ErrPersistentNatLeaseScopeProtocolIncompatible means the helper has not
-// proved that it understands the v25 persistent-lease routing_scope field.
-// Lease export/import are live control verbs, so unlike config compilation
-// these paths fail closed when status is unavailable or unobserved.
+// proved that it understands the persistent-lease routing scope and
+// permission fields. Lease export/import are live control verbs, so these
+// paths fail closed when status is unavailable or unobserved.
 var ErrPersistentNatLeaseScopeProtocolIncompatible = errors.New(
-	"userspace persistent NAT lease scope protocol incompatible")
+	"userspace persistent NAT lease protocol incompatible")
 
-// ensurePersistentNatLeaseScopeProtocolLocked is the live-verb compatibility
-// fence for every lease control request. A cached status is usable only after
-// it was actually observed from the running helper; a zero-value or failed
-// probe is not evidence that an old helper is safe to receive scoped JSON.
-func (m *Manager) ensurePersistentNatLeaseScopeProtocolLocked() error {
+func (m *Manager) ensurePersistentNatLeaseProtocolLocked(required int, feature string) error {
 	if m.helperStatusObserved &&
-		m.lastStatus.ConfigSnapshotProtocolVersion >= MinProtocolPersistentNatLeaseScope {
+		m.lastStatus.ConfigSnapshotProtocolVersion >= required {
 		return nil
 	}
 
@@ -29,17 +26,39 @@ func (m *Manager) ensurePersistentNatLeaseScopeProtocolLocked() error {
 		return fmt.Errorf("%w: could not verify helper protocol before lease request: %v",
 			ErrPersistentNatLeaseScopeProtocolIncompatible, err)
 	}
-	// requestLocked leaves status at its zero value when a test hook or a
-	// malformed response does not provide the status object. Record that
-	// observation, then reject it below rather than treating zero as domain 0.
 	m.recordHelperStatusLocked(&status)
-	if status.ConfigSnapshotProtocolVersion < MinProtocolPersistentNatLeaseScope {
+	if status.ConfigSnapshotProtocolVersion < required {
 		return fmt.Errorf(
-			"%w: helper protocol version %d is below required %d for scoped persistent-NAT leases",
+			"%w: helper protocol version %d is below required %d for persistent-NAT lease %s",
 			ErrPersistentNatLeaseScopeProtocolIncompatible,
 			status.ConfigSnapshotProtocolVersion,
-			MinProtocolPersistentNatLeaseScope,
+			required,
+			feature,
 		)
+	}
+	return nil
+}
+
+func (m *Manager) ensurePersistentNatLeasePermissionProtocolLocked() error {
+	return m.ensurePersistentNatLeaseProtocolLocked(
+		MinProtocolPersistentNatLeasePermissions, "permissions")
+}
+
+func (m *Manager) ensurePersistentNatLeaseScopeProtocolLocked() error {
+	return m.ensurePersistentNatLeaseProtocolLocked(
+		MinProtocolPersistentNatLeaseScope, "scope")
+}
+
+func validatePersistentNatRemotes(remotes []PersistentNatRemote) error {
+	if len(remotes) > MaxPersistentNatLeaseRemotes {
+		return fmt.Errorf("permission list has %d remotes; maximum is %d",
+			len(remotes), MaxPersistentNatLeaseRemotes)
+	}
+	for i, remote := range remotes {
+		addr, err := netip.ParseAddr(remote.IP)
+		if err != nil || addr.Zone() != "" {
+			return fmt.Errorf("permission remote %d has invalid IP %q", i, remote.IP)
+		}
 	}
 	return nil
 }
@@ -51,6 +70,10 @@ func validateIdleLeaseScopes(leases []IdleLeaseWire) error {
 				"%w: helper returned idle lease %d without routing_scope",
 				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
 		}
+		if err := validatePersistentNatRemotes(lease.PermittedRemotes); err != nil {
+			return fmt.Errorf("%w: helper returned idle lease %d with invalid permissions: %v",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i, err)
+		}
 	}
 	return nil
 }
@@ -61,6 +84,10 @@ func validateDisplayLeaseScopes(leases []DisplayLeaseWire) error {
 			return fmt.Errorf(
 				"%w: helper returned display lease %d without routing_scope",
 				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
+		}
+		if err := validatePersistentNatRemotes(lease.PermittedRemotes); err != nil {
+			return fmt.Errorf("%w: helper returned display lease %d with invalid permissions: %v",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i, err)
 		}
 	}
 	return nil
@@ -92,7 +119,7 @@ func (m *Manager) exportIdleLeasesLocked() ([]IdleLeaseWire, error) {
 	if m.proc == nil {
 		return nil, errors.New("userspace dataplane helper not running")
 	}
-	if err := m.ensurePersistentNatLeaseScopeProtocolLocked(); err != nil {
+	if err := m.ensurePersistentNatLeasePermissionProtocolLocked(); err != nil {
 		return nil, err
 	}
 	resp, err := m.requestDetailedLocked(ControlRequest{
@@ -141,6 +168,17 @@ func (m *Manager) ExportPersistentNatLeaseBatch() (PersistentNatLeaseBatch, erro
 func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) error {
 	if !validPersistentNatLeaseOrigin11486(batch.OriginID) {
 		return errors.New("persistent-NAT lease batch has invalid origin identity")
+	}
+	for i, lease := range batch.Leases {
+		if lease.RoutingScope == nil {
+			return fmt.Errorf(
+				"%w: imported lease %d has no routing_scope",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
+		}
+		if err := validatePersistentNatRemotes(lease.PermittedRemotes); err != nil {
+			return fmt.Errorf("%w: imported lease %d has invalid permissions: %v",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i, err)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -199,7 +237,7 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 	if len(batch.Leases) == 0 {
 		return nil
 	}
-	if err := m.ensurePersistentNatLeaseScopeProtocolLocked(); err != nil {
+	if err := m.ensurePersistentNatLeasePermissionProtocolLocked(); err != nil {
 		return err
 	}
 	_, err := m.requestDetailedLocked(ControlRequest{
@@ -247,7 +285,13 @@ func (m *Manager) importIdleLeasesLocked(leases []IdleLeaseWire) error {
 	if err := validateIdleLeaseScopes(leases); err != nil {
 		return err
 	}
-	if err := m.ensurePersistentNatLeaseScopeProtocolLocked(); err != nil {
+	for i, lease := range leases {
+		if err := validatePersistentNatRemotes(lease.PermittedRemotes); err != nil {
+			return fmt.Errorf("%w: imported lease %d has invalid permissions: %v",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i, err)
+		}
+	}
+	if err := m.ensurePersistentNatLeasePermissionProtocolLocked(); err != nil {
 		return err
 	}
 	_, err := m.requestDetailedLocked(ControlRequest{
