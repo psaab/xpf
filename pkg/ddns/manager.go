@@ -1017,6 +1017,14 @@ func (m *Manager) familyOwnsRecords(family int) bool {
 	return false
 }
 
+// desiredRecord is one entry of the reconcile desired set: the record a
+// live lease wants owned for its scope+identity+address this pass.
+type desiredRecord struct {
+	rec  LeaseDNSRecord
+	ow   ownedRecord
+	seen bool
+}
+
 // dhcidSharedWithOther reports whether ANOTHER owned record (a different store
 // key) shares the SAME RFC 4701 DHCID as `owned` — i.e. the same non-empty
 // ClientID and the same canonical FQDN (#2700). The DHCID digest is
@@ -1041,6 +1049,26 @@ func (m *Manager) dhcidSharedWithOther(owned ownedRecord) bool {
 			continue
 		}
 		if r.ClientID == owned.ClientID && dnsCanonicalFQDN(r.FQDN) == ownedFQDN {
+			return true
+		}
+	}
+	return false
+}
+
+// dhcidStillWanted reports whether the desired set itself still wants a
+// record that would compute the SAME RFC 4701 DHCID as `owned` (#14189).
+// It is consulted ONLY by the Pass-1 move path (a still-wanted-differently
+// delete whose replacement Pass 2 re-publishes this pass) — never by a
+// genuine expiry / backend-transition withdraw — so the expiration
+// semantics of dhcidSharedWithOther (scan the store only) are unchanged
+// everywhere else. Caller holds m.mu.
+func dhcidStillWanted(owned ownedRecord, want map[string]*desiredRecord) bool {
+	if owned.ClientID == "" {
+		return false
+	}
+	ownedFQDN := dnsCanonicalFQDN(owned.FQDN)
+	for _, d := range want {
+		if d.ow.ClientID == owned.ClientID && dnsCanonicalFQDN(d.ow.FQDN) == ownedFQDN {
 			return true
 		}
 	}
@@ -1252,12 +1280,7 @@ func (m *Manager) reconcileOnceLocked(ctx context.Context, env *reconcileEnv, le
 	gatedScope := map[string]bool{}
 
 	// desired[key] = the record we want owned for that scope+identity+address.
-	type desired struct {
-		rec  LeaseDNSRecord
-		ow   ownedRecord
-		seen bool
-	}
-	want := map[string]*desired{}
+	want := map[string]*desiredRecord{}
 	// Reassignment (a new client taking over an address a different client
 	// held) is cleaned by the owned-state delete pass below, NOT a separate
 	// tracker: the old owner's (scope,identity,address) key is no longer in
@@ -1332,7 +1355,7 @@ func (m *Manager) reconcileOnceLocked(ctx context.Context, env *reconcileEnv, le
 			// fixed-updater path (env.backendFP unset) — no transition ever fires.
 			BackendFingerprint: env.backendFPFor(l.Family),
 		}.withScope(scope)
-		want[ownedRecordKey(scope, identity, l.Address)] = &desired{rec: rec, ow: ow}
+		want[ownedRecordKey(scope, identity, l.Address)] = &desiredRecord{rec: rec, ow: ow}
 	}
 
 	var firstErr error
@@ -1469,7 +1492,17 @@ func (m *Manager) reconcileOnceLocked(ctx context.Context, env *reconcileEnv, le
 			}
 			delUpdater = prev
 		}
-		if err := m.deleteOwnedLocked(ctx, delUpdater, owned); err != nil {
+		// #14189: this Pass-1 delete is a MOVE (not an expiry) iff the desired
+		// set re-publishes the same FQDN+ClientID — hence the same DHCID —
+		// this pass (Pass 2). The owned key embeds the address, so an IP
+		// change makes stillWanted false even though the NAME is still
+		// wanted; dhcidStillWanted is the move test. Keep the DHCID on the
+		// wire for the replacement, or the re-add's RFC 4703 Attempt B loses
+		// its ownership proof and refuses forever when any other RRset
+		// coexists at the name. A genuine expiry (no matching desired
+		// record) must NOT keep it — the name is being released.
+		keepDHCID := dhcidStillWanted(owned, want)
+		if err := m.deleteOwnedLocked(ctx, delUpdater, owned, keepDHCID); err != nil {
 			// errDDNSNoBackendToWithdraw is a "kept ownership, no backend"
 			// non-failure (#2699): the record stays owned + cleanable, but no
 			// wire op was attempted, so it must NOT fail the reconcile pass (a
@@ -1542,7 +1575,7 @@ func (m *Manager) withdrawAllLocked(ctx context.Context) error {
 		// real backend was ever resolved, or a restart that has not yet built
 		// one) legitimately resolves to nop. Do NOT surface it — the records are
 		// kept and a later reconcile with a live backend withdraws them.
-		if err := m.deleteOwnedLocked(ctx, m.updater, r); err != nil &&
+		if err := m.deleteOwnedLocked(ctx, m.updater, r, false); err != nil &&
 			!errors.Is(err, errDDNSNoBackendToWithdraw) && firstErr == nil {
 			firstErr = err
 		}
@@ -1725,7 +1758,13 @@ func (m *Manager) upsertLocked(ctx context.Context, updater DNSUpdater, rec Leas
 // deletes it, removing the ownership entry on success. This is the sole
 // delete authority — it never constructs a delete from anything but the
 // store, so a record xpf did not create can never be deleted.
-func (m *Manager) deleteOwnedLocked(ctx context.Context, updater DNSUpdater, owned ownedRecord) error {
+//
+// keepDHCIDForMove (#14189) is set ONLY by the Pass-1 move path when the
+// desired set re-publishes the same FQDN+ClientID this pass: the shared
+// DHCID must survive the old record's delete so the replacement's RFC 4703
+// ownership proof (Attempt B) still holds. Every genuine-withdraw caller
+// passes false.
+func (m *Manager) deleteOwnedLocked(ctx context.Context, updater DNSUpdater, owned ownedRecord, keepDHCIDForMove bool) error {
 	rec, err := buildLeaseRecord(owned.FQDN, owned.Address, owned.TTL)
 	if err != nil {
 		// The stored address no longer parses (a corrupt store now fails closed
@@ -1778,7 +1817,9 @@ func (m *Manager) deleteOwnedLocked(ctx context.Context, updater DNSUpdater, own
 	// surviving family's record stays DHCID-protected (RFC 4703) and its later
 	// delete still satisfies the DHCID-match prerequisite. Only when THIS is the
 	// last owned record under the name is the DHCID removed with it.
-	rec.KeepForwardDHCID = m.dhcidSharedWithOther(owned)
+	// #14189: keepDHCIDForMove extends the same keep to a same-pass MOVE whose
+	// replacement (in the desired set, not yet in the store) shares the DHCID.
+	rec.KeepForwardDHCID = m.dhcidSharedWithOther(owned) || keepDHCIDForMove
 	if err := m.providerIO(func() error { return updater.DeleteLease(ctx, rec) }); err != nil {
 		m.deleteFail.Add(1)
 		return err
