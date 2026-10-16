@@ -1063,10 +1063,10 @@ fn static_nat_mapped_port_snat_untranslates_src_port() {
 // TCP/UDP return traffic on the exact port still matches.
 #[test]
 fn static_nat_snat_icmp_identifier_must_not_match_port_scoped_rule() {
-    let table = StaticNatTable::from_snapshots(
-        &[mapped_port_snapshot()],
-        &crate::nat::NatCounterStore::default(),
-    );
+    let counters = crate::nat::NatCounterStore::default();
+    let mut port_rule = mapped_port_snapshot();
+    port_rule.counter_id = 42;
+    let table = StaticNatTable::from_snapshots(&[port_rule], &counters);
     let int: IpAddr = "10.0.0.5".parse().unwrap();
 
     for protocol in [crate::ip_proto::PROTO_ICMP, crate::ip_proto::PROTO_ICMPV6] {
@@ -1094,10 +1094,14 @@ fn static_nat_snat_icmp_identifier_must_not_match_port_scoped_rule() {
     );
     // TCP/UDP on the mapped port still reverse-translate + un-translate port.
     for protocol in [crate::ip_proto::PROTO_TCP, crate::ip_proto::PROTO_UDP] {
-        let (decision, _) = table
+        let (decision, hit_counter) = table
             .match_snat_with_counter_scoped(int, 80, Some(protocol), None, "untrust", "", "")
             .expect("TCP/UDP mapped-port return flow must still match");
         assert_eq!(decision.rewrite_src_port, Some(8080));
+        assert!(
+            hit_counter.is_some(),
+            "TCP/UDP port-specific match must retain its nonzero rule counter"
+        );
     }
 }
 
