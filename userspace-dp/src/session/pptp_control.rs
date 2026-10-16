@@ -92,7 +92,7 @@ pub(crate) struct PptpControlInbox {
 
 #[derive(Default)]
 struct InboxInner {
-    pending: Vec<PendingControlSegment>,
+    pending: Vec<(u32, PendingControlSegment)>,
     /// When [`PptpControlInbox::take_pending`] last handed the buffer out.
     last_drain_ns: u64,
     /// Segments dropped because the buffer was full.
@@ -151,6 +151,10 @@ impl PptpControlInbox {
     /// and evicting it to make room would lose an association that was about to
     /// be learned in favour of one that may not even be a control message.
     pub(crate) fn push(&self, seg: PendingControlSegment) -> bool {
+        self.push_in_domain(0, seg)
+    }
+
+    pub(crate) fn push_in_domain(&self, routing_domain: u32, seg: PendingControlSegment) -> bool {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -159,7 +163,7 @@ impl PptpControlInbox {
             inner.dropped = inner.dropped.saturating_add(1);
             return false;
         }
-        inner.pending.push(seg);
+        inner.pending.push((routing_domain, seg));
         true
     }
 
@@ -177,6 +181,13 @@ impl PptpControlInbox {
     /// Returns an empty vec when gated, so a caller cannot distinguish "nothing
     /// to do" from "not yet" — which is correct: both mean do nothing.
     pub(crate) fn take_pending(&self, now_ns: u64) -> Vec<PendingControlSegment> {
+        self.take_pending_in_domain(now_ns)
+            .into_iter()
+            .map(|(_, segment)| segment)
+            .collect()
+    }
+
+    pub(crate) fn take_pending_in_domain(&self, now_ns: u64) -> Vec<(u32, PendingControlSegment)> {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -208,17 +219,15 @@ impl PptpControlInbox {
     ///
     /// A Reply may be admitted into the interval-gated inbox just before FIN
     /// or RST; purge it now so a later drain cannot resurrect the call.
-    pub(crate) fn forget_channel(
-        &self,
-        control: crate::session::pptp::ControlChannelId,
-    ) -> usize {
+    pub(crate) fn forget_channel(&self, control: crate::session::pptp::ControlChannelId) -> usize {
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
         let before = inner.pending.len();
-        inner.pending.retain(|segment| {
-            crate::session::pptp::ControlChannelId::new(
+        inner.pending.retain(|(routing_domain, segment)| {
+            crate::session::pptp::ControlChannelId::new_in_domain(
+                *routing_domain,
                 segment.src,
                 segment.src_port,
                 segment.dst,
@@ -362,7 +371,9 @@ impl PptpControlInbox {
         inner.pending_call_installs.retain(|pending| {
             pending.control != disconnect.control
                 || pending.learned_ns > disconnect.disconnected_ns
-                || !pending.call.has_alias(disconnect.allocator, disconnect.call_id)
+                || !pending
+                    .call
+                    .has_alias(disconnect.allocator, disconnect.call_id)
         });
     }
 
@@ -376,9 +387,9 @@ impl PptpControlInbox {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        inner.pending_call_installs.retain(|pending| {
-            pending.control != control || pending.learned_ns > closed_ns
-        });
+        inner
+            .pending_call_installs
+            .retain(|pending| pending.control != control || pending.learned_ns > closed_ns);
     }
 
     /// Take a snapshot of due close retries. Queue locks are acquired only
@@ -618,11 +629,21 @@ pub(crate) fn learn_from_control_segment(
     dst: std::net::IpAddr,
     payload: &[u8],
 ) -> Option<crate::session::pptp::PptpCall> {
+    learn_from_control_segment_in_domain(0, src, dst, payload)
+}
+
+pub(crate) fn learn_from_control_segment_in_domain(
+    routing_domain: u32,
+    src: std::net::IpAddr,
+    dst: std::net::IpAddr,
+    payload: &[u8],
+) -> Option<crate::session::pptp::PptpCall> {
     match parse_control_segment(payload) {
         ControlParse::CallReply {
             call_id,
             peer_call_id,
-        } => Some(crate::session::pptp::PptpCall::new(
+        } => Some(crate::session::pptp::PptpCall::new_in_domain(
+            routing_domain,
             src,
             call_id,
             dst,
@@ -660,7 +681,11 @@ pub(crate) mod fixtures_7699 {
         m.extend_from_slice(&0u16.to_be_bytes()); // Recv Window Size
         m.extend_from_slice(&0u16.to_be_bytes()); // Processing Delay
         m.extend_from_slice(&0u32.to_be_bytes()); // Physical Channel ID
-        assert_eq!(m.len(), OUTGOING_CALL_REPLY_LEN, "fixture must match the RFC length");
+        assert_eq!(
+            m.len(),
+            OUTGOING_CALL_REPLY_LEN,
+            "fixture must match the RFC length"
+        );
         m
     }
     /// Build a Call-Disconnect-Notify exactly as RFC 2637 §2.13 lays it out.
@@ -688,8 +713,8 @@ pub(crate) mod fixtures_7699 {
 
 #[cfg(test)]
 mod tests_7699 {
-    use super::fixtures_7699::outgoing_call_reply;
     use super::fixtures_7699::call_disconnect_notify;
+    use super::fixtures_7699::outgoing_call_reply;
     use super::*;
 
     fn ip(s: &str) -> std::net::IpAddr {
@@ -772,12 +797,8 @@ mod tests_7699 {
                 "a {cut}-byte prefix must report Truncated"
             );
             assert!(
-                learn_from_control_segment(
-                    ip("198.51.100.7"),
-                    ip("203.0.113.9"),
-                    partial
-                )
-                .is_none(),
+                learn_from_control_segment(ip("198.51.100.7"), ip("203.0.113.9"), partial)
+                    .is_none(),
                 "a truncated message must learn nothing"
             );
         }
@@ -807,7 +828,10 @@ mod tests_7699 {
 
         let mut bad_msg_type = outgoing_call_reply(1, 2, RESULT_CONNECTED);
         bad_msg_type[3] = 9;
-        assert_eq!(parse_control_segment(&bad_msg_type), ControlParse::NotControl);
+        assert_eq!(
+            parse_control_segment(&bad_msg_type),
+            ControlParse::NotControl
+        );
     }
 
     /// A control message of another type is Ignored, not misread.
@@ -830,9 +854,7 @@ mod tests_7699 {
             "a CDN removes an association; it never installs one"
         );
         let mut wrong_length = msg.clone();
-        wrong_length[..2].copy_from_slice(
-            &((CALL_DISCONNECT_NOTIFY_LEN - 1) as u16).to_be_bytes(),
-        );
+        wrong_length[..2].copy_from_slice(&((CALL_DISCONNECT_NOTIFY_LEN - 1) as u16).to_be_bytes());
         assert_eq!(
             parse_control_segment(&wrong_length),
             ControlParse::Ignored,
@@ -878,7 +900,10 @@ mod inbox_drop_policy_tests_7699 {
     fn a_full_inbox_drops_the_newest_segment_7699() {
         let inbox = PptpControlInbox::default();
         for i in 0..PENDING_CONTROL_CAPACITY {
-            assert!(inbox.push(seg(i as u8)), "segment {i} must fit below capacity");
+            assert!(
+                inbox.push(seg(i as u8)),
+                "segment {i} must fit below capacity"
+            );
         }
         assert_eq!(inbox.dropped_count(), 0, "nothing dropped while it fit");
 
@@ -959,9 +984,7 @@ mod call_install_retry_fence_tests_12133 {
 
         inbox.mark_call_install_sent(call, control, 20, QUEUE);
         assert!(
-            inbox
-                .take_call_install_retries(2_000_000_000)
-                .is_empty(),
+            inbox.take_call_install_retries(2_000_000_000).is_empty(),
             "an acknowledgement for the current learned timestamp did not clear it"
         );
     }
@@ -1024,10 +1047,38 @@ mod call_install_retry_fence_tests_12133 {
 
         inbox.forget_call_installs_for_channel(control, 20);
         assert!(
-            inbox
-                .take_call_install_retries(2_000_000_000)
-                .is_empty(),
+            inbox.take_call_install_retries(2_000_000_000).is_empty(),
             "the close timestamp equal to the learned time must cancel that install"
         );
+    }
+}
+
+#[cfg(test)]
+mod routing_domain_inbox_13681_tests {
+    use super::*;
+
+    #[test]
+    fn closing_one_routing_domain_does_not_purge_another_domains_reply_13681() {
+        let src = "198.51.100.7".parse().unwrap();
+        let dst = "203.0.113.9".parse().unwrap();
+        let segment = || PendingControlSegment {
+            src,
+            dst,
+            src_port: 49_152,
+            dst_port: 1723,
+            captured_ns: 1,
+            payload: vec![1],
+        };
+        let inbox = PptpControlInbox::default();
+        assert!(inbox.push_in_domain(100_001, segment()));
+        assert!(inbox.push_in_domain(100_002, segment()));
+
+        let closed =
+            crate::session::pptp::ControlChannelId::new_in_domain(100_001, src, 49_152, dst, 1723);
+        assert_eq!(inbox.forget_channel(closed), 1);
+
+        let pending = inbox.take_pending_in_domain(1);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, 100_002);
     }
 }

@@ -167,6 +167,7 @@ fn resolve_synced_discriminator(
 /// failure this check exists to catch.
 pub(crate) fn verify_synced_pptp_association(
     req: &SessionSyncRequest,
+    routing_domain: u32,
     discriminator: TunnelDiscriminator,
     src_ip: std::net::IpAddr,
     dst_ip: std::net::IpAddr,
@@ -174,9 +175,12 @@ pub(crate) fn verify_synced_pptp_association(
     let TunnelDiscriminator::Pptp(handle) = discriminator else {
         return Ok(None);
     };
-    let Some(call) =
-        crate::session::pptp::PptpCall::from_wire_call_ids(req.pptp_call_ids, src_ip, dst_ip)
-    else {
+    let Some(call) = crate::session::pptp::PptpCall::from_wire_call_ids_in_domain(
+        routing_domain,
+        req.pptp_call_ids,
+        src_ip,
+        dst_ip,
+    ) else {
         return Err(format!(
             "{SYNCED_IMPORT_REFUSED_PREFIX}pptp-call-ids-not-carried"
         ));
@@ -209,7 +213,7 @@ pub(crate) fn build_synced_session_key(
     // record carrying the handle without the pair is one the receiver can never
     // match a packet against — it cannot build the association its workers
     // resolve through. Withhold rather than downgrade, the #7188 discipline.
-    verify_synced_pptp_association(req, discriminator, src_ip, dst_ip)?;
+    verify_synced_pptp_association(req, routing_domain, discriminator, src_ip, dst_ip)?;
     Ok(crate::session::SessionKey {
         addr_family: req.addr_family,
         protocol: req.protocol,

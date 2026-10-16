@@ -39,10 +39,11 @@ use rustc_hash::FxHashMap;
 
 /// A learned PPTP call: the two peers and the call ID each ALLOCATED.
 ///
-/// Stored canonically (lower IP first) so the two directions of one call
-/// produce one association and one handle.
+/// Stored canonically (lower IP first) and scoped to its routing domain so the
+/// two directions of one call produce one association and one handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PptpCall {
+    pub(crate) routing_domain: u32,
     lo: IpAddr,
     hi: IpAddr,
     /// Call ID allocated BY the peer at `lo` — so it appears in packets sent TO
@@ -56,10 +57,32 @@ impl PptpCall {
     /// Build the canonical association from the two `(peer, call-id-it
     /// allocated)` halves, in either argument order.
     pub(crate) fn new(a: IpAddr, a_call_id: u16, b: IpAddr, b_call_id: u16) -> Self {
+        Self::new_in_domain(0, a, a_call_id, b, b_call_id)
+    }
+
+    pub(crate) fn new_in_domain(
+        routing_domain: u32,
+        a: IpAddr,
+        a_call_id: u16,
+        b: IpAddr,
+        b_call_id: u16,
+    ) -> Self {
         if (a, a_call_id) <= (b, b_call_id) {
-            Self { lo: a, hi: b, lo_call_id: a_call_id, hi_call_id: b_call_id }
+            Self {
+                routing_domain,
+                lo: a,
+                hi: b,
+                lo_call_id: a_call_id,
+                hi_call_id: b_call_id,
+            }
         } else {
-            Self { lo: b, hi: a, lo_call_id: b_call_id, hi_call_id: a_call_id }
+            Self {
+                routing_domain,
+                lo: b,
+                hi: a,
+                lo_call_id: b_call_id,
+                hi_call_id: a_call_id,
+            }
         }
     }
 
@@ -83,15 +106,30 @@ impl PptpCall {
     /// the import path rather than a default — a session whose handle the
     /// receiver cannot reproduce is one it can never match a packet against.
     /// The addresses come from the session key, and re-canonicalizing through
-    /// [`Self::new`] keeps the ordering identical to the sender's.
+    /// [`Self::new_in_domain`] keeps the ordering identical to the sender's.
     pub(crate) fn from_wire_call_ids(wire: u64, a: IpAddr, b: IpAddr) -> Option<Self> {
+        Self::from_wire_call_ids_in_domain(0, wire, a, b)
+    }
+
+    pub(crate) fn from_wire_call_ids_in_domain(
+        routing_domain: u32,
+        wire: u64,
+        a: IpAddr,
+        b: IpAddr,
+    ) -> Option<Self> {
         if wire & PPTP_CALL_IDS_PRESENT == 0 || wire >> 33 != 0 {
             return None;
         }
         let lo_call_id = ((wire >> 16) & 0xFFFF) as u16;
         let hi_call_id = (wire & 0xFFFF) as u16;
         let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-        Some(Self::new(lo, lo_call_id, hi, hi_call_id))
+        Some(Self::new_in_domain(
+            routing_domain,
+            lo,
+            lo_call_id,
+            hi,
+            hi_call_id,
+        ))
     }
 
     /// The deterministic call handle.
@@ -110,13 +148,26 @@ impl PptpCall {
                 h = h.wrapping_mul(PRIME);
             }
         };
+        eat(&self.routing_domain.to_be_bytes());
         match self.lo {
-            IpAddr::V4(v4) => { eat(&[4]); eat(&v4.octets()); }
-            IpAddr::V6(v6) => { eat(&[6]); eat(&v6.octets()); }
+            IpAddr::V4(v4) => {
+                eat(&[4]);
+                eat(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                eat(&[6]);
+                eat(&v6.octets());
+            }
         }
         match self.hi {
-            IpAddr::V4(v4) => { eat(&[4]); eat(&v4.octets()); }
-            IpAddr::V6(v6) => { eat(&[6]); eat(&v6.octets()); }
+            IpAddr::V4(v4) => {
+                eat(&[4]);
+                eat(&v4.octets());
+            }
+            IpAddr::V6(v6) => {
+                eat(&[6]);
+                eat(&v6.octets());
+            }
         }
         eat(&self.lo_call_id.to_be_bytes());
         eat(&self.hi_call_id.to_be_bytes());
@@ -135,22 +186,42 @@ pub(crate) const PPTP_CALL_IDS_PRESENT: u64 = 1 << 32;
 
 /// The TCP/1723 control channel an association was learned on (#7699 stage 3).
 ///
-/// Canonical (lower endpoint first) so both directions of the control
-/// connection name one channel. An association must not outlive the channel
-/// that taught it: when the control session goes away, the calls it set up are
-/// gone whether or not their Call-Disconnect-Notify was ever seen.
+/// Canonical (lower endpoint first) within its routing domain, so both
+/// directions of a control connection name one channel without crossing
+/// routing instances. An association must not outlive the channel that taught
+/// it: when the control session goes away, the calls it set up are gone whether
+/// or not their Call-Disconnect-Notify was ever seen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ControlChannelId {
+    pub(crate) routing_domain: u32,
     lo: (IpAddr, u16),
     hi: (IpAddr, u16),
 }
 
 impl ControlChannelId {
     pub(crate) fn new(a: IpAddr, a_port: u16, b: IpAddr, b_port: u16) -> Self {
+        Self::new_in_domain(0, a, a_port, b, b_port)
+    }
+
+    pub(crate) fn new_in_domain(
+        routing_domain: u32,
+        a: IpAddr,
+        a_port: u16,
+        b: IpAddr,
+        b_port: u16,
+    ) -> Self {
         if (a, a_port) <= (b, b_port) {
-            Self { lo: (a, a_port), hi: (b, b_port) }
+            Self {
+                routing_domain,
+                lo: (a, a_port),
+                hi: (b, b_port),
+            }
         } else {
-            Self { lo: (b, b_port), hi: (a, a_port) }
+            Self {
+                routing_domain,
+                lo: (b, b_port),
+                hi: (a, a_port),
+            }
         }
     }
 }
@@ -219,7 +290,11 @@ pub(crate) enum PptpInstallError {
     /// handle — the same identity collapse as a handle collision, through the
     /// other index. Refused, with no mutation, for the same reason.
     /// `owner` is the handle that already owns the alias.
-    AllocatorCollision { allocator: IpAddr, call_id: u16, owner: u32 },
+    AllocatorCollision {
+        allocator: IpAddr,
+        call_id: u16,
+        owner: u32,
+    },
 }
 
 /// Cumulative PPTP association lifecycle and fail-closed install outcomes.
@@ -231,16 +306,15 @@ pub(crate) struct PptpCounters {
     pub(crate) allocator_collisions: u64,
 }
 
-
 /// The learned associations, indexed for packet resolution.
 #[derive(Default)]
 pub(crate) struct PptpAssociations {
-    /// `(allocator, call-id it allocated) -> handle`.
+    /// `(routing-domain, allocator, call-id it allocated) -> handle`.
     ///
     /// A packet is keyed on its DESTINATION, because the Call ID it carries
     /// belongs to the peer it is being sent to. Two entries per call — one per
     /// peer — which is what makes both directions resolve to one handle.
-    by_allocator: FxHashMap<(IpAddr, u16), u32>,
+    by_allocator: FxHashMap<(u32, IpAddr, u16), u32>,
     /// `handle -> record`, for teardown, expiry and collision detection.
     by_handle: FxHashMap<u32, AssociationRecord>,
     /// Version-1 packets that resolved to no association.
@@ -294,7 +368,9 @@ impl PptpAssociations {
         // arm above, but comparing rather than merely probing keeps the refusal
         // exact if this ever runs without it).
         for (allocator, call_id) in [(call.lo, call.lo_call_id), (call.hi, call.hi_call_id)] {
-            if let Some(owner) = self.by_allocator.get(&(allocator, call_id))
+            if let Some(owner) = self
+                .by_allocator
+                .get(&(call.routing_domain, allocator, call_id))
                 && *owner != handle
             {
                 self.allocator_collisions = self.allocator_collisions.saturating_add(1);
@@ -314,8 +390,10 @@ impl PptpAssociations {
                 last_seen_ns: now_ns,
             },
         );
-        self.by_allocator.insert((call.lo, call.lo_call_id), handle);
-        self.by_allocator.insert((call.hi, call.hi_call_id), handle);
+        self.by_allocator
+            .insert((call.routing_domain, call.lo, call.lo_call_id), handle);
+        self.by_allocator
+            .insert((call.routing_domain, call.hi, call.hi_call_id), handle);
         Ok(handle)
     }
 
@@ -326,7 +404,18 @@ impl PptpAssociations {
     /// `None` means unassociated; the caller forwards and counts rather than
     /// dropping (see [`Self::note_unassociated`]).
     pub(crate) fn resolve(&self, dst: IpAddr, call_id: u16) -> Option<u32> {
-        self.by_allocator.get(&(dst, call_id)).copied()
+        self.resolve_in_domain(0, dst, call_id)
+    }
+
+    pub(crate) fn resolve_in_domain(
+        &self,
+        routing_domain: u32,
+        dst: IpAddr,
+        call_id: u16,
+    ) -> Option<u32> {
+        self.by_allocator
+            .get(&(routing_domain, dst, call_id))
+            .copied()
     }
 
     /// The data-path form: resolve AND refresh the association's idle clock.
@@ -356,7 +445,17 @@ impl PptpAssociations {
         call_id: u16,
         now_ns: u64,
     ) -> Option<u32> {
-        let handle = *self.by_allocator.get(&(dst, call_id))?;
+        self.resolve_and_touch_in_domain(0, dst, call_id, now_ns)
+    }
+
+    pub(crate) fn resolve_and_touch_in_domain(
+        &mut self,
+        routing_domain: u32,
+        dst: IpAddr,
+        call_id: u16,
+        now_ns: u64,
+    ) -> Option<u32> {
+        let handle = *self.by_allocator.get(&(routing_domain, dst, call_id))?;
         if let Some(rec) = self.by_handle.get_mut(&handle) {
             rec.last_seen_ns = now_ns;
         }
@@ -432,8 +531,10 @@ impl PptpAssociations {
             return false;
         };
         let call = rec.call;
-        self.by_allocator.remove(&(call.lo, call.lo_call_id));
-        self.by_allocator.remove(&(call.hi, call.hi_call_id));
+        self.by_allocator
+            .remove(&(call.routing_domain, call.lo, call.lo_call_id));
+        self.by_allocator
+            .remove(&(call.routing_domain, call.hi, call.hi_call_id));
         true
     }
 
@@ -441,14 +542,12 @@ impl PptpAssociations {
     ///
     /// The notice timestamp fences delayed worker commands after a call id is
     /// reused. A stale notice, or one from another control channel, is inert.
-    pub(crate) fn forget_call_disconnected_by(
-        &mut self,
-        disconnect: PptpCallDisconnect,
-    ) -> bool {
-        let Some(&handle) = self
-            .by_allocator
-            .get(&(disconnect.allocator, disconnect.call_id))
-        else {
+    pub(crate) fn forget_call_disconnected_by(&mut self, disconnect: PptpCallDisconnect) -> bool {
+        let Some(&handle) = self.by_allocator.get(&(
+            disconnect.control.routing_domain,
+            disconnect.allocator,
+            disconnect.call_id,
+        )) else {
             return false;
         };
         let matches_notice = self.by_handle.get(&handle).is_some_and(|record| {
@@ -490,13 +589,21 @@ impl PptpAssociations {
             handle,
             AssociationRecord {
                 call,
-                control: ControlChannelId::new(call.lo, 1723, call.hi, 1723),
+                control: ControlChannelId::new_in_domain(
+                    call.routing_domain,
+                    call.lo,
+                    1723,
+                    call.hi,
+                    1723,
+                ),
                 learned_ns: 0,
                 last_seen_ns: 0,
             },
         );
-        self.by_allocator.insert((call.lo, call.lo_call_id), handle);
-        self.by_allocator.insert((call.hi, call.hi_call_id), handle);
+        self.by_allocator
+            .insert((call.routing_domain, call.lo, call.lo_call_id), handle);
+        self.by_allocator
+            .insert((call.routing_domain, call.hi, call.hi_call_id), handle);
     }
 }
 
@@ -527,7 +634,9 @@ mod tests_7699 {
         let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
         let (a_id, b_id) = (0x1111u16, 0x2222u16);
         let mut t = PptpAssociations::default();
-        let handle = t.install(PptpCall::new(a, a_id, b, b_id), ctl(a, b), 0).expect("install");
+        let handle = t
+            .install(PptpCall::new(a, a_id, b, b_id), ctl(a, b), 0)
+            .expect("install");
 
         // A→B carries B's call id, so it is keyed on the destination B.
         assert_eq!(
@@ -551,8 +660,12 @@ mod tests_7699 {
     fn two_calls_between_one_endpoint_pair_get_distinct_handles_7699() {
         let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
         let mut t = PptpAssociations::default();
-        let h1 = t.install(PptpCall::new(a, 0x1001, b, 0x2001), ctl(a, b), 0).expect("call 1");
-        let h2 = t.install(PptpCall::new(a, 0x1002, b, 0x2002), ctl(a, b), 0).expect("call 2");
+        let h1 = t
+            .install(PptpCall::new(a, 0x1001, b, 0x2001), ctl(a, b), 0)
+            .expect("call 1");
+        let h2 = t
+            .install(PptpCall::new(a, 0x1002, b, 0x2002), ctl(a, b), 0)
+            .expect("call 2");
         assert_ne!(
             h1, h2,
             "two calls between one endpoint pair shared a handle, so they share \
@@ -580,10 +693,22 @@ mod tests_7699 {
         let h = base.handle();
 
         for (what, other) in [
-            ("the call id allocated by A", PptpCall::new(a, 0x9999, b, 0x2222)),
-            ("the call id allocated by B", PptpCall::new(a, 0x1111, b, 0x9999)),
-            ("peer A's address", PptpCall::new(ip("198.51.100.8"), 0x1111, b, 0x2222)),
-            ("peer B's address", PptpCall::new(a, 0x1111, ip("203.0.113.10"), 0x2222)),
+            (
+                "the call id allocated by A",
+                PptpCall::new(a, 0x9999, b, 0x2222),
+            ),
+            (
+                "the call id allocated by B",
+                PptpCall::new(a, 0x1111, b, 0x9999),
+            ),
+            (
+                "peer A's address",
+                PptpCall::new(ip("198.51.100.8"), 0x1111, b, 0x2222),
+            ),
+            (
+                "peer B's address",
+                PptpCall::new(a, 0x1111, ip("203.0.113.10"), 0x2222),
+            ),
         ] {
             assert_ne!(
                 h,
@@ -634,7 +759,10 @@ mod tests_7699 {
         t.force_handle_for_test(squatter, handle);
 
         match t.install(victim, ctl(a, b), 0) {
-            Err(PptpInstallError::HandleCollision { existing, handle: h }) => {
+            Err(PptpInstallError::HandleCollision {
+                existing,
+                handle: h,
+            }) => {
                 assert_eq!(existing, squatter);
                 assert_eq!(h, handle);
             }
@@ -655,7 +783,9 @@ mod tests_7699 {
         // and the assertion would be about the seam rather than about
         // idempotence.
         let mut clean = PptpAssociations::default();
-        let first = clean.install(squatter, ctl(a, b), 0).expect("first install");
+        let first = clean
+            .install(squatter, ctl(a, b), 0)
+            .expect("first install");
         assert_eq!(
             clean.install(squatter, ctl(a, b), 0),
             Ok(first),
@@ -668,11 +798,7 @@ mod tests_7699 {
     /// handle: data lookup is indexed by this alias, not by the call record.
     #[test]
     fn an_allocator_alias_collision_is_refused_without_repointing_11053() {
-        let (a, b, c) = (
-            ip("198.51.100.7"),
-            ip("203.0.113.9"),
-            ip("203.0.113.10"),
-        );
+        let (a, b, c) = (ip("198.51.100.7"), ip("203.0.113.9"), ip("203.0.113.10"));
         let original = PptpCall::new(a, 0x1111, b, 0x2222);
         let colliding = PptpCall::new(a, 0x1111, c, 0x3333);
         let mut table = PptpAssociations::default();
@@ -710,11 +836,7 @@ mod tests_7699 {
     /// #13282: counter snapshot must retain all PPTP lifecycle/failure signals.
     #[test]
     fn pptp_counters_report_unassociated_expiry_and_collisions_13282() {
-        let (a, b, c) = (
-            ip("198.51.100.7"),
-            ip("203.0.113.9"),
-            ip("203.0.113.10"),
-        );
+        let (a, b, c) = (ip("198.51.100.7"), ip("203.0.113.9"), ip("203.0.113.10"));
         let mut table = PptpAssociations::default();
         table.note_unassociated();
         table.note_unassociated();
@@ -753,14 +875,10 @@ mod tests_7699 {
             .pptp_mut()
             .install(second, ctl(a, c), 0)
             .expect("session-table call 2");
-        let _ = sessions.expire_stale_entries_ha(
-            ASSOCIATION_IDLE_TIMEOUT_NS + 1,
-            None,
-        );
+        let _ = sessions.expire_stale_entries_ha(ASSOCIATION_IDLE_TIMEOUT_NS + 1, None);
         assert_eq!(sessions.pptp().counters().expired_idle, 2);
         assert_eq!(sessions.pptp().unassociated(), 1);
     }
-
 
     /// Teardown must remove BOTH allocator entries.
     ///
@@ -772,12 +890,17 @@ mod tests_7699 {
     fn removing_a_call_clears_both_directions_7699() {
         let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
         let mut t = PptpAssociations::default();
-        let handle = t.install(PptpCall::new(a, 0x1111, b, 0x2222), ctl(a, b), 0).expect("install");
+        let handle = t
+            .install(PptpCall::new(a, 0x1111, b, 0x2222), ctl(a, b), 0)
+            .expect("install");
         assert!(t.remove(handle));
         assert_eq!(t.resolve(a, 0x1111), None, "A-side entry survived teardown");
         assert_eq!(t.resolve(b, 0x2222), None, "B-side entry survived teardown");
         assert_eq!(t.len(), 0);
-        assert!(!t.remove(handle), "a second remove must report nothing removed");
+        assert!(
+            !t.remove(handle),
+            "a second remove must report nothing removed"
+        );
     }
 
     /// The end-to-end property: a session keyed on a PPTP handle has a reverse
@@ -797,6 +920,92 @@ mod tests_7699 {
              transforms, a reply is looked up under a key the stored companion \
              does not equal and matches no session at all"
         );
+    }
+}
+
+#[cfg(test)]
+mod routing_domain_13681_tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn ctl(a: IpAddr, b: IpAddr) -> ControlChannelId {
+        ControlChannelId::new(a, 49152, b, 1723)
+    }
+
+    #[test]
+    fn identical_pptp_calls_in_two_routing_domains_coexist_and_teardown_is_scoped_13681() {
+        let (a, b) = (ip("198.51.100.7"), ip("203.0.113.9"));
+        let call_vrf1 = PptpCall::new_in_domain(100_001, a, 0x1111, b, 0x2222);
+        let call_vrf2 = PptpCall::new_in_domain(100_002, a, 0x1111, b, 0x2222);
+        assert_ne!(
+            call_vrf1, call_vrf2,
+            "routing domain must separate PPTP calls"
+        );
+        assert_ne!(
+            call_vrf1.handle(),
+            call_vrf2.handle(),
+            "handle must carry routing domain"
+        );
+        assert_eq!(
+            call_vrf1.to_wire_call_ids(),
+            call_vrf2.to_wire_call_ids(),
+            "the routing domain comes from the session sync key, not a wire-format change"
+        );
+        assert_eq!(
+            PptpCall::from_wire_call_ids_in_domain(100_001, call_vrf1.to_wire_call_ids(), a, b),
+            Some(call_vrf1)
+        );
+        assert_eq!(
+            PptpCall::from_wire_call_ids_in_domain(100_002, call_vrf2.to_wire_call_ids(), a, b),
+            Some(call_vrf2)
+        );
+
+        let ctl1 = ControlChannelId::new_in_domain(100_001, a, 49152, b, 1723);
+        let ctl2 = ControlChannelId::new_in_domain(100_002, a, 49152, b, 1723);
+        assert_ne!(ctl1, ctl2, "routing domain must separate control channels");
+        let mut t = PptpAssociations::default();
+        let h1 = t.install(call_vrf1, ctl1, 1).expect("vrf1 install");
+        let h2 = t
+            .install(call_vrf2, ctl2, 2)
+            .expect("vrf2 install must not collide with vrf1");
+        assert_ne!(h1, h2);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t.resolve_in_domain(100_001, b, 0x2222), Some(h1));
+        assert_eq!(t.resolve_in_domain(100_002, b, 0x2222), Some(h2));
+        assert_eq!(t.resolve_in_domain(100_001, a, 0x1111), Some(h1));
+        assert_eq!(t.resolve_in_domain(100_002, a, 0x1111), Some(h2));
+        assert_eq!(
+            t.resolve_and_touch_in_domain(100_002, b, 0x2222, 9),
+            Some(h2)
+        );
+
+        let disconnect = PptpCallDisconnect {
+            allocator: a,
+            call_id: 0x1111,
+            control: ctl1,
+            disconnected_ns: 10,
+        };
+        assert!(
+            t.forget_call_disconnected_by(disconnect),
+            "vrf1 CDN must tear down its own call"
+        );
+        assert_eq!(t.resolve_in_domain(100_001, b, 0x2222), None);
+        assert_eq!(
+            t.resolve_in_domain(100_002, b, 0x2222),
+            Some(h2),
+            "vrf1 CDN must never remove the vrf2 call"
+        );
+        assert_eq!(t.len(), 1);
+
+        assert_eq!(
+            t.forget_control_channel(ctl2),
+            1,
+            "control-channel teardown must still remove its channel's calls"
+        );
+        assert_eq!(t.len(), 0);
     }
 }
 
@@ -861,7 +1070,6 @@ mod expiry_tests_7699 {
         );
     }
 
-
     /// A CDN removes both aliases; the PAC's call ID alone identifies the
     /// association when combined with the control channel that taught it.
     #[test]
@@ -870,7 +1078,9 @@ mod expiry_tests_7699 {
         let control = ControlChannelId::new(pac, 49152, pns, 1723);
         let mut associations = PptpAssociations::default();
         let old_call = PptpCall::new(pac, 0xAAAA, pns, 0xBBBB);
-        let old_handle = associations.install(old_call, control, T0).expect("old call");
+        let old_handle = associations
+            .install(old_call, control, T0)
+            .expect("old call");
         let disconnect = PptpCallDisconnect {
             allocator: pac,
             call_id: 0xAAAA,
@@ -902,23 +1112,27 @@ mod expiry_tests_7699 {
         let mut associations = PptpAssociations::default();
         let handle = associations.install(call, control, T0).expect("call");
 
-        assert!(!associations.forget_call_disconnected_by(PptpCallDisconnect {
-            allocator: pac,
-            call_id: 0xAAAA,
-            control: other_control,
-            disconnected_ns: T0 + 2,
-        }));
+        assert!(
+            !associations.forget_call_disconnected_by(PptpCallDisconnect {
+                allocator: pac,
+                call_id: 0xAAAA,
+                control: other_control,
+                disconnected_ns: T0 + 2,
+            })
+        );
         assert_eq!(
             associations.install(call, control, T0 + 3),
             Ok(handle),
             "an identical re-learn updates the install timestamp"
         );
-        assert!(!associations.forget_call_disconnected_by(PptpCallDisconnect {
-            allocator: pac,
-            call_id: 0xAAAA,
-            control,
-            disconnected_ns: T0 + 2,
-        }));
+        assert!(
+            !associations.forget_call_disconnected_by(PptpCallDisconnect {
+                allocator: pac,
+                call_id: 0xAAAA,
+                control,
+                disconnected_ns: T0 + 2,
+            })
+        );
         assert_eq!(associations.resolve(pac, 0xAAAA), Some(handle));
         assert_eq!(associations.resolve(pns, 0xBBBB), Some(handle));
     }
@@ -943,7 +1157,10 @@ mod expiry_tests_7699 {
             "a call carrying data just before the bound must resolve"
         );
         assert_eq!(
-            t.expire_idle(T0 + ASSOCIATION_IDLE_TIMEOUT_NS, ASSOCIATION_IDLE_TIMEOUT_NS),
+            t.expire_idle(
+                T0 + ASSOCIATION_IDLE_TIMEOUT_NS,
+                ASSOCIATION_IDLE_TIMEOUT_NS
+            ),
             0,
             "a sweep after recent traffic must preserve the call"
         );

@@ -579,14 +579,17 @@ pub(in crate::afxdp) fn capture_pptp_control_segment(
     if payload.is_empty() {
         return false;
     }
-    inbox.push(crate::session::pptp_control::PendingControlSegment {
-        src: flow.src_ip,
-        dst: flow.dst_ip,
-        src_port: flow.forward_key.src_port,
-        dst_port: flow.forward_key.dst_port,
-        captured_ns,
-        payload: payload.to_vec(),
-    })
+    inbox.push_in_domain(
+        flow.forward_key.routing_domain,
+        crate::session::pptp_control::PendingControlSegment {
+            src: flow.src_ip,
+            dst: flow.dst_ip,
+            src_port: flow.forward_key.src_port,
+            dst_port: flow.forward_key.dst_port,
+            captured_ns,
+            payload: payload.to_vec(),
+        },
+    )
 }
 
 /// Stage 9 — fabric-ingress classification.

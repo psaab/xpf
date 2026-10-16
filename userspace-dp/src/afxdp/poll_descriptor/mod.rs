@@ -125,7 +125,8 @@ pub(in crate::afxdp) fn forget_pptp_control_channel(
     control_key: &SessionKey,
     closed_ns: u64,
 ) -> (usize, usize) {
-    let control = crate::session::pptp::ControlChannelId::new(
+    let control = crate::session::pptp::ControlChannelId::new_in_domain(
+        control_key.routing_domain,
         control_key.src_ip,
         control_key.src_port,
         control_key.dst_ip,
@@ -955,12 +956,28 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // same reason the sibling is — with the knob off this expression
                 // does nothing and the path is bit-identical.
                 if flow.is_none() && worker_ctx.forwarding.gre_acceleration {
-                    flow = crate::afxdp::gre_discriminator::pptp_data_session_flow(
-                        packet_frame,
-                        meta,
-                        sessions,
-                        now_ns,
-                    );
+                    let routing_domain = if absent_fabric_ingress_suspect {
+                        0
+                    } else {
+                        crate::afxdp::forwarding::ingress_routing_domain(
+                            worker_ctx.forwarding,
+                            meta.ingress_ifindex as i32,
+                            meta.ingress_vlan_id,
+                            if packet_fabric_ingress {
+                                ingress_zone_override
+                            } else {
+                                None
+                            },
+                        )
+                    };
+                    flow =
+                        crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(
+                            packet_frame,
+                            meta,
+                            sessions,
+                            routing_domain,
+                            now_ns,
+                        );
                 }
                 // #4743/#10665: fail-closed drop for an over-limit IPv6
                 // extension-header chain. `stage_parse_flow_and_learn` returns

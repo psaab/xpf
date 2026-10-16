@@ -1527,7 +1527,7 @@ mod embedded_forward_key_resolve_wiring_9298_tests {
                 if t.starts_with("discriminator: quoted_discriminator") {
                     resolved += 1;
                 }
-                if t.contains("resolve_quoted_pptp_discriminator(") {
+                if t.contains("resolve_quoted_pptp_discriminator_in_domain(") {
                     calls += 1;
                 }
             }
