@@ -497,7 +497,24 @@ neither fails the build; at runtime it **denies** for any class with operational
 regexes, because a census is a build-time guard and the request path must fail
 closed on its own.
 
-Two consequences an operator should know:
+> **Being declared was itself the bypass until #14146.** The six operational
+> reads in `restRoutesNoCommand` with no canonical twin
+> (`statistics/interfaces`, `statistics/zones`, `security/vrrp`,
+> `routing/ospf`, `system/buffers`, `services/flow-exporters`) returned
+> *allowed* for a restricted class — the gate treated "declared, no command"
+> as "nothing to evaluate, allow", so `deny-commands ".*"` read all six over
+> REST while gRPC denied the same shape for unmapped RPCs. A declaration now
+> records why no command exists; it is not an exemption. For a class with
+> operational regexes every declared route **denies** except the routes in
+> `restNoCommandExempt14146` — `/health`, `/metrics`, and the config-mode
+> family, which are governed by a different authorization decision — and
+> the request-decoded routes, which resolve per request or deny. The
+> operator-visible consequence: a login class with any `allow-commands` or
+> `deny-commands` leaf can no longer read those six endpoints over REST at
+> all (there is no command an operator could write to permit them); a class
+> with no operational regexes is unaffected.
+
+Three consequences an operator should know:
 
 - **Config-mode REST routes are charged no operational command.** They are
   governed by `allow-configuration` / `deny-configuration`, exactly as the
@@ -509,6 +526,12 @@ Two consequences an operator should know:
   entry — including the prefix forms such as `cluster-failover:1:node0`, which
   the handler parses out of a packed string and which therefore cannot appear in
   any table — **denies** for a restricted class.
+- **`GET /api/v1/system/info` is charged the `type`'s command** (`show system
+  uptime` for `?type=uptime`, `show system memory` for `?type=memory`), the
+  same strings gRPC charges for `GetSystemInfo`. Before #14146 every type was
+  charged the flat `show version`, so a deny on `show system memory` never
+  fired over REST. An unknown or missing `type` has no command and **denies**
+  for a restricted class.
 
 > **This sentence was a LIVE OVERCLAIM until #9154, and the shape of the error
 > is worth keeping.** It said "every dispatch surface" and then enumerated two,

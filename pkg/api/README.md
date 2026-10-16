@@ -98,7 +98,12 @@ Routes with no operational twin are declared in `restRoutesNoCommand` with a
 reason, and a census test requires every route registered in `server.go` to
 appear in exactly one of the two tables. A route in neither fails the build and
 DENIES at runtime — the census is a build-time guard, so the request path fails
-closed independently of it.
+closed independently of it. Since #14146 a declared route also DENIES for a
+class with operational regexes, except `/health`, `/metrics`, and the
+config-mode family (`restNoCommandExempt14146`, governed by the
+`*-configuration` pair); `GET /api/v1/system/info` is request-decoded by its
+`type` (`show system uptime` / `show system memory`, as gRPC charges
+`GetSystemInfo`).
 
 - `GET /metrics` — Prometheus exposition.
   - Current-config remote archive debt is exposed as
