@@ -211,6 +211,18 @@
   counted, covers a pre-existing session hit and flowless fragment, and keeps
   IPv4/IPv6 unicast controls forwarding.
 
+### Transit destination-class gate omits IPv4/IPv6 link-local ranges (#13981)
+- The #11413 transit-destination gate rejected multicast, broadcast, loopback
+  and reserved destinations, but omitted IPv4 `169.254/16` and IPv6
+  `fe80::/10`. With a default route and an `application any` permit, packets
+  to either single-link-scope range could be forwarded onto another link.
+- **Fix:** Add both link-local classes to the shared transit destination
+  predicate, used by new flows, session/cache hits, flowless fragments and
+  final TX checks. The gate remains transit-only; `LocalDelivery` is unchanged.
+- **Regression tests:** `userspace-dp/src/afxdp/tests_martian_destination_11413.rs`
+  proves routed transit drops/counting for both families and both range
+  boundaries, plus direct predicate boundary and neighboring-range controls.
+
 
 
 ### NAT64 HA imports self-refuse under a dual SNAT reference (#10706)
