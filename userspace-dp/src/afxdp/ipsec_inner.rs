@@ -392,13 +392,10 @@ fn d14_zone_gate(
     if lookup.resolution.disposition != ForwardingDisposition::ForwardCandidate {
         return Err(deny(input, "d19_route_not_forwardable", reason::NO_ROUTE));
     }
-    // #9506 S9.5: the selector projection must be present AND must contain
-    // the frame's destination. This containment is the explicit prerequisite
-    // the deny-only phase documented: a forwarded (permitted) frame may only
-    // re-enter the kernel main table when its destination is inside the
-    // tunnel's route-derived selector projection, so a permitted re-entry can
-    // never widen the reachable set beyond what the tunnel's selectors and
-    // main-table routes already cover.
+    // The local selector projection is separate from the remote, route-derived
+    // ingress projection checked for the decrypted packet's source above.
+    // Forwarding may continue only when the destination is locally selected
+    // and reachable through a non-tunnel main-table route.
     let (selectors, effective_prefixes) = pmech_row.selector_projection();
     if selectors.is_empty() || effective_prefixes.is_empty() {
         return Err(deny(input, "d22_selector_inventory_invalid", reason::EVALUATOR_UNAVAILABLE));
@@ -409,6 +406,29 @@ fn d14_zone_gate(
             "d22_destination_outside_selector",
             reason::DOMAIN_OVERLAP,
         ));
+    }
+    let egress_zone = forwarding.egress_zone_id(lookup.resolution.egress_ifindex);
+    let policy = crate::policy::evaluate_policy_result_l3_aware(
+        &forwarding.policy,
+        ingress_zone,
+        egress_zone,
+        source,
+        destination,
+        input.protocol,
+        0,
+        0,
+        None,
+        input.inner_packet.len() as u64,
+        false,
+    );
+    if !matches!(policy.action, crate::policy::PolicyAction::Permit) {
+        return Err(IpsecInnerDecision::Deny {
+            request_id: input.descriptor.map(|descriptor| descriptor.request_id).unwrap_or_default(),
+            connection_id: input.descriptor.map(|descriptor| descriptor.connection_id).unwrap_or_default(),
+            stage: "d15_zone_policy",
+            reason: reason::LEGACY_POLICY_DENY,
+            policy_id: policy.policy_id,
+        });
     }
     Ok((owned, meta, row.if_id))
 }
@@ -578,6 +598,15 @@ mod tests {
                     domain: 0,
                     table: 254,
                     family: "inet".into(),
+                    destination: "192.0.2.0/24".into(),
+                    disposition: 1,
+                    next_hops: vec![IpsecMainRouteNextHopSnapshot { ifindex: 20, weight: 1 }],
+                    ..Default::default()
+                },
+                IpsecMainRouteSnapshot {
+                    domain: 0,
+                    table: 254,
+                    family: "inet".into(),
                     destination: "10.0.0.0/24".into(),
                     disposition: 1, // RTN_UNICAST
                     next_hops: vec![IpsecMainRouteNextHopSnapshot {
@@ -599,6 +628,7 @@ mod tests {
                 }],
                 effective_prefixes: vec!["10.0.0.0/24".into()],
                 ingress_prefixes: vec!["10.0.0.0/24".into()],
+                destination_prefixes: vec!["192.0.2.0/24".into()],
                 inventory_generation: 77,
                 fib_generation,
                 source_kind: "xfrmi".into(),
@@ -952,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn d14_destination_inside_selector_would_permits_9506() {
+    fn d14_destination_inside_remote_selector_but_outside_local_selector_denies_9506() {
         let mut forwarding = test_forwarding_with_route("10.0.0.0/24", 10);
         let next_hop: std::net::IpAddr = "10.0.0.2".parse().expect("IPv4 next hop");
         forwarding.neighbors.insert(
@@ -970,27 +1000,20 @@ mod tests {
         let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 9]);
         let decision =
             adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
-        assert!(decision.is_would_permit());
-        assert_eq!(decision.reason(), None);
+        assert!(!decision.is_would_permit());
+        assert_eq!(decision.reason(), Some(reason::DOMAIN_OVERLAP));
     }
 
     #[test]
     fn would_permit_verdict_is_not_itself_a_terminal_permit() {
-        let mut forwarding = test_forwarding_with_route("10.0.0.0/24", 10);
-        let next_hop: std::net::IpAddr = "10.0.0.2".parse().expect("IPv4 next hop");
-        forwarding.neighbors.insert(
-            (10, next_hop),
-            crate::afxdp::NeighborEntry {
-                mac: [0x02, 0, 0, 0, 0, 10],
-            },
-        );
+        let forwarding = local_lan_forwarding();
         let rows = IpsecTunnelRows::new([IpsecTunnelRow {
             stn: "st0".into(),
             if_id: 1,
             logical_ifindex: 10,
         }]);
         let v = view_with_rows(1, 1, rows, forwarding);
-        let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 1]);
+        let packet = test_packet_with_source([10, 0, 0, 1], [192, 0, 2, 1]);
         let d = adjudicate_ipsec_inner(&v, input(&packet, advisory(1, 1, 1, 1, 1)));
         assert!(d.is_would_permit());
         assert_eq!(d.reason(), None);
@@ -1001,7 +1024,7 @@ mod tests {
             &v,
             input(&outside_packet, advisory(1, 1, 1, 1, 1)),
         );
-        assert_eq!(outside.reason(), Some(reason::NO_ROUTE));
+        assert_eq!(outside.reason(), Some(reason::DOMAIN_OVERLAP));
     }
 
     #[test]
@@ -1071,6 +1094,24 @@ mod tests {
         forwarding
     }
 
+    fn local_lan_forwarding() -> ForwardingState {
+        let mut forwarding = test_forwarding_with_route("0.0.0.0/0", 20);
+        forwarding.ifindex_to_zone_id.insert(20, 2);
+        forwarding.ifindex_unambiguous_zone_id.insert(20, 2);
+        forwarding.zone_id_to_name.insert(1, "vpn".into());
+        forwarding.zone_id_to_name.insert(2, "lan".into());
+        let next_hop: std::net::IpAddr = "192.0.2.1".parse().expect("IPv4 next hop");
+        forwarding.neighbors.insert(
+            (20, next_hop),
+            crate::afxdp::NeighborEntry { mac: [0x02, 0, 0, 0, 0, 20] },
+        );
+        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        zones.insert("vpn".into(), 1);
+        zones.insert("lan".into(), 2);
+        forwarding.policy = crate::policy::parse_policy_state("permit", &[], &zones);
+        forwarding
+    }
+
     fn view_with_inventory_fib(
         validation_fib_generation: u32,
         inventory_fib_generation: u32,
@@ -1108,8 +1149,57 @@ mod tests {
     /// field it perturbs.
     #[test]
     fn d14_fixture_reaches_would_permit_9506() {
-        let view = view_with_rows(1, 1, st0_rows(), would_permit_forwarding());
-        let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 1]);
+        let view = view_with_rows(1, 1, st0_rows(), local_lan_forwarding());
+        let packet = test_packet_with_source([10, 0, 0, 1], [192, 0, 2, 1]);
+        let decision = adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
+        assert!(decision.is_would_permit(), "{decision:?}");
+    }
+
+    #[test]
+    fn h14_01_remote_to_local_lan_regression_13956() {
+        let mut forwarding = local_lan_forwarding();
+        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        zones.insert("vpn".into(), 1);
+        zones.insert("lan".into(), 2);
+        forwarding.policy = crate::policy::parse_policy_state("permit", &[], &zones);
+        let view = view_with_rows(1, 1, st0_rows(), forwarding);
+        let packet = test_packet_with_source([10, 0, 0, 1], [192, 0, 2, 5]);
+        let decision = adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
+        assert!(decision.is_would_permit(), "{decision:?}");
+    }
+
+    #[test]
+    fn h14_02_default_deny_policy_denies_remote_to_lan_13956() {
+        let mut forwarding = local_lan_forwarding();
+        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        zones.insert("vpn".into(), 1);
+        zones.insert("lan".into(), 2);
+        forwarding.policy = crate::policy::parse_policy_state("deny", &[], &zones);
+        let view = view_with_rows(1, 1, st0_rows(), forwarding);
+        let packet = test_packet_with_source([10, 0, 0, 1], [192, 0, 2, 5]);
+        let decision = adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
+        assert_eq!(decision.reason(), Some(reason::LEGACY_POLICY_DENY), "{decision:?}");
+    }
+
+    #[test]
+    fn h14_02_explicit_vpn_to_lan_policy_permits_remote_to_lan_13956() {
+        let mut forwarding = local_lan_forwarding();
+        let mut zones: rustc_hash::FxHashMap<String, u16> = Default::default();
+        zones.insert("vpn".into(), 1);
+        zones.insert("lan".into(), 2);
+        let rule = crate::PolicyRuleSnapshot {
+            name: "vpn-to-lan".into(),
+            from_zone: "vpn".into(),
+            to_zone: "lan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            action: "permit".into(),
+            ..Default::default()
+        };
+        forwarding.policy = crate::policy::parse_policy_state("deny", &[rule], &zones);
+        let view = view_with_rows(1, 1, st0_rows(), forwarding);
+        let packet = test_packet_with_source([10, 0, 0, 1], [192, 0, 2, 5]);
         let decision = adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
         assert!(decision.is_would_permit(), "{decision:?}");
     }
@@ -1179,8 +1269,8 @@ mod tests {
     fn d14_inventory_behind_validation_fib_is_stale_9506() {
         // The advisory agrees with both the inventory (FIB 1) and validation
         // (FIB 2); only the inventory-vs-validation fence can refuse it.
-        let view = view_with_inventory_fib(2, 1, would_permit_forwarding());
-        let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 1]);
+        let view = view_with_inventory_fib(2, 1, local_lan_forwarding());
+        let packet = test_packet_with_source([10, 0, 0, 1], [192, 0, 2, 5]);
         let mut claimed = advisory(1, 1, 2, 1, 1);
         claimed.pmech_inventory_fib_generation = 1;
         assert_denied(
@@ -1188,7 +1278,7 @@ mod tests {
             "d14_stale_generation",
             reason::STALE_GENERATION,
         );
-        let current = view_with_inventory_fib(2, 2, would_permit_forwarding());
+        let current = view_with_inventory_fib(2, 2, local_lan_forwarding());
         let mut matched = advisory(1, 1, 2, 1, 1);
         matched.pmech_inventory_fib_generation = 2;
         assert!(adjudicate_ipsec_inner(&current, input(&packet, matched)).is_would_permit());

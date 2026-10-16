@@ -1176,6 +1176,7 @@ mod slow_path_mtu_tests {
                     }],
                     effective_prefixes: vec!["10.0.0.1/32".into()],
                     ingress_prefixes: vec!["10.0.0.1/32".into()],
+                    destination_prefixes: Vec::new(),
                     inventory_generation: 7,
                     fib_generation: 3,
                     source_kind: "xfrmi".into(),
