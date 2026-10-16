@@ -39,6 +39,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/ipmon"
@@ -150,6 +151,12 @@ func (d *Daemon) assembleFRRConfigWithMgmtRouteInventory(
 	globalProtocols = haState.filterProtocols(cfg, globalProtocols, nil)
 
 	// Collect interface bandwidths and point-to-point flags for FRR.
+	// #14138: bandwidth is an interface-level property and keys on the
+	// interface's own kernel device (a RETH resolves to its local physical
+	// member); PointToPoint is a UNIT property and keys on the unit's own
+	// kernel device via the canonical resolver — so a p2p tagged unit
+	// (name.50 with vlan-id 50) marks `ge-0-0-1.50`, never its untagged
+	// parent where the broadcast unit 0 lives.
 	ifaceBandwidths := make(map[string]uint64)
 	ifaceP2P := make(map[string]bool)
 	// #9821: collect interface bandwidths and point-to-point flags while the
@@ -161,14 +168,14 @@ func (d *Daemon) assembleFRRConfigWithMgmtRouteInventory(
 		if ifc == nil {
 			continue
 		}
-		linuxName := config.LinuxIfName(name)
 		if ifc.Bandwidth > 0 {
-			ifaceBandwidths[linuxName] = ifc.Bandwidth
+			ifaceBandwidths[cfg.ResolveKernelIfName(name)] = ifc.Bandwidth
 		}
-		for _, unit := range ifc.Units {
-			if unit.PointToPoint {
-				ifaceP2P[linuxName] = true
+		for unitNum, unit := range ifc.Units {
+			if unit == nil || !unit.PointToPoint {
+				continue
 			}
+			ifaceP2P[cfg.ResolveKernelIfName(fmt.Sprintf("%s.%d", name, unitNum))] = true
 		}
 	}
 

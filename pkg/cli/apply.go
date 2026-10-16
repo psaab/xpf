@@ -309,6 +309,10 @@ func (c *CLI) applyToDataplane(cfg *config.Config) error {
 		// collapse, while retaining both authored and Linux spellings.
 		declaredNetdevs := frr.DeclaredNetdevsForConfig(cfg, nil)
 		// Collect interface bandwidths and point-to-point flags for FRR.
+		// #14138: same per-unit kernel naming as the daemon's
+		// assembleFRRConfig — bandwidth on the interface's own kernel
+		// device (RETH → local member), PointToPoint on the unit's own
+		// device, never the untagged parent.
 		ifaceBandwidths := make(map[string]uint64)
 		ifaceP2P := make(map[string]bool)
 		for name, ifc := range cfg.Interfaces.Interfaces {
@@ -316,14 +320,14 @@ func (c *CLI) applyToDataplane(cfg *config.Config) error {
 				continue
 			}
 			if ifc.Bandwidth > 0 {
-				ifaceBandwidths[name] = ifc.Bandwidth
+				ifaceBandwidths[cfg.ResolveKernelIfName(name)] = ifc.Bandwidth
 			}
-			for _, unit := range ifc.Units {
+			for unitNum, unit := range ifc.Units {
 				if unit == nil { // #5886: skip present-but-nil InterfaceUnit
 					continue
 				}
 				if unit.PointToPoint {
-					ifaceP2P[name] = true
+					ifaceP2P[cfg.ResolveKernelIfName(fmt.Sprintf("%s.%d", name, unitNum))] = true
 				}
 			}
 		}

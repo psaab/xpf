@@ -457,8 +457,10 @@ type FullConfig struct {
 	// FRR emits "bandwidth <kbps>" in interface blocks (used by OSPF auto-cost).
 	InterfaceBandwidths map[string]uint64
 
-	// InterfacePointToPoint maps interface names to point-to-point flag.
-	// When true and no explicit OSPF network-type is set, emits "ip ospf network point-to-point".
+	// InterfacePointToPoint maps per-unit KERNEL device names (e.g.
+	// "ge-0-0-1.50") to the point-to-point flag of that unit.
+	// When true and no explicit OSPF network-type is set (global or any
+	// routing instance), emits "ip ospf network point-to-point".
 	InterfacePointToPoint map[string]bool
 
 	// RethMap maps reth name → physical member name (e.g. "reth0" → "ge-0-0-1").
@@ -785,16 +787,23 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 
 	// 9. Interface-level settings (bandwidth, point-to-point).
 	//
-	// Fed the RESOLVED OSPF set: its ospfNetworkType suppression keys on the
-	// OSPF interface name and compares it against InterfaceBandwidths /
+	// Fed the RESOLVED OSPF sets: their ospfNetworkType suppression keys on
+	// the OSPF interface name and compares it against InterfaceBandwidths /
 	// InterfacePointToPoint, which the daemon keys by KERNEL name. Before
 	// #9405 a slash-spelled OSPF interface could never match, so the
 	// suppression silently did nothing; now that both sides name the same
 	// netdev, feeding the raw set would emit `ip ospf network point-to-point`
 	// here AND the operator's explicit network-type in the OSPF block, on one
-	// interface.
+	// interface. #14138: a routing-instance OSPF area's explicit type is the
+	// same authority, so every instance's resolved OSPF set feeds the same
+	// suppression.
 	ifSettings := *fc
 	ifSettings.OSPF = rOSPF
+	ifSettings.Instances = make([]InstanceConfig, len(fc.Instances))
+	for i, inst := range fc.Instances {
+		inst.OSPF = resolveOSPFIfNames(resolveIfName, inst.OSPF)
+		ifSettings.Instances[i] = inst
+	}
 	b.WriteString(m.generateInterfaceSettings(&ifSettings))
 
 	// BFD profiles/peers are accumulated across the default instance AND
