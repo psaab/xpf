@@ -14,8 +14,8 @@ import (
 // chain's `policy accept` fall-through on zoned ingress, bypassing the
 // per-zone host-inbound gate that judges unicast. The kernel chain now
 // judges those destinations by the ingress zone's service/protocol set
-// (all-nodes/solicited-node ICMPv6 echo stays gated on `ping`), keeps
-// ND/MLD global, and fails closed for unzoned/ambiguous ingress.
+// (all-nodes/solicited-node ICMPv6 echo stays gated on `ping`), preserves the
+// existing ND admits and MLD fall-through, and fails closed for unzoned/ambiguous ingress.
 //
 // RED-on-revert: deleting emitHostInboundNonUnicastIngressGuards (text)
 // and its netlink twin removes every rule asserted below.
@@ -113,12 +113,13 @@ func TestHostInboundNonUnicastIsScopedByIngressZone13925(t *testing.T) {
 	if !strings.Contains(payload, "224.0.0.5") {
 		t.Fatalf("catalog multicast guard missing:\n%s", payload)
 	}
-	// ND/MLD stay global (not zone-gated by the new guard).
+	// ND keeps its existing global accept; link-scope MLD retains the prior
+	// base-chain fall-through without introducing a global ACCEPT.
 	if !strings.Contains(payload, "icmpv6 type { 133, 134, 135, 136, 137 }") {
 		t.Fatalf("global ND accept missing:\n%s", payload)
 	}
-	if !strings.Contains(payload, "icmpv6 type { 130, 131, 132, 143 } accept") {
-		t.Fatalf("global MLD accept missing:\n%s", payload)
+	if !strings.Contains(payload, "ip6 daddr ff02::/16 icmpv6 type { 130, 131, 132, 143 } return") {
+		t.Fatalf("link-scope MLD must retain fall-through before the ff02 gate:\n%s", payload)
 	}
 }
 
@@ -162,12 +163,12 @@ func TestHostInboundNonUnicastUnzonedAndAnyService13925(t *testing.T) {
 	if !strings.Contains(fence, "255.255.255.255") || !strings.Contains(fence, "ff02::/16") {
 		t.Fatalf("cold-boot fence must deny both non-unicast classes:\n%s", fence)
 	}
-	mld := strings.Index(fence, "icmpv6 type { 130, 131, 132, 143 } accept")
+	mld := strings.Index(fence, "ip6 daddr ff02::/16 icmpv6 type { 130, 131, 132, 143 } return")
 	nd := strings.Index(fence, "icmpv6 type { 133, 134, 135, 136, 137 } accept")
-	guard := strings.Index(fence, "ff02::/16")
+	guard := strings.Index(fence, "ff02::/16 drop")
 	established := strings.Index(fence, "ct state established,related accept")
 	if mld < 0 || nd < 0 || guard < 0 || established < 0 ||
 		mld > guard || nd > guard || guard > established {
-		t.Fatalf("cold-boot fence must preserve MLD/ND then gate before established:\n%s", fence)
+		t.Fatalf("cold-boot fence must preserve MLD fall-through/ND then gate before established:\n%s", fence)
 	}
 }

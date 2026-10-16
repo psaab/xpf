@@ -10,9 +10,10 @@ package nftables
 
 // hostInboundFenceMandatoryAdmitsNetlink mirrors the text oracle's shared
 // mandatory admits: global ESP/AH, established/related, IPv6 ND, and v4/v6
-// PMTUD/error. Cold-boot multicast drops are inserted between ESP/AH and the
-// established-flow admit. WireGuard admissions have serving-zone scope; no
-// named counters are added to the transient fence.
+// PMTUD/error. Catalog-group drops follow ESP/AH; non-unicast drops follow the
+// mandatory L3 admits and MLD fall-through, before established-flow acceptance.
+// WireGuard admissions have serving-zone scope; no named counters are added to
+// the transient fence.
 func hostInboundFenceMandatoryAdmitsNetlink(p *nlPlan) {
 	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 	emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p)
@@ -183,7 +184,8 @@ func buildHostInboundFenceNetlink(p *nlPlan, spec FenceSpec) {
 	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 	emitHostInboundMulticastFenceDropsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 	emitHostInboundFenceL3AdmitsNetlink(p)
-	p.rule().icmpType(famV6, []uint8{130, 131, 132, 143}).emit(verdictAccept()...)
+	p.rule().daddr(famV6, []string{"ff02::/16"}, false).
+		icmpType(famV6, []uint8{130, 131, 132, 143}).emit(verdictReturn()...)
 	emitHostInboundNonUnicastFenceDropsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	buildFenceDropsAfterMandatoryAdmitsNetlink(p, spec)
