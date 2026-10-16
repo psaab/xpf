@@ -2136,10 +2136,8 @@ impl crate::afxdp::ha::SessionDomain {
             // #1790/#1807: recover-and-push instead of silently skipping a
             // poisoned queue (same policy as update_ha_state).
             let mut pending = worker_queue::lock_recover(&rec.handle.commands);
-            // #10512: the identity travels to the worker so a replacement
-            // installed during queue delay survives the drain. Legacy paths
-            // (expected_id 0) keep emitting plain DeleteSynced — same bytes,
-            // same existing match sites, zero behavior delta.
+            // #10512: identified removals carry the expected session id so a
+            // replacement installed during queue delay survives the drain.
             let forward_command = if expected_id != 0 {
                 // #10512: the identity + coordinator-derived companion travel
                 // to the worker so a replacement installed during queue delay
@@ -2149,8 +2147,10 @@ impl crate::afxdp::ha::SessionDomain {
                     expected_id,
                     companion: reverse_key.clone(),
                 }
-            } else {
+            } else if peer_delete {
                 WorkerCommand::DeleteSynced(key.clone())
+            } else {
+                WorkerCommand::DeleteLocalControl(key.clone())
             };
             let queued = worker_queue::push_bounded(&mut pending, forward_command);
             // #9560 round 3: the REVERSE half's result was discarded. Both halves carry

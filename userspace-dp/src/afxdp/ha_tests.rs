@@ -6468,7 +6468,13 @@ impl Fixture9714 {
                 .lock()
                 .expect("commands")
                 .iter()
-                .any(|cmd| matches!(cmd, WorkerCommand::DeleteSynced(k) if k == key))
+                .any(|cmd| {
+                    matches!(
+                        cmd,
+                        WorkerCommand::DeleteSynced(k) | WorkerCommand::DeleteLocalControl(k)
+                            if k == key
+                    )
+                })
         })
     }
 
