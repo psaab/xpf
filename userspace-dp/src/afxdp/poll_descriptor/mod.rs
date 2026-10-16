@@ -2038,7 +2038,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             } => (Some(arrival_zone), on_admitting_interface),
                         };
                         if foreign_arrival_zone.is_none() {
-                            let mut purged_keys = Vec::new();
                             crate::afxdp::session_glue::maybe_promote_synced_session_with_conntrack(
                                 sessions,
                                 binding.bpf_maps.session_map.handle(),
@@ -2058,11 +2057,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_id,
                                 crate::afxdp::session_glue::SessionHitVerdict::Owner,
                                 &mut resolved,
-                                &mut purged_keys,
+                                &mut binding.scratch.scratch_filter_revoked_keys,
                             );
-                            for key in &purged_keys {
-                                binding.flow.flow_cache.invalidate_slot(key, binding.ifindex);
-                            }
                         } else {
                             // A foreign verdict discards promotion effects.
                             resolved.deferred_shared_materialization = None;
