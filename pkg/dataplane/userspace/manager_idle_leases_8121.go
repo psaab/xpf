@@ -351,10 +351,11 @@ func (m *Manager) ClearPersistentNATLeasesWithGeneration(peerOrigin string, peer
 	if peerOrigin != "" && peerOrigin == state.OriginID {
 		return 0, "", 0, errors.New("peer persistent-NAT clear origin matches local origin")
 	}
-	// A clear revokes all locally held leases, so no later batch at a
-	// generation already observed from a peer can restore pre-clear state.
-	// Exempt a forwarded peer clear only when it advances that peer's
-	// generation; that newer generation can carry genuinely post-clear leases.
+	// A clear revokes all locally held leases. During the bounded replay
+	// window, fence each known peer at its observed generation so delayed
+	// same-generation batches cannot restore pre-clear state. Exempt a
+	// forwarded peer clear only when it advances that peer's generation;
+	// that newer generation can carry genuinely post-clear leases.
 	now := m.persistentNatLeaseNowLocked()
 	m.prunePersistentNatLocalClearFencesLocked(state, now)
 	for origin, generation := range state.RemoteGenerations {

@@ -238,6 +238,17 @@ func TestExpiredLocalClearFenceAdmitsSameGeneration13909(t *testing.T) {
 	case <-time.After(25 * time.Millisecond):
 		t.Fatal("expired fence continued rejecting same-generation lease batch")
 	}
+	restarted, staleHelper := persistentNatGenerationManager11486(t, path)
+	if err := restarted.ImportPersistentNatLeaseBatch(PersistentNatLeaseBatch{
+		OriginID: origin, Generation: 7, Leases: []IdleLeaseWire{scopedLease10018()},
+	}); err != nil {
+		t.Fatalf("import stale generation after fence expiry and restart: %v", err)
+	}
+	select {
+	case req := <-staleHelper.requests:
+		t.Fatalf("stale generation reached helper after fence expiry as %q", req.Type)
+	case <-time.After(25 * time.Millisecond):
+	}
 }
 
 // #13909: a local clear fences delayed same-generation batches only for a
