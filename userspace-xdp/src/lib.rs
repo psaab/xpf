@@ -1538,7 +1538,7 @@ fn is_firewall_owned_destination(pkt: &ParsedPacket, domain: u32) -> bool {
         AF_INET6 => {
             is_local_destination(pkt, domain)
                 || unsafe {
-                    USERSPACE_INTERFACE_NAT_V6.get(&UserspaceLocalV6Key {
+                    USERSPACE_INTERFACE_NAT_V6.get(&UserspaceInterfaceNatV6Key {
                         addr: pkt.dst_addr,
                     })
                 }
