@@ -1,10 +1,12 @@
 package dataplane
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 )
 
 // TestCPUMapLivePinPossibleCPUAccepted is the #5364 core: the live-pin ABI
@@ -92,18 +94,22 @@ func TestNonCPUMapMaxEntriesStillStrict(t *testing.T) {
 
 	base := validABIBaseSpec()
 	// A shim-declared HASH map; embedded shape is the reference for the diff.
-	base.Maps["userspace_sessions"] = &ebpf.MapSpec{Type: ebpf.Hash, KeySize: 16, ValueSize: 1, MaxEntries: 262144}
+	base.Maps["userspace_sessions"] = &ebpf.MapSpec{Type: ebpf.Hash, KeySize: 40, ValueSize: 1, MaxEntries: UserspaceSessionsMaxEntries, Flags: unix.BPF_F_NO_PREALLOC}
 	// Live pin drifted to a smaller MaxEntries — a genuine ABI break for a
 	// non-cpumap map, which must NOT be clamped away.
 	reader := pinReaderWithOverride(base, map[string]userspaceMapABI{
-		"userspace_sessions": {Type: ebpf.Hash, KeySize: 16, ValueSize: 1, MaxEntries: 65536},
+		"userspace_sessions": {Type: ebpf.Hash, KeySize: 40, ValueSize: 1, MaxEntries: UserspaceSessionsMaxEntries / 2, Flags: unix.BPF_F_NO_PREALLOC},
 	})
 
 	err := validateUserspaceShimSpecWith(base, reader)
 	if err == nil {
 		t.Fatal("non-cpumap MaxEntries drift must still be rejected (strict check preserved)")
 	}
-	for _, want := range []string{"userspace_sessions", "MaxEntries embedded=262144 pinned=65536", "ABI-incompatible"} {
+	for _, want := range []string{
+		"userspace_sessions",
+		fmt.Sprintf("MaxEntries embedded=%d pinned=%d", UserspaceSessionsMaxEntries, UserspaceSessionsMaxEntries/2),
+		"ABI-incompatible",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("err = %v, want substring %q", err, want)
 		}

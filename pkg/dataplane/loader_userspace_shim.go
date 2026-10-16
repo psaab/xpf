@@ -82,6 +82,7 @@ const (
 		"routes. Either way brief downtime is unavoidable. Do NOT `make " +
 		"generate` (the embedded shim is the intended target, not broken). See " +
 		"pkg/dataplane/README.md (#1864)."
+	userspaceSessionsMapName           = "userspace_sessions"
 	userspaceBindingsMapName           = "userspace_bindings"
 	userspaceIngressIfacesMapName      = "userspace_ingress_ifaces"
 	userspaceHeartbeatMapName          = "userspace_heartbeat"
@@ -257,6 +258,19 @@ func validateUserspaceShimSpecWith(userspaceSpec *ebpf.CollectionSpec, readPin u
 		if ms.MaxEntries != BindingSlotMapMaxEntries {
 			return userspaceSlotMapMaxEntriesDriftError(name, ms.MaxEntries)
 		}
+	}
+	if ms, ok := userspaceSpec.Maps[userspaceSessionsMapName]; !ok {
+		return fmt.Errorf("Rust xdp_userspace spec missing map userspace_sessions")
+	} else if ms.MaxEntries != UserspaceSessionsMaxEntries {
+		return fmt.Errorf(
+			"userspace_sessions max_entries drift: embedded=%d, expected=%d (steering-map capacity). %s",
+			ms.MaxEntries, UserspaceSessionsMaxEntries, userspaceShimGenerateRemediation,
+		)
+	} else if ms.Flags&unix.BPF_F_NO_PREALLOC == 0 {
+		return fmt.Errorf(
+			"userspace_sessions flags drift: embedded=%d, expected BPF_F_NO_PREALLOC (steering-map capacity). %s",
+			ms.Flags, userspaceShimGenerateRemediation,
+		)
 	}
 	if ms, ok := userspaceSpec.Maps[userspaceShimCompatibilityDNATName]; !ok {
 		return fmt.Errorf("Rust xdp_userspace spec missing map dnat_table")

@@ -479,8 +479,13 @@ static DNAT_TABLE: HashMap<DnatKeyV4, DnatValueV4> =
 static DNAT_TABLE_V6: HashMap<DnatKeyV6, DnatValueV6> =
     HashMap::with_max_entries(USERSPACE_SHIM_MAX_DNAT_ENTRIES, BPF_F_NO_PREALLOC);
 
+// #13931: a worker may contribute four distinct rows per session (the live
+// tuple and up to three NAT wire/canonical tuples). The binding planner caps
+// workers at 16; size for every worker's session ceiling.
+const USERSPACE_SESSIONS_MAX_ENTRIES: u32 = 16 * 131072 * 4;
 #[map(name = "userspace_sessions")]
-static USERSPACE_SESSIONS: HashMap<UserspaceSessionKey, u8> = HashMap::with_max_entries(262144, 0);
+static USERSPACE_SESSIONS: HashMap<UserspaceSessionKey, u8> =
+    HashMap::with_max_entries(USERSPACE_SESSIONS_MAX_ENTRIES, BPF_F_NO_PREALLOC);
 
 const USERSPACE_SESSION_ACTION_REDIRECT: u8 = 1;
 // PASS_TO_KERNEL's action value is shared with the GRE classifier.

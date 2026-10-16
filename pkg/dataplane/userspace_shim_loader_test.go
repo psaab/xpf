@@ -82,6 +82,35 @@ func TestEmbeddedUserspaceShimDNATMapMatchesSharedPinnedMap(t *testing.T) {
 	}
 }
 
+// #13931: each live session can publish four distinct steering rows, and
+// sessions may be present on every worker. The embedded map must therefore
+// hold the full worker/session/row product; an insert failure here silently
+// leaves packets without the shim's userspace steering entry.
+func TestEmbeddedUserspaceSessionsMapCoversWorkerSessionRows13931(t *testing.T) {
+	t.Parallel()
+	if want := uint32(16 * 131072 * 4); UserspaceSessionsMaxEntries != want {
+		t.Fatalf("UserspaceSessionsMaxEntries = %d, want 16 workers * 131072 sessions * 4 rows = %d",
+			UserspaceSessionsMaxEntries, want)
+	}
+
+	spec, err := loadRustUserspaceXDP()
+	if err != nil {
+		t.Fatalf("load Rust userspace XDP spec: %v", err)
+	}
+	sessions := spec.Maps[userspaceSessionsMapName]
+	if sessions == nil {
+		t.Fatal("Rust userspace XDP spec missing userspace_sessions")
+	}
+	if sessions.MaxEntries != UserspaceSessionsMaxEntries {
+		t.Fatalf("embedded userspace_sessions max_entries = %d, want %d",
+			sessions.MaxEntries, UserspaceSessionsMaxEntries)
+	}
+	if sessions.Flags&unix.BPF_F_NO_PREALLOC == 0 {
+		t.Fatalf("embedded userspace_sessions flags = %#x, want BPF_F_NO_PREALLOC",
+			sessions.Flags)
+	}
+}
+
 func TestValidateUserspaceShimSpecDriftMentionsUserspaceXDPGenerate(t *testing.T) {
 	t.Parallel()
 
@@ -127,13 +156,14 @@ func TestValidateUserspaceShimSpecDriftMentionsUserspaceXDPGenerate(t *testing.T
 	}
 }
 
-// validABIBaseSpec builds a shim spec that passes every pre-#5307 check
-// (presence + MaxEntries + NO_PREALLOC) AND the new dnat_table expected-shape
-// check, so the ONLY thing that can reject it is the #5307 live-pin ABI
-// comparison. Shapes mirror the real embedded shim (Type/KeySize/ValueSize).
+// validABIBaseSpec builds a shim spec that passes the preflight map-shape
+// checks (including #13931 userspace_sessions capacity) and the dnat_table
+// expected-shape check, so live-pin tests reach only the #5307 ABI comparison.
+// Shapes mirror the real embedded shim (Type/KeySize/ValueSize).
 func validABIBaseSpec() *ebpf.CollectionSpec {
 	return &ebpf.CollectionSpec{
 		Maps: map[string]*ebpf.MapSpec{
+			"userspace_sessions":       {Type: ebpf.Hash, KeySize: 40, ValueSize: 1, MaxEntries: UserspaceSessionsMaxEntries, Flags: unix.BPF_F_NO_PREALLOC},
 			"userspace_bindings":       {Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: BindingArrayMaxEntries},
 			"userspace_ingress_ifaces": {Type: ebpf.Hash, KeySize: 4, ValueSize: 1, MaxEntries: MaxInterfaces},
 			"dnat_table":               {Type: ebpf.Hash, KeySize: 12, ValueSize: 8, MaxEntries: userspaceShimMaxSessions, Flags: unix.BPF_F_NO_PREALLOC},
@@ -147,6 +177,29 @@ func validABIBaseSpec() *ebpf.CollectionSpec {
 			"userspace_heartbeat": {Type: ebpf.Array, KeySize: 4, ValueSize: 8, MaxEntries: BindingSlotMapMaxEntries},
 			"userspace_xsk_map":   {Type: ebpf.XSKMap, KeySize: 4, ValueSize: 4, MaxEntries: BindingSlotMapMaxEntries},
 		},
+	}
+}
+
+func TestValidateUserspaceSessionsMapCapacity13931(t *testing.T) {
+	t.Parallel()
+
+	for _, drift := range []string{"max-entries", "flags"} {
+		drift := drift
+		t.Run(drift, func(t *testing.T) {
+			t.Parallel()
+
+			spec := validABIBaseSpec()
+			if drift == "max-entries" {
+				spec.Maps[userspaceSessionsMapName].MaxEntries--
+			} else {
+				spec.Maps[userspaceSessionsMapName].Flags = 0
+			}
+			err := validateUserspaceShimSpec(spec)
+			if err == nil || !strings.Contains(err.Error(), userspaceSessionsMapName) {
+				t.Fatalf("validateUserspaceShimSpec(%s drift) = %v, want steering-map ABI error",
+					drift, err)
+			}
+		})
 	}
 }
 

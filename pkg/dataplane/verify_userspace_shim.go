@@ -110,14 +110,11 @@ const UserspaceShimMinVerifierHeadroomPct = 15.0
 const UserspaceShimStructuralChangeInsns = 87000
 
 // verifyShrinkHashMaxEntries is the verify-only ceiling applied to
-// hash-map MaxEntries before the anonymous load. The kernel allocates
-// a hash map's bucket array eagerly even for BPF_F_NO_PREALLOC maps
-// (dnat_table's 10M entries cost >128 MB of kernel memory empty), and
-// preallocated hash maps (USERSPACE_SESSIONS, 262144 entries) allocate
-// their element pool up front. Hash-map max_entries does not feed the
-// verifier's program safety analysis — shrinking it changes runtime
-// capacity only, which a verify-only load never uses. Array-type maps
-// are left untouched.
+// hash-map MaxEntries before the anonymous load. Hash maps allocate bucket
+// storage based on MaxEntries even when BPF_F_NO_PREALLOC is set; shrinking
+// this copy avoids production-capacity memory cost during verifier-only loads.
+// Hash-map MaxEntries does not feed the verifier's program safety analysis,
+// and this load never uses the runtime capacity. Array-type maps are untouched.
 const verifyShrinkHashMaxEntries = 1
 
 // verifierLogTailLines bounds how much of the verifier log a REJECT
