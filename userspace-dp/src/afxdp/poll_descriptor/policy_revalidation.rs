@@ -626,6 +626,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
                 forward_metadata.is_reverse = false;
                 forward_metadata.ingress_ifindex = forward_ingress_ifindex as u32;
                 if forward_decision.nat.rewrite_src.is_none()
+                    && forward_decision.nat.rewrite_dst.is_none()
                     && !forward_decision.nat.nat64
                     && !forward_decision.nat.nptv6
                 {
