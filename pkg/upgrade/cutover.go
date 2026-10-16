@@ -1738,8 +1738,15 @@ func (r *Runner) cleanupFailedVerifyCopy(j *Journal) {
 	if ver == "" {
 		return
 	}
-	cur, _ := r.readCurrentVersion()
-	if ver == j.PreviousVersion || ver == cur {
+	// Fail closed on an indeterminate live version (#14166): if `current`
+	// cannot be read (EIO, EINVAL when it is not a symlink, ...) we cannot
+	// prove ver is not the live dir, so NEVER delete it. Still rewind the
+	// journal below so a retry re-enters cleanly once the lookup recovers.
+	cur, curErr := r.readCurrentVersion()
+	if curErr != nil {
+		r.logf("upgrade: verify-fail cleanup SKIPPED for %s (cannot determine "+
+			"the live `current` version, so it cannot be proven non-live: %v)", ver, curErr)
+	} else if ver == j.PreviousVersion || ver == cur {
 		// Guard (a): the target version is the rollback target or the live
 		// `current` — its dir backs a runnable daemon. NEVER delete it. A
 		// same-version re-stage that fails verify against the active version
