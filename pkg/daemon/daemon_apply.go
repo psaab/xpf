@@ -507,6 +507,10 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		return err
 	}
 
+	if err := d.applyHostInboundPreNetworkdAddressFence(cfg); err != nil {
+		return err
+	}
+
 	// #1922 Item 2 bootstrap exit: the FIRST apply of a non-empty config
 	// (an interface-claiming confirmed commit, or a cluster SyncApply from
 	// the primary) leaves bootstrap mode and runs the one-time startup
