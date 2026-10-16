@@ -162,8 +162,35 @@ func runNftNetlinkParityInner(t *testing.T) {
 		// buildFenceTablePayload with cold_boot_fence, so this case proves the
 		// xpf_lo0 table wrapper (name + priority) composes with the shared fence
 		// rules bit-identically to the netlink InstallLo0ColdBootFence.
-		oracle := buildLo0FencePayload(views, unzonedV4, unzonedV6, wgZones)
+		oracle := buildLo0FencePayload(views, unzonedV4, unzonedV6, wgZones, nil, nil, dhcpBackstopLists{})
 		spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGZonePorts: wgZones}
+		parityCheck(t, xnft.Lo0TableName, oracle, func() error { return inst.InstallLo0ColdBootFence(spec) })
+	})
+
+	t.Run("lo0_cold_boot_fence_dhcp_backstop", func(t *testing.T) {
+		// #14135: the lo0 fence carries the same DHCP backstop sets as the
+		// host-inbound fence (unleased netdevs, VRF-slave subsets, DHCPv6
+		// reply admits), so a later-leased local address is denied by the
+		// lo0 table alone. The oracle and the FenceSpec must render them
+		// bit-identically on the netlink surface too.
+		backstopV4 := []string{"ge-0-0-8", "ge-0-0-9"}
+		backstopV6 := []string{"ge-0-0-9"}
+		vrfDevices := []string{"ge-0-0-5"}
+		admitV6 := []string{"ge-0-0-9"}
+		backstop := dhcpBackstopLists{v4: vrfDevices, v6: vrfDevices, admitV6: admitV6, admitVRFV6: vrfDevices}
+		oracle := buildLo0FencePayload(views, unzonedV4, unzonedV6, wgZones, backstopV4, backstopV6, backstop)
+		if !strings.Contains(oracle, "fib daddr type { local, anycast } drop") {
+			t.Fatal("lo0 fence oracle emitted no DHCP backstop drop; the diff below would be vacuous")
+		}
+		if !strings.Contains(oracle, "ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept") {
+			t.Fatal("lo0 fence oracle emitted no DHCPv6 reply admit; the diff below would be vacuous")
+		}
+		spec := xnft.FenceSpec{
+			Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGZonePorts: wgZones,
+			UnleasedV4: backstopV4, UnleasedV6: backstopV6,
+			UnleasedVRFSlavesV4: vrfDevices, UnleasedVRFSlavesV6: vrfDevices,
+			DHCPv6Admit: admitV6, DHCPv6AdmitVRFSlaves: vrfDevices,
+		}
 		parityCheck(t, xnft.Lo0TableName, oracle, func() error { return inst.InstallLo0ColdBootFence(spec) })
 	})
 

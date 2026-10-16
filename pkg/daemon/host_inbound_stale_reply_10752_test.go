@@ -438,7 +438,7 @@ func TestHostInboundStaleReplyGuardsPrecedeReplyAccept10752And10764(t *testing.T
 			t.Errorf("%s fence does not drop denied UDP service replies before broad established accept: guard=%d accept=%d", name, guardAt, acceptAt)
 		}
 	}
-	lo0Fence := buildLo0FencePayload(views, unzonedV4, unzonedV6, nil)
+	lo0Fence := buildLo0FencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, dhcpBackstopLists{})
 	if strings.Contains(lo0Fence, "ct state established,related ct direction reply") {
 		t.Fatal("host-inbound stale-reply guard must not change the lo0 fence's established-flow policy")
 	}
