@@ -23,7 +23,7 @@ use super::host_inbound::is_icmp_host_inbound_global_accept_for_test as accepts;
 fn crossed_family_pairs_are_not_globally_admitted_7520() {
     // IPv4 carrying the ICMPv6 protocol number, for every type the ICMPv6 arm
     // admits. Each one was a global admit before #7520.
-    for t in [1u8, 2, 3, 4, 133, 134, 135, 136, 137] {
+    for t in [1u8, 2, 3, 4, 133, 134, 135, 136] {
         assert!(
             !accepts(58, false, t),
             "an IPv4 packet with protocol 58 and type {t} was globally admitted as \
@@ -56,7 +56,7 @@ fn matched_family_pairs_are_still_admitted_7520() {
              unreachable / traceroute-to-self break on a zone that omits `ping` (#3171)"
         );
     }
-    for t in [1u8, 2, 3, 4, 133, 134, 135, 136, 137] {
+    for t in [1u8, 2, 3, 4, 133, 134, 135, 136] {
         assert!(
             accepts(58, true, t),
             "ICMPv6 type {t} on IPv6 is no longer globally admitted; v6 PMTUD and \
@@ -66,10 +66,19 @@ fn matched_family_pairs_are_still_admitted_7520() {
 }
 
 #[test]
+fn icmpv6_redirect_is_not_globally_admitted_13982() {
+    assert!(
+        !accepts(58, true, 137),
+        "ICMPv6 Redirect (137) must reach zone admission instead of the global accept"
+    );
+}
+
+#[test]
 fn mld_types_are_not_global_nd_accepts_10859() {
     // MLD Query/Report/Done (130-132) and MLDv2 Report (143) are not ND
-    // (133-137). Query traffic reaches the kernel via multicast early-pass;
-    // reports are egress, so none belongs in this global INPUT exemption.
+    // (133-136; Redirect 137 is explicitly excluded). Query traffic reaches
+    // the kernel via multicast early-pass; reports are egress, so none belongs
+    // in this global INPUT exemption.
     for t in [130u8, 131, 132, 143] {
         assert!(
             !accepts(58, true, t),

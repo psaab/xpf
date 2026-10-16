@@ -917,10 +917,10 @@ DHCPv4 (udp 67/68 over IPv4) while `dhcpv6` is DHCPv6 (udp 546/547 over IPv6);
 OSPFv2 (IPv4) and `ospf3` is OSPFv3 (IPv6) — both ride IP protocol 89 but on
 different families; `igmp` is IPv4 group membership. MLD, the IPv6 equivalent,
 uses ICMPv6 types 130-132 and 143, none of which are in the always-accepted ND
-set (types 133-137). Queries target multicast destinations, so XDP passes them
-to the kernel and daddr-scoped INPUT denies miss; Reports egress through OUTPUT
-(#10859). Neither is a global host-inbound exception. Before #3225 both
-layers compiled these into family-NEUTRAL matches, so a v4-only `dhcp` opened
+set (types 133-136; Redirect 137 is excluded). Queries target multicast
+destinations, so XDP passes them to the kernel and daddr-scoped INPUT denies miss
+(#10859). Neither is a global host-inbound exception. Before #3225 both layers
+compiled these into family-NEUTRAL matches, so a v4-only `dhcp` opened
 udp/67-68 on the IPv6 path and `ripng` opened udp/521 on IPv4 — wrong-family host
 exposure. `ZoneHostInbound` now carries family-scoped sets (`udp_ports_v4` /
 `udp_ports_v6`, `ip_protocols_v4` / `ip_protocols_v6`) alongside the dual-family
@@ -966,9 +966,9 @@ zone lists, mirroring the kernel `chain input` global accepts
   parameter-problem (12) — so PMTUD / unreachable / traceroute-to-self landing
   on the XSK LocalDelivery path is not fail-toward-dropped on a ping-less zone.
 - ICMPv6 *error* (1/2/3/4) PLUS the **Neighbor Discovery** set (133 RS, 134 RA,
-  135 NS, 136 NA, 137 Redirect). ND is core L3 operation accepted globally by
-  the nft chain; admitting it here is what lets per-zone `router-discovery` carry
-  nothing on v6 while still matching nft.
+  135 NS, 136 NA). Redirect 137 is excluded because a global admit lets a
+  received redirect change firewall-originated routing. The kernel nft chain
+  and userspace classifier both leave type 137 to zone admission.
 
 ECHO-REQUEST (v4 8 / v6 128) and IPv4 router-advert/solicit (9/10) are **not** in
 the global set — they stay gated on the `ping` / `router-discovery` tokens, so a

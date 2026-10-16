@@ -4093,7 +4093,7 @@ fn build_forwarding_state_admits_icmp_errors_on_pingless_zone() {
 // ICMP types it implies, not the whole ICMP/ICMPv6 protocol:
 //   ping            → echo-request (v4 8 / v6 128)
 //   router-discovery → IPv4 router-advert/solicit (9/10); v6 via global ND
-// Error/PMTUD (#3171) and IPv6 ND (133-137) ride the global accept on any
+// Error/PMTUD (#3171) and IPv6 ND (133-136) ride the global accept on any
 // configured zone.
 //
 // Fail-on-revert: restoring the protocol-wide `icmp = true` (admitting ANY
