@@ -988,7 +988,7 @@ func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 		},
 		{
 			name:     "next-hop prefix-list tail retains match",
-			text:     `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 prefix-list PL; } } }`,
+			text:     `policy-options { prefix-list PL 10.0.0.0/8; policy-statement P { term t { then accept next-hop 192.0.2.1 prefix-list PL; } } }`,
 			bad:      "prefix-list",
 			required: []string{"match ip address prefix-list PL", "set ip next-hop 192.0.2.1"},
 		},
@@ -1037,7 +1037,7 @@ func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 		},
 		{
 			name:     "quoted prefix-list prepend tail retains match",
-			text:     `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "prefix-list" PL; } } }`,
+			text:     `policy-options { prefix-list PL 10.0.0.0/8; policy-statement P { term t { then accept as-path-prepend 65001 "prefix-list" PL; } } }`,
 			bad:      "prefix-list",
 			required: []string{"match ip address prefix-list PL", "set as-path prepend 65001"},
 		},
@@ -1049,7 +1049,7 @@ func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 		},
 		{
 			name:     "prepend prefix-list tail retains match",
-			text:     `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 prefix-list PL; } } }`,
+			text:     `policy-options { prefix-list PL 10.0.0.0/8; policy-statement P { term t { then accept as-path-prepend 65001 prefix-list PL; } } }`,
 			bad:      "prefix-list",
 			required: []string{"match ip address prefix-list PL", "set as-path prepend 65001"},
 		},

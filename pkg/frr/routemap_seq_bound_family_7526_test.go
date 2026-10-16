@@ -144,10 +144,13 @@ func TestTermWithNoPrefixListStillCounts7526(t *testing.T) {
 	}
 }
 
-// An UNDEFINED or EMPTY referenced prefix-list must count as ONE family, since
-// the renderer still emits exactly one (fail-closed, NOMATCH) match line for
-// it. Counting zero families would under-count; counting two would over-count
-// and falsely reject.
+// An UNDEFINED or EMPTY referenced prefix-list was historically rendered as
+// one fail-closed NOMATCH match line. #14136 now skips the dangling branch:
+// an accept term over it emits no term sequence (only the trailing default,
+// excluded here), so the rendered count is 0 while the admission bound still
+// counts 1. The bound is an upper bound — over-counting by one is safe (it
+// can only refuse earlier), and changing the config-side bound would couple
+// it to the renderer's dangling policy.
 func TestUndefinedPrefixListCountsAsOneFamily7526(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -167,13 +170,16 @@ func TestUndefinedPrefixListCountsAsOneFamily7526(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			predicted := config.RouteMapSequenceCount(tc.po, tc.po.PolicyStatements["P"])
-			rendered := renderedSeqCount7526(t, tc.po, "P")
-			if predicted != rendered {
-				t.Errorf("bound predicts %d, renderer emits %d (#7526)", predicted, rendered)
+			if predicted != 1 {
+				t.Errorf("bound predicts %d, want 1 (safe upper bound)", predicted)
 			}
-			if rendered != 1 {
-				t.Errorf("an undefined/empty referenced list rendered %d sequences, "+
-					"want 1 — it still emits one fail-closed NOMATCH match line", rendered)
+			m := &Manager{}
+			out := m.renderRouteMapForPolicy(tc.po, "P", tc.po.PolicyStatements["P"], "")
+			if strings.Contains(out, "address prefix-list") {
+				t.Errorf("dangling prefix-list match was emitted:\n%s", out)
+			}
+			if strings.Contains(out, "route-map P permit") {
+				t.Errorf("dangling accept degraded to a permit:\n%s", out)
 			}
 		})
 	}
