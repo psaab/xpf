@@ -1969,13 +1969,6 @@ impl crate::afxdp::ha::SessionDomain {
             mirror_delete_ok =
                 crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(v4_fd, v6_fd, &key);
         }
-        refresh_reverse_prewarm_owner_rg_indexes(
-            &self.sessions.owner_rg_indexes.reverse_prewarm_sessions,
-            forwarding,
-            &self.dynamic_neighbors,
-            removed_entry.as_ref(),
-            None,
-        );
         //
         // `push_bounded` returns false when the queue is at
         // `MAX_PENDING_WORKER_COMMANDS`, and that return was ignored. Shared

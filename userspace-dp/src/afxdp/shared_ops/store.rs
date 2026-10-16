@@ -958,10 +958,11 @@ pub(in crate::afxdp) fn remove_shared_session_if(
     // entry remains LIVE and un-filing it would strand a session that still exists
     // (the activation prewarm skips a key it cannot find).
     //
-    // Safe to move: the prewarm lock and `shared_sessions` are acquired SEQUENTIALLY
-    // and never nested — the guard was dropped before the sessions lock was taken —
-    // and no production caller holds either across the call. All nine were checked
-    // by name; see docs/log/9714.md.
+    // The removal takes `shared_sessions` then the prewarm index. Publish paths
+    // release `shared_sessions` before refreshing the prewarm index, and
+    // production callers hold neither lock across this call. This nested
+    // order makes removal atomic against the publish-then-file sequence;
+    // #13672's regression pins the interleaving.
     //
     // #2402: recover poison so a delete-sync removal is never silently
     // skipped (leaving a stale entry that would mis-route after failover)
@@ -1026,12 +1027,13 @@ pub(in crate::afxdp) fn remove_shared_session_if(
             }
         }
     }
-    // Release the sessions lock before the prewarm un-file: the two are sequential,
-    // never nested, which is what makes the reorder safe (#9714 r2 F3).
-    drop(sessions);
-    // #7209, moved here from before the decision. Unconditional for REMOVED and
-    // ABSENT exactly as it was — "a key with no entry must not be filed either" —
-    // and reached only on those two paths, because a DECLINE returned above.
+    // Keep `shared_sessions` held through the prewarm un-file. If this lock is
+    // dropped first, a concurrent publisher can install a replacement and file
+    // it in `reverse_prewarm_sessions` before this unconditional cleanup runs;
+    // the cleanup would then erase the live replacement's only candidate filing
+    // (#13672 D11-06). Publishers serialize their shared-map write on this lock
+    // and file the prewarm index afterward, so this order leaves their filing
+    // intact.
     {
         let mut index = lock_shared_recover(&shared_owner_rg_indexes.reverse_prewarm_sessions);
         remove_owner_rg_index_key_from_every_bucket_locked(&mut index, key);
