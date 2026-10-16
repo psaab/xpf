@@ -593,17 +593,27 @@ func (d *Daemon) applyHostInboundPreNetworkdAddressFence(cfg *config.Config) err
 	if len(uncoveredV4)+len(uncoveredV6) == 0 {
 		return nil
 	}
+	dhcpBackstops := dpuserspace.BuildDHCPHostInboundBackstopNetdevs(cfg, snaps)
 	withheld := dpuserspace.BuildFenceAddrSetsFromSnapshots(cfg, snaps, views)
+
 	sharedV4 := intersectHostInboundAddresses(uncoveredV4, withheld.WithheldV4)
 	sharedV6 := intersectHostInboundAddresses(uncoveredV6, withheld.WithheldV6)
 	spec := xnft.GapFenceSpec{
-		// A temporary pre-activation fence denies host services uniformly;
-		// the full policy render follows once networkd activates addresses.
-		UncoveredV4:     uncoveredV4,
-		UncoveredV6:     uncoveredV6,
-		SharedV4:        sharedV4,
-		SharedV6:        sharedV6,
-		LifelineNetdevs: dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
+		// The pre-activation fence closes host services except mandatory protocol
+		// and DHCP backstop handling; the full policy render follows networkd.
+		// Preserve DHCP protocol backstops when replacing an already-active gap
+		// table; DHCP intent is independent of the destination-address delta.
+		UnleasedV4:           dhcpBackstops.V4,
+		UnleasedV6:           dhcpBackstops.V6,
+		UnleasedVRFSlavesV4:  dhcpBackstops.VRFSlavesV4,
+		UnleasedVRFSlavesV6:  dhcpBackstops.VRFSlavesV6,
+		DHCPv6Admit:          dhcpBackstops.AdmitV6,
+		DHCPv6AdmitVRFSlaves: dhcpBackstops.AdmitVRFSlavesV6,
+		UncoveredV4:          uncoveredV4,
+		UncoveredV6:          uncoveredV6,
+		SharedV4:             sharedV4,
+		SharedV6:             sharedV6,
+		LifelineNetdevs:      dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
 	}
 	if err := d.installHostInboundGapFence(spec); err != nil {
 		d.noteHostInboundGapApplyResult(err)
