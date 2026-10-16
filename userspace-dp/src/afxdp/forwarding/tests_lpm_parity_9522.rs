@@ -863,3 +863,153 @@ fn floating_static_keeps_unresolved_primary_for_neighbor_resolution_v4_v6_11316(
         Some(IpAddr::V6("2001:db8:99::2".parse().unwrap()))
     );
 }
+
+// ---------------------------------------------------------------------------
+// #13950: same-prefix discard rows must obey preference. A less-preferred
+// discard row must not shadow a preferred gateway row.
+// ---------------------------------------------------------------------------
+
+fn discard_snapshot_13950(
+    rows: Vec<crate::RouteSnapshot>,
+    neighbors: Vec<crate::NeighborSnapshot>,
+) -> crate::ConfigSnapshot {
+    let mut snapshot = base_snapshot();
+    snapshot.routes = rows;
+    snapshot.neighbors = neighbors;
+    snapshot
+}
+
+fn discard_route_13950(destination: &str, family: &str, preference: i32) -> crate::RouteSnapshot {
+    crate::RouteSnapshot {
+        table: if family == "inet" {
+            "inet.0".into()
+        } else {
+            "inet6.0".into()
+        },
+        family: family.into(),
+        destination: destination.into(),
+        discard: true,
+        preference,
+        ..Default::default()
+    }
+}
+
+/// A preferred ARP-drivable gateway must not be shadowed by a
+/// less-preferred discard, for both address families.
+///
+/// FAIL-ON-REVERT: `select_v*_route` returns DiscardRoute on encountering
+/// the discard row even though the preferred gateway is the cold-path fallback.
+#[test]
+fn less_preferred_discard_does_not_shadow_drivable_gateway_13950() {
+    let state = build_forwarding_state(&discard_snapshot_13950(
+        vec![
+            v4_route("203.0.113.0/24", vec!["10.99.0.2"], 5),
+            discard_route_13950("203.0.113.0/24", "inet", 10),
+            v6_route("2001:db8:300::/48", vec!["2001:db8:99::2"], 5),
+            discard_route_13950("2001:db8:300::/48", "inet6", 10),
+        ],
+        vec![],
+    ));
+
+    let v4 = resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5));
+    assert_eq!(
+        v4.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "v4: less-preferred discard must not shadow the preferred drivable gateway"
+    );
+    assert_eq!(v4.egress_ifindex, 11);
+    assert_eq!(v4.next_hop, Some(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2))));
+
+    let v6 = resolve_v6(&state, "2001:db8:300::5".parse().unwrap());
+    assert_eq!(
+        v6.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "v6: less-preferred discard must not shadow the preferred drivable gateway"
+    );
+    assert_eq!(v6.egress_ifindex, 11);
+    assert_eq!(
+        v6.next_hop,
+        Some(IpAddr::V6("2001:db8:99::2".parse().unwrap()))
+    );
+}
+
+/// A discard row at the preferred preference still wins over a less-preferred
+/// gateway, for both address families.
+#[test]
+fn preferred_discard_still_wins_13950() {
+    let state = build_forwarding_state(&discard_snapshot_13950(
+        vec![
+            discard_route_13950("203.0.113.0/24", "inet", 5),
+            v4_route("203.0.113.0/24", vec!["10.99.0.2"], 10),
+            discard_route_13950("2001:db8:300::/48", "inet6", 5),
+            v6_route("2001:db8:300::/48", vec!["2001:db8:99::2"], 10),
+        ],
+        vec![
+            reachable_neighbor_11316("ge-0-0-0", 11, "inet", "10.99.0.2", "00:11:22:33:44:61"),
+            reachable_neighbor_11316(
+                "ge-0-0-0",
+                11,
+                "inet6",
+                "2001:db8:99::2",
+                "00:11:22:33:44:62",
+            ),
+        ],
+    ));
+
+    let v4 = resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5));
+    assert_eq!(v4.disposition, ForwardingDisposition::DiscardRoute);
+    assert_eq!(v4.egress_ifindex, 0);
+
+    let v6 = resolve_v6(&state, "2001:db8:300::5".parse().unwrap());
+    assert_eq!(v6.disposition, ForwardingDisposition::DiscardRoute);
+    assert_eq!(v6.egress_ifindex, 0);
+}
+
+/// A discard-only prefix remains a discard in both address families.
+#[test]
+fn discard_only_route_discards_13950() {
+    let state = build_forwarding_state(&discard_snapshot_13950(
+        vec![
+            discard_route_13950("203.0.113.0/24", "inet", 10),
+            discard_route_13950("2001:db8:300::/48", "inet6", 10),
+        ],
+        vec![],
+    ));
+
+    assert_eq!(
+        resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5)).disposition,
+        ForwardingDisposition::DiscardRoute
+    );
+    assert_eq!(
+        resolve_v6(&state, "2001:db8:300::5".parse().unwrap()).disposition,
+        ForwardingDisposition::DiscardRoute
+    );
+}
+
+/// Without a resolved gateway, its preferred drivable row remains selected
+/// so ARP/NDP can resolve it instead of choosing the less-preferred discard.
+#[test]
+fn less_preferred_discard_does_not_shadow_unresolved_gateway_13950() {
+    let state = build_forwarding_state(&discard_snapshot_13950(
+        vec![
+            v4_route("203.0.113.0/24", vec!["10.99.0.2"], 5),
+            discard_route_13950("203.0.113.0/24", "inet", 10),
+            v6_route("2001:db8:300::/48", vec!["2001:db8:99::2"], 5),
+            discard_route_13950("2001:db8:300::/48", "inet6", 10),
+        ],
+        vec![],
+    ));
+
+    let v4 = resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5));
+    assert_eq!(v4.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(v4.egress_ifindex, 11);
+    assert_eq!(v4.next_hop, Some(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2))));
+
+    let v6 = resolve_v6(&state, "2001:db8:300::5".parse().unwrap());
+    assert_eq!(v6.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(v6.egress_ifindex, 11);
+    assert_eq!(
+        v6.next_hop,
+        Some(IpAddr::V6("2001:db8:99::2".parse().unwrap()))
+    );
+}
