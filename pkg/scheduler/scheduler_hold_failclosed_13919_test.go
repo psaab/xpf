@@ -69,3 +69,31 @@ func TestClockStepPublishesDenyDispositionWithoutMapChange13919(t *testing.T) {
 		t.Fatal("clock-step publication lost its deny-first disposition")
 	}
 }
+
+func TestRecoveryHoldExpiryPublishesNormalDispositionWithoutMapChange13919(t *testing.T) {
+	now := time.Date(2026, 2, 12, 2, 0, 0, 0, time.UTC)
+	defs := map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours", StartTime: "09:00", StopTime: "17:00"},
+	}
+	calls := 0
+	s, active := NewPrimed(defs, func(context.Context, map[string]bool) error {
+		calls++
+		return nil
+	}, now)
+	if active["workhours"] {
+		t.Fatal("test precondition: scheduler must be inactive outside its window")
+	}
+	s.mu.Lock()
+	s.unsafeUntil = now.Add(2 * time.Minute)
+	s.mu.Unlock()
+	if !s.PolicyFailClosed(now.Add(time.Minute)) {
+		t.Fatal("test precondition: hold was not active")
+	}
+	s.evaluate(context.Background(), now.Add(3*time.Minute), true)
+	if calls != 1 {
+		t.Fatalf("hold-expiry publication calls = %d, want 1 despite unchanged active map", calls)
+	}
+	if s.PolicyFailClosed(now.Add(3 * time.Minute)) {
+		t.Fatal("hold-expiry publication retained fail-closed disposition")
+	}
+}

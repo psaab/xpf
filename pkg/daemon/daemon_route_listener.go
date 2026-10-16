@@ -264,11 +264,7 @@ func (d *Daemon) actuateLearnedRouteRefresh(ctx context.Context) bool {
 		// Helperless build: FRR is the only routing consumer. Converged.
 		return true
 	}
-	var schedulerState map[string]bool
-	var schedulerFailClosed bool
-	if sched := d.scheduler.Load(); sched != nil {
-		schedulerState, schedulerFailClosed = sched.ActiveStateWithFailClosed()
-	}
+	schedulerState, schedulerFailClosed := policySchedulerPublicationState(d.scheduler.Load(), time.Now())
 	// Bounded by the coalescer's throttle (one per 3 s at worst), so this is
 	// a state-transition log rather than a per-event one — CLAUDE.md's rule is
 	// about the latter. It is also the only operator-visible signal that the

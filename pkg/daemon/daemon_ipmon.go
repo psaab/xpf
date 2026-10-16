@@ -47,6 +47,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 )
 
 // routeOverlaySetter caches the overlay for full snapshot builds.
@@ -488,11 +489,7 @@ func (d *Daemon) actuateRouteOverlayLocked(cfg *config.Config) bool {
 		// consumer and it converged — nothing more to do.
 		return true
 	}
-	var schedulerState map[string]bool
-	var schedulerFailClosed bool
-	if sched := d.scheduler.Load(); sched != nil {
-		schedulerState, schedulerFailClosed = sched.ActiveStateWithFailClosed()
-	}
+	schedulerState, schedulerFailClosed := policySchedulerPublicationState(d.scheduler.Load(), time.Now())
 	published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, schedulerFailClosed)
 	if err != nil {
 		// #3757 H2: a transient publish failure keeps the state dirty for
