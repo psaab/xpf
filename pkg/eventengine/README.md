@@ -590,6 +590,17 @@ dispositions (`gh issue view 4423`):
   `TestDeletePathWrapsErrPathNotFound`, `...ContainerMiss...`,
   `...MissingMember...`, and the engine-level
   `TestBatchContainerMissDeleteIsTolerated`.
+- **Grouped delete syntax (#14174).** `classifyPlan` parses a `delete`
+  with `ParseSetCommandGrouped` and carries the per-token bracket
+  grouping on `plannedOp.delGrouped` into
+  `DeleteAsGroupedPlantClass` — the same grouped pair the interactive
+  delete uses. Without it, a delete naming an entire bracketed container
+  group (`delete security zones security-zone [ trust dmz ]`) re-split
+  the wide node at schema arity, hit the M9 tolerated-missing-delete
+  carve-out, and the batch committed with no deletion. A truly absent
+  grouped path stays tolerated. Locked by
+  `TestGroupedDeleteRemovesBracketedZoneGroup14174` and
+  `TestGroupedDeleteAbsentGroupStillTolerated14174`.
 - **Regex cache back-fill (M10).** A pattern that reaches `attributesMatch`
   without an `Apply`-time cache entry (legacy lenient-load path) is compiled
   once and cached, not recompiled per event. Locked by
