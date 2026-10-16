@@ -3483,3 +3483,110 @@ fn idle_lease_permissions_round_trip_and_merge_safely_13945() {
         "a mismatched binding must not widen the local permit set"
     );
 }
+/// #14046: PAT and address-only persistent leases can share a translated
+/// `(protocol, ip, port)` while their remote permissions differ. The
+/// one-to-one `persistent_by_translated` index displaced one lease with the
+/// other, so inbound lookup resolved only whichever lease inserted last.
+#[test]
+fn persistent_reverse_collision_keeps_both_lease_permissions_14046() {
+    use super::allocator::PersistentInbound;
+    let addrs = ["203.0.113.1".parse().unwrap()];
+    let allocator = PortAllocator::new(1, 40_000, 40_010);
+    let pat_flow = SourceNatFlowKey {
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        ..flow("10.0.61.50", 40_000)
+    };
+    let addr_flow = SourceNatFlowKey {
+        dst_ip: "9.9.9.9".parse().unwrap(),
+        dst_port: 8443,
+        ..flow("10.0.61.51", 40_000)
+    };
+    let pat = mint_persistent(&allocator, &addrs, pat_flow, 1_000);
+    let address_only = allocator
+        .reserve_address_only_persistent(
+            addr_flow,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            PersistentNatPermit::TargetHostPort,
+            TIMEOUT_NS,
+            1_000,
+            NatHolder::Untracked,
+        )
+        .expect("address-only persistent allocation succeeds");
+    assert_eq!(
+        (pat.ip, pat.port),
+        (address_only.ip, address_only.port),
+        "fixture must create the translated-base collision"
+    );
+
+    let lookup = |remote: &str, remote_port: u16| {
+        allocator.persistent_inbound_lookup(
+            TCP,
+            pat.ip,
+            pat.port,
+            remote.parse().unwrap(),
+            remote_port,
+            2_000,
+        )
+    };
+    assert_eq!(
+        lookup("8.8.8.8", 443),
+        PersistentInbound::Permitted {
+            internal_ip: pat_flow.src_ip,
+            internal_port: 40_000,
+            address_only: false,
+        },
+        "PAT remote resolves to its internal endpoint"
+    );
+    assert_eq!(
+        lookup("9.9.9.9", 8443),
+        PersistentInbound::Permitted {
+            internal_ip: addr_flow.src_ip,
+            internal_port: 40_000,
+            address_only: true,
+        },
+        "address-only remote resolves to its internal endpoint"
+    );
+    // A permission update can make both leases match one remote. The base
+    // bucket must fail closed rather than choose an endpoint by hash order.
+    allocator.record_synced_persistent_permission(
+        SourceNatFlowKey {
+            dst_ip: pat_flow.dst_ip,
+            dst_port: pat_flow.dst_port,
+            ..addr_flow
+        },
+        PersistentNatPermit::TargetHostPort,
+    );
+    assert_eq!(
+        lookup("8.8.8.8", 443),
+        PersistentInbound::Denied,
+        "multiple different endpoints permitted by one remote are ambiguous"
+    );
+
+
+    let pat_key = pat_flow.persistent_source_key(PersistentNatPermit::TargetHostPort);
+    {
+        let mut live = allocator.lock_live();
+        live.remove_persistent_lease(&pat_key)
+            .expect("PAT lease present");
+    }
+    assert_eq!(
+        lookup("9.9.9.9", 8443),
+        PersistentInbound::Permitted {
+            internal_ip: addr_flow.src_ip,
+            internal_port: 40_000,
+            address_only: true,
+        },
+        "removing PAT lease keeps the colliding address-only lease indexed"
+    );
+    assert_eq!(
+        lookup("8.8.8.8", 443),
+        PersistentInbound::Permitted {
+            internal_ip: addr_flow.src_ip,
+            internal_port: 40_000,
+            address_only: true,
+        },
+        "removing the PAT owner resolves the shared permission to the remaining lease"
+    );
+}
