@@ -3383,3 +3383,426 @@ fn companionless_reverse_dnat_hit_revokes_after_rule_withdrawal_13923() {
         "sessionless revocation must not claim a forward row"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #14128: source-NAT revalidation on reverse-only sessions. Three bundled
+// defects in the companion-less reverse reconstruction:
+//   (a) `NatDecision::reverse` dropped `source_nat_icmp` (type/code), so a
+//       PAT ICMP mapping reconstructed without type/code was misread as
+//       portless and its translated identifier rejected;
+//   (b) the reconstructed forward egress was the physical arrival ifindex,
+//       not the logical VLAN unit `forwarding.egress` is keyed by, so
+//       interface-SNAT on the logical unit was spuriously revoked;
+//   (c) `source_nat_translation_matches` accepted a stored portless mapping
+//       under a PAT rule when the ORIGINAL src_port fell in the pool range
+//       (no-translation -> PAT laundering).
+// ---------------------------------------------------------------------------
+
+/// #14128 (a): companion-less reverse hit for an ICMP PAT flow. The forward
+/// half is absent locally; the reverse row was synthesized from a forward
+/// decision carrying `source_nat_icmp = (8,0)` (echo-request). Pre-fix the
+/// double `reverse()` dropped the type/code and the validator took the
+/// portless branch (`translated_src_port.is_none()` == false) -> false
+/// `StaleSourceNat`. The typed pool rule (echo-request only) also pins that
+/// the restored type/code actually reaches rule matching: a timestamp-only
+/// rule must still revoke.
+#[test]
+fn reverse_only_icmp_pat_survives_revalidation_14128() {
+    // Forward: 10.0.0.1 icmp-id 0x1234 -> 198.51.100.1, PAT to
+    // 203.0.113.10 icmp-id 45000 under an echo-request pool rule.
+    let forward_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: libc::IPPROTO_ICMP as u8,
+        src_ip: "10.0.0.1".parse().expect("client"),
+        dst_ip: "198.51.100.1".parse().expect("server"),
+        src_port: 0x1234,
+        dst_port: 0,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let forward_nat = NatDecision {
+        rewrite_src: Some("203.0.113.10".parse().expect("pool address")),
+        rewrite_src_port: Some(45_000),
+        source_nat_icmp: Some((8, 0)),
+        ..Default::default()
+    };
+    let forward_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: forward_nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let forward_metadata = SessionMetadata {
+        ingress_zone: 1,
+        egress_zone: 2,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 11,
+        ingress_vlan_id: 0,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        forward_ingress_vlan_id: None,
+    };
+    // Production reverse synthesis (also exercises the `reverse()` at
+    // shared_ops/reverse_synth.rs, not just the revalidation one).
+    let forward_match = crate::session::ForwardSessionMatch {
+        key: forward_key.clone(),
+        decision: forward_decision,
+        metadata: SessionMetadata {
+            ingress_ifindex: 11,
+            ingress_vlan_id: 0,
+            ..forward_metadata.clone()
+        },
+        forwarding_generation: crate::session::ForwardingGenerationStamp::default(),
+        aux: crate::session::SessionLookupAux {
+            session_id: 0,
+            source_nat_static: Some(false),
+            leak_incarnation: 0,
+        },
+    };
+    let mut forwarding = reverse_snat_forwarding_13771(true);
+    forwarding.ifindex_unambiguous_zone_id.insert(11, 1);
+    forwarding.ifindex_unambiguous_zone_id.insert(12, 2);
+    // Replace the TCP-scoped pool with a typed ICMP PAT pool: echo-request
+    // (8,0) only, pool 203.0.113.10, identifier range 45000..=45000.
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+        crate::protocol::SourceNATRuleSnapshot {
+            name: "icmp-pat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            match_applications: vec![crate::protocol::NatAppTermWire {
+                protocol: 1,
+                icmp_type: Some(8),
+                icmp_code: Some(0),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    ]);
+    let reverse = crate::afxdp::shared_ops::build_reverse_session_from_forward_match(
+        &forwarding,
+        &BTreeMap::new(),
+        &Arc::new(crate::afxdp::ShardedNeighborMap::new()),
+        forward_match,
+        0,
+        0,
+    );
+    // The reverse decision must retain the forward type/code after the fix.
+    assert_eq!(
+        reverse.decision.nat.source_nat_icmp,
+        Some((8, 0)),
+        "reverse() must preserve source_nat_icmp (#14128)"
+    );
+    let reverse_key = crate::session::reverse_session_key(&forward_key, forward_nat);
+    let case = (
+        forward_key.clone(),
+        reverse_key,
+        forward_decision,
+        forward_metadata,
+        reverse.decision,
+        reverse.metadata,
+        SessionOrigin::SyncImport,
+        reverse.aux.source_nat_static,
+    );
+    // Only the reverse row is installed locally — the forward half is absent,
+    // so the hit takes the NoLocalEntry reconstruction.
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    sessions.set_source_nat_static(&case.1, case.7);
+    assert!(
+        reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
+        "unchanged ICMP PAT must survive a companion-less reverse hit (#14128)"
+    );
+    // Typed control: a rule for a DIFFERENT ICMP type (timestamp 13,0) must
+    // not validate the echo mapping — the restored type/code is load-bearing,
+    // not a blanket ICMP pass.
+    let mut other_type = forwarding.clone();
+    other_type.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+        crate::protocol::SourceNATRuleSnapshot {
+            name: "icmp-other-type".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.0.1/32".to_string()],
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            match_applications: vec![crate::protocol::NatAppTermWire {
+                protocol: 1,
+                icmp_type: Some(13),
+                icmp_code: Some(0),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    ]);
+    let revocation = reverse_snat_hit_13652(&other_type, &mut sessions, &case)
+        .expect("a different-type ICMP rule must revoke the echo PAT mapping");
+    assert!(matches!(
+        revocation.reason,
+        PolicyRevocationReason::StaleSourceNat
+    ));
+}
+
+/// #14128 (b): companion-less reverse hit arriving on a VLAN trunk. The WAN
+/// egress is logical unit 13 (VLAN 50 on physical parent 12) whose primary
+/// address is the interface-SNAT address; the parent row 12 carries a
+/// DIFFERENT address. Pre-fix the reconstruction keyed `forwarding.egress`
+/// on the physical arrival ifindex (12) and compared against the parent's
+/// address -> false `StaleSourceNat`. The parent address must NOT validate:
+/// only the logical unit's address expresses the interface translation.
+#[test]
+fn reverse_only_vlan_interface_snat_survives_14128() {
+    let mut forwarding = reverse_snat_forwarding_13771(false);
+    // WAN trunk: physical parent 12 (bind), logical unit 13 on VLAN 50.
+    forwarding.egress.insert(
+        13,
+        EgressInterface {
+            bind_ifindex: 12,
+            vlan_id: 50,
+            mtu: 1500,
+            src_mac: [0; 6],
+            zone_id: 2,
+            redundancy_group: 0,
+            primary_v4: Some("203.0.113.10".parse().expect("logical WAN IPv4")),
+            primary_v6: None,
+        },
+    );
+    forwarding
+        .egress
+        .get_mut(&12)
+        .expect("WAN parent")
+        .primary_v4 = Some("198.51.100.254".parse().expect("parent WAN IPv4"));
+    forwarding.ingress_logical_ifindex.insert((12, 50), 13);
+    // Interface-SNAT rule (unchanged): translate to the egress interface's
+    // own address — the logical unit's 203.0.113.10, not the parent's.
+    let case = reverse_snat_case_from_production_13771(&forwarding);
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        case.1.clone(),
+        case.4,
+        case.5.clone(),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        case.1.protocol,
+        0x10,
+    ));
+    // The reply arrives on the physical parent with VLAN 50.
+    let flow = SessionFlow {
+        src_ip: case.1.src_ip,
+        dst_ip: case.1.dst_ip,
+        forward_key: case.1.clone(),
+    };
+    let mut observed_metadata = case.5.clone_without_policy_counter();
+    observed_metadata.ingress_ifindex = 12;
+    observed_metadata.ingress_vlan_id = 50;
+    assert!(
+        source_nat_revocation_on_session_hit_with_ingress(
+            &forwarding,
+            &mut sessions,
+            &case.1,
+            &observed_metadata,
+            12,
+            50,
+            case.4,
+            &flow,
+            case.6,
+            case.7,
+            None,
+        )
+        .is_none(),
+        "interface-SNAT on logical VLAN unit 13 must survive a companion-less reverse hit (#14128)"
+    );
+    // Anti-laundering control: if the logical unit's address changes so the
+    // stored translation is no longer the interface address, the same hit
+    // must revoke — logical resolution must not become a blanket pass.
+    let mut changed = forwarding.clone();
+    changed.egress.get_mut(&13).expect("logical WAN").primary_v4 =
+        Some("203.0.113.99".parse().expect("changed logical IPv4"));
+    assert!(
+        source_nat_revocation_on_session_hit_with_ingress(
+            &changed,
+            &mut sessions,
+            &case.1,
+            &observed_metadata,
+            12,
+            50,
+            case.4,
+            &flow,
+            case.6,
+            case.7,
+            None,
+        )
+        .is_some(),
+        "a logical-unit address change must revoke the stale interface translation"
+    );
+}
+
+/// #14128 (c): translation-provenance invariant at the validator. A session
+/// installed under `port no-translation` (address-only, no translated port,
+/// original src_port inside the pool range) must NOT survive a reconfigure
+/// to PAT: the PAT rule never allocated that mapping. Pre-fix the
+/// `translated_src_port.map_or(contains(&src_port))` fallback accepted it.
+/// The genuine no-translation rule must still validate the same mapping,
+/// and a real PAT mapping (translated port in range) must still validate.
+#[test]
+fn source_nat_translation_matches_no_translation_to_pat_revokes_14128() {
+    let pat_rules = crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
+        name: "pat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["10.0.0.1/32".to_string()],
+        pool_addresses: vec!["203.0.113.10/32".to_string()],
+        port_low: 40_000,
+        port_high: 50_000,
+        ..Default::default()
+    }]);
+    let mut no_translation = pat_rules.clone();
+    no_translation[0].no_translation = true;
+    let src: IpAddr = "10.0.0.1".parse().expect("src");
+    let dst: IpAddr = "198.51.100.1".parse().expect("dst");
+    let translated: IpAddr = "203.0.113.10".parse().expect("translated");
+    // Address-only mapping: original port 45000 (inside the PAT range),
+    // no translated port — installed under `port no-translation`.
+    assert!(
+        crate::nat::source_nat_translation_matches(
+            &no_translation,
+            &crate::nat::NatScopeCtx::default(),
+            "lan",
+            "wan",
+            src,
+            dst,
+            6,
+            45_000,
+            443,
+            None,
+            translated,
+            None,
+            None,
+            None,
+        ),
+        "the address-only mapping must validate under its own no-translation rule"
+    );
+    assert!(
+        !crate::nat::source_nat_translation_matches(
+            &pat_rules,
+            &crate::nat::NatScopeCtx::default(),
+            "lan",
+            "wan",
+            src,
+            dst,
+            6,
+            45_000,
+            443,
+            None,
+            translated,
+            None,
+            None,
+            None,
+        ),
+        "a portless mapping must not be laundered by a PAT rule via the original src_port (#14128)"
+    );
+    // Real PAT mapping still validates; out-of-range translated port does not.
+    assert!(crate::nat::source_nat_translation_matches(
+        &pat_rules,
+        &crate::nat::NatScopeCtx::default(),
+        "lan",
+        "wan",
+        src,
+        dst,
+        6,
+        45_000,
+        443,
+        None,
+        translated,
+        Some(46_000),
+        None,
+        None,
+    ));
+    assert!(!crate::nat::source_nat_translation_matches(
+        &pat_rules,
+        &crate::nat::NatScopeCtx::default(),
+        "lan",
+        "wan",
+        src,
+        dst,
+        6,
+        45_000,
+        443,
+        None,
+        translated,
+        Some(60_000),
+        None,
+        None,
+    ));
+    // ICMP PAT without reconstructed type/code: the translated identifier
+    // alone (in range) must validate — this is the (a) mechanism at the
+    // validator level, independent of `NatDecision::reverse`.
+    assert!(crate::nat::source_nat_translation_matches(
+        &pat_rules,
+        &crate::nat::NatScopeCtx::default(),
+        "lan",
+        "wan",
+        src,
+        dst,
+        libc::IPPROTO_ICMP as u8,
+        0x1234,
+        0,
+        None,
+        translated,
+        Some(45_000),
+        None,
+        None,
+    ));
+    // A PAT-typed stored port under a no-translation rule must not validate
+    // (the inverse reconfigure direction stays fail-closed).
+    assert!(!crate::nat::source_nat_translation_matches(
+        &no_translation,
+        &crate::nat::NatScopeCtx::default(),
+        "lan",
+        "wan",
+        src,
+        dst,
+        6,
+        45_000,
+        443,
+        None,
+        translated,
+        Some(46_000),
+        None,
+        None,
+    ));
+}
