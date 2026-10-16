@@ -462,16 +462,35 @@ func (m *Manager) SetPrivateFeedAllowlist(prefixes []netip.Prefix) {
 	m.mu.Unlock()
 }
 
-// blockedFeedDestinationPrefixes contains address space that is not a public
-// feed destination. netip.Addr's classification methods cover the RFC1918,
-// RFC4193, loopback, and link-local classes; these explicit prefixes add the
-// cloud metadata/CGNAT and special-purpose ranges that are still otherwise
-// classified as global unicast by the standard library.
+// blockedFeedDestinationPrefixes contains IPv6 transition / special-purpose
+// address space that is not a public feed destination, plus the IPv4
+// special-purpose ranges stdlib classification still calls global unicast.
+// netip.Addr.IsGlobalUnicast follows package net: NAT64 (64:ff9b::/96),
+// NAT64 local-use (64:ff9b:1::/48), 6to4 (2002::/16), the IETF protocol
+// assignments block (2001::/23, which includes Teredo 2001::/32),
+// discard-only (100::/64), dummy (100:0:0:1::/64), SRv6 SIDs (5f00::/16)
+// and the documentation prefixes below all pass IsGlobalUnicast, so
+// without this list a feed hostname resolving to a translator /
+// transition address — whose embedded IPv4 can name an internal target —
+// would be dialled as if it were a public destination (#14177). The IPv6
+// entries mirror specialPurposeV6 in pkg/ddns/checkip.go; keep in sync.
+// IsUnspecified/IsLoopback/IsLinkLocal/IsMulticast are still handled by
+// the predicates in feedDestinationBlocked.
 var blockedFeedDestinationPrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
-	netip.MustParsePrefix("100.64.0.0/10"), // CGNAT; Alibaba metadata is within it.
-	netip.MustParsePrefix("192.0.0.0/24"),  // IETF protocol assignments.
-	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking/special-purpose.
+	netip.MustParsePrefix("100.64.0.0/10"),  // CGNAT; Alibaba metadata is within it.
+	netip.MustParsePrefix("192.0.0.0/24"),   // IETF protocol assignments.
+	netip.MustParsePrefix("198.18.0.0/15"),  // benchmarking/special-purpose.
+	netip.MustParsePrefix("64:ff9b::/96"),   // NAT64 well-known prefix (RFC 6052).
+	netip.MustParsePrefix("64:ff9b:1::/48"), // NAT64 local-use (RFC 8215).
+	netip.MustParsePrefix("100::/64"),       // discard-only (RFC 6666).
+	netip.MustParsePrefix("100:0:0:1::/64"), // dummy IPv6 prefix (RFC 9780).
+	netip.MustParsePrefix("2001::/23"),      // IETF protocol assignments (incl. Teredo 2001::/32).
+	netip.MustParsePrefix("2001:db8::/32"),  // documentation (RFC 3849).
+	netip.MustParsePrefix("2002::/16"),      // 6to4 (RFC 3056, deprecated).
+	netip.MustParsePrefix("3fff::/20"),      // documentation (RFC 9637).
+	netip.MustParsePrefix("5f00::/16"),      // SRv6 SIDs (RFC 9602).
+	netip.MustParsePrefix("fc00::/7"),       // ULA (RFC 4193; also IsPrivate).
 }
 
 func (m *Manager) privateFeedAllowlistSnapshot() []netip.Prefix {
@@ -615,6 +634,49 @@ func pinnedFeedClient(base *http.Client, ips []netip.Addr, port string) (*http.C
 	client := *base
 	client.Transport = transport
 	return &client, nil
+}
+
+// joinFeedURL appends a per-feed path to a feed-server base URL,
+// preserving any query (and fragment) the base carries. Plain string
+// concatenation (baseURL + path) appends the path AFTER a base query:
+// https://feed.example/base?token=abc plus /malware.txt became
+// .../base?token=abc/malware.txt, so the server saw path /base with a
+// mangled token and the feed never fetched (#14177). The per-feed path
+// is instead appended to the base PATH (the base is a directory-like
+// prefix, matching the pre-existing concatenation semantics for
+// query-free bases), and the query is re-attached after it. A per-feed
+// path that itself carries a query replaces the base query for that
+// feed (the #7406 provider shape: the token lives on the path leaf);
+// otherwise the base query is inherited. A scheme or authority in the
+// per-feed path is dropped — only its path+query contribute, so a path
+// can never escape the configured origin. On any parse failure the raw
+// base is returned unchanged; readFeed then rejects an unconstructible
+// URL and the strict compiler gate rejects it at commit, so failure
+// stays fail-closed.
+func joinFeedURL(baseURL, rawPath string) string {
+	if rawPath == "" {
+		return baseURL
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return baseURL
+	}
+	ref, err := url.Parse(rawPath)
+	if err != nil {
+		return baseURL
+	}
+	joined := *base
+	joined.Path = strings.TrimSuffix(base.Path, "/") + "/" + strings.TrimPrefix(ref.Path, "/")
+	joined.RawPath = ""
+	if ref.RawQuery != "" || ref.ForceQuery {
+		joined.RawQuery = ref.RawQuery
+		joined.ForceQuery = ref.ForceQuery
+	}
+	if ref.Fragment != "" {
+		joined.Fragment = ref.Fragment
+		joined.RawFragment = ref.RawFragment
+	}
+	return joined.String()
 }
 
 // resolveBaseURL returns the base URL for a feed server.
@@ -768,15 +830,7 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 			if len(fsCfg.FeedEntries) > 0 {
 				// Multiple named feeds with per-feed paths.
 				for _, fe := range fsCfg.FeedEntries {
-					feedURL := baseURL
-					if fe.Path != "" {
-						p := fe.Path
-						if !strings.HasPrefix(p, "/") {
-							p = "/" + p
-						}
-						feedURL = baseURL + p
-					}
-					plan(fe.Name, feedURL)
+					plan(fe.Name, joinFeedURL(baseURL, fe.Path))
 				}
 			} else {
 				// Single feed (backward compat): keyed by FeedName or server name.
