@@ -828,11 +828,14 @@ initiation without a valid MAC2 is cookie-challenged and NOT handshaked, while
 one echoing a decrypted-cookie MAC2 IS processed, and a stolen MAC2 from a
 different source is re-challenged). Reverting the gate makes it `Process` for
 every initiation and the test fails. #4332 adds
-`classify_initiation_per_source_budget_isolation` (a flood from one source past
-the global budget must NOT budget-suppress a legit peer's challenge from another
-source) plus the `cookie.rs` unit tests `source_bucket_burst_then_throttle`,
-`source_bucket_isolates_sources`, `source_table_cap_fails_closed`,
-`source_gc_reclaims_idle_buckets`, and `source_bucket_ignores_backwards_clock`.
+`classify_initiation_per_source_budget_isolation` (one exhausted source does
+not consume another source's bucket) and #13958's
+`classify_initiation_rotating_source_flood_keeps_legit_challenge` (3,000 fresh
+valid-MAC1 sources exceed the former global cap while a legitimate peer still
+gets its first challenge). Cookie-table unit tests include
+`source_bucket_burst_then_throttle`, `source_bucket_isolates_sources`,
+`source_table_cap_evicts_for_new_sources`, `source_gc_reclaims_idle_buckets`,
+and `source_bucket_ignores_backwards_clock`.
 - **Engine orchestration**
   (`userspace-dp/src/afxdp/wg/handshake_session.rs`): `create_initiation`,
   `consume_response`, and `consume_initiation_create_response` compose snow +
