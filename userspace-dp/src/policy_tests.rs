@@ -756,6 +756,18 @@ fn scheduler_lease_ignores_version_zero_and_rejects_rollback() {
 }
 
 #[test]
+fn scheduler_lease_does_not_expire_from_pre_heartbeat_now_snapshot_13703() {
+    let lease = SchedulerHeartbeatLease::default();
+    assert!(lease.apply(1, 100));
+    assert!(lease.apply(2, 200));
+
+    assert!(
+        !lease.expired_at(150),
+        "a time sampled before the accepted heartbeat cannot expire its newer receipt stamp"
+    );
+}
+
+#[test]
 fn scheduler_lease_never_publishes_version_before_receipt_stamp_13703() {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
     use std::sync::Arc;
