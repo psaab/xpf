@@ -8,6 +8,12 @@ xpf (0.0.0) unstable; urgency=medium
     policy, session creation, neighbor retry or transmission, matching the
     existing transit destination-class gate. LocalDelivery is unaffected
     (#13981).
+  * Keep IPv6 fe80::/10 unicast on the userspace policy path unless the
+    destination is exactly configured local. The shim no longer early-passes
+    arbitrary link-local unicast to the kernel, preventing hairpin forwarding;
+    multicast control traffic and local link-local delivery are preserved
+    (#13983).
+
   * Resolve REST operational command regexes before reading request bodies and
     reject body-independent command denials before buffering (#13249).
 

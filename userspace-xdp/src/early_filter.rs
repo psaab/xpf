@@ -2,25 +2,21 @@
 //!
 //! `should_fallback_early` hands a packet to the kernel BEFORE any session
 //! lookup, so its predicate is a security boundary: every address class it
-//! names bypasses the userspace policy engine entirely. Two of the classes
-//! the early path used to name did not survive review:
+//! names bypasses the userspace policy engine entirely. The early path has
+//! removed destination classes that lacked exact locality checks:
 //!
-//! * IPv4 169.254/16 unicast, matched with no destination-locality test, so
-//!   a SYN to a routable NON-local 169.254 address on a tracked-XDP ingress
-//!   rode the kernel forward path plus the armed fence's ingress-name
-//!   pinhole with no zone policy — the same shape #304 closed for ESP and
-//!   non-native GRE. Genuinely local 169.254 destinations are unaffected:
-//!   an assigned link-local address is a member of `userspace_local_v4`
-//!   (the Go sync enumerates every kernel address with no link-local
-//!   exclusion), so the session-miss path's `is_local_destination` arm
-//!   still delivers it to the kernel.
-//! * ICMPv6 NDP types 133-137, matched on TYPE alone with no destination
-//!   predicate at all. That arm is deleted, not moved here. What remains
-//!   for NDP is exactly the destination predicate below: multicast NDP
-//!   (solicited-node, all-nodes, all-routers) still passes early, unicast
-//!   NDP to a firewall-local address passes via `is_local_destination`,
-//!   and NDP to a transit destination continues to the AF_XDP redirect
-//!   for adjudication by the worker.
+//! * IPv4 169.254/16 unicast must reach the session-miss path rather than
+//!   pass early. Scope alone never makes a destination local to this box;
+//!   genuinely local addresses still pass through `is_local_destination`.
+//! * IPv6 fe80::/10 unicast follows the same ownership rule (#13983). Only
+//!   an exact-local link-local destination passes early; non-owned link-local
+//!   destinations continue on the AF_XDP policy path rather than hairpinning
+//!   through the kernel.
+//! * ICMPv6 NDP types 133-137 were matched on TYPE alone with no destination
+//!   predicate. That arm is deleted, not moved here. Multicast NDP still
+//!   passes early, unicast NDP to a firewall-local address passes via
+//!   `is_local_destination`, and NDP to a transit destination continues to
+//!   the AF_XDP redirect for adjudication by the worker.
 //!
 //! # Why this is a module and not two arms inside `should_fallback_early`
 //!
@@ -38,9 +34,9 @@
 //! Nothing in here may take a dependency on `aya`, on a BPF map, or on
 //! `std` — that is what keeps it host-compilable, and it is the whole
 //! point. `is_local_destination` stays at the call site for exactly that
-//! reason: it reads BPF maps this module cannot see. What this module owns
-//! is that the link-local answer is no longer CONSULTED for IPv4 at all,
-//! and that no ICMPv6 type test exists anywhere on the early path.
+//! reason: it reads BPF maps this module cannot see. This module owns no
+//! scope-only link-local pass and no ICMPv6 type test exists on the early
+//! path.
 
 /// Is this big-endian IPv4 destination a multicast address (224.0.0.0/4)?
 ///
@@ -94,13 +90,12 @@ pub fn ipv4_early_pass_to_kernel(dst_v4: u32) -> bool {
     dst_v4 == 0xffff_ffff || is_ipv4_multicast(dst_v4)
 }
 
-/// The IPv6 early kernel-pass verdict, UNCHANGED by #10640.
+/// The IPv6 early kernel-pass verdict.
 ///
-/// Multicast and link-local destinations pass early — that is the arm that
-/// still delivers multicast NDP now that the type-only NDP arm is deleted.
-/// A global/transit destination answers false here, which for an NDP packet
-/// is the whole early decision: it continues to the AF_XDP redirect.
+/// Multicast passes for control traffic. A link-local unicast passes only if
+/// the shim's exact local-destination lookup succeeded; scope alone does not
+/// make it local to this firewall.
 #[inline(always)]
-pub fn ipv6_early_pass_to_kernel(dst: [u8; 16]) -> bool {
-    is_ipv6_multicast(dst) || is_ipv6_link_local(dst)
+pub fn ipv6_early_pass_to_kernel(dst: [u8; 16], is_local: bool) -> bool {
+    is_ipv6_multicast(dst) || (is_local && is_ipv6_link_local(dst))
 }
