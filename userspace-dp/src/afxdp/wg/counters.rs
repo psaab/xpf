@@ -106,15 +106,9 @@ pub(crate) struct WgCounters {
     /// from `hs_rx_drops_replayed_init`, which is reached only after DH.
     pub(crate) hs_rx_under_load_admission_drops: AtomicU64,
     /// #4094 PR-A: under-load initiations dropped WITHOUT a cookie reply.
-    /// Primarily the per-window cookie-reply emission budget being exhausted
-    /// (item 6 storm bound) — non-zero means the generated-reply budget is
-    /// clamping a heavy valid-MAC1 flood. #4332 folds in the per-SOURCE
-    /// token-bucket throttle drops (a single flooding source, or a
-    /// full-source-table fail-closed) — a bounded hardening layered before the
-    /// global budget; both drops mean "under load, challenged but no reply
-    /// emitted". Also covers the fail-closed drop when the OS CSPRNG is
-    /// unavailable for the secret/nonce (BUG-2; impossible on Linux, so
-    /// effectively budget/source-throttle-only in practice).
+    /// Includes per-source token-bucket throttling and fail-closed drops when
+    /// the OS CSPRNG is unavailable for the secret/nonce (BUG-2; impossible on
+    /// Linux).
     pub(crate) hs_cookie_reply_budget_drops: AtomicU64,
     /// Type byte ∉ {1,2,3,4}. Zero-length UDP datagrams never reach
     /// type dispatch (consumed by the `Ok(_) => break` recv arm in

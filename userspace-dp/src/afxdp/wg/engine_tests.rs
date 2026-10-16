@@ -1872,19 +1872,11 @@ fn classify_initiation_under_load_requires_mac2() {
     assert!(c.hs_rx_under_load_no_mac2.load(Ordering::Relaxed) >= 2);
 }
 
-/// #4332 RED-on-revert: the cookie-reply budget is isolated PER SOURCE, so a
-/// valid-MAC1 flood from ONE source cannot drain the GLOBAL per-window budget
-/// away from a legit peer at a DIFFERENT source. Source A floods far past
-/// `COOKIE_REPLY_BUDGET_PER_WINDOW`; without the per-source layer A would
-/// consume every global cookie-reply slot and B's FIRST challenge would be
-/// budget-suppressed (Drop). With the per-source bucket A is throttled after
-/// its own burst — consuming only a handful of the global slots — so B still
-/// gets its cookie challenge. Reverting the `source_reply_allowed` gate in
-/// `classify_initiation` makes B's assertion fail (the shared budget is drained
-/// by A's flood).
+/// #4332 per-source throttling keeps a single flooder's burst local, so a
+/// legitimate source can still get its first challenge.
 #[test]
 fn classify_initiation_per_source_budget_isolation() {
-    use crate::afxdp::wg::cookie::{COOKIE_REPLY_BUDGET_PER_WINDOW, INITIATIONS_UNDER_LOAD_THRESHOLD};
+    use crate::afxdp::wg::cookie::INITIATIONS_UNDER_LOAD_THRESHOLD;
     use std::net::SocketAddr;
 
     let (engine, _our_pub, init) = under_load_fixture();
@@ -1895,11 +1887,9 @@ fn classify_initiation_per_source_budget_isolation() {
     let flood: SocketAddr = "203.0.113.9:51820".parse().unwrap();
     let legit: SocketAddr = "198.51.100.7:51820".parse().unwrap();
 
-    // Trip under-load, then flood source A well past the GLOBAL budget. The
-    // first INITIATIONS_UNDER_LOAD_THRESHOLD arrivals just build load (Process);
-    // the remainder are valid-MAC1 / no-MAC2 under-load challenges. On revert
-    // these would consume every one of COOKIE_REPLY_BUDGET_PER_WINDOW slots.
-    let shots = INITIATIONS_UNDER_LOAD_THRESHOLD + COOKIE_REPLY_BUDGET_PER_WINDOW + 20;
+    // Repeated source-A attempts exceed its per-source burst; that throttle
+    // must not consume source B's independent bucket.
+    let shots = INITIATIONS_UNDER_LOAD_THRESHOLD + 50;
     for _ in 0..shots {
         engine.classify_initiation(&init, flood, &mut out, now);
     }
@@ -1911,6 +1901,45 @@ fn classify_initiation_per_source_budget_isolation() {
         matches!(action, InitiationAction::SendCookie(_)),
         "a legit source must still be cookie-challenged despite a flood from \
          another source (per-source budget isolation), got {action:?}"
+    );
+}
+
+/// #13958 (residual of #4332): rotating-source valid-MAC1 floods must not
+/// starve a legitimate peer's first cookie challenge. Each fresh source gets
+/// a full bucket; no global first-come cap can be shared across the sources.
+#[test]
+fn classify_initiation_rotating_source_flood_keeps_legit_challenge() {
+    use crate::afxdp::wg::cookie::INITIATIONS_UNDER_LOAD_THRESHOLD;
+    use std::net::SocketAddr;
+
+    let (engine, _our_pub, init) = under_load_fixture();
+    let now = 10_000_000_000u64;
+    engine.set_mock_now_ns(now);
+    let mut out = [0u8; 256];
+    let mut replies = 0u64;
+    for i in 0..3000u32 {
+        let source: SocketAddr = format!("10.1.{}.{}:51820", (i >> 8) & 0xff, i & 0xff)
+            .parse()
+            .unwrap();
+        if matches!(
+            engine.classify_initiation(&init, source, &mut out, now),
+            InitiationAction::SendCookie(_)
+        ) {
+            replies += 1;
+        }
+    }
+    assert!(
+        replies > 40,
+        "distinct sources should not share a global reply cap; got {replies}"
+    );
+
+    let legit: SocketAddr = "198.51.100.7:51820".parse().unwrap();
+    assert!(
+        matches!(
+            engine.classify_initiation(&init, legit, &mut out, now),
+            InitiationAction::SendCookie(_)
+        ),
+        "legitimate source remains challenged after rotating-source flood"
     );
 }
 
@@ -2102,7 +2131,9 @@ fn initiator_consume_completes_handshake_under_load() {
     // 1. Initiator builds its FIRST real initiation toward the responder.
     //    No cookie held yet → MAC2 is zero.
     let mut init_buf = [0u8; 256];
-    i_engine.create_initiation(&resp_pub, &mut init_buf).unwrap();
+    i_engine
+        .create_initiation(&resp_pub, &mut init_buf)
+        .unwrap();
     let init = init_buf[..crate::afxdp::wg::WG_MSG_INIT_LEN].to_vec();
     assert_eq!(
         &init[132..148],
@@ -2319,7 +2350,11 @@ fn handshake_admission_9908_replay_flood_bounded_and_counted() {
         c.hs_rx_under_load_mac2_ok.load(Ordering::Relaxed),
         elapsed.as_millis(),
     );
-    assert_eq!(processed + dropped, N, "every replay is admitted or dropped");
+    assert_eq!(
+        processed + dropped,
+        N,
+        "every replay is admitted or dropped"
+    );
     assert!(
         processed >= 1,
         "a fresh source's first primed initiation must always be admitted"
@@ -2399,7 +2434,10 @@ fn handshake_admission_9908_legit_source_completes_during_flood() {
         "the admitted fresh initiation must complete the responder handshake"
     );
     assert_eq!(
-        r_engine.counters().hs_responses_created.load(Ordering::Relaxed),
+        r_engine
+            .counters()
+            .hs_responses_created
+            .load(Ordering::Relaxed),
         2,
         "attacker's first replay + legit fresh handshake both complete"
     );
