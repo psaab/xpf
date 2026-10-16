@@ -1734,7 +1734,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // #11053: control traffic bypasses the flow cache so control
                 // segments can be captured only after the same session/policy
                 // admission path that governs their forwarding.
+                // #13947: injected TX-pool frames take the authoritative
+                // resolution/gates below, never a cached forwarding decision.
                 if !overlap_skip_cache_9950
+                    && !is_injected
                     && FlowCacheEntry::packet_eligible(meta)
                     && let Some(flow) = flow.as_ref()
                     && !crate::afxdp::poll_stages::is_pptp_control_flow(flow)
@@ -6982,6 +6985,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 budget_key,
                                 policy_src_ip,
                             } => {
+                                if is_injected {
+                                    crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    binding.scratch.scratch_forwards.pop();
+                                    sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                                 let policy_allowed = binding
                                     .scratch
                                     .scratch_forwards
@@ -7084,6 +7095,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 budget_key,
                                 policy_src_ip,
                             } => {
+                                if is_injected {
+                                    crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    binding.scratch.scratch_forwards.pop();
+                                    sessions.refund_icmp_error_not_delivered(&budget_key, now_ns);
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                                 // Reversed error queued as a prebuilt forward;
                                 // authorize the actual rewritten wire identity
                                 // before allowing the request to own the desc.
