@@ -7053,13 +7053,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // it live. #5140-safe classification: read the INNER ICMP type
                     // from `packet_frame` (decapped post native-GRE, else
                     // `raw_frame`) at the inner-relative `meta.l4_offset`.
-                    let is_embedded_icmp_error = worker_ctx.forwarding.allow_embedded_icmp
-                        && matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6)
+                    // Session-matched errors are core NAT behavior and must
+                    // not depend on the optional unmatched embedded-ICMP
+                    // setting. A miss still falls through to ordinary
+                    // flowless enforcement below.
+                    let is_embedded_icmp_error = matches!(
+                        meta.protocol,
+                        PROTO_ICMP | PROTO_ICMPV6
+                    )
                         && packet_frame
-                            .get(meta.l4_offset as usize)
-                            .copied()
-                            .map(|icmp_type| is_icmp_error(meta.protocol, icmp_type))
-                            .unwrap_or(false);
+                        .get(meta.l4_offset as usize)
+                        .copied()
+                        .map(|icmp_type| is_icmp_error(meta.protocol, icmp_type))
+                        .unwrap_or(false);
                     if is_embedded_icmp_error {
                         match try_reverse_embedded_icmp_error(
                             desc,

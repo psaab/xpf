@@ -60,9 +60,8 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
 
 /// Attempt the generic embedded-ICMP NAT reversal for a non-query ICMP error
 /// on the flowless poll path. Returns [`EmbeddedIcmpReversal`] telling the
-/// caller how the descriptor was consumed. Only invoked when
-/// `allow_embedded_icmp` is set AND the packet is classified as an ICMP error
-/// (both checked by the caller).
+/// caller how the descriptor was consumed. Invoked for every classified ICMP
+/// error; only a live-session match can produce a reversal.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     desc: XdpDesc,

@@ -860,6 +860,35 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
     quote_reply_reverse_half: bool,
     initial_disposition: ForwardingDisposition,
 ) {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition_and_knob(
+        allow_reverse_policy,
+        ha_state,
+        expect_denied,
+        expect_fabric_redirect,
+        outer_ttl,
+        outer_pmtud,
+        arrival_ifindex,
+        expect_related_admit,
+        quote_reply_reverse_half,
+        initial_disposition,
+        true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition_and_knob(
+    allow_reverse_policy: bool,
+    ha_state: BTreeMap<i32, HAGroupRuntime>,
+    expect_denied: bool,
+    expect_fabric_redirect: bool,
+    outer_ttl: u8,
+    outer_pmtud: bool,
+    arrival_ifindex: u32,
+    expect_related_admit: bool,
+    quote_reply_reverse_half: bool,
+    initial_disposition: ForwardingDisposition,
+    enable_allow_embedded_icmp: bool,
+) {
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
@@ -910,7 +939,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
     } else {
         nat_snapshot()
     };
-    snapshot.flow.allow_embedded_icmp = true;
+    snapshot.flow.allow_embedded_icmp = enable_allow_embedded_icmp;
     if arrival_ifindex == 32 {
         add_untrusted_icmp_ingress(&mut snapshot);
     }
@@ -1649,6 +1678,25 @@ fn poll_descriptor_snat_frag_needed_admitted_as_related_10666() {
         true,
         12,
         true,
+        false,
+    );
+}
+
+/// #13935: session-matched same-family PMTUD reversal is independent of the
+/// optional unmatched embedded-ICMP knob, which defaults off.
+#[test]
+fn poll_descriptor_snat_frag_needed_reversed_with_knob_off_13935() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition_and_knob(
+        false,
+        txn_ha_state(),
+        false,
+        false,
+        64,
+        true,
+        12,
+        true,
+        false,
+        ForwardingDisposition::ForwardCandidate,
         false,
     );
 }
@@ -5743,7 +5791,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
     // Outer: router -> snat_ip; embedded quoted: snat_ip:snat_port -> server:80.
     let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_WAN_MAC);
 
-    // allow_embedded_icmp gates the poll-path reversal — enable it.
+    // Keep the optional setting enabled in this existing policy-path case.
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
     permit_wan_to_lan_flowless_icmp(&mut snapshot);
@@ -6041,7 +6089,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
     // Outer: router -> snat_ip; embedded quoted: snat_ip:snat_port -> server:80.
     let frame = build_icmp_te_frame_v4_with_mac(router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP, TEST_WAN_MAC);
 
-    // allow_embedded_icmp gates the poll-path reversal — enable it.
+    // Keep the optional setting enabled in this existing policy-path case.
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
     permit_wan_to_lan_flowless_icmp(&mut snapshot);
@@ -6439,7 +6487,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
     // vlan 80 = the live reth0.80 shape. See the header note on why tagged.
     let frame = build_gre_to_self_outer_frame_v4(80, &inner);
 
-    // allow_embedded_icmp gates the poll-path reversal — enable it.
+    // Keep the optional setting enabled in this existing policy-path case.
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
     permit_wan_to_lan_flowless_icmp(&mut snapshot);
@@ -6862,7 +6910,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
     // POST-DNAT tuple as it appeared on the wire toward the real server.
     let frame = build_icmp_te_frame_v4_with_mac(router_ip, client_ip, server_ip, client_port, 80, PROTO_TCP, TEST_WAN_MAC);
 
-    // allow_embedded_icmp gates the poll-path reversal — enable it.
+    // Keep the optional setting enabled in this existing policy-path case.
     let mut snapshot = nat_snapshot();
     snapshot.flow.allow_embedded_icmp = true;
     permit_wan_to_lan_flowless_icmp(&mut snapshot);
