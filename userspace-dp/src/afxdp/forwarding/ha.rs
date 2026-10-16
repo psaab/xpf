@@ -173,12 +173,11 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
                 ..resolution
             };
         };
-        // GRE/ip6gre have one configured outer destination and use the
-        // canonical tunnel resolver. WireGuard selects an outer destination
-        // per peer; its materialized resolution carries that route's
-        // next-hop and transport table, so re-resolve that next-hop rather
-        // than the intentionally-zero endpoint destination.
-        let outer_egress_ifindex = if endpoint.mode == "wireguard" {
+        // GRE/ip6gre have a fixed endpoint destination, so use the L3 egress
+        // RG derived once when this forwarding snapshot was built. WireGuard
+        // selects an outer destination per peer; its materialized resolution
+        // carries that route's next-hop and transport table.
+        let outer_rg_id = if endpoint.mode == "wireguard" {
             let Some(next_hop) = resolution.next_hop else {
                 return ForwardingResolution {
                     disposition: ForwardingDisposition::HAInactive,
@@ -187,31 +186,37 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
                     ..resolution
                 };
             };
-            super::lookup_forwarding_resolution_inner(
-                forwarding,
-                None,
-                next_hop,
-                Some(&endpoint.transport_table),
-            )
-            .resolution
-            .egress_ifindex
+            match forwarding
+                .wireguard_peer_outer_egress_rgs
+                .get(&(resolution.tunnel_endpoint_id, next_hop))
+                .copied()
+            {
+                Some(rg_id) if rg_id >= 0 => Some(rg_id),
+                Some(_) => None,
+                None => {
+                    // Runtime-learned/roaming endpoints are absent from the
+                    // config-derived index; resolve only this cold fallback.
+                    let outer_egress_ifindex = super::lookup_forwarding_resolution_inner(
+                        forwarding,
+                        None,
+                        next_hop,
+                        Some(&endpoint.transport_table),
+                    )
+                    .resolution
+                    .egress_ifindex;
+                    forwarding
+                        .egress
+                        .get(&outer_egress_ifindex)
+                        .map(|egress| egress.redundancy_group.max(0))
+                }
+            }
         } else {
-            let Some(outer) =
-                super::resolve_tunnel_outer(forwarding, None, resolution.tunnel_endpoint_id, 0)
-            else {
-                return ForwardingResolution {
-                    disposition: ForwardingDisposition::HAInactive,
-                    route_mtu: 0,
-                    transport_route_mtu: 0,
-                    ..resolution
-                };
-            };
-            outer.resolution.egress_ifindex
+            forwarding
+                .tunnel_outer_egress_rgs
+                .get(&resolution.tunnel_endpoint_id)
+                .copied()
         };
-        // A standalone node has no HA inventory and does not gate host egress.
-        // Clustered non-RETH underlays (RG 0) also need no ownership gate;
-        // positive but absent/inactive RETH groups fail closed.
-        let Some(outer_egress) = forwarding.egress.get(&outer_egress_ifindex) else {
+        let Some(outer_rg_id) = outer_rg_id else {
             return ForwardingResolution {
                 disposition: ForwardingDisposition::HAInactive,
                 route_mtu: 0,
@@ -219,7 +224,9 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
                 ..resolution
             };
         };
-        let outer_rg_id = outer_egress.redundancy_group.max(0);
+        // A standalone node has no HA inventory and does not gate host egress.
+        // Clustered non-RETH underlays (RG 0) also need no ownership gate;
+        // positive but absent/inactive RETH groups fail closed.
         if outer_rg_id > 0
             && !ha_state.is_empty()
             && !ha_state
@@ -342,6 +349,19 @@ pub(in crate::afxdp) fn finalize_new_flow_ha_resolution(
         ha_startup_grace_until_secs,
     );
     if fabric_ingress && enforced.disposition == ForwardingDisposition::HAInactive {
+        // Preserve the long-standing plain/endpoint-owner fabric-ingress
+        // exception, but do not turn the new outer-egress-RG failure back into
+        // a forward. The endpoint RG is already active in this case, so
+        // HAInactive came from the tunnel's outer egress gate.
+        let endpoint_rg_id = owner_rg_for_resolution(forwarding, resolution);
+        if resolution.tunnel_endpoint_id != 0
+            && endpoint_rg_id > 0
+            && ha_state
+                .get(&endpoint_rg_id)
+                .is_some_and(|group| group.is_forwarding_active(now_secs))
+        {
+            return enforced;
+        }
         return resolution;
     }
     super::session_glue::redirect_session_via_fabric_if_needed(

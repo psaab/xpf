@@ -183,6 +183,15 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) route_table_identity_map_complete: bool,
     pub(in crate::afxdp) tunnel_endpoints: FastMap<u16, TunnelEndpoint>,
     pub(in crate::afxdp) tunnel_endpoint_by_ifindex: FastMap<i32, u16>,
+    /// Outer L3 egress RG for fixed-destination GRE/ip6gre endpoints, derived
+    /// once from this forwarding snapshot. Enforcement uses this instead of
+    /// repeating an outer FIB lookup on each tunnel packet. Missing entries
+    /// mean the endpoint has no usable outer egress mapping.
+    pub(in crate::afxdp) tunnel_outer_egress_rgs: FastMap<u16, i32>,
+    /// Per-peer WireGuard outer RGs keyed by the next-hop in each peer's
+    /// transport table. Configured peers are indexed at snapshot build time;
+    /// absent entries may represent a runtime-learned endpoint.
+    pub(in crate::afxdp) wireguard_peer_outer_egress_rgs: FastMap<(u16, IpAddr), i32>,
     /// #11423: endpoint ids whose tunnel devices are explicitly down in the
     /// snapshot. Missing liveness remains compatible with older snapshots.
     pub(in crate::afxdp) tunnel_endpoints_down: FastSet<u16>,
