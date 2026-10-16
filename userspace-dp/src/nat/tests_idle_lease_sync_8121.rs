@@ -2931,6 +2931,7 @@ fn synced_pat_reserve_refuses_when_live_flow_cap_is_full_11692() {
 fn expired_idle_lease_does_not_block_import_13692() {
     let addrs = pool();
     let standby = PortAllocator::new(1, 1024, 65535);
+    let local_pool = ipv4_pool(&addrs);
     let client = flow("10.0.61.50", 40000);
     let key = client.persistent_source_key(PersistentNatPermit::TargetHostPort);
     let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
@@ -2942,7 +2943,7 @@ fn expired_idle_lease_does_not_block_import_13692() {
     let mut rec = idle_record_for(client, old.ip, old.port + 1, false, Some(("8.8.8.8".parse().unwrap(), 443)));
     rec.remaining_ns = TIMEOUT_NS;
     assert_eq!(
-        standby.import_idle_lease_at(&rec, Some(0), TIMEOUT_NS, later),
+        standby.import_idle_lease(&rec, &local_pool, TIMEOUT_NS, later),
         IdleLeaseImport::Installed,
         "expired idle lease must be reclaimed inline, not SkippedExisting"
     );
@@ -2955,7 +2956,7 @@ fn expired_idle_lease_does_not_block_import_13692() {
     assert!(standby.holds_port(0, old.port + 1), "new imported port must be held");
     // Live existing lease still wins.
     assert_eq!(
-        standby.import_idle_lease_at(&rec, Some(0), TIMEOUT_NS, later + 1),
+        standby.import_idle_lease(&rec, &local_pool, TIMEOUT_NS, later + 1),
         IdleLeaseImport::SkippedExisting
     );
 }
