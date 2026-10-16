@@ -265,25 +265,16 @@ pub(super) fn owner_hit_icmp_verdict(
     // Transit owners can be judged from the session's recorded zone pair and
     // this packet's ICMP type; an absent fabric stamp does not disable that
     // packet-scoped check.
-    if decision.resolution.disposition == ForwardingDisposition::LocalDelivery
-        || !forwarding
-            .policy
-            .icmp_packet_verdict_may_depend_on_type(meta.protocol)
-    {
+    if decision.resolution.disposition == ForwardingDisposition::LocalDelivery {
         return None;
     }
+    // Reverse ICMP requests are new queries, even when no configured rule
+    // constrains the type. The default-deny reverse pair is still policy and
+    // must be consulted; only actual reply types coast on the session.
     let packet_icmp = policy_packet_icmp(packet_frame, meta);
-    // #10637: a reverse companion hit by a query ANSWER coasts — Junos permits
-    // return traffic because the session exists, and GATE 1 still judges the
-    // pair by the forward companion (#9604). Any other reverse type is a NEW
-    // query that merely shares the typeless session key: judge the reverse
-    // pair with the packet's type, exactly as the miss path would judge a
-    // packet arriving from that side. The companion's zones are stamped
-    // swapped (peer's side -> pinger's side), the tuple is the wire tuple,
-    // and the destination is un-rewritten — the same shape
-    // `foreign_hit_verdict` judges for a reverse hit, since an un-SNAT is
-    // never admission input.
-    if metadata.is_reverse {
+    if metadata.is_reverse
+        && matches!(meta.protocol, crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6)
+    {
         if packet_icmp.is_some_and(|(icmp_type, _)| {
             crate::afxdp::frame::icmp_reply_type(meta.protocol, icmp_type)
         }) {
@@ -311,6 +302,12 @@ pub(super) fn owner_hit_icmp_verdict(
                 })
             },
         );
+    }
+    if !forwarding
+        .policy
+        .icmp_packet_verdict_may_depend_on_type(meta.protocol)
+    {
+        return None;
     }
     let dst_ip = decision.nat.rewrite_dst.unwrap_or(flow.dst_ip);
     let dst_port = decision

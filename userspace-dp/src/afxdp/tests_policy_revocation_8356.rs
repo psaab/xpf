@@ -1804,6 +1804,69 @@ fn forwarding_with_reverse_icmp_split_10637() -> ForwardingState {
     build_forwarding_state(&snapshot)
 }
 
+/// #13940: a box with NO type-constrained ICMP term in any direction. This
+/// is the inverse of `forwarding_with_reverse_icmp_split_10637`: only an
+/// untyped `lan -> wan` ICMP permit exists, while the reverse pair has no
+/// permit at all and falls back to default deny. On this policy shape the
+/// global packet-type bit stays false, which is exactly the configuration
+/// where the reverse non-answer arm was previously skipped.
+fn forwarding_typeblind_reverse_icmp_13940() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == LAN_IFINDEX)
+        .expect("policy_deny_snapshot must carry reth1.0")
+        .addresses
+        .push(crate::InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: "10.0.61.1/24".into(),
+            scope: 0,
+        });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".into(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".into(),
+        ip: "10.0.61.102".into(),
+        mac: "02:aa:bb:cc:dd:01".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: "172.16.80.200".into(),
+        mac: "00:11:22:33:44:66".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "icmp-any-permit".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "permit".into(),
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        !forwarding
+            .policy
+            .icmp_packet_verdict_may_depend_on_type(PROTO_ICMP),
+        "13940 fixture must have no type-constrained ICMP term"
+    );
+    forwarding
+}
+
 /// A wan-side frame of the live `lan -> wan` query session: swapped tuple,
 /// arriving on the configured `reth0.80` VLAN child with VID 80. The metadata
 /// must carry that VID so the common ingress guard admits the reply.
@@ -1866,6 +1929,7 @@ fn a_denied_reverse_icmp_request_cannot_ride_the_query_session_10637() {
     assert_eq!(
         session_count(&sessions),
         2,
+
         "the admitted ICMP flow must install forward and reverse entries"
     );
 
@@ -1889,6 +1953,32 @@ fn a_denied_reverse_icmp_request_cannot_ride_the_query_session_10637() {
         session_count(&sessions),
         2,
         "the denied reverse packet is rejected without tearing down the live session"
+    );
+}
+#[test]
+fn typeblind_reverse_icmp_request_is_judged_by_reverse_policy_13940() {
+    let forwarding = forwarding_typeblind_reverse_icmp_13940();
+    let mut sessions = SessionTable::new();
+    let admitted = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 8);
+    assert_eq!(
+        (admitted.session_hit, admitted.session_create, admitted.tx),
+        (0, 2, 1),
+        "the untyped outbound query must install its session"
+    );
+
+    let denied = drive_reverse_icmp_type_10637(&forwarding, &mut sessions, 8);
+    assert_eq!(denied.session_hit, 1, "reverse request hits the query companion");
+    assert_eq!(
+        (denied.tx, denied.policy_deny),
+        (0, 1),
+        "a type-blind reverse request must take the denied reverse-policy path"
+    );
+
+    let reply = drive_reverse_icmp_type_10637(&forwarding, &mut sessions, 0);
+    assert_eq!(
+        (reply.session_hit, reply.tx, reply.policy_deny),
+        (1, 1, 0),
+        "the actual echo reply remains return traffic on the live session"
     );
 }
 
