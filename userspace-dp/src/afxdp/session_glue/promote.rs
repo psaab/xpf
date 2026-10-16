@@ -106,6 +106,8 @@ fn promote_synced_session_with_conntrack(
     if fabric_ingress {
         promoted.fabric_ingress = true;
     }
+    // #13939: `promote_synced_with_origin` preserves any FIN/RST for the
+    // Owner-only deferred-close step after the authority verdict.
     if sessions.promote_synced_with_origin(SessionUpdate {
         key,
         decision,

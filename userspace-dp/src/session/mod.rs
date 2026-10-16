@@ -4177,7 +4177,11 @@ impl SessionTable {
     /// Convenience wrapper around update_session that hides the
     /// `ha_activation` flag (always false on this path).
     #[inline]
-    pub fn promote_synced_with_origin(&mut self, req: SessionUpdate<'_>) -> bool {
+    pub fn promote_synced_with_origin(&mut self, mut req: SessionUpdate<'_>) -> bool {
+        // #13939: the Owner path applies a deferred FIN/RST immediately after
+        // promotion. Keep close progress for that step so it propagates to the
+        // companion instead of being consumed by this in-place update.
+        req.tcp_flags &= !(TCP_FIN | TCP_RST);
         self.update_session(req, false)
     }
 
@@ -4989,6 +4993,13 @@ mod tcp_close_state_7342_tests;
 #[cfg(test)]
 #[path = "close_refresh_gate_10885_tests.rs"]
 mod close_refresh_gate_10885_tests;
+
+// #13939 (H09-02): an Owner hit that promotes a peer-synced pair, then
+// applies the deferred FIN/RST close, must close BOTH halves. The promotion
+// must not consume the close flags and leave the companion on 300 s.
+#[cfg(test)]
+#[path = "promoted_synced_close_13939_tests.rs"]
+mod promoted_synced_close_13939_tests;
 
 // #9412: pins that the production HA import path carries `tcp_flags: 0`, so the
 // close bits derived from it are vacuous and an imported session ages on the
