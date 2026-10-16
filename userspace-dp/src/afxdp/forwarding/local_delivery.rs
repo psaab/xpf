@@ -34,42 +34,23 @@ pub(in crate::afxdp) fn should_cache_local_delivery_session_on_miss(
     }
     let _ = state;
     let _ = resolution_target;
-    // #4539 (gate-consistency hardening; subsumes #2151 + #4487): cache a
-    // host-inbound TCP session ONLY off the handshake — a first packet that
-    // carries SYN (an initial SYN, or a SYN|ACK for the inbound leg of a
-    // firewall-originated flow). Decline every other non-SYN TCP first packet.
+    // #4539/#13941 (gate-consistency hardening): cache a host-inbound TCP
+    // session ONLY off a non-closing handshake packet — an initial SYN, or a
+    // SYN|ACK for the inbound leg of a firewall-originated flow. A SYN that
+    // also carries FIN or RST is not a valid session opener and must not seed
+    // an immediately-closing session.
     //
-    // A SINGLE POSITIVE `has_syn` predicate replaces the two prior NARROW
-    // decline-gates that this subsumes:
-    //   - #2151 declined a bare/established ACK (`has_ack && !has_syn`) — the
-    //     prior inline `(tcp_flags & ACK) != 0 && (tcp_flags & SYN) == 0`.
-    //   - #4487 (residual of P6 / #4400) declined a bare RST / FIN closing
-    //     segment (`is_closing && !has_syn`) — a session-table DoS surface (a
-    //     RST/FIN flood to a firewall IP churns the per-worker table) plus a
-    //     policy-evaluation skip (a stray teardown seeding an immediately
-    //     `closing` host-local session).
-    // Both are `!has_syn` cases, so a single `has_syn` gate subsumes them. It
-    // ADDITIONALLY closes the residual the two decline-gates left open: a
-    // non-handshake anomalous / crafted first packet that is neither ACK-set
-    // nor closing — pure PSH (0x08), a null segment (0x00), pure URG (0x20),
-    // or an ECE/CWR-only segment — which previously fell through to the
-    // default `true` and seeded a 300s host-local LocalDelivery session
-    // (`is_initial_syn` false at install → `established = true`). Aligning on
-    // `has_syn` matches the gate to its stated "only off the handshake" intent.
+    // This declines every other TCP first packet: ACK/data, bare RST/FIN, and
+    // anomalous packets that carry neither ACK nor SYN (pure PSH, null, URG,
+    // or ECE/CWR-only). The packet is NOT dropped: a declined packet still
+    // reaches the host via the LocalDelivery reinject chokepoint. This gate
+    // only declines to CACHE, so policy remains in the session-hit path.
     //
-    // The packet is NOT dropped: a declined non-SYN first packet still reaches
-    // the host via the LocalDelivery reinject chokepoint (the #4400
-    // drop-exemption for host-inbound — the ACTION differs BY DISPOSITION, as
-    // #4400 deliberately chose: the TRANSIT dispositions DROP a bare teardown,
-    // host-inbound LocalDelivery must NOT). A peer RST/FIN tearing down a
-    // firewall-ORIGINATED TCP flow (BGP-active, syslog-TCP/TLS, feed/RPM
-    // fetches, DNS-over-TCP), or a connection-refused RST for the firewall's
-    // own outbound SYN, therefore still reaches the local stack so the kernel
-    // socket tears down promptly — this gate only declines to CACHE. A later
-    // real SYN hitting a firewall IP is re-evaluated by the `to-zone
-    // junos-host` mandatory-teardown gate that runs on EVERY LocalDelivery
-    // session hit (poll_descriptor), so declining to cache never skips policy.
-    crate::tcp_flags::has_syn(tcp_flags)
+    // Peer RST/FIN packets still reach the local stack so kernel sockets can
+    // tear down firewall-originated flows; declining to cache never skips
+    // policy because a later real SYN is re-evaluated by the `to-zone
+    // junos-host` mandatory-teardown gate on every LocalDelivery session hit.
+    crate::tcp_flags::has_syn(tcp_flags) && !crate::tcp_flags::is_closing(tcp_flags)
 }
 
 pub(in crate::afxdp) fn install_helper_local_session_on_miss(

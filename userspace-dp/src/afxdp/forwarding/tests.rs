@@ -2650,15 +2650,23 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
             ),
             "a SYN to a host service must still create a session"
         );
-        // PRESERVED: a SYN|ACK (0x12) — a firewall-originated flow's inbound
-        // handshake response — still seeds the host-local session.
+        // SYN|ACK remains valid for a firewall-originated flow, but adding
+        // FIN or RST must not cache a born-closing session (#13941).
         assert!(should_cache_local_delivery_session_on_miss(
-            &state,
-            target.parse().expect("v4"),
-            resolution,
-            PROTO_TCP,
-            0x12,
+            &state, target.parse().expect("v4"), resolution, PROTO_TCP, 0x12
         ));
+        for flags in [0x13, 0x16, 0x17] {
+            assert!(
+                !should_cache_local_delivery_session_on_miss(
+                    &state,
+                    target.parse().expect("v4"),
+                    resolution,
+                    PROTO_TCP,
+                    flags,
+                ),
+                "closing SYN flags 0x{flags:02x} must not seed a host-local session"
+            );
+        }
     }
     // A non-LocalDelivery disposition never caches here regardless of flags —
     // the guard is scoped to host-inbound, and an ESTABLISHED-session packet is
