@@ -509,15 +509,16 @@ impl crate::afxdp::ha::SessionDomain {
             return;
         }
         let now_ns = monotonic_nanos();
-        // Reserve order is SNAT then NAT64; release in reverse order so an
+        // Reserve order is SNAT then NAT64; roll back in reverse order so an
         // unaccepted import's coordinator-only reservations unwind LIFO.
-        let current_nat64_released = crate::nat64::release_synced_nat64_allocation_untracked(
-            &forwarding.nat64,
-            &entry.key,
-            entry.decision.nat,
-            entry.metadata.is_reverse,
-            now_ns,
-        );
+        let current_nat64_rolled_back =
+            crate::nat64::rollback_synced_nat64_allocation_untracked(
+                &forwarding.nat64,
+                &entry.key,
+                entry.decision.nat,
+                entry.metadata.is_reverse,
+                now_ns,
+            );
         let current_snat_released = crate::nat::release_synced_source_nat_allocation_untracked(
             &forwarding.iface_nat_allocators,
             &forwarding.source_nat_rules,
@@ -613,11 +614,11 @@ impl crate::afxdp::ha::SessionDomain {
         }
         debug_log!(
             "xpf-ha: strict mirror import refused key={:?} previous_present={} \
-             current_nat64_released={} current_snat_released={} \
+             current_nat64_rolled_back={} current_snat_released={} \
              previous_snat_restored={:?} previous_nat64_restored={:?}",
             entry.key,
             previous_entry.is_some(),
-            current_nat64_released,
+            current_nat64_rolled_back,
             current_snat_released,
             previous_snat_restored,
             previous_nat64_restored
@@ -2679,7 +2680,7 @@ mod rejected_mirror_reservation_10790_tests {
         }
         assert!(nat64_allocator.debug_is_port_occupied(0, 51_001));
         publish_seeded_shared_entry(&coordinator, &previous);
-        let current = synced_entry(key.clone(), translated_nat64(51_002), 6, 606);
+        let current = synced_entry(key.clone(), translated_nat64(51_001), 6, 606);
 
         assert_eq!(
             coordinator
@@ -2718,8 +2719,8 @@ mod rejected_mirror_reservation_10790_tests {
             1,
         );
         assert!(
-            !nat64_allocator.debug_is_port_occupied(0, 51_001),
-            "the last worker release must free the restored reservation"
+            nat64_allocator.debug_is_port_occupied(0, 51_001),
+            "the final active release leaves the idle BIB mapping reserved"
         );
     }
 
@@ -3200,7 +3201,7 @@ mod rejected_mirror_reservation_10790_tests {
                 .publish_mirror_only(&coordinator.forwarding, &previous),
             ConntrackPublishResult::Written
         );
-        let current = synced_entry(key, translated_nat64(51_004), 6, 606);
+        let current = synced_entry(key, translated_nat64(51_003), 6, 606);
         let _record_guard = take_conntrack_publish_guard();
         let _override_guard = override_conntrack_publish_results_for_test(&[
             ConntrackPublishResult::Written,
@@ -3457,7 +3458,7 @@ mod rejected_mirror_reservation_10790_tests {
                 .publish_mirror_only(&coordinator.forwarding, &previous),
             ConntrackPublishResult::Written
         );
-        let current = synced_entry(key.clone(), translated_nat64(51_004), 6, 606);
+        let current = synced_entry(key.clone(), translated_nat64(51_003), 6, 606);
         let _record_guard = take_conntrack_publish_guard();
         let _restore_fail_guard = force_conntrack_restore_failure_for_test();
         let _override_guard = override_conntrack_publish_results_for_test(&[
@@ -3566,7 +3567,7 @@ mod rejected_mirror_reservation_10790_tests {
         let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
         let key = nat64_key();
         let previous_nat = translated_nat64(51_030);
-        let current_nat = translated_nat64(51_031);
+        let current_nat = previous_nat;
         let previous = synced_entry(key.clone(), previous_nat, 5, 5_030);
         let allocator = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
         for worker_id in [0, 1] {
@@ -3607,8 +3608,8 @@ mod rejected_mirror_reservation_10790_tests {
             1,
         );
         assert!(
-            !allocator.debug_is_port_occupied(0, 51_030),
-            "the captured mask must exclude worker 0 after its gap release"
+            allocator.debug_is_port_occupied(0, 51_030),
+            "the final active release retains the idle BIB mapping"
         );
     }
 
@@ -3690,7 +3691,7 @@ mod rejected_mirror_reservation_10790_tests {
         let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
         let key = nat64_key();
         let previous_nat = translated_nat64(51_050);
-        let current_nat = translated_nat64(51_051);
+        let current_nat = previous_nat;
         let previous = synced_entry(key.clone(), previous_nat, 5, 5_050);
         let allocator = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
         for worker_id in [0, 1] {
@@ -3741,7 +3742,10 @@ mod rejected_mirror_reservation_10790_tests {
             5_000,
             2,
         );
-        assert!(!allocator.debug_is_port_occupied(0, 51_050));
+        assert!(
+            allocator.debug_is_port_occupied(0, 51_050),
+            "the final active release retains the idle BIB mapping"
+        );
     }
     #[test]
     fn synced_import_rebinds_policy_counter_by_stable_rule_identity11070() {

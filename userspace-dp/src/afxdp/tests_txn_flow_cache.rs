@@ -612,13 +612,16 @@ fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764()
             .contains_key(&victim_key),
         "retry must remove the deferred victim shared row"
     );
+    let nat64_after_retry = forwarding.nat64.prefixes[0].port_allocator.snapshot();
     assert_eq!(
-        forwarding.nat64.prefixes[0]
-            .port_allocator
-            .snapshot()
-            .used_ports,
+        nat64_after_retry.live_flows,
         0,
-        "retry must release the deferred victim NAT64 hold"
+        "retry must release the deferred victim's active NAT64 flow reference"
+    );
+    assert_eq!(
+        nat64_after_retry.used_ports,
+        1,
+        "the released flow's idle BIB lease must remain reserved"
     );
 }
 

@@ -71,9 +71,10 @@ pub(crate) fn allocate_nat64_pool_port_deterministic_v6(
 }
 
 /// #4381: release (or roll back) a NAT64 forward flow's translated pool port,
-/// mirroring [`release_synced_source_nat_allocation_untracked`]'s flow-key /
-/// translated-tuple construction so the SAME `release_flow` / `rollback_flow`
-/// forward flow allocated. Returns whether the allocation was found and freed.
+/// mirroring the flow-key / translated-tuple construction used by source NAT.
+/// Normal release drops this flow's active reference; a persistent BIB lease
+/// keeps the tuple allocated for its idle timeout. Rollback removes a
+/// speculative activation that was never published.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn release_nat64_pool_port(
     allocator: &PortAllocator,
@@ -82,9 +83,8 @@ pub(crate) fn release_nat64_pool_port(
     port: u16,
     now_ns: u64,
     rollback: bool,
-    // #6211 F2: the worker letting go. `NatHolder::Untracked` keeps the
-    // pre-#6211-F2 first-release-frees contract for a local NAT64 flow; a synced
-    // reservation taken by N workers frees only on the last one.
+    // #6211 F2: the worker letting go. Synced reservations taken by N workers
+    // are released once per holder; the final release retains the idle lease.
     holder: NatHolder,
 ) -> bool {
     let translated = TranslatedTuple {
@@ -104,20 +104,16 @@ pub(crate) fn release_nat64_pool_port(
 /// the pool-mode SNAT allocator (#4388).
 ///
 /// The standby imports the active node's pre-computed NAT64 decision but never
-/// calls `allocate_source`, so without this its allocator has no record that
-/// `(snat_v4, port)` is in use — post-failover a fresh local NAT64 flow could
-/// `allocate_source` the SAME tuple, two flows colliding on one translated
-/// source (the exact RFC 6146 BIB violation #4381 closed, reappearing across a
-/// cross-node failover). The reservation is stored EXACTLY like a normal
-/// allocation and freed by the SAME `release_nat64_pool_port` on the standard
-/// teardown path (`release_nat64_allocation`, already called on reap / purge /
-/// delete-sync), so no new delete site is needed.
+/// calls `allocate_source`, so this joins the same endpoint-independent BIB
+/// lease as a local flow. Multiple synchronized flows from the same IPv6
+/// transport address share its translated tuple and active reference count.
+/// The final flow release retains the 300-second idle lease.
 ///
 /// `addr_index` is the position of `snat_v4` in the prefix's `pool_v4` — the
 /// NAT64 allocator uses `family_offset == 0`, so the absolute allocator index
 /// equals the pool position. Returns whether the reservation took (`false` if
-/// the port is already owned by a DIFFERENT live allocation — the caller then
-/// tries the next prefix).
+/// another flow or incompatible BIB lease owns the translated tuple, in which
+/// case the caller tries the next prefix).
 ///
 /// #5178: `deterministic` is `true` when the prefix runs a NAPT64 (mode 2)
 /// deterministic pool (`prefix.deterministic_v6.is_some()`), so the reservation
@@ -143,10 +139,22 @@ pub(crate) fn reserve_nat64_pool_port(
         ip: IpAddr::V4(snat_v4),
         port,
     };
-    // #7360: NAT64 pools have no persistent-NAT lease concept — the lease is a
-    // source-NAT rule property (`SourceNatRule::persistent_nat`) and this is the
-    // NAT64 translated-port domain — so this stays the non-persistent entry point.
-    allocator.reserve_flow(flow, translated, addr_index, deterministic, now_ns, holder)
+    let persistent = Some((
+        flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
+        300 * 1_000_000_000,
+    ));
+    let mut previous_snapshot = None;
+    allocator.reserve_flow_maybe_persistent(
+        flow,
+        translated,
+        addr_index,
+        deterministic,
+        now_ns,
+        holder,
+        persistent,
+        false,
+        &mut previous_snapshot,
+    )
 }
 
 /// #11478: coordinator form of [`reserve_nat64_pool_port`]. The holder mask is
@@ -175,7 +183,10 @@ pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
         deterministic,
         now_ns,
         holder,
-        None,
+        Some((
+            flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
+            300 * 1_000_000_000,
+        )),
         true,
         &mut previous_snapshot,
     );

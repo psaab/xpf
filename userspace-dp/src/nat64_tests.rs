@@ -4262,6 +4262,63 @@ fn nat64_13946_same_transport_address_reuses_mapping_across_destinations() {
     assert_eq!(first, other_remote, "#13946: transport binding must be independent of destination");
 }
 
+#[test]
+fn nat64_13946_synced_flows_join_endpoint_independent_binding() {
+    let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
+    let allocator = &state.prefixes[0].port_allocator;
+    let flow = |dst_ip| crate::nat::SourceNatFlowKey {
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        dst_ip: IpAddr::V4(dst_ip),
+        src_port: 5000,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    let first = flow(Ipv4Addr::new(8, 8, 8, 8));
+    let second = flow(Ipv4Addr::new(1, 1, 1, 1));
+    let snat = Ipv4Addr::new(198, 51, 100, 1);
+    for flow in [first, second] {
+        assert!(crate::nat::reserve_nat64_pool_port(
+            allocator,
+            flow,
+            snat,
+            1024,
+            0,
+            false,
+            1,
+            crate::nat::NatHolder::Untracked,
+        ));
+    }
+    let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
+    assert_eq!(
+        allocator
+            .debug_persistent_lease_for_flow(&first, permit)
+            .unwrap()
+            .active_flows,
+        2,
+        "both synchronized remotes must join one active BIB lease"
+    );
+    for flow in [first, second] {
+        assert!(crate::nat::release_nat64_pool_port(
+            allocator,
+            flow,
+            snat,
+            1024,
+            2,
+            false,
+            crate::nat::NatHolder::Untracked,
+        ));
+    }
+    assert_eq!(
+        allocator
+            .debug_persistent_lease_for_flow(&first, permit)
+            .unwrap()
+            .active_flows,
+        0,
+        "the BIB lease must become idle only after every synchronized flow releases"
+    );
+}
+
 // Release removes the active flow reference but retains the idle BIB mapping.
 #[test]
 fn nat64_4381_release_untracks_flow() {
@@ -4360,6 +4417,17 @@ fn nat64_synced_key(client: &str) -> crate::session::SessionKey {
     }
 }
 
+fn nat64_synced_flow(client: &str) -> SourceNatFlowKey {
+    SourceNatFlowKey {
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: IpAddr::V6(client.parse().unwrap()),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        src_port: 5000,
+        dst_port: 443,
+        routing_scope: 0,
+    }
+}
+
 // A fresh local NAT64 flow from a distinct client to 8.8.8.8, used to probe
 // whether a prior reservation forced the sequential allocator to skip a port.
 fn nat64_probe_alloc(state: &Nat64State) -> (Ipv4Addr, u16) {
@@ -4413,29 +4481,35 @@ fn nat64_4512_synced_session_reserves_translated_port() {
     );
 }
 
-// #10788-F1: a strict coordinator refusal has no worker id to release, so it
-// must use the named UNTRACKED release. The first case proves its reservation
-// becomes available to another flow; the second pins that this release cannot
-// clear a holder that a worker has already adopted.
+// #10788-F1: release drops the active reference but preserves the persistent
+// BIB lease. An adopted worker still holds its reference until its own release.
 #[test]
-fn nat64_10788_untracked_release_frees_only_unadopted_reservation() {
+fn nat64_10788_untracked_release_leaves_idle_bib_lease() {
     let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
     let key = nat64_synced_key("2001:db8::1");
+    let flow = nat64_synced_flow("2001:db8::1");
     let nat = Nat64State::forward_decision(
         Ipv4Addr::new(198, 51, 100, 1),
         Ipv4Addr::new(8, 8, 8, 8),
         1024,
     );
     let allocator = &state.prefixes[0].port_allocator;
+    let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
 
     assert!(reserve_synced_nat64_allocation(&state, &key, nat, false, 0));
-    assert!(allocator.debug_is_port_occupied(0, 1024));
     release_synced_nat64_allocation_untracked(&state, &key, nat, false, 1);
-    assert!(!allocator.debug_is_port_occupied(0, 1024));
+    assert_eq!(
+        allocator
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .unwrap()
+            .active_flows,
+        0
+    );
+    assert!(allocator.debug_is_port_occupied(0, 1024));
     assert_eq!(
         nat64_probe_alloc(&state).1,
-        1024,
-        "a fresh flow must be able to claim the port released from a refused import"
+        1025,
+        "a new source must not claim a port held by an idle BIB lease"
     );
 }
 
@@ -4443,27 +4517,40 @@ fn nat64_10788_untracked_release_frees_only_unadopted_reservation() {
 fn nat64_10788_untracked_release_preserves_adopted_worker_holder() {
     let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
     let key = nat64_synced_key("2001:db8::1");
+    let flow = nat64_synced_flow("2001:db8::1");
     let nat = Nat64State::forward_decision(
         Ipv4Addr::new(198, 51, 100, 1),
         Ipv4Addr::new(8, 8, 8, 8),
         1024,
     );
     let allocator = &state.prefixes[0].port_allocator;
+    let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
 
     assert!(reserve_synced_nat64_allocation(&state, &key, nat, false, 0));
     assert!(reserve_synced_nat64_allocation_for_worker(
         &state, &key, nat, false, 1, 7
     ));
     release_synced_nat64_allocation_untracked(&state, &key, nat, false, 2);
-    assert!(
-        allocator.debug_is_port_occupied(0, 1024),
-        "the coordinator cannot free a reservation a worker has adopted"
+    assert_eq!(
+        allocator
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .unwrap()
+            .active_flows,
+        1,
+        "the coordinator cannot retire the worker's active BIB reference"
     );
 
     release_nat64_allocation_for_worker(&state, &key, nat, false, 3, 7);
+    assert_eq!(
+        allocator
+            .debug_persistent_lease_for_flow(&flow, permit)
+            .unwrap()
+            .active_flows,
+        0
+    );
     assert!(
-        !allocator.debug_is_port_occupied(0, 1024),
-        "the last worker release must still free the adopted reservation"
+        allocator.debug_is_port_occupied(0, 1024),
+        "the last active release leaves the BIB's idle port lease"
     );
 }
 
@@ -4523,11 +4610,8 @@ fn nat64_4512_foreign_pool_addr_skips_reserve() {
     );
 }
 
-// #4512: the low-level reserve/release wrappers are a symmetric pair. A reserve
-// marks (snat, port) owned for a flow; a SECOND reserve for a DIFFERENT flow on
-// the same port refuses to steal it (returns false); the standard teardown
-// release frees it so a later flow can re-own it. This pins the standby-side
-// reserve/release contract the session-sync install/delete paths depend on.
+// #4512: the synced reserve adds a persistent source binding. A different
+// source cannot steal its live or idle translated tuple after teardown.
 #[test]
 fn nat64_4512_reserve_release_wrapper_symmetry() {
     let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
@@ -4576,7 +4660,7 @@ fn nat64_4512_reserve_release_wrapper_symmetry() {
         "release must free the reservation for the owning flow"
     );
     assert!(
-        reserve_nat64_pool_port(
+        !reserve_nat64_pool_port(
             alloc,
             flow2,
             snat,
@@ -4586,7 +4670,7 @@ fn nat64_4512_reserve_release_wrapper_symmetry() {
             0,
             crate::nat::NatHolder::Untracked
         ),
-        "after release the port is free and a later flow can re-own it"
+        "release drops the active flow but leaves the BIB's idle lease"
     );
 }
 
@@ -6579,91 +6663,39 @@ fn nat64_6876_release_frees_every_prefix_holding_the_flow() {
     ]);
     let snat = Ipv4Addr::new(198, 51, 100, 1);
     let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
-    let synced_key = nat64_synced_key("2001:db8::1");
-    let synced = Nat64State::forward_decision(snat, dst_v4, 1024);
+    let key = nat64_synced_key("2001:db8::1");
+    let nat = Nat64State::forward_decision(snat, dst_v4, 1024);
+    let flow = nat64_synced_flow("2001:db8::1");
+    let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
 
-    // A local flow takes port 1024 in prefix A (1024 is the first sequential
-    // NAT64 port), so A cannot accept the synced reservation.
-    let squatter_key = nat64_synced_key("2001:db8::9");
-    let squatter = state
-        .allocate_source(
+    // Construct the duplicate-prefix state directly: one synchronized flow
+    // has an active BIB lease in both allocators.
+    for prefix in &state.prefixes {
+        assert!(crate::nat::reserve_nat64_pool_port(
+            &prefix.port_allocator,
+            flow,
+            snat,
+            1024,
             0,
-            crate::ip_proto::PROTO_TCP,
-            "2001:db8::9".parse().unwrap(),
-            dst_v4,
-            5000,
-            443,
+            false,
             1,
-        )
-        .expect("prefix A allocates for the squatting flow");
-    assert_eq!(
-        squatter,
-        (snat, 1024),
-        "fixture precondition: the squatting flow must hold prefix A's port 1024"
-    );
-
-    // The synced flow arrives. A REFUSES (1024 is the squatter's), so the
-    // reservation lands in B.
-    reserve_synced_nat64_allocation(&state, &synced_key, synced, false, 0);
-
-    // The squatter retires, freeing 1024 in A. It is held only in A, so the
-    // break under test cannot affect this release.
-    release_nat64_allocation(
-        &state,
-        &squatter_key,
-        Nat64State::forward_decision(snat, dst_v4, 1024),
-        false,
-        2,
-    );
-
-    // The synced session refreshes (HA reconnect / periodic re-upsert). A now
-    // accepts, so the SAME flow is held in BOTH prefixes.
-    reserve_synced_nat64_allocation(&state, &synced_key, synced, false, 0);
-
-    // ONE release, exactly as the teardown path issues it.
-    release_nat64_allocation(&state, &synced_key, synced, false, 3);
-
-    // Both allocators must have given the port back. Probe each with a fresh,
-    // unrelated flow: `reserve_nat64_pool_port` returns false while a different
-    // live allocation still owns the port.
-    let probe = |client: &str| crate::nat::SourceNatFlowKey {
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: IpAddr::V6(client.parse().unwrap()),
-        dst_ip: IpAddr::V4(dst_v4),
-        src_port: 6000,
-        dst_port: 443,
-        routing_scope: 0,
-    };
-    assert!(
-        crate::nat::reserve_nat64_pool_port(
-            &state.prefixes[0].port_allocator,
-            probe("2001:db8::a"),
-            snat,
-            1024,
-            0,
-            false,
-            0,
             crate::nat::NatHolder::Untracked,
-        ),
-        "prefix A must have freed the released flow's port"
-    );
-    assert!(
-        crate::nat::reserve_nat64_pool_port(
-            &state.prefixes[1].port_allocator,
-            probe("2001:db8::b"),
-            snat,
-            1024,
+        ));
+    }
+
+    // One teardown must retire that flow from every prefix allocator.
+    release_nat64_allocation(&state, &key, nat, false, 2);
+    for prefix in &state.prefixes {
+        assert_eq!(
+            prefix
+                .port_allocator
+                .debug_persistent_lease_for_flow(&flow, permit)
+                .unwrap()
+                .active_flows,
             0,
-            false,
-            0,
-            crate::nat::NatHolder::Untracked,
-        ),
-        "prefix B still owns the released flow's port: the NAT64 release stopped \
-         at the FIRST prefix that freed it, stranding every other holder \
-         permanently — nothing else removes a live_by_flow entry. This is the \
-         exact first-hit break this PR removed from the source-NAT release \
-         (#6876)"
-    );
+            "release must clear each prefix's active reference"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

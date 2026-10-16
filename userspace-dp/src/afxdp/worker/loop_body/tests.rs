@@ -1342,8 +1342,7 @@ mod gc_reap_nat64_release_tests_7740 {
                 .allocate_source(0, PROTO_TCP, c, DST_V4, 5000, 443, 1)
                 .expect("re-allocate"),
             (snat, port),
-            "precondition: while live the mapping is idempotent, so a DIFFERENT \
-             port after the reap is the release and nothing else",
+            "precondition: a live NAT64 flow reuses its endpoint-independent mapping",
         );
 
         reap(
@@ -1353,17 +1352,36 @@ mod gc_reap_nat64_release_tests_7740 {
                 Nat64State::forward_decision(snat, DST_V4, port),
             )],
         );
+        let flow = crate::nat::SourceNatFlowKey {
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V6(c),
+            dst_ip: IpAddr::V4(DST_V4),
+            src_port: 5000,
+            dst_port: 443,
+            routing_scope: 0,
+        };
+        assert_eq!(
+            forwarding.nat64.prefixes[0]
+                .port_allocator
+                .debug_persistent_lease_for_flow(
+                    &flow,
+                    crate::nat::PersistentNatPermit::AnyRemoteHost
+                )
+                .unwrap()
+                .active_flows,
+            0,
+            "reap must drop the active flow reference"
+        );
 
         let (snat2, port2) = forwarding
             .nat64
             .allocate_source(0, PROTO_TCP, c, DST_V4, 5000, 443, 3)
             .expect("post-reap allocate");
         assert_eq!(snat2, snat, "same one-address pool");
-        assert_ne!(
-            port2, port,
-            "the GC reap must release the NAT64 translated port. An idempotent \
-             re-allocation means the flow is still live — the reaped session \
-             leaked its port (#7740)",
+        assert_eq!(
+            (snat2, port2),
+            (snat, port),
+            "reap releases the active session but preserves its idle BIB mapping"
         );
     }
 
@@ -1397,14 +1415,41 @@ mod gc_reap_nat64_release_tests_7740 {
                 Nat64State::forward_decision(snat1, DST_V4, port1),
             )],
         );
+        let flow1 = crate::nat::SourceNatFlowKey {
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V6(c1),
+            dst_ip: IpAddr::V4(DST_V4),
+            src_port: 5000,
+            dst_port: 443,
+            routing_scope: 0,
+        };
+        assert_eq!(
+            forwarding.nat64.prefixes[0]
+                .port_allocator
+                .debug_persistent_lease_for_flow(
+                    &flow1,
+                    crate::nat::PersistentNatPermit::AnyRemoteHost
+                )
+                .unwrap()
+                .active_flows,
+            0,
+            "reap must retire only the first flow's active BIB reference"
+        );
+        assert_eq!(
+            forwarding.nat64.prefixes[0].port_allocator.snapshot().live_flows,
+            1,
+            "the second flow remains active"
+        );
+
 
         let fresh1 = forwarding
             .nat64
             .allocate_source(0, PROTO_TCP, c1, DST_V4, 5000, 443, 3)
             .expect("post-reap allocate c1");
-        assert_ne!(
-            fresh1.1, port1,
-            "the reaped flow's own allocation must be released",
+        assert_eq!(
+            fresh1,
+            (snat1, port1),
+            "reap releases the active session but retains its idle BIB mapping"
         );
 
         let still2 = forwarding

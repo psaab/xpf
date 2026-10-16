@@ -146,14 +146,13 @@
 //! violation #4381 closed for the same-node case, reappearing across a failover
 //! (1:N reverse index → v4→v6 reply mis-demux).
 //!
-//! [`reserve_synced_nat64_allocation`] closes this by applying #4388's
-//! source-NAT `reserve_synced_source_nat_allocation` treatment to NAT64: on the
-//! standby, `handle_upsert_synced` reserves the synced forward flow's translated
-//! port in the local NAT64 allocator (via `reserve_nat64_pool_port` →
-//! `PortAllocator::reserve_flow`, without advancing the round-robin cursor), and
-//! the EXISTING teardown path (`release_nat64_allocation` on reap / purge /
-//! delete-sync) frees it with the same flow key. Pinned by the fail-on-revert
-//! test `nat64_4512_synced_session_reserves_translated_port`.
+//! [`reserve_synced_nat64_allocation`] applies the source-NAT synchronization
+//! path to NAT64: the standby reserves the translated tuple through
+//! `reserve_nat64_pool_port` and joins the same `AnyRemoteHost` persistent BIB
+//! lease as local allocations. Normal teardown drops the session's active
+//! reference but retains the BIB for 300 seconds, so a new remote endpoint
+//! cannot receive a different mapping during that idle interval. Pinned by
+//! `nat64_4512_synced_session_reserves_translated_port`.
 //!
 //! Scope: this closes the port-COLLISION harm. Reverse-TRANSLATION of a
 //! promoted synced NAT64 session (restoring the original client v6 address)
@@ -1536,21 +1535,32 @@ fn release_nat64_allocation_with_mode(
     freed
 }
 
-/// #10788-F1: release a coordinator's import-time UNTRACKED NAT64 reservation —
-/// the ONLY permitted untracked production use, mirroring
-/// `release_synced_source_nat_allocation_untracked` (#9902 F-097).
+/// Roll back a coordinator's import-time NAT64 reservation when strict mirror
+/// publication refuses the unaccepted entry. This uses `rollback_flow` so a
+/// newly created lease is removed rather than retained as an idle BIB mapping.
+pub(crate) fn rollback_synced_nat64_allocation_untracked(
+    nat64: &Nat64State,
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> bool {
+    release_nat64_allocation_with_mode(
+        nat64,
+        key,
+        nat,
+        is_reverse,
+        now_ns,
+        true,
+        crate::nat::NatHolder::Untracked,
+    )
+}
+
+/// Test-only release helper for coordinator imports. Normal teardown preserves
+/// the persistent BIB as an idle lease.
 ///
-/// The coordinator takes import-time reservations as `NatHolder::Untracked`
-/// (`reserve_synced_nat64_allocation`); when a strict-mirror import is refused
-/// before any worker adopts it there is no worker_id to thread, so the
-/// holder-aware `_for_worker` twins are the wrong call, not a safer one.
-/// Records a worker HAS adopted survive: `Untracked.bit()` is 0, so
-/// `drop_holder_locked` keeps any record with holders set. That is the
-/// deliberate direction for a release site that cannot name a worker: an
-/// under-release leaks a bounded pool port, an over-release hands a live
-/// worker's port to a new flow.
-///
-/// Returns whether a reservation was actually freed.
+/// Returns whether the active flow reference was released.
+#[cfg(test)]
 pub(crate) fn release_synced_nat64_allocation_untracked(
     nat64: &Nat64State,
     key: &crate::session::SessionKey,
@@ -1576,8 +1586,8 @@ pub(crate) fn release_synced_nat64_allocation_untracked(
 /// TEST-ONLY, so a production caller that forgot to thread its `worker_id` is a
 /// BUILD FAILURE in the non-test profile rather than a silent single-holder
 /// release of a reservation every worker holds. Production uses the
-/// `_for_worker` twin, or `release_synced_nat64_allocation_untracked` for the
-/// one permitted coordinator-rollback use above.
+/// `_for_worker` twin or `rollback_synced_nat64_allocation_untracked` for the
+/// coordinator's strict-import rollback.
 #[cfg(test)]
 pub(crate) fn release_nat64_allocation(
     nat64: &Nat64State,
