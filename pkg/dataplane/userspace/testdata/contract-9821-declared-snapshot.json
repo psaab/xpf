@@ -561,9 +561,7 @@
     },
     "EventOptions": null,
     "BridgeDomains": null,
-    "Warnings": [
-      "zone interface defined (downgraded to warning on tolerant path): security zone \"trust\" references interface \"ge-0/0/5.0.0\", which is not defined under `interfaces` (nor materialized as the lo0 loopback or an IPsec secure-tunnel bind-interface); Junos rejects a zone member that names no configured interface — define the interface or fix the typo (the daemon brings an unconfigured interface DOWN, so the zone member silently carries no traffic)"
-    ],
+    "Warnings": null,
     "LenientNATTerminalActionRules": null
   },
   "userspace": {
