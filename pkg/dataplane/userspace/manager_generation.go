@@ -194,6 +194,16 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 		}
 		return newGen, fmt.Errorf("bump fib generation: %w", err)
 	}
+	// #13933: a route-only bump has no apply_snapshot afterward to refresh
+	// userspace_ctrl. The helper response status can still carry its prior FIB
+	// generation (refresh_status runs before the handler's update), so stamp
+	// the confirmed generation explicitly before publishing the ctrl row. The
+	// shim copies ctrl.fib_generation into packet metadata; without this write,
+	// the helper rejects every redirected packet as FibGenerationMismatch.
+	status.LastFIBGeneration = newGen
+	if err := m.applyHelperStatusLocked(&status); err != nil {
+		return newGen, errors.Join(shimErr, fmt.Errorf("publish userspace_ctrl after FIB generation bump: %w", err))
+	}
 	if committer := m.captureAuthorityCommitter; committer != nil && m.appliedSnapshot.Generation != 0 {
 		committer(m.appliedSnapshot.Generation, m.lastSnapshot)
 	}
