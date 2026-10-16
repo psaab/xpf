@@ -464,17 +464,20 @@ pub(in crate::afxdp) fn retry_deferred_conntrack_deletes(
     conntrack_v6_fd: c_int,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
 ) {
-    let pending = sessions.take_deferred_conntrack_deletes();
-    if pending.is_empty() {
+    let mut pending = sessions.take_deferred_conntrack_deletes().into_iter();
+    if pending.len() == 0 {
         return;
     }
-    let keys = pending.iter().map(|delete| delete.key.clone()).collect::<Vec<_>>();
-    let Ok(_lease) = crate::afxdp::bpf_map::global_tuple_gate().acquire_lease(keys) else {
-        sessions.defer_conntrack_deletes(pending);
-        return;
-    };
-    let mut retry = crate::session::DeferredConntrackDeletes::new();
-    for delete in pending {
+    // Bound per-tick work and acquire tuples independently so one contended
+    // key cannot delay unrelated deferred deletions.
+    const RETRY_BUDGET: usize = 64;
+    let gate = crate::afxdp::bpf_map::global_tuple_gate();
+    let mut busy = crate::session::DeferredConntrackDeletes::new();
+    for delete in pending.by_ref().take(RETRY_BUDGET) {
+        let Ok(_permit) = gate.try_acquire_install(&delete.key) else {
+            busy.push(delete);
+            continue;
+        };
         let local_id = sessions.session_id_for_bare_tuple(&delete.key);
         let shared_id = shared_sessions
             .lock()
@@ -483,9 +486,9 @@ pub(in crate::afxdp) fn retry_deferred_conntrack_deletes(
             .find(|entry| entry.key.bare_tuple() == delete.key.bare_tuple())
             .map(|entry| entry.session_id);
         if local_id.is_some_and(|session_id| {
-            delete.session_id == 0 || session_id != delete.session_id
+            session_id != 0 && (delete.session_id == 0 || session_id != delete.session_id)
         }) || shared_id.is_some_and(|session_id| {
-            delete.session_id == 0 || session_id != delete.session_id
+            session_id != 0 && (delete.session_id == 0 || session_id != delete.session_id)
         }) {
             continue;
         }
@@ -495,11 +498,14 @@ pub(in crate::afxdp) fn retry_deferred_conntrack_deletes(
             &delete.key,
             delete.session_id,
         ) {
-            crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy => retry.push(delete),
+            crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy => busy.push(delete),
             crate::afxdp::bpf_map::ConntrackDeleteResult::Deleted
             | crate::afxdp::bpf_map::ConntrackDeleteResult::KernelError
             | crate::afxdp::bpf_map::ConntrackDeleteResult::Superseded => {}
         }
     }
+    let mut retry = crate::session::DeferredConntrackDeletes::new();
+    retry.extend(pending);
+    retry.extend(busy);
     sessions.defer_conntrack_deletes(retry);
 }

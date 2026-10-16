@@ -515,6 +515,7 @@ mod flow_cache_invalidation_tests {
         use crate::afxdp::bpf_map::global_tuple_gate;
         use crate::session::SessionTable;
         use std::sync::{Arc, Mutex};
+        use crate::afxdp::worker::SyncedSessionEntry;
 
         for (port, old_id, replacement_id) in [(62001, 71001, None), (62002, 71002, Some(71003))] {
             crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
@@ -561,6 +562,72 @@ mod flow_cache_invalidation_tests {
             );
             let mut sessions = SessionTable::new();
             sessions.defer_conntrack_deletes(std::mem::take(&mut deferred));
+            let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+            shared_sessions.lock().unwrap().insert(
+                key.clone(),
+                SyncedSessionEntry {
+                    key: key.clone(),
+                    decision: reap_decision(None),
+                    metadata: reap_metadata(),
+                    source_nat_static: None,
+                    leak_incarnation: 0,
+                    origin: SessionOrigin::ForwardFlow,
+                    protocol: PROTO_TCP,
+                    tcp_flags: crate::tcp_flags::TCP_ACK,
+                    generation: 0,
+                    session_id: 0,
+                    tcp_close_class: 0,
+                    tcp_handshake_state: 0,
+                },
+            );
+            let unrelated_key = if replacement_id.is_none() {
+                let unrelated_key = reap_key(port + 100);
+                assert_eq!(
+                    publish_bpf_conntrack_entry_with_source_nat(
+                        CONNTRACK_TEST_MAP_FD,
+                        CONNTRACK_TEST_MAP_FD,
+                        &unrelated_key,
+                        reap_decision(None),
+                        &reap_metadata(),
+                        &FastMap::default(),
+                        0,
+                        0,
+                        old_id + 100,
+                        300,
+                        SessionOrigin::ForwardFlow,
+                        None,
+                    ),
+                    crate::afxdp::bpf_map::ConntrackPublishResult::Written
+                );
+                sessions.defer_conntrack_delete(crate::session::DeferredConntrackDelete {
+                    key: unrelated_key.clone(),
+                    session_id: old_id + 100,
+                });
+                Some(unrelated_key)
+            } else {
+                None
+            };
+            crate::afxdp::worker::retry_deferred_conntrack_deletes(
+                &mut sessions,
+                CONNTRACK_TEST_MAP_FD,
+                CONNTRACK_TEST_MAP_FD,
+                &shared_sessions,
+            );
+            assert_eq!(
+                conntrack_row_for_test(&key).unwrap().session_id,
+                old_id,
+                "a busy tuple remains deferred"
+            );
+            if let Some(unrelated_key) = unrelated_key {
+                assert!(
+                    conntrack_row_for_test(&unrelated_key).is_none(),
+                    "one busy tuple must not block unrelated deferred deletes"
+                );
+            }
+            let pending = sessions.take_deferred_conntrack_deletes();
+            assert_eq!(pending.len(), 1, "only the busy tuple remains queued");
+            assert_eq!(pending[0].key.bare_tuple(), key.bare_tuple());
+            sessions.defer_conntrack_deletes(pending);
             drop(held);
             if let Some(replacement_id) = replacement_id {
                 let mut replacement_key = key.clone();
@@ -587,7 +654,7 @@ mod flow_cache_invalidation_tests {
                 &mut sessions,
                 CONNTRACK_TEST_MAP_FD,
                 CONNTRACK_TEST_MAP_FD,
-                &Arc::new(Mutex::new(FastMap::default())),
+                &shared_sessions,
             );
             assert!(
                 sessions.take_deferred_conntrack_deletes().is_empty(),
