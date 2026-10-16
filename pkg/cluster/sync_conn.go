@@ -267,8 +267,14 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	s.peerIncarnation++
 	// The priming connection's capability frame belongs to the same peer
 	// process as its changed-boot BulkStart. Restore only that connection's
-	// learned version; never carry forward the retired global observation.
+	// learned capability set; never carry forward the retired global
+	// observation. A priming connection that sent no interpretable frame
+	// leaves the new incarnation unlearned (snapshot 0), incapable
+	// (flags 0) and wire-unknown (0) — the #14161 provenance rule, the
+	// same set installConn and full disconnect clear.
 	var snapshotProtocol uint32
+	var capabilityFlags uint32
+	var sessionSyncWire uint32
 	var primingConn net.Conn
 	switch keepIdx {
 	case 0:
@@ -279,9 +285,14 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int) bool {
 	if ac, ok := primingConn.(*authConn); ok &&
 		ac.bootIncarnation.known() && ac.bootIncarnation == s.peerBootIncarnation {
 		snapshotProtocol = uint32(ac.peerSnapshotVersion)
+		capabilityFlags = uint32(ac.peerCapabilityFlags)
+		sessionSyncWire = uint32(ac.peerSessionSyncWire)
 	}
 	s.peerSnapshotProtocol.Store(snapshotProtocol)
 	s.peerSnapshotProtocolGeneration++
+	s.peerCapabilityFlags.Store(capabilityFlags)
+	s.peerSessionSyncWire.Store(sessionSyncWire)
+	s.scopedPolicySuppressionWarned.Store(false)
 	s.peerSnapshotProtocolWriteMu.Unlock()
 	retiredIdentity := s.peerIdentity
 	s.peerHeartbeatAckEver.Store(false)
