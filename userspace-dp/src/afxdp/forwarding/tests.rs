@@ -1645,6 +1645,29 @@ fn new_flow_from_fabric_keeps_forward_candidate_when_owner_rg_inactive() {
     assert_eq!(resolved.egress_ifindex, routed.egress_ifindex);
 }
 
+/// A fabric-ingress tunnel packet may not undo the outer-RG gate by restoring
+/// its ForwardCandidate, even while the tunnel endpoint RG remains active.
+#[test]
+fn tunnel_outer_rg_inactive_drops_new_fabric_ingress_flow_13980() {
+    let mut snapshot = native_gre_snapshot(true);
+    snapshot.interfaces[0].redundancy_group = 2;
+    let state = build_forwarding_state(&snapshot);
+    let now = monotonic_nanos() / 1_000_000_000;
+    let ha = BTreeMap::from([
+        (1, active_ha_runtime(now)),
+        (2, inactive_ha_runtime(now)),
+    ]);
+    let tunnel = resolve_tunnel_forwarding_resolution(&state, None, 1, 0);
+    assert_eq!(tunnel.disposition, ForwardingDisposition::ForwardCandidate);
+    let finalized =
+        finalize_new_flow_ha_resolution(&state, &ha, now, tunnel, true, true, 21, 1, 0);
+    assert_eq!(
+        finalized.disposition,
+        ForwardingDisposition::HAInactive,
+        "fabric ingress must not reinstate tunnel forwarding on peer-owned outer RG2"
+    );
+}
+
 #[test]
 fn fabric_originated_reverse_session_prefers_local_client_delivery_when_rg_active() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());

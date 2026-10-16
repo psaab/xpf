@@ -1118,6 +1118,56 @@ fn build_fallible_forwarding_state(
         build_route_table_identity_map(snapshot, &state);
     state.route_table_identities = route_table_identities;
     state.route_table_identity_map_complete = route_table_identity_map_complete;
+    state.tunnel_outer_egress_rgs = state
+        .tunnel_endpoints
+        .iter()
+        .filter_map(|(&id, endpoint)| {
+            if endpoint.mode == "wireguard" {
+                return None;
+            }
+            let outer = crate::afxdp::forwarding::resolve_tunnel_outer(&state, None, id, 0)?;
+            let egress = state.egress.get(&outer.resolution.egress_ifindex)?;
+            Some((id, egress.redundancy_group.max(0)))
+        })
+        .collect();
+    let mut wireguard_peer_outer_egress_rgs = FastMap::default();
+    for (&id, endpoint) in &state.tunnel_endpoints {
+        if endpoint.mode != "wireguard" {
+            continue;
+        }
+        for peer in &endpoint.wg_peers {
+            let Some(peer_endpoint) = peer.endpoint else {
+                continue;
+            };
+            let outer = crate::afxdp::forwarding::lookup_forwarding_resolution_inner(
+                &state,
+                None,
+                peer_endpoint.ip(),
+                Some(&endpoint.transport_table),
+            )
+            .resolution;
+            let (Some(next_hop), Some(egress)) = (
+                outer.next_hop,
+                state.egress.get(&outer.egress_ifindex),
+            ) else {
+                continue;
+            };
+            let rg_id = egress.redundancy_group.max(0);
+            match wireguard_peer_outer_egress_rgs.entry((id, next_hop)) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(rg_id);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if *entry.get() != rg_id {
+                        // Same peer next-hop resolving through different RGs
+                        // is ambiguous; preserve the fail-closed sentinel.
+                        entry.insert(-1);
+                    }
+                }
+            }
+        }
+    }
+    state.wireguard_peer_outer_egress_rgs = wireguard_peer_outer_egress_rgs;
 
     Ok(state)
 }
