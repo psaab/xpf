@@ -3588,6 +3588,10 @@ fn per_packet_shape_preserves_pbr_discard_on_hit_13648() {
             1,
             "the PBR deny counter must be charged once"
         );
+        // #13765: the per-packet fix (#13648) must charge the preceding
+        // counted fall-through exactly once as well — packets AND bytes.
+        // The pre-fix session-hit arm counted it in the non-routing walk
+        // and again in the counted routing-instance replay.
         assert_eq!(
             filter.terms[1]
                 .counter
@@ -3595,6 +3599,23 @@ fn per_packet_shape_preserves_pbr_discard_on_hit_13648() {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1,
             "a preceding fall-through counter must be charged exactly once"
+        );
+        let expected_bytes = meta(LAN_IFINDEX as u32, 0, v6).pkt_len as u64;
+        assert_eq!(
+            filter.terms[1]
+                .counter
+                .bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            expected_bytes,
+            "a preceding fall-through counter bytes must be charged exactly once"
+        );
+        assert_eq!(
+            filter.terms[2]
+                .counter
+                .bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            expected_bytes,
+            "the PBR deny counter bytes must be charged exactly once"
         );
     }
 }
