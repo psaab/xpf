@@ -35,6 +35,52 @@ fn pressure_shed_close_harvests_counters_and_timestamps_13973() {
 }
 
 #[test]
+fn pressure_shed_batch_keeps_each_sessions_close_counters_13973() {
+    let now = 1_000_000_000u64;
+    let mut table = SessionTable::new();
+    table.set_max_sessions_for_test(4);
+
+    let key_one = key_v4();
+    let reverse_one =
+        super::tests::install_forward_reverse_pair(&mut table, &key_one, now, 0x02);
+    let mut key_two = key_v4();
+    key_two.src_port += 1;
+    let reverse_two =
+        super::tests::install_forward_reverse_pair(&mut table, &key_two, now + 1, 0x02);
+    let _ = table.drain_deltas(8);
+
+    table.account_packet(&key_one, 111, 0x10, 0);
+    table.account_packet(&reverse_one, 211, 0x10, 0);
+    table.account_packet(&key_two, 222, 0x10, 0);
+    table.account_packet(&reverse_two, 422, 0x10, 0);
+    table.set_max_sessions_for_test(2);
+
+    let (admitted, shed) = table.can_admit_new_syn(1, PROTO_TCP, 0x02);
+    assert!(admitted);
+    assert_eq!(shed.len(), 4);
+    let closes: Vec<_> = table
+        .drain_deltas(8)
+        .into_iter()
+        .filter(|delta| delta.kind == SessionDeltaKind::Close)
+        .collect();
+    assert_eq!(closes.len(), 2);
+
+    let close_one = closes.iter().find(|delta| delta.key == key_one).unwrap();
+    assert_eq!(close_one.counters.fwd_packets, 1);
+    assert_eq!(close_one.counters.fwd_bytes, 111);
+    assert_eq!(close_one.counters.rev_packets, 1);
+    assert_eq!(close_one.counters.rev_bytes, 211);
+    assert_eq!(close_one.created_ns, now);
+
+    let close_two = closes.iter().find(|delta| delta.key == key_two).unwrap();
+    assert_eq!(close_two.counters.fwd_packets, 1);
+    assert_eq!(close_two.counters.fwd_bytes, 222);
+    assert_eq!(close_two.counters.rev_packets, 1);
+    assert_eq!(close_two.counters.rev_bytes, 422);
+    assert_eq!(close_two.created_ns, now + 1);
+}
+
+#[test]
 // The lower-level explicit-close path has the same contract as the production
 // revalidation and purge callers, which snapshot before deleting the entry.
 fn explicit_close_emitter_accepts_removed_entry_snapshot_13973() {
