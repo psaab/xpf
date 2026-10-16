@@ -2,6 +2,7 @@ package config
 
 import (
 	"net/netip"
+	"sort"
 	"strings"
 )
 
@@ -135,5 +136,19 @@ func ConfiguredIPv6Prefixes(cfg *Config) []netip.Prefix {
 		}
 		add(rs.Prefix)
 	}
+	// Deterministic order: iface map iteration above is randomized, and
+	// consumers (daemon protected-set stamp, cluster RA digest via JSON
+	// marshal) must not observe a different order on every rebuild of
+	// the same config (#14153). Dedupe masked prefixes: the same prefix
+	// can be collected from an interface address and an RA prefix.
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	deduped := out[:0]
+	for i, p := range out {
+		if i > 0 && p == out[i-1] {
+			continue
+		}
+		deduped = append(deduped, p)
+	}
+	out = deduped
 	return out
 }

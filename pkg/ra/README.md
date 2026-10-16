@@ -554,6 +554,18 @@ never retried and the stale IPv6 default-router identity lingered on hosts
     `netip.ParsePrefix` and falls back to an exact string compare when either
     side fails to parse (so a genuine change is never masked — an unnecessary
     restart is harmless, a missed one is not).
+  - **`ProtectedPrefixes` gates the wire without being on it (#14153).**
+    `buildRA` reads it to REFUSE a delegated PIO overlapping configured
+    space, so it is wire-affecting in effect and `configEqual` compares
+    it — as set equality over the effective prefixes (parsed, masked,
+    IPv6-only; unparseable/non-v6 skipped, matching the consumer), NOT
+    raw slice equality. The producer derives order from interface-map
+    iteration, so an order-sensitive compare would spurious-restart on
+    every no-op reconcile; `config.ConfiguredIPv6Prefixes` is also now
+    sorted+deduped so the cluster RA digest (`raDesiredHash`, JSON
+    marshal) is stable for the same reason. The claimed `DNSDomains`
+    sibling does not exist: the RDNSS wire field is `DNSServers`,
+    already compared.
 - IPv6 NODAD is set on the per-instance NDP socket so it doesn't fight
   the kernel's own duplicate-address detection on the link-local
   address.
