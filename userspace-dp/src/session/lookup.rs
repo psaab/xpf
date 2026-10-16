@@ -429,16 +429,22 @@ impl SessionTable {
                 && entry.handshake_pending
                 && entry.metadata.is_reverse
                 && has_ack(tcp_flags)
-                && !has_syn(tcp_flags);
+                && !has_syn(tcp_flags)
+                && !is_closing(tcp_flags);
             // A normal SYN-first handshake completes on the forward segment
             // following its reverse SYN-ACK (data implies completion too).
-            // With SYN-ACK-first pickup, only a reverse non-SYN ACK completes;
-            // a retransmitted SYN-ACK in the installing direction must remain
+            // With SYN-ACK-first pickup, only a reverse non-SYN, non-closing
+            // ACK completes; retransmitted SYN-ACKs and closing ACKs remain
             // OPENING.
             let handshake_completed = if entry.syn_ack_first {
                 promote_from_asymmetric_ack
             } else {
-                is_tcp && entry.handshake_pending && !entry.metadata.is_reverse
+                is_tcp
+                    && entry.handshake_pending
+                    && !entry.metadata.is_reverse
+                    && has_ack(tcp_flags)
+                    && !has_syn(tcp_flags)
+                    && !is_closing(tcp_flags)
             };
             if handshake_completed {
                 entry.established = true;
