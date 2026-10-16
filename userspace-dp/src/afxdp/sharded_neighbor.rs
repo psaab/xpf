@@ -541,13 +541,24 @@ impl ShardedNeighborMap {
         // first insert, no bump), but a re-resolution that observes a new
         // MAC must invalidate just like the monitor path. A re-confirm of
         // the SAME MAC does not bump.
-        if let Some(prior) = shard.get(&key)
-            && prior.entry.mac != val.mac
+        let prior = shard.get(&key).map(|record| record.entry);
+        let changed_mac = prior.is_some_and(|prior| prior.mac != val.mac);
+        if changed_mac
+            && !self.peek_arp_reply_solicited(&key, super::neighbor::monotonic_nanos())
         {
+            // A kernel GETNEIGH result is not evidence that an unsolicited
+            // ARP/NA update was solicited. Only the monitor's probe token may
+            // authorize the resolver's second write conduit.
+            return false;
+        }
+        if changed_mac {
             // #5147: bump only THIS neighbor's shard epoch.
             self.bump_shard_epoch(idx);
         }
         shard.insert(key, NeighborRecord::authoritative(val));
+        if changed_mac {
+            self.take_arp_reply_solicited(&key, super::neighbor::monotonic_nanos());
+        }
         // #7156: AFTER the map write, Release-ordered — a worker that observes
         // this generation is guaranteed to see the entry it announces.
         self.insert_generation.fetch_add(1, Ordering::Release);
