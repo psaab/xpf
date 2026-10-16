@@ -27,6 +27,7 @@ func overlapSnapshot(ifaceRule, poolRule *SourceNATRuleSnapshot, ifc InterfaceSn
 func wanUnit() InterfaceSnapshot {
 	return InterfaceSnapshot{
 		Name:            "ge-0/0/2.0",
+		Ifindex:         5,
 		Zone:            "wan",
 		RoutingInstance: "vr-blue",
 		Addresses: []InterfaceAddressSnapshot{
@@ -83,6 +84,32 @@ func TestInterfaceSNATPoolOverlapDetection(t *testing.T) {
 			}
 			if tc.want > 0 && got[0].Address != overlapEgress {
 				t.Errorf("finding names address %q, want %q", got[0].Address, overlapEgress)
+			}
+		})
+	}
+}
+
+// TestInterfaceSNATPoolOverlapIgnoresIneligibleEgresses pins the same
+// eligibility boundary used by interface-SNAT registration. A false candidate
+// here quarantines an unrelated pool during snapshot build.
+func TestInterfaceSNATPoolOverlapIgnoresIneligibleEgresses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ifc  InterfaceSnapshot
+		rule SourceNATRuleSnapshot
+	}{
+		{"admin disabled", func() InterfaceSnapshot { i := wanUnit(); i.AdminDisabled = true; return i }(), SourceNATRuleSnapshot{InterfaceMode: true}},
+		{"unmaterialized", func() InterfaceSnapshot { i := wanUnit(); i.Ifindex = 0; return i }(), SourceNATRuleSnapshot{InterfaceMode: true}},
+		{"unscoped zone cannot use unzoned interface", func() InterfaceSnapshot { i := wanUnit(); i.Zone = ""; return i }(), SourceNATRuleSnapshot{InterfaceMode: true}},
+		{"loopback", func() InterfaceSnapshot { i := wanUnit(); i.Name = "lo0.0"; return i }(), SourceNATRuleSnapshot{InterfaceMode: true}},
+		{"management", func() InterfaceSnapshot { i := wanUnit(); i.Name = "fxp0.0"; return i }(), SourceNATRuleSnapshot{InterfaceMode: true}},
+		{"lenient match dropped", wanUnit(), SourceNATRuleSnapshot{InterfaceMode: true, LenientMatchDropped: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.rule.Name = "iface-snat"
+			got := detectInterfaceSNATPoolOverlaps(overlapSnapshot(&tc.rule, poolRuleOn(overlapEgress), tc.ifc))
+			if len(got) != 0 {
+				t.Fatalf("ineligible interface-SNAT produced overlaps %v; must not quarantine pool", got)
 			}
 		})
 	}
@@ -213,6 +240,8 @@ func TestBuilderRunsTheOverlapDetector(t *testing.T) {
 // bind that only counted calls would pass even if the builder handed the
 // detector a snapshot with no interfaces in it.
 func TestBuilderDetectsOverlapEndToEnd(t *testing.T) {
+	defer stubLinkSnapshot5619(t, map[string]int{"ge-0-0-2": 42})()
+
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
 		"ge-0/0/2": {Name: "ge-0/0/2", Units: map[int]*config.InterfaceUnit{
@@ -267,6 +296,7 @@ func TestBuilderDetectsOverlapEndToEnd(t *testing.T) {
 // address coincides with the interface egress address. Without the second row a
 // builder that quarantined every pool would pass.
 func TestBuilderQuarantinesTheOverlappingPool(t *testing.T) {
+	defer stubLinkSnapshot5619(t, map[string]int{"ge-0-0-2": 42})()
 	for _, tc := range []struct {
 		name     string
 		poolAddr string

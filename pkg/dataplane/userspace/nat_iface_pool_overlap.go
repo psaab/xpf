@@ -98,11 +98,11 @@ func interfaceSNATEgressCandidatesFromSnapshot(snap *ConfigSnapshot) map[string]
 	sort.SliceStable(ifaces, func(i, j int) bool { return ifaces[i].Name < ifaces[j].Name })
 
 	for _, rule := range rules {
-		if !rule.InterfaceMode {
+		if !rule.InterfaceMode || rule.LenientMatchDropped {
 			continue
 		}
 		for _, ifc := range ifaces {
-			if !interfaceInSnapshotEgressScope(rule, ifc) {
+			if !interfaceSnapshotCanBeSNATEgress(&ifc) || !interfaceInSnapshotEgressScope(rule, ifc) {
 				continue
 			}
 			for _, a := range ifc.Addresses {
