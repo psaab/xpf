@@ -800,6 +800,203 @@ func TestSendBoundarySeversOnConcurrentSuccess_9891(t *testing.T) {
 	}
 }
 
+// ctxDecoupledBlockingStream14150 models the #14150 production shape: its
+// Context() is the reauth-derived context (cancellable independently), while
+// Send parks on a SEPARATE transport release channel — cancelling the derived
+// context does NOT unblock Send, exactly as revocation-cancel of
+// reauthServerStream does not cancel the underlying transport Send. This is
+// distinct from blockingMonitorStream9891, whose Send keys off the same ctx,
+// so a premature limiter release is invisible there.
+type ctxDecoupledBlockingStream14150 struct {
+	ctx         context.Context
+	sendRelease chan struct{}
+	calls       atomic.Int64
+	exits       atomic.Int64
+}
+
+func (m *ctxDecoupledBlockingStream14150) Send(*pb.MonitorInterfaceResponse) error {
+	m.calls.Add(1)
+	defer m.exits.Add(1)
+	<-m.sendRelease
+	return nil
+}
+func (m *ctxDecoupledBlockingStream14150) Context() context.Context     { return m.ctx }
+func (m *ctxDecoupledBlockingStream14150) SetHeader(metadata.MD) error  { return nil }
+func (m *ctxDecoupledBlockingStream14150) SendHeader(metadata.MD) error { return nil }
+func (m *ctxDecoupledBlockingStream14150) SetTrailer(metadata.MD)       {}
+func (m *ctxDecoupledBlockingStream14150) SendMsg(any) error            { return nil }
+func (m *ctxDecoupledBlockingStream14150) RecvMsg(any) error            { return nil }
+
+// TestMonitorInterfaceCtxCancelTransfersSlot_14150 is the decisive #14150
+// regression: a blocking Send whose transport is decoupled from the stream
+// context, then cancel the (derived) context. The limiter slot must remain
+// held (transferred to the parked worker) until Send actually returns.
+//
+// FAIL-ON-REVERT: the pre-fix ctx.Done branch returned (ctx.Err(), false)
+// without transferring, so MonitorInterface's defer released the slot while
+// the worker was still parked — InFlight==0 / xfer==false fires RED here.
+// Repeated cycles on pre-fix would admit unbounded parked senders past cap.
+func TestMonitorInterfaceCtxCancelTransfersSlot_14150(t *testing.T) {
+	// Direct unit shape (PacketDrop twin's shape): drive the frame helper.
+	t.Run("sendFrame", func(t *testing.T) {
+		lim := diagcmd.NewLimiter(1)
+		release, err := lim.Acquire()
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		handlerCtx, cancelHandler := context.WithCancel(context.Background())
+		defer cancelHandler()
+		st := &ctxDecoupledBlockingStream14150{
+			ctx:         handlerCtx,
+			sendRelease: make(chan struct{}),
+		}
+		done := make(chan struct {
+			err  error
+			xfer bool
+		}, 1)
+		go func() {
+			e, x := sendMonitorInterfaceFrame(st, &pb.MonitorInterfaceResponse{Frame: "x"}, release)
+			done <- struct {
+				err  error
+				xfer bool
+			}{e, x}
+		}()
+		// Wait until Send is parked.
+		deadline := time.Now().Add(2 * time.Second)
+		for st.calls.Load() < 1 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if st.calls.Load() < 1 {
+			close(st.sendRelease)
+			t.Fatal("Send never entered")
+		}
+		// Cancel only the derived/handler context — transport Send stays parked.
+		cancelHandler()
+		var res struct {
+			err  error
+			xfer bool
+		}
+		select {
+		case res = <-done:
+		case <-time.After(2 * time.Second):
+			close(st.sendRelease)
+			t.Fatal("sendMonitorInterfaceFrame did not return on ctx cancel")
+		}
+		if res.err != context.Canceled {
+			t.Fatalf("err = %v, want context.Canceled", res.err)
+		}
+		if !res.xfer {
+			// Pre-fix path: caller would release via defer. Simulate that
+			// defer to show the slot drops while worker parked, then fail.
+			release()
+			t.Fatalf("xfer = false on ctx-cancel with parked Send, want true (slot released while worker parked, InFlight=%d exits=%d)", lim.InFlight(), st.exits.Load())
+		}
+		// Transferred: slot must still be held while worker parked.
+		if got := lim.InFlight(); got != 1 {
+			t.Fatalf("InFlight after ctx-cancel = %d, want 1 (transferred slot held by parked worker)", got)
+		}
+		if got := st.exits.Load(); got != 0 {
+			t.Fatalf("Send exits = %d, want 0 (worker still parked)", got)
+		}
+		if probe, perr := lim.Acquire(); perr == nil {
+			probe()
+			t.Fatal("probe acquire succeeded while transferred worker parked — cap defeated")
+		}
+		// Transport finally unblocks: worker releases, slot drains.
+		close(st.sendRelease)
+		deadline = time.Now().Add(2 * time.Second)
+		for lim.InFlight() != 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := lim.InFlight(); got != 0 {
+			t.Fatalf("InFlight after Send return = %d, want 0 (transferred slot leaked)", got)
+		}
+		deadline = time.Now().Add(2 * time.Second)
+		for st.exits.Load() < 1 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if st.exits.Load() < 1 {
+			t.Fatal("Send worker never exited after transport release")
+		}
+		if probe, perr := lim.Acquire(); perr != nil {
+			t.Fatalf("probe acquire after worker exit: %v", perr)
+		} else {
+			probe()
+		}
+	})
+
+	// Handler-level shape: full MonitorInterface with decoupled Send.
+	t.Run("handler", func(t *testing.T) {
+		origLim := monitorInterfaceLimiter
+		monitorInterfaceLimiter = diagcmd.NewLimiter(1)
+		t.Cleanup(func() { monitorInterfaceLimiter = origLim })
+		// Keep send timeout far away so only ctx-cancel drives the return.
+		origTimeout := monitorInterfaceSendTimeout
+		monitorInterfaceSendTimeout = 30 * time.Second
+		t.Cleanup(func() { monitorInterfaceSendTimeout = origTimeout })
+
+		s := monitorBudgetStore9891(t)
+		handlerCtx, cancelHandler := context.WithCancel(context.Background())
+		defer cancelHandler()
+		st := &ctxDecoupledBlockingStream14150{
+			ctx:         handlerCtx,
+			sendRelease: make(chan struct{}),
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- s.MonitorInterface(&pb.MonitorInterfaceRequest{InterfaceName: "lo"}, st)
+		}()
+		deadline := time.Now().Add(2 * time.Second)
+		for st.calls.Load() < 1 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if st.calls.Load() < 1 {
+			cancelHandler()
+			close(st.sendRelease)
+			<-done
+			t.Fatal("MonitorInterface never entered its blocked Send")
+		}
+		if got := monitorInterfaceLimiter.InFlight(); got != 1 {
+			t.Fatalf("InFlight while parked = %d, want 1", got)
+		}
+		cancelHandler()
+		select {
+		case err := <-done:
+			if err != context.Canceled {
+				t.Fatalf("handler err = %v, want context.Canceled", err)
+			}
+		case <-time.After(2 * time.Second):
+			close(st.sendRelease)
+			t.Fatal("MonitorInterface did not return on ctx cancel")
+		}
+		// Core #14150 assertion: handler returned but Send worker parked,
+		// so slot must NOT be free.
+		if got := st.exits.Load(); got != 0 {
+			t.Fatalf("Send exits at handler return = %d, want 0 (worker still parked)", got)
+		}
+		if got := monitorInterfaceLimiter.InFlight(); got != 1 {
+			t.Fatalf("InFlight at handler return = %d, want 1 (slot released while Send worker parked — #14150)", got)
+		}
+		if probe, perr := monitorInterfaceLimiter.Acquire(); perr == nil {
+			probe()
+			t.Fatal("probe acquire succeeded while parked worker held transferred slot")
+		}
+		close(st.sendRelease)
+		deadline = time.Now().Add(2 * time.Second)
+		for monitorInterfaceLimiter.InFlight() != 0 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := monitorInterfaceLimiter.InFlight(); got != 0 {
+			t.Fatalf("InFlight after Send return = %d, want 0 (leaked)", got)
+		}
+		if probe, perr := monitorInterfaceLimiter.Acquire(); perr != nil {
+			t.Fatalf("probe acquire after worker exit: %v", perr)
+		} else {
+			probe()
+		}
+	})
+}
+
 // TestMonitorInterfacePeerEstablishmentBound_9891 pins the GPT-3 fix: a peer
 // that never grants stream quota (wedged NewStream) must not pin the proxy's
 // slot past the establishment budget, while a healthy establishment must not

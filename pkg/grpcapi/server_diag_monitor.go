@@ -190,10 +190,16 @@ var sendBoundaryDelay9891 time.Duration
 // timeout. The timer is stopped on the fast path so a healthy Send leaves no
 // 30s timer behind.
 //
-// On timeout the handler severs with DeadlineExceeded and the slot TRANSFERS
-// to the worker, which releases it when Send unblocks on the handler-return
-// stream cancel (see the limiter note); the caller must NOT release on the
-// transferred path (it disarms its defer via the returned flag).
+// On timeout OR context cancellation the handler severs and the slot
+// TRANSFERS to the worker, which releases it when Send unblocks (see the
+// limiter note); the caller must NOT release on the transferred path (it
+// disarms its defer via the returned flag). The ctx branch must transfer
+// for the same reason as the timer branch: the stream context here is the
+// reauth-derived context (#9051, authz_stream_reauth_9051.go), whose
+// cancellation does NOT cancel the underlying transport Send, so a
+// revocation-cancelled slow reader can park the worker indefinitely. If
+// the handler released on that path, repeated cycles would admit unbounded
+// parked senders beyond the limiter cap (#14150).
 //
 // Timeout ownership is TERMINAL: once the timer wins, this function never
 // returns (nil, false). The boundary race — Send completes exactly as the
@@ -205,6 +211,8 @@ var sendBoundaryDelay9891 time.Duration
 // releases immediately — safe under the idempotent release even if the worker
 // also releases, and leak-free if the worker's Load raced ahead of the Store
 // and it never releases. A continuing stream therefore always holds admission.
+// The ctx-done boundary mirrors it: if Send already completed, release here
+// and report not-transferred; otherwise transfer.
 // Worker exit is proven by test: cancel unblocks Send and InFlight drains.
 func sendMonitorInterfaceFrame(stream grpc.ServerStreamingServer[pb.MonitorInterfaceResponse], resp *pb.MonitorInterfaceResponse, release func()) (error, bool) {
 	ctx := stream.Context()
@@ -228,7 +236,14 @@ func sendMonitorInterfaceFrame(stream grpc.ServerStreamingServer[pb.MonitorInter
 	case err := <-done:
 		return err, false
 	case <-ctx.Done():
-		return ctx.Err(), false
+		timedOut.Store(true)
+		select {
+		case <-done:
+			release()
+			return ctx.Err(), false
+		default:
+			return ctx.Err(), true
+		}
 	case <-timer.C:
 		timedOut.Store(true)
 		// Test seam (#9891 GPT-1): widen the Store-to-drain window so the
@@ -914,10 +929,10 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 	// no ticker, and no connection. Held across the proxy forwarding loop as
 	// well — it still pins a local goroutine plus a peer connection — while
 	// the peer charges its own slot for the rendering half. A Send that times
-	// out TRANSFERS the slot to its worker (transferred=true disarms this
-	// defer); the worker releases when the transport unblocks, so retained
-	// timeout workers compete for the same 64 and churn cannot accumulate
-	// outside the budget.
+	// out or whose (reauth-derived) context is cancelled TRANSFERS the slot
+	// to its worker (transferred=true disarms this defer); the worker releases
+	// when the transport unblocks, so retained workers compete for the same
+	// 64 and churn cannot accumulate outside the budget (#14150).
 	release, err := monitorInterfaceLimiter.Acquire()
 	if err != nil {
 		return status.Error(codes.ResourceExhausted, "too many concurrent monitor interface subscribers")
