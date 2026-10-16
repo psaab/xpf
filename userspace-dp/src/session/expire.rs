@@ -567,15 +567,12 @@ impl SessionTable {
         let companion_key = reverse_session_key(key, entry_nat);
         let companion_last_seen = match self.entry_by_key(&companion_key) {
             Some(companion) => {
-                // #6752: never extend a half whose companion is still waiting on
-                // the handshake-completing segment. The probe is otherwise
-                // handshake-agnostic, and that is precisely how a SYN-ACK the
-                // client never ACKed held BOTH halves for ~300s: the reverse
-                // half was on its fresh established window, so this probe kept
-                // re-stamping the forward half off it. Refusing here is the
-                // second half of the fix — the effective-class change in
-                // `lookup` keeps the reverse half short, and this keeps the
-                // probe from undoing it.
+                // #6752: do not extend a half whose companion is waiting on
+                // the handshake-completing segment. The effective-class
+                // change in `lookup` keeps the reverse half short, and this
+                // check prevents the probe from undoing it: a SYN-ACK the
+                // client never ACKed must not hold both halves for ~300s by
+                // re-stamping the forward half from the reverse half.
                 //
                 // Checking the COMPANION alone is sufficient because the bit is
                 // set and cleared on both halves together
