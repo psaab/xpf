@@ -290,3 +290,104 @@ event-options {
 		t.Fatalf("quarantine disturbed inherited commands: %q", compiled.EventOptions[0].ThenCommands)
 	}
 }
+
+// #14142: the one-key-container shape `policy { p { ... } }` is compiled by
+// compileEventOptions via namedInstances, but eventPolicyNodes9984 indexed
+// only direct `policy p` nodes. A solely nested super-user marker was thus
+// invisible to QuarantineUntrustedEventPlantClasses and survived HA ingress.
+func TestNestedPolicySuperuserIsQuarantined14142(t *testing.T) {
+	const source = `event-options {
+    policy {
+        p {
+            plant-class super-user;
+            then { change-configuration { commands "set system host-name x"; } }
+        }
+    }
+}`
+	tree, errs := NewParser(source).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("nested policy parse failed: %v", errs)
+	}
+	if pol := compiledPlantClass9984(t, tree); pol.PlantClass != EventPlantClassSuperuser ||
+		len(pol.ThenCommands) != 1 {
+		t.Fatalf("fixture PlantClass=%q commands=%q, want executable super-user policy",
+			pol.PlantClass, pol.ThenCommands)
+	}
+
+	QuarantineUntrustedEventPlantClasses(tree)
+	if pol := compiledPlantClass9984(t, tree); pol.PlantClass != "" {
+		t.Fatalf("nested super-user PlantClass=%q, want empty quarantine marker", pol.PlantClass)
+	}
+}
+
+// #14142: in a mixed tree the compiler merges direct and nested instances of
+// the same policy (last plant-class wins), so quarantine must clear the
+// marker from every instance, not only the direct ones.
+func TestMixedDirectAndNestedSuperuserIsQuarantined14142(t *testing.T) {
+	const source = `event-options {
+    policy p {
+        plant-class alice;
+    }
+    policy {
+        p {
+            plant-class super-user;
+            then { change-configuration { commands "set system host-name x"; } }
+        }
+    }
+}`
+	tree, errs := NewParser(source).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("mixed policy parse failed: %v", errs)
+	}
+	if pol := compiledPlantClass9984(t, tree); pol.PlantClass != EventPlantClassSuperuser {
+		t.Fatalf("fixture PlantClass=%q, want super-user (nested last-wins)", pol.PlantClass)
+	}
+
+	QuarantineUntrustedEventPlantClasses(tree)
+	if pol := compiledPlantClass9984(t, tree); pol.PlantClass != "" {
+		t.Fatalf("mixed-tree PlantClass=%q, want empty quarantine marker", pol.PlantClass)
+	}
+}
+
+// #14142: stamping must also reach a solely nested policy, and a forged
+// nested super-user marker on a legacy (unmarked) nested payload must be
+// cleared rather than laundered. On master the nested instance was
+// invisible to the raw census, so the forgery survived stamping.
+func TestNestedPolicyIsStamped14142(t *testing.T) {
+	const source = `event-options {
+    policy {
+        p {
+            then { change-configuration { commands "set system host-name x"; } }
+        }
+    }
+}`
+	tree, errs := NewParser(source).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("nested policy parse failed: %v", errs)
+	}
+	StampChangedEventPlantClasses(nil, tree, "alice")
+	if pol := compiledPlantClass9984(t, tree); pol.PlantClass != "alice" {
+		t.Fatalf("nested policy stamped PlantClass=%q, want alice", pol.PlantClass)
+	}
+
+	forgedSource := `event-options {
+    policy {
+        p {
+            plant-class super-user;
+            then { change-configuration { commands "set system host-name x"; } }
+        }
+    }
+}`
+	before, errs := NewParser(source).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("nested legacy parse failed: %v", errs)
+	}
+	after, errs := NewParser(forgedSource).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("nested forged parse failed: %v", errs)
+	}
+	StampChangedEventPlantClasses(before, after, "mallory")
+	if pol := compiledPlantClass9984(t, after); pol.PlantClass != "" {
+		t.Fatalf("nested legacy laundering persisted PlantClass=%q, want empty quarantine marker", pol.PlantClass)
+	}
+}
