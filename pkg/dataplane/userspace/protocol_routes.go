@@ -6,9 +6,9 @@ type RouteSnapshot struct {
 	Destination string   `json:"destination"`
 	NextHops    []string `json:"next_hops,omitempty"`
 	// NextHopWeights parallels NextHops when any weight differs from default 1;
-	// absent, short, and zero entries default to one in the Rust FIB.
 	NextHopWeights []uint32 `json:"next_hop_weights,omitempty"`
 	Discard        bool     `json:"discard"`
+	Reject         bool     `json:"reject,omitempty"`
 	NextTable      string   `json:"next_table,omitempty"`
 	// RulePriority is the kernel ip-rule priority of a NextTable leak (#9955).
 	// The kernel resolves inter-VRF leaks in TWO stages: priority-ordered

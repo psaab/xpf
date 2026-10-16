@@ -360,16 +360,10 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				Table:       tableName,
 				Family:      familyName,
 				Destination: route.Destination,
-				// #5298: a `reject` route drops on the AF_XDP fast path the same
-				// way `discard` does. Without an entry in the userspace FIB, a
-				// reject prefix would longest-prefix-match a less-specific route
-				// (e.g. the default) and forward — the identical fail-wide the
-				// FRR/kernel reject route closes. Fold reject into the helper's
-				// silent-drop disposition (fail-closed). The ICMP-unreachable
-				// distinction (reject vs discard) is emitted by the kernel/FRR
-				// reject route today; a userspace-generated ICMP unreachable is a
-				// follow-up that would need a dedicated RouteSnapshot field.
-				Discard:      route.Discard || route.Reject,
+				// `reject` and `discard` both install a terminal route, but only
+				// `reject` asks the dataplane to return an ICMP unreachable.
+				Reject:      route.Reject,
+				Discard:     route.Discard,
 				NextTable:    route.NextTable,
 				RulePriority: nextTableRulePriorities[route],
 				Preference:   route.Preference,

@@ -391,7 +391,7 @@ const (
 	// selector intersections, and a dedicated zone/policy identity for the
 	// P-MECH worker/view commit guard. Older helpers cannot validate this
 	// authority.
-	ProtocolVersion = 46
+	ProtocolVersion = 47
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

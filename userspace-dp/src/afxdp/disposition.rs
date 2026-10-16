@@ -966,6 +966,19 @@ pub(super) fn record_forwarding_disposition(
                 forwarding,
             );
         }
+        ForwardingDisposition::RejectRoute => {
+            update_last_resolution(last_resolution, resolution, debug, forwarding);
+            counters.bump_discard_route();
+            record_exception(
+                recent_exceptions,
+                binding,
+                "reject_route",
+                packet_length,
+                meta,
+                debug,
+                forwarding,
+            );
+        }
         ForwardingDisposition::NextTableUnsupported => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
             counters.bump_next_table();

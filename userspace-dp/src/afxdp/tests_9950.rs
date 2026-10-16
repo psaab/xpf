@@ -1117,6 +1117,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
     }];
     // Default route via wan gateway + neighbors for gateway and internal host.
     snapshot.routes = vec![RouteSnapshot {
+        reject: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
@@ -1430,6 +1431,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         ..Default::default()
     }];
     snapshot.routes = vec![RouteSnapshot {
+        reject: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
@@ -1669,6 +1671,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
         ..Default::default()
     }];
     snapshot.routes = vec![RouteSnapshot {
+        reject: false,
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),

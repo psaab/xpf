@@ -679,6 +679,7 @@ pub(super) fn populate_routes(
             );
             let prefix = PrefixV4::from_net(prefix);
             if !route.discard
+                && !route.reject
                 && route.next_table.is_empty()
                 && next_hops.is_empty()
                 && !state
@@ -711,6 +712,7 @@ pub(super) fn populate_routes(
                         prefix,
                         next_hops,
                         discard: route.discard,
+                        reject: route.reject,
                         next_table: String::new(),
                         preference: route.preference,
                         mtu: route.mtu as u32,
@@ -744,6 +746,7 @@ pub(super) fn populate_routes(
             );
             let prefix = PrefixV6::from_net(prefix);
             if !route.discard
+                && !route.reject
                 && route.next_table.is_empty()
                 && next_hops.is_empty()
                 && !state
@@ -776,6 +779,7 @@ pub(super) fn populate_routes(
                         prefix,
                         next_hops,
                         discard: route.discard,
+                        reject: route.reject,
                         next_table: String::new(),
                         preference: route.preference,
                         mtu: route.mtu as u32,
@@ -1419,14 +1423,12 @@ mod recursive_prefix_index_12617_tests {
 
     fn snapshot_v4(count: usize) -> ConfigSnapshot {
         let routes = (0..count)
-            .map(|n| RouteSnapshot {
-                table: "inet.0".into(),
-                family: "inet".into(),
-                destination: format!("10.{}.{}.{} /32", (n >> 16) & 255, (n >> 8) & 255, n & 255)
-                    .replace(" ", ""),
-                next_hops: vec!["203.0.113.1".into()],
-                ..Default::default()
-            })
+            .map(|n| RouteSnapshot { reject: false, table: "inet.0".into(),
+            family: "inet".into(),
+            destination: format!("10.{}.{}.{} /32", (n >> 16) & 255, (n >> 8) & 255, n & 255)
+                .replace(" ", ""),
+            next_hops: vec!["203.0.113.1".into()],
+            ..Default::default() })
             .collect();
         ConfigSnapshot {
             routes,

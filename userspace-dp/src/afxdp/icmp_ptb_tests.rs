@@ -1743,6 +1743,7 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
             scope: 0,
         });
     snap.routes = vec![crate::RouteSnapshot {
+        reject: false,
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:c0::/64".to_string(),
@@ -1867,18 +1868,16 @@ fn wg_two_peer_asymmetric_snapshot() -> crate::ConfigSnapshot {
         ..Default::default()
     });
     // Route to peer B's endpoint egresses reth0.50.
-    snap.routes.push(crate::RouteSnapshot {
-        table: "inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: "198.51.100.0/24".to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec!["172.16.50.1@reth0.50".to_string()],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0,
-    });
+    snap.routes.push(crate::RouteSnapshot { reject: false, table: "inet.0".to_string(),
+    family: "inet".to_string(),
+    destination: "198.51.100.0/24".to_string(),
+    next_hop_weights: vec![],
+    next_hops: vec!["172.16.50.1@reth0.50".to_string()],
+    discard: false,
+    next_table: String::new(),
+    preference: 0,
+    rule_priority: 0,
+    mtu: 0, });
     {
         let ep = &mut snap.tunnel_endpoints[0];
         // Peer A: give it the smaller pubkey so it is first in any sorted order

@@ -779,18 +779,16 @@ fn noroute_descriptor_uses_effective_protocol_for_ah_deny_13769() {
     snapshot.policies = ah_deny_snapshot_13645().policies;
     snapshot.policies[0].from_zone = "any".to_string();
     snapshot.policies[0].to_zone = "any".to_string();
-    snapshot.routes.push(crate::RouteSnapshot {
-        table: "sfmix.inet6.0".to_string(),
-        family: "inet6".to_string(),
-        destination: "::/0".to_string(),
-        next_hop_weights: vec![],
-        next_hops: vec!["@gr-0/0/0.0".to_string()],
-        discard: false,
-        next_table: String::new(),
-        preference: 0,
-        rule_priority: 0,
-        mtu: 0,
-    });
+    snapshot.routes.push(crate::RouteSnapshot { reject: false, table: "sfmix.inet6.0".to_string(),
+    family: "inet6".to_string(),
+    destination: "::/0".to_string(),
+    next_hop_weights: vec![],
+    next_hops: vec!["@gr-0/0/0.0".to_string()],
+    discard: false,
+    next_table: String::new(),
+    preference: 0,
+    rule_priority: 0,
+    mtu: 0, });
     snapshot.tunnel_endpoints[0].destination = "2001:db8:dead::7".to_string();
     let forwarding = build_forwarding_state(&snapshot);
 
