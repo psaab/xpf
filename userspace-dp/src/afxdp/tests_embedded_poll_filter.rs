@@ -844,6 +844,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
         arrival_ifindex,
         expect_related_admit,
         quote_reply_reverse_half,
+        false,
         ForwardingDisposition::ForwardCandidate,
     );
 }
@@ -858,6 +859,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
     arrival_ifindex: u32,
     expect_related_admit: bool,
     quote_reply_reverse_half: bool,
+    injected: bool,
     initial_disposition: ForwardingDisposition,
 ) {
     poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition_and_knob(
@@ -1266,6 +1268,10 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         return;
     }
 
+    let free_tx_before = binding.tx_pipeline.free_tx_frames.len();
+    let injected_addr = binding.tx_pipeline.free_tx_frames.front().copied();
+    let nonlocal_before = crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+        .load(Ordering::Relaxed);
     let mut screen = ScreenState::new();
     let mut batch = BatchCounters::default();
     let mut dbg = DebugPollCounters::default();
@@ -1275,27 +1281,84 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
     };
     let area_ptr = binding.umem.area() as *const MmapArea;
 
-    poll_binding_process_descriptor(
-        &mut binding,
-        0,
-        area_ptr,
-        1,
-        &mut sessions,
-        &mut screen,
-        ValidationState {
-            snapshot_installed: true,
-            config_generation: 7,
-            fib_generation: 9,
-        },
-        123_000_000_000,
-        123,
-        0,
-        0,
-        -1,
-        -1,
-        &worker_ctx,
-        &mut telemetry,
-    );
+    if injected {
+        super::poll_descriptor::poll_binding_process_descriptor_with_injection(
+            &mut binding,
+            0,
+            area_ptr,
+            0,
+            Some((frame.clone(), meta)),
+            &mut sessions,
+            &mut screen,
+            ValidationState {
+                snapshot_installed: true,
+                config_generation: 7,
+                fib_generation: 9,
+            },
+            123_000_000_000,
+            123,
+            0,
+            0,
+            -1,
+            -1,
+            &worker_ctx,
+            &mut telemetry,
+        );
+    } else {
+        poll_binding_process_descriptor(
+            &mut binding,
+            0,
+            area_ptr,
+            1,
+            &mut sessions,
+            &mut screen,
+            ValidationState {
+                snapshot_installed: true,
+                config_generation: 7,
+                fib_generation: 9,
+            },
+            123_000_000_000,
+            123,
+            0,
+            0,
+            -1,
+            -1,
+            &worker_ctx,
+            &mut telemetry,
+        );
+    }
+
+    if injected {
+        assert!(
+            binding.scratch.scratch_forwards.is_empty(),
+            "injected ICMP reversal must be rejected before TX dispatch"
+        );
+        assert!(
+            binding.scratch.scratch_recycle.is_empty(),
+            "injected TX-pool frame must not enter RX recycle"
+        );
+        assert!(
+            injected_addr.is_none_or(|addr| !binding.tx_pipeline.pending_fill_frames.contains(&addr)),
+            "injected frame must never be queued for the RX fill ring"
+        );
+        assert_eq!(
+            crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+                .load(Ordering::Relaxed)
+                - nonlocal_before,
+            1,
+            "injected reversed ICMP error must count as nonlocal"
+        );
+        assert_eq!(
+            binding.tx_pipeline.free_tx_frames.len(),
+            free_tx_before,
+            "the injected TX-pool frame must return to its owner pool"
+        );
+        assert!(
+            injected_addr.is_some_and(|addr| binding.tx_pipeline.free_tx_frames.contains(&addr)),
+            "the injected frame address must not be handed to the RX fill path"
+        );
+        return;
+    }
 
     if expect_fabric_redirect {
         assert_eq!(
@@ -1563,6 +1626,117 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         "a queued prebuilt forward owns the descriptor; no recycle"
     );
 }
+/// A matching injected tuple must not inherit a cached transit decision.
+/// The first two native packets install and cache the session; the injected ACK
+/// then must bypass that cache and be counted by the LocalDelivery-only fence.
+#[test]
+fn injected_flow_cache_hit_is_fenced_as_nonlocal_13947() {
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules.clear();
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let source = Ipv4Addr::new(10, 0, 61, 102);
+    let destination = Ipv4Addr::new(198, 51, 100, 20);
+    let syn = build_txn_tcp_syn_frame_v4(
+        source,
+        destination,
+        49152,
+        443,
+        crate::tcp_flags::TCP_SYN,
+        TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(24, crate::tcp_flags::TCP_SYN, syn.len() as u16);
+    txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        syn_meta,
+    );
+
+    let ack = build_txn_tcp_syn_frame_v4(
+        source,
+        destination,
+        49152,
+        443,
+        crate::tcp_flags::TCP_ACK,
+        TEST_LAN_MAC,
+    );
+    let ack_meta = txn_meta_v4(24, crate::tcp_flags::TCP_ACK, ack.len() as u16);
+    txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+    );
+    assert!(
+        binding.flow.flow_cache.entries.iter().flatten().any(|entry| {
+            entry.decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
+        }),
+        "fixture must seed a ForwardCandidate flow-cache entry before injection"
+    );
+    let cache_hits_before = binding.flow.flow_cache.hits;
+    let free_tx_before = binding.tx_pipeline.free_tx_frames.len();
+    let nonlocal_before = crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+        .load(Ordering::Relaxed);
+    let deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    txn_run_descriptor_with_injected(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        (ack, ack_meta),
+        &deliveries,
+    );
+    assert_eq!(
+        binding.flow.flow_cache.hits,
+        cache_hits_before,
+        "injected records must bypass the flow-cache hit path"
+    );
+    assert_eq!(
+        crate::afxdp::wg_uncovered_forward::WG_UNCOVERED_NONLOCAL_TOTAL
+            .load(Ordering::Relaxed)
+            - nonlocal_before,
+        1,
+        "matching cached transit tuple must be fenced as nonlocal"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "injected flow-cache hit must not queue a transit forward"
+    );
+    assert_eq!(
+        binding.tx_pipeline.free_tx_frames.len(),
+        free_tx_before,
+        "injected frame must return to its TX-pool owner"
+    );
+}
+
+/// An injected WireGuard descriptor that matches an SNAT ICMP reversal must not
+/// be turned into a cross-binding forward. Its TX-pool address must return to
+/// that pool, never to the RX fill path.
+#[test]
+fn injected_flowless_icmp_reversal_preserves_tx_pool_ownership_13947() {
+    poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition(
+        true,
+        txn_ha_state(),
+        false,
+        false,
+        64,
+        false,
+        12,
+        false,
+        false,
+        true,
+        ForwardingDisposition::ForwardCandidate,
+    );
+}
+
 #[test]
 fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690() {
     poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl(
@@ -1625,6 +1799,7 @@ fn poll_descriptor_embedded_icmp_upstream_policy_denied_is_not_reattributed_1098
         64,
         false,
         12,
+        false,
         false,
         false,
         ForwardingDisposition::PolicyDenied,
