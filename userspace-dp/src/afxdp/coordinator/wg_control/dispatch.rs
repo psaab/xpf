@@ -18,7 +18,9 @@ pub(super) enum InboundOutcome {
     /// Failed authentication / cookie / unknown type — no endpoint
     /// learning, no stamps.
     Unauthenticated,
-    /// Authenticated transport record (data or keepalive). Carries the
+    /// Authenticated transport record (data or keepalive), or an
+    /// authenticated msg1 whose Type-2 response send failed (#13665:
+    /// endpoint learning retained, completion NOT reported). Carries the
     /// peer that owned the session (#1434: endpoint roaming is
     /// per-peer — we learn THIS peer's endpoint from `from`).
     Authenticated([u8; 32]),
