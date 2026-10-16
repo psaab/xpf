@@ -92,12 +92,10 @@ pub(super) fn zone_pair_for_flow_with_override(
 /// downstream re-checks it. The destination is attacker-chosen, which is what
 /// makes it the steerable half of #6664.
 ///
-/// This lives here, as a function, for one reason: the call site is the NoRoute
-/// arm of `poll_binding_process_descriptor`, which NO test in this crate can
-/// drive (it needs a live binding, a UMEM and a descriptor ring — the same
-/// reason #6664 had to use a source guard). Inlining the decision there would
-/// make it unbindable; as a function the policy semantics are unit-testable and
-/// only the wiring needs a source guard.
+/// This lives here as a function so the policy semantics stay independently
+/// unit-testable. The #13769 descriptor regression now also drives the
+/// `NoRoute` arm of `poll_binding_process_descriptor` end-to-end and holds its
+/// callsite wiring behaviorally.
 ///
 /// Returns `Some(result)` when the flow is DENIED and the caller must downgrade
 /// the disposition to `PolicyDenied`; `None` when it is permitted and the

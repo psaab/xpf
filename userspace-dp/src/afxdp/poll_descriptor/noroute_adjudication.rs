@@ -1,10 +1,10 @@
 //! #12906: the `NoRoute` policy adjudication as a pure function.
 //!
-//! The `NoRoute` arm of `poll_binding_process_descriptor` cannot be driven
-//! from this crate (it needs a live binding, a UMEM and a descriptor ring —
-//! the #7480 note), so the two decisions the arm makes BEFORE the trailing
-//! #1913 chokepoint hands a permitted frame to the kernel FIB are extracted
-//! here, where a fixture can pin them:
+//! The `NoRoute` arm of `poll_binding_process_descriptor` evaluates this
+//! pure adjudication function before the trailing #1913 chokepoint hands
+//! a permitted frame to the kernel FIB. Extracting the policy computation
+//! keeps the tuple and zone decisions directly unit-testable; the #13769
+//! descriptor regression also drives the arm's wiring end-to-end.
 //!
 //!   1. WHICH zone pair adjudicates. The #6458 V2 owner-RG gate runs on the
 //!      fabric zone stamp FIRST — the same binding the ForwardCandidate

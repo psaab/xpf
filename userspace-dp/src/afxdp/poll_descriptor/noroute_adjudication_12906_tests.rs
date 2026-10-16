@@ -578,14 +578,9 @@ fn flowless_ports_stay_fail_closed_through_the_adjudication_12906() {
     );
 }
 
-// #13645 (D4-10): the NoRoute arm passes the frame-derived effective
-// protocol, not raw `meta.protocol`. The arm itself needs a live binding,
-// so this pins the wiring the same way the #11338 PBR cells pin theirs:
-// flowless_effective_protocol(frame, meta) under the AH and fragment
-// shapes, then the pure adjudication must deny on an effective-protocol
-// term. Pre-fix the arm passed meta.protocol (inner TCP stamped 6, or
-// sentinel 255), so an `ah`/`udp`-only deny never fired and the frame
-// was delegated to the kernel FIB.
+// #13645 (D4-10): pure cells below pin the effective-protocol selector and
+// adjudicator. The #13769 descriptor regression separately drives the real
+// NoRoute arm, proving its protocol argument is wired to that selector.
 fn ah_deny_snapshot_13645() -> crate::ConfigSnapshot {
     let mut snap = nat_snapshot();
     snap.default_policy = "permit".to_string();
@@ -780,6 +775,7 @@ fn noroute_descriptor_uses_effective_protocol_for_ah_deny_13769() {
         routing_domain: sfmix_domain,
         ..Default::default()
     });
+    snapshot.default_policy = "permit".to_string();
     snapshot.policies = ah_deny_snapshot_13645().policies;
     snapshot.policies[0].from_zone = "any".to_string();
     snapshot.policies[0].to_zone = "any".to_string();
