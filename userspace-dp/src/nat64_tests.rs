@@ -4232,9 +4232,37 @@ fn nat64_4381_same_flow_reuses_mapping() {
     assert_eq!(a, b, "same flow reuses its translated mapping");
 }
 
-// Release un-tracks the flow so its port returns to the pool. Before release a
-// re-allocation is idempotent (returns the live mapping); after release the
-// live entry is gone, so a fresh allocation is issued.
+// RFC 6146 §3.5.2: a BIB mapping is independent of the remote endpoint.
+#[test]
+fn nat64_13946_same_transport_address_reuses_mapping_across_destinations() {
+    let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let first = state
+        .allocate_source(
+            0,
+            crate::ip_proto::PROTO_TCP,
+            client,
+            Ipv4Addr::new(8, 8, 8, 8),
+            5000,
+            443,
+            1,
+        )
+        .unwrap();
+    let other_remote = state
+        .allocate_source(
+            0,
+            crate::ip_proto::PROTO_TCP,
+            client,
+            Ipv4Addr::new(1, 1, 1, 1),
+            5000,
+            443,
+            2,
+        )
+        .unwrap();
+    assert_eq!(first, other_remote, "#13946: transport binding must be independent of destination");
+}
+
+// Release removes the active flow reference but retains the idle BIB mapping.
 #[test]
 fn nat64_4381_release_untracks_flow() {
     let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
@@ -4243,14 +4271,6 @@ fn nat64_4381_release_untracks_flow() {
     let (snat, pa) = state
         .allocate_source(0, crate::ip_proto::PROTO_TCP, c, dst_v4, 5000, 443, 1)
         .unwrap();
-    // Idempotent while live.
-    assert_eq!(
-        state
-            .allocate_source(0, crate::ip_proto::PROTO_TCP, c, dst_v4, 5000, 443, 1)
-            .unwrap(),
-        (snat, pa)
-    );
-    // The forward session key + decision the teardown release path reconstructs.
     let key = crate::session::SessionKey {
         addr_family: libc::AF_INET6 as u8,
         protocol: crate::ip_proto::PROTO_TCP,
@@ -4258,8 +4278,8 @@ fn nat64_4381_release_untracks_flow() {
         dst_ip: IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()),
         src_port: 5000,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     release_nat64_allocation(
         &state,
@@ -4268,15 +4288,20 @@ fn nat64_4381_release_untracks_flow() {
         false,
         2,
     );
-    // Flow no longer live: a fresh allocation is issued (NOT the cached live
-    // entry), proving the release removed the tracking.
-    let (snat2, pb) = state
-        .allocate_source(0, crate::ip_proto::PROTO_TCP, c, dst_v4, 5000, 443, 3)
-        .unwrap();
-    assert_eq!(snat2, snat);
-    assert_ne!(
-        pb, pa,
-        "post-release allocation is fresh, not the released live entry"
+    assert_eq!(
+        state
+            .allocate_source(
+                0,
+                crate::ip_proto::PROTO_TCP,
+                c,
+                Ipv4Addr::new(1, 1, 1, 1),
+                5000,
+                443,
+                3,
+            )
+            .unwrap(),
+        (snat, pa),
+        "release must preserve the idle BIB binding for a different destination"
     );
 }
 
@@ -8307,11 +8332,10 @@ fn nat64_release_is_keyed_by_routing_domain_9680() {
         5,
         0,
     );
-    assert_ne!(
+    assert_eq!(
         nat64_alloc_in_domain_9680(&state, 6, TENANT_A_9680),
         a,
-        "tenant A's release did not free its binding: the release key's routing \
-         scope does not match the allocation's, so the pool entry leaks"
+        "tenant A's released flow must retain its idle BIB binding"
     );
     assert_eq!(
         nat64_alloc_in_domain_9680(&state, 7, TENANT_B_9680),

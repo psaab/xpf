@@ -1,4 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
+
+  * Reuse NAT64 translated IPv4 address and port across remote endpoints for
+    each IPv6 protocol/source-address/source-port binding (RFC 6146 endpoint-
+    independent mapping). Keep the binding while any associated session is
+    active and for 300 seconds after its last session closes (#13946).
   * Resolve REST operational command regexes before reading request bodies and
     reject body-independent command denials before buffering (#13249).
 
