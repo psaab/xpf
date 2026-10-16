@@ -9362,6 +9362,54 @@ fn completed_handshake_still_gets_the_established_window_6752() {
          fix trades a half-open leak for a reaped live session",
     );
 }
+/// #13677: a reverse SYN-ACK arriving on an ALREADY-established flow (a stray
+/// or retransmitted SYN-ACK after the completing ACK) must not re-pend either
+/// half. Handshake completion is terminal: re-pending flips both halves back
+/// to the ~20 s opening idle class, blocks the companion probe, and re-holds a
+/// live flow for reaping at the opening window.
+#[test]
+fn reverse_synack_after_established_does_not_repend_13677() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+
+    assert!(
+        table
+            .lookup(&reverse, now + 1_000_000, TCP_SYN | TCP_ACK)
+            .is_some()
+    );
+    assert!(table.lookup(&forward, now + 2_000_000, TCP_ACK).is_some());
+    for key in [&forward, &reverse] {
+        let entry = table.entry_by_key(key).expect("completed handshake half");
+        assert!(entry.established);
+        assert!(
+            !entry.handshake_pending,
+            "premise: completed handshake must not be pending"
+        );
+    }
+
+    // A stray / retransmitted reverse SYN-ACK on the established flow.
+    assert!(
+        table
+            .lookup(&reverse, now + 3_000_000, TCP_SYN | TCP_ACK)
+            .is_some()
+    );
+    for key in [&forward, &reverse] {
+        let entry = table.entry_by_key(key).expect("established half after SYN-ACK");
+        assert!(entry.established);
+        assert!(
+            !entry.handshake_pending,
+            "#13677: reverse SYN-ACK on an established flow re-pended a half"
+        );
+        assert_eq!(
+            entry.expires_after_ns,
+            table.timeouts.tcp_established_ns,
+            "#13677: established flow must keep the established idle window"
+        );
+    }
+}
+
 /// #10891: a SYN-ACK-first pickup is embryonic, and without the peer ACK both
 /// directions must reap on the opening window rather than the 300 s idle
 /// timeout. Even a retransmitted SYN-ACK is not handshake completion.

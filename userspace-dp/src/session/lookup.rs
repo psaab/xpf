@@ -408,7 +408,9 @@ impl SessionTable {
             // #10889: a non-TCP entry with an application override promotes
             // only on the first packet observed on its reverse half.
             let promote_from_reverse = if is_tcp {
-                is_syn_ack(tcp_flags) && entry.metadata.is_reverse
+                is_syn_ack(tcp_flags)
+                    && entry.metadata.is_reverse
+                    && (!entry.established || entry.handshake_pending)
             } else {
                 !entry.established
                     && entry.metadata.is_reverse
