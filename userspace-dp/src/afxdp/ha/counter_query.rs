@@ -65,6 +65,8 @@ pub(crate) struct WorkerSessionCounters {
 pub(crate) struct SessionCounterQueryWait {
     sequence: u64,
     slots: Vec<(u32, Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>)>,
+    /// Workers whose query could not be queued and therefore cannot answer.
+    refused: Vec<u32>,
     /// #9900 F-093: workers shed at kick time; the wait reports them as
     /// unanswered without eating the timeout.
     dead: Vec<u32>,
@@ -80,6 +82,7 @@ impl crate::afxdp::Coordinator {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         let mut slots = Vec::with_capacity(self.workers.records().len());
+        let mut refused = Vec::new();
         let mut dead = Vec::new();
         for (worker_id, rec) in self.workers.records().iter() {
             let handle = &rec.handle;
@@ -89,11 +92,12 @@ impl crate::afxdp::Coordinator {
                 continue;
             }
             // Recover, never early-return: one worker's poisoned queue must not
-            // deny the reading for every healthy worker. A worker that never
-            // receives the command simply never answers, which the deadline
-            // below already reports as `answered: false`.
+            // deny the reading for every healthy worker. A worker whose command
+            // is refused is reported unanswered immediately; waiting for an
+            // ack to a command that was never queued would impose the whole
+            // timeout without any possibility of success.
             let mut pending = worker_queue::lock_recover(&handle.commands);
-            worker_queue::push_bounded(
+            let queued = worker_queue::push_bounded(
                 &mut pending,
                 WorkerCommand::QuerySessionCounters {
                     sequence,
@@ -101,32 +105,44 @@ impl crate::afxdp::Coordinator {
                 },
             );
             drop(pending);
-            slots.push((*worker_id, handle.runtime_atomics.clone()));
+            if queued {
+                slots.push((*worker_id, handle.runtime_atomics.clone()));
+            } else {
+                refused.push(*worker_id);
+            }
         }
         SessionCounterQueryWait {
             sequence,
             slots,
+            refused,
             dead,
         }
     }
 }
 
 impl SessionCounterQueryWait {
-    /// Lock-free phase: wait (bounded) for each worker's sequence to reach ours,
-    /// then read its answer. Run with the `ServerState` lock RELEASED.
+    /// Lock-free phase: wait (bounded) for each queued worker's exact sequence
+    /// to publish, then read its answer. A later sequence means the single
+    /// response slot was overwritten by another session query and is reported
+    /// unanswered rather than cross-attributed. Run with the `ServerState` lock
+    /// RELEASED.
     pub(crate) fn wait_and_collect(self) -> Vec<WorkerSessionCounters> {
         let deadline = Instant::now() + COUNTER_QUERY_TIMEOUT;
-        let mut out = Vec::with_capacity(self.slots.len());
+        let mut out = Vec::with_capacity(self.slots.len() + self.refused.len() + self.dead.len());
         for (worker_id, atomics) in self.slots {
             let mut answered = false;
             loop {
                 // Acquire pairs with the worker's Release store of the sequence,
-                // so every answer field written before it is visible here.
-                if atomics.counter_query_seq.load(Ordering::Acquire) >= self.sequence {
+                // so every answer field written before it is visible here. The
+                // slot holds only the latest answer: an LATER sequence means
+                // this query was overwritten and must not borrow that session's
+                // counters.
+                let published = atomics.counter_query_seq.load(Ordering::Acquire);
+                if published == self.sequence {
                     answered = true;
                     break;
                 }
-                if Instant::now() >= deadline {
+                if published > self.sequence || Instant::now() >= deadline {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(2));
@@ -147,6 +163,12 @@ impl SessionCounterQueryWait {
                 fwd_bytes: atomics.counter_query_fwd_bytes.load(Ordering::Relaxed),
                 rev_packets: atomics.counter_query_rev_packets.load(Ordering::Relaxed),
                 rev_bytes: atomics.counter_query_rev_bytes.load(Ordering::Relaxed),
+            });
+        }
+        for worker_id in self.refused {
+            out.push(WorkerSessionCounters {
+                worker_id,
+                ..Default::default()
             });
         }
         // #9900 F-093: dead workers were shed at kick time; report them as

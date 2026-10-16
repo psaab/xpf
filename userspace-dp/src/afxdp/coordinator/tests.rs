@@ -11965,14 +11965,17 @@ fn record_keyed_fan_out_sheds_dead_workers_9900() {
     let dead_atomics = dead_rec.handle.runtime_atomics.clone();
     dead_atomics.dead.store(true, Ordering::Relaxed);
     coordinator.workers.register(5, dead_rec, None);
-    // The live worker answers immediately so the wait below cannot stall.
-    live_atomics
-        .counter_query_seq
-        .store(u64::MAX, Ordering::Release);
 
     let shed_before =
         crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed);
     let wait = coordinator.kick_session_counter_query(&f4_key());
+    let sequence = match live_commands.lock().unwrap().front() {
+        Some(WorkerCommand::QuerySessionCounters { sequence, .. }) => *sequence,
+        other => panic!("expected counter query, got {other:?}"),
+    };
+    live_atomics
+        .counter_query_seq
+        .store(sequence, Ordering::Release);
     assert_eq!(
         live_commands.lock().unwrap().len(),
         1,
@@ -11997,6 +12000,71 @@ fn record_keyed_fan_out_sheds_dead_workers_9900() {
         got.iter().any(|c| c.worker_id == 6 && c.answered),
         "the live worker must answer"
     );
+}
+
+/// #13711: a refused bounded-queue query cannot be answered. Do not include
+/// its worker in the wait set and burn the full timeout.
+#[test]
+fn counter_query_queue_full_does_not_wait_13711() {
+    use std::time::Instant;
+    let mut coordinator = Coordinator::new();
+    let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    let commands = rec.handle.commands.clone();
+    coordinator.workers.register(7, rec, None);
+    commands.lock().unwrap().resize_with(
+        crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+        || WorkerCommand::VacateAllSharedExactSlots,
+    );
+    let started = Instant::now();
+    let rows = coordinator
+        .kick_session_counter_query(&f4_key())
+        .wait_and_collect();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].worker_id, 7);
+    assert!(!rows[0].answered);
+}
+
+/// #13711: a later query overwrites the single per-worker reply slot. Its
+/// sequence must not acknowledge an earlier session query or cross-attribute
+/// the later session's counters.
+#[test]
+fn counter_query_later_session_reply_does_not_answer_earlier_13711() {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+    let mut coordinator = Coordinator::new();
+    let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
+    let atomics = rec.handle.runtime_atomics.clone();
+    coordinator.workers.register(8, rec, None);
+    let wait_a = coordinator.kick_session_counter_query(&f4_key());
+    let mut key_b = f4_key();
+    key_b.src_port += 1;
+    let wait_b = coordinator.kick_session_counter_query(&key_b);
+    let seq_b = {
+        let records = coordinator.workers.records();
+        let q = records[&8].handle.commands.lock().unwrap();
+        let sequences: Vec<_> = q
+            .iter()
+            .filter_map(|command| match command {
+                WorkerCommand::QuerySessionCounters { sequence, .. } => Some(*sequence),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sequences.len(), 2);
+        sequences[1]
+    };
+    atomics.counter_query_found.store(1, Ordering::Relaxed);
+    atomics.counter_query_fwd_packets.store(999, Ordering::Relaxed);
+    atomics.counter_query_seq.store(seq_b, Ordering::Release);
+    let started = Instant::now();
+    let rows_a = wait_a.wait_and_collect();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(rows_a.len(), 1);
+    assert!(!rows_a[0].answered, "B's reply must not satisfy A: {rows_a:?}");
+    let rows_b = wait_b.wait_and_collect();
+    assert_eq!(rows_b.len(), 1);
+    assert!(rows_b[0].answered);
+    assert_eq!(rows_b[0].fwd_packets, 999);
 }
 
 /// #9900 F-093 (GPT-3): an owner-RG export that shed a dead worker FAILS as
