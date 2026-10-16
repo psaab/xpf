@@ -1169,6 +1169,7 @@ impl PortAllocatorLiveState {
             },
             key,
         );
+        self.persistent_permissions.remove(key);
         Some(lease)
     }
 

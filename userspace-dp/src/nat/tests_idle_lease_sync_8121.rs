@@ -3590,3 +3590,55 @@ fn persistent_reverse_collision_keeps_both_lease_permissions_14046() {
         "removing the PAT owner resolves the shared permission to the remaining lease"
     );
 }
+/// #14113: removing an expired lease must also remove its permit history.
+/// Otherwise a new lease for the same source key inherits the old remote grant.
+#[test]
+fn expired_lease_recreation_drops_obsolete_remote_permissions_14113() {
+    use super::allocator::PersistentInbound;
+    let addrs = ["203.0.113.1".parse().unwrap()];
+    let allocator = PortAllocator::new(1, 20_000, 20_010);
+    let original = flow("10.0.61.50", 40_000);
+    let first = mint_persistent(&allocator, &addrs, original, 1_000);
+    assert!(allocator.release_flow(
+        original,
+        first,
+        2_000,
+        NatHolder::Untracked,
+    ));
+
+    let replacement = SourceNatFlowKey {
+        dst_ip: "9.9.9.9".parse().unwrap(),
+        dst_port: 8443,
+        ..original
+    };
+    let reallocated_at = 2_000 + TIMEOUT_NS + 1;
+    let translated = mint_persistent(&allocator, &addrs, replacement, reallocated_at);
+    assert_eq!(
+        allocator.persistent_inbound_lookup(
+            TCP,
+            translated.ip,
+            translated.port,
+            original.dst_ip,
+            original.dst_port,
+            reallocated_at + 1,
+        ),
+        PersistentInbound::Denied,
+        "expired lease's old remote grant must not survive same-key recreation"
+    );
+    assert_eq!(
+        allocator.persistent_inbound_lookup(
+            TCP,
+            translated.ip,
+            translated.port,
+            replacement.dst_ip,
+            replacement.dst_port,
+            reallocated_at + 1,
+        ),
+        PersistentInbound::Permitted {
+            internal_ip: replacement.src_ip,
+            internal_port: replacement.src_port,
+            address_only: false,
+        },
+        "new lease remote grant remains admitted"
+    );
+}
