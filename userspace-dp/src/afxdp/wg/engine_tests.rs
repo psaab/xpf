@@ -1537,6 +1537,122 @@ fn peer_for_dest_lpm_selects_owning_peer() {
     );
 }
 
+/// #13664: `peer_for_dest` must return the peer's LIVE endpoint,
+/// not the static commit-time `config.endpoint` captured at engine
+/// build. A peer that roams (NAT rebinding / mobility) or whose
+/// DDNS name re-resolves to a new address is learned on authenticated
+/// traffic (`note_worker_observed_endpoint`) and adopted by the
+/// control thread into the engine-side live slot
+/// (`adopt_live_endpoint`); the dataplane encap / PTB / outer-MTU
+/// egress paths select the send target via `peer_for_dest`, so until
+/// they observe the live value every transit packet keeps being
+/// encapsulated toward the dead static address — a blackhole the
+/// control thread's keepalives (which use the adopted map) do not
+/// show. An accepted DDNS resolution, mirrored into the live slot
+/// by the control thread, must move the dataplane target once the
+/// peer has been silent past the roam hold; fresher authenticated
+/// traffic re-wins it immediately. With no live
+/// endpoint the static config endpoint is the fallback, and a new
+/// config commit must not resurrect a superseded live endpoint for
+/// the surviving peer (the live slot lives on the `Arc<Peer>` that
+/// `reconcile_peers` reuses per pubkey).
+///
+/// FAIL-ON-REVERT: un-fix `peer_for_dest` to return
+/// `entry.config.endpoint` unconditionally (the pre-#13664 body) and
+/// the roam and DDNS assertions fail with the static A endpoint.
+#[test]
+fn peer_for_dest_prefers_live_roamed_and_resolved_endpoint_13664() {
+    let (local_priv, _local_pub) = keypair();
+    let (_a_priv, a_pub) = keypair();
+    let a_cfg: std::net::SocketAddr = "203.0.113.1:51820".parse().unwrap();
+    let a_roamed: std::net::SocketAddr = "198.51.100.77:33445".parse().unwrap();
+    let a_ddns: std::net::SocketAddr = "192.0.2.9:51820".parse().unwrap();
+    let cfg = |endpoint: Option<std::net::SocketAddr>| WgPeerConfig {
+        pubkey: a_pub,
+        endpoint,
+        persistent_keepalive: 0,
+        allowed_ips: vec![ipnet::IpNet::from_str("10.1.0.0/16").unwrap()],
+        preshared_key: [0u8; 32].into(),
+    };
+    let engine = WgEngine::new(WgEngineConfig {
+        local_private_key: local_priv.into(),
+        listen_port: 51820,
+        peers: vec![cfg(Some(a_cfg))],
+    });
+    let dst: std::net::IpAddr = "10.1.9.9".parse().unwrap();
+
+    // No live endpoint yet: the static config endpoint is used.
+    let (pk, ep) = engine.peer_for_dest(dst).expect("A covers 10.1.9.9");
+    assert_eq!(pk, a_pub);
+    assert_eq!(ep, Some(a_cfg), "pre-roam fallback is the config endpoint");
+
+    // The peer roams: an authenticated datagram from a new source is
+    // observed by a worker and adopted into the live slot.
+    assert!(engine.note_worker_observed_endpoint(&a_pub, a_roamed));
+    assert_eq!(
+        engine.take_worker_observed_endpoint(&a_pub),
+        Some(a_roamed),
+        "the control-thread drain still sees the mailbox report"
+    );
+    engine.adopt_live_endpoint(&a_pub, a_roamed);
+    let (_, ep) = engine.peer_for_dest(dst).expect("A covers 10.1.9.9");
+    assert_eq!(
+        ep,
+        Some(a_roamed),
+        "#13664: peer_for_dest must follow the roamed live endpoint, \
+         not blackhole transit toward the static config endpoint"
+    );
+
+    // DDNS: after silence past the roam hold the resolver's new
+    // address is pushed into the same live slot and takes over.
+    engine.adopt_live_endpoint(&a_pub, a_ddns);
+    let (_, ep) = engine.peer_for_dest(dst).expect("A covers 10.1.9.9");
+    assert_eq!(
+        ep,
+        Some(a_ddns),
+        "#13664: DDNS re-resolution must move the dataplane target"
+    );
+
+    // A fresher authenticated datagram re-wins over the DNS value.
+    assert!(engine.note_worker_observed_endpoint(&a_pub, a_roamed));
+    let _ = engine.take_worker_observed_endpoint(&a_pub);
+    engine.adopt_live_endpoint(&a_pub, a_roamed);
+    let (_, ep) = engine.peer_for_dest(dst).expect("A covers 10.1.9.9");
+    assert_eq!(ep, Some(a_roamed), "authenticated traffic re-wins over DNS");
+
+    // A new config commit (even one rewriting the static endpoint)
+    // must not resurrect the superseded address for the kept peer.
+    let a_cfg_new: std::net::SocketAddr = "203.0.113.2:51820".parse().unwrap();
+    engine.reconcile_peers(&[cfg(Some(a_cfg_new))]);
+    let (_, ep) = engine.peer_for_dest(dst).expect("A covers 10.1.9.9");
+    assert_eq!(
+        ep,
+        Some(a_roamed),
+        "the live endpoint survives config commits on the reused peer Arc"
+    );
+
+    // A peer with neither config nor live endpoint still resolves to
+    // the owning peer with no target (responder-only parity).
+    let (local2_priv, _local2_pub) = keypair();
+    let (_b_priv, b_pub) = keypair();
+    let engine2 = WgEngine::new(WgEngineConfig {
+        local_private_key: local2_priv.into(),
+        listen_port: 51820,
+        peers: vec![WgPeerConfig {
+            pubkey: b_pub,
+            endpoint: None,
+            persistent_keepalive: 0,
+            allowed_ips: vec![ipnet::IpNet::from_str("10.2.0.0/16").unwrap()],
+            preshared_key: [0u8; 32].into(),
+        }],
+    });
+    let (pk, ep) = engine2
+        .peer_for_dest("10.2.0.1".parse().unwrap())
+        .expect("B covers 10.2.0.1");
+    assert_eq!(pk, b_pub);
+    assert_eq!(ep, None, "responder-only peer has no egress target until heard from");
+}
+
 /// #1434 B2: a per-peer preshared key must round-trip through a real
 /// handshake — matching PSKs complete, a mismatched PSK fails the AEAD
 /// in msg2. Exercises the initiator (build-time PSK) and responder
