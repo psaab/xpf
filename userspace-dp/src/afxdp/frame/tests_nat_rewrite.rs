@@ -2306,3 +2306,140 @@ fn rewrite_in_place_leaves_mss_untouched_through_ah_10729() {
         "MSS must be untouched through AH (ICV break otherwise)"
     );
 }
+
+// #14115: a GRE/WG-decapsulated reverse NAT64 non-first fragment carries its
+// REAL protocol (UDP) in meta (parse_inner_protocol_and_offsets reads the IPv4
+// Protocol byte), unlike a direct-XDP non-first fragment whose shim meta
+// carries the 255 no-L4 sentinel. build_nat64_inner_frame must skip the L4
+// port/identifier rewrite on the translated non-first output: its bytes after
+// the inserted IPv6 Fragment Header are opaque payload. On master the fall-
+// through to apply_nat64_port_translation overwrites payload[0..4] as UDP
+// ports and payload[6..8] as an apparent UDP checksum.
+#[test]
+fn nat64_14115_reverse_nonfirst_decapped_payload_not_treated_as_ports() {
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let translated = 40001u16;
+    let orig_sport = 5000u16;
+    let payload: &[u8] = &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00];
+    let build_frame = |proto_meta: u8| {
+        let mut frame = vec![0u8; 14 + 20 + payload.len()];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[14] = 0x45;
+        let total = (20 + payload.len()) as u16;
+        frame[16..18].copy_from_slice(&total.to_be_bytes());
+        frame[18..20].copy_from_slice(&0x4242u16.to_be_bytes());
+        frame[20..22].copy_from_slice(&0x00b9u16.to_be_bytes());
+        frame[22] = 64;
+        frame[23] = PROTO_UDP;
+        frame[26..30].copy_from_slice(&server.octets());
+        frame[30..34].copy_from_slice(&pool.octets());
+        let csum = checksum16(&frame[14..34]);
+        frame[24..26].copy_from_slice(&csum.to_be_bytes());
+        frame[34..].copy_from_slice(payload);
+        let mut meta = nat64_reverse_meta();
+        meta.protocol = proto_meta;
+        (frame, meta)
+    };
+    let fwd = Nat64State::forward_decision(pool, server, translated);
+    let rev = fwd.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), orig_sport, 443);
+    assert_eq!(rev.rewrite_dst_port, Some(orig_sport));
+    let decision = icmp_test_decision(rev);
+    let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    let (frame, meta) = build_frame(PROTO_UDP);
+    let out = build_nat64_forwarded_frame(&frame, meta, &decision, Some(&info), false, &ForwardingState::default())
+        .expect("#14115: reverse non-first fragment L3-translates");
+    assert_eq!(out[20], 44, "output carries an IPv6 Fragment Header");
+    assert_eq!(&out[22..38], &synthetic.octets(), "src restored to synthetic server");
+    assert_eq!(&out[38..54], &client.octets(), "dst restored to original client");
+    assert_eq!(&out[62..], payload, "#14115: non-first payload must be verbatim, not overwritten as UDP ports/checksum");
+    let (frame2, meta2) = build_frame(255);
+    let out2 = build_nat64_forwarded_frame(&frame2, meta2, &decision, Some(&info), false, &ForwardingState::default())
+        .expect("#14115: sentinel reverse non-first fragment L3-translates");
+    assert_eq!(&out2[62..], payload, "#14115: sentinel control payload verbatim");
+}
+
+// #14115/#14114 combined on the merged slow path: forward decapped meta
+// (real UDP) cannot regress the fast-path early-return, and the slow-path
+// L3 builder — which after #14114 owns the recorded-decision non-first
+// case — translates L3-only with preserved TTL instead of #14115's
+// original fail-closed drop, never treating payload as L4. Missing
+// reverse metadata still fails closed (#14114's control).
+#[test]
+fn nat64_14115_forward_nonfirst_and_slow_path_do_not_touch_payload() {
+    let pool = Ipv4Addr::new(203, 0, 113, 1);
+    let server = Ipv4Addr::new(8, 8, 8, 8);
+    let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let synthetic: Ipv6Addr = "64:ff9b::0808:0808".parse().unwrap();
+    let payload: &[u8] = &[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06];
+    let mut frame = vec![0u8; 14 + 40 + 8 + payload.len()];
+    frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+    frame[14] = 0x60;
+    frame[18..20].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    frame[20] = 44;
+    frame[21] = 64;
+    frame[22..38].copy_from_slice(&client.octets());
+    frame[38..54].copy_from_slice(&synthetic.octets());
+    frame[54] = PROTO_UDP;
+    frame[56..58].copy_from_slice(&((100u16 << 3) | 1).to_be_bytes());
+    frame[58..62].copy_from_slice(&0x1234u32.to_be_bytes());
+    frame[62..].copy_from_slice(payload);
+    let mut meta = nat64_forward_meta();
+    meta.protocol = PROTO_UDP;
+    let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, 40001));
+    let out = build_nat64_forwarded_frame(&frame, meta, &decision, None, false, &ForwardingState::default())
+        .expect("forward non-first translates");
+    assert_eq!(&out[34..], payload, "forward non-first payload verbatim");
+    // #14114: v6->v4 preserve-TTL L3-only translation. Input: 40B v6 +
+    // 8B Fragment Header (offset 100<<3, MF=1, ident 0x1234) + payload,
+    // Hop Limit 64. Output: 20B v4, ident 0x1234 low16, frag word
+    // MF|100, TTL preserved, pool/server addresses, verbatim payload.
+    let slow = build_nat64_l3_packet_for_slow_path(&frame, nat64_forward_meta(), &decision, None, false)
+        .expect("#14114: slow path L3-translates a v6 non-first fragment");
+    assert_eq!(slow[0], 0x45);
+    assert_eq!(&slow[4..6], &[0x12, 0x34], "#14114: v4 ident = v6 ident low 16 bits");
+    assert_eq!(&slow[6..8], &[0x20, 0x64], "#14114: MF + offset 100 preserved");
+    assert_eq!(slow[8], 64, "#14114: Hop Limit preserved for kernel FIB decrement");
+    assert_eq!(slow[9], PROTO_UDP);
+    assert_eq!(&slow[12..16], &pool.octets());
+    assert_eq!(&slow[16..20], &server.octets());
+    assert_eq!(&slow[20..], payload, "#14115/#14114: slow-path payload must be verbatim, never ports/checksum");
+    let mut v4frame = vec![0u8; 14 + 20 + payload.len()];
+    v4frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+    v4frame[14] = 0x45;
+    v4frame[16..18].copy_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+    v4frame[18..20].copy_from_slice(&0x4242u16.to_be_bytes());
+    v4frame[20..22].copy_from_slice(&0x00b9u16.to_be_bytes());
+    v4frame[22] = 64;
+    v4frame[23] = PROTO_UDP;
+    v4frame[26..30].copy_from_slice(&server.octets());
+    v4frame[30..34].copy_from_slice(&pool.octets());
+    let csum = checksum16(&v4frame[14..34]);
+    v4frame[24..26].copy_from_slice(&csum.to_be_bytes());
+    v4frame[34..].copy_from_slice(payload);
+    let fwd = Nat64State::forward_decision(pool, server, 40001);
+    let rev = fwd.reverse(IpAddr::V6(client), IpAddr::V6(synthetic), 5000, 443);
+    let rdecision = icmp_test_decision(rev);
+    let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
+    let mut rmeta = nat64_reverse_meta();
+    rmeta.protocol = PROTO_UDP;
+    // #14114: v4->v6 preserve-TTL L3-only translation. Input v4 frag word
+    // 0x00b9 = offset 185, MF=0, ident 0x4242, TTL 64. Output: 40B v6 +
+    // 8B Fragment Header (offset 185<<3, ident 0x4242 zero-extended),
+    // Hop Limit preserved, restored reverse endpoints, verbatim payload.
+    let rslow = build_nat64_l3_packet_for_slow_path(&v4frame, rmeta, &rdecision, Some(&info), false)
+        .expect("#14114: slow path L3-translates a v4 non-first fragment");
+    assert_eq!(rslow[6], 44, "#14114: output carries an IPv6 Fragment Header");
+    assert_eq!(rslow[7], 64, "#14114: TTL preserved for kernel FIB decrement");
+    assert_eq!(&rslow[8..24], &synthetic.octets(), "#14114: src restored to synthetic server");
+    assert_eq!(&rslow[24..40], &client.octets(), "#14114: dst restored to original client");
+    assert_eq!(&rslow[42..44], &(185u16 << 3).to_be_bytes(), "#14114: v6 frag offset from v4 word");
+    assert_eq!(&rslow[44..48], &0x4242u32.to_be_bytes(), "#14114: v6 ident = zero-extended v4 ident");
+    assert_eq!(&rslow[48..], payload, "#14115/#14114: slow-path payload must be verbatim, never ports/checksum");
+    assert!(
+        build_nat64_l3_packet_for_slow_path(&v4frame, rmeta, &rdecision, None, false).is_none(),
+        "#14114: slow path still fails closed without Nat64ReverseInfo"
+    );
+}
