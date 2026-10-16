@@ -1147,18 +1147,8 @@ fn stamp_injected_packet_tuple_builds_ipv4_icmp_flow_key() {
     let owned = forwarding_owning(&[IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))]);
     let tuple =
         inject::validate_injected_packet_tuple(&req, dst, &owned).expect("validate tuple");
-    let egress = EgressInterface {
-        bind_ifindex: 12,
-        vlan_id: 0,
-        mtu: 1500,
-        src_mac: [0; 6],
-        zone_id: TEST_WAN_ZONE_ID,
-        redundancy_group: 0,
-        primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
-        primary_v6: None,
-    };
 
-    inject::stamp_injected_packet_tuple(&mut meta, 98, tuple, &egress).expect("stamp tuple");
+    inject::stamp_injected_packet_tuple(&mut meta, 98, tuple, 0).expect("stamp tuple");
 
     let flow = parse_session_flow_from_meta(meta).expect("metadata flow");
     assert_eq!(meta.protocol, PROTO_ICMP);
@@ -1199,18 +1189,8 @@ fn stamp_injected_packet_tuple_builds_ipv6_icmp_flow_key() {
     let owned = forwarding_owning(&[IpAddr::V6(src)]);
     let tuple = inject::validate_injected_packet_tuple(&req, IpAddr::V6(dst), &owned)
         .expect("validate tuple");
-    let egress = EgressInterface {
-        bind_ifindex: 12,
-        vlan_id: 80,
-        mtu: 1500,
-        src_mac: [0; 6],
-        zone_id: TEST_WAN_ZONE_ID,
-        redundancy_group: 0,
-        primary_v4: None,
-        primary_v6: Some(src),
-    };
 
-    inject::stamp_injected_packet_tuple(&mut meta, 118, tuple, &egress).expect("stamp tuple");
+    inject::stamp_injected_packet_tuple(&mut meta, 118, tuple, 80).expect("stamp tuple");
 
     let flow = parse_session_flow_from_meta(meta).expect("metadata flow");
     assert_eq!(meta.protocol, PROTO_ICMPV6);
@@ -11770,7 +11750,7 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
         let mut maps = TestShimMaps9594::default();
         maps.ingress.insert(lo);
         if local {
-            maps.local.insert(inner_dst);
+            maps.local.insert((0, inner_dst));
         }
         seam.push(("wgt9594s".to_string(), maps));
     };

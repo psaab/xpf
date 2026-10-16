@@ -1470,10 +1470,14 @@ Scope of the fallback:
   their physical fallback; other contested parent identities remain fail-closed.
   **#13979 native VLAN egress.** A native unit remains keyed by its configured
   VID for ingress identity, but forwarding emits frames through that unit
-  untagged. `populate_egress` records the uniquely resolved native unit and
-  the shared egress-resolution path returns wire VID 0 for it; other VLAN
-  units retain their configured tag. Regression coverage is in
-  `forwarding_build/tests.rs::native_vlan_native_unit_egress_is_untagged_13979`.
+  untagged. `populate_egress` records the uniquely resolved native unit; route
+  resolutions, cached sessions, reflected ICMP/PTB errors, and on-wire
+  diagnostics all use wire VID 0. Reflected errors also suppress an inbound
+  VLAN tag when the egress unit is native, while preserving tagged and
+  priority-tag reflection on non-native interfaces. Other VLAN units retain
+  their configured tag. Regression coverage includes
+  `forwarding_build/tests.rs::native_vlan_native_unit_egress_is_untagged_13979`
+  and `icmp_tests.rs::native_vlan_reflected_error_untags_but_other_egress_reflects_priority_13979`.
 
 
   **#12055 shim local-delivery guard.** The AF_XDP worker's tagged-only VID-0

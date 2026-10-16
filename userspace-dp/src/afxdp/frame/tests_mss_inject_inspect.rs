@@ -73,6 +73,7 @@ fn inject_ipv4_normal_length_builds() {
         Ipv4Addr::new(172, 16, 80, 8),
         Ipv4Addr::new(172, 16, 80, 200),
         4660,
+        0,
         &egress,
     )
     .expect("normal injected IPv4 frame builds");
@@ -95,6 +96,7 @@ fn inject_ipv4_at_max_builds_and_is_bounded() {
         Ipv4Addr::new(172, 16, 80, 8),
         Ipv4Addr::new(172, 16, 80, 200),
         4660,
+        0,
         &egress,
     )
     .expect("at-max injected IPv4 frame builds");
@@ -122,6 +124,7 @@ fn inject_ipv4_giant_length_clamped_no_wire_wrap() {
         Ipv4Addr::new(172, 16, 80, 8),
         Ipv4Addr::new(172, 16, 80, 200),
         4660,
+        0,
         &egress,
     )
     .expect("giant length must be clamped, not rejected by the builder");
@@ -148,6 +151,7 @@ fn inject_ipv6_giant_length_clamped_no_wire_wrap() {
         Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 8),
         Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200),
         4660,
+        0,
         &egress,
     )
     .expect("giant length must be clamped, not rejected by the builder");

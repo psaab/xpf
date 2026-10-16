@@ -621,11 +621,7 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
     let total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
     let packet_len = total_len.min(packet.len());
     let quoted_len = packet_len.min(ihl.saturating_add(8));
-    let tag = if ingress_tag.emits() {
-        ingress_tag
-    } else {
-        TxVlanTag::from(forwarding.egress_tx_vlan_id(ingress_ifindex))
-    };
+    let tag = super::icmp::reflected_egress_tag(forwarding, ingress_ifindex, ingress_tag);
     let eth_len = tag.header_len();
     let total_len = 20usize.checked_add(8)?.checked_add(quoted_len)?;
     let mut out = Vec::with_capacity(eth_len + total_len);
@@ -739,11 +735,7 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
     let packet_len = (40 + payload_len).min(packet.len());
     // RFC 4443 §3.2: the error must not exceed the IPv6 minimum MTU. Cap
     // the quote so eth + 40 (outer IP) + 8 (ICMPv6 header) + quote <= 1280.
-    let tag = if ingress_tag.emits() {
-        ingress_tag
-    } else {
-        TxVlanTag::from(forwarding.egress_tx_vlan_id(ingress_ifindex))
-    };
+    let tag = super::icmp::reflected_egress_tag(forwarding, ingress_ifindex, ingress_tag);
     let eth_len = tag.header_len();
     let max_quote = 1280usize.saturating_sub(40 + 8);
     let quoted_len = packet_len.min(max_quote);
