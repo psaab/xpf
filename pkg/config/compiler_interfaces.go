@@ -1159,6 +1159,160 @@ func selectMSSToken(node *Node) (string, bool) {
 	return "", false
 }
 
+// selectMSSValueEnd returns the token the compiler selects (the
+// selectMSSToken value) plus the end-exclusive index just past the
+// consumed value grammar:
+//
+//   - parseable `mss` child: index 2 in that child (Keys[0]=="mss",
+//     Keys[1]==value); the kind node's own Keys then carry no value —
+//     a flat token beside a parseable child is the SELECTED value's
+//     sibling in the #1979 mixed shape (`gre-in 70000 { mss 1360; }`
+//     compiles 1360), not a tail.
+//   - flat Keys[1]=="mss" with a value: index 3 in the kind node.
+//   - any other flat token: index 2 in the kind node.
+//   - unparseable child with a flat fallback: the value is Keys[1], so
+//     index 2 in the kind node — tokens past it were never consumed
+//     even though a child exists (`gre-in 1400 bogus { mss bogus; }`).
+//   - unparseable/missing-value child with NO flat token, and any other
+//     braced body (the #8838 branch): the offending keyword itself is
+//     the selected token and the whole body is the (invalid) value
+//     position, so there is no leftover to account.
+//
+// ok is false exactly when selectMSSToken reports no token; child != nil
+// only for the parseable-child selection. #14576 uses the leftover past
+// end (in child if set, else in the node) for token accounting: every
+// token the statement carries must be the kind, the optional `mss`
+// keyword, the selected value, or a #1979-discarded sibling — anything
+// else packed into the same node was silently dropped before #14576.
+func selectMSSValueEnd(node *Node) (tok string, child *Node, end int, ok bool) {
+	if mssChild := node.FindChild("mss"); mssChild != nil && len(mssChild.Keys) >= 2 {
+		if _, err := strconv.Atoi(mssChild.Keys[1]); err == nil {
+			return mssChild.Keys[1], mssChild, 2, true
+		}
+		if len(node.Keys) < 2 {
+			return mssChild.Keys[1], nil, 0, true
+		}
+		return node.Keys[1], nil, 2, true
+	}
+	if len(node.Keys) >= 3 && node.Keys[1] == "mss" {
+		return node.Keys[2], nil, 3, true
+	}
+	if len(node.Keys) >= 2 {
+		return node.Keys[1], nil, 2, true
+	}
+	if len(node.Children) > 0 {
+		return node.Children[0].Name(), nil, 0, true
+	}
+	return "", nil, 0, false
+}
+
+// mssLeftoverTokens returns the tokens packed into a tcp-mss kind node
+// past the compiler-selected value (#14576): a second kind
+// (`gre-out mss 1300 all-tcp mss 1350`), trailing junk
+// (`all-tcp mss 1350 bogus 7`), or an extra value
+// (`all-tcp 1350 9999`). In the flat-set AST the tail nests on the
+// `mss`/value child (`gre-out > [mss 1300 all-tcp ...]`, or
+// `all-tcp > [1350 9999]` for the bare-value form); in the hierarchical
+// packed AST it sits on the kind node itself; inside a braced `mss`
+// child it follows the child's selected value. The first `mss` child is
+// the value carrier the selection reads (or, when the flat token wins
+// the #1979 fallback, the precedence's discard — only its tail past
+// the value position is leftover). Any OTHER child contributed nothing
+// the selection consumed, EXCEPT the child the precedence deliberately
+// discards when a flat token exists (#1979/#8838: an unusable child
+// beside a flat token is silent by design, and the flat token beside
+// a parseable child likewise). A repeated `mss` child the FindChild
+// selection never reads is leftover on the same terms.
+func mssLeftoverTokens(node *Node) []string {
+	_, child, end, ok := selectMSSValueEnd(node)
+	if !ok {
+		return nil
+	}
+	selected := child != nil || end > 0
+	var leftover []string
+	if child != nil {
+		leftover = append(leftover, child.Keys[2:]...)
+	} else if end > 0 {
+		leftover = append(leftover, node.Keys[end:]...)
+	}
+	firstMSS := node.FindChild("mss")
+	flatExists := len(node.Keys) >= 2
+	for _, c := range node.Children {
+		switch {
+		case c == child:
+			// The selected braced child; its tail is counted above.
+		case c == firstMSS && flatExists && child == nil:
+			// Flat fallback won (#1979): the child's value position
+			// is the precedence's discard; tokens past it are
+			// nobody's.
+			leftover = append(leftover, c.Keys[2:]...)
+		case c == firstMSS:
+			// The value carrier when there is no flat token. Its tail
+			// is handled once, after the loop, by the carrier check:
+			// when the carrier IS the selection (packed keyword on
+			// the kind node, or flat-set nesting) tokens past its
+			// selected value count; when it merely holds the #8838
+			// no-token keyword its rejection already covers the child.
+		default:
+			// Any other child — a repeated `mss`, a typo keyword,
+			// junk. When a flat token exists the #1979/#8838
+			// precedence discards an unusable child silently BY
+			// DESIGN (`gre-in 1400 { msss 1; }` compiles 1400); when
+			// there is no flat token and a value was selected (from
+			// a braced child), a sibling child was never read at all.
+			if !flatExists && selected {
+				leftover = append(leftover, c.Keys...)
+			}
+		}
+	}
+	// Flat-set / SetPath nesting: an empty kind node whose single value
+	// carrier child holds `[mss] value [tail...]` or `value [tail...]`.
+	// selectMSSToken reads the carrier's token directly (it IS the
+	// selection), so tokens past the carrier's selected value are
+	// leftover even though selectMSSValueEnd reports end==0 on the
+	// kind node. Only when the carrier was actually selected: a carrier
+	// present beside a selected flat/braced value is the precedence
+	// discard above, not this.
+	if child == nil && end == 0 && len(node.Keys) < 2 {
+		if carrier := valueCarrierChild(node); carrier != nil {
+			if _, _, cend, cok := selectMSSValueEnd(carrierAsKind(carrier)); cok && cend > 0 {
+				// cend indexes the adapted carrier (kind token
+				// prepended), so the carrier's own leftover starts
+				// one position earlier.
+				leftover = append(leftover, carrier.Keys[cend-1:]...)
+			}
+		}
+	}
+	return leftover
+}
+
+// valueCarrierChild returns the single child of a leaf-less kind node
+// that carries the MSS value in the flat-set AST (see
+// mssLeftoverTokens), or nil when there is no such child. Repeated or
+// multiple children are not a single carrier; the caller accounts them
+// as leftover through the main loop instead.
+func valueCarrierChild(node *Node) *Node {
+	if len(node.Children) != 1 {
+		return nil
+	}
+	c := node.Children[0]
+	if len(c.Keys) == 0 {
+		return nil
+	}
+	return c
+}
+
+// carrierAsKind adapts a flat-set value carrier (`[mss 1350 ...]` or
+// `[1350 ...]`) to the kind-node shape selectMSSValueEnd expects (kind
+// token first), so the carrier's consumed end index can be reused
+// instead of duplicating the `mss`-keyword grammar.
+func carrierAsKind(carrier *Node) *Node {
+	keys := make([]string, 0, len(carrier.Keys)+1)
+	keys = append(keys, "")
+	keys = append(keys, carrier.Keys...)
+	return &Node{Keys: keys}
+}
+
 // parseMSSValue extracts MSS value from either "node { mss VALUE; }" or "node VALUE;" syntax.
 func parseMSSValue(node *Node) int {
 	tok, ok := selectMSSToken(node)
