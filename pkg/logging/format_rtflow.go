@@ -260,6 +260,64 @@ func formatStructuredMsg(rec EventRecord, protoNum uint8) string {
 	}
 }
 
+// splitRTFlowStructured splits a formatStructuredMsg output into the
+// MSGID token and the SD element. Structured output is shaped
+// "RT_FLOW - <MSGID> [<SD-ID> ...]" for session events; anything else
+// (the formatSyslogMsg fallback) returns ("", msg) unchanged.
+func splitRTFlowStructured(structured string) (msgid, sd string, ok bool) {
+	const prefix = "RT_FLOW - "
+	if !strings.HasPrefix(structured, prefix) {
+		return "", "", false
+	}
+	rest := structured[len(prefix):]
+	sp := strings.IndexByte(rest, ' ')
+	if sp <= 0 {
+		return "", "", false
+	}
+	msgid, sd = rest[:sp], strings.TrimSpace(rest[sp+1:])
+	if !strings.HasPrefix(sd, "[junos@") {
+		return "", "", false
+	}
+	return msgid, sd, true
+}
+
+// formatSDSyslogLine renders one Junos sd-syslog record (#14611):
+// "<PRI>1 TS HOST RT_FLOW - <MSGID> [<junos SD>]" for session events,
+// and "<PRI>1 TS HOST RT_FLOW - - <flat body>" for event types with no
+// SD shape. It is the single envelope builder shared by SyslogClient
+// and LocalLogWriter so the stream and event-mode writers cannot drift.
+// ts is the RFC 5424 TIMESTAMP the caller formats (one clock read per
+// record at the caller keeps stream/event behaviour aligned with the
+// pre-#14611 code, which read time.Now() inside each Send).
+func formatSDSyslogLine(priority int, ts, hostname, structured, flat string) string {
+	hostname = sanitizeSyslogHostname(hostname)
+	if msgid, sd, ok := splitRTFlowStructured(structured); ok {
+		return fmt.Sprintf("<%d>1 %s %s RT_FLOW - %s %s", priority, ts, hostname, msgid, sd)
+	}
+	// No SD shape: keep the record parseable. APP-NAME is still RT_FLOW
+	// for RT_FLOW bodies so SIEM routing by app-name keeps working.
+	body := structured
+	if body == "" {
+		body = flat
+	}
+	if strings.HasPrefix(body, "RT_FLOW ") || body == "RT_FLOW" {
+		return fmt.Sprintf("<%d>1 %s %s RT_FLOW - - %s", priority, ts, hostname, body)
+	}
+	return fmt.Sprintf("<%d>1 %s %s xpf - - %s", priority, ts, hostname, body)
+}
+
+// stripRTFlowLeadIn removes the "RT_FLOW - " lead-in formatStructuredMsg
+// historically emitted, leaving "<MSGID> [<SD>]". Used where the body is
+// carried as MSG (RFC 3164 structured, local structured) so the wire no
+// longer shows the doubled "RT_FLOW - RT_FLOW_SESSION_*" (#14611).
+// Non-structured bodies are returned unchanged.
+func stripRTFlowLeadIn(msg string) string {
+	if _, _, ok := splitRTFlowStructured(msg); !ok {
+		return msg
+	}
+	return strings.TrimPrefix(msg, "RT_FLOW - ")
+}
+
 // splitAddrPort splits "10.0.1.5:443" or "[::1]:443" into IP and port strings.
 func splitAddrPort(addr string) (string, string) {
 	if addr == "" {
