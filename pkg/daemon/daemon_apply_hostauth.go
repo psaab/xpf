@@ -128,7 +128,7 @@ func runHostAuthCloseoutOwners(cfg *config.Config, budget time.Duration, owners 
 // every failure — a reconcile error OR a budget timeout — into a single error.
 // A nil return means every host-authorization owner reconciled to the committed
 // config within budget; a non-nil return names WHICH owners did not, and is
-// propagated by closeoutHostAuthOnCancel so the cancel fails visibly instead of
+// propagated by closeoutHostAuthOnPostPromotionError so the error fails visibly instead of
 // reporting clean over a silently-failed credential reconcile (#5874).
 //
 // budget is the wall-clock budget the outcomes were produced under — the value
@@ -188,36 +188,50 @@ func (d *Daemon) applyBootstrapHostAuthorizationCloseout(cfg *config.Config) err
 	return errors.Join(guardErr, summarizeHostAuthCloseout(outcomes, hostAuthCloseoutBudget))
 }
 
-// closeoutHostAuthOnCancel wraps a post-promotion apply-abort error so a #2926
-// ctx-cancellation still runs the bounded, non-cancellable host-authorization
-// closeout before the error propagates (#5643 / M35). Store.Commit promotes the
-// config UPSTREAM of applyConfigLocked, so EVERY ctx-cancellation early-return
-// inside applyConfigLocked is post-promotion — C1 (in applyVRFReconcile, before
-// the netlink phase), C2 (before the dataplane apply), and C3 (before the FRR
-// reload) — and each leaves the durable config advanced while the nft/login/
-// root-auth host-authorization tail has not run. For a non-cancellation error it
-// returns err unchanged, and the healthy (uncancelled) path never calls this, so
-// a normal commit's tail is unaffected. Centralizing the guard here keeps all
-// three boundaries wired to the same closeout (#5643 Gap B).
-func (d *Daemon) closeoutHostAuthOnCancel(err error, cfg *config.Config) error {
+// closeoutHostAuthOnPostPromotionError wraps a post-promotion apply error so
+// the bounded, non-cancellable host-authorization closeout still runs before
+// the error propagates (#5643 / M35, extended by #14356 to non-cancellation
+// aborts). Store.Commit promotes the config UPSTREAM of applyConfigLocked, so
+// EVERY early-return inside applyConfigLocked after the pre-networkd fence —
+// C1 (in applyVRFReconcile, before the netlink phase), C2 (before the
+// dataplane apply), C3 (before the FRR reload), the compile-abort and
+// ancestry-refusal returns inside applyDataplaneAndHACore, and the
+// bootstrap-exit / config-arrival naming refusals — is post-promotion and
+// leaves the durable config advanced while the nft/login/root-auth
+// host-authorization tail has not run. Running the closeout enforces the
+// committed tightening (lo0 / host-inbound filters + OS credentials) even
+// when the dataplane or takeover step cannot proceed; the healthy
+// (successful) path never calls this, so a normal commit's tail is
+// unaffected and never double-runs. Centralizing here keeps every
+// post-promotion boundary wired to the same closeout.
+//
+// Fail-closed rendering: the closeout renders applyHostInboundFilter from
+// the INCOMING config WITHOUT any ApplyConfig of that config having
+// succeeded on the abort paths — the dataplane still runs the previous
+// snapshot. Clear the reinject-accept gate first so the closeout installs
+// the destination rules WITHOUT the accept (a fresh view address the
+// dataplane never authorized meets the owner-zone deny). Where the
+// dataplane MAY already enforce the new snapshot (C3) this over-refuses
+// until the next successful apply — the fail-closed direction.
+//
+// Preactivation fence: applyHostInboundPreNetworkdAddressFence may have
+// installed the xpf_hostinbound_preactivation drop fence earlier in this
+// same apply. The closeout's real host-inbound install retires it on
+// success (applyHostInboundFilterWithOverlay deletes the table and clears
+// hostInboundPreActivationFence). When the fence is still standing after
+// the closeout, record staleness so the applied state never claims
+// currency behind a stranded temporary fence.
+func (d *Daemon) closeoutHostAuthOnPostPromotionError(err error, cfg *config.Config) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		// #9637-D1 (F1-A): the closeout below renders applyHostInboundFilter
-		// from the INCOMING config at C1/C2 WITHOUT any ApplyConfig of that
-		// config having succeeded — the dataplane still runs the previous
-		// snapshot. Clear the reinject-accept gate first so the closeout
-		// installs the destination rules WITHOUT the accept (a fresh view
-		// address the dataplane never authorized meets the owner-zone deny).
-		// At C3 the dataplane MAY already enforce the new snapshot, so this
-		// over-refuses until the next successful apply — the fail-closed
-		// direction, and the daemon is stopping. Non-cancellation errors
-		// return below untouched (ordinary #5679 clears at its own site).
-		d.hostInboundDataplaneFresh.Store(false)
-		if closeoutErr := d.applyHostAuthorizationCloseout(cfg); closeoutErr != nil {
-			return errors.Join(err, closeoutErr)
-		}
+	d.hostInboundDataplaneFresh.Store(false)
+	closeoutErr := d.applyHostAuthorizationCloseout(cfg)
+	if d.hostInboundPreActivationFence != nil {
+		d.noteHostInboundApplyFailed(time.Now())
+	}
+	if closeoutErr != nil {
+		return errors.Join(err, closeoutErr)
 	}
 	return err
 }
