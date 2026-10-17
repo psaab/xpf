@@ -1009,7 +1009,8 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 
 // buildSSHDConfig renders the xpf-managed sshd drop-in body for a configured
 // SSH service. A missing SSH stanza produces no daemon drop-in: the image's
-// factory drop-in owns the unconditional attempt limits (#10825). Configured
+// factory drop-in owns the unconditional attempt limits (#10825) and the
+// unconditional forwarding denial (#14581). Configured
 // stanzas repeat those limits before user-selected settings: root-login →
 // PermitRootLogin, key-exchange → KexAlgorithms (H5, #2008). sshd validates
 // algorithm spellings at reload. filterSSHAlgorithms drops any token that is
@@ -1035,6 +1036,14 @@ func buildSSHDConfig(ssh *config.SSHServiceConfig) string {
 		"MaxAuthTries 3",
 		"LoginGraceTime 30",
 		"PermitEmptyPasswords no",
+		// #14581: an SSH remote forward can squat on the loopback
+		// management port (127.0.0.1:50051) and impersonate xpfd.
+		// Login shells are the RBAC-enforced CLI or bash for
+		// super-user (#10833); neither needs forwarding on an
+		// appliance, so disable it unconditionally in every managed
+		// drop-in. The factory drop-in (scripts/image/bake.py) sets
+		// the same line for boxes with no ssh stanza.
+		"DisableForwarding yes",
 	}
 	if ssh.RootLogin != "" {
 		var permitRoot string

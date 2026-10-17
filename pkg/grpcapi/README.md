@@ -178,6 +178,22 @@ intermittent collisions cannot accumulate toward it. On expiry `Run` returns
 `ErrManagementPortHeld`, the daemon treats it as fatal (`grpcRunErrIsFatal`),
 and the process exits non-zero naming what it waited for.
 
+**Who holds the port decides (#14581).** The expiry above proves only that
+*someone* holds the port. At the fatal decision the supervisor attributes
+the LISTEN socket from `/proc/net/tcp{,6}` (`pkg/authz` `LookupListenerOwner`):
+fatal requires a **privileged** holder — uid 0 or our own uid, what another
+xpfd runs as. A non-root holder (an SSH remote forward, a compromised
+service uid, any unprivileged process — all can bind port 50051) or an
+unattributed holder stays supervised and keeps alarming at ERROR on the
+grace cadence: going fatal there handed the squatter a persistent kill
+switch (`Restart=on-failure` loops the exit) while it impersonated the
+management server. The client half of the same fix is in `pkg/authz`'s
+`client.go`: the remote `cli` and `pkg/upgrade` verify at dial time that
+a loopback server is privileged-owned before writing any RPC, so a
+squatter is never handed `set`/`load` payloads. Separately, both sshd
+drop-ins (image factory and daemon-managed) set `DisableForwarding yes`,
+closing the `ssh -R` squat path for login accounts.
+
 **What this does NOT close.** The mixed-version window. A supervisor that
 ignores the exit code can still start a second daemon, and nothing here helps a
 node already in the two-daemon state. #7501's live-sibling refiner remains the

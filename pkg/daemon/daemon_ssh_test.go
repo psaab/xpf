@@ -29,7 +29,7 @@ func TestBuildSSHDConfigKeyExchange(t *testing.T) {
 		{
 			name: "no-settings",
 			ssh:  &config.SSHServiceConfig{},
-			want: []string{"MaxAuthTries 3", "LoginGraceTime 30", "PermitEmptyPasswords no"},
+			want: []string{"MaxAuthTries 3", "LoginGraceTime 30", "PermitEmptyPasswords no", "DisableForwarding yes"},
 		},
 		{
 			name: "key-exchange-only",

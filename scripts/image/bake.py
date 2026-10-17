@@ -140,7 +140,16 @@ SSHD_DROPIN = (
     'PasswordAuthentication no\n'
     'KbdInteractiveAuthentication no\n'
     'MaxAuthTries 3\n'
-    'LoginGraceTime 30'
+    'LoginGraceTime 30\n'
+    # #14581: no SSH forwarding at all on the factory image. A remote
+    # forward (`ssh -R 127.0.0.1:50051:...`) lets any login — including
+    # a view-only class login — squat on the xpfd management port,
+    # which (pre-#14581) killed xpfd in a restart loop and let the
+    # forward impersonate the management server. Non-super-user login
+    # shells are the xpf CLI (#10833), which never forwards; super-user
+    # shells do not need to either on an appliance. `DisableForwarding`
+    # covers local, remote and agent forwarding in one directive.
+    'DisableForwarding yes'
 )
 
 

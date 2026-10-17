@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/clusterfailover"
 	"github.com/psaab/xpf/pkg/config"
@@ -72,7 +73,11 @@ func NewCLICluster(unit string) (RollingCluster, error) {
 }
 
 func (g *grpcCluster) dial() (pb.BpfrxServiceClient, func(), error) {
-	conn, err := grpc.NewClient(g.addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// #14581: this endpoint is the hard-coded loopback management port;
+	// verify the server is privileged-owned at dial time (see authz).
+	conn, err := grpc.NewClient(g.addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(authz.DialContext))
 	if err != nil {
 		return nil, nil, fmt.Errorf("dial xpfd gRPC %s: %w", g.addr, err)
 	}
