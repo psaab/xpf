@@ -985,7 +985,8 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// #11821/#12821 can see both values.
 			if len(s.Keys) == 1 && hasMatchingLeaf(*dst, s.Keys) &&
 				(!isDefaultPolicyGroupStanza12923(ancestorPath, s) ||
-					!groupDefaultPolicyStanzaAdopted12923(budget, *dst)) {
+					!groupDefaultPolicyStanzaAdopted12923(budget, *dst)) &&
+				!packedTailLeafExempts4325(ancestorPath, *dst, s) {
 				continue
 			}
 			hadChildren := len(s.Children) > 0
@@ -1477,4 +1478,44 @@ func hasMatchingLeaf(nodes []*Node, keys []string) bool {
 		}
 	}
 	return false
+}
+
+// hasPackedTailMatchingLeaf returns true if nodes contains a leaf whose
+// first key matches keys[0] and which carries a packed tail
+// (len(Keys) > 1), e.g. `authentication md5 1;` or `from is-fragment;`.
+// Such a leaf states only part of what a same-keyed container states,
+// so it is not a duplicate of that container (#14414).
+func hasPackedTailMatchingLeaf(nodes []*Node, keys []string) bool {
+	if len(keys) == 0 {
+		return false
+	}
+	for _, n := range nodes {
+		if n.IsLeaf && len(n.Keys) > 1 && n.Keys[0] == keys[0] {
+			return true
+		}
+	}
+	return false
+}
+
+// packedTailLeafExempts4325 reports whether the #4325 guard must not
+// drop the single-key group container s beside a packed-tail leaf in
+// dst (#14414). A packed-tail leaf (len(Keys) > 1) states only part of
+// what the container states — e.g. `authentication md5 1;` carries the
+// OSPF auth TYPE while `authentication { md5 1 { key K; } }` carries
+// the KEY — so "same key" does not mean "same content" and the
+// container is adopted beside the leaf for the compiler to merge.
+//
+// Two shapes keep the guard:
+//   - leaf-list keys (either spelling): the union path above owns
+//     them, and a collapsed leaf there IS the same statement as the
+//     block, so a second node would duplicate it;
+//   - the #12923 default-policy choice beside a group-adopted stanza:
+//     the pair must materialize for #11821/#12821, while beside an
+//     authored inline choice the inline value wins alone.
+func packedTailLeafExempts4325(ancestorPath [][]string, dst []*Node, s *Node) bool {
+	if len(s.Keys) != 1 || isLeafListSchema(ancestorPath, s.Keys[0]) ||
+		isDefaultPolicyGroupStanza12923(ancestorPath, s) {
+		return false
+	}
+	return hasPackedTailMatchingLeaf(dst, s.Keys)
 }
