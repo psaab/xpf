@@ -590,9 +590,8 @@ type RAInterfaceConfig struct {
 	// §4.2). It is meaningful ONLY when DefaultLifetimeSet is true; an
 	// EXPLICIT 0 means "not a default router" (RFC 4861 §6.2.1) and MUST be
 	// preserved through to the wire. When DefaultLifetimeSet is false the
-	// field is unset and readers default it to defaultRouterLifetime (1800).
-	// Do NOT treat 0 as "unset" — that conflation (#4119) made an explicit
-	// 0 indistinguishable from absent and coerced it back to 1800.
+	// field is unset and readers derive min(3*effective max-adv, 9000)
+	// via EffectiveRouterLifetime (#14605; 1800s at the default max 600s).
 	DefaultLifetime    int
 	DefaultLifetimeSet bool // true when default-lifetime was explicitly configured
 	MaxAdvInterval     int  // seconds, 0 = default (600)
@@ -618,6 +617,39 @@ type RAInterfaceConfig struct {
 	// default), which is the pre-#4307 wire behavior.
 	ReachableTime int // reachable-time (ms), 0 = unspecified
 	RetransTimer  int // retransmit-timer (ms), 0 = unspecified
+}
+
+// EffectiveMaxAdvInterval returns the MaxRtrAdvInterval the RA sender
+// uses: the configured value when positive, otherwise the RFC 4861
+// §6.2.1 default (600s).
+func (ra *RAInterfaceConfig) EffectiveMaxAdvInterval() int {
+	if ra != nil && ra.MaxAdvInterval > 0 {
+		return ra.MaxAdvInterval
+	}
+	return RADefaultMaxAdvIntervalSeconds
+}
+
+// DefaultRouterLifetime returns the RFC 4861 §6.2.1 default Router
+// Lifetime for an unset default-lifetime: 3 * effective
+// MaxRtrAdvInterval, capped at 9000s. For the default max (600s) this
+// is 1800s, preserving the historic default.
+func (ra *RAInterfaceConfig) DefaultRouterLifetime() int {
+	lifetime := 3 * ra.EffectiveMaxAdvInterval()
+	if lifetime > RADefaultLifetimeMaxSeconds {
+		lifetime = RADefaultLifetimeMaxSeconds
+	}
+	return lifetime
+}
+
+// EffectiveRouterLifetime returns the Router Lifetime buildRA should
+// advertise before wire clamping: an explicit default-lifetime verbatim
+// (including 0, "not a default router"), otherwise the derived default
+// above.
+func (ra *RAInterfaceConfig) EffectiveRouterLifetime() int {
+	if ra != nil && ra.DefaultLifetimeSet {
+		return ra.DefaultLifetime
+	}
+	return ra.DefaultRouterLifetime()
 }
 
 // RAPrefix defines a prefix advertised via RA.

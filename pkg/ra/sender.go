@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	// Default RA timing per RFC 4861.
-	defaultMaxAdvInterval = 600  // seconds
-	defaultRouterLifetime = 1800 // seconds
+	// Default RA timing per RFC 4861 §6.2.1. defaultMaxAdvInterval mirrors
+	// config.RADefaultMaxAdvIntervalSeconds; the unset Router Lifetime is
+	// derived as min(3*effective max, 9000) by RAInterfaceConfig helpers
+	// (#14605) — 1800s at the default max of 600s.
+	defaultMaxAdvInterval = 600 // seconds
 
 	// minAdvInterval is the hard runtime floor for the unsolicited periodic
 	// RA timer (#4525). RFC 4861 §6.2.1 requires MinRtrAdvInterval >= 3s, but
@@ -815,32 +817,30 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 	// #4119: an EXPLICIT default-lifetime (DefaultLifetimeSet) is honored
 	// verbatim, including 0 — RFC 4861 §6.2.1 Router Lifetime 0 means "this
 	// router is NOT a default router" (hosts drop it from their default-router
-	// list but may still use the prefixes/PREF64 it advertises). Only an UNSET
-	// default-lifetime falls back to defaultRouterLifetime (1800). The old
-	// `if lifetime <= 0` coercion made an explicit 0 indistinguishable from
-	// unset and forced it to 1800, so xpf could never advertise "not a default
-	// router" and hijacked host default-route selection on multi-router LANs.
-	lifetime := defaultRouterLifetime
-	if s.cfg.DefaultLifetimeSet {
-		lifetime = s.cfg.DefaultLifetime
-	}
+	// list but may still use the prefixes/PREF64 it advertises).
+	// #14605: an UNSET default-lifetime derives from the effective
+	// MaxRtrAdvInterval as min(3*max, 9000) per RFC 4861 §6.2.1 (1800s at
+	// the default max of 600s), so a large configured max no longer leaves
+	// hosts with a lifetime equal to a single advertisement interval.
+	lifetime := s.cfg.EffectiveRouterLifetime()
 	// Clamp once at the source: the Router Lifetime and dependent options that
 	// inherit it must derive from the same value, not independently narrow the
 	// original config value.
 	lifetime = clampRAHeaderSeconds(lifetime)
 
-	// Dependent options (RDNSS, PREF64) that inherit a lifetime default MUST
-	// NOT collapse to 0 just because the ROUTER lifetime is an explicit 0:
-	// their independent lifetimes govern whether hosts keep using the DNS
-	// server / NAT64 prefix, and the whole point of Router Lifetime 0 is to
-	// keep advertising those while declining default-router duty. Fall back to
-	// the standard 1800s default for a dependent option whenever the resolved
-	// router lifetime is not positive (identical to the pre-#4119 value, which
-	// was always >= 1800). The Prefix Information options are unaffected — they
-	// carry their own valid/preferred lifetimes (30d/7d) already.
+	// Dependent options (RDNSS, PREF64) that inherit a lifetime MUST NOT
+	// expire before the next RA. RFC 8106 §5.1 says the RDNSS lifetime
+	// SHOULD by default be at least 3 * MaxRtrAdvInterval, so the inherited
+	// floor is the derived default (min(3*effective max, 9000)) — which also
+	// covers the explicit Router Lifetime 0 case, where the options must
+	// keep advertising while the router declines default-router duty
+	// (#4119). An explicit positive router lifetime at or above that floor
+	// is inherited verbatim; a shorter explicit lifetime (reachable only
+	// via tolerant ingress, strict commit rejects it per #14605) still
+	// leaves RDNSS/PREF64 at the floor instead of flapping between RAs.
 	optLifetime := lifetime
-	if optLifetime <= 0 {
-		optLifetime = defaultRouterLifetime
+	if floor := s.cfg.DefaultRouterLifetime(); optLifetime < floor {
+		optLifetime = floor
 	}
 
 	ra := &ndp.RouterAdvertisement{

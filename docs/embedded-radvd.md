@@ -359,7 +359,7 @@ The RFC specifies randomized RA intervals to prevent synchronization:
 |-----------|---------|-------------------------------|-------------|
 | `MaxRtrAdvInterval` | 600s | 4 .. 1800 s | `RAInterfaceConfig.MaxAdvInterval` |
 | `MinRtrAdvInterval` | 0.33 * Max | 3 s .. 0.75 * Max (ceiling 1350 s) | `RAInterfaceConfig.MinAdvInterval` |
-| `AdvDefaultLifetime` | 3 * Max (max 9000s) | 0 .. 9000 s | `RAInterfaceConfig.DefaultLifetime` |
+| `AdvDefaultLifetime` | 3 * Max (max 9000s) | 0, or Max .. 9000 s | `RAInterfaceConfig.DefaultLifetime` |
 
 Each periodic RA uses a random delay in `[MinRtrAdvInterval, MaxRtrAdvInterval]`.
 
@@ -374,6 +374,16 @@ RFC 4861 §6.2.1 bounds above:
   (`crossCheckRAIntervals`, `pkg/configstore/store.go`). Both siblings must
   be present for the ratio check to fire; a lone leaf is completed by the
   sender's own derivation.
+
+**Lifetime validation (#14605).** RFC 4861 §6.2.1 requires
+`AdvDefaultLifetime` to be 0 or in `[MaxRtrAdvInterval, 9000]`.
+`crossCheckRAIntervals` rejects an explicit `default-lifetime` that is
+positive but below the effective max (the configured
+`max-advertisement-interval`, or 600s when unset) or above 9000 at strict
+commit, and warns on tolerant ingress. An unset `default-lifetime`
+derives as `min(3 * effective max, 9000)` in the sender (1800s at the
+default max), and inherited RDNSS/PREF64 lifetimes are floored at that
+derived value per RFC 8106 §5.1.
 
 These are strict on the operator commit / `commit check` / `xpfd
 check-config` path and downgraded to a warning on the tolerant `Store.Load`

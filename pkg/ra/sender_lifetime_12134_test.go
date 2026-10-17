@@ -53,8 +53,8 @@ func TestBuildRA_12134_InheritedLifetimesAreBounded(t *testing.T) {
 				wantRouterLifetime = config.RARouterMaxLifetimeSeconds
 			}
 			wantOptionLifetime := wantRouterLifetime
-			if wantOptionLifetime <= 0 {
-				wantOptionLifetime = defaultRouterLifetime
+			if floor := s.cfg.DefaultRouterLifetime(); wantOptionLifetime < floor {
+				wantOptionLifetime = floor
 			}
 			wantPREF64Lifetime := wantOptionLifetime
 			if wantPREF64Lifetime > config.RAPREF64MaxLifetimeSeconds {

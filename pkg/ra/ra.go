@@ -1382,14 +1382,11 @@ func (m *Manager) Status() []SenderInfo {
 
 	var result []SenderInfo
 	for _, s := range m.senders {
-		// #4119: report the effective Router Lifetime. An explicit 0
+		// #4119/#14605: report the effective Router Lifetime. An explicit 0
 		// (DefaultLifetimeSet, "not a default router") is reported as 0, not
-		// coerced to 1800; only an unset default-lifetime shows the 1800
-		// default.
-		lifetime := defaultRouterLifetime
-		if s.cfg.DefaultLifetimeSet {
-			lifetime = s.cfg.DefaultLifetime
-		}
+		// coerced to 1800; an unset default-lifetime shows the derived
+		// min(3*effective max, 9000) default (1800s at max 600s).
+		lifetime := s.cfg.EffectiveRouterLifetime()
 		info := SenderInfo{
 			Interface:   s.cfg.Interface,
 			SrcAddr:     s.getSrcAddr().String(),
