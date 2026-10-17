@@ -199,18 +199,18 @@ func TestEventChangeConfigCommands6714RepeatedStatementsAllCompile(t *testing.T)
 
 	for _, tc := range []struct{ name, cfg string }{
 		{"repeated commands leaves", `
-event-options { policy P { events e1; then { change-configuration {
+event-options { policy P { events ping_test_failed; then { change-configuration {
   commands "set system host-name a"; commands "set system host-name b"; } } } }`},
 		{"repeated change-configuration blocks", `
-event-options { policy P { events e1; then {
+event-options { policy P { events ping_test_failed; then {
   change-configuration { commands "set system host-name a"; }
   change-configuration { commands "set system host-name b"; } } } }`},
 		{"repeated then blocks (control: already worked)", `
-event-options { policy P { events e1;
+event-options { policy P { events ping_test_failed;
   then { change-configuration { commands "set system host-name a"; } }
   then { change-configuration { commands "set system host-name b"; } } } }`},
 		{"block spelling (control: already worked)", `
-event-options { policy P { events e1; then { change-configuration {
+event-options { policy P { events ping_test_failed; then { change-configuration {
   commands { "set system host-name a"; "set system host-name b"; } } } } }`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,7 +229,7 @@ event-options { policy P { events e1; then { change-configuration {
 
 	t.Run("flat-set repeated (control: already worked)", func(t *testing.T) {
 		cfg, err := CompileConfig(setTree6659(t,
-			`set event-options policy P events e1`,
+			`set event-options policy P events ping_test_failed`,
 			`set event-options policy P then change-configuration commands "set system host-name a"`,
 			`set event-options policy P then change-configuration commands "set system host-name b"`))
 		if err != nil {

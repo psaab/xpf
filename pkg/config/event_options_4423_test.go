@@ -106,7 +106,7 @@ event-options {
         }
     }
     policy foo {
-        events other_event;
+        events ping_test_completed;
     }
 }
 `
@@ -136,7 +136,7 @@ event-options {
 		}
 		return false
 	}
-	if !haveEvent("ping_test_failed") || !haveEvent("other_event") {
+	if !haveEvent("ping_test_failed") || !haveEvent("ping_test_completed") {
 		t.Fatalf("merged events %v missing one of the two blocks' events", pol.Events)
 	}
 	// The then-commands from the first block survive the merge.
