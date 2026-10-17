@@ -94,6 +94,10 @@ pub(super) struct CachedTxSelectionDescriptor {
 pub(super) struct CachedInputFilterLog {
     pub(super) log_match: crate::filter::FilterLogMatch,
     pub(super) ingress_zone_id: u16,
+    // #14313: whether the evaluated packet carried a real L4 header. Carried
+    // so the deferred filter-log AppID resolution skips port-constrained
+    // catalog entries for a flowless fragment (synthetic ports 0,0).
+    pub(super) l4_present: bool,
 }
 
 /// Precomputed rewrite descriptor for an established flow.

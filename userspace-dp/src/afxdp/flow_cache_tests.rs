@@ -667,6 +667,7 @@ fn from_deny_decision_retains_policy_replay_and_expiry_state() {
             action: crate::filter::FilterAction::Accept,
         },
         ingress_zone_id: TEST_TRUST_ZONE_ID,
+        l4_present: true,
     });
     let entry = FlowCacheEntry::from_deny_decision(
         &flow,
@@ -1542,6 +1543,7 @@ fn from_forward_decision_preserves_input_filter_log_for_cached_hits() {
             action: crate::filter::FilterAction::Accept,
         },
         ingress_zone_id: 7,
+        l4_present: true,
     };
 
     let entry = FlowCacheEntry::from_forward_decision(

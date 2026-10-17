@@ -141,6 +141,38 @@ pub(super) fn emit_junos_host_deny(
     reject_reply_enqueued: bool,
     now_ns: u64,
 ) {
+    emit_junos_host_deny_l4(
+        forwarding,
+        event_stream,
+        flow,
+        meta,
+        policy_dst_port,
+        from_zone_id,
+        policy_id,
+        action,
+        reject_reply_enqueued,
+        true,
+        now_ns,
+    );
+}
+
+/// #14313: as `emit_junos_host_deny`, with explicit L4 presence. The flowless
+/// LocalDelivery arm passes `false` so its synthetic (0,0) tuple cannot match
+/// a `0..=N` port-constrained catalog entry.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_junos_host_deny_l4(
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    policy_dst_port: u16,
+    from_zone_id: u16,
+    policy_id: u32,
+    action: PolicyAction,
+    reject_reply_enqueued: bool,
+    l4_present: bool,
+    now_ns: u64,
+) {
     emit_policy_deny_event(
         event_stream,
         flow,
@@ -159,7 +191,7 @@ pub(super) fn emit_junos_host_deny(
         0,
         policy_id,
         action,
-        resolve_policy_deny_app_id(&forwarding.app_catalog, flow, policy_dst_port),
+        resolve_policy_deny_app_id_l4(&forwarding.app_catalog, flow, policy_dst_port, l4_present),
         reject_reply_enqueued,
         now_ns,
     );
@@ -183,12 +215,36 @@ pub(super) fn emit_host_inbound_deny(
     policy_dst_port: u16,
     now_ns: u64,
 ) {
+    emit_host_inbound_deny_l4(
+        forwarding,
+        event_stream,
+        flow,
+        meta,
+        from_zone_id,
+        policy_dst_port,
+        true,
+        now_ns,
+    );
+}
+
+/// #14313: as `emit_host_inbound_deny`, with explicit L4 presence. The
+/// flowless LocalDelivery arm passes `false` (see `emit_junos_host_deny_l4`).
+pub(super) fn emit_host_inbound_deny_l4(
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    from_zone_id: u16,
+    policy_dst_port: u16,
+    l4_present: bool,
+    now_ns: u64,
+) {
     emit_host_inbound_deny_event(
         event_stream,
         flow,
         meta,
         from_zone_id,
-        resolve_policy_deny_app_id(&forwarding.app_catalog, flow, policy_dst_port),
+        resolve_policy_deny_app_id_l4(&forwarding.app_catalog, flow, policy_dst_port, l4_present),
         now_ns,
     );
 }
