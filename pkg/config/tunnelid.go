@@ -70,8 +70,11 @@ func collectTunnelEndpointNamesAST(ifacesNode *Node, out map[string]struct{}) {
 		if name == "" {
 			continue
 		}
-		tunnelNode := iface.FindChild("tunnel")
-		hasIfaceTunnel := tunnelNode != nil
+		// #14450: duplicate `tunnel` blocks merge (last-wins mode), so
+		// presence and the WireGuard selection must consult every block,
+		// not the first only.
+		tunnelNodes := iface.FindChildren("tunnel")
+		hasIfaceTunnel := len(tunnelNodes) > 0
 		units := namedInstances(iface.FindChildren("unit"))
 		// Mirror the typed compiler's unit admission: only
 		// Atoi-parseable names become InterfaceUnit entries, and a
@@ -92,7 +95,7 @@ func collectTunnelEndpointNamesAST(ifacesNode *Node, out map[string]struct{}) {
 			if _, seen := unitTunnel[n]; !seen {
 				unitNums = append(unitNums, n)
 			}
-			unitTunnel[n] = unit.node.FindChild("tunnel") != nil
+			unitTunnel[n] = len(unit.node.FindChildren("tunnel")) > 0
 		}
 		if hasIfaceTunnel {
 			if len(unitNums) == 0 {
@@ -102,7 +105,7 @@ func collectTunnelEndpointNamesAST(ifacesNode *Node, out map[string]struct{}) {
 				out[name] = struct{}{}
 				continue
 			}
-			if astTunnelModeWireguard(tunnelNode) {
+			if astTunnelModeWireguardMerged14450(tunnelNodes) {
 				lowest := unitNums[0]
 				for _, n := range unitNums[1:] {
 					if n < lowest {
@@ -133,6 +136,33 @@ func collectTunnelEndpointNamesAST(ifacesNode *Node, out map[string]struct{}) {
 // is only ever gre/ipip, so wireguard is always explicit. The braced
 // form `mode { wireguard; }` (#14440) is honoured via nodeVal, which
 // reads the braced child shape as well as Keys[1].
+
+// astTunnelModeWireguardMerged14450 reports the merged (#14450)
+// WireGuard selection over duplicate interface `tunnel` blocks: the
+// last block's explicit mode wins (nodeVal, so the braced form counts
+// too), exactly as the compiler's merged TunnelConfig.Mode. A later
+// `mode gre` therefore un-selects the single-endpoint WireGuard
+// naming an earlier block selected.
+func astTunnelModeWireguardMerged14450(nodes []*Node) bool {
+	wireguard := false
+	for _, n := range nodes {
+		// Braced `mode { wireguard; }` (#14440): the raw child's nodeVal
+		// carries the value the run expansion flattens away, as in
+		// astTunnelModeWireguard.
+		for _, prop := range n.Children {
+			if prop.Name() == "mode" && nodeVal(prop) != "" {
+				wireguard = nodeVal(prop) == "wireguard"
+			}
+		}
+		for _, prop := range tunnelRunChildren9156(n) {
+			if prop.Name() == "mode" && nodeVal(prop) != "" {
+				wireguard = nodeVal(prop) == "wireguard"
+			}
+		}
+	}
+	return wireguard
+}
+
 func astTunnelModeWireguard(tunnelNode *Node) bool {
 	if tunnelNode == nil {
 		return false
