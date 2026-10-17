@@ -4059,7 +4059,9 @@ impl SessionTable {
         policy_counter_idx: u32,
         policy_counter: std::sync::Arc<crate::policy::PolicyRuleCounter>,
         ingress_zone: u16,
+        ingress_zone_check: u32,
         egress_zone: u16,
+        egress_zone_check: u32,
     ) -> bool {
         let Some(forward) = self.entry_by_key(key) else {
             return false;
@@ -4091,7 +4093,9 @@ impl SessionTable {
             record.metadata.policy_counter_idx = policy_counter_idx;
             record.metadata.policy_counter = Some(policy_counter.clone());
             record.metadata.ingress_zone = ingress_zone;
+            record.metadata.ingress_zone_check = ingress_zone_check;
             record.metadata.egress_zone = egress_zone;
+            record.metadata.egress_zone_check = egress_zone_check;
             rebound = true;
         }
         if companion_key != *key {
@@ -4101,7 +4105,9 @@ impl SessionTable {
                 record.metadata.policy_counter_idx = policy_counter_idx;
                 record.metadata.policy_counter = Some(policy_counter);
                 record.metadata.ingress_zone = egress_zone;
+                record.metadata.ingress_zone_check = egress_zone_check;
                 record.metadata.egress_zone = ingress_zone;
+                record.metadata.egress_zone_check = ingress_zone_check;
                 rebound = true;
             }
         }
@@ -4121,7 +4127,9 @@ impl SessionTable {
         &mut self,
         key: &SessionKey,
         ingress_zone: u16,
+        ingress_zone_check: u32,
         egress_zone: u16,
+        egress_zone_check: u32,
     ) -> bool {
         let Some(forward) = self.entry_by_key(key) else {
             return false;
@@ -4145,14 +4153,18 @@ impl SessionTable {
         let mut rebound = false;
         if let Some(record) = self.entry_by_key_mut(key) {
             record.metadata.ingress_zone = ingress_zone;
+            record.metadata.ingress_zone_check = ingress_zone_check;
             record.metadata.egress_zone = egress_zone;
+            record.metadata.egress_zone_check = egress_zone_check;
             rebound = true;
         }
         if companion_key != *key
             && let Some(record) = self.entry_by_key_mut(&companion_key)
         {
             record.metadata.ingress_zone = egress_zone;
+            record.metadata.ingress_zone_check = egress_zone_check;
             record.metadata.egress_zone = ingress_zone;
+            record.metadata.egress_zone_check = ingress_zone_check;
             rebound = true;
         }
         if rebound && forward_counted && old_ingress_zone != ingress_zone {
