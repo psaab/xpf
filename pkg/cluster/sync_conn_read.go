@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // malformedRecordWarnDetector bounds the "dropping malformed session record"
@@ -833,7 +834,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// bypass the receiver's permanent replay floor.
 		slog.Warn("cluster sync: ignoring persistent-NAT lease set without clear generation",
 			"bytes", len(payload))
-	case syncMsgPersistentNatLeaseGeneration:
+	case syncMsgPersistentNatLeaseGeneration, syncMsgPersistentNatLeaseDeterministic:
 		// #11486: generation-bearing idle-lease batch. Sequence ordering handles
 		// transport reordering within one peer incarnation; the daemon persists
 		// origin generation independently across reconnects and process restarts.
@@ -847,7 +848,13 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				"incarnation", incarnation, "seq", seq)
 			return
 		}
-		batch, ok := decodePersistentNatLeaseBatchPayload(base)
+		var batch userspace.PersistentNatLeaseBatch
+		var ok bool
+		if msgType == syncMsgPersistentNatLeaseDeterministic {
+			batch, ok = decodePersistentNatLeaseBatchPayloadDeterministic(base)
+		} else {
+			batch, ok = decodePersistentNatLeaseBatchPayload(base)
+		}
 		if !ok {
 			s.stats.MalformedRecordsDropped.Add(1)
 			slog.Warn("cluster sync: dropping malformed persistent-NAT generation batch",

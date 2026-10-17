@@ -20,6 +20,7 @@ func chunkLease14607(i int, remotes int) userspace.IdleLeaseWire {
 		SrcIP:          fmt.Sprintf("10.0.%d.%d", (i>>8)&0xff, i&0xff),
 		SrcPort:        uint16(1024 + i%60000),
 		RoutingScope:   persistentNatLeaseScope(0),
+		EgressScope:    persistentNatLeaseScope(0),
 		RemoteIP:       "198.51.100.1",
 		RemotePort:     443,
 		TranslatedIP:   "203.0.113.1",

@@ -23,6 +23,12 @@ func equalIdleLeaseWire(a, b userspace.IdleLeaseWire) bool {
 			slices.Equal(a.PermittedRemotes, b.PermittedRemotes) &&
 			a.TranslatedIP == b.TranslatedIP &&
 			a.TranslatedPort == b.TranslatedPort && a.AddressOnly == b.AddressOnly &&
+			a.Deterministic == b.Deterministic && a.DeterministicMode == b.DeterministicMode &&
+			a.DeterministicBlockSize == b.DeterministicBlockSize &&
+			a.DeterministicBlocksPerIP == b.DeterministicBlocksPerIP &&
+			a.DeterministicHostPrefixLen == b.DeterministicHostPrefixLen &&
+			a.DeterministicHostBase == b.DeterministicHostBase &&
+			a.DeterministicHostCount == b.DeterministicHostCount &&
 			a.RemainingNs == b.RemainingNs && a.TimeoutNs == b.TimeoutNs
 	}
 	as, bs := *a.RoutingScope, *b.RoutingScope
@@ -35,8 +41,14 @@ func equalIdleLeaseWire(a, b userspace.IdleLeaseWire) bool {
 		a.PermitAnyRemote == b.PermitAnyRemote &&
 		slices.Equal(a.PermittedRemotes, b.PermittedRemotes) &&
 		a.TranslatedIP == b.TranslatedIP && a.TranslatedPort == b.TranslatedPort &&
-		a.AddressOnly == b.AddressOnly && a.RemainingNs == b.RemainingNs &&
-		a.TimeoutNs == b.TimeoutNs
+		a.AddressOnly == b.AddressOnly &&
+		a.Deterministic == b.Deterministic && a.DeterministicMode == b.DeterministicMode &&
+		a.DeterministicBlockSize == b.DeterministicBlockSize &&
+		a.DeterministicBlocksPerIP == b.DeterministicBlocksPerIP &&
+		a.DeterministicHostPrefixLen == b.DeterministicHostPrefixLen &&
+		a.DeterministicHostBase == b.DeterministicHostBase &&
+		a.DeterministicHostCount == b.DeterministicHostCount &&
+		a.RemainingNs == b.RemainingNs && a.TimeoutNs == b.TimeoutNs
 }
 
 func sampleIdleLease() userspace.IdleLeaseWire {

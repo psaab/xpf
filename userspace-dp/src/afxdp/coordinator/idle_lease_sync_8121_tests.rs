@@ -482,3 +482,25 @@ fn deterministic_nat64_idle_bib_exports_and_imports_only_in_block_14091() {
         "out-of-block deterministic BIB must not import: {counts:?}"
     );
 }
+
+/// #14638: a deterministic-shaped lease arriving under an ordinary source-NAT
+/// pool name must never install through the generic path as a dynamic lease.
+#[test]
+fn deterministic_shaped_lease_never_installs_via_generic_pool_14638() {
+    let mut coord = Coordinator::new();
+    coord.forwarding.source_nat_rules =
+        parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1"])]);
+    let mut rec = record("P", "10.0.61.50", "203.0.113.1", 2048);
+    rec.lease.deterministic = true;
+    rec.lease.deterministic_identity = Some(crate::nat::DeterministicPortedIdentity::V6(crate::nat::DeterministicV6 {
+        block_size: 32,
+        blocks_per_ip: 2,
+        host_prefix_len: 32,
+        host_base: "2001:db8::".parse::<std::net::Ipv6Addr>().unwrap().octets(),
+        host_count: 2,
+    }));
+    let counts = coord.import_idle_persistent_leases(&[rec], 1_000);
+    assert_eq!(counts.installed, 0, "deterministic lease must not install as dynamic: {counts:?}");
+    assert_eq!(counts.skipped_identity_busy, 1, "deterministic-via-generic must count identity-busy: {counts:?}");
+    assert_eq!(coord.export_idle_persistent_leases(2_000).len(), 0);
+}
