@@ -140,8 +140,12 @@ func TestPackedOrNestedLeafRunGuard9792(t *testing.T) {
 		// container head has an undeclared tail), so deleting either shape arm
 		// changed no verdict and both mutations survived. guardSchema9792 gives
 		// each shape a DECLARED tail, so only the shape arm can reject it.
-		{"a valueless FLAG head with a declared nested tail",
-			with(leaf("flag"), leaf("leaf", "v")), guardSchema9792(), false},
+		{"a valueless FLAG head with a declared nested tail (#14442: SetPath nests a flag-first run)",
+			with(leaf("flag"), leaf("leaf", "v")), guardSchema9792(), true},
+		{"a valueless FLAG head with an UNDECLARED nested tail",
+			with(leaf("flag"), leaf("extra")), guardSchema9792(), false},
+		{"a valueless FLAG head packed with a declared leaf token (#14442)",
+			leaf("flag", "leaf", "v"), guardSchema9792(), true},
 		{"a value-bearing CONTAINER head with a declared nested tail",
 			with(leaf("box", "name"), leaf("leaf", "v")), guardSchema9792(), false},
 		{"a value-bearing WILDCARD head with a declared nested tail",
