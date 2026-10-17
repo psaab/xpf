@@ -1021,6 +1021,18 @@ func (m *Manager) UpdateRGPriority(rgID int, priority int) {
 // Uses a one-shot forcePreemptOnce flag instead of modifying cfg.Preempt,
 // so the configured preempt value is never leaked.
 func (m *Manager) ForceRGMaster(rgID int) {
+	// #14406: never force MASTER during sync-hold. forcePreemptOnce
+	// bypasses the Preempt=false the hold installed, so a cluster
+	// promotion reaching here while held would preempt before bulk
+	// session sync. The load-bearing gate is the daemon readiness
+	// term; this is the manager-level backstop for any other caller.
+	// Deliberately no queue/replay: after ReleaseSyncHold the
+	// daemon reconcile re-derives promotion from cluster state.
+	if m.InSyncHold() {
+		slog.Info("vrrp: sync-hold active, refusing ForceRGMaster until bulk sync",
+			"rg_id", rgID)
+		return
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	// #14404: cluster-authoritative force must not override the

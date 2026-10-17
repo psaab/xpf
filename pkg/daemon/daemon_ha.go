@@ -659,6 +659,20 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 	//   add blackholes, then clear rg_active (#485)
 	isPrimary := ev.NewState == cluster.StatePrimary
 	clusterDemotionEdge := ev.OldState == cluster.StatePrimary && !isPrimary
+	// #14406: sync-hold suppresses a cluster promotion's activation.
+	// The load-bearing gate is the InSyncHold term in
+	// takeoverReadinessForRG, which keeps election from emitting this
+	// event while held; this guard is the backstop for an event already
+	// queued (or a degraded/peer-yielded promotion) when the hold is
+	// observed here. Returning early leaves the RG secondary/inactive:
+	// clusterPri is not recorded, so reconcile keeps desired inactive
+	// and re-derives promotion after ReleaseSyncHold. Demotions are
+	// never gated — resigning during hold is always safe.
+	if isPrimary && !noRethVRRP && d.vrrpMgr != nil && d.vrrpMgr.InSyncHold() {
+		slog.Info("cluster: sync-hold active, suppressing RG promotion until bulk sync",
+			"rg", ev.GroupID)
+		return vrrpTimer
+	}
 	d.setLocalFailoverCommitReady(ev.GroupID, false)
 	s := d.getOrCreateRGState(ev.GroupID)
 	tr := s.SetCluster(isPrimary)
@@ -706,6 +720,12 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 			// Only do this for intentional promotions (Secondary →
 			// Primary), NOT on initial boot (SecondaryHold → Primary)
 			// where VRRP should follow its own election timer.
+			// #14406: the boot transition is also Secondary->Primary —
+			// fresh groups start StateSecondary (group_state.go), so
+			// the first promotion fires this force; there is no
+			// SecondaryHold boot exemption in practice. Sync-hold
+			// suppression above is what protects the boot/failback
+			// window.
 			if ev.OldState == cluster.StateSecondary && d.vrrpMgr != nil {
 				d.vrrpMgr.ForceRGMaster(ev.GroupID)
 			}

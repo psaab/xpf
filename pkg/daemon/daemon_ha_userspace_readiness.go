@@ -237,6 +237,19 @@ func (d *Daemon) takeoverReadinessForRG(rt dataplane.RuntimeDataPlane, rgID int,
 	} else if d.vrrpMgr != nil {
 		hasRETH := rgHasRETH(d.store.ActiveConfig(), rgID)
 		takeoverGateReady, takeoverGateReasons = d.vrrpMgr.RGVRRPReady(rgID, hasRETH)
+		// #14406: the RETH sibling of the #7162 NoRETH hold term.
+		// RGVRRPReady is built-ness only; without this term a boot-fresh
+		// node with a healthy peer primary and higher priority/preempt
+		// was takeover-ready during sync-hold, cluster election promoted
+		// it, and handleClusterEvent forced VRRP MASTER before bulk
+		// session sync. Bounded like the NoRETH hold: SetSyncHold arms
+		// once at bringup and releases on bulk sync or its own 30s
+		// timer, never on a continuous IsSyncReady() conjunct (#110).
+		if d.vrrpMgr.InSyncHold() {
+			takeoverGateReady = false
+			takeoverGateReasons = append(takeoverGateReasons,
+				"session sync startup hold: bulk sync not yet complete")
+		}
 	} else {
 		takeoverGateReady = true // no VRRP = always ready
 	}
