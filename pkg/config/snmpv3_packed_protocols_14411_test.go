@@ -365,3 +365,53 @@ func TestSystemWrappedSNMPv3UserIsGated14411(t *testing.T) {
 		t.Fatalf("system-wrapped valid user compiled wrong: %+v", u)
 	}
 }
+
+// compileSNMP iterates EVERY `v3` child of an snmp root; the gate must too.
+// A case-variant user in the SECOND v3 block must reject, not slip past a
+// first-block-only gate.
+func TestSecondV3BlockIsGated14767(t *testing.T) {
+	for _, bad := range []string{"Authentication-SHA256", "authentication-sha512"} {
+		src := `snmp { v3 { usm { local-engine { user alice { authentication-sha256 { authentication-password APASS; } } } } } v3 { usm { local-engine { user bob { ` + bad + ` { authentication-password BPASS; } } } } } }`
+		tree, perr := NewParser(src).Parse()
+		if perr != nil {
+			t.Fatalf("parse: %v", perr)
+		}
+		if _, err := CompileConfig(tree); err == nil {
+			t.Fatalf("bad protocol %s in second v3 block committed clean", bad)
+		}
+	}
+}
+
+// The brace-elided `system snmp …` form packs the path onto the system
+// node's own Keys; compileSystem synthesises the snmp node from it, and
+// the gate must see that synthesised root too.
+func TestSystemElidedSNMPIsGated14767(t *testing.T) {
+	p := NewParser(`system snmp v3 usm local-engine user alice Authentication-SHA256 authentication-password APASS;`)
+	tree, perr := p.Parse()
+	if perr != nil {
+		t.Fatalf("parse: %v", perr)
+	}
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatal("system-elided case-variant committed clean")
+	}
+}
+
+// The top-level flat form (`snmp v3 usm local-engine user <name> <run>;`)
+// packs the user onto the snmp node's own Keys, where compileSNMPv3's flat
+// branch reads it. A case-variant there must reject, and an unknown
+// protocol there must reject — neither may compile to a bare user.
+func TestTopLevelFlatCaseVariantAndUnknownRejected14767(t *testing.T) {
+	for _, src := range []string{
+		`snmp v3 usm local-engine user alice Authentication-SHA256 authentication-password APASS;`,
+		`snmp v3 usm local-engine user alice authentication-sha512 authentication-password APASS;`,
+	} {
+		p := NewParser(src)
+		tree, perr := p.Parse()
+		if perr != nil {
+			t.Fatalf("parse %q: %v", src, perr)
+		}
+		if _, err := CompileConfig(tree); err == nil {
+			t.Fatalf("top-level flat bad protocol committed clean: %s", src)
+		}
+	}
+}
