@@ -736,6 +736,22 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 						appendPath(ancestorPath, cpeer.Keys), budget, group, vars, level, haveExcept, deferWildcards); err != nil {
 						return err
 					}
+				} else if isApplicationTermLeaf14434(ancestorPath, s) {
+					// #14434: an applications `term` leaf is an opaque
+					// packed instance (children==nil), so none of the
+					// unions/promotions above can reach it. Same-name
+					// leaf peer → merge bodies with inline-wins (group
+					// `alg` tail preserved); no same-name leaf peer →
+					// adopt the distinct term beside the inline peer.
+					// A container peer is deliberately not merged
+					// here: that adopt-beside shape keeps twinning
+					// into the collision gate.
+					if tpeer := applicationTermPeer14434(*dst, s); tpeer != nil {
+						mergeApplicationTermLeaves14434(tpeer, s)
+						appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{tpeer}, markers)
+					} else if !applicationTermExists14434(*dst, s) {
+						*dst = append(*dst, s)
+					}
 				} else if isRouteFilterORMember14416(ancestorPath, s) &&
 					!routeFilterMemberExists14416(*dst, s) {
 					// #14416: route-filter is a schema-documented OR-member
@@ -931,6 +947,26 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		// and merging it would re-introduce compiler last-wins.
 		if asPathSameNameInlinePeer14419(ancestorPath, *dst, s) != nil {
 			continue
+		}
+		// #14434: flat-set chained applications term (Keys [term <name>]
+		// with body on a child leaf) is a container node, so the leaf
+		// arm above never sees it. Merge same-name chained terms here;
+		// adopt a distinct chained term beside its inline peer instead
+		// of recursing (which would nest bodies). Braced terms have
+		// multiple/named children and keep the container path below.
+		if applicationTermFamilyNode14434(ancestorPath, s) && isApplicationTermChained14434(s) {
+			if tpeer := findApplicationTermPeer14434(*dst, s); tpeer != nil {
+				if mergeApplicationTermNodes14434(tpeer, s) {
+					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{tpeer}, markers)
+					continue
+				}
+			} else if !applicationTermExists14434(*dst, s) {
+				*dst = append(*dst, s)
+				continue
+			} else {
+				// Same name exists only as a braced/container peer:
+				// keep adopt-beside twin → collision gate.
+			}
 		}
 
 		// Container node: find matching containers in dst.
