@@ -6287,14 +6287,36 @@ fn forward_wire_1n_collision_preserves_displaced_session() {
     // aggregate collision counter bumps twice for this one flow-pair.
     assert_eq!(table.nat_reverse_key_collisions(), 2);
 
-    // A forward-wire lookup on W resolves to a LIVE session. Both validate --
-    // the wire tuple is genuinely ambiguous under no-PAT interface SNAT -- so
-    // the multimap returns the first-installed S1 deterministically instead of
-    // "whatever was written last".
+    // #14382: a forward-wire lookup on W must fail closed when TWO live
+    // candidates validate. Both validate -- the wire tuple is genuinely
+    // ambiguous under no-PAT interface SNAT -- so returning the
+    // first-installed S1 would admit the packet under the wrong flow's
+    // decision/zones/counter. The multimap must return None (miss/policy
+    // path), mirroring lookup_ipsec_reply_alias_at's Ambiguous and
+    // find_unique_established_forward_nat_match_at's None.
     assert_eq!(
         table.find_forward_wire_match(&wire).map(|m| m.key),
-        Some(s1.clone()),
-        "forward-wire lookup on W resolves to the first-installed session",
+        None,
+        "forward-wire lookup on W is ambiguous with two live candidates",
+    );
+    assert_eq!(
+        table
+            .find_forward_wire_match_with_origin(&wire)
+            .map(|(m, _)| m.key),
+        None,
+        "with-origin forward-wire lookup on W is ambiguous with two live candidates",
+    );
+    assert_eq!(
+        table
+            .find_forward_wire_match_with_origin_at(&wire, now)
+            .map(|(m, _)| m.key),
+        None,
+        "expiry-aware forward-wire lookup on W is ambiguous with two live candidates",
+    );
+    assert_eq!(
+        table.find_forward_wire_match_expiry(&wire, now),
+        SessionExpiryProbe::Absent,
+        "expiry probe on W is Absent (not IdleCrossed) with two live candidates",
     );
 
     // RED-on-revert: close S2 (the LAST-installed). The single-value map stored
@@ -6378,6 +6400,102 @@ fn forward_wire_1n_pool_snat_fast_path_stays_single_value() {
         Some(s1.clone()),
         "the pool-mode forward-wire lookup resolves through the len-1 fast path",
     );
+}
+
+#[test]
+fn forward_wire_dnat_shared_backend_ambiguous_fails_closed_14382() {
+    // #14382 decisive fixture: two DNAT-shared-backend flows -- client C
+    // -> VIP1 and C -> VIP2 (same domain/ports) both DNAT to backend B --
+    // collapse to the identical forward-wire key W = C -> B. Admission
+    // (#6751) does NOT remove DNAT-to-shared-backend, so both live
+    // forwards land in one forward-wire bucket. Selecting either would
+    // admit the packet under the wrong VIP's decision/zones/counter, so
+    // the wire probe must fail closed; a single flow still hits and the
+    // survivor hits after the other closes.
+    let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
+    let backend = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 50));
+    let dec = SessionDecision {
+        resolution: resolution(),
+        nat: NatDecision {
+            rewrite_dst: Some(backend),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut f1 = key_v4();
+    f1.src_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    f1.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+    f1.src_port = 41000;
+    f1.dst_port = 443;
+    let mut f2 = f1.clone();
+    f2.dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20));
+    let wire = forward_wire_key(&f1, dec.nat);
+    assert_eq!(wire.dst_ip, backend, "DNAT must rewrite both VIPs to B");
+    assert_eq!(
+        wire,
+        forward_wire_key(&f2, dec.nat),
+        "two DNAT-shared-backend flows must share forward-wire key W"
+    );
+    assert_ne!(wire, f1);
+    assert_ne!(wire, f2);
+    assert!(table.install_with_protocol(f1.clone(), dec, metadata(), now, PROTO_TCP, 0x10));
+    assert_eq!(
+        table.find_forward_wire_match(&wire).map(|m| m.key),
+        Some(f1.clone()),
+        "single DNAT flow still hits on W"
+    );
+    assert!(matches!(
+        table.find_forward_wire_match_expiry(&wire, now),
+        SessionExpiryProbe::Live(_)
+    ));
+    assert!(table.install_with_protocol(f2.clone(), dec, metadata(), now, PROTO_TCP, 0x10));
+    assert_eq!(forward_wire_bucket_len(&table, &wire), 2);
+    assert_eq!(
+        table.find_forward_wire_match(&wire).map(|m| m.key),
+        None,
+        "two DNAT-shared-backend flows -> wire probe on W is None"
+    );
+    assert_eq!(
+        table
+            .find_forward_wire_match_with_origin(&wire)
+            .map(|(m, _)| m.key),
+        None,
+        "with-origin wire probe on W is None when ambiguous"
+    );
+    assert_eq!(
+        table
+            .find_forward_wire_match_with_origin_at(&wire, now)
+            .map(|(m, _)| m.key),
+        None,
+        "expiry-aware wire probe on W is None when ambiguous"
+    );
+    assert_eq!(
+        table.find_forward_wire_match_expiry(&wire, now),
+        SessionExpiryProbe::Absent,
+        "expiry probe on W is Absent (candidates are live, not idle-crossed)"
+    );
+    table.delete(&f2);
+    assert_eq!(
+        table.find_forward_wire_match(&wire).map(|m| m.key),
+        Some(f1.clone()),
+        "survivor F1 hits after F2 closes"
+    );
+    assert!(table.install_with_protocol(f2.clone(), dec, metadata(), now, PROTO_TCP, 0x10));
+    assert_eq!(
+        table.find_forward_wire_match(&wire).map(|m| m.key),
+        None,
+        "reinstalled pair is ambiguous again"
+    );
+    table.delete(&f1);
+    assert_eq!(
+        table.find_forward_wire_match(&wire).map(|m| m.key),
+        Some(f2.clone()),
+        "survivor F2 hits after F1 closes"
+    );
+    table.delete(&f2);
+    assert!(table.find_forward_wire_match(&wire).is_none());
 }
 
 /// Build a reverse (reply-direction) SessionDecision whose NAT rewrites the
