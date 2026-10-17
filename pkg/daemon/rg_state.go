@@ -50,6 +50,14 @@ type rgStateMachine struct {
 
 	startedAt time.Time // when this state machine was created (for posture delay selection)
 
+	// kernelUpgradeHold (#14404): while set, desired is forced false
+	// regardless of clusterPri / VRRP MASTER. The daemon mirrors the
+	// cluster hold onto every rgStateMachine (syncRGKernelUpgradeHold);
+	// without this term a VRRP MASTER event alone (cluster secondary)
+	// activates rg_active, removes blackholes, and starts RETH services
+	// on an unverified candidate kernel.
+	kernelUpgradeHold bool
+
 	// Strict VIP ownership (#104): when enabled, rg_active is derived
 	// solely from VRRP master state, NOT clusterPri || anyVrrpMaster.
 	// This prevents the brief dual-active window during failover.
@@ -365,10 +373,31 @@ func (s *rgStateMachine) CurrentDesired() (active bool, epoch uint64) {
 	return s.active, s.epoch
 }
 
+// SetKernelUpgradeHold mirrors the cluster kernel-upgrade hold onto this
+// RG (#14404). While held, reconcileLocked forces desired=false; clearing
+// re-derives desired from the retained cluster/VRRP inputs so a VRRP
+// MASTER that arrived (and was suppressed) while held activates on clear
+// without needing a new event. Returns the resulting transition.
+func (s *rgStateMachine) SetKernelUpgradeHold(held bool) rgTransition {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.kernelUpgradeHold = held
+	return s.reconcileLocked()
+}
+
+// KernelUpgradeHeld reports the #14404 hold mirrored on this RG.
+func (s *rgStateMachine) KernelUpgradeHeld() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.kernelUpgradeHold
+}
+
 func (s *rgStateMachine) reconcileLocked() rgTransition {
 	s.epoch++
 	var desired bool
-	if s.strictVIPOwnership {
+	if s.kernelUpgradeHold {
+		desired = false // #14404: hold is authority until the marker clears it
+	} else if s.strictVIPOwnership {
 		desired = s.allMasterLocked() // VRRP-only: ALL instances must be MASTER (#132)
 	} else {
 		desired = s.clusterPri || s.allMasterLocked() // ALL VRRP instances required (#132)
@@ -465,6 +494,16 @@ func (s *rgStateMachine) CheckVRRPPosture(now time.Time, expectedInstances int) 
 	// nothing to drive UpdateRGPriority against — so skip. This bounds the
 	// inventory-gap fix to the PARTIAL case (>=1 instantiated): a fully
 	// absent RG is left to reconcileVRRPInstances' re-instantiation.
+	// #14404: while the kernel-upgrade hold is armed the hold — not the
+	// posture timer — is the authority. Reporting NeedsResign here would
+	// ResignRG (priority 0), then the 2s reconcile re-drives priority from
+	// config and the instance re-promotes: MASTER-flapping, not held-down.
+	// The VRRP hold gate (becomeMaster refusal) keeps it BACKUP; posture
+	// stays silent until the hold clears.
+	if s.kernelUpgradeHold {
+		s.vrrpMismatchSince = time.Time{}
+		return vrrpPostureOK
+	}
 	if len(s.vrrpInstances) == 0 {
 		s.vrrpMismatchSince = time.Time{}
 		return vrrpPostureOK

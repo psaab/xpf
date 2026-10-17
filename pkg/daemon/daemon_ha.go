@@ -48,6 +48,29 @@ func (d *Daemon) getOrCreateRGState(rgID int) *rgStateMachine {
 	return s
 }
 
+// syncRGKernelUpgradeHold mirrors the cluster kernel-upgrade hold onto
+// every rgStateMachine and the VRRP manager (#14404). Callers: daemon
+// bringup (after holdSecondaryIfKernelCandidateArmed, before instances are
+// driven), reconcileKernelUpgradeHold release/self-heal paths, and every
+// reconcileRGState pass (so a hold armed after an RG state was created
+// still lands, and a cleared hold restores desired from retained inputs).
+// Nil-safe for minimal daemon constructions.
+func (d *Daemon) syncRGKernelUpgradeHold() {
+	held := d.cluster != nil && d.cluster.KernelUpgradeHeld()
+	if d.vrrpMgr != nil {
+		d.vrrpMgr.SetKernelUpgradeHold(held)
+	}
+	d.rgStatesMu.RLock()
+	states := make([]*rgStateMachine, 0, len(d.rgStates))
+	for _, s := range d.rgStates {
+		states = append(states, s)
+	}
+	d.rgStatesMu.RUnlock()
+	for _, s := range states {
+		s.SetKernelUpgradeHold(held)
+	}
+}
+
 func (d *Daemon) syncRGStrictVIPOwnershipMode(cc *config.ClusterConfig) {
 	if cc == nil {
 		return
@@ -667,16 +690,23 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 		}
 
 		// VRRP priority + ForceRGMaster AFTER rg_active and
-		// blackhole removal (#485).
-		if !noRethVRRP {
-			d.vrrpMgr.UpdateRGPriority(ev.GroupID, 200)
+		// blackhole removal (#485). #14404: while the kernel-upgrade hold
+		// is armed, do not re-drive priority 200 or force MASTER — the
+		// node is cluster-secondary by hold, so this arm is unreachable in
+		// the held boot, but ForceRGMaster/UpdateRGPriority also run on
+		// any stale primary event; the VRRP manager hold gate is the
+		// backstop and this skip keeps priority 0 from being overwritten.
+		if !noRethVRRP && (d.cluster == nil || !d.cluster.KernelUpgradeHeld()) {
+			if d.vrrpMgr != nil {
+				d.vrrpMgr.UpdateRGPriority(ev.GroupID, 200)
+			}
 			// With preempt=false, VRRP won't self-elect even at
 			// higher priority. Force MASTER since cluster state
 			// is authoritative (e.g. after failover reset).
 			// Only do this for intentional promotions (Secondary →
 			// Primary), NOT on initial boot (SecondaryHold → Primary)
 			// where VRRP should follow its own election timer.
-			if ev.OldState == cluster.StateSecondary {
+			if ev.OldState == cluster.StateSecondary && d.vrrpMgr != nil {
 				d.vrrpMgr.ForceRGMaster(ev.GroupID)
 			}
 		}
@@ -1231,6 +1261,11 @@ func (d *Daemon) reconcileRGState() {
 	if d.cluster == nil || d.vrrpMgr == nil {
 		return
 	}
+
+	// #14404: mirror the kernel-upgrade hold before any desired computation
+	// or instance re-drive in this pass — a held RG must stay inactive and
+	// its instances must carry priority 0 / refuse MASTER this pass.
+	d.syncRGKernelUpgradeHold()
 
 	// #6889: re-derive the config read-only gate from RG0's authoritative
 	// state. Placed FIRST so no later early return in this function can skip

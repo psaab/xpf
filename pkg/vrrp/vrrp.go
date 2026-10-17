@@ -216,8 +216,13 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 			continue
 		}
 
-		pri := localPriority[rgID]
-		if pri == 0 {
+		// #14404: an RG present in localPriority with value 0 is the
+		// kernel-upgrade hold suppression (cluster.LocalPriorities held
+		// branch) — preserve it. Only an ABSENT RG defaults to secondary
+		// priority 100. Defaulting an explicit 0 to 100 would re-arm the
+		// held candidate's VRRP election.
+		pri, priPresent := localPriority[rgID]
+		if !priPresent {
 			pri = 100 // default to secondary priority
 		}
 

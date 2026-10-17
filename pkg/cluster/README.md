@@ -342,6 +342,21 @@ than the thing the status renders. A single string would be a false statement
 in the fail-closed case, where the daemon does not know a candidate exists and
 no marker may ever be written.
 
+**The hold also gates the RETH-VRRP promotion path (#14404).** Cluster
+election alone was not enough: RETH VRRP is a parallel promotion path, and
+a held secondary advertising priority 100 dead-master-promotes after ~3s
+of peer-advert silence — well before the promotion gate's verdict — then
+`watchVRRPEvents` activates `rg_active`, removes blackholes, and starts
+RETH services on the unverified kernel. Now `LocalPriorities` reports 0
+for every RG while held (preserved by `CollectRethInstances`, not defaulted
+to 100), the VRRP manager mirrors the hold (`SetKernelUpgradeHold`:
+`becomeMaster` refuses, `ForceRGMaster`/`UpdateRGPriority` are no-ops while
+held), each `rgStateMachine` forces desired=false while held, and posture
+correction stays silent while held so resign/re-drive cannot flap the node
+back to MASTER. The daemon mirrors the cluster hold at VRRP bringup, on
+every reconcile pass, and on every hold-release path; clearing the hold
+promotes normally on the next master-down horizon.
+
 **There is deliberately no equivalent hold for an image ROLL (#7559), and it
 must not be added here.** The kernel roll and the image roll look like the same
 problem — an unverified node booting into an election it can win — but they are

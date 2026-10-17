@@ -101,6 +101,15 @@ default RETH ownership/failover path.
   instances.
 - `ResignRG(rgID int)` — `manager.go`. Forces this node out of master
   for the given redundancy group ID.
+- `SetKernelUpgradeHold(bool)` — `manager.go` (#14404). Mirrors the cluster
+  kernel-upgrade election hold: while armed, RETH instances (Family=="")
+  refuse `becomeMaster` (dead-master takeover included — unlike sync-hold,
+  which only suppresses preemption), and `ForceRGMaster`/`UpdateRGPriority`
+  are no-ops. Held RETH instances carry priority 0 from
+  `cluster.LocalPriorities` via `CollectRethInstances` (explicit 0 preserved,
+  absent RG still defaults to 100; the #8597 clamp preserves held 0 only
+  under the manager hold). Clearing does not force promotion; the next
+  master-down horizon promotes normally.
 
 ## File layout
 

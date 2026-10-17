@@ -162,8 +162,11 @@ func (d *Daemon) reconcileKernelUpgradeHold() {
 	if d.cluster == nil || !d.cluster.KernelUpgradeHeld() {
 		// The hold is gone (or never set), possibly cleared by another path
 		// (rejoin / manual reset). Drop our local fail-closed bookkeeping so a
-		// future hold starts clean.
+		// future hold starts clean. #14404: also clear the VRRP/RG mirrors —
+		// a hold cleared via ResetFailover/rejoin bypasses the release
+		// sites below, and a stale VRRP hold would block promotion forever.
 		d.kernelUpgradeHoldFailClosed = false
+		d.syncRGKernelUpgradeHold()
 		return
 	}
 
@@ -201,6 +204,7 @@ func (d *Daemon) reconcileKernelUpgradeHold() {
 				// either hold would strand an otherwise healthy node.
 				d.kernelUpgradeHoldFailClosed = false
 				d.cluster.ClearKernelUpgradeHold()
+				d.syncRGKernelUpgradeHold()
 				slog.Info("kernel-upgrade journal is ARMED but running kernel is not the candidate; "+
 					"releasing fail-closed election hold", "candidate", j.CandidateVersion)
 				return
@@ -220,6 +224,7 @@ func (d *Daemon) reconcileKernelUpgradeHold() {
 			// was transient and no kernel upgrade is pending. Release the hold.
 			d.kernelUpgradeHoldFailClosed = false
 			d.cluster.ClearKernelUpgradeHold()
+			d.syncRGKernelUpgradeHold()
 			slog.Warn("kernel-upgrade journal now readable and NOT armed; releasing the " +
 				"fail-closed SECONDARY election hold (transient read error self-healed)")
 			return
@@ -245,6 +250,7 @@ func (d *Daemon) reconcileKernelUpgradeHold() {
 		return
 	}
 	d.cluster.ClearKernelUpgradeHold()
+	d.syncRGKernelUpgradeHold()
 	slog.Info("kernel-candidate PROMOTED (promotion marker matches running kernel); "+
 		"releasing the SECONDARY election hold so the node takes its normal role",
 		"kernel", running)
