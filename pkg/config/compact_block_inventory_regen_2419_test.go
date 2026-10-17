@@ -266,6 +266,31 @@ const inventoryNotes = `#
 # entire path onto the event-options node, which the existing event-options
 # compiler intentionally does not consume; keep this measured divergence in
 # the inventory rather than widening the unrelated compact-policy reader.
+#
+# #14729: checked 1198 -> 1202; 15 lines removed, 2 shapes changed
+# (empty -> partial), nothing added. The census PANICKED before it could
+# report any of this: the #14441 gate expansion dropped the
+# rg==nil guard in validateRethRedundancyGroupTokensAST, so the
+# census's own empty-stanza skeleton fixture (empty redundant-ether-options
+# block, compiled for every interfaces site) crashed the pre-walk in
+# nodeVal(nil). Restoring the absent-token guard lets the census run,
+# and running it surfaces the drift three already-merged fixes left
+# behind because the panic masked their inventory updates:
+#
+#   - 11 'interfaces xpfname <leaf>' lines + 'interfaces xpfname unit'
+#     fixed by #14442 (every interface-level read routed through
+#     packedBody(ifBody)); 'interfaces xpfname mtu' moves from
+#     filedStillOpen to filedFixed — it was the positive control's
+#     compiler_interfaces.go anchor, re-anchored on the #14442 issue
+#     rather than deleted so the site stays checked in both directions;
+#   - 'protocols router-advertisement interface xpfarg
+#     managed-configuration' + 'other-stateful-configuration' fixed by
+#     #14420's packed-opening expansion (the same change #14428 built
+#     on for the prefix flags already anchored in filedFixed);
+#   - 'interfaces xpfname unit xpfarg point-to-point' fixed by the same
+#     #14442 routing; 'unit xpfarg family inet6 dad-disable' / 'mtu'
+#     stay divergent but their compact spelling now PARTIALLY compiles
+#     (shape empty -> partial) under it.
 #`
 
 func TestRegenerateCompactBlockInventory2419(t *testing.T) {

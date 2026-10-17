@@ -110,6 +110,21 @@ func validateRethRedundancyGroupTokensAST(nodes []*Node, lenient bool) ([]string
 			reo = expandResolvingRun9792(reo, redundantEtherOptionsSchema9792())
 			reo = packedBody(reo, redundantEtherOptionsSchema9792())
 			rg := reo.FindChild("redundancy-group")
+			if rg == nil {
+				// #14729: an EMPTY redundant-ether-options stanza
+				// (`redundant-ether-options { }`, or the bare leaf
+				// `redundant-ether-options;`) carries NO redundancy-group
+				// token at all. That is the ABSENT-token case scoped out
+				// above — not flagged, exactly as a reth with no reo
+				// stanza — not a present-but-empty token. nodeVal(nil)
+				// panicked here: FindChild returns nil for it and
+				// nodeVal dereferences its argument, so any config (or
+				// census fixture) with an empty reo stanza crashed the
+				// pre-walk. A PRESENT leaf with no value
+				// (`redundancy-group;`) still reaches nodeVal below and
+				// is classified unusable.
+				continue
+			}
 			tok := nodeVal(rg)
 			if why, bad := rethRGTokenProblem(tok); bad {
 				found = append(found, offence{iface: name, token: tok, why: why})

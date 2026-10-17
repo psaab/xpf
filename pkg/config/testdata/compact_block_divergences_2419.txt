@@ -229,12 +229,37 @@
 # compiler intentionally does not consume; keep this measured divergence in
 # the inventory rather than widening the unrelated compact-policy reader.
 #
-# checked: 1198
+# #14729: checked 1198 -> 1202; 15 lines removed, 2 shapes changed
+# (empty -> partial), nothing added. The census PANICKED before it could
+# report any of this: the #14441 gate expansion dropped the
+# rg==nil guard in validateRethRedundancyGroupTokensAST, so the
+# census's own empty-stanza skeleton fixture (empty redundant-ether-options
+# block, compiled for every interfaces site) crashed the pre-walk in
+# nodeVal(nil). Restoring the absent-token guard lets the census run,
+# and running it surfaces the drift three already-merged fixes left
+# behind because the panic masked their inventory updates:
 #
-# skipped (leaf value not observable in the typed config): 240
-# skipped (a spelling did not parse or compile): 20
-# skipped (no two distinct synthesizable values): 12
-# skipped (under groups (schema re-host, duplicate coverage)): 1162
+#   - 11 'interfaces xpfname <leaf>' lines + 'interfaces xpfname unit'
+#     fixed by #14442 (every interface-level read routed through
+#     packedBody(ifBody)); 'interfaces xpfname mtu' moves from
+#     filedStillOpen to filedFixed — it was the positive control's
+#     compiler_interfaces.go anchor, re-anchored on the #14442 issue
+#     rather than deleted so the site stays checked in both directions;
+#   - 'protocols router-advertisement interface xpfarg
+#     managed-configuration' + 'other-stateful-configuration' fixed by
+#     #14420's packed-opening expansion (the same change #14428 built
+#     on for the prefix flags already anchored in filedFixed);
+#   - 'interfaces xpfname unit xpfarg point-to-point' fixed by the same
+#     #14442 routing; 'unit xpfarg family inet6 dad-disable' / 'mtu'
+#     stay divergent but their compact spelling now PARTIALLY compiles
+#     (shape empty -> partial) under it.
+#
+# checked: 1202
+#
+# skipped (leaf value not observable in the typed config): 239
+# skipped (a spelling did not parse or compile): 19
+# skipped (no two distinct synthesizable values): 14
+# skipped (under groups (schema re-host, duplicate coverage)): 1165
 #
 bridge-domains xpfname domain-type	partial
 bridge-domains xpfname routing-interface	partial
@@ -248,17 +273,6 @@ firewall policer xpfarg logical-interface-policer	empty
 forwarding-options allow-dataplane-sleep	empty
 interfaces xpfname aggregated-ether-options lacp active	empty
 interfaces xpfname aggregated-ether-options lacp passive	empty
-interfaces xpfname description	partial
-interfaces xpfname disable	partial
-interfaces xpfname duplex	partial
-interfaces xpfname encapsulation	partial
-interfaces xpfname flexible-vlan-tagging	partial
-interfaces xpfname gratuitous-arp-reply	partial
-interfaces xpfname mtu	partial
-interfaces xpfname native-vlan-id	partial
-interfaces xpfname no-gratuitous-arp-request	partial
-interfaces xpfname speed	partial
-interfaces xpfname unit	partial
 interfaces xpfname unit xpfarg family inet address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group	empty
@@ -268,18 +282,14 @@ interfaces xpfname unit xpfarg family inet unnumbered-address	partial
 interfaces xpfname unit xpfarg family inet6 address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg vrrp-group	empty
-interfaces xpfname unit xpfarg family inet6 dad-disable	empty
-interfaces xpfname unit xpfarg family inet6 mtu	empty
-interfaces xpfname unit xpfarg point-to-point	empty
-interfaces xpfname vlan-tagging	partial
+interfaces xpfname unit xpfarg family inet6 dad-disable	partial
+interfaces xpfname unit xpfarg family inet6 mtu	partial
 protocols bgp graceful-restart	empty
 protocols bgp log-updown	empty
 protocols bgp multipath ibgp	empty
 protocols bgp multipath multiple-as	empty
 protocols lldp disable	empty
 protocols lldp interface xpfarg disable	empty
-protocols router-advertisement interface xpfarg managed-configuration	empty
-protocols router-advertisement interface xpfarg other-stateful-configuration	empty
 routing-instances xpfname protocols bgp graceful-restart	empty
 routing-instances xpfname protocols bgp log-updown	empty
 routing-instances xpfname protocols bgp multipath ibgp	empty
