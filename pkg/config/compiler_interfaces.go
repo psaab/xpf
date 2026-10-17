@@ -72,10 +72,20 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 	for _, child := range node.Children {
 		interfaceSchema := interfaceSchema9792()
 		ifLeaves := expandResolvingRun9792(child, interfaceSchema) // #9792: expand a lenient-path packed run (#9235).
-		// A direct `wan0 bandwidth 1g` tail or a leaf exposed by run expansion
-		// can make a parser-marked leaf into a valid interface container.
-		bandwidthNode := packedBody(ifLeaves, interfaceSchema).FindChild("bandwidth")
-		if child.IsLeaf && bandwidthNode == nil {
+		// #14442: the interface node's own packed tail (`ge-0/0/0
+		// description "uplink" disable;`, or the same run nested under a
+		// braced first leaf) carries every interface-level leaf on Keys
+		// with no Children. packedBody expands that tail through the
+		// schema so braced, packed and flat-set spellings compile
+		// identically; reading raw child below dropped a non-first
+		// `disable` (and every other non-first leaf) and, for a packed
+		// interface with no bandwidth, skipped the interface entirely.
+		// All interface-level reads go through ifBody; only authored-
+		// unit detection and the IsLeaf guard consult the raw child,
+		// and the guard now also honours a leaf exposed by expansion.
+		ifBody := packedBody(ifLeaves, interfaceSchema)
+		bandwidthNode := ifBody.FindChild("bandwidth")
+		if child.IsLeaf && bandwidthNode == nil && len(ifBody.Children) == 0 {
 			continue
 		}
 		ifName := child.Name()
@@ -86,16 +96,16 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			// below can skip every unit. An interface that authored units but
 			// kept none is quarantined, not unitless — the emitter must not
 			// fall back to the bare-name endpoint.
-			AuthoredUnits: len(child.FindChildren("unit")) > 0,
+			AuthoredUnits: len(ifBody.FindChildren("unit")) > 0,
 		}
 
 		// Check for description
-		if descNode := ifLeaves.FindChild("description"); descNode != nil {
+		if descNode := ifBody.FindChild("description"); descNode != nil {
 			ifc.Description = nodeVal(descNode)
 		}
 
 		// Interface-level MTU
-		if mtuNode := child.FindChild("mtu"); mtuNode != nil {
+		if mtuNode := ifBody.FindChild("mtu"); mtuNode != nil {
 			if v := nodeVal(mtuNode); v != "" {
 				if n, err := strconv.Atoi(v); err == nil {
 					ifc.MTU = n
@@ -106,7 +116,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		// Speed tokens are typed in the schema and rechecked here for callers
 		// that compile directly. Tolerant loads discard an unsupported legacy
 		// token with a warning so one bad value cannot block activation.
-		if speedNode := child.FindChild("speed"); speedNode != nil {
+		if speedNode := ifBody.FindChild("speed"); speedNode != nil {
 			raw := nodeVal(speedNode)
 			speed := strings.ToLower(strings.TrimSpace(raw))
 			if speed == "auto" {
@@ -123,7 +133,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				}
 			}
 		}
-		if duplexNode := child.FindChild("duplex"); duplexNode != nil {
+		if duplexNode := ifBody.FindChild("duplex"); duplexNode != nil {
 			duplex := nodeVal(duplexNode)
 			switch duplex {
 			case "full", "half", "auto":
@@ -138,7 +148,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				}
 			}
 		}
-		if child.FindChild("disable") != nil {
+		if ifBody.FindChild("disable") != nil {
 			ifc.Disable = true
 		}
 
@@ -161,12 +171,12 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		}
 
 		// Check for vlan-tagging flag
-		if child.FindChild("vlan-tagging") != nil {
+		if ifBody.FindChild("vlan-tagging") != nil {
 			ifc.VlanTagging = true
 		}
 
 		// Check for flexible-vlan-tagging flag (QinQ)
-		if child.FindChild("flexible-vlan-tagging") != nil {
+		if ifBody.FindChild("flexible-vlan-tagging") != nil {
 			ifc.FlexibleVlanTagging = true
 		}
 
@@ -174,27 +184,27 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		// vlan-id unit when present (#11434); otherwise the dataplane rejects
 		// untagged traffic, so warn after compiling the units below (#12248).
 		// The remaining ARP/addressing knobs retain their accepted-only advisory.
-		if nvNode := child.FindChild("native-vlan-id"); nvNode != nil {
+		if nvNode := ifBody.FindChild("native-vlan-id"); nvNode != nil {
 			if v := nodeVal(nvNode); v != "" {
 				if n, err := strconv.Atoi(v); err == nil {
 					ifc.NativeVlanID = n
 				}
 			}
 		}
-		if child.FindChild("gratuitous-arp-reply") != nil {
+		if ifBody.FindChild("gratuitous-arp-reply") != nil {
 			ifc.GratuitousARPReply = true
 		}
-		if child.FindChild("no-gratuitous-arp-request") != nil {
+		if ifBody.FindChild("no-gratuitous-arp-request") != nil {
 			ifc.NoGratuitousARPRequest = true
 		}
 
 		// Check for encapsulation
-		if encapNode := child.FindChild("encapsulation"); encapNode != nil {
+		if encapNode := ifBody.FindChild("encapsulation"); encapNode != nil {
 			ifc.Encapsulation = nodeVal(encapNode)
 		}
 
 		// Check for gigether-options redundant-parent and 802.3ad LAG member
-		if goNode := child.FindChild("gigether-options"); goNode != nil {
+		if goNode := ifBody.FindChild("gigether-options"); goNode != nil {
 			goNode = expandResolvingRun9792(goNode, gigetherOptionsSchema9792()) // #9792: expand a lenient-path packed run (#9235).
 			if rpNode := goNode.FindChild("redundant-parent"); rpNode != nil {
 				ifc.RedundantParent = nodeVal(rpNode)
@@ -205,7 +215,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		}
 
 		// Check for aggregated-ether-options (LAG/ae interface)
-		if aeoNode := child.FindChild("aggregated-ether-options"); aeoNode != nil {
+		if aeoNode := ifBody.FindChild("aggregated-ether-options"); aeoNode != nil {
 			aeoNode = expandResolvingRun9792(aeoNode, aggregatedEtherOptionsSchema9792()) // #9792: expand a lenient-path packed run (#9235).
 			opts := &AggregatedEtherOptions{}
 			if lacpNode := aeoNode.FindChild("lacp"); lacpNode != nil {
@@ -239,7 +249,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		// gigether/aggregated siblings above do for their packed runs.
 		// Without the expansion FindChild sees no child and the group stays
 		// 0, so the reth reads as an ordinary interface on both nodes.
-		if reoNode := child.FindChild("redundant-ether-options"); reoNode != nil {
+		if reoNode := ifBody.FindChild("redundant-ether-options"); reoNode != nil {
 			reoNode = expandResolvingRun9792(reoNode, redundantEtherOptionsSchema9792())
 			reoNode = packedBody(reoNode, redundantEtherOptionsSchema9792())
 			if rgNode := reoNode.FindChild("redundancy-group"); rgNode != nil {
@@ -278,7 +288,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		// `member-interfaces ge-0/0/0;`. FindChildren, not FindChild, because
 		// repeated hierarchical statements land as SIBLING nodes and only the
 		// first was ever consulted.
-		if foNode := child.FindChild("fabric-options"); foNode != nil {
+		if foNode := ifBody.FindChild("fabric-options"); foNode != nil {
 			for _, miNode := range foNode.FindChildren("member-interfaces") {
 				ifc.FabricMembers = append(ifc.FabricMembers, fabricMemberValues(miNode)...)
 			}
@@ -288,7 +298,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 		}
 
 		// Check for interface-level tunnel configuration
-		tunnelNode := child.FindChild("tunnel")
+		tunnelNode := ifBody.FindChild("tunnel")
 		skipIface9899 := false
 		if tunnelNode != nil {
 			// Default mode based on interface name prefix: ip-X/X/X → ipip, gr-X/X/X → gre
@@ -401,7 +411,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			ifc.Tunnel = tc
 		}
 
-		for _, unitInst := range namedInstances(child.FindChildren("unit")) {
+		for _, unitInst := range namedInstances(ifBody.FindChildren("unit")) {
 			unitNum, err := strconv.Atoi(unitInst.name)
 			if err != nil || unitNum < 0 || unitNum > MaxLogicalUnit {
 				// #5829: a non-numeric / negative / overflow / out-of-range

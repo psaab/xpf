@@ -179,14 +179,17 @@ func expandResolvingRun9792(n *Node, container *schemaNode) *Node {
 // hoistAndSplitRun8939 may flatten without moving anything the container does
 // not declare.
 func packedOrNestedLeafRun9792(c *Node, container *schemaNode) bool {
-	if c == nil || len(c.Keys) < 2 {
-		return false // a run's head carries its value; `processes { ... }` does not
+	if c == nil || len(c.Keys) == 0 {
+		return false
 	}
 	head := container.children[c.Keys[0]]
 	if head == nil || len(head.children) > 0 || head.wildcard != nil || head.multi {
 		return false
 	}
 	if len(c.Children) == 0 {
+		if len(c.Keys) < 2 {
+			return false // a lone leaf is not a run
+		}
 		// Packed continuations may be split only at leaf keywords. A container
 		// token owns a body, so splitting there promotes later body tokens into
 		// the enclosing scope (#13108).
@@ -198,7 +201,22 @@ func packedOrNestedLeafRun9792(c *Node, container *schemaNode) bool {
 				i += child.args
 			}
 		}
-		return len(c.Keys) > 2 && container.children[c.Keys[2]] != nil
+		// #14442: the continuation starts right after the head's own
+		// tokens — Keys[1+args], not a fixed Keys[2]. A flag head
+		// (args:0, e.g. interface `disable`) carries its tail at
+		// Keys[1]; the old fixed index required a value-bearing head
+		// and silently refused every flag-first run.
+		cont := 1 + head.args
+		return cont < len(c.Keys) && container.children[c.Keys[cont]] != nil
+	}
+	// #14442: a flag head (args:0, no value) can also carry a nested
+	// run — SetPath nests `disable description uplink` as
+	// [disable] > [description uplink]. The old `len(Keys) < 2` gate
+	// rejected it for lacking a value the flag never had, so the tail
+	// stayed nested where FindChild cannot see it. A value-bearing
+	// head still requires its value token.
+	if head.args > 0 && len(c.Keys) < 2 {
+		return false
 	}
 	return allDescendantsDeclared9792(c, container)
 }
