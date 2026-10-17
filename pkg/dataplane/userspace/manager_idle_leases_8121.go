@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,32 @@ import (
 // paths fail closed when status is unavailable or unobserved.
 var ErrPersistentNatLeaseScopeProtocolIncompatible = errors.New(
 	"userspace persistent NAT lease protocol incompatible")
+
+// maxPersistentNatGenerationJump14580 bounds how far one forwarded clear may
+// advance a KNOWN peer's durable generation watermark (#14580). Genuine peers
+// advance by exactly one per authoritative clear; 1024 leaves generous room
+// for clears this node missed while partitioned, without letting one forged
+// fence (e.g. MaxUint64) discard every genuine batch below it forever.
+const maxPersistentNatGenerationJump14580 = 1024
+
+// persistentNatStaleBatchDrops counts lease batches dropped as stale against
+// the durable peer-generation watermark in ImportPersistentNatLeaseBatch
+// (#14580). The drop used to be silent; surfaced for tests/operator tooling.
+var persistentNatStaleBatchDrops atomic.Uint64
+
+// PersistentNatStaleBatchDrops reports the process-lifetime stale-batch drop
+// count (#14580).
+func PersistentNatStaleBatchDrops() uint64 { return persistentNatStaleBatchDrops.Load() }
+
+// persistentNatGenerationJumpsRejected counts forwarded clears refused for
+// jumping a known peer's watermark implausibly far (#14580).
+var persistentNatGenerationJumpsRejected atomic.Uint64
+
+// PersistentNatGenerationJumpsRejected reports the process-lifetime count of
+// refused generation jumps (#14580).
+func PersistentNatGenerationJumpsRejected() uint64 {
+	return persistentNatGenerationJumpsRejected.Load()
+}
 
 func (m *Manager) ensurePersistentNatLeaseProtocolLocked(required int, feature string) error {
 	if m.helperStatusObserved &&
@@ -212,6 +239,21 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 		return nil
 	}
 	if generation, ok := state.RemoteGenerations[batch.OriginID]; ok && batch.Generation < generation {
+		// #14580: this drop used to be silent (`return nil`), which is what
+		// made a poisoned watermark invisible. Count and rate-limited-log it
+		// like the #13909 local-clear fence above.
+		persistentNatStaleBatchDrops.Add(1)
+		if m.persistentNatStaleDropLoggedAt == nil {
+			m.persistentNatStaleDropLoggedAt = make(map[string]time.Time)
+		}
+		lastLogged := m.persistentNatStaleDropLoggedAt[batch.OriginID]
+		if lastLogged.IsZero() || now.Sub(lastLogged) >= persistentNatLocalClearFenceLifetime {
+			slog.Warn("persistent-NAT lease batch dropped as stale against durable peer-generation watermark",
+				"origin", batch.OriginID, "generation", batch.Generation,
+				"watermark", generation, "drops_total", persistentNatStaleBatchDrops.Load(),
+				"issue", "#14580")
+			m.persistentNatStaleDropLoggedAt[batch.OriginID] = now
+		}
 		return nil
 	}
 	generation, known := state.RemoteGenerations[batch.OriginID]
@@ -394,6 +436,26 @@ func (m *Manager) ClearPersistentNATLeasesWithGeneration(peerOrigin string, peer
 	state := clonePersistentNatLeaseGenerationState11486(m.persistentNatLeaseGeneration)
 	if peerOrigin != "" && peerOrigin == state.OriginID {
 		return 0, "", 0, errors.New("peer persistent-NAT clear origin matches local origin")
+	}
+	if peerOrigin != "" {
+		// #14580 defense-in-depth: a forwarded clear may advance a KNOWN
+		// peer's watermark by at most maxPersistentNatGenerationJump14580
+		// generations. Genuine peers advance by exactly one per clear, so a
+		// larger jump is a forged or corrupted fence; persisting it would
+		// silently discard every genuine batch below it (the pre-fix
+		// MaxUint64 poison). An UNSEEN origin's first clear is accepted at
+		// any generation: there is no watermark to jump from, and rejecting
+		// it would break first contact with a long-lived peer.
+		if old, seen := state.RemoteGenerations[peerOrigin]; seen &&
+			peerGeneration > old && peerGeneration-old > maxPersistentNatGenerationJump14580 {
+			persistentNatGenerationJumpsRejected.Add(1)
+			slog.Warn("persistent-NAT peer clear generation jump refused",
+				"origin", peerOrigin, "generation", peerGeneration,
+				"watermark", old, "max_jump", maxPersistentNatGenerationJump14580,
+				"jumps_rejected_total", persistentNatGenerationJumpsRejected.Load(),
+				"issue", "#14580")
+			return 0, "", 0, fmt.Errorf("peer persistent-NAT clear generation %d jumps implausibly from observed %d", peerGeneration, old)
+		}
 	}
 	// A clear revokes all locally held leases. During the bounded replay
 	// window, fence each known peer at its observed generation so delayed

@@ -123,6 +123,19 @@ dialed.
 exception for the userspace helper's authoritative persistent-NAT clear
 (#10784). The receiving peer executes the clear without forwarding it again;
 no other `SystemAction` action is added to the fabric allowlist.
+
+The forwarded clear's durable generation fence (#11486) rides **inside**
+`SystemActionRequest` (`persistent_nat_origin`/`persistent_nat_generation`,
+#14580), never in metadata: the #4107 token's request-digest MAC therefore
+binds origin+generation, so a captured token replayed with a forged
+generation is rejected `Unauthenticated` before the receiver's durable
+peer-generation watermark can be poisoned. The legacy
+`x-peer-persistent-nat-{origin,generation}` headers are stripped as reserved
+metadata and never honored; a forwarded clear with an empty body (legacy
+peer) clears locally with no fence. The receiver additionally refuses a
+forwarded clear that jumps a known peer's watermark by more than 1024
+generations, and counts/logs lease batches dropped as stale against the
+watermark (previously silent).
 `ClearSessions` and all admitted `SystemAction` verbs bypass rollout grace
 on keyed listeners and always require a valid PSK token (#11487).
 

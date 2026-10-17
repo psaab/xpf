@@ -25,6 +25,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/clusterfailover/grammarvectors"
+	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
 const nilClusterMsg = "cluster not configured"
@@ -64,7 +65,7 @@ func TestInProcFailoverRejectsNeverProxy_5810(t *testing.T) {
 	for _, tc := range grammarvectors.CommandRejects {
 		t.Run(tc.Name, func(t *testing.T) {
 			c := &CLI{cluster: cluster.NewManager(0, 1)}
-			c.peerSystemActionFn = func(context.Context, string) (string, error) {
+			c.peerSystemActionFn = func(context.Context, *pb.SystemActionRequest) (string, error) {
 				t.Fatalf("rejected form %v proxied to peer", tc.Args)
 				return "", nil
 			}

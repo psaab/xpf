@@ -216,6 +216,9 @@ type Manager struct {
 	// persistentNatLocalClearDropLoggedAt rate-limits fenced-batch warnings
 	// per origin. Runtime-only; guarded by mu.
 	persistentNatLocalClearDropLoggedAt map[string]time.Time
+	// persistentNatStaleDropLoggedAt rate-limits stale-batch (#14580)
+	// warnings per origin. Runtime-only; guarded by mu.
+	persistentNatStaleDropLoggedAt map[string]time.Time
 	cfg                                 config.UserspaceConfig
 	clusterHA                           bool
 	captureEpochProvider                CaptureEpochProvider

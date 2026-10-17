@@ -134,23 +134,17 @@ func (c *CLI) requestPeerSystemAction(ctx context.Context, action string) (strin
 
 // requestPeerSystemActionWithPersistentNatGeneration is
 // requestPeerSystemAction plus the durable persistent-NAT clear
-// generation fence (#11486): when origin is non-empty it forwards
-// x-peer-persistent-nat-{origin,generation} so the peer records
-// RemoteGenerations[origin]=generation and rejects pre-clear lease
-// replays. Mirrors grpcapi's
-// proxyPeerSystemActionWithPersistentNatGeneration; metadata keys
-// must stay in sync with
-// pkg/grpcapi/persistent_nat_clear_generation_11486.go.
+// generation fence (#11486): when origin is non-empty it carries
+// persistent_nat_{origin,generation} inside the signed SystemActionRequest
+// body so the peer records RemoteGenerations[origin]=generation and rejects
+// pre-clear lease replays. #14580 moved these out of unsigned gRPC metadata
+// (x-peer-persistent-nat-*) into the request body, where the #4107 fabric
+// token's request-digest MAC binds them.
 func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Context, action string, origin string, generation uint64) (string, error) {
-	pairs := []string{"x-peer-forwarded", "1"}
-	if origin != "" {
-		pairs = append(pairs,
-			"x-peer-persistent-nat-origin", origin,
-			"x-peer-persistent-nat-generation", strconv.FormatUint(generation, 10))
-	}
-	ctx = metadata.AppendToOutgoingContext(ctx, pairs...)
+	ctx = metadata.AppendToOutgoingContext(ctx, "x-peer-forwarded", "1")
+	req := &pb.SystemActionRequest{Action: action, PersistentNatOrigin: origin, PersistentNatGeneration: generation}
 	if c.peerSystemActionFn != nil {
-		return c.peerSystemActionFn(ctx, action)
+		return c.peerSystemActionFn(ctx, req)
 	}
 	conn := c.dialPeer()
 	if conn == nil {
@@ -160,7 +154,7 @@ func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Con
 
 	peerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	resp, err := pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, &pb.SystemActionRequest{Action: action})
+	resp, err := pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, req)
 	if err != nil {
 		return "", err
 	}

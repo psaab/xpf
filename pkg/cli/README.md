@@ -482,6 +482,9 @@ EOF or an over-cap suffix is never reported as a successful empty FIB.
   clearing the SHOW mirror. Other dataplanes clear their authoritative table
   directly. In cluster mode the CLI also sends the exact `clear-persistent-nat`
   peer action; a peer failure is reported as a warning after the local clear.
+  The forwarded clear's generation fence rides inside the signed
+  `SystemActionRequest` body (`persistent_nat_origin`/`persistent_nat_generation`,
+  #14580), never in unsigned metadata.
 - `show security match-policies` (`showMatchPolicies`) and `test policy`
   (`testPolicy`) are THIN adapters over the single shared policy simulator
   `pkg/policymatch` (#3042) — the same matcher the REST and gRPC surfaces

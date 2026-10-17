@@ -9078,8 +9078,17 @@ type SystemActionRequest struct {
 	CandidateOldCount uint32 `protobuf:"varint,6,opt,name=candidate_old_count,json=candidateOldCount,proto3" json:"candidate_old_count,omitempty"`
 	CandidateNewCount uint32 `protobuf:"varint,7,opt,name=candidate_new_count,json=candidateNewCount,proto3" json:"candidate_new_count,omitempty"`
 	BaselineHash      string `protobuf:"bytes,8,opt,name=baseline_hash,json=baselineHash,proto3" json:"baseline_hash,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// #14580: forwarded clear-persistent-nat carries the origin node's durable
+	// lease origin (32 lower-hex chars) and its post-clear generation. These
+	// travel INSIDE the signed request body so the #4107 fabric token (HMAC
+	// over the request digest) binds them: a captured token replayed with
+	// forged origin/generation metadata is rejected Unauthenticated before
+	// the durable peer-generation watermark can be poisoned. Empty/zero on
+	// every non-forwarded and legacy call.
+	PersistentNatOrigin     string `protobuf:"bytes,9,opt,name=persistent_nat_origin,json=persistentNatOrigin,proto3" json:"persistent_nat_origin,omitempty"`
+	PersistentNatGeneration uint64 `protobuf:"varint,10,opt,name=persistent_nat_generation,json=persistentNatGeneration,proto3" json:"persistent_nat_generation,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *SystemActionRequest) Reset() {
@@ -9166,6 +9175,20 @@ func (x *SystemActionRequest) GetBaselineHash() string {
 		return x.BaselineHash
 	}
 	return ""
+}
+
+func (x *SystemActionRequest) GetPersistentNatOrigin() string {
+	if x != nil {
+		return x.PersistentNatOrigin
+	}
+	return ""
+}
+
+func (x *SystemActionRequest) GetPersistentNatGeneration() uint64 {
+	if x != nil {
+		return x.PersistentNatGeneration
+	}
+	return 0
 }
 
 type SystemActionResponse struct {
@@ -10362,7 +10385,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\x14GetSystemInfoRequest\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\"/\n" +
 	"\x15GetSystemInfoResponse\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\tR\x06output\"\xac\x02\n" +
+	"\x06output\x18\x01 \x01(\tR\x06output\"\x9c\x03\n" +
 	"\x13SystemActionRequest\x12\x16\n" +
 	"\x06action\x18\x01 \x01(\tR\x06action\x12\x16\n" +
 	"\x06target\x18\x02 \x01(\tR\x06target\x12!\n" +
@@ -10371,7 +10394,10 @@ const file_xpf_proto_rawDesc = "" +
 	"\x0ecandidate_hash\x18\x05 \x01(\tR\rcandidateHash\x12.\n" +
 	"\x13candidate_old_count\x18\x06 \x01(\rR\x11candidateOldCount\x12.\n" +
 	"\x13candidate_new_count\x18\a \x01(\rR\x11candidateNewCount\x12#\n" +
-	"\rbaseline_hash\x18\b \x01(\tR\fbaselineHash\"0\n" +
+	"\rbaseline_hash\x18\b \x01(\tR\fbaselineHash\x122\n" +
+	"\x15persistent_nat_origin\x18\t \x01(\tR\x13persistentNatOrigin\x12:\n" +
+	"\x19persistent_nat_generation\x18\n" +
+	" \x01(\x04R\x17persistentNatGeneration\"0\n" +
 	"\x14SystemActionResponse\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\"\xbb\x02\n" +
 	"\x18MonitorPacketDropRequest\x12#\n" +

@@ -55,6 +55,11 @@ const (
 var reservedPeerMetadataKeys = []string{
 	peerForwardedMetadataKey,
 	peerNoPeerMetadataKey,
+	// #14580: legacy unsigned persistent-NAT clear generation metadata.
+	// Never honored (the signed request body is authoritative); stripped on
+	// both listeners so no handler can read it even by mistake.
+	"x-peer-persistent-nat-origin",
+	"x-peer-persistent-nat-generation",
 }
 
 type peerMarkerCtxKeyType struct{}

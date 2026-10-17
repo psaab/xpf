@@ -197,7 +197,7 @@ func TestPeerMarkerStreamInterceptorAppliesToStreams(t *testing.T) {
 func TestReservedPeerMetadataKeysAreComplete(t *testing.T) {
 	got := append([]string(nil), reservedPeerMetadataKeys...)
 	sort.Strings(got)
-	want := []string{"x-peer-forwarded", "xpf-no-peer"}
+	want := []string{"x-peer-forwarded", "x-peer-persistent-nat-generation", "x-peer-persistent-nat-origin", "xpf-no-peer"}
 	if len(got) != len(want) {
 		t.Fatalf("reserved key set = %v, want %v", got, want)
 	}
