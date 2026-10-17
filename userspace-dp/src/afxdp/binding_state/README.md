@@ -82,6 +82,11 @@ orderings and `#[inline]` attributes moved byte-identical, and the
   loop-safe one: the recovery is an OPEN-ONLY snapshot of the owned set,
   so it cannot restore a dropped CLOSE however many times it runs, and
   every OPEN it could restore is already in the snapshot being shipped.
+  The same non-arming rule holds on the lossless event-stream leg
+  (#14646): a `bulk_resync` delta whose `push_delta_lossless_within`
+  fails (disconnected stream / bounded timeout) counts in
+  `frames_dropped` but does not set `event_stream_out_of_sync`, so the
+  worker loop's `set_delta_loss` is never re-armed by the export itself.
 - **Status-snapshot `last_error` precedence (#4971 / #6145).**
   `snapshot()` (`snapshot.rs`) renders `last_error` from TWO sources with
   a fixed precedence: the `last_error` **mutex** string (written by the

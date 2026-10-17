@@ -421,6 +421,19 @@ cluster-scoped.
     which the worker loop folds into `SessionTable::set_delta_loss` so the same
     `take_delta_loss` owner-RG resync recovers the lost/undrained deltas.
     Debounced by a single `AtomicBool` per binding: one episode → one resync.
+  - **#14646: a `bulk_resync` delta's own lossless failure does NOT re-arm.**
+    The #8593 exemption covered only the per-binding RPC-fallback buffer;
+    the event-stream leg still latched `event_stream_out_of_sync` when a
+    LossResync re-export delta could not be queued while the stream was
+    disconnected, so `flush_session_deltas_loop` re-armed `set_delta_loss`
+    and every worker re-exported its whole owned table on every pass for
+    the whole outage (bounded only by outage length). A failed bulk delta
+    now counts (`frames_dropped`) without setting the return/wedge latch;
+    attempts are gated per kind (bulk gated on `bulk_loss_this_batch`,
+    incremental gated on `event_stream_out_of_sync`) so neither kind's
+    failure suppresses the other kind's first attempt in the batch, and
+    reconnect already triggers a FullResync that supersedes the lost
+    bulk deltas. A genuinely-new incremental loss still latches (#2874).
   - **#5468: the worker-loop lossless wait is BOUNDED — per call AND in
     aggregate.** `flush_session_deltas` runs on the packet worker loop, so it
     uses `push_delta_lossless_within` with a short `WORKER_LOSSLESS_QUEUE_BUDGET`

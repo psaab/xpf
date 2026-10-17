@@ -595,8 +595,8 @@ pub(super) fn flush_session_deltas(
 ) -> bool {
     let zone_name_to_id = &forwarding.zone_name_to_id;
     let zone_id_to_name = &forwarding.zone_id_to_name;
-    // #2874: set the moment a session open/close delta cannot be queued
-    // losslessly to the event-stream consumer. Once set we stop attempting
+    // #2874: set the moment a session open/close (non-bulk) delta cannot be
+    // queued losslessly to the event-stream consumer. Once set we stop attempting
     // further lossless pushes this batch — the full owner-RG resync the caller
     // schedules supersedes the remaining incremental deltas, and this bounds the
     // worst-case producer backpressure to a single lossless wait per drain
@@ -610,7 +610,10 @@ pub(super) fn flush_session_deltas(
     // budget wait on every batch. If a prior batch this cycle already wedged, we
     // start out-of-sync and never attempt another lossless push — the aggregate
     // worker-loop wait stays ~1 budget regardless of the owned-session count K.
+    // A prior non-bulk failure this cycle may have pre-seeded the wedge;
+    // the first bulk failure in this batch must not be masked by it (#14646).
     let mut event_stream_out_of_sync = *worker_lossless_wedged;
+    let mut bulk_loss_this_batch = false;
     for (delta_index, delta) in deltas.iter().enumerate() {
         // #10512: the plan's bounded worker retry contract forbids dropping a
         // close when its install permit is busy. Requeue this suffix before
@@ -908,11 +911,13 @@ pub(super) fn flush_session_deltas(
                 // the #2874 defect). `push_delta_lossless` applies the producer's
                 // bounded backpressure and PROPAGATES a genuine failure (peer
                 // disconnect / queue timeout) as an error instead of swallowing it.
-                // On failure we latch out-of-sync; the caller then re-exports the
-                // full owner-RG snapshot (the #2442 recovery path) so the peer
-                // re-derives a complete session view. The RT_FLOW telemetry frames
-                // below stay best-effort (`try_send`) — a dropped flow-export record
-                // is not a correctness loss and must not force a resync.
+                // On failure of a non-bulk (incremental) delta we latch out-of-sync;
+                // the caller then re-exports the full owner-RG snapshot (the #2442
+                // recovery path) so the peer re-derives a complete session view.
+                // Bulk-resync failures count but do not latch (#14646, below).
+                // The RT_FLOW telemetry frames below stay best-effort (`try_send`) —
+                // a dropped flow-export record is not a correctness loss and must
+                // not force a resync.
                 //
                 // #5468: this runs on the PACKET WORKER LOOP, so the lossless send is
                 // BOUNDED to `WORKER_LOSSLESS_QUEUE_BUDGET` (well below
@@ -927,7 +932,34 @@ pub(super) fn flush_session_deltas(
                 // RT_FLOW and flow export, not to claim HA authority. Keep it
                 // out of the lossless session-sync stream while letting the
                 // producer-gated telemetry frames below run normally.
-                if !event_stream_out_of_sync
+                // #14646: a bulk_resync (LossResync) delta that cannot be
+                // queued does NOT re-arm the latch — the same non-arming
+                // contract as the RPC fallback leg above (#8593). During
+                // this very resync the caller has already consumed the
+                // latch (`take_delta_loss`), and reconnect already
+                // triggers a FullResync, so re-arming here would make
+                // every worker re-export its whole owned table on every
+                // pass for the whole event-stream outage. A genuinely
+                // new incremental drop (bulk_resync=false) still arms.
+                // The event-stream gate therefore cannot be the shared
+                // `event_stream_out_of_sync` flag: a still-unfired prior
+                // wedge (this cycle) must not mask the first bulk attempt,
+                // and bulk failures must not set the flag that suppresses
+                // a later incremental attempt in the same drain (its
+                // return value, and the #5468 wedge, stay attributable to
+                // non-bulk failures only). Attempts stop at the first
+                // failure of EITHER kind this drain — the remainder is
+                // superseded by the resync the genuine drop schedules,
+                // or by the reconnect FullResync for bulk-only loss — so
+                // the per-cycle lossless wait stays ~1 budget (#5468):
+                //   bulk delta:        attempted unless bulk_loss_this_batch
+                //   incremental delta: attempted unless event_stream_out_of_sync
+                let gate_open = if delta.bulk_resync {
+                    !bulk_loss_this_batch
+                } else {
+                    !event_stream_out_of_sync
+                };
+                if gate_open
                     && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed
                 {
                     if let Err(err) = es.push_delta_lossless_within(
@@ -935,10 +967,15 @@ pub(super) fn flush_session_deltas(
                         zone_name_to_id,
                         WORKER_LOSSLESS_QUEUE_BUDGET,
                     ) {
-                        event_stream_out_of_sync = true;
-                        eprintln!(
-                            "xpf-event-stream: HA session-sync delta could not be queued losslessly ({err}); latching out-of-sync to force a full owner-RG resync"
-                        );
+                        if delta.bulk_resync {
+                            bulk_loss_this_batch = true;
+                            es.record_dropped_frames(1);
+                        } else {
+                            event_stream_out_of_sync = true;
+                            eprintln!(
+                                "xpf-event-stream: HA session-sync delta could not be queued losslessly ({err}); latching out-of-sync to force a full owner-RG resync"
+                            );
+                        }
                     }
                 }
                 // #2460: a Close delta also emits a SEPARATE RT_FLOW

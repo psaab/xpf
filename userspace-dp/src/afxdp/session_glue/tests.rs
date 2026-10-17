@@ -11234,6 +11234,119 @@ mod flush_tuple_gate_contention_13654 {
 
 }
 
+/// #14646 FAIL-ON-REVERT: the LossResync export's own deltas must not
+/// re-arm the loss-of-sync latch through the event-stream leg either.
+/// The RPC-fallback leg already exempts `bulk_resync` deltas (#8593);
+/// the lossless event-stream leg did not: while the stream is
+/// disconnected, `push_delta_lossless_within` fails immediately, and a
+/// re-exported open set `event_stream_out_of_sync`, so
+/// `flush_session_deltas_loop` called `set_delta_loss()` and the next
+/// worker pass re-exported the whole owned table again — under every
+/// worker, for the whole outage (reconnect already triggers a
+/// FullResync, so the outage-time re-export carries nothing new).
+/// Fail-on-revert: dropping the `bulk_resync` exemption in the
+/// event-stream leg re-arms every disconnected pass and fails the
+/// `bulk_resync=true` arm below.
+#[test]
+fn flush_session_deltas_bulk_resync_event_stream_loss_does_not_rearm_14646() {
+    let key = test_key();
+    let decision = test_decision();
+    let metadata = test_metadata();
+
+    let mk = |bulk_resync: bool| SessionDelta {
+        kind: SessionDeltaKind::Open,
+        key: key.clone(),
+        decision,
+        metadata: metadata.clone(),
+        policy_generation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: false,
+        provenance: if bulk_resync {
+            crate::session::ExportProvenance::LossResync
+        } else {
+            crate::session::ExportProvenance::Incremental
+        },
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        purge_retirement: false,
+        source_nat_static: None,
+    };
+    let one_pass = |delta: SessionDelta| -> (bool, bool) {
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+        let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+        let forwarding = ForwardingState::default();
+        let ident = BindingIdentity {
+            slot: 0,
+            queue_id: 0,
+            worker_id: 0,
+            interface: Arc::<str>::from(""),
+            ifindex: -1,
+        };
+        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
+        let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let __r3_reader = __r3_channel.reader();
+        // Disconnected handle: lossless push fails immediately (~!connected).
+        let (handle, _rx) = crate::event_stream::test_worker_handle(
+            1,
+            crate::event_stream::DataplaneEventRateLimitConfig::default(),
+        );
+        let event_stream = Some(handle);
+        let mut wedged = false;
+        let out_of_sync = flush_session_deltas(
+            &ident,
+            None,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &dnat_fds,
+            &[delta],
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &recent_session_deltas,
+            &peer_worker_commands,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &event_stream,
+            &forwarding,
+            &__r3_reader,
+            &mut wedged,
+            None,
+        );
+        (out_of_sync, wedged)
+    };
+
+    // The export's own delta, lost to the disconnected stream, must NOT
+    // re-arm — the same non-arming contract as the RPC fallback (#8593).
+    assert_eq!(
+        one_pass(mk(true)),
+        (false, false),
+        "#14646: a bulk_resync (LossResync) delta lost to the disconnected \
+         event stream must not latch loss-of-sync, or the export re-triggers \
+         itself on every pass until reconnect"
+    );
+    // A genuinely-new incremental drop on the same legs must still re-arm.
+    assert_eq!(
+        one_pass(mk(false)),
+        (true, true),
+        "#14646: an incremental delta lost to the disconnected event stream \
+         must still latch loss-of-sync (#2874); suppressing it deletes the \
+         genuine-drop recovery"
+    );
+}
+
 
 /// #9630 FAIL-ON-REVERT: a CommandExport already delivered the complete
 /// paged control response, so its event-stream echo must not be sent again.
