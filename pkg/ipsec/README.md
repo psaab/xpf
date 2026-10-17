@@ -18,10 +18,23 @@ the apply path pays no fsync (the file is regenerated on every apply).
   connection that departed the rendered/loaded set since the last Apply —
   whether the operator DELETED it (#3941) or it became UNRENDERABLE and was
   omitted from the render (#5494). **The returned error is
-  load-bearing (#4433):** a render/write/`swanctl --load-all` failure leaves
-  the previously-loaded strongSwan config (the OLD tunnels) active and restores
-  the prior swanctl file before returning (#10712), so a later service restart
-  cannot activate the rejected candidate. The commit path (`daemon_apply.go` step 6)
+  load-bearing (#4433):** a render/write failure leaves the prior file
+  untouched. A total `swanctl --load-all` failure (vici/exec, no partial
+  summary) leaves the previously-loaded config active and restores the
+  prior swanctl file before returning (#10712), so a later service restart
+  cannot activate the rejected candidate. A **partial** load — a parseable
+  `loaded N of M ..., F failed to load` summary for connections, pools, or
+  authorities, with any exit code including 0 — is different (#14589):
+  charon already runs a subset, so restoring the prior file would name a
+  set charon is not running and a charon-only restart would resurrect a
+  deleted/rotated VPN. Instead xpf asks charon (`ListLoadedConns`) what it
+  loaded: a candidate subset is re-filed as exactly that subset (refused
+  VPNs and their secrets dropped) and re-loaded for verification; any
+  other case falls back to a true rollback (prior file restored **and
+  re-loaded**). Either way the recovered set is promoted (departed SAs
+  torn down, `Loaded` not fired) and the partial error is still returned,
+  so disk, `swanctl --list-conns`, and `prevConnNames` name the same set
+  when Apply returns. The commit path (`daemon_apply.go` step 6)
   MUST surface this error rather than swallow it at WARN — otherwise a new config is
   reported committed while the enforced IPsec runtime is stale. The daemon joins it into
   `applyConfigLocked` tail result alongside networkd / Kea / host-inbound /
@@ -31,15 +44,20 @@ the apply path pays no fsync (the file is regenerated on every apply).
   (#4898/#10712):** deleting the last VPN routes `Apply(nil)` → `clearConfig`, which
   now RETURNS the `swanctl --load-all` error (it previously did `_ = m.reload()` and
   `prevConnNames`, rendered-content fingerprints, and stale-SA teardown are gated on
-  reload SUCCESS — a failed reload leaves the OLD config effective, so the applied
+  reload SUCCESS — a total reload failure leaves the OLD config effective, so the applied
   state is preserved and no SA is torn down; the next successful Apply/Clear retries
-  the diff + teardown. **A FAILED terminate is also load-bearing (#6542/#10878):**
+  the diff + teardown. (A partial load is the #14589 exception above: the recovered
+  set charon actually runs is promoted and its departed SAs torn down, while the
+  error still propagates.) **A FAILED terminate is also load-bearing (#6542/#10878):**
   failed removals become `pendingTerminate` debt, while failed same-name changes
   become `pendingChanged` debt. Apply RETURNS a failed termination or reinitiation
   error instead of reporting success over a stale SA or an un-reestablished tunnel.
 - `Clear() error` — `manager.go`. Remove the xpf snippet, reload, and
   terminate every previously-applied connection's live SAs (#3941). Like Apply,
-  a reload failure is returned and skips promotion/termination (#4898), and a
+  a total reload failure is returned and skips promotion/termination (#4898); a
+  partial clear (#14589) restores and re-loads the prior file when charon still
+  holds prior connections (or promotes the empty set when it holds none),
+  promotes that recovered set, and still returns the error; and a
   failed terminate is carried as debt and returned (#6542).
 - `SAStatus`, `TerminateAllSAs`, `InitiateConnection`, `GetSAStatus`,
   `ActiveConnectionNames` — `ike.go`.
@@ -57,8 +75,9 @@ the apply path pays no fsync (the file is regenerated on every apply).
     does not run on a render or write failure.
   - `Loaded` runs the moment strongSwan has LOADED the config: right after the loaded
     connection set is promoted and before removed or changed SAs are torn down or
-    changed live SAs reinitiated (#9511/#10878). It does not run on a failed reload,
-    and it does run when the apply then returns teardown debt (#6542).
+    changed live SAs reinitiated (#9511/#10878). It does not run on a failed reload
+    (including a recovered partial load, #14589 — the candidate generation did not
+    load), and it does run when the apply then returns teardown debt (#6542).
   - The daemon records the loaded config for HA IPsec attribution from these hooks.
     `SetSwanctlForTesting` (`test_seams.go`) installs the swanctl exec double for other
     packages' tests.
