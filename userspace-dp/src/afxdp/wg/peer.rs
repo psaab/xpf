@@ -488,9 +488,13 @@ pub(crate) struct Peer {
     /// effective-endpoint map. `peer_for_dest` reads this ahead of the
     /// immutable commit-time `config.endpoint`, so dataplane transit
     /// follows the peer instead of blackholing toward the stale
-    /// static address. Lives on the reused `Arc<Peer>`, so it survives
-    /// config commits; a fresh peer starts with `None` and falls back
-    /// to the configured endpoint. `ArcSwapOption` keeps packet-path
+    /// static address. Lives on the `Arc<Peer>`, so it survives
+    /// same-engine `reconcile_peers` commits that reuse the Arc; on an
+    /// identity-change engine rebuild `populate_wg_engines` carries it
+    /// into the fresh engine via `seed_live_endpoints` for each
+    /// surviving pubkey whose configured endpoint did not change
+    /// (#14640); a fresh peer with no carry starts with `None` and
+    /// falls back to the configured endpoint. `ArcSwapOption` keeps packet-path
     /// reads lock-free; allocations occur only when an endpoint is
     /// adopted, not on egress.
     pub(crate) live_endpoint: arc_swap::ArcSwapOption<SocketAddr>,

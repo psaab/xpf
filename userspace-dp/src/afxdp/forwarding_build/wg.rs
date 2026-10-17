@@ -26,14 +26,20 @@
 //!   - **Identity changed (or new)** — construct a fresh `WgEngine` (which
 //!     reconciles the new peer set at construction) and **seed its TAI64N
 //!     high-water from the prior engine** so initiator-timestamp
-//!     monotonicity survives the rebuild. This has two sides: the
+//!     monotonicity survives the rebuild. This has three sides: the
 //!     OUTGOING initiator clock (one engine-wide value, #1432) via
-//!     `seed_tai64n_high_water`, and the #4092 INCOMING per-peer
+//!     `seed_tai64n_high_water`, the #4092 INCOMING per-peer
 //!     responder anti-replay high-water (`Peer::greatest_tai64n`) via
-//!     `seed_greatest_tai64n`, keyed by pubkey (#4103). Without the
-//!     incoming side, a routine WG commit (add allowed-ip, rotate a PSK,
+//!     `seed_greatest_tai64n`, keyed by pubkey (#4103), and the #14640
+//!     per-peer adopted live endpoint via `seed_live_endpoints`, keyed
+//!     by pubkey and carried only when that peer's configured endpoint
+//!     is unchanged. Without the incoming side, a routine WG commit (add allowed-ip, rotate a PSK,
 //!     add/remove a peer) would reset every surviving peer's responder
-//!     high-water to `[0; 12]` and silently disarm the anti-replay. Live
+//!     high-water to `[0; 12]` and silently disarm the anti-replay.
+//!     Without the live-endpoint side, editing one peer would revert
+//!     every other peer to its stale configured endpoint (or `None`
+//!     for responder-only peers), blackholing hub->peer traffic until
+//!     that peer next sends authenticated traffic. Live
 //!     sessions are dropped (a real config change re-handshakes once,
 //!     seeded so the peer accepts it); S5 adds session migration if
 //!     needed.
@@ -110,6 +116,14 @@ pub(super) fn populate_wg_engines(
                 // different peer identity). Matches kernel / wireguard-go,
                 // which retain per-peer `last_timestamp` across reconfigure.
                 engine.seed_greatest_tai64n(&prev_engine.greatest_tai64n_by_pubkey());
+                // #14640: carry each surviving peer's adopted live
+                // endpoint forward, keyed by pubkey, only when that
+                // peer's configured endpoint is unchanged. Editing one
+                // peer must not revert every other peer's roamed/NATed
+                // endpoint to its stale configured address (or None
+                // for responder-only peers). If a peer's own configured
+                // endpoint was edited, the new configured value wins.
+                engine.seed_live_endpoints(&prev_engine.live_endpoints_by_pubkey());
             }
         }
         state.wg_engines.insert(id, Arc::new(engine));

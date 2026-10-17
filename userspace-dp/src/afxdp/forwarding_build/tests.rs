@@ -9325,6 +9325,88 @@ fn wg_responder_high_water_survives_config_change_rebuild() {
     );
 }
 
+/// #14640: editing ONLY peer B forces an identity-change engine rebuild.
+/// Peer A's adopted (roamed) `live_endpoint` must be carried into the
+/// fresh engine for the unchanged peer A, and the control thread must
+/// re-seed it via `peer_endpoints`. Also covers the responder-only case
+/// (no configured endpoint).
+#[test]
+fn wg_live_endpoint_survives_one_peer_edit_rebuild_14640() {
+    const PEER_A_PUB_HEX: &str = "1010101010101010101010101010101010101010101010101010101010101010";
+    const PEER_B_PUB_HEX: &str = "2020202020202020202020202020202020202020202020202020202020202020";
+    fn two_peer_snapshot(b_endpoint: &str, b_keepalive: u16) -> ConfigSnapshot {
+        ConfigSnapshot {
+            tunnel_endpoints: vec![crate::protocol::snapshot::TunnelEndpointSnapshot {
+                id: 7,
+                interface: "wg0".into(),
+                linux_name: "wg0".into(),
+                ifindex: 42,
+                mode: "wireguard".into(),
+                wg_listen_port: 51820,
+                wg_local_privkey_hex: WG_TEST_PRIVKEY_HEX.into(),
+                wg_peers: vec![
+                    crate::protocol::snapshot::TunnelWgPeerSnapshot {
+                        wg_peer_pubkey_hex: PEER_A_PUB_HEX.into(),
+                        wg_allowed_ips: vec!["10.1.0.0/24".into()],
+                        wg_endpoint: "198.51.100.1:51820".into(),
+                        ..Default::default()
+                    },
+                    crate::protocol::snapshot::TunnelWgPeerSnapshot {
+                        wg_peer_pubkey_hex: PEER_B_PUB_HEX.into(),
+                        wg_allowed_ips: vec!["10.2.0.0/24".into()],
+                        wg_endpoint: b_endpoint.into(),
+                        wg_keepalive_secs: b_keepalive,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+    let prev = build_forwarding_state(&two_peer_snapshot("198.51.100.2:51820", 0));
+    let prev_engine = prev.wg_engines.get(&7).expect("prev engine").clone();
+    // Peer A roamed away from its configured endpoint; peer B is responder-only learned.
+    // Adopt via engine API (same as control thread does).
+    let a_roamed: std::net::SocketAddr = "192.0.2.44:61001".parse().unwrap();
+    let b_learned: std::net::SocketAddr = "192.0.2.55:61002".parse().unwrap();
+    // Need pubkeys: decode hex manually
+    fn hex32(s: &str) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for i in 0..32 { out[i] = u8::from_str_radix(&s[2*i..2*i+2], 16).unwrap(); }
+        out
+    }
+    let a_pub = hex32(PEER_A_PUB_HEX);
+    let b_pub = hex32(PEER_B_PUB_HEX);
+    prev_engine.adopt_live_endpoint(&a_pub, a_roamed);
+    prev_engine.adopt_live_endpoint(&b_pub, b_learned);
+    // Positive control: peer_for_dest returns roamed
+    let dst_a: IpAddr = "10.1.0.9".parse().unwrap();
+    assert_eq!(prev_engine.peer_for_dest(dst_a), Some((a_pub, Some(a_roamed))));
+    // Positive control: identical re-commit reuses Arc
+    let snap_same = two_peer_snapshot("198.51.100.2:51820", 0);
+    let same = build_forwarding_state_with_policy_counters_and_previous(&snap_same, &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev)).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&prev_engine, same.wg_engines.get(&7).unwrap()), "identical commit must reuse engine");
+    assert_eq!(same.wg_engines.get(&7).unwrap().peer_for_dest(dst_a), Some((a_pub, Some(a_roamed))));
+    // Defect: edit ONLY peer B (keepalive 0 -> 25)
+    let snap2 = two_peer_snapshot("198.51.100.2:51820", 25);
+    let next = build_forwarding_state_with_policy_counters_and_previous(&snap2, &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev)).unwrap();
+    let next_engine = next.wg_engines.get(&7).expect("next engine");
+    assert!(!std::sync::Arc::ptr_eq(&prev_engine, next_engine), "editing peer B must rebuild engine");
+    assert_eq!(next_engine.peer_for_dest(dst_a), Some((a_pub, Some(a_roamed))), "peer A roamed endpoint must survive peer-B-only edit (#14640)");
+    // peer_endpoints (control re-seed) must carry it too
+    let eps: std::collections::HashMap<[u8;32], Option<std::net::SocketAddr>> = next_engine.peer_endpoints().into_iter().collect();
+    assert_eq!(eps.get(&a_pub), Some(&Some(a_roamed)), "peer_endpoints must re-seed roamed endpoint");
+    assert_eq!(eps.get(&b_pub), Some(&Some(b_learned)), "peer B learned endpoint must survive when its configured endpoint unchanged (only keepalive edited)");
+    // Negative control: peer A configured endpoint changed -> live must NOT carry (stale roam would override new config)
+    let mut snap3 = two_peer_snapshot("198.51.100.2:51820", 25);
+    snap3.tunnel_endpoints[0].wg_peers[0].wg_endpoint = "203.0.113.99:51820".into();
+    let next3 = build_forwarding_state_with_policy_counters_and_previous(&snap3, &PolicyCounterStore::default(), &crate::nat::NatCounterStore::default(), Some(&prev)).unwrap();
+    let e3 = next3.wg_engines.get(&7).unwrap();
+    let new_cfg: std::net::SocketAddr = "203.0.113.99:51820".parse().unwrap();
+    assert_eq!(e3.peer_for_dest(dst_a), Some((a_pub, Some(new_cfg))), "changed configured endpoint must win over stale live endpoint");
+}
+
 /// #1873 R-D purge-set pins: (a) vanished id purged, (b) owner-name
 /// change purged, (c) cosmetic linux_name change NOT purged,
 /// (d) untouched ids NOT purged.

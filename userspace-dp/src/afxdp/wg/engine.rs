@@ -1073,6 +1073,54 @@ impl WgEngine {
         }
     }
 
+    /// #14640: snapshot every peer's adopted live endpoint, keyed by
+    /// pubkey, paired with its configured endpoint so a successor
+    /// engine can tell whether the configured endpoint changed.
+    /// Peers with no live endpoint are omitted. Slow path / build-time only.
+    pub(crate) fn live_endpoints_by_pubkey(
+        &self,
+    ) -> Vec<(
+        [u8; WG_KEY_LEN],
+        Option<std::net::SocketAddr>,
+        std::net::SocketAddr,
+    )> {
+        self.load_table()
+            .peers
+            .iter()
+            .filter_map(|e| {
+                e.peer
+                    .live_endpoint()
+                    .map(|live| (e.peer.pubkey, e.config.endpoint, live))
+            })
+            .collect()
+    }
+
+    /// #14640: seed this engine's per-peer live endpoints from a prior
+    /// engine's snapshot across an identity-change rebuild. A pubkey
+    /// present in BOTH engines carries its live endpoint forward ONLY
+    /// if its configured endpoint is unchanged; if the operator edited
+    /// that peer's configured endpoint, the new configured value wins
+    /// and the stale live endpoint is dropped. Build-time only.
+    pub(crate) fn seed_live_endpoints(
+        &self,
+        snapshot: &[(
+            [u8; WG_KEY_LEN],
+            Option<std::net::SocketAddr>,
+            std::net::SocketAddr,
+        )],
+    ) {
+        let table = self.load_table();
+        for (pubkey, prev_configured, live) in snapshot {
+            if let Some(&idx) = table.peer_index_by_pubkey.get(pubkey) {
+                if let Some(entry) = table.peers.get(idx as usize) {
+                    if entry.config.endpoint == *prev_configured {
+                        entry.peer.adopt_live_endpoint(*live);
+                    }
+                }
+            }
+        }
+    }
+
     /// Reconcile the engine's peer table against a new config
     /// snapshot. Slow path only.
     ///
