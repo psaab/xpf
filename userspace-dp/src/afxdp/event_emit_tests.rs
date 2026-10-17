@@ -76,6 +76,8 @@ fn unlimited_handle() -> (
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     )
 }

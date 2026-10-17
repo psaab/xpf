@@ -3490,6 +3490,8 @@ fn policy_selection_deny_emits_rt_flow_event() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let meta = UserspaceDpMeta {

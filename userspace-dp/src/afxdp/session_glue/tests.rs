@@ -10456,6 +10456,8 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let event_stream = Some(event_handle);
@@ -10673,6 +10675,8 @@ fn flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191()
                 crate::event_stream::DataplaneEventRateLimitConfig {
                     events_per_second: 0,
                     burst: 0,
+                    session_close_events_per_second: 0,
+                    session_close_burst: 0,
                 },
             );
             let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -10848,6 +10852,8 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -11298,6 +11304,8 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let command_event_stream = Some(command_handle);
@@ -11338,6 +11346,8 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let loss_event_stream = Some(loss_handle);
@@ -16164,7 +16174,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
         // refuses it before any frame reaches the channel.
         crate::event_stream::test_worker_handle_connected(
             8,
-            crate::event_stream::DataplaneEventRateLimitConfig { events_per_second: 0, burst: 0 },
+            crate::event_stream::DataplaneEventRateLimitConfig { events_per_second: 0, burst: 0, session_close_events_per_second: 0, session_close_burst: 0 },
         );
         let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
         let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));

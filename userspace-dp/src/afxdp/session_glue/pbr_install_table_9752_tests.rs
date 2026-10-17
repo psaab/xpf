@@ -1936,6 +1936,8 @@ fn purge_close_after_table_readd_preserves_new_authority_through_flush() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let handle = Some(handle);
@@ -2123,6 +2125,8 @@ fn purge_close_after_reinstall_without_readd_drops_through_flush() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let handle = Some(handle);
@@ -2247,6 +2251,8 @@ fn purge_close_reinstall_scoped_survivor_skips_flush_10512() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let handle = Some(handle);
@@ -2424,6 +2430,8 @@ fn purge_close_without_reinstall_flushes_through_flush() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let handle = Some(handle);
@@ -2570,6 +2578,8 @@ fn purge_close_after_readd_without_reinstall_drops_through_flush() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let handle = Some(handle);
@@ -2648,6 +2658,8 @@ fn ordinary_close_bypasses_the_stale_check_through_flush() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let handle = Some(handle);
@@ -2835,6 +2847,8 @@ fn flush_handle10512() -> (
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     (forwarding, channel.reader(), Some(handle), rx)

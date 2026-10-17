@@ -757,6 +757,8 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -2780,6 +2782,8 @@ fn gre_outer_ce_over_not_ect_counts_underlay_once_12289() {
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let (batch, dbg) = txn_run_descriptor_with_event_stream(

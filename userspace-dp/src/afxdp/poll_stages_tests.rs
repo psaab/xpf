@@ -284,6 +284,8 @@ fn session_miss_ack_stage_invokes_syn_cookie_runtime_validation() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -548,6 +550,8 @@ fn unresolved_screen_profile_zone_continues_to_policy_5806() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -744,6 +748,8 @@ fn screen_parse_fail_on_unscreened_zone_passes_12875() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_12875 =
@@ -942,6 +948,8 @@ fn syn_cookie_ack_stage_parse_fail_on_unscreened_zone_passes_12875() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_12875 =
@@ -1100,6 +1108,8 @@ fn priority_tagged_vlan0_screen_stage_parses_l3_at_offset_18() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -2550,6 +2560,8 @@ fn screen_zone_lookup_uses_logical_ingress_ifindex_3022() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -2800,6 +2812,8 @@ fn run_stage_screen_capture_in(
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -3506,6 +3520,8 @@ fn stage_ipsec_passthrough_exempts_all_classes_3616() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -3796,6 +3812,8 @@ fn stage_ipsec_passthrough_gates_new_ike_4323() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -4026,6 +4044,8 @@ fn stage_ipsec_passthrough_gates_forged_responder_spi_6471() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
@@ -4261,7 +4281,7 @@ fn stage_ipsec_established_seed_does_not_cross_zone_or_vrf_14124() {
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
-        DataplaneEventRateLimitConfig { events_per_second: 0, burst: 0 },
+        DataplaneEventRateLimitConfig { events_per_second: 0, burst: 0, session_close_events_per_second: 0, session_close_burst: 0 },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let worker_ctx = WorkerContext {
@@ -4590,6 +4610,8 @@ fn run_stage11_on_ifindex(
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let __pptp_control_7699 = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());

@@ -15,6 +15,8 @@ fn test_emit_session_close_rt_flow_pairs_with_ha_delta() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let zone_map = FxHashMap::default();
@@ -22,7 +24,13 @@ fn test_emit_session_close_rt_flow_pairs_with_ha_delta() {
 
     // Mirror flush_session_deltas: the HA delta then the RT_FLOW frame.
     handle.push_delta(&delta, &zone_map);
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
+    handle.emit_session_close_rt_flow(
+        &delta,
+        0,
+        0,
+        delta.metadata.policy_id,
+        delta.policy_generation,
+    );
 
     let frames: Vec<EventFrame> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert_eq!(
@@ -63,7 +71,10 @@ fn test_emit_session_close_rt_flow_carries_close_reason_13971() {
         (1, codec::RT_FLOW_CLOSE_REASON_TCP_FIN),
         (2, codec::RT_FLOW_CLOSE_REASON_TCP_FIN),
         (3, codec::RT_FLOW_CLOSE_REASON_TCP_RST),
-        (codec::RT_FLOW_CLOSE_REASON_CLEAR, codec::RT_FLOW_CLOSE_REASON_CLEAR),
+        (
+            codec::RT_FLOW_CLOSE_REASON_CLEAR,
+            codec::RT_FLOW_CLOSE_REASON_CLEAR,
+        ),
         (
             codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE,
             codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE,
@@ -74,6 +85,8 @@ fn test_emit_session_close_rt_flow_carries_close_reason_13971() {
             DataplaneEventRateLimitConfig {
                 events_per_second: 0,
                 burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
             },
         );
         let mut delta = test_close_delta(crate::session::SessionDeltaKind::Close);
@@ -165,6 +178,8 @@ fn test_emit_session_close_rt_flow_carries_real_created_stamp() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     // Anchor the delta's monotonic timestamps to the live CLOCK_MONOTONIC so
@@ -174,7 +189,13 @@ fn test_emit_session_close_rt_flow_carries_real_created_stamp() {
     delta.created_ns = now_mono.saturating_sub(60 * NS_PER_SEC);
     delta.last_seen_ns = now_mono;
 
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
+    handle.emit_session_close_rt_flow(
+        &delta,
+        0,
+        0,
+        delta.metadata.policy_id,
+        delta.policy_generation,
+    );
     let frame = rx.try_recv().expect("RT_FLOW close frame");
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
 
@@ -208,10 +229,18 @@ fn test_emit_session_close_rt_flow_carries_app_id() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close);
-    handle.emit_session_close_rt_flow(&delta, 7, 42, delta.metadata.policy_id, delta.policy_generation);
+    handle.emit_session_close_rt_flow(
+        &delta,
+        7,
+        42,
+        delta.metadata.policy_id,
+        delta.policy_generation,
+    );
     let frame = rx.try_recv().expect("RT_FLOW close frame");
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     assert_eq!(
@@ -248,12 +277,20 @@ fn test_emit_session_close_rt_flow_carries_admitting_policy_id() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Close);
     // The session was admitted by policy ID 42.
     delta.metadata.policy_id = 42;
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
+    handle.emit_session_close_rt_flow(
+        &delta,
+        0,
+        0,
+        delta.metadata.policy_id,
+        delta.policy_generation,
+    );
     let frame = rx.try_recv().expect("RT_FLOW close frame");
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     assert_eq!(
@@ -277,10 +314,18 @@ fn test_emit_session_close_rt_flow_zero_created_stays_zero() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close); // created_ns == 0
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
+    handle.emit_session_close_rt_flow(
+        &delta,
+        0,
+        0,
+        delta.metadata.policy_id,
+        delta.policy_generation,
+    );
     let frame = rx.try_recv().expect("RT_FLOW close frame");
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     assert_eq!(u32::from_le_bytes(p[108..112].try_into().unwrap()), 0);
@@ -297,10 +342,18 @@ fn test_emit_session_close_rt_flow_ignores_open_delta() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Open);
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
+    handle.emit_session_close_rt_flow(
+        &delta,
+        0,
+        0,
+        delta.metadata.policy_id,
+        delta.policy_generation,
+    );
     assert!(
         rx.try_recv().is_err(),
         "Open delta must emit no RT_FLOW close frame"
@@ -325,6 +378,8 @@ fn test_emit_session_close_rt_flow_accounts_under_session_close_kind() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0, // unlimited: isolate the queue-budget gate
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close);
@@ -332,7 +387,13 @@ fn test_emit_session_close_rt_flow_accounts_under_session_close_kind() {
     // Emit 4 closes; the per-kind budget admits 1, the rest are queue-full.
     // (`_rx` is never drained, so the budget is never released.)
     for _ in 0..4 {
-        handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
+        handle.emit_session_close_rt_flow(
+            &delta,
+            0,
+            0,
+            delta.metadata.policy_id,
+            delta.policy_generation,
+        );
     }
 
     let stats = handle.dataplane_event_stats();
@@ -356,22 +417,32 @@ fn test_emit_session_close_rt_flow_accounts_under_session_close_kind() {
 
 #[test]
 fn test_emit_session_close_rt_flow_rate_limited_is_counted() {
-    // #2512 fail-on-revert: a SESSION_CLOSE burst beyond the per-(kind,zone)
-    // rate-limiter token budget must be counted as a SessionClose
-    // `rate_limited` drop. Session-table closes can be bursty at GC time;
-    // this proves the limiter is actually applied to type-14 (a bare
-    // try_send would never rate-limit and this counter would stay 0).
+    // #2512/#14609 fail-on-revert: a SESSION_CLOSE burst beyond its OWN
+    // per-(kind,zone) rate-limiter token budget must be counted as a
+    // SessionClose `rate_limited` drop. Since #14609 the close kind has a
+    // separately sized GCRA, so this test configures THAT budget (1000/s,
+    // burst 2) explicitly; the shared telemetry fields stay unlimited so
+    // only the close limiter can shed. A bare try_send would never
+    // rate-limit and this counter would stay 0.
     let (handle, rx) = test_worker_handle(
         64, // large channel/budget so the limiter, not the queue, is the gate
         DataplaneEventRateLimitConfig {
-            events_per_second: 1_000,
-            burst: 2, // only 2 closes allowed in the instantaneous burst
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 1_000,
+            session_close_burst: 2, // only 2 closes allowed in the instantaneous burst
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close);
 
     for _ in 0..5 {
-        handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
+        handle.emit_session_close_rt_flow(
+            &delta,
+            0,
+            0,
+            delta.metadata.policy_id,
+            delta.policy_generation,
+        );
     }
 
     let stats = handle.dataplane_event_stats();
@@ -395,6 +466,8 @@ fn test_emit_session_create_rt_flow_accounts_under_session_create_kind() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Open);
@@ -426,6 +499,8 @@ fn test_emit_session_create_rt_flow_carries_app_id_and_ifindex() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Open);
@@ -463,6 +538,8 @@ fn test_emit_session_create_rt_flow_carries_admitting_policy_id() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Open);
@@ -500,6 +577,8 @@ fn test_emit_session_create_rt_flow_carries_admission_timestamp() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let (now_mono, _now_wall) = read_mono_and_wall_clocks();
@@ -544,6 +623,8 @@ fn test_emit_session_create_rt_flow_zero_created_stays_zero() {
         DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Open); // created_ns == 0
@@ -554,5 +635,58 @@ fn test_emit_session_create_rt_flow_zero_created_stays_zero() {
         u64::from_le_bytes(p[0..8].try_into().unwrap()),
         0,
         "unknown admission instant must stay 0 (Go time.Now() fallback)"
+    );
+}
+
+#[test]
+fn test_session_close_survives_production_rate_14609() {
+    // #14609 acceptance (z4): with the PRODUCTION limiter config
+    // (DataplaneEventRateLimitConfig::default()) a burst of 5000
+    // back-to-back closes from ONE zone must all reach the channel, or
+    // SessionClose must be governed by a separately sized budget whose
+    // shed count is surfaced. Before the fix SessionClose shared the
+    // 1000/s GCRA, so this fails RED: about one burst admitted and the
+    // rest counted rate_limited, silently undercounting flow export
+    // and falsifying the advertised 1-in-N.
+    //
+    // Capacity 8192 mirrors CHANNEL_CAPACITY. The receiver is drained
+    // between batches and each drained frame releases its queue budget
+    // via release_dataplane_event_queue_budget, exactly as the
+    // production I/O thread does when a frame leaves the channel, so
+    // the per-kind queue budget (ceil((8192/2)/5) = 820 in flight) is
+    // not the gate; only the rate limiter can shed a close here.
+    // Batches of 500 stay below that 820 in-flight budget.
+    let (handle, rx) = test_worker_handle(8192, DataplaneEventRateLimitConfig::default());
+    let mut delta = test_close_delta(crate::session::SessionDeltaKind::Close);
+    delta.metadata.ingress_zone = 7;
+    let mut received = 0usize;
+    for batch in 0..10 {
+        for _ in 0..500 {
+            handle.emit_session_close_rt_flow(
+                &delta,
+                0,
+                0,
+                delta.metadata.policy_id,
+                delta.policy_generation,
+            );
+        }
+        let stats = handle.dataplane_event_stats();
+        assert_eq!(
+            stats.session_close.rate_limited, 0,
+            "batch {batch}: no close may be rate-shed under the separately sized budget"
+        );
+        assert_eq!(
+            stats.session_close.queue_full, 0,
+            "batch {batch}: queue budget must not shed while drained between batches"
+        );
+        assert_eq!(stats.session_close.sent, ((batch + 1) * 500) as u64);
+        while let Ok(frame) = rx.try_recv() {
+            release_dataplane_event_queue_budget(&handle.shared, &frame);
+            received += 1;
+        }
+    }
+    assert_eq!(
+        received, 5000,
+        "all 5000 closes must reach the channel under the production limiter"
     );
 }

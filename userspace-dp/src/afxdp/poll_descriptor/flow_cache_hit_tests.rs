@@ -969,6 +969,8 @@ impl LiveCallSiteFixture {
             crate::event_stream::DataplaneEventRateLimitConfig {
                 events_per_second: 0,
                 burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
             },
         );
         self.event_stream = Some(handle);

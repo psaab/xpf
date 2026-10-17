@@ -302,6 +302,8 @@ fn drive_packets(
         crate::event_stream::DataplaneEventRateLimitConfig {
             events_per_second: 0,
             burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
         },
     );
     let slow_path = second_packet.then(|| Arc::new(SlowPathReinjector::new_without_worker(1500)));
