@@ -251,6 +251,13 @@ type syncHeader struct {
 }
 
 const syncHeaderSize = 12
+
+// maxSyncPayload is the shared session-sync receive cap (#14607). The
+// receive loop refuses any frame whose declared length exceeds it, so no
+// sender may write a larger payload. Full-set encoders that can exceed it
+// (persistent-NAT idle leases) must chunk below it; see
+// encodePersistentNatLeaseBatchFrames.
+const maxSyncPayload = 16 * 1024 * 1024
 const syncWriteDeadline = 2 * time.Second
 const failoverAckTimeout = 20 * time.Second
 const syncReadDeadline = 10 * time.Second

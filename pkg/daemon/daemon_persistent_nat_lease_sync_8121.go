@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
@@ -23,6 +24,32 @@ import (
 // peer, against a window an order of magnitude longer. Pushing faster would buy
 // a shrinking slice of an already-narrow window at the cost of the one resource
 // the codebase says not to spend.
+
+// #14607: an export failure used to be logged only at Debug, so the
+// regime where the helper cannot produce the snapshot (and the peer
+// rebuild silently never happens) was invisible. Count every failure and
+// Warn at most once per minute.
+var persistentNatLeaseExportFailures atomic.Uint64
+var persistentNatLeaseExportWarnThrottle warnThrottle
+
+const persistentNatLeaseExportWarnInterval = time.Minute
+
+// PersistentNatLeaseExportFailures reports the process-lifetime count of
+// failed idle-lease exports in the 30 s push loop (#14607).
+func PersistentNatLeaseExportFailures() uint64 {
+	return persistentNatLeaseExportFailures.Load()
+}
+
+// notePersistentNatLeaseExportFailure counts one export failure and logs
+// it at Warn (rate-limited). Extracted for tests.
+func notePersistentNatLeaseExportFailure(err error, now time.Time) {
+	total := persistentNatLeaseExportFailures.Add(1)
+	if emit, suppressed := persistentNatLeaseExportWarnThrottle.shouldLog(now, persistentNatLeaseExportWarnInterval); emit {
+		slog.Warn("persistent-NAT idle lease export failed",
+			"err", err, "failures_total", total, "suppressed_since_last", suppressed)
+	}
+}
+
 const persistentNatLeaseSyncInterval = 30 * time.Second
 
 // persistentNatLeaseManager returns the userspace helper manager, or nil when
@@ -101,7 +128,7 @@ func (d *Daemon) runPersistentNatLeaseSyncLoop(ctx context.Context) {
 			}
 			batch, err := mgr.ExportPersistentNatLeaseBatch()
 			if err != nil {
-				slog.Debug("persistent-NAT idle lease export failed", "err", err)
+				notePersistentNatLeaseExportFailure(err, time.Now())
 				continue
 			}
 			// Empty batches carry the sender's durable clear generation. The

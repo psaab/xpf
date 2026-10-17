@@ -408,7 +408,7 @@ func readSyncFrameRaw(conn net.Conn) (typ uint8, payload []byte, err error) {
 	}
 	typ = hdr[4]
 	length := binary.LittleEndian.Uint32(hdr[8:12])
-	if length > 16*1024*1024 {
+	if length > maxSyncPayload {
 		return 0, nil, fmt.Errorf("cluster sync: handshake frame too large: %d", length)
 	}
 	if length > 0 {
