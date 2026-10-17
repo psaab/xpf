@@ -1989,6 +1989,193 @@ fn worker_decap_is_not_gated_by_the_steered_port_9521() {
     assert_eq!(&decapped.frame[14..], &inner[..]);
 }
 
+// ---------------------------------------------------------------------------
+// #14326: same-port multi-tunnel endpoint selection.
+//
+// Two WG tunnels share listen port 51820 in one transport instance, bound to
+// different local IPs. `wg_endpoint_for_listen_port` used to return the first
+// HashMap entry matching only (port, instance) and aborted the whole lookup
+// (`?`) when one engine lacked a tunnel_endpoints row. Selection must instead
+// be exact on (dst_ip == endpoint.source | unspecified, port, instance, zone).
+
+/// Outer frame to a specific local dst (the base `outer_frame` always uses
+/// XPF_OUTER).
+fn outer_frame_to(record: &[u8], dst: [u8; 4], dst_port: u16) -> Vec<u8> {
+    let mut f = outer_frame(record, dst_port);
+    f[30..34].copy_from_slice(&dst);
+    f
+}
+
+/// Build a snapshot with TWO WG tunnels sharing WG_PORT, bound to
+/// 172.16.80.8 (id 1, ifindex 400, zone sfmix) and 172.16.80.9 (id 2,
+/// ifindex 401, zone sfmix). Both WAN addresses live on reth0.80 (WAN zone),
+/// both in the default transport instance.
+fn two_tunnel_snapshot() -> crate::ConfigSnapshot {
+    let mut snap = wg_outer_mtu_snapshot();
+    snap.interfaces[0]
+        .addresses
+        .push(crate::InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "172.16.80.9/24".to_string(),
+            scope: 0,
+        });
+    snap.interfaces.push(crate::InterfaceSnapshot {
+        name: "wg1.0".to_string(),
+        zone: "sfmix".to_string(),
+        linux_name: "wg1".to_string(),
+        ifindex: 401,
+        mtu: 1420,
+        redundancy_group: 1,
+        tunnel: true,
+        addresses: vec![crate::InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "10.124.0.1/24".to_string(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    let mut ep2 = snap.tunnel_endpoints[0].clone();
+    ep2.id = 2;
+    ep2.interface = "wg1.0".to_string();
+    ep2.linux_name = "wg1".to_string();
+    ep2.ifindex = 401;
+    ep2.source = "172.16.80.9".to_string();
+    snap.tunnel_endpoints.push(ep2);
+    snap
+}
+
+#[test]
+fn wg_same_port_multi_tunnel_selects_exact_dst_ip_14326() {
+    let allowed_a: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let allowed_b: Vec<ipnet::IpNet> = vec!["10.124.0.0/24".parse().unwrap()];
+    let (init_a, resp_a, _ipub_a, rpub_a) = established_pair(allowed_a.clone(), allowed_a);
+    let (init_b, resp_b, _ipub_b, rpub_b) = established_pair(allowed_b.clone(), allowed_b);
+    let mut forwarding = build_forwarding_state(&two_tunnel_snapshot());
+    assert_eq!(forwarding.tunnel_endpoints.len(), 2, "fixture: two tunnels");
+    assert_eq!(forwarding.wg_engines.len(), 2, "fixture: two engines");
+    forwarding.wg_engines.insert(1, std::sync::Arc::new(resp_a));
+    forwarding.wg_engines.insert(2, std::sync::Arc::new(resp_b));
+    let ip_a = std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 8));
+    let ip_b = std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 9));
+    assert_eq!(
+        forwarding
+            .wg_local_address_zone_v4
+            .get(&std::net::Ipv4Addr::new(172, 16, 80, 8)),
+        Some(&crate::test_zone_ids::TEST_WAN_ZONE_ID)
+    );
+    assert_eq!(
+        forwarding
+            .wg_local_address_zone_v4
+            .get(&std::net::Ipv4Addr::new(172, 16, 80, 9)),
+        Some(&crate::test_zone_ids::TEST_WAN_ZONE_ID)
+    );
+    assert!(forwarding.owns_configured_ip(ip_a));
+    assert!(forwarding.owns_configured_ip(ip_b));
+    let meta_probe = outer_meta(60);
+    assert!(
+        super::decap::is_wg_listener_tuple(WG_PORT, ip_a, meta_probe, &forwarding),
+        "#14326: listener tuple for tunnel A dst must be recognised"
+    );
+    assert!(
+        super::decap::is_wg_listener_tuple(WG_PORT, ip_b, meta_probe, &forwarding),
+        "#14326: listener tuple for tunnel B dst must be recognised (same port, different local IP)"
+    );
+    assert!(
+        !super::decap::is_wg_listener_tuple(
+            WG_PORT,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 99)),
+            meta_probe,
+            &forwarding
+        ),
+        "#14326: transit dst sharing the port must not be claimed"
+    );
+    let scratch = WgWorkerScratch::new(4096);
+    let inner_b = inner_v4([10, 124, 0, 5], [10, 0, 61, 102]);
+    let mut wire_b = vec![0u8; 2048];
+    let enc_b = init_b
+        .try_encap(&rpub_b, &inner_b, &mut wire_b)
+        .expect("encap B");
+    let frame_b = outer_frame_to(&wire_b[..enc_b.len], [172, 16, 80, 9], WG_PORT);
+    let decapped_b = super::decap::try_wg_decap_from_frame(
+        &frame_b,
+        outer_meta(frame_b.len()),
+        &forwarding,
+        &scratch,
+    )
+    .expect("#14326: record for tunnel B at IP_B must decap via engine B");
+    assert_eq!(
+        decapped_b.meta.ingress_ifindex as i32, 401,
+        "#14326: B record must present tunnel B logical ifindex"
+    );
+    assert_eq!(&decapped_b.frame[14..], &inner_b[..]);
+    let inner_a = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
+    let mut wire_a = vec![0u8; 2048];
+    let enc_a = init_a
+        .try_encap(&rpub_a, &inner_a, &mut wire_a)
+        .expect("encap A");
+    let frame_a = outer_frame_to(&wire_a[..enc_a.len], [172, 16, 80, 8], WG_PORT);
+    let decapped_a = super::decap::try_wg_decap_from_frame(
+        &frame_a,
+        outer_meta(frame_a.len()),
+        &forwarding,
+        &scratch,
+    )
+    .expect("#14326: record for tunnel A at IP_A must decap via engine A");
+    assert_eq!(
+        decapped_a.meta.ingress_ifindex as i32, 400,
+        "#14326: A record must present tunnel A logical ifindex"
+    );
+    assert_eq!(&decapped_a.frame[14..], &inner_a[..]);
+    let inner_b2 = inner_v4([10, 124, 0, 6], [10, 0, 61, 102]);
+    let mut wire_b2 = vec![0u8; 2048];
+    let enc_b2 = init_b
+        .try_encap(&rpub_b, &inner_b2, &mut wire_b2)
+        .expect("encap B2");
+    let frame_cross = outer_frame_to(&wire_b2[..enc_b2.len], [172, 16, 80, 8], WG_PORT);
+    assert!(
+        super::decap::try_wg_decap_from_frame(
+            &frame_cross,
+            outer_meta(frame_cross.len()),
+            &forwarding,
+            &scratch
+        )
+        .is_none(),
+        "#14326: B record to A's address must fail closed"
+    );
+}
+
+#[test]
+fn wg_same_port_lookup_skips_engine_without_endpoint_14326() {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _ipub, rpub) = established_pair(allowed.clone(), allowed);
+    let (mut forwarding, id) = forwarding_with_engine(resp);
+    let orphan = std::sync::Arc::clone(&forwarding.wg_engines[&id]);
+    forwarding.wg_engines.insert(99, orphan);
+    let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
+    let mut wire = vec![0u8; 2048];
+    let enc = init.try_encap(&rpub, &inner, &mut wire).expect("encap");
+    let frame = outer_frame(&wire[..enc.len], WG_PORT);
+    let scratch = WgWorkerScratch::new(4096);
+    let decapped = super::decap::try_wg_decap_from_frame(
+        &frame,
+        outer_meta(frame.len()),
+        &forwarding,
+        &scratch,
+    )
+    .expect("#14326: orphan engine row must not abort the listener lookup");
+    assert_eq!(&decapped.frame[14..], &inner[..]);
+    let meta_probe = outer_meta(60);
+    assert!(
+        super::decap::is_wg_listener_tuple(
+            WG_PORT,
+            std::net::IpAddr::V4(XPF_OUTER.into()),
+            meta_probe,
+            &forwarding
+        ),
+        "#14326: listener tuple must survive an orphan engine row"
+    );
+}
+
 /// An inner IPv4 ICMP echo packet (request type 8 / reply type 0), bare IP.
 /// Checksums computed (not zero) so no screen can refuse it for that reason.
 fn icmp_echo_inner_v4(icmp_type: u8, src: [u8; 4], dst: [u8; 4], ident: u16, seq: u16) -> Vec<u8> {

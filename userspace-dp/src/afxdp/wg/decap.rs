@@ -87,6 +87,13 @@ fn logical_ingress_ifindex(forwarding: &ForwardingState, meta: UserspaceDpMeta) 
 /// The WG socket's outer source and packet destination must both be uniquely
 /// owned in the packet's actual ingress zone. TunnelEndpoint.zone is the
 /// separate inner-policy zone and is intentionally not consulted here.
+///
+/// #14326: the packet destination must also BE the endpoint's configured
+/// local source (or the endpoint must carry an unspecified source, which
+/// then fails closed below because 0.0.0.0/:: has no owner-zone row).
+/// Without the equality, two tunnels sharing a listen port in one zone
+/// but bound to different local IPs satisfied this check for whichever
+/// endpoint the port scan happened to select first.
 fn wg_outer_zone_matches(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
@@ -101,6 +108,15 @@ fn wg_outer_zone_matches(
     if ingress_zone_id == 0 {
         return false;
     }
+    // #14326: within one address family the destination must BE the
+    // endpoint's configured source. A cross-family source (a v4-bound
+    // listener whose records arrive as mapped v6, #10686) cannot be
+    // compared; it is admitted on the destination's owner zone alone and
+    // its source-zone lookup below is skipped for the same reason.
+    let same_family = endpoint.source.is_ipv4() == dst_ip.is_ipv4();
+    if same_family && !endpoint.source.is_unspecified() && endpoint.source != dst_ip {
+        return false;
+    }
     let local_zone = match dst_ip {
         std::net::IpAddr::V4(ip) => forwarding
             .wg_local_address_zone_v4
@@ -113,17 +129,21 @@ fn wg_outer_zone_matches(
             .copied()
             .unwrap_or(0),
     };
-    let source_zone = match endpoint.source {
-        std::net::IpAddr::V4(ip) => forwarding
-            .wg_local_address_zone_v4
-            .get(&ip)
-            .copied()
-            .unwrap_or(0),
-        std::net::IpAddr::V6(ip) => forwarding
-            .wg_local_address_zone_v6
-            .get(&ip)
-            .copied()
-            .unwrap_or(0),
+    let source_zone = if same_family {
+        match endpoint.source {
+            std::net::IpAddr::V4(ip) => forwarding
+                .wg_local_address_zone_v4
+                .get(&ip)
+                .copied()
+                .unwrap_or(0),
+            std::net::IpAddr::V6(ip) => forwarding
+                .wg_local_address_zone_v6
+                .get(&ip)
+                .copied()
+                .unwrap_or(0),
+        }
+    } else {
+        ingress_zone_id
     };
     local_zone != 0 && local_zone == ingress_zone_id && source_zone == ingress_zone_id
 }
@@ -143,7 +163,8 @@ pub(in crate::afxdp) fn is_wg_listener_tuple(
         return false;
     }
     let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
-    let Some((endpoint, _)) = wg_endpoint_for_listen_port(forwarding, dst_port, ingress_ifindex)
+    let Some((endpoint, _)) =
+        wg_endpoint_for_listen_port(forwarding, dst_port, dst_ip, ingress_ifindex)
     else {
         return false;
     };
@@ -151,8 +172,9 @@ pub(in crate::afxdp) fn is_wg_listener_tuple(
         && forwarding.owns_configured_ip(dst_ip)
 }
 
-/// The WireGuard tunnel endpoint listening on `dst_port` in the resolved
-/// ingress interface's transport routing instance, with its live engine.
+/// The WireGuard tunnel endpoint listening on `dst_port` at local address
+/// `dst_ip` in the resolved ingress interface's transport routing instance,
+/// with its live engine.
 ///
 /// Walks `wg_engines` rather than `tunnel_endpoints` deliberately: that map IS
 /// the WireGuard-only set, so the scan is over the number of WG tunnels (0, 1 or
@@ -162,9 +184,18 @@ pub(in crate::afxdp) fn is_wg_listener_tuple(
 /// re-checks `TunnelKind::Gre` against its own index. #11568 additionally
 /// requires the outer ingress to be in the endpoint's transport routing
 /// instance before either decap or underlay exemption can claim the datagram.
+///
+/// #14326: `(dst_port, transport_instance)` does not identify a listener
+/// when several tunnels share a port. A candidate must additionally be
+/// bound to `dst_ip` (`endpoint.source == dst_ip`, or an unspecified source
+/// which `wg_outer_zone_matches` then fails closed) and pass the outer-zone
+/// ownership check for this ingress. An engine row whose endpoint row is
+/// missing is skipped (`continue`), never allowed to abort the scan for
+/// its siblings.
 fn wg_endpoint_for_listen_port(
     forwarding: &ForwardingState,
     dst_port: u16,
+    dst_ip: std::net::IpAddr,
     ingress_ifindex: i32,
 ) -> Option<(&TunnelEndpoint, &std::sync::Arc<super::WgEngine>)> {
     let ingress_instance = forwarding
@@ -173,10 +204,22 @@ fn wg_endpoint_for_listen_port(
         .map(String::as_str)
         .unwrap_or("");
     for (id, engine) in forwarding.wg_engines.iter() {
-        let endpoint = forwarding.tunnel_endpoints.get(id)?;
+        let Some(endpoint) = forwarding.tunnel_endpoints.get(id) else {
+            continue;
+        };
+        // Family is deliberately NOT an equality gate: one listener bound
+        // to a v4 source also serves its records arriving as (mapped) v6
+        // (#10686) -- there `wg_outer_zone_matches` admits via the v6
+        // destination's own owner zone while the v4 source's zone is not
+        // consulted. Within the packet's own family the binding is exact.
+        let source_matches = endpoint.source.is_unspecified()
+            || endpoint.source == dst_ip
+            || endpoint.source.is_ipv4() != dst_ip.is_ipv4();
         if endpoint.wg_listen_port == dst_port
             && tunnel_mode_kind(&endpoint.mode) == TunnelKind::WireGuard
             && transport_instance_of_table(&endpoint.transport_table) == ingress_instance
+            && source_matches
+            && wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
         {
             return Some((endpoint, engine));
         }
@@ -221,13 +264,10 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
     };
     let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
     let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
-    let Some((endpoint, _)) = wg_endpoint_for_listen_port(forwarding, dst_port, ingress_ifindex)
-    else {
-        return false;
-    };
-    // This helper is reached only for a mapped/compatible IPv6 packet. Mirror
-    // the ingress gate's wire-L3 derivation and version check before trusting
-    // the destination address.
+    // #14326: the destination must be parsed BEFORE the endpoint lookup --
+    // the lookup is keyed on it. This helper is reached only for a
+    // mapped/compatible IPv6 packet. Mirror the ingress gate's wire-L3
+    // derivation and version check before trusting the destination address.
     if meta.addr_family as i32 != libc::AF_INET6 {
         return false;
     }
@@ -247,6 +287,11 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
         return false;
     };
     let dst_ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from(raw_dst));
+    let Some((endpoint, _)) =
+        wg_endpoint_for_listen_port(forwarding, dst_port, dst_ip, ingress_ifindex)
+    else {
+        return false;
+    };
     wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
         && forwarding.owns_configured_ip(dst_ip)
 }
@@ -317,11 +362,16 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame_with_input_filter(
     }
 
     let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
-    let (endpoint, engine) = wg_endpoint_for_listen_port(forwarding, dst_port, ingress_ifindex)?;
-
+    // #14326: resolve the outer destination BEFORE selecting the endpoint --
+    // with several tunnels sharing a listen port the destination (plus the
+    // ingress zone) is what identifies the listener.
     let dst_ip = outer_destination_ip(outer, meta)?;
+    let (endpoint, engine) =
+        wg_endpoint_for_listen_port(forwarding, dst_port, dst_ip, ingress_ifindex)?;
     // The listener's local source address and the datagram destination must
     // both resolve uniquely to the actual ingress zone before AEAD work.
+    // (Already enforced inside the lookup; kept as the explicit fail-closed
+    // gate at the AEAD boundary.)
     if !wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip) {
         return None;
     }
