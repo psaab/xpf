@@ -1023,6 +1023,25 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 				physicalNetdev, unit.VlanID)
 		}
 	}
+	// #14351: synthetic bound secure-tunnel unit rows (same refs as coverage).
+	for ref := range ZoneAuthoredBoundSecureTunnelUnitRefs(cfg) {
+		if _, conflicted := QuarantinedZoneInterfaceKeys(cfg)[ref]; conflicted {
+			continue
+		}
+		s := cfg.SplitInterfaceUnitRef(ref)
+		if iface := cfg.Interfaces.Interfaces[s.Base]; iface != nil {
+			if unitNum, _, err := CanonicalLogicalUnit(s.UnitTok); err == nil {
+				if _, declared := iface.Units[unitNum]; declared {
+					continue
+				}
+			}
+		}
+		dev, ok := cfg.SecureTunnelNetdevForRef(ref)
+		if !ok || dev == "" {
+			continue
+		}
+		addRow(ref, dev, junosHostLinuxNameWith(cfg, s.Base, nil, tunNames), 0)
+	}
 	for _, nd := range netdevs {
 		v := byNetdev[nd]
 		if v == nil {
@@ -1332,9 +1351,12 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 	// call and that map walks every interface and every unit, so resolving one
 	// name per interface AND per unit here was quadratic. Same shape as #8854.
 	tunNames := tunnelNameMapFn(cfg)
-	if cfg == nil || len(cfg.Security.Zones) == 0 || len(cfg.Interfaces.Interfaces) == 0 {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
 	}
+	// #14351: bound secure-tunnel units may have no [interfaces] stanza at
+	// all (or only a bare parent stanza). Do not return early just because
+	// cfg.Interfaces is empty — the synthetic unit rows below still exist.
 	lifelines := HostInboundLifelineSet(cfg)
 	zoneByIface := junosHostZoneByInterface(cfg)
 	// cand[zone][netdev] records whether the netdev is the zone's OWN ingress
@@ -1402,6 +1424,29 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 			addRow(unitName, junosHostLinuxNameWith(cfg, ifName, unit, tunNames),
 				junosHostLinuxNameWith(cfg, ifName, nil, tunNames), unit.VlanID)
 		}
+	}
+	// #14351: synthetic bound secure-tunnel unit rows (snapshot parity with
+	// appendBindInterfaceOnlySecureTunnelRows / authoredZoneRefs). Their
+	// zone is already in zoneByIface; addRow filters by it. The netdev must
+	// come from the authored bind-interface spelling
+	// (SecureTunnelNetdevForRef), not the unit-0 collapse.
+	for ref := range ZoneAuthoredBoundSecureTunnelUnitRefs(cfg) {
+		if _, conflicted := QuarantinedZoneInterfaceKeys(cfg)[ref]; conflicted {
+			continue
+		}
+		s := cfg.SplitInterfaceUnitRef(ref)
+		if iface := cfg.Interfaces.Interfaces[s.Base]; iface != nil {
+			if unitNum, _, err := CanonicalLogicalUnit(s.UnitTok); err == nil {
+				if _, declared := iface.Units[unitNum]; declared {
+					continue
+				}
+			}
+		}
+		dev, ok := cfg.SecureTunnelNetdevForRef(ref)
+		if !ok || dev == "" {
+			continue
+		}
+		addRow(ref, dev, junosHostLinuxNameWith(cfg, s.Base, nil, tunNames), 0)
 	}
 	out := map[string]junosHostZoneNetdevCoverage{}
 	// A VRF master is safe for a zone-scoped fine DENY only when every
@@ -1679,15 +1724,17 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 				}
 				continue
 			}
-			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
-				for unitNum := range ifCfg.Units {
-					unitName := fmt.Sprintf("%s.%d", s.Base, unitNum)
-					if _, conflicted := conflictedInterfaces[unitName]; conflicted {
-						continue
-					}
-					if _, exists := out[unitName]; !exists {
-						out[unitName] = zoneName
-					}
+			// #14351: a bare ref fans down via InterfaceUnitRefKeys, which
+			// includes daemon-materialized bound secure-tunnel units.
+			for _, unitName := range InterfaceUnitRefKeys(cfg, rawIface) {
+				if unitName == s.Literal {
+					continue
+				}
+				if _, conflicted := conflictedInterfaces[unitName]; conflicted {
+					continue
+				}
+				if _, exists := out[unitName]; !exists {
+					out[unitName] = zoneName
 				}
 			}
 		}

@@ -93,14 +93,13 @@ func InterfaceUnitRefKeys(cfg *Config, rawRef string) []string {
 		for unitNum := range ifCfg.Units {
 			units = append(units, unitNum)
 		}
-	} else {
-		if len(cfg.Security.IPsec.VPNs) == 0 || !IsSecureTunnelIfName(s.Base) {
-			return keys
-		}
-		// #13100: a bind-interface-only secure tunnel has no interface stanza,
-		// but its materialized logical units are still covered by a bare zone
-		// member. Resolve each candidate through the XFRM ownership/collision
-		// gate; never invent an unbound or colliding unit on tolerant loads.
+	}
+	// #14351: a bare parent stanza (`interfaces st0 { description ... }`
+	// with no unit) must not hide daemon-materialized bound secure-tunnel
+	// units. The bind walk below used to run only when ifCfg==nil, so
+	// `InterfaceUnitRefKeys(st0)` returned [st0] and junos-host scoping
+	// named the nonexistent `st0` netdev instead of `st0.0`.
+	if IsSecureTunnelIfName(s.Base) && len(cfg.Security.IPsec.VPNs) > 0 {
 		for _, vpn := range cfg.Security.IPsec.VPNs {
 			if vpn == nil {
 				continue
@@ -122,6 +121,8 @@ func InterfaceUnitRefKeys(cfg *Config, rawRef string) []string {
 				units = append(units, unitNum)
 			}
 		}
+	} else if ifCfg == nil {
+		return keys
 	}
 	if len(units) == 0 {
 		return keys
