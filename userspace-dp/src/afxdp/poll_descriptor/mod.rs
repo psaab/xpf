@@ -59,15 +59,15 @@ pub(crate) use policy_revalidation::{
     revalidate_zone_policy_revocation_for_test, revalidate_zone_policy_revokes_for_test,
     revalidate_zone_policy_sessionless_denies_for_test,
 };
+mod pmech_replay;
+#[cfg(test)]
+#[path = "poll_descriptor_structure_13081_tests.rs"]
+mod poll_descriptor_structure_13081_tests;
 pub(in crate::afxdp) mod reject_reply;
 mod resolver_enqueue;
 mod rx_telemetry;
 mod session_admission;
 mod session_hit_authority;
-mod pmech_replay;
-#[cfg(test)]
-#[path = "poll_descriptor_structure_13081_tests.rs"]
-mod poll_descriptor_structure_13081_tests;
 
 use crate::nat::PersistentInbound;
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
@@ -457,7 +457,6 @@ pub(super) fn dns_reply_fastpath_admit(
         && dns_reply_qr_set(packet_frame, meta)
 }
 
-
 pub(super) fn is_pressure_shed_shared_opening(
     current: &SyncedSessionEntry,
     shed: &crate::session::PressureShedSession,
@@ -632,9 +631,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // guards can recycle the descriptor without reaching the
                 // mapped-v6 gate. Tunnel plaintext is checked again after
                 // decapsulation below.
-                if !is_injected
-                    && ipv6_frame_has_v4_mapped_or_compat(raw_frame, meta.addr_family)
-                {
+                if !is_injected && ipv6_frame_has_v4_mapped_or_compat(raw_frame, meta.addr_family) {
                     let wg_underlay = crate::afxdp::wg::decap::is_wg_underlay_frame(
                         raw_frame,
                         meta,
@@ -969,14 +966,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             },
                         )
                     };
-                    flow =
-                        crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(
-                            packet_frame,
-                            meta,
-                            sessions,
-                            routing_domain,
-                            now_ns,
-                        );
+                    flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(
+                        packet_frame,
+                        meta,
+                        sessions,
+                        routing_domain,
+                        now_ns,
+                    );
                 }
                 // #4743/#10665: fail-closed drop for an over-limit IPv6
                 // extension-header chain. `stage_parse_flow_and_learn` returns
@@ -2715,21 +2711,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 resolved.source_nat_static,
                                 resolved.source_nat_validation_key.as_ref(),
                             );
-                        let owner_icmp_verdict = if session_hit_revocation.is_none()
-                            && foreign_arrival_zone.is_none()
-                        {
-                            owner_hit_icmp_verdict(
-                                worker_ctx.forwarding,
-                                &resolved.metadata,
-                                resolved.decision,
-                                flow,
-                                meta,
-                                packet_frame,
-                                now_ns,
-                            )
-                        } else {
-                            None
-                        };
+                        let owner_icmp_verdict =
+                            if session_hit_revocation.is_none() && foreign_arrival_zone.is_none() {
+                                owner_hit_icmp_verdict(
+                                    worker_ctx.forwarding,
+                                    &resolved.metadata,
+                                    resolved.decision,
+                                    flow,
+                                    meta,
+                                    packet_frame,
+                                    now_ns,
+                                )
+                            } else {
+                                None
+                            };
                         // `is_reverse` disambiguates the arm: the verdict is
                         // only `Some` for a forward hit or a reverse
                         // non-answer hit, never both at once.
@@ -3470,6 +3465,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 if !pool_contains_target {
                                     continue;
                                 }
+                                // #14322: the lease this rule minted is scoped
+                                // to ITS (from_zone, to_zone) pair. Pass the
+                                // packet's arrival zone with the rule's own
+                                // zones: the fold inside the lookup rebuilds
+                                // this rule's scope, so a sibling rule sharing
+                                // the pool can neither authorize nor deny on
+                                // this rule's lease (it returns Miss and the
+                                // scan continues).
                                 match rule.pool_allocator.persistent_inbound_lookup(
                                     meta.protocol,
                                     resolution_target,
@@ -3477,6 +3480,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     flow.forward_key.src_ip,
                                     flow.forward_key.src_port,
                                     now_ns,
+                                    &rule.from_zone,
+                                    ingress_zone_name,
                                 ) {
                                     PersistentInbound::Miss => {}
                                     PersistentInbound::Denied => {
@@ -3489,7 +3494,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     } => {
                                         let candidate = NatDecision {
                                             rewrite_dst: Some(internal_ip),
-                                            rewrite_dst_port: (!address_only).then_some(internal_port),
+                                            rewrite_dst_port: (!address_only)
+                                                .then_some(internal_port),
                                             ..NatDecision::default()
                                         };
                                         if persistent_dnat
@@ -3947,10 +3953,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         worker_ctx.forwarding,
                                         worker_ctx.ha_state,
                                         now_secs,
-                                        lookup_forwarding_resolution_in_table_with_dynamic(worker_ctx.forwarding,
-                                        worker_ctx.dynamic_neighbors,
-                                        effective_resolution_target,
-                                        route_table_override.as_deref(),).resolution,
+                                        lookup_forwarding_resolution_in_table_with_dynamic(
+                                            worker_ctx.forwarding,
+                                            worker_ctx.dynamic_neighbors,
+                                            effective_resolution_target,
+                                            route_table_override.as_deref(),
+                                        )
+                                        .resolution,
                                     ),
                                     true,
                                 )
@@ -4671,16 +4680,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         if resolution.disposition == ForwardingDisposition::LocalDelivery
                             && !cache_local_delivery
                         {
-                            let local_miss_policers =
-                                evaluate_non_pbr_input_filter_policers_cached(
-                                    worker_ctx.forwarding,
-                                    crate::afxdp::frame::term_match_extra_from_frame(
-                                        packet_frame,
-                                        meta,
-                                    ),
-                                    Some(flow),
+                            let local_miss_policers = evaluate_non_pbr_input_filter_policers_cached(
+                                worker_ctx.forwarding,
+                                crate::afxdp::frame::term_match_extra_from_frame(
+                                    packet_frame,
                                     meta,
-                                );
+                                ),
+                                Some(flow),
+                                meta,
+                            );
                             if !local_miss_policers.is_empty() {
                                 let miss_action = crate::filter::apply_cached_three_color_policers(
                                     &local_miss_policers,
@@ -5250,7 +5258,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .translate_outbound_result(&mut src_v6, to_zone)
                                             {
                                                 crate::nptv6::Nptv6Translation::Translated => {
-                                                    worker_ctx.forwarding.nptv6.record_translation(false);
+                                                    worker_ctx
+                                                        .forwarding
+                                                        .nptv6
+                                                        .record_translation(false);
                                                     Some(NatDecision {
                                                         rewrite_src: Some(IpAddr::V6(src_v6)),
                                                         rewrite_dst: None,
@@ -5261,7 +5272,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 }
                                                 crate::nptv6::Nptv6Translation::NoMatch => None,
                                                 crate::nptv6::Nptv6Translation::Untranslatable => {
-                                                    worker_ctx.forwarding.nptv6.record_untranslatable_drop();
+                                                    worker_ctx
+                                                        .forwarding
+                                                        .nptv6
+                                                        .record_untranslatable_drop();
                                                     // Untranslatable is terminal:
                                                     // §3.7's all-zero IID is
                                                     // an explicit MUST-drop;
@@ -7371,15 +7385,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // not depend on the optional unmatched embedded-ICMP
                     // setting. A miss still falls through to ordinary
                     // flowless enforcement below.
-                    let is_embedded_icmp_error = matches!(
-                        meta.protocol,
-                        PROTO_ICMP | PROTO_ICMPV6
-                    )
+                    let is_embedded_icmp_error = matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6)
                         && packet_frame
-                        .get(meta.l4_offset as usize)
-                        .copied()
-                        .map(|icmp_type| is_icmp_error(meta.protocol, icmp_type))
-                        .unwrap_or(false);
+                            .get(meta.l4_offset as usize)
+                            .copied()
+                            .map(|icmp_type| is_icmp_error(meta.protocol, icmp_type))
+                            .unwrap_or(false);
                     if is_embedded_icmp_error {
                         match try_reverse_embedded_icmp_error(
                             desc,
@@ -7549,13 +7560,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.forwarding,
                                 worker_ctx.ha_state,
                                 now_secs,
-                                resolve_forwarding(// SAFETY: per the `area` contract in this
-                                // function's header comment.
-                                unsafe { &*area },
-                                desc,
-                                meta,
-                                worker_ctx.forwarding,
-                                worker_ctx.dynamic_neighbors,).resolution,
+                                resolve_forwarding(
+                                    // SAFETY: per the `area` contract in this
+                                    // function's header comment.
+                                    unsafe { &*area },
+                                    desc,
+                                    meta,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.dynamic_neighbors,
+                                )
+                                .resolution,
                             ),
                             NatDecision::default(),
                         ),
@@ -7724,8 +7738,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #12865: for FabricRedirect, final_resolution's
                         // egress is the transport parent; the pre-redirect
                         // capture above is the adjudicated zone.
-                        if !(final_resolution.disposition
-                            == ForwardingDisposition::FabricRedirect
+                        if !(final_resolution.disposition == ForwardingDisposition::FabricRedirect
                             && admission_to_zone != 0)
                         {
                             admission_to_zone = to_zone_id;
@@ -8585,13 +8598,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         ingress_zone_override,
                         decision.resolution,
                     );
-                    let (counter_from_zone, counter_to_zone) =
-                        zone_pair_ids_for_flow_with_override(
-                            worker_ctx.forwarding,
-                            counter_ingress_logical,
-                            counter_override,
-                            decision.resolution.egress_ifindex,
-                        );
+                    let (counter_from_zone, counter_to_zone) = zone_pair_ids_for_flow_with_override(
+                        worker_ctx.forwarding,
+                        counter_ingress_logical,
+                        counter_override,
+                        decision.resolution.egress_ifindex,
+                    );
                     crate::afxdp::zone_counters::record_zone_traffic(
                         &worker_ctx.forwarding.zone_counter_slot_map,
                         counter_from_zone,
@@ -9812,11 +9824,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         }
                                         let nat_translation_required = if fragment_association_hit {
                                             false
-                                        } else if decision
-                                            .nat
-                                            .rewrite_dst
-                                            .is_some()
-                                        {
+                                        } else if decision.nat.rewrite_dst.is_some() {
                                             // #12905: mirror the ForwardCandidate
                                             // translated fence — the destination
                                             // rewrite is applied and carried by
@@ -10257,7 +10265,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 .translate_outbound_result(&mut src_v6, to_zone)
                                             {
                                                 crate::nptv6::Nptv6Translation::Translated => {
-                                                    worker_ctx.forwarding.nptv6.record_translation(false);
+                                                    worker_ctx
+                                                        .forwarding
+                                                        .nptv6
+                                                        .record_translation(false);
                                                     Some(NatDecision {
                                                         rewrite_src: Some(IpAddr::V6(src_v6)),
                                                         rewrite_dst: None,
@@ -10268,7 +10279,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 }
                                                 crate::nptv6::Nptv6Translation::NoMatch => None,
                                                 crate::nptv6::Nptv6Translation::Untranslatable => {
-                                                    worker_ctx.forwarding.nptv6.record_untranslatable_drop();
+                                                    worker_ctx
+                                                        .forwarding
+                                                        .nptv6
+                                                        .record_untranslatable_drop();
                                                     // Untranslatable is
                                                     // terminal: §3.7's
                                                     // all-zero IID is an
@@ -10577,13 +10591,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             )..,
                                         )
                                     {
-                                        let frag_authority =
-                                            frag_ingress_authority_with_nat_scope(
-                                                worker_ctx.forwarding,
-                                                meta,
-                                                frag_authority_zone_override,
-                                                frag_authority_nat_scope_ifindex,
-                                            );
+                                        let frag_authority = frag_ingress_authority_with_nat_scope(
+                                            worker_ctx.forwarding,
+                                            meta,
+                                            frag_authority_zone_override,
+                                            frag_authority_nat_scope_ifindex,
+                                        );
                                         if frag_assoc::missing_neighbor_install_fragment_assoc(
                                             worker_ctx.forwarding,
                                             l3_packet,
@@ -11109,11 +11122,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
             binding.tx_pipeline.free_tx_frames.push_back(addr);
         }
     }
-    while let Some(addr) = binding
-        .scratch
-        .pmech_injected_replay_addrs
-        .pop()
-    {
+    while let Some(addr) = binding.scratch.pmech_injected_replay_addrs.pop() {
         if let Some(pos) = binding
             .scratch
             .scratch_recycle

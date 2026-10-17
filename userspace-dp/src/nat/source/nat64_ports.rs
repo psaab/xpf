@@ -39,6 +39,7 @@ pub(crate) fn allocate_nat64_pool_port(
         300 * 1_000_000_000, // RFC 6146 idle BIB lifetime
         now_ns,
         holder,
+        0,
     )?;
     match translated.ip {
         IpAddr::V4(v4) => Ok((v4, translated.port)),

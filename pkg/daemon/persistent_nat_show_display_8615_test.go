@@ -27,6 +27,7 @@ func displayLease(activeFlows uint32, remaining time.Duration) dpuserspace.Displ
 		SrcIP:          "10.0.61.102",
 		SrcPort:        40000,
 		RoutingScope:   persistentNatLeaseScopeDaemon(0),
+		EgressScope:    persistentNatLeaseScopeDaemon(0),
 		TranslatedIP:   "172.16.80.7",
 		TranslatedPort: 51400,
 		RemainingNs:    uint64(remaining),

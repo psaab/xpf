@@ -401,7 +401,11 @@ const (
 	// v48 -> v49 (#13957): GRE tunnel endpoint snapshots carry the explicit
 	// clear-dont-fragment-bit option; an older helper cannot honor the configured
 	// copy/clear behavior, so mixed-version pairs must not silently disagree.
-	ProtocolVersion = 49
+	// v49 -> v50 (#14322): persistent-NAT lease identity gained EgressScope.
+	// The manager gates both lease-control verbs on an observed v50 helper;
+	// without that gate an old helper would ignore the field and merge two
+	// egress zones' permissions into one lease.
+	ProtocolVersion = 50
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -457,6 +461,10 @@ const (
 	// historical wire floor; current lease synchronization uses the stricter
 	// permission floor below.
 	MinProtocolPersistentNatLeaseScope = 25
+	// MinProtocolPersistentNatLeaseEgressScope is the first protocol version
+	// whose persistent-NAT lease records carry EgressScope (#14322). Below
+	// it a helper would ignore the field and merge two egress zones.
+	MinProtocolPersistentNatLeaseEgressScope = 50
 	// MinProtocolPersistentNatLeasePermissions is the first protocol version
 	// whose helper lease records preserve inbound permission scopes. A helper
 	// below this version can silently import permission-less leases.
@@ -523,6 +531,7 @@ type IdleLeaseWire struct {
 	SrcIP                      string                `json:"src_ip"`
 	SrcPort                    uint16                `json:"src_port"`
 	RoutingScope               *uint32               `json:"routing_scope"`
+	EgressScope                *uint32               `json:"egress_scope"`
 	RemoteIP                   string                `json:"remote_ip,omitempty"`
 	RemotePort                 uint16                `json:"remote_port,omitempty"`
 	PermitAnyRemote            bool                  `json:"permit_any_remote"`
@@ -557,6 +566,7 @@ type DisplayLeaseWire struct {
 	SrcIP                      string                `json:"src_ip"`
 	SrcPort                    uint16                `json:"src_port"`
 	RoutingScope               *uint32               `json:"routing_scope"`
+	EgressScope                *uint32               `json:"egress_scope"`
 	RemoteIP                   string                `json:"remote_ip,omitempty"`
 	RemotePort                 uint16                `json:"remote_port,omitempty"`
 	PermitAnyRemote            bool                  `json:"permit_any_remote"`

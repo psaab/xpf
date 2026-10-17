@@ -40,6 +40,12 @@ func (m *Manager) ensurePersistentNatLeaseProtocolLocked(required int, feature s
 }
 
 func (m *Manager) ensurePersistentNatLeasePermissionProtocolLocked() error {
+	// #14322: lease verbs require the egress-scope fence too — an old helper
+	// would ignore EgressScope and merge two zones' permissions on import.
+	if err := m.ensurePersistentNatLeaseProtocolLocked(
+		MinProtocolPersistentNatLeaseEgressScope, "egress scope"); err != nil {
+		return err
+	}
 	return m.ensurePersistentNatLeaseProtocolLocked(
 		MinProtocolPersistentNatLeasePermissions, "permissions")
 }
@@ -70,6 +76,11 @@ func validateIdleLeaseScopes(leases []IdleLeaseWire) error {
 				"%w: helper returned idle lease %d without routing_scope",
 				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
 		}
+		if lease.EgressScope == nil {
+			return fmt.Errorf(
+				"%w: helper returned idle lease %d without egress_scope",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
+		}
 		if err := validatePersistentNatRemotes(lease.PermittedRemotes); err != nil {
 			return fmt.Errorf("%w: helper returned idle lease %d with invalid permissions: %v",
 				ErrPersistentNatLeaseScopeProtocolIncompatible, i, err)
@@ -83,6 +94,11 @@ func validateDisplayLeaseScopes(leases []DisplayLeaseWire) error {
 		if lease.RoutingScope == nil {
 			return fmt.Errorf(
 				"%w: helper returned display lease %d without routing_scope",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
+		}
+		if lease.EgressScope == nil {
+			return fmt.Errorf(
+				"%w: helper returned display lease %d without egress_scope",
 				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
 		}
 		if err := validatePersistentNatRemotes(lease.PermittedRemotes); err != nil {
@@ -173,6 +189,11 @@ func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) e
 		if lease.RoutingScope == nil {
 			return fmt.Errorf(
 				"%w: imported lease %d has no routing_scope",
+				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
+		}
+		if lease.EgressScope == nil {
+			return fmt.Errorf(
+				"%w: imported lease %d has no egress_scope",
 				ErrPersistentNatLeaseScopeProtocolIncompatible, i)
 		}
 		if err := validatePersistentNatRemotes(lease.PermittedRemotes); err != nil {

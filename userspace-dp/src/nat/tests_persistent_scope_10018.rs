@@ -73,8 +73,7 @@ fn allocate_pat(
         permit,
         TIMEOUT_NS,
         now_ns,
-        NatHolder::Untracked,
-    )
+        NatHolder::Untracked, 0)
 }
 
 fn reserve_addr_only(
@@ -90,8 +89,7 @@ fn reserve_addr_only(
         PersistentNatPermit::AnyRemoteHost,
         TIMEOUT_NS,
         NS_PER_SEC,
-        NatHolder::Untracked,
-    )
+        NatHolder::Untracked, 0)
 }
 
 /// THE KEY CELL. One subscriber 5-tuple in two routing scopes must be two

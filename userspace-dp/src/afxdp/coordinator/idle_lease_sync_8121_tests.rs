@@ -35,6 +35,7 @@ fn record(pool: &str, src: &str, translated: &str, port: u16) -> PoolIdleLease {
             src_ip: src.parse().unwrap(),
             src_port: 40000,
             routing_scope: 0,
+            egress_scope: 0,
             remote: Some(("8.8.8.8".parse().unwrap(), 443)),
             permit_any_remote: false,
             permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
@@ -54,16 +55,7 @@ fn mint_local_idle_lease(coord: &Coordinator, pool: &str) -> PoolIdleLease {
     let src_ip: std::net::IpAddr = "10.0.61.50".parse().unwrap();
     let dst_ip: std::net::IpAddr = "8.8.8.8".parse().unwrap();
     let nat = match coord.test_match_source_nat_result_for_tuple(
-        "lan",
-        "wan",
-        src_ip,
-        dst_ip,
-        6,
-        40000,
-        443,
-        None,
-        None,
-        1_000,
+        "lan", "wan", src_ip, dst_ip, 6, 40000, 443, None, None, 1_000,
     ) {
         crate::nat::SourceNatLookup::Matched(nat) => nat,
         other => panic!("fixture: local source NAT must match, got {other:?}"),
@@ -96,16 +88,7 @@ fn mint_active_local_identity(
     let src_ip: std::net::IpAddr = "10.0.61.50".parse().unwrap();
     let dst_ip: std::net::IpAddr = "8.8.8.8".parse().unwrap();
     let nat = match coord.test_match_source_nat_result_for_tuple(
-        "lan",
-        "wan",
-        src_ip,
-        dst_ip,
-        6,
-        40000,
-        443,
-        None,
-        None,
-        1_000,
+        "lan", "wan", src_ip, dst_ip, 6, 40000, 443, None, None, 1_000,
     ) {
         crate::nat::SourceNatLookup::Matched(nat) => nat,
         other => panic!("fixture: local source NAT must match, got {other:?}"),
@@ -117,10 +100,13 @@ fn mint_active_local_identity(
             src_ip,
             src_port: 40000,
             routing_scope: 0,
+            egress_scope: 0,
             remote: Some((dst_ip, 443)),
             permit_any_remote: false,
             permitted_remotes: vec![(dst_ip, 443)],
-            translated_ip: nat.rewrite_src.expect("fixture: source NAT rewrites source IP"),
+            translated_ip: nat
+                .rewrite_src
+                .expect("fixture: source NAT rewrites source IP"),
             translated_port: nat.rewrite_src_port.unwrap_or(40_000),
             address_only,
             deterministic: false,
@@ -159,7 +145,9 @@ fn two_coordinators_do_not_echo_imported_idle_leases_10789_f4() {
         "B must not advertise the imported copy: {returned:?}"
     );
     assert_eq!(
-        active.import_idle_persistent_leases(&returned, 12_000).installed,
+        active
+            .import_idle_persistent_leases(&returned, 12_000)
+            .installed,
         0,
         "the additive channel has no record to reinstall on A"
     );
@@ -235,28 +223,26 @@ fn repeated_unique_import_batches_remain_within_pool_capacity_11475() {
     rule.port_high = 20_001;
     let mut coord = Coordinator::new();
     coord.forwarding.source_nat_rules = parse_source_nat_rules(&[rule]);
-    let record = |pool: &str, src_ip: &str, pool_addr: &str, translated_port| {
-        PoolIdleLease {
-            pool_name: pool.to_owned(),
-            lease: crate::nat::IdleLeaseRecord {
-                protocol: 6,
-                src_ip: src_ip.parse().unwrap(),
-                src_port: 40_000,
-                routing_scope: 0,
-                remote: Some(("8.8.8.8".parse().unwrap(), 443)),
-                permit_any_remote: false,
-                permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
-                translated_ip: pool_addr.parse().unwrap(),
-                translated_port,
-                address_only: false,
-                deterministic: false,
-                deterministic_identity: None,
-                remaining_ns: TIMEOUT_NS,
-                timeout_ns: TIMEOUT_NS,
-            },
-        }
+    let record = |pool: &str, src_ip: &str, pool_addr: &str, translated_port| PoolIdleLease {
+        pool_name: pool.to_owned(),
+        lease: crate::nat::IdleLeaseRecord {
+            protocol: 6,
+            src_ip: src_ip.parse().unwrap(),
+            src_port: 40_000,
+            routing_scope: 0,
+            egress_scope: 0,
+            remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+            permit_any_remote: false,
+            permitted_remotes: vec![("8.8.8.8".parse().unwrap(), 443)],
+            translated_ip: pool_addr.parse().unwrap(),
+            translated_port,
+            address_only: false,
+            deterministic: false,
+            deterministic_identity: None,
+            remaining_ns: TIMEOUT_NS,
+            timeout_ns: TIMEOUT_NS,
+        },
     };
-
 
     let mut installed = 0;
     let mut skipped_capacity = 0;
@@ -404,7 +390,9 @@ fn sequential_address_only_idle_imports_reject_overlapping_pool_identity_11496()
     peer.lease.address_only = true;
     peer.lease.translated_port = peer.lease.src_port;
     assert_eq!(
-        coord.import_idle_persistent_leases(&[peer], 3_000).installed,
+        coord
+            .import_idle_persistent_leases(&[peer], 3_000)
+            .installed,
         1,
         "the first pool's idle address-only lease must install"
     );
@@ -427,23 +415,70 @@ fn sequential_address_only_idle_imports_reject_overlapping_pool_identity_11496()
 
 #[test]
 fn deterministic_nat64_idle_bib_exports_and_imports_only_in_block_14091() {
-    let snap = crate::NAT64RuleSnapshot { name: "napt64".into(), prefix: "64:ff9b::/96".into(), pool_addresses: vec!["203.0.113.1".into()], deterministic_block_size: 32, deterministic_blocks_per_ip: 2, deterministic_host_prefix_len: 32, deterministic_host_base_v6: "2001:db8::".into(), ..Default::default() };
+    let snap = crate::NAT64RuleSnapshot {
+        name: "napt64".into(),
+        prefix: "64:ff9b::/96".into(),
+        pool_addresses: vec!["203.0.113.1".into()],
+        deterministic_block_size: 32,
+        deterministic_blocks_per_ip: 2,
+        deterministic_host_prefix_len: 32,
+        deterministic_host_base_v6: "2001:db8::".into(),
+        ..Default::default()
+    };
     let mut active = Coordinator::new();
     active.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap.clone()]);
     let prefix = &active.forwarding.nat64.prefixes[0];
     let params = prefix.deterministic_v6.expect("deterministic prefix");
-    let flow = crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "2001:db8::1".parse().unwrap(), dst_ip: "8.8.8.8".parse().unwrap(), src_port: 40000, dst_port: 443, routing_scope: 0 };
-    let (ip, port) = crate::nat::allocate_nat64_pool_port_deterministic_v6(&prefix.port_allocator, flow, &prefix.pool_v4, params, "2001:db8::1".parse().unwrap(), 1, crate::nat::NatHolder::Untracked).unwrap();
-    assert!(crate::nat::release_nat64_pool_port(&prefix.port_allocator, flow, ip, port, 20, false, crate::nat::NatHolder::Untracked));
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "2001:db8::1".parse().unwrap(),
+        dst_ip: "8.8.8.8".parse().unwrap(),
+        src_port: 40000,
+        dst_port: 443,
+        routing_scope: 0,
+    };
+    let (ip, port) = crate::nat::allocate_nat64_pool_port_deterministic_v6(
+        &prefix.port_allocator,
+        flow,
+        &prefix.pool_v4,
+        params,
+        "2001:db8::1".parse().unwrap(),
+        1,
+        crate::nat::NatHolder::Untracked,
+    )
+    .unwrap();
+    assert!(crate::nat::release_nat64_pool_port(
+        &prefix.port_allocator,
+        flow,
+        ip,
+        port,
+        20,
+        false,
+        crate::nat::NatHolder::Untracked
+    ));
     let exported = active.export_idle_persistent_leases(21);
-    assert_eq!(exported.len(), 1, "deterministic NAT64 idle BIB must export: {exported:?}");
+    assert_eq!(
+        exported.len(),
+        1,
+        "deterministic NAT64 idle BIB must export: {exported:?}"
+    );
     assert_eq!(exported[0].pool_name, "nat64-deterministic-0");
     let mut standby = Coordinator::new();
     standby.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap.clone()]);
-    assert_eq!(standby.import_idle_persistent_leases(&exported, 1000).installed, 1, "matching deterministic BIB must import");
-    let mut stale = exported[0].clone(); stale.lease.translated_port = stale.lease.translated_port + 32;
+    assert_eq!(
+        standby
+            .import_idle_persistent_leases(&exported, 1000)
+            .installed,
+        1,
+        "matching deterministic BIB must import"
+    );
+    let mut stale = exported[0].clone();
+    stale.lease.translated_port = stale.lease.translated_port + 32;
     let mut stale_standby = Coordinator::new();
     stale_standby.forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[snap]);
     let counts = stale_standby.import_idle_persistent_leases(&[stale], 1000);
-    assert_eq!(counts.installed, 0, "out-of-block deterministic BIB must not import: {counts:?}");
+    assert_eq!(
+        counts.installed, 0,
+        "out-of-block deterministic BIB must not import: {counts:?}"
+    );
 }

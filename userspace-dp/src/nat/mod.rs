@@ -189,6 +189,9 @@ mod tests_addr_only_index_13690;
 #[cfg(test)]
 #[path = "tests_persistent_scope_10018.rs"]
 mod tests_persistent_scope_10018;
+#[cfg(test)]
+#[path = "tests_persistent_zone_14322.rs"]
+mod tests_persistent_zone_14322;
 // #9874: authored-but-empty source-NAT match poison (fail-closed drop).
 #[cfg(test)]
 #[path = "tests_empty_match_poison_9874.rs"]

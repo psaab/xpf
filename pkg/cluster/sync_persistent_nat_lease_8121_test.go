@@ -27,7 +27,9 @@ func equalIdleLeaseWire(a, b userspace.IdleLeaseWire) bool {
 	}
 	as, bs := *a.RoutingScope, *b.RoutingScope
 	a.RoutingScope, b.RoutingScope = nil, nil
-	return as == bs && a.Pool == b.Pool && a.Protocol == b.Protocol &&
+	egressOK := (a.EgressScope == nil) == (b.EgressScope == nil) &&
+		(a.EgressScope == nil || *a.EgressScope == *b.EgressScope)
+	return as == bs && egressOK && a.Pool == b.Pool && a.Protocol == b.Protocol &&
 		a.SrcIP == b.SrcIP && a.SrcPort == b.SrcPort &&
 		a.RemoteIP == b.RemoteIP && a.RemotePort == b.RemotePort &&
 		a.PermitAnyRemote == b.PermitAnyRemote &&
@@ -44,6 +46,7 @@ func sampleIdleLease() userspace.IdleLeaseWire {
 		SrcIP:        "10.0.61.50",
 		SrcPort:      40000,
 		RoutingScope: persistentNatLeaseScope(7),
+		EgressScope:  persistentNatLeaseScope(0),
 		RemoteIP:     "8.8.8.8",
 		RemotePort:   443,
 		PermittedRemotes: []userspace.PersistentNatRemote{
@@ -116,6 +119,7 @@ func TestPersistentNatLeasePayload_RoundTrip(t *testing.T) {
 			SrcIP:           "2001:db8::1",
 			SrcPort:         5000,
 			RoutingScope:    persistentNatLeaseScope(0),
+			EgressScope:     persistentNatLeaseScope(0),
 			PermitAnyRemote: true,
 			TranslatedIP:    "203.0.113.9",
 			TranslatedPort:  2048,
@@ -178,7 +182,8 @@ func TestPersistentNatLeasePermissionsAreBoundedAndValidated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode permission fixture: %v", err)
 	}
-	permissionCountOffset := 2 + len(lease.Pool) + 1 + 4 +
+	// +4 routing scope and +4 egress scope (#14322) precede SrcIP.
+	permissionCountOffset := 2 + len(lease.Pool) + 1 + 4 + 4 +
 		2 + len(lease.SrcIP) + 2 + 2 + len(lease.RemoteIP) + 2 + 1
 	binary.LittleEndian.PutUint16(record[permissionCountOffset:],
 		userspace.MaxPersistentNatLeaseRemotes+1)

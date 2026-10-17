@@ -45,7 +45,7 @@ pub(crate) use lease_note_7560::{dropped_persistent_lease_note, report_dropped_l
 use super::allocator::{
     DeterministicV4, DeterministicV6, InterfaceDomainReserve, NS_PER_SEC, NatHolder,
     PersistentSourceKey, PoolAddressFamily, PortAllocator, TranslatedTuple,
-    deterministic_indices_v4,
+    deterministic_indices_v4, persistent_egress_scope,
 };
 use super::iface_registry::InterfaceNatAllocators;
 use super::{NatCounterStore, NatDecision, NatRuleCounter, NatScopeCtx};

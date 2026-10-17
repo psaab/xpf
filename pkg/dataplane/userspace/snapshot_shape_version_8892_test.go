@@ -543,7 +543,10 @@ const (
 	// contract. ProtocolVersion 48 was instead used for persistent-lease
 	// permissions carried on control/HA records. Version 49 adds the GRE
 	// endpoint's clear_dont_fragment_bit setting to the snapshot shape.
-	snapshotShapeVersion8892 = 49
+	// Version 50 (#14322) carries EgressScope on the lease records — a
+	// control-wire change, not a snapshot-shape change, so the golden below
+	// is unchanged.
+	snapshotShapeVersion8892 = 50
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

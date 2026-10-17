@@ -15,6 +15,7 @@ func scopedLease10018() IdleLeaseWire {
 		SrcIP:          "10.0.61.50",
 		SrcPort:        40000,
 		RoutingScope:   &scope,
+		EgressScope:    userspaceLeaseScope(0),
 		RemoteIP:       "8.8.8.8",
 		RemotePort:     443,
 		TranslatedIP:   "203.0.113.1",

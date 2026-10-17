@@ -89,6 +89,10 @@ func encodeOnePersistentNatLease(l userspace.IdleLeaseWire) ([]byte, error) {
 		return nil, errors.New("encode idle lease RoutingScope: missing v25 scope")
 	}
 	b = binary.LittleEndian.AppendUint32(b, *l.RoutingScope)
+	if l.EgressScope == nil {
+		return nil, errors.New("encode idle lease EgressScope: missing v50 scope")
+	}
+	b = binary.LittleEndian.AppendUint32(b, *l.EgressScope)
 	if b, err = putLeaseString(b, l.SrcIP); err != nil {
 		return nil, fmt.Errorf("encode idle lease SrcIP: %w", err)
 	}
@@ -262,6 +266,12 @@ func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	}
 	scope := binary.LittleEndian.Uint32(buf[off:])
 	l.RoutingScope = &scope
+	off += 4
+	if off+4 > len(buf) {
+		return l, false
+	}
+	egressScope := binary.LittleEndian.Uint32(buf[off:])
+	l.EgressScope = &egressScope
 	off += 4
 	if l.SrcIP, off, ok = getLeaseString(buf, off); !ok {
 		return l, false
