@@ -217,11 +217,11 @@
 #
 # Retracting that claim is what exposed the model defect underneath it.
 #
-# Seven sites remain in the no-pair bucket and SIX of them are declared inert
-# by their own valueDesc — `authentication-type` ("not an OSPF leaf") and the
+# Nine sites remain in the no-pair bucket and EIGHT of them are declared inert
+# by their own valueDesc — `authentication-type` and `authentication-key` ("not an OSPF leaf", #14402) and the
 # four `system login class` regexp leaves ("not implemented by xpf"). They are
 # not fixture failures and no synthesiser should invent a pair for them; the
-# seventh, `security nat source interface port-overloading`, declares one
+# ninth, `security nat source interface port-overloading`, declares one
 # example and a validator whose message does not enumerate.
 # #9984: `event-options policy <name> plant-class` is a new value-bearing
 # child under a policy. The canonical compact policy spelling still folds the

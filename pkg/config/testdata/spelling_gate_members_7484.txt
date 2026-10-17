@@ -467,6 +467,7 @@ flag (read, but value-less)	protocols ospf area <*> area-type nssa no-summaries
 flag (read, but value-less)	protocols ospf area <*> area-type stub no-summaries
 COMPARED	protocols ospf area <*> interface <*> authentication md5 <*> key
 COMPARED	protocols ospf area <*> interface <*> authentication simple-password
+unreachable (leaf changed nothing)	protocols ospf area <*> interface <*> authentication-key
 unreachable (leaf changed nothing)	protocols ospf area <*> interface <*> authentication-type
 COMPARED	protocols ospf area <*> interface <*> bfd-liveness-detection minimum-interval
 COMPARED	protocols ospf area <*> interface <*> bfd-liveness-detection multiplier
@@ -590,6 +591,7 @@ flag (read, but value-less)	routing-instances <*> protocols ospf area <*> area-t
 flag (read, but value-less)	routing-instances <*> protocols ospf area <*> area-type stub no-summaries
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> authentication md5 <*> key
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> authentication simple-password
+unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> interface <*> authentication-key
 unreachable (leaf changed nothing)	routing-instances <*> protocols ospf area <*> interface <*> authentication-type
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> bfd-liveness-detection minimum-interval
 COMPARED	routing-instances <*> protocols ospf area <*> interface <*> bfd-liveness-detection multiplier

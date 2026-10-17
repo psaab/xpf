@@ -605,7 +605,18 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// compiler (`DailyExclude`); `security policy-stats system-wide` moved to
 	// advisory with #12825 (`aa37d9e0c`) once its ignored-value warning landed.
 	// The member registry records both reclassifications.
-	gateBlindUnreachable: 133,
+	// #14402: 133 -> 135, deliberately, for the two
+	// `protocols ospf ... interface <*> authentication-key` leaves (top-level
+	// and the routing-instances copy, which shares the same schema node).
+	// Like the #8443 `authentication-type` leaves above (140 -> 142), they
+	// are modeled SOLELY so they are refused at commit
+	// (schema_ospf_authentication_8443.go) — OSPF has no such leaf, and
+	// leaving it unmodeled meant it committed clean and left the adjacency
+	// UNAUTHENTICATED. Both spellings of a refused leaf produce the same
+	// rejection, so the differential can observe no difference between
+	// them. If OSPF ever gains a real `authentication-key`, these two
+	// must LEAVE this class and the ceiling must come back down by two.
+	gateBlindUnreachable: 135,
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
