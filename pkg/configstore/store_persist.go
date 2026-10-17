@@ -1119,6 +1119,11 @@ func (s *Store) recoverPendingConfirmLocked(rawActiveHash string) error {
 		} else {
 			s.persistDegraded = false
 			s.confirmResolvePendingPersist = false
+			// #14578: boot recovery rewrote active.json (new inode) without
+			// shifting history; rebind rollback-meta.json or the NEXT restart
+			// tombstones the ladder. History was loaded at the top of Load, so
+			// s.history already holds the on-disk slots (tombstones included).
+			s.rebindRollbackMetadataLocked()
 			if rec.FirstCommit {
 				// #12155: confirm.json is the retry source until teardown debt
 				// is durable. Do not remove it if the marker write fails.
@@ -1586,6 +1591,13 @@ func (s *Store) retryActiveConfigPersistLocked(backoff time.Duration) {
 		// pre-#1922 committed=1 write exactly.
 		if err := s.writeActiveMarker(s.active, s.persistMarkerCommitted); err == nil {
 			s.persistDegraded = false
+			// #14578: the retry just created a new active.json inode. If the
+			// original writer was a commit/sync, its saveRollbackFiles already
+			// bound that generation — but a rollback/boot-recovery heal binds
+			// nothing, and even a commit heal races a newer active rewrite.
+			// Rebinding unconditionally is idempotent (history unchanged,
+			// generation bumps) and guarantees sidecar matches disk.
+			s.rebindRollbackMetadataLocked()
 			// #5473: the active config is now durable. If a commit-confirmed
 			// resolution (rollback / boot recovery / sync supersede) deferred
 			// its confirm.json removal because the resolving write failed, that

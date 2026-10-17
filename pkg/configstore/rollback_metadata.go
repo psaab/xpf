@@ -111,6 +111,98 @@ func (s *Store) writeRollbackMetadataGeneration(generation uint64, entries []rol
 	return nil
 }
 
+// rebindRollbackMetadataLocked rewrites rollback-meta.json so it binds the
+// CURRENT s.history slot set to the CURRENT on-disk active.json (#14578).
+// Callers that rewrite active.json without shifting history (commit-confirmed
+// timeout revert, boot recovery, persist-retry heal) must call this after a
+// successful active write; otherwise the stale active hash/inode makes the
+// next loadRollbackHistory tombstone every slot (#10723 generation check).
+// The generation is bumped so the rebound sidecar is a new generation, not a
+// mutation of the old one. Slot files are NOT rewritten — their bytes and
+// identities are re-read from disk, so per-slot metadata stays exact.
+// Best-effort degrade-not-fail like saveRollbackFiles: a failure sets
+// rollbackPersistDegraded and journals, never fails the promotion.
+// Caller must hold s.mu (write lock) and have just durably written active.
+func (s *Store) rebindRollbackMetadataLocked() {
+	if s.filePath == "" || s.db == nil {
+		return
+	}
+	entries := s.history.List()
+	prevGen, _, _, _ := s.readRollbackMetadataSnapshot()
+	generation := prevGen + 1
+	if generation == 0 {
+		generation = 1
+	}
+	metadata := make([]rollbackSlotMetadataEntry, len(entries))
+	degraded := false
+	for i, entry := range entries {
+		path := s.rollbackPath(i + 1)
+		var data []byte
+		var identity rollbackSlotIdentity
+		var identityOK bool
+		if entry.Config == nil {
+			data = []byte(rollbackTombstoneMarker)
+			// Slot file on disk should already hold the marker; read its
+			// identity if present, else leave identity zero (slot stays
+			// tombstoned on next load via marker bytes).
+			if b, err := ReadBoundedFile(path, MaxConfigSize); err == nil {
+				data = b
+			}
+			identity, identityOK = rollbackSlotIdentityForPath(path)
+		} else {
+			data = []byte(entry.Config.Format())
+			identity, identityOK = rollbackSlotIdentityForPath(path)
+			if !identityOK {
+				// Slot file missing (e.g. history loaded before any
+				// saveRollbackFiles in this process, or slot file removed).
+				// Rewrite it durably so the rebound metadata points at real bytes.
+				if werr := rbWriteFileDurable(path, data, 0600); werr != nil {
+					slog.Warn("failed to rewrite rollback file during rebind", "path", path, "err", werr, "issue", "#14578")
+					degraded = true
+				} else {
+					identity, identityOK = rollbackSlotIdentityForPath(path)
+				}
+			} else {
+				// Verify on-disk bytes match in-memory entry; if a prior
+				// legitimate slot rewrite diverged, trust disk bytes for hash.
+				if b, err := ReadBoundedFile(path, MaxConfigSize); err == nil {
+					data = b
+				}
+			}
+		}
+		if !identityOK {
+			degraded = true
+		}
+		metadata[i] = rollbackSlotMetadataEntry{
+			Hash:       rollbackSlotHash(data),
+			Device:     identity.Device,
+			Inode:      identity.Inode,
+			ModTime:    identity.ModTime,
+			Timestamp:  entry.Timestamp,
+			Comment:    entry.Comment,
+			Generation: generation,
+		}
+	}
+	if err := s.writeRollbackMetadataGeneration(generation, metadata); err != nil {
+		slog.Warn("failed to rebind rollback metadata", "path", s.rollbackMetadataPath(), "err", err, "issue", "#14578")
+		degraded = true
+	}
+	if degraded && !s.rollbackPersistDegraded {
+		s.journalLog(&JournalEntry{
+			Action:    "rollback_persist_error",
+			Detail:    "rollback metadata rebind after active rewrite failed; rollback history may be stale after restart (#14578)",
+			Principal: "system:configstore",
+		})
+	}
+	if degraded {
+		s.rollbackPersistDegraded = true
+	} else {
+		// A successful rebind means the sidecar now matches disk exactly,
+		// mirroring saveRollbackFiles' unconditional clear on success.
+		s.rollbackPersistDegraded = false
+	}
+}
+
 func (s *Store) readRollbackMetadataSnapshot() (uint64, string, rollbackSlotIdentity, []rollbackSlotMetadataEntry) {
 	path := s.rollbackMetadataPath()
 	data, err := ReadBoundedFile(path, MaxConfigSize)
