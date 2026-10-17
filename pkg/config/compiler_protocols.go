@@ -941,7 +941,34 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		// #8939, and the same cleartext downgrade as `rip` above: a dropped
 		// authentication-type renders `area-password clear` / `domain-password
 		// clear` instead of `md5`.
-		for _, child := range expandFlatRun(isisNode.Children, isisLeafSchema8939()) {
+		//
+		// #14426: read the PACKED body too. The braced spelling arrives as
+		// Children, but
+		// `isis wide-metrics-only authentication-key K1 authentication-type md5;`
+		// (and the `overload`-first twin) packs the whole body onto this
+		// node's own Keys with no Children, so a Children-only loop saw
+		// nothing — AuthKey/AuthType stayed empty and the flags were lost,
+		// while FRR renders area-password/domain-password only when
+		// AuthKey != "". packedBodyChildren is the schema-driven SSOT the
+		// IS-IS interface loop below already uses; it returns Children
+		// unchanged when there is no packed tail.
+		isisSchema := isisLeafSchema8939()
+		isisChildren := packedBodyChildren(isisNode, isisSchema)
+		if len(isisNode.Keys) > 1 && len(isisNode.Children) > 0 &&
+			len(isisChildren) == len(isisNode.Children) &&
+			(len(isisChildren) == 0 || &isisChildren[0] == &isisNode.Children[0]) {
+			// Mixed tail+braced body whose packed tail ends in a leaf:
+			// packedBodyChildren declines to expand (compact_tail.go's
+			// do-not-guess guard), returning the braced Children alone.
+			// Expand the tail from a childless view of the same node and
+			// read both halves; an unmodelled tail still expands to
+			// nothing there.
+			tailOnly := *isisNode
+			tailOnly.Children = nil
+			isisChildren = append(packedBodyChildren(&tailOnly, isisSchema),
+				isisNode.Children...)
+		}
+		for _, child := range expandFlatRun(isisChildren, isisLeafSchema8939()) {
 			switch child.Name() {
 			case "net":
 				if len(child.Keys) >= 2 {

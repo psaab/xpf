@@ -644,6 +644,12 @@ var filedFixed = map[string]string{
 	// here rather than deleted, for the same reason #6821 moved its two.
 	"protocols router-advertisement interface xpfarg prefix xpfarg no-autonomous": "#14428",
 	"protocols router-advertisement interface xpfarg prefix xpfarg no-onlink":     "#14428",
+	// #14426: the IS-IS top loop now unpacks the packed body on the isis
+	// node itself, so a lone packed flag (and any trailing leaves) compile.
+	"protocols isis overload":                                    "#14426",
+	"protocols isis wide-metrics-only":                           "#14426",
+	"routing-instances xpfname protocols isis overload":          "#14426",
+	"routing-instances xpfname protocols isis wide-metrics-only": "#14426",
 }
 
 // filedByDesign is the category the inventory did not previously distinguish:
