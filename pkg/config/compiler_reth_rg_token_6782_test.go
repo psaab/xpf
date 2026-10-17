@@ -408,3 +408,108 @@ func TestSuppressionIsScopedToTheOffendingReth6782(t *testing.T) {
 			"to members of the OFFENDING reth, not every member on the box")
 	}
 }
+
+// #14441: the brace-elided spelling
+// `redundant-ether-options redundancy-group 1;` parses as one node with
+// Keys=[redundant-ether-options redundancy-group 1] and no Children, so the
+// Children-only FindChild in compileInterfaces (and in the #6782 pre-walk
+// gate, which mirrors it) found no rg child and RedundancyGroup stayed 0.
+// Downstream isReth/isVRRPReth are `> 0`, so the reth read as an ordinary
+// interface on both nodes. The elided spelling must compile identically to
+// the braced twin on strict and lenient paths; braced + flat-set unchanged.
+func TestElidedRedundantEtherOptionsCompilesGroup14441(t *testing.T) {
+	const unit = "unit 0 { family inet { address 10.0.61.1/24; } }"
+	elided := "interfaces { reth0 { redundant-ether-options redundancy-group 1; " + unit + " } }"
+	braced := "interfaces { reth0 { redundant-ether-options { redundancy-group 1; } " + unit + " } }"
+	parse := func(text string) *ConfigTree {
+		p := NewParser(text)
+		tree, perrs := p.Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("parse %q: %v", text, perrs)
+		}
+		return tree
+	}
+	for _, tc := range []struct {
+		name string
+		tree *ConfigTree
+		desc string
+	}{
+		{"elided-hierarchical", parse(elided), elided},
+		{"braced-hierarchical", parse(braced), braced},
+		{"flat-set", rethRGTree(t, rethRGSet("1")), "flat-set redundancy-group 1"},
+	} {
+		t.Run(tc.name+"/strict", func(t *testing.T) {
+			cfg, err := CompileConfig(tc.tree)
+			if err != nil {
+				t.Fatalf("%s must COMMIT (valid group 1): %v", tc.desc, err)
+			}
+			ifc := cfg.Interfaces.Interfaces["reth0"]
+			if ifc == nil {
+				t.Fatal("reth0 must compile")
+			}
+			if ifc.RedundancyGroup != 1 {
+				t.Fatalf("%s must compile RedundancyGroup=1 identically to the braced twin, got %d (#14441)", tc.desc, ifc.RedundancyGroup)
+			}
+			addrs := 0
+			for _, u := range ifc.Units {
+				addrs += len(u.Addresses)
+			}
+			if addrs == 0 {
+				t.Fatal("valid group 1 must keep the reth address")
+			}
+		})
+		t.Run(tc.name+"/lenient", func(t *testing.T) {
+			cfg, err := CompileConfigLenient(tc.tree)
+			if err != nil {
+				t.Fatalf("lenient %s: %v", tc.desc, err)
+			}
+			ifc := cfg.Interfaces.Interfaces["reth0"]
+			if ifc == nil || ifc.RedundancyGroup != 1 {
+				t.Fatalf("lenient %s must compile RedundancyGroup=1, got %+v", tc.desc, ifc)
+			}
+		})
+	}
+}
+
+// #14441 gate-mirror: an UNUSABLE elided token must not escape the #6782
+// gate just because it is packed. Strict must reject and lenient must warn
+// + suppress, exactly as for the braced spelling.
+func TestElidedRedundantEtherOptionsBadTokenGated14441(t *testing.T) {
+	for _, tok := range []string{"0", "abc", "256"} {
+		elided := "interfaces { reth0 { redundant-ether-options redundancy-group " + tok + "; unit 0 { family inet { address 10.0.61.1/24; } } } }"
+		p := NewParser(elided)
+		tree, perrs := p.Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("parse: %v", perrs)
+		}
+		if _, err := CompileConfig(tree); err == nil {
+			t.Fatalf("elided redundancy-group %q must be REJECTED at commit (#14441/#6782)", tok)
+		} else if !strings.Contains(err.Error(), "reth0") {
+			t.Fatalf("rejection must name reth0, got: %v", err)
+		}
+		cfg, err := CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("lenient must boot (#1960): %v", err)
+		}
+		ifc := cfg.Interfaces.Interfaces["reth0"]
+		if ifc == nil {
+			t.Fatal("reth0 must compile on lenient path")
+		}
+		addrs := 0
+		for _, u := range ifc.Units {
+			addrs += len(u.Addresses)
+		}
+		if addrs != 0 {
+			t.Fatalf("lenient elided bad token %q must suppress addresses (#6782), kept %d", tok, addrs)
+		}
+		found := false
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "6782") && strings.Contains(w, "reth0") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("lenient elided bad token %q must warn (#6782), got %v", tok, cfg.Warnings)
+		}
+	}
+}

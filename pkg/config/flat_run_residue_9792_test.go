@@ -29,6 +29,7 @@ func TestFlatRunResidueSchemasResolve9792(t *testing.T) {
 		{"interface", interfaceSchema9792(), []string{"bandwidth", "description"}},
 		{"gigether-options", gigetherOptionsSchema9792(), []string{"802.3ad", "redundant-parent"}},
 		{"aggregated-ether-options", aggregatedEtherOptionsSchema9792(), []string{"link-speed", "minimum-links"}},
+		{"redundant-ether-options", redundantEtherOptionsSchema9792(), []string{"redundancy-group"}},
 		{"tunnel wireguard", tunnelWireguardSchema9792(), []string{"listen-port", "private-key"}},
 		{"tunnel wireguard peer", tunnelWireguardPeerSchema9792(), []string{"endpoint", "persistent-keepalive"}},
 		{"bgp neighbor", bgpNeighborSchema9792(), []string{"authentication-key", "description"}},
