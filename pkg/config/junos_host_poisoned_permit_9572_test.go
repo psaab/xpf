@@ -84,11 +84,14 @@ func junosHost9572Program(proj JunosHostDenyProjection) *JunosHostDenyProgram {
 
 // junosHost9572AssertSSHDrop asserts p1's authored content in ONE family: one
 // drop rule for every source (no return ahead of it), and exactly TCP
-// destination port 22.
+// destination port 22. #14349: when the program also carries an authored
+// permit (the skipped p0 in these fixtures), the #11065 terminal deny
+// follows p1 as a second, unconditional drop; the helper accepts exactly
+// that trailing shape and still pins p1 first with no return ahead of it.
 func junosHost9572AssertSSHDrop(t *testing.T, family string, rules []JunosHostDenyRule) {
 	t.Helper()
-	if len(rules) != 1 {
-		t.Fatalf("%s: want exactly the p1 DROP rule, got %d rules: %+v", family, len(rules), rules)
+	if len(rules) < 1 || len(rules) > 2 {
+		t.Fatalf("%s: want the p1 DROP rule plus at most the #11065 terminal deny, got %d rules: %+v", family, len(rules), rules)
 	}
 	r := rules[0]
 	if !r.SrcAny || len(r.Src) != 0 || r.Verdict != JunosHostDrop {
@@ -98,6 +101,17 @@ func junosHost9572AssertSSHDrop(t *testing.T, family string, rules []JunosHostDe
 	if len(r.L4) != 1 || r.L4[0].Proto != HostInboundProtoTCP ||
 		len(r.L4[0].Ports) != 1 || r.L4[0].Ports[0] != (PortRange{Lo: 22, Hi: 22}) {
 		t.Errorf("%s: p1 L4 content = %+v, want exactly tcp dport 22 (junos-ssh)", family, r.L4)
+	}
+	if len(rules) == 2 {
+		term := rules[1]
+		if term.Verdict != JunosHostDrop || !term.SrcAny || !term.DstAny || len(term.L4) != 0 {
+			t.Errorf("%s: trailing rule = %+v, want the unconditional #11065 terminal deny after p1", family, term)
+		}
+	}
+	for _, rr := range rules {
+		if rr.Verdict == JunosHostReturn {
+			t.Errorf("%s: a return must never appear in this program, got %+v", family, rules)
+		}
 	}
 }
 
