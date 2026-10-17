@@ -997,7 +997,42 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 					}
 					// #8939: per-interface authentication has the same
 					// cleartext-downgrade shape as the area-level pair above.
-					for _, prop := range expandFlatRun(child.Children, isisInterfaceSchema8939()) {
+					//
+					// #14410: read the PACKED body too. The braced spelling
+					// arrives as Children, but
+					// `interface ge-0/0/0.0 passive authentication-key K
+					// authentication-type md5;` packs the whole tail onto this
+					// node's own Keys with no Children, so a Children-only
+					// loop read nothing and the Keys[2:] shim below rescued
+					// only passive/level — the circuit compiled with no
+					// credentials while `ip router isis` still rendered, an
+					// unauthenticated adjacency on a commit reporting success.
+					// The #8662 fold cannot rescue it: it keys on the FIRST
+					// tail token and `passive` is not a scoped interface pair,
+					// and the #8880 decline strands even a scoped head when a
+					// following router-level sibling shares its keyword.
+					// packedBodyChildren is the schema-driven SSOT the OSPF
+					// interface loop above already uses.
+					isisIfaceBody := child.Children
+					if len(child.Keys) > 2 {
+						ifaceSchema := isisInterfaceSchema8939()
+						isisIfaceBody = packedBodyChildren(child, ifaceSchema)
+						if len(child.Children) > 0 && len(isisIfaceBody) == len(child.Children) &&
+							(len(isisIfaceBody) == 0 || &isisIfaceBody[0] == &child.Children[0]) {
+							// Mixed tail+braced body whose packed tail ends
+							// in a leaf: packedBodyChildren declines to
+							// expand (compact_tail.go's do-not-guess guard),
+							// returning the braced Children alone. Expand
+							// the tail from a childless view of the same
+							// node and read both halves; an unmodelled
+							// tail still expands to nothing there.
+							tailOnly := *child
+							tailOnly.Children = nil
+							isisIfaceBody = append(packedBodyChildren(&tailOnly, ifaceSchema),
+								child.Children...)
+						}
+					}
+					for _, prop := range expandFlatRun(isisIfaceBody, isisInterfaceSchema8939()) {
 						switch prop.Name() {
 						case "level":
 							if len(prop.Keys) >= 2 {
