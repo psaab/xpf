@@ -1197,7 +1197,7 @@ type compileOpts struct {
 	// last-write-wins cannot install an accidental allow. Sibling of
 	// lenientFilterRoutingInstanceConflict (#3308).
 	lenientFilterTerminalConflict bool
-	// lenientPolicerThenConflict (#8445) downgrades the policer `then`
+	// lenientPolicerThenConflict (#8445, #14443) downgrades the policer `then`
 	// terminal-vs-marking gate (validateFirewallPolicerThenConflictStrict) from
 	// a hard compile error to a cfg.Warnings entry. The strict commit /
 	// commit-check path hard-rejects a policer whose `then` carries both
@@ -1205,9 +1205,11 @@ type compileOpts struct {
 	// keeps only the last one — and with `discard` written first the policer
 	// meters and drops nothing, so an authored rate limit is entirely
 	// unenforced. The tolerant load / peer-sync paths warn so an
-	// already-persisted or peer-synced config still BOOTS (#1960 no-brick); the
-	// last-wins ThenAction drives the dataplane exactly as it did before the
-	// gate, so a leniently-loaded config is no worse off. Same doctrine as
+	// already-persisted or peer-synced config still BOOTS (#1960 no-brick),
+	// and poison each conflicting policer to `discard`
+	// (failClosedPolicerThenConflicts) so the lenient survivor is fail-closed:
+	// the snapshot derives DiscardExcess=true and excess traffic is dropped,
+	// not metered-and-forwarded. Same doctrine as
 	// lenientFilterTerminalConflict.
 	lenientPolicerThenConflict bool
 	// lenientPolicerUnknownActions (#9882) downgrades the policer `then`
