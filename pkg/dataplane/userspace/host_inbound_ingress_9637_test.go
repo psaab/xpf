@@ -242,8 +242,10 @@ func TestZoneHostInboundViewLifelineOnlyHasNoAddrs10431(t *testing.T) {
 
 // TestZoneHostInboundViewLifelineSharedVRFMasterIsNotScoped10431 drives the
 // production builder with a real lifeline member and data member in one VRF.
-// The effective VRF master must not appear in either normal or fail-closed
-// ingress scopes, because LOCAL_IN sees the same master for both members.
+// The lifeline member alone must not scope the master; the data member keeps
+// its per-slave VRF scope (and the legacy flat flood-screen master) so its
+// host-bound traffic is still judged (#14332), while the lifeline member is
+// carried only in LifelineVRFScopes for sdifname discrimination.
 func TestZoneHostInboundViewLifelineSharedVRFMasterIsNotScoped10431(t *testing.T) {
 	cfg := ingressCfg9637()
 	cfg.RoutingInstances[0].Interfaces = append(cfg.RoutingInstances[0].Interfaces, "fxp0.0")
@@ -253,15 +255,20 @@ func TestZoneHostInboundViewLifelineSharedVRFMasterIsNotScoped10431(t *testing.T
 	for _, view := range views {
 		if view.Zone == "sfmix" {
 			foundSfmix = true
-		}
-		for _, netdev := range view.IngressNetdevs {
-			if netdev == "vrf-sfmix" {
-				t.Fatalf("view %s has shared lifeline VRF master in ingress scope: %+v", view.Zone, view)
+			if len(view.IngressVRFScopes) != 1 || view.IngressVRFScopes[0].Master != "vrf-sfmix" || strings.Join(view.IngressVRFScopes[0].Slaves, " ") != "ge-0-0-2" {
+				t.Fatalf("sfmix VRF scope = %+v, want master vrf-sfmix with only the data slave ge-0-0-2", view.IngressVRFScopes)
 			}
 		}
-		for _, netdev := range view.IngressDenyNetdevs {
-			if netdev == "vrf-sfmix" {
-				t.Fatalf("view %s has shared lifeline VRF master in deny scope: %+v", view.Zone, view)
+		if view.Zone == "mgmt" {
+			for _, netdev := range view.IngressNetdevs {
+				if netdev == "vrf-sfmix" {
+					t.Fatalf("lifeline-only view claims shared VRF master in ingress scope: %+v", view)
+				}
+			}
+			for _, netdev := range view.IngressDenyNetdevs {
+				if netdev == "vrf-sfmix" {
+					t.Fatalf("lifeline view has shared VRF master in deny scope: %+v", view)
+				}
 			}
 		}
 		for _, scope := range view.LifelineVRFScopes {
@@ -388,8 +395,10 @@ func TestHostInboundViewIngressBareVRFMemberFansDownTaggedUnits10431(t *testing.
 }
 
 // TestHostInboundViewIngressLifelineVRFMasterIsNotScoped10431 ensures a
-// lifeline and data member sharing a VRF master do not turn that master into a
-// deny scope that catches management traffic.
+// lifeline member does not by itself turn its VRF master into a scope, while
+// a non-lifeline co-member keeps its own claim on that master (#14332). The
+// lifeline member is discriminated by sdifname via LifelineVRFScopes, so the
+// flat master scope judges only the co-member's traffic.
 func TestHostInboundViewIngressLifelineVRFMasterIsNotScoped10431(t *testing.T) {
 	sig := "data\x00ping"
 	claims := map[string]map[string]bool{
@@ -399,11 +408,19 @@ func TestHostInboundViewIngressLifelineVRFMasterIsNotScoped10431(t *testing.T) {
 	lifelines := map[string]bool{"lifeline-slave": true}
 	enslaved := map[string]bool{"lifeline-slave": true, "data-slave": true}
 	masters := map[string]string{"lifeline-slave": "vrf-shared", "data-slave": "vrf-shared"}
-	if got := hostInboundViewIngressNetdevsWithMasters(sig, claims, lifelines, enslaved, masters); len(got) != 0 {
-		t.Fatalf("shared lifeline VRF scope = %v, want empty", got)
+	if got := hostInboundViewIngressNetdevsWithMasters(sig, claims, lifelines, enslaved, masters); len(got) != 1 || got[0] != "vrf-shared" {
+		t.Fatalf("shared lifeline VRF scope = %v, want [vrf-shared] from the non-lifeline co-member", got)
 	}
 	if got := hostInboundViewIngressDenyNetdevs(claims, lifelines, enslaved, masters); len(got) != 0 {
-		t.Fatalf("shared lifeline VRF deny scope = %v, want empty", got)
+		t.Fatalf("shared lifeline VRF deny scope = %v, want empty (single surviving sig is unambiguous)", got)
+	}
+	// Lifeline alone in the VRF: no scope at all.
+	alone := map[string]map[string]bool{"lifeline-slave": {sig: true}}
+	if got := hostInboundViewIngressNetdevsWithMasters(sig, alone, lifelines, enslaved, masters); len(got) != 0 {
+		t.Fatalf("lifeline-only VRF scope = %v, want empty", got)
+	}
+	if got := hostInboundViewIngressDenyNetdevs(alone, lifelines, enslaved, masters); len(got) != 0 {
+		t.Fatalf("lifeline-only VRF deny scope = %v, want empty", got)
 	}
 }
 
