@@ -635,15 +635,30 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		//   - A DEFINED policy-statement name → a Junos default export
 		//     policy applied to every BGP peer, i.e. a peer-level
 		//     `route-map <name> out` per neighbor/address-family. It MUST
-		//     NOT be routed through resolveRedistribute: doing so emitted
-		//     `redistribute ospf route-map ...` under `router bgp`, which
-		//     actively ANNOUNCES all OSPF/connected routes into BGP (route
-		//     leak, #2473 failure mode 1), and for a prefix/community-only
-		//     policy with no `from protocol` it returned "" and SILENTLY
-		//     DROPPED the operator's advertise filter (#2473 failure mode
-		//     2). The route-map is already emitted by generatePolicyOptions,
-		//     so `route-map out` filters advertisements without leaking the
-		//     internal RIB.
+		//     NOT be routed through the BARE-token redistribute path:
+		//     doing so emitted an UNFILTERED `redistribute ospf` under
+		//     `router bgp`, which actively ANNOUNCES all OSPF/connected
+		//     routes into BGP (route leak, #2473 failure mode 1), and for
+		//     a prefix/community-only policy with no `from protocol` it
+		//     returned "" and SILENTLY DROPPED the operator's advertise
+		//     filter (#2473 failure mode 2). The route-map is already
+		//     emitted by generatePolicyOptions, so `route-map out`
+		//     filters advertisements without leaking the internal RIB.
+		//
+		//     #14586 completes this shape: in Junos the BGP export
+		//     policy is ALSO what originates the routes its `from
+		//     protocol` terms select — there is no separate
+		//     redistribution step. The route-map-out alone could only
+		//     filter routes already in BGP, so `from protocol
+		//     static|direct` advertised nothing (PfxSnt 0). For each
+		//     defined policy in the effective export chains (global +
+		//     per-neighbor union, bgpExportPolicies14586) the renderer
+		//     now ALSO emits `redistribute <proto> route-map
+		//     <policy>-<proto>-xpf-redist` per family — the filtered
+		//     per-source map (#12065), never an unfiltered
+		//     redistribute — keeping `route-map out` as the per-peer
+		//     filter. A policy whose terms select no source at a node
+		//     (e.g. prefix/community-only) originates nothing there.
 		//
 		//   - A BARE PROTOCOL TOKEN (connected/direct/static/kernel/ospf/
 		//     bgp/rip/isis — i.e. NOT a defined policy-statement) → this
@@ -673,6 +688,11 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		// `-xpf-chain` route-map via composedChainName/bgpRouteMapRef,
 		// #5277). A bare-token redistribute is a GLOBAL redistribute verb,
 		// not per-neighbor, and is emitted once under `router bgp`.
+		// Origination (#14586) follows the UNION of effective chains:
+		// redistribution is router-global in FRR (like the Junos BGP
+		// RIB), so a policy any neighbor effectively exports originates
+		// its selected routes once; the per-peer route-map out remains
+		// the per-peer gate.
 		// globalExportChain is the ORDERED list of DEFINED policy-statements
 		// in `protocols bgp export` — the global export CHAIN applied as a
 		// peer-level default to neighbors with no own export. Every entry is
@@ -684,7 +704,12 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		// #9667: a bare token's IPv6 routes go into `address-family ipv6
 		// unicast`, the only BGP node whose redistribute grammar lists IPv6
 		// sources. Collected here, written when that block is opened below.
+		// #14586 defined-policy IPv6 origination joins the same block.
 		var bgpIPv6Redist strings.Builder
+		// #14586: defined-policy origination entries are already
+		// de-duplicated by (proto, routeMap) in
+		// bgpPolicyRedistEntries14586; a bare token (routeMap "") can
+		// never collide with a filtered policy entry.
 		for _, e := range bgp.Export {
 			if e == "" {
 				continue
@@ -706,12 +731,51 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				kw, isProto := config.FRRRoutingProtocolKeyword(e)
 				fam, _ := config.RedistributionSourceFamilies(kw)
 				if !isProto || fam&config.FamilyIPv4 != 0 || kw == "bgp" {
+					// Bare-token path: resolveRedistribute (self "bgp")
+					// keeps the historical skip-and-warn wording; a bare
+					// token has no route-map, so no entry can collide
+					// with the filtered policy entries below.
 					b.WriteString(m.resolveRedistribute(e, policyOptions, "bgp", bgpAcceptDefault))
 				}
 				if isProto && kw != "bgp" && fam&config.FamilyIPv6 != 0 {
 					bgpIPv6Redist.WriteString(m.resolveBGPIPv6Redistribute(e, policyOptions, bgpAcceptDefault))
 				}
 			}
+		}
+		// #14586: originate the routes selected by every defined policy
+		// in the effective export chains, through the filtered
+		// per-source maps. Router-level (IPv4 grammar) lines are written
+		// now, de-duplicated against the bare-token lines above; IPv6
+		// lines join bgpIPv6Redist for the address-family block below,
+		// de-duplicated against bare-token IPv6 lines already collected.
+		bgpPolicies14586 := bgpExportPolicies14586(bgp, policyOptions)
+		b.WriteString(formatRedistEntries(m.bgpPolicyRedistEntries14586(bgpPolicies14586, policyOptions)))
+		{
+			seen6 := make(map[redistEntry]bool)
+			for _, ln := range strings.Split(bgpIPv6Redist.String(), "\n") {
+				ln = strings.TrimSpace(ln)
+				if ln == "" {
+					continue
+				}
+				// Reconstruct the entry from "redistribute <proto>[ route-map <name>]".
+				fields := strings.Fields(ln)
+				if len(fields) >= 2 && fields[0] == "redistribute" {
+					ent := redistEntry{proto: fields[1]}
+					if len(fields) >= 4 && fields[2] == "route-map" {
+						ent.routeMap = fields[3]
+					}
+					seen6[ent] = true
+				}
+			}
+			var extra6 strings.Builder
+			for _, ent := range m.bgpPolicyIPv6RedistEntries14586(bgpPolicies14586, policyOptions) {
+				if seen6[ent] {
+					continue
+				}
+				seen6[ent] = true
+				extra6.WriteString(formatRedistEntries([]redistEntry{ent}))
+			}
+			bgpIPv6Redist.WriteString(indentFRRLines(extra6.String(), " "))
 		}
 
 		// Global `protocols bgp import <policy>` default (#2490). Unlike
