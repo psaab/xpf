@@ -1817,7 +1817,62 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 		case "is-fragment":
 			term.IsFragment = true
 		case "flexible-match-range":
-			for _, rangeInst := range namedInstances(child.FindChildren("range")) {
+			// #14347: inspect every child of flexible-match-range, not only
+			// named range instances. Direct field leaves, unknown children,
+			// nameless/bare range nodes and packed tails on this node were
+			// silently dropped (entire predicate lost). Record them on
+			// UnknownFlexMatch so strict rejects and tolerant warns+poisons.
+			// Packed tails: if child.Keys carries a tail beyond the keyword,
+			// packedBody with the flex schema can synthesize range/field
+			// nodes; otherwise the tail itself is unread.
+			flexSchema := resolveSchemaPath9235("firewall", "family", "inet", "filter", "term", "from", "flexible-match-range")
+			flexBody := child
+			if len(child.Keys) > 1 {
+				if exp := packedBody(child, flexSchema); exp != child {
+					flexBody = exp
+				} else {
+					// Unresolvable packed tail (e.g. direct leaf run the
+					// schema walk declines): record first unread token.
+					term.UnknownFlexMatch = append(term.UnknownFlexMatch, "flexible-match-range "+child.Keys[1])
+				}
+			}
+			for _, fc := range flexBody.Children {
+				switch fc.Name() {
+				case "range":
+				case "match-start", "byte-offset", "bit-length", "match-value", "match-mask":
+					// Direct leaf under flexible-match-range (no range name):
+					// outside schema grammar (only range children declared).
+					term.UnknownFlexMatch = append(term.UnknownFlexMatch, "flexible-match-range "+fc.Name())
+				case "":
+					term.UnknownFlexMatch = append(term.UnknownFlexMatch, "flexible-match-range")
+				default:
+					// Unknown child beside ranges. Fused `then` is owned by
+					// the #12528 pre-walk, so do not double-record it.
+					if fc.Name() != "then" {
+						term.UnknownFlexMatch = append(term.UnknownFlexMatch, fc.Name())
+					}
+				}
+			}
+			// Nameless/bare range nodes: a faithful named range is either
+			// Keys=["range",name,...] or Keys=["range"] with a first child
+			// that is the instance name (not a field). `range;` has neither;
+			// `range { match-value ...; }` has a field as first child, which
+			// namedInstances would fabricate into a range name.
+			for _, rcNode := range flexBody.FindChildren("range") {
+				if len(rcNode.Keys) >= 2 {
+					continue
+				}
+				if len(rcNode.Children) == 0 {
+					term.UnknownFlexMatch = append(term.UnknownFlexMatch, "range")
+					continue
+				}
+				switch rcNode.Children[0].Name() {
+				case "match-start", "byte-offset", "bit-length", "match-value", "match-mask", "range":
+					term.UnknownFlexMatch = append(term.UnknownFlexMatch, "range")
+				}
+			}
+			rangeInsts := namedInstances(flexBody.FindChildren("range"))
+			for _, rangeInst := range rangeInsts {
 				// Count distinct range names for #5823. Repeated blocks for
 				// the same name are fragments of one object, just as in flat
 				// set syntax; merge their fields in authored order (#9899).
@@ -1829,14 +1884,35 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 					term.FlexMatchRangeNames = append(term.FlexMatchRangeNames, rangeInst.name)
 				}
 				if term.FlexMatch != nil && rangeInst.name != term.FlexMatchRangeNames[0] {
-					continue // distinct later ranges remain fail-closed
+					// Distinct later ranges remain fail-closed, but their
+					// bodies must still be recorded if malformed (#14347):
+					// fall through to body inspection without merging.
+					rangeSchema0 := resolveSchemaPath9235("firewall", "family", "inet", "filter", "term", "from", "flexible-match-range", "range")
+					body0 := expandResolvingRuns9792(packedBody(rangeInst.node, rangeSchema0).Children, rangeSchema0)
+					if len(body0) == 0 && len(packedBody(rangeInst.node, rangeSchema0).Children) == 0 {
+						// Empty later range: still malformed, but cardinality
+						// gate already rejects; record for completeness.
+						term.UnknownFlexMatch = append(term.UnknownFlexMatch, "range "+rangeInst.name)
+					} else {
+						for _, rc := range body0 {
+							recordFlexRangeChild14347(term, rc)
+						}
+					}
+					continue
 				}
 				fm := term.FlexMatch
 				if fm == nil {
 					fm = &FlexMatchConfig{MatchStart: "layer-3"}
 				}
 				rangeSchema := resolveSchemaPath9235("firewall", "family", "inet", "filter", "term", "from", "flexible-match-range", "range")
-				for _, rc := range expandResolvingRuns9792(packedBody(rangeInst.node, rangeSchema).Children, rangeSchema) {
+				expanded := expandResolvingRuns9792(packedBody(rangeInst.node, rangeSchema).Children, rangeSchema)
+				if len(expanded) == 0 {
+					term.UnknownFlexMatch = append(term.UnknownFlexMatch, "range "+rangeInst.name)
+				}
+				for _, rc := range expanded {
+					if recordFlexRangeChild14347(term, rc) {
+						continue
+					}
 					switch rc.Name() {
 					case "match-start":
 						if v := nodeVal(rc); v != "" {
@@ -1932,6 +2008,37 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 		}
 	}
 	return rangeNames
+}
+
+// recordFlexRangeChild14347 records a malformed range child on
+// term.UnknownFlexMatch and reports whether it was recorded (so the caller
+// must not also apply it). Malformed means: unknown leaf name, a known leaf
+// with no value (nodeVal==""), a known leaf with trailing tokens beyond its
+// single declared value (len(Keys)>2, or a value plus a child statement), or
+// a leaf carrying children the compiler never reads. #14347.
+func recordFlexRangeChild14347(term *FirewallFilterTerm, rc *Node) bool {
+	switch rc.Name() {
+	case "match-start", "byte-offset", "bit-length", "range", "match-value", "match-mask":
+	default:
+		if rc.Name() == "then" {
+			return true // #12528 pre-walk owns fused `then`; do not apply it as a field
+		}
+		name := rc.Name()
+		if name == "" {
+			name = "flexible-match-range"
+		}
+		term.UnknownFlexMatch = append(term.UnknownFlexMatch, name)
+		return true
+	}
+	if nodeVal(rc) == "" || len(rc.Keys) > 2 || len(rc.Children) > 0 {
+		// Children-carried value (`byte-offset { 9; }`): nodeVal reads
+		// Children[0], so it is non-empty but still unread structurally —
+		// len(Children)>0 catches it. Flat nested extra (`match-start
+		// layer-4` + child `extra`) likewise.
+		term.UnknownFlexMatch = append(term.UnknownFlexMatch, rc.Name())
+		return true
+	}
+	return false
 }
 
 // rejectMessageTypes is the set of message-types Junos accepts after
