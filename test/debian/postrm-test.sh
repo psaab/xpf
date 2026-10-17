@@ -37,6 +37,7 @@ patched_postrm() {
       -e "s#^TRANSIT_IPV4_SYSCTL=.*#TRANSIT_IPV4_SYSCTL=$ROOT/proc/sys/net/ipv4/ip_forward#" \
       -e "s#^EARLY_INPUT_HANDOFF_MARKER=.*#EARLY_INPUT_HANDOFF_MARKER=$ROOT/run/xpf/early-input-handoff.done#" \
       -e "s#^TRANSIT_IPV6_SYSCTL=.*#TRANSIT_IPV6_SYSCTL=$ROOT/proc/sys/net/ipv6/conf/all/forwarding#" \
+      -e "s#^TRANSIT_OWNED_FILE=.*#TRANSIT_OWNED_FILE=$ROOT/var/lib/xpf/transit-gate-owned#" \
       -e "s#^XPF_APT_SRC=/etc/apt/sources.list.d/xpf.sources#XPF_APT_SRC=$ROOT/etc/apt/sources.list.d/xpf.sources#" \
       -e "s#^XPF_APT_PREF=/etc/apt/preferences.d/xpf-channel.pref#XPF_APT_PREF=$ROOT/etc/apt/preferences.d/xpf-channel.pref#" \
       -e "s#\\[ -d /run/systemd/system \\]#false#" \
@@ -76,6 +77,7 @@ run_scenario() {
     INPUT_XPFD_REQUIRES_LINK="$XPFD_REQUIRES_DIR/xpf-input-closed.service"
     TRANSIT_IPV4_SYSCTL="$ROOT/proc/sys/net/ipv4/ip_forward"
     TRANSIT_IPV6_SYSCTL="$ROOT/proc/sys/net/ipv6/conf/all/forwarding"
+    TRANSIT_OWNED_FILE="$ROOT/var/lib/xpf/transit-gate-owned"
     XPF_APT_PREF="$ROOT/etc/apt/preferences.d/xpf-channel.pref"
     mkdir -p "$(dirname "$TRANSIT_IPV4_SYSCTL")" "$(dirname "$TRANSIT_IPV6_SYSCTL")"
     printf '0\n' > "$TRANSIT_IPV4_SYSCTL"
@@ -151,10 +153,21 @@ EOF
     chmod +x "$STAGED/xpfd"
 }
 
+# #14620: mark the fixture host xpf-owned, as xpfd's
+# recordTransitGateOwnership does when the transit gate first latches:
+# the record carries the host's PRE-xpf sysctl values. Owned fixtures seed
+# the record with priors 1,1 (an owned host whose forwarding was open
+# before xpf), matching the removal-time expectations below.
+mark_transit_owned() {
+    mkdir -p "$(dirname "$TRANSIT_OWNED_FILE")"
+    printf 'ipv4=1\nipv6=1\n' > "$TRANSIT_OWNED_FILE"
+}
+
 # remove leaves versions/ but removes the through-current sbin links AND the
 # runtime unit drop-in (#1967).
 scenario_remove_keeps_versions() {
     build_hardened "1.0.0"
+    mark_transit_owned
     "$ROOT/postrm" remove
     for b in $BINS; do
         [ -L "$SBIN/$b" ] && { echo "FAIL: sbin $b not removed"; exit 1; } || true
@@ -199,6 +212,7 @@ scenario_transit_failure_still_removes_input_barrier() {
 # table was removed.
 scenario_input_failure_still_restores_forwarding() {
     build_hardened "1.0.0"
+    mark_transit_owned
     INPUT_BARRIER_FAIL=yes
     export INPUT_BARRIER_FAIL
     "$ROOT/postrm" remove
@@ -206,6 +220,82 @@ scenario_input_failure_still_restores_forwarding() {
     [ "$(cat "$INPUT_BARRIER_LOG")" = remove ] || { echo "FAIL: input removal was not attempted"; exit 1; }
     [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 1 ] || { echo "FAIL: IPv4 forwarding not restored after successful transit removal"; exit 1; }
     [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 1 ] || { echo "FAIL: IPv6 forwarding not restored after successful transit removal"; exit 1; }
+}
+
+# === #14620 regression: postrm must not write forwarding sysctls on a
+# host xpf never owned ===
+
+# DECISIVE CELL (z6 acceptance): no ownership record, pre-values 0/0 (the
+# run_scenario seed), and a stub barrier-remove that SUCCEEDS (vacuously,
+# as RemoveTransitBarrier does when no barrier ever existed). Before the
+# fix postrm unconditionally wrote 1/1, turning a never-owned host into an
+# unfiltered router; it must now leave both at 0. The barrier/input
+# removals themselves still run (they are idempotent no-ops there).
+scenario_remove_never_owned_keeps_sysctls_closed() {
+    build_hardened "1.0.0"
+    [ ! -e "$TRANSIT_OWNED_FILE" ] || { echo "FAIL: fixture unexpectedly owned"; exit 1; }
+    "$ROOT/postrm" remove
+    [ "$(cat "$TRANSIT_BARRIER_LOG")" = remove ] || { echo "FAIL: transit removal was not attempted"; exit 1; }
+    [ "$(cat "$INPUT_BARRIER_LOG")" = remove ] || { echo "FAIL: input removal was not attempted"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 0 ] || { echo "FAIL: IPv4 forwarding opened on never-owned host (#14620)"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 0 ] || { echo "FAIL: IPv6 forwarding opened on never-owned host (#14620)"; exit 1; }
+}
+
+# PURGE twin of the decisive cell: purge must also leave a never-owned
+# host's sysctls untouched.
+scenario_purge_never_owned_keeps_sysctls_closed() {
+    build_hardened "1.0.0"
+    "$ROOT/postrm" purge
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 0 ] || { echo "FAIL: IPv4 forwarding opened on never-owned purge (#14620)"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 0 ] || { echo "FAIL: IPv6 forwarding opened on never-owned purge (#14620)"; exit 1; }
+}
+
+# OWNED CONTROL: an ownership record with recorded priors 1/1 ends at 1/1
+# (the owned-host policy the pre-fix cells asserted for every host).
+scenario_remove_owned_restores_recorded_priors() {
+    build_hardened "1.0.0"
+    mark_transit_owned
+    "$ROOT/postrm" remove
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 1 ] || { echo "FAIL: IPv4 recorded prior not restored on owned host"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 1 ] || { echo "FAIL: IPv6 recorded prior not restored on owned host"; exit 1; }
+    # remove does NOT consume the record (a reinstall's daemon keeps
+    # owning the posture without re-capturing priors).
+    [ -f "$TRANSIT_OWNED_FILE" ] || { echo "FAIL: ownership record consumed by remove"; exit 1; }
+}
+
+# OWNED PRIORS HONOURED: a record whose priors are 0/0 (host had forwarding
+# off before xpf) restores 0/0 — not a hard-coded 1 — and a mixed record
+# restores per-knob.
+scenario_remove_owned_restores_zero_and_mixed_priors() {
+    build_hardened "1.0.0"
+    mkdir -p "$(dirname "$TRANSIT_OWNED_FILE")"
+    printf 'ipv4=0\nipv6=1\n' > "$TRANSIT_OWNED_FILE"
+    printf '1\n' > "$TRANSIT_IPV4_SYSCTL"
+    printf '0\n' > "$TRANSIT_IPV6_SYSCTL"
+    "$ROOT/postrm" remove
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 0 ] || { echo "FAIL: IPv4 prior 0 not restored"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 1 ] || { echo "FAIL: IPv6 prior 1 not restored"; exit 1; }
+}
+
+# OWNED-BUT-CORRUPT RECORD: a present record with unparseable values still
+# counts as owned and falls back to 1/1 per knob (never strand an owned
+# host transit-closed after removal).
+scenario_remove_owned_corrupt_record_defaults_open() {
+    build_hardened "1.0.0"
+    mkdir -p "$(dirname "$TRANSIT_OWNED_FILE")"
+    printf 'garbage\n' > "$TRANSIT_OWNED_FILE"
+    "$ROOT/postrm" remove
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 1 ] || { echo "FAIL: IPv4 corrupt prior did not default to 1"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 1 ] || { echo "FAIL: IPv6 corrupt prior did not default to 1"; exit 1; }
+}
+
+# purge CONSUMES the ownership record (package-derived runtime state).
+scenario_purge_consumes_transit_ownership_record() {
+    build_hardened "1.0.0"
+    mark_transit_owned
+    "$ROOT/postrm" purge
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 1 ] || { echo "FAIL: IPv4 prior not restored on owned purge"; exit 1; }
+    [ -e "$TRANSIT_OWNED_FILE" ] && { echo "FAIL: ownership record survived purge"; exit 1; } || true
 }
 
 # purge removes the through-current sbin links, the runtime drop-in (#1967),
@@ -628,6 +718,12 @@ run_scenario remove_keeps_versions
 run_scenario remove_barrier_failure_keeps_sysctls_closed
 run_scenario transit_failure_still_removes_input_barrier
 run_scenario input_failure_still_restores_forwarding
+run_scenario remove_never_owned_keeps_sysctls_closed
+run_scenario purge_never_owned_keeps_sysctls_closed
+run_scenario remove_owned_restores_recorded_priors
+run_scenario remove_owned_restores_zero_and_mixed_priors
+run_scenario remove_owned_corrupt_record_defaults_open
+run_scenario purge_consumes_transit_ownership_record
 run_scenario purge_removes_versions
 run_scenario remove_keeps_foreign_dropin
 run_scenario remove_no_dropin_ok

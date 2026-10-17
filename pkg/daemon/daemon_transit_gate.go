@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
 )
@@ -187,6 +188,15 @@ func (d *Daemon) armedTransitFenceSpecForIfindexes(ifindexes []int) (xnft.Forwar
 var (
 	ipv4ForwardSysctlPath = "/proc/sys/net/ipv4/ip_forward"
 	ipv6ForwardSysctlPath = "/proc/sys/net/ipv6/conf/all/forwarding"
+	// transitOwnershipRecordFile records, durably, that this host's transit
+	// forwarding posture is xpf-owned (#14620) together with the sysctl
+	// values observed just before the gate first wrote them. It lives in
+	// /var/lib/xpf (package-derived runtime state, purged by postrm) and
+	// NOT in /etc/xpf, which postrm never touches. postrm restores the
+	// recorded priors ONLY when this file is present; on a host where the
+	// daemon never latched ownership the file never exists and postrm
+	// leaves the sysctls untouched. A package var for tests.
+	transitOwnershipRecordFile = "/var/lib/xpf/transit-gate-owned"
 )
 
 // transitForwardSysctlPaths is the single source of truth for the gated
@@ -194,6 +204,42 @@ var (
 // remains separate and is applied by applyHostForwardingPosture.
 func transitForwardSysctlPaths() []string {
 	return []string{ipv4ForwardSysctlPath, ipv6ForwardSysctlPath}
+}
+
+// transitGatePriorValues reads the current transit sysctls for the
+// ownership record. Missing/unreadable knobs record "1": postrm's restore
+// is best-effort and an unknown prior must not strand transit CLOSED on an
+// owned host after package removal (the pre-#14620 behaviour there).
+func transitGatePriorValues() (ipv4, ipv6 string) {
+	read := func(path string) string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "1"
+		}
+		if v := strings.TrimSpace(string(b)); v == "0" || v == "1" {
+			return v
+		}
+		return "1"
+	}
+	return read(ipv4ForwardSysctlPath), read(ipv6ForwardSysctlPath)
+}
+
+// recordTransitGateOwnership persists the #14620 ownership record the first
+// time ownership latches in this daemon lifetime. It MUST run before the
+// gate's first sysctl write so the recorded priors are the host's own
+// pre-xpf values. Best-effort: a failed write is logged and the gate still
+// actuates (fail-closed posture outranks removal-time restoration); an
+// existing record is never overwritten, so priors survive restarts.
+func recordTransitGateOwnership() {
+	if _, err := os.Stat(transitOwnershipRecordFile); err == nil {
+		return
+	}
+	v4, v6 := transitGatePriorValues()
+	content := fmt.Sprintf("ipv4=%s\nipv6=%s\n", v4, v6)
+	if err := fsatomic.WriteFileDurable(transitOwnershipRecordFile, []byte(content), 0o644); err != nil {
+		slog.Warn("failed to record transit-gate ownership for postrm restore",
+			"path", transitOwnershipRecordFile, "err", err)
+	}
 }
 
 // shouldManageTransitGate limits the persistent kernel forwarding fence to
@@ -210,18 +256,22 @@ func (d *Daemon) shouldManageTransitGate() bool {
 	}
 	if _, err := os.Stat(applianceMarkerFile); err == nil {
 		d.transitGateOwned.Store(true)
+		recordTransitGateOwnership()
 		return true
 	}
 	if d.store != nil && d.store.FirstCommitTeardownOwed() {
 		d.transitGateOwned.Store(true)
+		recordTransitGateOwnership()
 		return true
 	}
 	if d.store != nil && d.store.EverCommitted() {
 		d.transitGateOwned.Store(true)
+		recordTransitGateOwnership()
 		return true
 	}
 	if d.dataplaneArmed.Load() {
 		d.transitGateOwned.Store(true)
+		recordTransitGateOwnership()
 		return true
 	}
 	return false
@@ -263,6 +313,7 @@ func writeTransitForwardSysctls(on bool) {
 	}
 	applyNoRedirectsPosture()
 }
+
 // DataplaneArmed reports whether the runtime dataplane has been successfully
 // started in this daemon's lifetime. Kernel transit additionally requires a
 // kernel-truth XDP-link count and, for userspace runtimes, a live helper

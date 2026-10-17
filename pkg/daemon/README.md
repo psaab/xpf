@@ -2305,6 +2305,16 @@ never lock an operator out of a remote box it manages.
     periodic kernel-truth tick is gated by the same predicate. Once ownership
     is established it stays latched through a first-commit rollback, so the
     rollback closes forwarding before detaching the dataplane.
+  - **Removal-time restore (#14620).** When ownership first latches, the
+    daemon durably records it (with the host's pre-xpf sysctl values) in
+    `/var/lib/xpf/transit-gate-owned` (`recordTransitGateOwnership`).
+    `debian/xpf.postrm` restores the recorded priors on remove/purge ONLY
+    when that record exists; on a never-owned host the record never exists
+    and postrm leaves both sysctls untouched — writing `1` unconditionally
+    (the old behaviour) turned a foreign forwarding=0 host into an
+    unfiltered router and disabled v6 RA acceptance. purge consumes the
+    record; remove leaves it so a reinstall's daemon does not re-capture
+    the closed values as priors.
   - **Why.** A successful config *compile* followed by an *arm* failure took a
     branch that logged "running in config-only mode", cleared the dataplane
     cell, and fell through to `applyConfig` — while bring-up had already
