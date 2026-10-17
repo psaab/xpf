@@ -188,6 +188,10 @@ mod tests_addr_only_sibling_9131;
 #[cfg(test)]
 #[path = "tests_addr_only_index_13690.rs"]
 mod tests_addr_only_index_13690;
+// #14622: address-only reseed carry + deterministic mint retain the pool index.
+#[cfg(test)]
+#[path = "tests_addr_only_reseed_14622.rs"]
+mod tests_addr_only_reseed_14622;
 // #10018: PersistentSourceKey must include routing scope so overlapping
 // subscribers in different VRFs cannot share a persistent NAT lease.
 #[cfg(test)]

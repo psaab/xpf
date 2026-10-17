@@ -546,7 +546,7 @@ fn match_source_nat_result_for_tuple_inner(
                     crate::nat::INTERFACE_SNAT_IDENTITY_EXHAUSTION.fetch_add(1, Ordering::Relaxed);
                     return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(rule, SourceNatFailureReason::InterfaceIdentityExhausted));
                 }
-                return match alloc.reserve_address_only(flow, rewrite_src, holder) {
+                return match alloc.reserve_address_only(flow, rewrite_src, 0, holder) {
                     Ok(_) => SourceNatLookup::Matched(NatDecision {
                         rewrite_src: Some(rewrite_src),
                         rewrite_dst: None,
@@ -784,6 +784,7 @@ fn match_source_nat_result_for_tuple_inner(
                         match rule.pool_allocator.reserve_address_only(
                             flow,
                             IpAddr::V4(pool_addr),
+                            ip_idx,
                             holder,
                         ) {
                             Ok(translated) => {

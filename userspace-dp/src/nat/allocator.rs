@@ -3640,7 +3640,8 @@ impl PortAllocator {
     /// not a no-op — it mutates state belonging to an UNRELATED flow:
     ///
     ///   - ADDRESS-ONLY (`port no-translation` / port-less, #5269/#6041): owns
-    ///     NO occupancy bit. `addr_index` is a hardcoded 0 and `translated.port`
+    ///     NO occupancy bit. `addr_index` names its pool address (#14622;
+    ///     interface-mode records use 0, their only address) and `translated.port`
     ///     is the PRESERVED internal source port, so calling
     ///     `free_translated_port` on it clears whatever bit pool address 0
     ///     happens to hold at that offset — which, when a PAT rule shares the
@@ -4710,8 +4711,13 @@ impl PortAllocator {
                 // N-1 still forward through.
                 let mut carried_ok = false;
                 if alloc.holders == 0 {
+                    // #14622: thread `new_index` — the remapped position of
+                    // the address this record holds — instead of letting
+                    // `reserve_address_only` stamp 0. Without it a second
+                    // pool edit filters the record out by its lying stamp
+                    // and drops the #5269 guard it was carried to keep.
                     carried_ok = self
-                        .reserve_address_only(flow, alloc.translated.ip, NatHolder::Untracked)
+                        .reserve_address_only(flow, alloc.translated.ip, new_index, NatHolder::Untracked)
                         .is_ok();
                 } else {
                     for worker in 0..MAX_NAT_HOLDER_WORKERS {
@@ -4722,6 +4728,7 @@ impl PortAllocator {
                             .reserve_address_only(
                                 flow,
                                 alloc.translated.ip,
+                                new_index,
                                 NatHolder::Worker(worker),
                             )
                             .is_ok();
@@ -5152,13 +5159,21 @@ impl PortAllocator {
         &self,
         flow: SourceNatFlowKey,
         translated_ip: IpAddr,
+        // #14622: the pool index of `translated_ip` in the caller's pool
+        // (0 for single-address interface-mode allocators, whose only
+        // address is index 0). Stored verbatim on the live record so
+        // `reseed_retained_from` filters/remaps on the address the record
+        // actually holds — hardcoding 0 here re-stamped every carried or
+        // deterministically-minted record onto pool[0] and a later pool
+        // edit dropped its #5269 guard.
+        addr_index: usize,
         holder: NatHolder,
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         let mut previous_holders = None;
         self.reserve_address_only_maybe_persistent(
             flow,
             translated_ip,
-            0,
+            addr_index,
             0,
             holder,
             None,
@@ -5748,9 +5763,10 @@ impl PortAllocator {
     /// deterministic-CGNAT (#5341) and address-only persistent-NAT (#6041)
     /// branches are untouched — they correctly single-probe their chosen address.
     ///
-    /// The minted token is byte-identical to [`reserve_address_only`]'s
+    /// The minted token is byte-identical in shape to [`reserve_address_only`]'s
     /// (`translated = (chosen address, preserved source port)`, `address_only =
-    /// true`, `persistent_key = None`, `addr_index = 0`), so the SAME
+    /// true`, `persistent_key = None`, `addr_index = family_offset + rel` — the
+    /// selected index, #13690/#14622), so the SAME
     /// `release_flow`/`rollback_flow` teardown frees it — no new leak, no new
     /// delete site. Idempotent re-entry (a racing second packet of the same
     /// flow) returns the existing translation regardless of the round-robin

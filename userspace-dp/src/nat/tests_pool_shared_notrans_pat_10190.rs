@@ -242,7 +242,7 @@ fn persistent_pat_lease_reuse_skips_address_only_identity_10190() {
         routing_scope: 0,
     };
     let preserved = alloc
-        .reserve_address_only(address_only_flow, shared_ip(), NatHolder::Untracked)
+        .reserve_address_only(address_only_flow, shared_ip(), 0, NatHolder::Untracked)
         .expect("address-only flow may claim the idle lease's exact token");
     assert_eq!(preserved.port, 20000);
 
