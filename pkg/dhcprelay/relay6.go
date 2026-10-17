@@ -1293,8 +1293,9 @@ func (m *dhcpV6Manager) runDHCPV6ClientLoop(ctx context.Context, relay *dhcpV6Re
 			continue
 		}
 		// Insert before sending; the server read loop can receive a fast reply
-		// concurrently with this client loop.
-		relay.pending.insertValue(key, pending6EntryFor(peer, packet.Type()))
+		// concurrently with this client loop. Confirm/Release/Decline also
+		// record an IA-less alias binding (#14599, see insertPending6).
+		insertPending6(relay.pending, key, packet.Type(), peer)
 		data := forward.ToBytes()
 		for _, destination := range servers {
 			if _, err := server.WriteTo(data, destination); err == nil {

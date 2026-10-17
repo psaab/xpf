@@ -81,7 +81,7 @@ func armDHCPV6ReplyFrom(t *testing.T, relay *dhcpV6Relay, message dhcpv6.DHCPv6,
 	if !ok {
 		t.Fatal("failed to create DHCPv6 pending key")
 	}
-	relay.pending.insertValue(key, pending6EntryFor(clientAddr, message.Type()))
+	insertPending6(relay.pending, key, message.Type(), clientAddr)
 }
 
 func TestBuildRelayForwardV6RFC8415(t *testing.T) {
