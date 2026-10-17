@@ -472,7 +472,7 @@ pub(super) fn try_nat64_icmp_error_match_from_frame(
         dynamic_neighbors,
         shared_sessions,
         shared_nat_sessions,
-        shared_owner_rg_indexes: None,
+        shared_owner_rg_indexes: Some(shared_owner_rg_indexes),
         shared_forward_wire_sessions,
         ingress_zone_override,
     };

@@ -17,10 +17,11 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
     now_ns: u64,
 ) -> ForwardingResolution {
     let reverse_key = reverse_session_key(forward_key, forward_decision.nat);
-    if let Some(reverse) = probe_session_across_scopes(
+    if let Some(reverse) = probe_session_across_scopes_with_wire_indexes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
+        ctx.shared_owner_rg_indexes,
         &reverse_key,
         now_ns,
     ) {
@@ -54,10 +55,11 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_quoted_reply_resolution(
     quoted_src: IpAddr,
     now_ns: u64,
 ) -> ForwardingResolution {
-    if let Some(fwd) = probe_session_across_scopes(
+    if let Some(fwd) = probe_session_across_scopes_with_wire_indexes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
+        ctx.shared_owner_rg_indexes,
         forward_key,
         now_ns,
     ) {

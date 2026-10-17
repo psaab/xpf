@@ -231,19 +231,21 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         // arm was dead for every VRF flow.
         embedded_routing_domain,
     );
-    let found = probe_session_across_scopes(
+    let found = probe_session_across_scopes_with_wire_indexes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
+        ctx.shared_owner_rg_indexes,
         &embedded_key,
         now_ns,
     )
     .map(|resolved| (resolved, false))
     .or_else(|| {
-        probe_session_across_scopes(
+        probe_session_across_scopes_with_wire_indexes(
             ctx.sessions,
             ctx.shared_sessions,
             ctx.shared_forward_wire_sessions,
+        ctx.shared_owner_rg_indexes,
             &shared_reverse_key,
             now_ns,
         )

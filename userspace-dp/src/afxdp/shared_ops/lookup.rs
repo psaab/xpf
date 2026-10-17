@@ -193,14 +193,28 @@ pub(in crate::afxdp) fn shared_forward_nat_candidate_is_unique(
                     .map_or(true, |owner| owner == expected_forward_key)))
 }
 
+/// #14383: shared forward-wire lookup. The wire map holds ONE entry per
+/// wire key over a displacing publish, so a bare map get resolved a
+/// colliding tuple to the LAST-published session — the opposite tiebreak
+/// from the local first-wins matcher. Fail closed unless the wire
+/// ambiguity index proves this candidate is the key's only owner.
 pub(in crate::afxdp) fn lookup_shared_forward_wire_match(
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     wire_key: &SessionKey,
 ) -> Option<SyncedSessionEntry> {
     // #2402: recover poison (see lookup_shared_session).
-    lock_shared_recover(shared_forward_wire_sessions)
+    // Keep map and ambiguity locks unnested (mirrors
+    // `shared_forward_nat_candidate_is_unique`): the map guard drops
+    // before the ambiguity lock is taken.
+    let candidate = lock_shared_recover(shared_forward_wire_sessions)
         .get(wire_key)
-        .cloned()
+        .cloned()?;
+    let ambiguities = lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities);
+    if !ambiguities.is_unique_for(wire_key, &candidate.key) {
+        return None;
+    }
+    Some(candidate)
 }
 
 /// Recover the canonical tuple for a translated transient alias only when the
@@ -503,14 +517,16 @@ fn retire_shared_tcp_pair_for_syn(
 fn shared_closing_tcp_entry_for_syn(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     key: &SessionKey,
     tcp_flags: u8,
 ) -> Option<(SessionKey, SessionKey)> {
     if !crate::tcp_flags::is_initial_syn(tcp_flags) || crate::tcp_flags::is_closing(tcp_flags) {
         return None;
     }
-    let entry = lookup_shared_session(shared_sessions, key)
-        .or_else(|| lookup_shared_forward_wire_match(shared_forward_wire_sessions, key))?;
+    let entry = lookup_shared_session(shared_sessions, key).or_else(|| {
+        lookup_shared_forward_wire_match(shared_forward_wire_sessions, shared_owner_rg_indexes, key)
+    })?;
     if entry.tcp_close_class == 0 {
         return None;
     }
@@ -566,6 +582,7 @@ pub(in crate::afxdp) fn probe_closing_syn_candidate(
     sessions: &SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     key: &SessionKey,
     now_ns: u64,
     tcp_flags: u8,
@@ -580,6 +597,7 @@ pub(in crate::afxdp) fn probe_closing_syn_candidate(
         sessions,
         shared_sessions,
         shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
         key,
         now_ns,
     )?;
@@ -616,6 +634,7 @@ pub(in crate::afxdp) fn evict_owner_closing_tcp_pair_for_syn(
             shared_closing_tcp_entry_for_syn(
                 shared_sessions,
                 shared_forward_wire_sessions,
+                shared_owner_rg_indexes,
                 key,
                 tcp_flags,
             )
@@ -639,7 +658,7 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     _shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    _shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     key: &SessionKey,
     now_ns: u64,
     tcp_flags: u8,
@@ -664,7 +683,7 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared(
                 lookup.metadata.is_reverse,
                 lookup.decision,
             ) && let Some(shared) =
-                lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+                lookup_shared_forward_wire_match(shared_forward_wire_sessions, shared_owner_rg_indexes, key)
             {
                 return Some(ResolvedSessionLookup::shared(shared));
             }
@@ -686,7 +705,7 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared(
                 lookup.metadata.is_reverse,
                 lookup.decision,
             ) && let Some(shared) =
-                lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+                lookup_shared_forward_wire_match(shared_forward_wire_sessions, shared_owner_rg_indexes, key)
             {
                 return Some(ResolvedSessionLookup::shared(shared));
             }
@@ -698,7 +717,7 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared(
     lookup_shared_session(shared_sessions, key)
         .map(ResolvedSessionLookup::shared)
         .or_else(|| {
-            lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+            lookup_shared_forward_wire_match(shared_forward_wire_sessions, shared_owner_rg_indexes, key)
                 .map(ResolvedSessionLookup::shared)
         })
 }
@@ -726,6 +745,33 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_for_test(
     )
 }
 
+/// #14383: like [`lookup_session_across_scopes_for_test`] but against the
+/// caller's own owner-RG indexes, so a fixture that published through
+/// `publish_shared_session` is looked up against the same wire ambiguity
+/// index the publish recorded into.
+#[cfg(test)]
+pub(in crate::afxdp) fn lookup_session_across_scopes_for_test_with_indexes(
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+) -> Option<ResolvedSessionLookup> {
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    lookup_session_across_scopes_with_shared(
+        sessions,
+        shared_sessions,
+        &shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        key,
+        now_ns,
+        tcp_flags,
+    )
+}
+
 /// #9990: non-mutating counterpart to [`lookup_session_across_scopes_with_shared`].
 ///
 /// Delete guards and embedded-error quote matching inspect an installed
@@ -739,17 +785,44 @@ pub(in crate::afxdp) fn probe_session_across_scopes(
     sessions: &SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     key: &SessionKey,
     now_ns: u64,
 ) -> Option<ResolvedSessionLookup> {
+    probe_session_across_scopes_with_wire_indexes(
+        sessions,
+        shared_sessions,
+        shared_forward_wire_sessions,
+        Some(shared_owner_rg_indexes),
+        key,
+        now_ns,
+    )
+}
+
+/// #14383: probe variant for callers that may not carry the wire ambiguity
+/// index (test-only ICMP constructors pass `None`). Without the index there
+/// is no uniqueness proof, so the shared forward-wire fallback is skipped
+/// rather than resolving a possibly-displaced entry.
+pub(in crate::afxdp) fn probe_session_across_scopes_with_wire_indexes(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: Option<&SharedSessionOwnerRgIndexes>,
+    key: &SessionKey,
+    now_ns: u64,
+) -> Option<ResolvedSessionLookup> {
+    let wire_lookup = |key: &SessionKey| {
+        shared_owner_rg_indexes.and_then(|indexes| {
+            lookup_shared_forward_wire_match(shared_forward_wire_sessions, indexes, key)
+        })
+    };
     match probe_local_exact_at(sessions, key, now_ns) {
         LocalExpiryProbe::Live((lookup, origin)) => {
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,
                 lookup.metadata.is_reverse,
                 lookup.decision,
-            ) && let Some(shared) =
-                lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+            ) && let Some(shared) = wire_lookup(key)
             {
                 return Some(ResolvedSessionLookup::shared(shared));
             }
@@ -770,8 +843,7 @@ pub(in crate::afxdp) fn probe_session_across_scopes(
                 lookup.metadata.fabric_ingress,
                 lookup.metadata.is_reverse,
                 lookup.decision,
-            ) && let Some(shared) =
-                lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
+            ) && let Some(shared) = wire_lookup(key)
             {
                 return Some(ResolvedSessionLookup::shared(shared));
             }
@@ -782,10 +854,7 @@ pub(in crate::afxdp) fn probe_session_across_scopes(
     }
     lookup_shared_session(shared_sessions, key)
         .map(ResolvedSessionLookup::shared)
-        .or_else(|| {
-            lookup_shared_forward_wire_match(shared_forward_wire_sessions, key)
-                .map(ResolvedSessionLookup::shared)
-        })
+        .or_else(|| wire_lookup(key).map(ResolvedSessionLookup::shared))
 }
 
 /// #7169: what the caller knows about where the packet being matched actually

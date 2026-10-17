@@ -164,19 +164,21 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     //     unassociable quote.
     //   * reply-key hit otherwise (a DNAT/composed flow): the pre-#6474
     //     behavior is preserved bit-for-bit.
-    let found = probe_session_across_scopes(
+    let found = probe_session_across_scopes_with_wire_indexes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
+        ctx.shared_owner_rg_indexes,
         &embedded_key,
         now_ns,
     )
     .map(|resolved| (resolved, false))
     .or_else(|| {
-        probe_session_across_scopes(
+        probe_session_across_scopes_with_wire_indexes(
             ctx.sessions,
             ctx.shared_sessions,
             ctx.shared_forward_wire_sessions,
+        ctx.shared_owner_rg_indexes,
             &reverse_key,
             now_ns,
         )

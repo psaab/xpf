@@ -1145,6 +1145,7 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
             &sessions,
             &shared_sessions,
             &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
             &forward_key,
             now_ns,
         )
@@ -1715,16 +1716,24 @@ fn lookup_session_across_scopes_returns_shared_forward_wire_entry() {
     };
     let translated_key = forward_wire_key(&key, decision.nat);
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    shared_forward_wire_sessions
-        .lock()
-        .expect("shared forward-wire lock")
-        .insert(translated_key.clone(), entry.clone());
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #14383: publish through the real path so the wire ambiguity index
+    // records this owner; a bare map insert has no uniqueness proof.
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
 
-    let resolved = lookup_session_across_scopes_for_test(
+    let resolved = lookup_session_across_scopes_for_test_with_indexes(
         &mut sessions,
         &shared_sessions,
         &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
         &translated_key,
         1,
         0,
@@ -1815,16 +1824,24 @@ fn lookup_session_across_scopes_prefers_shared_entry_over_fabric_wire_placeholde
         source_nat_static: None,
     };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    shared_forward_wire_sessions
-        .lock()
-        .expect("shared forward-wire lock")
-        .insert(translated_key.clone(), shared_entry.clone());
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #14383: publish through the real path so the wire ambiguity index
+    // records this owner; a bare map insert has no uniqueness proof.
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &shared_entry,
+    );
 
-    let resolved = lookup_session_across_scopes_for_test(
+    let resolved = lookup_session_across_scopes_for_test_with_indexes(
         &mut sessions,
         &shared_sessions,
         &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
         &translated_key,
         2,
         0,
@@ -2821,9 +2838,12 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
         &shared_owner_rg_indexes,
         &entry,
     );
-    let alias_hit =
-        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &translated_key)
-            .expect("forward-wire alias should be published");
+    let alias_hit = lookup_shared_forward_wire_match(
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &translated_key,
+    )
+    .expect("forward-wire alias should be published");
     assert_eq!(alias_hit.key, key);
 
     remove_shared_session(
@@ -2833,8 +2853,165 @@ fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
         &shared_owner_rg_indexes,
         &entry.key,
     );
+    assert!(lookup_shared_forward_wire_match(
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &translated_key,
+    )
+    .is_none());
+}
+
+// #14383 (DR5-H4): the shared forward-wire map is a single-value map over a
+// displacing publish. Two distinct forward sessions DNAT'd to the same
+// backend derive the same forward-wire key W, so the second publish displaced
+// the first with no record that W ever had two owners — and a worker holding
+// neither session locally resolved C -> B to the LAST-published session
+// (the opposite tiebreak from the local first-wins matcher, DR5-H3).
+// The wire lookup must fail closed while W is ambiguous, and must resolve
+// again to the survivor once the displacing owner is removed.
+fn wire_ambiguity_entry(vip: Ipv4Addr, backend: Ipv4Addr) -> SyncedSessionEntry {
+    SyncedSessionEntry {
+        key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 50)),
+            dst_ip: IpAddr::V4(vip),
+            src_port: 40_100,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 3,
+        },
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision {
+                rewrite_dst: Some(IpAddr::V4(backend)),
+                ..NatDecision::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x02,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    }
+}
+
+#[test]
+fn shared_forward_wire_lookup_fails_closed_on_ambiguity_and_resolves_14383() {
+    let backend = Ipv4Addr::new(10, 0, 61, 200);
+    let f1 = wire_ambiguity_entry(Ipv4Addr::new(172, 16, 80, 91), backend);
+    let f2 = wire_ambiguity_entry(Ipv4Addr::new(172, 16, 80, 92), backend);
+    assert_ne!(f1.key, f2.key, "the pair must be two distinct sessions");
+    let wire_key = forward_wire_key(&f1.key, f1.decision.nat);
+    assert_eq!(
+        wire_key,
+        forward_wire_key(&f2.key, f2.decision.nat),
+        "construction must produce a genuine forward-wire collision"
+    );
+    assert_ne!(wire_key, f1.key, "the wire alias must differ from F1's key");
+    assert_ne!(wire_key, f2.key, "the wire alias must differ from F2's key");
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let publish = |entry: &SyncedSessionEntry| {
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            entry,
+        );
+    };
+    let lookup = || {
+        lookup_shared_forward_wire_match(
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &wire_key,
+        )
+    };
+
+    // Single owner still resolves.
+    publish(&f1);
+    assert_eq!(
+        lookup().map(|entry| entry.key),
+        Some(f1.key.clone()),
+        "single-owner wire lookup must resolve to F1"
+    );
+
+    // Second owner claiming the same wire key: fail closed, do not hand
+    // the packet to the last-published session.
+    publish(&f2);
     assert!(
-        lookup_shared_forward_wire_match(&shared_forward_wire_sessions, &translated_key).is_none()
+        lookup().is_none(),
+        "ambiguous wire key must fail closed instead of resolving to the \
+         last-published session F2"
+    );
+
+    // Removing the displacing owner re-resolves to the survivor, which is
+    // still live in shared_sessions.
+    remove_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f2.key,
+    );
+    assert_eq!(
+        lookup().map(|entry| entry.key),
+        Some(f1.key.clone()),
+        "after removing F2 the surviving F1 must resolve again"
+    );
+
+    // Removing the last owner leaves nothing behind.
+    remove_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &f1.key,
+    );
+    assert!(lookup().is_none(), "with both owners gone the wire lookup must miss");
+}
+
+#[test]
+fn shared_forward_wire_republish_same_session_stays_unique_14383() {
+    // Control: republishing the SAME session (promote / HA re-sync churn)
+    // must not mark its own wire key ambiguous.
+    let backend = Ipv4Addr::new(10, 0, 61, 200);
+    let f1 = wire_ambiguity_entry(Ipv4Addr::new(172, 16, 80, 91), backend);
+    let wire_key = forward_wire_key(&f1.key, f1.decision.nat);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    for _ in 0..2 {
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &f1,
+        );
+    }
+    assert_eq!(
+        lookup_shared_forward_wire_match(
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &wire_key,
+        )
+        .map(|entry| entry.key),
+        Some(f1.key.clone()),
+        "same-session republish must keep resolving"
     );
 }
 
@@ -9320,6 +9497,10 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
                 source_nat_static: None,
             },
         );
+    // #14383: record this fixture's wire ownership (the publish path's
+    // observe step) so the fail-closed wire lookup can prove it unique.
+    lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities)
+        .observe(wire_key.clone(), key.clone());
     let resolved = resolve_flow_session_decision(&mut sessions,
     SteeringMap::unshared_for_test(-1),
     &shared_sessions,
@@ -9580,6 +9761,10 @@ fn resolve_shared_hit_no_incumbent_fixture_10613() -> (
                 source_nat_static: None,
             },
         );
+    // #14383: record this fixture's wire ownership (the publish path's
+    // observe step) so the fail-closed wire lookup can prove it unique.
+    lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities)
+        .observe(wire_key.clone(), key.clone());
     let resolved = resolve_flow_session_decision(&mut sessions,
     SteeringMap::unshared_for_test(-1),
     &shared_sessions,

@@ -1985,6 +1985,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         sessions,
                         worker_ctx.shared_sessions,
                         worker_ctx.shared_forward_wire_sessions,
+                        worker_ctx.shared_owner_rg_indexes,
                         &flow.forward_key,
                         now_ns,
                         meta.tcp_flags,

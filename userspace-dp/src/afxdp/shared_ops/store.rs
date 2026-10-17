@@ -47,6 +47,15 @@ fn lock_nat_ambiguities_for_publish(
     lock_shared_recover(&indexes.nat_ambiguities)
 }
 
+// #14383: publish-side lock for the forward-wire ambiguity index. Mirrors
+// `lock_nat_ambiguities_for_publish` (plain recovering lock); no lock-count
+// test seam is wired for the wire index.
+fn lock_wire_ambiguities_for_publish(
+    indexes: &SharedSessionOwnerRgIndexes,
+) -> MutexGuard<'_, SharedNatAmbiguityIndex> {
+    lock_shared_recover(&indexes.wire_ambiguities)
+}
+
 /// #8486: the largest `owner_rg_id` this helper will FILE into the owner-RG
 /// indexes.
 ///
@@ -773,18 +782,32 @@ pub(in crate::afxdp) fn publish_shared_session(
         }
     }
     if !entry.metadata.is_reverse {
-        let mut sessions = lock_shared_publish(shared_forward_wire_sessions);
         let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
         if wire_key != entry.key {
-            let previous_owner_rg = sessions
-                .insert(wire_key.clone(), entry.clone())
-                .map(|existing| existing.metadata.owner_rg_id);
+            // #14383: record the wire-key owner BEFORE the map write (same
+            // order as the NAT publish) so a reader can never observe a
+            // wire alias whose owner has not been recorded. A publish that
+            // displaces a DIFFERENT forward session marks the key
+            // ambiguous; the shared wire lookup then fails closed.
+            let mut wire_ambiguities =
+                lock_wire_ambiguities_for_publish(shared_owner_rg_indexes);
+            wire_ambiguities.observe(wire_key.clone(), entry.key.clone());
+            let mut sessions = lock_shared_publish(shared_forward_wire_sessions);
+            let displaced = sessions.insert(wire_key.clone(), entry.clone());
+            let wire_displaced = displaced
+                .as_ref()
+                .is_some_and(|existing| existing.key != entry.key);
+            let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
             update_owner_rg_index(
                 &shared_owner_rg_indexes.forward_wire_sessions,
                 &wire_key,
                 previous_owner_rg,
                 entry.metadata.owner_rg_id,
             );
+            drop(sessions);
+            if wire_displaced {
+                wire_ambiguities.mark(wire_key.clone());
+            }
         }
     }
 }
@@ -1011,20 +1034,67 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                 );
             }
             {
-                let mut forward_wire_sessions = lock_shared_recover(shared_forward_wire_sessions);
                 let wire_key = forward_wire_key(&entry.key, entry.decision.nat);
-                if wire_key != entry.key
-                    && let Some(removed) = remove_shared_alias_owned_by(
-                        &mut forward_wire_sessions,
-                        &wire_key,
-                        &entry.key,
-                    )
-                {
-                    remove_owner_rg_index_entry(
-                        &shared_owner_rg_indexes.forward_wire_sessions,
-                        removed.metadata.owner_rg_id,
-                        &wire_key,
-                    );
+                if wire_key != entry.key {
+                    // #14383: after this removal, re-resolve the wire key
+                    // against the survivors still live in `shared_sessions`
+                    // (held by this call). The wire map holds one entry per
+                    // key, so an ambiguous key may currently name the removed
+                    // entry, the survivor, or nothing (the survivor was
+                    // displaced at publish). Exactly one survivor: restore
+                    // its alias and reset the ambiguity record to it, so the
+                    // shared wire lookup resolves again. No survivor: drop
+                    // the alias and the record. Two or more survivors: the
+                    // key stays ambiguous and unresolvable.
+                    let mut survivors = sessions
+                        .values()
+                        .filter(|candidate| {
+                            !candidate.metadata.is_reverse
+                                && candidate.key != entry.key
+                                && forward_wire_key(&candidate.key, candidate.decision.nat)
+                                    == wire_key
+                        })
+                        .take(2);
+                    let survivor = survivors.next().cloned();
+                    let still_ambiguous = survivors.next().is_some();
+                    let mut forward_wire_sessions =
+                        lock_shared_recover(shared_forward_wire_sessions);
+                    let mut wire_ambiguities =
+                        lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities);
+                    match survivor {
+                        Some(survivor) if !still_ambiguous => {
+                            let previous_owner_rg = forward_wire_sessions
+                                .insert(wire_key.clone(), survivor.clone())
+                                .map(|existing| existing.metadata.owner_rg_id);
+                            update_owner_rg_index(
+                                &shared_owner_rg_indexes.forward_wire_sessions,
+                                &wire_key,
+                                previous_owner_rg,
+                                survivor.metadata.owner_rg_id,
+                            );
+                            wire_ambiguities
+                                .reset_to_owner(wire_key.clone(), survivor.key.clone());
+                        }
+                        _ => {
+                            // No survivor, or still ambiguous: only the
+                            // removed entry's own alias may be deleted
+                            // (#9679 ownership discipline).
+                            if let Some(removed) = remove_shared_alias_owned_by(
+                                &mut forward_wire_sessions,
+                                &wire_key,
+                                &entry.key,
+                            ) {
+                                remove_owner_rg_index_entry(
+                                    &shared_owner_rg_indexes.forward_wire_sessions,
+                                    removed.metadata.owner_rg_id,
+                                    &wire_key,
+                                );
+                            }
+                            if !still_ambiguous {
+                                wire_ambiguities.forget(&wire_key);
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -208,10 +208,11 @@ fn match_v4_error(
         TunnelDiscriminator::None,
         embedded_routing_domain,
     );
-    let Some(resolved) = probe_session_across_scopes(
+    let Some(resolved) = probe_session_across_scopes_with_wire_indexes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
+        ctx.shared_owner_rg_indexes,
         &reply_key,
         now_ns,
     ) else {
@@ -320,10 +321,11 @@ fn match_v6_error(
         TunnelDiscriminator::None,
         embedded_routing_domain,
     );
-    let Some(resolved) = probe_session_across_scopes(
+    let Some(resolved) = probe_session_across_scopes_with_wire_indexes(
         ctx.sessions,
         ctx.shared_sessions,
         ctx.shared_forward_wire_sessions,
+        ctx.shared_owner_rg_indexes,
         &forward_key,
         now_ns,
     ) else {

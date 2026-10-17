@@ -101,6 +101,35 @@ impl SharedNatAmbiguityIndex {
             && matches!(self.aliases.get(key), Some(Some(candidate)) if candidate == owner)
     }
 
+    /// #14383: unconditionally record `owner` as the sole owner of `key`,
+    /// overwriting any prior ambiguity mark. Used when a removal leaves a
+    /// single surviving owner whose entry is re-published into the alias
+    /// map. `observe`/`mark` cannot do this: `remember` keeps a `None`
+    /// (ambiguous) record sticky forever.
+    pub(super) fn reset_to_owner(&mut self, key: SessionKey, owner: SessionKey) {
+        if self.saturated {
+            return;
+        }
+        match self.aliases.get(&key) {
+            Some(existing) if existing.as_ref() == Some(&owner) => {}
+            Some(_) => {
+                self.aliases.insert(key, Some(owner));
+            }
+            None if self.aliases.len() == Self::MAX_KEYS => {
+                self.saturated = true;
+            }
+            None => {
+                self.aliases.insert(key, Some(owner));
+            }
+        }
+    }
+
+    /// #14383: drop the record for `key` entirely. Used when a removal
+    /// leaves no surviving owner for the alias.
+    pub(super) fn forget(&mut self, key: &SessionKey) {
+        self.aliases.remove(key);
+    }
+
     pub(super) fn unique_owner(&self, key: &SessionKey) -> Option<&SessionKey> {
         if self.saturated {
             return None;
@@ -230,6 +259,10 @@ pub(super) struct SharedSessionOwnerRgIndexes {
     pub(super) forward_wire_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) reverse_prewarm_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) nat_ambiguities: Arc<Mutex<SharedNatAmbiguityIndex>>,
+    // #14383: forward-wire counterpart of `nat_ambiguities` — records every
+    // owner that ever claimed a forward-wire key so the shared wire lookup
+    // can fail closed instead of resolving to the last-published session.
+    pub(super) wire_ambiguities: Arc<Mutex<SharedNatAmbiguityIndex>>,
     pub(super) bare_tuple_sessions: Arc<Mutex<SharedSessionBareTupleIndex>>,
 }
 
@@ -241,6 +274,7 @@ impl Default for SharedSessionOwnerRgIndexes {
             forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
             reverse_prewarm_sessions: Arc::new(Mutex::new(FastMap::default())),
             nat_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
+            wire_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
             bare_tuple_sessions: Arc::new(Mutex::new(SharedSessionBareTupleIndex::default())),
         }
     }
@@ -272,6 +306,7 @@ impl SharedSessionOwnerRgIndexes {
         crate::afxdp::shared_ops::lock_shared_recover(&self.forward_wire_sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.reverse_prewarm_sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.nat_ambiguities).clear();
+        crate::afxdp::shared_ops::lock_shared_recover(&self.wire_ambiguities).clear();
     }
 }
 
