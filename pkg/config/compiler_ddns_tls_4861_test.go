@@ -191,3 +191,101 @@ func TestDDNSCredentialedPlaintextLenientWarns(t *testing.T) {
 		t.Fatalf("lenient load should still materialize the provider catalog")
 	}
 }
+
+// #14372 (DR3-H5): `checkip-url` is an unauthenticated address ORACLE — a
+// plaintext response is trusted as this firewall's public address and
+// published as its DNS record by Surface A, even for a provider that carries
+// NO update credential. The #4861 gate above therefore extends to
+// checkip-url WITHOUT the credentialed-only condition: strict commit
+// rejects an explicit non-https checkip-url (credentialed or not), lenient
+// load warns, https / empty / bare-host checkip-urls are untouched.
+func TestDDNSPlaintextCheckIPURLRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		set  []string
+	}{
+		{"credentialed dyndns2 + Surface A binding (fixture F-DR3-H5-1)", []string{
+			"set system services dynamic-dns provider p backend dyndns2",
+			"set system services dynamic-dns provider p username alice",
+			"set system services dynamic-dns provider p password s3cret",
+			"set system services dynamic-dns provider p server https://updates.example/nic/update",
+			"set system services dynamic-dns provider p checkip-url http://checkip.example/",
+			"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns provider p",
+			"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns hostname wan.example.net",
+			"set interfaces ge-0-0-2 unit 50 family inet dynamic-dns address-source checkip",
+		}},
+		{"non-credentialed dyndns2 (proves no credential gate)", []string{
+			"set system services dynamic-dns provider p backend dyndns2",
+			"set system services dynamic-dns provider p server https://updates.example/nic/update",
+			"set system services dynamic-dns provider p checkip-url http://checkip.example/",
+		}},
+		{"credentialed endpoint stays https, only checkip-url is http", []string{
+			"set system services dynamic-dns provider p backend cloudflare",
+			"set system services dynamic-dns provider p api-token TOKEN123",
+			"set system services dynamic-dns provider p zone example.net",
+			"set system services dynamic-dns provider p server https://api.example",
+			"set system services dynamic-dns provider p checkip-url HTTP://checkip.example/",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := buildTree(t, tc.set)
+			_, err := CompileConfig(tree)
+			if err == nil {
+				t.Fatalf("plaintext checkip-url compiled without error (#14372: a spoofed " +
+					"checkip response would control the published DNS record)")
+			}
+			if !strings.Contains(err.Error(), "checkip-url") || !strings.Contains(err.Error(), "https://") {
+				t.Fatalf("error should name checkip-url and require https, got: %v", err)
+			}
+			if strings.Contains(err.Error(), "update credential in cleartext") {
+				t.Fatalf("checkip-url refusal must not claim an update-credential leak, got: %v", err)
+			}
+		})
+	}
+}
+
+// #14372: an https (or empty / bare-host) checkip-url must NOT be flagged —
+// the gate flags only an explicit non-https scheme.
+func TestDDNSHTTPSCheckIPURLAccepted(t *testing.T) {
+	for _, url := range []string{"https://checkip.example/", "HTTPS://checkip.example/", "checkip.example"} {
+		t.Run(url, func(t *testing.T) {
+			tree := buildTree(t, []string{
+				"set system services dynamic-dns provider p backend dyndns2",
+				"set system services dynamic-dns provider p server https://updates.example/nic/update",
+				"set system services dynamic-dns provider p checkip-url " + url,
+			})
+			if _, err := CompileConfig(tree); err != nil {
+				t.Fatalf("checkip-url %q should compile, got: %v", url, err)
+			}
+		})
+	}
+}
+
+// #14372: lenient load of a plaintext checkip-url WARNS (naming checkip-url)
+// instead of rejecting, so a persisted config still boots (#1960); the
+// runtime CheckIP https backstop then publishes nothing for the scope.
+func TestDDNSPlaintextCheckIPURLLenientWarns(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set system services dynamic-dns provider p backend dyndns2",
+		"set system services dynamic-dns provider p server https://updates.example/nic/update",
+		"set system services dynamic-dns provider p checkip-url http://checkip.example/",
+	})
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient load of a plaintext checkip-url must NOT fail, got: %v", err)
+	}
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "checkip-url") && strings.Contains(w, "https://") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("lenient load must warn naming checkip-url + https, warnings=%v", cfg.Warnings)
+	}
+	if cfg.System.Services == nil || cfg.System.Services.DynamicDNS == nil ||
+		cfg.System.Services.DynamicDNS.Providers["p"] == nil {
+		t.Fatalf("lenient load should still materialize the provider catalog")
+	}
+}

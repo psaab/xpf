@@ -313,15 +313,18 @@ func ParseAllowlist(s string) []netip.Addr {
 // AddressSource values live in surface_a.go.
 const AddressSourceCheckIP AddressSource = "checkip"
 
-// validateCheckIPURL rejects an obviously malformed checkip URL so a typo is
+// validateCheckIPURL rejects a malformed or plaintext checkip URL so a typo is
 // caught at commit (validateSurfaceADDNSWarnings mirrors this) and fails closed
 // at runtime construction (CheckIP) rather than spinning forever as a phantom
-// "transient" observation failure (#2773). It requires an http(s) scheme AND a
+// "transient" observation failure (#2773). It requires an https scheme AND a
 // host: http.NewRequest accepts ftp://, "not a url", and a host-less "http://",
 // none of which can ever fetch a public address. The scheme check is
 // case-INSENSITIVE per RFC 3986 §3.1 ("HTTPS://host" is valid), so it parses
 // first and compares the parsed scheme with EqualFold rather than a
-// case-sensitive HasPrefix on the raw string (#2842).
+// case-sensitive HasPrefix on the raw string (#2842). Plaintext http is
+// refused since #14372: the response is an unauthenticated oracle for the
+// published DNS record, so a spoofed response must never be trusted (and an
+// API key embedded in the URL must never travel in cleartext).
 //
 // SECURITY: NO refusal below prints ANY part of the URL. Since #6545 the daemon
 // observer (pkg/daemon/daemon_ddns_surface_a.go) LOGS this error and retains its
@@ -368,8 +371,8 @@ func validateCheckIPURL(u string) error {
 		// string.
 		return fmt.Errorf("ddns checkip: url is not a valid URL: %s", urlParseCause(err))
 	}
-	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
-		return errors.New("ddns checkip: url must be http(s)")
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return errors.New("ddns checkip: url must be https")
 	}
 	if parsed.Host == "" {
 		return errors.New("ddns checkip: url has no host")

@@ -220,18 +220,20 @@ func ddnsDyndns2ServerValid(s string) bool {
 // warning ONLY (config cannot import pkg/ddns). It must stay in sync with that
 // validator; a divergence only affects whether the operator gets a warning at
 // commit — the runtime CheckIP gate in pkg/ddns is authoritative and fails
-// closed regardless (#2773). A checkip-url must be an http(s) URL with a host;
+// closed regardless (#2773). A checkip-url must be an https URL with a host;
 // without that gate a typo (ftp://, "not a url", host-less "http://") commits
 // silently and then masquerades forever as a transient observation failure,
-// suppressing publishing indefinitely. The scheme check is case-INSENSITIVE per
-// RFC 3986 §3.1 ("HTTPS://host" is valid); it parses first and compares the
-// parsed scheme with EqualFold, matching pkg/ddns.validateCheckIPURL (#2842).
+// suppressing publishing indefinitely, and a plaintext http:// checkip-url
+// would let a spoofed response control the published record (#14372). The
+// scheme check is case-INSENSITIVE per RFC 3986 §3.1 ("HTTPS://host" is
+// valid); it parses first and compares the parsed scheme with EqualFold,
+// matching pkg/ddns.validateCheckIPURL (#2842).
 func ddnsCheckIPURLValid(u string) bool {
 	parsed, err := url.Parse(u)
 	if err != nil || parsed.Host == "" {
 		return false
 	}
-	return strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https")
+	return strings.EqualFold(parsed.Scheme, "https")
 }
 
 // ddnsGenericURLTemplateValid mirrors pkg/ddns.validateGenericURLTemplate for
@@ -472,7 +474,7 @@ func validateSurfaceADDNSWarnings(cfg *Config) []string {
 			// not DEPEND on RedactURL either way, which is why the paragraph
 			// is kept — but it no longer describes a live gap.
 			warnings = append(warnings, fmt.Sprintf("system services dynamic-dns "+
-				"provider %q checkip-url is not a valid http(s) URL with a host; "+
+				"provider %q checkip-url is not a valid https URL with a host; "+
 				"scopes using address-source checkip publish nothing", name))
 		}
 

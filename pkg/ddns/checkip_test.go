@@ -2,9 +2,12 @@ package ddns
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -132,13 +135,55 @@ func TestIsPublicAddrSpecialPurpose(t *testing.T) {
 }
 
 func TestCheckIPThroughMockServer(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("93.184.216.34\n"))
 	}))
 	defer srv.Close()
 	a, ok, err := CheckIP(context.Background(), srv.Client(), srv.URL, true, nil)
 	if !ok || a.String() != "93.184.216.34" || err != nil {
 		t.Fatalf("CheckIP returned %v ok=%v err=%v", a, ok, err)
+	}
+}
+
+// #14372 (DR3-H5, fixture F-DR3-H5-2): the runtime backstop. validateCheckIPURL
+// must require https — a plaintext checkip-url that slipped past commit
+// (lenient load, peer-sync, hand-built provider) fails closed in CheckIP
+// BEFORE any fetch, so a spoofed plaintext response can never become the
+// published address. The refusal names the https requirement and carries no
+// part of the URL (an embedded API key must not leak, #6545 discipline).
+func TestCheckIPRejectsPlaintextURL(t *testing.T) {
+	var hits int32
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&hits, 1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("93.184.216.34\n")),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})}
+	for _, u := range []string{
+		"http://checkip.example/",
+		"http://user:CHECKIP-SECRET-MUST-NOT-LOG@checkip.example/?apikey=CHECKIP-SECRET-MUST-NOT-LOG",
+		"HTTP://checkip.example/",
+	} {
+		a, ok, err := CheckIP(context.Background(), client, u, true, nil)
+		if ok || a.IsValid() {
+			t.Fatalf("CheckIP(%q) = %v ok=%v; a plaintext checkip-url must fail closed", u, a, ok)
+		}
+		if err == nil || !strings.Contains(err.Error(), "https") {
+			t.Fatalf("CheckIP(%q) err = %v; want a refusal naming the https requirement", u, err)
+		}
+		if strings.Contains(err.Error(), "CHECKIP-SECRET-MUST-NOT-LOG") {
+			t.Fatalf("CheckIP(%q) refusal leaked the checkip-url credential: %v", u, err)
+		}
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("CheckIP contacted a plaintext checkip endpoint %d time(s); it must refuse before any fetch", n)
+	}
+	if err := validateCheckIPURL("http://checkip.example/"); err == nil ||
+		!strings.Contains(err.Error(), "https") {
+		t.Fatalf("validateCheckIPURL(http) = %v; want an https refusal", err)
 	}
 }
 
@@ -187,18 +232,19 @@ func TestParseAllowlistChecked(t *testing.T) {
 	}
 }
 
-// TestValidateCheckIPURL is the #2773 validator gate: http(s) scheme + a host.
+// TestValidateCheckIPURL is the #2773 validator gate, tightened by #14372:
+// https scheme + a host (http is now refused — the response is an
+// unauthenticated oracle for the published DNS record).
 // validateCheckIPURL was dead code (no callers) before #2773 wired it into
 // CheckIP and (mirrored) into the commit-time warning.
 func TestValidateCheckIPURL(t *testing.T) {
 	for _, ok := range []string{
-		"http://checkip.example/",
+		"https://checkip.example/",
 		"https://checkip.example:8443/cdn-cgi/trace",
 		"https://192.0.2.1/",
 		// RFC 3986 §3.1: the scheme is case-INSENSITIVE. Uppercase/mixed-case
-		// http(s) schemes must be ACCEPTED (#2842). Goes RED if the validator
+		// https schemes must be ACCEPTED (#2842). Goes RED if the validator
 		// reverts to a case-sensitive HasPrefix on the raw string.
-		"HTTP://checkip.example/",
 		"Https://h/",
 		"HTTPS://checkip.example:8443/cdn-cgi/trace",
 	} {
@@ -207,13 +253,16 @@ func TestValidateCheckIPURL(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{
-		"",                // empty
-		"ftp://host/",     // non-http scheme
-		"not a url",       // no scheme
-		"http://",         // scheme but no host
-		"https:///path",   // empty host
-		"javascript:0",    // non-http scheme
-		"checkip.example", // bare host, no scheme
+		"",                        // empty
+		"ftp://host/",             // non-https scheme
+		"http://checkip.example/", // plaintext oracle (#14372)
+		"HTTP://checkip.example/", // plaintext, upper-case scheme (#14372)
+		"not a url",               // no scheme
+		"http://",                 // scheme but no host
+		"https://",                // scheme but no host
+		"https:///path",           // empty host
+		"javascript:0",            // non-https scheme
+		"checkip.example",         // bare host, no scheme
 	} {
 		if err := validateCheckIPURL(bad); err == nil {
 			t.Fatalf("validateCheckIPURL(%q) = nil, want error", bad)

@@ -714,8 +714,12 @@ func TestSurfaceAObserverDHCPPublicGate(t *testing.T) {
 func TestSurfaceAObserverCheckIPHonorsReconcileContext(t *testing.T) {
 	// A checkip endpoint that black-holes: it accepts the request and blocks
 	// until the client cancels (the fix) or the test tears down (a revert).
+	// Plaintext is refused before any fetch since #14372, so the endpoint is
+	// TLS and the probe blocks inside the TLS handshake (the production
+	// client does not trust the test CA) — the reconcile ctx must abort the
+	// in-flight probe either way, which is the #3736 property under test.
 	done := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 		case <-done:

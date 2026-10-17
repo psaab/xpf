@@ -112,7 +112,7 @@ func TestCheckIPClientBoundDialsFromSourceAddress(t *testing.T) {
 	const wantSrc = "127.0.0.2"
 
 	gotSrc := make(chan string, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil {
 			host = r.RemoteAddr
@@ -134,6 +134,10 @@ func TestCheckIPClientBoundDialsFromSourceAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCheckIPClient: %v", err)
 	}
+	// Trust the test server's certificate on the real production transport
+	// while keeping its source-bound DialContext.
+	client.Transport.(*http.Transport).TLSClientConfig.RootCAs =
+		srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 	// wantV4=true; allowlist nil. The response is TEST-NET (rejected by the
 	// public gate) so the ADDRESS result is irrelevant here — we only assert the
 	// dial source. CheckIP still performs the bound dial.

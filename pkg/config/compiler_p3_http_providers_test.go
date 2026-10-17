@@ -222,12 +222,20 @@ func TestDyndns2DualStackNameWarns(t *testing.T) {
 	}
 }
 
-// TestP3CheckIPURLMalformedWarns is the #2773 fail-on-revert gate: a malformed
-// checkip-url must be flagged at commit (was dead code — validateCheckIPURL had
-// no callers, so a typo committed silently and then masqueraded forever as a
-// transient observation failure that suppressed publishing). Goes GREEN with the
-// validateSurfaceADDNSWarnings wiring and RED if that wiring is removed. The
-// valid-URL providers in the same config must NOT warn (no false positives).
+// TestP3CheckIPURLMalformedWarns is the #2773 fail-on-revert gate for the
+// WARNING layer: a malformed checkip-url must be flagged at commit (was dead
+// code — validateCheckIPURL had no callers, so a typo committed silently and
+// then masqueraded forever as a transient observation failure that suppressed
+// publishing). Goes GREEN with the validateSurfaceADDNSWarnings wiring and
+// RED if that wiring is removed. The valid-URL providers in the same config
+// must NOT warn (no false positives).
+//
+// Since #14372 the STRICT gate (ddnsPlaintextCredentialEndpoint) hard-rejects
+// an explicit non-https checkip-url, so this warning-layer fixture compiles
+// LENIENT (where the strict gate degrades to a warning) and then exercises
+// validateSurfaceADDNSWarnings directly — the two layers are distinct: the
+// strict gate owns the scheme refusal, this pass owns malformed shapes on a
+// lenient-loaded catalog.
 func TestP3CheckIPURLMalformedWarns(t *testing.T) {
 	tree := buildTree(t, []string{
 		// Malformed checkip-urls that http.NewRequest would otherwise accept and
@@ -246,7 +254,7 @@ func TestP3CheckIPURLMalformedWarns(t *testing.T) {
 		"set system services dynamic-dns provider good server dyn.example",
 		"set system services dynamic-dns provider good checkip-url https://checkip.example/",
 	})
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
@@ -311,32 +319,32 @@ func TestP3CheckIPAllowlistMalformedWarns(t *testing.T) {
 }
 
 // TestP3CheckIPURLUppercaseSchemeAccepted is the #2842 fail-on-revert gate: a
-// checkip-url with an uppercase/mixed-case scheme is valid per RFC 3986 §3.1
-// (the scheme is case-INSENSITIVE) and must NOT warn. Goes RED if the mirror
+// checkip-url with an uppercase/mixed-case HTTPS scheme is valid per RFC 3986
+// §3.1 (the scheme is case-INSENSITIVE) and must NOT warn. Goes RED if the mirror
 // ddnsCheckIPURLValid reverts to a case-sensitive HasPrefix on the raw string.
+// (Uppercase HTTP is plaintext and is now refused by the strict #14372 gate,
+// so this warning-layer fixture compiles lenient and keeps only the https
+// case in the accepted set.)
 func TestP3CheckIPURLUppercaseSchemeAccepted(t *testing.T) {
 	tree := buildTree(t, []string{
-		"set system services dynamic-dns provider up-http backend dyndns2",
-		"set system services dynamic-dns provider up-http server dyn.example",
-		"set system services dynamic-dns provider up-http checkip-url HTTP://checkip.example/",
 		"set system services dynamic-dns provider mixed-https backend dyndns2",
 		"set system services dynamic-dns provider mixed-https server dyn.example",
 		"set system services dynamic-dns provider mixed-https checkip-url Https://h/",
-		// A non-http scheme and a host-less URL must STILL warn (no over-accept).
+		// A non-https scheme and a host-less URL must STILL warn (no over-accept).
 		"set system services dynamic-dns provider bad-scheme backend dyndns2",
 		"set system services dynamic-dns provider bad-scheme server dyn.example",
 		"set system services dynamic-dns provider bad-scheme checkip-url ftp://checkip.example/",
 		"set system services dynamic-dns provider no-host backend dyndns2",
 		"set system services dynamic-dns provider no-host server dyn.example",
-		"set system services dynamic-dns provider no-host checkip-url http://",
+		"set system services dynamic-dns provider no-host checkip-url https://",
 	})
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("CompileConfig: %v", err)
+		t.Fatalf("CompileConfigLenient: %v", err)
 	}
 	joined := strings.Join(validateSurfaceADDNSWarnings(cfg), "\n")
 
-	for _, okName := range []string{"up-http", "mixed-https"} {
+	for _, okName := range []string{"mixed-https"} {
 		if strings.Contains(joined, "provider \""+okName+"\" checkip-url") {
 			t.Fatalf("uppercase-scheme checkip-url should not warn for %q; got:\n%s", okName, joined)
 		}

@@ -372,7 +372,7 @@ func TestCheckIPCrossHostRedirectRefused(t *testing.T) {
 // warn once per (provider, error) for every v6-less deployment on every family
 // probe.
 func TestCheckIPNoAddressIsNotAnError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "93.184.216.34\n")
 	}))
 	defer srv.Close()

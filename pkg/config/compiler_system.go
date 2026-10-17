@@ -1193,19 +1193,32 @@ func compileDDNSServices(node *Node, lenient bool) (*DDNSServicesConfig, []strin
 			continue
 		}
 		cat.Providers[p.Name] = p
-		// TLS enforcement (#4861): a credentialed HTTP backend
+		// TLS enforcement (#4861 + #14372): a credentialed HTTP backend
 		// (dyndns2/duckdns/cloudflare/route53/generic) must not carry its
-		// update credential over a plaintext http:// endpoint. Strict
-		// (commit / commit-check) hard-rejects; lenient (load / peer-sync)
-		// downgrades to a warning so an already-persisted config an older
-		// binary accepted still boots (#1960 fail-closed-on-load class). The
-		// redirect-downgrade half (an https endpoint 30x'd to http) is blocked
-		// at runtime by the shared client's CheckRedirect (pkg/ddns).
+		// update credential over a plaintext http:// server/url-template, and
+		// NO backend may use a plaintext checkip-url — its response is an
+		// unauthenticated oracle Surface A publishes as this firewall's DNS
+		// record. Strict (commit / commit-check) hard-rejects; lenient (load
+		// / peer-sync) downgrades to a warning so an already-persisted config
+		// an older binary accepted still boots (#1960 fail-closed-on-load
+		// class). The redirect-downgrade half (an https endpoint 30x'd to
+		// http) is blocked at runtime by the shared client's CheckRedirect
+		// (pkg/ddns); the runtime CheckIP gate refuses http outright.
 		if field, val, bad := ddnsPlaintextCredentialEndpoint(p); bad {
 			msg := fmt.Sprintf("system services dynamic-dns provider %q (backend %s) "+
 				"%s %q must be an https:// endpoint — a credentialed backend over a "+
 				"plaintext http:// endpoint transmits the update credential in cleartext",
 				p.Name, p.Backend, field, RedactURL(val))
+			if field == "checkip-url" {
+				// The value is OMITTED, not redacted: a checkip-url commonly
+				// carries an API key and RedactURL preserves a bracketed
+				// IP-literal host, so rendering any part of it can leak the
+				// key (mirrors the warning pass + pkg/ddns, #6545).
+				msg = fmt.Sprintf("system services dynamic-dns provider %q (backend %s) "+
+					"%s must be an https:// endpoint — a plaintext checkip "+
+					"response is trusted as this firewall's public address",
+					p.Name, p.Backend, field)
+			}
 			if !lenient {
 				return nil, nil, fmt.Errorf("%s", msg)
 			}

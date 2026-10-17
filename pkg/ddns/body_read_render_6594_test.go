@@ -50,7 +50,7 @@ func TestBodyReadErrorIsClassifiedNotEchoed(t *testing.T) {
 	hostile := errors.New("upstream read of http://prov.example/update?token=" + secret + " failed")
 	client := &http.Client{Transport: bodyErrRoundTripper{readErr: hostile}}
 
-	_, _, err := CheckIP(context.Background(), client, "http://prov.example/ip", true, nil)
+	_, _, err := CheckIP(context.Background(), client, "https://prov.example/ip", true, nil)
 	if err == nil {
 		t.Fatal("a failing body read reported success")
 	}
@@ -78,7 +78,7 @@ func TestBodyReadErrorIsStableAcrossConnections(t *testing.T) {
 			text: "read tcp 127.0.0.1:" + port + "->127.0.0.1:41397: read: connection reset by peer",
 		}}
 		_, _, err := CheckIP(context.Background(), &http.Client{Transport: rt},
-			"http://prov.example/ip", true, nil)
+			"https://prov.example/ip", true, nil)
 		if err == nil {
 			t.Fatal("a failing body read reported success")
 		}

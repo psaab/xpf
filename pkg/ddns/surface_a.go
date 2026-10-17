@@ -2,6 +2,7 @@ package ddns
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -569,6 +570,18 @@ func (m *SurfaceAManager) CheckIPClient(p *config.DDNSProvider) (*http.Client, e
 		return newProviderHTTPClient(p, m.ifResolver)
 	}
 	return m.httpClients.clientFor(p, m.ifResolver)
+}
+
+// SetCheckIPRootCAsForTesting replaces the TLS trust roots on every client
+// the manager's cache builds so tests can point a probe at an httptest TLS
+// server. Test-only; not for production callers (production clients verify
+// against the system trust store). Call BEFORE the first probe: clients
+// already built keep their original roots.
+func (m *SurfaceAManager) SetCheckIPRootCAsForTesting(pool *x509.CertPool) {
+	if m.httpClients == nil {
+		m.httpClients = newHTTPClientCache()
+	}
+	m.httpClients.rootCAs = pool
 }
 
 // resolveBackend is the manager-bound backend resolver (#2904). It is identical
