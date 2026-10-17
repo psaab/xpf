@@ -257,30 +257,44 @@ func validateInterfaceNameCollisionStrict(cfg *Config) error {
 		if ifc == nil {
 			continue
 		}
-		// A RETH IS SKIPPED ENTIRELY, and this is a scope correction to the
-		// issue rather than a convenience.
+		// #14573: a reth is NOT skipped entirely any more — only its
+		// ALIASING onto other config objects is out of scope.
 		//
 		// #7795 frames every `<base>.<n>` device shared by two config objects
-		// as a defect. For a reth it is not. A reth's units resolve onto the
-		// PHYSICAL MEMBER's device, so `reth1 unit 100 vlan-id 100` lands on
-		// ge-0-0-1.100 — exactly where an interface authored `ge-0/0/1.100`
-		// lands — and #6722 established that this aliasing is LEGAL and built
-		// the resolution for it: "the dotted name is a real, separate
-		// configured interface AND an alias of a reth unit ... Resolving the
-		// AUTHORED binding through the aliasing does" (egress_zone_identity_
-		// 6722_test.go, case C). Rejecting it here would un-ship that decision.
+		// as a defect. For a reth's cross-object aliasing it is not. A reth's
+		// units resolve onto the PHYSICAL MEMBER's device, so `reth1 unit 100
+		// vlan-id 100` lands on ge-0-0-1.100 — exactly where an interface
+		// authored `ge-0/0/1.100` lands — and #6722 established that this
+		// aliasing is LEGAL and built the resolution for it: "the dotted name
+		// is a real, separate configured interface AND an alias of a reth
+		// unit ... Resolving the AUTHORED binding through the aliasing does"
+		// (egress_zone_identity_6722_test.go, case C). Rejecting that here
+		// would un-ship that decision. The collapse case is the same story
+		// one step simpler: `reth1 unit 0` becomes the member device, which
+		// the authored pass already claimed for the member itself.
 		//
-		// The collapse case is the same story one step simpler: `reth1 unit 0`
-		// becomes the member device, which the authored pass already claimed
-		// for the member itself.
-		//
-		// So the reth aliasing is OUT OF SCOPE for this gate, not merely
-		// exempted from part of it. A non-reth interface still has no
-		// equivalent resolution and its collisions are genuine.
-		if cfg.ResolveReth(name) != name {
-			continue
-		}
+		// What #7795's skip ALSO exempted — and #14573 closes — is two units
+		// OF THE SAME RETH resolving to one device: `reth1 unit 100 vlan-id
+		// 100` and `reth1 unit 200 vlan-id 100` both land on the member's
+		// ge-0-0-1.100. No #6722 aliasing justifies that: the two units are
+		// two distinct L3 identities (own addresses, zones, filters) on one
+		// ifindex, so the forwarding builder's last-wins / contested-zone
+		// handling silently drops or mis-zones one of them, and
+		// daemon_reth.go already calls a duplicate vlan-id "an invalid
+		// config the compiler does not reject for uniqueness". So a reth's
+		// units are checked against EACH OTHER via the sibling `subOwner`
+		// registry (and the IFNAMSIZ bound), but never against
+		// firstByLinux / derivedOwner: a reth unit's device is by design
+		// also claimed by the member / authored dotted alias.
+		isReth := cfg.ResolveReth(name) != name
 		base := LinuxIfName(name)
+		if isReth {
+			// The resolver collapses a reth unit onto its member's bare
+			// device (reth1.0 -> ge-0-0-1); compare reth units against the
+			// RESOLVED base so that collapse is skipped exactly as the
+			// non-reth unit-0 collapse below is.
+			base = LinuxIfName(cfg.ResolveReth(name))
+		}
 		unitNums := make([]int, 0, len(ifc.Units))
 		for unitNum := range ifc.Units {
 			unitNums = append(unitNums, unitNum)
@@ -311,16 +325,18 @@ func validateInterfaceNameCollisionStrict(cfg *Config) error {
 						"shorten the interface name or renumber the unit",
 					ref, dev, len(dev), maxLinuxIfNameLen)
 			}
-			if owner, ok := firstByLinux[dev]; ok {
-				return fmt.Errorf(
-					"interface %q and unit %s both resolve to the same Linux device name "+
-						"%q (a sub-interface device is the interface's canonical name plus "+
-						"\".\" and its vlan-id, or its unit number when no vlan-id is set); "+
-						"pkg/routing keys the device's addresses, VRF claim and zone by that "+
-						"name, so the two would reconcile ONE kernel device twice per commit "+
-						"and delete each other's addresses off it — and the order is the "+
-						"interface map's, so there is no stable winner — rename one of the two",
-					owner, ref, dev)
+			if !isReth {
+				if owner, ok := firstByLinux[dev]; ok {
+					return fmt.Errorf(
+						"interface %q and unit %s both resolve to the same Linux device name "+
+							"%q (a sub-interface device is the interface's canonical name plus "+
+							"\".\" and its vlan-id, or its unit number when no vlan-id is set); "+
+							"pkg/routing keys the device's addresses, VRF claim and zone by that "+
+							"name, so the two would reconcile ONE kernel device twice per commit "+
+							"and delete each other's addresses off it — and the order is the "+
+							"interface map's, so there is no stable winner — rename one of the two",
+						owner, ref, dev)
+				}
 			}
 			// THE CROSS-PRODUCT, and its REACHABILITY stated honestly.
 			//
@@ -348,16 +364,26 @@ func validateInterfaceNameCollisionStrict(cfg *Config) error {
 			// every pass to check every prior one, and the durable form at that
 			// point is a single owner map all passes register into rather than
 			// one map per pass.
-			if owner, ok := derivedOwner[dev]; ok {
-				return fmt.Errorf(
-					"per-unit tunnel %s and unit %s both resolve to the same Linux device "+
-						"name %q (one from the tunnel device's \"u<unit>\" suffix, the other "+
-						"from a sub-interface's vlan-id or unit number); they would reconcile "+
-						"ONE kernel device twice per commit, with no stable winner — rename "+
-						"one of the two interfaces",
-					owner, ref, dev)
+			if !isReth {
+				if owner, ok := derivedOwner[dev]; ok {
+					return fmt.Errorf(
+						"per-unit tunnel %s and unit %s both resolve to the same Linux device "+
+							"name %q (one from the tunnel device's \"u<unit>\" suffix, the other "+
+							"from a sub-interface's vlan-id or unit number); they would reconcile "+
+							"ONE kernel device twice per commit, with no stable winner — rename "+
+							"one of the two interfaces",
+						owner, ref, dev)
+				}
 			}
-			if other, ok := subOwner[dev]; ok {
+			// #14573: subOwner is scoped to the OWNING interface (`name`).
+			// For a non-reth interface the device already embeds its base,
+			// so cross-interface collisions are impossible and the scope is
+			// a no-op; for a reth every unit resolves onto the ONE member
+			// device its parent selects, so same-reth duplicates must
+			// collide here while a second reth on a different member (or
+			// the peer node's member of the same reth) must not.
+			subKey := name + "\x00" + dev
+			if other, ok := subOwner[subKey]; ok {
 				return fmt.Errorf(
 					"units %s and %s both resolve to the same Linux device name %q (a "+
 						"sub-interface device is the interface's canonical name plus \".\" "+
@@ -366,7 +392,7 @@ func validateInterfaceNameCollisionStrict(cfg *Config) error {
 						"winner — give one of them a different vlan-id",
 					other, ref, dev)
 			}
-			subOwner[dev] = ref
+			subOwner[subKey] = ref
 		}
 	}
 	return nil
