@@ -9,7 +9,7 @@
 // Symbols:
 //   - knownRedistProtocols
 //   - resolveRedistribute
-//   - isDefinedPolicyStatement
+//   - bgpExportPolicies14586, bgpPolicyRedistEntries14586
 package frr
 
 import (
@@ -258,13 +258,98 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 	return formatRedistEntries(m.redistributeEntries(export, po, self, metrics...))
 }
 
+// bgpExportPolicies14586 returns the sorted, de-duplicated set of DEFINED
+// policy-statements referenced by the effective BGP export chain of any
+// neighbor in this BGP instance (global default or per-neighbor override,
+// Junos most-specific-wins via bgpNeighborExportChain), plus the global
+// chain when the instance has no neighbors. Import chains never
+// contribute: inbound filtering originates nothing.
+//
+// #14586: a defined policy in an effective export chain must ORIGINATE
+// the routes its `from protocol` terms select. Junos has no separate
+// redistribution step — the BGP export policy is what originates
+// static/direct (and other) routes — so the renderer emits, per policy
+// and source, `redistribute <proto> route-map <policy>-<proto>-xpf-redist`
+// (the filtered per-source map #12065 already renders) alongside the
+// per-peer `route-map out`. This is not the #2473 leak: redistribution
+// is gated by that filtered map (fail-closed deny), never unfiltered.
+func bgpExportPolicies14586(bgp *config.BGPConfig, po *config.PolicyOptionsConfig) []string {
+	if bgp == nil || po == nil {
+		return nil
+	}
+	global := bgpGlobalExportChain(bgp, po)
+	seen := make(map[string]bool)
+	add := func(chain []string) {
+		for _, name := range chain {
+			seen[name] = true
+		}
+	}
+	if len(bgp.Neighbors) == 0 {
+		add(global)
+	}
+	for _, n := range bgp.Neighbors {
+		if n == nil {
+			continue
+		}
+		add(bgpNeighborExportChain(n, global, po))
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// bgpPolicyRedistEntries14586 returns the filtered redistribution entries
+// for the defined policies in policies at the router-level BGP node,
+// de-duplicated by (proto, routeMap) so a policy named by several chains
+// originates each source once. Self (bgp) and off-family sources are
+// dropped by redistributeEntriesAt, exactly as for IGP exports; a
+// no-`from protocol` term expands over the whole node-fitting domain
+// (#14380 semantics). The IPv6 sibling is bgpPolicyIPv6RedistEntries14586.
+func (m *Manager) bgpPolicyRedistEntries14586(policies []string, po *config.PolicyOptionsConfig) []redistEntry {
+	return m.bgpPolicyRedistEntriesAt14586(policies, po, "bgp", "bgp")
+}
+
+// bgpPolicyIPv6RedistEntries14586 is bgpPolicyRedistEntries14586 at the
+// `address-family ipv6 unicast` node ("bgp-ipv6" grammar).
+func (m *Manager) bgpPolicyIPv6RedistEntries14586(policies []string, po *config.PolicyOptionsConfig) []redistEntry {
+	return m.bgpPolicyRedistEntriesAt14586(policies, po, "bgp", "bgp-ipv6")
+}
+
+func (m *Manager) bgpPolicyRedistEntriesAt14586(policies []string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
+	seen := make(map[redistEntry]bool)
+	var out []redistEntry
+	for _, name := range policies {
+		for _, e := range m.redistributeEntriesAt(name, po, self, node) {
+			if seen[e] {
+				continue
+			}
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].proto != out[j].proto {
+			return out[i].proto < out[j].proto
+		}
+		return out[i].routeMap < out[j].routeMap
+	})
+	return out
+}
+
 // redistReferencedNodes14380 collects the (self, node) pairs at which
 // a policy-statement is actually referenced by a redistribute-backed
-// export (OSPF/OSPFv3/RIP/IS-IS, global and per-instance), so the
-// per-source maps generatePolicyOptions defines and the collision
-// belt guards cover exactly the nodes whose attachments name them.
-// A defined BGP policy-statement renders as `route-map out`, never as
-// a redistribute, so BGP exports contribute nothing here.
+// export, so the per-source maps generatePolicyOptions defines and the
+// collision belt guards cover exactly the nodes whose attachments name
+// them. IGP exports (OSPF/OSPFv3/RIP/IS-IS, global and per-instance)
+// contribute their (self, node) pair; #14586 BGP exports contribute
+// ("bgp", "bgp") AND ("bgp", "bgp-ipv6") — a defined policy in an
+// effective BGP export chain now also renders as a filtered
+// `redistribute … route-map <policy>-<proto>-xpf-redist` per family,
+// so its per-source maps (incl. a no-from policy's expanded set) must
+// be defined at both BGP nodes.
 func redistReferencedNodes14380(fc *FullConfig) map[string][][2]string {
 	out := make(map[string][][2]string)
 	if fc == nil {
@@ -282,7 +367,7 @@ func redistReferencedNodes14380(fc *FullConfig) map[string][][2]string {
 		}
 		out[name] = append(out[name], [2]string{self, node})
 	}
-	walk := func(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, rip *config.RIPConfig, isis *config.ISISConfig) {
+	walk := func(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, bgp *config.BGPConfig, rip *config.RIPConfig, isis *config.ISISConfig) {
 		if ospf != nil {
 			for _, e := range ospf.Export {
 				add(e, "ospf", "ospf")
@@ -291,6 +376,14 @@ func redistReferencedNodes14380(fc *FullConfig) map[string][][2]string {
 		if ospfv3 != nil {
 			for _, e := range ospfv3.Export {
 				add(e, "ospf6", "ospf6")
+			}
+		}
+		if bgp != nil {
+			// #14586: the union of effective export chains (global +
+			// per-neighbor) at both BGP family nodes.
+			for _, name := range bgpExportPolicies14586(bgp, po) {
+				add(name, "bgp", "bgp")
+				add(name, "bgp", "bgp-ipv6")
 			}
 		}
 		if rip != nil {
@@ -304,9 +397,9 @@ func redistReferencedNodes14380(fc *FullConfig) map[string][][2]string {
 			}
 		}
 	}
-	walk(fc.OSPF, fc.OSPFv3, fc.RIP, fc.ISIS)
+	walk(fc.OSPF, fc.OSPFv3, fc.BGP, fc.RIP, fc.ISIS)
 	for _, inst := range fc.Instances {
-		walk(inst.OSPF, inst.OSPFv3, inst.RIP, inst.ISIS)
+		walk(inst.OSPF, inst.OSPFv3, inst.BGP, inst.RIP, inst.ISIS)
 	}
 	return out
 }
