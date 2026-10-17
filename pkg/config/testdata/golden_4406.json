@@ -18810,48 +18810,7 @@
           "AddressPersistent": false,
           "Destination": {
             "Pools": {},
-            "RuleSets": [
-              {
-                "Name": "rs1",
-                "FromZone": "",
-                "ToZone": "",
-                "FromInterface": "",
-                "ToInterface": "",
-                "FromRoutingInstance": "",
-                "ToRoutingInstance": "",
-                "Rules": [
-                  {
-                    "Name": "r1",
-                    "Match": {
-                      "SourceAddress": "",
-                      "SourceAddresses": null,
-                      "SourceAddressName": "",
-                      "SourceAddressNames": null,
-                      "DestinationAddress": "10.0.0.1/32",
-                      "DestinationAddresses": [
-                        "10.0.0.1/32"
-                      ],
-                      "DestinationAddressName": "",
-                      "DestinationAddressNames": null,
-                      "DestinationPort": 0,
-                      "DestinationPorts": null,
-                      "InvalidDestinationPorts": null,
-                      "ReversedDestinationPortRanges": null,
-                      "Protocol": "",
-                      "Protocols": null,
-                      "Application": "",
-                      "Applications": null
-                    },
-                    "Then": {
-                      "Type": 1,
-                      "Interface": false,
-                      "PoolName": "",
-                      "Off": true
-                    }
-                  }
-                ]
-              }
-            ]
+            "RuleSets": null
           },
           "Static": null,
           "NAT64": null,
@@ -19148,48 +19107,7 @@
           "AddressPersistent": false,
           "Destination": {
             "Pools": {},
-            "RuleSets": [
-              {
-                "Name": "rs1",
-                "FromZone": "",
-                "ToZone": "",
-                "FromInterface": "",
-                "ToInterface": "",
-                "FromRoutingInstance": "",
-                "ToRoutingInstance": "",
-                "Rules": [
-                  {
-                    "Name": "r1",
-                    "Match": {
-                      "SourceAddress": "",
-                      "SourceAddresses": null,
-                      "SourceAddressName": "",
-                      "SourceAddressNames": null,
-                      "DestinationAddress": "10.0.0.1/32",
-                      "DestinationAddresses": [
-                        "10.0.0.1/32"
-                      ],
-                      "DestinationAddressName": "",
-                      "DestinationAddressNames": null,
-                      "DestinationPort": 0,
-                      "DestinationPorts": null,
-                      "InvalidDestinationPorts": null,
-                      "ReversedDestinationPortRanges": null,
-                      "Protocol": "",
-                      "Protocols": null,
-                      "Application": "",
-                      "Applications": null
-                    },
-                    "Then": {
-                      "Type": 1,
-                      "Interface": false,
-                      "PoolName": "",
-                      "Off": true
-                    }
-                  }
-                ]
-              }
-            ]
+            "RuleSets": null
           },
           "Static": null,
           "NAT64": null,
@@ -19486,48 +19404,7 @@
           "AddressPersistent": false,
           "Destination": {
             "Pools": {},
-            "RuleSets": [
-              {
-                "Name": "rs1",
-                "FromZone": "",
-                "ToZone": "",
-                "FromInterface": "",
-                "ToInterface": "",
-                "FromRoutingInstance": "",
-                "ToRoutingInstance": "",
-                "Rules": [
-                  {
-                    "Name": "r1",
-                    "Match": {
-                      "SourceAddress": "",
-                      "SourceAddresses": null,
-                      "SourceAddressName": "",
-                      "SourceAddressNames": null,
-                      "DestinationAddress": "10.0.0.1/32",
-                      "DestinationAddresses": [
-                        "10.0.0.1/32"
-                      ],
-                      "DestinationAddressName": "",
-                      "DestinationAddressNames": null,
-                      "DestinationPort": 0,
-                      "DestinationPorts": null,
-                      "InvalidDestinationPorts": null,
-                      "ReversedDestinationPortRanges": null,
-                      "Protocol": "",
-                      "Protocols": null,
-                      "Application": "",
-                      "Applications": null
-                    },
-                    "Then": {
-                      "Type": 1,
-                      "Interface": false,
-                      "PoolName": "",
-                      "Off": true
-                    }
-                  }
-                ]
-              }
-            ]
+            "RuleSets": null
           },
           "Static": null,
           "NAT64": null,
