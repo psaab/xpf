@@ -545,12 +545,24 @@ func compilePolicy(polInst struct {
 	// #9792: `description <d> scheduler-name <s>` on one line reaches here as a
 	// chain on the lenient path (Store.Load / Store.SyncApply), and FindChild
 	// on the raw node saw only the description. Expand it as #9235 does.
+	// #14449: a duplicate `scheduler-name` is a singleton scalar written
+	// twice. Collect every value in author order: the compiled name is
+	// the LAST one (author-order last-wins, matching the other scalar
+	// readers), the full ordered list is kept on schedulerNames so
+	// validateDuplicatePolicySchedulerName14449 can reject conflicting
+	// values at strict commit instead of silently installing the FIRST
+	// (which could be the wide 00:00-23:59 window while the operator's
+	// last-authored value selected the narrow one). Identical repeats
+	// stay legal, like identical terminal actions (#3850).
 	policyLeaves := expandResolvingRun9792(polInst.node, policySchema9792(isGlobal))
 	if descNode := policyLeaves.FindChild("description"); descNode != nil {
 		pol.Description = nodeVal(descNode)
 	}
-	if snNode := policyLeaves.FindChild("scheduler-name"); snNode != nil {
-		pol.SchedulerName = nodeVal(snNode)
+	for _, snNode := range policyLeaves.FindChildren("scheduler-name") {
+		pol.schedulerNames = append(pol.schedulerNames, nodeVal(snNode))
+	}
+	if len(pol.schedulerNames) > 0 {
+		pol.SchedulerName = pol.schedulerNames[len(pol.schedulerNames)-1]
 	}
 
 	// #4232 (fable-167 P-4b): record any DIRECT policy child whose keyword the

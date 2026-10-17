@@ -608,6 +608,18 @@ type Policy struct {
 	// visitation order). The typed Config is never serialized, so this
 	// unexported field carries no persistence / back-compat obligation.
 	terminalActions []PolicyAction
+	// schedulerNames records, in config order, every `scheduler-name`
+	// value authored under this policy (#14449). It exists only to drive
+	// the commit-time validator (validateDuplicatePolicySchedulerName14449):
+	// SchedulerName holds the last value (author-order last-wins), but a
+	// policy MUST name at most one distinct scheduler — two differing
+	// values otherwise resolved silently to the FIRST via FindChild,
+	// which could install the wide window while the operator's last
+	// value selected the narrow one. Identical repeats stay legal. The
+	// typed Config is never serialized, so this unexported field carries
+	// no persistence / back-compat obligation (same doctrine as
+	// terminalActions above).
+	schedulerNames []string
 	// UnknownChildren records DIRECT children of a `policy <name>` node whose
 	// keyword the compiler does not read (match / then / description /
 	// scheduler-name). They feed the #4232 probable-typo advisory. Unknown
