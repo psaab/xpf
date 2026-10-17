@@ -19,6 +19,19 @@ import (
 // that inspected external-interface alone would both let the bug through
 // (VR-owned local-address with a default external-interface) and refuse valid
 // configs (a default-instance local-address overriding a VR external-interface).
+//
+// #14393: an effective source that cannot be mapped to any declared
+// interface device is NOT clean when a non-default routing-instance with
+// members exists. With no source pinning charon binds every local
+// interface; with a hostname or an undeclared IP literal it binds whatever
+// that value resolves to at runtime — either can be a VR-owned address.
+// Such a VPN is rejected at strict commit and, on tolerant load, warned
+// about AND removed so the renderer never emits an unpinned connection.
+// A source resolving to at least one declared device (even a device with
+// no configured address, e.g. a DHCP external-interface) is mappable: the
+// runtime resolution is then bounded to that device. When no VR with
+// members exists there is no VR address to bind and unmappable sources
+// stay accepted.
 func validateIPsecGatewayRoutingInstance12089(cfg *Config, lenient bool) ([]string, error) {
 	if cfg == nil ||
 		(len(cfg.Security.IPsec.Gateways) == 0 && len(cfg.Security.IPsec.VPNs) == 0) {
@@ -64,6 +77,19 @@ func validateIPsecGatewayRoutingInstance12089(cfg *Config, lenient bool) ([]stri
 			subject, source, instanceList))
 		return nil
 	}
+	reportUnmappable := func(subject, source string) error {
+		if !lenient {
+			return fmt.Errorf(
+				"%s %s cannot be mapped to any configured interface address, but a routing-instance with members exists; charon would bind an unpinned local address that may belong to a routing-instance, and IKE/ESP outer traffic is not scoped to that routing table; commit refused (#12089)",
+				subject, source)
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"%s %s cannot be mapped to any configured interface address, but a routing-instance with members exists; charon would bind an unpinned local address that may belong to a routing-instance, so the VPN is not rendered (#12089)",
+			subject, source))
+		return nil
+	}
+	hasVR := len(instanceOwners) > 0
+	var dropVPNs []string
 	for _, name := range gatewayNames {
 		gateway := cfg.Security.IPsec.Gateways[name]
 		if gateway == nil {
@@ -71,35 +97,54 @@ func validateIPsecGatewayRoutingInstance12089(cfg *Config, lenient bool) ([]stri
 		}
 		subject := fmt.Sprintf("ipsec gateway %q", name)
 		referencing := gatewayVPNs[name]
-		gatewayAddressMemo := make(map[string][]string)
+		gatewayAddressMemo := make(map[string]ipsecScopedSource12089)
 		if len(referencing) == 0 {
-			instances, source := ipsecGatewayScopedInstances12089(
+			res := ipsecGatewayScopedInstances12089(
 				cfg, tunnelNames, instanceOwners, quarantined, addressIndex, gatewayAddressMemo, gateway, nil)
-			if err := report(subject, source, instances); err != nil {
+			if err := report(subject, res.source, res.instances); err != nil {
 				return nil, err
 			}
 			continue
 		}
 		for _, vpnName := range referencing {
 			vpn := cfg.Security.IPsec.VPNs[vpnName]
-			instances, source := ipsecGatewayScopedInstances12089(
+			res := ipsecGatewayScopedInstances12089(
 				cfg, tunnelNames, instanceOwners, quarantined, addressIndex, gatewayAddressMemo, gateway, vpn)
-			if err := report(subject+" "+fmt.Sprintf("vpn %q", vpnName), source, instances); err != nil {
+			vpnSubject := subject + " " + fmt.Sprintf("vpn %q", vpnName)
+			if err := report(vpnSubject, res.source, res.instances); err != nil {
 				return nil, err
+			}
+			if len(res.instances) == 0 && hasVR && !res.mappable {
+				if err := reportUnmappable(vpnSubject, res.source); err != nil {
+					return nil, err
+				}
+				dropVPNs = append(dropVPNs, vpnName)
 			}
 		}
 	}
-
 	// A VPN may use an inline gateway endpoint (or no gateway object), but its
 	// local-address still becomes swanctl local_addrs. Check those sources too;
 	// there is no gateway external-interface from which to derive a fallback.
+	// A gateway-less VPN with NO local-address renders no local_addrs at
+	// all, so it is unmappable for the same reason (#14393).
 	for _, name := range vpnNames {
 		vpn := cfg.Security.IPsec.VPNs[name]
-		if vpn == nil || vpn.LocalAddr == "" {
+		if vpn == nil {
 			continue
 		}
 		if gateway := cfg.Security.IPsec.Gateways[vpn.Gateway]; vpn.Gateway != "" && gateway != nil {
-			continue // handled with the referenced gateway above
+			continue
+		}
+		if vpn.LocalAddr == "" {
+			if !hasVR {
+				continue
+			}
+			subject := fmt.Sprintf("ipsec vpn %q", name)
+			if err := reportUnmappable(subject, "no local-address configured"); err != nil {
+				return nil, err
+			}
+			dropVPNs = append(dropVPNs, name)
+			continue
 		}
 		devices := ipsecLocalAddressDevices12089(addressIndex, vpn.LocalAddr)
 		instances := ipsecScopedInstances12089(instanceOwners, quarantined, devices)
@@ -107,8 +152,26 @@ func validateIPsecGatewayRoutingInstance12089(cfg *Config, lenient bool) ([]stri
 			fmt.Sprintf("local-address %q", vpn.LocalAddr), instances); err != nil {
 			return nil, err
 		}
+		if len(instances) == 0 && hasVR && len(devices) == 0 {
+			subject := fmt.Sprintf("ipsec vpn %q", name)
+			if err := reportUnmappable(subject, fmt.Sprintf("local-address %q", vpn.LocalAddr)); err != nil {
+				return nil, err
+			}
+			dropVPNs = append(dropVPNs, name)
+		}
+	}
+	if lenient {
+		for _, name := range dropVPNs {
+			delete(cfg.Security.IPsec.VPNs, name)
+		}
 	}
 	return warnings, nil
+}
+
+type ipsecScopedSource12089 struct {
+	instances []string
+	source    string
+	mappable  bool
 }
 
 // ipsecGatewayScopedInstances12089 resolves one (gateway, vpn) pair's
@@ -118,8 +181,9 @@ func validateIPsecGatewayRoutingInstance12089(cfg *Config, lenient bool) ([]stri
 // Devices under a recorded #11060 conflict read as unowned: the dual-claim gate
 // owns that diagnostic, and tolerant quarantine removes every conflicting
 // membership. The per-gateway memo avoids re-resolving a shared gateway source
-// for each referencing VPN.
-func ipsecGatewayScopedInstances12089(cfg *Config, tunnelNames map[string]string, instanceOwners map[string]string, quarantined map[string]struct{}, addressIndex map[string][]string, addressMemo map[string][]string, gateway *IPsecGateway, vpn *IPsecVPN) ([]string, string) {
+// for each referencing VPN; it keys on the full result so an unmappable
+// source cached for one VPN cannot read as clean for a later one (#14393).
+func ipsecGatewayScopedInstances12089(cfg *Config, tunnelNames map[string]string, instanceOwners map[string]string, quarantined map[string]struct{}, addressIndex map[string][]string, addressMemo map[string]ipsecScopedSource12089, gateway *IPsecGateway, vpn *IPsecVPN) ipsecScopedSource12089 {
 	localAddress := ""
 	if vpn != nil && vpn.LocalAddr != "" {
 		localAddress = vpn.LocalAddr
@@ -130,20 +194,64 @@ func ipsecGatewayScopedInstances12089(cfg *Config, tunnelNames map[string]string
 		key := ipsecAddressIndexKey12089(localAddress)
 		source := fmt.Sprintf("local-address %q", localAddress)
 		if key != "" {
-			if instances, found := addressMemo[key]; found {
-				return instances, source
+			if res, found := addressMemo[key]; found {
+				res.source = source
+				return res
 			}
 		}
 		devices := ipsecLocalAddressDevices12089(addressIndex, localAddress)
-		instances := ipsecScopedInstances12089(instanceOwners, quarantined, devices)
-		if key != "" {
-			addressMemo[key] = instances
+		res := ipsecScopedSource12089{
+			instances: ipsecScopedInstances12089(instanceOwners, quarantined, devices),
+			source:    source,
+			mappable:  len(devices) > 0,
 		}
-		return instances, source
+		if key != "" {
+			addressMemo[key] = res
+		}
+		return res
 	}
 	devices := ipsecGatewayExternalDevices12089(cfg, tunnelNames, gateway)
-	return ipsecScopedInstances12089(instanceOwners, quarantined, devices),
-		fmt.Sprintf("external-interface %q", gateway.ExternalIface)
+	source := fmt.Sprintf("external-interface %q", gateway.ExternalIface)
+	mappable := len(devices) > 0
+	if gateway.ExternalIface != "" && !mappable {
+		if refs := ipsecGatewayExternalInterfaceRefs12089(cfg, gateway); len(refs) > 0 {
+			mappable = true
+		}
+	}
+	if gateway.ExternalIface == "" {
+		source = "no local-address or external-interface configured"
+	}
+	return ipsecScopedSource12089{
+		instances: ipsecScopedInstances12089(instanceOwners, quarantined, devices),
+		source:    source,
+		mappable:  mappable,
+	}
+}
+
+// ipsecGatewayExternalInterfaceRefs12089 returns the interface-unit refs an
+// external-interface spelling denotes on declared interfaces. A non-empty
+// result means the spelling names a real interface even if no unit
+// currently carries a configured address.
+func ipsecGatewayExternalInterfaceRefs12089(cfg *Config, gateway *IPsecGateway) []string {
+	if cfg == nil || gateway == nil || gateway.ExternalIface == "" {
+		return nil
+	}
+	external := gateway.ExternalIface
+	split := cfg.SplitInterfaceUnitRef(external)
+	if split.HasUnit {
+		if ifc := cfg.Interfaces.Interfaces[split.Base]; ifc != nil {
+			if unitNum, _, err := CanonicalLogicalUnit(split.UnitTok); err == nil {
+				if _, ok := ifc.Units[unitNum]; ok {
+					return []string{external}
+				}
+			}
+		}
+		return nil
+	}
+	if ifc := cfg.Interfaces.Interfaces[split.Base]; ifc != nil && len(ifc.Units) > 0 {
+		return []string{external}
+	}
+	return nil
 }
 
 // ipsecScopedInstances12089 maps devices to their owning instances, dropping
