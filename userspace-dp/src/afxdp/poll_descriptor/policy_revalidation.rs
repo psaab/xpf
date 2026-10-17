@@ -356,23 +356,43 @@ fn arrival_carries_translated_source(nat: NatDecision, flow: &SessionFlow) -> bo
 /// pre-routing NAT rule for this flow. DNAT is independent of route identity:
 /// a route/config generation change must not keep a withdrawn port-forward
 /// alive.
+///
+/// #14315: no protocol or translation family bypasses this check.
+/// - `nat64` stays exempt: NAT64 is prefix-driven (Pref64), not rule-table
+///   driven, so there is no withdrawn DNAT/static/persistent rule to consult.
+/// - `nptv6` is re-derived from the live `forwarding.nptv6` state (see
+///   `nptv6_destination_still_valid` / `nptv6_source_still_valid`).
+/// - Non-TCP/UDP protocols (ICMP, GRE, ESP, …) are checked against the same
+///   static/DNAT tables: both lookups are address-scoped for port-less
+///   protocols (static whole-address entries; DNAT PROTO_ANY / wildcard-port
+///   tiers) and never attach a port rewrite to them.
+/// - A Persistent-NAT inbound binding (minted by an outbound SNAT flow, with
+///   no static/DNAT entry) validates against the live pool allocator via
+///   `persistent_inbound_lookup`. Revalidation is read-only there: it never
+///   allocates and — like the `*_with_counter_scoped` lookups, which only
+///   clone the matched rule's `Arc<NatRuleCounter>` handle that this path
+///   discards — never increments a rule hit counter.
 fn destination_nat_translation_still_valid(
     forwarding: &ForwardingState,
     decision: &SessionDecision,
     metadata: &SessionMetadata,
     forward_key: &SessionKey,
+    now_ns: u64,
 ) -> bool {
     let nat = decision.nat;
     let Some(translated_dst) = nat.rewrite_dst else {
         return true;
     };
-    if nat.nat64 || nat.nptv6 || !crate::ip_proto::has_l4_ports(forward_key.protocol) {
+    if nat.nat64 {
         return true;
+    }
+    if nat.nptv6 {
+        return nptv6_destination_still_valid(forwarding, metadata, forward_key, translated_dst);
     }
 
     let ingress_ifindex = metadata.ingress_ifindex as i32;
-    let zone_override = (metadata.fabric_ingress || ingress_ifindex == 0)
-        .then_some(metadata.ingress_zone);
+    let zone_override =
+        (metadata.fabric_ingress || ingress_ifindex == 0).then_some(metadata.ingress_zone);
     let scope = super::prerouting_ingress_scope(
         forwarding,
         ingress_ifindex,
@@ -406,11 +426,135 @@ fn destination_nat_translation_still_valid(
                     None,
                 )
                 .map(|(decision, _)| decision)
-        });
+        })
+        .or_else(|| persistent_nat_destination(forwarding, forward_key, now_ns));
     expected.is_some_and(|current| {
         current.rewrite_dst == Some(translated_dst)
             && current.rewrite_dst_port == nat.rewrite_dst_port
     })
+}
+
+/// #14315: an inbound Persistent-NAT binding has no static/DNAT entry: it was
+/// minted by an outbound persistent pool allocation and lives only in a
+/// source-NAT rule's allocator. Re-derive it read-only, mirroring the
+/// admission loop in `poll_descriptor/mod.rs` (same pool-membership pre-filter,
+/// same first-match / conflict-denied semantics). `Miss`/`Denied` and
+/// conflicting candidates yield `None` (fail closed); a permitted binding
+/// yields the same `NatDecision` shape admission installed.
+fn persistent_nat_destination(
+    forwarding: &ForwardingState,
+    forward_key: &SessionKey,
+    now_ns: u64,
+) -> Option<NatDecision> {
+    let mut persistent_dnat = None;
+    for rule in &forwarding.source_nat_rules {
+        if !rule.persistent_nat || !rule.pool_mode {
+            continue;
+        }
+        let pool_contains_target = match forward_key.dst_ip {
+            IpAddr::V4(ip) => rule.pool_index_v4.contains_key(&ip),
+            IpAddr::V6(ip) => rule.pool_index_v6.contains_key(&ip),
+        };
+        if !pool_contains_target {
+            continue;
+        }
+        match rule.pool_allocator.persistent_inbound_lookup(
+            forward_key.protocol,
+            forward_key.dst_ip,
+            forward_key.dst_port,
+            forward_key.src_ip,
+            forward_key.src_port,
+            now_ns,
+        ) {
+            crate::nat::PersistentInbound::Miss => {}
+            crate::nat::PersistentInbound::Denied => return None,
+            crate::nat::PersistentInbound::Permitted {
+                internal_ip,
+                internal_port,
+                address_only,
+            } => {
+                let candidate = NatDecision {
+                    rewrite_dst: Some(internal_ip),
+                    rewrite_dst_port: (!address_only).then_some(internal_port),
+                    ..NatDecision::default()
+                };
+                if persistent_dnat.is_some_and(|previous| previous != candidate) {
+                    return None;
+                }
+                persistent_dnat = Some(candidate);
+            }
+        }
+    }
+    persistent_dnat
+}
+
+/// #14315: recompute the NPTv6 inbound (external -> internal) destination
+/// translation from live state. The stored session carries only the
+/// translated result, so validity is: translating the wire destination under
+/// the ingress zone reproduces exactly that result. `NoMatch` (rule withdrawn
+/// or re-scoped) and `Untranslatable` both fail closed.
+fn nptv6_destination_still_valid(
+    forwarding: &ForwardingState,
+    metadata: &SessionMetadata,
+    forward_key: &SessionKey,
+    translated_dst: IpAddr,
+) -> bool {
+    let IpAddr::V6(wire_dst) = forward_key.dst_ip else {
+        return false;
+    };
+    let ingress_ifindex = metadata.ingress_ifindex as i32;
+    let zone_override =
+        (metadata.fabric_ingress || ingress_ifindex == 0).then_some(metadata.ingress_zone);
+    let scope = super::prerouting_ingress_scope(
+        forwarding,
+        ingress_ifindex,
+        metadata.ingress_vlan_id,
+        zone_override,
+        None,
+    );
+    let mut candidate = wire_dst;
+    forwarding
+        .nptv6
+        .translate_inbound_result(&mut candidate, scope.zone_name)
+        .is_translated()
+        && IpAddr::V6(candidate) == translated_dst
+}
+
+/// #14315: recompute the NPTv6 outbound (internal -> external) source
+/// translation from live state under the egress zone. Mirrors
+/// `nptv6_destination_still_valid` for the source side.
+fn nptv6_source_still_valid(
+    forwarding: &ForwardingState,
+    metadata: &SessionMetadata,
+    decision: &SessionDecision,
+    forward_key: &SessionKey,
+    translated_src: IpAddr,
+) -> bool {
+    let IpAddr::V6(internal_src) = forward_key.src_ip else {
+        return false;
+    };
+    let egress_ifindex = decision.resolution.egress_ifindex;
+    let to_zone = if metadata.fabric_ingress || metadata.ingress_ifindex == 0 {
+        forwarding
+            .zone_id_to_name
+            .get(&metadata.egress_zone)
+            .map(|name| name.as_str())
+    } else {
+        forwarding
+            .egress
+            .get(&egress_ifindex)
+            .and_then(|egress| forwarding.zone_id_to_name.get(&egress.zone_id))
+            .map(|name| name.as_str())
+    };
+    let Some(to_zone) = to_zone else {
+        return false;
+    };
+    let mut candidate = internal_src;
+    forwarding
+        .nptv6
+        .translate_outbound_result(&mut candidate, to_zone)
+        .is_translated()
+        && IpAddr::V6(candidate) == translated_src
 }
 
 /// Check whether a stored forward source translation remains expressible by
@@ -425,15 +569,32 @@ fn source_nat_translation_still_valid(
     metadata: &SessionMetadata,
     forward_key: &SessionKey,
     stored_static: Option<bool>,
+    now_ns: u64,
 ) -> (bool, Option<bool>) {
     let nat = decision.nat;
-    let destination_valid =
-        destination_nat_translation_still_valid(forwarding, decision, metadata, forward_key);
+    let destination_valid = destination_nat_translation_still_valid(
+        forwarding,
+        decision,
+        metadata,
+        forward_key,
+        now_ns,
+    );
     let Some(translated_src) = nat.rewrite_src else {
         return (destination_valid, None);
     };
-    if nat.nat64 || nat.nptv6 {
+    if nat.nat64 {
         return (destination_valid, None);
+    }
+    if nat.nptv6 {
+        // #14315: an NPTv6 source rewrite is re-derived from live state.
+        // The destination side is only re-derived when the stored decision
+        // carries the inbound half as well (composed DNAT+NPTv6); a pure
+        // outbound session has `rewrite_dst == None` and `destination_valid`
+        // is trivially true, so the conjunction is exactly the source check.
+        let valid =
+            nptv6_source_still_valid(forwarding, metadata, decision, forward_key, translated_src)
+                && destination_valid;
+        return (valid, None);
     }
 
     let ingress_ifindex = metadata.ingress_ifindex as i32;
@@ -539,6 +700,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
     origin: SessionOrigin,
     source_nat_static: Option<bool>,
     source_nat_validation_key: Option<&SessionKey>,
+    now_ns: u64,
 ) -> Option<PolicyRevocation> {
     source_nat_revocation_on_session_hit_with_ingress(
         forwarding,
@@ -552,6 +714,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
         origin,
         source_nat_static,
         source_nat_validation_key,
+        now_ns,
     )
 }
 
@@ -568,6 +731,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     origin: SessionOrigin,
     source_nat_static: Option<bool>,
     source_nat_validation_key: Option<&SessionKey>,
+    now_ns: u64,
 ) -> Option<PolicyRevocation> {
     let (
         forward_key,
@@ -576,7 +740,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         forward_origin,
         canonical_key,
         stored_static,
-) = if metadata.is_reverse {
+    ) = if metadata.is_reverse {
         let reverse_key = sessions
             .revalidation_canonical_key(session_key)
             .unwrap_or_else(|| session_key.clone());
@@ -584,120 +748,124 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
             .entry_with_origin(&reverse_key)
             .map(|(decision, _, _)| decision)
             .unwrap_or(decision);
-        let forward_query =
-            crate::session::reverse_session_key(&reverse_key, reverse_decision.nat);
-        let (forward_key, static_nat) = match sessions.source_nat_revalidation_target(&forward_query)
-        {
-            SourceNatRevalidationTarget::Fresh => return None,
-            SourceNatRevalidationTarget::Stale { key, static_nat } => (key, static_nat),
-            SourceNatRevalidationTarget::NoLocalEntry => {
-                // Reverse hits do not own the forward translation. When the
-                // companion is not materialized locally, reconstruct its
-                // decision and tuple from the reverse row and run the same
-                // sessionless validation as a forward peer-synced hit. A
-                // failed check drops this packet but claims no session to
-                // tear down; absent NAT provenance deliberately fails closed
-                // for translated source-NAT state.
-                // Normalize the interface pair into forward direction:
-                // the reverse decision's egress predicts the original LAN
-                // ingress, while this packet's observed ingress is the
-                // original WAN egress. Reverse metadata intentionally stores
-                // no predicted ingress (see SessionMetadata), so use the
-                // packet observation rather than copying the zero sentinel.
-                // The original forward ingress VLAN is separate provenance
-                // carried by synthesized reverse metadata: the reply may use
-                // an asymmetric VLAN and cannot supply the forward scope.
-                let reverse_ingress_ifindex = arrival_ingress_ifindex as i32;
-                let forward_ingress_ifindex = reverse_decision.resolution.egress_ifindex;
-                // #14128: the packet's observed ingress is the PHYSICAL
-                // arrival ifindex (the original WAN egress's bind parent on
-                // a VLAN trunk). `forwarding.egress` is keyed by LOGICAL
-                // unit ifindex, and interface-SNAT reads the logical unit's
-                // primary address — keying the reconstruction on the raw
-                // parent either misses the egress row entirely (fail-closed
-                // revocation of a live flow) or reads the parent row's
-                // address instead of the VLAN unit's. Resolve
-                // `(physical, arrival VLAN) -> logical` exactly as the
-                // ingress-side sites do; an untagged/physical arrival
-                // resolves to itself.
-                let forward_egress_ifindex = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
-                    forwarding,
-                    reverse_ingress_ifindex,
-                    metadata.ingress_vlan_id,
-                )
-                .unwrap_or(reverse_ingress_ifindex);
-                let forward_decision = SessionDecision {
-                    resolution: crate::afxdp::ForwardingResolution {
-                        egress_ifindex: forward_egress_ifindex,
-                        ..reverse_decision.resolution
-                    },
-                    nat: reverse_decision.nat.reverse(
-                        reverse_key.src_ip,
-                        reverse_key.dst_ip,
-                        reverse_key.src_port,
-                        reverse_key.dst_port,
-                    ),
-                    ..reverse_decision
-                };
-                // #14128: `NatDecision::reverse` is port-pair oriented: for
-                // ICMP it puts the translated identifier (carried in the
-                // reverse key's `src_port`, since the identifier is a single
-                // symmetric field — #4074) into `rewrite_src_port` as
-                // `Some(0)` (the reverse key's `dst_port`). The forward
-                // decision's translated identifier is the reverse key's
-                // `src_port`, not 0. Restore it or the validator sees a
-                // bogus translated port of 0 and rejects the mapping.
-                let forward_decision = if matches!(
-                    forward_query.protocol,
-                    crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
-                ) && forward_decision.nat.rewrite_src_port == Some(0)
-                {
-                    let mut nat = forward_decision.nat;
-                    nat.rewrite_src_port = Some(reverse_key.src_port);
-                    SessionDecision { nat, ..forward_decision }
-                } else {
-                    forward_decision
-                };
-                let mut forward_metadata = metadata.clone();
-                forward_metadata.is_reverse = false;
-                forward_metadata.ingress_ifindex = forward_ingress_ifindex as u32;
-                if forward_decision.nat.rewrite_src.is_none()
-                    && forward_decision.nat.rewrite_dst.is_none()
-                    && !forward_decision.nat.nat64
-                    && !forward_decision.nat.nptv6
-                {
-                    return None;
-                }
-                let Some(forward_ingress_vlan_id) = metadata.forward_ingress_vlan_id else {
-                    return Some(PolicyRevocation {
+        let forward_query = crate::session::reverse_session_key(&reverse_key, reverse_decision.nat);
+        let (forward_key, static_nat) =
+            match sessions.source_nat_revalidation_target(&forward_query) {
+                SourceNatRevalidationTarget::Fresh => return None,
+                SourceNatRevalidationTarget::Stale { key, static_nat } => (key, static_nat),
+                SourceNatRevalidationTarget::NoLocalEntry => {
+                    // Reverse hits do not own the forward translation. When the
+                    // companion is not materialized locally, reconstruct its
+                    // decision and tuple from the reverse row and run the same
+                    // sessionless validation as a forward peer-synced hit. A
+                    // failed check drops this packet but claims no session to
+                    // tear down; absent NAT provenance deliberately fails closed
+                    // for translated source-NAT state.
+                    // Normalize the interface pair into forward direction:
+                    // the reverse decision's egress predicts the original LAN
+                    // ingress, while this packet's observed ingress is the
+                    // original WAN egress. Reverse metadata intentionally stores
+                    // no predicted ingress (see SessionMetadata), so use the
+                    // packet observation rather than copying the zero sentinel.
+                    // The original forward ingress VLAN is separate provenance
+                    // carried by synthesized reverse metadata: the reply may use
+                    // an asymmetric VLAN and cannot supply the forward scope.
+                    let reverse_ingress_ifindex = arrival_ingress_ifindex as i32;
+                    let forward_ingress_ifindex = reverse_decision.resolution.egress_ifindex;
+                    // #14128: the packet's observed ingress is the PHYSICAL
+                    // arrival ifindex (the original WAN egress's bind parent on
+                    // a VLAN trunk). `forwarding.egress` is keyed by LOGICAL
+                    // unit ifindex, and interface-SNAT reads the logical unit's
+                    // primary address — keying the reconstruction on the raw
+                    // parent either misses the egress row entirely (fail-closed
+                    // revocation of a live flow) or reads the parent row's
+                    // address instead of the VLAN unit's. Resolve
+                    // `(physical, arrival VLAN) -> logical` exactly as the
+                    // ingress-side sites do; an untagged/physical arrival
+                    // resolves to itself.
+                    let forward_egress_ifindex =
+                        crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+                            forwarding,
+                            reverse_ingress_ifindex,
+                            metadata.ingress_vlan_id,
+                        )
+                        .unwrap_or(reverse_ingress_ifindex);
+                    let forward_decision = SessionDecision {
+                        resolution: crate::afxdp::ForwardingResolution {
+                            egress_ifindex: forward_egress_ifindex,
+                            ..reverse_decision.resolution
+                        },
+                        nat: reverse_decision.nat.reverse(
+                            reverse_key.src_ip,
+                            reverse_key.dst_ip,
+                            reverse_key.src_port,
+                            reverse_key.dst_port,
+                        ),
+                        ..reverse_decision
+                    };
+                    // #14128: `NatDecision::reverse` is port-pair oriented: for
+                    // ICMP it puts the translated identifier (carried in the
+                    // reverse key's `src_port`, since the identifier is a single
+                    // symmetric field — #4074) into `rewrite_src_port` as
+                    // `Some(0)` (the reverse key's `dst_port`). The forward
+                    // decision's translated identifier is the reverse key's
+                    // `src_port`, not 0. Restore it or the validator sees a
+                    // bogus translated port of 0 and rejects the mapping.
+                    let forward_decision = if matches!(
+                        forward_query.protocol,
+                        crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+                    ) && forward_decision.nat.rewrite_src_port == Some(0)
+                    {
+                        let mut nat = forward_decision.nat;
+                        nat.rewrite_src_port = Some(reverse_key.src_port);
+                        SessionDecision {
+                            nat,
+                            ..forward_decision
+                        }
+                    } else {
+                        forward_decision
+                    };
+                    let mut forward_metadata = metadata.clone();
+                    forward_metadata.is_reverse = false;
+                    forward_metadata.ingress_ifindex = forward_ingress_ifindex as u32;
+                    if forward_decision.nat.rewrite_src.is_none()
+                        && forward_decision.nat.rewrite_dst.is_none()
+                        && !forward_decision.nat.nat64
+                        && !forward_decision.nat.nptv6
+                    {
+                        return None;
+                    }
+                    let Some(forward_ingress_vlan_id) = metadata.forward_ingress_vlan_id else {
+                        return Some(PolicyRevocation {
+                            canonical_key: None,
+                            decision: reverse_decision,
+                            metadata: metadata.clone(),
+                            origin,
+                            reason: PolicyRevocationReason::StaleSourceNat,
+                        });
+                    };
+                    forward_metadata.ingress_vlan_id = forward_ingress_vlan_id;
+                    std::mem::swap(
+                        &mut forward_metadata.ingress_zone,
+                        &mut forward_metadata.egress_zone,
+                    );
+                    let (valid, _) = source_nat_translation_still_valid(
+                        forwarding,
+                        &forward_decision,
+                        &forward_metadata,
+                        &forward_query,
+                        source_nat_static,
+                        now_ns,
+                    );
+                    return (!valid).then_some(PolicyRevocation {
                         canonical_key: None,
-                        decision: reverse_decision,
-                        metadata: metadata.clone(),
+                        decision: forward_decision,
+                        metadata: forward_metadata,
                         origin,
                         reason: PolicyRevocationReason::StaleSourceNat,
                     });
-                };
-                forward_metadata.ingress_vlan_id = forward_ingress_vlan_id;
-                std::mem::swap(
-                    &mut forward_metadata.ingress_zone,
-                    &mut forward_metadata.egress_zone,
-                );
-                let (valid, _) = source_nat_translation_still_valid(
-                    forwarding,
-                    &forward_decision,
-                    &forward_metadata,
-                    &forward_query,
-                    source_nat_static,
-                );
-                return (!valid).then_some(PolicyRevocation {
-                    canonical_key: None,
-                    decision: forward_decision,
-                    metadata: forward_metadata,
-                    origin,
-                    reason: PolicyRevocationReason::StaleSourceNat,
-                });
-            }
-        };
+                }
+            };
         let (forward_decision, forward_metadata, forward_origin) =
             sessions.entry_with_origin(&forward_key)?;
         (
@@ -755,6 +923,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         &forward_metadata,
         &forward_key,
         stored_static,
+        now_ns,
     );
     if valid {
         if let Some(canonical_key) = canonical_key.as_ref() {
@@ -770,7 +939,6 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
         reason: PolicyRevocationReason::StaleSourceNat,
     })
 }
-
 
 /// Outcome of the cold judgment. Stamping lives with the caller: PERMIT-only,
 /// never on decline or revoke (fail-closed).
@@ -1707,14 +1875,14 @@ fn reverse_hit_zone_policy(
                 );
                 if resolution_is_locally_forwarding(current_fwd_resolution) {
                     fwd_decision.resolution = current_fwd_resolution;
-                } else if current_fwd_resolution.disposition
-                    == ForwardingDisposition::LocalDelivery
+                } else if current_fwd_resolution.disposition == ForwardingDisposition::LocalDelivery
                 {
                     // The prior entry was transit; judge that stored pair
                     // rather than treating today's LocalDelivery route as
                     // policy authority.
                     stored_pair_only = true;
-                } else if current_fwd_resolution.disposition == ForwardingDisposition::FabricRedirect
+                } else if current_fwd_resolution.disposition
+                    == ForwardingDisposition::FabricRedirect
                 {
                     // Continue to judge the recorded policy egress below; the
                     // transport route is not the forward flow's policy zone.
@@ -1834,9 +2002,9 @@ fn reverse_hit_zone_policy(
     // Permit and must not manufacture a DENY (#8618).
     let fwd_companion = sessions.entry_with_origin_and_forwarding_generation(&fwd_key);
     let companion_forwarding_stale = reverse_has_intent
-        && fwd_companion
-            .as_ref()
-            .is_some_and(|(_, _, _, generation)| sessions.forwarding_resolution_is_stale(*generation));
+        && fwd_companion.as_ref().is_some_and(|(_, _, _, generation)| {
+            sessions.forwarding_resolution_is_stale(*generation)
+        });
     // The companion's forwarding generation is checked independently of its
     // policy provenance, including for `LiveEgress`.
     let companion_needs_live = if reverse_has_intent {
@@ -1855,8 +2023,7 @@ fn reverse_hit_zone_policy(
     } else {
         false
     };
-    let force_reverse_cold =
-        rev_force_cold || companion_needs_live || companion_forwarding_stale;
+    let force_reverse_cold = rev_force_cold || companion_needs_live || companion_forwarding_stale;
     // Inconsistent-companion arms fail closed when the reverse packet would
     // locally forward and its own row needs cold, or the companion itself
     // demands live. A FIB-stale LiveEgress companion with a non-forwarding
@@ -1873,8 +2040,7 @@ fn reverse_hit_zone_policy(
     {
         return None;
     }
-    let Some((mut fwd_decision, fwd_metadata, fwd_origin, _)) = fwd_companion
-    else {
+    let Some((mut fwd_decision, fwd_metadata, fwd_origin, _)) = fwd_companion else {
         // A locally-forwarding reverse hit with no companion is not allowed
         // to retain a recorded Permit or take the old reverse Decline arm.
         // #9604: no tuple synthesis — zones would degrade to recorded-swapped with no live ledger.

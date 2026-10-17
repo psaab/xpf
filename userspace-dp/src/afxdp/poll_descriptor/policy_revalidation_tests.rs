@@ -582,6 +582,7 @@ fn ha_imported_static_snat_survives_first_hit_12187() {
             origin,
             source_nat_static,
             None,
+            1_000_000_000,
         )
         .is_none(),
         "an imported static SNAT must survive its first hit with unchanged config"
@@ -622,6 +623,7 @@ fn ha_imported_dynamic_snat_survives_then_static_collision_revokes_12187() {
             origin,
             source_nat_static,
             None,
+            1_000_000_000,
         )
         .is_none(),
         "an imported dynamic SNAT must survive its first hit with unchanged config"
@@ -639,6 +641,7 @@ fn ha_imported_dynamic_snat_survives_then_static_collision_revokes_12187() {
             origin,
             source_nat_static,
             None,
+            1_000_000_000,
         )
         .is_some(),
         "a later same-tuple static SNAT must not launder the imported dynamic allocation"
@@ -741,6 +744,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
             resolved.origin,
             resolved.source_nat_static,
             resolved.source_nat_validation_key.as_ref(),
+            1_000_000_000,
         )
         .is_none(),
         "transient imported dynamic SNAT must survive its unchanged first hit"
@@ -756,6 +760,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
             resolved.origin,
             resolved.source_nat_static,
             resolved.source_nat_validation_key.as_ref(),
+            1_000_000_000,
         )
         .is_some(),
         "transient dynamic provenance must still reject a later static collision"
@@ -842,6 +847,7 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
             collision_resolved.origin,
             collision_resolved.source_nat_static,
             collision_resolved.source_nat_validation_key.as_ref(),
+            1_000_000_000,
         )
         .is_some(),
         "ambiguous original-tuple identity must fail closed, not borrow another flow's rule"
@@ -976,6 +982,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
                 hit.origin,
                 hit.source_nat_static,
                 hit.source_nat_validation_key.as_ref(),
+                1_000_000_000,
             )
             .is_none(),
             "unchanged dynamic SNAT survives each translated hit"
@@ -994,6 +1001,7 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
             resolved.origin,
             resolved.source_nat_static,
             resolved.source_nat_validation_key.as_ref(),
+            1_000_000_000,
         )
         .is_some(),
         "a later same-tuple static SNAT still revokes the imported dynamic allocation"
@@ -1147,6 +1155,7 @@ fn ha_imported_transient_dynamic_snat_local_alias_keeps_shared_canonical_12187()
             hit.origin,
             hit.source_nat_static,
             hit.source_nat_validation_key.as_ref(),
+            1_000_000_000,
         )
         .is_none(),
         "the local alias's unchanged dynamic SNAT survives sessionless revalidation"
@@ -2229,8 +2238,14 @@ fn snat_vlan_trunk_case_12861(
 fn source_nat_revalidation_resolves_vlan_logical_ingress_12861() {
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(snat_vlan_trunk_forwarding_12861(), 11, 50, false);
-    let (valid, static_nat) =
-        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    let (valid, static_nat) = source_nat_translation_still_valid(
+        &forwarding,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+    );
     assert!(
         valid,
         "SNAT session on VLAN 50 (lan) must remain valid; raw physical parent resolves to dmz"
@@ -2280,6 +2295,7 @@ fn source_nat_vlan_logical_ingress_survives_generation_advance_12861() {
             origin,
             static_nat,
             None,
+            1_000_000_000,
         )
         .is_none(),
         "the unchanged SNAT mapping on VLAN 50 must survive revalidation"
@@ -2295,8 +2311,14 @@ fn source_nat_revalidation_untagged_trunk_stays_valid_12861() {
     forwarding.ingress_logical_ifindex.insert((11, 0), 13);
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(forwarding, 11, 0, false);
-    let (valid, _) =
-        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    let (valid, _) = source_nat_translation_still_valid(
+        &forwarding,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+    );
     assert!(valid, "untagged SNAT session on lan unit must remain valid");
 }
 
@@ -2309,8 +2331,14 @@ fn source_nat_revalidation_physical_lan_stays_valid_12861() {
     forwarding.ifindex_to_zone_id.insert(11, 1);
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(forwarding, 11, 0, false);
-    let (valid, _) =
-        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    let (valid, _) = source_nat_translation_still_valid(
+        &forwarding,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+    );
     assert!(
         valid,
         "SNAT session on a physical lan port must remain valid"
@@ -2323,8 +2351,14 @@ fn source_nat_revalidation_physical_lan_stays_valid_12861() {
 fn source_nat_revalidation_fabric_keeps_recorded_zones_12861() {
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(snat_vlan_trunk_forwarding_12861(), 0, 0, true);
-    let (valid, _) =
-        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    let (valid, _) = source_nat_translation_still_valid(
+        &forwarding,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+    );
     assert!(
         valid,
         "fabric SNAT session must keep recorded lan->wan zones"
@@ -2341,8 +2375,14 @@ fn source_nat_revalidation_other_vlan_zone_still_revoked_12861() {
     forwarding.ifindex_to_zone_id.insert(14, 3);
     let (forwarding, decision, metadata, key) =
         snat_vlan_trunk_case_12861(forwarding, 11, 60, false);
-    let (valid, _) =
-        source_nat_translation_still_valid(&forwarding, &decision, &metadata, &key, Some(false));
+    let (valid, _) = source_nat_translation_still_valid(
+        &forwarding,
+        &decision,
+        &metadata,
+        &key,
+        Some(false),
+        1_000_000_000,
+    );
     assert!(
         !valid,
         "SNAT session arriving on a dmz VLAN must not match the lan->wan rule"
@@ -2758,6 +2798,7 @@ fn reverse_snat_hit_13652(
         case.6,
         case.7,
         None,
+        1_000_000_000,
     )
 }
 
@@ -2853,7 +2894,11 @@ fn reverse_hit_without_local_forward_companion_revokes_sessionlessly_13652() {
         revocation.reason,
         PolicyRevocationReason::StaleSourceNat
     ));
-    assert_eq!(sessions.len(), 1, "sessionless validation does not tear down a row");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "sessionless validation does not tear down a row"
+    );
 }
 
 /// #13652 control (guarded twin): forward row installed and stale, reverse
@@ -2905,8 +2950,16 @@ fn reverse_snat_case_from_production_13771(
     SessionOrigin,
     Option<bool>,
 ) {
-    let (forward_key, _reverse_key, forward_decision, forward_metadata, _reverse_decision, _reverse_metadata, origin, provenance) =
-        reverse_snat_case_13652();
+    let (
+        forward_key,
+        _reverse_key,
+        forward_decision,
+        forward_metadata,
+        _reverse_decision,
+        _reverse_metadata,
+        origin,
+        provenance,
+    ) = reverse_snat_case_13652();
     let forward_match = crate::session::ForwardSessionMatch {
         key: forward_key.clone(),
         decision: forward_decision,
@@ -2934,8 +2987,7 @@ fn reverse_snat_case_from_production_13771(
         0,
         0,
     );
-    let reverse_key =
-        crate::session::reverse_session_key(&forward_key, forward_decision.nat);
+    let reverse_key = crate::session::reverse_session_key(&forward_key, forward_decision.nat);
     assert_eq!(reverse.aux.source_nat_static, Some(false));
     assert_eq!(
         reverse.decision.resolution.egress_ifindex, 11,
@@ -2978,8 +3030,11 @@ fn reverse_snat_forwarding_13771(with_pool: bool) -> ForwardingState {
             primary_v6: None,
         },
     );
-    forwarding.egress.get_mut(&12).expect("WAN interface").primary_v4 =
-        Some("203.0.113.10".parse().expect("WAN IPv4"));
+    forwarding
+        .egress
+        .get_mut(&12)
+        .expect("WAN interface")
+        .primary_v4 = Some("203.0.113.10".parse().expect("WAN IPv4"));
     let next_hop = Ipv4Addr::new(10, 0, 0, 254);
     forwarding.routes_v4.insert(
         "inet.0".to_string(),
@@ -3002,10 +3057,9 @@ fn reverse_snat_forwarding_13771(with_pool: bool) -> ForwardingState {
             rule_priority: 0,
         }],
     );
-    forwarding.neighbors.insert(
-        (11, IpAddr::V4(next_hop)),
-        NeighborEntry { mac: [0; 6] },
-    );
+    forwarding
+        .neighbors
+        .insert((11, IpAddr::V4(next_hop)), NeighborEntry { mac: [0; 6] });
     let rules = if with_pool {
         vec![crate::protocol::SourceNATRuleSnapshot {
             name: "scoped-pool".to_string(),
@@ -3054,18 +3108,20 @@ fn reverse_without_companion_unchanged_interface_snat_survives_13771() {
 #[test]
 fn reverse_without_companion_uses_forward_vlan_for_snat_scope_13789() {
     let mut forwarding = reverse_snat_forwarding_13771(true);
-    forwarding.egress.get_mut(&11).expect("LAN interface").vlan_id = 100;
     forwarding
-        .ingress_logical_ifindex
-        .insert((11, 200), 14);
+        .egress
+        .get_mut(&11)
+        .expect("LAN interface")
+        .vlan_id = 100;
+    forwarding.ingress_logical_ifindex.insert((11, 200), 14);
     forwarding
         .ifindex_to_config_name
         .insert(11, "ge-0/0/0.100".to_string());
     forwarding
         .ifindex_to_config_name
         .insert(14, "ge-0/0/0.200".to_string());
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
-        crate::protocol::SourceNATRuleSnapshot {
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
             name: "forward-vlan-snat".to_string(),
             from_zone: "lan".to_string(),
             to_zone: "wan".to_string(),
@@ -3076,8 +3132,7 @@ fn reverse_without_companion_uses_forward_vlan_for_snat_scope_13789() {
             port_low: 45_000,
             port_high: 45_000,
             ..Default::default()
-        },
-    ]);
+        }]);
     let case = reverse_snat_case_from_production_13771(&forwarding);
     let mut sessions = SessionTable::new();
     sessions.set_forwarding_revalidation_gen(1, 1);
@@ -3091,15 +3146,17 @@ fn reverse_without_companion_uses_forward_vlan_for_snat_scope_13789() {
 #[test]
 fn reverse_without_companion_symmetric_vlan_snat_scope_survives_13789() {
     let mut forwarding = reverse_snat_forwarding_13771(true);
-    forwarding.egress.get_mut(&11).expect("LAN interface").vlan_id = 200;
     forwarding
-        .ingress_logical_ifindex
-        .insert((11, 200), 14);
+        .egress
+        .get_mut(&11)
+        .expect("LAN interface")
+        .vlan_id = 200;
+    forwarding.ingress_logical_ifindex.insert((11, 200), 14);
     forwarding
         .ifindex_to_config_name
         .insert(14, "ge-0/0/0.200".to_string());
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
-        crate::protocol::SourceNATRuleSnapshot {
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
             name: "symmetric-vlan-snat".to_string(),
             from_zone: "lan".to_string(),
             to_zone: "wan".to_string(),
@@ -3110,8 +3167,7 @@ fn reverse_without_companion_symmetric_vlan_snat_scope_survives_13789() {
             port_low: 45_000,
             port_high: 45_000,
             ..Default::default()
-        },
-    ]);
+        }]);
     let case = reverse_snat_case_from_production_13771(&forwarding);
     let mut sessions = SessionTable::new();
     sessions.set_forwarding_revalidation_gen(1, 1);
@@ -3120,7 +3176,6 @@ fn reverse_without_companion_symmetric_vlan_snat_scope_survives_13789() {
         "symmetric VLAN SNAT scope must survive"
     );
 }
-
 
 /// #13771 negative control: withdrawing SNAT still revokes a
 /// companion-less reverse hit.
@@ -3182,8 +3237,8 @@ fn reverse_without_companion_nat64_nptv6_missing_provenance_fails_closed_13910()
         case.4.nat.rewrite_src = Some("203.0.113.10".parse().expect("translated source"));
         let mut sessions = SessionTable::new();
         sessions.set_forwarding_revalidation_gen(1, 1);
-        let revocation = reverse_snat_hit_13652(&forwarding, &mut sessions, &case)
-            .unwrap_or_else(|| {
+        let revocation =
+            reverse_snat_hit_13652(&forwarding, &mut sessions, &case).unwrap_or_else(|| {
                 panic!(
                     "{shape}: translated reverse hit without forward VLAN provenance \
                      must fail closed"
@@ -3194,28 +3249,56 @@ fn reverse_without_companion_nat64_nptv6_missing_provenance_fails_closed_13910()
             revocation.reason,
             PolicyRevocationReason::StaleSourceNat
         ));
-        assert_eq!(sessions.len(), 0, "{shape}: drop-only verdict installs nothing");
+        assert_eq!(
+            sessions.len(),
+            0,
+            "{shape}: drop-only verdict installs nothing"
+        );
     }
 }
 
-/// #13910 control: NAT64/NPTv6 with recorded forward VLAN provenance is not
-/// rejected by the provenance arm and reaches the policy gate.
+/// #13910 control (NAT64): with recorded forward VLAN provenance the hit is
+/// not rejected by the provenance arm. NAT64 stays exempt from rule-table
+/// re-derivation (#14315: prefix-driven, no withdrawn rule to consult), so
+/// provenance remains its only stale-translation guard.
+/// The NPTv6 shape moved to
+/// `reverse_without_companion_nptv6_rederived_14315`: #14315 now re-derives
+/// NPTv6 from live state, and this fixture's forwarding carries no NPTv6 rule
+/// (its rewrite is an IPv4 SNAT pool address), so it correctly fails closed.
 #[test]
 fn reverse_without_companion_nat64_nptv6_with_provenance_survives_13910() {
-    for (shape, nat64, nptv6) in [("nat64", true, false), ("nptv6", false, true)] {
-        let forwarding = reverse_snat_forwarding_13771(false);
-        let mut case = reverse_snat_case_from_production_13771(&forwarding);
-        case.5.forward_ingress_vlan_id = Some(100);
-        case.4.nat.nat64 = nat64;
-        case.4.nat.nptv6 = nptv6;
-        case.4.nat.rewrite_src = Some("203.0.113.10".parse().expect("translated source"));
-        let mut sessions = SessionTable::new();
-        sessions.set_forwarding_revalidation_gen(1, 1);
-        assert!(
-            reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
-            "{shape}: recorded forward provenance must let the reverse hit pass"
-        );
-    }
+    let forwarding = reverse_snat_forwarding_13771(false);
+    let mut case = reverse_snat_case_from_production_13771(&forwarding);
+    case.5.forward_ingress_vlan_id = Some(100);
+    case.4.nat.nat64 = true;
+    case.4.nat.nptv6 = false;
+    case.4.nat.rewrite_src = Some("203.0.113.10".parse().expect("translated source"));
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(
+        reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_none(),
+        "nat64: recorded forward provenance must let the reverse hit pass"
+    );
+}
+
+/// #14315: a companion-less NPTv6 reverse hit is re-derived from live NPTv6
+/// state. The #13910 fixture carries no such rule, so it now fails closed
+/// even with forward VLAN provenance — the pre-#14315 blanket
+/// `(destination_valid, None)` return for `nptv6` is gone.
+#[test]
+fn reverse_without_companion_nptv6_rederived_14315() {
+    let forwarding = reverse_snat_forwarding_13771(false);
+    let mut case = reverse_snat_case_from_production_13771(&forwarding);
+    case.5.forward_ingress_vlan_id = Some(100);
+    case.4.nat.nat64 = false;
+    case.4.nat.nptv6 = true;
+    case.4.nat.rewrite_src = Some("203.0.113.10".parse().expect("translated source"));
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(
+        reverse_snat_hit_13652(&forwarding, &mut sessions, &case).is_some(),
+        "nptv6: no live NPTv6 rule re-derives the stored rewrite, so it must fail closed (#14315)"
+    );
 }
 
 /// #13910 pin of #13789's intended narrowing: a companion-less reverse hit
@@ -3271,10 +3354,8 @@ fn established_session_is_revoked_when_its_dnat_rule_is_withdrawn_13923() {
         ..Default::default()
     };
     let mut configured = imported_snat_forwarding(false);
-    configured.dnat_table = crate::nat::DnatTable::from_snapshots(
-        &[rule],
-        &crate::nat::NatCounterStore::default(),
-    );
+    configured.dnat_table =
+        crate::nat::DnatTable::from_snapshots(&[rule], &crate::nat::NatCounterStore::default());
     let mut sessions = SessionTable::new();
     sessions.set_forwarding_revalidation_gen(1, 1);
     assert!(sessions.upsert_synced_with_origin(synced.into_session_install(1), false));
@@ -3289,6 +3370,7 @@ fn established_session_is_revoked_when_its_dnat_rule_is_withdrawn_13923() {
             origin,
             source_nat_static,
             None,
+            1_000_000_000,
         )
         .is_none(),
         "the session must survive while its port-forward still matches"
@@ -3306,6 +3388,7 @@ fn established_session_is_revoked_when_its_dnat_rule_is_withdrawn_13923() {
             origin,
             source_nat_static,
             None,
+            1_000_000_000,
         )
         .is_some(),
         "withdrawing the destination-NAT rule must revoke the established session"
@@ -3358,10 +3441,8 @@ fn companionless_reverse_dnat_hit_revokes_after_rule_withdrawal_13923() {
         ..Default::default()
     };
     let mut configured = imported_snat_forwarding(false);
-    configured.dnat_table = crate::nat::DnatTable::from_snapshots(
-        &[rule],
-        &crate::nat::NatCounterStore::default(),
-    );
+    configured.dnat_table =
+        crate::nat::DnatTable::from_snapshots(&[rule], &crate::nat::NatCounterStore::default());
     let mut sessions = SessionTable::new();
     sessions.set_forwarding_revalidation_gen(1, 1);
     assert!(sessions.install_with_protocol_with_origin(
@@ -3487,8 +3568,8 @@ fn reverse_only_icmp_pat_survives_revalidation_14128() {
     forwarding.ifindex_unambiguous_zone_id.insert(12, 2);
     // Replace the TCP-scoped pool with a typed ICMP PAT pool: echo-request
     // (8,0) only, pool 203.0.113.10, identifier range 45000..=45000.
-    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
-        crate::protocol::SourceNATRuleSnapshot {
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
             name: "icmp-pat".to_string(),
             from_zone: "lan".to_string(),
             to_zone: "wan".to_string(),
@@ -3503,8 +3584,7 @@ fn reverse_only_icmp_pat_survives_revalidation_14128() {
                 ..Default::default()
             }],
             ..Default::default()
-        },
-    ]);
+        }]);
     let reverse = crate::afxdp::shared_ops::build_reverse_session_from_forward_match(
         &forwarding,
         &BTreeMap::new(),
@@ -3552,8 +3632,8 @@ fn reverse_only_icmp_pat_survives_revalidation_14128() {
     // not validate the echo mapping — the restored type/code is load-bearing,
     // not a blanket ICMP pass.
     let mut other_type = forwarding.clone();
-    other_type.source_nat_rules = crate::nat::parse_source_nat_rules(&[
-        crate::protocol::SourceNATRuleSnapshot {
+    other_type.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
             name: "icmp-other-type".to_string(),
             from_zone: "lan".to_string(),
             to_zone: "wan".to_string(),
@@ -3568,8 +3648,7 @@ fn reverse_only_icmp_pat_survives_revalidation_14128() {
                 ..Default::default()
             }],
             ..Default::default()
-        },
-    ]);
+        }]);
     let revocation = reverse_snat_hit_13652(&other_type, &mut sessions, &case)
         .expect("a different-type ICMP rule must revoke the echo PAT mapping");
     assert!(matches!(
@@ -3644,6 +3723,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             case.6,
             case.7,
             None,
+            1_000_000_000,
         )
         .is_none(),
         "interface-SNAT on logical VLAN unit 13 must survive a companion-less reverse hit (#14128)"
@@ -3667,6 +3747,7 @@ fn reverse_only_vlan_interface_snat_survives_14128() {
             case.6,
             case.7,
             None,
+            1_000_000_000,
         )
         .is_some(),
         "a logical-unit address change must revoke the stale interface translation"
@@ -3807,4 +3888,404 @@ fn source_nat_translation_matches_no_translation_to_pat_revokes_14128() {
         None,
         None,
     ));
+}
+
+// ---------------------------------------------------------------------------
+// #14315: destination/source NAT revalidation must not bypass NPTv6 or
+// non-TCP/UDP translations, must keep live Persistent-NAT inbound bindings,
+// and must stay read-only w.r.t. per-rule hit counters.
+// ---------------------------------------------------------------------------
+
+const NOW_14315: u64 = 1_000_000_000;
+
+fn meta_14315(ingress_zone: u16, egress_zone: u16) -> SessionMetadata {
+    SessionMetadata {
+        ingress_zone,
+        egress_zone,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 1,
+        fabric_ingress: true,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        forward_ingress_vlan_id: None,
+    }
+}
+
+fn key_14315(protocol: u8, src: &str, dst: &str, src_port: u16, dst_port: u16) -> SessionKey {
+    SessionKey {
+        addr_family: if src.contains(':') {
+            libc::AF_INET6 as u8
+        } else {
+            libc::AF_INET as u8
+        },
+        protocol,
+        src_ip: src.parse().expect("src ip"),
+        dst_ip: dst.parse().expect("dst ip"),
+        src_port,
+        dst_port,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    }
+}
+
+fn decision_14315(nat: NatDecision) -> SessionDecision {
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
+}
+
+/// (a1) A withdrawn ICMP DNAT rule must revoke: pre-fix the
+/// `!has_l4_ports` early return kept every ICMP/GRE/ESP translation alive.
+#[test]
+fn withdrawn_icmp_dnat_revokes_14315() {
+    let key = key_14315(
+        libc::IPPROTO_ICMP as u8,
+        "198.51.100.9",
+        "203.0.113.7",
+        0x1234,
+        0,
+    );
+    let decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.0.7".parse().expect("internal")),
+        ..NatDecision::default()
+    });
+    let metadata = meta_14315(2, 1);
+    let rule = crate::protocol::DestinationNATRuleSnapshot {
+        name: "icmp-forward".to_string(),
+        destination_address: "203.0.113.7".to_string(),
+        pool_address: "10.0.0.7".to_string(),
+        ..Default::default()
+    };
+    let mut configured = ForwardingState::default();
+    configured.dnat_table =
+        crate::nat::DnatTable::from_snapshots(&[rule], &crate::nat::NatCounterStore::default());
+    assert!(
+        destination_nat_translation_still_valid(&configured, &decision, &metadata, &key, NOW_14315),
+        "ICMP DNAT session must validate while its rule exists"
+    );
+    let withdrawn = ForwardingState::default();
+    assert!(
+        !destination_nat_translation_still_valid(&withdrawn, &decision, &metadata, &key, NOW_14315),
+        "withdrawing the ICMP DNAT rule must invalidate the session (#14315)"
+    );
+}
+
+/// (a2) Same for a GRE static-NAT (whole-address) mapping.
+#[test]
+fn withdrawn_gre_static_nat_revokes_14315() {
+    let key = key_14315(libc::IPPROTO_GRE as u8, "198.51.100.9", "203.0.113.8", 0, 0);
+    let decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.0.8".parse().expect("internal")),
+        ..NatDecision::default()
+    });
+    let metadata = meta_14315(2, 1);
+    let mut configured = ForwardingState::default();
+    configured.static_nat = crate::nat::StaticNatTable::from_snapshots(
+        &[crate::protocol::StaticNATRuleSnapshot {
+            name: "gre-static".to_string(),
+            external_ip: "203.0.113.8".to_string(),
+            internal_ip: "10.0.0.8".to_string(),
+            ..Default::default()
+        }],
+        &crate::nat::NatCounterStore::default(),
+    );
+    assert!(
+        destination_nat_translation_still_valid(&configured, &decision, &metadata, &key, NOW_14315),
+        "GRE static-NAT session must validate while its rule exists"
+    );
+    let withdrawn = ForwardingState::default();
+    assert!(
+        !destination_nat_translation_still_valid(&withdrawn, &decision, &metadata, &key, NOW_14315),
+        "withdrawing the GRE static-NAT rule must invalidate the session (#14315)"
+    );
+}
+
+fn nptv6_forwarding_14315() -> ForwardingState {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.nptv6 =
+        crate::nptv6::Nptv6State::from_snapshots(&[crate::protocol::Nptv6RuleSnapshot {
+            name: "npt".to_string(),
+            internal_prefix: "fd00:1::/48".to_string(),
+            external_prefix: "2001:db8:1::/48".to_string(),
+            ..Default::default()
+        }]);
+    forwarding
+}
+
+/// (a3) A withdrawn NPTv6 prefix rule must revoke both directions.
+#[test]
+fn withdrawn_nptv6_prefix_revokes_14315() {
+    let configured = nptv6_forwarding_14315();
+    let withdrawn = ForwardingState::default();
+    // Inbound: wire dst in external prefix -> internal.
+    let mut internal = "2001:db8:1::1234"
+        .parse::<std::net::Ipv6Addr>()
+        .expect("v6");
+    assert!(configured.nptv6.translate_inbound(&mut internal, ""));
+    let in_key = key_14315(6, "2001:db8:9::1", "2001:db8:1::1234", 40000, 443);
+    let in_decision = decision_14315(NatDecision {
+        rewrite_dst: Some(IpAddr::V6(internal)),
+        nptv6: true,
+        ..NatDecision::default()
+    });
+    let metadata = meta_14315(2, 1);
+    assert!(
+        destination_nat_translation_still_valid(
+            &configured,
+            &in_decision,
+            &metadata,
+            &in_key,
+            NOW_14315
+        ),
+        "NPTv6 inbound session must validate while its prefix rule exists"
+    );
+    assert!(
+        !destination_nat_translation_still_valid(
+            &withdrawn,
+            &in_decision,
+            &metadata,
+            &in_key,
+            NOW_14315
+        ),
+        "withdrawing the NPTv6 prefix must invalidate the inbound session (#14315)"
+    );
+    // Outbound: internal src -> external.
+    let mut external = "fd00:1::1234".parse::<std::net::Ipv6Addr>().expect("v6");
+    assert!(configured.nptv6.translate_outbound(&mut external, ""));
+    let out_key = key_14315(6, "fd00:1::1234", "2001:db8:9::1", 40000, 443);
+    let out_decision = decision_14315(NatDecision {
+        rewrite_src: Some(IpAddr::V6(external)),
+        nptv6: true,
+        ..NatDecision::default()
+    });
+    let (valid, _) = source_nat_translation_still_valid(
+        &configured,
+        &out_decision,
+        &metadata,
+        &out_key,
+        None,
+        NOW_14315,
+    );
+    assert!(
+        valid,
+        "NPTv6 outbound session must validate while its prefix rule exists"
+    );
+    let (valid, _) = source_nat_translation_still_valid(
+        &withdrawn,
+        &out_decision,
+        &metadata,
+        &out_key,
+        None,
+        NOW_14315,
+    );
+    assert!(
+        !valid,
+        "withdrawing the NPTv6 prefix must invalidate the outbound session (#14315)"
+    );
+}
+
+/// (b) An inbound Persistent-NAT session (no static/DNAT entry) stays valid
+/// while its binding lives in the pool allocator, and revokes once the
+/// persistent rule (and thus its allocator) is withdrawn.
+#[test]
+fn persistent_nat_inbound_survives_revalidation_14315() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.source_nat_rules =
+        crate::nat::parse_source_nat_rules(&[crate::protocol::SourceNATRuleSnapshot {
+            name: "persistent-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "persistent-pool".to_string(),
+            pool_addresses: vec!["203.0.113.10".to_string()],
+            port_low: 40000,
+            port_high: 40010,
+            persistent_nat: true,
+            persistent_nat_permit_any_remote_host: true,
+            persistent_nat_inactivity_timeout: 300,
+            ..Default::default()
+        }]);
+    // Mint the binding exactly as an outbound flow would.
+    let mut counter = None;
+    let outbound = match crate::nat::match_source_nat_result_for_tuple(
+        &crate::nat::InterfaceNatAllocators::default(),
+        &forwarding.source_nat_rules,
+        &crate::nat::NatScopeCtx::default(),
+        "lan",
+        "wan",
+        "10.0.1.100".parse().expect("internal host"),
+        "8.8.8.8".parse().expect("remote"),
+        Some(6),
+        12345,
+        53,
+        None,
+        None,
+        NOW_14315,
+        false,
+        false,
+        crate::nat::NatHolder::Untracked,
+        &mut counter,
+    ) {
+        crate::nat::SourceNatLookup::Matched(decision) => decision,
+        other => panic!("expected matched persistent SNAT, got {other:?}"),
+    };
+    let public_ip = outbound.rewrite_src.expect("translated src");
+    let public_port = outbound.rewrite_src_port.expect("translated port");
+    // Unsolicited inbound packet to the persistent binding.
+    let in_key = key_14315(6, "8.8.8.8", &public_ip.to_string(), 53, public_port);
+    // Admission would use dst_port = public_port; the inbound flow key carries
+    // it as dst_port, and the remote as src.
+    let in_key = SessionKey {
+        dst_port: public_port,
+        ..in_key
+    };
+    let in_decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.1.100".parse().expect("internal host")),
+        rewrite_dst_port: Some(12345),
+        ..NatDecision::default()
+    });
+    let metadata = meta_14315(2, 1);
+    assert!(
+        destination_nat_translation_still_valid(
+            &forwarding,
+            &in_decision,
+            &metadata,
+            &in_key,
+            NOW_14315 + 1
+        ),
+        "live Persistent-NAT inbound binding must survive revalidation (#14315)"
+    );
+    let withdrawn = ForwardingState::default();
+    assert!(
+        !destination_nat_translation_still_valid(
+            &withdrawn,
+            &in_decision,
+            &metadata,
+            &in_key,
+            NOW_14315 + 1
+        ),
+        "withdrawing the persistent rule must invalidate the inbound binding (#14315)"
+    );
+}
+
+/// (c) Revalidation is read-only: TCP DNAT + static SNAT revalidation leaves
+/// every per-rule hit counter unchanged.
+#[test]
+fn revalidation_leaves_nat_rule_counters_unchanged_14315() {
+    let store = crate::nat::NatCounterStore::default();
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.egress.insert(
+        12,
+        EgressInterface {
+            bind_ifindex: 12,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0; 6],
+            zone_id: 2,
+            redundancy_group: 0,
+            primary_v4: Some("203.0.113.254".parse().expect("egress")),
+            primary_v6: None,
+        },
+    );
+    forwarding.dnat_table = crate::nat::DnatTable::from_snapshots(
+        &[crate::protocol::DestinationNATRuleSnapshot {
+            name: "web-forward".to_string(),
+            counter_id: 77,
+            destination_address: "198.51.100.1".to_string(),
+            destination_port: 443,
+            protocol: "tcp".to_string(),
+            pool_address: "10.0.0.10".to_string(),
+            pool_port: 8443,
+            ..Default::default()
+        }],
+        &store,
+    );
+    forwarding.static_nat = crate::nat::StaticNatTable::from_snapshots(
+        &[crate::protocol::StaticNATRuleSnapshot {
+            name: "static-snat".to_string(),
+            counter_id: 78,
+            from_zone: "wan".to_string(),
+            external_ip: "203.0.113.10".to_string(),
+            internal_ip: "10.0.0.1".to_string(),
+            ..Default::default()
+        }],
+        &store,
+    );
+    let before = store.snapshots();
+    // TCP DNAT session.
+    let dnat_key = key_14315(6, "198.51.100.9", "198.51.100.1", 40000, 443);
+    let dnat_decision = decision_14315(NatDecision {
+        rewrite_dst: Some("10.0.0.10".parse().expect("server")),
+        rewrite_dst_port: Some(8443),
+        ..NatDecision::default()
+    });
+    let metadata = meta_14315(2, 1);
+    assert!(destination_nat_translation_still_valid(
+        &forwarding,
+        &dnat_decision,
+        &metadata,
+        &dnat_key,
+        NOW_14315
+    ));
+    // Static SNAT session (also exercises the static destination branch).
+    // Forward direction is lan -> wan; the validator resolves the zone pair
+    // from the recorded zones on this fabric-ingress fixture.
+    let snat_key = key_14315(6, "10.0.0.1", "198.51.100.1", 443, 443);
+    let snat_decision = decision_14315(NatDecision {
+        rewrite_src: Some("203.0.113.10".parse().expect("external")),
+        ..NatDecision::default()
+    });
+    let snat_metadata = meta_14315(1, 2);
+    let (valid, _) = source_nat_translation_still_valid(
+        &forwarding,
+        &snat_decision,
+        &snat_metadata,
+        &snat_key,
+        Some(true),
+        NOW_14315,
+    );
+    assert!(
+        valid,
+        "static SNAT session must validate while its rule exists"
+    );
+    let after = store.snapshots();
+    assert_eq!(before.len(), after.len(), "counter row set must not change");
+    for (b, a) in before.iter().zip(after.iter()) {
+        assert_eq!(
+            (b.packets, b.bytes),
+            (a.packets, a.bytes),
+            "revalidation must not increment NAT rule counter {} (#14315)",
+            b.counter_id
+        );
+    }
 }
