@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -532,6 +533,23 @@ func (d *Daemon) reconcileDHCPRelay(cfg *config.Config) {
 // empty, or absent (the "stop the service" signal). It is the single mapping
 // used by both boot and the day-2 reconcile, so the diff-guard in reconcileLLDP
 // compares like-for-like.
+// effectiveLLDPConfigChecked is effectiveLLDPConfig plus the #14617
+// `interface all { disable; }` rejection: expanding "every interface,
+// disabled" silently to silence would invert the wildcard's meaning,
+// so the combination is refused instead (warn + no service, not a
+// kernel lookup of a device named "all").
+func effectiveLLDPConfigChecked(cfg *config.Config) (*lldp.LLDPConfig, bool) {
+	if cfg != nil && cfg.Protocols.LLDP != nil {
+		for _, iface := range cfg.Protocols.LLDP.Interfaces {
+			if lldp.IsAllInterface(iface.Name) && iface.Disable {
+				slog.Warn("LLDP: `protocols lldp interface all disable` is not supported; use `protocols lldp disable` or per-interface disable entries — LLDP not started")
+				return nil, false
+			}
+		}
+	}
+	return effectiveLLDPConfig(cfg), true
+}
+
 func effectiveLLDPConfig(cfg *config.Config) *lldp.LLDPConfig {
 	if cfg == nil || cfg.Protocols.LLDP == nil ||
 		cfg.Protocols.LLDP.Disable || len(cfg.Protocols.LLDP.Interfaces) == 0 {
@@ -584,7 +602,7 @@ func (d *Daemon) reconcileLLDP(cfg *config.Config) {
 		return
 	}
 
-	want := effectiveLLDPConfig(cfg)
+	want, wantOK := effectiveLLDPConfigChecked(cfg)
 
 	// Skip when the effective config is unchanged since the last reconcile, so
 	// an unrelated commit never bounces a healthy LLDP generation (sockets +
@@ -606,18 +624,18 @@ func (d *Daemon) reconcileLLDP(cfg *config.Config) {
 	// interface (a typo in the config) never resolves, never triggers a retry,
 	// and cannot churn the generation on every commit — which is the #2372
 	// finding-6 regression this guard exists to prevent.
-	if d.lldpApplyInit && lldpConfigEqual(d.lldpApplied, want) && !d.lldpRecoveryDue() {
+	if d.lldpApplyInit && wantOK && lldpConfigEqual(d.lldpApplied, want) && !d.lldpRecoveryDue() {
 		return
 	}
 
 	if want == nil {
-		// Disabled / empty: stop the running service (idempotent if already
-		// stopped). Stop cannot partially fail, so there is no unresolved set
-		// to carry: record convergence directly.
+		// Disabled / empty (or rejected `all disable`): stop the running
+		// service. Stop cannot partially fail, so record convergence.
 		d.lldpMgr.Stop()
 		d.lldpApplyInit = true
 		d.lldpApplied = want
 		d.lldpUnresolved = nil
+		d.lldpManagedNames = nil
 		return
 	}
 
@@ -625,13 +643,15 @@ func (d *Daemon) reconcileLLDP(cfg *config.Config) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// Record what the apply ACHIEVED, and record it AFTER the apply. The
-	// unresolved set is the ground truth that makes an incomplete generation
-	// distinguishable from a converged one.
 	unresolved := d.lldpMgr.Apply(ctx, want)
 	d.lldpApplyInit = true
 	d.lldpApplied = want
 	d.lldpUnresolved = unresolved
+	if lldp.ExpandsAllInterfaces(want) {
+		d.lldpManagedNames = lldp.ManagedInterfaceNames()
+	} else {
+		d.lldpManagedNames = nil
+	}
 	if len(unresolved) > 0 {
 		slog.Warn("LLDP: generation is INCOMPLETE — these configured interfaces could not be "+
 			"resolved and are dark; they will be retried automatically as soon as they appear, "+
@@ -664,6 +684,23 @@ func (d *Daemon) lldpRecoveryDue() bool {
 	for _, name := range d.lldpUnresolved {
 		if lldp.InterfaceResolvable(name) {
 			return true
+		}
+	}
+	// #14617: under `interface all`, a NIC that appears after a converged
+	// apply is not in lldpUnresolved (it was never configured by name),
+	// so compare the live inventory with the inventory the last apply
+	// expanded over. Only growth/replacement triggers a rebuild; an
+	// explicit (non-all) config never reaches this branch.
+	if lldp.ExpandsAllInterfaces(d.lldpApplied) {
+		cur := lldp.ManagedInterfaceNames()
+		if !slices.Equal(cur, d.lldpManagedNames) {
+			// A mere disappearance does not need a rebuild either, but
+			// Apply is idempotent and inventory change is rare; treating
+			// any change as due keeps a replaced NIC covered. Guard
+			// against churn when both are empty.
+			if len(cur) > 0 || len(d.lldpManagedNames) > 0 {
+				return true
+			}
 		}
 	}
 	return false

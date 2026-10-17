@@ -44,6 +44,15 @@ frame flood cannot exhaust memory (#4044).
   its tests to observe the start/stop transition.
 - `ApplyCount()` — `lldp.go`. Number of `Apply()` calls. Test seam for the
   day-2 reconcile diff-guard (#2372) — an unrelated commit must not re-`Apply`.
+- `IsAllInterface(name)` / `ExpandsAllInterfaces(cfg)` /
+  `ManagedInterfaceNames()` / `AllInterfacesResolvable()` — `lldp.go`
+  (#14617). The Junos `protocols lldp interface all` wildcard: `Apply`
+  expands an enabled `all` to every kernel-enumerated (non-loopback)
+  interface, minus per-interface `disable` entries (either spelling)
+  and minus explicitly enabled interfaces (started once). Enumeration
+  failure reports `"all"` as unresolved (#6794 retry debt).
+  `interface all { disable; }` is NOT expanded to silence: the daemon
+  refuses it (warn + no service) and `ValidateConfig` warns at commit.
 - `Neighbors()` — `lldp.go`. Snapshot consumed by `show lldp
   neighbors`.
 

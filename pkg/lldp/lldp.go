@@ -185,6 +185,17 @@ type ifSession struct {
 	recvFn func(buf []byte) (int, int, error)
 }
 
+// IsAllInterface reports whether name is the Junos `all` wildcard for
+// `protocols lldp interface all` (#14617). Matching is exact and
+// case-sensitive: interface names are case-sensitive kernel names, and
+// only the documented lower-case wildcard is special.
+func IsAllInterface(name string) bool { return name == "all" }
+
+// interfacesFn enumerates kernel interfaces for the `all` expansion.
+// It is the same host inventory net.InterfaceByName consults, behind a
+// seam so tests can present a managed set without host devices.
+var interfacesFn = net.Interfaces
+
 // interfaceByNameFn is the interface-resolution seam. Tests override it to
 // assert Apply resolves the kernel (dash-form) device name before the lookup,
 // and to avoid depending on a host device being present.
@@ -338,7 +349,17 @@ func (m *Manager) Apply(ctx context.Context, cfg *LLDPConfig) (unresolved []stri
 		sysName = "xpf"
 	}
 
-	for _, lldpIf := range cfg.Interfaces {
+	// #14617: expand the Junos `interface all` wildcard to every managed
+	// (kernel-enumerated) interface, minus per-interface `disable` entries
+	// and minus interfaces explicitly enabled (started once, below).
+	// Without this, "all" was handed to InterfaceByName as a kernel device
+	// name, never resolved, and LLDP ran nowhere with only a Warn.
+	effective, allUnresolved := expandAllInterfaces(cfg.Interfaces)
+	if allUnresolved {
+		unresolved = append(unresolved, "all")
+	}
+
+	for _, lldpIf := range effective {
 		if lldpIf.Disable {
 			continue
 		}
@@ -403,12 +424,136 @@ func (m *Manager) Apply(ctx context.Context, cfg *LLDPConfig) (unresolved []stri
 	return unresolved
 }
 
+// expandAllInterfaces returns the effective interface list for Apply.
+// Without an enabled `all` entry it returns ifaces unchanged (no host
+// enumeration on the common path). With `all`, it enumerates kernel
+// interfaces via interfacesFn, drops loopback, drops names disabled by
+// a per-interface entry (either spelling), and drops names already
+// explicitly enabled (they keep their authored entry and run once).
+// Remaining enumerated names are appended in sorted order. If
+// enumeration fails, allUnresolved is true so the caller reports "all"
+// as #6794 retry debt; a late-appearing interface then triggers
+// recovery through InterfaceResolvable.
+func expandAllInterfaces(ifaces []LLDPInterface) (effective []LLDPInterface, allUnresolved bool) {
+	hasAll := false
+	for _, ifc := range ifaces {
+		if IsAllInterface(ifc.Name) && !ifc.Disable {
+			hasAll = true
+			break
+		}
+	}
+	if !hasAll {
+		return ifaces, false
+	}
+	disabled := make(map[string]bool)
+	enabled := make(map[string]bool)
+	for _, ifc := range ifaces {
+		if IsAllInterface(ifc.Name) {
+			continue
+		}
+		k := config.LinuxIfName(ifc.Name)
+		if ifc.Disable {
+			disabled[k] = true
+		} else {
+			enabled[k] = true
+		}
+	}
+	hostIfs, err := interfacesFn()
+	if err != nil {
+		slog.Warn("LLDP: enumerate interfaces for `all` expansion failed", "err", err)
+		out := make([]LLDPInterface, 0, len(ifaces))
+		for _, ifc := range ifaces {
+			if !IsAllInterface(ifc.Name) {
+				out = append(out, ifc)
+			}
+		}
+		return out, true
+	}
+	seen := make(map[string]bool)
+	var extra []string
+	for _, hi := range hostIfs {
+		name := hi.Name
+		if name == "" || name == "lo" || hi.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		k := config.LinuxIfName(name)
+		if disabled[k] || enabled[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		extra = append(extra, name)
+	}
+	sort.Strings(extra)
+	out := make([]LLDPInterface, 0, len(ifaces)+len(extra))
+	for _, ifc := range ifaces {
+		if !IsAllInterface(ifc.Name) {
+			out = append(out, ifc)
+		}
+	}
+	for _, name := range extra {
+		out = append(out, LLDPInterface{Name: name})
+	}
+	return out, false
+}
+
+// ExpandsAllInterfaces reports whether the enabled set contains the
+// `all` wildcard, so the daemon recovery guard can re-apply when the
+// host interface inventory grows (#14617, extending #6794).
+func ExpandsAllInterfaces(cfg *LLDPConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, ifc := range cfg.Interfaces {
+		if IsAllInterface(ifc.Name) && !ifc.Disable {
+			return true
+		}
+	}
+	return false
+}
+
+// AllInterfacesResolvable reports whether at least one non-loopback
+// kernel interface exists for the `all` expansion to cover.
+func AllInterfacesResolvable() bool {
+	hostIfs, err := interfacesFn()
+	if err != nil {
+		return false
+	}
+	for _, hi := range hostIfs {
+		if hi.Name != "" && hi.Name != "lo" && hi.Flags&net.FlagLoopback == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// ManagedInterfaceNames returns sorted non-loopback kernel names.
+// Used by the daemon recovery guard to detect inventory growth under
+// an `all` config without re-applying on every commit.
+func ManagedInterfaceNames() []string {
+	hostIfs, err := interfacesFn()
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, hi := range hostIfs {
+		if hi.Name == "" || hi.Name == "lo" || hi.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		names = append(names, hi.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // InterfaceResolvable reports whether a configured LLDP interface name resolves
 // to a kernel interface right now (#6794). It is the same lookup Apply performs
 // — the SAME name conversion and the SAME seam — so a caller deciding whether a
 // previously-unresolved interface has appeared cannot disagree with the code
 // that will act on that decision.
 func InterfaceResolvable(name string) bool {
+	if IsAllInterface(name) {
+		return AllInterfacesResolvable()
+	}
 	_, err := interfaceByNameFn(config.LinuxIfName(name))
 	return err == nil
 }
