@@ -33,3 +33,14 @@ func FailIfSessionForTesting(err error) {
 	}
 	newIfSessionFn = func(*net.Interface) (*ifSession, error) { return nil, err }
 }
+
+// SetInterfacesForTesting overrides the kernel interface enumeration
+// used by the `all` expansion (#14617) and by ManagedInterfaceNames /
+// AllInterfacesResolvable. Pass nil to restore net.Interfaces.
+func SetInterfacesForTesting(fn func() ([]net.Interface, error)) {
+	if fn == nil {
+		interfacesFn = net.Interfaces
+		return
+	}
+	interfacesFn = fn
+}

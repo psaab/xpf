@@ -717,6 +717,11 @@ type Daemon struct {
 	// unchanged-config reconcile should nevertheless re-apply. Mutated under
 	// applySem like the two fields above.
 	lldpUnresolved []string
+	// lldpManagedNames is the sorted kernel-interface inventory covered
+	// by the last `all` expansion (#14617). Compared on unchanged-config
+	// reconciles so a NIC that appears later joins LLDP without an
+	// unrelated commit bouncing a converged explicit config.
+	lldpManagedNames []string
 	// policyActivationSecs is CLOCK_MONOTONIC seconds captured immediately
 	// BEFORE the dataplane apply publishes a new policy set (#6948).
 	//

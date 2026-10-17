@@ -1740,6 +1740,9 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	// #9405: a routing-protocol interface reference that names no configured
 	// interface renders an FRR stanza that binds nothing, silently.
 	warnings = append(warnings, validateProtocolInterfaceRefWarnings(cfg)...)
+	// #14617: `interface all disable` would mean "disable everywhere";
+	// name it at commit instead of silently silencing LLDP.
+	warnings = append(warnings, validateLLDPAllDisableWarning(cfg)...)
 	// #7512: a `routing-options rib <name>` the compiler does not implement
 	// discarded its static routes. Warn rather than reject — see
 	// validateUnhandledRibWarnings for the #1960 reasoning.
