@@ -12,12 +12,14 @@ import (
 // codec reds here instead of silently zeroing on the standby.
 func TestPersistentNatLeaseDeterministicFieldsSurviveClusterCodec14638(t *testing.T) {
 	scope := uint32(7)
+	egress := uint32(11)
 	in := userspace.IdleLeaseWire{
 		Pool:                       "nat64-deterministic-0",
 		Protocol:                   6,
 		SrcIP:                      "2001:db8::1",
 		SrcPort:                    40000,
 		RoutingScope:               &scope,
+		EgressScope:                &egress,
 		RemoteIP:                   "8.8.8.8",
 		RemotePort:                 443,
 		PermitAnyRemote:            false,
@@ -146,14 +148,13 @@ func assertEveryFieldEqual14638(t *testing.T, want, got userspace.IdleLeaseWire)
 		name := typ.Field(i).Name
 		wf := wv.Field(i)
 		gf := gv.Field(i)
-		// RoutingScope is *uint32: compare pointee.
-		if name == "RoutingScope" {
+		if wf.Kind() == reflect.Pointer {
 			if (wf.IsNil()) != (gf.IsNil()) {
-				t.Errorf("field RoutingScope nil mismatch: want nil=%v got nil=%v", wf.IsNil(), gf.IsNil())
+				t.Errorf("field %s nil mismatch: want nil=%v got nil=%v", name, wf.IsNil(), gf.IsNil())
 				continue
 			}
 			if !wf.IsNil() && wf.Elem().Interface() != gf.Elem().Interface() {
-				t.Errorf("field RoutingScope = %v, want %v", gf.Elem(), wf.Elem())
+				t.Errorf("field %s = %v, want %v", name, gf.Elem(), wf.Elem())
 			}
 			continue
 		}
