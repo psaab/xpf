@@ -318,11 +318,17 @@ indistinguishable from a real default-route match.
 *Scoping (Option A).* The SESSION_CLOSE event already carries the
 ingress/egress ifindex (#2615/#2749 → `SessionCloseData.InIf`/`OutIf`),
 and xpf enslaves interfaces to real l3mdev VRF master devices
-(`pkg/routing/vrf.go`), so each interface's ifindex selects a distinct
-kernel table. `MaskResolver` now takes an `ifindex`; `fibMatchMask` sets
-`RouteGetOptions.IifIndex` when it is >0, which makes the kernel perform
-an *input-path* route lookup that follows l3mdev enslavement into the
-interface's VRF table. `resolveMasks(r, srcIP, dstIP, inIf, outIf)` scopes
+(`pkg/routing/vrf.go`), so each interface's VRF master selects a distinct
+kernel table. `MaskResolver` takes an `ifindex`; `fibMatchMask` maps it
+to its l3mdev master (`vrfOifForIfindex`) and sets
+`RouteGetOptions.OifIndex`, which makes the kernel perform an *output-path*
+route lookup in that VRF's table. (#3744 originally set
+`RouteGetOptions.IifIndex` — an input-path lookup with no source address.
+The kernel's IPv4 input path rejects a zero source as martian (EINVAL),
+so every IPv4 lookup on an attributed interface failed and masks were
+always exported as unresolved 0 — #14610. An output lookup needs no
+source address; `RTA_OIF` set to an l3mdev master selects the VRF table.)
+`resolveMasks(r, srcIP, dstIP, inIf, outIf)` scopes
 **both** the source and destination half by the **ingress** instance
 (`inIf`): Junos attributes the session to the ingress routing-instance and
 next-table / rib-group leaked routes to the destination appear in that
@@ -330,9 +336,6 @@ ingress table. When the dataplane reported no ingress attribution
 (`inIf==0`) it falls back to `outIf`, then to the global table
 (`inIf==outIf==0`) — bit-identical to the pre-#3744 main-table lookup, so
 single-VRF / default deployments are a no-op. The async #3743 cache key
-widens from the 16-byte IP to `(ifindex, IP)` (`routeMaskKey`) so per-VRF
-masks for the same host address do not collide; the non-blocking-callback,
-bounded-inflight, dedup and size-cap invariants are unchanged.
 
 *Unresolved bit (Option B).* The wire field is a `u8` prefix length
 (0..128) with no room for an "unresolved" sentinel a collector would
