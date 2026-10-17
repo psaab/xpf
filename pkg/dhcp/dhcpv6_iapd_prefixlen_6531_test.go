@@ -233,7 +233,7 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 			msg := decodeReplyWire(t, 1,
 				iaPDWire(iaPrefixWire(tc.prefLen, "2606:4700:1000::", 3600, 7200)))
 
-			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", now, nil)
+			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 
 			if tc.want == "" {
 				if len(live) != 0 {
@@ -284,7 +284,7 @@ func TestIAPDPrefixLen6531_BadSiblingDoesNotRideAlong(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			msg := decodeReplyWire(t, 2, iaPDWire(tc.order...))
 
-			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", now, nil)
+			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 
 			if len(live) != 1 {
 				t.Fatalf("got %d live prefixes %v, want exactly the good /56", len(live), live)
@@ -315,7 +315,7 @@ func TestIAPDPrefixLen6531_BadWithdrawalIsDropped(t *testing.T) {
 	msg := decodeReplyWire(t, 1,
 		iaPDWire(iaPrefixWire(129, "2606:4700:bad::", 0, 0)))
 
-	live, withdrawn := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
+	live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
 
 	if len(live) != 0 {
 		t.Errorf("live = %v, want empty", live)
@@ -429,7 +429,7 @@ func TestIAPDPrefixLen6531_NormalDelegationSurvivesSubPrefixDerivation(t *testin
 			msg := decodeReplyWire(t, 1,
 				iaPDWire(iaPrefixWire(tc.prefLen, "2606:4700:900d::", 3600, 7200)))
 
-			live, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
+			live, _, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 			if len(live) != 1 {
 				t.Fatalf("a /%d delegation must decode, got %d live prefixes",
 					tc.prefLen, len(live))

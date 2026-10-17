@@ -34,7 +34,7 @@ func TestExtractDelegatedPrefixes(t *testing.T) {
 		})
 		msg.AddOption(iapd)
 
-		pds, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
+		pds, _, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 		if len(pds) != 1 {
 			t.Fatalf("got %d prefixes, want 1", len(pds))
 		}
@@ -60,7 +60,7 @@ func TestExtractDelegatedPrefixes(t *testing.T) {
 		}
 		msg.MessageType = dhcpv6.MessageTypeReply
 
-		pds, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
+		pds, _, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 		if len(pds) != 0 {
 			t.Errorf("got %d prefixes, want 0", len(pds))
 		}
@@ -94,7 +94,7 @@ func TestExtractDelegatedPrefixes(t *testing.T) {
 		})
 		msg.AddOption(iapd)
 
-		pds, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
+		pds, _, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 		if len(pds) != 2 {
 			t.Fatalf("got %d prefixes, want 2", len(pds))
 		}

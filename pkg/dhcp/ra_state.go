@@ -229,25 +229,40 @@ func expireIPv6RouterState(lease *Lease, now time.Time) {
 }
 
 func nextIPv6RARefreshDelay(lease *Lease, now time.Time) time.Duration {
+	return nextIPv6WakeDelay(lease, now, nil)
+}
+
+// nextIPv6WakeDelay is the earliest of the RA refresh interval, RA
+// expiries, and the earliest delegated-prefix expiry (#14598). The PD
+// term makes the renewal-loop wait wake at the PD's own valid-lifetime
+// deadline so it can be pruned (and RA recompiled) even when T1/the
+// IA_NA lease deadline is far away.
+func nextIPv6WakeDelay(lease *Lease, now time.Time, pds []DelegatedPrefix) time.Duration {
 	delay := raRefreshInterval
-	if lease == nil || lease.Family != AFInet6 {
-		return delay
+	if lease != nil && lease.Family == AFInet6 {
+		dhcpExpiry := leaseDeadline(lease)
+		consider := func(expiry time.Time) {
+			if expiry.IsZero() {
+				return
+			}
+			if !dhcpExpiry.IsZero() && dhcpExpiry.Before(expiry) {
+				expiry = dhcpExpiry
+			}
+			if remaining := expiry.Sub(now); remaining < delay {
+				delay = remaining
+			}
+		}
+		consider(lease.raGatewayExpiresAt)
+		for _, expiry := range lease.raRouteExpires {
+			consider(expiry)
+		}
 	}
-	dhcpExpiry := leaseDeadline(lease)
-	consider := func(expiry time.Time) {
-		if expiry.IsZero() {
-			return
+	for _, dp := range pds {
+		if exp := dp.ExpiresAt(); !exp.IsZero() {
+			if remaining := exp.Sub(now); remaining < delay {
+				delay = remaining
+			}
 		}
-		if !dhcpExpiry.IsZero() && dhcpExpiry.Before(expiry) {
-			expiry = dhcpExpiry
-		}
-		if remaining := expiry.Sub(now); remaining < delay {
-			delay = remaining
-		}
-	}
-	consider(lease.raGatewayExpiresAt)
-	for _, expiry := range lease.raRouteExpires {
-		consider(expiry)
 	}
 	if delay < 0 {
 		return 0
@@ -262,20 +277,51 @@ func (m *Manager) waitForIPv6TimerOrRA(
 	ifaceName string,
 	lease *Lease,
 ) (*Lease, bool) {
+	lease, _, outcome := m.waitForIPv6TimerOrRAWithPD(ctx, timer, key, ifaceName, lease, nil)
+	return lease, outcome == waitOutcomeTimer
+}
+
+type pdWaitOutcome int
+
+const (
+	waitOutcomeTimer pdWaitOutcome = iota
+	waitOutcomeDone
+	waitOutcomePDExpired
+)
+
+// waitForIPv6TimerOrRAWithPD is waitForIPv6TimerOrRA plus a wake at the
+// earliest delegated-prefix expiry (#14598). On that wake it prunes the
+// expired PDs from the stored set (scheduling a recompile), updates the
+// caller's committed slice, and reports waitOutcomePDExpired so the
+// caller can distinguish a PD prune from T1/T2 expiry or cancellation
+// without tearing down a still-live IA_NA lease.
+func (m *Manager) waitForIPv6TimerOrRAWithPD(
+	ctx context.Context,
+	timer <-chan time.Time,
+	key clientKey,
+	ifaceName string,
+	lease *Lease,
+	pds []DelegatedPrefix,
+) (*Lease, []DelegatedPrefix, pdWaitOutcome) {
 	for {
 		if ctx.Err() != nil {
-			return lease, false
+			return lease, pds, waitOutcomeDone
 		}
 		select {
 		case <-timer:
-			return lease, true
+			return lease, pds, waitOutcomeTimer
 		case <-ctx.Done():
-			return lease, false
-		case <-m.afterRA(nextIPv6RARefreshDelay(lease, time.Now())):
+			return lease, pds, waitOutcomeDone
+		case <-m.afterRA(nextIPv6WakeDelay(lease, time.Now(), pds)):
+			if kept, pruned := m.pruneDelegatedFor(ifaceName, pds, time.Now()); pruned {
+				return lease, kept, waitOutcomePDExpired
+			} else {
+				pds = kept
+			}
 			var refreshed bool
 			lease, refreshed = m.refreshIPv6RouterState(ctx, key, ifaceName, lease)
 			if !refreshed {
-				return lease, false
+				return lease, pds, waitOutcomeDone
 			}
 		}
 	}

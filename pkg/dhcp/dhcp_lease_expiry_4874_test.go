@@ -608,7 +608,7 @@ func TestExtractDelegatedPrefixesPartition(t *testing.T) {
 		pdPrefixOpt(t, "2606:4700:1000::/48", 3600*time.Second, 7200*time.Second),
 		pdPrefixOpt(t, "2606:4700:dead::/56", 0, 0), // withdrawn
 	)
-	live, withdrawn := extractDelegatedPrefixes(msg, "wan0", now, nil)
+	live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", now, nil)
 	if len(live) != 1 || live[0].Prefix != netip.MustParsePrefix("2606:4700:1000::/48") {
 		t.Fatalf("live = %+v, want the single /48", live)
 	}

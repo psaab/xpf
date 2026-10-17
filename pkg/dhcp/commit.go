@@ -160,7 +160,7 @@ func delegatedPrefixesChanged(prev, next []DelegatedPrefix) bool {
 // apply reports whether the caller should write result to the stored PD
 // set (and delete the map entry when result is empty). When apply is false
 // the result equals prior and the stored set must be left untouched.
-func reconcileDelegatedPDs(prior, live, withdrawn []DelegatedPrefix) (result []DelegatedPrefix, apply bool) {
+func reconcileDelegatedPDs(prior, live, withdrawn []DelegatedPrefix, now ...time.Time) (result []DelegatedPrefix, apply bool) {
 	if len(live) == 0 && len(withdrawn) == 0 {
 		return prior, false
 	}
@@ -172,13 +172,22 @@ func reconcileDelegatedPDs(prior, live, withdrawn []DelegatedPrefix) (result []D
 	for _, l := range live {
 		liveSet[l.Prefix] = struct{}{}
 	}
+	at := time.Now()
+	if len(now) > 0 {
+		at = now[0]
+	}
 	// Retain co-held prefixes the reply neither withdrew nor renewed; a
 	// renewed prefix is re-added below with the reply's fresh lifetimes.
+	// A retained prefix whose own valid lifetime has elapsed is dropped
+	// (#14598): retaining it would re-advertise a reclaimed prefix.
 	for _, p := range prior {
 		if _, w := withdrawnSet[p.Prefix]; w {
 			continue
 		}
 		if _, l := liveSet[p.Prefix]; l {
+			continue
+		}
+		if p.Expired(at) {
 			continue
 		}
 		result = append(result, p)
