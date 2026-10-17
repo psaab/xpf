@@ -1597,6 +1597,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceGreOuterFragDrops: prometheus.NewDesc(
+			"xpf_userspace_gre_outer_frag_drops_total",
+			"gre outer fragment drops",
+			nil,
+			nil,
+		),
 		userspaceTimeExceededRateLimited: prometheus.NewDesc(
 			"xpf_userspace_time_exceeded_rate_limited_total",
 			"time-exceeded generated-error rate-limit drops",
@@ -1781,6 +1787,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #10865: GRE-decap PT/nibble mismatch refusal counter emitted
 		// unconditionally with a distinct value.
 		GreDecapPtNibbleMismatchRefusalsTotal: 10,
+		GreOuterFragDropsTotal: 14,
 		// #2472: per-reason generated-error rate-limit drop counters emitted
 		// unconditionally.
 		TimeExceededRateLimitedTotal: 11,
@@ -2120,6 +2127,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// #10865: PT/nibble mismatch refusal counter emitted unconditionally
 	// with its own value, distinct from the neighboring GRE counters.
 	assertCounterClose(t, got, c.userspaceGreDecapPtNibbleMismatchRefusals, nil, 10)
+	assertCounterClose(t, got, c.userspaceGreOuterFragDrops, nil, 14)
 	// #2472: per-reason generated-error rate-limit drop counters emitted
 	// unconditionally.
 	assertCounterClose(t, got, c.userspaceTimeExceededRateLimited, nil, 11)

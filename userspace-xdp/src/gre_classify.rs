@@ -122,3 +122,25 @@ pub fn degraded_general_local_pass_applies(
 ) -> bool {
     destination_is_local && !is_native_gre
 }
+
+/// #14645: must a native-GRE outer fragment be kept on the userspace (XSK)
+/// path instead of a kernel pass? `protocol`/`wire_protocol` are the parsed
+/// and pre-substitution protocols; `is_fragment` separates a fragmented
+/// datagram from a whole one (a whole GRE packet keeps its ordinary
+/// disposition and is never buffered). A non-first fragment carries the
+/// #7494 sentinel (255) with the wire protocol still GRE; a first fragment
+/// keeps GRE. For both, the answer is yes when native GRE is armed: a local
+/// tail has no kernel GRE terminator (the tunnel netdev is a TUN anchor),
+/// and an interface-NAT tail must follow its head into the helper, which
+/// reassembles before decap. Host-executed by the userspace-dp test.
+#[inline(always)]
+pub fn native_gre_fragment_stays_on_helper(
+    protocol: u8,
+    wire_protocol: u8,
+    is_fragment: bool,
+    native_gre_armed: bool,
+) -> bool {
+    native_gre_armed
+        && is_fragment
+        && ((protocol == 47 && wire_protocol == 47) || (protocol == 255 && wire_protocol == 47))
+}

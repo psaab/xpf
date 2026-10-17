@@ -911,6 +911,13 @@ impl super::Coordinator {
             .pt_nibble_mismatch_refusals()
     }
 
+    /// #14645: outer-fragmented native-GRE datagrams dropped by the bounded
+    /// reassembly pool. Surfaced as
+    /// `xpf_userspace_gre_outer_frag_drops_total`.
+    pub fn gre_outer_frag_drops_total(&self) -> u64 {
+        crate::afxdp::gre_reassembly::GRE_OUTER_FRAG_DROPS.load(Ordering::Relaxed)
+    }
+
     /// #2472: locally-generated ICMP/ICMPv6 Time Exceeded replies dropped
     /// because the per-reason token bucket was empty. The TTL/hop-limit error
     /// generator is rate-limited (global-per-reason, Linux `icmp_msgs_per_sec`

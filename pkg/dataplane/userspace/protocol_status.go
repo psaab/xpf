@@ -828,6 +828,9 @@ type ProcessStatus struct {
 	// Surfaced as xpf_userspace_gre_decap_pt_nibble_mismatch_refusals_total.
 	// Omitempty for wire compat with older helpers (defaults to 0).
 	GreDecapPtNibbleMismatchRefusalsTotal uint64 `json:"gre_decap_pt_nibble_mismatch_refusals_total,omitempty"`
+	// #14645: outer-fragmented native-GRE datagrams dropped by the bounded
+	// reassembly pool. Omitempty for wire compat with older helpers.
+	GreOuterFragDropsTotal uint64 `json:"gre_outer_frag_drops_total,omitempty"`
 	// #10695 (#9506 counter slice): D14 zone-gate refusals — IPsec-inner
 	// frames refused before zone admission because no zone claimed the
 	// ingress (unzoned), the STN/ifid resolution was unknown or ambiguous,

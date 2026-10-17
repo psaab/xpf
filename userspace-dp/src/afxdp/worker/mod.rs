@@ -169,6 +169,9 @@ pub(crate) struct BindingWorker {
     /// `WgWorkerScratch::new(UMEM_FRAME_SIZE as usize)` from the dispatch
     /// side").
     pub(crate) wg_scratch: crate::afxdp::wg::WgWorkerScratch,
+    /// #14645: bounded outer-fragment reassembly for native GRE, owned by
+    /// this worker (all fragments of a datagram hash to one queue/worker).
+    pub(crate) gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler,
     /// Packets waiting for neighbor resolution. The UMEM frame is held
     /// (not recycled) until the neighbor resolves or the entry times out.
     ///
@@ -590,6 +593,7 @@ impl BindingWorker {
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
+            gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             // GEMINI-NEXT.md Section 3 cold start: lazy allocation. The
             // 4096-cap is enforced at admission (poll_descriptor.rs check
             // against MAX_PENDING_NEIGH), so pre-allocating that capacity
@@ -742,6 +746,7 @@ impl BindingWorker {
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
+            gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),
             pending_neigh_schedule: Default::default(),
             last_neigh_generation: (0, 0),
@@ -864,6 +869,7 @@ impl BindingWorker {
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
+            gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),
             pending_neigh_schedule: Default::default(),
             last_neigh_generation: (0, 0),

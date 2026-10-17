@@ -733,10 +733,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // only if decap construction falls back to the raw outer frame.
                 let mut tunnel_outer_filter_accepted = false;
                 let mut tunnel_outer_pbr_route_override = None;
+                let mut gre_buffered = false;
                 let (mut meta, mut owned_packet_frame, outer_input_filter_drop) = if is_injected {
                     (meta, Some(raw_frame.to_vec()), false)
                 } else {
-                    let (new_meta, owned_frame, filtered) = {
+                    let stage = {
                         let mut input_filter_allows =
                             |outer_frame: &[u8], outer_meta: UserspaceDpMeta| {
                                 match filter::enforce_tunnel_outer_input_filter(
@@ -767,11 +768,29 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             raw_frame,
                             meta,
                             worker_ctx.forwarding,
+                            &mut binding.gre_reassembler,
+                            now_ns,
                             &mut input_filter_allows,
                         )
                     };
-                    (new_meta, owned_frame, filtered)
+                    match stage {
+                        crate::afxdp::poll_stages::GreDecapStage::Decapped(m, f) => {
+                            (m, Some(f), false)
+                        }
+                        crate::afxdp::poll_stages::GreDecapStage::NotGre(m) => (m, None, false),
+                        crate::afxdp::poll_stages::GreDecapStage::FilterDropped => {
+                            (meta, None, true)
+                        }
+                        crate::afxdp::poll_stages::GreDecapStage::Buffered => {
+                            gre_buffered = true;
+                            (meta, None, false)
+                        }
+                    }
                 };
+                if gre_buffered {
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 if outer_input_filter_drop {
                     telemetry.counters.touched = true;
                     binding.scratch.scratch_recycle.push(desc.addr);
