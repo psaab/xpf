@@ -205,6 +205,31 @@ pub(crate) enum ScreenParseError {
     /// the malformed frame passed unscreened — a fail-open asymmetry vs
     /// the IPv6 #2146 fail-closed contract.
     TruncatedIpv4Header,
+    /// #14325: the IPv6 extension-header chain sighted a SECOND Fragment
+    /// header. RFC 8200 allows each extension-header type at most once,
+    /// and -- unlike the other headers -- there is no defined reassembly
+    /// or screening meaning for a duplicated Fragment header: receivers
+    /// key on the FIRST fragment header and treat the second as payload
+    /// bytes, so the screens cannot meaningfully pick between the two
+    /// headers' offset/M bits (#14129's sticky-first governing header
+    /// plus a later `is_first_fragment` downgrade left
+    /// `is_first_fragment == false` while `ip_frag_off` still reported
+    /// the first header's offset 0, splitting the TCP-flag screens
+    /// (`!is_first_fragment`, so they skipped) from the sizing screens
+    /// (`(ip_frag_off & 0xFFF8) > 0`, so they skipped too) and letting a
+    /// `[Frag(off=0,M=1), Frag(off>0)]` packet evade BOTH families).
+    /// The malformed chain is rejected outright -- the same fail-closed
+    /// posture as a truncated chain -- rather than resolved by
+    /// special-casing which later header wins. Only reachable when the
+    /// second header's own 8 bytes are readable (a truncated second
+    /// header returns `TruncatedIpv6ExtChain` first, matching the
+    /// #10661 truncated-header wording). Screen scope only: the shared
+    /// forwarding walk's every-sighting verdicts (tracker, L4-refusal,
+    /// NAT64) are unchanged -- a chained-fragment packet that a
+    /// no-screen zone would forward still forwards, but on a screened
+    /// zone it drops as `ip-malformed` before reaching the session /
+    /// policy path, so the forward is never on the screened path.
+    MultipleIpv6FragmentHeaders,
 }
 
 impl ScreenParseError {
@@ -219,6 +244,7 @@ impl ScreenParseError {
         match self {
             ScreenParseError::TruncatedIpv6ExtChain => "ip-malformed",
             ScreenParseError::TruncatedIpv4Header => "ip-malformed",
+            ScreenParseError::MultipleIpv6FragmentHeaders => "ip-malformed",
         }
     }
 }
