@@ -16,8 +16,10 @@ import (
 // connection nor an SA.
 
 func combinedProofConfig9641() (*config.IPsecConfig, string) {
+	// #14592: pinned to responder-only so ApplyGeneration stays byte-equal
+	// to the inert source charon loaded; "" would now render trap.
 	return &config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{
-		"proof-gen": {PSK: "fixture-secret", Name: "proof-gen", Gateway: "198.51.100.64", LocalAddr: "192.0.2.64",
+		"proof-gen": {PSK: "fixture-secret", Name: "proof-gen", Gateway: "198.51.100.64", LocalAddr: "192.0.2.64", EstablishTunnels: "responder-only",
 			TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 				"ts1": {Name: "ts1", LocalIP: "10.65.1.0/24", RemoteIP: "10.66.1.0/24"},
 			}},

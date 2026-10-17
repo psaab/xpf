@@ -3163,10 +3163,11 @@ standby can re-initiate the primary's tunnels on takeover:
   - node 1 dies, node 0 takes RG1, and there is NO RG0 transition (node 0 was
     already RG0 primary), so `reinitiateIPsecSAs` never fired.
 
-  charon does not cover for it: `pkg/ipsec/policy.go` emits `start_action =
-  start` only for `establish-tunnels immediately`, so on the default setting the
-  tunnel waits for the REMOTE peer. This is the shape #3764 already fixed once
-  for the ip-monitoring overlay in `daemon_ipmon.go`.
+  charon does not cover for an HA takeover: `pkg/ipsec/policy.go` emits
+  `start_action = start` only for `establish-tunnels immediately`; the
+  unset Junos default renders `trap` (#14592), which waits for outbound
+  traffic the new owner may not trigger. This is the shape #3764 already
+  fixed once for the ip-monitoring overlay in `daemon_ipmon.go`.
 
   Attribution is evaluated at INITIATE time, not advertise time: a node
   advertises its whole active set, and the RECEIVER asks whether it owns the

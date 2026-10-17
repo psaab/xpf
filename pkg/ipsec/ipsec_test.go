@@ -1050,6 +1050,8 @@ func TestGenerateConfig_EstablishTunnels(t *testing.T) {
 	}{
 		{"immediately", "start"},
 		{"on-traffic", "trap"},
+		// #14592: Junos defaults an absent establish-tunnels to on-traffic.
+		{"", "trap"},
 		{"responder-only", ""},
 	}
 	for _, tt := range tests {
@@ -1893,7 +1895,9 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 // `remote_addrs = %any`). Reverting the ResponderOnly handling makes both
 // assertions below fail.
 func TestGenerateConfig_ResponderOnlyGateway(t *testing.T) {
-	for _, establishTunnels := range []string{"immediately", "on-traffic"} {
+	// #14592: "" is the Junos default (on-traffic); a responder-only
+	// gateway must still emit no start_action for it.
+	for _, establishTunnels := range []string{"immediately", "on-traffic", ""} {
 		t.Run(establishTunnels, func(t *testing.T) {
 			m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 			cfg := &config.IPsecConfig{

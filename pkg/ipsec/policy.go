@@ -506,11 +506,16 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 			}
 			// A dynamic responder has no fixed remote endpoint; neither an
 			// explicit start nor a traffic-triggered trap may initiate.
+			// #14592: an absent establish-tunnels statement is the Junos
+			// default, on-traffic ("IKE is activated only when data traffic
+			// flows"), so "" renders the same trap as explicit on-traffic.
+			// Rendering nothing left two default-configured peers with no
+			// initiator at all: no SA, no error, green commit.
 			if gw == nil || !gw.ResponderOnly {
 				switch vpn.EstablishTunnels {
 				case "immediately":
 					fmt.Fprintf(&b, "        start_action = start\n")
-				case "on-traffic":
+				case "on-traffic", "":
 					fmt.Fprintf(&b, "        start_action = trap\n")
 				}
 			}

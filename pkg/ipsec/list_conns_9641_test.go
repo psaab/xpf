@@ -139,10 +139,13 @@ func TestListLoadedConnsUnreachableIsAnError9641(t *testing.T) {
 }
 
 func proofConfig9641() *config.IPsecConfig {
+	// #14592: pinned to responder-only so this #9641 fixture stays
+	// byte-equal to the inert config charon 6.0.5 actually loaded (no
+	// start_action, initiates nothing). "" would now render trap.
 	return &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"proof-plain": {PSK: "fixture-secret", Name: "proof-plain", Gateway: "198.51.100.61"},
-			"proof-ms": {PSK: "fixture-secret", Name: "proof-ms", Gateway: "198.51.100.62",
+			"proof-plain": {PSK: "fixture-secret", Name: "proof-plain", Gateway: "198.51.100.61", EstablishTunnels: "responder-only"},
+			"proof-ms": {PSK: "fixture-secret", Name: "proof-ms", Gateway: "198.51.100.62", EstablishTunnels: "responder-only",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"ts1": {Name: "ts1", LocalIP: "10.61.1.0/24", RemoteIP: "10.62.1.0/24"},
 					"ts2": {Name: "ts2", LocalIP: "10.61.2.0/24", RemoteIP: "10.62.2.0/24"},

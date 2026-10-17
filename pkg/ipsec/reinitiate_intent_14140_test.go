@@ -68,8 +68,9 @@ func TestChangedResponderOnlyVPNIsNotReinitiated14140(t *testing.T) {
 
 func TestChangedNonEagerModesAreNotReinitiated14140(t *testing.T) {
 	// A fixed-address gateway isolates EstablishTunnels as the only
-	// variable: on-traffic renders trap, responder-only/unset render no
-	// start_action — none may be eagerly initiated after a change.
+	// variable: on-traffic renders trap, the absent Junos default also
+	// renders trap (#14592), responder-only mode renders no start_action
+	// — none may be eagerly initiated after a change.
 	for _, mode := range []string{"on-traffic", "responder-only", ""} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			rec := &swanctlRecorder{}

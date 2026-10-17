@@ -19,10 +19,12 @@ package daemon
 //     already RG0 primary), so reinitiateIPsecSAs never fires — and the peer set
 //     it would read is empty regardless.
 //
-// charon does not paper over it: pkg/ipsec/policy.go emits `start_action = start`
-// ONLY for `establish-tunnels immediately`, so on the default setting the tunnel
-// waits for the REMOTE peer to initiate. Every site-to-site VPN stays down until
-// it does, with IPsecSASync configured and reporting healthy.
+// charon does not paper over an HA takeover: `start_action = start` is
+// emitted only for `establish-tunnels immediately`; the unset Junos
+// default renders `trap` (#14592), which waits for outbound traffic —
+// after an RG takeover the new owner may hold no traffic-triggering SA
+// state, so without this re-initiation every site-to-site VPN stays
+// down, with IPsecSASync configured and reporting healthy.
 //
 // #3764 in daemon_ipmon.go is the same defect on the ip-monitoring overlay and
 // its comment describes the identical failure: "Keying on the lowest data RG

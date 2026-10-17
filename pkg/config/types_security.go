@@ -2139,7 +2139,7 @@ type IPsecVPN struct {
 	LocalAddr        string // local address
 	BindInterface    string // tunnel interface (e.g. "st0.0") — creates xfrmi with if_id
 	DFBit            string // "copy", "set", "clear"
-	EstablishTunnels string // "immediately", "on-traffic", "responder-only"
+	EstablishTunnels string // "immediately", "on-traffic", "responder-only"; "" = Junos default on-traffic (#14592)
 	TrafficSelectors map[string]*IPsecTrafficSelector
 	// Manual records a `manual { ... }` manual-key SA block (#4300, V-4).
 	// xpf does not support manual-key SAs; the block used to be silently

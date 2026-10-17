@@ -104,10 +104,13 @@ func TestStartActionIsChildOnly7165(t *testing.T) {
 		requireSetting(t, "start_action", "start")
 }
 
-// Control: when establish-tunnels is unset, start_action must not appear.
-// This distinguishes the default responder behavior from the explicit
-// on-demand `trap` mode.
-func TestStartActionAbsentWhenEstablishTunnelsUnset7165(t *testing.T) {
+// #14592 supersedes the #7165 unset control: Junos defaults an absent
+// `establish-tunnels` statement to on-traffic ("IKE is activated only
+// when data traffic flows"), so an unset mode on a non-responder-only
+// gateway must render the same child trap as explicit on-traffic. The
+// earlier assertion that unset emits no start_action left two xpf peers
+// at the default with no initiator at all: no SA, no error, green commit.
+func TestStartActionTrapWhenEstablishTunnelsUnset14592(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		IKEProposals: map[string]*config.IKEProposal{
@@ -130,6 +133,29 @@ func TestStartActionAbsentWhenEstablishTunnelsUnset7165(t *testing.T) {
 		VPNs: map[string]*config.IPsecVPN{
 			"vpn-a": {PSK: "fixture-secret", Name: "vpn-a", Gateway: "gw-a", IPsecPolicy: "ipsec-pol", BindInterface: "st0.0"},
 		},
+	}
+	rendered, _, err := m.renderConfig(cfg)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	doc := parseSwanctlDoc(t, rendered)
+	conn := doc.at(t, "connections", "vpn-a")
+	conn.hasNoSetting(t, "start_action")
+	conn.at(t, "children", "vpn-a").requireSetting(t, "start_action", "trap")
+}
+
+// Control for #14592: an unset mode on a responder-only gateway still
+// emits no start_action — there is no fixed peer for a trap to dial.
+func TestStartActionAbsentWhenUnsetOnResponderOnly14592(t *testing.T) {
+	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
+	cfg := &config.IPsecConfig{
+		Gateways: map[string]*config.IPsecGateway{
+			"dial-in": {Name: "dial-in", ResponderOnly: true, LocalAddress: "203.0.113.5"},
+		},
+		VPNs: map[string]*config.IPsecVPN{
+			"vpn-a": {PSK: "fixture-secret", Name: "vpn-a", Gateway: "dial-in"},
+		},
+		Proposals: map[string]*config.IPsecProposal{},
 	}
 	rendered, _, err := m.renderConfig(cfg)
 	if err != nil {

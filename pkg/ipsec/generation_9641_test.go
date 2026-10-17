@@ -164,10 +164,12 @@ func TestLoadedGenerationRefusesWhatItCannotName9641(t *testing.T) {
 }
 
 // localAddrProofConfig9641 rebuilds the config behind the local_addrs capture.
+// #14592: pinned to responder-only so the rebuild stays byte-equal to
+// the inert source charon loaded; "" would now render trap by design.
 func localAddrProofConfig9641() *config.IPsecConfig {
 	return &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
-			"proof-la": {PSK: "fixture-secret", Name: "proof-la", Gateway: "198.51.100.63", LocalAddr: "192.0.2.61",
+			"proof-la": {PSK: "fixture-secret", Name: "proof-la", Gateway: "198.51.100.63", LocalAddr: "192.0.2.61", EstablishTunnels: "responder-only",
 				TrafficSelectors: map[string]*config.IPsecTrafficSelector{
 					"ts1": {Name: "ts1", LocalIP: "10.63.1.0/24", RemoteIP: "10.64.1.0/24"},
 				}},
