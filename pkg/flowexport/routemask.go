@@ -12,9 +12,10 @@ import (
 // MaskResolver returns the prefix length (subnet mask, in bits) of the FIB
 // longest-prefix-match route for an IP, plus whether a mask was resolved. The
 // lookup is scoped to the flow's routing table by ifindex (#3744): the ingress
-// interface selects the l3mdev VRF table the flow was actually forwarded in, so
-// a multi-VRF/routing-instance flow's mask is resolved in ITS table, not the
-// global one. ifindex==0 (no attribution) falls back to the global/main table,
+// interface's l3mdev master selects the VRF table the flow was actually
+// forwarded in, so a multi-VRF/routing-instance flow's mask is resolved in
+// ITS table, not the global one. ifindex==0 (no attribution) — and an
+// ifindex that is not VRF-enslaved — falls back to the global/main table,
 // the pre-#3744 behaviour and a bit-identical no-op for single-VRF/default
 // deployments where the main table IS the flow's table.
 //
@@ -358,24 +359,60 @@ func resolveMasks(r MaskResolver, srcIP, dstIP net.IP, inIf, outIf uint32) (srcM
 	return srcMask, dstMask, misses
 }
 
+// routeMasterLinkByIndex resolves an ifindex to its l3mdev master: when the
+// link is enslaved to a VRF (MasterIndex>0), the master link is returned;
+// otherwise the link itself is returned. Test seam: package-level var so a
+// unit test can exercise the resolution without a kernel netns.
+var routeMasterLinkByIndex = netlink.LinkByIndex
+
+// routeLookupWithOptions is the netlink route query seam; a test var so the
+// OIF-scoped query shape can be asserted without a kernel netns.
+var routeLookupWithOptions = netlink.RouteGetWithOptions
+
+// vrfOifForIfindex maps an ingress ifindex to the RTA_OIF value that scopes
+// an OUTPUT route lookup to the flow's VRF table: the ifindex of the l3mdev
+// master the ingress link is enslaved to, or — when the link is not enslaved
+// (the default-routing-instance case) — 0, meaning "no RTA_OIF, main table".
+// A lookup error is treated the same way (fall back to the main table)
+// rather than failing the mask lookup: the interface may have been torn
+// down between session close and this background lookup, and a main-table
+// answer is strictly better than an unresolved mask.
+func vrfOifForIfindex(ifindex int) int {
+	if ifindex <= 0 {
+		return 0
+	}
+	link, err := routeMasterLinkByIndex(ifindex)
+	if err != nil {
+		return 0
+	}
+	if master := link.Attrs().MasterIndex; master > 0 {
+		return master
+	}
+	return 0
+}
+
 // fibMatchMask queries the kernel FIB for the longest-prefix-match route to ip
 // and returns the matched route's prefix length. RTM_F_FIB_MATCH makes the
 // kernel report the actual matching FIB entry (with its Dst prefix) rather than
 // echoing the queried host as a /32 or /128, so a default-route match returns
 // the real /0.
 //
-// ifindex>0 sets RTA_IIF, which makes the kernel perform an INPUT route lookup
-// as if the packet arrived on that interface — that follows l3mdev enslavement
-// into the interface's VRF table (#3744), so the mask is resolved in the flow's
-// own routing instance rather than the main table. ifindex==0 omits RTA_IIF and
-// keeps the pre-#3744 main-table output-route lookup, bit-identical for
-// single-VRF/default deployments.
+// ifindex>0 scopes the lookup to the flow's VRF table (#3744) with an OUTPUT
+// route lookup (RTA_OIF = the ifindex's l3mdev master). The previous code set
+// RTA_IIF (an input-path lookup) with no RTA_SRC: the kernel's IPv4 input
+// path rejects a zero source as martian (EINVAL in ip_route_input_slow), so
+// every IPv4 lookup on an attributed interface failed and masks were always
+// exported as unresolved 0 (#14610). An output lookup needs no source
+// address, and RTA_OIF set to an l3mdev master selects that VRF's table;
+// a non-enslaved ifindex (default routing instance) omits RTA_OIF and keeps
+// the main-table lookup, bit-identical for single-VRF/default deployments.
+// ifindex==0 omits RTA_OIF as well (pre-#3744 main-table behaviour).
 func fibMatchMask(ip net.IP, ifindex int) (uint8, bool) {
 	opts := &netlink.RouteGetOptions{FIBMatch: true}
-	if ifindex > 0 {
-		opts.IifIndex = ifindex
+	if oif := vrfOifForIfindex(ifindex); oif > 0 {
+		opts.OifIndex = oif
 	}
-	routes, err := netlink.RouteGetWithOptions(ip, opts)
+	routes, err := routeLookupWithOptions(ip, opts)
 	if err != nil || len(routes) == 0 {
 		return 0, false
 	}
