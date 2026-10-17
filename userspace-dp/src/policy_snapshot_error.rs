@@ -98,6 +98,37 @@ pub(crate) enum SnapshotIntegrityError {
         application: String,
         reason: &'static str,
     },
+    /// #14312: a policy rule's application term carried a source/destination
+    /// port on a protocol that presents no extracted L4 ports — i.e. any
+    /// protocol other than TCP/UDP (`ip_proto::has_l4_ports`), including an
+    /// ICMP/ICMPv6 term with `icmp_type`/`icmp_code` set (whose ports
+    /// `CompiledApplications::from_matches` silently discards when steering
+    /// to `icmp_constraints`) and an SCTP term (ports exist on the wire but
+    /// this dataplane never extracts them). Pre-fix the compiled matcher
+    /// turned such a term into either a silently port-ignoring ICMP term
+    /// (a permit broadens to every message of the constrained type/code,
+    /// matching arbitrary ICMP Echo Identifiers), a dead range/exact term
+    /// keyed on ports the packet never presents (a deny/reject on
+    /// GRE/ESP/OSPF/... never matches and falls through to a later permit /
+    /// default-permit), or a `0-N` range that matches flowless traffic.
+    /// The Go strict commit gate (`validateApplicationSpecsStrict`, #3373)
+    /// and the Go expansion drop detector (`ApplicationMatchDrops`, #9525)
+    /// are the primary defenses — a freshly committed / Go-lowered config
+    /// never reaches Rust with these terms — so this is the helper-boundary
+    /// backstop for a corrupt / hand-built / mixed-version / leniently
+    /// peer-synced snapshot, consistent with the #2124/#3261/#3367/#3711/
+    /// #3712 fail-closed family and the filter-side mirror
+    /// `UnsatisfiableFilterCrossField` (#3723). Rejecting the WHOLE
+    /// snapshot (the preflight keeps the previous good state; a fresh boot
+    /// keeps the default-deny `PolicyState`) is action-agnostic.
+    /// `application` is the term's name; `reason` names the offending port
+    /// dimension; `protocol` is the incompatible IANA number.
+    InvalidApplicationPortProtocol {
+        rule_id: String,
+        application: String,
+        reason: &'static str,
+        protocol: u8,
+    },
     /// #3261: a policy rule carries the reserved `__unsupported_address__`
     /// sentinel in its source/destination address fields. The Go capability
     /// gate emits it when a policy names an address it cannot represent — an
@@ -959,6 +990,16 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "rule {:?} application term {:?} has an invalid ICMP field combination: {} — refusing to compile a wrong-behaving term (icmp-code without icmp-type matches ALL ICMP; icmp-type/code on a non-ICMP protocol never matches, so a deny falls through to default-permit)",
                 rule_id, application, reason
+            ),
+            Self::InvalidApplicationPortProtocol {
+                rule_id,
+                application,
+                reason,
+                protocol,
+            } => write!(
+                f,
+                "rule {:?} application term {:?} has an invalid port/protocol combination: {} on protocol {} (only TCP/UDP present extracted L4 ports) — refusing to compile a wrong-behaving term (ports on an ICMP-typed term are silently dropped and broaden the permit; ports on a portless protocol never match, so a deny falls through to a later permit / default-permit)",
+                rule_id, application, reason, protocol
             ),
             Self::UnrepresentableAddress { rule_id } => write!(
                 f,
