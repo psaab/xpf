@@ -721,6 +721,13 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					// repeated inline route-filters already compile from —
 					// instead of dropping it to the override. A duplicate
 					// full member keeps the drop below.
+				} else if prefixListDefinitionInstanceDiffers14417(ancestorPath, peer, s) {
+					// #14417: a packed prefix-list definition leaf whose
+					// instance name (Keys[1]) differs from the inline peer
+					// is a different named object, not the same statement.
+					// Adopt it beside the peer so both definitions compile;
+					// same-name leaves keep the override above and union
+					// via the compiler #2641 loop when adopted/merged.
 					*dst = append(*dst, s)
 				}
 				continue
@@ -1330,6 +1337,41 @@ func leafListUnionEligible(ancestorPath [][]string, key string, dst, src *Node) 
 		return false
 	}
 	return !leafListCarriesRange(dst) && !leafListCarriesRange(src)
+}
+
+// prefixListDefinitionInstanceDiffers14417 reports whether s is a packed
+// policy-options prefix-list definition leaf (direct child of
+// policy-options, Keys = [prefix-list NAME prefix...]) whose instance
+// name differs from the inline peer. Such a leaf is a different named
+// object sharing only Keys[0]; the legacy keyword-peer override dropped
+// it (#14417). The from-level prefix-list reference (multi:true under a
+// term from) is excluded: it is not a definition, and the policy-options
+// ancestor check plus the children==nil schema test keep it on the
+// existing leaf-list union path. Braced definitions (children-bearing)
+// never reach this leaf arm as the group source.
+func prefixListDefinitionInstanceDiffers14417(ancestorPath [][]string, peer, s *Node) bool {
+	if peer == nil || s == nil || len(s.Keys) < 2 || len(peer.Keys) < 2 {
+		return false
+	}
+	if s.Keys[0] != "prefix-list" || peer.Keys[0] != "prefix-list" {
+		return false
+	}
+	if len(ancestorPath) == 0 {
+		return false
+	}
+	last := ancestorPath[len(ancestorPath)-1]
+	if len(last) == 0 || last[0] != "policy-options" {
+		return false
+	}
+	parent := schemaAtAncestorPath(ancestorPath)
+	if parent == nil {
+		return false
+	}
+	leafSchema := resolveSchemaChild(parent, s.Keys[0])
+	if leafSchema == nil || leafSchema.children != nil || leafSchema.multi {
+		return false
+	}
+	return s.Keys[1] != peer.Keys[1]
 }
 
 // leafListCarriesRange reports whether a leaf-list node packs a Junos range
