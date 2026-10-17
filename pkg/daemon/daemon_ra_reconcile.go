@@ -321,6 +321,9 @@ func sortRAPrefixes(prefixes []*config.RAPrefix) {
 		if a.PreferredLife != b.PreferredLife {
 			return a.PreferredLife < b.PreferredLife
 		}
+		if a.PreferredLifeSet != b.PreferredLifeSet {
+			return !a.PreferredLifeSet && b.PreferredLifeSet
+		}
 		if a.OnLink != b.OnLink {
 			return !a.OnLink // false sorts before true
 		}

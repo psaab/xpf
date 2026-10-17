@@ -355,6 +355,19 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   is an acquisition failure and is retried, never settled into an empty
   1h lease — counted regardless of `wantNA` so a PD-only client cannot
   fall through. Pinned by `dhcp_lease_expiry_4874_test.go`.
+- **DHCPv6 IA_PD preferred lifetime 0 is deprecated, not unset** (#14606,
+  RFC 8415 §21.22, RFC 9096 L-15): `extractDelegatedPrefixes` stores the
+  IAPREFIX preferred lifetime verbatim (only valid 0 withdraws), and
+  `buildRAConfigs` stamps it as `RAPrefix.PreferredLife` with
+  `PreferredLifeSet=true` — always, on the PD path. `pkg/ra` honors an
+  explicitly-set preferred 0 on the wire instead of substituting the
+  7-day default (which the pref≤valid clamp then turned into the full
+  valid lifetime), so the ISP's graceful-renumbering signal reaches LAN
+  hosts: addresses from the prefix are deprecated (RFC 4862 §5.5.4) but
+  the prefix stays on-link/autonomous until its valid lifetime ends. An
+  operator prefix with no `preferred-lifetime` leaf keeps the 7-day
+  default. Pinned by `pkg/daemon/ra_pd_preferred_zero_14606_test.go` and
+  `pkg/ra/sender_preferred_zero_14606_test.go`.
 - **DHCPv6 IA_PD prefix-length is validated at the DECODER** (#6531). The
   wire prefix-length is a single byte, and insomniacslk/dhcp decodes it
   as `net.CIDRMask(int(length), 128)` — which returns a **nil** mask for
