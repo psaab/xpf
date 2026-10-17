@@ -28,9 +28,16 @@ func TestJunosHostWarningsMatchPostQuarantineProjection13138(t *testing.T) {
 		lines        []string
 		policy       string
 		wantLifeline bool
+		// wantIngress false marks cases where the quarantine removed the
+		// zone's only ingress row (#14390 tunnel removal): the policy then
+		// has no applicable ingress at all, so the #4146 warning (which
+		// warns about unenforced restrictions on a live ingress path)
+		// still fires from validateJunosHostDirectDeliveryWarnings, and
+		// the no-gap assertion below does not apply.
+		wantIngress bool
 	}{
 		{
-			name: "12520 clears undefined tunnel routing-instance target",
+			name: "12520 removes undefined tunnel routing-instance target",
 			lines: append(append([]string{
 				"set interfaces gr-0/0/0 unit 0 tunnel source 192.0.2.1",
 				"set interfaces gr-0/0/0 unit 0 tunnel destination 192.0.2.2",
@@ -38,6 +45,9 @@ func TestJunosHostWarningsMatchPostQuarantineProjection13138(t *testing.T) {
 				"set interfaces gr-0/0/0 unit 0 family inet address 10.0.0.1/30",
 			}, zone("gr-0/0/0.0")...), denyPolicy("deny-ssh")...),
 			policy: "deny-ssh",
+			// The removed tunnel was the zone's only ingress: no gap is
+			// recorded (nothing to cover), yet the deny still warns.
+			wantIngress: false,
 		},
 		{
 			name: "9909 drops WireGuard forwarding-instance membership",
@@ -46,7 +56,8 @@ func TestJunosHostWarningsMatchPostQuarantineProjection13138(t *testing.T) {
 				"set routing-instances fwd interface wg0",
 				"set interfaces wg0 unit 0 family inet address 10.9.0.1/30",
 			), zone("wg0.0")...), denyPolicy("deny-wg")...),
-			policy: "deny-wg",
+			policy:      "deny-wg",
+			wantIngress: true,
 		},
 		{
 			name: "11060 dual-claim quarantine removes stale gap",
@@ -57,7 +68,8 @@ func TestJunosHostWarningsMatchPostQuarantineProjection13138(t *testing.T) {
 				"set routing-instances red instance-type virtual-router",
 				"set routing-instances red interface ge-0/0/7.0",
 			}, zone("ge-0/0/7.0")...), denyPolicy("deny-shared")...),
-			policy: "deny-shared",
+			policy:      "deny-shared",
+			wantIngress: true,
 		},
 		{
 			name: "11392 mgmt quarantine preserves lifeline warning",
@@ -68,6 +80,7 @@ func TestJunosHostWarningsMatchPostQuarantineProjection13138(t *testing.T) {
 			}, zone("fxp0.0")...), denyPolicy("deny-mgmt")...),
 			policy:       "deny-mgmt",
 			wantLifeline: true,
+			wantIngress:  true,
 		},
 	}
 	for _, tc := range cases {
@@ -86,9 +99,12 @@ func TestJunosHostWarningsMatchPostQuarantineProjection13138(t *testing.T) {
 					policyWarnings = append(policyWarnings, w)
 				}
 			}
-			if len(gaps) == 0 && !lifeline && len(policyWarnings) != 0 {
+			if tc.wantIngress && len(gaps) == 0 && !lifeline && len(policyWarnings) != 0 {
 				t.Fatalf("warning claims incomplete direct-path coverage but post-quarantine projection has no gap for policy %q: warnings=%v projection={rendered:%v zones:%v}",
 					tc.policy, policyWarnings, proj.RenderedPolicyKeys, proj.RenderedPolicyZoneKeys)
+			}
+			if !tc.wantIngress && len(policyWarnings) == 0 {
+				t.Fatalf("policy %q with no surviving ingress should still warn (#4146): warnings=%v", tc.policy, cfg.Warnings)
 			}
 			if len(gaps) > 0 && !strings.Contains(strings.Join(policyWarnings, "\n"), "not covered on") {
 				t.Fatalf("post-quarantine ingress gap for policy %q is silent in cfg.Warnings: gaps=%v warnings=%v", tc.policy, gaps, policyWarnings)

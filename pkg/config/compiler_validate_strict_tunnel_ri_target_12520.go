@@ -57,24 +57,107 @@ func validateTunnelRoutingInstanceTargetsStrict12520(cfg *Config) error {
 	return nil
 }
 
-// skipQuarantinedGRECollisions12520 runs after the tolerant clear below.
-// Clearing a target moves that tunnel's GRE decap identity (#10654: source,
-// destination, key and transport instance) into the default instance, where
-// another tunnel may already own it. The #10654 gate ran before the clear and
-// saw two distinct identities; left alone, the snapshot builder would keep the
-// first-sorting duplicate, which can be the quarantined tunnel, blackholing
-// the valid tunnel's egress and crediting its inbound frames to the wrong one.
+// removeQuarantinedTunnels12520 removes every tunnel in removed from the
+// compiled config (#14390). An interface-level tunnel is removed the way
+// #9909 removes one; units that inherited it must also go, or they survive
+// as live non-tunnel interfaces. A unit-level tunnel takes its unit with
+// it, as the tolerant #9899 unit skip does, because a unit left without
+// its tunnel would inherit any interface-level tunnel. A unit with its
+// own (non-removed) tunnel keeps it.
+func removeQuarantinedTunnels12520(cfg *Config, removed map[*TunnelConfig]struct{}) {
+	if len(removed) == 0 {
+		return
+	}
+	removedRefs := make(map[string]struct{})
+	for ifName, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		removeInterfaceTunnel := false
+		if ifc.Tunnel != nil {
+			_, removeInterfaceTunnel = removed[ifc.Tunnel]
+			if removeInterfaceTunnel {
+				ifc.Tunnel = nil
+			}
+		}
+		for unitNum, unit := range ifc.Units {
+			if unit == nil {
+				continue
+			}
+			if removeInterfaceTunnel && unit.Tunnel == nil {
+				removedRefs[fmt.Sprintf("%s.%d", ifName, unitNum)] = struct{}{}
+				delete(ifc.Units, unitNum)
+				continue
+			}
+			if unit.Tunnel == nil {
+				continue
+			}
+			if _, remove := removed[unit.Tunnel]; remove {
+				removedRefs[fmt.Sprintf("%s.%d", ifName, unitNum)] = struct{}{}
+				delete(ifc.Units, unitNum)
+			}
+		}
+		// An interface-level removal with no surviving units leaves no
+		// logical interface behind; record the bare ref too.
+		if removeInterfaceTunnel && len(ifc.Units) == 0 {
+			removedRefs[ifName] = struct{}{}
+			// Unit 0 is the implicit row of an interface-level tunnel.
+			removedRefs[fmt.Sprintf("%s.0", ifName)] = struct{}{}
+		}
+	}
+	// Drop zone bindings naming a removed tunnel row: the interface no
+	// longer exists as an ingress device, so the binding must not scope
+	// host-inbound coverage (or any other consumer) to a phantom netdev.
+	// A unit-qualified ref is dropped only when it names a removed unit;
+	// a bare ref is dropped only when the whole interface is gone.
+	// Surviving units and other interfaces are untouched.
+	if len(removedRefs) == 0 {
+		return
+	}
+	for _, zone := range cfg.Security.Zones {
+		if zone == nil || len(zone.Interfaces) == 0 {
+			continue
+		}
+		kept := zone.Interfaces[:0]
+		for _, ref := range zone.Interfaces {
+			s := cfg.SplitInterfaceUnitRef(ref)
+			key := s.Literal
+			if !s.HasUnit || s.UnitTok == "" {
+				key = s.Base
+				if key == "" {
+					key = ref
+				}
+			}
+			if _, gone := removedRefs[key]; !gone {
+				kept = append(kept, ref)
+			}
+		}
+		for i := len(kept); i < len(zone.Interfaces); i++ {
+			zone.Interfaces[i] = ""
+		}
+		zone.Interfaces = kept
+	}
+}
+
+// skipQuarantinedGRECollisions12520 runs before the tolerant removal below.
+// A quarantined tunnel's GRE decap identity (#10654: source, destination,
+// key and transport instance) would, if the tunnel were installed in the
+// default instance, belong to that instance; another tunnel may already
+// own the same identity there. The #10654 gate ran before this gate with
+// the authored targets still present and saw two distinct identities.
+// Since #14390 every quarantined tunnel is removed, so no quarantined
+// tunnel can take an owned identity; this check keeps the explicit
+// collision diagnostic (naming the skipped tunnel and its owner) for the
+// colliding sub-case instead of a plain removal warning.
 //
-// Every non-quarantined GRE endpoint claims its identity first, then the
-// quarantined endpoints claim theirs in emitter order. A quarantined tunnel
-// whose identity is already owned is removed from the compiled config, so the
-// kernel tunnel manager and the snapshot builder both see only the owner.
-// Duplicates among non-quarantined tunnels predate this gate and stay with
-// #10654. An interface-level tunnel is removed the way #9909 removes one;
-// units that inherited it must also go, or they survive as live non-tunnel
-// interfaces. A unit-level tunnel takes its unit with it, as the tolerant
-// #9899 unit skip does, because a unit left without its tunnel would inherit
-// any interface-level tunnel.
+// Every non-quarantined GRE endpoint claims its post-removal identity
+// first (its RoutingInstance is unchanged by the removal), then the
+// quarantined endpoints claim theirs in emitter order with the target
+// treated as the default instance (""). A quarantined tunnel whose
+// identity is already owned gets the collision warning; all quarantined
+// tunnels are removed by removeQuarantinedTunnels12520 regardless.
+// Duplicates among non-quarantined tunnels predate this gate and stay
+// with #10654.
 func skipQuarantinedGRECollisions12520(cfg *Config, quarantined map[*TunnelConfig]string) {
 	if len(quarantined) == 0 {
 		return
@@ -97,7 +180,11 @@ func skipQuarantinedGRECollisions12520(cfg *Config, quarantined map[*TunnelConfi
 			continue
 		}
 		endpoint := greEndpoint{name: ep.Name, tunnel: ep.Tunnel, key: key}
-		if _, wasCleared := quarantined[ep.Tunnel]; wasCleared {
+		if _, wasQuarantined := quarantined[ep.Tunnel]; wasQuarantined {
+			// The authored target never installs (#14390 removal), so
+			// the identity this tunnel WOULD have claimed is the
+			// default-instance one.
+			endpoint.key.transportRI = ""
 			cleared = append(cleared, endpoint)
 		} else {
 			owners = append(owners, endpoint)
@@ -109,55 +196,25 @@ func skipQuarantinedGRECollisions12520(cfg *Config, quarantined map[*TunnelConfi
 			owner[endpoint.key] = endpoint.name
 		}
 	}
-	skipped := make(map[*TunnelConfig]struct{})
 	for _, endpoint := range cleared {
 		kept, taken := owner[endpoint.key]
 		if !taken {
 			owner[endpoint.key] = endpoint.name
 			continue
 		}
-		skipped[endpoint.tunnel] = struct{}{}
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
-			"tunnel %q is skipped on tolerant load: clearing its routing-instance target %q moves its GRE outer (%s) into the default instance, where tunnel %q already owns it (#12520, #10654)",
+			"tunnel %q is skipped on tolerant load: its routing-instance target %q is unsupported, and installing it in the default instance would move its GRE outer (%s) onto tunnel %q, which already owns it (#14390, #12520, #10654)",
 			endpoint.name, quarantined[endpoint.tunnel], endpoint.key.outerDescription(), kept))
-	}
-	if len(skipped) == 0 {
-		return
-	}
-	for _, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
-			continue
-		}
-		skipInterfaceTunnel := false
-		if ifc.Tunnel != nil {
-			_, skipInterfaceTunnel = skipped[ifc.Tunnel]
-			if skipInterfaceTunnel {
-				ifc.Tunnel = nil
-			}
-		}
-		for unitNum, unit := range ifc.Units {
-			if unit == nil {
-				continue
-			}
-			if skipInterfaceTunnel && unit.Tunnel == nil {
-				delete(ifc.Units, unitNum)
-				continue
-			}
-			if unit.Tunnel == nil {
-				continue
-			}
-			if _, skip := skipped[unit.Tunnel]; skip {
-				delete(ifc.Units, unitNum)
-			}
-		}
 	}
 }
 
 // runTailGatesTunnelRITarget12520 checks explicit tunnel targets after the
 // established tail gates. Tolerant loads warn once per violating claim and
-// clear that target, keeping kernel and userspace ownership in the default
-// routing domain without rejecting persisted configurations (#1960); a cleared
-// GRE tunnel that collides with an owned outer identity is skipped instead.
+// remove that tunnel (#14390, the #9909 posture), without rejecting
+// persisted configurations (#1960). Removing — not clearing the target —
+// keeps the tunnel out of every routing domain: clearing installed it in
+// the default domain (RoutingDomain 0), a VRF escape from the undefined,
+// forwarding, or reserved-management domain the operator named.
 func runTailGatesTunnelRITarget12520(cfg *Config, opts compileOpts) error {
 	if cfg == nil {
 		return nil
@@ -177,10 +234,14 @@ func runTailGatesTunnelRITarget12520(cfg *Config, opts compileOpts) error {
 				fmt.Sprintf("tunnel routing-instance target (quarantined on tolerant path): %v", err))
 			if claim.Tunnel != nil {
 				quarantined[claim.Tunnel] = claim.Instance
-				claim.Tunnel.RoutingInstance = ""
 			}
 		}
 	}
 	skipQuarantinedGRECollisions12520(cfg, quarantined)
+	removed := make(map[*TunnelConfig]struct{}, len(quarantined))
+	for tunnel := range quarantined {
+		removed[tunnel] = struct{}{}
+	}
+	removeQuarantinedTunnels12520(cfg, removed)
 	return nil
 }

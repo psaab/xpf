@@ -7,9 +7,9 @@ import (
 )
 
 // TestQuarantinedGRECollisionAppliesOnlyValidTunnel12520 is the kernel half of
-// the userspace snapshot cell: when clearing gr-0/0/0's undefined target lands
-// it on gr-0/0/1's GRE outer, the tunnel manager is handed only the valid
-// gr-0-0-1, in the default domain, so both planes agree on one owner.
+// the userspace snapshot cell: gr-0/0/0's undefined target gets it removed
+// (#14390), so the tunnel manager is handed only the valid
+// gr-0/0/1, in the default domain, and both planes agree on one owner.
 func TestQuarantinedGRECollisionAppliesOnlyValidTunnel12520(t *testing.T) {
 	cfg, err := config.CompileConfigLenient(tree12082(t, []string{
 		"set system dataplane-type userspace",
