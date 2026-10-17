@@ -3133,7 +3133,13 @@ func compileSchedulers(node *Node, cfg *Config) error {
 						sched.StopTime = win.StopTime
 					}
 					sched.AllDay = sched.AllDay || win.AllDay
-					sched.DailyExclude = win.Exclude
+					// #14396: OR, not assign — a duplicate `daily` stanza
+					// (second stanza in one block, duplicate scheduler
+					// instance, or group-expanded fragment) carrying only
+					// a window must not clear an exclude an earlier stanza
+					// declared, or a never-active scheduler goes active.
+					// Mirrors the weekday arm's `w.Exclude || win.Exclude`.
+					sched.DailyExclude = sched.DailyExclude || win.Exclude
 				}
 			default:
 				if _, ok := schedulerWeekdays[name]; ok {
