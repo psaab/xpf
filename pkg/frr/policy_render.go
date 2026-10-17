@@ -152,10 +152,24 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 	if len(bgpAccept) > 0 {
 		bgpAcceptDefault = bgpAccept[0]
 	}
-	return m.generatePolicyOptionsWithQNH11447(po, bgpAcceptDefault, nil)
+	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, nil, nil)
 }
 
 func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447) string {
+	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, qnhMetrics, nil)
+}
+
+// generatePolicyOptionsForSection is generatePolicyOptions for the
+// managed section: #14380 referencedNodes carries the (self, node)
+// pairs at which each policy-statement is referenced by a
+// redistribute-backed export, so a referenced no-from policy gets
+// its expanded per-source maps defined. Direct callers use
+// generatePolicyOptions and keep the explicit-only set.
+func (m *Manager) generatePolicyOptionsForSection(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string) string {
+	return m.generatePolicyOptionsWithRefNodes14380(po, bgpAcceptDefault, qnhMetrics, referencedNodes)
+}
+
+func (m *Manager) generatePolicyOptionsWithRefNodes14380(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447, referencedNodes map[string][][2]string) string {
 	var b strings.Builder
 	b.WriteString(qnhMetrics.renderPrefixLists())
 
@@ -378,7 +392,10 @@ func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConf
 				po, name, ps, policyTrailingAction(name, ps, bgpAcceptDefault), fallbackAction))
 		}
 		b.WriteString("!\n")
-		for _, proto := range redistProtocols(ps) {
+		// #14380: referencedNodes expands a referenced no-from policy
+		// to the whole node-fitting domain at its referencing nodes;
+		// nil (direct callers) keeps the explicit-only set.
+		for _, proto := range redistReferencedProtocols14380(ps, referencedNodes[name]) {
 			b.WriteString(renderRedistributePolicyMap(m, po, name, ps, proto))
 		}
 		for _, scope := range qnhMetrics.scopes() {

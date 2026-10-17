@@ -620,6 +620,15 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := redistProtocolMapCollision(fc.PolicyOptions); err != nil {
 			return err
 		}
+		// #14380: a referenced no-from policy also generates the
+		// expanded node-fitting set; guard those names too.
+		for _, nodes := range redistReferencedNodes14380(fc) {
+			for _, nd := range nodes {
+				if err := redistProtocolMapCollisionForNodes(fc.PolicyOptions, nd[0], nd[1]); err != nil {
+					return err
+				}
+			}
+		}
 		if err := qualifiedNextHopMetricCollision11447(fc.PolicyOptions, buildQNHMetricSet11447(fc, fc.PolicyOptions)); err != nil {
 			return err
 		}
@@ -744,7 +753,9 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 		policyOptions = &config.PolicyOptionsConfig{}
 	}
 	if policyOptions != nil {
-		b.WriteString(m.generatePolicyOptionsWithQNH11447(policyOptions, bgpAcceptDefault, qnhMetrics))
+		// #14380: referenced no-from policies get their expanded
+		// per-source maps defined at exactly the referencing nodes.
+		b.WriteString(m.generatePolicyOptionsForSection(policyOptions, bgpAcceptDefault, qnhMetrics, redistReferencedNodes14380(fc)))
 		if fc.PolicyOptions != nil {
 			// Composed BGP policy-chain route-maps: an ordered `import`/`export
 			// [ A B C ]` list of >= 2 defined policy-statements is composed into a
