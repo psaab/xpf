@@ -82,10 +82,20 @@ type LeaseDNSRecord struct {
 	// family, no sibling left) fires the host-wide verb and cleans both — no
 	// permanent orphan on teardown. Backends with a PER-FAMILY delete (rfc2136 /
 	// cloudflare / route53 / bind) touch only the requested A/AAAA RRset and
-	// IGNORE this flag. Set by withdrawOwnedLocked from a scan of the ownership
-	// store (same {provider, FQDN} under the opposite family). Ignored on
-	// UpsertLease. Defaults false (single-family / full-teardown — the host-wide
-	// verb is correct and issued).
+	// IGNORE this flag on DeleteLease. Set by withdrawOwnedLocked from a scan of
+	// the ownership store (same {provider, FQDN} under the opposite family).
+	// Defaults false (single-family / full-teardown — the host-wide verb is
+	// correct and issued).
+	//
+	// On UpsertLease the same flag carries the #14604 meaning (a DIFFERENT
+	// predicate): the manager already owns a record at this forward name
+	// under the opposite family (durable store, or this pass's write-ahead
+	// intent for the sibling), so the name is xpf-owned, not foreign. The
+	// RFC 2136 backend's skip-existing/strict-fail guard then stays
+	// per-type (RRsetNotUsed) for that legitimate sibling publish instead
+	// of refusing the second family with the name-level NameNotUsed guard.
+	// Set by Manager.upsertLocked from its ownership scan — deliberately
+	// NOT set anywhere on a DeleteLease-construction path for this meaning.
 	SiblingFamilyOwned bool
 }
 

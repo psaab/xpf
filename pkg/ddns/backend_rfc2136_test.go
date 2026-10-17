@@ -702,10 +702,15 @@ func TestRFC2136SkipExistingConflictSkips(t *testing.T) {
 	if conf != 1 {
 		t.Errorf("conflict skip counter = %d, want 1", conf)
 	}
-	// The add carried a prerequisite (RRsetNotUsed → an Answer RR).
+	// The add carried a prerequisite (NameNotUsed → an Answer RR, #14604:
+	// a name-level guard, not the per-type RRsetNotUsed that let a client
+	// plant one family at a name holding only the other type).
 	ups := srv.recorded()
 	if len(ups) == 0 || len(ups[0].prereqs) == 0 {
-		t.Errorf("skip-existing must send a no-RRset prerequisite")
+		t.Errorf("skip-existing must send a no-name prerequisite")
+	} else if pre := ups[0].prereqs[0]; pre.Header().Class != dns.ClassNONE || pre.Header().Rrtype != dns.TypeANY {
+		t.Errorf("skip-existing prereq = class %d type %s, want NameNotUsed (ClassNONE ANY) (#14604)",
+			pre.Header().Class, dns.TypeToString[pre.Header().Rrtype])
 	}
 }
 
