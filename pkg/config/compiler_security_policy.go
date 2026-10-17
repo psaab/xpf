@@ -1,6 +1,86 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+// containerBracketedZoneList14342 reports a bracketed multi-member zone
+// list in the container-form zone-pair branches of compilePolicies
+// (#14342), or "" when every zone token is a single scalar.
+//
+// The container shapes carry the list on the SOURCE child
+// (`from-zone { [ trust dmz ] { ... } }` -> fzSub.Keys=[trust dmz]), on
+// the KEYED destination (`to-zone [ untrust dmz ]` ->
+// tzNode.Keys=[to-zone untrust dmz]), or on a CHILD of a keyless
+// destination (`to-zone { [ untrust dmz ] { ... } }` ->
+// tzSub.Keys=[untrust dmz]). The pair builder reads only the first token
+// of each (fzSub.Name(), Keys[1], tzSub.Name()), so the remaining members
+// and their zone pairs vanished with a clean strict commit. Junos has no
+// bracketed zone-list semantics for a policy context (one context = one
+// pair, #9246), so — like malformedZonePairShape9246 for the inline form
+// — this rejects strict and poisons tolerant via MalformedZonePairs,
+// rather than expanding the list into invented pairs.
+//
+// The count check is deliberately broader than "was it bracketed": a
+// multi-token tail has no policy-context meaning however it was produced.
+// Single-member brackets ([ trust ]) carry no dropped pair and stay
+// valid, matching the #12680 single-member precedent.
+func containerBracketedZoneList14342(fzSub, tzNode *Node) string {
+	// A `to-zone` token past Keys[0] means the #11346 mixed spelling
+	// (`A to-zone B { ... }` as one node); its shared diagnostic owns
+	// that node, so do not re-label it a bracketed list.
+	_, mixed11346 := keysCarryToZone12231(fzSub)
+	if len(fzSub.Keys) > 1 && !mixed11346 {
+		return "from-zone [ " + strings.Join(fzSub.Keys, " ") + " ]" +
+			": a bracketed [ ... ] zone list is not valid on from-zone — a policy context is ONE " +
+			"zone pair. The malformed context is not enforced on tolerant loads; write one " +
+			"`from-zone <zone> to-zone <zone>` context per pair"
+	}
+	if len(tzNode.Keys) == 2 {
+		// Keyed destination on the keyed from-zone context
+		// (`from-zone trust { to-zone [ untrust dmz ] }` re-parsed with
+		// the `trust` container peeled, #14342): to-zone carries Keys[1]
+		// and folds the remaining list members into its children as
+		// further `to-zone <zone> { ... }` blocks carrying the rule.
+		// Only the first such child becomes a pair; the rest — and any
+		// policy-bearing grandchild, whose policy is never compiled —
+		// would be silently dropped.
+		for _, gc := range tzNode.Children {
+			if gc.Name() == "to-zone" && len(gc.Keys) >= 2 {
+				return "from-zone " + fzSub.Name() + " to-zone [ " + tzNode.Keys[1] + " " + gc.Keys[1] + " ]" +
+					": a bracketed [ ... ] zone list is not valid on to-zone — a policy context is ONE " +
+					"zone pair. The malformed context is not enforced on tolerant loads; write one " +
+					"`from-zone <zone> to-zone <zone>` context per pair"
+			}
+			if len(gc.FindChildren("policy")) > 0 {
+				return "from-zone " + fzSub.Name() + " to-zone [ " + tzNode.Keys[1] + " " + gc.Name() + " ]" +
+					": a bracketed [ ... ] zone list is not valid on to-zone — a policy context is ONE " +
+					"zone pair. The malformed context is not enforced on tolerant loads; write one " +
+					"`from-zone <zone> to-zone <zone>` context per pair"
+			}
+		}
+	}
+	if len(tzNode.Keys) > 2 {
+		return "from-zone " + fzSub.Name() + " to-zone [ " + strings.Join(tzNode.Keys[1:], " ") + " ]" +
+			": a bracketed [ ... ] zone list is not valid on to-zone — a policy context is ONE " +
+			"zone pair. The malformed context is not enforced on tolerant loads; write one " +
+			"`from-zone <zone> to-zone <zone>` context per pair"
+	}
+	// Only a keyless to-zone carries destination zones as children; a
+	// keyed to-zone's children are policies (Keys=[policy <name>]).
+	if len(tzNode.Keys) < 2 {
+		for _, tzSub := range tzNode.Children {
+			if len(tzSub.Keys) > 1 {
+				return "from-zone " + fzSub.Name() + " to-zone [ " + strings.Join(tzSub.Keys, " ") + " ]" +
+					": a bracketed [ ... ] zone list is not valid on to-zone — a policy context is ONE " +
+					"zone pair. The malformed context is not enforced on tolerant loads; write one " +
+					"`from-zone <zone> to-zone <zone>` context per pair"
+			}
+		}
+	}
+	return ""
+}
 
 func compilePolicies(node *Node, sec *SecurityConfig) error {
 	ambiguousDefaultPolicy := false
@@ -200,6 +280,10 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 					// Its child names are policy keywords, not destination
 					// zones; use the key just as the combined spelling does.
 					for _, tzNode := range fzSub.FindChildren("to-zone") {
+						if bad := containerBracketedZoneList14342(fzSub, tzNode); bad != "" {
+							sec.MalformedZonePairs = append(sec.MalformedZonePairs, bad)
+							continue
+						}
 						if len(tzNode.Keys) >= 2 {
 							pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
 							continue
