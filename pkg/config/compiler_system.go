@@ -1681,6 +1681,16 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 	}
 	var warnings []string
 	for _, lc := range cfg.System.Login.Classes {
+		// #14387: a class whose name shadows a built-in is INERT at runtime
+		// (ResolveClassPermissions consults the built-in table first), so
+		// reporting its Junos permissions as "mapped to xpf coarse
+		// permissions {...}" states the opposite of the installed semantics.
+		// On the strict path such a definition never reaches here (the
+		// shadow gate rejects it); on the tolerant path the gate warning
+		// plus the per-user neutralisation warning carry the signal.
+		if _, builtin := LoginClassPermissions[lc.Name]; builtin {
+			continue
+		}
 		_, folded := mapJunosPermissions(lc.Permissions)
 		// Report the EFFECTIVE set (lc.MappedPermissions), not a fresh
 		// mapJunosPermissions call (#5831). The two are identical for every

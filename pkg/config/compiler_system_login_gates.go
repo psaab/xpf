@@ -635,13 +635,72 @@ func loginBlockOnlyArity(keyword, stmt string) (int, bool) {
 //
 // Strict at commit / commit-check; warn on the tolerant load / peer-sync path
 // (#1960) — leniently loaded the definition stays exactly as inert as it
-// already was, now stated.
+// already was, now stated. Since #14387 the tolerant path additionally
+// neutralises assignments to the shadowed name (see
+// neutraliseShadowedLoginAssignments14387), so warn-only no longer leaves
+// the assigned user holding the built-in's permissions.
 func validateLoginClassShadowsBuiltinAST(tree *ConfigTree, lenient bool) ([]string, error) {
 	var f loginFindings
 	forEachClusterNodeView(tree, func(view *ConfigTree) {
 		collectLoginClassShadowFindings(view.Children, &f)
 	})
 	return f.verdict(lenient)
+}
+
+// neutraliseShadowedLoginAssignments14387 rewrites, on the tolerant load /
+// peer-sync path only, every compiled user whose class names a built-in that
+// is ALSO shadowed by a custom class definition in cfg (#14387 / DR6-H3).
+//
+// The shadowing definition is inert (ResolveClassPermissions consults the
+// built-in table first), so keeping the assignment would hand the user the
+// built-in's permissions — for `super-user`, PermAll — while the authored
+// narrowing never applied. Rewriting the assignment to "unauthorized" (a
+// built-in whose permission set is empty) makes every consumer agree:
+// LoginUserClass, pkg/cli ResolveLoginClass (via the compiled user record),
+// pkg/authz, the daemon login-shell selection and the sudoers reconciliation
+// all read User.Class. The custom definition itself is left authored so show
+// config still displays what was written, and users assigned a built-in with
+// NO shadowing definition are untouched (their built-in grant is legitimate).
+//
+// "unauthorized" is itself a built-in, but it can never be a shadowing target
+// that widens anyone: its permission set is empty, so even a (separately
+// gated) `class unauthorized { permissions all; }` definition still resolves
+// through the built-in empty set. Rewriting to it therefore cannot recurse.
+//
+// Returns one warning per neutralised user. Must only be called when the
+// shadow gate ran leniently; strict compiles never reach a compiled cfg with
+// a shadowing definition.
+func neutraliseShadowedLoginAssignments14387(cfg *Config) []string {
+	if cfg == nil || cfg.System.Login == nil || len(cfg.System.Login.Classes) == 0 {
+		return nil
+	}
+	shadowed := map[string]bool{}
+	for _, lc := range cfg.System.Login.Classes {
+		if lc == nil {
+			continue
+		}
+		if _, builtin := LoginClassPermissions[lc.Name]; builtin {
+			shadowed[lc.Name] = true
+		}
+	}
+	if len(shadowed) == 0 {
+		return nil
+	}
+	var warnings []string
+	for _, u := range cfg.System.Login.Users {
+		if u == nil || !shadowed[u.Class] {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"system login user %s: class %q is shadowed by a custom `system login class %s` "+
+				"definition that is INERT at runtime (the built-in %q always wins), so the "+
+				"authored narrowing was never applied; the assignment was neutralised to "+
+				"\"unauthorized\" (no permissions) on this tolerant load — rename the custom "+
+				"class or assign the built-in directly (#14387)",
+			u.Name, u.Class, u.Class, u.Class))
+		u.Class = "unauthorized"
+	}
+	return warnings
 }
 
 // collectLoginClassShadowFindings records every built-in-shadowing class

@@ -715,6 +715,9 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 		cfg.Warnings = append(cfg.Warnings, fabricStampSharedSegmentAdvisories10105(cfg)...)
 	}
 	cfg.Warnings = append(cfg.Warnings, loginShadowWarnings...)
+	if opts.lenientLoginClassShadowsBuiltin {
+		cfg.Warnings = append(cfg.Warnings, neutraliseShadowedLoginAssignments14387(cfg)...)
+	}
 	// #6706: record that a `system login` path was authored packed, so the
 	// daemon can tell "RBAC never configured" from "RBAC configured and dropped"
 	// — both of which arrive here as System.Login == nil. Set from the BROADER
@@ -1052,6 +1055,9 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	appendUserspaceMgmtZoneAdvisoryLocked(cfg, opts)
 	appendUserspaceRxMTUAdvisoryLocked(cfg, opts)
 	cfg.Warnings = append(cfg.Warnings, loginShadowWarnings...)
+	if opts.lenientLoginClassShadowsBuiltin {
+		cfg.Warnings = append(cfg.Warnings, neutraliseShadowedLoginAssignments14387(cfg)...)
+	}
 	// #6706: record that a `system login` path was authored packed, so the
 	// daemon can tell "RBAC never configured" from "RBAC configured and dropped"
 	// — both of which arrive here as System.Login == nil. Set from the BROADER
