@@ -1175,10 +1175,15 @@ func validateHostInboundUnknownChildrenStrict(cfg *Config) error {
 				continue
 			}
 			for _, child := range hib.UnknownChildren {
+				if child == "" {
+					continue
+				}
 				if strings.HasPrefix(child, nestedHostInboundChildMarker13106) {
 					return fmt.Errorf("security zone %q interfaces %q host-inbound-traffic has unsupported nested child %q",
 						zoneName, ifName, hostInboundUnknownChildName13106(child))
 				}
+				return fmt.Errorf("security zone %q interfaces %q host-inbound-traffic has unknown child keyword %q, which would be discarded",
+					zoneName, ifName, child)
 			}
 		}
 	}

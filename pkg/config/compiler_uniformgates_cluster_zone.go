@@ -449,9 +449,9 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
-	// #12219: tolerant ingestion warns about retained unknown children at both
-	// zone and interface scope. Strict unknown-child validation is zone-level;
-	// per-interface packed-tail rejection remains owned by #6735.
+	// #12219/#14352: tolerant ingestion warns about retained unknown children
+	// at both zone and interface scope; strict validation rejects them at
+	// both scopes. Per-interface packed-tail rejection remains owned by #6735.
 	if opts.lenientHostInboundTokens {
 		cfg.Warnings = append(cfg.Warnings, toleratedUnknownHostInboundChildWarnings(cfg)...)
 	} else if err := validateHostInboundUnknownChildrenStrict(cfg); err != nil {
