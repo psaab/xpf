@@ -38,6 +38,13 @@ import (
 //     dataplane (hydrate_wg_identity drops the whole row).
 //   - Malformed preshared-key = REJECT (when present). Same 64-hex
 //     shape (#1434 B2).
+//   - Degenerate key = REJECT (#14373). Shape alone is not enough: an
+//     all-zero / all-same-byte private key clamps to a publicly known
+//     scalar, an all-zero / small-order peer public key makes every DH
+//     output zero or enumerable, and an explicit degenerate PSK is a
+//     known constant rather than a secret. The same predicate is
+//     mirrored in the Rust hydrate/engine so a leniently-loaded
+//     degenerate config fails closed in the dataplane.
 //   - Mixed endpoint family = REJECT. One WG interface binds one kernel
 //     UDP socket = one outer transport family. Peers that DECLARE an
 //     endpoint must all agree on v4-vs-v6; a responder-only peer (no
@@ -299,6 +306,9 @@ func validateOneWireguardTunnel(tc *TunnelConfig) error {
 	if !isWireguardKeyHex(tc.WgLocalPrivkeyHex.Reveal()) {
 		return fmt.Errorf("private-key is invalid or missing (expected 64 hex chars / 32-byte X25519 private key; the dataplane drops a tunnel whose private-key does not decode)")
 	}
+	if isDegenerateWireguardKeyHex(tc.WgLocalPrivkeyHex.Reveal()) {
+		return fmt.Errorf("private-key is degenerate (an all-zero, repeated-byte, or small-order X25519 key clamps to a publicly known scalar, so anyone can handshake as any peer; generate a fresh random private key)")
+	}
 	if len(tc.WgPeers) == 0 {
 		return fmt.Errorf("tunnel has no peer (a peerless WireGuard tunnel can never handshake; configure at least one `peer <public-key>`)")
 	}
@@ -316,6 +326,9 @@ func validateOneWireguardTunnel(tc *TunnelConfig) error {
 		if !isWireguardKeyHex(p.PublicKeyHex) {
 			return fmt.Errorf("peer %d has an invalid public key (expected 64 hex chars / 32-byte X25519, got %q)", i, p.PublicKeyHex)
 		}
+		if isDegenerateWireguardKeyHex(p.PublicKeyHex) {
+			return fmt.Errorf("peer %d has a degenerate public key %q (an all-zero, repeated-byte, or small-order X25519 point yields a zero or enumerable DH secret, so anyone can handshake as this peer)", i, p.PublicKeyHex)
+		}
 		if _, dup := seen[p.PublicKeyHex]; dup {
 			return fmt.Errorf("duplicate peer public key %q (each peer on a WireGuard tunnel must have a unique public key)", p.PublicKeyHex)
 		}
@@ -323,6 +336,9 @@ func validateOneWireguardTunnel(tc *TunnelConfig) error {
 
 		if p.PresharedKeyHex != "" && !isWireguardKeyHex(string(p.PresharedKeyHex)) {
 			return fmt.Errorf("peer %q has an invalid preshared key (expected 64 hex chars / 32 bytes)", p.PublicKeyHex)
+		}
+		if p.PresharedKeyHex != "" && isDegenerateWireguardKeyHex(string(p.PresharedKeyHex)) {
+			return fmt.Errorf("peer %q has a degenerate preshared key (an all-zero, repeated-byte, or small-order value is a publicly known constant, not a secret; generate a fresh random preshared key or omit it)", p.PublicKeyHex)
 		}
 
 		if p.Endpoint != "" {
@@ -430,6 +446,48 @@ func isWireguardKeyHex(s string) bool {
 		case c >= 'a' && c <= 'f':
 		case c >= 'A' && c <= 'F':
 		default:
+			return false
+		}
+	}
+	return true
+}
+
+// wgSmallOrderKeyHex lists every 32-byte little-endian encoding whose
+// Montgomery u-coordinate (top bit masked, per RFC 7748, then reduced
+// mod p) is a point of order dividing 8: u=0, u=1, the two order-8
+// points, u=p-1, and the non-canonical encodings that reduce to the
+// same points. A clamped scalar is a multiple of 8, so X25519 maps
+// each of these to the all-zero output. Mirrored byte-for-byte in the
+// Rust dataplane (wg::is_degenerate_wg_key_bytes).
+var wgSmallOrderKeyHex = []string{
+	"0000000000000000000000000000000000000000000000000000000000000000",
+	"0100000000000000000000000000000000000000000000000000000000000000",
+	"e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+	"5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+	"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+}
+
+// isDegenerateWireguardKeyHex reports whether a shape-valid WG key is a
+// publicly known degenerate value (#14373): every byte identical
+// (all-zero, all-0xFF, and every other repeated-byte constant), or one
+// of the small-order encodings above. Applied uniformly to the local
+// private key, peer public keys, and explicit preshared keys: a random
+// key is never one of these values, and each is either publicly known
+// after X25519 clamping or yields a zero/enumerable DH secret.
+func isDegenerateWireguardKeyHex(s string) bool {
+	if !isWireguardKeyHex(s) {
+		return false
+	}
+	low := strings.ToLower(s)
+	for _, k := range wgSmallOrderKeyHex {
+		if low == k {
+			return true
+		}
+	}
+	for i := 2; i < len(low); i += 2 {
+		if low[i] != low[0] || low[i+1] != low[1] {
 			return false
 		}
 	}

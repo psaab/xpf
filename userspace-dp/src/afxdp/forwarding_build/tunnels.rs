@@ -306,6 +306,17 @@ pub(in crate::afxdp) fn hydrate_wg_identity(
     if decode_wg_key_hex(&row.wg_local_privkey_hex, &mut local_privkey).is_err() {
         return None;
     }
+    // #14373: a degenerate local private key (all-zero / repeated-byte /
+    // small-order) clamps to a publicly known scalar — anyone could
+    // handshake as any peer. The Go commit gate rejects it; a
+    // leniently-loaded row that slipped past the warn path drops here,
+    // fail-closed like an undecodable key.
+    if crate::afxdp::wg::is_degenerate_wg_key_bytes(&local_privkey) {
+        eprintln!(
+            "xpf-userspace-dp: wireguard local private key is degenerate (all-zero, repeated-byte, or small-order); dropping this tunnel row (#14373)"
+        );
+        return None;
+    }
     if row.wg_peers.is_empty() {
         return None;
     }
@@ -316,6 +327,16 @@ pub(in crate::afxdp) fn hydrate_wg_identity(
         // LPM / demux index would be inconsistent), so drop the ROW —
         // same fail-closed posture the scalar path had.
         if decode_wg_key_hex(&wire.wg_peer_pubkey_hex, &mut peer_pubkey).is_err() {
+            return None;
+        }
+        // #14373: a small-order / degenerate peer public key yields a
+        // zero or enumerable DH secret against any clamped scalar, so
+        // anyone could handshake as this peer. Drop the ROW, mirroring
+        // the undecodable-pubkey posture above.
+        if crate::afxdp::wg::is_degenerate_wg_key_bytes(&peer_pubkey) {
+            eprintln!(
+                "xpf-userspace-dp: wireguard peer public key is degenerate (all-zero, repeated-byte, or small-order); dropping this tunnel row (#14373)"
+            );
             return None;
         }
         let mut allowed_ips: Vec<ipnet::IpNet> = Vec::new();
@@ -381,6 +402,18 @@ pub(in crate::afxdp) fn hydrate_wg_identity(
         if !wire.wg_preshared_key_hex.is_empty()
             && decode_wg_key_hex(&wire.wg_preshared_key_hex, &mut preshared_key).is_err()
         {
+            return None;
+        }
+        // #14373: an EXPLICIT degenerate PSK is a publicly known
+        // constant, not a secret. Drop the row (fail closed, like a
+        // malformed PSK). An absent PSK still hydrates to the all-zero
+        // no-PSK value above — that protocol semantics is unchanged.
+        if !wire.wg_preshared_key_hex.is_empty()
+            && crate::afxdp::wg::is_degenerate_wg_key_bytes(&preshared_key)
+        {
+            eprintln!(
+                "xpf-userspace-dp: wireguard preshared key is degenerate (all-zero, repeated-byte, or small-order); dropping this tunnel row (#14373)"
+            );
             return None;
         }
         peers.push(WgRuntimePeer {

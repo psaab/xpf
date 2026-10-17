@@ -100,6 +100,102 @@ fn keypair() -> ([u8; 32], [u8; 32]) {
     (priv_k, pub_k)
 }
 
+/// #14373: the engine must never install a small-order peer — its
+/// public key yields an all-zero DH secret against any clamped
+/// scalar, so no HandshakeState may be built for it. This pins the
+/// zero-DH-output refusal at the only in-tree enforcement point (snow
+/// computes DH opaquely; see is_small_order_wg_peer_key). A
+/// repeated-byte peer key that is NOT small-order stays installed at
+/// this layer (the commit gate / hydrate refuse it as a known
+/// constant; the engine guard is the cryptographic one).
+/// Fail-on-revert: removing the reconcile_peers guard installs the
+/// small-order peers and turns this RED.
+#[test]
+fn reconcile_refuses_degenerate_peer_14373() {
+    let (init_priv, _init_pub) = keypair();
+    let (_peer_priv, peer_pub) = keypair();
+    let mut small_order_u1 = [0u8; 32];
+    small_order_u1[0] = 1;
+    let engine = WgEngine::new(WgEngineConfig {
+        local_private_key: init_priv.into(),
+        listen_port: 51820,
+        peers: vec![
+            WgPeerConfig {
+                pubkey: [0u8; 32],
+                endpoint: None,
+                persistent_keepalive: 0,
+                allowed_ips: vec![ipnet::IpNet::from_str("10.0.0.0/24").unwrap()],
+                preshared_key: [0u8; 32].into(),
+            },
+            WgPeerConfig {
+                pubkey: small_order_u1,
+                endpoint: None,
+                persistent_keepalive: 0,
+                allowed_ips: vec![ipnet::IpNet::from_str("10.0.1.0/24").unwrap()],
+                preshared_key: [0u8; 32].into(),
+            },
+            WgPeerConfig {
+                pubkey: [0xabu8; 32],
+                endpoint: None,
+                persistent_keepalive: 0,
+                allowed_ips: vec![ipnet::IpNet::from_str("10.0.2.0/24").unwrap()],
+                preshared_key: [0u8; 32].into(),
+            },
+            WgPeerConfig {
+                pubkey: peer_pub,
+                endpoint: None,
+                persistent_keepalive: 0,
+                allowed_ips: vec![ipnet::IpNet::from_str("10.0.3.0/24").unwrap()],
+                preshared_key: [0u8; 32].into(),
+            },
+        ],
+    });
+    let table = engine.table_for_test();
+    assert_eq!(
+        table.peers.len(),
+        2,
+        "the valid peer and the non-small-order repeated-byte peer may be installed (#14373)"
+    );
+    assert!(table.peer_index_by_pubkey.contains_key(&peer_pub));
+    assert_eq!(
+        engine
+            .counters()
+            .hs_refused_degenerate_key
+            .load(Ordering::Relaxed),
+        2,
+        "each small-order peer refusal must be counted (#14373)"
+    );
+    // A later reconcile with the valid peer alone keeps it installed.
+    engine.reconcile_peers(&[WgPeerConfig {
+        pubkey: peer_pub,
+        endpoint: None,
+        persistent_keepalive: 0,
+        allowed_ips: vec![ipnet::IpNet::from_str("10.0.3.0/24").unwrap()],
+        preshared_key: [0u8; 32].into(),
+    }]);
+    assert_eq!(engine.table_for_test().peers.len(), 1);
+}
+
+/// #14373: every denylisted encoding really is small-order — X25519
+/// with a clamped scalar yields the all-zero (contributory-failure)
+/// output for each one. This is the executable pin that the denylist
+/// is exactly the contributory-failure set, not a copied table.
+#[test]
+fn small_order_keys_yield_zero_dh_14373() {
+    let (priv_k, pub_k) = keypair();
+    for key in WG_SMALL_ORDER_KEYS.iter() {
+        let dh = MontgomeryPoint(*key).mul_clamped(priv_k).to_bytes();
+        assert_eq!(
+            dh, [0u8; 32],
+            "small-order key must yield an all-zero DH output (#14373)"
+        );
+    }
+    // Repeated-byte constants are degenerate as known scalars/points.
+    assert!(super::super::is_degenerate_wg_key_bytes(&[0xffu8; 32]));
+    assert!(super::super::is_degenerate_wg_key_bytes(&[0xaau8; 32]));
+    assert!(!super::super::is_degenerate_wg_key_bytes(&pub_k));
+}
+
 #[test]
 fn inner_src_ip_v4() {
     let mut pkt = [0u8; 40];

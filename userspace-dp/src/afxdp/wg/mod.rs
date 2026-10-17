@@ -161,6 +161,84 @@ pub(crate) fn encode_wg_key_hex(key: &[u8; WG_KEY_LEN]) -> String {
     out
 }
 
+/// #14373: every 32-byte encoding whose Montgomery u-coordinate (top
+/// bit masked, per RFC 7748, then reduced mod p) is a point of order
+/// dividing 8: u=0, u=1, the two order-8 points, u=p-1, and the
+/// non-canonical encodings that reduce to the same points. A clamped
+/// scalar is a multiple of 8, so X25519 maps each to the all-zero
+/// output. Mirrored byte-for-byte from the Go commit gate
+/// (pkg/config wgSmallOrderKeyHex).
+pub(crate) const WG_SMALL_ORDER_KEYS: [[u8; WG_KEY_LEN]; 7] = [
+    // u = 0 (order 2)
+    [0u8; 32],
+    // u = 1 (order 4)
+    [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
+    ],
+    // order 8: e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800
+    [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4,
+        0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49,
+        0xb8, 0x00,
+    ],
+    // order 8: 5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157
+    [
+        0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24, 0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef,
+        0x5b, 0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86, 0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f,
+        0x11, 0x57,
+    ],
+    // u = p-1 (order 2): ec ff..ff 7f
+    [
+        0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ],
+    // non-canonical order 2: ed ff..ff 7f
+    [
+        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ],
+    // order 4 twin: ee ff..ff 7f
+    [
+        0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ],
+];
+
+/// #14373: is this 32-byte key a publicly known degenerate value?
+/// True iff every byte is identical (all-zero, all-0xFF, and every
+/// other repeated-byte constant — each clamps to a publicly known
+/// scalar) or the bytes are one of the small-order encodings above.
+/// Used for LOCAL private keys, peer keys at hydrate, and explicit
+/// PSKs, where the authored value itself must not be a known
+/// constant. Engine peer admission uses the narrower
+/// `is_small_order_wg_peer_key` below.
+pub(crate) fn is_degenerate_wg_key_bytes(key: &[u8; WG_KEY_LEN]) -> bool {
+    if is_small_order_wg_peer_key(key) {
+        return true;
+    }
+    // The all-zero encoding is already in the table; the repeated-byte
+    // check covers the remaining constants (and re-covers 0x00/0xFF).
+    key.iter().all(|&b| b == key[0])
+}
+
+/// #14373: is this peer public key a small-order point? This is the
+/// contributory-behaviour guard the spec resolves to: snow computes
+/// DH opaquely inside HandshakeState, so no DH-output hook exists
+/// in-tree; a clamped scalar is a multiple of 8 (and never a multiple
+/// of the group order), so the DH output is the identity iff the
+/// peer point has order dividing 8, and every such point's encoding
+/// is listed above. Deliberately narrower than
+/// `is_degenerate_wg_key_bytes`: a repeated-byte peer key that is
+/// not small-order is a weird but genuine point (the commit gate
+/// refuses it as a known constant; the engine need not).
+pub(crate) fn is_small_order_wg_peer_key(key: &[u8; WG_KEY_LEN]) -> bool {
+    WG_SMALL_ORDER_KEYS.contains(key)
+}
+
 /// Canonicalize a WG peer endpoint address: unmap a V4-MAPPED IPv6
 /// (`::ffff:a.b.c.d`) to its canonical V4 form so overhead math
 /// (v4 vs v6 outer), logging, and endpoint comparisons all see the
