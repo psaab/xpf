@@ -29,10 +29,35 @@ import (
 	"github.com/psaab/xpf/pkg/logging"
 )
 
-// SamplingDir tracks per-zone sampling direction flags.
+// SamplingDir tracks per-zone sampling direction flags for one address
+// family (#14608: `family inet` and `family inet6` sampling are separate
+// selections — an inet-only flag must not select an IPv6 flow).
 type SamplingDir struct {
 	Input  bool
 	Output bool
+}
+
+// FamilySamplingDirs carries the per-zone sampling directions for both
+// address families (#14608). The zero value is the unrestricted state
+// (both maps nil: no zone restriction for either family). For each
+// family independently: a nil map means unrestricted for that family,
+// and a non-nil empty map fails closed (deny) for that family.
+type FamilySamplingDirs struct {
+	V4 map[uint16]SamplingDir
+	V6 map[uint16]SamplingDir
+}
+
+// dirsFor returns the per-zone directions for one family.
+func (z FamilySamplingDirs) dirsFor(isIPv6 bool) map[uint16]SamplingDir {
+	if isIPv6 {
+		return z.V6
+	}
+	return z.V4
+}
+
+// unrestricted reports whether neither family carries a restriction.
+func (z FamilySamplingDirs) unrestricted() bool {
+	return z.V4 == nil && z.V6 == nil
 }
 
 // ExportConfig holds the resolved NetFlow export configuration for a
@@ -73,8 +98,8 @@ type ExportConfig struct {
 	FlowActiveTimeout   time.Duration
 	FlowInactiveTimeout time.Duration
 	TemplateRefreshRate time.Duration
-	SamplingZones       map[uint16]SamplingDir // nil=unrestricted; non-nil empty=deny
-	SamplingRate        int                    // 1-in-N sampling (0 = export all)
+	SamplingZones       FamilySamplingDirs // per-family; both maps nil=unrestricted, non-nil empty family map=deny that family
+	SamplingRate        int                // 1-in-N sampling (0 = export all)
 	// ServesInet / ServesInet6 record which address families this instance
 	// has a SURVIVING collector group for (#2462, narrowed by #9172): a family
 	// whose only group names an undefined template is not served, because
@@ -771,14 +796,18 @@ func BuildIPFIXExportConfig(svc *config.ServicesConfig, fo *config.ForwardingOpt
 	return groups[0]
 }
 
-// BuildSamplingZones builds a map of zone ID to sampling direction flags.
-// For each zone, it checks whether any interface in that zone has
-// sampling input or output enabled on its unit. A nil result means no
-// effective zone restriction is configured (export-all); a non-nil empty
-// result means a sampled interface was referenced through an absent unit and
-// must fail closed rather than widening to export-all.
-func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) map[uint16]SamplingDir {
-	var result map[uint16]SamplingDir
+// BuildSamplingZones builds, per address family, a map of zone ID to
+// sampling direction flags (#14608). For each zone and family, it checks
+// whether any interface in that zone has that family's sampling input or
+// output enabled on its unit: `family inet sampling` selects IPv4 flows
+// only and `family inet6 sampling` selects IPv6 flows only. When no
+// interface sampling is configured in any family, both maps stay nil
+// (export-all). Once any family is sampled, a family sampled nowhere
+// gets a non-nil empty map and fails closed; a non-nil empty family map
+// also results from a sampled interface referenced through an absent
+// unit, which must fail closed rather than widen to export-all.
+func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) FamilySamplingDirs {
+	var result FamilySamplingDirs
 	for zoneName, zone := range cfg.Security.Zones {
 		// A nil zone value is reachable on the tolerant/programmatic/
 		// HA-peer-sync config path (the same nil-slot invariant the
@@ -791,7 +820,7 @@ func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) map[uint1
 		if !ok {
 			continue
 		}
-		var dir SamplingDir
+		var dir4, dir6 SamplingDir
 		for _, ifaceRef := range zone.Interfaces {
 			physName, unitNum, ok := parseIfaceRef(ifaceRef)
 			if !ok {
@@ -812,27 +841,61 @@ func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) map[uint1
 			unit, ok := ifCfg.Units[unitNum]
 			if !ok || unit == nil {
 				// A well-formed zone ref can survive tolerant loading even
-				// though its logical unit is absent. If sampling is enabled
-				// on another unit of this interface, retain an explicit
-				// empty restriction so ShouldExport cannot interpret the
-				// filtered result as export-all.
-				if interfaceHasSampling(ifCfg) && result == nil {
-					result = make(map[uint16]SamplingDir)
+				// though its logical unit is absent. If sampling of either
+				// family is enabled on another unit of this interface,
+				// retain an explicit empty restriction for BOTH families
+				// (the absent unit's family flags are unknowable — the
+				// pre-#14608 single-map behaviour denied all families
+				// here) so ShouldExport cannot interpret the filtered
+				// result as export-all.
+				if interfaceHasSampling(ifCfg) {
+					if result.V4 == nil {
+						result.V4 = make(map[uint16]SamplingDir)
+					}
+					if result.V6 == nil {
+						result.V6 = make(map[uint16]SamplingDir)
+					}
 				}
 				continue
 			}
-			if unit.SamplingInput {
-				dir.Input = true
+			if unit.SamplingV4Input {
+				dir4.Input = true
 			}
-			if unit.SamplingOutput {
-				dir.Output = true
+			if unit.SamplingV4Output {
+				dir4.Output = true
+			}
+			if unit.SamplingV6Input {
+				dir6.Input = true
+			}
+			if unit.SamplingV6Output {
+				dir6.Output = true
 			}
 		}
-		if dir.Input || dir.Output {
-			if result == nil {
-				result = make(map[uint16]SamplingDir)
+		if dir4.Input || dir4.Output {
+			if result.V4 == nil {
+				result.V4 = make(map[uint16]SamplingDir)
 			}
-			result[zid] = dir
+			result.V4[zid] = dir4
+		}
+		if dir6.Input || dir6.Output {
+			if result.V6 == nil {
+				result.V6 = make(map[uint16]SamplingDir)
+			}
+			result.V6[zid] = dir6
+		}
+	}
+	// #14608 global rule: interface sampling is a per-family SELECTION.
+	// Once sampling is configured for ANY family, a family with no
+	// sampling anywhere is NOT unrestricted — its flows were never
+	// selected, so it fails closed with an explicit empty map (deny in
+	// every zone). Only a config with no interface sampling at all keeps
+	// both maps nil, which is the documented export-all.
+	if result.V4 != nil || result.V6 != nil {
+		if result.V4 == nil {
+			result.V4 = make(map[uint16]SamplingDir)
+		}
+		if result.V6 == nil {
+			result.V6 = make(map[uint16]SamplingDir)
 		}
 	}
 	return result
@@ -840,7 +903,8 @@ func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) map[uint1
 
 func interfaceHasSampling(ifCfg *config.InterfaceConfig) bool {
 	for _, unit := range ifCfg.Units {
-		if unit != nil && (unit.SamplingInput || unit.SamplingOutput) {
+		if unit != nil && (unit.SamplingV4Input || unit.SamplingV4Output ||
+			unit.SamplingV6Input || unit.SamplingV6Output) {
 			return true
 		}
 	}
@@ -848,18 +912,22 @@ func interfaceHasSampling(ifCfg *config.InterfaceConfig) bool {
 }
 
 // ShouldExport checks whether a session close event should be exported based
-// on the ingress/egress zone sampling configuration and sampling rate.
-// A session is exported if the ingress zone has sampling input enabled OR
-// the egress zone has sampling output enabled. A nil SamplingZones means no
-// zone restriction is configured; a non-nil empty map fails closed. When
-// SamplingRate > 0, only 1-in-N eligible sessions are actually exported.
-func (ec *ExportConfig) ShouldExport(inZone, outZone uint16) bool {
-	if ec.SamplingZones != nil {
+// on the ingress/egress zone sampling configuration for the record's own
+// address family (#14608) and the sampling rate. A session is exported if,
+// in its family, the ingress zone has sampling input enabled OR the egress
+// zone has sampling output enabled. A nil map for the record's family means
+// no zone restriction is configured for that family; a non-nil empty map
+// fails closed for that family. A record whose family was never sampled is
+// denied BEFORE the 1-in-N counter advances, so it never consumes a
+// sampling slot of the sampled family. When SamplingRate > 0, only 1-in-N
+// eligible sessions are actually exported.
+func (ec *ExportConfig) ShouldExport(inZone, outZone uint16, isIPv6 bool) bool {
+	if dirs := ec.SamplingZones.dirsFor(isIPv6); dirs != nil {
 		eligible := false
-		if d, ok := ec.SamplingZones[inZone]; ok && d.Input {
+		if d, ok := dirs[inZone]; ok && d.Input {
 			eligible = true
 		}
-		if d, ok := ec.SamplingZones[outZone]; ok && d.Output {
+		if d, ok := dirs[outZone]; ok && d.Output {
 			eligible = true
 		}
 		if !eligible {
@@ -882,30 +950,32 @@ func (ec *ExportConfig) ShouldExport(inZone, outZone uint16) bool {
 }
 
 // FlowDirection derives the NetFlow/IPFIX flowDirection (IE 61) for a flow
-// from the per-zone sampling-direction configuration (#3270). RFC 5102:
+// from the per-zone sampling-direction configuration for the flow's own
+// address family (#3270, per-family since #14608). RFC 5102:
 // 0 = ingress (observed at the ingress observation point), 1 = egress.
 //
 // xpf exports one record per bidirectional session anchored at the initiator
 // tuple, so the direction is the OBSERVATION anchor, derived from which
-// sampling direction selected the flow for export — exactly the signal
-// ShouldExport already consults:
+// sampling direction (in the record's family) selected the flow for
+// export — exactly the signal ShouldExport already consults:
 //
-//   - the INGRESS zone has `sampling input`  -> 0 (ingress)
-//   - else the EGRESS zone has `sampling output` -> 1 (egress)
-//   - neither (or no sampling configured) -> 0 (default ingress)
+//   - the INGRESS zone has `sampling input` (in this family)  -> 0 (ingress)
+//   - else the EGRESS zone has `sampling output` (in this family) -> 1 (egress)
+//   - neither (or no sampling configured for this family) -> 0 (default ingress)
 //
 // Ingress wins ties (both directions sampled): it matches the record's
 // initiator-tuple anchor and Junos SRX inline active-flow-monitoring, which
 // applies input sampling first. The result is a pure function of the flow's
-// two zone IDs and the static sampling config; it is meaningful only when the
-// group advertises IE 61 (IncludeFlowDir) — the encoder writes it only then,
-// and a commit-time warning fires when flow-dir is enabled with no
-// sampling-direction configured (the field would always read 0).
-func (ec *ExportConfig) FlowDirection(inZone, outZone uint16) uint8 {
-	if d, ok := ec.SamplingZones[inZone]; ok && d.Input {
+// two zone IDs, its family, and the static sampling config; it is meaningful
+// only when the group advertises IE 61 (IncludeFlowDir) — the encoder writes
+// it only then, and a commit-time warning fires when flow-dir is enabled
+// with no sampling-direction configured (the field would always read 0).
+func (ec *ExportConfig) FlowDirection(inZone, outZone uint16, isIPv6 bool) uint8 {
+	dirs := ec.SamplingZones.dirsFor(isIPv6)
+	if d, ok := dirs[inZone]; ok && d.Input {
 		return 0
 	}
-	if d, ok := ec.SamplingZones[outZone]; ok && d.Output {
+	if d, ok := dirs[outZone]; ok && d.Output {
 		return 1
 	}
 	return 0

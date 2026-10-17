@@ -305,8 +305,10 @@ func TestRepeatedFamilyEditor12661(t *testing.T) {
 					t.Fatalf("SetPath: %v", err)
 				}
 				unit := compileInterfaceUnit12508(t, tree, "ge-0/0/0", fam)
-				if !unit.SamplingInput || !unit.SamplingOutput {
-					t.Errorf("after set sampling output = %v/%v, want true/true", unit.SamplingInput, unit.SamplingOutput)
+				if sIn, sOut := samplingPair12508(unit, fam); !sIn || !sOut {
+					t.Errorf("after set sampling output = %v/%v, want true/true", sIn, sOut)
+				} else if oIn, oOut := otherSamplingPair12508(unit, fam); oIn || oOut {
+					t.Errorf("other-family sampling leaked: %v/%v", oIn, oOut)
 				}
 			})
 			for _, op := range []struct {
@@ -320,12 +322,12 @@ func TestRepeatedFamilyEditor12661(t *testing.T) {
 				{"delete filter input", (*ConfigTree).DeletePath, []string{"filter", "input"}, "filter after delete input", nil},
 				{"deactivate filter", (*ConfigTree).DeactivatePath, []string{"filter"}, "filter after deactivate", nil},
 				{"deactivate filter input", (*ConfigTree).DeactivatePath, []string{"filter", "input"}, "filter after deactivate input", nil},
-				{"delete sampling", (*ConfigTree).DeletePath, []string{"sampling"}, "sampling after delete", func(u *InterfaceUnit) bool { return !u.SamplingInput && !u.SamplingOutput }},
-				{"deactivate sampling", (*ConfigTree).DeactivatePath, []string{"sampling"}, "sampling after deactivate", func(u *InterfaceUnit) bool { return !u.SamplingInput && !u.SamplingOutput }},
-				{"delete sampling output", (*ConfigTree).DeletePath, []string{"sampling", "output"}, "sampling after delete output", func(u *InterfaceUnit) bool { return u.SamplingInput && !u.SamplingOutput }},
-				{"deactivate sampling output", (*ConfigTree).DeactivatePath, []string{"sampling", "output"}, "sampling after deactivate output", func(u *InterfaceUnit) bool { return u.SamplingInput && !u.SamplingOutput }},
-				{"delete family", (*ConfigTree).DeletePath, nil, "filter after delete family", func(u *InterfaceUnit) bool { return !u.SamplingInput && !u.SamplingOutput }},
-				{"deactivate family", (*ConfigTree).DeactivatePath, nil, "filter after deactivate family", func(u *InterfaceUnit) bool { return !u.SamplingInput && !u.SamplingOutput }},
+				{"delete sampling", (*ConfigTree).DeletePath, []string{"sampling"}, "sampling after delete", func(u *InterfaceUnit) bool { in, out := samplingPair12508(u, fam); return !in && !out }},
+				{"deactivate sampling", (*ConfigTree).DeactivatePath, []string{"sampling"}, "sampling after deactivate", func(u *InterfaceUnit) bool { in, out := samplingPair12508(u, fam); return !in && !out }},
+				{"delete sampling output", (*ConfigTree).DeletePath, []string{"sampling", "output"}, "sampling after delete output", func(u *InterfaceUnit) bool { in, out := samplingPair12508(u, fam); return in && !out }},
+				{"deactivate sampling output", (*ConfigTree).DeactivatePath, []string{"sampling", "output"}, "sampling after deactivate output", func(u *InterfaceUnit) bool { in, out := samplingPair12508(u, fam); return in && !out }},
+				{"delete family", (*ConfigTree).DeletePath, nil, "filter after delete family", func(u *InterfaceUnit) bool { in, out := samplingPair12508(u, fam); return !in && !out }},
+				{"deactivate family", (*ConfigTree).DeactivatePath, nil, "filter after deactivate family", func(u *InterfaceUnit) bool { in, out := samplingPair12508(u, fam); return !in && !out }},
 			} {
 				t.Run(fam+"/"+shape.name+"/"+op.name, func(t *testing.T) {
 					tree := tree12661(t, fam, shape.fams)
@@ -347,7 +349,10 @@ func TestRepeatedFamilyEditor12661(t *testing.T) {
 						}
 					}
 					if op.wantSample != nil && !op.wantSample(unit) {
-						t.Errorf("%s: samplingInput=%v samplingOutput=%v, stale sibling remains active", op.what, unit.SamplingInput, unit.SamplingOutput)
+						func() {
+							sIn, sOut := samplingPair12508(unit, fam)
+							t.Errorf("%s: samplingInput=%v samplingOutput=%v, stale sibling remains active", op.what, sIn, sOut)
+						}()
 					}
 				})
 			}

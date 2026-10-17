@@ -272,12 +272,12 @@ func TestSharedSamplingCounterAcrossGroups(t *testing.T) {
 		g.SamplingRate = 2
 	}
 	// First call on group 0: counter 1 -> 1%2 != 0 -> false.
-	if groups[0].ShouldExport(0, 0) {
+	if groups[0].ShouldExport(0, 0, false) {
 		t.Fatal("first sampled call must be dropped (1%2 != 0)")
 	}
 	// Next call on group 1 must see the SHARED counter at 2 -> true,
 	// not a fresh per-group counter at 1 (which would drop).
-	if !groups[1].ShouldExport(0, 0) {
+	if !groups[1].ShouldExport(0, 0, false) {
 		t.Fatal("second call on the OTHER group must see the shared counter (2%2 == 0); " +
 			"a per-group counter would wrongly drop it")
 	}

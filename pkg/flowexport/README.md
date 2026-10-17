@@ -221,19 +221,21 @@ the name lookup makes every case encode 0.
 sampling-direction, opt-in.** flowDirection is exported again, but only when a
 template configures `export-extension flow-dir`, and the value is a REAL signal
 derived in Go — never the synthetic ingress=0 #2613 removed. The signal source
-is the per-zone sampling-direction xpf already consults to DECIDE whether to
-export a flow (`ExportConfig.ShouldExport`): a flow is exported because its
-ingress zone has `sampling input` (observed at ingress → `0`) or its egress
-zone has `sampling output` (observed at egress → `1`). `ExportConfig.FlowDirection`
-mirrors that decision (RFC 5102 ingress/egress observation point; the exact
-mapping Junos SRX inline active-flow-monitoring uses for input- vs
-output-applied sampling). **Ingress wins ties** (both directions sampled) to
-match the record's initiator-tuple anchor.
+is the per-zone, per-family (#14608) sampling-direction xpf already
+consults to DECIDE whether to export a flow
+(`ExportConfig.ShouldExport(in, out, isIPv6)`): a flow is exported because
+its ingress zone has `sampling input` in the flow's own family (observed
+at ingress → `0`) or its egress zone has `sampling output` in that family
+(observed at egress → `1`). `ExportConfig.FlowDirection` mirrors that
+decision (RFC 5102 ingress/egress observation point; the exact mapping
+Junos SRX inline active-flow-monitoring uses for input- vs output-applied
+sampling). **Ingress wins ties** (both directions sampled) to match the
+record's initiator-tuple anchor.
 
 The dataplane is unchanged: it has no zone-role/trust signal, so the original
 "Rust-stamp `[146]`" idea is infeasible — the reserved `[146]` byte on the
 SESSION_CLOSE frame stays reserved. The daemon callback computes
-`sd.Direction = lead.FlowDirection(rec.InZone, rec.OutZone)` and the v9 / IPFIX
+`sd.Direction = lead.FlowDirection(rec.InZone, rec.OutZone, sd.IsIPv6)` and the v9 / IPFIX
 encoders write it **only** in groups whose template enabled flow-dir
 (`IncludeFlowDir`). The templates splice IE 61 in just before the post-NAT
 trailer (`buildTemplateFieldsV4/V6`, `ipfixTemplateFieldsV4/V6`); a config that
@@ -1098,8 +1100,7 @@ grouping key is `(instance, version, template)`:
   1-in-N is independent per instance (and still shared across that
   instance's template groups, the #2461 invariant scoped to one instance).
 - **Attribution by family.** The only per-flow instance selector available
-  is the address family: the interface `family inet { sampling { input; } }`
-  stanza is a plain boolean and there is **no per-interface
+  is the address family: there is **no per-interface
   sampling-instance selector** in the config model. So `ServesInet` /
   `ServesInet6` record which families an instance has a surviving collector
   group for (a group whose template is undefined does not count; see the
@@ -1108,6 +1109,18 @@ grouping key is `(instance, version, template)`:
   the contiguous per-instance run of groups, applies the family gate + the
   single per-instance sampling decision, then fans to that instance's
   groups.
+- **Interface sampling is per-family (#14608).** `family inet { sampling }`
+  and `family inet6 { sampling }` are separate selections: the compiler
+  carries four flags on the unit (`SamplingV4Input/Output`,
+  `SamplingV6Input/Output`), `BuildSamplingZones` returns a
+  `FamilySamplingDirs` (one zone->direction map per family), and
+  `ShouldExport(in, out, isIPv6)` / `FlowDirection(in, out, isIPv6)`
+  consult only the record's own family. Once any family is sampled, a
+  family sampled nowhere fails closed (non-nil empty map) and never
+  consumes a 1-in-N slot; no sampling anywhere keeps both maps nil
+  (export-all). This is distinct from the collector-side `ServesFamily`
+  gate above: a dual-family instance passes that gate for IPv6 yet still
+  denies an IPv6 flow whose interfaces sampled only `family inet`.
 - **The family flags describe the groups that SURVIVE (#9172, V076).** Both
   resolvers drop a template group whose template is undefined (the strict
   commit gate rejects the reference; the tolerant load / peer-sync path
@@ -1218,9 +1231,10 @@ moment any caller sampled off the copy (#2224).
   unit 0. The strict config compiler rejects other absent units at commit.
   If a tolerant load still carries an absent-unit zone ref while sampling is
   configured on another unit of that interface, `BuildSamplingZones` preserves
-  a non-nil empty restriction and `ShouldExport` denies sessions rather than
-  interpreting the filtered result as export-all. A nil `SamplingZones` map
-  continues to mean that no zone restriction is configured.
+  a non-nil empty restriction (both families — the absent unit's family
+  flags are unknowable) and `ShouldExport` denies sessions of that family
+  rather than interpreting the filtered result as export-all. Both family
+  maps nil continues to mean that no zone restriction is configured.
 - `ExportSessionClose` builds the flow record synchronously from the
   event-reader callback. The export goroutine (started in `Run(ctx)`)
   is what actually transmits and refreshes templates; record assembly

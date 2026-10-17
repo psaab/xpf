@@ -104,8 +104,10 @@ type InterfaceUnit struct {
 	// targeted-broadcast needs dataplane directed-broadcast forwarding.
 	UnnumberedInet    string                // family inet unnumbered-address <donor> — accepted-only (#4308)
 	TargetedBroadcast bool                  // family inet targeted-broadcast — accepted-only (#4308)
-	SamplingInput     bool                  // family inet/inet6 { sampling { input; } }
-	SamplingOutput    bool                  // family inet/inet6 { sampling { output; } }
+	SamplingV4Input   bool                  // family inet  { sampling { input; } }  (#14608: per-family)
+	SamplingV4Output  bool                  // family inet  { sampling { output; } }
+	SamplingV6Input   bool                  // family inet6 { sampling { input; } }
+	SamplingV6Output  bool                  // family inet6 { sampling { output; } }
 	FilterInputV4     string                // family inet { filter { input NAME; } }
 	FilterOutputV4    string                // family inet { filter { output NAME; } }
 	FilterInputV6     string                // family inet6 { filter { input NAME; } }

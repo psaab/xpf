@@ -43,8 +43,8 @@ func flowDirV9Config(addr string, v9Port int) *config.Config {
 	}
 	cfg.Interfaces = config.InterfacesConfig{
 		Interfaces: map[string]*config.InterfaceConfig{
-			"eth1": {Units: map[int]*config.InterfaceUnit{0: {SamplingInput: true}}},
-			"eth2": {Units: map[int]*config.InterfaceUnit{0: {SamplingOutput: true}}},
+			"eth1": {Units: map[int]*config.InterfaceUnit{0: {SamplingV4Input: true}}},
+			"eth2": {Units: map[int]*config.InterfaceUnit{0: {SamplingV4Output: true}}},
 		},
 	}
 	return cfg

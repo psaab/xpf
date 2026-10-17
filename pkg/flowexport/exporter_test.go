@@ -74,12 +74,12 @@ func TestBuildSamplingZones(t *testing.T) {
 			Interfaces: map[string]*config.InterfaceConfig{
 				"eth0": {
 					Units: map[int]*config.InterfaceUnit{
-						0: {SamplingInput: true, SamplingOutput: true},
+						0: {SamplingV4Input: true, SamplingV4Output: true, SamplingV6Input: true, SamplingV6Output: true},
 					},
 				},
 				"eth1": {
 					Units: map[int]*config.InterfaceUnit{
-						0: {SamplingInput: true},
+						0: {SamplingV4Input: true, SamplingV6Input: true},
 					},
 				},
 				"eth2": {
@@ -95,17 +95,20 @@ func TestBuildSamplingZones(t *testing.T) {
 	zoneIDs := map[string]uint16{"dmz": 1, "trust": 2, "untrust": 3}
 	sz := BuildSamplingZones(cfg, zoneIDs)
 
-	// trust (id=2) should have both input and output
-	if d, ok := sz[2]; !ok || !d.Input || !d.Output {
-		t.Errorf("trust zone: got %+v, want Input=true Output=true", sz[2])
-	}
-	// untrust (id=3) should have input only
-	if d, ok := sz[3]; !ok || !d.Input || d.Output {
-		t.Errorf("untrust zone: got %+v, want Input=true Output=false", sz[3])
-	}
-	// dmz (id=1) should not be in the map (no sampling)
-	if _, ok := sz[1]; ok {
-		t.Errorf("dmz zone should not have sampling, got %+v", sz[1])
+	// trust (id=2) should have both input and output, in both families.
+	for _, fam := range []struct {
+		name string
+		m    map[uint16]SamplingDir
+	}{{"v4", sz.V4}, {"v6", sz.V6}} {
+		if d, ok := fam.m[2]; !ok || !d.Input || !d.Output {
+			t.Errorf("trust zone (%s): got %+v, want Input=true Output=true", fam.name, fam.m[2])
+		}
+		if d, ok := fam.m[3]; !ok || !d.Input || d.Output {
+			t.Errorf("untrust zone (%s): got %+v, want Input=true Output=false", fam.name, fam.m[3])
+		}
+		if _, ok := fam.m[1]; ok {
+			t.Errorf("dmz zone (%s) should not have sampling, got %+v", fam.name, fam.m[1])
+		}
 	}
 }
 
@@ -127,7 +130,7 @@ func TestBuildSamplingZonesSkipsNilZone(t *testing.T) {
 		Interfaces: config.InterfacesConfig{
 			Interfaces: map[string]*config.InterfaceConfig{
 				"eth0": {Units: map[int]*config.InterfaceUnit{
-					0: {SamplingInput: true},
+					0: {SamplingV4Input: true},
 				}},
 			},
 		},
@@ -144,43 +147,52 @@ func TestBuildSamplingZonesSkipsNilZone(t *testing.T) {
 	// Must not panic on the nil "bogus" zone or nil interface value.
 	sz := BuildSamplingZones(cfg, zoneIDs)
 
-	// The healthy zone is still mapped.
-	if d, ok := sz[2]; !ok || !d.Input {
-		t.Errorf("trust zone (id=2): want Input=true, got %+v (ok=%v)", sz[2], ok)
+	// The healthy zone is still mapped (v4 only; eth0 samples inet input).
+	if d, ok := sz.V4[2]; !ok || !d.Input {
+		t.Errorf("trust zone (id=2): want Input=true, got %+v (ok=%v)", sz.V4[2], ok)
+	}
+	// #14608: inet sampled somewhere -> inet6 fails closed (empty, non-nil).
+	if sz.V6 == nil || len(sz.V6) != 0 {
+		t.Errorf("inet-only sampling must fail inet6 closed: V6 = %#v, want non-nil empty", sz.V6)
 	}
 	// The nil zone contributes nothing.
-	if _, ok := sz[9]; ok {
-		t.Errorf("nil zone (id=9) should not be in sampling map, got %+v", sz[9])
+	if _, ok := sz.V4[9]; ok {
+		t.Errorf("nil zone (id=9) should not be in sampling map, got %+v", sz.V4[9])
 	}
 }
 
 func TestShouldExport(t *testing.T) {
 	ec := &ExportConfig{
-		SamplingZones: map[uint16]SamplingDir{
-			2: {Input: true, Output: true},  // trust
-			3: {Input: true, Output: false}, // untrust
+		SamplingZones: FamilySamplingDirs{
+			V4: map[uint16]SamplingDir{
+				2: {Input: true, Output: true},  // trust
+				3: {Input: true, Output: false}, // untrust
+			},
+			V6: map[uint16]SamplingDir{
+				2: {Input: true, Output: true},
+				3: {Input: true, Output: false},
+			},
 		},
 	}
 
-	// Ingress zone has sampling input -> export
-	if !ec.ShouldExport(2, 1) {
-		t.Error("should export when ingress zone has sampling input")
-	}
-	// Egress zone has sampling output -> export
-	if !ec.ShouldExport(1, 2) {
-		t.Error("should export when egress zone has sampling output")
-	}
-	// Ingress zone=untrust (input only), egress zone=dmz (no sampling) -> export
-	if !ec.ShouldExport(3, 1) {
-		t.Error("should export when ingress zone has sampling input")
-	}
-	// Ingress zone=dmz (no sampling), egress zone=untrust (no output) -> skip
-	if ec.ShouldExport(1, 3) {
-		t.Error("should not export when neither zone has matching sampling")
+	// Both families share the same directions in this fixture.
+	for _, isV6 := range []bool{false, true} {
+		if !ec.ShouldExport(2, 1, isV6) {
+			t.Error("should export when ingress zone has sampling input")
+		}
+		if !ec.ShouldExport(1, 2, isV6) {
+			t.Error("should export when egress zone has sampling output")
+		}
+		if !ec.ShouldExport(3, 1, isV6) {
+			t.Error("should export when ingress zone has sampling input")
+		}
+		if ec.ShouldExport(1, 3, isV6) {
+			t.Error("should not export when neither zone has matching sampling")
+		}
 	}
 	// No sampling zones configured -> export all
 	ecNone := &ExportConfig{}
-	if !ecNone.ShouldExport(1, 2) {
+	if !ecNone.ShouldExport(1, 2, false) {
 		t.Error("should export all when no sampling zones configured")
 	}
 }
@@ -229,7 +241,7 @@ func TestExporterSharesSingleSampleCounter(t *testing.T) {
 	const packets = 100
 	got := 0
 	for k := 1; k <= packets; k++ {
-		sampled := ec.ShouldExport(0, 0)
+		sampled := ec.ShouldExport(0, 0, false)
 		wantSampled := k%rate == 0
 		if sampled != wantSampled {
 			t.Fatalf("packet %d: ShouldExport=%v, want %v (cadence broke -> "+
@@ -320,12 +332,12 @@ func TestBuildSamplingZonesMalformedRefSkipped(t *testing.T) {
 					Units: map[int]*config.InterfaceUnit{
 						// Unit 12 has sampling enabled — the digit-scan
 						// mis-parse would wrongly turn this on for "bad".
-						12: {SamplingInput: true, SamplingOutput: true},
+						12: {SamplingV4Input: true, SamplingV4Output: true},
 					},
 				},
 				"ge-0/0/1": {
 					Units: map[int]*config.InterfaceUnit{
-						0: {SamplingInput: true},
+						0: {SamplingV4Input: true},
 					},
 				},
 			},
@@ -337,13 +349,13 @@ func TestBuildSamplingZonesMalformedRefSkipped(t *testing.T) {
 
 	// "bad" (id=1) must NOT enable sampling — the malformed ref is skipped,
 	// so the bogus unit-12 sampling config is never consulted.
-	if d, ok := sz[1]; ok {
+	if d, ok := sz.V4[1]; ok {
 		t.Errorf("bad zone: malformed sampling-interface ref must be skipped, "+
 			"got %+v (digit-scan mis-parse enabled the wrong unit)", d)
 	}
 	// "good" (id=2) enables input sampling on the correct unit 0.
-	if d, ok := sz[2]; !ok || !d.Input || d.Output {
-		t.Errorf("good zone: got %+v (ok=%v), want Input=true Output=false", sz[2], ok)
+	if d, ok := sz.V4[2]; !ok || !d.Input || d.Output {
+		t.Errorf("good zone: got %+v (ok=%v), want Input=true Output=false", sz.V4[2], ok)
 	}
 }
 
@@ -371,17 +383,17 @@ func TestBuildSamplingZonesAbsentUnitDoesNotWidenExport(t *testing.T) {
 				Interfaces: config.InterfacesConfig{
 					Interfaces: map[string]*config.InterfaceConfig{
 						"ge-0/0/0": {Units: map[int]*config.InterfaceUnit{
-							0: {SamplingInput: true},
+							0: {SamplingV4Input: true},
 						}},
 					},
 				},
 			}
 			ec := &ExportConfig{SamplingZones: BuildSamplingZones(cfg, map[string]uint16{"trust": 1})}
-			if got := ec.ShouldExport(1, 99); got != tc.wantEligible {
+			if got := ec.ShouldExport(1, 99, false); got != tc.wantEligible {
 				t.Fatalf("ShouldExport(trust, unrelated) = %v, want %v (sampling zones: %#v)",
 					got, tc.wantEligible, ec.SamplingZones)
 			}
-			if ec.ShouldExport(99, 99) {
+			if ec.ShouldExport(99, 99, false) {
 				t.Fatal("session outside the configured sampling zone was exported")
 			}
 		})
@@ -389,16 +401,16 @@ func TestBuildSamplingZonesAbsentUnitDoesNotWidenExport(t *testing.T) {
 
 	// A truly absent sampling-zone restriction intentionally retains the
 	// documented export-all behavior.
-	if !(&ExportConfig{}).ShouldExport(99, 99) {
+	if !(&ExportConfig{}).ShouldExport(99, 99, false) {
 		t.Fatal("empty ExportConfig should remain export-all")
 	}
 
 	unrestricted := BuildSamplingZones(&config.Config{}, nil)
-	if unrestricted != nil {
-		t.Fatalf("no configured sampling restriction should produce nil zones, got %#v", unrestricted)
+	if !unrestricted.unrestricted() {
+		t.Fatalf("no configured sampling restriction should produce unrestricted zones, got %#v", unrestricted)
 	}
-	if !(&ExportConfig{SamplingZones: unrestricted}).ShouldExport(99, 99) {
-		t.Fatal("nil sampling-zone result should retain export-all behavior")
+	if !(&ExportConfig{SamplingZones: unrestricted}).ShouldExport(99, 99, false) {
+		t.Fatal("unrestricted sampling-zone result should retain export-all behavior")
 	}
 }
 

@@ -763,13 +763,16 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 								}
 							}
 						}
-						// Union presence flags; input/output accumulate across siblings.
+						// #14608: sampling is per-family — `family inet
+						// sampling` selects IPv4 flows only (see the inet6
+						// arm for the other half). Union presence flags;
+						// input/output accumulate across siblings.
 						for _, sampNode := range afNode.FindChildren("sampling") {
 							if sampNode.FindChild("input") != nil {
-								unit.SamplingInput = true
+								unit.SamplingV4Input = true
 							}
 							if sampNode.FindChild("output") != nil {
-								unit.SamplingOutput = true
+								unit.SamplingV4Output = true
 							}
 						}
 						for _, filterNode := range afNode.FindChildren("filter") {
@@ -832,13 +835,14 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 								}
 							}
 						}
-						// Union presence flags; input/output accumulate across siblings.
+						// #14608: per-family — `family inet6 sampling`
+						// selects IPv6 flows only (see the inet arm).
 						for _, sampNode := range afNode.FindChildren("sampling") {
 							if sampNode.FindChild("input") != nil {
-								unit.SamplingInput = true
+								unit.SamplingV6Input = true
 							}
 							if sampNode.FindChild("output") != nil {
-								unit.SamplingOutput = true
+								unit.SamplingV6Output = true
 							}
 						}
 						for _, filterNode := range afNode.FindChildren("filter") {

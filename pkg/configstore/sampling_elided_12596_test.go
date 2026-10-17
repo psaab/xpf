@@ -22,8 +22,11 @@ func TestCheckTextSamplingElided12596(t *testing.T) {
 				t.Fatalf("CheckText: %v", err)
 			}
 			unit := cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0]
-			if unit.SamplingInput != tc.in || unit.SamplingOutput != tc.out {
-				t.Errorf("sampling = (%v,%v), want (%v,%v)", unit.SamplingInput, unit.SamplingOutput, tc.in, tc.out)
+			if unit.SamplingV4Input != tc.in || unit.SamplingV4Output != tc.out {
+				t.Errorf("sampling = (%v,%v), want (%v,%v)", unit.SamplingV4Input, unit.SamplingV4Output, tc.in, tc.out)
+			}
+			if unit.SamplingV6Input || unit.SamplingV6Output {
+				t.Errorf("inet6 sampling leaked from inet spelling: (%v,%v)", unit.SamplingV6Input, unit.SamplingV6Output)
 			}
 		})
 	}

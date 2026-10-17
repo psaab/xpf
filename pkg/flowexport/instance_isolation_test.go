@@ -141,13 +141,13 @@ func TestInstanceCounterIndependence(t *testing.T) {
 
 	// Drive bravo several times; this must NOT perturb alpha's own counter.
 	for i := 0; i < 5; i++ {
-		bravo.ShouldExport(0, 0)
+		bravo.ShouldExport(0, 0, true)
 	}
 	// alpha rate 2: first call -> counter 1 -> 1%2 != 0 -> drop; second -> 2%2 == 0 -> export.
-	if alpha.ShouldExport(0, 0) {
+	if alpha.ShouldExport(0, 0, false) {
 		t.Fatal("alpha first call must drop (1%2 != 0); bravo's sampling must not advance alpha's counter")
 	}
-	if !alpha.ShouldExport(0, 0) {
+	if !alpha.ShouldExport(0, 0, false) {
 		t.Fatal("alpha second call must export (2%2 == 0)")
 	}
 }

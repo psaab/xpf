@@ -418,11 +418,17 @@ interfaces {
 	if unit == nil {
 		t.Fatal("unit 0 not found")
 	}
-	if !unit.SamplingInput {
+	if !unit.SamplingV4Input {
 		t.Error("sampling input should be true")
 	}
-	if !unit.SamplingOutput {
+	if !unit.SamplingV4Output {
 		t.Error("sampling output should be true")
+	}
+	if !unit.SamplingV6Input {
+		t.Error("inet6 sampling input should be true")
+	}
+	if unit.SamplingV6Output {
+		t.Error("inet6 sampling output should be false (only input configured)")
 	}
 	if unit.FilterInputV4 != "ingress-filter" {
 		t.Errorf("FilterInputV4 = %q", unit.FilterInputV4)
@@ -485,11 +491,21 @@ func TestInterfaceSamplingRepeatedSiblings12512(t *testing.T) {
 			if unit == nil {
 				t.Fatal("unit 0 not found")
 			}
-			if !unit.SamplingInput {
-				t.Errorf("%s: SamplingInput = false, want true", tt.name)
+			// #14608: each family's repeated siblings union into that
+			// family's own flags; the other family stays unset.
+			in, out := unit.SamplingV4Input, unit.SamplingV4Output
+			otherIn, otherOut := unit.SamplingV6Input, unit.SamplingV6Output
+			if tt.family == "inet6" {
+				in, out, otherIn, otherOut = otherIn, otherOut, in, out
 			}
-			if !unit.SamplingOutput {
-				t.Errorf("%s: SamplingOutput = false, want true", tt.name)
+			if !in {
+				t.Errorf("%s: sampling input = false, want true", tt.name)
+			}
+			if !out {
+				t.Errorf("%s: sampling output = false, want true", tt.name)
+			}
+			if otherIn || otherOut {
+				t.Errorf("%s: other-family sampling = %v/%v, want false/false", tt.name, otherIn, otherOut)
 			}
 		})
 	}

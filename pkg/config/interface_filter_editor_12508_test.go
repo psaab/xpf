@@ -62,10 +62,14 @@ func TestInterfaceFilterEditorDeleteAndDeactivate12508(t *testing.T) {
 					bindings := shape.bindings + ` sampling { input; } sampling { output; }`
 					tree := interfaceFilterTree12508(t, "ge-0/0/0", family, bindings)
 					unit := compileInterfaceUnit12508(t, tree, "ge-0/0/0", family)
+					sIn, sOut := samplingPair12508(unit, family)
 					if got := interfaceFilterValue12508(t, tree, "ge-0/0/0", family); got != "B" ||
-						!unit.SamplingInput || !unit.SamplingOutput {
+						!sIn || !sOut {
 						t.Fatalf("initial bindings = filter:%q sample:%v/%v, want B/true/true",
-							got, unit.SamplingInput, unit.SamplingOutput)
+							got, sIn, sOut)
+					}
+					if oIn, oOut := otherSamplingPair12508(unit, family); oIn || oOut {
+						t.Fatalf("other-family sampling leaked: %v/%v", oIn, oOut)
 					}
 					path := append([]string{
 						"interfaces", "ge-0/0/0", "unit", "0", "family", family,
@@ -78,10 +82,10 @@ func TestInterfaceFilterEditorDeleteAndDeactivate12508(t *testing.T) {
 						t.Errorf("effective filter after %s = %q, want %q",
 							operation.name, got, operation.wantFilter)
 					}
-					if unit.SamplingInput != operation.wantSamplingInput ||
-						unit.SamplingOutput != operation.wantSamplingOutput {
+					if sIn, sOut := samplingPair12508(unit, family); sIn != operation.wantSamplingInput ||
+						sOut != operation.wantSamplingOutput {
 						t.Errorf("sampling after %s = input:%v output:%v, want %v/%v",
-							operation.name, unit.SamplingInput, unit.SamplingOutput,
+							operation.name, sIn, sOut,
 							operation.wantSamplingInput, operation.wantSamplingOutput)
 					}
 				})
@@ -153,8 +157,8 @@ func TestInterfaceSamplingEditorTargetsCompilerVisibleSiblings12508(t *testing.T
 		t.Fatalf("SetPath sampling output: %v", err)
 	}
 	unit := compileInterfaceUnit12508(t, tree, "ge-0/0/0", "inet")
-	if !unit.SamplingInput || !unit.SamplingOutput {
-		t.Fatalf("sampling after set = input:%v output:%v, want both true", unit.SamplingInput, unit.SamplingOutput)
+	if !unit.SamplingV4Input || !unit.SamplingV4Output {
+		t.Fatalf("sampling after set = input:%v output:%v, want both true", unit.SamplingV4Input, unit.SamplingV4Output)
 	}
 
 	family := interfaceFamilyNode12508(tree, "ge-0/0/0", "inet")
@@ -171,8 +175,8 @@ func TestInterfaceSamplingEditorTargetsCompilerVisibleSiblings12508(t *testing.T
 		t.Fatalf("DeletePath sampling output in later sibling: %v", err)
 	}
 	unit = compileInterfaceUnit12508(t, tree, "ge-0/0/0", "inet")
-	if !unit.SamplingInput || unit.SamplingOutput {
-		t.Fatalf("sampling after targeted delete = input:%v output:%v, want true/false", unit.SamplingInput, unit.SamplingOutput)
+	if !unit.SamplingV4Input || unit.SamplingV4Output {
+		t.Fatalf("sampling after targeted delete = input:%v output:%v, want true/false", unit.SamplingV4Input, unit.SamplingV4Output)
 	}
 
 	path = path[:len(path)-1]
@@ -180,8 +184,8 @@ func TestInterfaceSamplingEditorTargetsCompilerVisibleSiblings12508(t *testing.T
 		t.Fatalf("DeletePath sampling: %v", err)
 	}
 	unit = compileInterfaceUnit12508(t, tree, "ge-0/0/0", "inet")
-	if unit.SamplingInput || unit.SamplingOutput {
-		t.Fatalf("sampling after container delete = input:%v output:%v, want both false", unit.SamplingInput, unit.SamplingOutput)
+	if unit.SamplingV4Input || unit.SamplingV4Output {
+		t.Fatalf("sampling after container delete = input:%v output:%v, want both false", unit.SamplingV4Input, unit.SamplingV4Output)
 	}
 }
 
@@ -193,15 +197,15 @@ func TestInterfaceSamplingDeactivateAllSiblings12508(t *testing.T) {
 		t.Fatalf("DeactivatePath sampling: %v", err)
 	}
 	unit := compileInterfaceUnit12508(t, tree, "ge-0/0/0", "inet")
-	if unit.SamplingInput || unit.SamplingOutput {
-		t.Fatalf("sampling after deactivate = input:%v output:%v, want both false", unit.SamplingInput, unit.SamplingOutput)
+	if unit.SamplingV4Input || unit.SamplingV4Output {
+		t.Fatalf("sampling after deactivate = input:%v output:%v, want both false", unit.SamplingV4Input, unit.SamplingV4Output)
 	}
 	if err := tree.ActivatePath(path); err != nil {
 		t.Fatalf("ActivatePath sampling: %v", err)
 	}
 	unit = compileInterfaceUnit12508(t, tree, "ge-0/0/0", "inet")
-	if !unit.SamplingInput || !unit.SamplingOutput {
-		t.Fatalf("sampling after activate = input:%v output:%v, want both true", unit.SamplingInput, unit.SamplingOutput)
+	if !unit.SamplingV4Input || !unit.SamplingV4Output {
+		t.Fatalf("sampling after activate = input:%v output:%v, want both true", unit.SamplingV4Input, unit.SamplingV4Output)
 	}
 }
 
@@ -213,9 +217,9 @@ func TestInterfaceSamplingDeactivateTargetedSibling12508(t *testing.T) {
 		t.Fatalf("DeactivatePath sampling output in later sibling: %v", err)
 	}
 	unit := compileInterfaceUnit12508(t, tree, "ge-0/0/0", "inet")
-	if !unit.SamplingInput || unit.SamplingOutput {
+	if !unit.SamplingV4Input || unit.SamplingV4Output {
 		t.Fatalf("sampling after targeted deactivate = input:%v output:%v, want true/false",
-			unit.SamplingInput, unit.SamplingOutput)
+			unit.SamplingV4Input, unit.SamplingV4Output)
 	}
 }
 
@@ -462,9 +466,9 @@ func TestInterfaceSamplingSetIntoInactiveStaysInactive12508(t *testing.T) {
 		t.Fatalf("set did not update the sole inactive sampling statement: %#v", siblings)
 	}
 	unit := compileInterfaceUnit12508(t, tree, "ge-0/0/0", "inet")
-	if unit.SamplingInput || unit.SamplingOutput {
+	if unit.SamplingV4Input || unit.SamplingV4Output {
 		t.Fatalf("sampling after set into inactive statement = %v/%v, want off",
-			unit.SamplingInput, unit.SamplingOutput)
+			unit.SamplingV4Input, unit.SamplingV4Output)
 	}
 }
 
@@ -542,6 +546,23 @@ func interfaceFilterValue12508(t *testing.T, tree *ConfigTree, iface, family str
 		return unit.FilterInputV6
 	}
 	return unit.FilterInputV4
+}
+
+// samplingPair12508 returns the (input, output) sampling flags of the
+// family the test spelled its bindings under (#14608: per-family flags).
+func samplingPair12508(unit *InterfaceUnit, family string) (bool, bool) {
+	if family == "inet6" {
+		return unit.SamplingV6Input, unit.SamplingV6Output
+	}
+	return unit.SamplingV4Input, unit.SamplingV4Output
+}
+
+// otherSamplingPair12508 returns the flags of the family NOT spelled.
+func otherSamplingPair12508(unit *InterfaceUnit, family string) (bool, bool) {
+	if family == "inet6" {
+		return unit.SamplingV4Input, unit.SamplingV4Output
+	}
+	return unit.SamplingV6Input, unit.SamplingV6Output
 }
 
 func compileInterfaceUnit12508(t *testing.T, tree *ConfigTree, ifaceName, family string) *InterfaceUnit {
