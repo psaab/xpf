@@ -845,6 +845,11 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 			return nil, err
 		}
 	}
+	// #14447: conflicting duplicate ssh root-login.
+	rootLoginDupWarnings, err := validateDuplicateRootLoginAST(tree, opts.lenientDuplicateRootLogin14447)
+	if err != nil {
+		return nil, err
+	}
 
 	// #10707: open-world routing schemas intentionally remain tolerant of
 	// incompletely modeled Junos subtrees, but a direct unknown child can still
@@ -902,5 +907,6 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, bareLeafWarnings...)
 	warnings = append(warnings, staticRouteQNHWarnings...)
 	warnings = append(warnings, openWorldRoutingWarnings...)
+	warnings = append(warnings, rootLoginDupWarnings...)
 	return warnings, nil
 }

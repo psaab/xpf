@@ -926,8 +926,13 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 			// sshd kept its defaults for hardening knobs the config declared.
 			// Expanded once, for the same reason compileLog does. Lenient path only.
 			sshNode = expandRun9235(sshNode, systemServicesSSHSchema9235())
-			if rl := sshNode.FindChild("root-login"); rl != nil && len(rl.Keys) >= 2 {
-				sys.Services.SSH.RootLogin = rl.Keys[1]
+			// #14447: last sibling wins (Junos). Conflicting duplicates
+			// are strict-rejected / lenient-warned by
+			// validateDuplicateRootLoginAST; this keeps lenient = last.
+			for _, rl := range sshNode.FindChildren("root-login") {
+				if len(rl.Keys) >= 2 {
+					sys.Services.SSH.RootLogin = rl.Keys[1]
+				}
 			}
 			// #6692: key-exchange is `multi: true` and the operator lists
 			// methods in PREFERENCE order, so a bracketed list truncated to

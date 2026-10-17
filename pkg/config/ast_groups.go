@@ -43,6 +43,9 @@ type groupExpandBudget struct {
 	// blocks, #12923 leaves). It distinguishes them from authored inline
 	// destinations without overloading #9862 exclusion provenance.
 	groupDefaultPolicyBlocks12823 map[*Node]bool
+	// groupRootLoginLeaves14447 tracks root-login leaves adopted from a
+	// group during this expansion (#14447), like the default-policy set.
+	groupRootLoginLeaves14447 map[*Node]bool
 }
 
 // charge accounts n units of expansion work and reports when the budget is
@@ -620,6 +623,12 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				*dst = append(*dst, s)
 				continue
 			}
+			if peer != nil && isRootLoginLeaf14447(ancestorPath, s) &&
+				budget.groupRootLoginLeaves14447[peer] {
+				markGroupRootLoginLeaf14447(budget, ancestorPath, s)
+				*dst = append(*dst, s)
+				continue
+			}
 			if bracketedPeer := bracketedAddressPeer9859(ancestorPath, *dst, s); bracketedPeer != nil &&
 				mergeBracketedAddressInto9859(ancestorPath, *dst, bracketedPeer, s) {
 				appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{bracketedPeer}, markers)
@@ -819,6 +828,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// default-policy leaf carries group provenance so a later group's
 			// stanza can pair with it instead of being order-suppressed.
 			markGroupDefaultPolicyStanza12923(budget, ancestorPath, s)
+			markGroupRootLoginLeaf14447(budget, ancestorPath, s)
 			*dst = append(*dst, s)
 			continue
 		}
