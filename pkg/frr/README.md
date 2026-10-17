@@ -1097,7 +1097,9 @@ step. Both are required — neither sees the other's case:
   (`checkRedist`/`checkPolicyRef`, `pkg/config`), via
   `isDefinedPolicyStatement`:
   - **A DEFINED policy-statement name** is a Junos DEFAULT export policy
-    applied to every peer (a group/global default), NOT redistribution.
+    applied to every peer (a group/global default). Since #14586 it ALSO
+    originates the routes its terms select (see the origination paragraph
+    below); it is still never an UNFILTERED redistribution.
     The old render routed ALL of `bgp.Export` through
     `resolveRedistribute`, which for such a policy produced `redistribute
     ospf route-map ...` under `router bgp` — actively ANNOUNCING the
@@ -1136,7 +1138,34 @@ step. Both are required — neither sees the other's case:
   peer. A bare-token redistribute is a GLOBAL
   redistribute verb, not per-neighbor, emitted once under `router bgp`.
   `resolveRedistribute` is still called on the BGP export path, but ONLY
-  for bare tokens — never for a policy-statement name (that was the leak).
+  for bare tokens — never for a policy-statement name as an unfiltered
+  verb (that was the leak).
+
+  **Origination (#14586).** In Junos the BGP export policy is what
+  originates static/direct (and other) routes — there is no separate
+  redistribution step. Before #14586 a defined policy rendered ONLY the
+  per-peer `route-map out`, which can filter routes already in BGP but
+  cannot create them, so `export EXP` with `from protocol static|direct`
+  advertised nothing (`PfxSnt 0`) while the `<policy>-<proto>-xpf-redist`
+  maps sat unreferenced. Now, for each defined policy in the UNION of
+  effective export chains of a `router bgp` instance (global default plus
+  every neighbor's most-specific chain; import chains never originate),
+  the renderer also emits `redistribute <proto> route-map
+  <policy>-<proto>-xpf-redist` per family — IPv4 sources at router level,
+  IPv6 sources under `address-family ipv6 unicast` — through the filtered
+  per-source maps (#12065, fail-closed deny), keeping `route-map out` as
+  the per-peer filter. Redistribution is router-global in FRR (like the
+  Junos BGP RIB), so origination follows the union while advertisement
+  stays per-peer. Self (`from protocol bgp`) and off-family sources are
+  dropped per node; a no-`from protocol` term originates the whole
+  node-fitting domain through the same filtered maps (#14380 semantics).
+  A defined policy whose terms select no source (prefix/community-only
+  with an explicit `from` that fits no source, or no terms) originates
+  nothing. The generated-map collision belt (`ApplyFull`) covers the
+  BGP-referenced names at both BGP nodes, and
+  `redistReferencedNodes14380` includes both nodes so a referenced
+  no-from policy's expanded maps are defined. Regression cells:
+  `bgp_export_redistribute_14586_test.go`.
   Both `route-map out` emit sites (ipv4 + ipv6 AF) are guarded by
   `isDefinedPolicyStatement` (#2539, sibling of the #2490 inbound guard):
   `globalExport` is already restricted to defined policy-statements, but a
