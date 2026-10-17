@@ -388,22 +388,59 @@ func lessPhysPortName(a, b string) bool {
 	return len(a) < len(b)
 }
 
-// extractPCIAddr extracts the last PCI address (DDDD:BB:DD.F) from a sysfs path.
+// extractPCIAddr extracts the PCI address (DDDD:BB:DD.F) from a sysfs
+// device path. Every caller passes the resolved `device` symlink
+// target. A PCI netdev's target ends in the device's own BDF (possibly
+// below PCI bridges / a root port), so that BDF names this device; a
+// virtio netdev's target ends in `virtioN` directly below its PCI
+// function, which is a 1:1 channel to that function, so the parent
+// BDF likewise names this device (enumeratePCINICs enumerates
+// virtio_net under it, sorted first). Any other final component means
+// the device sits on a NON-PCI bus below the last PCI ancestor, and
+// that ancestor's BDF must NOT be reported as this device's address
+// (#14595): on x86 a USB NIC hangs off an xHCI controller
+// (…/0000:00:14.0/usb2/2-1/2-1:1.0), and reporting the controller's BDF
+// gave every NIC behind one controller one shared "PCI address" in the
+// device-map candidates. Returns "" for a non-PCI device;
+// enumeratePCINICs then skips it (it has no PCI positional identity),
+// while the device-map inventory keeps it via its permanent MAC
+// (#4884). Mirrors devicemap.ExtractPCIAddr so the two enumerations
+// cannot drift.
 func extractPCIAddr(path string) string {
-	// Walk path components and find the last one matching PCI format.
+	// The length guard must admit index 10 (the '.'), so require
+	// >= 11 — a bare >= 10 lets a 10-char component with ':' at 4 and
+	// 7 index p[10] out of bounds (AGY r2 Low, hardened now that the
+	// bootstrap lifeline path calls extractPCIAddr on arbitrary sysfs
+	// components).
 	parts := strings.Split(path, "/")
-	var last string
-	for _, p := range parts {
-		// A PCI address is DDDD:BB:DD.F (>= 12 chars). The length guard must
-		// admit index 10 (the '.'), so require >= 11 — a bare >= 10 lets a
-		// 10-char component with ':' at 4 and 7 index p[10] out of bounds
-		// (AGY r2 Low, hardened now that the bootstrap lifeline path calls
-		// extractPCIAddr on arbitrary sysfs components).
-		if len(p) >= 11 && p[4] == ':' && p[7] == ':' && p[10] == '.' {
-			last = p
+	last := parts[len(parts)-1]
+	if len(last) >= 11 && last[4] == ':' && last[7] == ':' && last[10] == '.' {
+		return last
+	}
+	if isVirtioComponent(last) {
+		// virtioN directly below a PCI function: report that function.
+		for i := len(parts) - 2; i >= 0; i-- {
+			p := parts[i]
+			if len(p) >= 11 && p[4] == ':' && p[7] == ':' && p[10] == '.' {
+				return p
+			}
 		}
 	}
-	return last
+	return ""
+}
+
+// isVirtioComponent reports whether a sysfs path component is a virtio
+// device directory (`virtio0`, `virtio12`, …).
+func isVirtioComponent(p string) bool {
+	if !strings.HasPrefix(p, "virtio") || len(p) == len("virtio") {
+		return false
+	}
+	for _, c := range p[len("virtio"):] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // assignName returns the vSRX target name for a given enumeration index.
