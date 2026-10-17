@@ -84,6 +84,7 @@ type AggregatedEtherOptions struct {
 // InterfaceUnit represents a logical unit on an interface.
 type InterfaceUnit struct {
 	Number           int
+	Disable          bool             // unit-level `disable` — administratively disabled (#14575)
 	Description      string           // free-text unit description
 	VlanID           int              // 0 = native/untagged, >0 = 802.1Q tagged
 	InnerVlanID      int              // inner VLAN tag for QinQ (flexible-vlan-tagging)

@@ -29,7 +29,7 @@ func vlanParentVRRPSource(ifCfg *config.InterfaceConfig, isVRRPReth bool, cluste
 		return nil
 	}
 	for _, unit := range ifCfg.Units {
-		if unit != nil && unit.VlanID <= 0 && len(unit.Addresses) > 0 {
+		if unit != nil && !unit.Disable && unit.VlanID <= 0 && len(unit.Addresses) > 0 {
 			return []string{fmt.Sprintf("169.254.%d.%d/32", ifCfg.RedundancyGroup, clusterNodeID+1)}
 		}
 	}

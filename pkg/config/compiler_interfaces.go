@@ -474,6 +474,18 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				unit.Description = nodeVal(descNode)
 			}
 
+			// #14575: unit-level `disable` — the Junos per-logical-unit
+			// admin-down. packedBody above has already expanded a packed
+			// tail (`unit 0 disable family inet ...`), so braced, packed
+			// and flat-set spellings all land here as a `disable` child.
+			// Honoured end to end: the userspace snapshot marks the unit
+			// AdminDisabled with no addresses, and the networkd/legacy
+			// address planners skip it. Interface-level `disable`
+			// (ifc.Disable) is unchanged and still disables every unit.
+			if unitNode.FindChild("disable") != nil {
+				unit.Disable = true
+			}
+
 			// Parse point-to-point flag
 			if unitNode.FindChild("point-to-point") != nil {
 				unit.PointToPoint = true
@@ -918,13 +930,17 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 
 			ifc.Units[unitNum] = unit
 
-			// Collect tunnel addresses from unit config
-			if unit.Tunnel != nil {
-				// Per-unit tunnel: addresses belong to this specific tunnel
-				unit.Tunnel.Addresses = append(unit.Tunnel.Addresses, unit.Addresses...)
-			} else if ifc.Tunnel != nil {
-				// Interface-level tunnel: all unit addresses go to shared tunnel
-				ifc.Tunnel.Addresses = append(ifc.Tunnel.Addresses, unit.Addresses...)
+			// Collect tunnel addresses from unit config. A unit-disabled
+			// unit (#14575) contributes none: its addresses must not be
+			// installed on the tunnel device.
+			if !unit.Disable {
+				if unit.Tunnel != nil {
+					// Per-unit tunnel: addresses belong to this specific tunnel
+					unit.Tunnel.Addresses = append(unit.Tunnel.Addresses, unit.Addresses...)
+				} else if ifc.Tunnel != nil {
+					// Interface-level tunnel: all unit addresses go to shared tunnel
+					ifc.Tunnel.Addresses = append(ifc.Tunnel.Addresses, unit.Addresses...)
+				}
 			}
 		}
 		if warnings != nil {

@@ -383,7 +383,14 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 		}
 		linuxName := snapshotLinuxName(cfg, name, iface, nil)
 		ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(linuxName)
-		if iface.Disable {
+		// #14575: a unit-disabled unit 0 collapses onto this base netdev, so
+		// its disable suppresses the base row's addresses too (interface-level
+		// Disable already does). Other units keep their own rows below.
+		unit0Disabled := false
+		if u0, ok := iface.Units[0]; ok && u0 != nil && u0.Disable {
+			unit0Disabled = true
+		}
+		if iface.Disable || unit0Disabled {
 			addresses = nil
 		}
 		// Use the interface's own RG, or inherit from RETH parent.
@@ -430,7 +437,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			ParentLinuxName: "",
 			NativeVLANID:    iface.NativeVlanID,
 			Ifindex:         ifindex,
-			AdminDisabled:   iface.Disable,
+			AdminDisabled:   iface.Disable || (unit0Disabled && snapshotLinuxName(cfg, name, iface, iface.Units[0]) == linuxName),
 			ParentIfindex:   0,
 			RXQueues:        userspaceRXQueueCount(linuxName),
 			VLANID:          0,
@@ -497,7 +504,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 				}
 			}
 			addresses = mergeInterfaceAddressSnapshots(addresses, buildConfiguredAddressSnapshots(unit.Addresses))
-			if iface.Disable {
+			if iface.Disable || unit.Disable {
 				addresses = nil
 			}
 			out = append(out, InterfaceSnapshot{
@@ -509,7 +516,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 				LinuxName:                 linuxUnit,
 				ParentLinuxName:           parentLinux,
 				Ifindex:                   ifindex,
-				AdminDisabled:             iface.Disable,
+				AdminDisabled:             iface.Disable || unit.Disable,
 				ParentIfindex:             parentIfindex,
 				LogicalOnly:               logicalOnly,
 				RXQueues:                  rxQueues,

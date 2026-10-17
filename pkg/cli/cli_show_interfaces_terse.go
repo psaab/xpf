@@ -321,6 +321,12 @@ func (c *CLI) showInterfacesTerse() error {
 
 		admin := "up"
 		link := "up"
+		// #14575: unit-level disable is admin-down for this logical row.
+		if ifCfg, ok := config.LookupInterface(cfg, u.physName); ok && ifCfg != nil {
+			if unit, ok := config.LookupUnit(ifCfg, u.unitNum); ok && unit != nil && unit.Disable {
+				admin = "down"
+			}
+		}
 		if liface == nil {
 			link = "down"
 		} else if liface.Flags&net.FlagUp == 0 {

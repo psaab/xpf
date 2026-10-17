@@ -441,6 +441,10 @@ func (c *CLI) showInterfaces(args []string) error {
 				}
 			}
 			if unit != nil {
+				// #14575: a unit-disabled logical unit is admin-down.
+				if unit.Disable {
+					fmt.Println("    Administrative status: Disabled (unit disable)")
+				}
 				if unit.DHCP {
 					fmt.Println("    DHCPv4: enabled")
 					if lease := c.dhcpLease(physName, dhcp.AFInet); lease != nil {
