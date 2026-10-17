@@ -121,11 +121,57 @@ func hostInboundSchemaChildren() map[string]*schemaNode {
 	}
 }
 
+// hostInboundValueOperandCount13106 counts the positive value tokens a
+// host-inbound value node carries, mirroring hostInboundExceptParts'
+// inline-`except` handling: a trailing unquoted `except` excludes the
+// token before it instead of counting as a value. The node itself
+// (Keys[0] as authored) counts as its first value.
+func hostInboundValueOperandCount13106(node *Node) int {
+	count := 0
+	previous := ""
+	previousExcept := false
+	for i, token := range node.Keys {
+		if i > 0 && token == node.Keys[0] && !node.KeyQuoted(i) {
+			continue
+		}
+		if token == "" {
+			continue
+		}
+		if token == "except" && !node.KeyQuoted(i) && previous != "" && !previousExcept {
+			count--
+			previousExcept = true
+			continue
+		}
+		count++
+		previous = token
+		previousExcept = token == "except" && !node.KeyQuoted(i)
+	}
+	return count
+}
+
 // validateHostInboundNestedValueChildren13106 rejects nested values below an
 // already-valued service/protocol node. `X { except; }` remains the supported
 // hierarchical exclusion form; `all { ssh except; }` and arbitrary nested
 // payloads are unsupported and must not disappear under an untyped value leaf.
+// A child `{ except; }` on a parent with more than one value token
+// (`[ ssh telnet ] { except; }`, #14344) has no single operand and is
+// rejected here too, naming the parent's first token.
 func validateHostInboundNestedValueChildren13106(node *Node, _ *schemaNode) error {
+	// A braced body on the root's own inline sequence
+	// (`system-services [ ssh telnet ] { except; }`) parks the `except`
+	// node directly under this node rather than under a value child.
+	if len(node.Children) == 1 && len(node.Children[0].Keys) > 0 &&
+		node.Children[0].Keys[0] == "except" && !node.Children[0].KeyQuoted(0) {
+		child := node.Children[0]
+		if len(child.Keys) == 1 && len(child.Children) == 0 &&
+			hostInboundRootOperandCount13106(node) == 1 {
+			return nil
+		}
+		if len(node.Keys) > 1 {
+			return fmt.Errorf("nested child %q is unsupported under a host-inbound value", node.Keys[1])
+		}
+		return fmt.Errorf("nested child %q is unsupported under a host-inbound value", child.Keys[0])
+	}
 	for _, value := range node.Children {
 		for _, child := range value.Children {
 			if len(child.Keys) == 0 {
@@ -133,13 +179,47 @@ func validateHostInboundNestedValueChildren13106(node *Node, _ *schemaNode) erro
 			}
 			if child.Keys[0] == "except" && !child.KeyQuoted(0) &&
 				len(child.Keys) == 1 && len(child.Children) == 0 &&
-				len(value.Children) == 1 {
+				len(value.Children) == 1 &&
+				hostInboundValueOperandCount13106(value) == 1 {
 				continue
+			}
+			if child.Keys[0] == "except" && !child.KeyQuoted(0) &&
+				!(len(child.Keys) == 1 && len(child.Children) == 0 && len(value.Children) == 1) {
+				// Malformed except shape itself (payload after it, a
+				// nested payload, or sibling payloads): name the
+				// modifier, as before #14344.
+				return fmt.Errorf("nested child %q is unsupported under a host-inbound value", child.Keys[0])
+			}
+			if child.Keys[0] == "except" && !child.KeyQuoted(0) && len(value.Keys) > 0 {
+				// Well-formed `{ except; }` on a multi-token parent
+				// (#14344): name the parent's first token.
+				return fmt.Errorf("nested child %q is unsupported under a host-inbound value", value.Keys[0])
 			}
 			return fmt.Errorf("nested child %q is unsupported under a host-inbound value", child.Keys[0])
 		}
 	}
 	return nil
+}
+
+// hostInboundRootOperandCount13106 counts positive value tokens on the
+// system-services / protocols node's own Keys tail (Keys[1:]), with the
+// same inline-`except` handling as hostInboundValueOperandCount13106.
+func hostInboundRootOperandCount13106(node *Node) int {
+	if len(node.Keys) < 2 {
+		return 0
+	}
+	sub := &Node{Keys: node.Keys[1:], KeysQuoted: node.KeysQuoted, KeysBracketed: node.KeysBracketed}
+	if len(node.KeysQuoted) == len(node.Keys) {
+		sub.KeysQuoted = node.KeysQuoted[1:]
+	} else {
+		sub.KeysQuoted = nil
+	}
+	if len(node.KeysBracketed) == len(node.Keys) {
+		sub.KeysBracketed = node.KeysBracketed[1:]
+	} else {
+		sub.KeysBracketed = nil
+	}
+	return hostInboundValueOperandCount13106(sub)
 }
 
 // policyThenSchemaChildren builds the `then` action subtree shared by

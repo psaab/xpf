@@ -86,22 +86,27 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 // returning positive values, exclusions, and unsupported nested children.
 // Supported exclusion shapes are `X except` and `X { except; }`; nested values
 // (for example `all { ssh except; }`) are unsupported and poison their
-// admission dimension on tolerant ingestion.
+// admission dimension on tolerant ingestion. A child `{ except; }` attached
+// to a parent carrying more than one value token (for example
+// `[ ssh telnet ] { except; }`, #14344) is likewise unsupported: the braced
+// modifier has no single operand, so it is recorded as malformed rather
+// than excluding only the parent's final token and admitting the rest.
 func hostInboundExceptParts(n *Node) (values, excluded, malformed []string) {
 	if n == nil || len(n.Keys) == 0 {
 		return nil, nil, nil
 	}
 
 	// appendKeys preserves the boundary of one AST value node while recognizing
-	// an inline modifier in that node's own key tail.
-	appendKeys := func(node *Node, start int) string {
-		self := node.Keys[0]
+	// an inline modifier in that node's own key tail. It returns every value
+	// token it appended for this node so a following child `{ except; }` can
+	// tell whether it has exactly one operand.
+	appendKeys := func(node *Node, start int) []string {
+		var nodeValues []string
 		previous := ""
 		previousExcept := false
-		last := ""
 		for i := start; i < len(node.Keys); i++ {
 			token := node.Keys[i]
-			if token == self && i > 0 && !node.KeyQuoted(i) {
+			if token == node.Keys[0] && i > 0 && !node.KeyQuoted(i) {
 				continue
 			}
 			if token == "" {
@@ -109,15 +114,20 @@ func hostInboundExceptParts(n *Node) (values, excluded, malformed []string) {
 			}
 			if token == "except" && !node.KeyQuoted(i) && previous != "" && !previousExcept {
 				excluded = append(excluded, previous)
+				// The excluded token is not a positive value of this node;
+				// drop it so nodeValues counts positive operands only.
+				if len(nodeValues) > 0 {
+					nodeValues = nodeValues[:len(nodeValues)-1]
+				}
 				previousExcept = true
 				continue
 			}
 			values = append(values, token)
+			nodeValues = append(nodeValues, token)
 			previous = token
 			previousExcept = token == "except" && !node.KeyQuoted(i)
-			last = token
 		}
-		return last
+		return nodeValues
 	}
 
 	var walkValue func(*Node)
@@ -125,15 +135,25 @@ func hostInboundExceptParts(n *Node) (values, excluded, malformed []string) {
 		if node == nil || len(node.Keys) == 0 {
 			return
 		}
-		parent := appendKeys(node, 0)
+		nodeValues := appendKeys(node, 0)
 		for _, child := range node.Children {
 			if len(child.Keys) == 0 {
 				continue
 			}
 			if child.Keys[0] == "except" && !child.KeyQuoted(0) {
 				if len(child.Keys) == 1 && len(child.Children) == 0 &&
-					parent != "" && len(node.Children) == 1 {
-					excluded = append(excluded, parent)
+					len(nodeValues) == 1 && len(node.Children) == 1 {
+					excluded = append(excluded, nodeValues[0])
+					continue
+				}
+				if len(child.Keys) == 1 && len(child.Children) == 0 &&
+					len(node.Children) == 1 && len(nodeValues) > 1 {
+					// #14344: a multi-token parent has no single operand
+					// for its child `{ except; }`. Name the first token
+					// so the diagnostic identifies the authored list;
+					// appending it as malformed poisons this dimension
+					// on tolerant load.
+					malformed = append(malformed, nodeValues[0])
 					continue
 				}
 				malformed = append(malformed, child.Keys[0])
@@ -147,8 +167,23 @@ func hostInboundExceptParts(n *Node) (values, excluded, malformed []string) {
 	}
 
 	// The root keyword's first key is the container name; its remaining keys
-	// are one inline value sequence. Child nodes each retain their own boundary.
-	appendKeys(n, 1)
+	// are one inline value sequence. A braced body on that root sequence
+	// (`system-services [ ssh telnet ] { except; }`) arrives as a child of
+	// the root itself, so it must go through the same single-operand check
+	// as any other value node instead of being read as a plain child value.
+	rootValues := appendKeys(n, 1)
+	if len(n.Children) == 1 && len(n.Children[0].Keys) > 0 &&
+		n.Children[0].Keys[0] == "except" && !n.Children[0].KeyQuoted(0) {
+		child := n.Children[0]
+		if len(child.Keys) == 1 && len(child.Children) == 0 && len(rootValues) == 1 {
+			excluded = append(excluded, rootValues[0])
+		} else if len(child.Keys) == 1 && len(child.Children) == 0 && len(rootValues) > 1 {
+			malformed = append(malformed, rootValues[0])
+		} else {
+			malformed = append(malformed, child.Keys[0])
+		}
+		return values, excluded, malformed
+	}
 	for _, child := range n.Children {
 		walkValue(child)
 	}
