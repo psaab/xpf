@@ -43,6 +43,35 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 	if cfg == nil {
 		return set
 	}
+	// #14348: positive lifeline designations and negative transit
+	// exclusions are tracked separately, so a negative marker (a
+	// declared transit VLAN unit, a non-zero-unit parent demotion) can
+	// never overwrite an explicit positive lifeline role, no matter
+	// which role or interface is walked first. set is the merged view:
+	// a key is false only when it is excluded and not designated.
+	pos := map[string]bool{"fxp0": true, "fxp0.0": true}
+	neg := map[string]bool{}
+	markPositive := func(key string) {
+		pos[key] = true
+		set[key] = true
+	}
+	markNegative := func(key string) {
+		neg[key] = true
+		if !pos[key] {
+			set[key] = false
+		}
+	}
+	// unit0SharesParent reports whether unit 0 of iface shares the bare
+	// parent kernel netdev: true when unit 0 is undeclared or untagged.
+	// A VLAN-tagged unit 0 has its own netdev (#14192), so the bare
+	// parent and its tagged unit 0 must never alias each other (#14348).
+	unit0SharesParent := func(iface *InterfaceConfig) bool {
+		if iface == nil {
+			return true
+		}
+		u, declared := iface.Units[0]
+		return !declared || u == nil || u.VlanID == 0
+	}
 	// Retain every declared interface identity (false for ordinary links).
 	// The matcher uses key presence to prefer a declared dotted base over
 	// interpreting that same spelling as a unit on the shorter parent.
@@ -52,7 +81,7 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 		}
 		name = strings.TrimSpace(name)
 		if _, known := set[name]; !known {
-			set[name] = false
+			markNegative(name)
 		}
 		// #14192: register every DECLARED unit as ordinary too. A bare
 		// control/fabric lifeline base (e.g. control-interface ge-0/0/0)
@@ -64,7 +93,7 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 		for unit := range ifc.Units {
 			key := name + "." + strconv.Itoa(unit)
 			if _, known := set[key]; !known {
-				set[key] = false
+				markNegative(key)
 			}
 		}
 		// #14192: a role name spelled with a unit (control-interface hb.1,
@@ -81,10 +110,10 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 			cc := cfg.Chassis.Cluster
 			for _, role := range []string{cc.ControlInterface, cc.FabricInterface, cc.Fabric1Interface} {
 				if role = strings.TrimSpace(role); role == name {
-					set[name] = true
+					markPositive(name)
 					if strings.Contains(name, ".") {
 						for unit := range ifc.Units {
-							set[name+"."+strconv.Itoa(unit)] = true
+							markPositive(name + "." + strconv.Itoa(unit))
 						}
 					}
 				}
@@ -108,65 +137,117 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 				dottedLifelineBases[role] = true
 			}
 		}
-		markBaseLifeline := func(base string) {
-			set[base] = true
+		// markBaseLifeline exempts base and classifies its declared
+		// units. A VLAN-tagged unit never inherits through this walk: it
+		// is demoted to ordinary UNLESS it was explicitly designated
+		// (markNegative never overrides a positive). Only an untagged
+		// (or undeclared) unit 0 shares the parent netdev, so only then
+		// does unit 0 follow the parent; a tagged unit 0 leaves the
+		// parent ordinary unless another role designated it (#14348).
+		// markBaseLifelineCore classifies base and its declared units
+		// WITHOUT touching base.0: a VLAN-tagged unit is demoted (never
+		// overriding a positive), an untagged unit 0 is promoted, other
+		// untagged units are demoted, and a declared dotted lifeline
+		// owns every declared unit (#14302).
+		markBaseLifelineCore := func(base string) {
 			if iface := cfg.Interfaces.Interfaces[base]; iface != nil {
 				for unit, u := range iface.Units {
-					// #14302: a declared dotted lifeline owns every declared
-					// unit, VLAN-tagged or not (hb.1.7 is the lifeline's own
-					// netdev, not a transit VLAN of a bare parent).
 					if dottedLifelineBases[base] {
-						set[base+"."+strconv.Itoa(unit)] = true
+						markPositive(base + "." + strconv.Itoa(unit))
 						continue
 					}
-					// #14192: a VLAN-tagged unit has a distinct netdev
-					// and never inherits a bare parent lifeline; an
-					// untagged unit keeps the prior unit==0 rule.
 					if u != nil && u.VlanID != 0 {
-						set[base+"."+strconv.Itoa(unit)] = false
+						markNegative(base + "." + strconv.Itoa(unit))
+					} else if unit == 0 {
+						markPositive(base + "." + strconv.Itoa(unit))
 					} else {
-						set[base+"."+strconv.Itoa(unit)] = unit == 0
+						markNegative(base + "." + strconv.Itoa(unit))
 					}
 				}
 			}
+		}
+		// markBaseLifeline: the base itself is a lifeline (explicit
+		// fabric member, or a unit-0 role whose untagged unit 0 shares
+		// the parent netdev). A declared unit 0 that is VLAN-tagged
+		// does NOT demote an explicitly designated base (#14348 bare
+		// role): its tagged unit stays demoted unless designated.
+		markBaseLifeline := func(base string) {
+			markPositive(base)
+			markBaseLifelineCore(base)
+		}
+		// markUnit0Parent classifies the parent of a ".0" role/member:
+		// the parent is promoted only when unit 0 shares its netdev
+		// (undeclared or untagged); a tagged unit 0 leaves the parent
+		// ordinary unless another role designated it, while the
+		// designated tagged unit itself stays positive.
+		markUnit0Parent := func(base string) {
+			if unit0SharesParent(cfg.Interfaces.Interfaces[base]) {
+				markPositive(base)
+			} else {
+				markNegative(base)
+			}
+			markBaseLifelineCore(base)
 		}
 		for _, name := range []string{cc.ControlInterface, cc.FabricInterface, cc.Fabric1Interface} {
 			name = strings.TrimSpace(name)
 			if name == "" {
 				continue
 			}
-			set[name] = true
-			// #14192: the lifeline's own unit 0 shares the parent netdev;
-			// register it explicitly so the declared-unit false above does
-			// not strand it (ge-0/0/0.0, hb.1.0, ge-0/0/0.100.0).
-			set[name+".0"] = true
+			markPositive(name)
+			split := cfg.SplitInterfaceUnitRef(name)
+			// #14192/#14348: name+".0" is the lifeline's own unit-0 view
+			// only when that unit shares the name's netdev. A declared
+			// interface's own unit 0 follows it (hb.1.0); a bare parent's
+			// unit 0 follows only when untagged; a unit of a bare parent
+			// (ge-0/0/0.100 -> ge-0/0/0.100.0) and undeclared names keep
+			// the historical alias.
+			aliasUnit0 := true
+			if !split.HasUnit {
+				if iface, declared := cfg.Interfaces.Interfaces[name]; declared && iface != nil {
+					aliasUnit0 = unit0SharesParent(iface)
+				}
+			} else if iface, declared := cfg.Interfaces.Interfaces[name]; declared && iface != nil {
+				// Declared dotted interface (hb.1): its own unit 0.
+				aliasUnit0 = unit0SharesParent(iface)
+			} else if _, canon, err := CanonicalLogicalUnit(split.UnitTok); err == nil && canon == "0" {
+				if iface, declared := cfg.Interfaces.Interfaces[split.Base]; declared && iface != nil {
+					if u, ok := iface.Units[0]; ok && u != nil && u.VlanID != 0 {
+						aliasUnit0 = false
+					}
+				}
+			}
+			if aliasUnit0 {
+				markPositive(name + ".0")
+			}
 			// #14302: when the role spelling is itself a DECLARED interface
 			// (hb.1 declared with units hb.1.<unit>) it names that interface,
 			// not a unit of a shorter parent, so the naive-cut demotion of its
 			// prefix (hb) must not run. For undeclared-parent spellings the
 			// #14192 rule stands: a role at a non-zero unit designates that
-			// unit only; never promote its bare parent.
+			// unit only; never promote its bare parent. #14348: demotions go
+			// through markNegative, so they never clobber a parent that
+			// another role on the same trunk designated.
 			if _, roleDeclared := cfg.Interfaces.Interfaces[name]; !roleDeclared {
 				if base, suf, hasSuffix := strings.Cut(name, "."); hasSuffix {
 					if _, unit, err := CanonicalLogicalUnit(suf); err == nil && unit != "0" {
 						if _, declared := set[base]; declared {
-							set[base] = false
+							markNegative(base)
 						}
 					}
 				}
 			}
-			// An untagged unit 0 shares the parent kernel netdev. Mark
-			// that netdev as a lifeline too; do not promote non-zero units.
-			split := cfg.SplitInterfaceUnitRef(name)
+			// A unit-0 role shares its parent netdev only when unit 0 is
+			// untagged; markBaseLifeline encodes that. Do not promote
+			// non-zero units.
 			if split.HasUnit {
 				if _, unit, err := CanonicalLogicalUnit(split.UnitTok); err == nil {
 					if unit == "0" {
-						markBaseLifeline(split.Base)
+						markUnit0Parent(split.Base)
 					} else {
 						// #14192: role at a non-zero unit of a DECLARED
 						// bare parent: the parent stays ordinary.
 						if _, declared := set[split.Base]; declared {
-							set[split.Base] = false
+							markNegative(split.Base)
 						}
 					}
 				}
@@ -180,12 +261,42 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 			}
 			// Keep the fabric interface itself exempt as before; its
 			// member links are independent lifelines as well.
-			set[strings.TrimSpace(name)] = true
-			set[strings.TrimSpace(name)+".0"] = true
+			markPositive(strings.TrimSpace(name))
+			if unit0SharesParent(ifc) {
+				markPositive(strings.TrimSpace(name) + ".0")
+			}
 			for _, member := range ifc.FabricMembers {
 				member = strings.TrimSpace(member)
-				if member != "" {
-					markBaseLifeline(member)
+				if member == "" {
+					continue
+				}
+				// A member spelled with a unit designates that unit: mark
+				// it directly and, for unit 0, classify the parent via
+				// markUnit0Parent. A BARE member designates the member
+				// interface itself (markBaseLifeline): the member stays
+				// positive even when its unit 0 is VLAN-tagged, and that
+				// tagged unit follows only its own designation.
+				msplit := cfg.SplitInterfaceUnitRef(member)
+				if msplit.HasUnit {
+					if _, unit, err := CanonicalLogicalUnit(msplit.UnitTok); err == nil {
+						markPositive(member)
+						if unit == "0" {
+							markUnit0Parent(msplit.Base)
+						} else if _, declared := set[msplit.Base]; declared {
+							markNegative(msplit.Base)
+						}
+						continue
+					}
+				}
+				markBaseLifeline(member)
+				// A bare member whose unit 0 is VLAN-tagged carries the
+				// fabric traffic on that tagged netdev (#14348 member
+				// case, mirroring a bare role): exempt the tagged unit
+				// alongside the explicitly designated member.
+				if iface := cfg.Interfaces.Interfaces[member]; iface != nil {
+					if u, ok := iface.Units[0]; ok && u != nil && u.VlanID != 0 {
+						markPositive(member + ".0")
+					}
 				}
 			}
 		}
