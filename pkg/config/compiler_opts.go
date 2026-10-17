@@ -2848,6 +2848,21 @@ type compileOpts struct {
 	// produce a duplicate-address collision.
 	lenientVRRPVIPEmpty bool
 
+	// lenientVRRPVIPCrossGroup (#14407) downgrades the cross-group VIP
+	// overlap gate (validateVRRPVIPCrossGroupStrict) from a hard compile
+	// error to a cfg.Warnings entry. Two distinct VRRP elections (distinct
+	// VRIDs, explicit-vs-explicit or explicit-vs-RETH) claiming one canonical
+	// VIP on the same kernel interface+family can elect different masters
+	// under divergent per-node track state, so both nodes install and
+	// advertise the same address (dual-master duplicate-IP). The strict
+	// commit / commit-check path hard-rejects naming the VIP and both
+	// groups; the tolerant load / peer-sync paths downgrade to a warning so
+	// an already-persisted or peer-synced config still boots (#1960
+	// no-brick). The pkg/vrrp runtime backstop in UpdateInstances refuses
+	// the second claimant, so a leniently-loaded duplicate is bounded to
+	// one seated election rather than two masters for one VIP.
+	lenientVRRPVIPCrossGroup bool
+
 	// lenientDNATToScope (#3444) downgrades the destination-NAT rule-set
 	// `to` scope reject (validateDNATRuleSetToScopeAST) from a hard compile
 	// error to a cfg.Warnings entry. Junos destination NAT rule-sets have
@@ -3464,6 +3479,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVRRPVirtualAddress:              true,
 		lenientVRRPVIPCount:                    true,
 		lenientVRRPVIPEmpty:                    true,
+		lenientVRRPVIPCrossGroup:               true,
 		lenientDNATToScope:                     true,
 		lenientNATMixedScope:                   true,
 		lenientNATEmptyScope:                   true,

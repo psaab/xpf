@@ -107,6 +107,62 @@ func validateInstanceFamily(inst *Instance) error {
 	return nil
 }
 
+// vipClaimKey identifies one canonical VIP claim: resolved interface plus
+// the VIP's own address family and canonical host identity (#14407).
+type vipClaimKey struct {
+	iface  string
+	family string
+	host   string
+}
+
+// vipClaimKeyFor returns the claim key for one VIP string, or false when the
+// VIP does not parse (left to the existing parse-error paths).
+func vipClaimKeyFor(iface, vip string) (vipClaimKey, bool) {
+	host, family, ok := parseVIPIdentity(vip)
+	if !ok {
+		return vipClaimKey{}, false
+	}
+	return vipClaimKey{iface: iface, family: family, host: host}, true
+}
+
+// parseVIPIdentity canonicalizes a VIP to its host identity and family.
+// CIDR and bare spellings of the same host collide; different prefixes on
+// the same host also collide, because both elections would install the
+// same host address.
+func parseVIPIdentity(vip string) (host, family string, ok bool) {
+	if ip, _, err := net.ParseCIDR(vip); err == nil {
+		family = "inet6"
+		if ip.To4() != nil {
+			family = "inet"
+		}
+		return ip.String(), family, true
+	}
+	if ip := net.ParseIP(vip); ip != nil {
+		family = "inet6"
+		if ip.To4() != nil {
+			family = "inet"
+		}
+		return ip.String(), family, true
+	}
+	return "", "", false
+}
+
+// secondVIPClaimant reports whether inst claims a VIP already claimed by a
+// DIFFERENT instance key. It returns the conflicting VIP spelling and the
+// first claimant's key.
+func secondVIPClaimant(claims map[vipClaimKey]instanceKey, self instanceKey, inst *Instance) (string, instanceKey, bool) {
+	for _, vip := range inst.VirtualAddresses {
+		ck, ok := vipClaimKeyFor(inst.Interface, vip)
+		if !ok {
+			continue
+		}
+		if first, exists := claims[ck]; exists && first != self {
+			return vip, first, true
+		}
+	}
+	return "", instanceKey{}, false
+}
+
 // isRethInstance distinguishes the implicit cluster/RETH state machines from
 // generic standalone VRRP. CollectRethInstances deliberately leaves Family
 // empty; CollectInstances always assigns inet/inet6. Cluster control methods
@@ -473,6 +529,9 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 	rejectedDesired := make(map[instanceKey]string)
 	domainsByElection := make(map[electionKey]*electionDomains, len(desired))
 	desiredIfaces := make(map[string]struct{}, len(desired))
+	// #14407: canonical VIP -> first claimant key, per interface+family.
+	// A second distinct election claiming the same VIP is refused below.
+	vipClaims := make(map[vipClaimKey]instanceKey)
 	needsLinkWatcher := false
 	for _, inst := range desired {
 		if inst != nil {
@@ -523,6 +582,37 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 				"interface", inst.Interface, "group_id", inst.GroupID,
 				"vip_count", len(inst.VirtualAddresses), "err", err)
 			continue
+		}
+		// #14407 runtime backstop for the cross-group VIP overlap the config
+		// gate (validateVRRPVIPCrossGroupStrict) rejects at commit. The
+		// tolerant load / HA-sync path downgrades that gate to a warning
+		// (#1960 no-brick), so two distinct elections claiming one canonical
+		// VIP on the same interface+family can reach here. Each election's
+		// master independently installs its VIPs, and divergent per-node
+		// track state can elect different masters — both nodes would own
+		// the same address. Refuse the second claimant (same refuse/skip
+		// pattern as the VRID / advert-capacity arms): the first claimant
+		// in desired order wins deterministically on every node given the
+		// same desired slice. Family for the claim key is derived per-VIP
+		// (a RETH instance leaves Family empty and carries both families),
+		// so a v4 and a v6 spelling of unrelated addresses never collide.
+		if conflictVIP, conflictKey, conflict := secondVIPClaimant(vipClaims, key, inst); conflict {
+			rejectedDesired[key] = fmt.Sprintf(
+				"virtual-address %s already claimed by VRID %d on interface %q; "+
+					"refusing second VRRP election for the same virtual address",
+				conflictVIP, conflictKey.groupID, inst.Interface)
+			slog.Warn("vrrp: refusing second claimant for a virtual address",
+				"interface", inst.Interface, "group_id", inst.GroupID,
+				"family", inst.Family, "vip", conflictVIP,
+				"first_group_id", conflictKey.groupID)
+			continue
+		}
+		for _, vip := range inst.VirtualAddresses {
+			if ck, ok := vipClaimKeyFor(inst.Interface, vip); ok {
+				if _, exists := vipClaims[ck]; !exists {
+					vipClaims[ck] = key
+				}
+			}
 		}
 		if _, exists := desiredMap[key]; exists {
 			return fmt.Errorf(

@@ -965,6 +965,24 @@ collection retains the first spelling, and strict capacity validation counts
 distinct canonical identities rather than repeated entries. The RETH-derived
 untagged set is canonicalized across its combined unit-address list.
 
+**Same VIP must not be claimed by two elections on one interface (#14407):**
+each `vrrp-group` (and each RETH-derived instance, VRID `100+RG`) is an
+independent election — the manager keys instances by (interface, VRID,
+family), never by VIP, and each master independently installs its VIPs. Two
+groups on one unit carrying the same VIP normally elect the same winner, but
+per-group, per-node track state breaks that coupling: if node A's tracked
+interface for group 1 is down while node B's for group 2 is down, group 1
+elects B while group 2 elects A, and both nodes install and advertise the
+same address (dual-master duplicate-IP). `validateVRRPVIPCrossGroupStrict`
+(`compiler_validate_strict_vrrp_vipcrossgroup.go`) rejects that at commit,
+naming the VIP and both groups, scoped to the resolved kernel interface +
+family so the same VIP on different units/interfaces stays legal. It also
+covers an explicit group whose VIP equals a RETH unit address when RETH VRRP
+synthesis is active. The tolerant path downgrades to a warning
+(`lenientVRRPVIPCrossGroup`, #1960 no-brick); `pkg/vrrp` `UpdateInstances`
+refuses the second claimant, so a leniently-loaded duplicate seats only one
+election.
+
 **No-match default-policy is fail-closed (#3065):** the sibling of #3043
 for the implicit fallback. When a flow matches NO zone-pair, global, or
 default policy, the verdict is `SecurityConfig.DefaultPolicy`. Because the
