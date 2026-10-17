@@ -92,7 +92,13 @@ func collectVLANMapFromInterfacesNode(ifacesNode *Node, out map[string]vlanMapFi
 		if ifName == "" {
 			continue
 		}
-		for _, unitInst := range namedInstances(iface.FindChildren("unit")) {
+		// #14436: expand a packed instance tail so its unit is checked
+		// like the braced spelling.
+		ifaceBody := packedBody(iface, interfaceSchema9792())
+		if ifaceBody == nil {
+			ifaceBody = iface
+		}
+		for _, unitInst := range namedInstances(ifaceBody.FindChildren("unit")) {
 			stmts := unitVLANMapStmts(unitInst.node)
 			if len(stmts) == 0 {
 				continue

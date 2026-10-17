@@ -162,6 +162,9 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 					consumer := p == 0 && head == "filter" &&
 						(isInterfaceFilterConsumerPath12090(ancestors) ||
 							isInterfacePackedFilterConsumer12090(ancestors, n))
+					if head == "filter" && isInterfaceInstancePackedTailFilterConsumer12090(ancestors, n, tail, p) {
+						consumer = true
+					}
 					if !consumer {
 						if err := emit(
 							"interfaces %s: `%s` is not supported (xpf has no consumer "+
@@ -192,9 +195,19 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 		if ifName == "" {
 			continue
 		}
+		// #14436: expand a packed instance tail (`ge-0/0/0 bandwidth 1g
+		// unit 0 family inet { ... }`) so the H9/H10/#10293 checks below
+		// see the same unit children as the braced spelling; on the raw
+		// node the unit is packed onto Keys and every check missed it.
+		ifaceBody := packedBody(iface, interfaceSchema9792())
+		if ifaceBody == nil {
+			ifaceBody = iface
+		}
 
 		// H10: a static MAC override at the physical-interface scope.
-		for _, c := range iface.Children {
+		// The packed tail may not expand when `mac` itself leaves the
+		// modelled grammar, so scan the raw Keys tail as well (#14436).
+		for _, c := range ifaceBody.Children {
 			if c.Name() == "mac" {
 				if err := emit(
 					"interfaces %s: static `mac` override is not supported "+
@@ -205,8 +218,17 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 				}
 			}
 		}
+		if packedIfaceTailHasMac14436(iface.Keys) {
+			if err := emit(
+				"interfaces %s: static `mac` override is not supported "+
+					"(the interface MAC is read-only; for cluster RETH it is "+
+					"computed deterministically per node) — remove it (#2008 H10)",
+				ifName); err != nil {
+				return nil, err
+			}
+		}
 
-		for _, unit := range iface.Children {
+		for _, unit := range ifaceBody.Children {
 			if unit.Name() != "unit" {
 				continue
 			}
@@ -504,11 +526,114 @@ func isInterfaceDirectFilterConsumerPath12090(ancestors []*Node, filter *Node) b
 		isInterfaceBracedFilterConsumer12090(filter) {
 		return true
 	}
+	if isInterfacePackedInstanceFilterConsumer12090(ancestors, filter) {
+		return true
+	}
 	if !isInterfaceFilterConsumerPath12090(ancestors) {
 		return false
 	}
 	familyIndex, ok := interfaceUnitFamilyAncestorIndex12090(ancestors)
 	return ok && (familyIndex != 3 || isInterfaceBracedFilterConsumer12090(filter))
+}
+
+// isInterfacePackedInstanceFilterConsumer12090 reports whether filter is
+// the braced `filter { input|output <name>; }` body of an interface
+// instance whose `unit <n> family inet|inet6` path is packed onto the
+// instance node's own Keys (#14436). packedBody expands that tail into
+// the same unit/family chain the braced spelling produces and appends
+// the original Children under it, so the filter node itself (pointer
+// identity) appears under unit -> family in the expanded tree.
+func isInterfacePackedInstanceFilterConsumer12090(ancestors []*Node, filter *Node) bool {
+	if len(ancestors) == 0 || filter == nil || !isInterfaceBracedFilterConsumer12090(filter) {
+		return false
+	}
+	iface := ancestors[0]
+	if iface == nil || len(iface.Keys) < 2 {
+		return false
+	}
+	expanded := packedBody(iface, interfaceSchema9792())
+	if expanded == iface {
+		return false
+	}
+	var found bool
+	var walk func(n *Node, underUnit, underInetFamily bool)
+	walk = func(n *Node, underUnit, underInetFamily bool) {
+		if n == nil || found {
+			return
+		}
+		if n == filter {
+			found = underUnit && underInetFamily
+			return
+		}
+		for _, c := range n.Children {
+			u, f := underUnit, underInetFamily
+			switch c.Name() {
+			case "unit":
+				u = true
+			case "family":
+				if len(c.Keys) == 1 {
+					// Split form `family { inet { ... } }`: defer the AF
+					// decision to the inet/inet6 child below.
+					f = underInetFamily
+				} else {
+					f = underUnit && isInetFamily(c)
+				}
+			case "inet", "inet6":
+				if underUnit {
+					f = true
+				}
+			}
+			walk(c, u, f)
+		}
+	}
+	walk(expanded, false, false)
+	return found
+}
+
+// isInterfaceInstancePackedTailFilterConsumer12090 reports whether a
+// `filter` keyword at tail[p] of an interface instance node completes a
+// packed `unit <n> family inet|inet6 filter input|output` run on that
+// node's own Keys (#14436) — the token form of the shape above.
+func isInterfaceInstancePackedTailFilterConsumer12090(ancestors []*Node, n *Node, tail []string, p int) bool {
+	if len(ancestors) != 0 || n == nil || p < 0 || p >= len(tail) || tail[p] != "filter" {
+		return false
+	}
+	if p+1 >= len(tail) || (tail[p+1] != "input" && tail[p+1] != "output") {
+		return false
+	}
+	// Rebuild the effective token path up to the filter keyword by
+	// consuming each preceding statement through the schema levels it
+	// opens, deepest-first — the same walk packedBodyChildren performs.
+	// Argument values are never mistaken for keywords.
+	levels := []*schemaNode{interfaceSchema9792()}
+	var path []string
+	for i := 0; i < p; {
+		at := -1
+		var child *schemaNode
+		for j := len(levels) - 1; j >= 0; j-- {
+			if cs := schemaChildFor(levels[j], tail[i]); cs != nil {
+				at, child = j, cs
+				break
+			}
+		}
+		if child == nil {
+			return false
+		}
+		consumed, refined := consumeNodeKeys(tail[i:p], child)
+		if consumed <= 0 || i+consumed > p {
+			return false
+		}
+		path = append(path, tail[i:i+consumed]...)
+		levels = append(levels[:at+1], refined)
+		i += consumed
+	}
+	// path must end `unit <n> family inet|inet6`.
+	if len(path) < 4 {
+		return false
+	}
+	tailPath := path[len(path)-4:]
+	return tailPath[0] == "unit" && tailPath[2] == "family" &&
+		(tailPath[3] == "inet" || tailPath[3] == "inet6")
 }
 
 // isInterfaceBracedFilterConsumer12090 accepts the filter-child shapes that
@@ -834,6 +959,46 @@ func hasARPPolicer(fam *Node) bool {
 // that merely spells "mac" (e.g. `description mac`) is not a hit;
 // unknown keywords advance one token (their arity is unknowable, the
 // same posture as filterKeywordPositions12090).
+// packedIfaceTailHasMac14436 is packedUnitTailHasMac for the interface
+// instance node (`<if> [leaf <args> ...]`): it walks Keys[1:] through
+// the interface schema levels (deepest-first, as packedBodyChildren
+// does) and reports a `mac` keyword at a statement position.
+func packedIfaceTailHasMac14436(keys []string) bool {
+	if len(keys) < 3 {
+		return false
+	}
+	levels := []*schemaNode{interfaceSchema9792()}
+	for i := 1; i < len(keys); {
+		keyword := keys[i]
+		if isApplyStatementKeyword(keyword) {
+			return false
+		}
+		if keyword == "mac" {
+			return true
+		}
+		at := -1
+		var child *schemaNode
+		for j := len(levels) - 1; j >= 0; j-- {
+			if cs := schemaChildFor(levels[j], keyword); cs != nil {
+				at, child = j, cs
+				break
+			}
+		}
+		if child == nil {
+			i++
+			continue
+		}
+		consumed, refined := consumeNodeKeys(keys[i:], child)
+		if consumed <= 0 {
+			i++
+			continue
+		}
+		levels = append(levels[:at+1], refined)
+		i += consumed
+	}
+	return false
+}
+
 func packedUnitTailHasMac(keys []string) bool {
 	if len(keys) < 4 {
 		return false
