@@ -921,8 +921,11 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 		isDHCPSub := false
 		isReth := false
 		if ifCfg, ok := cfg.Interfaces.Interfaces[cfgName]; ok && ifCfg != nil {
-			if unit, ok := ifCfg.Units[unitNum]; ok {
-				addrs = unit.Addresses
+			if unit, ok := ifCfg.Units[unitNum]; ok && unit != nil {
+				// #14575: a unit-disabled unit reconciles to no addresses.
+				if !unit.Disable {
+					addrs = unit.Addresses
+				}
 				isDHCPSub = unit.DHCP || unitHasDHCPv6(unit)
 			}
 			if ifCfg.RedundancyGroup > 0 {
@@ -1318,16 +1321,26 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				if unit.Description != "" {
 					desc = unit.Description
 				}
+				// #14575: a unit-disabled unit contributes no addresses/DHCP.
+				var stAddrs []string
+				var stPrimary, stPreferred string
+				var stIATypes []string
+				stDHCPv4, stDHCPv6, stDAD := false, false, false
+				if unit != nil && !unit.Disable {
+					stAddrs, stPrimary, stPreferred = unit.Addresses, unit.PrimaryAddress, unit.PreferredAddress
+					stDHCPv4, stDHCPv6, stDAD = unit.DHCP, unitHasDHCPv6(unit), unit.DADDisable
+					stIATypes = unitDHCPv6IATypes(unit)
+				}
 				result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
 					Name:             unitName,
-					Addresses:        unit.Addresses,
-					PrimaryAddress:   unit.PrimaryAddress,
-					PreferredAddress: unit.PreferredAddress,
-					DHCPv4:           unit.DHCP,
-					DHCPv6:           unitHasDHCPv6(unit),
-					DHCPv6Stateless:  unitDHCPv6Stateless(unit),
-					DHCPv6IATypes:    unitDHCPv6IATypes(unit),
-					DADDisable:       unit.DADDisable,
+					Addresses:        stAddrs,
+					PrimaryAddress:   stPrimary,
+					PreferredAddress: stPreferred,
+					DHCPv4:           stDHCPv4,
+					DHCPv6:           stDHCPv6,
+					DHCPv6Stateless:  stDHCPv6 && unitDHCPv6Stateless(unit),
+					DHCPv6IATypes:    stIATypes,
+					DADDisable:       stDAD,
 					MTU:              unitMTU,
 					Description:      desc,
 				})
@@ -1530,7 +1543,19 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 						addrs := unit.Addresses
 						primaryAddr := unit.PrimaryAddress
 						preferredAddr := unit.PreferredAddress
-						if isVRRPReth {
+						dhcpv4, dhcpv6, dad := unit.DHCP, unitHasDHCPv6(unit), unit.DADDisable
+						var iaTypes []string
+						if dhcpv6 {
+							iaTypes = unitDHCPv6IATypes(unit)
+						}
+						unitDisabled := unit != nil && unit.Disable
+						if unitDisabled {
+							// #14575: no addresses/DHCP on a unit-disabled unit;
+							// Disable keeps the sub-interface down.
+							addrs, primaryAddr, preferredAddr = nil, "", ""
+							dhcpv4, dhcpv6, iaTypes = false, false, nil
+						}
+						if isVRRPReth && !unitDisabled {
 							// Replace VIP addresses with a link-local base for VRRP.
 							addrs = []string{fmt.Sprintf("169.254.%d.%d/32", effectiveCfg.RedundancyGroup, clusterNodeID+1)}
 							primaryAddr = ""
@@ -1541,14 +1566,15 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 							Addresses:        addrs,
 							PrimaryAddress:   primaryAddr,
 							PreferredAddress: preferredAddr,
-							DHCPv4:           unit.DHCP,
-							DHCPv6:           unitHasDHCPv6(unit),
-							DHCPv6Stateless:  unitDHCPv6Stateless(unit),
-							DHCPv6IATypes:    unitDHCPv6IATypes(unit),
-							DADDisable:       unit.DADDisable,
+							DHCPv4:           dhcpv4,
+							DHCPv6:           dhcpv6,
+							DHCPv6Stateless:  dhcpv6 && unitDHCPv6Stateless(unit),
+							DHCPv6IATypes:    iaTypes,
+							DADDisable:       dad,
+							Disable:          unitDisabled,
 							MTU:              unit.MTU,
 							Description:      unit.Description,
-							KeepAddresses:    isVRRPReth,
+							KeepAddresses:    isVRRPReth && !unitDisabled,
 							VRFName:          mgmtVRFName,
 						})
 					}
@@ -1566,7 +1592,17 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				dhcpv6Seen := false
 				var primaryAddr, preferredAddr string
 				unitMTU := 0
+				allUnitsDisabled := len(effectiveCfg.Units) > 0
 				for _, unit := range effectiveCfg.Units {
+					if unit == nil {
+						allUnitsDisabled = false
+						continue
+					}
+					if unit.Disable {
+						// #14575: skip this unit's addresses/DHCP/MTU entirely.
+						continue
+					}
+					allUnitsDisabled = false
 					addrs = append(addrs, unit.Addresses...)
 					if unit.DHCP {
 						dhcpv4 = true
@@ -1617,7 +1653,7 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				}
 				// VRRP-backed RETH: replace VIP addresses with a
 				// link-local base; native VRRP manages the actual VIPs.
-				if isVRRPReth {
+				if isVRRPReth && !allUnitsDisabled {
 					addrs = []string{fmt.Sprintf("169.254.%d.%d/32", effectiveCfg.RedundancyGroup, clusterNodeID+1)}
 					primaryAddr = ""
 					preferredAddr = ""
@@ -1635,14 +1671,14 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					DHCPv6:           dhcpv6,
 					DHCPv6Stateless:  dhcpv6Stateless,
 					DHCPv6IATypes:    dhcpv6IATypes,
-					Disable:          ifCfg.Disable,
+					Disable:          ifCfg.Disable || allUnitsDisabled,
 					DADDisable:       dadDisable,
 					Speed:            ifCfg.Speed,
 					Duplex:           ifCfg.Duplex,
 					MTU:              mtu,
 					VRFName:          mgmtVRFName,
 					Description:      ifCfg.Description,
-					KeepAddresses:    isVRRPReth,
+					KeepAddresses:    isVRRPReth && !allUnitsDisabled,
 				})
 			}
 		}
@@ -1673,6 +1709,9 @@ func buildFabricBondModels(cfg *config.Config, result *CompileResult, seen map[s
 			// Collect addresses from fabric interface units
 			var addrs []string
 			for _, unit := range ifCfg.Units {
+				if unit == nil || unit.Disable {
+					continue
+				}
 				addrs = append(addrs, unit.Addresses...)
 			}
 			result.ManagedInterfaces = append(result.ManagedInterfaces, networkd.InterfaceConfig{
@@ -1793,7 +1832,7 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 				irbName := parts[0] // "irb"
 				unitNum, _ := strconv.Atoi(parts[1])
 				if irbCfg, ok := cfg.Interfaces.Interfaces[irbName]; ok && irbCfg != nil {
-					if unit, ok := irbCfg.Units[unitNum]; ok {
+					if unit, ok := irbCfg.Units[unitNum]; ok && unit != nil && !unit.Disable {
 						addrs = unit.Addresses
 					}
 				}

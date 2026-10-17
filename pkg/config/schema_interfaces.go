@@ -135,6 +135,7 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 	// an unknown modifier and the lenient load dropped the inner tag.
 	"unit": {desc: "Logical unit number", args: 1, valueHint: ValueHintUnitNumber, placeholder: "<unit-number>", keyValidator: ValidateLogicalUnit, packedStatements: true, children: map[string]*schemaNode{
 		"description":    {desc: "Text description", args: 1, scalar: true, placeholder: "<text>", children: nil},
+		"disable":        {desc: "Disable this logical unit", children: nil},
 		"point-to-point": {desc: "Point-to-point interface", children: nil},
 		// 802.1Q VID is a 12-bit wire field: 0 is the compiler's
 		// "untagged" zero-value sentinel and 4095 is reserved, so

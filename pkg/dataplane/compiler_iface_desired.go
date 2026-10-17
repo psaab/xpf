@@ -260,6 +260,12 @@ func planPhysDesired(cfg *config.Config) map[string]*physDesired {
 			if !ok || unit == nil {
 				continue
 			}
+			// #14575: a unit-disabled unit contributes no addresses and does
+			// not force the DHCP address-reconcile suppression; its sibling
+			// units on the same netdev still plan normally.
+			if unit.Disable {
+				continue
+			}
 			if unit.DHCP || unitHasDHCPv6(unit) {
 				pd.skipAddrs = true
 			}
