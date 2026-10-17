@@ -30,9 +30,11 @@ package cluster
 //     unblock a stalled handshake instead of hanging on the shutdown budget.
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 )
 
@@ -147,18 +149,96 @@ func (s *SessionSync) notePreAuthRejected(conn net.Conn) {
 	}
 }
 
+// lookupPeerHostIPs resolves a configured peer hostname to all its IPs.
+// It is a package var only so tests can stub DNS deterministically; production
+// uses the default resolver with a bounded context so a wedged resolver
+// cannot hang SessionSync construction (comms start). Never called per
+// connection or under preAuthMu.
+var lookupPeerHostIPs = func(host string) ([]netip.Addr, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+}
+
+// resolveConfiguredPeerIPs builds the cached peer-IP set for the configured
+// peer addresses (#14371). IP literals keep the exact prior semantics via
+// parseAddrIP (ip:port / bare IP / v4-in-v6, unmapped). A hostname is resolved
+// once here and ALL answers (v4+v6) are stored, mirroring the heartbeat's
+// resolve-at-startup shape (heartbeat_manager.go ResolveUDPAddr) and the sync
+// dial (DialContext), which both already resolve hostnames — only the
+// admission reserve compared literally and silently voided itself.
+//
+// An unresolvable/empty hostname yields no entry for that address (the peer
+// is then treated as a non-peer, exactly as before) but warns loudly naming
+// the address, so the misconfiguration is visible instead of silent.
+// Resolution failure never panics and never blocks beyond the lookup timeout.
+//
+// Known limitation: cached answers go stale if the peer's IP changes; the
+// reserve recovers on comms restart, which reconstructs SessionSync (same
+// posture as the heartbeat's startup resolution). DNS rebinding is out of
+// scope: an attacker who can rebind the peer hostname to their own IP still
+// cannot pass the HMAC handshake, and the general-pool cap still bounds the
+// total resource cost.
+func resolveConfiguredPeerIPs(addrs ...string) map[netip.Addr]struct{} {
+	out := make(map[netip.Addr]struct{})
+	for _, addr := range addrs {
+		if addr == "" {
+			continue
+		}
+		if ip := peerIPOf(addr); ip.IsValid() {
+			out[ip] = struct{}{}
+			continue
+		}
+		host := addr
+		if h, _, err := net.SplitHostPort(addr); err == nil {
+			host = h
+		}
+		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+		if host == "" {
+			continue
+		}
+		ips, err := lookupPeerHostIPs(host)
+		if err != nil || len(ips) == 0 {
+			slog.Warn("cluster sync: configured peer address does not resolve to any IP, "+
+				"pre-auth peer reserve unavailable for it",
+				"peer_address", addr, "err", err)
+			continue
+		}
+		for _, ip := range ips {
+			if ip.IsValid() {
+				out[ip.Unmap()] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+// refreshPeerIPs (re)resolves the configured peer addresses into the cached
+// peerIPs set. Called once at SessionSync construction; comms restart
+// reconstructs the SessionSync, which is the refresh point. Never called on
+// the per-connection admission path.
+func (s *SessionSync) refreshPeerIPs() {
+	s.peerIPs = resolveConfiguredPeerIPs(s.peerAddr, s.peerAddr1)
+}
+
 // isPeerRemote reports whether conn's remote IP matches a configured peer fabric
 // address. The reservation matches on IP only — the peer dials from an ephemeral
 // source port — so a flood from any other host cannot consume the peer's
 // reserved admission slots. An attacker who can source-spoof the exact peer IP
 // could reach the reserved tail, but that is a strictly harder attack and still
 // cannot pass the HMAC handshake; the general-pool cap already bounds the total
-// resource cost. Reads immutable construction-time config; the caller holds
-// preAuthMu for lock-discipline uniformity, not because the read needs it.
+// resource cost. Reads the construction-time resolved cache (peerIPs, #14371);
+// the caller holds preAuthMu for lock-discipline uniformity, not because the
+// read needs it. A zero-value SessionSync that never went through a
+// constructor falls back to the literal comparison.
 func (s *SessionSync) isPeerRemote(conn net.Conn) bool {
 	ip := remoteIPOf(conn)
 	if !ip.IsValid() {
 		return false
+	}
+	if s.peerIPs != nil {
+		_, ok := s.peerIPs[ip]
+		return ok
 	}
 	if peer := peerIPOf(s.peerAddr); peer.IsValid() && peer == ip {
 		return true

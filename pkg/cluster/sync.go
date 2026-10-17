@@ -11,6 +11,7 @@ import (
 	"github.com/psaab/xpf/pkg/dhcpserver"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -865,10 +866,16 @@ type SessionSync struct {
 	// and unblock a stalled handshake — the bool value records whether the entry
 	// holds a counted inbound admission slot. preAuthLogMono rate-limits the
 	// rejection warning to ~1/sec. All three are guarded by preAuthMu.
+	// peerIPs is the construction-time resolved cache of the configured peer
+	// addresses (#14371): literals via parseAddrIP, hostnames resolved once
+	// (all v4+v6 answers). Written only by the constructors via refreshPeerIPs
+	// before any connection goroutine starts; read by isPeerRemote under
+	// preAuthMu. Nil on a zero-value SessionSync (literal fallback).
 	preAuthMu       sync.Mutex
 	preAuthInFlight int
 	setupConns      map[net.Conn]bool
 	preAuthLogMono  atomic.Int64
+	peerIPs         map[netip.Addr]struct{}
 
 	listener   net.Listener
 	localAddr1 string
@@ -2051,6 +2058,7 @@ func NewSessionSync(localAddr, peerAddr string, rt clusterRuntime) *SessionSync 
 		failoverBatchCommitWaiters: make(map[string]failoverWaiter),
 	}
 	s.initGenState()
+	s.refreshPeerIPs()
 	s.SetRuntime(rt)
 	return s
 }
@@ -2141,6 +2149,7 @@ func NewDualSessionSync(local, peer, local1, peer1 string, rt clusterRuntime) *S
 		failoverBatchCommitWaiters: make(map[string]failoverWaiter),
 	}
 	s.initGenState()
+	s.refreshPeerIPs()
 	s.SetRuntime(rt)
 	return s
 }
