@@ -3,9 +3,9 @@ package config
 import "testing"
 
 const (
-	wg6941Priv  = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-	wg6941PeerX = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-	wg6941PeerA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	wg6941Priv  = "3de6404700006875ca73c26dfc1f4a50fa627601e24664d40310b975b40514c2"
+	wg6941PeerX = "5a9303297e0c6babb14de8cfcc2a84491da7f760ec8bd9729494f71d17829980"
+	wg6941PeerA = "6e2cc0919a4d6127938b531ab7cd6e69a908a780fd2b73083b31cba690abc177"
 )
 
 func wg6941Base() []string {

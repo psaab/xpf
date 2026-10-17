@@ -3320,6 +3320,7 @@ fn process_status_wg_tunnels_roundtrip_and_compat() {
         rx_unknown_type: 12,
         hs_send_errors: 13,
         hs_requests_armed: 14,
+        hs_refused_degenerate_key: 92,
         decap_packets: 15,
         decap_bytes: 16,
         decap_keepalives: 17,

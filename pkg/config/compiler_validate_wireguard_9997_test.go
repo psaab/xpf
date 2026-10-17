@@ -17,10 +17,10 @@ import (
 // diagnostic naming BOTH units.
 
 var (
-	wg9997Priv  = strings.Repeat("e4", 32)
-	wg9997PeerX = strings.Repeat("f1", 32) // interface-level (inherited) peer
-	wg9997PeerA = strings.Repeat("a5", 32) // the cross-unit duplicate
-	wg9997PeerB = strings.Repeat("b6", 32) // a distinct second unit peer
+	wg9997Priv  = "21a8e89546569ec63441fbc82a72e6a59c0528cb39896d0adf84e77c4758e6b3"
+	wg9997PeerX = "258ca6d9d6515c4e5b2166b183d9cd1efacfb2ee6d1337cf525843c940b022ff" // interface-level (inherited) peer
+	wg9997PeerA = "281c44584e21c01c573fc55561689a5bca17013ee790fa272cf51ed1681066e9" // the cross-unit duplicate
+	wg9997PeerB = "2ae44b6a8642694ac9636d842a3a358fb12d7f09c306a29342b133dfd7690116" // a distinct second unit peer
 )
 
 func wg9997Base() []string {

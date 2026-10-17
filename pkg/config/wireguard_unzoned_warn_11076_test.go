@@ -8,8 +8,8 @@ import (
 // #11076: a WireGuard tunnel on an unzoned interface gets no host-inbound
 // accept (admission scopes to the tunnel's zone) — the commit must warn.
 func TestWireGuardUnzonedTunnelWarns11076(t *testing.T) {
-	priv := strings.Repeat("e4", 32)
-	peer := strings.Repeat("f1", 32)
+	priv := "21a8e89546569ec63441fbc82a72e6a59c0528cb39896d0adf84e77c4758e6b3"
+	peer := "258ca6d9d6515c4e5b2166b183d9cd1efacfb2ee6d1337cf525843c940b022ff"
 	lines := []string{
 		"set interfaces wg0 tunnel mode wireguard",
 		"set interfaces wg0 tunnel wireguard listen-port 51820",
@@ -54,8 +54,8 @@ func TestWireGuardUnzonedTunnelWarns11076(t *testing.T) {
 }
 
 func TestWireGuardOuterSourceControlsZoneWarnings12119(t *testing.T) {
-	priv := strings.Repeat("e4", 32)
-	peer := strings.Repeat("f1", 32)
+	priv := "21a8e89546569ec63441fbc82a72e6a59c0528cb39896d0adf84e77c4758e6b3"
+	peer := "258ca6d9d6515c4e5b2166b183d9cd1efacfb2ee6d1337cf525843c940b022ff"
 	lines := []string{
 		"set interfaces wg0 tunnel mode wireguard",
 		"set interfaces wg0 tunnel source 10.0.0.1",

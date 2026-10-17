@@ -64,7 +64,7 @@ use super::session::{REJECT_AFTER_MESSAGES, ReplayDecision, WgSession};
 use super::tai64n::Tai64nClock;
 use super::{
     POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, WG_KEY_LEN, WG_NOISE_PATTERN, WG_PROTOCOL_ID_BYTES,
-    WG_ZERO_PSK, pad_to_16,
+    WG_SMALL_ORDER_KEYS, WG_ZERO_PSK, pad_to_16,
 };
 use arc_swap::ArcSwap;
 use curve25519_dalek::MontgomeryPoint;
@@ -561,6 +561,13 @@ impl std::fmt::Debug for WgEngine {
 
 impl WgEngine {
     pub(crate) fn new(config: WgEngineConfig) -> Self {
+        // #14373: no degenerate-LOCAL-key guard here. Production
+        // reaches this constructor only via hydrate_wg_identity,
+        // which drops a degenerate local private key fail-closed
+        // (and the Go commit gate rejects it before that); an
+        // assertion here would only panic test fixtures that use
+        // placeholder private keys. Peer admission below IS guarded:
+        // a small-order peer must never get a HandshakeState.
         let local_public_key =
             MontgomeryPoint::mul_base_clamped(*config.local_private_key).to_bytes();
         let mac1_key = super::handshake::mac1_key_for(&local_public_key);
@@ -1099,8 +1106,23 @@ impl WgEngine {
         let mut new_peers: Vec<PeerEntry> = Vec::with_capacity(configs.len());
         let mut new_index: FxHashMap<[u8; 32], u32> = FxHashMap::default();
         let mut new_allowed = AllowedIps::new();
-        for (i, cfg) in configs.iter().enumerate() {
-            let idx = i as u32;
+        for cfg in configs.iter() {
+            // #14373: a small-order peer public key yields an
+            // all-zero DH secret against any clamped scalar, so no
+            // HandshakeState may ever be built for it. Skip the peer
+            // (counted) instead of installing it; the Go commit gate
+            // rejects the config and the hydrate drops the row, so
+            // this only fires for a caller that bypassed both. The
+            // removal-drain below still publishes a table without the
+            // peer and drains any prior sessions for it as a removal.
+            if super::is_small_order_wg_peer_key(&cfg.pubkey) {
+                self.counters.inc_handshake_refused_degenerate_key();
+                eprintln!(
+                    "xpf-userspace-dp: wireguard peer public key is small-order; refusing peer (#14373)"
+                );
+                continue;
+            }
+            let idx = new_peers.len() as u32;
             let existing = old
                 .peer_index_by_pubkey
                 .get(&cfg.pubkey)

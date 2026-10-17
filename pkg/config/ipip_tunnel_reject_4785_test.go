@@ -453,8 +453,8 @@ func TestIpipAnchorAlarmDoesNotOverreach_4785(t *testing.T) {
 // the very mode the error message recommends — fails here.
 func TestIpipTunnelWireguardStillCommits_4785(t *testing.T) {
 	const (
-		privKey = "1111111111111111111111111111111111111111111111111111111111111111"
-		peerKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		privKey = "985d0b677e48cc829d765cc606e0fa9a84ab3c8469f8bc04de7b52f096a731b6"
+		peerKey = "6e2cc0919a4d6127938b531ab7cd6e69a908a780fd2b73083b31cba690abc177"
 	)
 	tree := ipipTree(t,
 		"set interfaces wg0 tunnel mode wireguard",

@@ -144,6 +144,7 @@ impl Coordinator {
                 rx_unknown_type: c.rx_unknown_type.load(Ordering::Relaxed),
                 hs_send_errors: c.hs_send_errors.load(Ordering::Relaxed),
                 hs_requests_armed: c.hs_requests_armed.load(Ordering::Relaxed),
+                hs_refused_degenerate_key: c.hs_refused_degenerate_key.load(Ordering::Relaxed),
                 decap_packets: c.decap_packets.load(Ordering::Relaxed),
                 decap_bytes: c.decap_bytes.load(Ordering::Relaxed),
                 decap_keepalives: c.decap_keepalives.load(Ordering::Relaxed),

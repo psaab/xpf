@@ -8868,6 +8868,51 @@ fn wg_endpoint_with_malformed_key_is_dropped() {
     assert!(!state.has_wg_tunnels);
 }
 
+/// #14373: a degenerate WireGuard key (all-zero / repeated-byte /
+/// small-order) must drop the tunnel row at hydrate, fail-closed like
+/// an undecodable key — the Go commit gate rejects it, and this is the
+/// defense-in-depth for a leniently-loaded config. Fail-on-revert:
+/// removing the is_degenerate_wg_key_bytes checks in hydrate_wg_identity
+/// installs the tunnel and turns this RED.
+#[test]
+fn wg_endpoint_with_degenerate_key_is_dropped_14373() {
+    // All-zero local private key (clamps to a publicly known scalar).
+    let mut snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");
+    snap.tunnel_endpoints[0].wg_local_privkey_hex = "00".repeat(32);
+    let state = build_forwarding_state(&snap);
+    assert!(
+        !state.tunnel_endpoints.contains_key(&7),
+        "all-zero private key must drop the WG row (#14373)"
+    );
+    assert!(!state.has_wg_tunnels);
+    assert!(!state.wg_engines.contains_key(&7));
+
+    // Small-order peer public key u=1 (order 4, DH enumerable).
+    let mut snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");
+    snap.tunnel_endpoints[0].wg_peers[0].wg_peer_pubkey_hex =
+        format!("01{}", "00".repeat(31));
+    let state = build_forwarding_state(&snap);
+    assert!(
+        !state.tunnel_endpoints.contains_key(&7),
+        "small-order peer public key must drop the WG row (#14373)"
+    );
+
+    // Explicit all-zero preshared key (a known constant, not a secret).
+    let mut snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");
+    snap.tunnel_endpoints[0].wg_peers[0].wg_preshared_key_hex = "00".repeat(32);
+    let state = build_forwarding_state(&snap);
+    assert!(
+        !state.tunnel_endpoints.contains_key(&7),
+        "explicit all-zero preshared key must drop the WG row (#14373)"
+    );
+
+    // Control: the valid fixture still hydrates and builds an engine.
+    let snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");
+    let state = build_forwarding_state(&snap);
+    assert!(state.tunnel_endpoints.contains_key(&7));
+    assert!(state.wg_engines.contains_key(&7));
+}
+
 #[test]
 fn wg_reload_reuses_engine_when_identity_unchanged() {
     let snap = wg_snapshot(51820, &["10.0.0.0/24"], "203.0.113.1:51820");

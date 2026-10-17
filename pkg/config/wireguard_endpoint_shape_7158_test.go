@@ -112,9 +112,9 @@ func TestWireguardEndpointShapeMatchesTheSharedFixture_7158(t *testing.T) {
 func TestWireguardHostnamePeerStillGetsAllowedIPsValidation_7158(t *testing.T) {
 	tc := &TunnelConfig{
 		WgListenPort:      51820,
-		WgLocalPrivkeyHex: Secret(strings.Repeat("cd", 32)),
+		WgLocalPrivkeyHex: Secret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"),
 		WgPeers: []WgPeerConfig{{
-			PublicKeyHex: strings.Repeat("ab", 32),
+			PublicKeyHex: "3234c2b228336f93d91937d8cf5704b76a02ac6d1c7ad02a4c06c0af18ae1b8d",
 			Endpoint:     "ddns.example.com:51820",
 			AllowedIPs:   []string{"this-is-not-a-cidr"},
 		}},
@@ -134,14 +134,21 @@ func TestWireguardHostnamePeerStillGetsAllowedIPsValidation_7158(t *testing.T) {
 // the one-UDP-socket gate must still reject exactly what it rejected before.
 func TestWireguardMixedFamilyGateUnchangedByHostnames_7158(t *testing.T) {
 	peer := func(n byte, endpoint string) WgPeerConfig {
+		// Distinct non-degenerate keys (#14373: a repeated-char key is
+		// now refused before the family gate this test exercises).
+		keys := []string{
+			"00bedd4ed26623ab2f765d16af2dcba4f6dbe17c284a66c6494b48b823f4c654",
+			"04d9dab116416940a490d8bab5d0dd921094f0a278dee3db867df8fbd2db6e16",
+			"15d9fd16500e6a671c69ef3dfa24e72ae7a463c3cf2a659b2969de785bb98504",
+		}
 		return WgPeerConfig{
-			PublicKeyHex: strings.Repeat(string("0123456789abcdef"[n%16]), 64),
+			PublicKeyHex: keys[int(n)%len(keys)],
 			Endpoint:     endpoint,
 			AllowedIPs:   []string{"10.0.0.0/24"},
 		}
 	}
 	// Mixed LITERALS still reject — unchanged behaviour.
-	mixed := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: Secret(strings.Repeat("cd", 32)), WgPeers: []WgPeerConfig{
+	mixed := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: Secret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"), WgPeers: []WgPeerConfig{
 		peer(1, "203.0.113.7:51820"),
 		peer(2, "[2001:db8::1]:51820"),
 	}}
@@ -153,7 +160,7 @@ func TestWireguardMixedFamilyGateUnchangedByHostnames_7158(t *testing.T) {
 
 	// A hostname alongside a literal does NOT trip the gate: its family is
 	// unknowable at commit, so it neither constrains nor is constrained.
-	withHostname := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: Secret(strings.Repeat("cd", 32)), WgPeers: []WgPeerConfig{
+	withHostname := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: Secret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"), WgPeers: []WgPeerConfig{
 		peer(3, "203.0.113.7:51820"),
 		peer(4, "ddns.example.com:51820"),
 	}}
@@ -163,7 +170,7 @@ func TestWireguardMixedFamilyGateUnchangedByHostnames_7158(t *testing.T) {
 	}
 
 	// And two hostnames are fine together.
-	twoHostnames := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: Secret(strings.Repeat("cd", 32)), WgPeers: []WgPeerConfig{
+	twoHostnames := &TunnelConfig{WgListenPort: 51820, WgLocalPrivkeyHex: Secret("2ff953c7f696fb2b203cd0fc455ee0936d53e587a99bd7076dcef27710a6b762"), WgPeers: []WgPeerConfig{
 		peer(5, "a.example.com:51820"),
 		peer(6, "b.example.com:51820"),
 	}}

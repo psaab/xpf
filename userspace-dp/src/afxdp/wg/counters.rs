@@ -122,6 +122,11 @@ pub(crate) struct WgCounters {
     /// worker→control "please initiate"). Ties an encap-drop burst to
     /// the re-initiation it triggered.
     pub(crate) hs_requests_armed: AtomicU64,
+    /// #14373: peer configs refused at `reconcile_peers` because the
+    /// peer public key is degenerate (all-zero / repeated-byte /
+    /// small-order). The Go commit gate and the hydrate drop such
+    /// configs first; a nonzero value means a caller bypassed both.
+    pub(crate) hs_refused_degenerate_key: AtomicU64,
 
     // --- transport decap (inbound) ---
     pub(crate) decap_packets: AtomicU64,
@@ -315,6 +320,11 @@ impl WgCounters {
     pub(crate) fn record_handshake_complete(&self, now_ns: u64) {
         self.last_handshake_complete_ns
             .store(now_ns.max(1), Ordering::Relaxed);
+    }
+
+    /// #14373: count one peer refused for a degenerate public key.
+    pub(crate) fn inc_handshake_refused_degenerate_key(&self) {
+        Self::bump(&self.hs_refused_degenerate_key);
     }
 }
 

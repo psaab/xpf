@@ -9,10 +9,10 @@ import (
 // cannot claim the same exact prefix when emitted into one interface-level
 // endpoint, even when their CIDR spellings differ only by host bits.
 func TestWireguardMergedDuplicateAllowedIPs11381(t *testing.T) {
-	parentPeer := strings.Repeat("a1", 32)
-	unitPeerA := strings.Repeat("b2", 32)
-	unitPeerB := strings.Repeat("c3", 32)
-	privateKey := strings.Repeat("e4", 32)
+	parentPeer := "00bedd4ed26623ab2f765d16af2dcba4f6dbe17c284a66c6494b48b823f4c654"
+	unitPeerA := "04d9dab116416940a490d8bab5d0dd921094f0a278dee3db867df8fbd2db6e16"
+	unitPeerB := "15d9fd16500e6a671c69ef3dfa24e72ae7a463c3cf2a659b2969de785bb98504"
+	privateKey := "21a8e89546569ec63441fbc82a72e6a59c0528cb39896d0adf84e77c4758e6b3"
 
 	for _, tc := range []struct {
 		name       string

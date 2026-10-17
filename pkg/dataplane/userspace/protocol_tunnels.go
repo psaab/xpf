@@ -157,6 +157,9 @@ type WgTunnelStatus struct {
 	RxUnknownType               uint64 `json:"rx_unknown_type,omitempty"`
 	HsSendErrors                uint64 `json:"hs_send_errors,omitempty"`
 	HsRequestsArmed             uint64 `json:"hs_requests_armed,omitempty"`
+	// #14373: peers refused at engine reconcile for a degenerate
+	// (all-zero / repeated-byte / small-order) public key.
+	HsRefusedDegenerateKey uint64 `json:"hs_refused_degenerate_key,omitempty"`
 
 	DecapPackets              uint64 `json:"decap_packets,omitempty"`
 	DecapBytes                uint64 `json:"decap_bytes,omitempty"`

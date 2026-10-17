@@ -822,6 +822,10 @@ pub(crate) struct WgTunnelStatus {
     pub hs_send_errors: u64,
     #[serde(rename = "hs_requests_armed", default)]
     pub hs_requests_armed: u64,
+    /// #14373: peers refused at engine reconcile for a degenerate
+    /// (all-zero / repeated-byte / small-order) public key.
+    #[serde(rename = "hs_refused_degenerate_key", default)]
+    pub hs_refused_degenerate_key: u64,
     // --- transport decap ---
     #[serde(rename = "decap_packets", default)]
     pub decap_packets: u64,
