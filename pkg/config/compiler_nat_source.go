@@ -912,7 +912,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 	for _, rsInst := range namedInstances(node.FindChildren("rule-set")) {
 		// #3096: capture from/to scope across zone | interface |
 		// routing-instance (bracket lists produce multiple scopes).
-		fromScopes, toScopes := collectNATScopes(rsInst.node, true)
+		fromScopes, toScopes := collectNATScopes(rsInst.node, true, "source")
 
 		// Parse rules (shared across all scope-pair expansions)
 		var rules []*NATRule

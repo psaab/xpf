@@ -28,7 +28,7 @@ func validateNATRuleSetEmptyScopesAST(nodes []*Node, lenient bool) ([]string, er
 	checkClause := func(natKind, rsName string, rsNode *Node, clause string) error {
 		present := false
 		var scopes []natMatchScope
-		for _, child := range rsNode.Children {
+		for _, child := range natRuleSetChildren(rsNode, natKind) {
 			if child.Name() != clause {
 				continue
 			}

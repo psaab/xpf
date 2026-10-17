@@ -56,9 +56,13 @@ import (
 // the kind count matches the compiler's Cartesian-expansion input. An empty
 // clause contributes no kinds (the match-any default is injected later by
 // collectNATScopes, never here).
-func natClauseScopeKinds(rsNode *Node, clause string) []string {
+func natClauseScopeKinds(rsNode *Node, clause string, natKind ...string) []string {
+	kind := ""
+	if len(natKind) > 0 {
+		kind = natKind[0]
+	}
 	seen := make(map[string]bool)
-	for _, child := range rsNode.Children {
+	for _, child := range natRuleSetChildren(rsNode, kind) {
 		if child.Name() != clause {
 			continue
 		}
@@ -101,7 +105,7 @@ func validateNATRuleSetMixedScopeAST(nodes []*Node, lenient bool) ([]string, err
 	}
 
 	checkClause := func(natKind, rsName string, rsNode *Node, clause string) error {
-		kinds := natClauseScopeKinds(rsNode, clause)
+		kinds := natClauseScopeKinds(rsNode, clause, natKind)
 		if len(kinds) <= 1 {
 			return nil
 		}
