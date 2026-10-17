@@ -1605,10 +1605,10 @@ type SessionSync struct {
 	recvGenV4            map[dataplane.SessionKey]uint64
 	recvGenV6            map[dataplane.SessionKeyV6]uint64
 	// recvGenScopedV4/V6 + recvTombScopedV4/V6 are the #10512 scoped
-	// policy-delete receiver spaces, keyed by (domain, tuple) and fully
-	// separate from the bare spaces in both directions (see
-	// deleteGenGuardScopedV4). Guarded by recvGenMu; reclaimed/reset
-	// alongside the bare maps.
+	// policy-delete receiver spaces, keyed by (domain, tuple). #14358
+	// couples deletes across spaces (a delete in either space tombstones
+	// the other at the same generation; install guards stay per-space).
+	// Guarded by recvGenMu; reclaimed/reset alongside the bare maps.
 	recvGenScopedV4 map[scopedDeleteKeyV4]uint64
 	recvGenScopedV6 map[scopedDeleteKeyV6]uint64
 	// recvTombV4/V6 order the TOMBSTONE entries of recvGenV4/V6, oldest first, so a

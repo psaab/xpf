@@ -109,23 +109,40 @@ func TestDeleteGenGuardScopedZeroEvicts10512(t *testing.T) {
 	}
 }
 
-// Migration pin (plan §1.2): bare and scoped spaces are fully separate
-// in BOTH directions — neither is ever authoritative for the other.
+// Migration pin, updated by #14358: install guards stay per-space, but
+// deletes are coupled — a delete in either space must check the other
+// space's tombstones/live high-water so it cannot regress a newer
+// incarnation, and tombstones the other space. The pre-#14358 pin
+// (neither space ever authoritative for the other) is exactly the
+// cross-clean defect #14358 fixes.
 func TestScopedGenSpaceIndependentFromBare10512(t *testing.T) {
 	key := scopedGenKeyV4(5004)
 	s := &SessionSync{}
 	if !s.deleteGenGuardV4(key, 100) {
 		t.Fatal("FIXTURE: bare delete must apply")
 	}
-	if !s.deleteGenGuardScopedV4(7, key, 50) {
-		t.Fatal("a bare tombstone must never gate a scoped delete")
+	if s.deleteGenGuardScopedV4(7, key, 50) {
+		t.Fatal("#14358: a bare tombstone must gate a stale scoped delete")
 	}
 	s2 := &SessionSync{}
 	if !s2.deleteGenGuardScopedV4(7, key, 200) {
 		t.Fatal("FIXTURE: scoped delete must apply")
 	}
-	if !s2.deleteGenGuardV4(key, 50) {
-		t.Fatal("a scoped tombstone must never gate a bare delete (legacy preserved)")
+	if s2.deleteGenGuardV4(key, 50) {
+		t.Fatal("#14358: a scoped tombstone must gate a stale bare delete")
+	}
+	// A delete newer than both spaces still applies in either space.
+	if !s.deleteGenGuardScopedV4(7, key, 150) {
+		t.Fatal("a scoped delete newer than the bare tombstone must apply")
+	}
+	if !s2.deleteGenGuardV4(key, 250) {
+		t.Fatal("a bare delete newer than the scoped tombstone must apply")
+	}
+	// Colliding-tenant live entry never refuses a bare delete.
+	s3 := &SessionSync{}
+	s3.recordInstalledGenScopedV4(8, key, 500)
+	if !s3.deleteGenGuardV4(key, 50) {
+		t.Fatal("a colliding tenant's live scoped entry must not gate a bare delete")
 	}
 }
 
@@ -155,7 +172,9 @@ func TestScopedGenResetPreserveAndClear10512(t *testing.T) {
 }
 
 // Cap bound: a new scoped key at the cap evicts the oldest scoped
-// tombstone (same #9719 machinery as the bare spaces).
+// tombstone (same #9719 machinery as the bare spaces). #14358: these
+// keys were never bare-tracked, so no bare entries are created and the
+// count stays scoped-only.
 func TestScopedGenCapEvictsOldestTombstone10512(t *testing.T) {
 	s := &SessionSync{}
 	s.recvGenGuardCap = 2
@@ -272,10 +291,12 @@ func TestScopedStampTakeDefaultDomain10512(t *testing.T) {
 }
 
 // Sender-side lifecycle: scoped stamps are bounded by sentCap like the
-// bare maps (ordinary bare-path closes do not remove them; the cap +
-// overflow latch is the reclamation discipline, #9719-shaped). Past the
-// cap, installs skip stamping, the overflow latches, and takes for
-// unstamped keys draw fresh (safe: fresh out-ranks every install).
+// bare maps. #14358: takeDeleteGenV4/V6 reclaim every scoped stamp for
+// the tuple (TestNormalCloseReclaimsScopedGen14358 covers the churn
+// lifecycle); TestScopedSenderStampsBoundedAtCap10512's keys are never
+// closed, so past the cap installs still skip stamping, the overflow
+// latches, and takes for unstamped keys draw fresh (safe: fresh
+// out-ranks every install).
 func TestScopedSenderStampsBoundedAtCap10512(t *testing.T) {
 	s := &SessionSync{}
 	const wantCap = 8

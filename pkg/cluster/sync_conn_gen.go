@@ -122,8 +122,11 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 // cap down (growGuardCapSide) and every read clamps to the ceiling in force
 // (sentCap/recvCap); the receiver side is additionally reclaimed at a
 // namespace-reset bulk barrier (resetRecvGen), while sender maps self-drain on
-// delete-echo. All twenty-four families are evicted on delete; the cap is a
-// safety valve for keys whose delete never arrives (e.g. dropped close delta).
+// delete-echo. All twenty-four families are evicted on delete (#14358: a
+// bare delete reclaims every scoped entry naming its tuple, and a delete in
+// either space tombstones the other space at the same generation); the cap
+// is a safety valve for keys whose delete never arrives (e.g. dropped close
+// delta).
 //
 // Heap honesty (#9915 F-044 review): the ceiling costs nothing until the table
 // genuinely fills, and per-map=wired is coverage-correct — one family can hold
@@ -187,6 +190,20 @@ func putGenBounded[K comparable](m map[K]uint64, key K, gen uint64, maxEntries i
 	}
 	m[key] = gen
 	return true
+}
+
+// scopedKeysForTuple returns every scoped key in m naming the bare tuple.
+// A normal (bare) close carries no domain, so reclaiming/tombstoning it
+// must cover each domain's entry for the tuple (#14358); scanning is the
+// only domain-complete option. Caller holds the map's mutex.
+func scopedKeysForTuple[K comparable, SK comparable](m map[SK]uint64, tupleOf func(SK) K, key K) []SK {
+	var out []SK
+	for skey := range m {
+		if tupleOf(skey) == key {
+			out = append(out, skey)
+		}
+	}
+	return out
 }
 
 // sentCap/recvCap return the effective sender/receiver-side guard caps. Zero
@@ -823,6 +840,11 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	// early return, so a key with no generation stamp is still evicted.
 	delete(s.closeClassSentV4, key)
 	delete(s.tcpHandshakeSentV4, key)
+	// #14358: a bare close names no domain, so reclaim every scoped stamp
+	// for this tuple; otherwise ordinary churn leaks scoped entries to cap.
+	for _, skey := range scopedKeysForTuple(s.genSentScopedV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, key) {
+		delete(s.genSentScopedV4, skey)
+	}
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV4, key)
 	delete(s.sourceNatICMPSentV4, key)
@@ -864,6 +886,10 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 	// early return, so a key with no generation stamp is still evicted.
 	delete(s.closeClassSentV6, key)
 	delete(s.tcpHandshakeSentV6, key)
+	// #14358: v6 twin of the scoped reclaim in takeDeleteGenV4.
+	for _, skey := range scopedKeysForTuple(s.genSentScopedV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, key) {
+		delete(s.genSentScopedV6, skey)
+	}
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV6, key)
 	delete(s.sourceNatICMPSentV6, key)
@@ -1178,6 +1204,106 @@ func (s *SessionSync) recordInstalledGenV6(key dataplane.SessionKeyV6, gen uint6
 // fill with tombstones of closed sessions and then skip-record every NEW key.
 // The oldest tombstone is now evicted to make room (genTombstoneOrder); a live
 // entry never is.
+
+// tombstoneBareLocked records a bare tombstone at gen (or evicts on gen-0),
+// mirroring deleteGenGuardV4's record half without its refusal check.
+// Caller holds recvGenMu. #14358 cross-space coupling.
+func (s *SessionSync) tombstoneBareLocked(key dataplane.SessionKey, gen uint64) {
+	if gen == 0 {
+		delete(s.recvGenV4, key)
+		s.recvTombV4.forget(key)
+		return
+	}
+	if s.recvGenV4 == nil {
+		s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
+	}
+	stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, gen, s.recvCap())
+	}
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		s.recvTombV4.mark(key)
+	} else {
+		s.stats.GenMapOverflow.Add(1)
+	}
+}
+
+// tombstoneBareLockedV6 is the IPv6 twin of tombstoneBareLocked.
+func (s *SessionSync) tombstoneBareLockedV6(key dataplane.SessionKeyV6, gen uint64) {
+	if gen == 0 {
+		delete(s.recvGenV6, key)
+		s.recvTombV6.forget(key)
+		return
+	}
+	if s.recvGenV6 == nil {
+		s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
+	}
+	stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, gen, s.recvCap())
+	}
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		s.recvTombV6.mark(key)
+	} else {
+		s.stats.GenMapOverflow.Add(1)
+	}
+}
+
+// tombstoneScopedLocked records a scoped tombstone (or evicts on gen-0)
+// without a refusal check. Caller holds recvGenMu.
+func (s *SessionSync) tombstoneScopedLocked(skey scopedDeleteKeyV4, gen uint64) {
+	if gen == 0 {
+		delete(s.recvGenScopedV4, skey)
+		s.recvTombScopedV4.forget(skey)
+		return
+	}
+	if s.recvGenScopedV4 == nil {
+		s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
+	}
+	stored, evicted := putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, gen, s.recvCap())
+	}
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		s.recvTombScopedV4.mark(skey)
+	} else {
+		s.stats.GenMapOverflow.Add(1)
+	}
+}
+
+// tombstoneScopedLockedV6 is the IPv6 twin of tombstoneScopedLocked.
+func (s *SessionSync) tombstoneScopedLockedV6(skey scopedDeleteKeyV6, gen uint64) {
+	if gen == 0 {
+		delete(s.recvGenScopedV6, skey)
+		s.recvTombScopedV6.forget(skey)
+		return
+	}
+	if s.recvGenScopedV6 == nil {
+		s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
+	}
+	stored, evicted := putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, gen, s.recvCap())
+	if !stored && !evicted && s.growRecvCap() {
+		stored, evicted = putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, gen, s.recvCap())
+	}
+	if evicted {
+		s.stats.GenTombstonesEvicted.Add(1)
+	}
+	if stored {
+		s.recvTombScopedV6.mark(skey)
+	} else {
+		s.stats.GenMapOverflow.Add(1)
+	}
+}
+
 func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint64) bool {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
@@ -1185,28 +1311,32 @@ func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint6
 	if stored != 0 && deleteGen != 0 && deleteGen < stored {
 		return false
 	}
+	// #14358: a scoped tombstone for this tuple also orders bare deletes
+	// (a bare delete names no domain); live scoped entries of colliding
+	// tenants never refuse it.
+	for _, skey := range scopedKeysForTuple(s.recvGenScopedV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, key) {
+		if _, isTomb := s.recvTombScopedV4.elems[skey]; !isTomb {
+			continue
+		}
+		if tg := s.recvGenScopedV4[skey]; tg != 0 && deleteGen != 0 && deleteGen < tg {
+			return false
+		}
+	}
 	if deleteGen != 0 {
-		// Record the delete generation as a tombstone so a reordered older
-		// install of the cancelled session is refused. Bounded; never clears.
-		if s.recvGenV4 == nil {
-			s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
-		}
-		stored, evicted := putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, deleteGen, s.recvCap())
-		if !stored && !evicted && s.growRecvCap() {
-			stored, evicted = putGenEvictingTombstones(s.recvGenV4, &s.recvTombV4, key, deleteGen, s.recvCap())
-		}
-		if evicted {
-			s.stats.GenTombstonesEvicted.Add(1)
-		}
-		if stored {
-			// #9719: the newest tombstone, and so the last to be evicted.
-			s.recvTombV4.mark(key)
-		} else {
-			s.stats.GenMapOverflow.Add(1)
+		s.tombstoneBareLocked(key, deleteGen)
+		for _, skey := range scopedKeysForTuple(s.recvGenScopedV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, key) {
+			if s.recvGenScopedV4[skey] > deleteGen {
+				continue
+			}
+			s.tombstoneScopedLocked(skey, deleteGen)
 		}
 	} else {
 		delete(s.recvGenV4, key)
 		s.recvTombV4.forget(key)
+		for _, skey := range scopedKeysForTuple(s.recvGenScopedV4, func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, key) {
+			delete(s.recvGenScopedV4, skey)
+			s.recvTombScopedV4.forget(skey)
+		}
 	}
 	return true
 }
@@ -1218,36 +1348,45 @@ func (s *SessionSync) deleteGenGuardV6(key dataplane.SessionKeyV6, deleteGen uin
 	if stored != 0 && deleteGen != 0 && deleteGen < stored {
 		return false
 	}
+	for _, skey := range scopedKeysForTuple(s.recvGenScopedV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, key) {
+		if _, isTomb := s.recvTombScopedV6.elems[skey]; !isTomb {
+			continue
+		}
+		if tg := s.recvGenScopedV6[skey]; tg != 0 && deleteGen != 0 && deleteGen < tg {
+			return false
+		}
+	}
 	if deleteGen != 0 {
-		if s.recvGenV6 == nil {
-			s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
-		}
-		stored, evicted := putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, deleteGen, s.recvCap())
-		if !stored && !evicted && s.growRecvCap() {
-			stored, evicted = putGenEvictingTombstones(s.recvGenV6, &s.recvTombV6, key, deleteGen, s.recvCap())
-		}
-		if evicted {
-			s.stats.GenTombstonesEvicted.Add(1)
-		}
-		if stored {
-			s.recvTombV6.mark(key) // #9719: see the v4 twin.
-		} else {
-			s.stats.GenMapOverflow.Add(1)
+		s.tombstoneBareLockedV6(key, deleteGen)
+		for _, skey := range scopedKeysForTuple(s.recvGenScopedV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, key) {
+			if s.recvGenScopedV6[skey] > deleteGen {
+				continue
+			}
+			s.tombstoneScopedLockedV6(skey, deleteGen)
 		}
 	} else {
 		delete(s.recvGenV6, key)
 		s.recvTombV6.forget(key)
+		for _, skey := range scopedKeysForTuple(s.recvGenScopedV6, func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, key) {
+			delete(s.recvGenScopedV6, skey)
+			s.recvTombScopedV6.forget(skey)
+		}
 	}
 	return true
 }
 
 // deleteGenGuardScopedV4 is the receiver-side reorder guard for scoped
 // policy deletes (#10512): same refuse-older + tombstone semantics as
-// deleteGenGuardV4, in a dedicated per-(domain, tuple) space. Fully
-// separate from the bare space in both directions — bare records are
-// unknown-generation to scoped deletes and never authoritative for one
-// (plan §1.2 migration note), and scoped tombstones never gate bare
-// deletes (legacy over/under preserved exactly, not reshaped).
+// deleteGenGuardV4, in a dedicated per-(domain, tuple) space. #14358
+// couples deletes (not installs) across spaces when the bare space
+// already tracks the tuple: an accepted scoped delete is refused if it
+// would regress the bare high-water, and raises an existing bare entry
+// to a tombstone at the same generation, so a delayed same-generation
+// install is refused by the bare guard if the scoped tombstone is
+// evicted at cap. It never creates a bare entry for a tuple the bare
+// space never tracked (preserving per-domain independence, #10512),
+// and never lowers it. Symmetrically, scoped tombstones order bare
+// deletes. Install guards stay per-space.
 func (s *SessionSync) deleteGenGuardScopedV4(domain uint32, key dataplane.SessionKey, deleteGen uint64) bool {
 	s.recvGenMu.Lock()
 	defer s.recvGenMu.Unlock()
@@ -1256,25 +1395,21 @@ func (s *SessionSync) deleteGenGuardScopedV4(domain uint32, key dataplane.Sessio
 	if stored != 0 && deleteGen != 0 && deleteGen < stored {
 		return false
 	}
+	if bare := s.recvGenV4[key]; bare != 0 && deleteGen != 0 && deleteGen < bare {
+		return false
+	}
 	if deleteGen != 0 {
-		if s.recvGenScopedV4 == nil {
-			s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
-		}
-		stored, evicted := putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, deleteGen, s.recvCap())
-		if !stored && !evicted && s.growRecvCap() {
-			stored, evicted = putGenEvictingTombstones(s.recvGenScopedV4, &s.recvTombScopedV4, skey, deleteGen, s.recvCap())
-		}
-		if evicted {
-			s.stats.GenTombstonesEvicted.Add(1)
-		}
-		if stored {
-			s.recvTombScopedV4.mark(skey) // #9719: see the bare twin.
-		} else {
-			s.stats.GenMapOverflow.Add(1)
+		s.tombstoneScopedLocked(skey, deleteGen)
+		// Raise-only: a colliding domain's scoped delete must not lower
+		// (or create ordering against) a newer bare high-water.
+		if cur := s.recvGenV4[key]; cur != 0 && cur <= deleteGen {
+			s.tombstoneBareLocked(key, deleteGen)
 		}
 	} else {
 		delete(s.recvGenScopedV4, skey)
 		s.recvTombScopedV4.forget(skey)
+		delete(s.recvGenV4, key)
+		s.recvTombV4.forget(key)
 	}
 	return true
 }
@@ -1288,25 +1423,19 @@ func (s *SessionSync) deleteGenGuardScopedV6(domain uint32, key dataplane.Sessio
 	if stored != 0 && deleteGen != 0 && deleteGen < stored {
 		return false
 	}
+	if bare := s.recvGenV6[key]; bare != 0 && deleteGen != 0 && deleteGen < bare {
+		return false
+	}
 	if deleteGen != 0 {
-		if s.recvGenScopedV6 == nil {
-			s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
-		}
-		stored, evicted := putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, deleteGen, s.recvCap())
-		if !stored && !evicted && s.growRecvCap() {
-			stored, evicted = putGenEvictingTombstones(s.recvGenScopedV6, &s.recvTombScopedV6, skey, deleteGen, s.recvCap())
-		}
-		if evicted {
-			s.stats.GenTombstonesEvicted.Add(1)
-		}
-		if stored {
-			s.recvTombScopedV6.mark(skey)
-		} else {
-			s.stats.GenMapOverflow.Add(1)
+		s.tombstoneScopedLockedV6(skey, deleteGen)
+		if cur := s.recvGenV6[key]; cur != 0 && cur <= deleteGen {
+			s.tombstoneBareLockedV6(key, deleteGen)
 		}
 	} else {
 		delete(s.recvGenScopedV6, skey)
 		s.recvTombScopedV6.forget(skey)
+		delete(s.recvGenV6, key)
+		s.recvTombV6.forget(key)
 	}
 	return true
 }
@@ -1869,6 +1998,11 @@ func (s *SessionSync) deleteClusterSyncedScopedV4(domain uint32, key dataplane.S
 			"domain", domain, "delete_gen", deleteGen)
 		return
 	}
+	// #14358: forget the received identity, as the bare twin does.
+	s.recvGenMu.Lock()
+	delete(s.installTableRecvV4, key)
+	delete(s.sourceNatICMPRecvV4, key)
+	s.recvGenMu.Unlock()
 	if err := s.sessions.DeleteClusterScopedV4(key, domain, expectedID); err != nil {
 		s.stats.Errors.Add(1)
 		slog.Warn("cluster sync: failed to delete scoped v4 session", "err", err)
@@ -1889,6 +2023,10 @@ func (s *SessionSync) deleteClusterSyncedScopedV6(domain uint32, key dataplane.S
 			"domain", domain, "delete_gen", deleteGen)
 		return
 	}
+	s.recvGenMu.Lock()
+	delete(s.installTableRecvV6, key)
+	delete(s.sourceNatICMPRecvV6, key)
+	s.recvGenMu.Unlock()
 	if err := s.sessions.DeleteClusterScopedV6(key, domain, expectedID); err != nil {
 		s.stats.Errors.Add(1)
 		slog.Warn("cluster sync: failed to delete scoped v6 session", "err", err)
