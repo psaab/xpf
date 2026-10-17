@@ -224,6 +224,87 @@ func encodePersistentNatLeaseBatchPayload(batch userspace.PersistentNatLeaseBatc
 	return append(b, encodePersistentNatLeasePayload(batch.Leases)...), nil
 }
 
+// persistentNatLeaseFrameBudget is the per-frame byte budget for one
+// chunked lease frame (#14607): the shared receive cap minus the
+// origin/generation envelope, the lease count prefix, and the full-set
+// sequence trailer the sender appends. Every frame produced by
+// encodePersistentNatLeaseBatchFrames — envelope + records + trailer —
+// stays at or below maxSyncPayload.
+const persistentNatLeaseFrameBudget = maxSyncPayload - 64
+
+// encodePersistentNatLeaseBatchFrames encodes one origin/generation batch
+// as one or more complete batch payloads (WITHOUT the full-set trailer),
+// each within persistentNatLeaseFrameBudget. Records are additive within
+// one generation and advancing the generation clears the receiver before
+// import, so delivering chunks of the same generation in order rebuilds
+// exactly the sender's set: the first chunk carries the generation barrier
+// (clearing stale state) and later chunks add to it. An empty batch yields
+// exactly one frame so the barrier still reaches the peer. A lease whose
+// single record cannot fit any frame is dropped and counted by the caller
+// via the returned dropped count — it is never emitted over-cap.
+func encodePersistentNatLeaseBatchFrames(batch userspace.PersistentNatLeaseBatch) ([][]byte, error) {
+	frames, _, err := encodePersistentNatLeaseBatchFramesCounted(batch)
+	return frames, err
+}
+
+func encodePersistentNatLeaseBatchFramesCounted(batch userspace.PersistentNatLeaseBatch) ([][]byte, int, error) {
+	if len(batch.OriginID) != 32 {
+		return nil, 0, errors.New("persistent-NAT batch origin must be 16-byte hex")
+	}
+	if _, err := hex.DecodeString(batch.OriginID); err != nil {
+		return nil, 0, fmt.Errorf("persistent-NAT batch origin: %w", err)
+	}
+	envelope, err := putLeaseString(nil, batch.OriginID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("encode persistent-NAT batch origin: %w", err)
+	}
+	envelope = binary.LittleEndian.AppendUint64(envelope, batch.Generation)
+	// Per-frame overhead: envelope + 4-byte count + 4-byte per-record prefix.
+	overhead := len(envelope) + 4
+
+	var frames [][]byte
+	var cur [][]byte
+	curBytes := overhead
+	flush := func() {
+		b := make([]byte, 0, curBytes)
+		b = append(b, envelope...)
+		b = binary.LittleEndian.AppendUint32(b, uint32(len(cur)))
+		for _, rec := range cur {
+			b = binary.LittleEndian.AppendUint32(b, uint32(len(rec)))
+			b = append(b, rec...)
+		}
+		frames = append(frames, b)
+		cur = nil
+		curBytes = overhead
+	}
+	dropped := 0
+	for _, l := range batch.Leases {
+		rec, err := encodeOnePersistentNatLease(l)
+		if err != nil {
+			slog.Warn("cluster sync: dropping unencodable persistent-NAT lease from sync push",
+				"pool", l.Pool, "src", l.SrcIP, "err", err)
+			dropped++
+			continue
+		}
+		need := 4 + len(rec)
+		if overhead+need > persistentNatLeaseFrameBudget {
+			slog.Warn("cluster sync: dropping persistent-NAT lease exceeding sync frame budget",
+				"pool", l.Pool, "src", l.SrcIP, "record_bytes", len(rec), "budget", persistentNatLeaseFrameBudget)
+			dropped++
+			continue
+		}
+		if len(cur) > 0 && curBytes+need > persistentNatLeaseFrameBudget {
+			flush()
+		}
+		cur = append(cur, rec)
+		curBytes += need
+	}
+	// Always emit a final frame: for an empty (or all-dropped) batch this is
+	// the sole generation-barrier frame; otherwise it carries the tail chunk.
+	flush()
+	return frames, dropped, nil
+}
+
 func decodePersistentNatLeaseBatchPayload(buf []byte) (userspace.PersistentNatLeaseBatch, bool) {
 	var batch userspace.PersistentNatLeaseBatch
 	origin, off, ok := getLeaseString(buf, 0)
@@ -361,31 +442,45 @@ func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	return l, off == len(buf)
 }
 
-// QueuePersistentNatLeaseBatch sends one sender-origin/generation snapshot.
-// Empty batches are sent too so a clear generation reaches the peer even when
-// no idle leases remain.
+// QueuePersistentNatLeaseBatch sends one sender-origin/generation snapshot
+// as one or more sub-cap frames (#14607). Empty batches are sent too so a
+// clear generation reaches the peer even when no idle leases remain. All
+// chunks share the batch origin/generation and are written in order under
+// writeMu, each with its own increasing full-set sequence, so the peer
+// applies the generation barrier on the first chunk and adds the rest.
 func (s *SessionSync) QueuePersistentNatLeaseBatch(batch userspace.PersistentNatLeaseBatch) {
 	conn := s.getActiveConn()
 	if conn == nil {
 		return
 	}
-	base, err := encodePersistentNatLeaseBatchPayload(batch)
+	frames, dropped, err := encodePersistentNatLeaseBatchFramesCounted(batch)
 	if err != nil {
 		slog.Warn("cluster sync: refusing invalid persistent-NAT lease batch", "err", err)
 		s.stats.MalformedRecordsDropped.Add(1)
 		return
 	}
-	seq := s.persistentNatLeaseSeqCounter.Add(1)
-	payload := appendFullSetSeq(base, s.syncEpoch, seq)
-	s.writeMu.Lock()
-	err = writeMsg(conn, syncMsgPersistentNatLeaseGeneration, payload)
-	s.writeMu.Unlock()
-	if err != nil {
-		slog.Warn("cluster sync: persistent-NAT lease send error", "err", err)
-		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
-		return
+	if dropped > 0 {
+		s.stats.MalformedRecordsDropped.Add(uint64(dropped))
+	}
+	for _, frame := range frames {
+		if len(frame)+fullSetSeqTrailerLen > maxSyncPayload {
+			slog.Warn("cluster sync: refusing oversize persistent-NAT lease frame",
+				"bytes", len(frame)+fullSetSeqTrailerLen, "cap", maxSyncPayload)
+			s.stats.MalformedRecordsDropped.Add(1)
+			return
+		}
+		seq := s.persistentNatLeaseSeqCounter.Add(1)
+		payload := appendFullSetSeq(frame, s.syncEpoch, seq)
+		s.writeMu.Lock()
+		err = writeMsg(conn, syncMsgPersistentNatLeaseGeneration, payload)
+		s.writeMu.Unlock()
+		if err != nil {
+			slog.Warn("cluster sync: persistent-NAT lease send error", "err", err)
+			s.stats.Errors.Add(1)
+			s.handleDisconnect(conn)
+			return
+		}
 	}
 	slog.Debug("cluster sync: persistent-NAT lease generation batch sent",
-		"count", len(batch.Leases), "generation", batch.Generation)
+		"count", len(batch.Leases), "generation", batch.Generation, "frames", len(frames))
 }

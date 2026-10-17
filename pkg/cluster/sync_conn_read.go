@@ -92,7 +92,8 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 		}
 		var payload []byte
 		if hdr.Length > 0 {
-			if hdr.Length > 16*1024*1024 {
+			if hdr.Length > maxSyncPayload {
+				s.stats.Errors.Add(1)
 				slog.Warn("cluster sync: payload too large", "len", hdr.Length)
 				return
 			}
