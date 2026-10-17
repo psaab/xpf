@@ -27,14 +27,19 @@ import (
 // the ownership/wire logic cannot prove an orphan/hijack bug). Reverting any
 // of the three fixes makes the matching test fail.
 
-// dualStackLease pairs a v4 + a v6 lease under the SAME host-name and the SAME
-// client identity — a dual-stack DHCP client. With one FQDN + one client
-// identity, the RFC 4701 DHCID digest (SHA-256(clientID||FQDN), address NOT
-// folded in) is IDENTICAL for both records: the shared-DHCID condition #2700
-// is about.
-func dualStackLease(identity string) (v4, v6 []Lease) {
-	v4 = []Lease{{Family: 4, Address: "10.0.1.5", Identity: identity, SubnetID: "1", HostName: "laptop"}}
-	v6 = []Lease{{Family: 6, Address: "2001:db8::5", Identity: identity, SubnetID: "1", HostName: "laptop"}}
+// dualStackLease pairs a v4 + a v6 lease under the SAME host-name with
+// PRODUCTION-SHAPED identities (#14602): the v4 lease carries the
+// `cid:` identity identity4 produces and the v6 lease the `duid:`
+// identity identity6 produces. The two families of one dual-stack host
+// therefore digest to DIFFERENT RFC 4701 DHCIDs — there is no single
+// shared DHCID across families in production. (The pre-#14602 fixture
+// passed one identical string for both families, a shape identity6
+// cannot produce; it tested a condition that never occurs.) Each
+// family publishes its OWN DHCID, and the manager store is the
+// cross-family ownership proof.
+func dualStackLease() (v4, v6 []Lease) {
+	v4 = []Lease{{Family: 4, Address: "10.0.1.5", Identity: "cid:01:02:03", SubnetID: "1", HostName: "laptop"}}
+	v6 = []Lease{{Family: 6, Address: "2001:db8::5", Identity: "duid:00:01:00:01:22:33:44:55:66:77/16777216", SubnetID: "1", HostName: "laptop"}}
 	return v4, v6
 }
 
@@ -50,14 +55,21 @@ func dhcidForName(t *testing.T, identity, fqdn string) *dns.DHCID {
 }
 
 // TestPartialDualStackTeardownKeepsSharedDHCID is the #2700 fail-on-revert
-// regression. A dual-stack client publishes an A and an AAAA under one FQDN
-// sharing one DHCID. Releasing only the v4 lease must delete the A but KEEP the
-// shared DHCID (so the surviving AAAA stays ownership-protected); releasing the
-// v6 lease afterwards must then delete the AAAA AND the now-unshared DHCID.
+// regression, rewritten with production-shaped identities (#14602). A
+// dual-stack client publishes an A and an AAAA under one FQDN; each
+// family digests its OWN identity string (`cid:` v4, `duid:` v6) so
+// the name carries TWO per-family DHCIDs, not one shared one.
+// Releasing only the v4 lease must delete the A and the v4 DHCID but
+// KEEP the v6 DHCID (so the surviving AAAA stays ownership-protected);
+// releasing the v6 lease afterwards must then delete the AAAA AND its
+// now-unshared DHCID, leaving no orphan.
 //
-// Pre-fix (sendRemoveForward always Remove([]dns.RR{rr, dhcid})): the v4
-// release deletes the shared DHCID, so the surviving AAAA's later delete fails
-// its DHCID-match prerequisite (NXRRSET) and the AAAA is LEAKED on the wire.
+// Note: the original #2700 wording ("one shared DHCID")
+// described the identical-identity fixture, a shape identity6 cannot
+// produce. The #14602 regression test
+// (TestDualStackProductionIdentitiesBothPublishReplaceOwned) is the
+// publish-side proof with production shapes; this test is the
+// teardown-side proof with the same shapes.
 func TestPartialDualStackTeardownKeepsSharedDHCID(t *testing.T) {
 	srv := newFakeDNSServer(t, nil)
 	srv.setStateful(true)
@@ -67,34 +79,42 @@ func TestPartialDualStackTeardownKeepsSharedDHCID(t *testing.T) {
 	// replace-owned with a DHCID; reuse the same cfg for both.
 	cfg.DynamicDNSv6 = cfg.DynamicDNS
 
-	const identity = "cid:01:02:03"
+	const v4Identity = "cid:01:02:03"
+	const v6Identity = "duid:00:01:00:01:22:33:44:55:66:77/16777216"
 	const fqdn = "laptop.example.com"
-	v4, v6 := dualStackLease(identity)
+	v4, v6 := dualStackLease()
 
-	// Cycle 1: both families active → A, AAAA, and the shared DHCID published.
+	// Cycle 1: both families active → A, AAAA, and BOTH per-family
+	// DHCIDs published.
 	src.v4, src.v6 = v4, v6
 	if err := m.Reconcile(context.Background(), cfg); err != nil {
 		t.Fatalf("publish reconcile: %v", err)
 	}
-	dhcid := dhcidForName(t, identity, fqdn)
-	if !srv.zoneHas(dhcid) {
-		t.Fatal("setup: shared DHCID was not published")
+	dhcid4 := dhcidForName(t, v4Identity, fqdn)
+	dhcid6 := dhcidForName(t, v6Identity, fqdn)
+	if !srv.zoneHas(dhcid4) {
+		t.Fatal("setup: v4 DHCID was not published")
 	}
-	aRR := recV4ID(fqdn, "10.0.1.5", identity, 300)
+	if !srv.zoneHas(dhcid6) {
+		t.Fatal("setup: v6 DHCID was not published")
+	}
 	if m.Stats().OwnedRecords != 2 {
 		t.Fatalf("want 2 owned records (A+AAAA), got %d", m.Stats().OwnedRecords)
 	}
-	_ = aRR
 
-	// Cycle 2: v4 lease released, v6 still active. The A is withdrawn but the
-	// shared DHCID MUST survive (the AAAA still needs it).
+	// Cycle 2: v4 lease released, v6 still active. The A and the v4
+	// DHCID are withdrawn but the v6 DHCID MUST survive (the AAAA
+	// still needs it for its own delete prerequisite).
 	src.v4 = nil
 	if err := m.Reconcile(context.Background(), cfg); err != nil {
 		t.Fatalf("partial-teardown reconcile: %v", err)
 	}
-	if !srv.zoneHas(dhcid) {
-		t.Fatal("#2700 regression: shared DHCID was deleted on partial dual-stack " +
+	if !srv.zoneHas(dhcid6) {
+		t.Fatal("#2700/#14602 regression: v6 DHCID was deleted on partial dual-stack " +
 			"teardown — the surviving AAAA is now unprotected and will leak")
+	}
+	if srv.zoneHas(dhcid4) {
+		t.Fatal("v4 DHCID orphaned after the v4 family released")
 	}
 	// The A must be gone; the AAAA must remain.
 	if hasA := zoneHasType(srv, dns.Fqdn(fqdn), dns.TypeA); hasA {
@@ -104,8 +124,8 @@ func TestPartialDualStackTeardownKeepsSharedDHCID(t *testing.T) {
 		t.Fatal("surviving v6 AAAA was wrongly removed on the v4 teardown")
 	}
 
-	// Cycle 3: v6 lease released too → the AAAA must be deleted, AND the
-	// (now-unshared) DHCID removed with it, leaving no orphan.
+	// Cycle 3: v6 lease released too → the AAAA must be deleted, AND
+	// its (now-unshared) DHCID removed with it, leaving no orphan.
 	src.v6 = nil
 	if err := m.Reconcile(context.Background(), cfg); err != nil {
 		t.Fatalf("final-teardown reconcile: %v", err)
@@ -113,8 +133,8 @@ func TestPartialDualStackTeardownKeepsSharedDHCID(t *testing.T) {
 	if zoneHasType(srv, dns.Fqdn(fqdn), dns.TypeAAAA) {
 		t.Fatal("#2700: surviving AAAA leaked — its delete failed the DHCID-match prereq")
 	}
-	if srv.zoneHas(dhcid) {
-		t.Fatal("#2700: DHCID orphaned after the last family released")
+	if srv.zoneHas(dhcid6) {
+		t.Fatal("#2700: v6 DHCID orphaned after the last family released")
 	}
 	if m.Stats().OwnedRecords != 0 {
 		t.Fatalf("want 0 owned records after full teardown, got %d", m.Stats().OwnedRecords)
