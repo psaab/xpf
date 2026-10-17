@@ -64,12 +64,26 @@ func validateZoneStatementTails9656(nodes []*Node, lenient bool) ([]string, erro
 				}
 				var msg string
 				if len(ch.Children) > 0 {
-					// #13094: a braced statement whose apply-macro header is
-					// malformed has its whole body hidden from zone readers by
-					// bracketedGroupInstances8794, which never checks that a
-					// macro name follows the keyword. Refuse the dropped body
-					// instead of losing it silently.
-					msg = zoneMalformedApplyMacroHeader13094(ch)
+					// #14343: a braced body whose header tail is not a
+					// bracketed group fans out phantom zones in
+					// bracketedGroupInstances8794. A valid group is either
+					// authored bracketed or is the bracket-stripped form
+					// Format emits (Keys[1:] are bare zone names and the
+					// body holds only declared zone properties). Any other
+					// tail token colliding with a declared zone child
+					// (tcp-reset, screen, description, interfaces,
+					// host-inbound-traffic, address-book, tcp-rst) is a
+					// header token, not a zone name.
+					if msg14343 := zoneUnbracketedHeaderToken14343(ch); msg14343 != "" {
+						msg = msg14343
+					} else if msg13094 := zoneMalformedApplyMacroHeader13094(ch); msg13094 != "" {
+						// #13094: a braced statement whose apply-macro header is
+						// malformed has its whole body hidden from zone readers by
+						// bracketedGroupInstances8794, which never checks that a
+						// macro name follows the keyword. Refuse the dropped body
+						// instead of losing it silently.
+						msg = msg13094
+					}
 					if msg == "" {
 						continue
 					}
@@ -160,6 +174,45 @@ func zoneMalformedApplyMacroHeader13094(ch *Node) string {
 				ch.Keys[1], rest, ch.Keys[k+1], advice)
 		}
 		return ""
+	}
+	return ""
+}
+
+// zoneUnbracketedHeaderToken14343 reports a braced security-zone header
+// whose unbracketed tail token is a declared zone child rather than a
+// zone name, or "" when the header is a legitimate group.
+//
+// A legitimate unbracketed group is the bracket-stripped form Format
+// emits for `security-zone [ a b ] { ... }`: it has already lost its
+// bracket provenance, so it cannot be told from header garbage by
+// provenance alone. The discriminator is the token itself: a zone may
+// be named anything except a token the zone schema declares as a child
+// keyword in that slot, because Junos reserves those words there and
+// XPF's own fan-out would otherwise mint a phantom zone (e.g.
+// `security-zone trust tcp-reset { ... }` created zone "tcp-reset").
+// Bracketed members keep their names even when they collide (a zone
+// literally named tcp-rst inside brackets, #9656 allowed row).
+func zoneUnbracketedHeaderToken14343(ch *Node) string {
+	if ch == nil || len(ch.Keys) < 3 || len(ch.Children) == 0 {
+		return ""
+	}
+	zoneSchema := securityZoneSchema9792()
+	if zoneSchema == nil {
+		return ""
+	}
+	for i := 2; i < len(ch.Keys); i++ {
+		if ch.KeyBracketed(i) {
+			continue
+		}
+		tok := ch.Keys[i]
+		// apply-macro tails are judged by zoneMalformedApplyMacroHeader13094.
+		if tok == "apply-macro" {
+			return ""
+		}
+		if _, isChild := zoneSchema.children[tok]; isChild {
+			return fmt.Sprintf("security zones security-zone %s: header token %q is a security-zone child keyword, not a zone name, so it must not fan out a phantom zone or carry the braced body. Write security-zone %s { %s ...; } inside the zone body, security-zone [ a b ] { ... } for a zone group, or each zone as its own statement (#14343)",
+				ch.Keys[1], tok, ch.Keys[1], tok)
+		}
 	}
 	return ""
 }
