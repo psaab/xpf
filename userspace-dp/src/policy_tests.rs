@@ -5211,6 +5211,216 @@ fn valid_icmpv6_type_and_code_still_compiles() {
 }
 
 // ---------------------------------------------------------------------------
+// #14312 — ports on non-port-bearing application protocols must FAIL CLOSED
+// at the Rust snapshot boundary. `parse_applications` previously rejected
+// only the #3712 ICMP-field combos; a port on any protocol other than
+// TCP/UDP compiled into a wrong-behaving term:
+//   - icmp/icmpv6 WITH icmp_type: `from_matches` steers to icmp_constraints
+//     and silently discards the ports — a permit broadens to every message
+//     of that type/code (arbitrary ICMP Echo Identifiers).
+//   - icmp without type / gre / esp / ospf / sctp / ...: a range/exact term
+//     keyed on ports the packet never presents (0,0) — a deny/reject never
+//     matches and falls through to a later permit (fail-OPEN); a 0-N range
+//     matches flowless traffic of that protocol.
+// The Go strict gate (#3373) and expansion drop detector (#9525) poison
+// these before the wire, so this is the corrupt / hand-built /
+// mixed-version / lenient peer-sync backstop, mirroring #3712 here and
+// #3723 (`UnsatisfiableFilterCrossField`) on the filter side.
+// ---------------------------------------------------------------------------
+
+/// Build a one-term rule carrying explicit source/destination ports, for
+/// the #14312 fail-closed tests.
+fn port_protocol_rule(
+    rule_id: &str,
+    protocol: &str,
+    src_port: &str,
+    dst_port: &str,
+    icmp_type: Option<u8>,
+    icmp_code: Option<u8>,
+    action: &str,
+) -> PolicyRuleSnapshot {
+    PolicyRuleSnapshot {
+        rule_id: rule_id.to_string(),
+        name: rule_id.to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec![rule_id.to_string()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: format!("app-{rule_id}"),
+            protocol: protocol.to_string(),
+            source_port: src_port.to_string(),
+            destination_port: dst_port.to_string(),
+            icmp_type,
+            icmp_code,
+            inactivity_timeout: None,
+        }],
+        action: action.to_string(),
+        ..Default::default()
+    }
+}
+
+fn assert_port_protocol_rejected(
+    bad: PolicyRuleSnapshot,
+    want_rule: &str,
+    want_reason: &'static str,
+    want_protocol: u8,
+) {
+    let store = PolicyCounterStore::default();
+    let result =
+        parse_policy_state_with_counters("permit", &[bad], &test_zone_name_to_id(), &[], &store);
+    match result {
+        Err(SnapshotIntegrityError::InvalidApplicationPortProtocol {
+            rule_id,
+            application,
+            reason,
+            protocol,
+        }) => {
+            assert_eq!(rule_id, want_rule);
+            assert_eq!(application, format!("app-{want_rule}"));
+            assert_eq!(reason, want_reason);
+            assert_eq!(protocol, want_protocol);
+        }
+        other => panic!("expected InvalidApplicationPortProtocol, got {other:?}"),
+    }
+}
+
+#[test]
+fn icmp_with_icmp_type_and_dst_port_rejects_whole_snapshot() {
+    // RED-on-revert: icmp + type 8 + dst 80, permit, default permit.
+    // Pre-fix `from_matches` steered to icmp_constraints and discarded
+    // port 80, broadening the permit to every echo message. The fix
+    // rejects the whole snapshot; reverting returns Ok(state).
+    let bad = port_protocol_rule("icmp-typed-port", "icmp", "", "80", Some(8), None, "permit");
+    assert_port_protocol_rejected(
+        bad,
+        "icmp-typed-port",
+        "destination-port set on a non-port-bearing protocol",
+        PROTO_ICMP,
+    );
+}
+
+#[test]
+fn icmp_without_type_and_dst_port_rejects_whole_snapshot() {
+    // icmp with no type + dst 80: pre-fix a dead range term (ports 0,0
+    // never present 80), so a deny never matched.
+    let bad = port_protocol_rule("icmp-port", "icmp", "", "80", None, None, "deny");
+    assert_port_protocol_rejected(
+        bad,
+        "icmp-port",
+        "destination-port set on a non-port-bearing protocol",
+        PROTO_ICMP,
+    );
+}
+
+#[test]
+fn icmpv6_with_type_and_src_port_rejects_whole_snapshot() {
+    // Source-port-only on a typed icmpv6 term: also silently discarded
+    // pre-fix. Exercises the source-port reason arm.
+    let bad = port_protocol_rule(
+        "icmpv6-typed-sport",
+        "icmpv6",
+        "1234",
+        "",
+        Some(128),
+        None,
+        "permit",
+    );
+    assert_port_protocol_rejected(
+        bad,
+        "icmpv6-typed-sport",
+        "source-port set on a non-port-bearing protocol",
+        PROTO_ICMPV6,
+    );
+}
+
+#[test]
+fn gre_with_dst_port_rejects_whole_snapshot() {
+    // Acceptance case from #14312: gre deny dst 80 + fall-through permit
+    // was a dead deny pre-fix.
+    let bad = port_protocol_rule("gre-port", "gre", "", "80", None, None, "deny");
+    assert_port_protocol_rejected(
+        bad,
+        "gre-port",
+        "destination-port set on a non-port-bearing protocol",
+        PROTO_GRE,
+    );
+}
+
+#[test]
+fn esp_with_src_port_rejects_whole_snapshot() {
+    let bad = port_protocol_rule("esp-sport", "esp", "4500", "", None, None, "deny");
+    assert_port_protocol_rejected(
+        bad,
+        "esp-sport",
+        "source-port set on a non-port-bearing protocol",
+        PROTO_ESP,
+    );
+}
+
+#[test]
+fn ospf_with_dst_port_range_rejects_whole_snapshot() {
+    // A range (not a single port) must be caught identically — the check
+    // is on parsed non-emptiness, not string shape.
+    let bad = port_protocol_rule("ospf-range", "ospf", "", "0-1023", None, None, "deny");
+    assert_port_protocol_rejected(
+        bad,
+        "ospf-range",
+        "destination-port set on a non-port-bearing protocol",
+        PROTO_OSPF,
+    );
+}
+
+#[test]
+fn sctp_with_dst_port_rejects_whole_snapshot() {
+    // SCTP has wire ports but this dataplane never extracts them
+    // (`has_l4_ports` = TCP/UDP only), so sctp+port is the same
+    // never-match — mirroring the Go #3373 gate.
+    let bad = port_protocol_rule("sctp-port", "sctp", "", "80", None, None, "deny");
+    assert_port_protocol_rejected(
+        bad,
+        "sctp-port",
+        "destination-port set on a non-port-bearing protocol",
+        PROTO_SCTP,
+    );
+}
+
+#[test]
+fn numeric_non_port_protocol_with_port_rejects_whole_snapshot() {
+    // Numeric protocol tokens resolve through `parse_protocol`'s numeric
+    // arm (47 = GRE); the check keys on the resolved number, not the
+    // spelling, so this cannot be bypassed by writing "47".
+    let bad = port_protocol_rule("numeric-gre-port", "47", "", "80", None, None, "deny");
+    assert_port_protocol_rejected(
+        bad,
+        "numeric-gre-port",
+        "destination-port set on a non-port-bearing protocol",
+        PROTO_GRE,
+    );
+}
+
+#[test]
+fn valid_port_protocol_terms_still_compile() {
+    // Guards against false rejects: tcp/udp with ports, and portless
+    // non-TCP/UDP terms (protocol-only icmp/gre/esp, typed icmp without
+    // ports) must all still compile.
+    let store = PolicyCounterStore::default();
+    for (rule_id, protocol, src, dst, icmp_type) in [
+        ("tcp-port", "tcp", "", "80", None),
+        ("udp-port", "udp", "1234", "53", None),
+        ("icmp-typed-noport", "icmp", "", "", Some(8)),
+        ("icmp-noport", "icmp", "", "", None),
+        ("gre-noport", "gre", "", "", None),
+        ("esp-noport", "esp", "", "", None),
+    ] {
+        let good = port_protocol_rule(rule_id, protocol, src, dst, icmp_type, None, "permit");
+        parse_policy_state_with_counters("deny", &[good], &test_zone_name_to_id(), &[], &store)
+            .unwrap_or_else(|e| panic!("{rule_id} must compile, got {e:?}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // #3019: `to-zone junos-host` / `from-zone junos-host` self-traffic policy.
 // ---------------------------------------------------------------------------
 

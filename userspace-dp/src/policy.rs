@@ -1223,8 +1223,10 @@ impl CompiledApplications {
             // the existing port path — protocol-only junos-ping and
             // junos-icmp-all have empty ports and land as `range_terms` entries
             // with empty ranges (match-all), so citing either also matches all
-            // ICMP. (ICMP terms never carry ports in practice; the type
-            // constraint takes precedence so a stray port is irrelevant here.)
+            // ICMP. (#14312: `parse_applications` now REJECTS any term
+            // carrying ports on a non-TCP/UDP protocol — including a typed
+            // ICMP term — at the snapshot boundary, so a port-bearing term
+            // can no longer reach this steering and be silently dropped.)
             if app.icmp_type.is_some() {
                 entry.icmp_constraints.push((
                     order,
@@ -2639,6 +2641,24 @@ pub(crate) fn parse_policy_state_with_counters(
                 rule_id: rule_id.clone(),
                 application,
                 reason,
+            });
+        }
+        // #14312: fail the whole snapshot closed when an application term
+        // carries a port on a non-port-bearing protocol (ports on an
+        // ICMP-typed term are silently dropped → broadened permit; ports
+        // on GRE/ESP/OSPF/SCTP/... never match → deny falls through). The
+        // Go strict gate (#3373) and expansion drop detector (#9525) are
+        // the primary defenses; this is the helper-boundary backstop for
+        // the lenient / peer-sync / corrupt-snapshot path, consistent
+        // with the #3712 backstop above and #3723 on the filter side.
+        // Checked after `invalid_icmp` so a term violating both surfaces
+        // the earlier #3712 diagnostic first.
+        if let Some((application, reason, protocol)) = parsed.invalid_port_protocol {
+            return Err(SnapshotIntegrityError::InvalidApplicationPortProtocol {
+                rule_id: rule_id.clone(),
+                application,
+                reason,
+                protocol,
             });
         }
         let applications = parsed.matches;
@@ -4666,12 +4686,22 @@ struct ParsedApplications {
     /// `dropped_any` so a rule mixing a bad-ICMP term with an unparseable one
     /// still surfaces the ICMP diagnostic when protocol/port parse.
     invalid_icmp: Option<(String, &'static str)>,
+    /// #14312: the FIRST application term found with a port on a
+    /// non-port-bearing protocol — `(application name, reason, protocol)`.
+    /// `None` when every term is well-formed. The caller fails the whole
+    /// snapshot closed via
+    /// `SnapshotIntegrityError::InvalidApplicationPortProtocol`, naming the
+    /// rule (which `parse_applications` does not have). Detected regardless
+    /// of `dropped_any` / `invalid_icmp` so a rule mixing offenders still
+    /// surfaces a diagnostic when protocol/port parse.
+    invalid_port_protocol: Option<(String, &'static str, u8)>,
 }
 
 fn parse_applications(terms: &[PolicyApplicationSnapshot]) -> ParsedApplications {
     let mut out = Vec::with_capacity(terms.len());
     let mut dropped_any = false;
     let mut invalid_icmp: Option<(String, &'static str)> = None;
+    let mut invalid_port_protocol: Option<(String, &'static str, u8)> = None;
     for term in terms {
         let Some(protocol) = parse_protocol(&term.protocol) else {
             dropped_any = true;
@@ -4703,6 +4733,26 @@ fn parse_applications(terms: &[PolicyApplicationSnapshot]) -> ParsedApplications
                 invalid_icmp = Some((term.name.clone(), "icmp-code set without icmp-type"));
             }
         }
+        // #14312: reject any port on a protocol that presents no extracted
+        // L4 ports. Uses the parsed ranges (not the raw strings) so named
+        // ports (e.g. "dns") and ranges count exactly as the matcher sees
+        // them. TCP/UDP are the only port-bearing protocols
+        // (`ip_proto::has_l4_ports`); this also covers an ICMP-typed term
+        // whose ports `from_matches` would silently discard, and SCTP
+        // (wire ports never extracted). Destination is checked first to
+        // mirror the Go `ApplicationMatchDrops` ordering.
+        if invalid_port_protocol.is_none()
+            && protocol != PROTO_TCP
+            && protocol != PROTO_UDP
+            && (!source_ports.is_empty() || !destination_ports.is_empty())
+        {
+            let reason = if !destination_ports.is_empty() {
+                "destination-port set on a non-port-bearing protocol"
+            } else {
+                "source-port set on a non-port-bearing protocol"
+            };
+            invalid_port_protocol = Some((term.name.clone(), reason, protocol));
+        }
         out.push(ApplicationMatch {
             protocol,
             source_ports,
@@ -4728,6 +4778,7 @@ fn parse_applications(terms: &[PolicyApplicationSnapshot]) -> ParsedApplications
         matches: out,
         dropped_any,
         invalid_icmp,
+        invalid_port_protocol,
     }
 }
 
