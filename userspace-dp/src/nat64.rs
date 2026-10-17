@@ -188,7 +188,7 @@ use crate::nat::{
     reserve_nat64_pool_port,
 };
 use crate::session::SessionDecision;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -597,9 +597,19 @@ fn nat64_rule_identity(snap: &NAT64RuleSnapshot) -> Option<([u8; 12], Vec<Ipv4Ad
     let octets = addr.octets();
     let mut prefix_bytes = [0u8; 12];
     prefix_bytes.copy_from_slice(&octets[..12]);
+    // #14624: first-occurrence dedupe, IDENTICAL to the build loop below.
+    // This identity is the reuse key AND the #6982 charge basis: if it kept
+    // a duplicate the build loop dropped (or vice versa), reuse would miss
+    // a pool it should have matched and the charge would count phantom
+    // addresses. `parse_pool_v4` accepts both `X` and `X/32`, so the same
+    // address can arrive twice under two spellings on a tolerated load.
+    let mut seen = FxHashSet::default();
     let mut pool_v4 = Vec::with_capacity(snap.pool_addresses.len());
     for s in &snap.pool_addresses {
-        pool_v4.push(parse_pool_v4(s)?);
+        let addr = parse_pool_v4(s)?;
+        if seen.insert(addr) {
+            pool_v4.push(addr);
+        }
     }
     Some((prefix_bytes, pool_v4))
 }
@@ -881,10 +891,29 @@ impl Nat64State {
             // than silently NARROWING the pool by dropping just the bad entry
             // (the #2212 fail-open). `continue 'rules` bails on the offending
             // rule so no partially-installed pool reaches the dataplane.
+            // #14624: keep only the FIRST occurrence of each pool address.
+            // A tolerated load (legacy / mixed-version / lenient
+            // configstore) can carry the same address twice — bare and
+            // with the /32 host mask range-expansion stamps — and each
+            // duplicate position got an INDEPENDENT occupancy bitmap, so
+            // round-robin placement minted the same (address, port) BIB
+            // for two IPv6 subscribers (RFC 6146 §3.5; the #10700 class,
+            // whose fix covered only the SNAT parser). One address is one
+            // allocator slot here too, exactly as the strict message
+            // ("the dataplane keeps only the first occurrence … on
+            // tolerated loads") and the overlap.rs #10700 note claim.
+            // First-seen order is preserved, so `nat64_rule_identity`,
+            // the #6982 charge, and `build_deterministic_v6`'s host_count
+            // all see the same deduped pool this loop builds.
+            let mut seen_pool = FxHashSet::default();
             let mut pool_v4 = Vec::with_capacity(snap.pool_addresses.len());
             for s in &snap.pool_addresses {
                 match parse_pool_v4(s) {
-                    Some(addr) => pool_v4.push(addr),
+                    Some(addr) => {
+                        if seen_pool.insert(addr) {
+                            pool_v4.push(addr);
+                        }
+                    }
                     None => {
                         eprintln!(
                             "xpf nat64: skipping malformed rule {:?}: unparseable source-pool address {:?}",

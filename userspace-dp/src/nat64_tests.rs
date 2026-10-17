@@ -262,8 +262,13 @@ fn napt64_deterministic_v6_host_count_overflow_warns_operator() {
     let before = DETERMINISTIC_V6_DOWNGRADE_COUNT.load(Ordering::Relaxed);
     // blocks_per_ip at its u16 max; a 70_000-entry pool makes
     // `num_pool_ips * blocks_per_ip` (70_000 * 65_535 ≈ 4.59e9) exceed
-    // `u32::MAX` (≈4.29e9) — `checked_mul` returns `None`.
-    let pool_addresses = vec!["203.0.113.1".to_string(); 70_000];
+    // `u32::MAX` (≈4.29e9) — `checked_mul` returns `None`. The entries
+    // must be DISTINCT addresses: since #14624 the pool parser keeps
+    // only the first occurrence of each address, so 70_000 copies of
+    // one address would dedupe to a one-address pool and never overflow.
+    let pool_addresses: Vec<String> = (0..70_000u32)
+        .map(|i| format!("10.{}.{}.{}", (i >> 16) & 0xff, (i >> 8) & 0xff, i & 0xff))
+        .collect();
     let state = Nat64State::from_snapshots(&[NAT64RuleSnapshot {
         name: "napt64-overflow".to_string(),
         prefix: "64:ff9b::/96".to_string(),
@@ -334,6 +339,158 @@ fn nat64_pool_mixed_bare_and_masked() {
     assert_eq!(state.prefixes[0].pool_v4.len(), 2);
     assert!(state.prefixes[0].pool_v4.contains(&Ipv4Addr::new(198, 51, 100, 1)));
     assert!(state.prefixes[0].pool_v4.contains(&Ipv4Addr::new(198, 51, 100, 5)));
+}
+
+// #14624 (Y23-03): a tolerated load (legacy / mixed-version / lenient
+// configstore) can carry the SAME pool address twice — once bare and once
+// with the canonical /32 host mask Go range-expansion stamps (#2123).
+// `parse_pool_v4` accepts both spellings, so without a first-occurrence
+// seen-set each duplicate became its own pool position with an INDEPENDENT
+// occupancy bitmap, and round-robin placement minted the same (X, port)
+// BIB for two IPv6 subscribers (RFC 6146 §3.5; the #10700 class, which
+// fixed only the SNAT `expand.rs` path). The strict message at
+// compiler_validate_strict_nat.go ("the dataplane keeps only the first
+// occurrence … on tolerated loads") and the overlap.rs "parser stores
+// each pool address only once (#10700)" comment were both false for
+// NAT64. FAIL-ON-REVERT: drop the seen-set in either NAT64 pool loop and
+// this test goes RED — pool_v4 keeps both positions (len 2) and the 16
+// subscribers below collide on duplicated (addr, port) tuples.
+#[test]
+fn nat64_14624_duplicate_member_unique_tuples() {
+    let dup_snap = NAT64RuleSnapshot {
+        name: "nat64-dup".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: vec![
+            "203.0.113.1".to_string(),
+            "203.0.113.1/32".to_string(),
+        ],
+        no_v6_frag_header: false,
+        ..Default::default()
+    };
+    let state = Nat64State::from_snapshots(&[dup_snap.clone()]);
+    assert_eq!(
+        state.prefixes[0].pool_v4,
+        vec![Ipv4Addr::new(203, 0, 113, 1)],
+        "a duplicate pool member (bare + /32 spellings) must keep only the \
+         first occurrence — one address, one allocator slot (#14624)"
+    );
+    // The phase-1 reuse key must dedupe IDENTICALLY, or it would never
+    // match the built pool (allocator wrongly not reused / wrongly
+    // reused, and the #6982 charge would count the duplicate).
+    let (_, identity_pool) =
+        nat64_rule_identity(&dup_snap).expect("a valid rule must have an identity");
+    assert_eq!(
+        identity_pool, state.prefixes[0].pool_v4,
+        "the reuse-key identity pool must equal the built pool (#14624)"
+    );
+
+    // 16 distinct subscribers, same remote: every translated tuple unique.
+    let dst_v4 = Ipv4Addr::new(8, 8, 8, 8);
+    let mut seen = std::collections::HashSet::new();
+    for i in 1..=16u32 {
+        let src: Ipv6Addr = format!("2001:db8::{i}").parse().unwrap();
+        let tuple = state
+            .allocate_source(0, PROTO_TCP, src, dst_v4, 40000 + i as u16, 443, 0)
+            .expect("each subscriber must allocate");
+        assert!(
+            seen.insert(tuple),
+            "subscriber {src} got duplicate translated tuple {tuple:?} — \
+             two subscribers share one BIB (#14624)"
+        );
+    }
+    assert_eq!(seen.len(), 16, "16 subscribers must hold 16 distinct tuples");
+
+    // Control: a genuinely two-address pool is unchanged — both members
+    // kept, first-seen order, and allocation still spans both.
+    let control = Nat64State::from_snapshots(&[well_known_prefix()]);
+    assert_eq!(
+        control.prefixes[0].pool_v4,
+        vec![Ipv4Addr::new(198, 51, 100, 1), Ipv4Addr::new(198, 51, 100, 2)],
+        "the distinct-member control pool must be untouched by dedupe"
+    );
+    let mut control_seen = std::collections::HashSet::new();
+    for i in 1..=16u32 {
+        let src: Ipv6Addr = format!("2001:db8::{i}").parse().unwrap();
+        let tuple = control
+            .allocate_source(0, PROTO_TCP, src, dst_v4, 40000 + i as u16, 443, 0)
+            .expect("control subscriber must allocate");
+        assert!(control_seen.insert(tuple), "control tuple {tuple:?} duplicated");
+    }
+    assert_eq!(control_seen.len(), 16);
+}
+
+// #14624: the deterministic NAPT64 arm over a duplicated list. The
+// deterministic params derive `host_count = pool_len * blocks_per_ip`
+// from the parsed pool, so a duplicate member inflates the subscriber
+// space and shifts ip_idx placement (subscriber word / blocks_per_ip).
+// After dedupe the duplicated spelling must behave EXACTLY as the
+// single-address pool: same DeterministicV6 (host_count included), and
+// a subscriber whose index only fits the inflated count fails closed.
+// FAIL-ON-REVERT: without the seen-set, host_count doubles (252 vs 126),
+// subscriber word 200 maps onto the duplicate position instead of
+// failing closed, and this test goes RED.
+#[test]
+fn nat64_14624_deterministic_duplicate_pool_matches_single() {
+    let mk = |pool: Vec<String>| NAT64RuleSnapshot {
+        name: "napt64-dup".to_string(),
+        prefix: "64:ff9b::/96".to_string(),
+        pool_addresses: pool,
+        no_v6_frag_header: false,
+        // NAT64 fixed range 1024..=65535 => 64512 ports; block 512 => bpi 126.
+        deterministic_block_size: 512,
+        deterministic_blocks_per_ip: 126,
+        deterministic_host_prefix_len: 32,
+        deterministic_host_base_v6: "2001:db8::".to_string(),
+    };
+    let dup = Nat64State::from_snapshots(&[mk(vec![
+        "198.51.100.1".to_string(),
+        "198.51.100.1/32".to_string(),
+    ])]);
+    let single = Nat64State::from_snapshots(&[mk(vec!["198.51.100.1".to_string()])]);
+    assert_eq!(
+        dup.prefixes[0].pool_v4,
+        vec![Ipv4Addr::new(198, 51, 100, 1)],
+        "deterministic pool must dedupe to the first occurrence (#14624)"
+    );
+    assert_eq!(
+        dup.prefixes[0].deterministic_v6, single.prefixes[0].deterministic_v6,
+        "deterministic params (host_count = deduped pool_len * blocks_per_ip) \
+         must match the single-address pool exactly (#14624)"
+    );
+    assert_eq!(
+        dup.prefixes[0].deterministic_v6.expect("deterministic built").host_count,
+        126,
+        "host_count must be 1 * 126, not the duplicated 2 * 126 (#14624)"
+    );
+
+    let dst_v4 = Ipv4Addr::new(203, 0, 113, 9);
+    // In-range subscriber (word 5 -> ip_idx 0, block 5): identical tuple
+    // from the duplicated and single pools.
+    let alloc = |state: &Nat64State, src: &str| {
+        state.allocate_source(
+            0,
+            PROTO_TCP,
+            src.parse().expect("src"),
+            dst_v4,
+            40001,
+            443,
+            0,
+        )
+    };
+    assert_eq!(
+        alloc(&dup, "2001:db8:0:5::").expect("in-range subscriber allocates"),
+        alloc(&single, "2001:db8:0:5::").expect("in-range subscriber allocates"),
+        "an in-range subscriber must land on the same tuple either way"
+    );
+    // Subscriber word 200 fits ONLY the inflated duplicated host_count
+    // (252): pre-fix it maps onto duplicate position ip_idx 1 and mints;
+    // post-fix it is past the real capacity and fails closed.
+    assert!(
+        alloc(&dup, "2001:db8:0:c8::").is_err(),
+        "a subscriber past the deduped pool capacity must fail closed, \
+         not alias onto the duplicate pool position (#14624)"
+    );
+    assert!(alloc(&single, "2001:db8:0:c8::").is_err());
 }
 
 #[test]
