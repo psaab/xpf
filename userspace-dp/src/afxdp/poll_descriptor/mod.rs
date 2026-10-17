@@ -1201,11 +1201,56 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     }
                     _ => packet_frame,
                 };
+                // #14314: resolve the input-filter PBR route override
+                // BEFORE the Stage-11 claim, exactly once. The claim's
+                // local-ownership table must follow the steer: a
+                // `Table(vrf)` packet is adjudicated in that VRF (a dst
+                // owned only in `inet.0` is NOT claimed and takes the
+                // tenant's transit policy; a dst owned in the steered
+                // VRF IS claimed), and a `Drop` term drops here instead
+                // of reaching the host. Pre-fix the override was
+                // evaluated only after the claim and only its `Drop`
+                // arm was honoured, so PBR/fabric-steered IPsec was
+                // claimed (or missed) in the physical ingress VRF.
+                // Uncounted: the counted evaluation (and any reject
+                // reply) still runs exactly once, in the arm below for
+                // a claimed packet or on the ordinary miss path for an
+                // unclaimed one — counting here would double-count
+                // every steered IPsec packet.
+                let stage11_route_table: Option<String> = match flow.as_ref() {
+                    Some(flow)
+                        if crate::afxdp::forwarding::is_ipsec_traffic(
+                            meta.protocol,
+                            flow.forward_key.dst_port,
+                        ) =>
+                    {
+                        match crate::afxdp::forwarding::ingress_route_table_override_uncounted(
+                            worker_ctx.forwarding,
+                            stage11_packet_frame,
+                            meta,
+                            flow,
+                            ingress_zone_override,
+                            now_ns,
+                            None,
+                        ) {
+                            crate::afxdp::forwarding::RouteOverride::Drop => {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                            crate::afxdp::forwarding::RouteOverride::Table {
+                                table, ..
+                            } => Some(table),
+                            crate::afxdp::forwarding::RouteOverride::None => None,
+                        }
+                    }
+                    _ => None,
+                };
                 match stage_ipsec_passthrough_check(
                     flow.as_ref(),
                     stage11_packet_frame,
                     meta,
                     ingress_zone_override,
+                    stage11_route_table.as_deref(),
                     &binding.live,
                     worker_ctx,
                     now_ns,
@@ -1245,10 +1290,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
-                            // Stage 11 bypasses the ordinary route-evaluation
-                            // stage, so independently enforce route-filter
-                            // routing-instance discard/reject terms before
-                            // handing a claimed packet to the host.
+                            // The counted PBR evaluation for a claimed
+                            // packet runs here (the pre-claim resolution
+                            // above was uncounted), so a `reject` still
+                            // synthesizes its reply and a matched term
+                            // counts/logs exactly once; a `Drop` verdict
+                            // recycles instead of handing the packet to
+                            // the host. The `Table` arm needs no further
+                            // action — it already scoped the claim.
                             let route_override =
                                 crate::afxdp::forwarding::ingress_route_table_override(
                                     worker_ctx.forwarding,
