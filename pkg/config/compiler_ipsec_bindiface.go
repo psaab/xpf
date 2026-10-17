@@ -134,41 +134,51 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 				// enough for the same reason ipsecTrafficSelectorSchema8939
 				// gives one file over, pointed the other way: the admission
 				// gate walks the same children and needs the same segmentation.
-				biNode := findChildInRun9088(inst.node, "bind-interface")
-				if biNode == nil {
-					continue
+				// #14451: validate EVERY bind-interface occurrence, not
+				// only the first. The typed compiler assigns per
+				// occurrence (compiler_ipsec.go: bind-interface ->
+				// vpn.BindInterface = v), so it installs the LAST
+				// value; a first-only gate passes V1 `st0.1; st0;`
+				// against V2 `st0.0` while the installed V1 `st0`
+				// collides with V2 on the same XFRM if_id. Iterating
+				// every occurrence means the #5297 invalid-name arm
+				// and the #2933 collision arm both see the installed
+				// set, and presence (#10638) is decided over the
+				// same set.
+				biNodes := findChildrenInRun9088(inst.node, "bind-interface")
+				for _, biNode := range biNodes {
+					bindIface := nodeVal(biNode)
+					if bindIface == "" {
+						continue
+					}
+					// #10638: presence (even an invalid name) satisfies "has a
+					// bind-interface"; a bad value is the #5297 arm's subject, not
+					// the missing arm's.
+					hasBind[inst.name] = true
+					_, ifID := XFRMIfNameAndID(bindIface)
+					if ifID == 0 {
+						// #5297: not a recognizable st<N>[.unit] secure-tunnel
+						// binding — it creates no XFRM device (empty name / zero
+						// id), so the VPN silently carries no traffic. Record for a
+						// fail-closed reject (strict) / warn (lenient) after the
+						// walk. NOT the #2933 collision case (that needs a valid,
+						// non-zero if_id).
+						invalid = append(invalid, invalidBind{vpn: inst.name, iface: bindIface})
+						continue
+					}
+					group, ok := byID[ifID]
+					if !ok {
+						group = map[string]*bindRef{}
+						byID[ifID] = group
+						order = append(order, ifID)
+					}
+					ref, ok := group[bindIface]
+					if !ok {
+						ref = &bindRef{}
+						group[bindIface] = ref
+					}
+					ref.vpns = append(ref.vpns, inst.name)
 				}
-				bindIface := nodeVal(biNode)
-				if bindIface == "" {
-					continue
-				}
-				// #10638: presence (even an invalid name) satisfies "has a
-				// bind-interface"; a bad value is the #5297 arm's subject, not
-				// the missing arm's.
-				hasBind[inst.name] = true
-				_, ifID := XFRMIfNameAndID(bindIface)
-				if ifID == 0 {
-					// #5297: not a recognizable st<N>[.unit] secure-tunnel
-					// binding — it creates no XFRM device (empty name / zero
-					// id), so the VPN silently carries no traffic. Record for a
-					// fail-closed reject (strict) / warn (lenient) after the
-					// walk. NOT the #2933 collision case (that needs a valid,
-					// non-zero if_id).
-					invalid = append(invalid, invalidBind{vpn: inst.name, iface: bindIface})
-					continue
-				}
-				group, ok := byID[ifID]
-				if !ok {
-					group = map[string]*bindRef{}
-					byID[ifID] = group
-					order = append(order, ifID)
-				}
-				ref, ok := group[bindIface]
-				if !ok {
-					ref = &bindRef{}
-					group[bindIface] = ref
-				}
-				ref.vpns = append(ref.vpns, inst.name)
 			}
 			return nil
 		})
@@ -289,4 +299,23 @@ func findChildInRun9088(vpn *Node, name string) *Node {
 		}
 	}
 	return nil
+}
+
+// findChildrenInRun9088 is findChildInRun9088 collecting ALL matches
+// instead of returning the first (#14451). The typed compiler installs
+// the LAST bind-interface occurrence, so the admission gate must
+// validate every occurrence the compiler could install, not only the
+// first one it encounters. Expansion/segmentation is identical to
+// findChildInRun9088 by construction.
+func findChildrenInRun9088(vpn *Node, name string) []*Node {
+	if vpn == nil {
+		return nil
+	}
+	var out []*Node
+	for _, c := range expandIPsecVPNRun9088(vpn) {
+		if c != nil && c.Name() == name {
+			out = append(out, c)
+		}
+	}
+	return out
 }

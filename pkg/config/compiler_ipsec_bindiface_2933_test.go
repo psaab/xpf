@@ -162,3 +162,151 @@ func TestSecureTunnelBindIfaceCollisionLenientWarns(t *testing.T) {
 		t.Fatalf("lenient compile produced no bind-interface collision warning; got %v", cfg.Warnings)
 	}
 }
+
+// #14451: hierarchical helper — flat `set` cannot express duplicate
+// bind-interface leaves (SetPath collapses to last value), so these
+// fixtures must be hierarchical text via NewParser.
+func buildBindIfaceHierTree14451(t *testing.T, src string) *ConfigTree {
+	t.Helper()
+	tree, errs := NewParser(src).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse hierarchical bind-interface fixture: %v", errs)
+	}
+	return tree
+}
+
+// TestSecureTunnelBindIfaceDuplicateOccurrenceCollision14451 proves the
+// admission gate validates EVERY bind-interface occurrence, not only the
+// first. V1's first value st0.1 is distinct from V2's st0.0, but the
+// compiler installs V1's LAST value st0, which collides with st0.0 on
+// if_id 1. Pre-fix the gate reads only the first and accepts.
+func TestSecureTunnelBindIfaceDuplicateOccurrenceCollision14451(t *testing.T) {
+	src := `
+security {
+    ipsec {
+        vpn V1 {
+            bind-interface st0.1;
+            bind-interface st0;
+        }
+        vpn V2 {
+            bind-interface st0.0;
+        }
+    }
+}
+`
+	tree := buildBindIfaceHierTree14451(t, src)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatalf("CompileConfig accepted duplicate bind-interface collision (installed st0 vs st0.0); want reject")
+	}
+	for _, sub := range []string{`bind-interface "st0"`, `bind-interface "st0.0"`, "if_id 1", "#2933"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("error %q missing substring %q", err.Error(), sub)
+		}
+	}
+	// Lenient path warns on the same installed-value collision.
+	tree2 := buildBindIfaceHierTree14451(t, src)
+	cfg, err := CompileConfigLenient(tree2)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient rejected duplicate collision (want warn): %v", err)
+	}
+	var found bool
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "bind-interface") && strings.Contains(w, "if_id 1") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("lenient compile produced no bind-interface collision warning; got %v", cfg.Warnings)
+	}
+}
+
+// TestSecureTunnelBindIfaceDuplicateSecondInvalid14451 proves a valid
+// first bind-interface does not hide an invalid second (installed) one:
+// the #5297 arm must see every occurrence.
+func TestSecureTunnelBindIfaceDuplicateSecondInvalid14451(t *testing.T) {
+	src := `
+security {
+    ipsec {
+        vpn V1 {
+            bind-interface st0;
+            bind-interface ge-0/0/0;
+        }
+    }
+}
+`
+	tree := buildBindIfaceHierTree14451(t, src)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatalf("CompileConfig accepted second invalid bind-interface ge-0/0/0; want reject")
+	}
+	for _, sub := range []string{`bind-interface "ge-0/0/0"`, "#5297"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("error %q missing substring %q", err.Error(), sub)
+		}
+	}
+}
+
+// TestSecureTunnelBindIfaceDuplicateControls14451 pins unchanged
+// behaviour: single bind-interface, harmless same-value repeats, and a
+// first-invalid/second-valid occurrence set (still rejected, now
+// because the invalid value is in the validated set).
+func TestSecureTunnelBindIfaceDuplicateControls14451(t *testing.T) {
+	t.Run("same-value repeat lenient compiles (no collision warning)", func(t *testing.T) {
+		// NOTE: strict CompileConfig on a bare-vpn fixture is also gated
+		// by the unrelated #14139 pre-shared-key check (bare VPNs have no
+		// PSK), which fires after the bind-interface gate; existing
+		// bare-vpn valid controls on master fail there too. Lenient
+		// compile exercises the bind-interface gate's own verdict: a
+		// same-value repeat must produce NO #2933 collision warning and
+		// the installed bind-interface stays st0.1.
+		tree := buildBindIfaceHierTree14451(t, `
+security {
+    ipsec {
+        vpn V1 {
+            bind-interface st0.1;
+            bind-interface st0.1;
+        }
+        vpn V2 {
+            bind-interface st0.0;
+        }
+    }
+}
+`)
+		cfg, err := CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("CompileConfigLenient rejected same-value repeat: %v", err)
+		}
+		for _, w := range cfg.Warnings {
+			if strings.Contains(w, "#2933") || strings.Contains(w, "alias collision") {
+				t.Fatalf("same-value repeat produced collision warning: %q", w)
+			}
+		}
+		if got := cfg.Security.IPsec.VPNs["V1"].BindInterface; got != "st0.1" {
+			t.Fatalf("V1 installed bind-interface = %q, want st0.1", got)
+		}
+		if got := cfg.Security.IPsec.VPNs["V2"].BindInterface; got != "st0.0" {
+			t.Fatalf("V2 installed bind-interface = %q, want st0.0", got)
+		}
+	})
+	t.Run("first invalid second valid still rejects naming invalid", func(t *testing.T) {
+		tree := buildBindIfaceHierTree14451(t, `
+security {
+    ipsec {
+        vpn V1 {
+            bind-interface ge-0/0/0;
+            bind-interface st0;
+        }
+    }
+}
+`)
+		_, err := CompileConfig(tree)
+		if err == nil {
+			t.Fatalf("CompileConfig accepted bind-interface set containing ge-0/0/0; want reject")
+		}
+		if !strings.Contains(err.Error(), `bind-interface "ge-0/0/0"`) {
+			t.Errorf("error %q missing invalid bind-interface name", err.Error())
+		}
+	})
+}
