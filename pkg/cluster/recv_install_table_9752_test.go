@@ -35,6 +35,7 @@ type lossyMirrorDP9752 struct {
 func dropSyncOnly9752(v *dataplane.SessionValue) {
 	v.Generation = 0
 	v.PolicyCounterIdx = 0
+	v.PolicyRuleID = ""
 	v.ConfigEpoch = 0
 	v.RTFlowSessionID = 0
 	v.IngressIfaceFold = 0
@@ -48,6 +49,7 @@ func dropSyncOnly9752(v *dataplane.SessionValue) {
 func dropSyncOnlyV69752(v *dataplane.SessionValueV6) {
 	v.Generation = 0
 	v.PolicyCounterIdx = 0
+	v.PolicyRuleID = ""
 	v.Nat64SnatV4 = [4]byte{}
 	v.ConfigEpoch = 0
 	v.RTFlowSessionID = 0
