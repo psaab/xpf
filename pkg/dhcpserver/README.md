@@ -713,19 +713,28 @@ What increment 2 ships (the feasible, CI-testable slice):
     forward owner name); they remain idempotent exact adds / exact-RR deletes.
 
   **`skip-existing` refusal sentinel (#2660).** `skip-existing` prepends an
-  RFC 2136 `RRsetNotUsed` ("name not in use") prerequisite to the Insert. On a
-  `YXRRSET`/`YXDOMAIN` collision the name already exists — a third party owns
-  it — so `sendAdd` now REFUSES by returning the SAME `errDDNSConflictRefused`
-  sentinel `replace-owned` uses (and counts the conflict). It used to return
-  `nil`, which `upsertLocked` reads as a SUCCESS and records phantom ownership.
-  That is the #2648/#2659 boundary breach on the skip-existing path: skip-
-  existing NEVER writes a DHCID, so the phantom-owned record's later release
-  takes `sendRemoveForward`'s `!hasDHCID` plain exact-RR delete branch and
-  DELETES the third party's RR. Returning the sentinel makes `upsertLocked`
-  record NO ownership (the same skip classification as replace-owned), so no
-  later delete is ever constructed. A FRESH (unused) name still publishes
-  normally and is owned — only a collision is refused. This is the #2648
-  mechanism extended to skip-existing.
+  RFC 2136 `NameNotUsed` ("name not in use", ANY/NONE) prerequisite to the
+  Insert. On a `YXRRSET`/`YXDOMAIN` collision the name already exists in
+  some type — a third party owns it — so `sendAdd` now REFUSES by returning
+  the SAME `errDDNSConflictRefused` sentinel `replace-owned` uses (and counts
+  the conflict). It used to return `nil`, which `upsertLocked` reads as a
+  SUCCESS and records phantom ownership. That is the #2648/#2659 boundary
+  breach on the skip-existing path: skip-existing NEVER writes a DHCID, so
+  the phantom-owned record's later release takes `sendRemoveForward`'s
+  `!hasDHCID` plain exact-RR delete branch and DELETES the third party's RR.
+  Returning the sentinel makes `upsertLocked` record NO ownership (the same
+  skip classification as replace-owned), so no later delete is ever
+  constructed. A FRESH (unused) name still publishes normally and is owned —
+  only a collision is refused. This is the #2648 mechanism extended to
+  skip-existing. **#14604:** the guard was previously the per-type
+  `RRsetNotUsed`, so a name holding only a foreign AAAA/MX/TXT was still
+  claimable for A/AAAA; it is now name-level `NameNotUsed`, and
+  `strict-fail` shares the same guard (surfacing the collision as a hard
+  error instead of the sentinel). A name the manager itself already owns
+  across the opposite address family is NOT third-party: the manager
+  threads `SiblingFamilyOwned` so the sibling family's publish keeps the
+  per-type guard (the documented residual: a foreign RR of another type
+  co-resident with xpf's own sibling cannot be classified backend-side).
 - **Zone surface** (plan §11 Q1): the forward zone is the configured
   `Domain` ONLY when the lease's FQDN is actually under it (an out-of-domain
   `ClientFQDN` derives its own parent zone instead of being misrouted into the

@@ -1073,6 +1073,34 @@ func (m *Manager) dhcidSharedWithOther(owned ownedRecord) bool {
 	return false
 }
 
+// crossTypeSiblingOwned reports whether the manager already owns a record
+// at owned's canonical FQDN under the OPPOSITE address family (#14604).
+// The sibling may be (a) a durable store record, or (b) a still-desired
+// record whose write-ahead intent is already durable in this same pass
+// (the write-ahead put that precedes every UpsertLease, #2662): Pass-2
+// sibling evaluation runs one lease at a time, so relying on the store
+// alone is enough only because upsertLocked writes each family's intent
+// before its own wire add. The check is re-run per call, so sibling state
+// is re-proven per cycle for the duration of the pass. Records are matched
+// on the canonical FQDN and opposite family only, NOT on ClientID/Identity:
+// production-shaped dual-stack producers never share an identity across
+// families (cid:/mac: vs duid:), so an identity match would re-create the
+// Y13-02/#14602 bug. A third record sharing only the FQDN under the SAME
+// family/scope never sets the flag. PTR records are forward-type absent
+// from this store, so they never match.
+func (m *Manager) crossTypeSiblingOwned(owned ownedRecord) bool {
+	ownedFQDN := dnsCanonicalFQDN(owned.FQDN)
+	for _, r := range m.state.records {
+		if r.Family == owned.Family {
+			continue
+		}
+		if dnsCanonicalFQDN(r.FQDN) == ownedFQDN {
+			return true
+		}
+	}
+	return false
+}
+
 // dhcidStillWanted reports whether the desired set itself still wants a
 // record that would compute the SAME RFC 4701 DHCID as `owned` (#14189).
 // It is consulted ONLY by the Pass-1 move path (a still-wanted-differently
@@ -1661,6 +1689,16 @@ func (m *Manager) providerIO(fn func() error) error {
 // safe: the #2648 DHCID-match / exact-RR delete prerequisite fails on a
 // non-existent RR, so the wire delete is a harmless no-op.
 func (m *Manager) upsertLocked(ctx context.Context, updater DNSUpdater, rec LeaseDNSRecord, ow ownedRecord) error {
+	// #14604: a name already owned under the opposite address family
+	// (durable store, or this pass's write-ahead intent for the sibling
+	// put by an earlier Pass-2 upsert) is xpf-owned, not foreign — signal
+	// the backend so its skip-existing/strict-fail guard stays per-type for
+	// that legitimate sibling publish instead of refusing the second family.
+	// The signal is recomputed from the store on every call and stamped
+	// only on UpsertLease paths; DeleteLease callers never receive it.
+	if m.crossTypeSiblingOwned(ow) {
+		rec.SiblingFamilyOwned = true
+	}
 	if isNopUpdater(updater) {
 		// No live backend: nothing is published, so record NO ownership and
 		// do not write-ahead an intent (an intent for a record nopUpdater

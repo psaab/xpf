@@ -61,8 +61,9 @@ const defaultDDNSTimeout = 5 * time.Second
 //
 //   - replace-owned (#2648): the name exists and its DHCID is not ours, or
 //     there is no DHCID and the name pre-exists.
-//   - skip-existing (#2660): the RRsetNotUsed prerequisite failed (the name
-//     already exists), so a third party owns it.
+//   - skip-existing (#2660, name-level since #14604): the NameNotUsed
+//     prerequisite failed (a record of ANY type already exists at the
+//     name), so a third party owns it.
 //
 // It is neither a success nor a hard transport error — it means "another party
 // owns this name". The manager (upsertLocked) classifies it like the nop-skip
@@ -141,6 +142,14 @@ type rfc2136Updater struct {
 	// Set at the top of UpsertLease and only consulted on the self-owned A/AAAA
 	// path; ignored by the DHCP-lease path (selfOwned=false) and by PTR adds.
 	selfOwnedPrevAddr netip.Addr
+
+	// siblingFamilyOwned mirrors rec.SiblingFamilyOwned for the FORWARD add
+	// in flight (#14604): the manager already owns a record at this forward
+	// name under the opposite address family, so the name is xpf-owned, not
+	// foreign. Set at the top of UpsertLease and consulted only by the
+	// skip-existing/strict-fail forward add; reset on every call so a stale
+	// flag never leaks into a PTR or same-family guard.
+	siblingFamilyOwned bool
 
 	// selfOwned marks a backend that publishes the FIREWALL'S OWN records
 	// (Surface A router/interface-address publish, #2691 P2), as opposed to a
@@ -404,12 +413,23 @@ func canonicalReverseZone(ptrName string) string {
 	}
 }
 
+// selfOwnedSiblingForward reports whether this forward A/AAAA add is a
+// same-name sibling-family publish (#14604): the name is already xpf-owned
+// for the sibling family. Named for the backend-local decision (a
+// self-owned sibling pair), not the manager-facing SiblingFamilyOwned
+// flag it mirrors.
+func (u *rfc2136Updater) selfOwnedSiblingForward(rr dns.RR) bool {
+	return u.siblingFamilyOwned &&
+		(rr.Header().Rrtype == dns.TypeA || rr.Header().Rrtype == dns.TypeAAAA)
+}
+
 // UpsertLease publishes the forward A/AAAA and reverse PTR for a lease
 // (plan §4.1). The forward add is the operation whose success governs the
 // lease's reconcile result; a PTR NOTAUTH/REFUSED is a counted skip.
 func (u *rfc2136Updater) UpsertLease(ctx context.Context, rec LeaseDNSRecord) error {
 	u.dhcidClientID = rec.ClientID
 	u.selfOwnedPrevAddr = rec.PrevAddr // #3739: value-specific self-owned replace
+	u.siblingFamilyOwned = rec.SiblingFamilyOwned
 	forwardRR, err := u.forwardRR(rec)
 	if err != nil {
 		return err
@@ -664,11 +684,19 @@ func dhcidRR(clientID, fqdn string, ttl uint32) (*dns.DHCID, bool) {
 //     record it did not create. When the lease has no stable client identity
 //     the DHCID is omitted and the name-not-in-use prerequisite alone guards
 //     the claim (still never adopting a pre-existing third-party RR).
-//   - skip-existing: precede the Insert with a "name not in use" prerequisite
-//     and REFUSE on a YX collision (the name already exists = a third party
-//     owns it) by returning errDDNSConflictRefused so the manager records NO
-//     ownership. skip-existing never writes a DHCID, so phantom ownership here
-//     would let a later release take the plain exact-RR delete and remove the
+//   - skip-existing: precede the Insert with a "name not in use"
+//     prerequisite (RFC 2136 §2.4.5 `NameNotUsed`, ANY/NONE) and REFUSE on a
+//     YX collision (the name already exists in ANY type = a third party owns
+//     it) by returning errDDNSConflictRefused so the manager records NO
+//     ownership. #14604: previously this used the per-type RRsetNotUsed
+//     prerequisite, so a v6-only or MX/TXT-only foreign name was still
+//     claimable for A/AAAA. A name xpf itself already owns across the other
+//     address family (or any owned sibling Family at the name) is NOT
+//     third-party: the manager threads `SiblingFamilyOwned` through
+//     `UpsertLease` in those cases and the cross-family allow-lists are
+//     re-proven per cycle for the remaining sibling state locally.
+//     skip-existing never writes a DHCID, so phantom ownership here would
+//     let a later release take the plain exact-RR delete and remove the
 //     third party's RR (#2660).
 //   - strict-fail: same prerequisite, surface the collision as an error.
 func (u *rfc2136Updater) sendAdd(ctx context.Context, zone string, rr dns.RR) error {
@@ -692,11 +720,23 @@ func (u *rfc2136Updater) sendAdd(ctx context.Context, zone string, rr dns.RR) er
 	}
 	m := new(dns.Msg)
 	m.SetUpdate(dns.Fqdn(zone))
-	switch u.conflictPolicy {
-	case "skip-existing", "strict-fail":
-		// Prerequisite: the exact RRset must NOT already exist (RFC 2136
-		// §2.4.3). A collision returns YXRRSET/YXDOMAIN.
+	// #14604: client-claimed forward adds are guarded name-level:
+	// NameNotUsed (ANY/NONE) refuses the add when ANY record exists at the
+	// name, not just the RRset being published. The backend cannot see the
+	// manager's durable ownership store, so a name it does already own
+	// across the sibling family is threaded in by the manager as
+	// SiblingFamilyOwned; the guarded add then keeps the per-type
+	// RRsetNotUsed guard so the already-owned sibling genuinely shares the
+	// name while a same-RRset stale row from someone else is still
+	// refused. The residual boundary: a foreign RR of another type
+	// co-resident with the manager's own sibling (e.g. AAAA xpf + MX
+	// third-party at one name) cannot be classified here, so the sibling
+	// signal accepts the cross-family publish.
+	switch {
+	case u.selfOwnedSiblingForward(rr):
 		m.RRsetNotUsed([]dns.RR{rr})
+	default:
+		m.NameNotUsed([]dns.RR{rr})
 	}
 	m.Insert([]dns.RR{rr})
 	resp, err := u.exchange(ctx, m)
