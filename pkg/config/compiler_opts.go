@@ -1698,6 +1698,15 @@ type compileOpts struct {
 	// with one subnet still boots (#1960). The Kea renderer skips the later
 	// pool, so Kea still loads.
 	lenientDHCPPoolSubnets bool
+	// lenientDHCPPoolValues (#14601) downgrades the pool subnet /
+	// address-range / router / dns-server gate
+	// (validateDHCPPoolValuesStrict) to a cfg.Warnings entry on the
+	// tolerant load / peer-sync paths, so a persisted config carrying a
+	// Kea-refused pool value still boots (#1960). The strict commit /
+	// commit-check path hard-rejects it: Kea refuses the whole rendered
+	// file for one bad pool value and stops serving every pool of the
+	// family.
+	lenientDHCPPoolValues bool
 	// lenientWireguardPeers (#1434 multi-peer) downgrades the WireGuard
 	// per-peer gate (validateWireguardPeersStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3485,6 +3494,7 @@ func lenientCompileOpts() compileOpts {
 		lenientGenerateRoutePolicy:             true,
 		lenientDHCPStaticBindings:              true,
 		lenientDHCPPoolSubnets:                 true,
+		lenientDHCPPoolValues:                   true,
 		lenientWireguardPeers:                  true,
 		lenientTunnelOuterFamily:               true,
 		lenientGreDuplicateOuter:               true,

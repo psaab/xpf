@@ -47,6 +47,25 @@ func runUniformGatesDHCPApp(tree *ConfigTree, cfg *Config, opts compileOpts) err
 		}
 	}
 
+	// #14601 pool subnet / address-range / router / dns-server gate. Strict
+	// on commit / commit-check: a subnet without a prefix length or of the
+	// wrong family, a range bound unparseable, wrong-family, outside the
+	// subnet or inverted, a v6 router in a v4 pool, or any wrong-family
+	// dns-server renders verbatim into the Kea file, Kea refuses the whole
+	// file, and every pool of the family stops while the commit reports
+	// success (the #9785 mechanism through four more leaves). The tolerant
+	// load / peer-sync paths warn so a persisted config still boots
+	// (#1960); Kea's own refusal then remains the operator-visible signal
+	// there, exactly as it was before this gate existed.
+	if err := validateDHCPPoolValuesStrict(cfg); err != nil {
+		if opts.lenientDHCPPoolValues {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("DHCP pool value (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #2142 application-definition port/protocol fail-open gate. Strict on
 	// commit / commit-check (hard-reject a `set applications application` whose
 	// destination-port / source-port is malformed or whose protocol is unknown
