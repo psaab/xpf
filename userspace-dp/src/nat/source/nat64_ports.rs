@@ -231,3 +231,47 @@ pub(crate) fn nat64_refuse_if_peer_owns(
     allocator.rollback_flow(flow, tuple, now_ns, holder);
     Err(SourceNatFailureReason::PoolPeerAddressOverlap)
 }
+
+/// #14367: refuse a NAT64 mint whose identity the interface registry owns.
+/// `owners` when Some restricts to shared addresses; otherwise direct query.
+pub(crate) fn nat64_refuse_if_interface_owns(
+    allocator: &PortAllocator,
+    owners: Option<&PoolAddressOwners>,
+    iface_allocs: &InterfaceNatAllocators,
+    flow: SourceNatFlowKey,
+    translated: (Ipv4Addr, u16),
+    now_ns: u64,
+    holder: NatHolder,
+) -> Result<(), SourceNatFailureReason> {
+    let tuple = TranslatedTuple { ip: IpAddr::V4(translated.0), port: translated.1 };
+    let owned = if let Some(o) = owners {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        o.interface_holds(flow, tuple, allocator) || direct_iface_owns(iface_allocs, flow, tuple)
+    } else {
+        direct_iface_owns(iface_allocs, flow, tuple)
+    };
+    if !owned {
+        return Ok(());
+    }
+    allocator.rollback_flow(flow, tuple, now_ns, holder);
+    Err(SourceNatFailureReason::PoolPeerAddressOverlap)
+}
+
+pub(crate) fn direct_iface_owns(iface_allocs: &InterfaceNatAllocators, flow: SourceNatFlowKey, translated: TranslatedTuple) -> bool {
+    match iface_allocs.allocator_if_present(translated.ip) {
+        Some(a) => a.holds_address_only_identity(&super::super::allocator::AddressOnlyReverseKey::for_flow(&flow, translated.ip, translated.port)),
+        None => false,
+    }
+}
+
+/// #14367: does any pool/NAT64 peer own candidate for interface mint?
+/// PAT bitmap remote-agnostic (PAT'd away), address-only remote-specific.
+pub(crate) fn peer_owns_for_interface(owners: Option<&PoolAddressOwners>, own_iface: &PortAllocator, flow: SourceNatFlowKey, translated: TranslatedTuple) -> bool {
+    let Some(o) = owners else { return false; };
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    o.holds_for_interface(flow, translated, own_iface)
+}
+
+pub(crate) fn iface_owns_for_pool(iface_allocs: &InterfaceNatAllocators, flow: SourceNatFlowKey, translated: TranslatedTuple) -> bool {
+    direct_iface_owns(iface_allocs, flow, translated)
+}

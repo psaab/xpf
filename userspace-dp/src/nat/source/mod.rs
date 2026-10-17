@@ -285,6 +285,10 @@ pub(crate) struct SourceNatRule {
     /// every config a strict commit accepts (#5144). The mint-path cost there
     /// is one `Option::is_none`.
     pub(crate) overlap_owners: Option<Arc<PoolAddressOwners>>,
+    /// #14367: combined pool+NAT64+interface index for interface-mode rules.
+    /// Synced at forwarding-build from actual egress addresses + interface
+    /// registry; None when no pool/NAT64 address equals an egress address.
+    pub(crate) iface_overlap_owners: Option<Arc<PoolAddressOwners>>,
 }
 
 /// One source-NAT allocator identity: two rules sharing this key share one

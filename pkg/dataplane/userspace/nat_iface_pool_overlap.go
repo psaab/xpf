@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -183,15 +184,67 @@ func hostOfSnapshotAddress(addr string) string {
 	}
 	return ip.String()
 }
+// poolMemberCandidateHosts returns candidate egress hosts contained in one
+// pool member (#14367). Handles bare host, "host/len", CIDR prefix, and
+// "A-B" range spellings; anything else contributes nothing.
+func poolMemberCandidateHosts(member string, candidates map[string]string) []string {
+	s := strings.TrimSpace(member)
+	if s == "" {
+		return nil
+	}
+	if lo, hi, ok := strings.Cut(s, "-"); ok {
+		loIP, err1 := netip.ParseAddr(strings.TrimSpace(lo))
+		hiIP, err2 := netip.ParseAddr(strings.TrimSpace(hi))
+		if err1 != nil || err2 != nil || loIP.Compare(hiIP) > 0 {
+			return nil
+		}
+		var out []string
+		for host := range candidates {
+			ip, err := netip.ParseAddr(host)
+			if err == nil && ip.Compare(loIP) >= 0 && ip.Compare(hiIP) <= 0 {
+				out = append(out, host)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	if strings.Contains(s, "/") {
+		if pfx, err := netip.ParsePrefix(s); err == nil {
+			var out []string
+			for host := range candidates {
+				ip, err := netip.ParseAddr(host)
+				if err == nil && pfx.Contains(ip) {
+					out = append(out, host)
+				}
+			}
+			sort.Strings(out)
+			return out
+		}
+		if h := hostOfSnapshotAddress(s); h != "" {
+			if _, ok := candidates[h]; ok {
+				return []string{h}
+			}
+		}
+		return nil
+	}
+	if h := hostOfSnapshotAddress(s); h != "" {
+		if _, ok := candidates[h]; ok {
+			return []string{h}
+		}
+	}
+	return nil
+}
+
 
 // detectInterfaceSNATPoolOverlaps reports every (pool address, interface-mode
 // egress address) coincidence in the snapshot.
 //
-// Pool addresses are compared as HOSTS. A pool member expressed as a range or
-// prefix is out of scope for this detector and is skipped rather than
-// approximated — reporting a maybe-overlap as an overlap would make the warning
-// unactionable, and this half exists to give operators a signal they can act on.
-// That limitation is stated in the warning's own text.
+// Pool members are compared PREFIX-AWARE (#14367): a member spelled as a CIDR
+// prefix (e.g. "203.0.113.0/24") contains every egress address in it, and a
+// range member "A-B" contains the interval between them. A bare host is the
+// /32 (or /128) interval. NAT64 pools (snap.NAT64) are iterated the same way
+// and named by their NAT64 rule. Members that parse in neither form
+// contribute nothing.
 func detectInterfaceSNATPoolOverlaps(snap *ConfigSnapshot) []interfaceSNATPoolOverlap {
 	if snap == nil {
 		return nil
@@ -212,30 +265,41 @@ func detectInterfaceSNATPoolOverlaps(snap *ConfigSnapshot) []interfaceSNATPoolOv
 
 	var out []interfaceSNATPoolOverlap
 	seen := make(map[string]struct{})
+	addFindings := func(poolRule string, members []string) {
+		for _, member := range members {
+			for _, host := range poolMemberCandidateHosts(member, candidates) {
+				label, isCandidate := candidates[host]
+				if !isCandidate {
+					continue
+				}
+				_ = label
+				key := host + "\x00" + poolRule
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, interfaceSNATPoolOverlap{
+					Address:       host,
+					Interface:     ifaceNameFor[host],
+					InterfaceRule: ifaceRuleFor[host],
+					PoolRule:      poolRule,
+				})
+			}
+		}
+	}
 	for _, rule := range rules {
 		if rule.InterfaceMode || len(rule.PoolAddresses) == 0 {
 			continue
 		}
-		for _, member := range rule.PoolAddresses {
-			host := hostOfSnapshotAddress(member)
-			if host == "" {
-				continue
-			}
-			if _, isCandidate := candidates[host]; !isCandidate {
-				continue
-			}
-			key := host + "\x00" + rule.Name
-			if _, dup := seen[key]; dup {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, interfaceSNATPoolOverlap{
-				Address:       host,
-				Interface:     ifaceNameFor[host],
-				InterfaceRule: ifaceRuleFor[host],
-				PoolRule:      rule.Name,
-			})
+		addFindings(rule.Name, rule.PoolAddresses)
+	}
+	nat64Rules := append([]NAT64RuleSnapshot(nil), snap.NAT64...)
+	sort.SliceStable(nat64Rules, func(i, j int) bool { return nat64Rules[i].Name < nat64Rules[j].Name })
+	for _, rule := range nat64Rules {
+		if len(rule.PoolAddresses) == 0 {
+			continue
 		}
+		addFindings(rule.Name, rule.PoolAddresses)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Address != out[j].Address {
@@ -296,8 +360,7 @@ func reportInterfaceSNATPoolOverlaps(snap *ConfigSnapshot) {
 			"address", o.Address,
 			"pool_rule", o.PoolRule,
 			"interface_rule", o.InterfaceRule,
-			"issue", "#7717",
-			"note", "pool members expressed as ranges or prefixes are not compared")
+			"issue", "#7717")
 	}
 }
 

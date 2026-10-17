@@ -806,6 +806,11 @@ fn build_fallible_forwarding_state(
     // assigned, and it fast-outs before any work when no prefix contributes a
     // domain.
     crate::nat::wire_nat64_overlap_peers(&mut state.source_nat_rules, &mut state.nat64.prefixes);
+    // #14367: sync interface members into combined index using actual egress.
+    {
+        let egress_addrs: rustc_hash::FxHashSet<std::net::IpAddr> = state.egress.values().flat_map(|e| e.primary_v4.map(std::net::IpAddr::V4).into_iter().chain(e.primary_v6.map(std::net::IpAddr::V6))).collect();
+        crate::nat::sync_interface_overlap_peers(&mut state.source_nat_rules, &mut state.nat64.prefixes, &state.iface_nat_allocators, &egress_addrs);
+    }
     let mut nptv6 = Nptv6State::try_from_snapshots(&snapshot.nptv6_rules)?;
     if let Some(previous) = previous {
         nptv6.retain_counters_from(&previous.nptv6);

@@ -7788,6 +7788,7 @@ fn nat64_7094_rollback_for_worker_frees_only_that_holder() {
             0,
             &[],
             0,
+            None,
         )
         .expect("a fresh flow still allocates");
     assert_ne!(
@@ -7831,6 +7832,7 @@ fn nat64_7094_rollback_is_a_noop_on_the_reverse_entry() {
             0,
             &[],
             0,
+            None,
         )
         .unwrap();
     let key = crate::session::SessionKey {
@@ -7863,6 +7865,7 @@ fn nat64_7094_rollback_is_a_noop_on_the_reverse_entry() {
             0,
             &[],
             0,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -8393,6 +8396,7 @@ fn nat64_alloc_in_domain_9680(state: &Nat64State, now_ns: u64, domain: u32) -> (
             0,
             &[],
             domain,
+            None,
         )
         .expect("NAT64 allocation")
 }
@@ -8535,16 +8539,13 @@ fn nat64_poll_path_passes_the_flow_routing_domain_9680() {
         }
     }
     let args = &src[open + 1..close];
-    let last_arg = args
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with("//"))
-        .last()
-        .unwrap_or("");
-    assert_eq!(
-        last_arg, "flow.forward_key.routing_domain,",
-        "the poll path's NAT64 allocation must key the BIB by the flow's routing domain; \
-         its last argument is {last_arg:?}"
+    assert!(
+        args.contains("flow.forward_key.routing_domain,"),
+        "the poll path's NAT64 allocation must key the BIB by the flow's routing domain"
+    );
+    assert!(
+        args.contains("iface_nat_allocators"),
+        "#14367: poll path must thread the interface registry to the NAT64 mint"
     );
 }
 
