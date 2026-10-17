@@ -33,6 +33,22 @@ func ValidateIPAddress(raw string, _ *Config) error {
 	return nil
 }
 
+// ValidateBGPLocalAddress accepts a BGP `local-address` (update-source) IP
+// literal WITHOUT surrounding whitespace (#14377). The renderer
+// (pkg/frr/protocols_render.go) gates the line on frrOperandOrOmit /
+// FRRSingleToken, which rejects any whitespace-bearing value and silently
+// omits `neighbor ... update-source ...`; the generic ValidateIPAddress
+// trimmed before parsing, so `local-address " 10.0.0.1 "` committed clean
+// and then rendered nothing — the BGP session sources from the wrong
+// address. Refuse padding at commit so the operator fixes the spelling.
+// Migration: remove quotes/padding and use the bare address.
+func ValidateBGPLocalAddress(raw string, _ *Config) error {
+	if raw != strings.TrimSpace(raw) {
+		return fmt.Errorf("invalid local-address %q (leading or trailing whitespace is not allowed; use a bare IP address)", raw)
+	}
+	return ValidateIPAddress(raw, nil)
+}
+
 // ValidateBGPClusterID accepts a BGP route-reflector cluster-id in exactly the
 // two forms FRR/vtysh's `bgp cluster-id <A.B.C.D | (1-4294967295)>` grammar
 // accepts: an IPv4 dotted-quad, or a 32-bit unsigned integer in 1..4294967295.
@@ -56,6 +72,16 @@ func ValidateBGPClusterID(raw string, _ *Config) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a BGP cluster-id: an IPv4 dotted-quad like 10.0.0.1, or an integer 1..4294967295)")
+	}
+	// #14377: validate what is rendered. The renderer gates on
+	// validClusterID (net.ParseIP / ParseUint on the RAW string, no trim),
+	// so a padded value that TrimSpace hides here was committed and then
+	// silently omitted from frr.conf — a route reflector with no cluster-id
+	// falls back to its router-id, defeating RR loop prevention. Padding IS
+	// authorable (quoted strings preserve it verbatim), so refuse it,
+	// mirroring ValidateOSPFArea / #9820. Migration: use the bare value.
+	if trimmed != raw {
+		return fmt.Errorf("invalid cluster-id %q (leading or trailing whitespace is not allowed; use a bare IPv4 dotted-quad or integer)", raw)
 	}
 	// IPv4 dotted-quad form. net.ParseIP rejects a bare integer, so the
 	// integer spelling falls through to the ParseUint arm below.

@@ -16,10 +16,12 @@
 package frr
 
 import (
+	"log/slog"
 	"math"
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 )
 
 // sanitizeFRRValue strips ASCII control characters — the C0 set
@@ -92,6 +94,22 @@ func validClusterID(s string) bool {
 	}
 	v, err := strconv.ParseUint(s, 10, 32)
 	return err == nil && v >= 1
+}
+
+// logOmittedBGPClusterID warns when a non-empty cluster-id is omitted at
+// render (#14377). validClusterID already fails closed on the raw string
+// (ParseIP/ParseUint reject padding, so ` 10.0.0.1 ` and ` 42 ` never
+// render), but the omission was silent: a route reflector fell back to
+// its router-id with no operator-visible signal. Warn like the other
+// render belts (frrOperandOrOmit) so the lenient-load path is observable
+// while staying fail-closed (FRR must not receive the padded token).
+func logOmittedBGPClusterID(clusterID string) {
+	reason := "is not a valid BGP cluster-id"
+	if strings.TrimSpace(clusterID) != clusterID && validClusterID(strings.TrimSpace(clusterID)) {
+		reason = "has leading or trailing whitespace; remove the padding (quoted values are preserved verbatim)"
+	}
+	slog.Warn("frr: omitting bgp cluster-id (#14377)",
+		"value", sanitizeFRRValue(clusterID), "reason", reason)
 }
 
 // validFRRRoutePrefix reports whether a static / generate-route destination is
