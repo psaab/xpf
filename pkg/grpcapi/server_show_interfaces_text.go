@@ -71,7 +71,17 @@ func (s *Server) showInterfacesExtensive(cfg *config.Config, filter string, buf 
 				continue
 			}
 			for _, ifName := range z.Interfaces {
-				ifZoneMap[ifName] = z.Name
+				// #14364: a zone binds a LOGICAL member ("ge-0/0/1.0",
+				// "eth0.0"), but the walk below queries the BARE kernel
+				// name (attrs.Name) — keying by the raw member missed
+				// every unit-qualified binding. The physical row stands
+				// for the base interface, so only a unit-0 (or bare)
+				// binding is attributed to it; a non-zero unit's zone
+				// belongs to that logical unit, not this row (the CLI
+				// twins key by baseIfName, #5325).
+				if base, ok := physicalRowZoneKey(cfg, ifName); ok {
+					ifZoneMap[base] = z.Name
+				}
 			}
 		}
 	}
@@ -203,7 +213,12 @@ func (s *Server) showInterfacesDetail(cfg *config.Config, filter string, buf *st
 				continue
 			}
 			for _, ifName := range z.Interfaces {
-				ifZoneMap[ifName] = z.Name
+				// #14364: see showInterfacesExtensive — only a unit-0
+				// (or bare) binding is attributed to the physical row
+				// the bare kernel-name query below renders.
+				if base, ok := physicalRowZoneKey(cfg, ifName); ok {
+					ifZoneMap[base] = z.Name
+				}
 			}
 		}
 		// #5913: skip present-but-nil InterfaceConfig slots via the shared
@@ -436,13 +451,28 @@ func (s *Server) showVLANs(cfg *config.Config, buf *strings.Builder) {
 	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		buf.WriteString("No VLANs configured\n")
 	} else {
-		ifZone := make(map[string]string)
+		// #14364 (the gRPC twin of the #5325 CLI fix): a zone binds a
+		// LOGICAL member such as "ge-0/0/9.50", but the entry loop below
+		// keys rows by BASE name + unit number. Keying by the raw member
+		// and querying with the bare base name missed every
+		// unit-qualified binding. Build the SAME canonical "base.unit"
+		// keys the query uses, plus a base-only map for unqualified
+		// bindings (which govern every unit).
+		ifZone := make(map[string]string)     // "base.unit" -> zone
+		ifZoneBase := make(map[string]string) // "base" -> zone (all units)
 		for zoneName, zone := range cfg.Security.Zones {
 			if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
 				continue
 			}
 			for _, iface := range zone.Interfaces {
-				ifZone[iface] = zoneName
+				s := cfg.SplitInterfaceUnitRef(iface)
+				if s.HasUnit {
+					if u, _, err := config.CanonicalLogicalUnit(s.UnitTok); err == nil {
+						ifZone[fmt.Sprintf("%s.%d", s.Base, u)] = zoneName
+						continue
+					}
+				}
+				ifZoneBase[s.Base] = zoneName
 			}
 		}
 		type vlanEntry struct {
@@ -461,11 +491,18 @@ func (s *Server) showVLANs(cfg *config.Config, buf *strings.Builder) {
 		config.RangeInterfaces(cfg, func(_ string, ifc *config.InterfaceConfig) {
 			config.RangeUnits(ifc, func(unitNum int, unit *config.InterfaceUnit) {
 				if unit.VlanID > 0 || ifc.VlanTagging {
+					// #14364: query with the SAME canonical "base.unit"
+					// key used when building ifZone; fall back to a
+					// base-only binding (which governs every unit).
+					zone := ifZone[fmt.Sprintf("%s.%d", ifc.Name, unitNum)]
+					if zone == "" {
+						zone = ifZoneBase[ifc.Name]
+					}
 					entries = append(entries, vlanEntry{
 						iface:  ifc.Name,
 						unit:   unitNum,
 						vlanID: unit.VlanID,
-						zone:   ifZone[ifc.Name],
+						zone:   zone,
 						trunk:  ifc.VlanTagging,
 					})
 				}
@@ -498,6 +535,31 @@ func (s *Server) showVLANs(cfg *config.Config, buf *strings.Builder) {
 			}
 		}
 	}
+}
+
+// physicalRowZoneKey returns the bare base name under which a zone member
+// is attributed to a physical-interface row in showInterfacesExtensive /
+// showInterfacesDetail (#14364). Those views render ONE zone line per
+// physical (kernel) interface, queried by the bare kernel name, so a
+// member resolves only when it names the base itself or its unit 0
+// ("ge-0/0/1.0" / "eth0.0" govern the physical interface's default unit).
+// A non-zero unit member ("ge-0/0/9.50") is NOT attributed to the
+// physical row — that zone belongs to the logical unit (rendered per-unit
+// by showVLANs) and claiming it here would misattribute a VLAN unit.
+// Malformed suffixes (rejected at commit by the strict #5933 gate) never
+// resolve. Splitting routes through the shared declared-name-aware
+// SplitInterfaceUnitRef (#9821) and CanonicalLogicalUnit (#5878), so
+// spellings like ".00" fold to unit 0 exactly as the binders do.
+func physicalRowZoneKey(cfg *config.Config, member string) (string, bool) {
+	s := cfg.SplitInterfaceUnitRef(member)
+	if !s.HasUnit {
+		return s.Base, true
+	}
+	u, _, err := config.CanonicalLogicalUnit(s.UnitTok)
+	if err != nil || u != 0 {
+		return "", false
+	}
+	return s.Base, true
 }
 
 func (s *Server) showIPv6RouterAdvertisement(cfg *config.Config, buf *strings.Builder) {
