@@ -706,13 +706,10 @@ func (c *CLI) showIPv6RouterAdvertisement() error {
 	for _, ra := range cfg.Protocols.RouterAdvertisement {
 		fmt.Printf("Interface: %s\n", ra.Interface)
 
-		// #4119: an explicit default-lifetime 0 ("not a default router", RFC
-		// 4861 §6.2.1) is shown as 0; only an unset leaf shows the 1800
-		// default.
-		lifetime := 1800
-		if ra.DefaultLifetimeSet {
-			lifetime = ra.DefaultLifetime
-		}
+		// #4119/#14605: an explicit default-lifetime 0 ("not a default
+		// router", RFC 4861 §6.2.1) is shown as 0; an unset leaf shows the
+		// derived min(3*effective max, 9000) default (1800s at max 600s).
+		lifetime := ra.EffectiveRouterLifetime()
 		fmt.Printf("  Router lifetime:    %ds\n", lifetime)
 
 		pref := ra.Preference

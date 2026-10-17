@@ -332,6 +332,15 @@ const (
 	// not the minimum. It must re-apply THIS constant rather than a copied
 	// 65535, so the gate and the sender cannot disagree about the ceiling.
 	RARouterMaxLifetimeSeconds = 65535
+	// RFC 4861 §6.2.1: AdvDefaultLifetime MUST be either zero or between
+	// MaxRtrAdvInterval and 9000 seconds. The 16-bit wire ceiling above
+	// (65535) is looser than the RFC's 9000s configuration ceiling; the
+	// strict cross-field gate (crossCheckRAIntervals) enforces 9000
+	// against the effective max-advertisement-interval.
+	RADefaultLifetimeMaxSeconds = 9000
+	// RADefaultMaxAdvIntervalSeconds is the effective MaxRtrAdvInterval
+	// when max-advertisement-interval is unset (RFC 4861 §6.2.1 default).
+	RADefaultMaxAdvIntervalSeconds = 600
 	// RFC 4861 §4.6.2: the Prefix Information valid/preferred lifetimes are
 	// 32-bit seconds fields (0xffffffff = infinity). A larger value silently
 	// truncates in ndp's uint32(lifetime); bound at the 32-bit maximum.

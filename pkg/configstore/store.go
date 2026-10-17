@@ -778,46 +778,61 @@ func crossCheckNodeID(compiled *config.Config, nodeID int) error {
 	return nil
 }
 
-// crossCheckRAIntervals enforces the one RFC 4861 §6.2.1 constraint the
-// per-leaf schema validators cannot express: when a router-advertisement
-// interface configures BOTH min- and max-advertisement-interval,
-// MinRtrAdvInterval MUST be <= 0.75 * MaxRtrAdvInterval (#4525). The
-// per-leaf gate (schema_routing.go) already bounds each leaf on its own —
-// max in [4,1800], min in [3,1350] per RFC 4861 §6.2.1 — but only the
-// compiled view sees both siblings together, so the ratio check lives here
-// (mirroring crossCheckNodeID's strict-only placement). An inverted or
-// over-narrowed window (min > 0.75*max) is the config that motivated #4525:
-// max-advertisement-interval 1|2 let the sender draw a 0-second periodic
-// delay and hot-loop; even within the new per-leaf floors an operator could
-// still author min close to max, which RFC 4861 forbids because it defeats the
-// desynchronizing jitter.
+// crossCheckRAIntervals enforces the RFC 4861 §6.2.1 constraints the
+// per-leaf schema validators cannot express (#4525, #14605):
 //
-// Absent leaves (value 0 = "use default") never cross-check: a lone max or a
-// lone min is completed by the RA sender's own derivation (pkg/ra
-// randomAdvInterval), which is safe. Only an explicit min > 0.75*max pairing
-// is rejected.
+//   - When BOTH min- and max-advertisement-interval are configured,
+//     MinRtrAdvInterval MUST be <= 0.75 * MaxRtrAdvInterval.
+//   - AdvDefaultLifetime MUST be either zero or between the effective
+//     MaxRtrAdvInterval and 9000 seconds. The effective max is the
+//     configured max-advertisement-interval, or 600s when unset, so an
+//     explicit default-lifetime is checked even with no max leaf. An
+//     unset default-lifetime needs no check: the sender derives
+//     min(3*effective max, 9000), which is always in range.
+//
+// The per-leaf gate (schema_routing.go) already bounds each leaf on its
+// own — max in [4,1800], min in [3,1350], default-lifetime in
+// [0,65535] per the 16-bit wire field — but only the compiled view sees
+// the siblings (and the unset-max default) together, so the cross-field
+// checks live here (mirroring crossCheckNodeID's strict-only placement).
+// An inverted or over-narrowed min/max window defeats the
+// desynchronizing jitter; a positive default-lifetime below the max
+// interval lets hosts' default routes (and inherited RDNSS/PREF64
+// lifetimes) expire between RAs.
 //
 // Strict on the operator commit / commit-check path (compileTreeStrict);
 // downgraded to a warning on the tolerant Store.Load / Store.SyncApply
 // ingress (compileTreeLenient) so a legacy or peer-synced config cannot
-// blackout-boot the node or alarm-loop HA config sync (#1960 doctrine). The
-// runtime floor in pkg/ra randomAdvInterval is the belt for anything that
-// reaches the sender through the lenient path.
+// blackout-boot the node or alarm-loop HA config sync (#1960 doctrine).
+// The runtime derivations in pkg/ra (randomAdvInterval floor, derived
+// unset lifetime, inherited-option floor) are the belt for anything
+// that reaches the sender through the lenient path.
 func crossCheckRAIntervals(compiled *config.Config) error {
 	if compiled == nil {
 		return nil
 	}
 	for _, ra := range compiled.Protocols.RouterAdvertisement {
-		if ra == nil || ra.MinAdvInterval <= 0 || ra.MaxAdvInterval <= 0 {
+		if ra == nil {
 			continue
 		}
-		// Integer form of min <= 0.75 * max (avoids float rounding):
-		// min*4 <= max*3.
-		if ra.MinAdvInterval*4 > ra.MaxAdvInterval*3 {
-			return fmt.Errorf("router-advertisement interface %q: min-advertisement-interval "+
-				"%d must be <= 0.75 * max-advertisement-interval %d per RFC 4861 §6.2.1 — "+
-				"lower min-advertisement-interval or raise max-advertisement-interval",
-				ra.Interface, ra.MinAdvInterval, ra.MaxAdvInterval)
+		if ra.MinAdvInterval > 0 && ra.MaxAdvInterval > 0 {
+			// Integer form of min <= 0.75 * max (avoids float rounding):
+			// min*4 <= max*3.
+			if ra.MinAdvInterval*4 > ra.MaxAdvInterval*3 {
+				return fmt.Errorf("router-advertisement interface %q: min-advertisement-interval "+
+					"%d must be <= 0.75 * max-advertisement-interval %d per RFC 4861 §6.2.1 — "+
+					"lower min-advertisement-interval or raise max-advertisement-interval",
+					ra.Interface, ra.MinAdvInterval, ra.MaxAdvInterval)
+			}
+		}
+		if ra.DefaultLifetimeSet && ra.DefaultLifetime != 0 {
+			effectiveMax := ra.EffectiveMaxAdvInterval()
+			if ra.DefaultLifetime < effectiveMax || ra.DefaultLifetime > config.RADefaultLifetimeMaxSeconds {
+				return fmt.Errorf("router-advertisement interface %q: default-lifetime "+
+					"%d must be 0 or between max-advertisement-interval %d and %d per RFC 4861 §6.2.1 — "+
+					"raise default-lifetime, lower max-advertisement-interval, or set default-lifetime 0 if this router is not a default router",
+					ra.Interface, ra.DefaultLifetime, effectiveMax, config.RADefaultLifetimeMaxSeconds)
+			}
 		}
 	}
 	return nil

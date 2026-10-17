@@ -485,8 +485,11 @@ never retried and the stale IPv6 default-router identity lingered on hosts
     RDNSS lifetime use that same value. Inherited PREF64 uses it too, but its
     narrower RFC 8781 field tops out at 65528 seconds; values above that
     saturate to 65528 with one warning per sender instead of pruning the option.
-    If the router lifetime is 0, inherited RDNSS/PREF64 fall back to 1800 seconds
-    (with PREF64 still subject to its 65528-second cap).
+    An unset Router Lifetime derives as min(3*effective MaxRtrAdvInterval,
+    9000) per RFC 4861 §6.2.1 (#14605; 1800s at the default max 600s), and
+    inherited RDNSS/PREF64 are floored at that derived default (RFC 8106
+    §5.1) — so Router Lifetime 0 and short tolerant-ingress lifetimes still
+    advertise DNS/NAT64 for 3*max instead of expiring between RAs.
   - **Explicit PREF64 lifetimes above 65528 are dropped at the send sink
     (`buildRA`, `sender.go`, #12536):** an explicit `nat-prefix`/`nat64prefix
     lifetime` is checked against the RFC 8781 maximum in integer seconds,
