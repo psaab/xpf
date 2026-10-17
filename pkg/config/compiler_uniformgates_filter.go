@@ -36,6 +36,21 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 		}
 	}
 
+	// #14633 inet6 next-header extension-header gate. Strict on commit:
+	// an inet6 term whose protocol value is an extension-header type
+	// (0/43/44/51/60/135/139/140/253/254) can never match — the Rust walk
+	// and the nft l4proto mirror both resolve the chain to its terminal
+	// protocol. Lenient on load / peer-sync (#1960); the Rust snapshot
+	// backstop fails that snapshot closed.
+	if err := validateFilterNextHeaderExtStrict(cfg); err != nil {
+		if opts.lenientFilterNextHeaderExt {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("firewall filter next-header (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #3723 firewall-filter cross-field satisfiability gate. Strict on commit /
 	// commit-check (hard-reject a term whose `from` block combines a port with a
 	// non-port protocol, tcp-flags with a non-TCP protocol, or icmp-type/code with

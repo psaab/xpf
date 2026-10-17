@@ -1059,6 +1059,12 @@ type compileOpts struct {
 	// constraint, never silently "protocol 0"). Same doctrine as
 	// lenientApplicationSpecs.
 	lenientFilterProtocols bool
+	// lenientFilterNextHeaderExt (#14633) downgrades the inet6 next-header
+	// extension-header gate (validateFilterNextHeaderExtStrict) to a warning
+	// on tolerant load / peer-sync so a persisted config carrying a dead
+	// extension-header term still boots (#1960); the Rust snapshot backstop
+	// fails that snapshot closed instead of silently forwarding.
+	lenientFilterNextHeaderExt bool
 	// lenientFilterCrossField (#3723) downgrades the firewall-filter cross-field
 	// satisfiability gate (validateFilterCrossFieldStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3379,6 +3385,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingInstanceChildTokens:      true,
 		lenientFirewallFilterFamilyAnyMatches:  true,
 		lenientFilterProtocols:                 true,
+		lenientFilterNextHeaderExt:             true,
 		lenientFilterCrossField:                true,
 		lenientFilterActions:                   true,
 		lenientFilterMatchValues:               true,

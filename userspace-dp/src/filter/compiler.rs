@@ -1132,6 +1132,24 @@ fn check_cross_field_satisfiability(
     if protocols.is_empty() {
         return Ok(());
     }
+    // #14633: an inet6 term carrying an extension-header protocol value
+    // (0/43/44/51/60/135/139/140/253/254 — the walk-traversed set) can
+    // never match: the extension-header walk resolves the chain to its
+    // terminal protocol before matching. The Go strict gate rejects it
+    // at commit; a leniently-loaded snapshot fails closed here.
+    if filter_family == "inet6" {
+        if let Some(&proto) = protocols.iter().find(|&&p| {
+            matches!(p, 0 | 43 | 44 | 51 | 60 | 135 | 139 | 140 | 253 | 254)
+        }) {
+            return Err(SnapshotIntegrityError::UnsatisfiableFilterCrossField {
+                family: filter_family.to_string(),
+                filter: filter_name.to_string(),
+                term: snap.name.clone(),
+                predicate: "next-header-extension",
+                protocol: proto,
+            });
+        }
+    }
     if ports_present {
         if let Some(&proto) = protocols
             .iter()
