@@ -200,12 +200,15 @@ func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsCon
 	return formatRedistEntries(m.redistributeEntries(export, po, self, metrics...))
 }
 
-func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, entries []redistEntry) {
+func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, entries []redistEntry, resolvedAsPolicy ...bool) {
 	if metrics == nil {
 		return
 	}
 	routeMap := ""
-	if export == "static" && knownRedistProtocol(export) {
+	// #14369: a defined policy-statement named `static` resolves through
+	// the policy branch, so its static entries take the policy QNH map;
+	// the bare-protocol staticMap applies only to the bare-token reading.
+	if export == "static" && knownRedistProtocol(export) && !(len(resolvedAsPolicy) > 0 && resolvedAsPolicy[0]) {
 		routeMap = metrics.staticMap
 	} else {
 		routeMap = metrics.policyMaps[export]
@@ -296,7 +299,7 @@ func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
 func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsConfig, self string, metrics ...*qnhMetricScope11447) []redistEntry {
 	entries := m.redistributeEntriesAt(export, po, self, self)
 	if len(metrics) > 0 {
-		applyQNHMetricRouteMap11447(export, metrics[0], entries)
+		applyQNHMetricRouteMap11447(export, metrics[0], entries, isDefinedPolicyStatement(export, po))
 	}
 	return entries
 }
@@ -331,49 +334,12 @@ func indentFRRLines(s, prefix string) string {
 // from the router identity: self decides the self-redistribute drop, node
 // selects the redistribute grammar a source must fit (#9667, #9510).
 func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
-	// Junos spells directly-connected routes "direct"; FRR's redistribute
-	// keyword is "connected". A bare `export direct` must render
-	// `redistribute connected`, not the FRR-invalid `redistribute direct`
-	// (which fails the reload). This mirrors the policy-term FromProtocols
-	// normalization below and in generatePolicyOptions. The commit-time
-	// gate (validateRoutingExportReferencesStrict, pkg/config) accepts
-	// "direct" as a known token, so this keeps render and validation in
-	// agreement (#2144).
-	if export == "direct" {
-		export = "connected"
-	}
-	if knownRedistProtocol(export) {
-		// A protocol can never redistribute itself: FRR rejects
-		// `redistribute ospf` under `router ospf` (etc.), and ONE
-		// rejected line degrades the WHOLE managed reload (#1880/#2223).
-		// Drop the self-redistribute rather than poison the section
-		// (#2943). self is "" for callers with no enclosing protocol.
-		if self != "" && export == self {
-			slog.Warn("FRR redistribute export skipped: protocol cannot redistribute itself",
-				"protocol", self)
-			return nil
-		}
-		// #9510: the source must also be in a family the enclosing router's
-		// redistribute grammar lists (redistribute_afi_9510.go).
-		if !redistSourceFitsNode(export, node) {
-			slog.Warn("FRR redistribute export skipped: source protocol is not in this router's address family",
-				"protocol", self, "source", export)
-			return nil
-		}
-		// #8597 (muse-004 K87): sanitized for PARITY, not because this site is
-		// reachable with a dirty operand.
-		//
-		// This branch is gated by knownRedistProtocol above — an ALLOWLIST,
-		// which is the stronger belt — so a control byte can never arrive here.
-		// Measured: knownRedistProtocol("static\n x") is false. The belt is
-		// here so the file has no unbelted `redistribute %s` interpolation for
-		// a future audit to have to reason about, and so a future change that
-		// widens the allowlist does not silently open the hole.
-		//
-		// The two-operand site below is the one that WAS reachable.
-		return []redistEntry{{proto: export}}
-	}
-
+	// #14369: a DEFINED policy-statement wins over the bare-protocol
+	// reading (the Junos reading, and the BGP renderer's reading in
+	// protocols_render.go). Look up the RAW export name, before the
+	// direct->connected normalization below, so a policy literally
+	// named `direct` (or any protocol keyword) is honored as a policy;
+	// the bare-token reading applies only when no such policy exists.
 	if po != nil && po.PolicyStatements != nil {
 		if ps, ok := po.PolicyStatements[export]; ok {
 			protocols := make(map[string]bool)
@@ -437,6 +403,49 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 				"hint", "redistribute requires a source protocol; add `from protocol <proto>` to the policy or use a bare protocol token")
 			return nil
 		}
+	}
+
+	// Junos spells directly-connected routes "direct"; FRR's redistribute
+	// keyword is "connected". A bare `export direct` must render
+	// `redistribute connected`, not the FRR-invalid `redistribute direct`
+	// (which fails the reload). This mirrors the policy-term FromProtocols
+	// normalization below and in generatePolicyOptions. The commit-time
+	// gate (validateRoutingExportReferencesStrict, pkg/config) accepts
+	// "direct" as a known token, so this keeps render and validation in
+	// agreement (#2144).
+	if export == "direct" {
+		export = "connected"
+	}
+	if knownRedistProtocol(export) {
+		// A protocol can never redistribute itself: FRR rejects
+		// `redistribute ospf` under `router ospf` (etc.), and ONE
+		// rejected line degrades the WHOLE managed reload (#1880/#2223).
+		// Drop the self-redistribute rather than poison the section
+		// (#2943). self is "" for callers with no enclosing protocol.
+		if self != "" && export == self {
+			slog.Warn("FRR redistribute export skipped: protocol cannot redistribute itself",
+				"protocol", self)
+			return nil
+		}
+		// #9510: the source must also be in a family the enclosing router's
+		// redistribute grammar lists (redistribute_afi_9510.go).
+		if !redistSourceFitsNode(export, node) {
+			slog.Warn("FRR redistribute export skipped: source protocol is not in this router's address family",
+				"protocol", self, "source", export)
+			return nil
+		}
+		// #8597 (muse-004 K87): sanitized for PARITY, not because this site is
+		// reachable with a dirty operand.
+		//
+		// This branch is gated by knownRedistProtocol above — an ALLOWLIST,
+		// which is the stronger belt — so a control byte can never arrive here.
+		// Measured: knownRedistProtocol("static\n x") is false. The belt is
+		// here so the file has no unbelted `redistribute %s` interpolation for
+		// a future audit to have to reason about, and so a future change that
+		// widens the allowlist does not silently open the hole.
+		//
+		// The two-operand site below is the one that WAS reachable.
+		return []redistEntry{{proto: export}}
 	}
 
 	// Unknown token: neither a known protocol nor a defined policy-statement
