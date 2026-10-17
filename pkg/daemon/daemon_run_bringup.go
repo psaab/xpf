@@ -246,6 +246,12 @@ func (d *Daemon) initManagers(failClosed bool) error {
 
 	// Create VRRP manager eagerly — must exist before applyConfig runs.
 	d.vrrpMgr = vrrp.NewManager()
+	// #14404: mirror the cluster kernel-upgrade hold (armed above, before
+	// the first election) onto the VRRP manager and RG state machines
+	// before any instance is built — a held candidate's RETH instances
+	// must carry priority 0 and refuse MASTER from the first master-down
+	// horizon (~3s), not just after the first 2s reconcile.
+	d.syncRGKernelUpgradeHold()
 	// Wire event-drop callback: on dropped VRRP events, trigger
 	// immediate reconciliation.
 	d.vrrpMgr.SetOnEventDrop(d.triggerReconcile)

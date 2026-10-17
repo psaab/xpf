@@ -90,6 +90,19 @@ func (vi *vrrpInstance) vipFamilies() (hasIPv4, hasIPv6 bool) {
 // Returns true iff ownership was claimed (VIP set actuated and advert/event
 // published).
 func (vi *vrrpInstance) becomeMaster() bool {
+	// #14404: refuse MASTER while the kernel-upgrade hold is armed (RETH
+	// only; kernelUpgradeHeld gates on Family). A held candidate must not
+	// forward on an unverified kernel even with zero peer adverts — the
+	// dead-master timer expiry that reaches here is not preemption, so the
+	// sync-hold preempt suppression cannot stop it. Before setState/addVIPs
+	// so there is nothing to roll back; callers re-arm the master-down
+	// timer (rearmForRetry), so promotion retries on the next horizon once
+	// the hold clears.
+	if vi.kernelUpgradeHeld() {
+		slog.Info("vrrp: refusing MASTER while kernel-upgrade hold is armed (#14404)",
+			"key", vi.key())
+		return false
+	}
 	// #6779: refuse ownership we cannot advertise — #5082's "do not claim what
 	// you cannot back" applied to the advert. Before setState/addVIPs so there
 	// is nothing to roll back. Rationale + log-rate note: advert_capacity.go.

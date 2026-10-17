@@ -412,12 +412,23 @@ func (m *Manager) IsLocalPrimaryAny() bool {
 
 // LocalPriorities returns a map of redundancy group ID to VRRP priority.
 // Primary RGs get priority 200, all others get 100.
+//
+// #14404: while the kernel-upgrade election hold is armed every RG reports
+// priority 0. Cluster election already holds the node secondary, but RETH
+// VRRP is a parallel promotion path: a held secondary advertising 100 can
+// dead-master-promote (zero peer adverts) and forward on an unverified
+// kernel. Priority 0 is the suppressed value for this purpose;
+// CollectRethInstances preserves an explicit held 0 instead of defaulting
+// it to 100, and the VRRP manager refuses MASTER while held (defense in
+// depth), so 0 here does not fabricate a resign advert from a BACKUP.
 func (m *Manager) LocalPriorities() map[int]int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	result := make(map[int]int, len(m.groups))
 	for _, rg := range m.groups {
-		if rg.State == StatePrimary {
+		if m.kernelUpgradeHold {
+			result[rg.GroupID] = 0
+		} else if rg.State == StatePrimary {
 			result[rg.GroupID] = 200
 		} else {
 			result[rg.GroupID] = 100

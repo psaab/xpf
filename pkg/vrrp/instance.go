@@ -98,6 +98,10 @@ type vrrpInstance struct {
 	cfg              Instance
 	desiredPreempt   bool // configured preempt value (may differ from cfg.Preempt during sync hold)
 	forcePreemptOnce bool // one-shot preempt override from ForceRGMaster (auto-cleared after use)
+	// kernelUpgradeHold (#14404): atomic mirror of Manager.kernelUpgradeHold
+	// for RETH instances; becomeMaster refuses while set. Atomic so the
+	// run-loop reads it without vi.mu (becomeMaster already takes vipMu).
+	kernelUpgradeHold atomic.Bool
 	// skipNextPreemptHold makes the next masterDownTimer expiry promote
 	// immediately, bypassing the preempt hold-time (#2850). Set when the
 	// master resigns (priority-0) so a graceful, planned failover is never
@@ -420,8 +424,22 @@ func (vi *vrrpInstance) key() string {
 // reth-advertise-interval or gratuitous-arp-count left the running instance at
 // its stale value until an unrelated restart.
 func (vi *vrrpInstance) updateConfig(cfg Instance) {
+	vi.updateConfigHeld(cfg, false)
+}
+
+// updateConfigHeld is updateConfig with the #14404 held-RETH exception:
+// a held RETH instance's priority 0 is preserved (not clamped to 1), because
+// 0 is the hold suppression value from LocalPriorities, not a config error.
+// The atomic kernelUpgradeHold flag on the instance is the promotion gate;
+// priority 0 is belt-and-suspenders so the instance does not out-advertise
+// a live peer while held.
+func (vi *vrrpInstance) updateConfigHeld(cfg Instance, heldRETH bool) {
 	vi.mu.Lock()
-	vi.cfg.Priority = clampConfigPriority(cfg.Priority)
+	if heldRETH && cfg.Priority == 0 {
+		vi.cfg.Priority = 0
+	} else {
+		vi.cfg.Priority = clampConfigPriority(cfg.Priority)
+	}
 	vi.cfg.Preempt = cfg.Preempt
 	vi.cfg.PreemptHoldTime = cfg.PreemptHoldTime
 	vi.cfg.AdvertiseInterval = cfg.AdvertiseInterval
@@ -438,6 +456,25 @@ func (vi *vrrpInstance) updateConfig(cfg Instance) {
 	case vi.configUpdatedCh <- struct{}{}:
 	default:
 	}
+}
+
+// setKernelUpgradeHold records the #14404 kernel-upgrade promotion hold on
+// this instance (atomic; read by becomeMaster without vi.mu).
+func (vi *vrrpInstance) setKernelUpgradeHold(held bool) {
+	vi.kernelUpgradeHold.Store(held)
+}
+
+// kernelUpgradeHeld reports the #14404 hold for this instance. Only RETH
+// instances (Family == "") are gated; standalone instances are never held
+// by the daemon (it only arms the hold on RETH instances via the manager,
+// which seeds it on every instance — so gate on RETH identity here too).
+func (vi *vrrpInstance) kernelUpgradeHeld() bool {
+	if !vi.kernelUpgradeHold.Load() {
+		return false
+	}
+	vi.mu.RLock()
+	defer vi.mu.RUnlock()
+	return vi.cfg.Family == ""
 }
 
 // stepBackup runs one iteration of the StateBackup select. It is called by the

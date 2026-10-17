@@ -125,7 +125,13 @@ type Manager struct {
 	syncHold       bool        // suppress preemption until session sync completes
 	syncHoldTimer  *time.Timer // safety timeout to release hold
 	syncHoldReason string      // "bulk-sync-complete" or "timeout-degraded"
-	onEventDrop    func()      // called when an event is dropped (full channel)
+	// kernelUpgradeHold (#14404): while set, RETH instances must not become
+	// MASTER. Mirrors cluster.Manager's kernel-upgrade election hold; the
+	// daemon sets/clears it in lockstep with the cluster hold. Distinct from
+	// syncHold: syncHold only suppresses PREEMPTION, dead-master takeover is
+	// ungated by it — this hold gates becomeMaster itself.
+	kernelUpgradeHold bool
+	onEventDrop       func() // called when an event is dropped (full channel)
 
 	// Interface tracking (#1814): ONE singleton link-watcher goroutine
 	// feeds trackDown into instances whose cfg.TrackInterface matches.
@@ -426,6 +432,29 @@ func (m *Manager) SyncHoldReason() string {
 	return m.syncHoldReason
 }
 
+// SetKernelUpgradeHold arms/clears the kernel-upgrade promotion hold
+// (#14404). While armed, RETH instances refuse becomeMaster (see
+// instance_transition.go) and ForceRGMaster is a no-op. The daemon drives
+// this from the cluster hold: set at VRRP bringup when the cluster hold is
+// armed, cleared when reconcileKernelUpgradeHold releases the cluster hold
+// (and on fail-closed self-heal releases). Idempotent; clearing does not
+// force promotion — the next master-down horizon promotes normally.
+func (m *Manager) SetKernelUpgradeHold(held bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.kernelUpgradeHold = held
+	for _, vi := range m.instances {
+		vi.setKernelUpgradeHold(held)
+	}
+}
+
+// KernelUpgradeHeld reports whether the kernel-upgrade promotion hold is set.
+func (m *Manager) KernelUpgradeHeld() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.kernelUpgradeHold
+}
+
 // Events returns the event channel for state change notifications.
 func (m *Manager) Events() <-chan VRRPEvent {
 	return m.eventCh
@@ -667,7 +696,8 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 				if m.syncHold {
 					instCfg.Preempt = false
 				}
-				existing.updateConfig(instCfg)
+				existing.setKernelUpgradeHold(m.kernelUpgradeHold)
+				existing.updateConfigHeld(instCfg, m.kernelUpgradeHold && isRethInstance(instCfg))
 				if m.syncHold {
 					existing.setDesiredPreempt(inst.Preempt)
 				}
@@ -726,6 +756,11 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 		if m.syncHold {
 			instCfg.Preempt = false
 		}
+		// #14404: a held RETH instance carries priority 0 from
+		// LocalPriorities/CollectRethInstances. Preserve it instead of
+		// clamping 0 up to 1 (the #8597 config clamp); the manager hold
+		// flag seeded below is the authority, 0 is its wire suppression.
+		heldRETH := m.kernelUpgradeHold && isRethInstance(instCfg)
 		// #8597: bound the CONFIGURED priority here, at the config->instance
 		// boundary, rather than inside newInstance. newInstance is also the
 		// constructor tests use to model states the runtime reaches by
@@ -734,8 +769,13 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 		// to express a state production genuinely holds. See
 		// clampConfigPriority (instance.go) for why an unbounded config
 		// priority is a resignation beacon rather than a wrong number.
-		instCfg.Priority = clampConfigPriority(instCfg.Priority)
+		if heldRETH && instCfg.Priority == 0 {
+			// preserve held 0
+		} else {
+			instCfg.Priority = clampConfigPriority(instCfg.Priority)
+		}
 		vi := newInstance(instCfg, iface, m.eventCh, m.onEventDrop)
+		vi.setKernelUpgradeHold(m.kernelUpgradeHold)
 		// Store the real configured preempt value for when sync hold releases.
 		vi.desiredPreempt = inst.Preempt
 
@@ -857,6 +897,12 @@ func (m *Manager) ResignRG(rgID int) *ResignBarrier {
 func (m *Manager) UpdateRGPriority(rgID int, priority int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// #14404: while held, do not restore priority 200 — that would undo
+	// the priority-0 suppression and re-arm the held candidate's election
+	// (posture NeedsMaster path calls this with 200).
+	if m.kernelUpgradeHold {
+		return
+	}
 	vrid, validVRID := rethVRID(rgID)
 	if !validVRID {
 		slog.Warn("vrrp: refusing priority update for out-of-range VRID",
@@ -887,6 +933,14 @@ func (m *Manager) UpdateRGPriority(rgID int, priority int) {
 func (m *Manager) ForceRGMaster(rgID int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	// #14404: cluster-authoritative force must not override the
+	// kernel-upgrade hold — a held candidate must not be forced MASTER on
+	// an unverified kernel. (becomeMaster also refuses, defense in depth.)
+	if m.kernelUpgradeHold {
+		slog.Info("vrrp: refusing forced MASTER while kernel-upgrade hold is armed (#14404)",
+			"rg_id", rgID)
+		return
+	}
 	vrid, validVRID := rethVRID(rgID)
 	if !validVRID {
 		slog.Warn("vrrp: refusing MASTER force for out-of-range VRID",
