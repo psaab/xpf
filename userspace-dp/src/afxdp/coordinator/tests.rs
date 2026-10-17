@@ -11768,7 +11768,7 @@ fn wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594() {
         maps.ingress.insert(lo);
         maps.ingress_domains.insert(lo, 0);
         if local {
-            maps.local.insert((0, inner_dst));
+            maps.insert_local(0, inner_dst);
         }
         seam.push(("wgt9594s".to_string(), maps));
     };

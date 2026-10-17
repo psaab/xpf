@@ -75,6 +75,11 @@ pub(in crate::afxdp) use wg_control::tun_origin::{
     build_wg_tun_origin_entries, parse_wg_tun_origin_flow, publish_wg_tun_origin_entries,
     sweep_wg_tun_origin_idle, wg_tun_origin_packet_initiates,
 };
+// #14323: re-exported (test-only, the tun_origin precedent) so the
+// frame-side parity cell can run the production WG kernel-path key
+// against the shim's ipv4_key without widening mod wg_control itself.
+#[cfg(test)]
+pub(in crate::afxdp) use wg_control::kernel_path::shim_v4_key;
 pub(in crate::afxdp) use worker_manager::WorkerManager;
 pub(in crate::afxdp) use worker_manager::WorkerRecordsReader;
 // #6242: the per-worker transactional runtime record. Named by `bringup.rs`

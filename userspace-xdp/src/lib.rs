@@ -79,6 +79,7 @@ mod degraded_ctrl_disabled;
 mod degraded_ndp;
 mod early_filter;
 mod gre_classify;
+mod ipv4_key;
 mod ipv4_len_gate;
 mod ipv6_ext_walk;
 mod ipv6_len_gate;
@@ -92,6 +93,7 @@ use gre_classify::{
     InnerSessionAction, OuterDestinationLocal, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
     degraded_general_local_pass_applies, native_gre_inner_pass_steers_to_kernel_typed,
 };
+use ipv4_key::ipv4_map_key;
 use ipv4_len_gate::{ipv4_declared_len_covers_header, ipv4_declared_read_end};
 use ipv6_ext_walk::{
     EH_CLASS_TERMINAL, FragHdr, MAX_EXT_HDRS, PROTO_FRAGMENT_NO_L4, eh_class, eh_class_table,
@@ -1269,9 +1271,10 @@ fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize
     };
     key.src_addr[..4].copy_from_slice(&iph[12..16]);
     key.dst_addr[..4].copy_from_slice(&iph[16..20]);
-    // Use native-endian to match Go's binary.NativeEndian.Uint32() used
-    // for BPF map keys (DNAT_TABLE, USERSPACE_INTERFACE_NAT_V4, USERSPACE_LOCAL_V4).
-    let dst_v4 = u32::from_ne_bytes([iph[16], iph[17], iph[18], iph[19]]);
+    // #14323: big-endian to match Go's binary.BigEndian.Uint32() used
+    // for BPF map keys (DNAT_TABLE, USERSPACE_INTERFACE_NAT_V4, USERSPACE_LOCAL_V4)
+    // and parse_ipv4's dst_v4. See ipv4_key.rs.
+    let dst_v4 = ipv4_map_key([iph[16], iph[17], iph[18], iph[19]]);
     let Some(l4_offset) = l3_offset.checked_add(ihl) else {
         return 0;
     };
@@ -1936,7 +1939,7 @@ fn parse_ipv4(
         flow_dst_port,
         dscp: tos >> 2,
         src_addr,
-        dst_v4: u32::from_be_bytes([dst_bytes[0], dst_bytes[1], dst_bytes[2], dst_bytes[3]]),
+        dst_v4: ipv4_map_key([dst_bytes[0], dst_bytes[1], dst_bytes[2], dst_bytes[3]]),
         dst_addr,
     })
 }
