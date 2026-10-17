@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -293,5 +294,116 @@ func TestBufferSizingObservationIsPerSync_8182(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the neighbour's handleNewConnection did not return")
+	}
+}
+
+// stubPeerLookup14371 replaces the hostname resolver for the duration of a
+// test so the #14371 cells do not depend on the host's /etc/hosts or DNS
+// (localhost may resolve to only ::1, only 127.0.0.1, or both; a sandbox may
+// wildcard-resolve the .invalid name). Production uses the default resolver.
+func stubPeerLookup14371(t *testing.T, fn func(string) ([]netip.Addr, error)) {
+	t.Helper()
+	orig := lookupPeerHostIPs
+	lookupPeerHostIPs = fn
+	t.Cleanup(func() { lookupPeerHostIPs = orig })
+}
+
+// TestPreAuthHostnamePeerReserve14371 is F-DR3-H4-1 (#14371): with a hostname
+// peer-address, a sustained non-peer flood saturating the general pool must
+// still admit the genuine peer's reconnect within the reserve.
+//
+// RED pre-fix: peerIPOf("localhost:4785") is invalid (literal-only parse), so
+// isPeerRemote returned false for 127.0.0.1 and the peer hit the 6-slot
+// non-peer limit. The stub records the lookup: pre-fix it is never called.
+func TestPreAuthHostnamePeerReserve14371(t *testing.T) {
+	var lookedUp []string
+	stubPeerLookup14371(t, func(host string) ([]netip.Addr, error) {
+		lookedUp = append(lookedUp, host)
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1")}, nil
+	})
+	s := NewSessionSync("127.0.0.1:9999", "localhost:4785", nil)
+	if len(lookedUp) != 1 || lookedUp[0] != "localhost" {
+		t.Fatalf("hostname resolved %v at construction, want exactly [localhost]", lookedUp)
+	}
+	general := preAuthSetupCap - preAuthPeerReserve
+	for i := 0; i < general; i++ {
+		if !s.beginSetup(newPreAuthTestConn("10.0.0.99:40000"), true) {
+			t.Fatalf("flood conn %d denied while general pool had room", i)
+		}
+	}
+	// Every resolved answer is reserved, not just the first (v4 and v6).
+	if !s.beginSetup(newPreAuthTestConn("127.0.0.1:55555"), true) {
+		t.Fatal("hostname-configured peer (127.0.0.1) denied reserved slot under flood (#14371)")
+	}
+	if !s.beginSetup(newPreAuthTestConn("[::1]:55556"), true) {
+		t.Fatal("hostname-configured peer (::1) denied reserved slot under flood (#14371)")
+	}
+	// Reserve exhausted: even the peer is now at the total cap.
+	if s.beginSetup(newPreAuthTestConn("127.0.0.1:55557"), true) {
+		t.Fatal("peer admitted past preAuthSetupCap — total cap broken")
+	}
+}
+
+// TestPreAuthDualHostnamePeerReserve14371 is the dual-fabric arm of
+// F-DR3-H4-1: peerAddr1 as a hostname must populate the same reserve.
+func TestPreAuthDualHostnamePeerReserve14371(t *testing.T) {
+	stubPeerLookup14371(t, func(host string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("10.0.0.7")}, nil
+	})
+	s := NewDualSessionSync("127.0.0.1:9999", "10.0.0.2:4785", "127.0.0.1:9998", "peer1.example:4786", nil)
+	general := preAuthSetupCap - preAuthPeerReserve
+	for i := 0; i < general; i++ {
+		if !s.beginSetup(newPreAuthTestConn("10.0.0.99:40000"), true) {
+			t.Fatalf("flood conn %d denied while general pool had room", i)
+		}
+	}
+	if !s.beginSetup(newPreAuthTestConn("10.0.0.7:55555"), true) {
+		t.Fatal("dual-fabric hostname peer (peerAddr1) denied reserved slot (#14371)")
+	}
+}
+
+// TestPreAuthUnresolvableHostnamePeer14371 is F-DR3-H4-2: an unresolvable
+// hostname must not panic/hang construction, the peer is treated as a
+// non-peer (general-pool limit), and no per-connection DNS happens (the
+// lookup count stays at the single construction-time attempt).
+func TestPreAuthUnresolvableHostnamePeer14371(t *testing.T) {
+	lookups := 0
+	stubPeerLookup14371(t, func(host string) ([]netip.Addr, error) {
+		lookups++
+		return nil, &net.DNSError{IsNotFound: true, Name: host}
+	})
+	s := NewSessionSync("127.0.0.1:9999", "nonexistent.invalid:4785", nil)
+	if lookups != 1 {
+		t.Fatalf("construction lookups = %d, want 1", lookups)
+	}
+	general := preAuthSetupCap - preAuthPeerReserve
+	for i := 0; i < general; i++ {
+		if !s.beginSetup(newPreAuthTestConn("10.0.0.99:40000"), true) {
+			t.Fatalf("flood conn %d denied while general pool had room", i)
+		}
+	}
+	if s.beginSetup(newPreAuthTestConn("127.0.0.1:55555"), true) {
+		t.Fatal("unresolvable peer must be treated as non-peer (no reserve)")
+	}
+	if lookups != 1 {
+		t.Fatalf("per-connection DNS: lookups = %d after admission, want 1", lookups)
+	}
+}
+
+// TestResolveConfiguredPeerIPsLiteral14371 pins that IP literals (ip:port,
+// bare, v4-in-v6) never touch DNS and keep the exact prior reserve semantics.
+func TestResolveConfiguredPeerIPsLiteral14371(t *testing.T) {
+	stubPeerLookup14371(t, func(host string) ([]netip.Addr, error) {
+		t.Errorf("DNS lookup for literal peer host %q — literals must not resolve", host)
+		return nil, nil
+	})
+	got := resolveConfiguredPeerIPs("10.0.0.2:4785", "[::ffff:10.0.0.3]:4785", "10.0.0.4", "")
+	for _, want := range []string{"10.0.0.2", "10.0.0.3", "10.0.0.4"} {
+		if _, ok := got[netip.MustParseAddr(want)]; !ok {
+			t.Fatalf("resolved set %v missing literal %s", got, want)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("resolved set = %v, want exactly the 3 literals", got)
 	}
 }
