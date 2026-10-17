@@ -55,7 +55,6 @@ var Registry = []Site{
 	{File: "pkg/dataplane/userspace/maps_sync_cap_test.go", Test: "TestSyncInterfaceNATAddressMapsReplacesStaleWhenCapacityAllows"},
 	{File: "pkg/dataplane/userspace/maps_sync_cap_test.go", Test: "TestSyncLocalAddressMapsDeletesStaleBeforeAddingReplacement13724"},
 	{File: "pkg/dataplane/userspace/maps_sync_cap_test.go", Test: "TestVerifyBindingsWatchdogSkipsOverCapIfindex"},
-	{File: "pkg/dataplane/userspace/maps_sync_ingress_partial_6537_test.go", Test: "newIngressManager"},
 	{File: "pkg/dataplane/userspace/maps_sync_queue_id_bound_4894_test.go", Test: "TestApplyHelperStatusRejectsQueueIDBeyondStride"},
 	{File: "pkg/dataplane/userspace/maps_sync_stale_binding_retry_5697_test.go", Test: "TestClearStaleBindingRowsKeepsLiveBindings"},
 	{File: "pkg/dataplane/userspace/maps_sync_stale_binding_retry_5697_test.go", Test: "TestClearStaleBindingRowsRetainsFailedClearInRetryInventory"},

@@ -24,9 +24,23 @@ if [ -z "$CHANGED" ]; then
   exit 0
 fi
 
+# Tree-census packages (#14647): their tests scan the whole repository
+# (git grep / AST walks over non-Go files too) yet no scanned package
+# imports them, so reverse-import closure can never reach them and a
+# content-only change would otherwise select nothing. They are always
+# selected. Keep this list in sync with the census self-test
+# (scripts/ci_affected_go_tests_selftest.sh), which fails if a listed
+# package disappears or a new import-less tree-scanning package appears
+# without being listed.
 # The Python selector uses go list's package owners and all regular/test import
 # edges. Package-local fixtures map to their nearest Go package; shared fixtures,
 # module changes, or vendored changes seed every in-repository package.
+# A changed path owned by no Go package and not on the never-read
+# allowlist below also seeds every package: Go tests read Rust sources,
+# docs, manifests, fixtures and workflow files by path, and the import
+# graph has no edge for those reads (#14647). The allowlist is only for
+# paths no Go test reads; when in doubt, do not allowlist -- seeding all
+# is the safe fallback, never seeding nothing.
 PKGS=$(printf '%s\n' "$CHANGED" | python3 -c '
 import json
 import os
@@ -38,6 +52,36 @@ changed = [line.rstrip("\n") for line in sys.stdin if line.rstrip("\n")]
 module_changed = any(path in ("go.mod", "go.sum") for path in changed)
 vendored_changed = any(path.startswith("vendor/") for path in changed)
 fixture_dirs = {"testdata", "fixtures", "test-fixtures", "test_fixtures"}
+
+# Packages whose tests scan the tree but that nothing scanned imports
+# (#14647). Synced with scripts/ci_affected_go_tests_selftest.sh.
+census_packages = {
+    "github.com/psaab/xpf/pkg/docsref",
+    "github.com/psaab/xpf/pkg/durationaudit",
+    "github.com/psaab/xpf/pkg/memlockcensus",
+    "github.com/psaab/xpf/pkg/refactoraudit",
+    "github.com/psaab/xpf/pkg/showaudit",
+}
+
+# Changed paths no Go test reads (#14647). Anything not listed here and
+# not owned by a Go package seeds every package instead of nothing.
+# docs/log/ and docs/issues/*-history*.md are append-only records that
+# docsref deliberately excludes (isHistoricalArchive); the two non-test
+# workflows examine no Go source.
+def never_read(path):
+    if path == "_Log.md":
+        return True
+    if path.startswith("docs/log/"):
+        return True
+    if path.startswith("docs/issues/") and (
+        path.endswith("-history.md") or path.endswith("-history-archive.md")
+    ):
+        return True
+    if path == ".github/workflows/close-keyword-lint.yml":
+        return True
+    if path == ".github/workflows/retain-shim-gate-verdict.yml":
+        return True
+    return False
 
 listed = subprocess.run(
     ["go", "list", "-json", "./..."],
@@ -88,6 +132,11 @@ else:
             seeds.update(packages)
         elif filename.endswith(".go"):
             unresolved.append(filename)
+        elif not never_read(filename):
+            # Non-Go path owned by no package: Go tests read such files
+            # by path (Rust sources, docs, manifests), so fall back to
+            # every package rather than selecting nothing (#14647).
+            seeds.update(packages)
     if unresolved:
         print(
             "cannot map changed Go file(s) to a package; refusing to skip tests: "
@@ -95,6 +144,20 @@ else:
             file=sys.stderr,
         )
         sys.exit(1)
+
+# Census packages scan the tree yet are imported by nothing scanned, so
+# reverse-import closure cannot reach them; always run them (#14647).
+# Fail closed if a listed census package no longer exists, so the list
+# cannot silently rot into a no-op.
+missing_census = sorted(census_packages - set(packages))
+if missing_census:
+    print(
+        "census package(s) no longer exist; update census_packages in "
+        "scripts/ci_affected_go_tests.sh: " + ", ".join(missing_census),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+seeds.update(census_packages)
 
 if not seeds:
     print("No changed Go source package; skipping affected Go tests.", file=sys.stderr)
