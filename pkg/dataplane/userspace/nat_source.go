@@ -190,7 +190,10 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 						poolUnusable = true
 						poolUnusableReason = "aggregate_over_budget"
 					}
-					if pool.PersistentNAT != nil {
+					// #14626: use the rule-effective config — a rule-level
+					// `then source-nat pool P persistent-nat ...` tail layers
+					// over the pool's own persistent-nat without mutating it.
+					if effPNAT, ok := rule.EffectivePersistentNAT(cfg); ok && effPNAT != nil {
 						persistentNAT = true
 						// #2823: carry the full three-way permit enum. Default
 						// an unset mode to target-host-port (the pre-#2823
@@ -199,13 +202,13 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 						// PermitAnyRemoteHost bool is kept on the wire for
 						// back-compat with an older helper that predates the
 						// enum (#1961 wire-skew discipline).
-						permit := pool.PersistentNAT.Permit
+						permit := effPNAT.Permit
 						if permit == "" {
 							permit = config.PersistentNATPermitTargetHostPort
 						}
 						persistentNATPermit = string(permit)
 						persistentNATPermitAnyRemoteHost = permit == config.PersistentNATPermitAnyRemoteHost
-						persistentNATInactivityTimeout = pool.PersistentNAT.InactivityTimeout
+						persistentNATInactivityTimeout = effPNAT.InactivityTimeout
 						if persistentNATInactivityTimeout <= 0 {
 							persistentNATInactivityTimeout = 300
 						}

@@ -278,6 +278,19 @@ func runUniformGatesNAT(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #14626: rule-level `then source-nat pool P persistent-nat ...` must not
+	// commit clean while doing nothing. The tail is compiled per-rule; a
+	// malformed tail, a tail on interface/off, or a tail disagreeing with the
+	// pool / a sibling rule on the same pool rejects here. Tolerant load warns
+	// and EffectivePersistentNAT falls back to the pool's own config.
+	if err := validateSourceNATRulePersistentNATStrict14626(cfg); err != nil {
+		if opts.lenientDestNATAddresses {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("source-nat rule persistent-nat (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	// #5875 source-NAT pool ZONE-SCOPED ADDRESS gate. A source-NAT pool address
 	// may carry an IPv6 zone/scope qualifier (`fe80::1%eth0`): the Junos lexer

@@ -30,8 +30,9 @@ package config
 // drift surface, and the failure mode is one copy silently disagreeing with the
 // other.
 
-// UsesPersistentSourceNATPool reports whether any source-NAT rule targets a
-// pool carrying a `persistent-nat` stanza.
+// UsesPersistentSourceNATPool reports whether any source-NAT rule effectively
+// carries persistence — via its pool's `persistent-nat` stanza or a rule-level
+// `then source-nat pool P persistent-nat ...` tail (#14626).
 //
 // Keyed on the RULE, not on the pool table: a pool defined but referenced by no
 // rule translates nothing, so it demands nothing of the helper. That is the
@@ -53,8 +54,7 @@ func UsesPersistentSourceNATPool(cfg *Config) bool {
 			if rule == nil || rule.Then.PoolName == "" {
 				continue
 			}
-			pool := cfg.Security.NAT.SourcePools[rule.Then.PoolName]
-			if pool != nil && pool.PersistentNAT != nil {
+			if _, ok := rule.EffectivePersistentNAT(cfg); ok {
 				return true
 			}
 		}

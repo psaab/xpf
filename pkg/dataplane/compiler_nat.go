@@ -505,7 +505,8 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 					// honor, or over the aggregate budget) installs no
 					// allocator in the dataplane, so it registers nothing —
 					// fail-closed rather than a narrowed subset.
-					if pool.PersistentNAT != nil {
+					// #14626: rule-effective persistence (rule tail over pool).
+					if effPNAT, hasPNAT := rule.EffectivePersistentNAT(cfg); hasPNAT && effPNAT != nil {
 						pnat := dp.GetPersistentNAT()
 						if pnat != nil {
 							expanded, usable := config.SourceNATPoolExpandedAddresses(pool)
@@ -522,7 +523,7 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 								// the 300s default; the lease inactivity window
 								// collapses to ~512ns and every persistent lease
 								// expires immediately.
-								timeout := config.SecondsToDuration(pool.PersistentNAT.InactivityTimeout, 0)
+								timeout := config.SecondsToDuration(effPNAT.InactivityTimeout, 0)
 								if timeout == 0 {
 									timeout = 300 * time.Second
 								}
@@ -532,7 +533,7 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 								// target-host-port (was a binary any-remote-host flag).
 								pnat.SetPoolConfig(pool.Name, PersistentNATPoolInfo{
 									Timeout: timeout,
-									Permit:  pool.PersistentNAT.Permit,
+									Permit:  effPNAT.Permit,
 								})
 								for _, addr := range expanded {
 									pnat.RegisterNATIP(addr, pool.Name)
@@ -540,7 +541,7 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 								compileInfo(dp, "persistent NAT pool registered",
 									"pool", pool.Name,
 									"timeout", timeout,
-									"permit", string(pool.PersistentNAT.Permit))
+									"permit", string(effPNAT.Permit))
 							}
 						}
 					}

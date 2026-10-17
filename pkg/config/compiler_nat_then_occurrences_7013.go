@@ -181,14 +181,15 @@ func natThenAuthoredOccurrences(thenNode *Node, kind string) natThenAuthored {
 // scanRun records the terminal actions in a flat token run from index from, and
 // STOPS at the first token it does not recognise.
 //
-// THE STOP IS THE WHOLE SAFETY ARGUMENT (#7033). The `then <kind>` subtree is
-// deliberately open-world (#4313): `source-nat pool P persistent-nat permit
-// any-remote-host` is valid, and everything from `persistent-nat` onward belongs
-// to a sub-grammar this scan knows nothing about. A scan that kept going would
-// read those trailing values as terminal actions the moment one of them happened
-// to be spelled `off` — inventing a contradiction in a valid config. Round 6 of
-// #6820 was reverted for the mirror-image of that mistake, fabricating an
-// exemption out of tokens under an unrecognised container.
+// THE STOP IS THE WHOLE SAFETY ARGUMENT (#7033). The `then <kind>` subtree
+// carries tails this scan does not model as actions: `source-nat pool P
+// persistent-nat permit any-remote-host` is valid (modeled since #14626), and
+// everything from `persistent-nat` onward belongs to that sub-grammar. A scan
+// that kept going would read those trailing values as terminal actions the
+// moment one of them happened to be spelled `off` — inventing a contradiction
+// in a valid config. Round 6 of #6820 was reverted for the mirror-image of
+// that mistake, fabricating an exemption out of tokens under an unrecognised
+// container.
 //
 // `pool` consumes EXACTLY ONE value token, which is what keeps a pool
 // legitimately named `off` resolving as a name: `pool off` is one pool, not a
