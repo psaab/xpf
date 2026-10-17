@@ -10,8 +10,8 @@ import (
 func TestUserspaceXDPTaggedOnlyIngressIfindexes12055(t *testing.T) {
 	base := []InterfaceSnapshot{
 		{Name: "ge-0/0/1", Ifindex: 10, IsUnit: false},
-		{Name: "ge-0/0/1.50", Ifindex: 11, ParentIfindex: 10, ParentLinuxName: "ge-0-0-1", LinuxName: "ge-0-0-1.50", VLANID: 50, IsUnit: true},
-		{Name: "ge-0/0/1.80", Ifindex: 12, ParentIfindex: 10, ParentLinuxName: "ge-0-0-1", LinuxName: "ge-0-0-1.80", VLANID: 80, IsUnit: true},
+		{Name: "ge-0/0/1.50", Ifindex: 11, ParentIfindex: 10, ParentLinuxName: "ge-0-0-1", LinuxName: "ge-0-0-1.50", VLANID: 50, IsUnit: true, Zone: "trust"},
+		{Name: "ge-0/0/1.80", Ifindex: 12, ParentIfindex: 10, ParentLinuxName: "ge-0-0-1", LinuxName: "ge-0-0-1.80", VLANID: 80, IsUnit: true, Zone: "trust"},
 	}
 	clone := func(rows []InterfaceSnapshot) []InterfaceSnapshot {
 		return append([]InterfaceSnapshot(nil), rows...)
@@ -29,7 +29,7 @@ func TestUserspaceXDPTaggedOnlyIngressIfindexes12055(t *testing.T) {
 		{
 			name: "explicit untagged unit zero owns the parent; VLAN children are not tagged-only",
 			rows: append(clone(base), InterfaceSnapshot{
-				Name: "ge-0/0/1.0", Ifindex: 10, LinuxName: "ge-0-0-1", VLANID: 0, IsUnit: true,
+				Name: "ge-0/0/1.0", Ifindex: 10, LinuxName: "ge-0-0-1", VLANID: 0, IsUnit: true, Zone: "trust",
 			}),
 			want: map[uint32]bool{},
 		},
@@ -76,6 +76,73 @@ func TestUserspaceXDPTaggedOnlyIngressIfindexes12055(t *testing.T) {
 			for ifindex := range tc.want {
 				if _, ok := got[ifindex]; !ok {
 					t.Errorf("tagged-only ifindex %d missing; got %v", ifindex, got)
+				}
+			}
+		})
+	}
+}
+
+// #14334: disabled/unzoned unit 0 and disabled/unzoned native-VLAN units
+// must not clear TAGGED_ONLY. Only a zoned, enabled untagged owner owns VID 0.
+func TestBuildUserspaceTaggedOnlyIngressIfindexesIgnoresUnzonedAndDisabledUnit0(t *testing.T) {
+	tagged := InterfaceSnapshot{Name: "ge-0/0/1.100", Ifindex: 11, ParentIfindex: 10, VLANID: 100, IsUnit: true, Zone: "trust"}
+	parent := InterfaceSnapshot{Name: "ge-0/0/1", Ifindex: 10}
+	cases := []struct {
+		name string
+		rows []InterfaceSnapshot
+		want map[uint32]bool
+	}{
+		{
+			name: "unzoned unit 0 does not own VID0",
+			rows: []InterfaceSnapshot{parent, tagged, {Name: "ge-0/0/1.0", Ifindex: 10, VLANID: 0, IsUnit: true}},
+			want: map[uint32]bool{10: true},
+		},
+		{
+			name: "disabled zoned unit 0 does not own VID0",
+			rows: []InterfaceSnapshot{parent, tagged, {Name: "ge-0/0/1.0", Ifindex: 10, VLANID: 0, IsUnit: true, Zone: "trust", AdminDisabled: true}},
+			want: map[uint32]bool{10: true},
+		},
+		{
+			name: "zoned enabled unit 0 owns VID0",
+			rows: []InterfaceSnapshot{parent, tagged, {Name: "ge-0/0/1.0", Ifindex: 10, VLANID: 0, IsUnit: true, Zone: "trust"}},
+			want: map[uint32]bool{},
+		},
+		{
+			name: "disabled native unit does not own VID0",
+			rows: []InterfaceSnapshot{
+				{Name: "ge-0/0/1", Ifindex: 10, NativeVLANID: 100},
+				{Name: "ge-0/0/1.200", Ifindex: 12, ParentIfindex: 10, VLANID: 200, IsUnit: true, Zone: "trust"},
+				{Name: "ge-0/0/1.100", Ifindex: 11, ParentIfindex: 10, VLANID: 100, IsUnit: true, Zone: "trust", AdminDisabled: true},
+			},
+			want: map[uint32]bool{10: true},
+		},
+		{
+			name: "unzoned native unit does not own VID0",
+			rows: []InterfaceSnapshot{
+				{Name: "ge-0/0/1", Ifindex: 10, NativeVLANID: 100},
+				{Name: "ge-0/0/1.100", Ifindex: 11, ParentIfindex: 10, VLANID: 100, IsUnit: true},
+				{Name: "ge-0/0/1.200", Ifindex: 12, ParentIfindex: 10, VLANID: 200, IsUnit: true, Zone: "trust"},
+			},
+			want: map[uint32]bool{10: true},
+		},
+		{
+			name: "zoned enabled native unit owns VID0",
+			rows: []InterfaceSnapshot{
+				{Name: "ge-0/0/1", Ifindex: 10, NativeVLANID: 100},
+				{Name: "ge-0/0/1.100", Ifindex: 11, ParentIfindex: 10, VLANID: 100, IsUnit: true, Zone: "trust"},
+			},
+			want: map[uint32]bool{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildUserspaceTaggedOnlyIngressIfindexes(&ConfigSnapshot{Interfaces: tc.rows})
+			if len(got) != len(tc.want) {
+				t.Fatalf("tagged-only = %v, want %v", got, tc.want)
+			}
+			for k := range tc.want {
+				if _, ok := got[k]; !ok {
+					t.Fatalf("tagged-only = %v, want %v", got, tc.want)
 				}
 			}
 		})

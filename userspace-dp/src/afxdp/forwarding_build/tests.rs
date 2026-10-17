@@ -2027,6 +2027,11 @@ fn native_vlan_native_unit_egress_is_untagged_13979() {
     const TAGGED_UNIT: i32 = 200;
 
     let state = build_forwarding_state(&ConfigSnapshot {
+        zones: vec![crate::ZoneSnapshot {
+            name: "trust".into(),
+            id: 11,
+            ..Default::default()
+        }],
         interfaces: vec![
             InterfaceSnapshot {
                 name: "ge-0-0-1".into(),
@@ -2038,6 +2043,7 @@ fn native_vlan_native_unit_egress_is_untagged_13979() {
             },
             InterfaceSnapshot {
                 name: "ge-0-0-1.100".into(),
+                zone: "trust".into(),
                 ifindex: NATIVE_UNIT,
                 parent_ifindex: PARENT,
                 vlan_id: 100,
@@ -2046,6 +2052,7 @@ fn native_vlan_native_unit_egress_is_untagged_13979() {
             },
             InterfaceSnapshot {
                 name: "ge-0-0-1.200".into(),
+                zone: "trust".into(),
                 ifindex: TAGGED_UNIT,
                 parent_ifindex: PARENT,
                 vlan_id: 200,
@@ -3359,6 +3366,129 @@ fn tagged_only_ingress_respects_legacy_unit_metadata_11297() {
     assert!(
         unknown_ingress_vlan(&dotted_base_unit_zero, 81, 0),
         "a dotted base row must not masquerade as an explicit unit 0"
+    );
+}
+
+// #14334: disabled/unzoned unit 0 and disabled/unzoned native-VLAN units
+// must not clear tagged-only. Only a zoned, enabled untagged owner owns VID 0.
+#[test]
+fn tagged_only_ignores_unzoned_disabled_unit0_and_native_14334() {
+    use crate::afxdp::forwarding::unknown_ingress_vlan;
+    use crate::ZoneSnapshot;
+
+    fn state(rows: Vec<InterfaceSnapshot>) -> crate::afxdp::ForwardingState {
+        build_forwarding_state(&ConfigSnapshot {
+            zones: vec![ZoneSnapshot {
+                name: "trust".into(),
+                id: 11,
+                ..Default::default()
+            }],
+            interfaces: rows,
+            ..Default::default()
+        })
+    }
+    fn parent(native: i32) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: "ge-0-0-1".into(),
+            ifindex: 10,
+            native_vlan_id: native,
+            is_unit: Some(false),
+            ..Default::default()
+        }
+    }
+    fn tagged() -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: "ge-0-0-1.100".into(),
+            zone: "trust".into(),
+            ifindex: 11,
+            parent_ifindex: 10,
+            vlan_id: 100,
+            is_unit: Some(true),
+            ..Default::default()
+        }
+    }
+    fn unit0(zone: &str, disabled: bool) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: "ge-0-0-1.0".into(),
+            zone: zone.into(),
+            admin_disabled: disabled,
+            ifindex: 10,
+            vlan_id: 0,
+            is_unit: Some(true),
+            ..Default::default()
+        }
+    }
+
+    // Unzoned / disabled unit 0 does not own VID 0.
+    for (label, owner) in [
+        ("unzoned unit0", unit0("", false)),
+        ("disabled unit0", unit0("trust", true)),
+    ] {
+        let s = state(vec![parent(0), tagged(), owner]);
+        assert!(
+            unknown_ingress_vlan(&s, 10, 0),
+            "{label} must not clear tagged-only"
+        );
+        assert_eq!(
+            crate::afxdp::forwarding::resolve_ingress_logical_ifindex(&s, 10, 0),
+            None,
+            "{label} must not resolve VID 0 to an owner"
+        );
+    }
+    // Zoned enabled unit 0 owns VID 0 (control).
+    let s = state(vec![parent(0), tagged(), unit0("trust", false)]);
+    assert!(
+        !unknown_ingress_vlan(&s, 10, 0),
+        "zoned enabled unit0 owns VID 0"
+    );
+
+    // Disabled / unzoned native unit does not own VID 0.
+    for (label, native_unit) in [
+        (
+            "disabled native",
+            InterfaceSnapshot {
+                admin_disabled: true,
+                ..tagged()
+            },
+        ),
+        (
+            "unzoned native",
+            InterfaceSnapshot {
+                zone: String::new(),
+                ..tagged()
+            },
+        ),
+    ] {
+        let other = InterfaceSnapshot {
+            name: "ge-0-0-1.200".into(),
+            zone: "trust".into(),
+            ifindex: 12,
+            parent_ifindex: 10,
+            vlan_id: 200,
+            is_unit: Some(true),
+            ..Default::default()
+        };
+        let s = state(vec![parent(100), native_unit, other]);
+        assert!(
+            unknown_ingress_vlan(&s, 10, 0),
+            "{label} must not clear tagged-only"
+        );
+        assert_eq!(
+            crate::afxdp::forwarding::resolve_ingress_logical_ifindex(&s, 10, 0),
+            None,
+            "{label} must not resolve VID 0 to an owner"
+        );
+    }
+    // Zoned enabled native unit owns VID 0 (control).
+    let s = state(vec![parent(100), tagged()]);
+    assert!(
+        !unknown_ingress_vlan(&s, 10, 0),
+        "zoned enabled native unit owns VID 0"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::resolve_ingress_logical_ifindex(&s, 10, 0),
+        Some(11),
+        "native VID 0 resolves to the native unit"
     );
 }
 

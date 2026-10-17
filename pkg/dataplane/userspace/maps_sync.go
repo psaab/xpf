@@ -1774,8 +1774,10 @@ func buildUserspaceIngressIfindexes(snapshot *ConfigSnapshot) []uint32 {
 // AF_XDP bind parent, but not their VLAN child: Linux strips the VLAN header
 // before generic XDP runs on that child, so the child's VID-0 packet may be a
 // tagged host-bound packet delivered by the parent. Explicit unit 0 removes
-// its bind target; configured native VLAN selection removes the parent only
-// when one unambiguous unit carries that VID.
+// its bind target only when zoned and not admin-disabled (#14334);
+// configured native VLAN selection removes the parent only when one
+// unambiguous zoned, enabled unit carries that VID. A disabled or unzoned
+// unit owns no VID-0 identity, so it must not clear TAGGED_ONLY.
 func buildUserspaceTaggedOnlyIngressIfindexes(snapshot *ConfigSnapshot) map[uint32]struct{} {
 	if snapshot == nil {
 		return nil
@@ -1808,13 +1810,13 @@ func buildUserspaceTaggedOnlyIngressIfindexes(snapshot *ConfigSnapshot) map[uint
 			// legitimate local traffic for this VLAN unit.
 			taggedOnly[uint32(bindIfindex)] = struct{}{}
 		}
-		if iface.IsUnit && strings.HasSuffix(iface.Name, ".0") && iface.VLANID == 0 {
+		if iface.IsUnit && strings.HasSuffix(iface.Name, ".0") && iface.VLANID == 0 && !iface.AdminDisabled && iface.Zone != "" {
 			untaggedUnitIfindexes[uint32(bindIfindex)] = struct{}{}
 		}
 	}
 	nativeUnitByParent := make(map[int]int)
 	for _, iface := range snapshot.Interfaces {
-		if iface.Ifindex <= 0 || iface.ParentIfindex <= 0 || !iface.IsUnit {
+		if iface.Ifindex <= 0 || iface.ParentIfindex <= 0 || !iface.IsUnit || iface.AdminDisabled || iface.Zone == "" {
 			continue
 		}
 		nativeVLANID := nativeVLANByParent[iface.ParentIfindex]
