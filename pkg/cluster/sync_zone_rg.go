@@ -60,12 +60,30 @@ func resolveSessionRG(ifindex uint32, vlan uint16, fold uint32, foldFn func(ifin
 	return rg, ok
 }
 
+// zoneRGSet returns the RG set for zoneID when the zone is mapped.
+func zoneRGSet(zoneID uint16, zoneRG ZoneRGMap) ([]int, bool) {
+	rgs, ok := zoneRG[zoneID]
+	return rgs, ok
+}
+
 // ShouldSyncSessionV4 reports whether this node owns the given session for
 // sync purposes. It resolves the session's OWN RG first and only falls back to
 // the zone approximation for unattributable rows, so a zone spanning RGs
 // syncs each session by its ingress RG instead of by whichever RG the zone map
 // happened to keep (#11012). Rows without any ingress identity answer exactly
 // as ShouldSyncZone does.
+//
+// Cluster-synced safety (#14357): a peer-installed row read back through the
+// BPF mirror has lost both ingress identity carriers — IngressIfaceFold is
+// not persisted in the on-map ABI and ScrubNodeLocal zeroed
+// IngressIfindex/IngressVlanID at install — so resolveSessionRG fails. For a
+// cluster-synced row in a multi-RG zone, the zone approximation (primary for
+// ANY RG in the set) would claim a peer-owned RG2 row on an RG1-primary node
+// as locally owned, so sweep/bulk would re-export it (echo) and bulk
+// reconcile would never purge it. Such a row is therefore NOT locally owned:
+// return false. Local rows (no ClusterSynced bit) keep the zone fallback,
+// and so do cluster-synced rows in single-RG/unmapped zones, where the zone
+// answer is unambiguous.
 func (s *SessionSync) ShouldSyncSessionV4(val dataplane.SessionValue) bool {
 	if s.IsPrimaryForRGFn == nil {
 		if s.IsPrimaryFn != nil {
@@ -81,6 +99,11 @@ func (s *SessionSync) ShouldSyncSessionV4(val dataplane.SessionValue) bool {
 	s.zoneRGMu.RUnlock()
 	if rg, ok := resolveSessionRG(val.IngressIfindex, val.IngressVlanID, val.IngressIfaceFold, foldFn, foldRG); ok {
 		return isPrimaryForRG(rg)
+	}
+	if val.Flags&dataplane.SessFlagClusterSynced != 0 {
+		if rgs, ok := zoneRGSet(val.IngressZone, zoneRG); ok && len(rgs) > 1 {
+			return false
+		}
 	}
 	return zoneSetSyncs(val.IngressZone, zoneRG, isPrimaryForRG, s.IsPrimaryFn)
 }
@@ -101,6 +124,11 @@ func (s *SessionSync) ShouldSyncSessionV6(val dataplane.SessionValueV6) bool {
 	s.zoneRGMu.RUnlock()
 	if rg, ok := resolveSessionRG(val.IngressIfindex, val.IngressVlanID, val.IngressIfaceFold, foldFn, foldRG); ok {
 		return isPrimaryForRG(rg)
+	}
+	if val.Flags&dataplane.SessFlagClusterSynced != 0 {
+		if rgs, ok := zoneRGSet(val.IngressZone, zoneRG); ok && len(rgs) > 1 {
+			return false
+		}
 	}
 	return zoneSetSyncs(val.IngressZone, zoneRG, isPrimaryForRG, s.IsPrimaryFn)
 }
@@ -123,10 +151,24 @@ func zoneSetSyncs(zoneID uint16, zoneRG ZoneRGMap, isPrimaryForRG func(int) bool
 	return false
 }
 
+// zoneRGs is the RG set for the row's ingress zone in this snapshot, used by
+// shouldSyncV4/V6 to apply the #14357 multi-RG cluster-synced guard.
+func (z *zoneOwnershipSnapshot) zoneRGs(zoneID uint16) ([]int, bool) {
+	rgs, ok := z.zoneRGsByZone[zoneID]
+	return rgs, ok
+}
+
 // shouldSyncV4 judges one v4 row by the bulk-start ownership answers this
 // snapshot was taken from. A resolved RG outside the bulk-start universe (a
 // skew the map-generation check did not catch) keeps the row: deleting on a
 // guess is the failure this reconcile can cause.
+//
+// Cluster-synced safety (#14357): as in ShouldSyncSessionV4, an unattributable
+// cluster-synced row in a multi-RG zone must not be kept by the zone
+// approximation — BulkEnd would never purge a stale peer RG row. Return
+// false so ReconcileClusterBulk treats it as not-locally-owned and, when it
+// was not received in this bulk, deletes it. Local unattributable rows keep
+// the zone fallback (fail-closed: never delete on a guess).
 func (z *zoneOwnershipSnapshot) shouldSyncV4(val dataplane.SessionValue) bool {
 	if z.useRG {
 		if rg, ok := resolveSessionRG(val.IngressIfindex, val.IngressVlanID, val.IngressIfaceFold, z.foldFn, z.foldRG); ok {
@@ -134,6 +176,11 @@ func (z *zoneOwnershipSnapshot) shouldSyncV4(val dataplane.SessionValue) bool {
 				return primary
 			}
 			return true
+		}
+		if val.Flags&dataplane.SessFlagClusterSynced != 0 {
+			if rgs, ok := z.zoneRGs(val.IngressZone); ok && len(rgs) > 1 {
+				return false
+			}
 		}
 	}
 	return z.shouldSync(val.IngressZone)
@@ -147,6 +194,11 @@ func (z *zoneOwnershipSnapshot) shouldSyncV6(val dataplane.SessionValueV6) bool 
 				return primary
 			}
 			return true
+		}
+		if val.Flags&dataplane.SessFlagClusterSynced != 0 {
+			if rgs, ok := z.zoneRGs(val.IngressZone); ok && len(rgs) > 1 {
+				return false
+			}
 		}
 	}
 	return z.shouldSync(val.IngressZone)
