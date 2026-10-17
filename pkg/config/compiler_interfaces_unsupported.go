@@ -518,11 +518,14 @@ func isInterfaceFilterConsumerPath12090(ancestors []*Node) bool {
 // compiler also consumes #12093 scalar block values such as `input { f; }`,
 // but not packed `filter input f;`.
 func isInterfaceDirectFilterConsumerPath12090(ancestors []*Node, filter *Node) bool {
-	// #14435: filter child directly under a packed unit node whose Keys
-	// tail carries `family inet|inet6` — packedBody in compileInterfaces
-	// consumes it as the family filter.
+	// #14435/#14629: filter child directly under a packed unit node whose
+	// Keys tail carries the packed family segment BEFORE any unit-level
+	// filter hit — packedBody in compileInterfaces consumes it as the
+	// family filter. A filter spelled BEFORE that segment is a unit-level
+	// binding packedBody never reaches as a family filter, so it must not
+	// inherit this exemption.
 	if len(ancestors) == 2 && ancestors[1] != nil && ancestors[1].Name() == "unit" &&
-		unitPackedTailHasFamilyFilter14435(ancestors[1]) &&
+		unitPackedTailHasFamilyBeforeFilter14435(ancestors[1]) &&
 		isInterfaceBracedFilterConsumer12090(filter) {
 		return true
 	}
@@ -773,7 +776,7 @@ func isInterfacePackedFilterConsumer12090(ancestors []*Node, n *Node) bool {
 	// packed unit node (the family body). packedBody in compileInterfaces
 	// now consumes it, so the gate must not reject it as unbound.
 	if n.Name() == "unit" && len(ancestors) == 1 {
-		return unitPackedTailHasFamilyFilter14435(n)
+		return unitPackedTailHasFamilyBeforeFilter14435(n)
 	}
 	familyIndex, ok := interfaceUnitFamilyAncestorIndex12090(ancestors)
 	return ok && familyIndex == 2 && len(ancestors) == familyIndex+1 &&
@@ -781,17 +784,103 @@ func isInterfacePackedFilterConsumer12090(ancestors []*Node, n *Node) bool {
 		(n.Name() == "inet" || n.Name() == "inet6")
 }
 
-// unitPackedTailHasFamilyFilter14435 reports whether a packed unit node
-// carries `... family inet|inet6` in its Keys tail (the #14435 shape), in
-// which case a `filter` keyword hit in the tail is — after packedBody
-// expansion in the compiler — the consumed family filter, not an unbound
-// unit-level filter.
-func unitPackedTailHasFamilyFilter14435(n *Node) bool {
-	for i := range len(n.Keys) - 1 {
-		if n.Keys[i] == "family" &&
-			(n.Keys[i+1] == "inet" || n.Keys[i+1] == "inet6") {
+// unitPackedTailHasFamilyBeforeFilter14435 reports whether a packed unit
+// node carries `... family inet|inet6` in its Keys tail BEFORE any
+// unit-level `filter`/`simple-filter` keyword hit in that same tail (the
+// #14435 shape), in which case a `filter` keyword hit in the tail is —
+// after packedBody expansion in the compiler — the consumed family filter,
+// not an unbound unit-level filter.
+//
+// #14629: the previous check accepted `family inet|inet6` ANYWHERE in the
+// tail, so `unit 0 filter input DISCARD-BAD family inet { ... }` (filter
+// FIRST, family later) exempted the unit-level filter from the #12090
+// gate while packedBody expanded only the trailing family segment — the
+// filter, the addresses and the family itself were all dropped and the
+// unit strict-committed empty: accepted-but-dropped, fail-open.
+//
+// The walk mirrors packedBodyChildren/filterKeywordPositions12090: it
+// consumes each statement by the unit schema's own arity (so a VALUE that
+// merely spells `family`, `filter` or `inet` — e.g. `description family`
+// or a tunnel endpoint — is never mistaken for a keyword), keeps the
+// open-levels stack packedBodyChildren keeps (so `family` after a
+// `tunnel …` run still resolves at the unit level), and stops at the
+// first token outside the modelled grammar (do-not-guess, same posture
+// as packedBodyChildren) or at a unit-level filter hit that precedes the
+// family segment. A family segment that appears only AFTER such a hit
+// does not retroactively consume it.
+func unitPackedTailHasFamilyBeforeFilter14435(n *Node) bool {
+	if n == nil || n.Name() != "unit" {
+		return false
+	}
+	schema := schemaForPath("interfaces", "x", "unit")
+	if schema == nil {
+		return false
+	}
+	consumed, _ := consumeNodeKeys(n.Keys, schema)
+	tail := n.Keys[consumed:]
+	quoted := func(idx int) bool {
+		return len(n.KeysQuoted) == len(n.Keys) && consumed+idx >= 0 && consumed+idx < len(n.KeysQuoted) && n.KeysQuoted[consumed+idx]
+	}
+	// Open levels, deepest last — the same stack packedBodyChildren
+	// keeps. A statement after `tunnel` (`source … destination …`) is
+	// declared by the tunnel level, not by `unit`; a single `pathSchema`
+	// that refined straight to `tunnel` would never resolve the unit-level
+	// `family` that follows it. Each token is owned by the DEEPEST open
+	// level declaring it, and the stack is truncated back to that level:
+	// siblings after a container therefore return to the container that
+	// declares them. The #14629 ordering question is decided at the
+	// unit level (stack depth 0): `family inet|inet6` there opens the
+	// consumed segment; `filter`/`simple-filter` there precedes it and
+	// blocks the exemption. The same keywords INSIDE an opened level
+	// (a tunnel argument spelled `family`, a description value, …) were
+	// already consumed by arity, so they never reach this switch.
+	levels := []*schemaNode{schema}
+	for i := 0; i < len(tail); {
+		keyword := tail[i]
+		if quoted(i) {
+			// A quoted token is a value, never a keyword (same provenance
+			// rule packedBodyChildren honours). Its arity is unknowable
+			// here, so stop rather than guess (fail-closed for the
+			// exemption: the #12090 gate still rejects the filter).
+			return false
+		}
+		at := -1
+		var child *schemaNode
+		for lvl := len(levels) - 1; lvl >= 0; lvl-- {
+			if cs := schemaChildFor(levels[lvl], keyword); cs != nil {
+				at, child = lvl, cs
+				break
+			}
+		}
+		if child == nil {
+			return false
+		}
+		if at == 0 && keyword == "family" && i+1 < len(tail) && !quoted(i+1) &&
+			(tail[i+1] == "inet" || tail[i+1] == "inet6") {
 			return true
 		}
+		if at == 0 && (keyword == "filter" || keyword == "simple-filter") {
+			return false
+		}
+		if isApplyStatementKeyword(keyword) {
+			return false
+		}
+		identity := 1 + child.args
+		refined := child
+		if child.compoundKey && i+identity < len(tail) {
+			fam := tail[i+identity]
+			identity++
+			if sub, ok := child.children[fam]; ok {
+				refined = sub
+			} else {
+				refined = nil
+			}
+		}
+		if i+identity > len(tail) {
+			return false
+		}
+		levels = append(levels[:at+1], refined)
+		i += identity
 	}
 	return false
 }
