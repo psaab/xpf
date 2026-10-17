@@ -645,6 +645,14 @@ message NATSourceInfo {
   // false/"" and behaves exactly as before.
   bool not_installed = 5;
   string not_installed_reason = 6;
+  // #14579: the #3096 non-zone scope of this rule's rule-set. Exactly one
+  // of from_interface/from_routing_instance (and the to- pair) is set
+  // when that side is not zone-scoped; both empty with an empty zone
+  // means match-any on that side.
+  string from_interface = 8;
+  string to_interface = 9;
+  string from_routing_instance = 10;
+  string to_routing_instance = 11;
 }
 
 message GetNATDestinationRequest {}
@@ -676,6 +684,9 @@ message NATDestInfo {
   // #13199: distinct from translate_ip (the pool's address), this identifies
   // the configured pool for accurate names and rule-stat hit lookups.
   string pool_name = 8;
+  // #14579: the #3096 non-zone from-scope of this rule's rule-set.
+  string from_interface = 9;
+  string from_routing_instance = 10;
 }
 
 message GetScreenRequest {}
@@ -942,6 +953,9 @@ message NATRuleSetSessions {
   string from_zone = 1;
   string to_zone = 2;
   int32 sessions = 3;
+  // #14579: additive scope echo so a non-zone-scoped row is
+  // distinguishable from a zone row; empty for zone-scoped rows.
+  string scope = 4;
 }
 
 // --- VRRP status ---
@@ -1277,6 +1291,11 @@ message NATRuleStats {
   // false/"" and behaves exactly as before.
   bool not_installed = 10;
   string not_installed_reason = 11;
+  // #14579: the #3096 non-zone scope of this rule's rule-set.
+  string from_interface = 12;
+  string to_interface = 13;
+  string from_routing_instance = 14;
+  string to_routing_instance = 15;
 }
 
 // --- Deterministic source-NAT (CGNAT / NAPT64) mapping lookup ---

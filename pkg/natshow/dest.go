@@ -120,16 +120,9 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			if dstMatch == "" {
 				dstMatch = "0.0.0.0/0"
 			}
-			fromZone, toZone := rs.FromZone, rs.ToZone
-			if config.ZoneQuarantineExcludedReason(fromZone, cfg) != "" {
-				fromZone += " " + config.ZoneQuarantineReferenceQualifier
-			}
-			if config.ZoneQuarantineExcludedReason(toZone, cfg) != "" {
-				toZone += " " + config.ZoneQuarantineReferenceQualifier
-			}
 			fmt.Fprintf(w, "destination NAT rule: %s\n", rule.Name)
 			fmt.Fprintf(w, "  Rule-set: %s                        ID: %d\n", rs.Name, ruleIdx)
-			fmt.Fprintf(w, "    From zone: %s    To zone: %s\n", fromZone, toZone)
+			fmt.Fprintf(w, "    %s\n", natScopeLine(rs, cfg, true))
 			fmt.Fprintf(w, "    Match:\n")
 			fmt.Fprintf(w, "      Destination addresses: %s\n", dstMatch)
 			if rule.Match.DestinationPort != 0 {
@@ -221,11 +214,20 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 		// attribute with. Reporting it once at the scope it actually measures
 		// is the honest form available: the number is real, it was labelled
 		// with the wrong noun.
-		quarantinedPair := config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
-			config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != ""
+		// #14579: as in the source renderer, a non-zone-scoped (or
+		// match-any) from side has no zone-pair measurement — the tally
+		// keys real zone names. Render n/a, never the lookup's zero.
+		// A zone-scoped dest rule-set keeps its pair/from-zone count.
+		zoneScoped := NATRuleSetZoneScoped(rs, true)
+		quarantinedPair := zoneScoped &&
+			(config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
+				config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != "")
 		if quarantinedPair {
 			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %s\n\n",
 				rs.Name, config.ZoneQuarantineLiveCountersUnavailable)
+		} else if !zoneScoped {
+			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %s\n\n",
+				rs.Name, natScopeNATCounterUnmeasured)
 		} else if armed {
 			count := rsSessions[ruleSetKey{rs.FromZone, rs.ToZone}]
 			if rs.ToZone == "" {

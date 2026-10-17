@@ -140,7 +140,7 @@ func TestNATRuleCounterReadsRequireInstalledRule11743(t *testing.T) {
 						dp.counterReads, state.wantRead, out)
 				}
 				if renderer.name == "destination pool" &&
-					!strings.Contains(out, "Referenced by: drs1/dr1 (from untrust)") {
+					!strings.Contains(out, "Referenced by: drs1/dr1 (from untrust -> trust)") {
 					t.Errorf("destination pool output missing Referenced-by line; output:\n%s", out)
 				}
 			})

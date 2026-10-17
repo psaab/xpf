@@ -124,16 +124,9 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 			// rendering a name-scoped rule as 0.0.0.0/0.
 			srcMatch := RuleMatchSource(rule)
 			dstMatch := RuleMatchDestination(rule)
-			fromZone, toZone := rs.FromZone, rs.ToZone
-			if config.ZoneQuarantineExcludedReason(fromZone, cfg) != "" {
-				fromZone += " " + config.ZoneQuarantineReferenceQualifier
-			}
-			if config.ZoneQuarantineExcludedReason(toZone, cfg) != "" {
-				toZone += " " + config.ZoneQuarantineReferenceQualifier
-			}
 			fmt.Fprintf(w, "source NAT rule: %s\n", rule.Name)
 			fmt.Fprintf(w, "  Rule-set: %s                        ID: %d\n", rs.Name, ruleIdx)
-			fmt.Fprintf(w, "    From zone: %s    To zone: %s\n", fromZone, toZone)
+			fmt.Fprintf(w, "    %s\n", natScopeLine(rs, cfg, false))
 			fmt.Fprintf(w, "    Match:\n")
 			fmt.Fprintf(w, "      Source addresses:      %s\n", srcMatch)
 			fmt.Fprintf(w, "      Destination addresses: %s\n", dstMatch)
@@ -239,11 +232,21 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 		// attribute with. Reporting it once at the scope it actually measures
 		// is the honest form available: the number is real, it was labelled
 		// with the wrong noun.
-		quarantinedPair := config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
-			config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != ""
+		// #14579: the tally is keyed by real zone pair, so a rule-set
+		// scoped by interface/routing-instance (or match-any) on either
+		// side has no zone-pair measurement. Printing the lookup's zero
+		// would claim an idle rule-set that was never measured; render
+		// n/a instead. Zone-scoped pairs keep the measured number.
+		zoneScoped := NATRuleSetZoneScoped(rs, false)
+		quarantinedPair := zoneScoped &&
+			(config.ZoneQuarantineExcludedReason(rs.FromZone, cfg) != "" ||
+				config.ZoneQuarantineExcludedReason(rs.ToZone, cfg) != "")
 		if quarantinedPair {
 			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %s\n\n",
 				rs.Name, config.ZoneQuarantineLiveCountersUnavailable)
+		} else if !zoneScoped {
+			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %s\n\n",
+				rs.Name, natScopeNATCounterUnmeasured)
 		} else if armed {
 			fmt.Fprintf(w, "  Rule-set %s: sessions for this zone pair: %d\n\n",
 				rs.Name, rsSessions[ruleSetKey{rs.FromZone, rs.ToZone}])

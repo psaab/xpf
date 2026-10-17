@@ -17,7 +17,18 @@ func RenderStatic(w io.Writer, cfg *config.Config) {
 	}
 	for _, rs := range cfg.Security.NAT.Static {
 		fmt.Fprintf(w, "Static NAT rule-set: %s\n", rs.Name)
-		fmt.Fprintf(w, "  From zone: %s\n", rs.FromZone)
+		// #14579: a #3096 interface/RI-scoped (or match-any) static
+		// rule-set rendered a blank "From zone:"; render its actual scope.
+		switch {
+		case rs.FromInterface != "":
+			fmt.Fprintf(w, "  From interface: %s\n", rs.FromInterface)
+		case rs.FromRoutingInstance != "":
+			fmt.Fprintf(w, "  From routing-instance: %s\n", rs.FromRoutingInstance)
+		case rs.FromZone != "":
+			fmt.Fprintf(w, "  From zone: %s\n", rs.FromZone)
+		default:
+			fmt.Fprintf(w, "  From zone: any\n")
+		}
 		for _, rule := range rs.Rules {
 			fmt.Fprintf(w, "  Rule: %s\n", rule.Name)
 			fmt.Fprintf(w, "    Match destination-address: %s\n", rule.Match)
@@ -79,11 +90,14 @@ func RenderStaticRule(w io.Writer, cfg *config.Config, detail bool) {
 		if rs.FromZone != "" {
 			fmt.Fprintf(w, "  From zone: %s\n", rs.FromZone)
 		}
-		if detail && rs.FromInterface != "" {
+		if rs.FromInterface != "" {
 			fmt.Fprintf(w, "  From interface: %s\n", rs.FromInterface)
 		}
-		if detail && rs.FromRoutingInstance != "" {
+		if rs.FromRoutingInstance != "" {
 			fmt.Fprintf(w, "  From routing-instance: %s\n", rs.FromRoutingInstance)
+		}
+		if detail && rs.FromZone == "" && rs.FromInterface == "" && rs.FromRoutingInstance == "" {
+			fmt.Fprintf(w, "  From zone: any\n")
 		}
 		for _, rule := range rs.Rules {
 			fmt.Fprintf(w, "  Rule: %s\n", rule.Name)
