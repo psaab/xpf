@@ -115,6 +115,17 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 			consumed, descend := consumeNodeKeys(node.Keys, childSchema)
 			pathLen := len(path)
 			path = append(path, node.Keys[:consumed]...)
+			// #14412: a packed node has no Children for this walk to visit,
+			// so a credential token packed past the identity (misplaced or
+			// case-variant) was invisible here exactly as it was to the
+			// schema walker. Warn on it by the same predicate the strict
+			// gate uses; validly placed packed credentials resolve as
+			// children of descend and stay silent.
+			if !childSchema.packedTail {
+				if tok, _ := packedTailCredential14412(node, descend, consumed); tok != "" {
+					warn(path, tok)
+				}
+			}
 			remaining := 1 + childSchema.args - consumed
 			if remaining > 0 {
 				walkInstances(node.Children, childSchema, remaining, path)

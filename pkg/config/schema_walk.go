@@ -867,6 +867,20 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 			walkChildren = append(inlineProps, walkChildren...)
 		}
 	}
+	// #14412 (DR13-H5): a credential token packed past the identity that
+	// is NOT a child of this container (misplaced one level up, or spelled
+	// case-variant) is consumed by no reader: the compiler's packed
+	// expansion bails on it and the nested reader never sees it, so the
+	// adjacency forms unauthenticated while `show configuration` displays
+	// the credential. packedTail containers are exempt — a reader consumes
+	// their tails. The path is rendered through redactSecretPath so the
+	// error names the dropped keyword, never its value.
+	if !childSchema.packedTail && len(node.Keys) > consumed {
+		if tok, _ := packedTailCredential14412(node, descendSchema, consumed); tok != "" {
+			return fmt.Errorf("%s: packed configuration keyword %q is not a child of this stanza and would be silently dropped — the credential it carries would not take effect; author it under the stanza that declares it, with its exact spelling (#14412)",
+				strings.Join(redactSecretPath(newPath), " "), tok)
+		}
+	}
 	return walkSchemaChildren(walkChildren, descendSchema, newPath, vc, childClosed)
 }
 
