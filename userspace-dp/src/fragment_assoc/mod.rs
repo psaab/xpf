@@ -177,6 +177,13 @@ pub(crate) const FRAG_CAP_PER_SHARD: usize = 64;
 /// untrusted claims and must not let a spoofing sender spend another session's
 /// quota.
 pub(crate) const FRAG_CAP_PER_SESSION_PER_SHARD: usize = FRAG_CAP_PER_SHARD / 2;
+/// Maximum associations charged to one ingress zone in a shard (#14321).
+/// Keyed on `(authority.ingress_zone, authority.routing_table)` — the zone
+/// half of the authority the key already carries — so admitted sessions in
+/// one zone cannot consume the whole 64-entry shard and starve another
+/// zone's associations. At the bound a new key is refused (fail-closed,
+/// no eviction of a live association), exactly like the per-session quota.
+pub(crate) const FRAG_CAP_PER_ZONE_PER_SHARD: usize = FRAG_CAP_PER_SHARD / 2;
 /// reassembly timeout): we associate a first fragment's decision with its
 /// non-first fragments, which arrive on the fast path within
 /// microseconds-milliseconds. Refreshed on every hit.
@@ -530,6 +537,20 @@ impl FragAssoc {
             shard.push(e);
             return false;
         }
+        // #14321: per-zone quota beside the per-session quota. Both are
+        // counted, then expired entries are pruned before any refusal, then
+        // both are re-counted — a zone at its bound refuses new keys
+        // fail-closed without evicting a live association, and cannot
+        // consume the other zone's half of the shard.
+        let zone_len = |shard: &[FragEntry]| {
+            shard
+                .iter()
+                .filter(|e| {
+                    e.key.authority.ingress_zone == key.authority.ingress_zone
+                        && e.key.authority.routing_table == key.authority.routing_table
+                })
+                .count()
+        };
         let session_len = shard
             .iter()
             .filter(|e| {
@@ -537,8 +558,11 @@ impl FragAssoc {
                     && e.admitting_session_id == admitting_session_id
             })
             .count();
-        if session_len >= FRAG_CAP_PER_SESSION_PER_SHARD || shard.len() >= FRAG_CAP_PER_SHARD {
-            // Prune before refusing a live session quota or a full shard.
+        if session_len >= FRAG_CAP_PER_SESSION_PER_SHARD
+            || zone_len(&shard) >= FRAG_CAP_PER_ZONE_PER_SHARD
+            || shard.len() >= FRAG_CAP_PER_SHARD
+        {
+            // Prune before refusing a live session/zone quota or a full shard.
             shard.retain(|e| frag_entry_live(e, now_ns));
             let session_len = shard
                 .iter()
@@ -547,7 +571,10 @@ impl FragAssoc {
                         && e.admitting_session_id == admitting_session_id
                 })
                 .count();
-            if session_len >= FRAG_CAP_PER_SESSION_PER_SHARD || shard.len() >= FRAG_CAP_PER_SHARD {
+            if session_len >= FRAG_CAP_PER_SESSION_PER_SHARD
+                || zone_len(&shard) >= FRAG_CAP_PER_ZONE_PER_SHARD
+                || shard.len() >= FRAG_CAP_PER_SHARD
+            {
                 return false;
             }
         }

@@ -11,7 +11,8 @@ use super::*;
 // `fn` silently steals the `#[test]` attribute). Imported here instead so the
 // move stays motion-only and no guard changes.
 use crate::fragment_assoc::{
-    FRAG_CAP_PER_SESSION_PER_SHARD, FRAG_CAP_PER_SHARD, FRAG_MAX_LIFETIME_EVICTIONS,
+    FRAG_CAP_PER_SESSION_PER_SHARD, FRAG_CAP_PER_SHARD, FRAG_CAP_PER_ZONE_PER_SHARD,
+    FRAG_MAX_LIFETIME_EVICTIONS,
     FRAG_MAX_LIFETIME_NS, FRAG_SHARDS, FRAG_TTL_NS, FragAssoc, FragAuthority, FragKey,
     NAT64_FRAG_CROSS_DOMAIN_MISSES, NAT64_FRAG_PROTOCOL_ALIAS_MISSES, first_fragment_key,
     frag_shard_index, frag_shard_index_seeded, nonfirst_fragment_key,
@@ -5480,25 +5481,32 @@ fn nat64_frag_assoc_cache_is_bounded() {
         Ipv4Addr::new(8, 8, 8, 8),
         5000,
     ));
-    let make_key = |src, ident| FragKey {
+    // #14321: the two filling sources sit in DIFFERENT zones so each fills
+    // its own 32-entry per-zone quota and the shard still reaches 64.
+    let make_key = |src, ident, authority| FragKey {
         addr_family: family,
         src,
         dst,
         ident,
         protocol: PROTO_UDP,
-        authority: frag_test_authority(),
+        authority,
     };
     for sources in &sources_by_shard {
-        for &src in &sources[..2] {
+        for (i, &src) in sources[..2].iter().enumerate() {
+            let authority = if i == 0 {
+                frag_test_authority()
+            } else {
+                frag_other_authority()
+            };
             for ident in 0..FRAG_CAP_PER_SESSION_PER_SHARD as u32 {
-                cache.install(make_key(src, ident), decision, None, 1_000, 1, 0);
+                cache.install(make_key(src, ident, authority), decision, None, 1_000, 1, 0);
             }
         }
     }
     assert_eq!(cache.len(), ceiling, "every shard reaches its fixed cap");
     for sources in &sources_by_shard {
         assert!(
-            !cache.install(make_key(sources[2], 0), decision, None, 1_000, 1, 0),
+            !cache.install(make_key(sources[2], 0, frag_test_authority()), decision, None, 1_000, 1, 0),
             "a full shard refuses another source rather than evicting"
         );
     }
@@ -5787,7 +5795,14 @@ fn frag_assoc_quota_is_admitting_session_scoped_11058() {
         "the attacker filled its own session quota first"
     );
 
-    let victim_key = make_key(FRAG_CAP_PER_SESSION_PER_SHARD as u32);
+    // #14321: the victim arrives in a different zone, so it also holds an
+    // independent per-zone quota; the assertion below is about the
+    // admitting-session quota, which the zone change does not weaken
+    // (both quotas must independently admit the victim).
+    let victim_key = FragKey {
+        authority: frag_other_authority(),
+        ..make_key(FRAG_CAP_PER_SESSION_PER_SHARD as u32)
+    };
     cache.install_with_session(
         victim_key,
         decision,
@@ -5832,6 +5847,69 @@ fn frag_assoc_quota_is_admitting_session_scoped_11058() {
         cache.lookup(&refused_key, 1_001, 1, |_| true).is_none(),
         "the over-quota association is refused"
     );
+}
+
+
+#[test]
+fn frag_assoc_zone_quota_cannot_starve_other_zone_14321() {
+    // #14321: many admitted sessions in zone 9 fill that zone's per-shard
+    // quota (32); a session in zone 3 sharing the shard must still install.
+    // install() uses one synthetic session, so use distinct admitting
+    // sessions per ident via install_with_session (per-session cap is also
+    // 32 — one session per ident keeps it non-binding).
+    let cache = FragAssoc::new();
+    let src = IpAddr::V6("2001:db8::4321".parse().unwrap());
+    let dst = IpAddr::V6("64:ff9b::0808:0808".parse().unwrap());
+    let family = libc::AF_INET6 as u8;
+    let idents = frag_idents_in_one_shard(src, dst, family, FRAG_CAP_PER_ZONE_PER_SHARD + 2);
+    let decision = frag_test_decision(Nat64State::forward_decision(
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+        5000,
+    ));
+    let mk = |ident: u32, authority: FragAuthority| FragKey {
+        addr_family: family,
+        src,
+        dst,
+        ident,
+        protocol: PROTO_UDP,
+        authority,
+    };
+    let session_for = |port: u16| crate::session::SessionKey {
+        addr_family: family,
+        protocol: PROTO_UDP,
+        src_ip: src,
+        dst_ip: dst,
+        src_port: port,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    // Fill zone 9 (frag_other_authority) to its quota, one session per ident.
+    for (i, &ident) in idents[..FRAG_CAP_PER_ZONE_PER_SHARD].iter().enumerate() {
+        cache.install_with_session(
+            mk(ident, frag_other_authority()),
+            decision,
+            None,
+            session_for(10_000 + i as u16),
+            900 + i as u64,
+            1_000,
+            1,
+            0,
+        );
+    }
+    assert_eq!(cache.len(), FRAG_CAP_PER_ZONE_PER_SHARD, "zone-9 fill reaches its quota");
+    // Zone 9 over-quota: a new zone-9 session is refused fail-closed.
+    let refused = mk(idents[FRAG_CAP_PER_ZONE_PER_SHARD], frag_other_authority());
+    cache.install_with_session(refused, decision, None, session_for(20_000), 999, 1_000, 1, 0);
+    assert!(cache.lookup(&refused, 1_001, 1, |_| true).is_none(),
+        "zone-9 over-quota association must be refused");
+    assert_eq!(cache.len(), FRAG_CAP_PER_ZONE_PER_SHARD, "refusal must not evict");
+    // Victim in zone 3 (frag_test_authority) still installs and hits.
+    let victim = mk(idents[FRAG_CAP_PER_ZONE_PER_SHARD + 1], frag_test_authority());
+    cache.install_with_session(victim, decision, None, session_for(30_000), 1000, 1_000, 1, 0);
+    assert!(cache.lookup(&victim, 1_001, 1, |_| true).is_some(),
+        "zone-3 victim must not be starved by zone-9 fill");
 }
 
 #[test]
@@ -6101,13 +6179,16 @@ fn frag_assoc_full_shard_refuses_foreign_eviction_10714() {
         family,
         3,
     );
-    let make_key = |src, ident| FragKey {
+    // #14321: the two filling sources sit in DIFFERENT zones so each fills
+    // its own per-zone quota and together they fill the shared shard.
+    let authorities = [frag_test_authority(), frag_other_authority()];
+    let make_key = |src, ident, authority| FragKey {
         addr_family: family,
         src,
         dst,
         ident,
         protocol: PROTO_UDP,
-        authority: frag_test_authority(),
+        authority,
     };
     let decision = frag_test_decision(Nat64State::forward_decision(
         Ipv4Addr::new(198, 51, 100, 1),
@@ -6116,8 +6197,8 @@ fn frag_assoc_full_shard_refuses_foreign_eviction_10714() {
     ));
     let cache = FragAssoc::new();
     for ident in 0..FRAG_CAP_PER_SESSION_PER_SHARD as u32 {
-        for &source in &sources[..2] {
-            cache.install(make_key(source, ident), decision, None, 1_000, 1, 0);
+        for (i, &source) in sources[..2].iter().enumerate() {
+            cache.install(make_key(source, ident, authorities[i]), decision, None, 1_000, 1, 0);
         }
     }
     assert_eq!(
@@ -6126,9 +6207,9 @@ fn frag_assoc_full_shard_refuses_foreign_eviction_10714() {
         "two admission-session quotas fill the shared shard"
     );
 
-    let first_source_oldest = make_key(sources[0], 0);
-    let second_source_oldest = make_key(sources[1], 0);
-    let rejected_key = make_key(sources[2], 0);
+    let first_source_oldest = make_key(sources[0], 0, authorities[0]);
+    let second_source_oldest = make_key(sources[1], 0, authorities[1]);
+    let rejected_key = make_key(sources[2], 0, authorities[0]);
     cache.install(rejected_key, decision, None, 1_000, 1, 0);
     assert_eq!(cache.len(), FRAG_CAP_PER_SHARD, "full shard stays bounded");
     assert!(

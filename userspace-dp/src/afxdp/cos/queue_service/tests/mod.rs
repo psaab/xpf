@@ -42,6 +42,7 @@ fn test_overlap_admissions_10285(
         ident,
         protocol: PROTO_TCP,
         routing_domain: 0,
+        ingress_zone: 0,
         fairness_origin: None,
     };
     let mut result = tracker.check_and_record_fragment_detailed(

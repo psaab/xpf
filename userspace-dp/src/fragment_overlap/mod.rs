@@ -7,17 +7,26 @@
 //! an IDS/enforcement-evasion primitive. This tracker closes the ordering gap by dropping
 //! overlapping fragments (RFC 5722 / Juniper `tear-drop` semantics).
 //!
-//! Key is the receiver's reassembly key plus the routing domain:
-//! `(family, src, dst, ident, proto, routing_domain)` for IPv4, with `protocol` pinned
+//! Key is the receiver's reassembly key plus the routing domain and the
+//! ingress security zone (#14321):
+//! `(family, src, dst, ident, proto, routing_domain, ingress_zone)` for IPv4, with `protocol` pinned
 //! to 0 for IPv6 (the receiver reassembles on src/dst/ident only, RFC 8200 §4.5, while
 //! the Fragment Header's Next Header is vary-able — keying it would let an attacker
-//! split overlap keys the receiver still reassembles together). WITHOUT ingress
-//! interface/zone/authority (ECMP/LAG L4-hash routinely splits one datagram's fragments
-//! across ingresses; authority-scoping would under-drop the threat itself), but WITH the
+//! split overlap keys the receiver still reassembles together). The zone is
+//! part of membership: two zones sharing one VRF must not share one overlap
+//! entry, otherwise a spoofed fragment in an untrusted zone poisons a trusted
+//! zone's datagram and one zone's incomplete entries exhaust the other's
+//! quota (see the fairness paragraph). WITHOUT ingress interface/authority
+//! beyond the zone (ECMP/LAG L4-hash routinely splits one datagram's fragments
+//! across ingress interfaces in the same zone; interface-scoping would
+//! under-drop the threat itself), but WITH the
 //! routing domain: overlapping tenant tuples in isolated VRFs never share a receiver,
 //! so a domain-free key would let tenant A drop tenant B's fragments (cross-VRF
 //! poisoning). The domain is stamped by the caller from the same SSOT as session keys
-//! (`forwarding::ingress_routing_domain`, or the parsed flow's stamped domain).
+//! (`forwarding::ingress_routing_domain`, or the parsed flow's stamped domain), and
+//! the zone from the same ingress inputs enforcement uses
+//! (`frag_ingress_authority`'s zone resolution: validated fabric override, else
+//! the logical unit's configured zone, else 0).
 //!
 //! Lifetimes cover realistic reassembly windows, not packet spacing. Linux holds
 //! incomplete datagrams up to `ipfrag_time` (30s); a 2s tracker TTL would reopen the
@@ -27,14 +36,16 @@
 //! TTL-bounded: ≈48B key + 128B ranges (16×8B) + stamps ≈ 200B/entry × 1024 entries
 //! (16 shards × 64) ≈ 200KB fixed. The TTL only sets how long attack residue squats,
 //! which the absolute bound + shard caps contain.
-//! Fairness (#10658): one sender (`routing_domain`, family, `src`) holds at most
-//! 8 incomplete entries per shard; a routing domain holds at most 32 incomplete
-//! entries per shard. Completed entries remain overlap anchors and do not
+//! Fairness (#10658, #14321): one sender (`routing_domain`, family, `src`) holds at most
+//! 8 incomplete entries per shard; a `(routing_domain, ingress_zone)` pair
+//! holds at most 32 entries per shard (`OVERLAP_CAP_PER_ZONE_PER_SHARD`).
+//! Completed entries remain overlap anchors and do not
 //! consume a sender's incomplete-datagram quota, avoiding modest-rate refusal
-//! of conformant completed traffic. All entries count toward the domain's
-//! 32-entry reserve; at the bound, the oldest completed anchor may be reclaimed
-//! to admit a new key. Incomplete anchors are not reclaimed, and all entries
-//! remain subject to the fixed 64-entry shard cap. Post-translation entries
+//! of conformant completed traffic. All entries count toward their zone's
+//! 32-entry reserve; at the bound, the oldest completed anchor in that zone
+//! may be reclaimed to admit a new key. Incomplete anchors are not reclaimed, and all entries
+//! remain subject to the fixed 64-entry shard cap, which stays the aggregate
+//! memory bound when many zones share one shard. Post-translation entries
 //! charge the sender quota to the pre-translation origin (`fairness_origin`,
 //! #14127) instead of the shared pool address, so tenants translated through
 //! one pool IP keep independent incomplete-fragment budgets; cross-origin
@@ -43,12 +54,15 @@
 //! ranges must stay anchored — see `overlap_entry_counts_for_sender_quota`).
 //! A fragment routed to a different egress domain with no address rewrite
 //! also gets a post key (egress domain only), so the downstream domain's
-//! anchor set is checked instead of skipped (#14127).
+//! anchor set is checked instead of skipped (#14127). Post-translation keys
+//! inherit the arrival `ingress_zone`: the downstream receiver is reached
+//! under the same ingress enforcement domain, and a translated fragment must
+//! not land in a different zone's quota/membership than its arrival key.
 //!
 //! Failure directions (explicit — they differ from `fragment_assoc`):
 //!   * Overlap/empty/overflow/capacity all fail CLOSED (drop). Sender quota
-//!     applies to incomplete entries; the domain cap counts all entries and
-//!     reclaims completed anchors only at that cap.
+//!     applies to incomplete entries; the zone cap counts all entries in
+//!     its (domain, zone) and reclaims completed anchors only at that cap.
 //!   * Check/record SPLIT (no refused-traffic planting): the early hook only CHECKS
 //!     (pure — drops overlaps before enforcement verdicts are earned); recording happens
 //!     post-commit at the TX site, so only ADMITTED fragments plant ranges. A refused
@@ -112,7 +126,7 @@ use crate::nat::NatDecision;
 pub(crate) static FRAG_OVERLAP_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Range-cap overflow drops (17th disjoint range, fail-closed).
 pub(crate) static FRAG_OVERLAP_OVERFLOW_DROPPED: AtomicU64 = AtomicU64::new(0);
-/// Capacity drops (sender/domain quota or full shard without reclaimable anchors).
+/// Capacity drops (sender/zone quota or full shard without reclaimable anchors).
 pub(crate) static FRAG_OVERLAP_SHARD_FULL_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// Post-translation overlap drops (TX-site hook, translated key).
 pub(crate) static FRAG_OVERLAP_POST_NAT_DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -124,9 +138,12 @@ const _: () = assert!(OVERLAP_SHARDS >= 2 && OVERLAP_SHARDS.is_power_of_two());
 pub(crate) const OVERLAP_CAP_PER_SHARD: usize = 64;
 /// Max entries one sender holds per shard (#10658).
 pub(crate) const OVERLAP_CAP_PER_SENDER_PER_SHARD: usize = 8;
-/// A routing domain can use at most half a shard; completed entries may be
-/// reclaimed at this limit.
-pub(crate) const OVERLAP_CAP_PER_DOMAIN_PER_SHARD: usize = OVERLAP_CAP_PER_SHARD / 2;
+/// A `(routing_domain, ingress_zone)` pair can use at most half a shard
+/// (#14321); completed entries in that zone may be reclaimed at this limit.
+/// The name is kept as `OVERLAP_CAP_PER_DOMAIN_PER_SHARD` alias for existing
+/// callers/tests that read the per-domain reserve value.
+pub(crate) const OVERLAP_CAP_PER_ZONE_PER_SHARD: usize = OVERLAP_CAP_PER_SHARD / 2;
+pub(crate) const OVERLAP_CAP_PER_DOMAIN_PER_SHARD: usize = OVERLAP_CAP_PER_ZONE_PER_SHARD;
 /// 30s idle TTL — covers the Linux `ipfrag_time` reassembly window (see docs).
 pub(crate) const OVERLAP_TTL_NS: u64 = 30_000_000_000;
 /// 60s absolute bound from first sighting — never refreshed by later fragments.
@@ -134,10 +151,15 @@ pub(crate) const OVERLAP_MAX_LIFETIME_NS: u64 = 60_000_000_000;
 /// Max disjoint ranges per datagram; the 17th fails closed.
 pub(crate) const OVERLAP_MAX_RANGES: usize = 16;
 
-/// Receiver's reassembly key + routing domain. `protocol` is the IPv4 Protocol byte;
+/// Receiver's reassembly key + routing domain + ingress zone (#14321).
+/// `protocol` is the IPv4 Protocol byte;
 /// for IPv6 it is always 0 (dropped from the key — see module docs). `routing_domain`
 /// is stamped by the caller (flow's stamped domain, else the ingress SSOT); parse
-/// leaves it 0. `fairness_origin` is `None` on arrival keys; post-translation
+/// leaves it 0. `ingress_zone` is stamped by the caller from the same ingress
+/// inputs enforcement uses (validated fabric override, else the logical
+/// unit's configured zone, else 0); parse leaves it 0. It IS part of overlap
+/// membership and of the per-zone quota: two zones sharing one VRF must not
+/// share one entry or one reserve. `fairness_origin` is `None` on arrival keys; post-translation
 /// keys carry the arrival sender for quota accounting only — it never
 /// participates in overlap membership (see the field doc).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -148,6 +170,9 @@ pub(crate) struct OverlapKey {
     pub(crate) ident: u32,
     pub(crate) protocol: u8,
     pub(crate) routing_domain: u32,
+    /// Ingress security zone (#14321); see the struct doc. Part of
+    /// membership (`overlap_same_datagram`) and of the per-zone quota.
+    pub(crate) ingress_zone: u16,
     /// Pre-translation arrival identity, set only on keys derived by
     /// `translated_overlap_key`. It is NOT part of the reassembly key:
     /// downstream receivers merge fragments by the translated tuple
@@ -272,7 +297,12 @@ fn overlap_sender(key: &OverlapKey) -> (u32, u8, IpAddr) {
 /// Reassembly membership ignores `fairness_origin`: downstream
 /// receivers merge by the translated tuple alone, so two tenants'
 /// fragments for one downstream datagram must find the same entry
-/// even though their fairness origins differ (#14127).
+/// even though their fairness origins differ (#14127). Membership DOES
+/// include `ingress_zone` (#14321): fragments arriving in different zones
+/// are adjudicated under different enforcement domains, and a fragment in
+/// one zone must not poison or merge into another zone's entry even when
+/// the receiver tuple coincides. Post-translation keys inherit the
+/// arrival zone, so a datagram keeps one membership identity across NAT.
 #[inline]
 fn overlap_same_datagram(a: &OverlapKey, b: &OverlapKey) -> bool {
     a.addr_family == b.addr_family
@@ -281,6 +311,7 @@ fn overlap_same_datagram(a: &OverlapKey, b: &OverlapKey) -> bool {
         && a.ident == b.ident
         && a.protocol == b.protocol
         && a.routing_domain == b.routing_domain
+        && a.ingress_zone == b.ingress_zone
 }
 
 #[inline]
@@ -850,15 +881,19 @@ impl OverlapTracker {
             }
         }
         // #10658: incomplete entries consume sender fairness quotas, and all
-        // entries count against the routing-domain reserve. Reclaiming the
-        // oldest completed anchor at that limit lets #13937 conformant traffic
-        // continue without allowing completions to bypass domain fairness.
+        // entries count against their (routing_domain, ingress_zone)
+        // reserve (#14321). Reclaiming the
+        // oldest completed anchor in that zone at that limit lets #13937 conformant traffic
+        // continue without allowing completions to bypass zone fairness,
+        // and without letting one zone's fill starve another zone sharing
+        // the same VRF.
         // #14127: post-translation candidates key the sender quota on their
         // pre-translation origin, so tenants sharing one pool address do not
         // share a budget; cross-origin entries in the same downstream
         // domain count again once this origin's pending fragments have
         // failed (poisoned — see `overlap_entry_counts_for_sender_quota`),
-        // and the domain reserve below always counts the downstream domain.
+        // and the zone reserve below always counts the downstream
+        // (domain, arrival-zone) pair (post keys inherit the arrival zone).
         let sender = overlap_sender(&key);
         let poisoned = key.fairness_origin.is_some()
             && shard.iter().any(|e| {
@@ -867,13 +902,15 @@ impl OverlapTracker {
                     && e.failed
             });
         let mut sender_entries = 0usize;
-        let mut domain_entries = 0usize;
+        let mut zone_entries = 0usize;
         for e in shard.iter() {
             if overlap_entry_counts_for_sender_quota(e, &key, sender, poisoned) {
                 sender_entries += 1;
             }
-            if e.key.routing_domain == key.routing_domain {
-                domain_entries += 1;
+            if e.key.routing_domain == key.routing_domain
+                && e.key.ingress_zone == key.ingress_zone
+            {
+                zone_entries += 1;
             }
         }
         if sender_entries >= OVERLAP_CAP_PER_SENDER_PER_SHARD {
@@ -887,11 +924,12 @@ impl OverlapTracker {
                 tracker: None,
             };
         }
-        if domain_entries >= OVERLAP_CAP_PER_DOMAIN_PER_SHARD {
+        if zone_entries >= OVERLAP_CAP_PER_ZONE_PER_SHARD {
             let mut reclaim_pos = None;
             let mut oldest_created_ns = u64::MAX;
             for (pos, entry) in shard.iter().enumerate() {
                 if entry.key.routing_domain == key.routing_domain
+                    && entry.key.ingress_zone == key.ingress_zone
                     && overlap_entry_complete(entry)
                     && entry.created_ns < oldest_created_ns
                 {
@@ -964,7 +1002,7 @@ impl OverlapTracker {
     /// (`OVERLAP_TTL_NS`, refreshed by each recorded fragment) or the
     /// 60s absolute lifetime expires them via the usual liveness sweep.
     /// Completed anchors do not consume sender quotas, but count toward the
-    /// domain reserve and may be reclaimed there. Incomplete anchors are never
+    /// (domain, zone) reserve and may be reclaimed there. Incomplete anchors are never
     /// evicted for capacity.
     ///
     /// Returns `true` when this settlement completes the datagram
@@ -1085,6 +1123,7 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
                     ident,
                     protocol: proto,
                     routing_domain: 0,
+                    ingress_zone: 0,
                     fairness_origin: None,
                 },
                 proto,
@@ -1132,6 +1171,7 @@ pub(crate) fn overlap_parse(l3_packet: &[u8], addr_family: i32) -> OverlapParse 
                     ident,
                     protocol: 0,
                     routing_domain: 0,
+                    ingress_zone: 0,
                     fairness_origin: None,
                 },
                 next_header,
@@ -1194,6 +1234,7 @@ pub(crate) fn translated_overlap_key(
                 ident: pre.ident & 0xFFFF,
                 protocol: map_v6_to_v4_proto(fragment_next_header),
                 routing_domain: egress_domain,
+                ingress_zone: pre.ingress_zone,
                 fairness_origin,
             })
         } else {
@@ -1210,6 +1251,7 @@ pub(crate) fn translated_overlap_key(
             ident: pre.ident,
             protocol: pre.protocol,
             routing_domain: egress_domain,
+            ingress_zone: pre.ingress_zone,
             fairness_origin,
         })
     } else if egress_domain != pre.routing_domain {
@@ -1222,6 +1264,7 @@ pub(crate) fn translated_overlap_key(
         // key distinct, so the post-check runs.
         TranslatedOverlapKey::Key(OverlapKey {
             routing_domain: egress_domain,
+            ingress_zone: pre.ingress_zone,
             fairness_origin,
             ..*pre
         })
@@ -1243,6 +1286,7 @@ mod tests {
             ident: 0xBEEF,
             protocol: 6,
             routing_domain: 0,
+            ingress_zone: 0,
             fairness_origin: None,
         }
     }
@@ -1255,6 +1299,7 @@ mod tests {
             ident: 0xBEEF,
             protocol: 6,
             routing_domain: 0,
+            ingress_zone: 0,
             fairness_origin: None,
         }
     }
@@ -1629,6 +1674,7 @@ mod tests {
             ident,
             protocol: 0,
             routing_domain: 0,
+            ingress_zone: 0,
             fairness_origin: None,
         };
         let a = mk(0x0001_0001);
@@ -1777,6 +1823,7 @@ mod tests {
             ident,
             protocol: 0,
             routing_domain: 0,
+            ingress_zone: 0,
             fairness_origin: None,
         };
         let TranslatedOverlapKey::Key(tcp_key) =
@@ -1822,6 +1869,7 @@ mod tests {
             ident: 0x0001_0001,
             protocol: 0,
             routing_domain: 0,
+            ingress_zone: 0,
             fairness_origin: None,
         };
         for nat in [
@@ -2357,7 +2405,8 @@ mod tests {
         }
         assert_eq!(tracker.len(), OVERLAP_CAP_PER_DOMAIN_PER_SHARD);
 
-        // A competing routing domain can use the other half of the shard.
+        // A competing routing domain can use the other half of the shard
+        // (its (domain, zone) reserve is independent).
         let mut victim = v4_key();
         victim.routing_domain = 8;
         victim.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101));
@@ -2583,6 +2632,7 @@ mod tests {
                     ident: *ident,
                     protocol: 6,
                     routing_domain: DOMAIN,
+                    ingress_zone: 0,
                     fairness_origin: None,
                 };
                 if !t.check_and_record(key, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED) {
@@ -2606,6 +2656,7 @@ mod tests {
                     ident: *ident,
                     protocol: 6,
                     routing_domain: DOMAIN,
+                    ingress_zone: 0,
                     fairness_origin: None,
                 };
                 assert_eq!(
@@ -2629,6 +2680,7 @@ mod tests {
             ident: 0,
             protocol: 6,
             routing_domain: DOMAIN,
+            ingress_zone: 0,
             fairness_origin: None,
         };
         while t.shard_index(&victim) != TARGET_SHARD {
@@ -2672,6 +2724,7 @@ mod tests {
                         ident,
                         protocol: 6,
                         routing_domain: 7,
+                        ingress_zone: 0,
                         fairness_origin: None,
                 };
                     seen[t.shard_index(&key)] = true;
@@ -2729,6 +2782,7 @@ mod tests {
                     ident: *ident,
                     protocol: 6,
                     routing_domain: 7,
+                    ingress_zone: 0,
                     fairness_origin: None,
                 };
                 assert_eq!(
@@ -2753,6 +2807,7 @@ mod tests {
                             ident: *ident,
                             protocol: 6,
                             routing_domain: 7,
+                            ingress_zone: 0,
                             fairness_origin: None,
                 };
                         let old_shard = legacy_index(&key, seed);
@@ -3031,5 +3086,111 @@ mod tests {
             ),
             "poisoned origin must not bypass the shared downstream budget"
         );
+    }
+
+    #[test]
+    fn cross_zone_domain_fill_cannot_starve_other_zone_14321() {
+        // #14321: four senders in zone 1 fill its per-(domain,zone) quota;
+        // a victim in zone 2 sharing the same routing domain must still be
+        // admitted. RED on master: domain quota is zone-blind (32/domain),
+        // so the fill exhausts the domain and the victim drops ShardFull.
+        let t = OverlapTracker::with_seed(1);
+        let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+        let mk = |src_last: u8, ident: u32, zone: u16| OverlapKey {
+            addr_family: libc::AF_INET as u8,
+            src: IpAddr::V4(Ipv4Addr::new(10, 0, 61, src_last)),
+            dst,
+            ident,
+            protocol: 6,
+            routing_domain: 0,
+            ingress_zone: zone,
+            fairness_origin: None,
+        };
+        // Find a shard and fill zone 1 there: 4 senders x 8 = 32 entries.
+        let probe = mk(101, 0, 1);
+        let shard = t.shard_index(&probe);
+        let mut idents: std::collections::HashMap<u8, Vec<u32>> =
+            std::collections::HashMap::new();
+        let mut ident = 0u32;
+        while idents.values().map(|v: &Vec<u32>| v.len()).sum::<usize>()
+            < OVERLAP_CAP_PER_ZONE_PER_SHARD
+        {
+            for s in 101..=104u8 {
+                let k = mk(s, ident, 1);
+                if t.shard_index(&k) == shard
+                    && idents.entry(s).or_default().len() < OVERLAP_CAP_PER_SENDER_PER_SHARD
+                {
+                    idents.entry(s).or_default().push(ident);
+                }
+            }
+            ident += 1;
+            assert!(ident < 1_000_000, "must find same-shard idents");
+        }
+        let now_ns = 1_000u64;
+        for (s, list) in &idents {
+            for &id in list {
+                let r = t.check_and_record_fragment_detailed(
+                    mk(*s, id, 1),
+                    0,
+                    8,
+                    false,
+                    now_ns,
+                    &FRAG_OVERLAP_DROPPED,
+                );
+                assert!(!r.dropped, "zone-1 fill ident {id} from {s} must admit, reason={:?}", r.reason);
+            }
+        }
+        // Zone 1 is at its own quota: its 5th sender (new sender, same zone)
+        // must be refused fail-closed (per-zone quota), not evict.
+        let mut z1_extra = None;
+        let mut id = 0u32;
+        while z1_extra.is_none() {
+            let k = mk(109, id, 1);
+            if t.shard_index(&k) == shard { z1_extra = Some(k); }
+            id += 1;
+        }
+        let z1_extra = z1_extra.unwrap();
+        let r = t.check_and_record_fragment_detailed(z1_extra, 0, 8, false, now_ns, &FRAG_OVERLAP_DROPPED);
+        assert!(r.dropped && r.reason == Some(OverlapDropReason::ShardFull),
+            "zone-1 over-quota datagram must fail closed, got dropped={} reason={:?}", r.dropped, r.reason);
+        // Victim in zone 2, same routing domain and shard, must be admitted.
+        let mut victim = None;
+        let mut id = 0u32;
+        while victim.is_none() {
+            let k = mk(200, id, 2);
+            if t.shard_index(&k) == shard { victim = Some(k); }
+            id += 1;
+        }
+        let victim = victim.unwrap();
+        let r = t.check_and_record_fragment_detailed(victim, 0, 8, false, now_ns, &FRAG_OVERLAP_DROPPED);
+        assert!(!r.dropped,
+            "zone-2 victim must not be starved by zone-1 fill, reason={:?}", r.reason);
+    }
+
+    #[test]
+    fn cross_zone_overlap_does_not_poison_other_zone_14321() {
+        // #14321 (2): overlapping fragment in zone 1 with same tuple as an
+        // active datagram in zone 2 must not poison the zone-2 entry.
+        // RED on master: overlap_same_datagram ignores ingress_zone, so the
+        // zone-1 overlap drops / merges into the zone-2 entry.
+        let t = OverlapTracker::new();
+        let mut trust = v4_key();
+        trust.ingress_zone = 2;
+        let mut untrust = trust;
+        untrust.ingress_zone = 1;
+        assert!(!t.check_and_record(trust, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED),
+            "trust head must admit");
+        // Same tuple, other zone, overlapping range: separate datagram for
+        // overlap purposes — must admit as its own entry, not drop as overlap.
+        assert!(!t.check_and_record(untrust, 8, 24, 1_000, &FRAG_OVERLAP_DROPPED),
+            "cross-zone overlapping fragment must not poison/drop via trust entry");
+        // Trust tail (adjacent, non-overlapping) still admits and is protected:
+        assert!(!t.check_and_record(trust, 16, 32, 1_000, &FRAG_OVERLAP_DROPPED),
+            "trust tail must still admit");
+        // And a true same-zone overlap still drops fail-closed.
+        assert!(t.check_and_record(trust, 8, 24, 1_000, &FRAG_OVERLAP_DROPPED),
+            "same-zone overlap must still drop");
+        assert!(t.check_and_record(untrust, 16, 32, 1_000, &FRAG_OVERLAP_DROPPED),
+            "same-zone (untrust) overlap with its own entry must still drop");
     }
 }

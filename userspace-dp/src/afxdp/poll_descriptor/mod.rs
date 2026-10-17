@@ -85,7 +85,7 @@ use frag_assoc::{
     flowbacked_no_route_requires_nat_translation, flowless_nat_rule_possible,
     flowless_nat_wire_info, flowless_no_route_requires_nat_translation,
     flowless_requires_nat_translation, flowless_source_nat_requires_translation,
-    frag_ingress_authority_with_nat_scope, nat64_consult_forward_fragment_assoc,
+    frag_ingress_authority_with_nat_scope, frag_ingress_zone, nat64_consult_forward_fragment_assoc,
     nat64_install_forward_fragment_assoc, same_family_or_plain_consult_forward_fragment_assoc,
     same_family_or_plain_install_forward_fragment_assoc,
     session_gated_reverse_fragment_requires_nat_translation,
@@ -1152,6 +1152,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     },
                                 )
                             });
+                        // #14321: stamp the ingress zone from the same
+                        // inputs enforcement uses, so overlap membership
+                        // and the per-zone quota partition by zone.
+                        okey.ingress_zone = frag_ingress_zone(
+                            worker_ctx.forwarding,
+                            meta,
+                            if packet_fabric_ingress {
+                                ingress_zone_override
+                            } else {
+                                None
+                            },
+                        );
                         let overlap = worker_ctx
                             .forwarding
                             .nat64
