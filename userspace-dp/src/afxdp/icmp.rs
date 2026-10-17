@@ -65,6 +65,17 @@ pub(super) fn can_generate_icmp_error_reply(
     meta: UserspaceDpMeta,
     forwarding: &ForwardingState,
 ) -> bool {
+    // #14642 (#12864 parity): GRE/WireGuard decap fabricates a zero-MAC
+    // Ethernet header for the inner packet. Reflecting it would emit an
+    // unencapsulated ICMP error onto the underlay with destination MAC
+    // 00:00:00:00:00:00 (flooded as unknown unicast, leaking inner header
+    // material). Suppress every locally generated error for such an
+    // inner — Time Exceeded here, and via `build_local_icmp_error_*` the
+    // reject Destination Unreachable builders as defense in depth (the
+    // reject choke in `enqueue_reject_reply` already gates this flag).
+    if meta.meta_flags & TUNNEL_DECAP_INGRESS_FLAG != 0 {
+        return false;
+    }
     let l3 = match meta.l3_offset {
         14 | 18 => meta.l3_offset as usize,
         _ => match frame_l3_offset(frame) {
@@ -444,6 +455,10 @@ pub(super) fn build_local_icmp_error_v4(
     icmp_type: u8,
     icmp_code: u8,
 ) -> Option<Vec<u8>> {
+    // #14642: never reflect a tunnel-decap synthetic zero-MAC header.
+    if meta.meta_flags & TUNNEL_DECAP_INGRESS_FLAG != 0 {
+        return None;
+    }
     let egress = forwarding.egress.get(&ingress_ifindex)?;
     let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
     let src_ip = egress.primary_v4?;
@@ -535,6 +550,10 @@ pub(super) fn build_local_icmp_error_v6(
     icmp_type: u8,
     icmp_code: u8,
 ) -> Option<Vec<u8>> {
+    // #14642: never reflect a tunnel-decap synthetic zero-MAC header.
+    if meta.meta_flags & TUNNEL_DECAP_INGRESS_FLAG != 0 {
+        return None;
+    }
     let egress = forwarding.egress.get(&ingress_ifindex)?;
     let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
     let src_ip = egress.primary_v6?;

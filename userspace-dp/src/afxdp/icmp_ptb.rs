@@ -462,6 +462,14 @@ pub(in crate::afxdp) fn ptb_reply_suppressed(
     l3_offset: usize,
     forwarding: &ForwardingState,
 ) -> bool {
+    // #14642 (#12864 parity): GRE/WireGuard decap fabricates a zero-MAC
+    // Ethernet header for the inner packet. Reflecting it would emit an
+    // unencapsulated PTB onto the underlay with destination MAC
+    // 00:00:00:00:00:00. Suppress it; the oversize original is still
+    // dropped by the caller (`mtu_signalled`), so this fails closed.
+    if meta.meta_flags & super::icmp::TUNNEL_DECAP_INGRESS_FLAG != 0 {
+        return true;
+    }
     // #2325: never generate a PTB in reply to a datagram delivered as an
     // L2 broadcast/multicast frame. This gives the PTB path the same L2
     // suppression that the reject / Time-Exceeded path
@@ -559,6 +567,10 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
     forwarding: &ForwardingState,
     next_hop_mtu: u16,
 ) -> Option<Vec<u8>> {
+    // #14642: never reflect a tunnel-decap synthetic zero-MAC header.
+    if meta.meta_flags & super::icmp::TUNNEL_DECAP_INGRESS_FLAG != 0 {
+        return None;
+    }
     let egress = forwarding.egress.get(&ingress_ifindex)?;
     let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
     // Cross-interface fallbacks must be non-link-local because link-local scope
@@ -676,6 +688,10 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
     forwarding: &ForwardingState,
     mtu: u32,
 ) -> Option<Vec<u8>> {
+    // #14642: never reflect a tunnel-decap synthetic zero-MAC header.
+    if meta.meta_flags & super::icmp::TUNNEL_DECAP_INGRESS_FLAG != 0 {
+        return None;
+    }
     let egress = forwarding.egress.get(&ingress_ifindex)?;
     let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
     // Cross-interface fallbacks must be non-link-local because link-local scope
