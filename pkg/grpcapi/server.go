@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -669,6 +670,12 @@ const (
 // exit code can still start a second daemon, and nothing here helps a node
 // already in the two-daemon state. #7501's live-sibling refiner remains the
 // mechanism that TOLERATES that state; this reduces how often it is reached.
+//
+// #14581 narrows WHEN this is returned: only when the holder is attributed
+// to a privileged uid (0 or our own — what another xpfd runs as). A
+// non-root or unattributed holder keeps the supervisor retrying and
+// alarming instead of exiting, because fatal-on-any-holder handed any
+// unprivileged port squatter a persistent control-plane kill switch.
 var ErrManagementPortHeld = errors.New("management port already bound by another process")
 
 type primarySupervisorConfig struct {
@@ -679,6 +686,16 @@ type primarySupervisorConfig struct {
 	// gives up and returns ErrManagementPortHeld. A test sets it small; nothing
 	// else varies it.
 	addrInUseGrace time.Duration
+	// holderCheck attributes the process holding the management port at
+	// the #8233 fatal decision (#14581). nil means the production
+	// kernel lookup (authz.LookupListenerOwnerForSupervisor). A test
+	// sets it to drive the privileged / non-privileged / unattributed
+	// branches without depending on who holds a port on the test box.
+	holderCheck func(addr string) (authz.ListenerOwner, error)
+	// selfUID is this process's uid for holderCheck's Privileged call.
+	// Zero in production means os.Getuid() at the decision point; a
+	// test sets it so the "own uid" arm is reachable without root.
+	selfUID int
 	// listen binds a fresh loopback listener. The #5035/#5278 clamp is NOT
 	// here: it mutates s.addr and must run once, before the loop, or a
 	// re-bind would re-clamp an already-clamped address and re-warn on every
@@ -758,12 +775,39 @@ func (s *Server) supervisePrimaryListener(ctx context.Context, cfg primarySuperv
 					addrInUseSince = time.Now()
 				}
 				if held := time.Since(addrInUseSince); held >= cfg.addrInUseGrace {
-					s.setListenState("", grpcFailed)
-					slog.Error("management port is still held after waiting; another xpfd is already running — exiting rather than running with a dead management listener",
-						"addr", s.addr, "waited", held.Round(time.Second),
-						"grace", cfg.addrInUseGrace, "err", err)
-					return fmt.Errorf("%w: %s held for %s: %w",
-						ErrManagementPortHeld, s.addr, held.Round(time.Second), err)
+					// #14581: the grace expiring proves only that SOMEONE
+					// holds the port, not that it is another xpfd. #8233's
+					// fatal is sound only for a privileged holder (uid 0
+					// or our own uid — what a second xpfd runs as). A
+					// non-root holder (an SSH remote forward, a
+					// compromised service uid, any unprivileged local
+					// process) is a squatter: going fatal hands it a
+					// persistent kill switch (Restart=on-failure loops
+					// us) while it impersonates the management server.
+					// An unattributed holder is likewise not evidence of
+					// another xpfd. Both stay supervised and keep
+					// alarming at ERROR instead of exiting.
+					if owner, privileged := s.managementPortHolder(cfg); privileged {
+						s.setListenState("", grpcFailed)
+						slog.Error("management port is still held after waiting by a privileged process; another xpfd is already running — exiting rather than running with a dead management listener",
+							"addr", s.addr, "waited", held.Round(time.Second),
+							"grace", cfg.addrInUseGrace, "holder_uid", owner.UID, "err", err)
+						return fmt.Errorf("%w: %s held for %s by uid %d: %w",
+							ErrManagementPortHeld, s.addr, held.Round(time.Second), owner.UID, err)
+					} else if owner.Found {
+						slog.Error("management port is held by a NON-PRIVILEGED process — not another xpfd; staying up and retrying (the holder can impersonate the management server to local clients; remove it) — #14581",
+							"addr", s.addr, "waited", held.Round(time.Second),
+							"holder_uid", owner.UID, "err", err)
+					} else {
+						slog.Error("management port is still held after waiting but the holder could not be attributed — not exiting (an unattributed holder is not evidence of another xpfd); staying up and retrying — #14581",
+							"addr", s.addr, "waited", held.Round(time.Second),
+							"detail", owner.Detail, "err", err)
+					}
+					// Restart the grace window so the alarm repeats at
+					// grace cadence rather than on every backoff tick,
+					// and so a later privileged holder gets a full
+					// window of its own before it can be fatal.
+					addrInUseSince = time.Now()
 				}
 			} else {
 				addrInUseSince = time.Time{}
@@ -814,6 +858,30 @@ func (s *Server) supervisePrimaryListener(ctx context.Context, cfg primarySuperv
 			return nil
 		}
 	}
+}
+
+// managementPortHolder attributes the holder of s.addr at the #8233
+// fatal decision (#14581). privileged is true only when the holder was
+// attributed AND is uid 0 or our own uid. A lookup error is folded into
+// an unattributed owner: it must never read as privileged, or a broken
+// /proc would reinstate the fatal-on-any-holder kill switch.
+func (s *Server) managementPortHolder(cfg primarySupervisorConfig) (authz.ListenerOwner, bool) {
+	check := cfg.holderCheck
+	if check == nil {
+		check = authz.LookupListenerOwnerForSupervisor
+	}
+	owner, err := check(s.addr)
+	if err != nil {
+		return authz.ListenerOwner{Detail: "holder lookup failed: " + err.Error()}, false
+	}
+	self := cfg.selfUID
+	if self == 0 && cfg.holderCheck == nil {
+		self = os.Getuid()
+	}
+	// When a test injects holderCheck without selfUID, self stays 0 and
+	// Privileged still covers the uid-0 arm; the own-uid arm is driven
+	// by setting selfUID explicitly.
+	return owner, owner.Privileged(uint32(self))
 }
 
 // reportPrimaryFault applies the escalation policy described on

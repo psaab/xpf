@@ -3,6 +3,8 @@ package grpcapi
 import (
 	"context"
 	"errors"
+
+	"github.com/psaab/xpf/pkg/authz"
 	"net"
 	"os"
 	"regexp"
@@ -60,6 +62,12 @@ func TestPrimaryAddrInUseGraceExceedsUnitStopTimeout_8233(t *testing.T) {
 }
 
 // A persistent EADDRINUSE must END the daemon rather than be retried forever.
+//
+// #14581: the holder attribution is INJECTED as uid 0 here — the fatal
+// is sound only for a privileged (duplicate-xpfd) holder. The same
+// synthetic EADDRINUSE with a non-root or unattributed holder must NOT
+// be fatal; those arms are TestNonRootHolderIsNotFatal_14581 and
+// TestUnattributedHolderIsNotFatal_14581.
 func TestPersistentAddrInUseIsFatal_8233(t *testing.T) {
 	s := &Server{addr: "127.0.0.1:0"}
 	// BOUNDED DELIBERATELY. The defect this test guards is "retries forever",
@@ -78,6 +86,7 @@ func TestPersistentAddrInUseIsFatal_8233(t *testing.T) {
 		backoffMax:     2 * time.Millisecond,
 		healthyServe:   time.Hour,
 		addrInUseGrace: 20 * time.Millisecond,
+		holderCheck:    holderFunc(authz.ListenerOwner{Found: true, UID: 0}, nil),
 		listen:         func(context.Context) (net.Listener, error) { return nil, addrInUseErr() },
 		serve:          func(context.Context, net.Listener) error { return nil },
 	})

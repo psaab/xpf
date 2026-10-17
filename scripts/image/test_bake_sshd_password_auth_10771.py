@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression for factory sshd password-auth posture (#10771 g3-F3)."""
+"""Regression for factory sshd posture (#10771 g3-F3, #14581 forwarding)."""
 
 from __future__ import annotations
 
@@ -83,6 +83,12 @@ class FactorySSHDPasswordAuthTests(unittest.TestCase):
             self.assertEqual(effective["maxauthtries"], "3")
             self.assertEqual(effective["logingracetime"], "30")
             self.assertEqual(effective["permitemptypasswords"], "no")
+            # #14581: no SSH forwarding — a remote forward can squat on
+            # the loopback xpfd management port and impersonate it.
+            # DisableForwarding implies AllowTcpForwarding=no but sshd -T
+            # still reports the latter's own default; assert the
+            # authoritative directive, not the implied one.
+            self.assertEqual(effective["disableforwarding"], "yes")
 
 
 if __name__ == "__main__":

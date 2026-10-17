@@ -3305,8 +3305,11 @@ never lock an operator out of a remote box it manages.
   already has for the three #5841 marker roots.
   The #10825 image-factory drop-in (`10-xpf-factory.conf`) sets
   `MaxAuthTries 3`, `LoginGraceTime 30`, and `PermitEmptyPasswords no` for
-  images regardless of whether `system services ssh` is configured. The
-  daemon's managed `00-xpf.conf` repeats those bounds when an SSH stanza exists;
+  images regardless of whether `system services ssh` is configured, and
+  (#14581) `DisableForwarding yes` so no login can `ssh -R` a squat onto
+  the loopback management port. The
+  daemon's managed `00-xpf.conf` repeats those bounds (forwarding denial
+  included) when an SSH stanza exists;
   `daemon_ssh_test.go` covers runtime rendering and
   `scripts/image/test_bake_sshd_password_auth_10771.py` checks the image drop-in.
 

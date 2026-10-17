@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/chzyer/readline"
+	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -49,6 +50,12 @@ func dialOpts(extra ...grpc.DialOption) []grpc.DialOption {
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxConfigRecvBytes)),
+		// #14581: verify at dial time that a loopback server is owned by
+		// a privileged uid before any RPC is written. A non-root
+		// squatter on 127.0.0.1:50051 would otherwise be handed `set` /
+		// `load` payloads — operator secrets included — by an operator
+		// who believes they are talking to xpfd.
+		grpc.WithContextDialer(authz.DialContext),
 	}
 	return append(opts, extra...)
 }
