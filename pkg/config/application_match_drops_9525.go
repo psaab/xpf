@@ -116,6 +116,55 @@ func ApplicationMatchDrops(app *Application) []string {
 	return out
 }
 
+// ApplicationMatchWidened reports whether the match compiled for app is
+// WIDER than the match its configuration authored — the subset of
+// ApplicationMatchDrops that lost a constraint rather than retaining an
+// unsatisfiable one. A dropped value-less leaf, a malformed icmp-type, a
+// conflicting duplicate (only the last value kept), a discarded direct
+// body, an unrecognized constraint-shaped statement on a protocol-wide
+// application, and an unimplemented Junos match leaf (#9603) all leave the
+// compiled term matching traffic the authored term did not. The remaining
+// drops (a port on a protocol presenting no such port, an icmp field on a
+// non-ICMP protocol, an icmp-code without a type) retain a constraint the
+// dataplane cannot satisfy, so the term never matches; refusing a POLICY
+// reference is still correct there (#9525), but an identification catalog
+// must not treat the app as widened merely because its retained port can
+// never match — the catalog row for such an app already matches nothing.
+//
+// pkg/appid (#14355) uses this predicate: a widened application compiles
+// to a protocol-wide shape and would stamp every session of its protocol,
+// so BuildCatalog and the tuple fallback keep it inert, while a
+// never-matching application (e.g. `protocol 0 destination-port 80`,
+// #4008) keeps its faithful catalog row.
+func ApplicationMatchWidened(app *Application) bool {
+	if app == nil {
+		return false
+	}
+	// Each arm mirrors one widening member of ApplicationMatchDrops; the
+	// never-matching members (a retained port on a protocol presenting no
+	// such port, an icmp field on a non-ICMP protocol) are deliberately
+	// absent. Leaf arms reuse the match-leaf filter so a settings leaf
+	// (timeout/alg) never counts as widening.
+	if len(app.UnknownICMP) > 0 {
+		return true
+	}
+	if app.ICMPCode != nil && app.ICMPType == nil {
+		return true
+	}
+	for _, leaves := range [][]string{
+		app.IncompleteDirectLeaves, app.IncompleteTermLeaves,
+		app.DuplicateDirectLeaves, app.DuplicateTermLeaves,
+	} {
+		if len(appendMatchLeafDrops9525(nil, leaves, "%q")) > 0 {
+			return true
+		}
+	}
+	if unknownStatementProtocolWide9595(app) != "" {
+		return true
+	}
+	return unimplementedJunosApplicationLeaf9603(app) != ""
+}
+
 func appendMatchLeafDrops9525(out, leaves []string, format string) []string {
 	for _, leaf := range leaves {
 		if applicationMatchLeaves9525[leaf] {

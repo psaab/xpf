@@ -1808,7 +1808,7 @@ func filterProtocolResolvable(token string) bool {
 	case "tcp", "junos-tcp-any",
 		"udp", "junos-udp-any",
 		"icmp", "junos-icmp-all", "junos-ping",
-		"icmpv6", "icmp6", "junos-icmp6-all", "junos-pingv6",
+		"icmpv6", "icmp6", "icmp-v6", "junos-icmp6-all", "junos-pingv6",
 		"gre", "junos-gre",
 		"ospf", "junos-ospf",
 		"junos-ip-in-ip", "junos-ipip", "ipip",
@@ -1905,7 +1905,7 @@ func protocolIsTCP(token string) bool {
 func protocolIsICMPFamily(token string) bool {
 	switch strings.ToLower(strings.TrimSpace(token)) {
 	case "icmp", "junos-icmp-all", "junos-ping",
-		"icmpv6", "icmp6", "junos-icmp6-all", "junos-pingv6":
+		"icmpv6", "icmp6", "icmp-v6", "junos-icmp6-all", "junos-pingv6":
 		return true
 	default:
 		if n, err := ParseCanonicalUint(token); err == nil {

@@ -578,7 +578,7 @@ func resolveUserspaceApplicationNames(cfg *config.Config, name string) ([]string
 
 func normalizeUserspaceApplicationProtocol(proto string) string {
 	switch strings.ToLower(strings.TrimSpace(proto)) {
-	case "icmp6":
+	case "icmp6", "icmp-v6":
 		return "icmpv6"
 	default:
 		return strings.ToLower(strings.TrimSpace(proto))

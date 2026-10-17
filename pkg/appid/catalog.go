@@ -195,8 +195,23 @@ func BuildCatalog(cfg *config.Config) (Catalog, error) {
 		// but still consumes the id below so the app_id sequence stays lock-step
 		// with compileApplications (which applies the identical gate for AppNames
 		// parity — appid_catalog_parity_test.go).
+		// #14355: an application whose authored match constraint was dropped
+		// on the tolerant load path so the compiled term is WIDER than
+		// authored (config.ApplicationMatchWidened — a value-less match leaf,
+		// a malformed icmp-type, an unimplemented leaf, ...) compiles to a
+		// protocol-wide shape (DestinationPort=="" / ICMPType==nil). Emitting
+		// it would stamp every session of its protocol with its name,
+		// contradicting the #9525 contract that a leniently-loaded bad app is
+		// inert — the contract the userspace policy expansion already
+		// enforces. Never-matching drops (a retained port on a protocol with
+		// no such port, #4008) are NOT widened: their catalog row already
+		// matches nothing, so it stays. Treat a widened app as unemittable:
+		// no catalog row, no AppNames name; the id is still consumed (ids are
+		// name-derived via AssignStableAppIDs, so parity with
+		// compileApplications is preserved by gating its AppNames identically).
+		dropped := config.ApplicationMatchWidened(app)
 		protoEmittable := protoOK || strings.TrimSpace(app.Protocol) == ""
-		emittable := protoEmittable && srcOK && dstOK && dstLow <= dstHigh && srcLow <= srcHigh
+		emittable := !dropped && protoEmittable && srcOK && dstOK && dstLow <= dstHigh && srcLow <= srcHigh
 
 		if emittable {
 			// #3725 M04: record the id->name mapping ONLY for an app that emits
@@ -323,7 +338,7 @@ func ProtocolNumber(name string) (uint8, bool) {
 		return 17, true
 	case "icmp", "junos-icmp-all", "junos-ping":
 		return 1, true
-	case "icmpv6", "icmp6", "junos-icmp6-all", "junos-pingv6":
+	case "icmpv6", "icmp6", "icmp-v6", "junos-icmp6-all", "junos-pingv6":
 		return 58, true
 	case "gre", "junos-gre":
 		return 47, true

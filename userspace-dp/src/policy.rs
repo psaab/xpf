@@ -4828,7 +4828,7 @@ fn parse_protocol(protocol: &str) -> Option<u8> {
         "tcp" => Some(PROTO_TCP),
         "udp" => Some(PROTO_UDP),
         "icmp" => Some(PROTO_ICMP),
-        "icmp6" | "icmpv6" => Some(PROTO_ICMPV6),
+        "icmp6" | "icmpv6" | "icmp-v6" => Some(PROTO_ICMPV6),
         "gre" => Some(PROTO_GRE),
         "89" | "ospf" => Some(PROTO_OSPF),
         "4" | "ipip" => Some(PROTO_IPIP),

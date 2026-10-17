@@ -223,6 +223,56 @@ func TestAppCatalogParityOnTolerantLoadPortEdges(t *testing.T) {
 	}
 }
 
+// TestAppCatalogParityOnDroppedConstraintApps14355 is the #14355 lock-step
+// guard: a widened dropped-constraint application (value-less destination-port
+// leaf, malformed icmp-type) must hold no AppNames name in EITHER producer,
+// while a never-matching dropped application (`protocol 0` with a retained
+// destination-port, #4008) keeps its name in both — only widening drops are
+// inert. Reverting the ApplicationMatchWidened gate in either producer makes
+// the maps diverge or re-adds the widened names, turning this RED.
+func TestAppCatalogParityOnDroppedConstraintApps14355(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Services.ApplicationIdentification = true
+	cfg.Applications.Applications = map[string]*config.Application{
+		"aaa-good":   {Name: "aaa-good", Protocol: "tcp", DestinationPort: "8443"},
+		"broken-tcp": {Name: "broken-tcp", Protocol: "tcp", IncompleteDirectLeaves: []string{"destination-port"}},
+		"bad-icmp":   {Name: "bad-icmp", Protocol: "icmp", UnknownICMP: []string{"bogus"}},
+		"hopopt":     {Name: "hopopt", Protocol: "0", DestinationPort: "80"},
+	}
+
+	result := &CompileResult{AppIDs: make(map[string]uint32)}
+	if err := compileApplications(appCatalogParityDP{}, cfg, result); err != nil {
+		t.Fatalf("compileApplications: %v", err)
+	}
+	cat, err := appid.BuildCatalog(cfg)
+	if err != nil {
+		t.Fatalf("BuildCatalog: %v", err)
+	}
+	if len(cat.AppNames) != len(result.AppNames) {
+		t.Fatalf("AppNames size mismatch on dropped-constraint apps: catalog=%d compiler=%d\n catalog=%v\n compiler=%v",
+			len(cat.AppNames), len(result.AppNames), cat.AppNames, result.AppNames)
+	}
+	for id, name := range result.AppNames {
+		if got := cat.AppNames[id]; got != name {
+			t.Fatalf("app_id %d: compiler=%q catalog=%q (dropped-constraint id drift)", id, name, got)
+		}
+	}
+	for _, name := range []string{"broken-tcp", "bad-icmp"} {
+		if _, ok := appNameID(result.AppNames, name); ok {
+			t.Fatalf("widened app %q must not hold a resolvable app_id in compileApplications", name)
+		}
+		if _, ok := appNameID(cat.AppNames, name); ok {
+			t.Fatalf("widened app %q must not hold a resolvable app_id in BuildCatalog", name)
+		}
+	}
+	if _, ok := appNameID(cat.AppNames, "hopopt"); !ok {
+		t.Fatal("never-matching protocol-0 app must keep its AppNames name in BuildCatalog (#4008)")
+	}
+	if _, ok := appNameID(result.AppNames, "hopopt"); !ok {
+		t.Fatal("never-matching protocol-0 app must keep its AppNames name in compileApplications (#4008)")
+	}
+}
+
 func appNameID(names map[uint16]string, want string) (uint16, bool) {
 	for id, name := range names {
 		if name == want {

@@ -7027,6 +7027,7 @@ fn filter_protocol_accept_set_subset_of_resolver() {
         "junos-ping",
         "icmpv6",
         "icmp6",
+        "icmp-v6",
         "junos-icmp6-all",
         "junos-pingv6",
         "gre",

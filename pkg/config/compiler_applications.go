@@ -1076,7 +1076,7 @@ func normalizeProtocol(name string) string {
 	switch strings.ToLower(name) {
 	case "junos-icmp-all", "junos-ping":
 		return "icmp"
-	case "junos-icmp6-all", "junos-pingv6", "icmp6":
+	case "junos-icmp6-all", "junos-pingv6", "icmp6", "icmp-v6":
 		return "icmpv6"
 	case "junos-gre":
 		return "gre"
@@ -1315,7 +1315,7 @@ func validApplicationALG(name string) bool {
 // validateProtocol checks that a protocol specification is valid.
 func validateProtocol(proto string) error {
 	validProtos := map[string]bool{
-		"tcp": true, "udp": true, "icmp": true, "icmp6": true, "icmpv6": true,
+		"tcp": true, "udp": true, "icmp": true, "icmp6": true, "icmpv6": true, "icmp-v6": true,
 		"ospf": true, "gre": true, "ipip": true, "ah": true, "esp": true,
 		"igmp": true, "pim": true, "sctp": true, "vrrp": true, "egp": true,
 	}
