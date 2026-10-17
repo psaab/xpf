@@ -406,6 +406,24 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #14585: BGP/OSPF cross-field gate. Per-value typing (#9012) cannot see
+	// relations: per-neighbor local-as equal to the router AS, route-
+	// reflector-client on an eBGP peer, remove-private on an iBGP peer,
+	// dampening suppress <= reuse, and a stub/nssa backbone all committed
+	// clean and then failed (or silently dropped from) every later
+	// frr-reload. Strict on commit / commit-check (hard reject naming the
+	// field); lenient on load / peer-sync (warn — #1960; the render path
+	// omits each refused line). Runs on the fully-compiled *Config so
+	// group-inherited peer-as/local-as/remove-private are effective.
+	if err := validateBGPCrossFieldStrict(cfg); err != nil {
+		if opts.lenientBGPCrossField14585 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("BGP/OSPF cross-field (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #2980: OSPF/OSPFv3/BGP router-id gate. router-id is parsed as a raw
 	// string with no validation, so a malformed value (not a 32-bit IPv4
 	// dotted-quad) flowed verbatim into frr.conf. FRR/vtysh requires an IPv4

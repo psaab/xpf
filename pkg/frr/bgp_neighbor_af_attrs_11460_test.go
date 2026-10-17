@@ -8,13 +8,15 @@ import (
 )
 
 func TestGenerateProtocols_BGPNeighborAttributesAreAddressFamilyScoped11460(t *testing.T) {
+	// #14585: RR-client is iBGP-only in FRR, so use an iBGP peer (PeerAS ==
+	// LocalAS 65001) for the RR-client attribute; remove-private is eBGP-only
+	// and is covered by the cross-field render test on an eBGP peer.
 	attributes := func(address string) *config.BGPNeighbor {
 		return &config.BGPNeighbor{
 			Address:              address,
-			PeerAS:               65002,
+			PeerAS:               65001,
 			RouteReflectorClient: true,
 			AllowASIn:            2,
-			RemovePrivateAS:      true,
 		}
 	}
 
@@ -65,7 +67,6 @@ func TestGenerateProtocols_BGPNeighborAttributesAreAddressFamilyScoped11460(t *t
 			want := []string{
 				"  neighbor " + tc.neighbor.Address + " route-reflector-client\n",
 				"  neighbor " + tc.neighbor.Address + " allowas-in 2\n",
-				"  neighbor " + tc.neighbor.Address + " remove-private-AS\n",
 			}
 			for _, line := range want {
 				if !strings.Contains(afBlock, line) {

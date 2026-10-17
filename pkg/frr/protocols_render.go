@@ -188,6 +188,9 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				if !validFRROSPFArea(area.ID) {
 					slog.Warn("frr: omitting an OSPF area stanza with an invalid area id (#9820)",
 						"area", sanitizeFRRValue(area.ID))
+				} else if isBackboneArea14585(area.ID) {
+					slog.Warn("frr: omitting an OSPF area-type stanza for the backbone area (#14585)",
+						"area", sanitizeFRRValue(area.ID), "area_type", sanitizeFRRValue(area.AreaType))
 				} else if area.NoSummary {
 					fmt.Fprintf(&b, " area %s %s no-summary\n", area.ID, area.AreaType)
 				} else {
@@ -372,7 +375,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			if area == nil || area.AreaType == "" {
 				continue
 			}
-			if !validFRROSPFArea(area.ID) || (area.AreaType != "stub" && area.AreaType != "nssa") {
+			if !validFRROSPFArea(area.ID) || (area.AreaType != "stub" && area.AreaType != "nssa") || isBackboneArea14585(area.ID) {
 				slog.Warn("frr: omitting an OSPFv3 area-type stanza with an invalid area id or type (#11401)",
 					"area", sanitizeFRRValue(area.ID), "area_type", sanitizeFRRValue(area.AreaType))
 				continue
@@ -564,7 +567,12 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			if maxSup == 0 {
 				maxSup = 60
 			}
-			fmt.Fprintf(&b, " bgp dampening %d %d %d %d\n", hl, reuse, suppress, maxSup)
+			if suppress <= reuse {
+				slog.Warn("frr: omitting bgp dampening with suppress <= reuse (#14585)",
+					"reuse", reuse, "suppress", suppress)
+			} else {
+				fmt.Fprintf(&b, " bgp dampening %d %d %d %d\n", hl, reuse, suppress, maxSup)
+			}
 		}
 		// validNeighbors excludes remote-as-0 neighbors (#2963/#5518). Every
 		// neighbor-referencing loop below (AF activation, BFD accumulator)
@@ -573,8 +581,12 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		for _, n := range validNeighbors {
 			fmt.Fprintf(&b, " neighbor %s remote-as %d\n", n.Address, n.PeerAS)
 			// Per-peering local-as (#4286): present a different AS than the
-			// router's own to this peer.
-			if n.LocalAS > 0 {
+			// router's own to this peer. #14585: bgpd refuses local-as equal
+			// to the router AS; omit it on the tolerant path.
+			if n.LocalAS > 0 && n.LocalAS == bgp.LocalAS {
+				slog.Warn("frr: omitting neighbor local-as equal to the router AS (#14585)",
+					"neighbor", sanitizeFRRValue(n.Address), "local_as", n.LocalAS)
+			} else if n.LocalAS > 0 {
 				fmt.Fprintf(&b, " neighbor %s local-as %d\n", n.Address, n.LocalAS)
 			}
 			// update-source (#4286): iBGP peers over loopbacks need the TCP
@@ -905,13 +917,10 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			}
 			for _, n := range inet4Neighbors {
 				fmt.Fprintf(&b, "  neighbor %s activate\n", n.Address)
-				if n.RouteReflectorClient {
-					fmt.Fprintf(&b, "  neighbor %s route-reflector-client\n", n.Address)
-				}
+				renderBGPRouteReflectorClient14585(&b, bgp.LocalAS, n)
 				renderBGPAllowASIn(&b, n)
-				if n.RemovePrivateAS {
-					fmt.Fprintf(&b, "  neighbor %s remove-private-AS\n", n.Address)
-				}
+				renderBGPRemovePrivate14585(&b, bgp.LocalAS, n)
+
 				if n.DefaultOriginate {
 					fmt.Fprintf(&b, "  neighbor %s default-originate\n", n.Address)
 				}
@@ -971,13 +980,9 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			b.WriteString(bgpIPv6Redist.String())
 			for _, n := range inet6Neighbors {
 				fmt.Fprintf(&b, "  neighbor %s activate\n", n.Address)
-				if n.RouteReflectorClient {
-					fmt.Fprintf(&b, "  neighbor %s route-reflector-client\n", n.Address)
-				}
+				renderBGPRouteReflectorClient14585(&b, bgp.LocalAS, n)
 				renderBGPAllowASIn(&b, n)
-				if n.RemovePrivateAS {
-					fmt.Fprintf(&b, "  neighbor %s remove-private-AS\n", n.Address)
-				}
+				renderBGPRemovePrivate14585(&b, bgp.LocalAS, n)
 				if n.DefaultOriginate {
 					fmt.Fprintf(&b, "  neighbor %s default-originate\n", n.Address)
 				}
