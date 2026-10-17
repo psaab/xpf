@@ -10220,15 +10220,19 @@ fn flex_match_does_not_match_when_bytes_differ() {
 
 #[test]
 fn flex_match_non_byte_aligned_12bit_field() {
-    // #3203: a 12-bit field lowers (Go control plane) to length=2 (ceil(12/8))
-    // and the default mask 0x0FFF (low 12 bits). The matcher reads 2 bytes
-    // big-endian, ANDs the mask, and compares. A packet whose 12-bit field
-    // equals 0x0ABC must match regardless of the upper 4 bits; one whose field
-    // differs must NOT. Before #3203 the Go side truncated length to 1 byte (so
-    // this read only the high byte) AND defaulted the mask to 0xFFFFFFFF (which
-    // a 2-byte read could never satisfy) — both made a 12-bit match impossible
-    // (silent fail-closed). These lowered values are what the Go compiler now
-    // emits; this test confirms they select the intended field.
+    // #3203: a 12-bit field lowers (Go control plane) to length=2 (ceil(12/8)).
+    // #14634: the Go snapshot builder MSB-aligns the field pair into the
+    // 2-byte window (value 0xABC0, mask 0xFFF0) because the field starts at
+    // the byte-offset (MSB-first). The matcher reads 2 bytes big-endian, ANDs
+    // the mask, and compares. A packet whose TOP 12 bits equal 0xABC must
+    // match regardless of the low 4 bits; one whose field differs must NOT.
+    // Before #3203 the Go side truncated length to 1 byte (so this read only
+    // the high byte) AND defaulted the mask to 0xFFFFFFFF (which a 2-byte
+    // read could never satisfy) — both made a 12-bit match impossible
+    // (silent fail-closed). Before #14634 the pair arrived right-aligned
+    // (0x0ABC/0x0FFF) and the matcher compared the LOW 12 bits. These aligned
+    // values are what the Go builder now emits; this test confirms they
+    // select the intended field.
     let state = make_filter_state(
         &flex_filter(
             "inet",
@@ -10236,15 +10240,15 @@ fn flex_match_non_byte_aligned_12bit_field() {
             FlexMatchSnapshot {
                 offset: 0,
                 length: 2,
-                value: 0x0ABC,
-                mask: 0x0FFF,
+                value: 0xABC0,
+                mask: 0xFFF0,
                 match_start: String::new(),
             },
         ),
         &[],
     );
-    // High nibble 0x1 is outside the 12-bit mask: 0x1ABC & 0x0FFF == 0x0ABC.
-    let l3_hit = [0x1Au8, 0xBC, 0x00, 0x00];
+    // Low nibble 0x1 is outside the 12-bit mask: 0xABC1 & 0xFFF0 == 0xABC0.
+    let l3_hit = [0xABu8, 0xC1, 0x00, 0x00];
     let hit = evaluate_filter(
         &state,
         "inet:fx",
@@ -10259,10 +10263,10 @@ fn flex_match_non_byte_aligned_12bit_field() {
     assert_eq!(
         hit.action,
         FilterAction::Discard,
-        "12-bit field 0x0ABC (bytes 0x1A,0xBC masked 0x0FFF) must match"
+        "12-bit field 0xABC (bytes 0xAB,0xC1 masked 0xFFF0) must match"
     );
-    // Field 0x0ABD != 0x0ABC -> the discard term must NOT match.
-    let l3_miss = [0x1Au8, 0xBD, 0x00, 0x00];
+    // Field 0xABD != 0xABC -> the discard term must NOT match.
+    let l3_miss = [0xABu8, 0xD0, 0x00, 0x00];
     let miss = evaluate_filter(
         &state,
         "inet:fx",
@@ -10277,7 +10281,73 @@ fn flex_match_non_byte_aligned_12bit_field() {
     assert_eq!(
         miss.action,
         FilterAction::Accept,
-        "12-bit field 0x0ABD must NOT match flex value 0x0ABC"
+        "12-bit field 0xABD must NOT match flex value 0xABC"
+    );
+}
+
+#[test]
+fn flex_match_subbyte_4bit_reads_high_nibble_14634() {
+    // #14634 decisive check (issue acceptance): `bit-length 4 byte-offset 0
+    // range 4` (default mask, or explicit Junos match-mask 0xf) must discard
+    // an IPv4 packet whose first byte is 0x45 — version nibble 4, IHL nibble
+    // 5. The Go snapshot builder MSB-aligns the field pair into the 1-byte
+    // window (value 0x40, mask 0xF0), so the matcher compares the HIGH
+    // nibble. Pre-fix the pair arrived right-aligned (0x04/0x0F) and the
+    // matcher compared the LOW (IHL) nibble: 0x45 missed and a packet whose
+    // low nibble is 4 (0x54) wrongly matched.
+    //
+    // FAIL-ON-REVERT: right-align the pair (value 0x04, mask 0x0F, the
+    // pre-#14634 lowering) and the 0x45 case flips to Accept while the 0x54
+    // control flips to Discard.
+    let state = make_filter_state(
+        &flex_filter(
+            "inet",
+            "tcp",
+            FlexMatchSnapshot {
+                offset: 0,
+                length: 1,
+                value: 0x40,
+                mask: 0xF0,
+                match_start: String::new(),
+            },
+        ),
+        &[],
+    );
+    // 0x45: version=4 (match), IHL=5.
+    let l3_hit = [0x45u8, 0x00, 0x00, 0x00];
+    let hit = evaluate_filter(
+        &state,
+        "inet:fx",
+        v4(10, 0, 0, 1),
+        v4(10, 0, 0, 2),
+        PROTO_TCP,
+        1000,
+        80,
+        0,
+        extra_flex(&l3_hit),
+    );
+    assert_eq!(
+        hit.action,
+        FilterAction::Discard,
+        "first byte 0x45 (version nibble 4) must match bit-length 4 range 4 (#14634)"
+    );
+    // 0x54: version=5, IHL=4 — the low-nibble control. Must NOT match.
+    let l3_miss = [0x54u8, 0x00, 0x00, 0x00];
+    let miss = evaluate_filter(
+        &state,
+        "inet:fx",
+        v4(10, 0, 0, 1),
+        v4(10, 0, 0, 2),
+        PROTO_TCP,
+        1000,
+        80,
+        0,
+        extra_flex(&l3_miss),
+    );
+    assert_eq!(
+        miss.action,
+        FilterAction::Accept,
+        "first byte 0x54 (low nibble 4, version 5) must NOT match bit-length 4 range 4 (#14634)"
     );
 }
 

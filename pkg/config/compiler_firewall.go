@@ -728,7 +728,10 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 							fm.BitLength = 32
 						}
 						if fm.Mask == 0 {
-							// #3203: default mask covers the low BitLength bits.
+							// #3203/#14634: default mask covers the field's
+							// BitLength bits. Stored field-aligned (low bits);
+							// each matcher boundary MSB-aligns the pair into
+							// the ceil-byte window (#14634).
 							if fm.BitLength >= 32 {
 								fm.Mask = 0xFFFFFFFF
 							} else {
