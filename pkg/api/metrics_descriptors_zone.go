@@ -53,7 +53,13 @@ func (c *xpfCollector) initZoneDescriptors() {
 	// publishes no per-zone block at all, (b) a zone past the helper's 63
 	// assignable hot-path slots, whose traffic genuinely goes uncounted
 	// (the helper stops publishing its row -- see below), and (c) a zone that
-	// is simply idle.
+	// is simply idle. #14619 NOTE: (a) and (c) ARE distinguishable on the
+	// status wire — a current helper stamps zone_counter_layout_version
+	// unconditionally, so 0/absent means (a) and >0 with no row means (c),
+	// and zone_counter_slotted_zone_ids splits (b) from slotted-idle under
+	// overflow. This gauge still counts all three together by design (it
+	// is a count of zones without samples, not a diagnosis); the per-cause
+	// diagnosis lives on `show security zones` via UnavailableLineForZone.
 	//
 	// #6843 R1 added a FOURTH, and the round-5 gate found two MORE that this
 	// collector's own pre-read branches produce (metrics_counters.go):

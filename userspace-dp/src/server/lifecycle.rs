@@ -578,13 +578,16 @@ pub(crate) fn run() -> Result<(), String> {
             static_nat_parse_errors: 0,
             filter_term_counters: Vec::new(),
             // #3651: per-zone traffic block is empty until the first status
-            // refresh reads the helper's zone-counter store.
+            // refresh reads the helper's zone-counter store. #14619: the
+            // layout version is stamped by refresh_status on every refresh;
+            // the pre-refresh 0 here is never published without a refresh.
             zone_counter_layout_version: 0,
+            zone_counter_slotted_zone_ids: Vec::new(),
             zone_counter_overflow_active: false,
             zone_traffic_counters: Vec::new(),
-            // #3651: per-zone flood-event block is empty until the first status
-            // refresh reads the helper's flood-counter store.
+            // #3651: per-zone flood-event block, same contract.
             flood_counter_layout_version: 0,
+            flood_counter_slotted_zone_ids: Vec::new(),
             flood_counter_overflow_active: false,
             zone_flood_counters: Vec::new(),
             three_color_policer_counters: Vec::new(),

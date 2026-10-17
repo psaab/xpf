@@ -2294,6 +2294,7 @@ fn zone_traffic_counters_wire_roundtrip_and_default_omits() {
     // Populated block round-trips (Rust encode -> JSON -> Rust decode).
     let mut status = ProcessStatus::default();
     status.zone_counter_layout_version = 1;
+    status.zone_counter_slotted_zone_ids = vec![7, 40000];
     status.zone_counter_overflow_active = true;
     status.zone_traffic_counters = vec![ZoneTrafficCounterStatus {
         zone_id: 40000,
@@ -2305,6 +2306,12 @@ fn zone_traffic_counters_wire_roundtrip_and_default_omits() {
     let json = serde_json::to_string(&status).expect("serialize populated ProcessStatus");
     let back: ProcessStatus = serde_json::from_str(&json).expect("deserialize ProcessStatus");
     assert_eq!(back.zone_counter_layout_version, 1);
+    // #14619: slotted set round-trips under its Go-facing key.
+    assert!(
+        json.contains("\"zone_counter_slotted_zone_ids\""),
+        "slotted ids must be on the wire: {json}"
+    );
+    assert_eq!(back.zone_counter_slotted_zone_ids, vec![7, 40000]);
     assert!(back.zone_counter_overflow_active);
     assert_eq!(back.zone_traffic_counters.len(), 1);
     let z = &back.zone_traffic_counters[0];

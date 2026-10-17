@@ -75,7 +75,9 @@ const _: () = assert!(ZONE_COUNTER_SLOTS <= 64);
 pub(in crate::afxdp) const ZONE_COUNTER_ASSIGNABLE_SLOTS: usize = ZONE_COUNTER_SLOTS - 1;
 
 /// Wire/layout version stamped into `ProcessStatus.zone_counter_layout_version`
-/// when the block is populated (#3651). 0/absent = pre-#3651 helper.
+/// (#3651). #14619: stamped UNCONDITIONALLY by the status publisher, even
+/// with no rows, so ">0, no row" reads as idle; 0/absent remains reserved
+/// for a pre-#3651 helper that never sets the field.
 pub(in crate::afxdp) const ZONE_COUNTER_LAYOUT_VERSION: u32 = 1;
 
 /// Flat direct-index zone-id → hot-path slot LUT, built at config apply.
@@ -173,6 +175,14 @@ impl ZoneCounterSlotMap {
     #[inline]
     pub(in crate::afxdp) fn slot_of(&self, zone_id: u16) -> u8 {
         self.slot_of[zone_id as usize]
+    }
+
+    /// #14619: zone ids currently holding a live slot, in slot order
+    /// (which is sorted zone-id order — see `build`). Published on the
+    /// wire so consumers can distinguish a slotted-but-idle zone from a
+    /// zone past capacity when overflow is active.
+    pub(in crate::afxdp) fn slotted_zone_ids(&self) -> Vec<u16> {
+        self.inverse.iter().copied().filter(|&z| z != 0).collect()
     }
 }
 

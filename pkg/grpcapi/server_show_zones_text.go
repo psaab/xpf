@@ -170,8 +170,9 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 				// this renderer previously had NO #6845 overflow
 				// specialisation, so the same cluster reported slot exhaustion
 				// on the local CLI and the generic three-cause line here.
-				buf.WriteString(zonecounters.UnavailableLineFor(
-					s.zoneCounterLayoutVersion(), s.zoneCounterOverflowActive()) + "\n")
+				buf.WriteString(zonecounters.UnavailableLineForZone(
+					s.zoneCounterLayoutVersion(), s.zoneCounterOverflowActive(),
+					s.zoneCounterSlotted(zoneID)) + "\n")
 			case errIn == nil && errOut == nil:
 				buf.WriteString("  Traffic statistics:\n")
 				fmt.Fprintf(buf, "    Input:  %d packets, %d bytes\n", ingress.Packets, ingress.Bytes)
@@ -473,4 +474,29 @@ func (s *Server) zoneCounterLayoutVersion() uint32 {
 		return zonecounters.LayoutVersionUnknown
 	}
 	return status.ZoneCounterLayoutVersion
+}
+
+// zoneCounterSlotted reports whether zoneID holds a live traffic-counter
+// slot (#14619), through dpProbe() for the same #2114 reason as the
+// siblings above. Fails to false on any error (see the CLI twin).
+func (s *Server) zoneCounterSlotted(zoneID uint16) bool {
+	if s == nil || zoneID == 0 {
+		return false
+	}
+	provider, ok := s.dpProbe().(interface {
+		Status() (dpuserspace.ProcessStatus, error)
+	})
+	if !ok {
+		return false
+	}
+	status, err := provider.Status()
+	if err != nil {
+		return false
+	}
+	for _, id := range status.ZoneCounterSlottedZoneIDs {
+		if id == zoneID {
+			return true
+		}
+	}
+	return false
 }

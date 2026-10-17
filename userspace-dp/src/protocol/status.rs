@@ -1150,6 +1150,17 @@ pub(crate) struct ProcessStatus {
         skip_serializing_if = "crate::protocol::u32_is_zero"
     )]
     pub zone_counter_layout_version: u32,
+    /// #14619: zone ids holding a live traffic-counter slot. Lets a
+    /// consumer distinguish a slotted-but-idle zone from a zone past
+    /// capacity when `zone_counter_overflow_active` is set — the global
+    /// overflow bit alone would mislabel every slotted idle zone as
+    /// uncounted. Omitted when empty, like the counter rows.
+    #[serde(
+        rename = "zone_counter_slotted_zone_ids",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub zone_counter_slotted_zone_ids: Vec<u16>,
     #[serde(
         rename = "zone_counter_overflow_active",
         default,
@@ -1187,6 +1198,13 @@ pub(crate) struct ProcessStatus {
         skip_serializing_if = "crate::protocol::u32_is_zero"
     )]
     pub flood_counter_layout_version: u32,
+    /// #14619: flood twin of `zone_counter_slotted_zone_ids`.
+    #[serde(
+        rename = "flood_counter_slotted_zone_ids",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub flood_counter_slotted_zone_ids: Vec<u16>,
     #[serde(
         rename = "flood_counter_overflow_active",
         default,

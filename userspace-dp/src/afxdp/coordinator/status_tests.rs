@@ -673,6 +673,71 @@ fn refresh_status_publishes_policy_revoked_sessions_total_10021() {
     );
 }
 
+/// #14619: a current helper with an EMPTY zone-counter store must still
+/// publish its layout version. The pre-fix publisher stamped 0 whenever
+/// no non-zero row existed (fresh boot, post-clear, idle HA secondary),
+/// and every Go surface renders version 0 as "upgrade the helper".
+#[test]
+fn refresh_status_stamps_zone_and_flood_layout_versions_when_quiet_14619() {
+    let coordinator = Coordinator::new();
+    let mut state = crate::server::state::ServerState {
+        status: Default::default(),
+        snapshot: None,
+        afxdp: coordinator,
+        state_writer: Arc::new(crate::state_writer::StateWriter::new()),
+        quarantined_after_panic: false,
+    };
+    assert!(state.afxdp.zone_traffic_counters().is_empty());
+    assert!(state.afxdp.zone_flood_counters().is_empty());
+    assert!(!state.afxdp.zone_counter_overflow_active());
+    assert!(!state.afxdp.flood_counter_overflow_active());
+
+    crate::server::helpers::status::refresh_status(&mut state);
+
+    assert_eq!(
+        state.status.zone_counter_layout_version,
+        crate::afxdp::zone_counters::ZONE_COUNTER_LAYOUT_VERSION,
+        "#14619: an empty zone store must still stamp the current layout version"
+    );
+    assert_ne!(state.status.zone_counter_layout_version, 0);
+    assert_eq!(
+        state.status.flood_counter_layout_version,
+        crate::afxdp::flood_counters::FLOOD_COUNTER_LAYOUT_VERSION,
+        "#14619: an empty flood store must still stamp the current layout version"
+    );
+    let json = serde_json::to_value(&state.status).expect("status serializes");
+    assert_eq!(
+        json["zone_counter_layout_version"].as_u64(),
+        Some(crate::afxdp::zone_counters::ZONE_COUNTER_LAYOUT_VERSION as u64),
+        "#14619: serialized status must carry the zone layout version when quiet"
+    );
+    assert_eq!(
+        json["flood_counter_layout_version"].as_u64(),
+        Some(crate::afxdp::flood_counters::FLOOD_COUNTER_LAYOUT_VERSION as u64),
+        "#14619: serialized status must carry the flood layout version when quiet"
+    );
+    assert!(state.status.zone_traffic_counters.is_empty());
+    assert!(state.status.zone_flood_counters.is_empty());
+
+    // Post-clear premise: seed traffic, clear, refresh — still current.
+    state
+        .afxdp
+        .seed_zone_traffic_counter_for_test(7, "trust", 1500);
+    crate::server::helpers::status::refresh_status(&mut state);
+    assert!(!state.status.zone_traffic_counters.is_empty());
+    state.afxdp.clear_zone_counters();
+    crate::server::helpers::status::refresh_status(&mut state);
+    assert!(
+        state.status.zone_traffic_counters.is_empty(),
+        "post-clear snapshot must be empty (all-zero rows dropped)"
+    );
+    assert_eq!(
+        state.status.zone_counter_layout_version,
+        crate::afxdp::zone_counters::ZONE_COUNTER_LAYOUT_VERSION,
+        "#14619: after clear_zone_counters the helper must not read as pre-#3651"
+    );
+}
+
 /// #13284 (D3-09): the process-global NAT64 budget-refusal and
 /// deterministic-v6 downgrade counters, plus the live over-budget prefix
 /// census, must cross the real refresh_status boundary into ProcessStatus

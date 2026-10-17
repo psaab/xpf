@@ -106,6 +106,13 @@ const LayoutVersionUnknown = ^uint32(0)
 // So with both fields all three are distinguishable and none is a guess. The
 // generic line survives only for callers that cannot supply a layout version.
 //
+// #14619: layoutVersion==0 is reachable ONLY from a helper that never
+// sets the field. A current helper stamps its version unconditionally
+// (even with no rows), so ">0, no row" is idle — the publisher must not
+// manufacture 0 in the all-quiet state. Callers that also know this
+// zone's slot membership should prefer UnavailableLineForZone, which
+// splits slotted-idle from past-capacity under overflow.
+//
 // Order matters: an old helper publishes no overflow bit either, so the version
 // check must come first or an upgrade-needed box would be reported as
 // slot-exhausted — a wrong AND actionable diagnosis, which is worse than an
@@ -118,6 +125,41 @@ func UnavailableLineFor(layoutVersion uint32, overflowActive bool) string {
 		return unavailableOverflow
 	case layoutVersion == unknownLayoutVersion:
 		return unavailableGeneric
+	default:
+		return unavailableIdle
+	}
+}
+
+// UnavailableLineForZone is the per-zone refinement of UnavailableLineFor
+// for callers that know whether THIS zone holds a hot-path slot (#14619).
+//
+// The global overflow bit alone mislabels every slotted-but-idle zone as
+// "not being counted at all" once more than 63 zones are configured.
+// With the slotted set on the wire the split is exact:
+//
+//	layoutVersion == 0          pre-#3651 helper (checked first, as above)
+//	slotted                     counted, nothing recorded: IDLE
+//	overflow && !slotted        past capacity: genuinely uncounted
+//	!overflow && !slotted       idle (no overflow: absence from the
+//	                            sparse block is the idle signal; a zone
+//	                            absent from an old helper's slotted set
+//	                            — the field is omitted pre-#14619 — also
+//	                            lands here only when overflow is off, so
+//	                            no false "uncounted" is manufactured)
+//
+// Callers that cannot supply slotted keep UnavailableLineFor.
+func UnavailableLineForZone(layoutVersion uint32, overflowActive bool, slotted bool) string {
+	switch {
+	case layoutVersion == 0:
+		return unavailablePreDatingHelper
+	case layoutVersion == unknownLayoutVersion:
+		// No status readable: slotted is meaningless; preserve the
+		// generic/overflow behaviour of UnavailableLineFor exactly.
+		return UnavailableLineFor(layoutVersion, overflowActive)
+	case slotted:
+		return unavailableIdle
+	case overflowActive:
+		return unavailableOverflow
 	default:
 		return unavailableIdle
 	}

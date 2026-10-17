@@ -141,3 +141,36 @@ func TestZoneTrafficCounterStatusWireRoundTrip(t *testing.T) {
 		t.Fatalf("Rust zone row mismatch: %+v", decoded.ZoneTrafficCounters[0])
 	}
 }
+
+// #14619: the slotted set must decode from the Rust wire name and
+// round-trip; without lockstep it silently stays empty and every
+// slotted-idle zone under overflow renders as uncounted.
+func TestZoneCounterSlottedZoneIDsWire_14619(t *testing.T) {
+	const rustJSON = `{
+		"pid": 1,
+		"zone_counter_layout_version": 1,
+		"zone_counter_overflow_active": true,
+		"zone_counter_slotted_zone_ids": [7, 40000]
+	}`
+	var decoded ProcessStatus
+	if err := json.Unmarshal([]byte(rustJSON), &decoded); err != nil {
+		t.Fatalf("decode Rust-style payload: %v", err)
+	}
+	if len(decoded.ZoneCounterSlottedZoneIDs) != 2 ||
+		decoded.ZoneCounterSlottedZoneIDs[0] != 7 ||
+		decoded.ZoneCounterSlottedZoneIDs[1] != 40000 {
+		t.Fatalf("slotted ids not decoded: %+v", decoded.ZoneCounterSlottedZoneIDs)
+	}
+	payload, err := json.Marshal(&decoded)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(payload), `"zone_counter_slotted_zone_ids":[7,40000]`) {
+		t.Fatalf("slotted ids not re-encoded under the Rust name: %s", payload)
+	}
+	// Empty set is omitted (matching Rust Vec::is_empty).
+	def, _ := json.Marshal(&ProcessStatus{})
+	if strings.Contains(string(def), "zone_counter_slotted_zone_ids") {
+		t.Fatalf("default must omit slotted ids: %s", def)
+	}
+}
