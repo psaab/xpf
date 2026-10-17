@@ -122,6 +122,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		// fingerprint, or switching back to stream mode with an unchanged
 		// stanza would hash-match a client set that has been closed.
 		d.syslogHashSet = false
+		d.setSyslogRetryOwed(false)
 		lw, err := logging.NewLocalLogWriter(logging.LocalLogConfig{})
 		if err != nil {
 			slog.Warn("failed to create local log writer", "err", err)
@@ -156,6 +157,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		// stanza later would hash-match the set that was just closed and
 		// install nothing.
 		d.syslogHashSet = false
+		d.setSyslogRetryOwed(false)
 		d.applyAggregator(er, cfg)
 		return
 	}
@@ -179,12 +181,23 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	// (DHCP renew, an address commit elsewhere) and the client is built from the
 	// resolved value. Hashing only the stanza would pin a stream to a stale
 	// source until something else forced a rebuild.
+	// #14597: the fingerprint is NOT latched here. It is latched only
+	// after the build below, and only when every configured stream
+	// produced a client. Latching here — before construction — pinned
+	// a UDP stream skipped on a source-bind failure (DialUDP: cannot
+	// assign requested address, e.g. a RETH VIP not yet present at the
+	// boot apply) dead for the life of the config: the fingerprint for
+	// an explicit source-address is config-only, so when the address
+	// later appeared nothing about the hash changed and every later
+	// apply hash-matched and skipped the rebuild.
+	var pendingHash string
+	var pendingHashOK bool
 	if h, ok := syslogClientFingerprint(cfg); ok {
 		if d.syslogHashSet && h == d.syslogHash {
 			d.applyAggregator(er, cfg)
 			return
 		}
-		d.syslogHash, d.syslogHashSet = h, true
+		pendingHash, pendingHashOK = h, true
 	} else {
 		// Fingerprint unavailable: fail OPEN and rebuild. An apply that skipped
 		// the rebuild because it could not compute a hash would leave the
@@ -201,6 +214,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	}
 
 	var clients []*logging.SyslogClient
+	skipped := 0
 	for name, stream := range cfg.Security.Log.Streams {
 		// #6875 precedence: an explicitly configured address beats one derived
 		// from an interface, and both beat the global fallback.
@@ -319,6 +333,10 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		if err != nil {
 			if client == nil {
 				// UDP / unrecoverable construction error: skip the stream.
+				// #14597: count it — a skipped stream must stop the
+				// fingerprint from latching and arm the retry owner, or
+				// this stream stays dead until the stanza is edited.
+				skipped++
 				slog.Warn("failed to create syslog client",
 					"stream", name, "host", stream.Host, "protocol", protocol, "err", err)
 				continue
@@ -373,6 +391,22 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	// old clients must still be torn down rather than left forwarding to a
 	// stale destination.
 	er.ReplaceSyslogClients(clients)
+	// #14597: latch ONLY on a complete build. A TCP/TLS client returned
+	// alongside an error is installed (reconnecting, #3351) and counts
+	// as built — only a nil-client skip leaves the set incomplete.
+	// On an incomplete build the fingerprint stays unset so the next
+	// apply retries, and the retry debt arms the always-on owner that
+	// recovers the stream with no commit at all (e.g. the source
+	// address appears when a RETH VIP arrives after the boot apply).
+	if skipped == 0 {
+		if pendingHashOK {
+			d.syslogHash, d.syslogHashSet = pendingHash, true
+		}
+		d.setSyslogRetryOwed(false)
+	} else {
+		d.syslogHashSet = false
+		d.setSyslogRetryOwed(true)
+	}
 	d.warmSyslogClients(clients)
 	d.applyAggregator(er, cfg)
 }

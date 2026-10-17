@@ -1862,9 +1862,20 @@ type Daemon struct {
 
 	// syslogHash / syslogHashSet gate the syslog CLIENT REBUILD on a config
 	// change (#9326), mirroring the SNMP reconcile's hash gate. Written only
-	// from applySyslogConfig, which runs under applySem.
+	// from applySyslogConfig, which runs under applySem. The hash latches
+	// only after a build in which EVERY configured stream produced a
+	// client (#14597): latching before a partial/failed build pinned a
+	// UDP stream skipped on a source-bind failure dead for the life of
+	// the config, because the next identical apply hash-matched.
 	syslogHash    string
 	syslogHashSet bool
+
+	// syslogRetryDebt records that the last stream-mode build skipped at
+	// least one stream (#14597). It is the debt the always-on
+	// syslogStreamRetryLoop re-drives until a build completes in full.
+	// Atomic because the loop's cheap gate reads it without applySem;
+	// writes happen under applySem (apply / retry tick).
+	syslogRetryDebt atomic.Bool
 
 	// archiveTransfer performs one upload from a serialized active-config file.
 	// The commit, periodic-timer, and retained-debt paths share this transport;
