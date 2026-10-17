@@ -884,6 +884,13 @@ type compileOpts struct {
 	// from a strict commit error to a warning on tolerant load / peer-sync.
 	// The FRR render belt independently omits the invalid authentication lines.
 	lenientOSPFMD5KeyID11794 bool
+	// lenientOSPFAuthKeyPresence14397 downgrades the #14397 OSPF
+	// authentication-with-no-key rejection (AuthType md5/simple with every
+	// key empty) to a warning on tolerant load / peer-sync. A config an
+	// older binary accepted must still BOOT (#1960); the FRR renderer
+	// independently omits the keyless-auth interface rather than
+	// activating it unauthenticated.
+	lenientOSPFAuthKeyPresence14397 bool
 	// lenientISISMetric11823 downgrades an invalid compiled IS-IS interface
 	// metric to a warning on tolerant load / peer-sync; the FRR renderer
 	// independently omits out-of-domain values.
@@ -3277,6 +3284,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingExportRef:                true,
 		lenientFRRAuthValues:                   true,
 		lenientOSPFMD5KeyID11794:               true,
+		lenientOSPFAuthKeyPresence14397:        true,
 		lenientISISMetric11823:                 true,
 		lenientBGPPrefixLimit11793:             true,
 		lenientBGPSAFI11815:                    true,
