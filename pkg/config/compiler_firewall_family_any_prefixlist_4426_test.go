@@ -445,3 +445,87 @@ firewall {
 		}
 	}
 }
+
+// #14446 (DR19-H2): single-family wrong-family-only prefix-list cases.
+func TestFirewallFilterSingleFamilyWrongFamilyPrefixListRejected14446(t *testing.T) {
+	cases := []struct {
+		name string
+		tree string
+		want []string
+	}{
+		{name: "inet6 source positive v4-only", tree: "\npolicy-options { prefix-list v4-only { 10.0.0.0/8; } }\nfirewall { family inet6 { filter f { term t { from { source-prefix-list v4-only; } then discard; } } } }\n", want: []string{"f", "t", "v4-only", "inet6", "#4426"}},
+		{name: "inet6 destination positive v4-only", tree: "\npolicy-options { prefix-list v4-only { 10.0.0.0/8; } }\nfirewall { family inet6 { filter f { term t { from { destination-prefix-list v4-only; } then discard; } } } }\n", want: []string{"f", "t", "v4-only", "inet6", "#4426"}},
+		{name: "inet6 source except v4-only", tree: "\npolicy-options { prefix-list v4-only { 10.0.0.0/8; } }\nfirewall { family inet6 { filter f { term t { from { source-prefix-list v4-only except; } then accept; } } } }\n", want: []string{"f", "t", "v4-only", "inet6", "#4426"}},
+		{name: "inet6 destination except v4-only", tree: "\npolicy-options { prefix-list v4-only { 10.0.0.0/8; } }\nfirewall { family inet6 { filter f { term t { from { destination-prefix-list v4-only except; } then accept; } } } }\n", want: []string{"f", "t", "v4-only", "inet6", "#4426"}},
+		{name: "inet source positive v6-only", tree: "\npolicy-options { prefix-list v6-only { 2001:db8::/32; } }\nfirewall { family inet { filter g { term t { from { source-prefix-list v6-only; } then discard; } } } }\n", want: []string{"g", "t", "v6-only", "inet", "#4426"}},
+		{name: "inet destination except v6-only", tree: "\npolicy-options { prefix-list v6-only { 2001:db8::/32; } }\nfirewall { family inet { filter g { term t { from { destination-prefix-list v6-only except; } then accept; } } } }\n", want: []string{"g", "t", "v6-only", "inet", "#4426"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(parseHier(t, tc.tree))
+			if err == nil {
+				t.Fatal("CompileConfig: expected strict rejection of wrong-family-only prefix-list under single-family filter, got nil")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Fatalf("error %q must contain %q", err.Error(), w)
+				}
+			}
+		})
+	}
+}
+
+func TestFirewallFilterSingleFamilyWrongFamilyPrefixListLenientWarns14446(t *testing.T) {
+	tree := parseHier(t, "\npolicy-options { prefix-list v4-only { 10.0.0.0/8; } }\nfirewall { family inet6 { filter f { term t { from { source-prefix-list v4-only; } then discard; } } } }\n")
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: wrong-family single-family prefix-list must downgrade to warning, got: %v", err)
+	}
+	found := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "#4426") && strings.Contains(w, "v4-only") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected #4426 lenient warning, got: %v", cfg.Warnings)
+	}
+	if cfg.Firewall.FiltersInet6["f"] == nil {
+		t.Fatal("lenient path must preserve the inet6 filter (Rust preflight fails the snapshot closed)")
+	}
+}
+
+func TestFirewallFilterSingleFamilyMatchedAndMixedPrefixListCommits14446(t *testing.T) {
+	tree := parseHier(t, `
+policy-options {
+    prefix-list v4-only { 10.0.0.0/8; }
+    prefix-list v6-only { 2001:db8::/32; }
+    prefix-list mixed { 10.0.0.0/8; 2001:db8::/32; }
+}
+firewall {
+    family inet6 {
+        filter f {
+            term matched { from { source-prefix-list v6-only; } then discard; }
+            term mixed-src { from { source-prefix-list mixed; } then discard; }
+            term mixed-dst { from { destination-prefix-list mixed; } then discard; }
+            term mixed-except { from { source-prefix-list mixed except; } then accept; }
+        }
+    }
+    family inet {
+        filter g {
+            term matched { from { source-prefix-list v4-only; } then discard; }
+            term mixed-src { from { source-prefix-list mixed; } then discard; }
+        }
+    }
+}
+`)
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig: matched/mixed prefix-lists under single-family filters must commit, got: %v", err)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "#4426") {
+			t.Fatalf("unexpected #4426 warning on matched/mixed config: %q", w)
+		}
+	}
+}

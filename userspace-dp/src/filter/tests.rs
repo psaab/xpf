@@ -7738,6 +7738,89 @@ fn from_unrepresentable_error_names_the_family_for_reused_filter_names() {
     }
 }
 
+// #14446 helper: single-term filter with explicit address scope.
+fn filter_with_address_scope(
+    family: &str,
+    source: Vec<String>,
+    dest: Vec<String>,
+    source_except: bool,
+    dest_except: bool,
+    constrained: bool,
+) -> Result<FilterState, SnapshotIntegrityError> {
+    let term = FirewallTermSnapshot {
+        name: "scoped".into(),
+        action: "discard".into(),
+        source_addresses: source,
+        destination_addresses: dest,
+        source_except,
+        destination_except: dest_except,
+        source_constrained: constrained,
+        destination_constrained: constrained,
+        ..Default::default()
+    };
+    parse_filter_state(
+        &[FirewallFilterSnapshot {
+            name: "f".into(),
+            family: family.into(),
+            terms: vec![term],
+        }],
+        &[],
+        &[],
+        "",
+        "",
+    )
+}
+
+#[test]
+fn cross_family_address_scope_14446_rejects_wrong_family_only() {
+    for (family, src, dst, sexc, dexc) in [
+        ("inet6", vec!["10.0.0.0/8".to_string()], vec![], false, false),
+        ("inet6", vec!["10.0.0.0/8".to_string()], vec![], true, false),
+        ("inet6", vec![], vec!["10.0.0.0/8".to_string()], false, false),
+        ("inet6", vec![], vec!["10.0.0.0/8".to_string()], false, true),
+        ("inet", vec!["2001:db8::/32".to_string()], vec![], false, false),
+        ("inet", vec![], vec!["2001:db8::/32".to_string()], false, true),
+    ] {
+        let err = filter_with_address_scope(family, src, dst, sexc, dexc, true)
+            .expect_err("wrong-family-only constrained scope must fail the snapshot closed");
+        match err {
+            SnapshotIntegrityError::CrossFamilyFilterAddressScope {
+                family: fam,
+                filter,
+                term,
+                direction,
+            } => {
+                assert_eq!(fam, family);
+                assert_eq!(filter, "f");
+                assert_eq!(term, "scoped");
+                assert!(direction == "source" || direction == "destination");
+            }
+            other => panic!("expected CrossFamilyFilterAddressScope, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn cross_family_address_scope_14446_controls_compile() {
+    filter_with_address_scope("inet6", vec!["2001:db8::/32".into()], vec![], false, false, true)
+        .expect("matched v6 scope under inet6 must compile");
+    filter_with_address_scope("inet", vec!["10.0.0.0/8".into()], vec![], false, false, true)
+        .expect("matched v4 scope under inet must compile");
+    filter_with_address_scope(
+        "inet6",
+        vec!["10.0.0.0/8".into(), "2001:db8::/32".into()],
+        vec![],
+        false,
+        false,
+        true,
+    )
+    .expect("mixed scope under inet6 must compile");
+    filter_with_address_scope("inet6", vec![], vec![], false, false, false)
+        .expect("unconstrained direction must compile");
+    filter_with_address_scope("inet6", vec![], vec![], false, false, true)
+        .expect("defined-empty constrained scope must compile");
+}
+
 #[test]
 fn filter_parse_port_spec_rejects_signed_6477() {
     // #6477 RED-on-revert: the filter-side port parser must reject a

@@ -1180,7 +1180,7 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 				if firewallFamilyQuarantined9883(m, firewallPermitted) {
 					continue
 				}
-				if af != "any" {
+				if af != "any" && af != "inet" && af != "inet6" {
 					continue
 				}
 				for _, filterInst := range namedInstances(afNode.FindChildren("filter")) {
@@ -1243,7 +1243,7 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 									}
 									continue
 								}
-								if !familyAnySpecificMatches[mname] {
+								if af != "any" || !familyAnySpecificMatches[mname] {
 									continue
 								}
 								detail := mname
@@ -1282,12 +1282,40 @@ func validateFirewallFilterFamilyAnyMatchesAST(nodes []*Node, lenient bool) ([]s
 							default:
 								continue // no defined refs in this direction
 							}
-							if fam.hasV4 == fam.hasV6 {
-								// both (legit mixed / dual-list) or neither (empty).
-								continue
+							if af == "any" {
+								if fam.hasV4 == fam.hasV6 {
+									continue
+								}
+							} else {
+								// #14446: single-family filter — reject only the
+								// wrong-family-only case; matched and mixed pass.
+								mismatch := (af == "inet" && !fam.hasV4 && fam.hasV6) || (af == "inet6" && fam.hasV4 && !fam.hasV6)
+								if !mismatch {
+									continue
+								}
 							}
 							names := strings.Join(dirNames[dir], " ")
 							var msg string
+							if af != "any" {
+								listFam := "inet (v4)"
+								if fam.hasV6 && !fam.hasV4 {
+									listFam = "inet6 (v6)"
+								}
+								if except {
+									msg = fmt.Sprintf(
+										"firewall family %s filter %q term %q: `from %s %s except` references only %s prefixes under `family %s` — the %s matcher evaluates `except` over an empty %s prefix set and matches EVERY %s packet (an over-block on `then discard`, a fail-open over-accept on `then accept`); use a prefix-list covering the filter family (#4426, extended to single-family filters #14446)",
+										af, filterInst.name, termInst.name, keyword, names, listFam, af, af, af, af)
+								} else {
+									msg = fmt.Sprintf(
+										"firewall family %s filter %q term %q: `from %s %s` references only %s prefixes under `family %s` — the %s matcher has no %s prefixes and matches nothing, so the term silently under-blocks and falls through to the implicit accept; use a prefix-list covering the filter family (#4426, extended to single-family filters #14446)",
+										af, filterInst.name, termInst.name, keyword, names, listFam, af, af, af)
+								}
+								if !lenient {
+									return nil, fmt.Errorf("%s", msg)
+								}
+								warnings = append(warnings, msg)
+								continue
+							}
 							if except {
 								// Single-family `except` list: the arm for the family
 								// the list does NOT cover evaluates `except` over an

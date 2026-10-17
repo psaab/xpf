@@ -868,6 +868,25 @@ Tests: `missing_policer_ref_6540_rejects_rather_than_forwarding_unpoliced`,
 (the cell that pins definedness-not-map), and
 `empty_policer_ref_6540_is_unpoliced_not_an_error` in `filter/tests.rs`.
 
+#### Wrong-family-only address scope under a single-family filter (#14446)
+
+Primary defense (Go): `validateFirewallFilterFamilyAnyMatchesAST` (#4426,
+extended #14446) strict-rejects / lenient-warns when a `family inet`/`inet6`
+filter term references a prefix-list covering only the other family
+(positive and `except`, both directions). Matched and mixed lists pass.
+
+Dataplane backstop (Rust): `preflight_term_cross_family_addresses` in
+`parse_term` raises `SnapshotIntegrityError::CrossFamilyFilterAddressScope`
+when a constrained direction partitions to zero prefixes of the filter
+family while carrying the other family's prefixes — covering prefix-list
+and literal scopes alike, since both land in the same snapshot vecs.
+Defined-empty scopes (both vecs empty, #2400/#2506), unconstrained
+directions, and mixed lists pass unchanged; `family any` is owned by the
+Go gate (its pools are compiled per family and checked there).
+
+Tests: `cross_family_address_scope_14446_*` in `filter/tests.rs` and
+`*14446` in `compiler_firewall_family_any_prefixlist_4426_test.go`.
+
 The fail-closed contract keys off the RETAINED per-interface fast maps
 (`iface_filter_*_fast`) — the structures the per-interface hot path consults —
 and the FAMILY-WIDE global TX gate keys off the `has_output_needs_tx_eval_*`
