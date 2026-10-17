@@ -684,6 +684,12 @@ func (u *rfc2136Updater) sendAdd(ctx context.Context, zone string, rr dns.RR) er
 	if u.conflictPolicy == "replace-owned" {
 		return u.sendAddOwned(ctx, zone, rr)
 	}
+	// #14429 defense-in-depth: an updater built outside newRFC2136Updater
+	// (struct literal) with a garbage policy must still refuse the ADD
+	// rather than fall through to the bare Insert below.
+	if u.conflictPolicy != "skip-existing" && u.conflictPolicy != "strict-fail" {
+		return fmt.Errorf("ddns: invalid conflict-policy %q (valid: replace-owned, skip-existing, strict-fail); refusing ADD of %s", u.conflictPolicy, rr.Header().Name)
+	}
 	m := new(dns.Msg)
 	m.SetUpdate(dns.Fqdn(zone))
 	switch u.conflictPolicy {
@@ -979,11 +985,11 @@ func (u *rfc2136Updater) sendRemove(ctx context.Context, zone string, rr dns.RR)
 // LAST owned record under the name (keepDHCID=false) the DHCID is removed with
 // it (the pre-#2700 behaviour), so a fully-released name leaves no orphan DHCID.
 func (u *rfc2136Updater) sendRemoveForward(ctx context.Context, zone string, rr dns.RR, keepDHCID bool) error {
+	// #14429/#14432: a garbage policy must not take any delete branch.
+	// Valid non-replace-owned policies keep the plain exact-RR delete;
+	// an invalid value (only reachable via a directly-built updater,
+	// since newRFC2136Updater refuses it) fails closed.
 	if u.conflictPolicy != "replace-owned" {
-		// #14432: valid non-replace-owned policies keep the plain
-		// exact-RR delete; a garbage value (only reachable via a
-		// directly-built updater, since newRFC2136Updater refuses it)
-		// must REFUSE the delete rather than take this unguarded branch.
 		if u.conflictPolicy != "skip-existing" && u.conflictPolicy != "strict-fail" {
 			return fmt.Errorf("ddns: invalid conflict-policy %q (valid: replace-owned, skip-existing, strict-fail); refusing DELETE of %s", u.conflictPolicy, rr.Header().Name)
 		}

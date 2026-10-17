@@ -67,6 +67,21 @@ func ddnsBackendWarningsForPolicy(d *DHCPDynamicDNSConfig, label string) []strin
 	}
 	var warnings []string
 
+	// #14429: a garbage conflict-policy (skip-existng, none, ...) is
+	// rejected by the strict schema enum at commit, but on the tolerant
+	// load / peer-sync path it previously sailed through silently and
+	// disabled the backend's DNS-ownership guard (bare Insert, phantom
+	// ownership). Warn here so the lenient path is visible; the runtime
+	// backend independently refuses to construct with such a policy.
+	if d.ConflictPolicy != "" && d.ConflictPolicy != "replace-owned" &&
+		d.ConflictPolicy != "skip-existing" && d.ConflictPolicy != "strict-fail" {
+		warnings = append(warnings, fmt.Sprintf("%s "+
+			"conflict-policy %q is not valid (use replace-owned, skip-existing, "+
+			"or strict-fail); the DNS-ownership guard would be disabled, so no "+
+			"records will be published or withdrawn until it is corrected",
+			label, d.ConflictPolicy))
+	}
+
 	backend := d.Backend
 	if backend == "" {
 		backend = "rfc2136"
