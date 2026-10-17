@@ -699,11 +699,15 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			// only under IPv6.
 			isIPv6Peer := strings.Contains(n.Address, ":")
 			policyDefault := len(globalExportChain) > 0 || len(globalImportChain) > 0 || hasOwnPolicy
-			hasAFNeighborAttributes := n.RouteReflectorClient || n.AllowASIn > 0 || n.RemovePrivateAS
+			hasAFNeighborAttributes := n.RouteReflectorClient || n.AllowASIn > 0 || n.RemovePrivateAS || n.DefaultOriginate
 			// Router-level emission of these controls configures IPv4 unicast
 			// by default in FRR. Keep family-less IPv4 neighbors in an explicit
 			// AF block so their existing IPv4 behavior is preserved when the
 			// controls are rendered in their actual address family below.
+			// DefaultOriginate belongs here too (#14381): without it a
+			// family-less IPv4 peer whose only AF attribute was
+			// default-originate landed in no set and the default route was
+			// never advertised.
 			// A cross-family per-neighbor inet declaration is equally
 			// unrenderable: fail closed instead of allowing FRR's default AF.
 			hasUnrenderableFamily := n.UnsupportedInetSAFI || n.UnsupportedInet6SAFI || n.CrossFamilyInet
