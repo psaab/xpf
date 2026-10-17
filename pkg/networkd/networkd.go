@@ -786,7 +786,6 @@ type externalNetworkMatch struct {
 	macPatterns  []string
 	hasName      bool
 	hasMAC       bool
-	matchAll     bool
 	unsupported  bool
 }
 
@@ -806,9 +805,6 @@ func (m ExternalMatchSet) MatchesForApply(name, mac string) bool {
 
 func (m ExternalMatchSet) matches(name, mac string, allowUnknown bool) bool {
 	for _, rule := range m.rules {
-		if rule.matchAll {
-			return true
-		}
 		if rule.unsupported && !allowUnknown {
 			continue
 		}
@@ -831,6 +827,14 @@ func (m ExternalMatchSet) matches(name, mac string, allowUnknown bool) bool {
 // Apply conservatively ignores additional unknown keys only when at least one
 // supported predicate matches, while Matches requires the complete supported
 // rule to be sufficient.
+//
+// systemd ignores a file whose effective [Match] has no valid settings
+// (#14593): an empty section, a Name=/MACAddress= reset that clears the
+// last predicate, or a MACAddress= whose words are all unparseable leaves
+// nothing to match, so the rule is dropped rather than treated as
+// match-all. The explicit match-all spelling is Name=* (a real Name
+// predicate). An all-unparsed MACAddress= is marked unsupported so
+// MatchesForApply stays conservative exactly like an unknown key.
 func FindExternallyManaged(dir string) ExternalMatchSet {
 	var result ExternalMatchSet
 	entries, err := os.ReadDir(dir)
@@ -847,7 +851,7 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 			continue
 		}
 		var rule externalNetworkMatch
-		inMatch, sawMatchSection := false, false
+		inMatch := false
 		for _, rawLine := range strings.Split(string(data), "\n") {
 			line := strings.TrimSpace(rawLine)
 			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
@@ -855,7 +859,6 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 			}
 			if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 				inMatch = line == "[Match]"
-				sawMatchSection = sawMatchSection || inMatch
 				continue
 			}
 			if !inMatch {
@@ -890,22 +893,31 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 					rule.hasMAC = false
 					continue
 				}
+				validWords := 0
 				for _, pattern := range strings.Fields(value) {
 					if _, ok := parseExternalMACAddress(pattern); ok {
 						rule.macPatterns = append(rule.macPatterns, pattern)
+						validWords++
 					}
 				}
 				rule.hasMAC = len(rule.macPatterns) > 0
+				if validWords == 0 && !rule.hasName {
+					// No valid setting remains yet: systemd would
+					// ignore the file unless a later line adds a
+					// valid predicate (#14593). Keep the rule
+					// unsupported so Matches cannot claim it; the
+					// hasName/hasMAC gate drops it if nothing
+					// valid follows. An invalid MAC beside a valid
+					// Name stays inert, matching master.
+					rule.unsupported = true
+				}
 			default:
 				rule.unsupported = true
 			}
 		}
-		switch {
-		case rule.hasName || rule.hasMAC:
-			result.rules = append(result.rules, rule)
-		case sawMatchSection && !rule.unsupported:
-			// An empty effective [Match] section matches every interface.
-			rule.matchAll = true
+		// No valid supported predicate remains: systemd ignores the
+		// file, so it must not exempt any interface from teardown.
+		if rule.hasName || rule.hasMAC {
 			result.rules = append(result.rules, rule)
 		}
 	}
