@@ -248,6 +248,18 @@ Only FILTER_LOG is gated. Session/policy/screen events have no per-term spelling
 to honour, and suppressing them would be a logging outage dressed as a parity
 fix.
 
+**The system-syslog sink is gated too (#14612).** #6859 covered only the
+EventReader's stream clients above. The daemon "firewall event" slog line is
+emitted before that fan-out and is forwarded by `SyslogSlogHandler` to the
+`system syslog host` clients, so a `then log`-only hit still left the box
+that way. `logEvent` now computes the same `allows(RuleID, TermID)` decision
+before the slog line and marks a gated FILTER_LOG record
+suppress-system-syslog: the handler still writes it to the local base
+handler but withholds the remote copy. `then syslog` hits, non-FILTER_LOG
+events, ordinary daemon records, and the unwired (nil-map) case are
+unchanged on both sinks. Coverage: `filter_log_system_syslog_14612_test.go`
+wires distinct stream and system collectors, mirroring the daemon.
+
 The behaviour change is announced at commit by a `pkg/config` advisory naming
 each affected term, fired only when the config actually installs syslog clients.
 See `docs/feature-gaps.md`.
