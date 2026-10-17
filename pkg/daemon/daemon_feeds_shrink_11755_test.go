@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,7 +26,7 @@ func TestFeedShrinkHighWaterSurvivesColdDaemonRestart11755(t *testing.T) {
 
 	var bodyMu sync.RWMutex
 	body := feedShrinkBody11755(50_000)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		bodyMu.RLock()
 		current := body
 		bodyMu.RUnlock()
@@ -40,6 +41,11 @@ func TestFeedShrinkHighWaterSurvivesColdDaemonRestart11755(t *testing.T) {
 		d := &Daemon{daemonCtx: context.Background()}
 		d.ensureFeedManager()
 		d.feeds.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
+		{
+			pool := x509.NewCertPool()
+			pool.AddCert(server.Certificate())
+			d.feeds.SetLabFeedTLSRoots(pool)
+		}
 		t.Cleanup(func() { d.feeds.StopAll() })
 		return d
 	}
@@ -131,7 +137,7 @@ func TestFeedShrinkHistoryFencePreventsWipeRecreation12170(t *testing.T) {
 
 	var bodyMu sync.RWMutex
 	body := feedShrinkBody11755(40)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		bodyMu.RLock()
 		defer bodyMu.RUnlock()
 		_, _ = w.Write([]byte(body))
@@ -146,6 +152,11 @@ func TestFeedShrinkHistoryFencePreventsWipeRecreation12170(t *testing.T) {
 		callbackRuns <- struct{}{}
 	})
 	d.feeds.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
+	{
+		pool := x509.NewCertPool()
+		pool.AddCert(server.Certificate())
+		d.feeds.SetLabFeedTLSRoots(pool)
+	}
 	t.Cleanup(d.feeds.StopAll)
 	d.reconcileFeeds(feedCfgWith(map[string]*config.FeedServer{
 		"server": {Name: "server", URL: server.URL, FeedName: "stable-feed", UpdateInterval: 1},

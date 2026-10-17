@@ -37,7 +37,7 @@ func TestReconcileFeedsDay2(t *testing.T) {
 	// fetch fast; we only assert the producer was registered, not that it
 	// fetched.
 	cfgAdd := feedCfgWith(map[string]*config.FeedServer{
-		"threats": {Name: "threats", URL: "http://127.0.0.1:1/threats", UpdateInterval: 3600},
+		"threats": {Name: "threats", URL: "https://127.0.0.1:1/threats", UpdateInterval: 3600},
 	}, nil)
 	d.reconcileFeeds(cfgAdd)
 	if n := len(d.feeds.AllFeeds()); n != 1 {
@@ -57,7 +57,7 @@ func TestReconcileFeedsDay2(t *testing.T) {
 func TestReconcileFeedsNilManagerSafe(t *testing.T) {
 	d := &Daemon{daemonCtx: context.Background()} // d.feeds == nil
 	d.reconcileFeeds(feedCfgWith(map[string]*config.FeedServer{
-		"threats": {Name: "threats", URL: "http://127.0.0.1:1/threats"},
+		"threats": {Name: "threats", URL: "https://127.0.0.1:1/threats"},
 	}, nil))
 	if d.feeds != nil {
 		t.Fatal("reconcileFeeds must not construct the manager itself (construction is single-threaded at boot)")

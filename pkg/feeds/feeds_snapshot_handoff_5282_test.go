@@ -44,7 +44,8 @@ func TestApplyReconfigureFailedFetchRetainsLastGood(t *testing.T) {
 	// 1) Install a deny feed's last-good snapshot from a healthy endpoint.
 	good := &bodyServer{}
 	good.set("203.0.113.0/24\n", http.StatusOK)
-	goodTS := httptest.NewServer(good.handler())
+	goodTS := httptest.NewTLSServer(good.handler())
+	trustLabFeedServer(m, goodTS)
 	defer goodTS.Close()
 
 	const feedName = "deny"
@@ -57,7 +58,8 @@ func TestApplyReconfigureFailedFetchRetainsLastGood(t *testing.T) {
 	// 2) Reconfigure: SAME feed name, a NEW url whose endpoint is DOWN (500).
 	down := &bodyServer{}
 	down.set("hijacked-or-error", http.StatusInternalServerError)
-	downTS := httptest.NewServer(down.handler())
+	downTS := httptest.NewTLSServer(down.handler())
+	trustLabFeedServer(m, downTS)
 	defer downTS.Close()
 
 	daCfg := &config.DynamicAddressConfig{
@@ -104,7 +106,8 @@ func TestApplyDropsRemovedFeed(t *testing.T) {
 	m := New(func() error { return nil })
 	good := &bodyServer{}
 	good.set("203.0.113.0/24\n", http.StatusOK)
-	ts := httptest.NewServer(good.handler())
+	ts := httptest.NewTLSServer(good.handler())
+	trustLabFeedServer(m, ts)
 	defer ts.Close()
 
 	// Pre-seed two feeds' last-good snapshots.
@@ -145,7 +148,8 @@ func TestApplyReconfigureSuccessfulFetchReplacesSnapshot(t *testing.T) {
 	// Last-good from endpoint A.
 	oldSrv := &bodyServer{}
 	oldSrv.set("203.0.113.0/24\n", http.StatusOK)
-	oldTS := httptest.NewServer(oldSrv.handler())
+	oldTS := httptest.NewTLSServer(oldSrv.handler())
+	trustLabFeedServer(m, oldTS)
 	defer oldTS.Close()
 
 	const feedName = "deny"
@@ -155,7 +159,8 @@ func TestApplyReconfigureSuccessfulFetchReplacesSnapshot(t *testing.T) {
 	// Reconfigure: a NEW, HEALTHY endpoint B serving a DIFFERENT set.
 	newSrv := &bodyServer{}
 	newSrv.set("198.51.100.0/24\n", http.StatusOK)
-	newTS := httptest.NewServer(newSrv.handler())
+	newTS := httptest.NewTLSServer(newSrv.handler())
+	trustLabFeedServer(m, newTS)
 	defer newTS.Close()
 
 	daCfg := &config.DynamicAddressConfig{

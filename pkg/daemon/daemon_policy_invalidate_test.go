@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/cluster"
@@ -1036,7 +1037,7 @@ func TestPeerSyncRenameAncestryCaptureAndClearJointFixture10511(t *testing.T) {
 // cannot resolve, exactly the feed-unresolved shape.
 func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
 	const feedBody = "203.0.113.0/24\n"
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, feedBody)
 	}))
@@ -1057,6 +1058,11 @@ func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
 	// Feed fetch SSRF policy blocks loopback by default; allowlist the
 	// httptest server exactly as the feeds package's own tests do.
 	mgr.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")})
+	{
+		pool := x509.NewCertPool()
+		pool.AddCert(server.Certificate())
+		mgr.SetLabFeedTLSRoots(pool)
+	}
 	mgr.Apply(ctx, daCfg)
 	defer mgr.StopAll()
 	deadline := time.Now().Add(10 * time.Second)
@@ -1136,7 +1142,7 @@ func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
 }
 
 func TestCaptureExtensiveRematchIncludesLiveFeedStaticSibling12851(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "203.0.113.0/24\n")
 	}))
@@ -1155,6 +1161,11 @@ func TestCaptureExtensiveRematchIncludesLiveFeedStaticSibling12851(t *testing.T)
 	defer cancel()
 	mgr := feeds.New(func() error { return nil })
 	mgr.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")})
+	{
+		pool := x509.NewCertPool()
+		pool.AddCert(server.Certificate())
+		mgr.SetLabFeedTLSRoots(pool)
+	}
 	mgr.Apply(ctx, &dynamic)
 	defer mgr.StopAll()
 	deadline := time.Now().Add(10 * time.Second)

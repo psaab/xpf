@@ -229,6 +229,30 @@ func validateDynamicAddressFeedServerEndpointStrict(cfg *Config) error {
 				"#5645), not silently match-none; set a valid http(s) url or hostname",
 				display, RedactURL(feedServerResolvedBaseURL(fs)), reason)
 		}
+		// #14385 (DR5-H13): a plaintext-http feed has no transport integrity
+		// and this package has no per-feed signature / pinned-hash
+		// verification, so an on-path attacker (or DNS spoof) can substitute
+		// an arbitrary body that installSnapshot then enforces as policy.
+		// Strict commit rejects an explicit http:// base url; hostname-only
+		// servers resolve to https:// and are unaffected. The tolerant
+		// load / peer-sync call site downgrades this to a warning, and the
+		// runtime (feeds.Manager.Apply) independently skips plaintext-http
+		// feeds, so a leniently-loaded config still boots but registers no
+		// worker for the feed — its bound name stays unresolvable and fails
+		// CLOSED (#5645) rather than installing attacker content.
+		if resolved := feedServerResolvedBaseURL(fs); strings.HasPrefix(strings.ToLower(resolved), "http://") {
+			display := fs.Name
+			if display == "" {
+				display = name
+			}
+			return fmt.Errorf("security dynamic-address feed-server %q base url "+
+				"%q uses plaintext http:// — a plaintext feed has no transport "+
+				"integrity and no signature/hash verification, so a MITM can "+
+				"substitute the feed body and have it installed as enforced "+
+				"policy (#14385); use an https:// url or a hostname (which "+
+				"resolves to https://)",
+				display, RedactURL(resolved))
+		}
 	}
 	return nil
 }

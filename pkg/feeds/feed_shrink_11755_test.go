@@ -16,7 +16,7 @@ func TestColdRestartRestoresHighWater11755(t *testing.T) {
 	logs := captureShrinkLogs11059(t)
 	cfg := func() *config.DynamicAddressConfig {
 		return &config.DynamicAddressConfig{FeedServers: map[string]*config.FeedServer{
-			"server": {Name: "server", URL: "http://127.0.0.1:1/feed", FeedName: "cold-feed", UpdateInterval: 3600},
+			"server": {Name: "server", URL: "https://127.0.0.1:1/feed", FeedName: "cold-feed", UpdateInterval: 3600},
 		}}
 	}
 	getState := func(m *Manager) *feedState {

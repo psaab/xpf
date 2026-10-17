@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -73,17 +74,17 @@ func readFeedHistory12170(t *testing.T, path string) []feeds.ShrinkHighWater {
 
 // serveFeed12170 serves the initial larger prefix set, then swaps to the
 // smaller set so one server drives both bootstrap and shrink-candidate fetches.
-func serveFeed12170(t *testing.T, big, small int) (url string, swap func()) {
+func serveFeed12170(t *testing.T, big, small int) (url string, cert *x509.Certificate, swap func()) {
 	t.Helper()
 	var mu sync.RWMutex
 	body := feedBody12170(big)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.RLock()
 		defer mu.RUnlock()
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(server.Close)
-	return server.URL, func() {
+	return server.URL, server.Certificate(), func() {
 		mu.Lock()
 		body = feedBody12170(small)
 		mu.Unlock()
@@ -113,10 +114,15 @@ func waitFeedPrefixes12170(t *testing.T, m *feeds.Manager, count int) {
 
 // newFeedManager12170 builds a fresh manager over url the way a rebooted
 // daemon would: restore the durable epochs first, then Apply the same name.
-func newFeedManager12170(t *testing.T, url, historyPath string) *feeds.Manager {
+func newFeedManager12170(t *testing.T, url string, cert *x509.Certificate, historyPath string) *feeds.Manager {
 	t.Helper()
 	m := feeds.New(func() error { return nil })
 	m.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
+	{
+		pool := x509.NewCertPool()
+		pool.AddCert(cert)
+		m.SetLabFeedTLSRoots(pool)
+	}
 	m.RestoreShrinkHighWater(readFeedHistory12170(t, historyPath))
 	m.Apply(context.Background(), &config.DynamicAddressConfig{FeedServers: map[string]*config.FeedServer{
 		"server": {Name: "server", URL: url, FeedName: feedHistory12170, UpdateInterval: 1},
@@ -247,15 +253,15 @@ func TestZeroizeFreesSameNameFeedFromPriorEpoch12170(t *testing.T) {
 		t.Fatalf("PerformZeroizeWipePending: %v", err)
 	}
 
-	url, swap := serveFeed12170(t, 40, 30)
-	fresh := newFeedManager12170(t, url, historyPath)
+	url, cert, swap := serveFeed12170(t, 40, 30)
+	fresh := newFeedManager12170(t, url, cert, historyPath)
 	waitFeedPrefixes12170(t, fresh, 40)
 	if info := fresh.AllFeeds()[feedHistory12170]; info.ShrinkRefused {
 		t.Fatalf("same-name bootstrap must install before the next fetch: %+v", info)
 	}
 	priorHistoryPath := filepath.Join(root, "prior-tenant", "feed-shrink-history.json")
 	seedFeedHistory12170(t, priorHistoryPath)
-	priorEpoch := newFeedManager12170(t, url, priorHistoryPath)
+	priorEpoch := newFeedManager12170(t, url, cert, priorHistoryPath)
 	waitFeedPrefixes12170(t, priorEpoch, 40)
 	if info := priorEpoch.AllFeeds()[feedHistory12170]; info.ShrinkGuardHighWaterCount != 64 {
 		t.Fatalf("control manager did not restore the prior 64-prefix epoch: %+v", info)

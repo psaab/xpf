@@ -118,7 +118,7 @@ func TestRecreatedFeedAuditsSmallBootstrapAgainstRememberedHighWater11489(t *tes
 	cancel()
 	cfg := func() *config.DynamicAddressConfig {
 		return &config.DynamicAddressConfig{FeedServers: map[string]*config.FeedServer{
-			"server": {Name: "server", URL: "http://127.0.0.1:1/feed", FeedName: "recreated-feed", UpdateInterval: 3600},
+			"server": {Name: "server", URL: "https://127.0.0.1:1/feed", FeedName: "recreated-feed", UpdateInterval: 3600},
 		}}
 	}
 	getState := func() *feedState {

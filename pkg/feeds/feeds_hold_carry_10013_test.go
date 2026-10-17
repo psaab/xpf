@@ -35,7 +35,8 @@ func applyNoopReconfigAfterHoldDrop10013(t *testing.T, feedName string) (*Manage
 	m := newLabManager10177(func() error { return nil })
 	down := &bodyServer{}
 	down.set("hijacked-or-error", http.StatusInternalServerError)
-	downTS := httptest.NewServer(down.handler())
+	downTS := httptest.NewTLSServer(down.handler())
+	trustLabFeedServer(m, downTS)
 	t.Cleanup(downTS.Close)
 
 	fs := holdDrop9689(t, m, feedName, []string{"198.51.100.0/24"})
@@ -132,7 +133,8 @@ func TestNoopReconfigDoesNotInventHoldDrop10013(t *testing.T) {
 	m := newLabManager10177(func() error { return nil })
 	down := &bodyServer{}
 	down.set("hijacked-or-error", http.StatusInternalServerError)
-	downTS := httptest.NewServer(down.handler())
+	downTS := httptest.NewTLSServer(down.handler())
+	trustLabFeedServer(m, downTS)
 	t.Cleanup(downTS.Close)
 
 	const feedName = "not-yet"

@@ -52,7 +52,7 @@ func TestStopAllJoinsRefreshGoroutines7174C12a(t *testing.T) {
 		}
 	}()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeEntered()
 		// Never respond. The only way out is the client's context being
 		// cancelled, which is exactly what StopAll does.
@@ -65,6 +65,7 @@ func TestStopAllJoinsRefreshGoroutines7174C12a(t *testing.T) {
 	defer close(blocked)
 
 	m := newLabManager10177(func() error { return nil })
+	trustLabFeedServer(m, ts)
 	m.Apply(context.Background(), &config.DynamicAddressConfig{
 		FeedServers: map[string]*config.FeedServer{
 			"held": {
