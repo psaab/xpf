@@ -7462,14 +7462,19 @@ to opt in. The completeness audit that gates the flip:
   clean and being silently dropped. Production tests:
   `schema_closedworld_nat_then_4313_test.go` (RED on revert of the flag).
 
-**NOT flipped — source-NAT rule then-action.** The sibling `security nat source
-… rule … then` is deliberately left open-world. Junos permits `then source-nat
-pool <name> persistent-nat { … }` at the RULE level, which xpf instead models
-per-pool (`security nat source pool <name> persistent-nat`). Flipping the
-source-NAT then would inherit closed-world down to its `pool` leaf and
-false-reject that valid Junos config (the #4191 class). It is a follow-up:
-model the rule-level persistent-nat leaves (or make an accept-with-advisory
-decision) FIRST, then flip.
+**Source-NAT rule then-action — rule-level persistent-nat modeled (#14626).**
+The sibling `security nat source … rule … then` remains `closedWorldOpaque`
+(its packed runs collapse the tail onto `Keys` past the pool-name slot, which
+the schema walk cannot represent as children), but the follow-up is done:
+the rule-level `then source-nat pool <name> persistent-nat { permit |
+inactivity-timeout }` tail is modeled in the schema (under the `pool` leaf)
+and compiled per-rule (`compiler_nat_source_persistent_rule_14626.go`). A
+tail disagreeing with the referenced pool or with a sibling rule on the
+same pool, a malformed tail, and a tail on `interface`/`off` reject at
+strict commit (tolerant load warns and falls back to the pool's own
+config); the userspace snapshot carries the rule-effective
+`persistent_nat`/permit/timeout. The pool-level spelling
+(`security nat source pool <name> persistent-nat`) is unchanged.
 
 **Terminal-action CARDINALITY — NAT rule `then` (codex-review-181 M16, #5628).**
 The closed-world keyword audit above validates WHICH keywords may appear under

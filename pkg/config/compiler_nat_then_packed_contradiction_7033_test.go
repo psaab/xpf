@@ -175,11 +175,11 @@ func TestFlatSetPackedContradictionRejected_7033(t *testing.T) {
 	}
 }
 
-// TestOpenWorldTrailingGrammarStillCommits_7033 pins #4313 bit-identically.
-//
-// It asserts the RESOLVED pool, not merely that the compile succeeded: the whole
-// risk of this change is a scan that reads an open-world tail as actions, and a
-// commit that succeeds with the wrong pool would satisfy an err == nil check.
+// TestOpenWorldTrailingGrammarStillCommits_7033: the #4313 tail now compiles
+// (#14626) instead of merely committing. It asserts the RESOLVED pool AND the
+// rule-effective persistent config: the whole risk of this change is a scan
+// that reads the tail as actions, and a commit that succeeds with the wrong
+// pool would satisfy an err == nil check.
 func TestOpenWorldTrailingGrammarStillCommits_7033(t *testing.T) {
 	txt := snat7033("then { source-nat pool P persistent-nat permit any-remote-host; }")
 	tree, perr := NewParser(txt).Parse()
@@ -188,41 +188,40 @@ func TestOpenWorldTrailingGrammarStillCommits_7033(t *testing.T) {
 	}
 	cfg, err := CompileConfig(tree)
 	if err != nil {
-		t.Fatalf("#4313's open-world trailing grammar must still commit, got: %v.\n"+
-			"Everything after `persistent-nat` belongs to a sub-grammar the action "+
-			"scan does not model; reading it as actions invents a contradiction in a "+
-			"valid config", err)
+		t.Fatalf("#4313's trailing grammar must still commit, got: %v", err)
 	}
 	if got := cfg.Security.NAT.Source[0].Rules[0].Then.PoolName; got != "P" {
 		t.Fatalf("open-world tail changed the resolved pool to %q, want P", got)
+	}
+	eff, ok := cfg.Security.NAT.Source[0].Rules[0].EffectivePersistentNAT(cfg)
+	if !ok || eff.Permit != PersistentNATPermitAnyRemoteHost {
+		t.Fatalf("rule tail did not compile (#14626): effective=%+v ok=%v", eff, ok)
 	}
 }
 
 // TestOpenWorldTailContainingOffStillCommits_7033 is the adversarial version of
 // the case above, and it is the one that actually bites.
 //
-// A realistic open-world tail (`persistent-nat permit any-remote-host`) contains
+// A realistic tail (`persistent-nat permit any-remote-host`) contains
 // no action keyword, so a scan that failed to stop would still record one mode
 // and that fixture would pass anyway. Putting the token `off` IN the tail is the
 // smallest shape where "stop at the first unrecognised token" changes an
 // outcome: without the stop, this legal config is rejected as a contradiction
-// the operator never wrote. #4313 makes the trailing grammar open-world, so the
-// scan cannot assume a tail is free of words it recognises.
+// the operator never wrote. Since #14626 the tail is modeled, so `permit off`
+// is an INVALID permit value and must reject as #14626 — never as a fabricated
+// `off` exemption and never as a silently-inert persistent tail.
 func TestOpenWorldTailContainingOffStillCommits_7033(t *testing.T) {
 	txt := snat7033("then { source-nat pool P persistent-nat permit off; }")
 	tree, perr := NewParser(txt).Parse()
 	if len(perr) != 0 {
 		t.Fatalf("fixture did not parse: %v", perr)
 	}
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("an open-world tail that happens to contain the token `off` must still "+
-			"commit, got: %v.\nEverything after `persistent-nat` belongs to a sub-grammar "+
-			"the action scan does not model — reading it as actions invents a "+
-			"contradiction in a valid config", err)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("`persistent-nat permit off` committed cleanly; want #14626 invalid-permit reject (not a fabricated off, not inert)")
 	}
-	if got := cfg.Security.NAT.Source[0].Rules[0].Then; got.PoolName != "P" || got.Off {
-		t.Fatalf("resolved Then={Off:%v PoolName:%q}, want {false P}", got.Off, got.PoolName)
+	if !strings.Contains(err.Error(), "#14626") {
+		t.Fatalf("error = %q, want #14626 invalid-permit diagnostic", err)
 	}
 }
 

@@ -52,9 +52,9 @@ import "strings"
 //
 //   - `pool off` — a pool legitimately NAMED `off`. `pool` consumes exactly one
 //     value token, so this is one pool, not a pool plus an exemption.
-//   - `pool P persistent-nat permit any-remote-host` — #4313's open-world
-//     trailing grammar. The scan stops at the first unrecognised token instead of
-//     reading the tail as actions.
+//   - `pool P persistent-nat permit any-remote-host` — #4313's trailing
+//     grammar (modeled since #14626). The scan stops at the first unrecognised
+//     token instead of reading the tail as actions.
 //   - `then { source-nat { frobnicate { off; } } }` — still rejected, but as the
 //     ZERO-action rule it is. The walk does not descend past an unrecognised
 //     container, so this never becomes a fabricated `off`.

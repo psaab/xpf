@@ -262,13 +262,14 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 //
 // THE BOUNDARY IS ANSWERED BY consumeNodeKeys, NOT GUESSED. Asking "is this
 // token a sibling keyword" is not sufficient and is actively wrong: a VALUE may
-// coincide with a sibling keyword, and #4313 makes some tails open-world. The
-// measured case is `then { source-nat pool P persistent-nat permit off; }`,
-// where `off` is a source-nat child AND a value inside a sub-grammar the schema
-// does not model. Splitting on the name invents a second translation action and
-// rejects a config that commits today — there is a cell for it,
-// TestOpenWorldTailContainingOffStillCommits_7033, and it is why the
-// name-matching version of this function was abandoned.
+// coincide with a sibling keyword. The measured case is
+// `then { source-nat pool P persistent-nat permit off; }`, where `off` is a
+// source-nat child AND a value inside the persistent-nat sub-grammar.
+// Splitting on the name invents a second translation action — there is a cell
+// for it, TestOpenWorldTailContainingOffStillCommits_7033 (since #14626 the
+// tail is modeled, so `permit off` rejects as an invalid permit value, never
+// as a fabricated exemption), and it is why the name-matching version of this
+// function was abandoned.
 //
 // So this borrows packedBodyChildren's contract: consume each statement by the
 // schema's own count, and THE MOMENT a token leaves the modelled grammar, stop

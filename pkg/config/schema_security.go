@@ -695,23 +695,44 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 						"destination-port":         {desc: "Destination port to match", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
 						"application":              {desc: "Application to match", args: 1, multi: true, placeholder: "<application>", children: nil},
 					}},
-					// #4313: this action is otherwise modeled completely, but
-					// Junos permits `then source-nat pool <name>
-					// persistent-nat { ... }` at rule level. The compiler
-					// consumes that tail as a pool-action extension, while xpf
-					// models the persistent-nat body on the pool definition.
-					// #10078: source-NAT's rule-level pool action remains
-					// explicitly open-world. Junos permits the compiler-owned
-					// `persistent-nat` tail after `pool <name>`; the existing
-					// #4313 contract also keeps unknown action tails accepted
-					// until that grammar is modeled. End inherited security
-					// closure at this action, rather than rejecting a valid
-					// persistent-nat body or changing the deferred contract.
+					// #14626: the rule-level `then source-nat pool <name>
+					// persistent-nat { permit|inactivity-timeout }` tail is now
+					// MODELED (compiled per-rule; see
+					// compiler_nat_source_persistent_rule_14626.go), so the
+					// source-NAT then-action no longer needs the #4313/#10078
+					// open-world exemption for it. The subtree stays
+					// closedWorldOpaque because the compiler-owned packed runs
+					// (`pool P persistent-nat permit any-remote-host`) collapse
+					// the tail onto Keys past the pool-name slot, which the
+					// schema walk cannot represent as children; value
+					// validation for the tail is owned by the #14626 compiler
+					// gate (strict reject / tolerant warn), not the walk.
 					"then": {desc: "Source NAT action", children: map[string]*schemaNode{
 						"source-nat": {desc: "Source NAT translation", closedWorldOpaque: true, children: map[string]*schemaNode{
 							"interface": {desc: "Translate to the egress interface address", children: nil},
 							"off":       {desc: "Disable source NAT for matching traffic", children: nil},
-							"pool":      {desc: "Translate using a source NAT pool", args: 1, valueHint: ValueHintPoolName, placeholder: "<pool-name>", closedWorldOpaque: true, children: nil},
+							"pool": {desc: "Translate using a source NAT pool", args: 1, valueHint: ValueHintPoolName, placeholder: "<pool-name>", closedWorldOpaque: true, children: map[string]*schemaNode{
+								"persistent-nat": {desc: "Rule-level persistent NAT for this pool reference (#14626)", children: map[string]*schemaNode{
+									"permit": {
+										desc:          "Remote-host reuse scope for persistent bindings",
+										args:          1,
+										valueType:     ValueEnumOf,
+										valueDesc:     "Persistent NAT permit scope",
+										valueExamples: []string{"any-remote-host", "target-host", "target-host-port"},
+										validator:     ValidateEnum([]string{"any-remote-host", "target-host", "target-host-port"}),
+										children:      nil,
+									},
+									"inactivity-timeout": {
+										desc:          "Persistent binding inactivity timeout",
+										args:          1,
+										valueType:     ValueInteger,
+										valueDesc:     "Timeout in seconds",
+										valueExamples: []string{"300", "600"},
+										validator:     ValidateInteger(1, 86400),
+										children:      nil,
+									},
+								}},
+							}},
 						}},
 					}},
 				}},
@@ -798,10 +819,11 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					// stored or peer-synced config is not bricked.
 					//
 					// EXPLICIT OPAQUE BOUNDARY: the SOURCE-NAT rule then-action
-					// remains open-world because Junos permits
-					// `then source-nat pool <name> persistent-nat { ... }` at
-					// rule level, which xpf instead models per-pool (`security
-					// nat source pool <name> persistent-nat`, ~line 360).
+					// stays closedWorldOpaque because its packed runs collapse
+					// the (now modeled, #14626) rule-level persistent-nat tail
+					// onto Keys past the pool-name slot, which the schema walk
+					// cannot represent as children; the #14626 compiler gate
+					// owns value validation for that tail.
 					// `source-nat` sets closedWorldOpaque above so the umbrella
 					// does not false-reject that valid compiler-owned tail.
 					"then": {desc: "Destination NAT action", closedWorld: true, children: map[string]*schemaNode{

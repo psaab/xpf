@@ -1057,7 +1057,9 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 			for _, thenNode := range ruleNode.FindChildren("then") {
 				rule.Then = NATThen{}
 				rule.unknownThenLeaves = nil
+				rule.rulePersistentNAT = rulePersistentNATState14626{Timeout: -1}
 				rule.thenAuthored = natThenAuthoredOccurrences(thenNode, "source-nat")
+				rule.rulePersistentNAT = scanRulePersistentTail14626(thenNode)
 				recordSourceNATUnknownThen(rule, thenNode)
 				// #7014: the FULLY-COMPACT authoring `then source-nat off;`
 				// packs every token onto the `then` node itself, so there is no
@@ -1160,9 +1162,11 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 }
 
 // recordSourceNATUnknownThen records source-NAT action keywords that the
-// compiler does not consume. The `pool <name> persistent-nat ...` tail is
-// deliberately left open because it is a valid compiler-owned extension
-// (#10078); unknown siblings of the source-nat action itself are not.
+// compiler does not consume. The `pool <name>` mode itself is consumed, and
+// the persistent-nat tail after it (plus after interface/off) is now modeled
+// by scanRulePersistentTail14626 (#14626) — so scanning stops at `pool` or
+// `persistent-nat` and never records the modeled tail as unknown. Unknown
+// siblings of the source-nat action itself are still recorded (#10294).
 func recordSourceNATUnknownThen(rule *NATRule, thenNode *Node) {
 	if rule == nil || thenNode == nil {
 		return
@@ -1182,14 +1186,20 @@ func recordSourceNATUnknownThen(rule *NATRule, thenNode *Node) {
 		for i := 0; i < len(tokens); i++ {
 			switch tokens[i] {
 			case "interface", "off":
-				// Known terminal modes; repeated modes are accepted by
-				// #7033's cardinality gate.
+				// Known terminal modes; a following persistent-nat tail is
+				// modeled (#14626) and rejected by that gate, not here.
+				if i+1 < len(tokens) && tokens[i+1] == "persistent-nat" {
+					return
+				}
 			case "pool":
-				// Consume the pool name and leave the compiler-owned
-				// persistent-nat tail open (#10078).
+				// Consume the pool name; the persistent-nat tail after it is
+				// modeled (#14626), so stop rather than scanning it as
+				// unknown action keywords.
 				if i+1 < len(tokens) {
 					i++
 				}
+				return
+			case "persistent-nat":
 				return
 			default:
 				add(tokens[i])
@@ -1204,10 +1214,13 @@ func recordSourceNATUnknownThen(rule *NATRule, thenNode *Node) {
 		switch node.Name() {
 		case "interface", "off":
 			for _, child := range node.Children {
+				if child != nil && child.Name() == "persistent-nat" {
+					continue
+				}
 				scanNode(child)
 			}
-		case "pool":
-			// The pool node owns the open persistent-nat tail.
+		case "pool", "persistent-nat":
+			// The pool node owns the modeled persistent-nat tail (#14626).
 		default:
 			// Do not descend into an unrecognised container: #7033's
 			// zero-action ordering must remain owned by NAT cardinality.

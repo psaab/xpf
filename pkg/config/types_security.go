@@ -1138,12 +1138,19 @@ type NATRule struct {
 	// synced tree text); it must not join golden JSON, ConfigFingerprint, or
 	// config-sync payloads (the MappedPortRaw/ThenTargetCount precedent).
 	UnknownMatchLeaves []string `json:"-"`
+	// rulePersistentNAT records the rule-level `then source-nat pool P
+	// persistent-nat ...` tail (#14626). Per-rule (never mutating the shared
+	// pool) so two rules sharing one pool with different tails are detectable
+	// and a rule-specific tail does not leak onto a sibling rule. Read by
+	// EffectivePersistentNAT and the #14626 strict gate. Unexported: compile-
+	// time state recomputed on every compile, not wire/golden content.
+	rulePersistentNAT rulePersistentNATState14626
 	// unknownThenLeaves records source-NAT action keywords that are not one
 	// of interface/off/pool. The source-NAT compiler previously ignored those
 	// children, so a typo could commit and leave the rule's translation action
 	// empty or different from what the operator authored. The strict/tolerant
-	// gate reports this field; the valid compiler-owned persistent-nat tail
-	// after pool remains intentionally open (#10078).
+	// gate reports this field; the rule-level persistent-nat tail after pool
+	// is now modeled (#14626) rather than merely tolerated.
 	unknownThenLeaves []string
 }
 

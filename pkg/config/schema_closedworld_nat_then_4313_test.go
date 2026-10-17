@@ -93,15 +93,15 @@ func TestClosedWorldDNATThen_RejectsUnknownDirectlyUnderThen(t *testing.T) {
 }
 
 // TestSourceNATThen_StillOpenWorld documents the deliberate asymmetry (#4313):
-// the source-NAT rule then-action is NOT yet closed, because Junos permits
-// `then source-nat pool <name> persistent-nat { ... }` at the rule level, which
-// xpf models per-pool rather than under the rule-then pool. Closing it would
-// false-reject that valid Junos config (#4191 class). This test guards against
-// an accidental future flip landing without first modeling the rule-level
-// persistent-nat leaves: it asserts the persistent-nat form still commits
-// (open-world) AND that a bogus source-NAT action is still silently accepted.
+// the source-NAT rule then-action is NOT closed-world, because its packed runs
+// collapse the rule-level persistent-nat tail onto Keys past the pool-name
+// slot. Since #14626 that tail is MODELED and compiled per-rule, so this test
+// now asserts SchemaValidate still accepts it (no false-reject) while the
+// compiler gate owns its value validation. A bogus source-NAT action remains
+// silently accepted at the schema layer (open-world) — the #10294 compiler
+// gate, not SchemaValidate, rejects it.
 func TestSourceNATThen_StillOpenWorld(t *testing.T) {
-	// A valid-Junos rule-level persistent-nat must NOT be rejected today.
+	// A valid-Junos rule-level persistent-nat must NOT be schema-rejected.
 	persistent := buildTree(t, []string{
 		"set security zones security-zone untrust",
 		"set security nat source pool p1 address 192.0.2.10",
@@ -112,9 +112,19 @@ func TestSourceNATThen_StillOpenWorld(t *testing.T) {
 	if err := SchemaValidate(persistent, nil); err != nil {
 		t.Fatalf("rule-level `then source-nat pool <name> persistent-nat ...` is valid Junos and must NOT be rejected while source-NAT then is open-world (deferred #4313 subtree), got: %v", err)
 	}
+	// #14626: the tail now compiles — assert the compiled effect, not just
+	// acceptance, so this test cannot pass on the old inert behavior.
+	cfg, err := CompileConfig(persistent)
+	if err != nil {
+		t.Fatalf("CompileConfig(persistent tail): %v", err)
+	}
+	eff, ok := cfg.Security.NAT.Source[0].Rules[0].EffectivePersistentNAT(cfg)
+	if !ok || eff.Permit != PersistentNATPermitAnyRemoteHost {
+		t.Fatalf("rule-level tail inert (#14626): effective=%+v ok=%v", eff, ok)
+	}
 
-	// And an outright bogus source-NAT action is still silently accepted
-	// (open-world) — the source-NAT then flip is a documented follow-up.
+	// And an outright bogus source-NAT action is still silently accepted by
+	// SchemaValidate (open-world) — the compiler gate owns that reject.
 	bogus := buildTree(t, []string{
 		"set security zones security-zone untrust",
 		"set security nat source rule-set rs1 from zone untrust",

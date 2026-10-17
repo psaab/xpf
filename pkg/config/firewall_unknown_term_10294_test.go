@@ -205,8 +205,15 @@ func TestSourceNATPersistentTailStillCommits10294(t *testing.T) {
 		"set security nat source rule-set rs1 rule r1 match source-address 10.0.0.0/8",
 		"set security nat source rule-set rs1 rule r1 then source-nat pool p1 persistent-nat permit target-host-port",
 	)
-	if _, err := CompileConfig(tree); err != nil {
-		t.Fatalf("valid #10078 persistent-nat tail rejected by #10294: %v", err)
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("valid persistent-nat tail rejected: %v", err)
+	}
+	// #14626: the tail must also TAKE EFFECT, not merely commit.
+	r := sourceRule9877(t, cfg, "rs1", "r1")
+	eff, ok := r.EffectivePersistentNAT(cfg)
+	if !ok || eff.Permit != PersistentNATPermitTargetHostPort {
+		t.Fatalf("rule tail inert (#14626): effective=%+v ok=%v", eff, ok)
 	}
 }
 func TestSourceNATKnownPackedModesStay7033Owned10294(t *testing.T) {

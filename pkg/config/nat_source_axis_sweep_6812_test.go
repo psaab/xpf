@@ -1033,6 +1033,19 @@ var walkRuleAxisExemptions6812 = mergeAxisExemptions6812(
 		"Rule.unknownThenLeaves.all", "Rule.unknownThenLeaves[0]",
 	),
 	fixtureConstantAxes6812(
+		"#14626 compile-time state: the rule-level `then source-nat pool P "+
+			"persistent-nat ...` tail, kept per-rule so EffectivePersistentNAT and "+
+			"the strict gate can see it. Every rule in this fixture is plain "+
+			"pool-mode source NAT with no rule tail, so all five columns are "+
+			"constant here; in production a rule tail varies every one of them. "+
+			"Nothing sorts or compares on it — it is read by the #14626 gate and "+
+			"EffectivePersistentNAT and never reaches the dataplane as a sort key. "+
+			"If that ever changes, vary it instead.",
+		"Rule.rulePersistentNAT.Present", "Rule.rulePersistentNAT.PermitSet",
+		"Rule.rulePersistentNAT.Permit", "Rule.rulePersistentNAT.Timeout",
+		"Rule.rulePersistentNAT.Invalid",
+	),
+	fixtureConstantAxes6812(
 		"#7013 compile-time diagnostic state: what ONE `then` container authored, kept "+
 			"so validateNATTerminalActionCardinalityStrict can see a pool the resolved "+
 			"NATThen scalar already discarded. Constant at exactly one authored pool "+

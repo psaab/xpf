@@ -163,7 +163,8 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 
 			if rule.Then.PoolName != "" && cfg.Security.NAT.SourcePools != nil {
 				if pool, ok := cfg.Security.NAT.SourcePools[rule.Then.PoolName]; ok {
-					if pool.PersistentNAT != nil {
+					// #14626: rule-effective persistence (rule tail over pool).
+					if _, hasPNAT := rule.EffectivePersistentNAT(cfg); hasPNAT {
 						fmt.Fprintf(w, "    Persistent NAT:          enabled\n")
 					}
 					if len(pool.Addresses) > 0 {
