@@ -692,7 +692,7 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 	// counted as rendered and had its #4168 warning suppressed, so the operator
 	// got neither the enforcement nor the diagnostic (#6705).
 	emitted := map[string]bool{}
-	var doneV4, doneV6, hasPermitV4, hasPermitV6, hasAuthoredPermit bool
+	var doneV4, doneV6, hasAuthoredPermit bool
 	for _, t := range terms {
 		if t.action == PolicyPermit {
 			// Authored presence counts even for a permit that is skipped
@@ -703,7 +703,7 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 			continue // An incomplete permit carves nothing.
 		}
 		verdict := junosHostTermVerdict(t.action)
-		add := func(family string, rules *[]JunosHostDenyRule, done, hasPermit *bool) {
+		add := func(family string, rules *[]JunosHostDenyRule, done *bool) {
 			if *done {
 				return
 			}
@@ -714,20 +714,18 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 			*rules = append(*rules, r)
 			emitted[t.key] = true
 			if verdict == JunosHostReturn {
-				*hasPermit = true
 				*done = junosHostRuleMatchesFamily(r)
 			} else if t.appAny {
 				prog.HasApplicationAnyDeny = true
 			}
 		}
-		add("ip", &prog.RulesV4, &doneV4, &hasPermitV4)
-		add("ip6", &prog.RulesV6, &doneV6, &hasPermitV6)
+		add("ip", &prog.RulesV4, &doneV4)
+		add("ip6", &prog.RulesV6, &doneV6)
 	}
 	terminal := junosHostTermVerdict(PolicyDeny)
-	// Per-family hasPermit* still suppress the terminal where a match-all
-	// permit already covers the family via done*; hasAuthoredPermit is the
-	// program-level trigger so an empty-intersection or skipped sole permit
-	// (#14349) cannot fail open to coarse host-inbound.
+	// hasAuthoredPermit is the program-level trigger so an empty-intersection
+	// or skipped sole permit (#14349) cannot fail open to coarse host-inbound;
+	// done* still suppress the terminal in a family a match-all permit covers.
 	hasPermitProgram := hasAuthoredPermit
 	if hasPermitProgram && !doneV4 {
 		prog.RulesV4 = append(prog.RulesV4, JunosHostDenyRule{
