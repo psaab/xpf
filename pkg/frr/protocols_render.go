@@ -19,6 +19,30 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+// bgpNeighborBFDMultihop14587 reports whether bgpd will key neighbor n's
+// BFD session as multihop in bfdd (#14587). Mirrors FRR's
+// PEER_IS_MULTIHOP (bgpd/bgp_bfd.h): an iBGP peer that is not on a shared
+// network, or an eBGP peer with ebgp-multihop configured. xpf cannot know
+// shared_network at render time (it is learned when the session's nexthop
+// resolves), and Junos bfd-liveness-detection on a BGP neighbor is
+// overwhelmingly the loopback/iBGP design, so an iBGP neighbor is treated
+// as multihop-conservative: keying multihop for a directly-connected iBGP
+// peer still matches bgpd's session because bfdd matches on
+// (peer, local-address, multihop, vrf) and bgpd installs its session with
+// the update-source as local address. The alternative (plain peer) is the
+// proven orphan: bgpd's dynamic multihop session runs FRR defaults and
+// the configured timers never apply.
+func bgpNeighborBFDMultihop14587(n *config.BGPNeighbor, routerAS uint32) bool {
+	effectiveLocalAS := n.LocalAS
+	if effectiveLocalAS == 0 {
+		effectiveLocalAS = routerAS
+	}
+	if n.PeerAS != 0 && effectiveLocalAS == n.PeerAS {
+		return true // iBGP
+	}
+	return n.MultihopTTL > 0 // ebgp-multihop
+}
+
 func writeBGPMaximumPrefix11793(b *strings.Builder, address, family string, limit int) {
 	if limit <= 0 {
 		return
@@ -574,7 +598,22 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				}
 			}
 			if n.BFD {
-				fmt.Fprintf(&b, " neighbor %s bfd\n", n.Address)
+				// #14587: for a multihop neighbor, plain `neighbor X bfd`
+				// leaves bgpd's dynamic bfdd session at FRR defaults
+				// (300ms x3) — the static single-hop peer stanza at the
+				// configured timers is an orphan bgpd never uses. Bind
+				// the profile encoding the configured timers so bgpd
+				// applies them to the session it actually creates. The
+				// profile definition is registered with the section;
+				// the static peer is keyed multihop in the accumulator
+				// below so bfdd shows exactly one session.
+				if bgpNeighborBFDMultihop14587(n, bgp.LocalAS) {
+					profile := bfdProfileName(n.BFDInterval, n.BFDMultiplier)
+					bfd.addProfile(profile, bfdProfile{n.BFDInterval, n.BFDMultiplier})
+					fmt.Fprintf(&b, " neighbor %s bfd profile %s\n", n.Address, profile)
+				} else {
+					fmt.Fprintf(&b, " neighbor %s bfd\n", n.Address)
+				}
 			}
 		}
 		// A global `protocols bgp export <token>` has TWO legitimate
@@ -1155,11 +1194,21 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		// exclusion set.
 		for _, n := range validNeighbors {
 			if n.BFD {
+				// #14587: key multihop neighbors as multihop (with the
+				// update-source as local-address) so the static peer is
+				// the session bgpd uses, not an orphan single-hop peer.
+				mh := bgpNeighborBFDMultihop14587(n, bgp.LocalAS)
+				localAddr := ""
+				if mh {
+					localAddr = n.LocalAddress
+				}
 				bfd.addPeer(bfdPeer{
-					address:    n.Address,
-					vrfName:    vrfName,
-					interval:   n.BFDInterval,
-					multiplier: n.BFDMultiplier,
+					address:      n.Address,
+					vrfName:      vrfName,
+					interval:     n.BFDInterval,
+					multiplier:   n.BFDMultiplier,
+					multihop:     mh,
+					localAddress: localAddr,
 				})
 			}
 		}
