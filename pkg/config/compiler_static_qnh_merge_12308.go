@@ -94,6 +94,15 @@ func mergeQualifiedNextHop12308(hops []NextHopEntry, stmt NextHopEntry) []NextHo
 // keeps an authored `interface` modifier authoritative: an entry that merged
 // a real egress interface keeps the address form. Only qualified entries
 // are promoted; plain next-hops were normalized by staticNextHopEntry.
+//
+// #14378: the same close is where a scalar `ip@interface` / `@interface`
+// qualified gateway is split into Address+Interface. Qualified gateways
+// are constructed directly (not via staticNextHopEntry), so without this
+// they reached FRR with '@' in Address and were silently dropped while
+// the userspace FIB installed them. Splitting after the #12308 fold
+// keeps statements for one raw gateway merging; an authored structured
+// `interface` modifier stays authoritative (only the '@' suffix is
+// stripped from Address in that case).
 func finalizeQualifiedNextHops12308(routes []*StaticRoute) {
 	for _, route := range routes {
 		if route == nil {
@@ -106,6 +115,12 @@ func finalizeQualifiedNextHops12308(routes []*StaticRoute) {
 			}
 			route.NextHops[i].qualified = false
 			qualified = true
+			if addr, ifName, ok := splitAtNextHopValue(route.NextHops[i].Address); ok {
+				route.NextHops[i].Address = addr
+				if route.NextHops[i].Interface == "" {
+					route.NextHops[i].Interface = ifName
+				}
+			}
 			if route.NextHops[i].Interface == "" &&
 				interfaceOnlyNextHopValue(route.NextHops[i].Address) {
 				route.NextHops[i].Interface, route.NextHops[i].Address =

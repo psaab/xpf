@@ -259,13 +259,41 @@ func interfaceOnlyNextHopValue(raw string) bool {
 		net.ParseIP(raw) == nil && plausibleInterfaceName(raw)
 }
 
+// splitAtNextHopValue splits the validator-accepted scalar
+// `ip@interface` / `@interface` form (ValidateStaticNextHop) into its
+// address and interface parts. ok is false for any other value, and for
+// malformed '@' values the validator rejects at strict commit (empty or
+// implausible interface part, unparseable IP part), so tolerant loads
+// keep the raw scalar for the FRR operand belt to drop exactly as before.
+func splitAtNextHopValue(raw string) (address, iface string, ok bool) {
+	ipPart, ifPart, hasAt := strings.Cut(raw, "@")
+	if !hasAt || ifPart == "" || !plausibleInterfaceName(ifPart) {
+		return "", "", false
+	}
+	if ipPart != "" && net.ParseIP(ipPart) == nil {
+		return "", "", false
+	}
+	return ipPart, ifPart, true
+}
+
 // staticNextHopEntry compiles a scalar `next-hop <value>`. A bare interface
 // name is a valid Junos next-hop and must be represented as an interface-only
 // entry so both FRR and the userspace snapshot install the same dev route
-// (#12036). IP and `ip@interface` values remain address-form next-hops.
+// (#12036). The scalar `ip@interface` / `@interface` form the validator
+// accepts is split into the structured Address+Interface form (#14378):
+// stored raw in Address, FRR's netip operand gate rejected '@' and the
+// renderer silently dropped the route while the userspace FIB split '@'
+// and installed it — the two FIBs disagreed. An explicit structured
+// `interface <iface>` modifier (iface != "") stays authoritative and the
+// scalar is left untouched.
 func staticNextHopEntry(raw, iface string) NextHopEntry {
 	if iface == "" && interfaceOnlyNextHopValue(raw) {
 		return NextHopEntry{Interface: raw}
+	}
+	if iface == "" {
+		if addr, ifName, ok := splitAtNextHopValue(raw); ok {
+			return NextHopEntry{Address: addr, Interface: ifName}
+		}
 	}
 	return NextHopEntry{Address: raw, Interface: iface}
 }
