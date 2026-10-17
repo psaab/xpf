@@ -979,16 +979,30 @@ regressed.
   transient/auth/throttle failures (`SignatureDoesNotMatch`, 5xx, 429, a
   non-"not found" `InvalidChangeBatch`) STILL return non-nil so the engine
   keeps retrying — only the already-gone case is swallowed.
-- **Shared-DHCID partial dual-stack teardown (#2700)** — the RFC 4701 DHCID
-  digest folds in `client-identity || FQDN` only (NOT the address), so a
-  dual-stack client (an A + an AAAA under one FQDN, same client id) shares ONE
-  DHCID. `deleteOwnedLocked` scans the store (`dhcidSharedWithOther`); when a
-  sibling family still owns the same FQDN+ClientID it sets
-  `LeaseDNSRecord.KeepForwardDHCID`, and `sendRemoveForward` then deletes only
-  the A/AAAA and LEAVES the shared DHCID (the DHCID-match prerequisite is still
-  sent, so the delete stays ownership-guarded). The DHCID is removed only with
-  the LAST family's record, so a fully-released name leaves no orphan DHCID and
-  a survivor is never left unprotected (no hijack window, no wire leak).
+- **Per-family DHCID + manager-owned sibling publish (#2700/#14602)** — the
+  RFC 4701 DHCID digest folds in `client-identity || FQDN` only (NOT the
+  address). Production identities are family-shaped (`identity4` yields
+  `cid:`/`mac:`, `identity6` yields `duid:<duid>/<iaid>`), so a dual-stack
+  client's two families digest to DIFFERENT DHCIDs — there is no single
+  shared DHCID across families in production (the identical-identity
+  fixture the #2700 wording described cannot be produced by `identity6`).
+  Each family publishes its OWN DHCID. The second family's publish
+  cannot satisfy Attempt B (DHCID-matches-ours) against the sibling's
+  DHCID, so `sendAddOwned` takes a sibling branch when the manager
+  threads `SiblingFamilyOwned` (from `crossTypeSiblingOwned`, its store
+  scan — the store, not the wire digest, is the cross-family ownership
+  proof): it adds the forward RR + its own DHCID under a per-type
+  `RRsetNotUsed` prerequisite, leaving the sibling untouched. On
+  teardown each family's delete replays its own publishing identity,
+  so it removes only its own A/AAAA + its own DHCID; the surviving
+  family's DHCID stays on the wire (its delete prerequisite still
+  holds) and the last family's delete leaves no orphan. The
+  identical-identity case (same ClientID both families) still shares
+  one DHCID and `dhcidSharedWithOther`/`KeepForwardDHCID` still keep
+  it across a partial teardown. A foreign client at the same name is
+  still refused: no sibling in the store leaves every name-level /
+  DHCID guard unchanged, and a same-type foreign RRset fails the
+  sibling branch's own `RRsetNotUsed`.
 - **Unloadable ownership state fails CLOSED (#2650)** — a corrupt, unknown-
   future-version, or unreadable state file is NOT silently reset to an empty
   store. `loadDDNSState` returns the empty store plus a CLASSIFIED error

@@ -802,6 +802,52 @@ func (u *rfc2136Updater) dhcidForRR(rr dns.RR) (*dns.DHCID, bool) {
 // name-not-in-use prerequisite alone gates the claim: a pre-existing name (by
 // anyone) is refused (same sentinel) and never adopted.
 func (u *rfc2136Updater) sendAddOwned(ctx context.Context, zone string, rr dns.RR) error {
+	// #14602: a manager-owned sibling forward record already occupies
+	// this name (the other family's A/AAAA — the manager threads
+	// SiblingFamilyOwned from its store, #14604). The sibling's DHCID
+	// was digested from a production-shaped identity string
+	// (`cid:`/`mac:` v4 vs `duid:` v6) that THIS family's identity can
+	// never reproduce, so Attempt B below could never match it and the
+	// second family would be refused forever. The manager store is
+	// the ownership proof here: add this family's forward RR + its
+	// OWN DHCID under a per-type RRsetNotUsed prerequisite. The
+	// sibling's forward RR and DHCID are left untouched; each
+	// family's delete later removes only its own forward RR + its
+	// own DHCID (sendRemoveForward replays the publishing identity).
+	// PTR adds never carry the sibling flag (UpsertLease sets it from
+	// the forward record only and sendAdd dispatches PTRs through the
+	// non-owned policies' caller — the flag is forward-scoped because
+	// selfOwnedSiblingForward requires an A/AAAA rrtype).
+	if u.selfOwnedSiblingForward(rr) {
+		dhcid, hasDHCID := u.dhcidForRR(rr)
+		m := new(dns.Msg)
+		m.SetUpdate(dns.Fqdn(zone))
+		m.RRsetNotUsed([]dns.RR{rr})
+		if hasDHCID {
+			m.Insert([]dns.RR{rr, dhcid})
+		} else {
+			m.Insert([]dns.RR{rr})
+		}
+		resp, err := u.exchange(ctx, m)
+		if err != nil {
+			return err
+		}
+		switch resp.Rcode {
+		case dns.RcodeSuccess:
+			return nil
+		case dns.RcodeYXRrset, dns.RcodeYXDomain, dns.RcodeNXRrset, dns.RcodeNameError:
+			// Our own type already exists at the name (a re-add the
+			// manager's recordsEqual skip would normally prevent, or
+			// a foreign same-type RRset predating the sibling):
+			// refuse rather than adopt it.
+			if u.onConflict != nil {
+				u.onConflict()
+			}
+			return errDDNSConflictRefused
+		default:
+			return rcodeError(resp.Rcode)
+		}
+	}
 	dhcid, hasDHCID := u.dhcidForRR(rr)
 
 	// Attempt A: fresh-name claim (name not in use).
