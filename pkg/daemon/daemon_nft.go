@@ -3748,10 +3748,24 @@ func nftFlexMatchByteLen(bits uint8) int {
 // pre-masked for the same reason the netlink builder pre-masks it: nft compares
 // the MASKED load, so a value carrying bits outside the mask would never match,
 // and a silent never-match is a different fail direction but just as quiet.
+//
+// #14634: the field starts at the byte-offset (bit-offset 0, MSB-first), so
+// the field pair is left-shifted into the TOP bits of the ceil-byte window
+// before rendering — the same alignment the userspace snapshot builder
+// applies. Pre-fix the right-aligned pair compared the LOW bits of the last
+// window byte (`bit-length 4 range 0x4` read the IHL nibble of 0x45, not the
+// version nibble). Byte-aligned lengths shift by 0 (unchanged). The trailing
+// truncation to the window width is retained for hand-built pairs whose mask
+// carries bits above the field.
 func nftFlexMatchExpr(fm config.FlexMatchConfig) string {
 	n := nftFlexMatchByteLen(fm.BitLength)
-	mask := fm.Mask
-	value := fm.Value & mask
+	bits := int(fm.BitLength)
+	if bits == 0 {
+		bits = 32
+	}
+	shift := uint(n*8 - bits)
+	mask := fm.Mask << shift
+	value := (fm.Value & fm.Mask) << shift
 	if n < 4 {
 		trunc := uint32(1)<<(uint(n)*8) - 1
 		mask &= trunc

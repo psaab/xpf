@@ -758,14 +758,29 @@ func flexMatchRepresentable(fm Lo0FlexMatch) bool {
 // integers over that same width (config.FlexMatchConfig). Truncating from the
 // low end of a big-endian encoding is what keeps a 1-byte match comparing the
 // byte the operator wrote rather than the top byte of a 32-bit word.
+//
+// #14634: the field starts at the byte-offset (bit-offset 0, MSB-first), so
+// the field pair is left-shifted into the TOP bits of the ceil-byte window
+// before the big-endian truncation — the same alignment the userspace
+// snapshot builder and the nft text renderer apply. Pre-fix the right-aligned
+// pair compared the LOW bits of the last window byte (`bit-length 4 range
+// 0x4` read the IHL nibble of 0x45, not the version nibble). Byte-aligned
+// lengths shift by 0 (unchanged).
 func flexMatchExprs(fm Lo0FlexMatch) []expr.Any {
 	n := flexMatchByteLen(fm.BitLength)
 	if !flexMatchRepresentable(fm) {
 		return nil
 	}
+	bits := int(fm.BitLength)
+	if bits == 0 {
+		bits = 32
+	}
+	shift := uint(int(n)*8 - bits)
+	alignedValue := (fm.Value & fm.Mask) << shift
+	alignedMask := fm.Mask << shift
 	var val, mask [4]byte
-	binary.BigEndian.PutUint32(val[:], fm.Value)
-	binary.BigEndian.PutUint32(mask[:], fm.Mask)
+	binary.BigEndian.PutUint32(val[:], alignedValue)
+	binary.BigEndian.PutUint32(mask[:], alignedMask)
 	v := append([]byte(nil), val[4-n:]...)
 	m := append([]byte(nil), mask[4-n:]...)
 	// Apply the mask to the expected value too. nft's own `& mask == value`

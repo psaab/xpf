@@ -3751,7 +3751,10 @@ never lock an operator out of a remote box it manages.
   length is carried by the MASK, exactly as the userspace matcher does it, and the expected value
   is pre-masked on both sides (nft compares the masked load, so a value with bits
   outside the mask would never match — a silent never-match is a different fail
-  direction but just as quiet).
+  direction but just as quiet). Since #14634 the field pair is MSB-aligned
+  into the ceil-byte window on every renderer (the field starts at the
+  byte-offset, bit-offset 0): a 4-bit field renders `& 0xf0 == 0x40`, not the
+  low-nibble `& 0xf == 0x4` that compared the wrong nibble of the window.
 
   An UNREPRESENTABLE predicate — more than one named range (#5823), an
   unparseable numeric token (`UnknownFlexMatch`), a load width outside 1..4

@@ -216,3 +216,85 @@ func TestFilterSnapshotFlexMatchCeilByteLength(t *testing.T) {
 		}
 	}
 }
+
+// flexAlignMSB14634 converts an operator-authored (value, mask) pair over a
+// bit-length field into the MSB-first-aligned wire pair for the ceil-byte
+// window (#14634). It is the test-side oracle for the alignment arithmetic:
+// the field occupies the TOP bits of the window, so both the expected value
+// and the field mask shift left by (windowBits - bitLength).
+func flexAlignMSB14634(value, mask uint32, bits uint8) (uint32, uint32) {
+	length := (int(bits) + 7) / 8
+	shift := uint(length*8 - int(bits))
+	return (value & mask) << shift, mask << shift
+}
+
+// TestFilterSnapshotFlexMatchSubByteMSBAligned14634 is the #14634
+// FAIL-ON-REVERT guard at the snapshot layer. A sub-byte flexible-match-range
+// field starts at the byte-offset (bit-offset 0, MSB-first per Junos), so a
+// 4-bit field at byte-offset 0 occupies the HIGH nibble of the first byte.
+// Pre-fix the compiler defaulted the mask to the low bits, the builder passed
+// the pre-masked value/mask verbatim, and the Rust matcher read the LOW
+// nibble: `bit-length 4 range 0x4` on wire byte 0x45 matched the IHL nibble
+// (5) instead of the version nibble (4) — a discard term failed open and an
+// accept term over-permitted, with a clean commit. After the fix the wire
+// pair is MSB-aligned and byte 0x45 compares as version=4.
+//
+// REVERT (drop the alignment in buildFilterTermSnapshots) -> every row whose
+// bit-length is not a multiple of 8 FAILS; byte-aligned rows (shift 0) are
+// the unchanged control.
+func TestFilterSnapshotFlexMatchSubByteMSBAligned14634(t *testing.T) {
+	cases := []struct {
+		name                string
+		bits                uint8
+		value, mask         uint32
+		wantValue, wantMask uint32
+	}{
+		// Compiler-default mask (operator wrote no match-mask): 4-bit field,
+		// value 0x4 -> wire 0x40/0xF0 (high nibble), so 0x45 matches.
+		{"sub-byte-4-default-mask", 4, 0x4, 0xF, 0x40, 0xF0},
+		// Explicit Junos match-mask 0xf covers the same 4-bit field and must
+		// be shifted identically; only a pre-shifted non-Junos mask (0xF0)
+		// avoided the bug pre-fix.
+		{"sub-byte-4-explicit-mask", 4, 0x4, 0xF, 0x40, 0xF0},
+		// 12-bit field over a 2-byte window: top 12 bits.
+		{"sub-byte-12-default-mask", 12, 0xABC, 0xFFF, 0xABC0, 0xFFF0},
+		// Trailing partial byte: 20-bit field over 3 bytes.
+		{"sub-byte-20-default-mask", 20, 0xABCDE, 0xFFFFF, 0xABCDE0, 0xFFFFF0},
+		// Byte-aligned controls: alignment is a no-op (shift 0).
+		{"byte-aligned-8-control", 8, 0x11, 0xFF, 0x11, 0xFF},
+		{"byte-aligned-16-control", 16, 0x0800, 0xFFFF, 0x0800, 0xFFFF},
+		{"full-32-control", 32, 0x12345678, 0xFFFFFFFF, 0x12345678, 0xFFFFFFFF},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
+				"f": {Name: "f", Terms: []*config.FirewallFilterTerm{{
+					Name:   "t",
+					Action: "discard",
+					FlexMatch: &config.FlexMatchConfig{
+						MatchStart: "layer-3",
+						ByteOffset: 0,
+						BitLength:  tc.bits,
+						Value:      tc.value,
+						Mask:       tc.mask,
+					},
+				}}},
+			}
+			fm := buildFirewallFilterSnapshots(cfg)[0].Terms[0].FlexMatch
+			if fm == nil {
+				t.Fatalf("bit-length %d: flexible-match-range dropped", tc.bits)
+			}
+			if fm.Value != tc.wantValue || fm.Mask != tc.wantMask {
+				t.Errorf("bit-length %d value 0x%x mask 0x%x: wire = {Value:0x%x Mask:0x%x}, "+
+					"want MSB-aligned {Value:0x%x Mask:0x%x} — the sub-byte field must occupy "+
+					"the TOP bits of the ceil-byte window, not the low bits (#14634)",
+					tc.bits, tc.value, tc.mask, fm.Value, fm.Mask, tc.wantValue, tc.wantMask)
+			}
+			// Cross-check the oracle helper agrees (guards a typo'd table).
+			if ov, om := flexAlignMSB14634(tc.value, tc.mask, tc.bits); ov != tc.wantValue || om != tc.wantMask {
+				t.Fatalf("oracle mismatch: flexAlignMSB14634(0x%x,0x%x,%d) = (0x%x,0x%x)", tc.value, tc.mask, tc.bits, ov, om)
+			}
+		})
+	}
+}

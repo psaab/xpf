@@ -411,14 +411,42 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 			// #3203: round UP to whole bytes so a non-multiple-of-8 bit length
 			// (e.g. 12 bits -> 2 bytes) reads enough bytes to cover the field.
 			// Integer truncation (BitLength/8) gave 1 byte for 12 bits, dropping
-			// the partial trailing byte so the match always failed closed. The
-			// Go compiler's default mask zeroes the extra bits within the ceil
-			// byte, so the matcher's (read & mask) == value comparison stays
-			// correct for a sub-byte field.
+			// the partial trailing byte so the match always failed closed.
+			//
+			// #14634: the field starts at the byte-offset (bit-offset 0,
+			// MSB-first per Junos), so within the ceil-byte window it occupies
+			// the TOP BitLength bits, not the low bits. The compiler stores the
+			// field pair (Value field-aligned, Mask over the field bits; the
+			// default mask is the low BitLength bits). Left-shifting both by
+			// (windowBits - BitLength) aligns them to the window the Rust
+			// matcher reads big-endian, so (read & mask) == value compares the
+			// authored field. Pre-fix the pair went on the wire right-aligned
+			// and the matcher compared the LOW bits of the last window byte:
+			// `bit-length 4 range 0x4` on first byte 0x45 matched the IHL
+			// nibble (5) instead of the version nibble (4). Byte-aligned
+			// lengths shift by 0 and stay byte-identical. Mask==0 (hand-built
+			// config that skipped the compiler default) stays 0: shifting a
+			// zero mask is a no-op and the value pre-mask stays 0.
 			length := (int(fm.BitLength) + 7) / 8
 			if length == 0 {
 				length = 4 // default 32-bit, matching compiler_filter.go
 			}
+			bits := int(fm.BitLength)
+			if bits == 0 {
+				bits = 32
+			}
+			shift := uint(length*8 - bits)
+			if shift >= 32 {
+				// Only reachable via a corrupt / hand-built BitLength whose
+				// ceil width exceeds the u32 window (e.g. 40 bits -> shift
+				// would still be small; a BitLength above the window cannot
+				// occur because length is derived from it). Guard anyway so
+				// the shift never wraps: carry the unaligned pair and let the
+				// Rust length guard reject the snapshot (#3406).
+				shift = 0
+			}
+			alignedMask := fm.Mask << shift
+			alignedValue := (fm.Value & fm.Mask) << shift
 			// #3406: do NOT cap an oversized width to 4. The commit gate bounds
 			// bit-length to 1..32 (validateFilterFlexMatchStrict), so ceil(bits/8) is
 			// always 1..4 for a committed config; a length > 4 can only arrive via a
@@ -441,8 +469,8 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 			snap.FlexMatch = &FlexMatchSnapshot{
 				Offset:     fm.ByteOffset,
 				Length:     uint8(length),
-				Value:      fm.Value & fm.Mask,
-				Mask:       fm.Mask,
+				Value:      alignedValue,
+				Mask:       alignedMask,
 				MatchStart: matchStart,
 			}
 		}
