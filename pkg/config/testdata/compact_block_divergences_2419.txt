@@ -282,8 +282,6 @@ protocols lldp disable	empty
 protocols lldp interface xpfarg disable	empty
 protocols router-advertisement interface xpfarg managed-configuration	empty
 protocols router-advertisement interface xpfarg other-stateful-configuration	empty
-protocols router-advertisement interface xpfarg prefix xpfarg no-autonomous	empty
-protocols router-advertisement interface xpfarg prefix xpfarg no-onlink	empty
 routing-instances xpfname protocols bgp graceful-restart	empty
 routing-instances xpfname protocols bgp log-updown	empty
 routing-instances xpfname protocols bgp multipath ibgp	empty

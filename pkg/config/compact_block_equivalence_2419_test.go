@@ -639,6 +639,11 @@ var filedFixed = map[string]string{
 	"firewall three-color-policer xpfarg single-rate color-blind": "#13214",
 	"firewall three-color-policer xpfarg two-rate color-aware":    "#13214",
 	"firewall three-color-policer xpfarg two-rate color-blind":    "#13214",
+	// #14428: the RA prefix reader now expands the packed tail, so the
+	// PIO flag spellings compile identically to the braced form. Moved
+	// here rather than deleted, for the same reason #6821 moved its two.
+	"protocols router-advertisement interface xpfarg prefix xpfarg no-autonomous": "#14428",
+	"protocols router-advertisement interface xpfarg prefix xpfarg no-onlink":     "#14428",
 }
 
 // filedByDesign is the category the inventory did not previously distinguish:
