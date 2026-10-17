@@ -113,17 +113,17 @@ func TestPerUnitTunnelAddressesIndependent(t *testing.T) {
 // 2's peer instead of its own.
 func TestPerUnitTunnelWgPeersIndependent(t *testing.T) {
 	const (
-		priv = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		priv = "3de6404700006875ca73c26dfc1f4a50fa627601e24664d40310b975b40514c2"
 		// X/Y/Z sort AFTER A/B on purpose (#7786). The merge appends the
 		// interface-level peers before the per-unit ones, so pubkeys that
 		// ascend in that order are already sorted by coincidence and the
 		// emitted-order assertion below could not detect the sort being
 		// dropped.
-		peerX = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-		peerY = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-		peerZ = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-		peerA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		peerB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		peerX = "5a9303297e0c6babb14de8cfcc2a84491da7f760ec8bd9729494f71d17829980"
+		peerY = "9120fd763bf1e7db2ccabc9b92a6b9e2ce66adab27c06fa060dc75ce2cfc971f"
+		peerZ = "7359c9b96d8163cea105619230a228503e6ae19b4997f0e440c1f04cc46627a0"
+		peerA = "6e2cc0919a4d6127938b531ab7cd6e69a908a780fd2b73083b31cba690abc177"
+		peerB = "892f9db59473d45dad1b10a68e562115cc633c972e1664b1660990309792c228"
 	)
 	cmds := []string{
 		"set interfaces gr-0/0/0 tunnel mode wireguard",

@@ -6,16 +6,16 @@ import (
 )
 
 const (
-	wg7786Priv  = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-	wg7786Priv2 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	wg7786Priv  = "3de6404700006875ca73c26dfc1f4a50fa627601e24664d40310b975b40514c2"
+	wg7786Priv2 = "5a9303297e0c6babb14de8cfcc2a84491da7f760ec8bd9729494f71d17829980"
 	// PeerX sorts AFTER the unit peers on purpose. The merge appends the
 	// interface-level peers first, so a fixture whose pubkeys ascend in that
 	// same order is already sorted by coincidence and CANNOT detect the sort
 	// being removed. Measured: with X="1111..." deleting the sort left every
 	// assertion green.
-	wg7786PeerX = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-	wg7786PeerA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	wg7786PeerB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	wg7786PeerX = "7359c9b96d8163cea105619230a228503e6ae19b4997f0e440c1f04cc46627a0"
+	wg7786PeerA = "6e2cc0919a4d6127938b531ab7cd6e69a908a780fd2b73083b31cba690abc177"
+	wg7786PeerB = "892f9db59473d45dad1b10a68e562115cc633c972e1664b1660990309792c228"
 )
 
 func wg7786Base() []string {

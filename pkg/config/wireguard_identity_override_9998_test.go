@@ -7,9 +7,9 @@ import (
 
 const (
 	wg9998PrivLower = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	wg9998PrivOther = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-	wg9998PeerX     = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-	wg9998PeerA     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	wg9998PrivOther = "5a9303297e0c6babb14de8cfcc2a84491da7f760ec8bd9729494f71d17829980"
+	wg9998PeerX     = "7359c9b96d8163cea105619230a228503e6ae19b4997f0e440c1f04cc46627a0"
+	wg9998PeerA     = "6e2cc0919a4d6127938b531ab7cd6e69a908a780fd2b73083b31cba690abc177"
 )
 
 func wg9998Base() []string {
