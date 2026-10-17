@@ -1336,6 +1336,10 @@ func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 		s.confirmResolvePendingPersist = false
 		// Defense in depth; clearConfirmResolutionPendingLocked is the primary clear.
 		s.firstCommitRecoveryIntent = nil
+		// #14578: writeActive created a new active.json inode; rebind the
+		// rollback sidecar to it or the next restart tombstones the ladder.
+		// History itself is unchanged by the revert, so only metadata moves.
+		s.rebindRollbackMetadataLocked()
 		// #5835: removal is durable-or-retry — a failed DeleteConfirm retains
 		// retry debt + degraded health rather than being swallowed, so a crash
 		// before the retry heals cannot leave a stale record that re-reverts.

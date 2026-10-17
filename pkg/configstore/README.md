@@ -1932,6 +1932,18 @@ owned by the `journal/` subpackage.
   When `active.json` is absent, surviving rollback slots remain available for
   the fail-closed recovery path (#10297). Generationless legacy metadata keeps
   its prior interpretation.
+- **Active rewrites without a history shift rebind the sidecar (#14578).**
+  `PromoteRollback` (commit-confirmed timeout), expired-window boot recovery
+  (`recoverPendingConfirmLocked`), and the degraded persist-retry heal
+  (`retryActiveConfigPersistLocked`) rewrite `active.json` (new inode) without
+  pushing/shifting rollback history. Each now calls
+  `rebindRollbackMetadataLocked` after its successful active write: it bumps
+  the sidecar generation and re-binds the existing slot bytes/identities to
+  the new active hash/inode, without rewriting slot contents. Without it the
+  next restart saw a generation mismatch and tombstoned the whole ladder.
+  Rebind failure is degrade-not-fail (`RollbackHistoryDegraded` + journal),
+  never blocking the rollback itself. Guarded by
+  `rollback_rebind_14578_test.go` (runtime, boot, and retry paths).
 - Rollback-history degradation (#3441 L1): a rollback-slot write or the
   trailing dir-sync failing no longer just logs a warning. The commit
   still succeeds (the canonical active config already persisted via the
