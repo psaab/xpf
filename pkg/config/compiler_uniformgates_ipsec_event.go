@@ -301,5 +301,20 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #14591 (Y09-04): a PSK VPN on a responder-only (dynamic, %any)
+	// gateway with no remote-identity cannot scope its secret to the
+	// peer, so a holder of another VPN's key can authenticate into it by
+	// claiming that peer's identity. Strict on commit / commit-check;
+	// lenient on load / peer-sync (warn, and the pkg/ipsec render belt
+	// skips the VPN so the other tunnels keep loading).
+	if err := validateIPsecResponderIdentityStrict(cfg); err != nil {
+		if opts.lenientIPsecResponderIdentity {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec responder-only remote identity (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

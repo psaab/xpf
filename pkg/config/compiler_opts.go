@@ -671,6 +671,14 @@ type compileOpts struct {
 	// auth=psk connection loads without a secret of its own.
 	lenientIPsecPSKPresence bool
 
+	// lenientIPsecResponderIdentity (#14591) downgrades the missing
+	// remote-identity reject (validateIPsecResponderIdentityStrict) to a
+	// warning on the tolerant load / peer-sync paths, so a persisted or
+	// synced config still boots. The pkg/ipsec render belt skips the
+	// unscoped responder-only PSK connection, so no such connection loads
+	// without an identity its secret can be scoped to.
+	lenientIPsecResponderIdentity bool
+
 	// lenientLogProfileStreamRef (#2008 H7) downgrades the
 	// `security log profile <name> stream-name <stream>` cross-reference
 	// from a hard error to a warning on the tolerant load / peer-sync
@@ -3330,6 +3338,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecSANameDisplay:              true,
 		lenientIPsecSectionName:                true,
 		lenientIPsecPSKPresence:                true,
+		lenientIPsecResponderIdentity:          true,
 		lenientLogProfileStreamRef:             true,
 		lenientAuthTypeAbsent:                  true,
 		lenientISISAuthTypeRequiresKey14399:    true,

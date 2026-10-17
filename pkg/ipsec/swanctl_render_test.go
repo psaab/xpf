@@ -608,12 +608,13 @@ func TestGenerateConfig_PSKIDSelectors_SingleVPN(t *testing.T) {
 	}
 }
 
-// TestGenerateConfig_PSKIDSelectors_ResponderAnyAndCert covers the two
-// no-scoping cases (#3952): a responder-only %any peer with no configured
-// remote-id emits NO id (%any is not a usable identity — legacy any-peer
-// behavior preserved, never a literal `id = "%any"`), and a cert VPN with
-// no PSK emits no secret block at all (so no stray id leaks).
-func TestGenerateConfig_PSKIDSelectors_ResponderAnyAndCert(t *testing.T) {
+// TestGenerateConfig_PSKIDSelectors_ResponderWithIDAndCert covers the two
+// boundary cases (#3952, #14591): a responder-only %any peer WITH a
+// configured remote-id scopes its secret to that identity, and a cert VPN
+// with no PSK emits no secret block at all (so no stray id leaks). A
+// responder-only PSK VPN with NO remote-id is skipped since #14591 and
+// is pinned by TestResponderOnlyPSKScoping14591.
+func TestGenerateConfig_PSKIDSelectors_ResponderWithIDAndCert(t *testing.T) {
 	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		VPNs: map[string]*config.IPsecVPN{
@@ -621,8 +622,8 @@ func TestGenerateConfig_PSKIDSelectors_ResponderAnyAndCert(t *testing.T) {
 			"cert-vpn":    {Gateway: "gw-cert"},
 		},
 		Gateways: map[string]*config.IPsecGateway{
-			// Dynamic responder-only peer, no remote-id → nothing to scope by.
-			"gw-dyn": {Name: "gw-dyn", ResponderOnly: true, LocalAddress: "198.51.100.10"},
+			// Dynamic responder-only peer with a remote-id → scoped by it.
+			"gw-dyn": {Name: "gw-dyn", ResponderOnly: true, LocalAddress: "198.51.100.10", RemoteIDType: "hostname", RemoteIDValue: "rw.example.com"},
 			// Cert gateway, no PSK anywhere.
 			"gw-cert": {Name: "gw-cert", Address: "203.0.113.20", LocalCertificate: "fw-cert"},
 		},
@@ -634,16 +635,10 @@ func TestGenerateConfig_PSKIDSelectors_ResponderAnyAndCert(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing ike-roadwarrior secret block")
 	}
-	if len(rw.ids) != 0 {
-		t.Errorf("responder-only %%any peer should emit no id selector, got %v", rw.ids)
+	if !containsStr(rw.ids, "@rw.example.com") {
+		t.Errorf("responder-only peer id selectors %v missing its configured identity @rw.example.com", rw.ids)
 	}
 	// Belt: a literal id = "%any" would defeat the scoping and match all.
-	//
-	// #6824: this was previously guarded by
-	// `Contains(got, "%any") && Contains(got, "id-")` -- a condition about the
-	// document as a whole gating a check about THIS block's selectors. A
-	// render that dropped the %any sentinel elsewhere would skip the belt
-	// entirely. The inner check is the claim; assert it unconditionally.
 	if containsStr(rw.ids, "%any") {
 		t.Errorf("emitted a literal %%any id selector")
 	}

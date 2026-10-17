@@ -1901,6 +1901,8 @@ func TestGenerateConfig_ResponderOnlyGateway(t *testing.T) {
 					"dial-in": {
 						Name:           "dial-in",
 						ResponderOnly:  true,
+						RemoteIDType:   "hostname",
+						RemoteIDValue:  "dialin.example.com",
 						LocalAddress:   "203.0.113.5",
 						DPDEnable:      true,
 						DeadPeerDetect: "optimized",
@@ -1918,6 +1920,7 @@ func TestGenerateConfig_ResponderOnlyGateway(t *testing.T) {
 			got := m.generateConfig(cfg)
 			conn := parseSwanctlDoc(t, got).at(t, "connections", "dyn")
 			conn.requireSetting(t, "remote_addrs", "%any")
+			conn.at(t, "remote").requireSetting(t, "id", `"@dialin.example.com"`)
 			conn.requireSetting(t, "local_addrs", "203.0.113.5")
 			child := conn.at(t, "children", "dyn")
 			child.hasNoSetting(t, "start_action")

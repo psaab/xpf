@@ -152,6 +152,8 @@ func TestSwanctlAddrLegitPreserved_6469(t *testing.T) {
 	t.Run("responder-only %any", func(t *testing.T) {
 		cfg := buildAddrCfg("", "", "", "")
 		cfg.Gateways["gw"].ResponderOnly = true
+		cfg.Gateways["gw"].RemoteIDType = "hostname"
+		cfg.Gateways["gw"].RemoteIDValue = "peer.example.com"
 		m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 		parseSwanctlDoc(t, m.generateConfig(cfg)).
 			at(t, "connections", "tun").

@@ -33,7 +33,8 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // OMITTED from the render — a skip class: an unrenderable gateway reference
 // (#2074), an unresolved ike-policy chain (#2270), an unusable IKE DH group
 // (#9919 F-161), an unsupported IKE authentication method, a malformed PSK,
-// a PSK connection with no effective secret (#14139),
+// a PSK connection with no effective secret (#14139), a responder-only PSK
+// connection whose gateway has no remote-identity (#14591),
 // a `protocol ah` proposal with no ESP render path (#4298), a section-breaking
 // VPN name (#9495), an unresolved ipsec-policy chain (#9919 F-090), an unusable
 // ESP/PFS DH group (#9919 F-161), a non-empty bind-interface that resolves to
@@ -302,6 +303,30 @@ func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
 				"a key (rendering the connection without a secret would "+
 				"let strongSwan select another VPN's secret)",
 				"vpn", name)
+			continue
+		}
+
+		// A responder-only PSK VPN whose gateway has no remote-identity
+		// (#14591, Y09-04) accepts an initiator from any address, and
+		// with no configured peer identity its secret carries no id
+		// selector — it matches any peer, so strongSwan's key selection
+		// by the claimed IDi lets a holder of another VPN's PSK
+		// authenticate into this connection by claiming that site's
+		// identity. Every other credential failure skips the VPN; an
+		// unscoped responder secret must do the same (fail-closed), so
+		// Apply unloads it and tears down any stale SA. The commit-time
+		// gate (validateIPsecResponderIdentityStrict) hard-rejects the
+		// shape; this belt covers the tolerant load / peer-sync path.
+		// Pubkey (certificate) VPNs are unaffected.
+		if authMethod == "psk" && gw != nil && gw.ResponderOnly && gw.RemoteIDValue == "" {
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: responder-only gateway has "+
+				"no remote-identity, so its pre-shared key cannot be "+
+				"scoped to the peer — configure a remote-identity on "+
+				"the gateway (rendering the connection would let a "+
+				"holder of another VPN's key authenticate into it by "+
+				"claiming that peer's identity)",
+				"vpn", name, "gateway", vpn.Gateway)
 			continue
 		}
 
@@ -976,10 +1001,11 @@ func escapeSwanctlQuoted(s string) string {
 //     on its own, but it can never cause a wrong-peer match either).
 //
 // A dynamic responder-only peer (remote_addrs = %any) with no configured
-// remote-id yields no address selector — %any is not a usable identity —
-// so the list carries only whatever identities ARE known (the local-id, if
-// any). When the list is empty the caller emits no id, preserving the
-// legacy any-peer behavior for a config that offers nothing to scope by.
+// remote-id yields no address selector — %any is not a usable identity.
+// Since #14591 such a PSK VPN is skipped at render and rejected at
+// commit (validateIPsecResponderIdentityStrict), an unscoped secret
+// never loads; the empty-list arm remains only for non-responder shapes
+// that offer nothing to scope by.
 func pskIDSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
 	var ids []string
 	seen := make(map[string]bool)

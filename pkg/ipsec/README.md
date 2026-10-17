@@ -795,9 +795,13 @@ all files stay in `package ipsec`, so the public API is unchanged.
   firewall usually share the local id, so it never disambiguates on its
   own, but it can never cause a wrong-peer match either). A dynamic
   responder-only peer (`remote_addrs = %any`) with no `remote-id` has
-  nothing to scope by, so it emits no id — never a literal `id = "%any"`
-  (which would defeat the scoping and match all peers) — preserving the
-  legacy any-peer behavior for that one tunnel. A cert/EAP VPN has no PSK,
+  nothing to scope by: since #14591 such a PSK VPN is rejected at commit
+  (`validateIPsecResponderIdentityStrict`) and skipped at render, so an
+  unscoped secret never loads — never a literal `id = "%any"` (which
+  would defeat the scoping and match all peers). Configure
+  `remote-identity` on the gateway; the peer presenting that identity
+  with this VPN's key is then the only one the secret matches. A
+  cert/EAP VPN has no PSK,
   so it emits no secret block and is unaffected. The selector values reuse
   the `sanitizeSwanctlValue`/`escapeSwanctlQuoted` quoting (#1798/#2126).
   Two #14139 (D5-06) refinements: a comma-separated multi-address gateway
