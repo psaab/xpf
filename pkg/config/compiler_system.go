@@ -1010,23 +1010,32 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					}
 				}
 			}
-			if authNode := wmNode.FindChild("api-auth"); authNode != nil {
-				auth := &APIAuthConfig{DefaultClass: "read-only"}
-				if classNode := authNode.FindChild("class"); classNode != nil && nodeVal(classNode) != "" {
-					auth.DefaultClass = nodeVal(classNode)
+			// #14448: class/expires are single-valued restrictions read
+			// last-wins (Junos semantics); the AST gate
+			// validateAPIAuthDuplicateScalarAST rejects conflicting
+			// duplicates at strict commit and warns on the tolerant path,
+			// so the last sibling is the value both paths install.
+			for _, authNode := range wmNode.FindChildren("api-auth") {
+				auth := sys.Services.WebManagement.APIAuth
+				if auth == nil {
+					auth = &APIAuthConfig{DefaultClass: "read-only"}
+					sys.Services.WebManagement.APIAuth = auth
 				}
-				if expiresNode := authNode.FindChild("expires"); expiresNode != nil {
-					auth.DefaultExpiresAt, _ = ParseAPIAuthExpiry(nodeVal(expiresNode))
+				if class := lastAPIAuthClass(authNode); class != "" {
+					auth.DefaultClass = class
+				}
+				if raw, present := lastAPIAuthExpires(authNode); present {
+					auth.DefaultExpiresAt, _ = ParseAPIAuthExpiry(raw)
 				}
 				for _, inst := range namedInstances(authNode.FindChildren("user")) {
 					if pwNode := inst.node.FindChild("password"); pwNode != nil {
 						class := auth.DefaultClass
-						if classNode := inst.node.FindChild("class"); classNode != nil && nodeVal(classNode) != "" {
-							class = nodeVal(classNode)
+						if v := lastAPIAuthClass(inst.node); v != "" {
+							class = v
 						}
 						expires := auth.DefaultExpiresAt
-						if expiresNode := inst.node.FindChild("expires"); expiresNode != nil {
-							expires, _ = ParseAPIAuthExpiry(nodeVal(expiresNode))
+						if raw, present := lastAPIAuthExpires(inst.node); present {
+							expires, _ = ParseAPIAuthExpiry(raw)
 						}
 						auth.Users = append(auth.Users, &APIAuthUser{
 							Username:  inst.name,
@@ -1051,12 +1060,12 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						continue
 					}
 					class := auth.DefaultClass
-					if classNode := inst.node.FindChild("class"); classNode != nil && nodeVal(classNode) != "" {
-						class = nodeVal(classNode)
+					if v := lastAPIAuthClass(inst.node); v != "" {
+						class = v
 					}
 					expires := auth.DefaultExpiresAt
-					if expiresNode := inst.node.FindChild("expires"); expiresNode != nil {
-						expires, _ = ParseAPIAuthExpiry(nodeVal(expiresNode))
+					if raw, present := lastAPIAuthExpires(inst.node); present {
+						expires, _ = ParseAPIAuthExpiry(raw)
 					}
 					auth.Keys = append(auth.Keys, &APIAuthKey{
 						Name:      inst.name,
@@ -1065,7 +1074,6 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						ExpiresAt: expires,
 					})
 				}
-				sys.Services.WebManagement.APIAuth = auth
 			}
 		}
 		// system services dynamic-dns — the Surface A provider catalog + engine

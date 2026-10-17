@@ -530,6 +530,16 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 		return nil, dupBlockErr
 	}
 
+	// #14448: duplicate api-auth class/expires gate — see
+	// validateAPIAuthDuplicateScalarAST. Pre-expansion, beside the #5180
+	// gate; strict rejects a conflicting duplicate, lenient warns and
+	// the reader keeps the last value.
+	apiAuthDupWarnings, apiAuthDupErr := validateAPIAuthDuplicateScalarAST(
+		tree, opts.lenientAPIAuthDuplicateScalar)
+	if apiAuthDupErr != nil {
+		return nil, apiAuthDupErr
+	}
+
 	// #5649 (C181-M18): duplicate NAT rule-name gate — see
 	// validateDuplicateNATRuleNamesAST. Pre-expansion, top-level `security`
 	// stanzas only, beside the #5180 gate. Two same-named rules in one NAT
@@ -697,6 +707,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, riTableIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupBlockWarnings...)
+	cfg.Warnings = append(cfg.Warnings, apiAuthDupWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleSetWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupExpandedWarnings...)
@@ -893,6 +904,14 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 		return nil, dupBlockErr
 	}
 
+	// #14448: duplicate api-auth class/expires gate — see
+	// compileConfigWithOpts / validateAPIAuthDuplicateScalarAST.
+	apiAuthDupWarnings, apiAuthDupErr := validateAPIAuthDuplicateScalarAST(
+		tree, opts.lenientAPIAuthDuplicateScalar)
+	if apiAuthDupErr != nil {
+		return nil, apiAuthDupErr
+	}
+
 	// #5649 (C181-M18): duplicate NAT rule-name gate — see compileConfigWithOpts
 	// / validateDuplicateNATRuleNamesAST. Pre-expansion, top-level `security`
 	// stanzas only; strict rejects, lenient warns. Also rejects a quoted-empty
@@ -1037,6 +1056,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	cfg.Warnings = append(cfg.Warnings, zoneIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, riTableIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupBlockWarnings...)
+	cfg.Warnings = append(cfg.Warnings, apiAuthDupWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupNATRuleSetWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupExpandedWarnings...)

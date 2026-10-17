@@ -3255,6 +3255,13 @@ type compileOpts struct {
 	// and ZoneQuarantineNamesForConfig falls back to cfg's own zone keys,
 	// which is the pre-#13095 behavior.
 	zoneQuarantineNames []string
+	// lenientAPIAuthDuplicateScalar (#14448) downgrades the api-auth
+	// duplicate class/expires gate (validateAPIAuthDuplicateScalarAST)
+	// from a hard error to a warning on the tolerant load / peer-sync
+	// paths. An already-persisted or peer-synced config carrying a
+	// conflicting duplicate still boots (#1960); the reader keeps the
+	// last value (Junos last-wins). Commit / commit-check stay strict.
+	lenientAPIAuthDuplicateScalar bool
 }
 
 // lenientCompileOpts returns a compileOpts with every tolerant-path
@@ -3328,6 +3335,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDuplicateNATRuleName:            true,
 		lenientDuplicateNATRuleSetName:         true,
 		lenientDuplicateNamesExpanded:          true,
+		lenientAPIAuthDuplicateScalar:          true,
 		lenientNATPoolAlarmThreshold:           true,
 		lenientNATHostMask:                     true,
 		lenientUnsupportedInterfaceStanzas:     true,
