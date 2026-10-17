@@ -46,6 +46,20 @@ type groupExpandBudget struct {
 	// groupRootLoginLeaves14447 tracks root-login leaves adopted from a
 	// group during this expansion (#14447), like the default-policy set.
 	groupRootLoginLeaves14447 map[*Node]bool
+	// adoptedRouteFilters14741 records route-filter member identities
+	// already adopted by the #14416 arm during this expansion, keyed by
+	// the destination `from` level (ancestor path + inline peer member
+	// identity; see routeFilterLevelKey14741). #14741: one group body is
+	// merged once per same-keyed destination container (#9802 fan-out
+	// routes the same body into every policy-statement/term/from twin
+	// at a level), and each merge sees only its own twin's children —
+	// so the per-merge routeFilterMemberExists14416 check cannot see
+	// the sibling adopted into the OTHER twin, and the member lands
+	// twice when the compiler later folds the twins' from bags. This
+	// per-expansion record makes the second adoption a no-op while a
+	// genuinely distinct member still adopts. Distinct levels never
+	// collide: the ancestor path carries the term identity.
+	adoptedRouteFilters14741 map[string]map[string]bool
 }
 
 // charge accounts n units of expansion work and reports when the budget is
@@ -772,7 +786,8 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 						*dst = append(*dst, s)
 					}
 				} else if isRouteFilterORMember14416(ancestorPath, s) &&
-					!routeFilterMemberExists14416(*dst, s) {
+					!routeFilterMemberExists14416(*dst, s) &&
+					!budget.routeFilterAlreadyAdopted14741(ancestorPath, peer, s) {
 					// #14416: route-filter is a schema-documented OR-member
 					// list (args:2, multi) that leafListUnionEligible cannot
 					// union (args<=1 gate) and the packed promotions cannot
@@ -781,6 +796,17 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					// repeated inline route-filters already compile from —
 					// instead of dropping it to the override. A duplicate
 					// full member keeps the drop below.
+					// #14741: the same group body is merged once per
+					// same-keyed destination container (#9802 fan-out), and
+					// each merge sees only its own twin's children, so the
+					// per-merge existence check above cannot see a sibling
+					// adopted into another twin of the same `from` level.
+					// The per-expansion record keyed on the destination
+					// level suppresses that second adoption; the compiler
+					// folds the twins' from bags, so one copy is the
+					// correct count.
+					budget.recordRouteFilterAdopted14741(ancestorPath, peer, s)
+					*dst = append(*dst, s)
 				} else if prefixListDefinitionInstanceDiffers14417(ancestorPath, peer, s) {
 					// #14417: a packed prefix-list definition leaf whose
 					// instance name (Keys[1]) differs from the inline peer
