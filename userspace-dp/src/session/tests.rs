@@ -4289,6 +4289,69 @@ fn fib_route_and_policy_invalidation_resolve_reverse_translated_alias_12074() {
 }
 
 #[test]
+fn reroute_rebinds_forward_egress_and_reverse_ingress_14318() {
+    let mut table = SessionTable::new();
+    table.set_forwarding_revalidation_gen(7, 9);
+    let forward = key_v4();
+    let reverse = install_forward_reverse_pair(&mut table, &forward, 1_000_000_000, 0x10);
+    let mut new_res = decision().resolution;
+    new_res.egress_ifindex = 26;
+    new_res.tx_ifindex = 26;
+    table.set_forwarding_revalidation_gen(7, 10);
+    assert!(table.revalidate_forwarding_resolution_with_egress_zone(
+        &forward,
+        new_res,
+        None,
+        Some(TEST_DMZ_ZONE_ID),
+    ));
+    let fwd = table.entry_with_origin(&forward).unwrap().1;
+    let rev = table.entry_with_origin(&reverse).unwrap().1;
+    assert_eq!(fwd.egress_zone, TEST_DMZ_ZONE_ID);
+    assert_eq!(rev.ingress_zone, TEST_DMZ_ZONE_ID);
+    assert_eq!(rev.egress_zone, TEST_LAN_ZONE_ID);
+    assert_eq!(fwd.ingress_zone, TEST_LAN_ZONE_ID);
+    assert_eq!(
+        table.entry_with_origin(&forward).unwrap().0.resolution.egress_ifindex,
+        26
+    );
+}
+
+#[test]
+fn reroute_none_zone_preserves_recorded_zones_14318() {
+    let mut table = SessionTable::new();
+    table.set_forwarding_revalidation_gen(7, 9);
+    let forward = key_v4();
+    let reverse = install_forward_reverse_pair(&mut table, &forward, 1_000_000_000, 0x10);
+    let mut new_res = decision().resolution;
+    new_res.egress_ifindex = 26;
+    table.set_forwarding_revalidation_gen(7, 10);
+    assert!(table.revalidate_forwarding_resolution_with_egress_zone(
+        &forward, new_res, None, None,
+    ));
+    assert_eq!(table.entry_with_origin(&forward).unwrap().1.egress_zone, TEST_WAN_ZONE_ID);
+    assert_eq!(table.entry_with_origin(&reverse).unwrap().1.ingress_zone, TEST_WAN_ZONE_ID);
+}
+
+#[test]
+fn reroute_via_reverse_hit_rebinds_pair_14318() {
+    let mut table = SessionTable::new();
+    table.set_forwarding_revalidation_gen(7, 9);
+    let forward = key_v4();
+    let reverse = install_forward_reverse_pair(&mut table, &forward, 1_000_000_000, 0x10);
+    let mut new_res = decision().resolution;
+    new_res.egress_ifindex = 26;
+    table.set_forwarding_revalidation_gen(7, 10);
+    assert!(table.revalidate_forwarding_resolution_with_egress_zone(
+        &reverse,
+        new_res,
+        None,
+        Some(TEST_DMZ_ZONE_ID),
+    ));
+    assert_eq!(table.entry_with_origin(&forward).unwrap().1.egress_zone, TEST_DMZ_ZONE_ID);
+    assert_eq!(table.entry_with_origin(&reverse).unwrap().1.ingress_zone, TEST_DMZ_ZONE_ID);
+}
+
+#[test]
 fn dnat_port_in_reverse_wire_key() {
     // Forward: client:54321 -> external:80, DNAT rewrites dst to internal:8080
     let forward = SessionKey {

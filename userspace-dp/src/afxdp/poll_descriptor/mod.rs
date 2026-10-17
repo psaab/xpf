@@ -2121,13 +2121,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             if revalidation.invalidate_policy_revalidation {
                                 sessions.invalidate_policy_revalidation(&resolved.key);
                             }
-                            sessions.revalidate_forwarding_resolution(
+                            sessions.revalidate_forwarding_resolution_with_egress_zone(
                                 &resolved.key,
                                 revalidation.resolution,
                                 revalidation.owner_rg_id,
+                                revalidation.new_egress_zone,
                             );
                             if let Some(owner_rg_id) = revalidation.owner_rg_id {
                                 resolved.metadata.owner_rg_id = owner_rg_id;
+                            }
+                            if let Some(new_zone) = revalidation.new_egress_zone {
+                                if resolved.metadata.is_reverse {
+                                    resolved.metadata.ingress_zone = new_zone;
+                                } else {
+                                    resolved.metadata.egress_zone = new_zone;
+                                }
                             }
                         }
                         // #13938: replay every local-hit mutation only after

@@ -158,13 +158,21 @@ verdict: SessionHitVerdict,) -> Option<ResolvedFlowSessionDecision> {
         if revalidation.invalidate_policy_revalidation {
             sessions.invalidate_policy_revalidation(&resolved.key);
         }
-        sessions.revalidate_forwarding_resolution(
+        sessions.revalidate_forwarding_resolution_with_egress_zone(
             &resolved.key,
             revalidation.resolution,
             revalidation.owner_rg_id,
+            revalidation.new_egress_zone,
         );
         if let Some(owner_rg_id) = revalidation.owner_rg_id {
             resolved.metadata.owner_rg_id = owner_rg_id;
+        }
+        if let Some(new_zone) = revalidation.new_egress_zone {
+            if resolved.metadata.is_reverse {
+                resolved.metadata.ingress_zone = new_zone;
+            } else {
+                resolved.metadata.egress_zone = new_zone;
+            }
         }
     }
 
@@ -459,10 +467,28 @@ prevalidated_forward_nat_match: Option<crate::session::ForwardSessionMatch>,) ->
                         | ForwardingDisposition::LocalDelivery
                 )
                 .then(|| owner_rg_for_resolution(forwarding, decision.resolution));
+                // #14318: only a locally-forwarding route (or the recorded
+                // zone behind a fabric redirect, already in policy_to_zone_id)
+                // names the flow's new egress zone. Terminal routes do not.
+                let new_egress_zone = if decision.resolution.disposition
+                    == ForwardingDisposition::FabricRedirect
+                {
+                    Some(policy_to_zone_id)
+                } else if matches!(
+                    decision.resolution.disposition,
+                    ForwardingDisposition::ForwardCandidate
+                        | ForwardingDisposition::MissingNeighbor
+                ) && decision.resolution.egress_ifindex != 0
+                {
+                    Some(policy_to_zone_id)
+                } else {
+                    None
+                };
                 Some(DeferredForwardingRevalidation {
                     resolution: decision.resolution,
                     owner_rg_id,
                     invalidate_policy_revalidation,
+                    new_egress_zone,
                 })
             } else {
                 None

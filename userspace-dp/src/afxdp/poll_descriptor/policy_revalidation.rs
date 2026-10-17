@@ -1079,6 +1079,26 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     }
     match zone_policy_deny_on_session_hit(forwarding, &input) {
         ZonePolicyJudgment::Permit => {
+            // #14318/#9384: a permitted re-derivation under a moved egress
+            // interface rebinds the pair's egress zone. The judgment already
+            // resolved the live to-zone from the stored egress ifindex; use
+            // the same resolver (recorded zone for fabric redirects).
+            {
+                let new_zone = if input.decision.resolution.disposition
+                    == ForwardingDisposition::FabricRedirect
+                {
+                    Some(input.metadata.egress_zone)
+                } else if resolution_is_locally_forwarding(input.decision.resolution) {
+                    Some(forwarding.egress_zone_id(input.decision.resolution.egress_ifindex))
+                } else {
+                    None
+                };
+                if let Some(new_zone) = new_zone {
+                    // Only move zones; resolution/generation already persisted
+                    // by the deferred revalidation persist (or unchanged here).
+                    let _ = sessions.rebind_forward_egress_zone(&canonical_key, new_zone);
+                }
+            }
             sessions.mark_policy_revalidated(
                 &canonical_key,
                 policy_kind_for_resolution(input.decision.resolution),
@@ -1759,10 +1779,19 @@ fn reverse_hit_zone_policy(
                             forwarding,
                             input.decision.resolution,
                         );
-                        sessions.revalidate_forwarding_resolution(
+                        // #14318: the judged resolution is the CURRENT
+                        // forward route; its live egress zone is the pair's
+                        // new egress (fabric already excluded above).
+                        let new_zone = if resolution_is_locally_forwarding(input.decision.resolution) {
+                            Some(forwarding.egress_zone_id(input.decision.resolution.egress_ifindex))
+                        } else {
+                            None
+                        };
+                        sessions.revalidate_forwarding_resolution_with_egress_zone(
                             &fwd_key,
                             input.decision.resolution,
                             Some(owner_rg_id),
+                            new_zone,
                         );
                     }
                     None
@@ -1984,10 +2013,23 @@ fn reverse_hit_zone_policy(
                         input.decision.resolution,
                     )
                 });
-                sessions.revalidate_forwarding_resolution(
+                // #14318: move the pair's egress zone with the persisted
+                // route. FabricRedirect keeps its recorded zone (the
+                // transport zone is not the flow's); others use live egress.
+                let new_zone = if input.decision.resolution.disposition
+                    == ForwardingDisposition::FabricRedirect
+                {
+                    Some(fwd_metadata.egress_zone)
+                } else if resolution_is_locally_forwarding(input.decision.resolution) {
+                    Some(forwarding.egress_zone_id(input.decision.resolution.egress_ifindex))
+                } else {
+                    None
+                };
+                sessions.revalidate_forwarding_resolution_with_egress_zone(
                     &fwd_key,
                     input.decision.resolution,
                     owner_rg_id,
+                    new_zone,
                 );
             }
             sessions.mark_policy_revalidated(

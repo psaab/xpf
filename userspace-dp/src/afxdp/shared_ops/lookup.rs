@@ -388,6 +388,12 @@ pub(in crate::afxdp) struct DeferredForwardingRevalidation {
     /// cached policy verdict must be re-judged. Applied with the route, only
     /// after an Owner verdict (`invalidate_policy_revalidation`).
     pub(in crate::afxdp) invalidate_policy_revalidation: bool,
+    /// #14318: the re-resolved route's policy egress zone, when it names a
+    /// real flow egress (locally-forwarding, or the recorded zone for a
+    /// fabric redirect). `None` for terminal/non-forwarding resolutions.
+    /// Persisted with the route so the forward entry's `egress_zone` and
+    /// the reverse companion's `ingress_zone` move with the reroute.
+    pub(in crate::afxdp) new_egress_zone: Option<u16>,
 }
 
 /// #12644: a synced-session promotion computed during `resolve`, NOT yet

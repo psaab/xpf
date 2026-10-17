@@ -351,6 +351,44 @@ fn a_reply_is_an_owner_only_from_the_zone_the_flow_went_to_9519() {
 }
 
 #[test]
+fn reply_after_reroute_is_owner_from_new_egress_zone_14318() {
+    // Acceptance scenario: lan -> wan1 session rerouted to wan2; after the
+    // forward revalidation rebinds the pair (see session tests), a reply
+    // arriving from wan2 must be Owner, not Foreign. This pins the
+    // authority half: with reverse ingress_zone == wan2, arrival on wan2
+    // is Owner; the stale wan1 value would classify it Foreign.
+    let fw = forwarding(false);
+    let mut reverse = session(TEST_DMZ_ZONE_ID, 0, 0, true);
+    reverse.egress_zone = TEST_LAN_ZONE_ID;
+    assert_eq!(
+        session_hit_authority(
+            &fw,
+            &reverse,
+            SessionOrigin::ReverseFlow,
+            arrival(DMZ, 0),
+            false,
+            None,
+        ),
+        HitAuthority::Owner,
+        "reply from the rerouted egress zone (dmz as wan2 stand-in) is owner after rebind"
+    );
+    // Control: stale metadata (still wan) classifies the same arrival Foreign.
+    let stale = session(TEST_WAN_ZONE_ID, 0, 0, true);
+    assert_eq!(
+        session_hit_authority(
+            &fw,
+            &stale,
+            SessionOrigin::ReverseFlow,
+            arrival(DMZ, 0),
+            false,
+            None,
+        ),
+        foreign(TEST_DMZ_ZONE_ID, false),
+        "control: stale reverse ingress_zone makes the rerouted reply foreign"
+    );
+}
+
+#[test]
 fn an_arrival_that_resolves_to_no_zone_is_foreign_9519() {
     let fw = forwarding(false);
     let lan = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);

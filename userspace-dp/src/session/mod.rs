@@ -2117,12 +2117,44 @@ impl SessionTable {
         resolution: ForwardingResolution,
         owner_rg_id: Option<i32>,
     ) -> bool {
+        self.revalidate_forwarding_resolution_with_egress_zone(key, resolution, owner_rg_id, None)
+    }
+
+    /// #14318: as [`Self::revalidate_forwarding_resolution`], plus rebind the
+    /// zone pair when the caller has resolved the NEW egress zone.
+    ///
+    /// `new_egress_zone` is `Some(zone)` only when the re-resolved route's
+    /// policy to-zone is known (locally-forwarding or fabric-redirect with a
+    /// recorded egress); `None` preserves the recorded zones (terminal /
+    /// non-forwarding resolutions name no flow egress, and a fabric
+    /// transport's zone is not the flow's).
+    ///
+    /// When the hit entry is the FORWARD entry and its egress zone changes,
+    /// the reverse companion's `ingress_zone` (the zone replies must arrive
+    /// from, #9519) is moved to the same zone, and both entries' egress
+    /// vintage checks are cleared (0 = unstamped; the caller re-stamps via
+    /// its forwarding view if it needs the vintage). When the hit entry is
+    /// itself the REVERSE companion (a reply-first re-resolve), its own
+    /// `ingress_zone` is the forward flow's egress, so it is moved directly
+    /// and the forward companion's `egress_zone` follows. A missing or
+    /// non-companion sibling is left untouched — the hit entry still
+    /// rebinds, and a lone reverse keeps flowing under #9604.
+    pub(crate) fn revalidate_forwarding_resolution_with_egress_zone(
+        &mut self,
+        key: &SessionKey,
+        resolution: ForwardingResolution,
+        owner_rg_id: Option<i32>,
+        new_egress_zone: Option<u16>,
+    ) -> bool {
         let Some(handle) = self.revalidation_handle(key) else {
             return false;
         };
         let Some(record) = self.entries.get(handle as usize) else {
             return false;
         };
+        let canonical_key = record.key.clone();
+        let hit_is_reverse = record.entry.metadata.is_reverse;
+        let hit_nat = record.entry.decision.nat;
         let old_owner_rg_id = record.entry.metadata.owner_rg_id;
         if let Some(new_owner_rg_id) = owner_rg_id
             && new_owner_rg_id != old_owner_rg_id
@@ -2142,6 +2174,102 @@ impl SessionTable {
         record.entry.forwarding_generation = self.forwarding_revalidation_gen;
         if let Some(new_owner_rg_id) = owner_rg_id {
             record.entry.metadata.owner_rg_id = new_owner_rg_id;
+        }
+        if let Some(new_zone) = new_egress_zone {
+            // Determine (forward_key, reverse_key) for the pair.
+            let (forward_key, reverse_key) = if hit_is_reverse {
+                (
+                    reverse_session_key(&canonical_key, hit_nat),
+                    canonical_key.clone(),
+                )
+            } else {
+                (
+                    canonical_key.clone(),
+                    reverse_session_key(&canonical_key, hit_nat),
+                )
+            };
+            if forward_key != reverse_key {
+                if let Some(fwd) = self.entry_by_key_mut(&forward_key)
+                    && !fwd.metadata.is_reverse
+                    && fwd.metadata.egress_zone != new_zone
+                {
+                    fwd.metadata.egress_zone = new_zone;
+                    fwd.metadata.egress_zone_check = 0;
+                }
+                if let Some(rev) = self.entry_by_key_mut(&reverse_key)
+                    && rev.metadata.is_reverse
+                    && rev.metadata.ingress_zone != new_zone
+                {
+                    rev.metadata.ingress_zone = new_zone;
+                    rev.metadata.ingress_zone_check = 0;
+                }
+            } else if hit_is_reverse {
+                if let Some(rev) = self.entry_by_key_mut(&canonical_key)
+                    && rev.metadata.ingress_zone != new_zone
+                {
+                    rev.metadata.ingress_zone = new_zone;
+                    rev.metadata.ingress_zone_check = 0;
+                }
+            } else if let Some(fwd) = self.entry_by_key_mut(&canonical_key)
+                && fwd.metadata.egress_zone != new_zone
+            {
+                fwd.metadata.egress_zone = new_zone;
+                fwd.metadata.egress_zone_check = 0;
+            }
+        }
+        true
+    }
+
+    /// #14318: move ONLY the egress leg of a forward/reverse pair to
+    /// `new_egress_zone` (forward `egress_zone`, reverse `ingress_zone`),
+    /// clearing the moved leg's vintage check. Takes the forward entry's
+    /// canonical key (or a reverse key, inverted via its NAT). Returns
+    /// true when the forward entry exists and is not itself a reverse.
+    pub(crate) fn rebind_forward_egress_zone(
+        &mut self,
+        key: &SessionKey,
+        new_egress_zone: u16,
+    ) -> bool {
+        let Some(record) = self.revalidation_record(key) else {
+            return false;
+        };
+        let canonical = record.key.clone();
+        let (forward_key, reverse_key) = if record.entry.metadata.is_reverse {
+            (
+                reverse_session_key(&canonical, record.entry.decision.nat),
+                canonical.clone(),
+            )
+        } else {
+            (
+                canonical.clone(),
+                reverse_session_key(&canonical, record.entry.decision.nat),
+            )
+        };
+        let Some(fwd) = self.entry_by_key(&forward_key) else {
+            return false;
+        };
+        if fwd.metadata.is_reverse {
+            return false;
+        }
+        if forward_key != reverse_key {
+            if let Some(fwd) = self.entry_by_key_mut(&forward_key)
+                && fwd.metadata.egress_zone != new_egress_zone
+            {
+                fwd.metadata.egress_zone = new_egress_zone;
+                fwd.metadata.egress_zone_check = 0;
+            }
+            if let Some(rev) = self.entry_by_key_mut(&reverse_key)
+                && rev.metadata.is_reverse
+                && rev.metadata.ingress_zone != new_egress_zone
+            {
+                rev.metadata.ingress_zone = new_egress_zone;
+                rev.metadata.ingress_zone_check = 0;
+            }
+        } else if let Some(fwd) = self.entry_by_key_mut(&forward_key)
+            && fwd.metadata.egress_zone != new_egress_zone
+        {
+            fwd.metadata.egress_zone = new_egress_zone;
+            fwd.metadata.egress_zone_check = 0;
         }
         true
     }
