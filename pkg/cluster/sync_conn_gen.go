@@ -105,13 +105,14 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 // while guard keys are forward sessions (#9915 F-044). Nothing reads it
 // directly except maxCap()'s clamp; every map goes through sentCap()/recvCap().
 //
-// TWENTY map families share the two side caps. The sender side bounds TWELVE by
-// sentCap() — genSentV4/V6, closeClassSentV4/V6 (#9412),
+// TWENTY-FOUR map families share the two side caps. The sender side bounds
+// FOURTEEN by sentCap() — genSentV4/V6, closeClassSentV4/V6 (#9412),
 // tcpHandshakeSentV4/V6 (#10888), installTableSentV4/V6 (#9752),
-// sourceNatICMPSentV4/V6 (#11064), and genSentScopedV4/V6 (#10512). The
-// receiver side bounds EIGHT by recvCap() — recvGenV4/V6 (with their #9719
-// tombstone orders, which index the same entries rather than adding new ones),
-// installTableRecvV4/V6, sourceNatICMPRecvV4/V6 (#11064), and
+// sourceNatICMPSentV4/V6 (#11064), policyIdentitySentV4/V6 (#14359), and
+// genSentScopedV4/V6 (#10512). The receiver side bounds TEN by recvCap() —
+// recvGenV4/V6 (with their #9719 tombstone orders, which index the same
+// entries rather than adding new ones), installTableRecvV4/V6,
+// sourceNatICMPRecvV4/V6 (#11064), policyIdentityRecvV4/V6 (#14359), and
 // recvGenScopedV4/V6 (#10512, with their own tombstone orders). Every family
 // grows on full-of-live demand and skip-records at the cap.
 //
@@ -121,19 +122,21 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 // cap down (growGuardCapSide) and every read clamps to the ceiling in force
 // (sentCap/recvCap); the receiver side is additionally reclaimed at a
 // namespace-reset bulk barrier (resetRecvGen), while sender maps self-drain on
-// delete-echo. All twenty families are evicted on delete; the cap is a safety
-// valve for keys whose delete never arrives (e.g. dropped close delta).
+// delete-echo. All twenty-four families are evicted on delete; the cap is a
+// safety valve for keys whose delete never arrives (e.g. dropped close delta).
 //
 // Heap honesty (#9915 F-044 review): the ceiling costs nothing until the table
 // genuinely fills, and per-map=wired is coverage-correct — one family can hold
 // every session (an all-v4 table fills genSentV4 alone), so each map must be
 // able to reach the full session count. The existing ~56B/entry measurement
 // and 5M-entry heap estimate in docs/log/9915.md cover the original 14 maps;
-// #11064 adds four bounded source-NAT identity maps and their possible cost is
-// additional (only typed-SNAT sessions populate them). The default 200k
-// effective cap's ~157MB estimate is likewise pre-#11064, and demand growth
-// past it requires helper-attested provisioned RAM via SetGenGuardSessionCap,
-// so guard heap stays proportionate to the table it protects.
+// #11064 adds four bounded source-NAT identity maps and #14359 four bounded
+// policy-identity maps (each entry additionally holds the rule-ID string,
+// shared with the frame that stated it), and their possible cost is
+// additional. The default 200k effective cap's ~157MB estimate is likewise
+// pre-#11064/#14359, and demand growth past it requires helper-attested
+// provisioned RAM via SetGenGuardSessionCap, so guard heap stays
+// proportionate to the table it protects.
 //
 // Honesty notes the ceiling does NOT promise: fabric-redirected sessions
 // consume TWO stamps (primary plus wire alias), so alias-heavy tables past
@@ -578,6 +581,22 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 		}
 		s.recvGenMu.Unlock()
 	}
+	// #14359: policy identity is sync-only like the stamps above; a
+	// mirror-sourced resend restores the identity last sent for this session,
+	// and a node that only RECEIVED it (promoted standby) resends that.
+	if s.policyIdentitySentV4 == nil {
+		s.policyIdentitySentV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
+	}
+	if !stampPolicyIdentityLocked(s.policyIdentitySentV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.sentCap()) && s.growSentCap() {
+		stampPolicyIdentityLocked(s.policyIdentitySentV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.sentCap())
+	}
+	if val.PolicyRuleID == "" && val.PolicyCounterIdx == 0 && val.SessionID != 0 {
+		s.recvGenMu.Lock()
+		if ruleID, counter, ok := lookupPolicyIdentityLocked(s.policyIdentityRecvV4, key, val.SessionID); ok {
+			val.PolicyRuleID, val.PolicyCounterIdx = ruleID, counter
+		}
+		s.recvGenMu.Unlock()
+	}
 	s.genSentMu.Unlock()
 }
 
@@ -652,6 +671,20 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 		s.recvGenMu.Lock()
 		if icmpType, icmpCode, ok := lookupSourceNatICMPLocked(s.sourceNatICMPRecvV6, key, val.SessionID); ok {
 			val.SourceNatICMPValid, val.SourceNatICMPType, val.SourceNatICMPCode = true, icmpType, icmpCode
+		}
+		s.recvGenMu.Unlock()
+	}
+	// #14359: v6 twin of the policy-identity restoration above.
+	if s.policyIdentitySentV6 == nil {
+		s.policyIdentitySentV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
+	}
+	if !stampPolicyIdentityLocked(s.policyIdentitySentV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.sentCap()) && s.growSentCap() {
+		stampPolicyIdentityLocked(s.policyIdentitySentV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.sentCap())
+	}
+	if val.PolicyRuleID == "" && val.PolicyCounterIdx == 0 && val.SessionID != 0 {
+		s.recvGenMu.Lock()
+		if ruleID, counter, ok := lookupPolicyIdentityLocked(s.policyIdentityRecvV6, key, val.SessionID); ok {
+			val.PolicyRuleID, val.PolicyCounterIdx = ruleID, counter
 		}
 		s.recvGenMu.Unlock()
 	}
@@ -793,11 +826,13 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV4, key)
 	delete(s.sourceNatICMPSentV4, key)
+	delete(s.policyIdentitySentV4, key)
 	// #9752 round 3: and for the identity received for it (genSentMu is a
 	// leaf, so nesting recvGenMu here cannot cycle).
 	s.recvGenMu.Lock()
 	delete(s.installTableRecvV4, key)
 	delete(s.sourceNatICMPRecvV4, key)
+	delete(s.policyIdentityRecvV4, key)
 	s.recvGenMu.Unlock()
 	if _, ok := s.genSentV4[key]; !ok {
 		if s.genSentOverflowV4 {
@@ -832,10 +867,12 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV6, key)
 	delete(s.sourceNatICMPSentV6, key)
+	delete(s.policyIdentitySentV6, key)
 	// #9752 round 3: and for the identity received for it (see the v4 twin).
 	s.recvGenMu.Lock()
 	delete(s.installTableRecvV6, key)
 	delete(s.sourceNatICMPRecvV6, key)
+	delete(s.policyIdentityRecvV6, key)
 	s.recvGenMu.Unlock()
 	if _, ok := s.genSentV6[key]; !ok {
 		if s.genSentOverflowV6 {
@@ -1363,6 +1400,10 @@ func (s *SessionSync) resetRecvSessionGen(preserve bool) {
 		// namespace; its rebooted sessions may reuse old session identifiers.
 		s.sourceNatICMPRecvV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
 		s.sourceNatICMPRecvV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
+		// #14359: same for the received policy identity — a surviving record
+		// would re-bind the dead incarnation's rule on a stamp-less re-prime.
+		s.policyIdentityRecvV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
+		s.policyIdentityRecvV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
 		s.recvTombV4.reset()
 		s.recvTombV6.reset()
 		s.recvTombScopedV4.reset()
@@ -1613,6 +1654,12 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	if !stampSourceNatICMPLocked(s.sourceNatICMPRecvV4, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.recvCap()) && s.growRecvCap() {
 		stampSourceNatICMPLocked(s.sourceNatICMPRecvV4, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.recvCap())
 	}
+	if s.policyIdentityRecvV4 == nil {
+		s.policyIdentityRecvV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
+	}
+	if !stampPolicyIdentityLocked(s.policyIdentityRecvV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap()) && s.growRecvCap() {
+		stampPolicyIdentityLocked(s.policyIdentityRecvV4, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap())
+	}
 	s.recvGenMu.Unlock()
 	if err := s.sessions.PutClusterSyncedV4(key, val); err == nil {
 		// #6368: the check above and this write are not atomic. Re-read the
@@ -1701,6 +1748,12 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	if !stampSourceNatICMPLocked(s.sourceNatICMPRecvV6, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.recvCap()) && s.growRecvCap() {
 		stampSourceNatICMPLocked(s.sourceNatICMPRecvV6, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.recvCap())
 	}
+	if s.policyIdentityRecvV6 == nil {
+		s.policyIdentityRecvV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
+	}
+	if !stampPolicyIdentityLocked(s.policyIdentityRecvV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap()) && s.growRecvCap() {
+		stampPolicyIdentityLocked(s.policyIdentityRecvV6, key, val.SessionID, &val.PolicyRuleID, &val.PolicyCounterIdx, s.recvCap())
+	}
 	s.recvGenMu.Unlock()
 	if err := s.sessions.PutClusterSyncedV6(key, val); err == nil {
 		// #6368: see the v4 twin — re-read the threshold after the write so a
@@ -1766,6 +1819,7 @@ func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen 
 	s.recvGenMu.Lock()
 	delete(s.installTableRecvV4, key)
 	delete(s.sourceNatICMPRecvV4, key)
+	delete(s.policyIdentityRecvV4, key)
 	s.recvGenMu.Unlock()
 	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)
@@ -1792,6 +1846,7 @@ func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGe
 	s.recvGenMu.Lock()
 	delete(s.installTableRecvV6, key)
 	delete(s.sourceNatICMPRecvV6, key)
+	delete(s.policyIdentityRecvV6, key)
 	s.recvGenMu.Unlock()
 	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)

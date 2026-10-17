@@ -1577,7 +1577,13 @@ type SessionSync struct {
 	// mirror resends and is guarded by genSentMu.
 	sourceNatICMPSentV4 map[dataplane.SessionKey]sourceNatICMPMemo
 	sourceNatICMPSentV6 map[dataplane.SessionKeyV6]sourceNatICMPMemo
-	recvGenMu           sync.Mutex
+	// #14359: per tuple, the admitting-policy identity (PolicyRuleID +
+	// PolicyCounterIdx) this node last SENT for one session incarnation
+	// (matched on SessionID), so a mirror-sourced resend cannot wipe it to
+	// ""/0. Guarded by genSentMu; see stampPolicyIdentityLocked.
+	policyIdentitySentV4 map[dataplane.SessionKey]policyIdentityMemo
+	policyIdentitySentV6 map[dataplane.SessionKeyV6]policyIdentityMemo
+	recvGenMu            sync.Mutex
 	// #9752 round 3: per tuple, the installing-table identity this node last
 	// RECEIVED for one session incarnation (matched on SessionID), so a
 	// stamp-less resend from an old sender cannot erase it. The BPF mirror
@@ -1591,8 +1597,13 @@ type SessionSync struct {
 	// BPF mirror so a promoted standby can resend the same allocator selector.
 	sourceNatICMPRecvV4 map[dataplane.SessionKey]sourceNatICMPMemo
 	sourceNatICMPRecvV6 map[dataplane.SessionKeyV6]sourceNatICMPMemo
-	recvGenV4           map[dataplane.SessionKey]uint64
-	recvGenV6           map[dataplane.SessionKeyV6]uint64
+	// #14359: last RECEIVED policy identity, kept outside the lossy BPF
+	// mirror so a stamp-less resend cannot erase it and a promoted standby
+	// can resend the same binding. Guarded by recvGenMu.
+	policyIdentityRecvV4 map[dataplane.SessionKey]policyIdentityMemo
+	policyIdentityRecvV6 map[dataplane.SessionKeyV6]policyIdentityMemo
+	recvGenV4            map[dataplane.SessionKey]uint64
+	recvGenV6            map[dataplane.SessionKeyV6]uint64
 	// recvGenScopedV4/V6 + recvTombScopedV4/V6 are the #10512 scoped
 	// policy-delete receiver spaces, keyed by (domain, tuple) and fully
 	// separate from the bare spaces in both directions (see
@@ -2076,12 +2087,16 @@ func (s *SessionSync) initGenState() {
 	s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
 	s.sourceNatICMPSentV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
 	s.sourceNatICMPSentV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
+	s.policyIdentitySentV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
+	s.policyIdentitySentV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
 	s.recvGenV4 = make(map[dataplane.SessionKey]uint64)
 	s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 	s.installTableRecvV4 = make(map[dataplane.SessionKey]recvInstallTable)
 	s.installTableRecvV6 = make(map[dataplane.SessionKeyV6]recvInstallTable)
 	s.sourceNatICMPRecvV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
 	s.sourceNatICMPRecvV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
+	s.policyIdentityRecvV4 = make(map[dataplane.SessionKey]policyIdentityMemo)
+	s.policyIdentityRecvV6 = make(map[dataplane.SessionKeyV6]policyIdentityMemo)
 	s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
 	s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
 	// #3931: seed the config generation from the same monotonic base so the
