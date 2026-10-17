@@ -13,9 +13,13 @@
 #      runner with comments stripped (a bare filename mention would be
 #      satisfied by a comment naming the script — the shape where a
 #      source-scanning gate passes on its own documentation).
-#   2. The §4 odd-name set is EXACTLY the eight declared below. These are
-#      registered self-tests outside every discovery glob; a ninth odd name
-#      must extend the glob or the declaration, never slip past both.
+#   2. The §4 odd-name set is EXACTLY the ten declared below. These are
+#      registered self-tests outside every discovery glob; an eleventh odd
+#      name must extend the glob or the declaration, never slip past both.
+#   2b. (#14653) Every shell script on disk under test/ or scripts/ carrying
+#      a `--selftest)` case arm is either registered in the runner (and, if
+#      outside every glob, declared in the odd set) — the arm scan finds
+#      verdict cores that no filename glob can see.
 #   3. Every §3 python self-test (scripts/image, scripts/dist,
 #      scripts/deploy, scripts root, test_*.py) defines a `__main__` guard.
 #      Each runs via direct `python3 <file>`; without the guard a file
@@ -40,6 +44,10 @@
 #   * A §4 registration outside the globs that is not in the odd set fails
 #     (an undeclared odd name); an odd-set member no longer registered in §4
 #     fails the other direction (a stale declaration).
+#   * (#14653) A script carrying a `--selftest)` arm with no
+#     `run_bash/run_shell <path> --selftest` registration in the runner
+#     fails NAMING the file; an arm scan that finds nothing fails instead
+#     of passing.
 #   * A §3 python file without `__main__` fails naming the file.
 #   * The positive control names a file that must be discovered AND
 #     registered; a matcher that finds nothing trips here by name.
@@ -50,11 +58,15 @@
 #   *-selftest.sh convention and stay explicitly registered. So do
 #   test/incus/wire-policy-deny.sh, test/incus/wire-appmatch-twins.sh,
 #   test/incus/wire-zone-matrix.sh, test/incus/wire-hostinbound-deny.sh,
-#   test/incus/wire-conntrack-lifecycle.sh and
-#   test/incus/wire-routing-separation.sh, which are verdict cores driven
+#   test/incus/wire-conntrack-lifecycle.sh,
+#   test/incus/wire-routing-separation.sh,
+#   test/incus/wire-nat-frag-needed.sh (#14653, #12809) and
+#   test/incus/t12-g2-9506.sh (#14653, #9506), which are verdict cores driven
 #   with a --selftest flag rather than standalone self-test files. Renaming
-#   any of the eight into a glob (or out of §4) means updating the set below —
-#   loudly, in review.
+#   any of the ten into a glob (or out of §4) means updating the set below —
+#   loudly, in review. The §2b arm scan below is what now NOTICES a new
+#   --selftest-arm script that nobody registered, instead of trusting this
+#   list to be complete.
 #
 # USAGE
 #   sh scripts/selftest-census.sh
@@ -77,7 +89,7 @@ note_pass() { echo "  PASS: $*"; }
 
 SELFTEST_GLOBS="test/incus/*-selftest.sh test/xsk-repro/selftest*.sh test/routing/selftest*.sh test/mutation/selftest*.sh scripts/*selftest*.sh scripts/docs/*selftest*.sh test/image/*-test.sh test/debian/*-test.sh"
 PY_GLOBS="scripts/image/test_*.py scripts/dist/test_*.py scripts/deploy/test_*.py scripts/test_*.py"
-ODD_SET="scripts/dist/selftest.sh scripts/image/test-grow-root.sh test/incus/wire-policy-deny.sh test/incus/wire-appmatch-twins.sh test/incus/wire-zone-matrix.sh test/incus/wire-hostinbound-deny.sh test/incus/wire-conntrack-lifecycle.sh test/incus/wire-routing-separation.sh"
+ODD_SET="scripts/dist/selftest.sh scripts/image/test-grow-root.sh test/incus/wire-policy-deny.sh test/incus/wire-appmatch-twins.sh test/incus/wire-zone-matrix.sh test/incus/wire-hostinbound-deny.sh test/incus/wire-conntrack-lifecycle.sh test/incus/wire-routing-separation.sh test/incus/wire-nat-frag-needed.sh test/incus/t12-g2-9506.sh"
 POSITIVE_CONTROL="test/incus/harness-result-selftest.sh"
 
 runner_code=$(sed 's/#.*//' "$RUNNER")
@@ -163,7 +175,54 @@ else
 		note_fail "odd-set members no longer registered in §4 (remove the declaration):$odd_stale"
 	fi
 	if [ -z "$odd_extra" ] && [ -z "$odd_stale" ]; then
-		note_pass "§4 odd-name set is exactly the 8 declared"
+		note_pass "§4 odd-name set is exactly the 10 declared"
+	fi
+fi
+
+# ── 2b. the --selftest-arm scan (#14653): a verdict core that no filename
+# glob can see ──
+# Some gates are ordinary scripts (wire-nat-frag-needed.sh, t12-g2-9506.sh)
+# whose hermetic core hides behind a `--selftest)` case arm. They match no
+# SELFTEST_GLOBS entry, so §1 never discovers them and §2 sees them only if
+# someone hand-adds them to ODD_SET — the #7296 "NOTHING NOTICED" shape one
+# level down: before #14653 the census reported OK while two such cores were
+# reached only by hand via `make test-*-lib`. Scan the disk for the arm
+# itself so the NEXT such script fails here by name until it is registered
+# in the runner.
+# Registration for an arm script means a `run_bash <path> --selftest` /
+# `run_shell <path> --selftest` line anywhere in the runner (comments
+# stripped) — registration without the flag would run the LIVE gate, not
+# the hermetic core, so it does not count. (Scripts recognising the flag
+# via an `if [ "$1" = "--selftest" ]` test rather than a case arm, e.g.
+# selftest-probe-filter_6898.sh, match a discovery glob by name and are
+# covered by §1; they are not this scan's subject.)
+# Keeping ODD_SET as the exemption DECLARATION is preserved through §2
+# above: an arm script added to ODD_SET without a §4 registration fails
+# §2 as stale, and a §4 registration without ODD_SET fails §2 as extra —
+# so no arm script can be exempted by declaration alone without §2 red.
+# grep over test/ and scripts/ (--include='*.sh') needs no extra fixture
+# layout; an EMPTY scan fails rather than sweeping nothing. This census
+# itself is excluded exactly as §1 excludes the runner: its own comments
+# and matcher name the arm, so requiring it to register itself would be
+# the source-scanning gate passing on its own documentation.
+echo "selftest census: --selftest-arm scan over test/ and scripts/"
+arm_files=$(grep -rl --include='*.sh' -- '--selftest)' test scripts 2>/dev/null | grep -v '^scripts/selftest-census\.sh$' | sort)
+if [ -z "$arm_files" ]; then
+	note_fail "--selftest-arm scan is EMPTY — the arm sweep found nothing (matcher broken, not the tree)"
+else
+	arm_n=0
+	arm_missing=""
+	for f in $arm_files; do
+		arm_n=$((arm_n + 1))
+		case "$runner_code" in
+		*"run_bash $f --selftest"* | *"run_shell $f --selftest"*) ;;
+		*) arm_missing="$arm_missing $f" ;;
+		esac
+	done
+	if [ -n "$arm_missing" ]; then
+		note_fail "scripts with a --selftest arm but no --selftest registration in $RUNNER (register them in §4 with --selftest and declare them in the odd set if outside every glob, or remove the arm):$arm_missing"
+	elif [ "$arm_n" -gt 0 ]; then
+		note_pass "$arm_n --selftest-arm scripts, all registered with --selftest"
 	fi
 fi
 

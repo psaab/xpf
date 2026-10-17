@@ -460,6 +460,13 @@ run_bash test/incus/wire-hostinbound-deny.sh --selftest
 run_bash test/incus/wire-conntrack-lifecycle.sh --selftest
 run_bash test/incus/wire-config-snapshot-selftest.sh
 run_bash test/incus/wire-routing-separation.sh --selftest
+# #14653: two more hermetic --selftest verdict cores sharing the wire-gate
+# verdict pattern above. frag-needed (#12809) guards NAT ICMP translation;
+# T12/G2 (#9506) guards its hermetic predicate cells. Their live paths run
+# via `make test-wire-nat-frag-needed` / `make test-t12-g2-9506`; the
+# --selftest arms need no cluster, lock, or network.
+run_bash test/incus/wire-nat-frag-needed.sh --selftest
+run_bash test/incus/t12-g2-9506.sh --selftest
 # #11056: the hermetic wire-gate legs — capture reduction over real tcpdump
 # transcripts, the gates' --fixture modes over measured transcripts, floor
 # binding, and near-miss rejection. --no-live keeps this aggregate
