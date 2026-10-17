@@ -111,6 +111,82 @@ type natMatchScope struct {
 // carry. Order matters only for deterministic emission, not precedence.
 var natScopeKinds = []string{"zone", "interface", "routing-instance"}
 
+// natRuleSetChildren returns the effective children of a NAT rule-set node,
+// expanding a scope tail packed onto its header
+// (`rule-set RS from zone trust { rule ... }`, #14421). The braced spelling
+// returns node.Children unchanged. packedBodyChildren cannot be used here:
+// the packed `from zone trust` tail runs through the multi-valued `zone`
+// leaf, whose terminal declares no body, so packedBodyChildren returns the
+// real children unexpanded (#6818 guard) and the scope stays invisible.
+// Instead the tail is consumed with the grammar's own arity — `from`/`to`
+// (no args) then a scope kind (args:1, multi) then one value per scope —
+// terminated at `rule` or end-of-tail, and each scope value is synthesised
+// as the clause child parseNATMatchScopes already reads
+// (Keys=[from, <kind>, <value>]). Bracket lists reach here already collapsed
+// onto Keys (TokensBracketed is not retained by the hierarchical parser), so
+// a multi-value packed clause reads as multiple scopes of one kind — the
+// same OR the braced bracket list produces; mixed kinds in the tail are
+// still caught by the mixed-scope gate because every synthesised clause is
+// returned. A `rule` tail is left in the real children (the compilers read
+// rules from rsNode directly, never through this helper). An unmodelled tail
+// returns the real children unchanged — never guess.
+func natRuleSetChildren(rsNode *Node, natKind string) []*Node {
+	if rsNode == nil || len(rsNode.Keys) < 2 {
+		return nodeChildren(rsNode)
+	}
+	_ = natKind
+	tail := instanceValueTail(rsNode, rsNode.Keys[1])
+	if len(tail) == 0 || (tail[0] != "from" && tail[0] != "to") {
+		return rsNode.Children
+	}
+	out := append([]*Node(nil), rsNode.Children...)
+	for len(tail) > 0 {
+		clause := tail[0]
+		if clause != "from" && clause != "to" {
+			return rsNode.Children
+		}
+		if len(tail) == 2 {
+			base := len(rsNode.Keys) - len(tail)
+			if base+1 < len(rsNode.Keys) && base+1 < len(rsNode.KeysBracketed) && rsNode.KeysBracketed[base+1] {
+				out = append(out, &Node{Keys: []string{clause, tail[1], ""}, InheritedFrom: rsNode.InheritedFrom})
+				tail = nil
+				continue
+			}
+			return rsNode.Children
+		}
+		if len(tail) < 3 {
+			return rsNode.Children
+		}
+		kind := tail[1]
+		known := false
+		for _, k := range natScopeKinds {
+			if k == kind {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return rsNode.Children
+		}
+		values := tail[2:]
+		n := 0
+		for n < len(values) && values[n] != "from" && values[n] != "to" && values[n] != "rule" {
+			n++
+		}
+		if n == 0 {
+			return rsNode.Children
+		}
+		for _, v := range values[:n] {
+			out = append(out, &Node{Keys: []string{clause, kind, v}, InheritedFrom: rsNode.InheritedFrom})
+		}
+		tail = values[n:]
+	}
+	if len(out) == len(rsNode.Children) {
+		return rsNode.Children
+	}
+	return out
+}
+
 // parseNATMatchScopes generalizes parseZoneList (#3096): it extracts every
 // from/to scope token — `zone`, `interface`, AND `routing-instance` — from a
 // from/to clause node in both AST shapes the parser produces, instead of
@@ -183,9 +259,16 @@ func parseNATMatchScopes(node *Node) []natMatchScope {
 // ({kind:"zone", value:""}) only for an absent clause; a present clause that
 // contains no non-empty scope stays empty so it cannot widen to match-any.
 // #3096.
-func collectNATScopes(rsNode *Node, wantTo bool) (fromScopes, toScopes []natMatchScope) {
+//
+// natKind (source|destination|static) is accepted for call-site symmetry
+// with the gates; the packed-header expansion is kind-independent.
+func collectNATScopes(rsNode *Node, wantTo bool, natKind ...string) (fromScopes, toScopes []natMatchScope) {
+	kind := ""
+	if len(natKind) > 0 {
+		kind = natKind[0]
+	}
 	fromPresent, toPresent := false, false
-	for _, child := range rsNode.Children {
+	for _, child := range natRuleSetChildren(rsNode, kind) {
 		switch child.Name() {
 		case "from":
 			fromPresent = true

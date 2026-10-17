@@ -52,11 +52,8 @@ func natRuleSetHasToScope(rsNode *Node, name string) bool {
 	if rsNode == nil {
 		return false
 	}
-	if rsNode.FindChild("to") != nil {
-		return true
-	}
-	for _, tok := range instanceValueTail(rsNode, name) {
-		if tok == "to" {
+	for _, child := range natRuleSetChildren(rsNode, "destination") {
+		if child.Name() == "to" {
 			return true
 		}
 	}

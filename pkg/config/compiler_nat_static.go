@@ -852,7 +852,7 @@ func compileNATStatic(node *Node, sec *SecurityConfig) error {
 	for _, rsInst := range namedInstances(node.FindChildren("rule-set")) {
 		// #3096: capture from scope across zone | interface |
 		// routing-instance (static NAT has no `to` clause).
-		fromScopes, _ := collectNATScopes(rsInst.node, false)
+		fromScopes, _ := collectNATScopes(rsInst.node, false, "static")
 
 		// Parse rules (shared across all scope expansions)
 		var rules []*StaticNATRule

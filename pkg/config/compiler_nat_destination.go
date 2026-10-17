@@ -205,7 +205,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 		}
 		// #3096: capture the `from` scope across zone | interface |
 		// routing-instance (bracket lists produce multiple scopes).
-		fromScopes, _ := collectNATScopes(rsInst.node, false)
+		fromScopes, _ := collectNATScopes(rsInst.node, false, "destination")
 
 		var rules []*NATRule
 		for _, ruleInst := range namedInstances(rsInst.node.FindChildren("rule")) {
