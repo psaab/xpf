@@ -391,14 +391,41 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 		if rg <= 0 {
 			rg = rethRG[name]
 		}
+		// #14331: an untagged unit .0 collapses onto the base netdev
+		// (snapshotLinuxName(unit.0) == linuxName), so the base row and the
+		// unit row share an ifindex and the same live kernel addresses.
+		// Routing-instance membership is authored per-unit, so the bare
+		// key is absent from ifaceRoutingInstance for
+		// `routing-instances vrf1 interface ge-0/0/1.0` and the base row
+		// would carry RoutingDomain 0 while republishing the VRF unit's
+		// addresses — leaking them into Domain:0 local entries and making
+		// localAddressRoutingDomain reject the shared ifindex as
+		// ambiguous. When unit .0 collapses onto the base, the base IS
+		// that unit for routing-domain purposes: inherit its instance
+		// and domain (quarantine sentinel included, via the same
+		// routingDomainForInterfaceKey resolution). A VLAN/tunnel unit .0
+		// on its own netdev does not collapse and leaves the base row
+		// untouched. An explicit bare-key membership keeps precedence.
+		baseRoutingInstance := ifaceRoutingInstance[name]
+		baseRoutingDomain := routingDomainForInterfaceKey(name, ifaceRoutingInstance, quarantinedKeys)
+		if _, bareClaimed := ifaceRoutingInstance[name]; !bareClaimed {
+			if _, quarantined := quarantinedKeys[name]; !quarantined {
+				if u0, ok := iface.Units[0]; ok && u0 != nil &&
+					snapshotLinuxName(cfg, name, iface, u0) == linuxName {
+					unitKey := fmt.Sprintf("%s.0", name)
+					baseRoutingInstance = ifaceRoutingInstance[unitKey]
+					baseRoutingDomain = routingDomainForInterfaceKey(unitKey, ifaceRoutingInstance, quarantinedKeys)
+				}
+			}
+		}
 		out = append(out, InterfaceSnapshot{
 			Name: name,
 			// #9821 #22: structural row identity, stated explicitly — a
 			// dotted base name (`ge-0/0/5.0`) must not parse as a unit.
 			IsUnit:          false,
 			Zone:            zoneByInterface[name],
-			RoutingInstance: ifaceRoutingInstance[name],
-			RoutingDomain:   routingDomainForInterfaceKey(name, ifaceRoutingInstance, quarantinedKeys),
+			RoutingInstance: baseRoutingInstance,
+			RoutingDomain:   baseRoutingDomain,
 			LinuxName:       linuxName,
 			ParentLinuxName: "",
 			NativeVLANID:    iface.NativeVlanID,
