@@ -259,15 +259,24 @@ type Manager struct {
 }
 
 // ShrinkHighWater is the durable per-feed cumulative-shrink epoch baseline.
+// Prefixes carries the epoch content set (#14395): the exact prefixes
+// installed at the last acknowledged epoch, so content churn can be
+// measured against the epoch rather than the immediate predecessor
+// across restarts. Records written before #14395 have no Prefixes; they
+// restore the count epoch only and the content epoch re-bootstraps on
+// the first install (the pre-existing bootstrap audit path).
 type ShrinkHighWater struct {
-	Name  string `json:"name"`
-	Count int    `json:"count"`
-	Hash  string `json:"hash"`
+	Name     string   `json:"name"`
+	Count    int      `json:"count"`
+	Hash     string   `json:"hash"`
+	Prefixes []string `json:"prefixes,omitempty"`
 }
 
 type feedShrinkHistory struct {
 	highWaterCount int
 	highWaterHash  [32]byte
+	epochPrefixes  []string
+	epochHash      [32]byte
 }
 
 var emptyFeedHash = sha256.Sum256(nil)
@@ -287,6 +296,17 @@ type feedState struct {
 	// persisted by the daemon for cold boot.
 	shrinkHighWaterCount int
 	shrinkHighWaterHash  [32]byte
+
+	// epochContentPrefixes is the exact prefix set installed at the last
+	// acknowledged epoch (bootstrap install or an acknowledged install);
+	// epochContentHash is its hashPrefixes digest. Content churn is
+	// measured against this set, NOT the immediate predecessor (#14395):
+	// otherwise three successive 51%-retained rotations fully replace a
+	// feed with zero refusals. The epoch is never moved by an ordinary
+	// unacknowledged install. It is persisted alongside the high-water
+	// count/hash in ShrinkHighWater.Prefixes.
+	epochContentPrefixes []string
+	epochContentHash     [32]byte
 
 	// The active refused candidate and one-shot acknowledgement are runtime
 	// status, not persisted across a producer replacement. The refusal counter,
@@ -420,7 +440,19 @@ func (m *Manager) RestoreShrinkHighWater(records []ShrinkHighWater) {
 		}
 		var hash [32]byte
 		copy(hash[:], raw)
-		m.shrinkHistory[record.Name] = feedShrinkHistory{highWaterCount: record.Count, highWaterHash: hash}
+		hist := feedShrinkHistory{highWaterCount: record.Count, highWaterHash: hash}
+		// #14395 epoch content: accept only a canonical set whose digest
+		// matches the record hash, bounded by the feed entry cap. A corrupt
+		// or mismatched set is dropped (count epoch still restores; the
+		// content epoch then re-bootstraps with the usual audit warning).
+		if len(record.Prefixes) > 0 && len(record.Prefixes) <= maxFeedPrefixes {
+			canon := canonicalize(append([]string(nil), record.Prefixes...))
+			if len(canon) == len(record.Prefixes) && hashPrefixes(canon) == hash {
+				hist.epochPrefixes = canon
+				hist.epochHash = hash
+			}
+		}
+		m.shrinkHistory[record.Name] = hist
 	}
 }
 
@@ -434,9 +466,13 @@ func (m *Manager) ShrinkHighWaterSnapshot() []ShrinkHighWater {
 		if history.highWaterCount <= 0 {
 			continue
 		}
-		records = append(records, ShrinkHighWater{
+		rec := ShrinkHighWater{
 			Name: name, Count: history.highWaterCount, Hash: fmt.Sprintf("%x", history.highWaterHash),
-		})
+		}
+		if len(history.epochPrefixes) > 0 {
+			rec.Prefixes = append([]string(nil), history.epochPrefixes...)
+		}
+		records = append(records, rec)
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Name < records[j].Name })
 	return records
@@ -898,6 +934,10 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 		} else if history, ok := m.shrinkHistory[p.name]; ok {
 			fs.shrinkHighWaterCount = history.highWaterCount
 			fs.shrinkHighWaterHash = history.highWaterHash
+			if len(history.epochPrefixes) > 0 {
+				fs.epochContentPrefixes = append([]string(nil), history.epochPrefixes...)
+				fs.epochContentHash = history.epochHash
+			}
 		}
 		newFeeds[p.name] = fs
 		warnPlaintextFeed(p.name, p.url)
@@ -945,6 +985,8 @@ func carryForwardSnapshot(dst, src *feedState) {
 	dst.shrinkLastWarn = src.shrinkLastWarn
 	dst.shrinkHighWaterCount = src.shrinkHighWaterCount
 	dst.shrinkHighWaterHash = src.shrinkHighWaterHash
+	dst.epochContentPrefixes = append([]string(nil), src.epochContentPrefixes...)
+	dst.epochContentHash = src.epochContentHash
 	// Carry the last confirmed publish state across a same-name producer
 	// replacement. The daemon's apply re-enforces a carried snapshot; matching
 	// content stays no-thrash, while an existing content mismatch remains
@@ -1817,11 +1859,17 @@ func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, candidate
 	// installed: after a hold-interval drop there is no installed hash to
 	// compare against, yet the surviving refusal still names the baseline
 	// that was dropped (#12882) and stays acknowledgeable. Any install
-	// clears the refusal, so a surviving tuple is never stale.
+	// clears the refusal, so a surviving tuple is never stale. For an epoch
+	// churn refusal (#14395) the baseline is the epoch set, which may
+	// legitimately differ from the installed set; currency then requires
+	// the baseline to still be the live epoch (or the installed set when
+	// no epoch exists).
+	baselineCurrent := !fs.hasSnapshot || fs.hash == fs.shrinkBaselineHash ||
+		(len(fs.epochContentPrefixes) > 0 && fs.epochContentHash == fs.shrinkBaselineHash)
 	if fs.shrinkRefusalID != refusalID ||
 		candidateHash != fmt.Sprintf("%x", fs.shrinkCandidateHash) ||
 		baselineHash != fmt.Sprintf("%x", fs.shrinkBaselineHash) ||
-		(fs.hasSnapshot && fs.hash != fs.shrinkBaselineHash) ||
+		!baselineCurrent ||
 		oldCount != fs.shrinkCandidateOldCount ||
 		newCount != fs.shrinkCandidateNewCount {
 		return fmt.Errorf("dynamic-address feed %q refusal candidate tuple is stale", name)
@@ -1884,10 +1932,25 @@ func contentChurnTripped(oldPrefixes, candidate []string, thresholds shrinkGuard
 }
 
 func (m *Manager) rememberShrinkHighWaterLocked(name string, count int, hash [32]byte) {
+	m.rememberShrinkEpochLocked(name, count, hash, nil, [32]byte{})
+}
+
+// rememberShrinkEpochLocked records the count high-water and, when
+// epochPrefixes is non-nil, the epoch content set (#14395). A nil epoch
+// leaves any previously remembered epoch content untouched, so count-only
+// advances never erase the content anchor.
+func (m *Manager) rememberShrinkEpochLocked(name string, count int, hash [32]byte, epochPrefixes []string, epochHash [32]byte) {
 	if m.shrinkHistory == nil {
 		m.shrinkHistory = make(map[string]feedShrinkHistory)
 	}
-	m.shrinkHistory[name] = feedShrinkHistory{highWaterCount: count, highWaterHash: hash}
+	hist := m.shrinkHistory[name]
+	hist.highWaterCount = count
+	hist.highWaterHash = hash
+	if epochPrefixes != nil {
+		hist.epochPrefixes = append([]string(nil), epochPrefixes...)
+		hist.epochHash = epochHash
+	}
+	m.shrinkHistory[name] = hist
 }
 
 func (fs *feedState) shrinkCandidateMatches(hash, baselineHash [32]byte, oldCount, newCount int) bool {
@@ -1984,6 +2047,7 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	}
 	priorHighWaterCount := fs.shrinkHighWaterCount
 	priorHighWaterHash := fs.shrinkHighWaterHash
+	wasBootstrap := !fs.hasSnapshot
 	// changed = the installed enforced content differs from the prior install.
 	// Drives the display/degraded logging (a content change), independent of
 	// whether that content has been PUBLISHED.
@@ -2009,8 +2073,20 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	}
 	shrinkTripped := fs.hasSnapshot && fs.hash != res.hash &&
 		shrinkGuardTrippedWithThresholds(highWaterCount, len(res.prefixes), thresholds)
+	// #14395: churn is measured against the EPOCH baseline, not the
+	// immediate predecessor. A 51%-retained rotation installs (51% of the
+	// epoch is at/above the floor) but does NOT move the epoch; a later
+	// rotation retaining <50% of the epoch is refused even though it
+	// retains 51% of its predecessor. Fall back to fs.prefixes only while
+	// no epoch exists (snapshot predating the epoch field; the first
+	// install below then establishes the epoch).
+	churnBaseline := fs.epochContentPrefixes
+	if len(churnBaseline) == 0 {
+		churnBaseline = fs.prefixes
+	}
 	churnTripped := fs.hasSnapshot &&
-		contentChurnTripped(fs.prefixes, res.prefixes, thresholds)
+		contentChurnTripped(churnBaseline, res.prefixes, thresholds)
+	epochChurnTripped := churnTripped && len(fs.epochContentPrefixes) > 0
 	bootstrapDiffersFromHighWater := !fs.hasSnapshot && fs.shrinkHighWaterCount > 0 &&
 		len(res.prefixes) <= fs.shrinkHighWaterCount &&
 		(len(res.prefixes) < fs.shrinkHighWaterCount || res.hash != fs.shrinkHighWaterHash)
@@ -2030,7 +2106,8 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 
 	// Refusals and their acknowledgements bind to the exact content/baseline
 	// tuple. For a cumulative shrink, old_count is the epoch high-water count;
-	// for content churn alone, it is the currently installed count.
+	// for content churn, it is the epoch baseline count/hash (#14395), so an
+	// acknowledgement reviews the epoch the candidate was refused against.
 	guardBypass := false
 	guardActor := ""
 	guardReason := ""
@@ -2045,7 +2122,19 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		if candidateReason != "" {
 			candidateReason += " and "
 		}
-		candidateReason += "retained content overlap below floor"
+		candidateReason += "epoch retained content overlap below floor"
+		// The ack tuple must bind the epoch baseline, not the predecessor:
+		// the operator reviews candidate-vs-epoch, and AcknowledgeFeedShrink's
+		// installed-hash currency check is bypassed for epoch baselines
+		// (the installed set may legitimately differ from the epoch).
+		baselineHash = fs.epochContentHash
+		if len(fs.epochContentPrefixes) == 0 {
+			baselineHash = fs.hash
+		}
+		candidateOldCount = len(churnBaseline)
+		if shrinkTripped {
+			candidateOldCount = highWaterCount
+		}
 	}
 	if refusedAfterDrop {
 		baselineHash = fs.shrinkBaselineHash
@@ -2089,6 +2178,10 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 				ferr = fmt.Errorf(
 					"drastic shrink refused against epoch high-water baseline: candidate %d prefixes vs %d high-water (%d currently installed); retain-percent floor %d%% and minimum drop %d; retaining last-good snapshot",
 					newCount, highWaterCount, oldCount, thresholds.minRetainPercent, thresholds.minDrop)
+			case epochChurnTripped:
+				ferr = fmt.Errorf(
+					"epoch content overlap below floor: candidate %d prefixes retain less than %d%% of the %d epoch-baseline prefixes (%d currently installed); retaining last-good snapshot",
+					newCount, thresholds.minRetainPercent, len(churnBaseline), oldCount)
 			default:
 				ferr = fmt.Errorf(
 					"content overlap below floor: candidate %d prefixes retain less than %d%% of the %d currently installed prefixes; retaining last-good snapshot",
@@ -2142,9 +2235,30 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		fs.shrinkHighWaterCount = newCount
 		fs.shrinkHighWaterHash = res.hash
 	}
-	m.rememberShrinkHighWaterLocked(fs.name, fs.shrinkHighWaterCount, fs.shrinkHighWaterHash)
+	// #14395 epoch rebase: ONLY bootstrap (first install) or an
+	// acknowledged (guardBypass) install moves the content epoch. An
+	// ordinary unacknowledged install — including equal-count rotations
+	// that pass the epoch floor — never rebases, so cumulative rotation
+	// cannot boil the frog. When the epoch rebases on acknowledgement,
+	// the count high-water rebases with it to the acknowledged set
+	// (mirrors the existing acknowledged-shrink epoch semantics).
+	epochRebased := false
+	if wasBootstrap || guardBypass {
+		fs.epochContentPrefixes = append([]string(nil), res.prefixes...)
+		fs.epochContentHash = res.hash
+		epochRebased = true
+		if guardBypass {
+			fs.shrinkHighWaterCount = newCount
+			fs.shrinkHighWaterHash = res.hash
+		}
+	}
+	if epochRebased {
+		m.rememberShrinkEpochLocked(fs.name, fs.shrinkHighWaterCount, fs.shrinkHighWaterHash, fs.epochContentPrefixes, fs.epochContentHash)
+	} else {
+		m.rememberShrinkHighWaterLocked(fs.name, fs.shrinkHighWaterCount, fs.shrinkHighWaterHash)
+	}
 	historyChanged := fs.shrinkHighWaterCount != priorHighWaterCount ||
-		fs.shrinkHighWaterHash != priorHighWaterHash
+		fs.shrinkHighWaterHash != priorHighWaterHash || epochRebased
 	historyChangedCallback := m.onShrinkHistoryChanged
 	// Any successful install re-baselines last-good and clears an outstanding
 	// refusal/acknowledgement. An ack can never apply to a later candidate.

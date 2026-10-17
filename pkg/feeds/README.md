@@ -27,10 +27,17 @@ An identical refetch of an already installed sub-high-water set is accepted;
 only a changed candidate is compared with the retained epoch baseline.
 
 For feeds meeting the minimum-old-count threshold, the guard also compares
-exact-prefix overlap with the currently installed snapshot. A candidate that
-retains less than the configured retained percentage is refused, including an
-equal-count wholly-disjoint swap. The same exact-candidate acknowledgement
-workflow applies to either refusal. Bootstrap remains installable; after a
+exact-prefix overlap with the epoch content baseline (#14395): the exact set
+installed at the last acknowledged epoch (bootstrap or an acknowledged
+install). A candidate that retains less than the configured retained
+percentage of that epoch set is refused, including an equal-count
+wholly-disjoint swap. An ordinary unacknowledged install never moves the
+epoch, so successive 51%-retained rotations cannot cumulatively replace
+the set: the rotation that drops epoch retention below the floor is
+refused and names epoch content overlap. The same exact-candidate
+acknowledgement workflow applies to either refusal; acknowledging an
+epoch-churn candidate installs it and rebases the epoch (and the count
+high-water) to the acknowledged set. Bootstrap remains installable; after a
 same-manager remove/re-add, a bootstrap with fewer prefixes or changed
 same-sized content installs with a warning that records both hashes and counts.
 
@@ -39,9 +46,12 @@ dataplane. `LastError`, `StaleSince`, `show security dynamic-address`, and the
 per-feed refusal metrics identify the held candidate. The zero-prefix,
 truncation, and whole-address-space guards remain independent and unchanged.
 High-water history survives same-name reconfiguration and removal/recreation,
-and the daemon durably stores each feed's count and hash in
+and the daemon durably stores each feed's count, hash, and epoch prefix set in
 `/var/lib/xpf/feed-shrink-history.json`. A cold boot restores that epoch before
-starting producers, so its first successful bootstrap is audited against it.
+starting producers, so its first successful bootstrap is audited against it,
+and the restored epoch set anchors subsequent content-churn refusals. Records
+written before the epoch set was persisted restore the count epoch only; the
+content epoch then re-bootstraps on the first install.
 Factory reset erases this file and any crash-leaked `.<base>.tmp-*` snapshots
 after fencing and draining the daemon's in-flight persistence callback, so a
 re-tenanted device does not inherit a prior tenant's same-named feed baseline.
@@ -136,9 +146,12 @@ groups:
 
 The #11489 bypasses are now guarded: cumulative under-floor shrinkage is
 compared with the epoch high-water baseline, and low-overlap content changes
-are refused. A same-manager delete/re-add retains the high-water count and
+are refused. The #14395 multi-step rotation bypass is guarded the same way:
+content overlap is compared with the epoch content set, not the immediate
+predecessor, so three successive 51%-retained rotations cannot fully replace
+a feed with zero refusals. A same-manager delete/re-add retains the high-water count and
 warns on a smaller or changed same-sized bootstrap candidate. The daemon also
-persists that per-feed count and hash across process restarts. Keep the source
+persists that per-feed count, hash, and epoch set across process restarts. Keep the source
 feed's own integrity/monitoring controls in place.
 
 ## Day-2 reconcile (#5036)
