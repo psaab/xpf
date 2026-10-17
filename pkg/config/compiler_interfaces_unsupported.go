@@ -700,10 +700,14 @@ func unsupportedInterfaceFilterKnobs(fam *Node) []string {
 				case "input-list", "output-list":
 					add("filter " + key)
 				case "input", "output":
-					// A packed filter child with more than one value
-					// leaves every value after nodeVal's first one
-					// unenforced.
-					if len(c.Keys[1:]) > i+2 {
+					// A packed filter child with more than one AUTHORED
+					// value for this direction leaves every value after
+					// nodeVal's first one unenforced. Direction keywords
+					// are statement boundaries, not values: a two-direction
+					// run (input F-IN output F-OUT) is two single-value
+					// statements, so a trailing direction bounds this
+					// direction to one value. (#14431)
+					if len(c.Keys[1:]) > i+2 && !isFilterDirection12090(c.Keys[i+3]) {
 						add("filter " + key)
 					}
 				}

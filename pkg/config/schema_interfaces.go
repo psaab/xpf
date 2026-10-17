@@ -246,7 +246,7 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 					"input":  {desc: "Sample input traffic", children: nil},
 					"output": {desc: "Sample output traffic", children: nil},
 				}},
-				"filter": {desc: "Firewall filter", children: map[string]*schemaNode{
+				"filter": {desc: "Firewall filter", packedStatements: true, children: map[string]*schemaNode{
 					"input":  {desc: "Input filter", args: 1, scalar: true, blockValue: true, placeholder: "<filter-name>", children: nil},
 					"output": {desc: "Output filter", args: 1, scalar: true, blockValue: true, placeholder: "<filter-name>", children: nil},
 				}},
@@ -286,7 +286,7 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 					"input":  {desc: "Sample input traffic", children: nil},
 					"output": {desc: "Sample output traffic", children: nil},
 				}},
-				"filter": {desc: "Firewall filter", children: map[string]*schemaNode{
+				"filter": {desc: "Firewall filter", packedStatements: true, children: map[string]*schemaNode{
 					"input":  {desc: "Input filter", args: 1, scalar: true, blockValue: true, placeholder: "<filter-name>", children: nil},
 					"output": {desc: "Output filter", args: 1, scalar: true, blockValue: true, placeholder: "<filter-name>", children: nil},
 				}},
