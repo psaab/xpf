@@ -487,6 +487,19 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 
 	if bgp != nil && bgp.LocalAS > 0 {
 		fmt.Fprintf(&b, "router bgp %d%s\n", bgp.LocalAS, vrfSuffix)
+		// #14584: FRR bgpd defaults to `bgp ebgp-requires-policy`
+		// (RFC 8212): an eBGP neighbor with no inbound route-map has
+		// every inbound update discarded (inboundEbgpRequiresPolicy),
+		// and a policy-less eBGP neighbor is discarded outbound too.
+		// Junos default import accepts all received routes and default
+		// export advertises active BGP routes, and this renderer
+		// already relies on an ABSENT route-map attachment meaning
+		// that default (#6807/#7625). Opt every stanza (default and
+		// each VRF) out of requires-policy so the absent-attachment
+		// shapes — export-only and policy-less eBGP — exchange routes
+		// as Junos does. Neighbors WITH policies are unaffected: their
+		// route-maps still filter exactly as before.
+		b.WriteString(" no bgp ebgp-requires-policy\n")
 		if validRouterID(bgp.RouterID) {
 			fmt.Fprintf(&b, " bgp router-id %s\n", bgp.RouterID)
 		}
@@ -676,7 +689,12 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		// and silently accept every inbound advertisement" — is backwards. FRR
 		// stable/10.6 bgp_input_modifier returns RMAP_DENY for an unresolvable
 		// name; it is the ABSENT attachment this skip produces that accepts
-		// everything. Behaviour unchanged here (that decision is #7625); the
+		// everything. That absent-attachment accept holds only because every
+		// `router bgp` stanza now emits `no bgp ebgp-requires-policy`
+		// (#14584): bgpd's RFC 8212 default otherwise discards every inbound
+		// update from an eBGP peer with no inbound route-map (and outbound
+		// too when it has no outbound route-map), even though the route-map
+		// attachment is absent. Behaviour unchanged here (that decision is #7625); the
 		// claim is corrected so nobody
 		// reasons from it. Every DEFINED entry is
 		// preserved as an ordered CHAIN and composed in order (#5277); the

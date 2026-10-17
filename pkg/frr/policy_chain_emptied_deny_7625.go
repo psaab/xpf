@@ -23,7 +23,14 @@ import (
 //	                      rmap = route_map_lookup_by_name(rmap_name);
 //	                      if (rmap == NULL) return RMAP_DENY;
 //
-// an ABSENT attachment is the one shape that PERMITS. So the direction whose
+// an ABSENT attachment is the one shape that PERMITS at the route-map
+// layer. That permit is load-bearing only with #14584: every `router bgp`
+// stanza emits `no bgp ebgp-requires-policy`, because bgpd's RFC 8212
+// default (bgp ebgp-requires-policy) discards every update from an eBGP
+// peer lacking a route-map in that direction BEFORE route-map evaluation
+// — so without #14584 an absent attachment on an eBGP peer discarded
+// rather than permitted, and a policy-less eBGP peer was mute both ways.
+// With #14584 in place, the direction whose
 // filter failed hardest — every single member unresolvable — was the direction
 // that ended up unfiltered. That is a hole, not a degradation: the config asking
 // for the most filtering got the least.
@@ -115,7 +122,9 @@ func junosProtocolToFRR7625(name string) string {
 // bgpChainRefOrEmptiedDeny resolves an attachment to the route-map name it must
 // reference. It returns the normal chain reference when the chain resolves, the
 // reserved emptied-chain deny when every authored member is a ghost, and "" when
-// there was no filter to begin with (no attachment — the correct permit).
+// there was no filter to begin with (no attachment — the Junos default permit,
+// effective for eBGP only because every stanza emits
+// `no bgp ebgp-requires-policy`, #14584).
 func bgpChainRefOrEmptiedDeny(authored, resolved []string, po *config.PolicyOptionsConfig, protocolTokensAreRedistribute bool) string {
 	if rm := bgpRouteMapRef(resolved); rm != "" {
 		return rm
