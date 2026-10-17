@@ -140,6 +140,13 @@ BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
 # Transit sysctls are closed by xpfd on orderly shutdown and outlive it.
 TRANSIT_IPV4_SYSCTL=/proc/sys/net/ipv4/ip_forward
 TRANSIT_IPV6_SYSCTL=/proc/sys/net/ipv6/conf/all/forwarding
+# #14620 ownership record: written durably by xpfd (recordTransitGateOwnership
+# in pkg/daemon/daemon_transit_gate.go) the first time the transit gate
+# latches ownership, with the host's pre-xpf sysctl values. Package-derived
+# runtime state under /var/lib/xpf (NOT /etc/xpf, which postrm never
+# touches). Absent on a never-owned host: xpf never wrote the sysctls there
+# and removal must not write them either (#10733 contract).
+TRANSIT_OWNED_FILE=/var/lib/xpf/transit-gate-owned
 
 cleanup_transit_state() {
     # Keep the removal commands before unlinking /usr/local/sbin/xpfd: the
@@ -162,17 +169,43 @@ cleanup_transit_state() {
         echo "xpf: early input barrier removal failed; leaving host input closed" >&2
     fi
     [ "$transit_removed" = yes ] || return 0
-    # Restore the normal forwarding posture after deleting the xpf fence.
-    # These are best-effort procfs writes; a non-booted package-build/chroot
-    # has no live sysctls and must not fail package removal.
-    for path in "$TRANSIT_IPV4_SYSCTL" "$TRANSIT_IPV6_SYSCTL"; do
-        if [ -e "$path" ]; then
-            printf '1\n' > "$path" 2>/dev/null || \
-                echo "xpf: could not restore forwarding sysctl $path" >&2
-        fi
-    done
+    # #14620: restore ONLY on a host xpf owned. Without the daemon's
+    # ownership record xpf never wrote these sysctls (a foreign,
+    # never-committed host retains its posture per #10733); writing 1
+    # unconditionally turned such a host into an unfiltered router and
+    # (v6 all.forwarding=1) disabled RA acceptance. The RemoveTransitBarrier
+    # success above is vacuous when no barrier ever existed, so it is not
+    # evidence of ownership.
+    if [ ! -f "$TRANSIT_OWNED_FILE" ]; then
+        echo "xpf: no transit-gate ownership record; leaving forwarding sysctls unchanged" >&2
+        return 0
+    fi
+    # Restore each recorded prior value; a missing/corrupt entry defaults
+    # to 1 so an owned host is not stranded transit-closed after removal
+    # (the pre-#14620 behaviour on owned hosts).
+    restore_transit_sysctl "$TRANSIT_IPV4_SYSCTL" "$(sed -n 's/^ipv4=//p' "$TRANSIT_OWNED_FILE" 2>/dev/null | head -n 1)"
+    restore_transit_sysctl "$TRANSIT_IPV6_SYSCTL" "$(sed -n 's/^ipv6=//p' "$TRANSIT_OWNED_FILE" 2>/dev/null | head -n 1)"
+    # The record is left in place on `remove` (a same-version reinstall's
+    # daemon continues to own the posture without re-capturing priors —
+    # which would then be the closed values). purge deletes the
+    # /var/lib/xpf tree, and therefore this record, in the case branch below.
 }
 
+
+# restore_transit_sysctl PATH VALUE writes VALUE (normalised to 0|1,
+# default 1) to the procfs knob at PATH. Best-effort: a non-booted
+# package-build/chroot has no live sysctls and must not fail removal.
+restore_transit_sysctl() {
+    _path="$1"; _value="$2"
+    case "$_value" in
+        0|1) ;;
+        *) _value=1 ;;
+    esac
+    if [ -e "$_path" ]; then
+        printf '%s\n' "$_value" > "$_path" 2>/dev/null || \
+            echo "xpf: could not restore forwarding sysctl $_path" >&2
+    fi
+}
 
 # atomic_symlink LINK TARGET — point LINK at TARGET via temp symlink +
 # rename (atomic; no unlink-then-create window).
@@ -345,6 +378,9 @@ case "$1" in
             rm -rf "$STAGED_GEN"
             rm -f "$XPF_UPGRADE_STATUS" "$XPF_UPGRADE_STATUS".*
             rm -f "$XPF_UPGRADE_STATUS_UNREADABLE"
+            # #14620: the transit ownership record is package-derived
+            # runtime state; purge consumes it (after the restore above).
+            rm -f "$TRANSIT_OWNED_FILE"
         fi
         ;;
     upgrade)
