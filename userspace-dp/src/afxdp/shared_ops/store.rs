@@ -802,7 +802,9 @@ pub(in crate::afxdp) fn restamp_shared_policy_entries(
         stored.metadata.policy_counter_idx = entry.metadata.policy_counter_idx;
         stored.metadata.policy_counter = entry.metadata.policy_counter.clone();
         stored.metadata.ingress_zone = entry.metadata.ingress_zone;
+        stored.metadata.ingress_zone_check = entry.metadata.ingress_zone_check;
         stored.metadata.egress_zone = entry.metadata.egress_zone;
+        stored.metadata.egress_zone_check = entry.metadata.egress_zone_check;
         stored.metadata.log_session_init = entry.metadata.log_session_init;
         stored.metadata.log_session_close = entry.metadata.log_session_close;
     }

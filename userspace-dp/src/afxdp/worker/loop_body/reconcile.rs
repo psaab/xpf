@@ -333,10 +333,30 @@ pub(super) fn rematch_bound_first_policy_sessions(
                     } else {
                         to_id
                     };
-                    retained = sessions.rebind_zones_pair(&key, from_id, zone_egress);
+                    retained = sessions.rebind_zones_pair(
+                        &key,
+                        from_id,
+                        crate::session::zone_vintage_check_for_id(
+                            &new_forwarding.zone_id_to_name,
+                            from_id,
+                        ),
+                        zone_egress,
+                        crate::session::zone_vintage_check_for_id(
+                            &new_forwarding.zone_id_to_name,
+                            zone_egress,
+                        ),
+                    );
                     if retained {
                         metadata.ingress_zone = from_id;
+                        metadata.ingress_zone_check = crate::session::zone_vintage_check_for_id(
+                            &new_forwarding.zone_id_to_name,
+                            from_id,
+                        );
                         metadata.egress_zone = zone_egress;
+                        metadata.egress_zone_check = crate::session::zone_vintage_check_for_id(
+                            &new_forwarding.zone_id_to_name,
+                            zone_egress,
+                        );
                     }
                     if retained {
                         let entries = sessions.policy_rebind_pair_entries(&key);
@@ -582,7 +602,15 @@ pub(super) fn rebind_policy_sessions_from_snapshot(
             policy_counter_idx,
             rule.hit_counter.clone(),
             record.ingress_zone,
+            crate::session::zone_vintage_check_for_id(
+                &forwarding.zone_id_to_name,
+                record.ingress_zone,
+            ),
             record.egress_zone,
+            crate::session::zone_vintage_check_for_id(
+                &forwarding.zone_id_to_name,
+                record.egress_zone,
+            ),
         ) {
             let Some(entries) = sessions.policy_rebind_pair_entries(&key) else {
                 continue;

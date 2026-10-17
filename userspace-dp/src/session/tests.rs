@@ -7663,7 +7663,9 @@ fn session_limit_count_moves_with_policy_rebind_before_delete_10985() {
         3,
         std::sync::Arc::new(crate::policy::PolicyRuleCounter::default()),
         TEST_DMZ_ZONE_ID,
+        0,
         TEST_WAN_ZONE_ID,
+        0,
     ));
     assert_eq!(table.session_limit_src_count(TEST_TRUST_ZONE_ID, src), 0);
     assert_eq!(table.session_limit_dst_count(TEST_TRUST_ZONE_ID, dst), 0);
@@ -7702,7 +7704,9 @@ fn local_delivery_single_entry_rebinds_policy_without_reverse_12858() {
         1,
         counter.clone(),
         TEST_LAN_ZONE_ID,
+        0,
         TEST_LAN_ZONE_ID,
+        0,
     ));
     let entries = table
         .policy_rebind_pair_entries(&key)
@@ -7737,9 +7741,164 @@ fn local_delivery_single_entry_rebinds_policy_without_reverse_12858() {
         1,
         counter,
         TEST_LAN_ZONE_ID,
+        0,
         TEST_WAN_ZONE_ID,
+        0,
     ));
     assert!(table.policy_rebind_pair_entries(&transit_key).is_none());
+}
+
+#[test]
+fn rebind_zones_pair_restamps_zone_vintage_checks_14320() {
+    // #14320 decisive regression: a legitimate zone rebind must move the
+    // (zone id, vintage check) pair together. Before the fix the checks
+    // stayed stamped under the OLD zone names, so the #10620 replay fence
+    // later judged the live rebound row stale.
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    let now = 1_000_000_000u64;
+    // Pair in (lan=TEST_LAN_ZONE_ID "lan", wan=TEST_WAN_ZONE_ID "wan"),
+    // stamped with the then-current vintage checks.
+    let mut forward_metadata = metadata();
+    forward_metadata.ingress_zone = TEST_LAN_ZONE_ID;
+    forward_metadata.egress_zone = TEST_WAN_ZONE_ID;
+    forward_metadata.ingress_zone_check = zone_identity_check("lan");
+    forward_metadata.egress_zone_check = zone_identity_check("wan");
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        decision(),
+        forward_metadata,
+        SessionOrigin::ForwardFlow,
+        now,
+        PROTO_TCP,
+        0x02,
+    ));
+    let reverse_key = reverse_key_of(&key);
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_zone = TEST_WAN_ZONE_ID;
+    reverse_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    reverse_metadata.ingress_zone_check = zone_identity_check("wan");
+    reverse_metadata.egress_zone_check = zone_identity_check("lan");
+    assert!(table.install_with_protocol_with_origin(
+        reverse_key.clone(),
+        decision(),
+        reverse_metadata,
+        SessionOrigin::ReverseFlow,
+        now,
+        PROTO_TCP,
+        0x02,
+    ));
+
+    // Rebind ingress lan -> dmz (TEST_DMZ_ZONE_ID, name "dmz"); egress stays wan.
+    assert!(table.rebind_zones_pair(
+        &key,
+        TEST_DMZ_ZONE_ID,
+        zone_identity_check("dmz"),
+        TEST_WAN_ZONE_ID,
+        zone_identity_check("wan"),
+    ));
+
+    let entries = table
+        .policy_rebind_pair_entries(&key)
+        .expect("rebound pair entries");
+    assert_eq!(entries.len(), 2);
+    let forward = &entries[0];
+    assert_eq!(forward.metadata.ingress_zone, TEST_DMZ_ZONE_ID);
+    assert_eq!(
+        forward.metadata.ingress_zone_check,
+        zone_identity_check("dmz"),
+        "forward ingress check must be restamped to the new zone name"
+    );
+    assert_eq!(forward.metadata.egress_zone, TEST_WAN_ZONE_ID);
+    assert_eq!(
+        forward.metadata.egress_zone_check,
+        zone_identity_check("wan")
+    );
+    let reverse = &entries[1];
+    assert_eq!(reverse.key, reverse_key);
+    assert_eq!(reverse.metadata.ingress_zone, TEST_WAN_ZONE_ID);
+    assert_eq!(
+        reverse.metadata.ingress_zone_check,
+        zone_identity_check("wan")
+    );
+    assert_eq!(reverse.metadata.egress_zone, TEST_DMZ_ZONE_ID);
+    assert_eq!(
+        reverse.metadata.egress_zone_check,
+        zone_identity_check("dmz"),
+        "reverse companion egress check must be restamped to the new zone name"
+    );
+}
+
+#[test]
+fn rebind_policy_pair_restamps_zone_vintage_checks_14320() {
+    // #14320: the policy rebind path moves zones too; it must restamp the
+    // vintage checks on both halves just like the zone-only rebind.
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    let now = 1_000_000_000u64;
+    let mut forward_metadata = metadata();
+    forward_metadata.ingress_zone_check = zone_identity_check("lan");
+    forward_metadata.egress_zone_check = zone_identity_check("wan");
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        decision(),
+        forward_metadata,
+        SessionOrigin::ForwardFlow,
+        now,
+        PROTO_TCP,
+        0x02,
+    ));
+    let reverse_key = reverse_key_of(&key);
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_zone = TEST_WAN_ZONE_ID;
+    reverse_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    reverse_metadata.ingress_zone_check = zone_identity_check("wan");
+    reverse_metadata.egress_zone_check = zone_identity_check("lan");
+    assert!(table.install_with_protocol_with_origin(
+        reverse_key.clone(),
+        decision(),
+        reverse_metadata,
+        SessionOrigin::ReverseFlow,
+        now,
+        PROTO_TCP,
+        0x02,
+    ));
+
+    assert!(table.rebind_policy_pair(
+        &key,
+        12,
+        3,
+        std::sync::Arc::new(crate::policy::PolicyRuleCounter::default()),
+        TEST_DMZ_ZONE_ID,
+        zone_identity_check("dmz"),
+        TEST_WAN_ZONE_ID,
+        zone_identity_check("wan"),
+    ));
+
+    let entries = table
+        .policy_rebind_pair_entries(&key)
+        .expect("rebound pair entries");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].metadata.ingress_zone, TEST_DMZ_ZONE_ID);
+    assert_eq!(
+        entries[0].metadata.ingress_zone_check,
+        zone_identity_check("dmz")
+    );
+    assert_eq!(
+        entries[0].metadata.egress_zone_check,
+        zone_identity_check("wan")
+    );
+    assert_eq!(entries[1].metadata.egress_zone, TEST_DMZ_ZONE_ID);
+    assert_eq!(
+        entries[1].metadata.egress_zone_check,
+        zone_identity_check("dmz")
+    );
+    assert_eq!(
+        entries[1].metadata.ingress_zone_check,
+        zone_identity_check("wan")
+    );
 }
 
 
