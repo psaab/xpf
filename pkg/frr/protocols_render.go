@@ -466,6 +466,11 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			// bad value) and sanitize the accepted value, so no invalid token or
 			// injected newline reaches the frr-reload.
 			fmt.Fprintf(&b, " bgp cluster-id %s\n", sanitizeFRRValue(bgp.ClusterID))
+		} else if bgp.ClusterID != "" {
+			// #14377: never silently omit a configured cluster-id (incl.
+			// padded spellings the strict gate now rejects): warn so the
+			// RR loop-prevention loss is operator-visible.
+			logOmittedBGPClusterID(bgp.ClusterID)
 		}
 		if bgp.GracefulRestart {
 			b.WriteString(" bgp graceful-restart\n")

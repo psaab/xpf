@@ -470,7 +470,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		"group": {desc: "BGP group", args: 1, placeholder: "<group-name>", children: map[string]*schemaNode{
 			"peer-as":            {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
 			"local-as":           {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
-			"local-address":      {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateIPAddress, children: nil},
+			"local-address":      {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateBGPLocalAddress, children: nil},
 			"hold-time":          {desc: "Hold time (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateBGPHoldTime, children: nil},
 			"passive":            {desc: "Passive mode (do not initiate connections)", children: nil},
 			"description":        {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
@@ -505,7 +505,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				"description":            {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 				"peer-as":                {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
 				"local-as":               {desc: "Local AS number for this peering", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
-				"local-address":          {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateIPAddress, children: nil},
+				"local-address":          {desc: "Local address (BGP update-source)", args: 1, valueType: ValueIPAddress, placeholder: "<address>", validator: ValidateBGPLocalAddress, children: nil},
 				"hold-time":              {desc: "Hold time (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateBGPHoldTime, children: nil},
 				"passive":                {desc: "Passive mode (do not initiate connections)", children: nil},
 				"multihop":               {desc: "Multihop TTL", args: 1, valueType: ValueInteger, placeholder: "<ttl>", validator: ValidateInteger(1, 255), children: nil},
