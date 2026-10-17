@@ -49,11 +49,14 @@ func TestCheckIPURLWarningRedactsCredential(t *testing.T) {
 				// quote a credentialed URL at the CLI.
 				`set system services dynamic-dns provider bad checkip-url "` + tc.url + `"`,
 			})
-			cfg, err := CompileConfig(tree)
+			// Lenient: since #14372 the strict gate hard-rejects a non-https
+			// checkip-url, so the warning layer is exercised on a lenient load.
+			cfg, err := CompileConfigLenient(tree)
 			if err != nil {
-				t.Fatalf("CompileConfig: %v", err)
+				t.Fatalf("CompileConfigLenient: %v", err)
 			}
-			joined := strings.Join(validateSurfaceADDNSWarnings(cfg), "\n")
+			joined := strings.Join(validateSurfaceADDNSWarnings(cfg), "\n") +
+				"\n" + strings.Join(cfg.Warnings, "\n")
 
 			// Not vacuous: the warning must have fired at all.
 			if !strings.Contains(joined, `provider "bad" checkip-url`) {
@@ -63,8 +66,8 @@ func TestCheckIPURLWarningRedactsCredential(t *testing.T) {
 			if strings.Contains(joined, checkIPWarnCredential) {
 				t.Fatalf("the commit-time checkip-url warning echoed the credential in "+
 					"cleartext:\n%s\nit must contain %q nowhere — the warning is shown to the "+
-					"operator and written to the log. Run p.CheckIPURL through RedactURL, as the "+
-					"url-template warning beside it already does.", joined, checkIPWarnCredential)
+					"operator and written to the log. The strict gate renders the value "+
+					"through RedactURL and the warning pass omits it entirely.", joined, checkIPWarnCredential)
 			}
 		})
 	}

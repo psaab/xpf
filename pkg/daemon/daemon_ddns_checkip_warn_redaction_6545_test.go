@@ -141,7 +141,7 @@ func TestCheckIPProbeWarnRedactsCredential(t *testing.T) {
 // probe gets a deterministic connection-refused against localhost — no network,
 // no timeout, and a genuinely VALID URL end to end.
 func TestCheckIPTransportFailureWarnRedactsFragment(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	base := srv.URL
 	srv.Close() // port now refuses: a transport failure, not a validation refusal
 

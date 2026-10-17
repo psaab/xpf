@@ -420,6 +420,10 @@ func redirectHost(u *url.URL) string {
 type httpClientCache struct {
 	mu      sync.Mutex
 	clients map[string]*cachedBoundClient
+	// rootCAs, when non-nil, replaces the TLS trust roots on every client
+	// this cache builds. Test-only (SetCheckIPRootCAsForTesting); production
+	// leaves it nil so clients verify against the system trust store.
+	rootCAs *x509.CertPool
 }
 
 // cachedBoundClient is a cached client plus the RESOLVED binding it was built
@@ -501,6 +505,11 @@ func (c *httpClientCache) clientFor(p *config.DDNSProvider, resolveIf ...func(st
 		closeIdleConns(ent.client)
 	}
 	cl := newHTTPClientBound(b)
+	if c.rootCAs != nil {
+		if tr, ok := cl.Transport.(*http.Transport); ok && tr.TLSClientConfig != nil {
+			tr.TLSClientConfig.RootCAs = c.rootCAs
+		}
+	}
 	c.clients[key] = &cachedBoundClient{client: cl, bind: b}
 	return cl, nil
 }

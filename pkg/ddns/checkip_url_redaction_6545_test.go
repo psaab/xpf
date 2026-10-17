@@ -21,7 +21,7 @@ import (
 // errors with the RAW url, so the new operator-visible signal wrote a
 // query-string API key into journald in cleartext:
 //
-//	ddns checkip: url "ftp://checkip.example/?apikey=SECRET" must be http(s)
+//	ddns checkip: url "ftp://checkip.example/?apikey=SECRET" must be https
 //
 // A checkip endpoint with a per-account API key in its query is ordinary
 // (ipify, ip-api, and the whole "what is my IP" API tier all offer one), and the
@@ -48,11 +48,11 @@ var malformedCredentialedURLs = []struct {
 	{
 		name: "bad scheme, credential in query",
 		url:  "ftp://checkip.example/?apikey=" + checkIPCredential,
-		want: "must be http(s)",
+		want: "must be https",
 	},
 	{
 		name: "no host, credential in query",
-		url:  "http://?apikey=" + checkIPCredential,
+		url:  "https://?apikey=" + checkIPCredential,
 		want: "has no host",
 	},
 	// PARSE-SUCCESS leaks. These are the shapes that disprove any
@@ -64,17 +64,17 @@ var malformedCredentialedURLs = []struct {
 		// '/' immediately and takes the authority to be empty — the userinfo is
 		// never found. url.Parse, by contrast, populates User just fine.
 		url:  "//user:" + checkIPCredential + "@checkip.example/",
-		want: "must be http(s)",
+		want: "must be https",
 	},
 	{
 		name: "credential in the fragment, bad scheme (parses)",
 		// RedactURL only ever drops the query; a fragment is never touched.
 		url:  "ftp://checkip.example/#apikey=" + checkIPCredential,
-		want: "must be http(s)",
+		want: "must be https",
 	},
 	{
 		name: "credential in the fragment, no host (parses)",
-		url:  "http:///path#" + checkIPCredential,
+		url:  "https:///path#" + checkIPCredential,
 		want: "has no host",
 	},
 	{
@@ -88,7 +88,7 @@ var malformedCredentialedURLs = []struct {
 	{
 		name: "bad scheme, credential in userinfo",
 		url:  "ftp://user:" + checkIPCredential + "@checkip.example/",
-		want: "must be http(s)",
+		want: "must be https",
 	},
 	{
 		name: "unparseable, credential in userinfo",

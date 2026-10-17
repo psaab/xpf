@@ -66,12 +66,24 @@ func ddnsTemplateAuthorityHasUserinfo(tmpl string) bool {
 }
 
 // ddnsPlaintextCredentialEndpoint reports the operator-supplied endpoint field
-// (server / url-template) and value when a CREDENTIALED HTTP DDNS backend is
-// configured with an explicit non-https scheme (#4861). A bare host with no
-// scheme is fine — every HTTP backend composes it over https — so only an
-// explicit http:// (or any non-https scheme) endpoint that would carry the
-// credential in cleartext is flagged. Returns bad=false for a non-credentialed
-// backend or an https/empty/bare endpoint.
+// (server / url-template / checkip-url) and value when it carries an explicit
+// non-https scheme that must not be plaintext.
+//
+// server / url-template are gated only for a CREDENTIALED HTTP DDNS backend
+// (#4861): an explicit http:// (or any non-https scheme) endpoint would carry
+// the update credential in cleartext.
+//
+// checkip-url is gated UNCONDITIONALLY (#14372): it carries no update
+// credential, but its response is an unauthenticated ORACLE — Surface A
+// trusts it as this firewall's public address and publishes it as the DNS
+// record, so a spoofed plaintext response controls the published record
+// (and an API key embedded in the URL leaks in cleartext on every probe).
+// The credentialed-only condition therefore does not apply to it.
+//
+// A bare host with no scheme is fine — every HTTP backend composes it over
+// https — so only an explicit non-https scheme is flagged. Returns bad=false
+// for an https/empty/bare endpoint (and, for server/url-template, for a
+// non-credentialed backend).
 //
 // Scheme extraction is the substring before "://" compared case-insensitively
 // (RFC 3986 §3.1), string-based rather than url.Parse-based because a generic
@@ -79,9 +91,6 @@ func ddnsTemplateAuthorityHasUserinfo(tmpl string) bool {
 // credential) that make url.Parse mangle or reject the value — the same reason
 // validateGenericURLTemplate is string-based.
 func ddnsPlaintextCredentialEndpoint(p *DDNSProvider) (field, value string, bad bool) {
-	if !ddnsBackendCarriesCredentials(p) {
-		return "", "", false
-	}
 	check := func(field, s string) (string, string, bool) {
 		s = strings.TrimSpace(s)
 		if s == "" {
@@ -95,6 +104,15 @@ func ddnsPlaintextCredentialEndpoint(p *DDNSProvider) (field, value string, bad 
 		if !strings.EqualFold(s[:i], "https") {
 			return field, s, true
 		}
+		return "", "", false
+	}
+	// checkip-url first and unconditional (#14372): even when the backend
+	// carries no credential at all, a plaintext checkip response is trusted
+	// as the published address.
+	if f, v, b := check("checkip-url", p.CheckIPURL); b {
+		return f, v, true
+	}
+	if !ddnsBackendCarriesCredentials(p) {
 		return "", "", false
 	}
 	if f, v, b := check("server", p.Server); b {

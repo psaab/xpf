@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"crypto/x509"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -120,8 +122,9 @@ func TestCheckIPProbeWarnReArmsOnDifferentError(t *testing.T) {
 	if _, ok := obs(context.Background(), checkIPScope(p)); ok {
 		t.Fatal("malformed checkip-url must not yield an observation")
 	}
-	// Same provider name, a DIFFERENT failure reason.
-	p2 := &config.DDNSProvider{Name: "prov", Backend: "duckdns", CheckIPURL: "http://"}
+	// Same provider name, a DIFFERENT failure reason (host-less https: the
+	// scheme is now valid, the missing host is the distinct refusal).
+	p2 := &config.DDNSProvider{Name: "prov", Backend: "duckdns", CheckIPURL: "https://"}
 	if _, ok := obs(context.Background(), checkIPScope(p2)); ok {
 		t.Fatal("host-less checkip-url must not yield an observation")
 	}
@@ -132,13 +135,45 @@ func TestCheckIPProbeWarnReArmsOnDifferentError(t *testing.T) {
 	}
 }
 
+// #14372 (fixture F-DR3-H5-3): a Surface A scope over a plaintext http
+// checkip-url publishes NOTHING. The plaintext server answers an attacker
+// public IP; on the buggy tree the observer would return it and Surface A
+// would publish it as the firewall's FQDN. With the runtime https backstop
+// the probe fails closed (transient miss, never a withdraw) and the server
+// is never contacted.
+func TestCheckIPPlaintextPublishesNothing(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = w.Write([]byte("93.184.216.34\n"))
+	}))
+	defer srv.Close()
+
+	rec := captureWarnings(t)
+	d := newCheckIPObserverDaemon(t)
+	obs := d.surfaceAObserver(&config.Config{})
+	scope := checkIPScope(&config.DDNSProvider{
+		Name: "httpprov", Backend: "duckdns", CheckIPURL: srv.URL,
+	})
+	if _, ok := obs(context.Background(), scope); ok {
+		t.Fatal("a plaintext http checkip scope yielded an observation; a spoofed " +
+			"response would control the published DNS record (#14372)")
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("plaintext checkip endpoint contacted %d time(s); the probe must refuse before any fetch", n)
+	}
+	if n := rec.count(checkIPWarnMsg); n != 1 {
+		t.Fatalf("plaintext checkip failure warned %d time(s), want 1 (the refusal must be operator-visible)", n)
+	}
+}
+
 // TestCheckIPNoAddressDoesNotWarn is the over-reach guard. An endpoint that
 // ANSWERS but carries no address of the requested family is the ordinary
 // dual-stack miss (a v4-only checkip service probed for AAAA) — it happens on
 // every pass for every v6-less deployment and must stay SILENT. Warning on it
 // would trade one silent failure for a permanent stream of false alarms.
 func TestCheckIPNoAddressDoesNotWarn(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A valid 200 with a v4 address and no v6 one.
 		_, _ = w.Write([]byte("93.184.216.34\n"))
 	}))
@@ -146,6 +181,9 @@ func TestCheckIPNoAddressDoesNotWarn(t *testing.T) {
 
 	rec := captureWarnings(t)
 	d := newCheckIPObserverDaemon(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	d.surfaceA.mgr.SetCheckIPRootCAsForTesting(pool)
 	obs := d.surfaceAObserver(&config.Config{})
 	scope := checkIPScope(&config.DDNSProvider{
 		Name: "goodprov", Backend: "duckdns", CheckIPURL: srv.URL,

@@ -62,7 +62,7 @@ func TestCheckIPBoundFailsClosedOnBindError(t *testing.T) {
 // if the gate ever fails closed when no source was requested (would suppress
 // publishing for every default-route deployment).
 func TestCheckIPBoundNoSourceUsesDefaultRoute(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("93.184.216.34\n"))
 	}))
 	defer srv.Close()
@@ -82,7 +82,7 @@ func TestCheckIPBoundNoSourceUsesDefaultRoute(t *testing.T) {
 // TestCheckIPBoundNoSourceUsesDefaultRoute (which threads the unbound default
 // client): here the probe egresses through a real source-bound *http.Client.
 func TestCheckIPBoundAvailableSourceWorks(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("93.184.216.34\n"))
 	}))
 	defer srv.Close()
@@ -91,19 +91,19 @@ func TestCheckIPBoundAvailableSourceWorks(t *testing.T) {
 	// httptest server listens on, so the source-bound socket connects to it
 	// successfully (v4 source, v4 dial — no #2901 family mismatch). A valid
 	// source-address resolves WITHOUT a bind error, so the caller passes
-	// bindErr=nil and the probe must proceed through the bound client.
+	// bindErr=nil and the probe must proceed through the bound client. Trust
+	// the test server's certificate on the real production transport while
+	// keeping its source-bound DialContext.
 	client, err := newProviderHTTPClient(&config.DDNSProvider{Name: "p", SourceAddress: "127.0.0.1"})
 	if err != nil {
 		t.Fatalf("a valid source-address must resolve without error, got %v", err)
 	}
-	// Assert this really IS a source-bound client (installs a DialContext),
-	// unlike the unbound default the no-source test uses — so this case
-	// genuinely exercises "bound client + bindErr==nil still probes".
 	tr, ok := client.Transport.(*http.Transport)
 	if !ok || tr.DialContext == nil {
 		t.Fatalf("expected a source-bound client with a DialContext, got %T (DialContext set=%v)",
 			client.Transport, ok && tr.DialContext != nil)
 	}
+	tr.TLSClientConfig.RootCAs = srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 
 	a, ok2, cerr := CheckIPBound(context.Background(), client, srv.URL, true, nil, nil)
 	if !ok2 || a.String() != "93.184.216.34" || cerr != nil {
