@@ -586,7 +586,14 @@ func parseOverrideContent(content string) (*config.ConfigTree, error) {
 		return nil, fmt.Errorf("parse error: %w", err)
 	}
 	if !isSetFormat {
-		tree, errs := config.NewParser(content).Parse()
+		// #14572: parse the classifier's uncommented text — the exact
+		// representation the authorization gate adjudicated (flatContent
+		// is LoadMerge's name for the same value) — not the raw body.
+		// The real lexer reaches the same statements either way only if
+		// the classifier's comment model mirrors it; parsing the shared
+		// text makes gate⊆store hold by construction even where the
+		// two models might disagree.
+		tree, errs := config.NewParser(flatContent).Parse()
 		if len(errs) > 0 {
 			return nil, fmt.Errorf("parse error: %v", errs[0])
 		}
@@ -685,8 +692,12 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 			}
 		}
 	} else {
-		// Parse as hierarchical config and merge each top-level node
-		tree, errs := config.NewParser(content).Parse()
+		// Parse the classifier's uncommented text, the exact
+		// representation the authorization gate adjudicated (#14572),
+		// not the raw body. `lines` already holds that text (computed
+		// above for line splitting); rejoining preserves the original
+		// newline positions for parse diagnostics.
+		tree, errs := config.NewParser(strings.Join(lines, "\n")).Parse()
 		if len(errs) > 0 {
 			return fmt.Errorf("parse error: %v", errs[0])
 		}
