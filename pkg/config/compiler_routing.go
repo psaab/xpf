@@ -1650,13 +1650,13 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 				for _, ac := range expandFlatRun(prop.Children, policyStatementThenSchema8939()) {
 					switch ac.Name() {
 					case "accept":
-						ps.DefaultAction = "accept"
+						recordPolicyDefaultAction14433(ps, "accept")
 					case "reject":
-						ps.DefaultAction = "reject"
+						recordPolicyDefaultAction14433(ps, "reject")
 					}
 				}
-				if len(prop.Keys) >= 2 {
-					ps.DefaultAction = prop.Keys[1]
+				if len(prop.Keys) >= 2 && (prop.Keys[1] == "accept" || prop.Keys[1] == "reject") {
+					recordPolicyDefaultAction14433(ps, prop.Keys[1])
 				}
 			}
 		}
@@ -1723,6 +1723,22 @@ func policyStatementUnknownFrom11779(node *Node) []string {
 	return opaque
 }
 
+// recordPolicyDefaultAction14433 stores an authored statement-level default
+// and preserves the distinct authored set for the #14433 conflict gate.
+// Repeated same-action defaults stay recorded once (redundancy, not conflict).
+func recordPolicyDefaultAction14433(stmt *PolicyStatement, action string) {
+	if stmt == nil {
+		return
+	}
+	stmt.DefaultAction = action
+	for _, seen := range stmt.DefaultActionsSeen {
+		if seen == action {
+			return
+		}
+	}
+	stmt.DefaultActionsSeen = append(stmt.DefaultActionsSeen, action)
+}
+
 // parsePolicyStatementInlineKeys11779 records policy-level clauses packed
 // onto the named policy-statement node. Policy-level `from` has no typed
 // representation in the FRR compiler, so every such clause must remain
@@ -1743,7 +1759,7 @@ func parsePolicyStatementInlineKeys11779(stmt *PolicyStatement, keys []string) {
 			if i+1 < len(keys) {
 				switch keys[i+1] {
 				case "accept", "reject":
-					stmt.DefaultAction = keys[i+1]
+					recordPolicyDefaultAction14433(stmt, keys[i+1])
 				}
 			}
 		}
