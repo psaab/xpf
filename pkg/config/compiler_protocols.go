@@ -1212,10 +1212,45 @@ func compileRouterAdvertisement(node *Node, proto *ProtocolsConfig) error {
 						OnLink:     true, // defaults
 						Autonomous: true,
 					}
-					// For flat set, prefix children may be under the named child
-					pfxChildren := prop.Children
+					// #14428 (DR16-H7): the brace-elided spelling
+					// `prefix 2001:db8::/64 no-autonomous no-onlink
+					// valid-lifetime 100;` packs the whole tail onto
+					// prop.Keys with no Children. ("prefix","no-autonomous")
+					// and ("prefix","no-onlink") are not in
+					// compactNormalizeInScope (only the lifetimes are), so
+					// the #8662 fold never delivers them; reading only
+					// prop.Children left OnLink/Autonomous at their true
+					// defaults and dropped the lifetimes — hosts SLAAC
+					// from a no-autonomous prefix and treat a no-onlink
+					// prefix as on-link. Expand the node's own packed
+					// body through the schema-driven SSOT before the
+					// #9235 run expansion, mirroring the OSPF/IS-IS
+					// interface readers. packedBodyChildren returns
+					// Children unchanged when there is no tail, so the
+					// braced and flat-set shapes are untouched.
+					pfxChildren := packedBodyChildren(prop, raPrefixSchema9235())
+					// packedBodyChildren returns Children unchanged (same
+					// slice) both when there is no tail and when it declines
+					// to expand a tail that ends in a leaf beside a braced
+					// body (compact_tail.go's do-not-guess guard).
+					declined := len(pfxChildren) == len(prop.Children) &&
+						(len(pfxChildren) == 0 || &pfxChildren[0] == &prop.Children[0])
 					if len(prop.Keys) < 2 && len(prop.Children) > 0 {
-						pfxChildren = prop.Children[0].Children
+						// Flat-set shape: prefix children sit under the
+						// named child (#9235 behaviour, unchanged).
+						if declined {
+							pfxChildren = prop.Children[0].Children
+						}
+					} else if declined && len(prop.Keys) > 2 && len(prop.Children) > 0 {
+						// Mixed packed tail + braced body, e.g.
+						// `prefix 2001:db8::/64 no-autonomous no-onlink {
+						// valid-lifetime 100; }`: expand the tail from a
+						// childless view and read both halves, as the IS-IS
+						// interface reader (#14410) does.
+						tailOnly := *prop
+						tailOnly.Children = nil
+						pfxChildren = append(packedBodyChildren(&tailOnly, raPrefixSchema9235()),
+							prop.Children...)
 					}
 					// #9235: `prefix 2001:db8::/64 no-onlink no-autonomous` packs
 					// the flags into a nested chain, so this loop read `no-onlink`
