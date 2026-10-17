@@ -858,6 +858,11 @@ func compileNATStatic(node *Node, sec *SecurityConfig) error {
 		var rules []*StaticNATRule
 		for _, ruleInst := range namedInstances(rsInst.node.FindChildren("rule")) {
 			rule := &StaticNATRule{Name: ruleInst.name}
+			// #14415 (DR14-H2): packed `match` on the rule line, static
+			// twin — see compileNATSource. Static keeps its strict #7216
+			// gate; this only makes the packed match visible to it and
+			// to the reader, identically to the braced spelling.
+			ruleNode := packedBody(ruleInst.node, schemaForPath("security", "nat", "static", "rule-set", "rule"))
 
 			// #3850: iterate EVERY `match {}` block, not just the first — a
 			// duplicate block (a `load merge`/`load override` that splits its
@@ -866,7 +871,7 @@ func compileNATStatic(node *Node, sec *SecurityConfig) error {
 			// read (a fail-open widening of the NAT match). Flat-set is
 			// unaffected: SetPath merges duplicate containers into one node
 			// (ast_edit.go), so this only changes the hierarchical/parser shape.
-			for _, matchNode := range ruleInst.node.FindChildren("match") {
+			for _, matchNode := range ruleNode.FindChildren("match") {
 				// #9877 compact: a brace-elided unknown leaf never unfolds (see
 				// compiler_nat_source.go) — record an unmodeled packed head.
 				if len(matchNode.Keys) > 1 && !natMatchLeafKnown("static", matchNode.Keys[1]) {
@@ -1001,7 +1006,7 @@ func compileNATStatic(node *Node, sec *SecurityConfig) error {
 			// branch. The reset here is scoped to BETWEEN `then` blocks and still
 			// gives #3850 last-then-block-wins — a superseded whole block is dead
 			// config, distinct from a merged sibling target that is live.
-			for _, thenNode := range ruleInst.node.FindChildren("then") {
+			for _, thenNode := range ruleNode.FindChildren("then") {
 				rule.Then = ""
 				rule.IsNPTv6 = false
 				rule.MappedPort = 0
