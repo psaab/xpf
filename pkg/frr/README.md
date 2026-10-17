@@ -1445,6 +1445,23 @@ step. Both are required — neither sees the other's case:
   a bare `export ospf6` / `export ripng` renders the valid line instead of
   falling through to skip-and-warn and silently dropping IPv6 IGP
   redistribution (#2943).
+- **Bare redistribute tokens are canonicalized before the self/AFI
+  gates and emission (#14376).** `RoutingProtocolResolvable` admits
+  case-variant and padded spellings (`BGP`, `OSPF6`, ` bgp`) by trimming
+  and lower-casing, so on the lenient path those spellings entered
+  `redistributeEntriesAt`, where the self check and
+  `redistSourceFitsNode` compared the RAW string and missed, and the
+  renderer emitted `redistribute BGP` — rejected by FRR, failing the
+  whole managed reload. After the #14369 defined-policy lookup,
+  `redistributeEntriesAt` rewrites a bare token through
+  `config.FRRRoutingProtocolKeyword` (which also maps Junos `direct`
+  → `connected`) before every gate, so the keyword the gates see is
+  the keyword emitted and no non-canonical token can be emitted.
+  Non-protocol exports (defined policy-statements, unknown
+  lenient-path names) are not rewritten and still resolve by exact
+  name. Pinned by `redistribute_case_padded_14376_test.go`: the named
+  spellings render zero `redistribute` lines (with the existing skip
+  warnings) and every emitted entry carries the canonical keyword.
 - **`resolveRedistribute` excludes the SELF protocol (#2943).** It takes a
   `self` argument naming the enclosing router protocol (`ospf` / `ospf6` /
   `bgp` / `rip` / `isis`; `""` for callers with no enclosing protocol such as

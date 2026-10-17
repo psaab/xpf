@@ -337,9 +337,13 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 	// #14369: a DEFINED policy-statement wins over the bare-protocol
 	// reading (the Junos reading, and the BGP renderer's reading in
 	// protocols_render.go). Look up the RAW export name, before the
-	// direct->connected normalization below, so a policy literally
+	// bare-token canonicalization below, so a policy literally
 	// named `direct` (or any protocol keyword) is honored as a policy;
 	// the bare-token reading applies only when no such policy exists.
+	// #14376 canonicalization therefore happens AFTER this lookup and
+	// only on the bare-token path: a defined policy name is never
+	// rewritten, and an unknown lenient-path name still misses both
+	// branches by its exact name and reaches skip-and-warn below.
 	if po != nil && po.PolicyStatements != nil {
 		if ps, ok := po.PolicyStatements[export]; ok {
 			protocols := make(map[string]bool)
@@ -405,16 +409,24 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 		}
 	}
 
-	// Junos spells directly-connected routes "direct"; FRR's redistribute
-	// keyword is "connected". A bare `export direct` must render
-	// `redistribute connected`, not the FRR-invalid `redistribute direct`
-	// (which fails the reload). This mirrors the policy-term FromProtocols
-	// normalization below and in generatePolicyOptions. The commit-time
-	// gate (validateRoutingExportReferencesStrict, pkg/config) accepts
-	// "direct" as a known token, so this keeps render and validation in
-	// agreement (#2144).
-	if export == "direct" {
-		export = "connected"
+	// #14376: canonicalize a bare protocol token ONCE, before the
+	// self/AFI gates and emission. knownRedistProtocol
+	// (config.RoutingProtocolResolvable) resolves case-variant and
+	// padded spellings — `BGP`, `OSPF6`, ` bgp` — by trimming and
+	// lower-casing, so it ADMITS them; but the self check
+	// (`export == self`), the AFI check (redistSourceFitsNode, keyed
+	// by canonical keywords), and the emitted token below previously
+	// compared and rendered the RAW export string, so `export BGP`
+	// under `router bgp` bypassed the self-redistribute drop,
+	// `export OSPF6` under `router ospf` bypassed the family filter,
+	// and the renderer wrote `redistribute BGP` — a token FRR
+	// rejects, failing the whole managed reload. FRRRoutingProtocolKeyword
+	// also maps Junos `direct` to FRR `connected` (#2144), subsuming
+	// the former direct-only special case. This runs only after the
+	// #14369 defined-policy lookup above, so a policy named e.g.
+	// `direct` or `static` is never rewritten here.
+	if kw, ok := config.FRRRoutingProtocolKeyword(export); ok {
+		export = kw
 	}
 	if knownRedistProtocol(export) {
 		// A protocol can never redistribute itself: FRR rejects
