@@ -2467,6 +2467,10 @@ type zoneOwnershipSnapshot struct {
 	foldRG  map[uint32]int
 	foldFn  func(uint32, uint16) uint32
 	primary map[int]bool
+	// zoneRGsByZone is the bulk-start RG set per zone (#14357), so
+	// shouldSyncV4/V6 can tell a multi-RG zone from a single-RG one without
+	// re-reading the live map.
+	zoneRGsByZone ZoneRGMap
 	// mapGen is the ownership-map generation captured at bulk start.
 	mapGen uint64
 }
@@ -2517,6 +2521,7 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 		foldRG:          foldRGCapture,
 		foldFn:          foldFn,
 		primary:         make(map[int]bool),
+		zoneRGsByZone:   zoneRG,
 		mapGen:          mapGen,
 	}
 	if isPrimaryForRG != nil {

@@ -110,6 +110,86 @@ func TestClusterSyncedOriginSurvivesBPFMirrorProjection10227(t *testing.T) {
 	}
 }
 
+// #14357: ReconcileClusterBulk must purge a peer-synced row that the per-row
+// predicate judged not-locally-owned (unattributable in a multi-RG zone),
+// even though its zone is mapped. Before the fix the mapped-zone origin
+// guard (and the zone-approximation predicate) kept every such stale row.
+//
+// FAIL-ON-REVERT: revert the syncedNotOwned guard in ReconcileClusterBulk
+// (or pass a zone-approximation ShouldSync predicate) and the stale rows
+// survive.
+func TestMultiRGPeerSyncedMirrorRowPurgedAtBulkEnd14357(t *testing.T) {
+	const zone = 42
+	stale4 := SessionKey{Protocol: 6, SrcPort: 2101, DstPort: 80}
+	received4 := SessionKey{Protocol: 6, SrcPort: 2102, DstPort: 80}
+	local4 := SessionKey{Protocol: 6, SrcPort: 2103, DstPort: 80}
+	stale6 := SessionKeyV6{Protocol: 6, SrcIP: [16]byte{0x20, 1, 0xdb, 8, 1}, DstIP: [16]byte{0x20, 1, 0xdb, 8, 2}, SrcPort: 2101, DstPort: 80}
+	received6 := SessionKeyV6{Protocol: 6, SrcIP: [16]byte{0x20, 1, 0xdb, 8, 3}, DstIP: [16]byte{0x20, 1, 0xdb, 8, 4}, SrcPort: 2102, DstPort: 80}
+	local6 := SessionKeyV6{Protocol: 6, SrcIP: [16]byte{0x20, 1, 0xdb, 8, 5}, DstIP: [16]byte{0x20, 1, 0xdb, 8, 6}, SrcPort: 2103, DstPort: 80}
+
+	// Mirror fidelity: values have passed through toBPF().sessionValue() +
+	// ScrubNodeLocal, so fold/ifindex are zero and only IngressZone + the
+	// ClusterSynced origin bit survive.
+	mirror4 := func(flags uint16) SessionValue {
+		v := SessionValue{IngressZone: zone, IngressIfaceFold: 0x2202, IngressIfindex: 99, Flags: flags}.toBPF().sessionValue()
+		v.ScrubNodeLocal()
+		return v
+	}
+	mirror6 := func(flags uint16) SessionValueV6 {
+		v := SessionValueV6{IngressZone: zone, IngressIfaceFold: 0x2202, IngressIfindex: 99, Flags: flags}.toBPF().sessionValue()
+		v.ScrubNodeLocal()
+		return v
+	}
+	synced4, synced6 := mirror4(SessFlagClusterSynced), mirror6(SessFlagClusterSynced)
+	if synced4.IngressIfaceFold != 0 || synced4.IngressIfindex != 0 || synced4.Flags&SessFlagClusterSynced == 0 {
+		t.Fatalf("v4 mirror fixture wrong: %+v", synced4)
+	}
+	if synced6.IngressIfaceFold != 0 || synced6.IngressIfindex != 0 || synced6.Flags&SessFlagClusterSynced == 0 {
+		t.Fatalf("v6 mirror fixture wrong: %+v", synced6)
+	}
+
+	dp := &sessionStoreTestDP{
+		v4: map[SessionKey]SessionValue{stale4: synced4, received4: synced4, local4: mirror4(0)},
+		v6: map[SessionKeyV6]SessionValueV6{stale6: synced6, received6: synced6, local6: mirror6(0)},
+	}
+	// Exactly the corrected cluster predicates: cluster-synced mirror rows
+	// in a multi-RG zone are not locally owned; local rows keep zone answer.
+	notOwnedV4 := func(v SessionValue) bool { return v.Flags&SessFlagClusterSynced == 0 }
+	notOwnedV6 := func(v SessionValueV6) bool { return v.Flags&SessFlagClusterSynced == 0 }
+	result, err := (dataPlaneSessionStore{dp: dp}).ReconcileClusterBulk(ClusterBulkReconcileInput{
+		ReceivedV4:     map[SessionKey]struct{}{received4: {}},
+		ReceivedV6:     map[SessionKeyV6]struct{}{received6: {}},
+		ShouldSyncZone: func(uint16) bool { return true },
+		ShouldSyncV4:   notOwnedV4,
+		ShouldSyncV6:   notOwnedV6,
+		IsZoneMapped:   func(uint16) bool { return true },
+	})
+	if err != nil {
+		t.Fatalf("ReconcileClusterBulk: %v", err)
+	}
+	if result.DeletedV4 != 1 || result.DeletedV6 != 1 {
+		t.Fatalf("deleted v4=%d v6=%d, want 1/1 stale peer rows", result.DeletedV4, result.DeletedV6)
+	}
+	if _, ok := dp.v4[stale4]; ok {
+		t.Fatal("stale peer v4 row survived BulkEnd")
+	}
+	if _, ok := dp.v6[stale6]; ok {
+		t.Fatal("stale peer v6 row survived BulkEnd")
+	}
+	if _, ok := dp.v4[received4]; !ok {
+		t.Fatal("received peer v4 row was deleted")
+	}
+	if _, ok := dp.v6[received6]; !ok {
+		t.Fatal("received peer v6 row was deleted")
+	}
+	if _, ok := dp.v4[local4]; !ok {
+		t.Fatal("local v4 row was deleted")
+	}
+	if _, ok := dp.v6[local6]; !ok {
+		t.Fatal("local v6 row was deleted")
+	}
+}
+
 func TestSourceNatProvenanceFlagsRoundTrip12187(t *testing.T) {
 	const unrelatedFlags = SessFlagSNAT | SessFlagDNAT | SessFlagClusterSynced
 	for _, tc := range []struct {

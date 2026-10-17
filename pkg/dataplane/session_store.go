@@ -1168,7 +1168,15 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 		if input.ShouldSyncV4 != nil {
 			shouldSync = input.ShouldSyncV4(val)
 		}
-		if shouldSync || (!mapped && val.Flags&SessFlagClusterSynced == 0) {
+		if shouldSync {
+			return true
+		}
+		// #14357: a cluster-synced row that the per-row predicate judged
+		// not-locally-owned (unattributable in a multi-RG zone) is stale
+		// when absent from the received set, even though its zone is mapped.
+		// The mapped/unmapped origin guard below must not resurrect it.
+		syncedNotOwned := input.ShouldSyncV4 != nil && val.Flags&SessFlagClusterSynced != 0
+		if !syncedNotOwned && !mapped && val.Flags&SessFlagClusterSynced == 0 {
 			return true
 		}
 		if val.IsReverse == 0 {
@@ -1198,7 +1206,12 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 		if input.ShouldSyncV6 != nil {
 			shouldSync = input.ShouldSyncV6(val)
 		}
-		if shouldSync || (!mapped && val.Flags&SessFlagClusterSynced == 0) {
+		if shouldSync {
+			return true
+		}
+		// #14357 v6 twin of the v4 guard above.
+		syncedNotOwned := input.ShouldSyncV6 != nil && val.Flags&SessFlagClusterSynced != 0
+		if !syncedNotOwned && !mapped && val.Flags&SessFlagClusterSynced == 0 {
 			return true
 		}
 		if val.IsReverse == 0 {
