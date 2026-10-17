@@ -117,7 +117,7 @@ func TestFilterValuelessFromControls9875(t *testing.T) {
 		{"omitted leaf", `term T { from { source-address 10.0.0.0/8; } then { discard; } }`},
 		{"empty from block", `term T { from { } then { discard; } }`},
 		{"is-fragment flag", `term T { from { is-fragment; } then { discard; } }`},
-		{"flexible-match-range with children", `term T { from { flexible-match-range { match-start layer-3; byte-offset 4; } } then { discard; } }`},
+		{"flexible-match-range with named range", `term T { from { flexible-match-range { range R { match-start layer-3; byte-offset 4; } } } then { discard; } }`},
 		{"duplicated leaf valueless-then-valued", `term T { from { protocol; protocol tcp; } then { discard; } }`},
 		{"duplicated leaf valued-then-valueless", `term T { from { protocol tcp; protocol; } then { discard; } }`},
 		{"valued prefix-list ref", `term T { from { source-prefix-list PL; } then { discard; } }`},

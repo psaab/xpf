@@ -1615,16 +1615,21 @@ type FirewallFilterTerm struct {
 	DSCPRewrite     string           // then dscp <value> — rewrite DSCP/traffic-class
 	Policer         string           // then policer <name> — reference to policer definition
 	FlexMatch       *FlexMatchConfig // flexible-match-range configuration
-	// UnknownFlexMatch records `flexible-match-range` numeric tokens that could
-	// not be parsed (byte-offset / bit-length / match-value / match-mask) OR
-	// that fell outside the representable range (#3203, agy-070 #02/#03/#04).
-	// Previously compileFilterFrom IGNORED the strconv error and left the field
-	// at its zero default — a malformed or >32-bit match-value silently became
-	// 0x0 and the term then matched the WRONG (zero) pattern with a clean
-	// commit. Mirroring UnknownActions/UnknownICMPTypes, the compile path
-	// records the offending token and validateFilterFlexMatchStrict hard-rejects
-	// the commit; the tolerant load / peer-sync path downgrades to a warning
-	// (#1960 no-brick). Populated by compileFilterFrom.
+	// UnknownFlexMatch records `flexible-match-range` tokens the compiler
+	// could not faithfully apply: numeric tokens that could not be parsed
+	// (byte-offset / bit-length / match-value / match-mask) or fell outside
+	// the representable range (#3203), plus — #14347 — direct field leaves
+	// under flexible-match-range without a named range, unknown/valueless/
+	// trailing-token/children-carrying leaves inside a range, nameless or
+	// bare range nodes, and empty ranges. Previously compileFilterFrom
+	// IGNORED these and left fields at zero defaults — a malformed or
+	// >32-bit match-value silently became 0x0 and the term then matched the
+	// WRONG (zero) pattern with a clean commit. Mirroring
+	// UnknownActions/UnknownICMPTypes, the compile path records the
+	// offending token and validateFilterFlexMatchStrict hard-rejects the
+	// commit; the tolerant load / peer-sync path downgrades to a warning
+	// (#1960 no-brick) and downstream builders poison the term. Populated
+	// by compileFilterFrom.
 	UnknownFlexMatch []string
 	// FlexMatchRangeNames records EVERY named `flexible-match-range` range seen
 	// for this term, aggregated across ALL repeated flexible-match-range blocks

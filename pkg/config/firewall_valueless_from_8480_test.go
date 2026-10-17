@@ -60,11 +60,13 @@ func TestValuelessFirewallFromIsRejected8480(t *testing.T) {
 			from: `is-fragment;`,
 		},
 		{
-			// flexible-match-range carries its operands in CHILDREN with their
-			// own grammar, so firewallMatchValues on the parent is not how it
-			// is read.
-			name: "flexible-match-range with children commits",
-			from: `flexible-match-range { match-start layer-3; byte-offset 4; }`,
+			// #14347: direct field leaves under flexible-match-range (no
+			// named range) are outside the schema grammar and are now
+			// recorded on UnknownFlexMatch, so strict rejects. (Was a
+			// commits control before #14347.)
+			name:    "flexible-match-range direct leaves rejected (#14347)",
+			from:    `flexible-match-range { match-start layer-3; byte-offset 4; }`,
+			wantErr: "flexible-match-range",
 		},
 		{
 			// Junos merges duplicate blocks, so a leaf written twice is
