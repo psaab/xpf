@@ -696,6 +696,7 @@ fn parse_term(
     preflight_term_value_ranges(snap, filter_family, filter_name)?;
     preflight_term_policer_ref(snap, filter_family, filter_name, defined_policers)?;
     let addresses = parse_term_addresses(snap);
+    preflight_term_cross_family_addresses(&addresses, filter_family, filter_name, snap)?;
     let protocols = resolve_term_protocols(snap, filter_family, filter_name)?;
     check_cross_field_satisfiability(snap, &protocols, filter_family, filter_name)?;
     let ports = parse_term_ports(snap);
@@ -939,6 +940,66 @@ struct TermAddressMatch {
 /// match-all (except) per the Junos empty-set semantics. An older Go control
 /// plane that omits the flag (false) falls back to the length derivation —
 /// unchanged for the non-prefix-list cases that have no empty-resolution gap.
+
+/// #14446: reject a constrained direction whose scope carries only the
+/// other family's prefixes. Both-vecs-empty is the #2400/#2506 empty-set
+/// semantic and passes; mixed lists pass; `any`/unknown families skip
+/// (Go #4426 owns `family any`, dual-compiled pools are checked per family).
+fn preflight_term_cross_family_addresses(
+    addresses: &TermAddressMatch,
+    filter_family: &str,
+    filter_name: &str,
+    snap: &FirewallTermSnapshot,
+) -> Result<(), SnapshotIntegrityError> {
+    let check = |constrained: bool,
+                 this_empty: bool,
+                 other_empty: bool,
+                 direction: &'static str|
+     -> Result<(), SnapshotIntegrityError> {
+        if constrained && this_empty && !other_empty {
+            return Err(SnapshotIntegrityError::CrossFamilyFilterAddressScope {
+                family: filter_family.to_string(),
+                filter: filter_name.to_string(),
+                term: snap.name.clone(),
+                direction,
+            });
+        }
+        Ok(())
+    };
+    match filter_family {
+        "inet" => {
+            check(
+                addresses.source_constrained,
+                addresses.source_v4.is_empty(),
+                addresses.source_v6.is_empty(),
+                "source",
+            )?;
+            check(
+                addresses.dest_constrained,
+                addresses.dest_v4.is_empty(),
+                addresses.dest_v6.is_empty(),
+                "destination",
+            )?;
+        }
+        "inet6" => {
+            check(
+                addresses.source_constrained,
+                addresses.source_v6.is_empty(),
+                addresses.source_v4.is_empty(),
+                "source",
+            )?;
+            check(
+                addresses.dest_constrained,
+                addresses.dest_v6.is_empty(),
+                addresses.dest_v4.is_empty(),
+                "destination",
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn parse_term_addresses(snap: &FirewallTermSnapshot) -> TermAddressMatch {
     let mut source_v4 = Vec::new();
     let mut source_v6 = Vec::new();

@@ -518,6 +518,17 @@ pub(crate) enum SnapshotIntegrityError {
         term: String,
         policer: String,
     },
+    /// #14446: a single-family filter term is address-constrained with zero
+    /// prefixes of the filter's family while carrying prefixes of the other
+    /// family (wrong-family-only prefix-list or literal scope). Positive
+    /// matches nothing (discard dead, fail-open); `except` matches everything.
+    /// Both-vecs-empty (defined-empty scope, #2400/#2506) and mixed lists pass.
+    CrossFamilyFilterAddressScope {
+        family: String,
+        filter: String,
+        term: String,
+        direction: &'static str,
+    },
     /// #2391: an interface snapshot named a NON-EMPTY security zone that is not
     /// present in the zone table (`zone_name_to_id`). The pre-fix code resolved
     /// the missing name to `zone_id == 0` (`unwrap_or(0)`), silently collapsing
@@ -1156,6 +1167,16 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "firewall family {:?} filter {:?} term {:?} references undefined policer {:?} — refusing to fail open by leaving the rate limit unmetered (which would forward unpoliced, equivalent to no policer)",
                 family, filter, term, policer
+            ),
+            Self::CrossFamilyFilterAddressScope {
+                family,
+                filter,
+                term,
+                direction,
+            } => write!(
+                f,
+                "firewall family {:?} filter {:?} term {:?} has a {} address scope with no prefixes of the filter family but prefixes of the other family — refusing to compile a term that matches nothing (positive) or everything (except) (#14446)",
+                family, filter, term, direction
             ),
             Self::InterfaceUnknownZone { interface, zone } => write!(
                 f,
