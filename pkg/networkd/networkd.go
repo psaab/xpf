@@ -59,22 +59,29 @@ type InterfaceConfig struct {
 	IsVLANParent     bool     // true = don't assign addresses (they go on sub-interface)
 	DHCPv4           bool     // true = daemon runs DHCPv4 client (don't set static addr)
 	DHCPv6           bool     // true = daemon runs DHCPv6 client
-	Unmanaged        bool     // true = not in config; keep down with no addresses
-	Disable          bool     // true = administratively disabled (keep down)
-	DADDisable       bool     // true = disable IPv6 Duplicate Address Detection
-	Speed            string   // Junos link speed, converted to numeric networkd BitsPerSecond
-	Duplex           string   // "full", "half", or "auto"
-	MTU              int      // interface MTU (0 = default)
-	Description      string   // interface description (maps to .network [Network] Description)
-	BondMaster       string   // LAG parent: bind this interface to a bond master (ae0, etc.)
-	IsBond           bool     // true = this is a bond/LAG device (needs .netdev file)
-	BondMode         string   // bond mode: "802.3ad" (default for ae interfaces)
-	LACPRate         string   // LACP transmit rate: "fast" or "slow" (default)
-	MinLinks         int      // minimum active member links (0 = no minimum)
-	KeepAddresses    bool     // true = KeepConfiguration=static (preserve external addresses across reload)
-	VRFName          string   // VRF device name (e.g. "vrf-mgmt") — emits [Network] VRF= so networkctl reconfigure preserves binding
-	BridgeMaster     string   // bridge device name to join (e.g. "br-bd0")
-	IsBridge         bool     // true = this is a bridge device (needs .netdev file)
+	// DHCPv6Stateless / DHCPv6IATypes refine DHCPv6 for the #14594 keep
+	// decision: only a stateful client that owns an IA_NA address on THIS
+	// interface has a lease address for networkd to preserve. A stateless
+	// client and a PD-only client own no address here. DHCPv6IATypes nil
+	// means the daemon default (IA_NA requested, mirroring pkg/dhcp).
+	DHCPv6Stateless bool
+	DHCPv6IATypes   []string
+	Unmanaged       bool   // true = not in config; keep down with no addresses
+	Disable         bool   // true = administratively disabled (keep down)
+	DADDisable      bool   // true = disable IPv6 Duplicate Address Detection
+	Speed           string // Junos link speed, converted to numeric networkd BitsPerSecond
+	Duplex          string // "full", "half", or "auto"
+	MTU             int    // interface MTU (0 = default)
+	Description     string // interface description (maps to .network [Network] Description)
+	BondMaster      string // LAG parent: bind this interface to a bond master (ae0, etc.)
+	IsBond          bool   // true = this is a bond/LAG device (needs .netdev file)
+	BondMode        string // bond mode: "802.3ad" (default for ae interfaces)
+	LACPRate        string // LACP transmit rate: "fast" or "slow" (default)
+	MinLinks        int    // minimum active member links (0 = no minimum)
+	KeepAddresses   bool   // true = KeepConfiguration=static (preserve external addresses across reload)
+	VRFName         string // VRF device name (e.g. "vrf-mgmt") — emits [Network] VRF= so networkctl reconfigure preserves binding
+	BridgeMaster    string // bridge device name to join (e.g. "br-bd0")
+	IsBridge        bool   // true = this is a bridge device (needs .netdev file)
 
 	// VLANParentAddresses are addresses a VLAN parent carries ITSELF. Addresses
 	// is ignored for a VLAN parent, so a sub-interface's addresses cannot leak
@@ -1600,9 +1607,17 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 		b.WriteString("DHCP=no\n")
 	}
 
-	// Preserve externally-added addresses (e.g. VRRP VIPs) across networkctl reload.
-	if ifc.KeepAddresses {
-		b.WriteString("KeepConfiguration=static\n")
+	// Preserve externally-added addresses across networkctl reload /
+	// reconfigure. Two owners add addresses networkd does not know about:
+	// VRRP VIPs / the RETH link-local base (KeepAddresses, static class)
+	// and the daemon DHCP client's lease (dynamic class, #14594). The
+	// daemon lease is written only by pkg/dhcp applyAddress (AddrReplace,
+	// no lifetimes), so without a keep directive an ordinary reconfigure
+	// of every managed interface strips it until at least T1.
+	// KeepConfiguration accepts one value, so the classes compose:
+	// static-only -> static, dynamic-only -> dhcp, both -> yes.
+	if keep := keepConfigurationValue(ifc); keep != "" {
+		fmt.Fprintf(&b, "KeepConfiguration=%s\n", keep)
 	}
 
 	b.WriteString("LinkLocalAddressing=ipv6\n")
@@ -1675,6 +1690,71 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 	}
 
 	return b.String()
+}
+
+// keepConfigurationValue returns the single KeepConfiguration value for
+// ifc, or "" when no externally-owned address needs preserving (#14594).
+//
+// Static class: KeepAddresses (VRRP VIPs, the RETH link-local base, a
+// VLAN parent's advert source) plus any Address= line this file itself
+// renders — a foreign address can only be the static class when the
+// interface actually carries one. Rendering is per-family DHCP-gated
+// (#2986), so the surviving set is recomputed exactly as generateNetwork
+// renders it; a DHCP-suppressed address does not count.
+//
+// Dynamic class: a daemon DHCP lease on THIS interface — DHCPv4 always,
+// DHCPv6 only when the client is stateful and requests IA_NA (nil
+// IATypes = daemon default, which requests IA_NA). Stateless and
+// PD-only DHCPv6 own no address here and must not widen the keep.
+func keepConfigurationValue(ifc InterfaceConfig) string {
+	static := ifc.KeepAddresses && hasRenderedStaticAddress(ifc)
+	dynamic := ifc.DHCPv4 || dhcpv6OwnsAddress(ifc)
+	switch {
+	case static && dynamic:
+		return "yes"
+	case static:
+		return "static"
+	case dynamic:
+		return "dhcp"
+	default:
+		return ""
+	}
+}
+
+// hasRenderedStaticAddress reports whether generateNetwork renders at
+// least one static Address= for ifc.
+func hasRenderedStaticAddress(ifc InterfaceConfig) bool {
+	if ifc.IsVLANParent {
+		return len(ifc.VLANParentAddresses) > 0
+	}
+	for _, addr := range ifc.Addresses {
+		if addressIsIPv6(addr) {
+			if ifc.DHCPv6 {
+				continue
+			}
+		} else if ifc.DHCPv4 {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// dhcpv6OwnsAddress reports whether ifc's DHCPv6 client installs an
+// IA_NA address on this interface (pkg/dhcp parseV6Reply wantNA rule).
+func dhcpv6OwnsAddress(ifc InterfaceConfig) bool {
+	if !ifc.DHCPv6 || ifc.DHCPv6Stateless {
+		return false
+	}
+	if len(ifc.DHCPv6IATypes) == 0 {
+		return true
+	}
+	for _, t := range ifc.DHCPv6IATypes {
+		if t == "ia-na" {
+			return true
+		}
+	}
+	return false
 }
 
 // junosSpeedToNetworkd converts the shared Junos Mbps value to networkd's

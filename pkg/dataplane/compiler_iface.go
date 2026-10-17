@@ -1325,6 +1325,8 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					PreferredAddress: unit.PreferredAddress,
 					DHCPv4:           unit.DHCP,
 					DHCPv6:           unitHasDHCPv6(unit),
+					DHCPv6Stateless:  unitDHCPv6Stateless(unit),
+					DHCPv6IATypes:    unitDHCPv6IATypes(unit),
 					DADDisable:       unit.DADDisable,
 					MTU:              unitMTU,
 					Description:      desc,
@@ -1541,6 +1543,8 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 							PreferredAddress: preferredAddr,
 							DHCPv4:           unit.DHCP,
 							DHCPv6:           unitHasDHCPv6(unit),
+							DHCPv6Stateless:  unitDHCPv6Stateless(unit),
+							DHCPv6IATypes:    unitDHCPv6IATypes(unit),
 							DADDisable:       unit.DADDisable,
 							MTU:              unit.MTU,
 							Description:      unit.Description,
@@ -1557,6 +1561,9 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 				// Collect addresses from all units (using effective config for RETH members)
 				var addrs []string
 				var dhcpv4, dhcpv6, dadDisable bool
+				var dhcpv6Stateless bool
+				var dhcpv6IATypes []string
+				dhcpv6Seen := false
 				var primaryAddr, preferredAddr string
 				unitMTU := 0
 				for _, unit := range effectiveCfg.Units {
@@ -1566,6 +1573,29 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					}
 					if unitHasDHCPv6(unit) {
 						dhcpv6 = true
+						// The .network model is per-interface while DHCP
+						// is per-unit, so merge conservatively (#14594):
+						// any address-owning unit keeps the dynamic class,
+						// and IATypes is the union across units. Stateless
+						// survives only when every DHCPv6 unit is stateless.
+						if !dhcpv6Seen {
+							dhcpv6Stateless = unitDHCPv6Stateless(unit)
+							dhcpv6Seen = true
+						} else if !unitDHCPv6Stateless(unit) {
+							dhcpv6Stateless = false
+						}
+						for _, t := range unitDHCPv6IATypes(unit) {
+							found := false
+							for _, have := range dhcpv6IATypes {
+								if have == t {
+									found = true
+									break
+								}
+							}
+							if !found {
+								dhcpv6IATypes = append(dhcpv6IATypes, t)
+							}
+						}
 					}
 					if unit.DADDisable {
 						dadDisable = true
@@ -1603,6 +1633,8 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 					PreferredAddress: preferredAddr,
 					DHCPv4:           dhcpv4,
 					DHCPv6:           dhcpv6,
+					DHCPv6Stateless:  dhcpv6Stateless,
+					DHCPv6IATypes:    dhcpv6IATypes,
 					Disable:          ifCfg.Disable,
 					DADDisable:       dadDisable,
 					Speed:            ifCfg.Speed,

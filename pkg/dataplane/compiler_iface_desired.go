@@ -65,6 +65,25 @@ func unitHasDHCPv6(unit *config.InterfaceUnit) bool {
 	return unit != nil && (unit.DHCPv6 || unit.DHCPv6Client != nil)
 }
 
+// unitDHCPv6Stateless reports whether unit's DHCPv6 client is stateless
+// (Information-Request only, no IA_NA/IA_PD). A bare `dhcpv6;` unit
+// (DHCPv6Client == nil) is stateful by default. Mirrors the daemon's
+// buildDHCPClientSpecs derivation (#14594).
+func unitDHCPv6Stateless(unit *config.InterfaceUnit) bool {
+	return unit != nil && unit.DHCPv6Client != nil &&
+		unit.DHCPv6Client.ClientType == "stateless"
+}
+
+// unitDHCPv6IATypes returns unit's configured IA types, or nil when unset
+// (daemon default: IA_NA requested). The slice is shared with the config;
+// callers must not mutate it.
+func unitDHCPv6IATypes(unit *config.InterfaceUnit) []string {
+	if unit == nil || unit.DHCPv6Client == nil {
+		return nil
+	}
+	return unit.DHCPv6Client.ClientIATypes
+}
+
 const defaultPhysicalMTU9985 = 1500
 
 // mtuOwnedNetdevs returns resolved Linux netdev names whose MTU is reconciled

@@ -60,6 +60,9 @@ func TestNetworkdUnitInterpolationInventory_10718(t *testing.T) {
 		"Bond":             {"ifc.BondMaster": 1},
 		"Bridge":           {"ifc.BridgeMaster": 1},
 		"Address":          {"addr": 3},
+		// #14594: keep is one of "", static, dhcp, yes from
+		// keepConfigurationValue — a closed enum, never raw input.
+		"KeepConfiguration": {"keep": 1},
 	}
 	got := make(map[string]map[string]int)
 	for _, m := range calls {

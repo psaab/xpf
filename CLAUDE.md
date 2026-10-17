@@ -416,7 +416,7 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   - RETH member interfaces: match by `OriginalName=` (PCI kernel name) — MAC alternates between physical (boot) and virtual (daemon), so `MACAddress=` is unreliable
   - `ensureRethLinkOriginalName()` auto-fixes stale `.link` files that use `MACAddress=` for RETH members
 - **`.network` files**: configure addresses (static), DHCP avoidance, RA disable, VLAN parent flags
-  - `KeepConfiguration=static` on RETH interfaces preserves VRRP VIPs across `networkctl reload`
+  - `KeepConfiguration=static` on RETH interfaces preserves VRRP VIPs across `networkctl reload`; DHCP rows carry `KeepConfiguration=dhcp` (or `yes` when both classes are present) so a reconfigure preserves the daemon's lease address (#14594)
 - Stale files are auto-removed; `networkctl reload` called only when files actually change
 - **DHCP interfaces**: daemon's DHCP client manages the address; address reconciliation is skipped
 - **Bootstrap (#1922 lifeline, #7114 appliance gate)**: on a NORMAL boot the
