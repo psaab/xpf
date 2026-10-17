@@ -134,12 +134,12 @@ fn deterministic_napt64_bib_identity_teardown_and_idle_import_14091() {
     let debug = allocator.debug_persistent_lease_for_flow(&tcp_flow, super::source::PersistentNatPermit::AnyRemoteHost).unwrap();
     assert!(debug.deterministic && debug.deterministic_identity == Some(super::DeterministicPortedIdentity::V6(params)));
     assert!(allocator.rollback_flow(tcp_flow, tcp, 10, NatHolder::Untracked));
-    assert!(allocator.debug_recycled_ports(0).is_empty(), "deterministic rollback must not recycle");
+    assert_eq!(allocator.debug_recycled_ports(0), vec![tcp.port], "#14625: deterministic rollback recycles (bounded ring; claim_in_block ignores it)");
     let tcp2 = allocator.allocate_deterministic_v6(tcp_flow, &[POOL], params, SUB, NatHolder::Untracked).unwrap();
     assert!(allocator.release_flow(tcp_flow, tcp2, 20, NatHolder::Untracked));
     assert!(allocator.release_flow(udp_flow, udp, 20, NatHolder::Untracked));
     assert!(allocator.release_flow(scoped_flow, scoped, 20, NatHolder::Untracked));
-    assert!(allocator.debug_recycled_ports(0).is_empty(), "deterministic expiry path must not recycle");
+    assert!(!allocator.debug_recycled_ports(0).is_empty(), "#14625: deterministic releases recycle (bounded ring; claim_in_block ignores it)");
     let exported = allocator.export_idle_leases(21);
     assert_eq!(exported.len(), 3, "idle deterministic BIBs must be exportable for failover");
     assert!(exported.iter().all(|r| r.deterministic && r.deterministic_identity == Some(super::DeterministicPortedIdentity::V6(params))));

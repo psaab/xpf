@@ -1844,8 +1844,7 @@ pub(crate) fn reserve_synced_nat64_allocation_for_worker(
 ///
 /// Rollback is the helper's job (`rollback_flow`, not `release_flow`): the
 /// activation is being WITHDRAWN, and the deterministic arm's block port must go
-/// back through `free_no_recycle` rather than onto a recycle ring the
-/// deterministic mapping never draws from.
+/// back through the recycling free (#14625) rather than being dropped.
 #[allow(clippy::too_many_arguments)]
 fn reserve_synced_nat64_port_unless_peer_owns(
     prefix: &Nat64Prefix,
@@ -2015,11 +2014,9 @@ fn reserve_synced_nat64_allocation_with_holder(
             continue;
         };
         // #5178: a NAPT64 (mode 2) deterministic prefix must tag its synced
-        // reservation deterministic so the standby releases it via
-        // `free_no_recycle`, mirroring the active node's
-        // `allocate_deterministic_v6` — otherwise a deterministic pool's synced
-        // churn leaks ports into a recycle queue the deterministic path never
-        // drains (unbounded standby memory).
+        // reservation deterministic (mode identity for BIB/lease bookkeeping;
+        // #14625: release recycles every port, bounded to one token per
+        // offset), mirroring the active node's `allocate_deterministic_v6`.
         // #9021: and on the fallback scan, which is the route a v4-keyed or
         // prefix-less key takes. Leaving it out here would be the partial-fix
         // shape on a path whose whole purpose is to keep working when the
