@@ -421,18 +421,33 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			}
 			unit := &InterfaceUnit{Number: unitNum}
 
+			// #14435 (DR17-H6): unpack the unit node's own Keys tail.
+			// `unit 0 point-to-point family inet { ... }` (and the
+			// `tunnel ...`-first form) is ONE node whose Children are the
+			// family's contents, not a `family` child — FindChild /
+			// FindChildren("family") below would see nothing and the whole
+			// family subtree (addresses + filters) would be dropped while
+			// the unit still gets a zoned snapshot row (fail-open).
+			// packedBody returns the original node when there is no tail
+			// (braced twin and bare `unit 0 point-to-point;` unchanged).
+			unitNode := packedBody(unitInst.node,
+				schemaForPath("interfaces", "x", "unit"))
+			if unitNode == nil {
+				unitNode = unitInst.node
+			}
+
 			// Parse description on unit
-			if descNode := unitInst.node.FindChild("description"); descNode != nil {
+			if descNode := unitNode.FindChild("description"); descNode != nil {
 				unit.Description = nodeVal(descNode)
 			}
 
 			// Parse point-to-point flag
-			if unitInst.node.FindChild("point-to-point") != nil {
+			if unitNode.FindChild("point-to-point") != nil {
 				unit.PointToPoint = true
 			}
 
 			// Parse tunnel config at unit level (gr-0/0/0 unit N { tunnel { ... } })
-			if tunnelNode := unitInst.node.FindChild("tunnel"); tunnelNode != nil {
+			if tunnelNode := unitNode.FindChild("tunnel"); tunnelNode != nil {
 				defaultMode := "gre"
 				if strings.HasPrefix(ifName, "ip-") {
 					defaultMode = "ipip"
@@ -541,7 +556,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			}
 
 			// Parse vlan-id on unit
-			if vlanNode := unitInst.node.FindChild("vlan-id"); vlanNode != nil {
+			if vlanNode := unitNode.FindChild("vlan-id"); vlanNode != nil {
 				v := nodeVal(vlanNode)
 				n, perr := parseInterfaceNumeric9899(v, 0, 4094)
 				if perr != nil {
@@ -558,7 +573,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			}
 
 			// Parse inner-vlan-id on unit (QinQ inner tag)
-			if ivNode := unitInst.node.FindChild("inner-vlan-id"); ivNode != nil {
+			if ivNode := unitNode.FindChild("inner-vlan-id"); ivNode != nil {
 				v := nodeVal(ivNode)
 				n, perr := parseInterfaceNumeric9899(v, 0, 4094)
 				if perr != nil {
@@ -579,7 +594,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			//   Keys=["family"], child Keys=["inet"] with grandchildren
 			// - hierarchical:  family inet { address ...; dhcp; }
 			//   Keys=["family","inet"], children are address/dhcp directly
-			for _, familyNode := range unitInst.node.FindChildren("family") {
+			for _, familyNode := range unitNode.FindChildren("family") {
 				var afNodes []*Node
 				if len(familyNode.Keys) >= 2 {
 					afNodes = append(afNodes, familyNode)
