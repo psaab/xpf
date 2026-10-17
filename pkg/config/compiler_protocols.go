@@ -98,7 +98,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		for _, areaInst := range namedInstances(ospfExpanded.FindChildren("area")) {
 			area := &OSPFArea{ID: areaInst.name}
 
-			for _, ifInst := range bracketedGroupInstances8794(areaInst.node.FindChildren("interface")) {
+			for _, ifInst := range bracketedGroupInstances8794(splitPackedSiblingInterfaceNodes14437(areaInst.node.FindChildren("interface"))) {
 				// #8436: FIND-OR-CREATE within the slice, keyed on the
 				// interface NAME.
 				//
@@ -775,7 +775,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			areaChildren := expandFlatRun(packedBodyChildren(areaInst.node, areaSchema), areaSchema)
 			areaNode := &Node{Keys: areaInst.node.Keys, Children: areaChildren}
 
-			for _, ifInst := range bracketedGroupInstances8794(areaNode.FindChildren("interface")) {
+			for _, ifInst := range bracketedGroupInstances8794(splitPackedSiblingInterfaceNodes14437(areaNode.FindChildren("interface"))) {
 				// #8436: FIND-OR-CREATE within the slice, keyed on the
 				// interface NAME.
 				//
