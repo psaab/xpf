@@ -797,7 +797,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		}},
 	}},
 	"lldp": {desc: "LLDP configuration", children: map[string]*schemaNode{
-		"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
+		"interface": {desc: "Interface", args: 1, packedTail: true, nodeValidator: validateLLDPInterfacePackedTokens, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
 			"disable": {desc: "Disable LLDP", children: nil},
 		}},
 		// #4596: bound to the IEEE 802.1AB LLDP-MIB ranges Junos also
