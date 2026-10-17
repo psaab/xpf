@@ -3090,6 +3090,119 @@ fn shared_nat_mixed_zero_refuses_ambiguous_tenant_alias_11361() {
 }
 
 #[test]
+fn shared_nat_exact_hit_refuses_ambiguous_same_domain_owner_14384() {
+    const DOMAIN_D: u32 = 100_084;
+    // F1 = C -> VIP1, F2 = C -> VIP2, both DNAT to the shared backend B in
+    // domain D. `reverse_session_key` preserves the forward routing domain,
+    // so both publish the same domain-D reply key (B -> C) and the second
+    // publish displaces the first in the shared NAT map.
+    let nat = NatDecision {
+        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 84, 200))),
+        ..NatDecision::default()
+    };
+    let mut key1 = test_key();
+    key1.routing_domain = DOMAIN_D;
+    key1.dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 84, 1));
+    let mut key2 = test_key();
+    key2.routing_domain = DOMAIN_D;
+    key2.dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 84, 2));
+
+    let entry = |key: SessionKey| SyncedSessionEntry {
+        key,
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+    };
+
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(test_resolution().egress_ifindex, DOMAIN_D);
+
+    // Control: a single owner in domain D still resolves via the exact hit.
+    {
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &entry(key1.clone()),
+        );
+        let reply = reverse_session_key(&key1, nat);
+        assert_eq!(reply.routing_domain, DOMAIN_D);
+        let hit = lookup_shared_forward_nat_match(
+            &forwarding,
+            &shared_nat_sessions,
+            &shared_owner_rg_indexes,
+            &reply,
+        )
+        .expect("single domain-D owner must resolve");
+        assert_eq!(hit.key, key1);
+    }
+
+    // Two same-key owners in domain D: the exact slot names the
+    // last-published owner, but the domain-D reply must fail closed rather
+    // than mint a reverse session under the wrong forward session (#14384).
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry(key1.clone()),
+    );
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry(key2.clone()),
+    );
+    let reply = reverse_session_key(&key1, nat);
+    assert_eq!(reply, reverse_session_key(&key2, nat));
+    {
+        let shared_nat = shared_nat_sessions.lock().expect("shared NAT lock");
+        assert_eq!(
+            shared_nat.get(&reply).expect("exact reply key").key,
+            key2,
+            "fixture must exercise the exact-hit branch (last publisher wins the slot)"
+        );
+    }
+    assert!(
+        lookup_shared_forward_nat_match(
+            &forwarding,
+            &shared_nat_sessions,
+            &shared_owner_rg_indexes,
+            &reply,
+        )
+        .is_none(),
+        "ambiguous same-domain exact hit must not select the last-published owner (#14384)"
+    );
+}
+
+#[test]
 fn publish_and_remove_shared_session_tracks_owner_rg_indexes() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
