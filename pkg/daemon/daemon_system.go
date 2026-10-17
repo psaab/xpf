@@ -751,16 +751,19 @@ func renderChronySources(servers []string, opts map[string]config.NTPServerOptio
 		// #7132: per-server modifiers. Before #7132 these were absorbed into the
 		// address list as if they were extra servers, so `prefer` reached this
 		// function AS A SERVER NAME and was rendered as its own source line.
-		// `version`/`key` take chrony's own spellings. `routing-instance` has no
+		// `version` takes chrony's own spelling. `routing-instance` has no
 		// chrony equivalent; the compiler retains it in typed config and emits
 		// a commit advisory rather than silently applying it here.
+		//
+		// #14596: `key` is NEVER rendered. xpf writes no chrony keyfile, so
+		// `key <id>` would make chronyd log "Key <id> is missing" and never
+		// poll the source. The compiler strips authored keys into
+		// NTPServerKeyIDs with a commit warning; this belt covers
+		// leniently-loaded / peer-synced options that still carry one.
 		opt := opts[server]
 		line := fmt.Sprintf("%s %s iburst", directive, server)
 		if opt.Version > 0 {
 			line += fmt.Sprintf(" version %d", opt.Version)
-		}
-		if opt.Key > 0 {
-			line += fmt.Sprintf(" key %d", opt.Key)
 		}
 		if opt.Prefer {
 			line += " prefer"

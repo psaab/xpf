@@ -27,7 +27,13 @@ type SystemConfig struct {
 	// existing consumer reads the address list and none of them needed changing,
 	// so widening the shared field would have been churn in three packages to
 	// serve one of them.
-	NTPServerOptions   map[string]NTPServerOption
+	NTPServerOptions map[string]NTPServerOption
+	// NTPServerKeyIDs carries the per-server `key <id>` ids stripped by
+	// the compiler (#14596): xpf writes no chrony keyfile, so a rendered
+	// `key <id>` would make chronyd refuse to poll the source. The ids
+	// are retained (sorted, deduplicated) only so the commit warning can
+	// name them; NTPServerOption.Key is always zero after compile.
+	NTPServerKeyIDs    []int
 	NTPThreshold       int    // NTP threshold in seconds (0 = default)
 	NTPThresholdAction string // "accept" or "reject"
 	NoRedirects        bool   // disable ICMP redirects
@@ -1992,7 +1998,12 @@ type DHCPStaticBinding struct {
 type NTPServerOption struct {
 	// Prefer marks this source preferred to chrony.
 	Prefer bool
-	// Key is the authentication key id (0 = unset).
+	// Key is the authentication key id as authored (0 = unset). The
+	// compiler strips it to SystemConfig.NTPServerKeyIDs (#14596) and
+	// zeroes this field, because xpf writes no chrony keyfile and a
+	// rendered `key <id>` would stop chronyd polling the source. It is
+	// retained on the struct only for lenient/peer-synced values that
+	// bypass the compiler strip; the renderer ignores it.
 	Key int
 	// Version is the NTP protocol version to use (0 = chrony default).
 	Version int

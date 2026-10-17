@@ -21,6 +21,21 @@ func compileNTPText(t *testing.T, text string) ([]string, map[string]NTPServerOp
 	return cfg.System.NTPServers, cfg.System.NTPServerOptions
 }
 
+// compileNTPKeyIDs14596 returns the stripped per-server key ids (#14596).
+func compileNTPKeyIDs14596(t *testing.T, text string) []int {
+	t.Helper()
+	p := NewParser(text)
+	tree, perrs := p.Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("parse %q: %v", text, perrs)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil || cfg == nil {
+		t.Fatalf("compile %q: err=%v cfg=%v", text, err, cfg)
+	}
+	return cfg.System.NTPServerKeyIDs
+}
+
 // TestNTPServerModifierSpellingsAgree_7132 is the fail-on-revert for the
 // compact-spelling capture.
 //
@@ -67,8 +82,13 @@ func TestNTPServerModifierSpellingsAgree_7132(t *testing.T) {
 
 			// Non-vacuity: if the BLOCK spelling records nothing either, the
 			// comparison below is `nil == nil` and proves nothing about the
-			// compact path.
-			if len(blockOpts) == 0 {
+			// compact path. #14596: `key` is stripped into NTPServerKeyIDs,
+			// so its non-vacuity lives there, not in the options map.
+			if c.mod == "key" {
+				if got := compileNTPKeyIDs14596(t, "system { ntp { server xpfarg { key 5; } } }"); len(got) != 1 || got[0] != 5 {
+					t.Fatalf("block spelling recorded no stripped key id; this cell cannot prove anything about the compact spelling")
+				}
+			} else if len(blockOpts) == 0 {
 				t.Fatalf("block spelling recorded no options for %q; this cell "+
 					"cannot prove anything about the compact spelling", c.mod)
 			}
@@ -111,8 +131,12 @@ func TestNTPServerModifierRegressionShapes_7132(t *testing.T) {
 	if !reflect.DeepEqual(srv, []string{"xpfarg"}) {
 		t.Errorf("a modifier's ARGUMENT must not be read as a server: got %v", srv)
 	}
-	if opts["xpfarg"].Key != 5 {
-		t.Errorf("the modifier argument must land on the server: got %+v", opts)
+	// #14596: the key id lands in NTPServerKeyIDs, stripped off the option.
+	if got := compileNTPKeyIDs14596(t, "system { ntp { server xpfarg key 5; } }"); len(got) != 1 || got[0] != 5 {
+		t.Errorf("the modifier argument must land as a stripped key id: got %v (opts %+v)", got, opts)
+	}
+	if opts["xpfarg"].Key != 0 {
+		t.Errorf("Key must be stripped off the option by #14596: got %+v", opts)
 	}
 
 	// 2. An early return on empty Keys dropped the #6689 nested-BLOCK shape,
