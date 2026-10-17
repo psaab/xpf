@@ -1999,8 +1999,12 @@ the whole snapshot (a running node keeps its previous one), and the mirror names
 the application.
 The kernel host-bound projection applies the same boundary (#12040): a permit
 referencing an application or application-set with match drops is skipped
-rather than rendered with the widened match, while deny/reject terms remain
-fail-closed.
+rather than rendered with the widened match. Deny/reject terms keep projecting
+only when the drop widens the match (fail-closed); a drop that narrows it —
+duplicate scalar leaves keeping only the last value, a discarded mixed direct
+body, or a set member named by an unrecognized statement — makes the term
+unrepresentable, withholding the zone program and retaining the #4168 warning
+(#14350).
 
 **Tolerant name-collision quarantine (#12049):** strict application namespace
 gates (#3339/#3472) and the strict same-name `address`/`address-set` gate

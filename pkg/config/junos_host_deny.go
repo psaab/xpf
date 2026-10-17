@@ -546,8 +546,11 @@ func containsZone(zs []string, z string) bool {
 // scheduler-gated policy, a feed-tainted / non-static source or destination, an
 // un-reducible application, or an application scoped to an IPsec/ident exempt
 // tuple marks the term un-representable. A permit with dropped application
-// matches is skipped so it cannot carve a later deny. Otherwise each
-// representable action keeps its verdict in first-match order (#9504).
+// matches is skipped so it cannot carve a later deny. A deny/reject whose
+// application reference was narrowed by a dropped clause (#14350) is
+// un-representable so the whole program is withheld and the #4168 warning is
+// retained. Otherwise each representable action keeps its verdict in
+// first-match order (#9504).
 func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[string]bool) junosHostTerm {
 	t := junosHostTerm{key: key, action: p.Action, representable: true}
 	// A LenientContentDropped permit has policy enforcement intent absent from
@@ -581,6 +584,34 @@ func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[stri
 				if len(ApplicationReferenceMatchDrops(name, &cfg.Applications)) > 0 {
 					t.skipPermit = true
 					return t
+				}
+			}
+		}
+	}
+	// #14350: a DENY/REJECT whose application reference was narrowed by a
+	// dropped clause (duplicate scalar leaves keeping only the last value, a
+	// discarded mixed direct body, a set member named by an unrecognized
+	// statement) would project only the surviving fragment, leaving the
+	// dropped ports/applications open while RenderedPolicyKeys suppressed
+	// the #4168 warning. Mark it unrepresentable: the whole-program gate
+	// withholds the zone program and retains the warning. Only narrowing
+	// drops trip this — widening drops keep projecting (#12040), and a
+	// LenientContentDropped deny likewise stays intact (its compiled match
+	// is broader than authored). `any` subsumes named siblings, mirroring
+	// the permit arm above.
+	if p.Action == PolicyDeny || p.Action == PolicyReject {
+		containsAny := false
+		for _, name := range p.Match.Applications {
+			if name == "" || name == "any" {
+				containsAny = true
+				break
+			}
+		}
+		if !containsAny {
+			for _, name := range p.Match.Applications {
+				if junosHostApplicationRefNarrows(cfg, name) {
+					t.representable = false
+					break
 				}
 			}
 		}

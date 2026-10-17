@@ -200,6 +200,65 @@ func junosHostFeedBoundNames(cfg *Config) map[string]bool {
 	return out
 }
 
+// junosHostApplicationRefNarrows reports whether resolving ref to its compiled
+// form loses authored match coverage: the compiled application/set matches a
+// strict subset of what was authored. That is the direction that leaves a
+// DENY/REJECT under-enforced (#14350): duplicate scalar leaves keep only the
+// last value; a mixed direct+term application discards its direct body; an
+// application-set member named by an unrecognized statement never joins the
+// set. Widening drops (a lost constraint, e.g. a malformed icmp-type leaving
+// the term unconstrained) are deliberately NOT narrowing: projecting them
+// denies at least everything authored, the fail-closed direction (#12040).
+//
+// The walk mirrors ApplicationReferenceMatchDrops (application-first at the
+// top level, memberIsNestedSet inside sets, MixedDirectTermApps on any set
+// reached) so the two predicates cannot drift on reference resolution.
+// Settings leaves (timeout/alg) never appear here: appendMatchLeafDrops9525
+// filters Duplicate*Leaves through applicationMatchLeaves9525, and the direct
+// icmp/protocol never-match arms of ApplicationMatchDrops are widening-or-
+// inert, not narrowing.
+func junosHostApplicationRefNarrows(cfg *Config, name string) bool {
+	if cfg == nil || name == "" || name == "any" {
+		return false
+	}
+	apps := &cfg.Applications
+	mixed := make(map[string]bool, len(apps.MixedDirectTermApps))
+	for _, n := range apps.MixedDirectTermApps {
+		mixed[n] = true
+	}
+	narrows := false
+	walkApplicationReference(name, apps, func(_, _, _ string) applicationReferenceCollisionAction {
+		// A collision makes the reference unresolvable; junosHostResolve-
+		// Applications already returns ok=false for it.
+		return applicationReferenceContinue
+	}, func(_ string, app *Application) {
+		if app == nil {
+			return
+		}
+		for _, leaf := range app.DuplicateDirectLeaves {
+			if applicationMatchLeaves9525[leaf] {
+				narrows = true
+				return
+			}
+		}
+		for _, leaf := range app.DuplicateTermLeaves {
+			if applicationMatchLeaves9525[leaf] {
+				narrows = true
+				return
+			}
+		}
+	}, func(setName string) {
+		if mixed[setName] {
+			narrows = true
+		}
+	}, func(_ string, set *ApplicationSet) {
+		if len(unknownMemberReferences9595(set, apps)) > 0 {
+			narrows = true
+		}
+	})
+	return narrows
+}
+
 // junosHostResolveApplications reduces a policy `match application` token list to
 // OR-expanded L4 fragments. appAny is true for `any`/empty (match every
 // protocol). ok=false when any application is un-resolvable, multi-term, ALG,
