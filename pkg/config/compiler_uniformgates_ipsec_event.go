@@ -212,6 +212,21 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 			return err
 		}
 	}
+	// #14588 (Y09-01): an IKE proposal REFERENCED by a rendered VPN with
+	// NO dh-group at all carries no InvalidSpec, so the value gate above
+	// cannot see it — but buildIKEProposalFromIKE omits the key-exchange
+	// term and strongSwan refuses the whole file ("invalid value for:
+	// proposals, config discarded, loaded 0 of 1"). Strict on commit,
+	// warn on the tolerant path (#1960); the renderer skips the affected
+	// VPN so the warned config keeps its healthy tunnels loadable.
+	if err := validateIPsecIkeDHGroupsPresentStrict(cfg); err != nil {
+		if opts.lenientIKEProposalMissingDH {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec ike proposal dh-group (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	// #4298 (V-2): reject an IPsec proposal with `protocol ah`. AH is
 	// integrity-only and xpf has no AH render path, so a `protocol ah`

@@ -487,6 +487,18 @@ type compileOpts struct {
 	// warns rather than gaining a new rejection. Same #1960
 	// fail-closed-on-load doctrine as lenientIPsecProposalLifetime.
 	lenientIPsecDHGroup bool
+	// lenientIKEProposalMissingDH (#14588, Y09-01) downgrades the
+	// absent-IKE-dh-group gate (validateIPsecIkeDHGroupsPresentStrict)
+	// from a hard compile error to a cfg.Warnings entry on the tolerant
+	// load / peer-sync paths. An IKE proposal with no dh-group renders a
+	// proposal with no key-exchange method, which strongSwan refuses
+	// ("invalid value for: proposals, config discarded, loaded 0 of 1"),
+	// so strict commit hard-rejects it; an already-persisted or
+	// peer-synced config an older binary accepted must still BOOT, so
+	// the tolerant path warns rather than gaining a new rejection, and
+	// the renderer skips the affected VPN. Same #1960 doctrine as
+	// lenientIPsecDHGroup.
+	lenientIKEProposalMissingDH bool
 
 	// lenientIPsecTrafficSelectors (#4098) downgrades the IPsec
 	// `traffic-selector local-ip / remote-ip` value gate
@@ -3318,6 +3330,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecRouteTrafficSelectors:      true,
 		lenientIPsecProposalLifetime:           true,
 		lenientIPsecDHGroup:                    true,
+		lenientIKEProposalMissingDH:            true,
 		lenientIPsecTrafficSelectors:           true,
 		lenientReservedProposalSetNames:        true,
 		lenientChassisClusterIdentities:        true,
