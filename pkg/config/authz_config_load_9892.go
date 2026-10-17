@@ -75,10 +75,14 @@ func IsFlatLoadLine(line string) bool {
 // mid-token at bracket depth 0 is literal). This classifier therefore
 // opens a comment only when NOT inside a bare token, and a '[' or ']'
 // met mid-token does NOT end the token: `set ... host-name a[/*` is one
-// identifier to both lexers, so no comment opens (#14145). A '[' that
-// BEGINS a token (after whitespace or a structural delimiter) is bracket
-// list sugar just as the real lexer's skip loop consumes it, so the
-// scanner stays at a token boundary and a '/*' there is a comment.
+// identifier to both lexers, so no comment opens (#14145). Within a gap,
+// the real lexer tries tryBracketedEndpointLiteral BEFORE consuming a
+// token-initial '[' as list sugar (#5182): '['+identrun+']'+':'+identrun
+// is ONE identifier, and since '/' and '*' are identifier characters a
+// token-initial `[/*x]:1` (or `[//x]:1`) is such a literal, so no comment
+// opens there either (#14572). Only a '[' that does not form an endpoint
+// literal is list sugar the skip loop consumes, so the scanner stays at
+// a token boundary and a '/*' after it is a comment.
 func ClassifyLoadContent(content string) (flat bool, uncommented string, err error) {
 	var b strings.Builder
 	b.Grow(len(content))
@@ -138,16 +142,36 @@ func ClassifyLoadContent(content string) (flat bool, uncommented string, err err
 			inBlock = true
 			continue
 		}
+		// A token-initial '[' that forms a bracketed endpoint literal is
+		// one identifier to the real lexer (#5182, modelled above): the
+		// whole literal is token text, so no '/' inside it can open a
+		// comment. A ']' met at a token boundary (list close or stray)
+		// can likewise be immediately followed by such a literal.
+		if !inToken && (ch == '[' || (ch == ']' && i+1 < len(content) && content[i+1] == '[')) {
+			start := i
+			if ch == ']' {
+				start = i + 1
+			}
+			if end, ok := bracketedEndpointLiteralEnd(content, start); ok {
+				for ; i < end; i++ {
+					b.WriteByte(content[i])
+				}
+				i-- // the loop's i++ lands on the first byte past the literal
+				inToken = true
+				continue
+			}
+		}
 		b.WriteByte(ch)
 		switch ch {
 		case ' ', '\t', '\r', '{', '}', ';', '|':
 			inToken = false
 		case '[', ']':
-			// A bracket that BEGINS a token is list sugar the real
-			// lexer's skip loop consumes, so the scanner stays at a
-			// token boundary (inToken stays false) and a following
-			// '/*' is a comment. A bracket met MID-token was consumed
-			// by readIdentifier as a literal character (#8453), so the
+			// A bracket that BEGINS a token (and is not an endpoint
+			// literal, handled above) is list sugar the real lexer's
+			// skip loop consumes, so the scanner stays at a token
+			// boundary (inToken stays false) and a following '/*' is
+			// a comment. A bracket met MID-token was consumed by
+			// readIdentifier as a literal character (#8453), so the
 			// token continues and inToken stays true. The pre-fix code
 			// reset inToken on every bracket, which is how `a[/*`
 			// opened a fictitious comment (#14145).
@@ -168,6 +192,34 @@ func ClassifyLoadContent(content string) (flat bool, uncommented string, err err
 	return flat, uncommented, nil
 }
 
+// bracketedEndpointLiteralEnd mirrors the real lexer's
+// tryBracketedEndpointLiteral (lexer.go): content[start] must be '[',
+// immediately followed by a run of identifier characters, a ']', a ':',
+// and a further run of identifier characters. On a match it returns the
+// index just past the literal. The identifier-character set is the
+// lexer's own isIdentChar, so the two models cannot drift on what the
+// runs may contain ('/', '*' and ':' included).
+func bracketedEndpointLiteralEnd(content string, start int) (int, bool) {
+	j := start + 1
+	if j >= len(content) || !isIdentChar(content[j]) {
+		return 0, false
+	}
+	for j < len(content) && isIdentChar(content[j]) {
+		j++
+	}
+	if j >= len(content) || content[j] != ']' {
+		return 0, false
+	}
+	j++
+	if j >= len(content) || content[j] != ':' {
+		return 0, false
+	}
+	for j < len(content) && isIdentChar(content[j]) {
+		j++
+	}
+	return j, true
+}
+
 // LoadMutationLines returns the set-form mutation lines a load body writes,
 // or an error when the shared classifier cannot classify the body at all
 // (an unterminated block comment). Authorization MUST refuse on that error:
@@ -176,9 +228,9 @@ func ClassifyLoadContent(content string) (flat bool, uncommented string, err err
 //
 // Set-format content is taken line by line. Hierarchical content is parsed
 // and rendered as set lines, so every leaf path it writes is checked.
-// Hierarchical content is parsed from the comment-free form: the store's
-// hierarchical branch parses the raw body, whose real lexer reaches the
-// same statements because comments are gap text to it as well.
+// Hierarchical content is parsed from the same comment-free form the
+// store's hierarchical branches parse (#14572), so the gate adjudicates
+// exactly the representation the store applies.
 // Content that does not parse yields its parsed part; the store's own Load
 // refuses what it cannot parse, and adjudicating the parsable part is
 // strictly better than adjudicating nothing.
