@@ -127,16 +127,18 @@ func collectTunnelEndpointNamesAST(ifacesNode *Node, out map[string]struct{}) {
 
 // astTunnelModeWireguard reports whether a tunnel AST node carries an
 // explicit `mode wireguard` — the exact extraction the compiler uses
-// for TunnelConfig.Mode (prop Keys[1], compiler_interfaces.go), so the
+// for TunnelConfig.Mode (nodeVal, compiler_interfaces.go), so the
 // collision gate's single-endpoint selection matches the compiled
 // outcome by construction. The compiler's prefix-derived default mode
-// is only ever gre/ipip, so wireguard is always explicit.
+// is only ever gre/ipip, so wireguard is always explicit. The braced
+// form `mode { wireguard; }` (#14440) is honoured via nodeVal, which
+// reads the braced child shape as well as Keys[1].
 func astTunnelModeWireguard(tunnelNode *Node) bool {
 	if tunnelNode == nil {
 		return false
 	}
 	for _, prop := range tunnelNode.Children {
-		if prop.Name() == "mode" && len(prop.Keys) >= 2 && prop.Keys[1] == "wireguard" {
+		if prop.Name() == "mode" && nodeVal(prop) == "wireguard" {
 			return true
 		}
 	}

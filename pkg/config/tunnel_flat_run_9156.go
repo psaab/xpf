@@ -1,5 +1,7 @@
 package config
 
+import "strconv"
+
 // #9156 (V020): the `tunnel` container's compiler reads
 // `tunnelNode.Children` directly, so a flat-set run whose head is an UNTYPED
 // leaf carries every later statement past the strict commit gate and then
@@ -62,4 +64,49 @@ func tunnelRunChildren9156(tunnelNode *Node) []*Node {
 		return nil
 	}
 	return hoistAndSplitRun8939(tunnelNode.Children, tunnelSchema9156())
+}
+
+// applyTunnelBracedScalars14440 retains braced-scalar tunnel leaves
+// (`source { X; }`, `destination { X; }`, `mode { X; }`,
+// `keepalive { N; }`, `keepalive-retry { N; }`) from the RAW tunnel
+// children before tunnelRunChildren9156 flattens them into an empty
+// leaf plus a stray value sibling the reader's v != "" guard skips
+// (#14440, extending the #13215 interface-level pre-pass). Both the
+// interface-level and unit-level readers call it; the flattened loop
+// that follows re-asserts flat spellings idempotently. key/ttl are
+// deliberately NOT handled here: their braced forms must still fail
+// parseInterfaceNumeric9899 in the flattened loop (strict error /
+// lenient quarantine), not be silently adopted.
+func applyTunnelBracedScalars14440(tc *TunnelConfig, tunnelNode *Node) {
+	if tc == nil || tunnelNode == nil {
+		return
+	}
+	for _, rawProp := range tunnelNode.Children {
+		switch rawProp.Name() {
+		case "source":
+			if v := nodeVal(rawProp); v != "" {
+				tc.Source = v
+			}
+		case "destination":
+			if v := nodeVal(rawProp); v != "" {
+				tc.Destination = v
+			}
+		case "mode":
+			if v := nodeVal(rawProp); v != "" {
+				tc.Mode = v
+			}
+		case "keepalive":
+			if v := nodeVal(rawProp); v != "" {
+				if n, err := strconv.Atoi(v); err == nil {
+					tc.Keepalive = n
+				}
+			}
+		case "keepalive-retry":
+			if v := nodeVal(rawProp); v != "" {
+				if n, err := strconv.Atoi(v); err == nil {
+					tc.KeepaliveRetry = n
+				}
+			}
+		}
+	}
 }

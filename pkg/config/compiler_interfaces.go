@@ -313,24 +313,9 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			// #9156: expand the flat-set run before reading it. An untyped head
 			// (`keepalive-retry`, `routing-instance`) admits the whole run past
 			// the strict gate and this loop would then read only the head.
-			// #13215: retain values from braced scalar blocks before
+			// #13215/#14440: retain values from braced scalar blocks before
 			// tunnelRunChildren9156 flattens their body into sibling nodes.
-			for _, rawProp := range tunnelNode.Children {
-				switch rawProp.Name() {
-				case "source":
-					if v := nodeVal(rawProp); v != "" {
-						tc.Source = v
-					}
-				case "destination":
-					if v := nodeVal(rawProp); v != "" {
-						tc.Destination = v
-					}
-				case "mode":
-					if v := nodeVal(rawProp); v != "" {
-						tc.Mode = v
-					}
-				}
-			}
+			applyTunnelBracedScalars14440(tc, tunnelNode)
 			for _, prop := range tunnelRunChildren9156(tunnelNode) {
 				switch prop.Name() {
 				case "source":
@@ -492,6 +477,10 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				if ifc.Tunnel != nil {
 					tc = ifc.Tunnel.cloneForUnit(linuxName)
 				}
+				// #14440: same braced-scalar pre-pass as the interface-level
+				// reader, applied after cloneForUnit so only leaves the unit
+				// itself authored override the inherited interface values.
+				applyTunnelBracedScalars14440(tc, tunnelNode)
 				// #9156: same expansion as the interface-level reader above.
 				skipUnit9899 := false
 				for _, prop := range tunnelRunChildren9156(tunnelNode) {
