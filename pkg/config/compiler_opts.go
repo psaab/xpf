@@ -601,13 +601,16 @@ type compileOpts struct {
 	// cfg.Warnings entry on the tolerant load / peer-sync paths. A custom class
 	// named after a system-defined one is INERT at runtime (resolveClassPerms
 	// resolves the built-in first), so a narrowed `class super-user { permissions
-	// view; }` grants full super-user while the commit advisory reports the
-	// narrowing took effect. Commit / commit-check stay strict so a new operator
-	// edit is rejected; an already-persisted or peer-synced config an older
-	// binary accepted must still BOOT (warn) per the #1960 fail-closed-on-load
-	// doctrine — leniently loaded the definition is exactly as inert as it
-	// already was, now flagged, and built-in-first precedence keeps the runtime
-	// class from being ESCALATED by the shadow. Same doctrine as
+	// view; }` would otherwise grant full super-user while the commit advisory
+	// reported the narrowing took effect. Commit / commit-check stay strict so
+	// a new operator edit is rejected; an already-persisted or peer-synced
+	// config an older binary accepted must still BOOT (warn) per the #1960
+	// fail-closed-on-load doctrine — and since #14387 the tolerant path also
+	// NEUTRALISES every user assignment to a shadowed name (rewritten to
+	// "unauthorized" by neutraliseShadowedLoginAssignments14387) instead of
+	// warn-and-keep, so the inert narrowing cannot hand the user the built-in's
+	// permissions. Built-in-first precedence itself is unchanged (inverting it
+	// would let a custom class ESCALATE a built-in). Same doctrine as
 	// lenientLoginPackedStatements.
 	lenientLoginClassShadowsBuiltin bool
 

@@ -415,6 +415,17 @@ described below:
   and `allow-configuration` as ALLOWLISTS, `deny-commands` and
   `deny-configuration` as denials, on both the CLI and the gRPC surface. Both
   directions changed on upgrade; see below.
+- **A custom class named after a built-in shadows nothing.** Built-in-first
+  resolution (`super-user`, `operator`, `read-only`, `config-viewer`,
+  `unauthorized`) always wins at runtime, so `class super-user { permissions
+  view; }` is inert: it neither narrows nor widens the built-in. Such a
+  definition is **rejected at commit**. On the tolerant load / peer-sync
+  path it still boots with a warning, but since #14387 every user assigned
+  the shadowed name is **neutralised to `unauthorized`** (no permissions) for
+  that load, and the per-class advisory no longer reports the shadowed
+  mapping as applied. Assign a distinct class name, or assign the built-in
+  directly if its semantics are what was intended. A user assigned a
+  built-in with **no** shadowing definition is unaffected.
 
 ### The four regex sub-statements are ENFORCED (#7172)
 
