@@ -3708,8 +3708,9 @@ func nftDSCPValue(name string) string {
 
 // lo0FlexMatchUnrepresentable reports whether a term's flexible-match-range
 // cannot be rendered faithfully (#6804): more than one named range (#5823), an
-// unparseable numeric token (UnknownFlexMatch), or a load width outside 1..4
-// bytes.
+// unparseable numeric token (UnknownFlexMatch), a load width outside 1..4
+// bytes, or a match-start other than "", "layer-3" or "layer-4" (#14394 —
+// any other base has no faithful rendering and must not re-base to layer-3).
 //
 // The width rule mirrors the userspace snapshot builder exactly: a zero
 // bit-length defaults to 4 (32-bit) and an oversized width is NOT capped —
@@ -3721,6 +3722,9 @@ func lo0FlexMatchUnrepresentable(term *config.FirewallFilterTerm) bool {
 	}
 	if term.FlexMatch == nil {
 		return false
+	}
+	if lo0FlexMatchStartUnrepresentable(term.FlexMatch) {
+		return true
 	}
 	n := nftFlexMatchByteLen(term.FlexMatch.BitLength)
 	return n < 1 || n > 4
@@ -3735,7 +3739,8 @@ func nftFlexMatchByteLen(bits uint8) int {
 	return (int(bits) + 7) / 8
 }
 
-// nftFlexMatchExpr renders `@nh,<bitoff>,<bitlen> & <mask> == <value>`.
+// nftFlexMatchExpr renders `@nh,<bitoff>,<bitlen> & <mask> == <value>` for
+// layer-3 (and the empty default) and `@th,...` for layer-4 (#14394).
 //
 // The load width is whole BYTES (nft loads byte-aligned), so the bit length in
 // the expression is the byte width times 8 — the sub-byte narrowing is carried
@@ -3752,5 +3757,9 @@ func nftFlexMatchExpr(fm config.FlexMatchConfig) string {
 		mask &= trunc
 		value &= trunc
 	}
-	return fmt.Sprintf("@nh,%d,%d & 0x%x == 0x%x", int(fm.ByteOffset)*8, n*8, mask, value)
+	base := "@nh"
+	if fm.MatchStart == "layer-4" {
+		base = "@th"
+	}
+	return fmt.Sprintf("%s,%d,%d & 0x%x == 0x%x", base, int(fm.ByteOffset)*8, n*8, mask, value)
 }

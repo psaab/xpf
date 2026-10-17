@@ -270,7 +270,7 @@ func toNftLo0Term(term *config.FirewallFilterTerm, pl map[string]*config.PrefixL
 		// than configured — a control-plane fail-open on the chain that is the
 		// PRIMARY enforcement for host traffic.
 		FlexMatch:                lo0FlexMatch(term.FlexMatch),
-		FlexMatchUnrepresentable: len(term.FlexMatchRangeNames) > 1 || len(term.UnknownFlexMatch) > 0,
+		FlexMatchUnrepresentable: len(term.FlexMatchRangeNames) > 1 || len(term.UnknownFlexMatch) > 0 || lo0FlexMatchStartUnrepresentable(term.FlexMatch),
 		IsFragment:               term.IsFragment,
 		Log:                      term.Log,
 		Count:                    term.Count,
@@ -293,9 +293,27 @@ func lo0FlexMatch(fm *config.FlexMatchConfig) *xnft.Lo0FlexMatch {
 		return nil
 	}
 	return &xnft.Lo0FlexMatch{
+		MatchStart: fm.MatchStart,
 		ByteOffset: fm.ByteOffset,
 		BitLength:  fm.BitLength,
 		Value:      fm.Value,
 		Mask:       fm.Mask,
+	}
+}
+
+// lo0FlexMatchStartUnrepresentable reports whether a flex-match's
+// match-start has no faithful kernel rendering (#14394). Only "",
+// "layer-3" and "layer-4" are representable; anything else (e.g. the
+// validator-rejected "payload" arriving via a tolerant load) must fail
+// the term closed rather than silently re-base to layer-3.
+func lo0FlexMatchStartUnrepresentable(fm *config.FlexMatchConfig) bool {
+	if fm == nil {
+		return false
+	}
+	switch fm.MatchStart {
+	case "", "layer-3", "layer-4":
+		return false
+	default:
+		return true
 	}
 }
