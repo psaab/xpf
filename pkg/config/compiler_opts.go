@@ -1061,9 +1061,11 @@ type compileOpts struct {
 	// hard-rejects a term whose `from` block combines a port with a non-port
 	// protocol (gre/esp/icmp/...), tcp-flags with a non-TCP protocol, or
 	// icmp-type/icmp-code with a non-ICMP protocol (and an icmp-code with no
-	// icmp-type) — cross-field pairs the dataplane matcher can never satisfy, so
-	// a `then discard`/`reject` term silently NEVER matches and the traffic is
-	// admitted by the implicit accept (fail-OPEN). The tolerant load / peer-sync
+	// icmp-type, and since #14445 a no-protocol port/tcp-flags + icmp-type/code
+	// disjoint pair) — cross-field pairs the dataplane matcher can never
+	// satisfy, so a `then discard`/`reject` term silently NEVER matches and
+	// the traffic is admitted by the implicit accept (fail-OPEN). The tolerant
+	// load / peer-sync
 	// paths downgrade to a warning so an already-persisted or peer-synced config
 	// carrying such a term still BOOTS (#1960 no-brick); the Rust snapshot
 	// builder's UnsatisfiableFilterCrossField backstop then rejects the whole

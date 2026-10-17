@@ -1019,24 +1019,58 @@ fn resolve_term_protocols(
 /// leniently-loaded snapshot, consistent with the #2505/#3367/#3406 fail-closed
 /// family. Rejecting the whole snapshot (the reconcile preflight keeps the
 /// previous good filter state) is action-agnostic.
+///
+/// #14445 (DR19-H1): an EMPTY protocol list is NOT always legitimate. A single
+/// port / tcp-flags / icmp predicate with no protocol is enforceable (the
+/// matcher matches the port on whatever port-bearing packet arrives, and the
+/// tcp-flags/icmp arms self-gate on the packet protocol), but a term combining
+/// predicates from DISJOINT families — ports (TCP/UDP) or tcp-flags (TCP)
+/// together with icmp-type/code (ICMP/ICMPv6) — ANDs arms no single packet can
+/// satisfy, so it is a never-match even with no protocol. That shape must fail
+/// the snapshot closed here (predicate "port+icmp-type/code" /
+/// "tcp-flags+icmp-type/code") instead of compiling. Ports + tcp-flags together
+/// are NOT disjoint (one TCP packet satisfies both) and stay accepted, as do
+/// all explicit-protocol combinations handled by the #3723 arms below.
 fn check_cross_field_satisfiability(
     snap: &FirewallTermSnapshot,
     protocols: &[u8],
     filter_family: &str,
     filter_name: &str,
 ) -> Result<(), SnapshotIntegrityError> {
-    // An EMPTY protocol list is the legitimate "no protocol constraint" case:
-    // a port / tcp-flags / icmp predicate with no protocol is enforceable for
-    // a FILTER (the matcher matches the port on whatever port-bearing packet
-    // arrives, and the tcp-flags/icmp arms self-gate on the packet protocol),
-    // so it is NOT an error.
-    if protocols.is_empty() {
-        return Ok(());
-    }
     let ports_present = snap.source_ports.iter().any(|p| port_is_real(p))
         || snap.destination_ports.iter().any(|p| port_is_real(p))
         || snap.source_ports_except.iter().any(|p| port_is_real(p))
         || snap.destination_ports_except.iter().any(|p| port_is_real(p));
+    let tcp_flags_present =
+        snap.tcp_flags.is_some_and(|m| m != 0) || snap.tcp_flags_forbidden.is_some_and(|m| m != 0);
+    let icmp_present = !snap.icmp_types.is_empty() || !snap.icmp_codes.is_empty();
+    // #14445 (DR19-H1): a no-protocol term combining disjoint families is a
+    // never-match. `protocol: 0` is a sentinel only (not a real protocol);
+    // no field is widened because predicate names the combined shape.
+    if protocols.is_empty() && icmp_present {
+        if ports_present {
+            return Err(SnapshotIntegrityError::UnsatisfiableFilterCrossField {
+                family: filter_family.to_string(),
+                filter: filter_name.to_string(),
+                term: snap.name.clone(),
+                predicate: "port+icmp-type/code",
+                protocol: 0,
+            });
+        }
+        if tcp_flags_present {
+            return Err(SnapshotIntegrityError::UnsatisfiableFilterCrossField {
+                family: filter_family.to_string(),
+                filter: filter_name.to_string(),
+                term: snap.name.clone(),
+                predicate: "tcp-flags+icmp-type/code",
+                protocol: 0,
+            });
+        }
+        return Ok(());
+    }
+    if protocols.is_empty() {
+        return Ok(());
+    }
     if ports_present {
         if let Some(&proto) = protocols
             .iter()
@@ -1051,8 +1085,6 @@ fn check_cross_field_satisfiability(
             });
         }
     }
-    let tcp_flags_present =
-        snap.tcp_flags.is_some_and(|m| m != 0) || snap.tcp_flags_forbidden.is_some_and(|m| m != 0);
     if tcp_flags_present {
         if let Some(&proto) = protocols
             .iter()
@@ -1067,7 +1099,6 @@ fn check_cross_field_satisfiability(
             });
         }
     }
-    let icmp_present = !snap.icmp_types.is_empty() || !snap.icmp_codes.is_empty();
     if icmp_present {
         if let Some(&proto) = protocols
             .iter()

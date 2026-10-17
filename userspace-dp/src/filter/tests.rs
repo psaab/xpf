@@ -7145,6 +7145,22 @@ fn crossfield_filter(
     tcp_flags: Option<u8>,
     icmp_types: Vec<u8>,
 ) -> Result<FilterState, SnapshotIntegrityError> {
+    crossfield_filter_full(family, protocols, dst_ports, vec![], tcp_flags, None, icmp_types, vec![])
+}
+
+// Full-shape variant for #14445: source/destination except lists, forbidden
+// tcp-flags half, and icmp codes.
+#[allow(clippy::too_many_arguments)]
+fn crossfield_filter_full(
+    family: &str,
+    protocols: Vec<String>,
+    dst_ports: Vec<String>,
+    dst_ports_except: Vec<String>,
+    tcp_flags: Option<u8>,
+    tcp_flags_forbidden: Option<u8>,
+    icmp_types: Vec<u8>,
+    icmp_codes: Vec<u8>,
+) -> Result<FilterState, SnapshotIntegrityError> {
     parse_filter_state(
         &[FirewallFilterSnapshot {
             name: "f".into(),
@@ -7153,8 +7169,11 @@ fn crossfield_filter(
                 name: "x".into(),
                 protocols,
                 destination_ports: dst_ports,
+                destination_ports_except: dst_ports_except,
                 tcp_flags,
+                tcp_flags_forbidden,
                 icmp_types,
+                icmp_codes,
                 action: "discard".into(),
                 ..Default::default()
             }],
@@ -7296,6 +7315,117 @@ fn filter_crossfield_3723_no_protocol_is_enforceable() {
         .expect("tcp-flags with no protocol is enforceable");
     crossfield_filter("inet", vec![], vec![], None, vec![8])
         .expect("icmp-type with no protocol is enforceable");
+}
+
+// =====================================================================
+// #14445 (DR19-H1): a NO-protocol term combining disjoint L4 families
+// (ports/tcp-flags with icmp-type/code) is a never-match. The backstop
+// must reject it even though protocols is empty; each predicate ALONE
+// with no protocol, and ports+tcp-flags together, must still compile.
+// =====================================================================
+
+#[test]
+fn filter_disjoint_noproto_14445_port_icmp_rejected() {
+    let err = crossfield_filter("inet", vec![], vec!["80".into()], None, vec![8])
+        .expect_err("no-protocol port+icmp-type must fail the build closed");
+    match err {
+        SnapshotIntegrityError::UnsatisfiableFilterCrossField {
+            family,
+            filter,
+            term,
+            predicate,
+            protocol,
+        } => {
+            assert_eq!(family, "inet");
+            assert_eq!(filter, "f");
+            assert_eq!(term, "x");
+            assert_eq!(predicate, "port+icmp-type/code");
+            assert_eq!(protocol, 0);
+        }
+        other => panic!("expected UnsatisfiableFilterCrossField, got {other:?}"),
+    }
+}
+
+#[test]
+fn filter_disjoint_noproto_14445_except_and_code_rejected() {
+    let err = crossfield_filter_full(
+        "inet",
+        vec![],
+        vec![],
+        vec!["80".into()],
+        None,
+        None,
+        vec![8],
+        vec![],
+    )
+    .expect_err("no-protocol port-except+icmp-type must fail closed");
+    match err {
+        SnapshotIntegrityError::UnsatisfiableFilterCrossField { predicate, protocol, .. } => {
+            assert_eq!(predicate, "port+icmp-type/code");
+            assert_eq!(protocol, 0);
+        }
+        other => panic!("expected UnsatisfiableFilterCrossField, got {other:?}"),
+    }
+    let err = crossfield_filter_full(
+        "inet6",
+        vec![],
+        vec!["80".into()],
+        vec![],
+        None,
+        None,
+        vec![128],
+        vec![0],
+    )
+    .expect_err("no-protocol port+icmp-code must fail closed");
+    match err {
+        SnapshotIntegrityError::UnsatisfiableFilterCrossField { family, predicate, .. } => {
+            assert_eq!(family, "inet6");
+            assert_eq!(predicate, "port+icmp-type/code");
+        }
+        other => panic!("expected UnsatisfiableFilterCrossField, got {other:?}"),
+    }
+}
+
+#[test]
+fn filter_disjoint_noproto_14445_tcpflags_icmp_rejected() {
+    let err = crossfield_filter("inet", vec![], vec![], Some(0x02), vec![8])
+        .expect_err("no-protocol tcp-flags+icmp-type must fail the build closed");
+    match err {
+        SnapshotIntegrityError::UnsatisfiableFilterCrossField { predicate, protocol, .. } => {
+            assert_eq!(predicate, "tcp-flags+icmp-type/code");
+            assert_eq!(protocol, 0);
+        }
+        other => panic!("expected UnsatisfiableFilterCrossField, got {other:?}"),
+    }
+    let err = crossfield_filter_full(
+        "inet",
+        vec![],
+        vec![],
+        vec![],
+        None,
+        Some(0x10),
+        vec![8],
+        vec![],
+    )
+    .expect_err("no-protocol forbidden-flags+icmp-type must fail closed");
+    match err {
+        SnapshotIntegrityError::UnsatisfiableFilterCrossField { predicate, .. } => {
+            assert_eq!(predicate, "tcp-flags+icmp-type/code");
+        }
+        other => panic!("expected UnsatisfiableFilterCrossField, got {other:?}"),
+    }
+}
+
+#[test]
+fn filter_disjoint_noproto_14445_single_and_joint_tcp_compile() {
+    crossfield_filter("inet", vec![], vec!["80".into()], None, vec![])
+        .expect("port alone with no protocol compiles");
+    crossfield_filter("inet", vec![], vec![], Some(0x02), vec![])
+        .expect("tcp-flags alone with no protocol compiles");
+    crossfield_filter("inet", vec![], vec![], None, vec![8])
+        .expect("icmp-type alone with no protocol compiles");
+    crossfield_filter("inet", vec![], vec!["80".into()], Some(0x02), vec![])
+        .expect("port+tcp-flags with no protocol compiles");
 }
 
 #[test]
