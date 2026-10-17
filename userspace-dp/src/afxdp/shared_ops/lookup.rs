@@ -57,14 +57,23 @@ fn lookup_shared_forward_nat_match_with_admission(
 
     // Domain-zero keys are canonical aliases, not owner identities. Even an
     // exact key hit needs a unique-owner proof before it can select a tenant.
+    // The same holds in a nonzero domain (#14384): the shared map is keyed by
+    // the domain-preserving reverse tuple, so two forward owners in that
+    // domain DNATing to one backend publish the same key and the second
+    // displaces the first. The publish path records that collision in the
+    // ambiguity index under the domain-neutral probe, so the exact branch
+    // must consult it instead of trusting the surviving slot.
     let exact = {
         let map = lock_shared_recover(shared_nat_sessions);
         map.get(reply_key).cloned()
     };
     if let Some(exact) = exact {
         if matches_reply_domain(&exact, true)
-            && (reply_key.routing_domain != 0
-                || shared_owner_rg_indexes.is_some_and(|indexes| {
+            && shared_owner_rg_indexes.is_some_and(|indexes| {
+                if reply_key.routing_domain != 0 {
+                    lock_shared_recover(&indexes.nat_ambiguities)
+                        .is_unique_for(&crate::session::reverse_match_key(reply_key), &exact.key)
+                } else {
                     shared_forward_nat_candidate_is_unique(
                         shared_nat_sessions,
                         indexes,
@@ -72,7 +81,8 @@ fn lookup_shared_forward_nat_match_with_admission(
                         &exact.key,
                         exact.decision.nat,
                     )
-                }))
+                }
+            })
         {
             return Some(exact);
         }
