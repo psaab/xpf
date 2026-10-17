@@ -662,6 +662,16 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					// and merging the expanded tail makes the two spellings of
 					// one group produce one outcome; the override decision
 					// happens one level down, so an inline value still wins.
+					// #14422: the synthesized body carries s's provenance, so a
+					// nested group's packed leaf filters as nested below. Mirror
+					// of the #7648 container-peer tagging above.
+					if haveExcept {
+						contrib := s.fromGroups
+						if len(contrib) == 0 {
+							contrib = []string{group}
+						}
+						addNodeContrib9862(body, contrib)
+					}
 					budget.notePromoted9855(peer)
 					appendDuplicateBlockMergeMarkersToLeaves9023(body, markers)
 					if err := budget.charge(countNodes(body)); err != nil {
@@ -676,6 +686,14 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					// same-instance container (promoted earlier in this merge
 					// or authored braced) is also present — merge there instead
 					// of dropping the tail.
+					// #14422: see the promote path above.
+					if haveExcept {
+						contrib := s.fromGroups
+						if len(contrib) == 0 {
+							contrib = []string{group}
+						}
+						addNodeContrib9862(cbody, contrib)
+					}
 					appendDuplicateBlockMergeMarkersToLeaves9023(cbody, markers)
 					if err := budget.charge(countNodes(cbody)); err != nil {
 						return err
@@ -696,6 +714,14 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// leaves after a promotion remain suppressed as the base suppressed
 			// them (suppressSuccessiveLeaf9855).
 			if cpeer, cbody, ok := sameInstanceContainerPeer9855(ancestorPath, *dst, s); ok {
+				// #14422: see the promote path above.
+				if haveExcept {
+					contrib := s.fromGroups
+					if len(contrib) == 0 {
+						contrib = []string{group}
+					}
+					addNodeContrib9862(cbody, contrib)
+				}
 				appendDuplicateBlockMergeMarkersToLeaves9023(cbody, markers)
 				if err := budget.charge(countNodes(cbody)); err != nil {
 					return err
