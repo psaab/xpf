@@ -95,8 +95,8 @@ pub(in crate::afxdp) const FLOOD_COUNTER_ASSIGNABLE_SLOTS: usize = FLOOD_COUNTER
 const _: () = assert!(FLOOD_COUNTER_SLOTS == crate::afxdp::zone_counters::ZONE_COUNTER_SLOTS);
 
 /// Wire/layout version stamped into `ProcessStatus.flood_counter_layout_version`
-/// when the block is populated (#3651). 0/absent = helper with no per-zone flood
-/// accounting.
+/// (#3651). #14619: stamped UNCONDITIONALLY, like the traffic twin;
+/// 0/absent = helper with no per-zone flood accounting.
 pub(in crate::afxdp) const FLOOD_COUNTER_LAYOUT_VERSION: u32 = 1;
 
 /// Per-zone flood-counter ordinal for a screen drop reason, or `None` when the
@@ -207,6 +207,13 @@ impl FloodCounterSlotMap {
     #[inline]
     pub(in crate::afxdp) fn slot_of(&self, zone_id: u16) -> u8 {
         self.slot_of[zone_id as usize]
+    }
+
+    /// #14619: zone ids currently holding a live flood slot, in slot
+    /// order. Twin of `ZoneCounterSlotMap::slotted_zone_ids`; capacities
+    /// are asserted equal so the two sets agree.
+    pub(in crate::afxdp) fn slotted_zone_ids(&self) -> Vec<u16> {
+        self.inverse.iter().copied().filter(|&z| z != 0).collect()
     }
 }
 

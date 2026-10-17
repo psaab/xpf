@@ -137,8 +137,11 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 				// because with no overflow they remain genuinely ambiguous and
 				// naming one would be a guess.
 				// #6895: one canonical spelling for all three surfaces.
-				fmt.Println(zonecounters.UnavailableLineFor(
-					zoneCounterLayoutVersion(c), zoneCounterOverflowActive(c)))
+				// #14619: per-zone form — under overflow a slotted zone
+				// is idle, only a past-capacity zone is uncounted.
+				fmt.Println(zonecounters.UnavailableLineForZone(
+					zoneCounterLayoutVersion(c), zoneCounterOverflowActive(c),
+					zoneCounterSlotted(c, zoneID)))
 			case errIn == nil && errOut == nil:
 				fmt.Println("  Traffic statistics:")
 				fmt.Printf("    Input:  %d packets, %d bytes\n",
@@ -278,4 +281,25 @@ func zoneCounterOverflowActive(c *CLI) bool {
 		return false
 	}
 	return status.ZoneCounterOverflowActive
+}
+
+// zoneCounterSlotted reports whether zoneID holds a live traffic-counter
+// slot (#14619). Fails to false on any read error: with overflow active
+// that yields the EXHAUSTED line only when overflow is actually reported;
+// without overflow the renderer treats unslotted as idle, so a failed
+// read never manufactures an "uncounted" claim.
+func zoneCounterSlotted(c *CLI, zoneID uint16) bool {
+	if c == nil || zoneID == 0 {
+		return false
+	}
+	status, err := c.userspaceDataplaneStatus()
+	if err != nil {
+		return false
+	}
+	for _, id := range status.ZoneCounterSlottedZoneIDs {
+		if id == zoneID {
+			return true
+		}
+	}
+	return false
 }

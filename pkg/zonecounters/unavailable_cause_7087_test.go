@@ -100,3 +100,59 @@ func TestUnavailableLineDelegatesUnchanged_7087(t *testing.T) {
 		t.Error("UnavailableLine(false) lost the generic three-cause line")
 	}
 }
+
+// #14619: the decisive Go half. A CURRENT helper (layout version 1, the
+// ZONE_COUNTER_LAYOUT_VERSION the Rust helper stamps) with no row for a
+// zone and no overflow must render the IDLE line — never "upgrade the
+// helper". Pre-fix the Rust publisher stamped 0 in exactly this state, so
+// this row was unreachable from a current helper; it pins the contract
+// the publisher now honours.
+func TestUnavailableLineForCurrentVersionNoRowIsIdle_14619(t *testing.T) {
+	got := UnavailableLineFor(1, false)
+	if !strings.Contains(got, "the zone is idle") {
+		t.Errorf("current-version, no-row, no-overflow rendered %q; want the idle line", got)
+	}
+	if strings.Contains(got, "upgrade the helper") {
+		t.Errorf("current-version helper told to upgrade itself: %q (#14619)", got)
+	}
+	// Overflow with a current version stays the actionable overflow line,
+	// distinct from idle (per-zone slotted refinement is #14619 follow-up
+	// scope documented in zonecounters.go; the global bit must not regress
+	// to idle or to the upgrade line).
+	ov := UnavailableLineFor(1, true)
+	if !strings.Contains(ov, "EXHAUSTED") || strings.Contains(ov, "upgrade the helper") {
+		t.Errorf("current-version overflow rendered %q; want EXHAUSTED, not upgrade", ov)
+	}
+}
+
+// #14619 overflow refinement: with >63 configured zones the global
+// overflow bit is set, but a SLOTTED zone with no row is idle — it must
+// not be told it is "not being counted at all". Only a non-slotted zone
+// under overflow gets the EXHAUSTED line.
+func TestUnavailableLineForZoneSplitsSlottedIdleFromOverflow_14619(t *testing.T) {
+	slottedIdle := UnavailableLineForZone(1, true, true)
+	if !strings.Contains(slottedIdle, "the zone is idle") {
+		t.Errorf("slotted zone under overflow rendered %q; want idle", slottedIdle)
+	}
+	if strings.Contains(slottedIdle, "not being counted") {
+		t.Errorf("slotted zone told it is uncounted: %q (#14619)", slottedIdle)
+	}
+	unslotted := UnavailableLineForZone(1, true, false)
+	if !strings.Contains(unslotted, "EXHAUSTED") {
+		t.Errorf("unslotted zone under overflow rendered %q; want EXHAUSTED", unslotted)
+	}
+	// No overflow, not slotted (e.g. pre-#14619 helper omits the set):
+	// idle, never a manufactured "uncounted".
+	noOverflow := UnavailableLineForZone(1, false, false)
+	if !strings.Contains(noOverflow, "the zone is idle") {
+		t.Errorf("no-overflow unslotted rendered %q; want idle", noOverflow)
+	}
+	// Version still wins over slot claims from a stale/mixed status.
+	if got := UnavailableLineForZone(0, true, true); !strings.Contains(got, "predates per-zone accounting") {
+		t.Errorf("version-0 with slotted=true rendered %q; want pre-dating helper", got)
+	}
+	// Unknown (no status) delegates exactly, ignoring the slot claim.
+	if got := UnavailableLineForZone(LayoutVersionUnknown, false, true); got != UnavailableLineFor(LayoutVersionUnknown, false) {
+		t.Errorf("unknown-version slotted rendered %q; want generic delegation", got)
+	}
+}

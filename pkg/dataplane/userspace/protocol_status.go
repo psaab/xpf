@@ -268,7 +268,11 @@ type ProcessStatus struct {
 	// configured zone count exceeded the helper's dense hot-path slot capacity
 	// so some zones went uncounted. JSON tags MUST match the Rust serde
 	// rename(...) exactly.
-	ZoneCounterLayoutVersion  uint32                     `json:"zone_counter_layout_version,omitempty"`
+	ZoneCounterLayoutVersion uint32 `json:"zone_counter_layout_version,omitempty"`
+	// #14619: zone ids holding a live traffic-counter slot, so a consumer
+	// can tell a slotted-but-idle zone from a past-capacity zone when
+	// ZoneCounterOverflowActive is set.
+	ZoneCounterSlottedZoneIDs []uint16                   `json:"zone_counter_slotted_zone_ids,omitempty"`
 	ZoneCounterOverflowActive bool                       `json:"zone_counter_overflow_active,omitempty"`
 	ZoneTrafficCounters       []ZoneTrafficCounterStatus `json:"zone_traffic_counters,omitempty"`
 	// #3651: per-zone SYN/ICMP/UDP flood-EVENT counts, summed across every
@@ -283,7 +287,9 @@ type ProcessStatus struct {
 	// accounting); FloodCounterOverflowActive means the configured zone count
 	// exceeded the helper's dense slot capacity so some zones went uncounted.
 	// JSON tags MUST match the Rust serde rename(...) exactly.
-	FloodCounterLayoutVersion  uint32                    `json:"flood_counter_layout_version,omitempty"`
+	FloodCounterLayoutVersion uint32 `json:"flood_counter_layout_version,omitempty"`
+	// #14619: flood twin of ZoneCounterSlottedZoneIDs.
+	FloodCounterSlottedZoneIDs []uint16                  `json:"flood_counter_slotted_zone_ids,omitempty"`
 	FloodCounterOverflowActive bool                      `json:"flood_counter_overflow_active,omitempty"`
 	ZoneFloodCounters          []ZoneFloodCounterStatus  `json:"zone_flood_counters,omitempty"`
 	ThreeColorPolicerCounters  []ThreeColorPolicerStatus `json:"three_color_policer_counters,omitempty"`

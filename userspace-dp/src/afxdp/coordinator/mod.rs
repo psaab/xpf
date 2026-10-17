@@ -1764,6 +1764,16 @@ impl Coordinator {
         crate::afxdp::zone_counters::ZONE_COUNTER_LAYOUT_VERSION
     }
 
+    /// #14619: zone ids holding a live traffic-counter slot.
+    pub fn zone_counter_slotted_zone_ids(&self) -> Vec<u16> {
+        self.forwarding.zone_counter_slot_map.slotted_zone_ids()
+    }
+
+    /// #14619: zone ids holding a live flood-counter slot.
+    pub fn flood_counter_slotted_zone_ids(&self) -> Vec<u16> {
+        self.forwarding.flood_counter_slot_map.slotted_zone_ids()
+    }
+
     /// #3651: operator clear of per-zone traffic counters. Resets the helper's
     /// cumulative store so the pre-clear total is not snapped back on the next
     /// 1 s status poll (the load-bearing half of the operator clear).

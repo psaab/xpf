@@ -635,28 +635,26 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.source_nat_parse_errors = source;
     state.status.destination_nat_parse_errors = destination;
     state.status.static_nat_parse_errors = static_nat;
-    // #3651: publish the pre-summed per-zone traffic block. Stamp the layout
-    // version only when there is data (rows or overflow) so a helper with no
-    // configured/active zones keeps the wire omitted (cold-path convention).
+    // #3651: publish the pre-summed per-zone traffic block.
+    // #14619: stamp the layout version UNCONDITIONALLY. The pre-fix
+    // "omit when no data" convention stamped 0 whenever no non-zero row
+    // existed (fresh boot, post-clear, idle HA secondary), and every Go
+    // surface renders version 0 as "the helper predates per-zone
+    // accounting; upgrade the helper" (#7087 contract) — a false,
+    // actionable misdiagnosis in the all-quiet state. A current helper
+    // must say so even when quiet: ">0, no row" is the idle line.
+    // Pre-#3651 helpers still omit the field entirely (they never set
+    // it), so 0/absent keeps its meaning. The slotted set lets
+    // consumers split slotted-idle from past-capacity under overflow.
     state.status.zone_traffic_counters = state.afxdp.zone_traffic_counters();
     state.status.zone_counter_overflow_active = state.afxdp.zone_counter_overflow_active();
-    state.status.zone_counter_layout_version = if state.status.zone_traffic_counters.is_empty()
-        && !state.status.zone_counter_overflow_active
-    {
-        0
-    } else {
-        state.afxdp.zone_counter_layout_version()
-    };
-    // #3651: and the pre-summed per-zone FLOOD-event block, same convention.
+    state.status.zone_counter_layout_version = state.afxdp.zone_counter_layout_version();
+    state.status.zone_counter_slotted_zone_ids = state.afxdp.zone_counter_slotted_zone_ids();
+    // #3651: and the pre-summed per-zone FLOOD-event block, same contract.
     state.status.zone_flood_counters = state.afxdp.zone_flood_counters();
     state.status.flood_counter_overflow_active = state.afxdp.flood_counter_overflow_active();
-    state.status.flood_counter_layout_version = if state.status.zone_flood_counters.is_empty()
-        && !state.status.flood_counter_overflow_active
-    {
-        0
-    } else {
-        state.afxdp.flood_counter_layout_version()
-    };
+    state.status.flood_counter_layout_version = state.afxdp.flood_counter_layout_version();
+    state.status.flood_counter_slotted_zone_ids = state.afxdp.flood_counter_slotted_zone_ids();
     state.status.three_color_policer_counters = state.afxdp.three_color_policer_counters();
     state.status.source_nat_pools = state.afxdp.source_nat_pool_statuses();
     let (flow_worker_map, flow_worker_map_truncated) = state.afxdp.flow_worker_map();
