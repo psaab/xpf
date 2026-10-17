@@ -299,28 +299,88 @@ func applicationDirectLeaves(appNode *Node) (leaves []*Node, unknown []string, u
 // `prop.Keys[1:]` and appended child keys onto it, which can write into the
 // node's own backing array whenever that slice has spare capacity — a latent
 // AST-corruption hazard the copy removes.
+//
+// #14340: grandchildren under a child are flattened recursively. A child
+// `destination-port` whose value is a nested block (`destination-port {
+// 443; }`) contributes its keys plus the block's keys, so the value reaches
+// parseApplicationTerms instead of being truncated; a trailing block after a
+// valued leaf (`destination-port 8443 { foo; }`) contributes its keys as
+// trailing tokens, which parseApplicationTerms records as unknown term
+// leaves for the strict gate rather than discarding silently.
 func applicationTermKeys(prop *Node) []string {
 	if prop == nil || len(prop.Keys) < 2 {
 		return nil
 	}
 	allKeys := append([]string(nil), prop.Keys[1:]...)
 	for _, c := range prop.Children {
-		allKeys = append(allKeys, c.Keys...)
+		allKeys = appendTermNodeKeys14340(allKeys, c)
 	}
 	return allKeys
+}
+
+// appendTermNodeKeys14340 appends a term-body child's keys and, recursively,
+// its descendants' keys in document order (#14340).
+func appendTermNodeKeys14340(dst []string, n *Node) []string {
+	if n == nil {
+		return dst
+	}
+	dst = append(dst, n.Keys...)
+	for _, ch := range n.Children {
+		dst = appendTermNodeKeys14340(dst, ch)
+	}
+	return dst
+}
+
+// isContainerTerm14340 reports whether leaf is a nameless container term:
+// Keys == ["term"] with named sub-blocks nested as children. The canonical
+// named term carries its name as Keys[1]; a flat-set chained term is
+// synthesized by applicationDirectLeaves with Keys == ["term", name, ...],
+// so only the single-key shape with children is a container (#14340).
+func isContainerTerm14340(leaf *Node) bool {
+	return leaf != nil && len(leaf.Keys) == 1 && leaf.Keys[0] == "term" && len(leaf.Children) > 0
+}
+
+// expandContainerTerm14340 unpacks a container term (`term { <name> { ... }
+// ... }`) into one synthesized named-term node per child, mirroring
+// namedInstances' container arm used by compileFirewall / compilePolicies.
+// Each synthesized node carries Keys ["term", <name>] and the child's body
+// as its children, so applicationTermKeys + parseApplicationTerms handle it
+// exactly like a canonically authored `term <name> { ... }`. A child with
+// no name token cannot be a term and is excluded here; the caller records
+// the container as nameless instead (#14340).
+func expandContainerTerm14340(leaf *Node) []*Node {
+	var out []*Node
+	for _, sub := range leaf.Children {
+		if sub == nil || len(sub.Keys) == 0 || sub.Keys[0] == "" {
+			continue
+		}
+		out = append(out, &Node{Keys: []string{"term", sub.Keys[0]}, Children: sub.Children})
+	}
+	return out
 }
 
 // applicationTermNodes returns the inline `term` leaves of an `applications
 // application <name>` body, walking the direct body with applicationDirectLeaves
 // so a term reached through a flat-set CHAIN is found in both AST shapes. It is
 // the enumeration half of the term contract shared with applicationTermKeys.
+//
+// #14340: a container-form term (`term { <name> { ... } }`) is expanded via
+// expandContainerTerm14340, so the collision gate and the compiler enumerate
+// the same generated names. An empty container (`term { }`) yields no named
+// terms here; compileApplications records that shape itself on
+// IncompleteDirectLeaves so it is not silently dropped.
 func applicationTermNodes(appNode *Node) []*Node {
 	leaves, _, _ := applicationDirectLeaves(appNode)
 	var terms []*Node
 	for _, leaf := range leaves {
-		if leaf.Name() == "term" {
-			terms = append(terms, leaf)
+		if leaf.Name() != "term" {
+			continue
 		}
+		if isContainerTerm14340(leaf) {
+			terms = append(terms, expandContainerTerm14340(leaf)...)
+			continue
+		}
+		terms = append(terms, leaf)
 	}
 	return terms
 }
@@ -484,8 +544,32 @@ func compileApplications(node *Node, apps *ApplicationsConfig) error {
 			case "term":
 				// Inline term: "term <name> [alg <a>] protocol <p> [source-port <sp>]
 				//               [destination-port <dp>] [inactivity-timeout <t>];"
+				// #14340: a container-form term (`term { <name> { ... } }`)
+				// carries no name token of its own; expand it into its named
+				// children (mirroring namedInstances in compileFirewall /
+				// compilePolicies) instead of silently skipping it. A term
+				// that can yield no named term (empty container / bare
+				// `term`) is recorded on IncompleteDirectLeaves so the
+				// strict gate rejects it and the tolerant path warns,
+				// instead of narrowing the application in silence.
+				if isContainerTerm14340(prop) {
+					expanded := expandContainerTerm14340(prop)
+					if len(expanded) == 0 {
+						incompleteDirectLeaves = append(incompleteDirectLeaves, "term")
+						continue
+					}
+					for _, sub := range expanded {
+						allKeys := applicationTermKeys(sub)
+						if len(allKeys) == 0 {
+							continue
+						}
+						terms = append(terms, parseApplicationTerms(appName, allKeys)...)
+					}
+					continue
+				}
 				allKeys := applicationTermKeys(prop)
 				if len(allKeys) == 0 {
+					incompleteDirectLeaves = append(incompleteDirectLeaves, "term")
 					continue
 				}
 				termApps := parseApplicationTerms(appName, allKeys)

@@ -424,6 +424,21 @@ func validateApplicationSyntaxStrict(cfg *Config) error {
 		// every port. Ordered before the term check only so the two read as a
 		// pair; an application cannot populate both.
 		if len(app.IncompleteDirectLeaves) > 0 {
+			// #14340: a nameless `term` (empty container `term { }` or a
+			// bare `term` with no name) is recorded on this same field; it
+			// is not a value-taking leaf, so word it as a missing term NAME
+			// rather than a missing leaf value.
+			if app.IncompleteDirectLeaves[0] == "term" {
+				return fmt.Errorf(
+					"application %q: `term` is missing its name; a term must be "+
+						"authored as `term <name> { ... }` (or as named blocks "+
+						"inside a `term { ... }` container with at least one "+
+						"named term) — the nameless term is dropped along with "+
+						"every constraint inside it, so the application matches "+
+						"less than intended (traffic meant to be denied can be "+
+						"permitted)",
+					name)
+			}
 			return fmt.Errorf(
 				"application %q: statement %q is missing its value; the "+
 					"statement is dropped along with the constraint it was meant to "+

@@ -1861,7 +1861,10 @@ type Application struct {
 	DuplicateDirectLeaves []string
 	// IncompleteDirectLeaves records recognized value-taking leaves on the
 	// DIRECT application body that were left with no value — the direct-body
-	// twin of IncompleteTermLeaves (#8339).
+	// twin of IncompleteTermLeaves (#8339). It also carries the literal
+	// "term" for a nameless term — an empty container `term { }` or a bare
+	// `term` with no name — which yields no named term at all (#14340);
+	// the strict gate words that entry as a missing term name.
 	//
 	// Worded separately from UnknownDirectLeaves because the keyword IS
 	// supported: calling it an unknown statement sends the operator looking for
