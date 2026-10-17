@@ -42,12 +42,14 @@ func TestClearPersistentNatCarriesDurableGenerationToPeer11486(t *testing.T) {
 				t.Fatalf("peer action = %q, want clear-persistent-nat", req.Action)
 			}
 			md, ok := metadata.FromOutgoingContext(ctx)
-			origins := md.Get(persistentNatClearOriginMetadata11486)
-			generations := md.Get(persistentNatClearGenerationMetadata11486)
+			// #14580: origin/generation ride the signed body, never metadata.
 			if !ok || len(md.Get("x-peer-forwarded")) != 1 ||
-				len(origins) != 1 || origins[0] != "0123456789abcdef0123456789abcdef" ||
-				len(generations) != 1 || generations[0] != "5" {
+				len(md.Get("x-peer-persistent-nat-origin")) != 0 ||
+				len(md.Get("x-peer-persistent-nat-generation")) != 0 {
 				t.Fatalf("peer clear metadata = %v", md)
+			}
+			if req.PersistentNatOrigin != "0123456789abcdef0123456789abcdef" || req.PersistentNatGeneration != 5 {
+				t.Fatalf("peer clear body origin/generation = %q/%d, want 0123456789abcdef0123456789abcdef/5", req.PersistentNatOrigin, req.PersistentNatGeneration)
 			}
 			return &pb.SystemActionResponse{Message: "peer clear accepted"}, nil
 		},
@@ -62,15 +64,14 @@ func TestClearPersistentNatCarriesDurableGenerationToPeer11486(t *testing.T) {
 		t.Fatalf("peer clear calls = %d, want 1", peerCalls)
 	}
 
-	// A forwarded clear records the original sender's generation and must not
-	// fan back out, otherwise the two peers would loop clears forever.
+	// A forwarded clear records the original sender's generation (from the
+	// signed body) and must not fan back out, otherwise the two peers would
+	// loop clears forever.
 	incoming := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
 		"x-peer-forwarded", "1",
-		persistentNatClearOriginMetadata11486, "fedcba9876543210fedcba9876543210",
-		persistentNatClearGenerationMetadata11486, "9",
 	))
 	incoming = withPeerMarkers(incoming, peerMarkers{forwarded: true})
-	if _, err := s.SystemAction(incoming, &pb.SystemActionRequest{Action: "clear-persistent-nat"}); err != nil {
+	if _, err := s.SystemAction(incoming, &pb.SystemActionRequest{Action: "clear-persistent-nat", PersistentNatOrigin: "fedcba9876543210fedcba9876543210", PersistentNatGeneration: 9}); err != nil {
 		t.Fatalf("forwarded clear: %v", err)
 	}
 	if dp.calls != 2 || dp.peerOrigin != "fedcba9876543210fedcba9876543210" || dp.peerGeneration != 9 {
@@ -81,51 +82,77 @@ func TestClearPersistentNatCarriesDurableGenerationToPeer11486(t *testing.T) {
 	}
 }
 
-func TestPersistentNatClearGenerationMetadataRequiresTrustedCompleteFrame11486(t *testing.T) {
+// #14580: the signed-body extractor. Legacy unsigned metadata is never
+// honored; non-forwarded smuggling is rejected; a legacy forwarded clear
+// (empty body) clears with no fence.
+func TestPersistentNatClearGenerationFromSignedBody14580(t *testing.T) {
 	origin := "0123456789abcdef0123456789abcdef"
 	for _, tc := range []struct {
-		name string
-		ctx  context.Context
-		want bool
-		bad  bool
+		name    string
+		ctx     context.Context
+		req     *pb.SystemActionRequest
+		want    bool
+		bad     bool
+		wantGen uint64
 	}{
 		{
-			name: "untrusted metadata ignored",
-			ctx: metadata.NewIncomingContext(context.Background(), metadata.Pairs(
-				persistentNatClearOriginMetadata11486, origin,
-				persistentNatClearGenerationMetadata11486, "3",
-			)),
+			name: "non-forwarded empty ignored",
+			ctx:  context.Background(),
+			req:  &pb.SystemActionRequest{Action: "clear-persistent-nat"},
 		},
 		{
-			name: "trusted complete metadata accepted",
-			ctx: withPeerMarkers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(
-				persistentNatClearOriginMetadata11486, origin,
-				persistentNatClearGenerationMetadata11486, "3",
-			)), peerMarkers{forwarded: true}),
-			want: true,
+			name: "non-forwarded smuggled fence rejected",
+			ctx:  context.Background(),
+			req:  &pb.SystemActionRequest{Action: "clear-persistent-nat", PersistentNatOrigin: origin, PersistentNatGeneration: 3},
+			bad:  true,
 		},
 		{
-			name: "trusted incomplete metadata rejected",
-			ctx: withPeerMarkers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(
-				persistentNatClearOriginMetadata11486, origin,
-			)), peerMarkers{forwarded: true}),
-			bad: true,
+			name:    "forwarded signed body accepted",
+			ctx:     withPeerMarkers(context.Background(), peerMarkers{forwarded: true}),
+			req:     &pb.SystemActionRequest{Action: "clear-persistent-nat", PersistentNatOrigin: origin, PersistentNatGeneration: 3},
+			want:    true,
+			wantGen: 3,
+		},
+		{
+			name: "forwarded legacy empty body no fence",
+			ctx:  withPeerMarkers(context.Background(), peerMarkers{forwarded: true}),
+			req:  &pb.SystemActionRequest{Action: "clear-persistent-nat"},
+		},
+		{
+			name: "forwarded generation without origin rejected",
+			ctx:  withPeerMarkers(context.Background(), peerMarkers{forwarded: true}),
+			req:  &pb.SystemActionRequest{Action: "clear-persistent-nat", PersistentNatGeneration: 3},
+			bad:  true,
+		},
+		{
+			name: "forwarded invalid origin rejected",
+			ctx:  withPeerMarkers(context.Background(), peerMarkers{forwarded: true}),
+			req:  &pb.SystemActionRequest{Action: "clear-persistent-nat", PersistentNatOrigin: "not-hex", PersistentNatGeneration: 3},
+			bad:  true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotOrigin, gotGeneration, got, err := persistentNatClearGenerationFromContext11486(tc.ctx)
+			gotOrigin, gotGeneration, got, err := persistentNatClearGenerationFromRequest11486(tc.ctx, tc.req)
 			if tc.bad {
 				if err == nil {
-					t.Fatal("incomplete trusted metadata was accepted")
+					t.Fatal("bad signed-body fence was accepted")
 				}
 				return
 			}
 			if err != nil || got != tc.want {
-				t.Fatalf("metadata result present=%v err=%v, want present=%v", got, err, tc.want)
+				t.Fatalf("result present=%v err=%v, want present=%v", got, err, tc.want)
 			}
-			if got && (gotOrigin != origin || gotGeneration != 3) {
-				t.Fatalf("metadata = %q/%d, want %q/3", gotOrigin, gotGeneration, origin)
+			if got && (gotOrigin != origin || gotGeneration != tc.wantGen) {
+				t.Fatalf("body = %q/%d, want %q/%d", gotOrigin, gotGeneration, origin, tc.wantGen)
 			}
 		})
+	}
+	// Legacy metadata alone (even trusted/forwarded) yields no fence.
+	legacyCtx := withPeerMarkers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"x-peer-persistent-nat-origin", origin,
+		"x-peer-persistent-nat-generation", "18446744073709551615",
+	)), peerMarkers{forwarded: true})
+	if _, _, got, err := persistentNatClearGenerationFromRequest11486(legacyCtx, &pb.SystemActionRequest{Action: "clear-persistent-nat"}); err != nil || got {
+		t.Fatalf("legacy metadata honored: present=%v err=%v, want no fence", got, err)
 	}
 }

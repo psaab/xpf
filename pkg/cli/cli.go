@@ -28,6 +28,7 @@ import (
 	"github.com/psaab/xpf/pkg/flowexport"
 	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/fwdstatus"
+	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/ipsec"
 	"github.com/psaab/xpf/pkg/lldp"
@@ -190,7 +191,7 @@ type CLI struct {
 	// fabricPeerPort overrides the peer gRPC port (default 50051 when 0). A
 	// test seam so dialPeer can target an ephemeral loopback fabric server.
 	fabricPeerPort     int
-	peerSystemActionFn func(ctx context.Context, action string) (string, error)
+	peerSystemActionFn func(ctx context.Context, req *pb.SystemActionRequest) (string, error)
 
 	// Monitor security flow state (per-CLI-session).
 	monitorFlow *monitorFlowState

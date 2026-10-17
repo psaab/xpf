@@ -37,22 +37,19 @@ func (s *Server) proxyPeerSystemActionWithPersistentNatGeneration(
 ) (*pb.SystemActionResponse, error) {
 	peerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	pairs := []string{"x-peer-forwarded", "1"}
-	if origin != "" {
-		pairs = append(pairs,
-			"x-peer-persistent-nat-origin", origin,
-			"x-peer-persistent-nat-generation", strconv.FormatUint(generation, 10))
-	}
-	peerCtx = metadata.AppendToOutgoingContext(peerCtx, pairs...)
+	// #14580: origin/generation ride inside the signed request body (see
+	// persistent_nat_clear_generation_14580.go), never unsigned metadata.
+	forwardedReq := persistentNatClearRequestWithGeneration(req, origin, generation)
+	peerCtx = metadata.AppendToOutgoingContext(peerCtx, "x-peer-forwarded", "1")
 	if s.peerSystemActionFn != nil {
-		return s.peerSystemActionFn(peerCtx, req)
+		return s.peerSystemActionFn(peerCtx, forwardedReq)
 	}
 	conn, err := s.dialPeer(peerCtx)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	return pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, req)
+	return pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, forwardedReq)
 }
 
 // logSystemAction records a destructive maintenance action to the configstore
@@ -464,7 +461,7 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 			return &pb.SystemActionResponse{Message: "Persistent NAT table not available"}, nil
 		}
 		peerOrigin, peerGeneration, hasPeerGeneration, metadataErr :=
-			persistentNatClearGenerationFromContext11486(ctx)
+			persistentNatClearGenerationFromRequest11486(ctx, req)
 		if metadataErr != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "persistent NAT clear generation: %v", metadataErr)
 		}

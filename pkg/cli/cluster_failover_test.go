@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
 func captureStdout(t *testing.T, fn func()) string {
@@ -51,8 +52,8 @@ func TestHandleRequestChassisClusterFailoverProxiesPeerTarget(t *testing.T) {
 	c := &CLI{cluster: cluster.NewManager(0, 1)}
 
 	var gotAction string
-	c.peerSystemActionFn = func(ctx context.Context, action string) (string, error) {
-		gotAction = action
+	c.peerSystemActionFn = func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
+		gotAction = req.Action
 		return "proxied manual failover", nil
 	}
 
@@ -75,8 +76,8 @@ func TestHandleRequestChassisClusterFailoverDataProxiesPeerTarget(t *testing.T) 
 	c := &CLI{cluster: cluster.NewManager(0, 1)}
 
 	var gotAction string
-	c.peerSystemActionFn = func(ctx context.Context, action string) (string, error) {
-		gotAction = action
+	c.peerSystemActionFn = func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
+		gotAction = req.Action
 		return "proxied data failover", nil
 	}
 
@@ -97,8 +98,8 @@ func TestHandleRequestChassisClusterFailoverDataProxiesPeerTarget(t *testing.T) 
 
 func TestHandleRequestChassisClusterFailoverDataRejectsUnsupportedTargetNode(t *testing.T) {
 	c := &CLI{cluster: cluster.NewManager(0, 1)}
-	c.peerSystemActionFn = func(ctx context.Context, action string) (string, error) {
-		t.Fatalf("unexpected peer proxy for action %q", action)
+	c.peerSystemActionFn = func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
+		t.Fatalf("unexpected peer proxy for action %q", req.Action)
 		return "", nil
 	}
 

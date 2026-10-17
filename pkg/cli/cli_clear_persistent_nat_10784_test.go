@@ -9,6 +9,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/dataplane"
+	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -40,10 +41,10 @@ func TestClearPersistentNATUsesAuthorityAndPropagatesToPeer10784(t *testing.T) {
 	})
 	c := &CLI{dp: dp, cluster: cluster.NewManager(0, 1)}
 	peerCalls := 0
-	c.peerSystemActionFn = func(ctx context.Context, action string) (string, error) {
+	c.peerSystemActionFn = func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
 		peerCalls++
-		if action != "clear-persistent-nat" {
-			t.Errorf("peer action = %q, want clear-persistent-nat", action)
+		if req.Action != "clear-persistent-nat" {
+			t.Errorf("peer action = %q, want clear-persistent-nat", req.Action)
 		}
 		md, ok := metadata.FromOutgoingContext(ctx)
 		if !ok || len(md.Get("x-peer-forwarded")) == 0 {

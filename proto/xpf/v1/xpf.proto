@@ -1382,6 +1382,15 @@ message SystemActionRequest {
   uint32 candidate_old_count = 6;
   uint32 candidate_new_count = 7;
   string baseline_hash = 8;
+  // #14580: forwarded clear-persistent-nat carries the origin node's durable
+  // lease origin (32 lower-hex chars) and its post-clear generation. These
+  // travel INSIDE the signed request body so the #4107 fabric token (HMAC
+  // over the request digest) binds them: a captured token replayed with
+  // forged origin/generation metadata is rejected Unauthenticated before
+  // the durable peer-generation watermark can be poisoned. Empty/zero on
+  // every non-forwarded and legacy call.
+  string persistent_nat_origin = 9;
+  uint64 persistent_nat_generation = 10;
 }
 message SystemActionResponse { string message = 1; }
 

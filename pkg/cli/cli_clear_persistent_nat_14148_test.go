@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/netip"
-	"strconv"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/dataplane"
+	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -51,10 +51,10 @@ func TestClearPersistentNATForwardsGenerationToPeer14148(t *testing.T) {
 	})
 	c := &CLI{dp: dp, cluster: cluster.NewManager(0, 1)}
 	peerCalls := 0
-	c.peerSystemActionFn = func(ctx context.Context, action string) (string, error) {
+	c.peerSystemActionFn = func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
 		peerCalls++
-		if action != "clear-persistent-nat" {
-			t.Errorf("peer action = %q, want clear-persistent-nat", action)
+		if req.Action != "clear-persistent-nat" {
+			t.Errorf("peer action = %q, want clear-persistent-nat", req.Action)
 		}
 		md, ok := metadata.FromOutgoingContext(ctx)
 		if !ok {
@@ -63,13 +63,12 @@ func TestClearPersistentNATForwardsGenerationToPeer14148(t *testing.T) {
 		if len(md.Get("x-peer-forwarded")) != 1 {
 			t.Errorf("x-peer-forwarded = %v, want [1]", md.Get("x-peer-forwarded"))
 		}
-		origins := md.Get("x-peer-persistent-nat-origin")
-		if len(origins) != 1 || origins[0] != persistentNATClearTestOrigin14148 {
-			t.Errorf("x-peer-persistent-nat-origin = %v, want [%s]", origins, persistentNATClearTestOrigin14148)
+		// #14580: origin/generation ride the signed request body, never metadata.
+		if len(md.Get("x-peer-persistent-nat-origin")) != 0 || len(md.Get("x-peer-persistent-nat-generation")) != 0 {
+			t.Errorf("peer clear carried unsigned generation metadata: %v", md)
 		}
-		gens := md.Get("x-peer-persistent-nat-generation")
-		if len(gens) != 1 || gens[0] != strconv.FormatUint(5, 10) {
-			t.Errorf("x-peer-persistent-nat-generation = %v, want [5]", gens)
+		if req.PersistentNatOrigin != persistentNATClearTestOrigin14148 || req.PersistentNatGeneration != 5 {
+			t.Errorf("peer clear body origin/generation = %q/%d, want %s/5", req.PersistentNatOrigin, req.PersistentNatGeneration, persistentNATClearTestOrigin14148)
 		}
 		return "Cleared 2 persistent NAT bindings", nil
 	}
@@ -96,10 +95,13 @@ func TestClearPersistentNATLegacyBackendForwardsNoGeneration14148(t *testing.T) 
 	// its own local fences, as on the pre-#11486 path).
 	dp := &persistentNATClearCLIBackend10784{Manager: dataplane.New(), count: 3}
 	c := &CLI{dp: dp, cluster: cluster.NewManager(0, 1)}
-	c.peerSystemActionFn = func(ctx context.Context, action string) (string, error) {
+	c.peerSystemActionFn = func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
 		md, _ := metadata.FromOutgoingContext(ctx)
 		if len(md.Get("x-peer-persistent-nat-origin")) != 0 || len(md.Get("x-peer-persistent-nat-generation")) != 0 {
 			t.Errorf("legacy peer clear carried generation metadata: %v", md)
+		}
+		if req.PersistentNatOrigin != "" || req.PersistentNatGeneration != 0 {
+			t.Errorf("legacy peer clear body origin/generation = %q/%d, want empty/0", req.PersistentNatOrigin, req.PersistentNatGeneration)
 		}
 		return "ok", nil
 	}
@@ -121,7 +123,7 @@ func TestClearPersistentNATGenerationErrorPropagates14148(t *testing.T) {
 	})
 	c := &CLI{dp: dp, cluster: cluster.NewManager(0, 1)}
 	peerCalled := false
-	c.peerSystemActionFn = func(ctx context.Context, action string) (string, error) {
+	c.peerSystemActionFn = func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
 		peerCalled = true
 		return "", nil
 	}
