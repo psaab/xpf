@@ -594,6 +594,15 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				continue
 			}
 			if peer != nil {
+				// #14419: same-name as-path — inline wins; different-name
+				// as-path must adopt, not be dropped by keyword peer.
+				if asPathIsDefinition14419(ancestorPath, s) {
+					if asPathSameNameInlinePeer14419(ancestorPath, *dst, s) != nil {
+						continue
+					}
+					*dst = append(*dst, s)
+					continue
+				}
 				if zoneLeafHasApplyMacroTail13112(peer) && groupPackedLeafBody(ancestorPath, s) != nil {
 					// #13112: the exact macro tail is inert. Remove it before
 					// promoting this leaf, or zone readers treat the merged
@@ -704,6 +713,11 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					appendPath(ancestorPath, cpeer.Keys), budget, group, vars, level, haveExcept, deferWildcards); err != nil {
 					return err
 				}
+				continue
+			}
+			// #14419: same-name as-path definition in container shape
+			// inline — inline regex wins, drop the group leaf.
+			if asPathSameNameInlinePeer14419(ancestorPath, *dst, s) != nil {
 				continue
 			}
 			if suppressSuccessiveLeaf9855(budget, ancestorPath, *dst, s) {
@@ -840,6 +854,13 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		// Choices inherited from another group remain mergeable so genuine
 		// group-group ambiguity is still rejected.
 		if defaultPolicyGroupBlockOverride12823(budget, ancestorPath, *dst, s) {
+			continue
+		}
+		// #14419: same-name as-path container vs inline leaf/container —
+		// inline regex wins, drop the whole group definition. Must not merge
+		// children: a braced group body holds the regex as a bare child leaf
+		// and merging it would re-introduce compiler last-wins.
+		if asPathSameNameInlinePeer14419(ancestorPath, *dst, s) != nil {
 			continue
 		}
 
