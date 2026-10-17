@@ -297,7 +297,7 @@ pub(in crate::afxdp) fn leak_incarnation_for_resolution(
                     .filter(|leak| leak.prefix.contains(ip))
                     .find_map(|leak| {
                         let next_table = canonical_next_table(&leak.next_table, false);
-                        table_has_v4_route(state, ip, next_table.as_ref())
+                        table_has_v4_route(state, ip, next_table.as_ref(), true)
                             .then_some(leak.incarnation)
                     })
             })
@@ -315,7 +315,7 @@ pub(in crate::afxdp) fn leak_incarnation_for_resolution(
                     .filter(|leak| leak.prefix.contains(ip))
                     .find_map(|leak| {
                         let next_table = canonical_next_table(&leak.next_table, true);
-                        table_has_v6_route(state, ip, next_table.as_ref())
+                        table_has_v6_route(state, ip, next_table.as_ref(), true)
                             .then_some(leak.incarnation)
                     })
             })
@@ -441,17 +441,63 @@ fn local_v4_owned_by_table(state: &ForwardingState, ip: Ipv4Addr, table: &str) -
                 .is_some_and(|tables| tables.contains(table)))
 }
 
+/// #14319: whether a route entry can serve a lookup. A route whose every
+/// next-hop is a tunnel endpoint cannot serve a tunnel-forbidden lookup
+/// (`allow_tunnels == false`); an entry with no next-hops (connected
+/// marker) is backed by the connected scan below, not by this check.
 #[inline]
-fn table_has_v4_route(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> bool {
+fn route_entry_usable_v4(entry: &RouteEntryV4, allow_tunnels: bool) -> bool {
+    allow_tunnels
+        || entry.next_hops.is_empty()
+        || entry.next_hops.iter().any(|nh| nh.tunnel_endpoint_id == 0)
+}
+
+#[inline]
+fn route_entry_usable_v6(entry: &RouteEntryV6, allow_tunnels: bool) -> bool {
+    allow_tunnels
+        || entry.next_hops.is_empty()
+        || entry.next_hops.iter().any(|nh| nh.tunnel_endpoint_id == 0)
+}
+
+/// #14319: IPv6 subnet-router anycast ownership (#10692): the network
+/// address of a connected prefix in `table`, mirroring the else-arm of
+/// `local_delivery_resolution_v6` so the precheck admits exactly what the
+/// leak-target lookup would local-deliver.
+#[inline]
+fn subnet_router_anycast_v6_owned_by_table(
+    state: &ForwardingState,
+    ip: Ipv6Addr,
+    table: &str,
+) -> bool {
+    state.connected_v6.iter().any(|entry| {
+        entry.table == table
+            && (1..127).contains(&entry.prefix.prefix_len())
+            && entry.prefix.addr() == ip
+    })
+}
+
+#[inline]
+fn table_has_v4_route(
+    state: &ForwardingState,
+    ip: Ipv4Addr,
+    table: &str,
+    allow_tunnels: bool,
+) -> bool {
     state.routes_v4.get(table).is_some_and(|routes| {
-        routes
-            .iter()
-            .any(|entry| entry.next_table.is_empty() && entry.prefix.contains(ip))
-    }) || state
-        .connected_v4
-        .iter()
-        .any(|entry| entry.table == table && entry.prefix.contains(ip))
-        || local_v4_owned_by_table(state, ip, table)
+        routes.iter().any(|entry| {
+            entry.next_table.is_empty()
+                && entry.prefix.contains(ip)
+                && route_entry_usable_v4(entry, allow_tunnels)
+        })
+    }) || state.connected_v4.iter().any(|entry| {
+        entry.table == table
+            && entry.prefix.contains(ip)
+            && (allow_tunnels || entry.tunnel_endpoint_id == 0)
+    }) || local_v4_owned_by_table(state, ip, table)
+        || state
+            .interface_nat_tables_v4
+            .get(&ip)
+            .is_some_and(|tables| tables.contains(table))
 }
 
 #[inline]
@@ -606,10 +652,15 @@ fn lookup_forwarding_resolution_v4_inner(
         if let Some(leaks) = state.leak_rules_v4.get(table) {
             for leak in leaks.iter().filter(|leak| leak.prefix.contains(ip)) {
                 let next_table_name = canonical_next_table(&leak.next_table, false);
-                if !table_has_v4_route(state, ip, next_table_name.as_ref()) {
+                if !table_has_v4_route(state, ip, next_table_name.as_ref(), allow_tunnels) {
                     continue;
                 }
-                return lookup_forwarding_resolution_v4_inner(
+                // #14319: a precheck-admitted target can still resolve to
+                // NoRoute (e.g. its only route is a tunnel route the caller
+                // forbade, filtered inside the target LPM). That is the
+                // same miss as a precheck failure — continue to the next
+                // leak and then to this table's LPM, never terminal.
+                let resolved = lookup_forwarding_resolution_v4_inner(
                     state,
                     dynamic_neighbors,
                     ip,
@@ -619,6 +670,10 @@ fn lookup_forwarding_resolution_v4_inner(
                     allow_tunnels,
                     ecmp_flow_hash,
                 );
+                if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+                    continue;
+                }
+                return resolved;
             }
         }
     }
@@ -769,16 +824,28 @@ fn local_v6_owned_by_table(state: &ForwardingState, ip: Ipv6Addr, table: &str) -
 }
 
 #[inline]
-fn table_has_v6_route(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> bool {
+fn table_has_v6_route(
+    state: &ForwardingState,
+    ip: Ipv6Addr,
+    table: &str,
+    allow_tunnels: bool,
+) -> bool {
     state.routes_v6.get(table).is_some_and(|routes| {
-        routes
-            .iter()
-            .any(|entry| entry.next_table.is_empty() && entry.prefix.contains(ip))
-    }) || state
-        .connected_v6
-        .iter()
-        .any(|entry| entry.table == table && entry.prefix.contains(ip))
-        || local_v6_owned_by_table(state, ip, table)
+        routes.iter().any(|entry| {
+            entry.next_table.is_empty()
+                && entry.prefix.contains(ip)
+                && route_entry_usable_v6(entry, allow_tunnels)
+        })
+    }) || state.connected_v6.iter().any(|entry| {
+        entry.table == table
+            && entry.prefix.contains(ip)
+            && (allow_tunnels || entry.tunnel_endpoint_id == 0)
+    }) || local_v6_owned_by_table(state, ip, table)
+        || state
+            .interface_nat_tables_v6
+            .get(&ip)
+            .is_some_and(|tables| tables.contains(table))
+        || subnet_router_anycast_v6_owned_by_table(state, ip, table)
 }
 
 fn lookup_forwarding_resolution_v6_inner(
@@ -818,10 +885,12 @@ fn lookup_forwarding_resolution_v6_inner(
         if let Some(leaks) = state.leak_rules_v6.get(table) {
             for leak in leaks.iter().filter(|leak| leak.prefix.contains(ip)) {
                 let next_table_name = canonical_next_table(&leak.next_table, true);
-                if !table_has_v6_route(state, ip, next_table_name.as_ref()) {
+                if !table_has_v6_route(state, ip, next_table_name.as_ref(), allow_tunnels) {
                     continue;
                 }
-                return lookup_forwarding_resolution_v6_inner(
+                // #14319: see the v4 twin — a recursive NoRoute is a miss,
+                // not a terminal result.
+                let resolved = lookup_forwarding_resolution_v6_inner(
                     state,
                     dynamic_neighbors,
                     ip,
@@ -831,6 +900,10 @@ fn lookup_forwarding_resolution_v6_inner(
                     allow_tunnels,
                     ecmp_flow_hash,
                 );
+                if resolved.resolution.disposition == ForwardingDisposition::NoRoute {
+                    continue;
+                }
+                return resolved;
             }
         }
     }

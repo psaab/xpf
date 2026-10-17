@@ -587,6 +587,11 @@ mod tests_zero_disposition_11327;
 #[cfg(test)]
 #[path = "tests_leak_overlap_9955.rs"]
 mod tests_leak_overlap_9955;
+// #14319: leak precheck admits interface-NAT / anycast ownership and the
+// leak walk continues past a recursive NoRoute.
+#[cfg(test)]
+#[path = "tests_leak_precheck_14319.rs"]
+mod tests_leak_precheck_14319;
 // #9956 F-052: the SNAT scope must resolve on the logical ingress unit.
 #[cfg(test)]
 #[path = "tests_snat_scope_9956.rs"]
