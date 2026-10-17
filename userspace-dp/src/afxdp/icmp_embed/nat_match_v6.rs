@@ -212,6 +212,13 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     // (RFC 5508 §4) instead of leaking the internal source with an
     // unassociable quote.
     //
+    // #14628: the as-is probe ALSO answers for that outbound error when
+    // the local reverse half is installed (the production default): the
+    // pre-NAT reply quote equals the reverse half's translated alias, so
+    // classification below is by DIRECTION (`quoted_is_reply`) plus the
+    // reverse-half shape of a pure source translation, and the match
+    // carries the recovered FORWARD decision for the outbound builders.
+    //
     // #10672: an as-is hit on the reverse half quotes a REPLY packet, so its
     // return resolution is toward that quote's source (the server), not the
     // reverse half's cached client-side egress. Other match cases retain the
@@ -284,7 +291,70 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
     // forward companion key is the TRANSLATED `shared_reverse_key` and the
     // fallback route target is `emb_src_lookup`, matching the keys this arm
     // probes and returns.)
-    let resolution = if sl.metadata.is_reverse && !via_reply_key {
+    // #14628: `quoted_is_reply` is computed BEFORE the resolution so the
+    // outbound branch can reuse the forward companion's cached resolution
+    // (egress toward the server) instead of the quoted-reply resolution.
+    let quoted_is_reply = via_reply_key != sl.metadata.is_reverse;
+    // #14628: an outbound error matched via the reverse half carries the
+    // REVERSED decision; the outbound builders need the FORWARD decision
+    // (external source + translated port). Recover it from the locally
+    // installed forward companion when present. The canonical reverse key
+    // comes from the session table (`resolved` carries only the query key
+    // for a local hit); `reverse_session_key` on it yields the forward
+    // key. A shared-only reverse hit has no local companion to recover
+    // from and keeps the historical reversed-builder path (the HA-peer
+    // shared-map residual).
+    let forward_companion = if quoted_is_reply && sl.metadata.is_reverse {
+        let canonical_reverse = match ctx
+            .sessions
+            .probe_canonical_with_origin_at(query_key, now_ns)
+        {
+            crate::session::SessionExpiryProbe::Live((key, lookup, _origin))
+                if lookup.metadata.is_reverse =>
+            {
+                Some(key)
+            }
+            _ => None,
+        };
+        canonical_reverse.and_then(|reverse_key| {
+            let forward_key =
+                crate::session::reverse_session_key(&reverse_key, sl.decision.nat);
+            ctx.sessions
+                .probe_with_origin_at(&forward_key, now_ns)
+                .map(|(lookup, _origin)| lookup)
+                .filter(|lookup| !lookup.metadata.is_reverse)
+        })
+    } else {
+        None
+    };
+    let outbound_snat = if via_reply_key {
+        !sl.metadata.is_reverse
+            && sl.decision.nat.rewrite_src.is_some()
+            && sl.decision.nat.rewrite_dst.is_none()
+    } else if sl.metadata.is_reverse {
+        // Reverse-half shape of a pure source translation (incl. NPTv6).
+        // Fabric-ingress frames are excluded: the redirecting node already
+        // re-NAT'd them (#13772), so at the peer the quote is the post-NAT
+        // wire form and the historical fabric policy-source path applies.
+        (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0
+            && forward_companion.is_some()
+            && (sl.decision.nat.nptv6
+                || (sl.decision.nat.rewrite_dst.is_some()
+                    && sl.decision.nat.rewrite_src.is_none()))
+    } else {
+        false
+    };
+    let resolution = if outbound_snat {
+        match &forward_companion {
+            Some(companion) => companion.decision.resolution,
+            None => embedded_icmp_quoted_reply_resolution(
+                ctx,
+                &shared_reverse_key,
+                emb_src_lookup,
+                now_ns,
+            ),
+        }
+    } else if sl.metadata.is_reverse && !via_reply_key {
         embedded_icmp_quoted_reply_resolution(ctx, &shared_reverse_key, emb_src_lookup, now_ns)
     } else if sl.metadata.is_reverse {
         sl.decision.resolution
@@ -297,16 +367,17 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
             now_ns,
         )
     };
-    let outbound_snat = via_reply_key
-        && !sl.metadata.is_reverse
-        && sl.decision.nat.rewrite_src.is_some()
-        && sl.decision.nat.rewrite_dst.is_none();
-    // #10671: the quoted packet is the session's reply (an outbound error)
-    // exactly when the match crossed direction (`via_reply_key XOR
-    // is_reverse`): a reply-key hit on a forward entry, or an as-is hit on
-    // a reverse entry. Inbound errors must arrive from the far-side
-    // (egress) zone; outbound ones from the near-side (ingress) zone.
-    let quoted_is_reply = via_reply_key != sl.metadata.is_reverse;
+    // #14628: hand the FORWARD decision to the outbound builders; every
+    // other arm keeps the matched entry's own decision bit-for-bit.
+    let match_nat = match &forward_companion {
+        Some(companion) if outbound_snat => companion.decision.nat,
+        _ => sl.decision.nat,
+    };
+    // #10671: `quoted_is_reply` (above) already names the direction: a
+    // reply-key hit on a forward entry, or an as-is hit on a reverse
+    // entry, quotes the session's reply. Inbound errors must arrive from
+    // the far-side (egress) zone; outbound ones from the near-side
+    // (ingress) zone.
     let (fwd_ingress_zone, fwd_egress_zone) =
         crate::afxdp::poll_descriptor::related_forward_zones(&sl.metadata);
     let related_expected_zone = if quoted_is_reply {
@@ -315,7 +386,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         fwd_egress_zone
     };
     EmbeddedMatchOutcome::Match(EmbeddedIcmpMatch {
-        nat: sl.decision.nat,
+        nat: match_nat,
         original_src: emb_src_lookup,
         original_src_port: hdr.src_port,
         // Plain (non-forward-NAT) match: nothing to un-DNAT, so the
