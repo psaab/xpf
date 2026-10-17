@@ -1352,7 +1352,7 @@ no token charge and no red discard/remarking.
 counted non-routing walk itself — the same `merge_matched_modifiers` seam
 #5857 used for lo0 — plus a routing-bearing metered walk for policers on or
 past a `routing-instance` term the non-routing walk defers at.
-`DeferToTxSelection` (transit miss/hit and flowless arms) keeps the old
+`DeferToTxSelection` (transit miss/hit and transit flowless arms) keeps the old
 behavior exactly: the TX-selection leg meters once, so a forwarded packet
 is never double-charged. The session MISS cannot know its disposition at
 the input precheck (route lookup follows), so a LocalDelivery verdict
@@ -1369,6 +1369,27 @@ never flow-cached. A red verdict folds to a silent `Discard`
 (`poll_descriptor/filter.rs`), `local_delivery_hit_replays_input_policer_14120`
 and `transit_hit_defers_input_policer_to_tx_selection_14120`
 (`filter_revalidation_7212_tests.rs`).
+
+**#14317 residual arms.** #14120 left four host-bound populations unmetered,
+all closed by metering at the point the packet is known to be host-bound:
+(a) a LocalDelivery MISS that declines to cache — non-SYN TCP
+(ACK/RST/data-first, by design) and WireGuard listener tuples (sessionless
+by design — the miss arm's gate reuses the same `is_wg_listener_tuple`
+predicate that declines caching) — meters inline at the miss site instead
+of only inside the cacheable-install block; (b) a fragment-association HIT whose stored
+decision is LocalDelivery meters inline in its input-filter evaluation
+(a transit hit still defers); (c) a flowless LocalDelivery packet meters
+inside `flowless_local_delivery_verdict` (`Filtered`); and (d) on
+session HITs, the `NoLocalEntry` arm meters inline (no entry exists to
+store handles on) and the `Stale` capture uses the packet's real
+frame-derived `TermMatchExtra` instead of `default()`, so tcp-flags /
+icmp-type / flex-scoped policer terms match on revalidation (the static
+*verdict* walk keeps `default()` — a port-gated term must not deny a flow
+on a fragment's absent L4). Tests: `stale_local_delivery_policer_captures_with_packet_extra_14317`,
+`no_local_entry_local_delivery_meters_input_policer_inline_14317`
+(`filter_revalidation_7212_tests.rs`), `flowless_input_policer_meters_and_drops_14317`
+(`flowless_verdict_tests.rs`), `local_delivery_non_syn_ack_input_policer_drops_second_packet_14317`
+(`tests_gre_local_delivery.rs`).
 
 ### `then reject` synthesizes an active reply (#2521)
 

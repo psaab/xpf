@@ -8,7 +8,10 @@
 // boundary per the #6386 hot-path contract). Bodies byte-identical to
 // their prior location.
 
-use super::filter::{emit_pending_filter_log, host_inbound_gated_lo0_action};
+use super::filter::{
+    emit_pending_filter_log, evaluate_non_pbr_input_filter_policers_cached,
+    host_inbound_gated_lo0_action,
+};
 use super::host_inbound_policy::{
     emit_host_inbound_deny, emit_junos_host_deny, junos_host_policy_eval,
 };
@@ -176,6 +179,31 @@ pub(super) fn flowless_local_delivery_verdict(
                 now_ns,
             );
             return FlowlessLocalVerdict::Filtered;
+        }
+    }
+    // #14317: interface INPUT three-color policer. A flowless host-bound
+    // packet never installs a session and never takes a TX-selection leg,
+    // so meter the captured handles HERE, once, on the LocalDelivery
+    // verdict path. The early input-filter evaluation on the miss arm
+    // deferred (`DeferToTxSelection`); only this path knows the packet is
+    // host-bound. Ports are unknown on the synthetic L3 flow, so a
+    // port-scoped policer term fails closed exactly as the early walk's
+    // port terms do; an L3/protocol-scoped term meters here and only here.
+    {
+        let mut policer_extra = extra;
+        policer_extra.ports_unknown = true;
+        let policers = evaluate_non_pbr_input_filter_policers_cached(
+            forwarding,
+            policer_extra,
+            Some(flow),
+            meta,
+        );
+        if !policers.is_empty() {
+            let action =
+                crate::filter::apply_cached_three_color_policers(&policers, now_ns, packet_len);
+            if action.drop {
+                return FlowlessLocalVerdict::Filtered;
+            }
         }
     }
     FlowlessLocalVerdict::Deliver
