@@ -85,6 +85,148 @@ fn txn_admission_refusal_at_cap_drops_and_leaks_nothing() {
     );
 }
 
+/// #14643 (Y32-02): on the session-miss arm, a TTL<=1 packet whose Time
+/// Exceeded is SUPPRESSED (here: the per-zone TE limiter is drained) must
+/// be dropped WITHOUT installing a forward+reverse session pair and
+/// WITHOUT forwarding — mirroring the flow-cache-hit sibling
+/// (`flow_cache_hit.rs`), which drops explicitly. Pre-fix the miss arm
+/// conflated "not expiring" with "expiring but suppressed" (both are
+/// `build_local_time_exceeded_request -> None`) and fell through to
+/// session install + a queued Live forward that the rewrite path later
+/// refuses for TTL<=1.
+///
+/// Witness: drain the LAN zone TE bucket (resolved via the PHYSICAL
+/// ingress ifindex 24 -> lan), then drive a TTL=1 TCP SYN through the
+/// real descriptor path with pool-mode SNAT so the NAT rollback is
+/// observable via `source_nat_pool_statuses`. Control 1: same TTL=1 SYN
+/// with a fresh bucket queues exactly one prebuilt TE, creates no
+/// session, and also rolls back SNAT. Control 2: TTL=64 installs the
+/// pair and forwards.
+#[test]
+fn txn_ttl1_suppressed_te_installs_no_session_14643() {
+    use crate::afxdp::icmp_ratelimit::global_bucket_test_lock;
+    let _g = global_bucket_test_lock();
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let dst = Ipv4Addr::new(8, 8, 8, 8);
+
+    fn snapshot_pool() -> crate::ConfigSnapshot {
+        let mut snapshot = nat_snapshot();
+        snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+            name: "snat-pool".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            pool_name: "pool-a".to_string(),
+            pool_addresses: vec!["172.16.80.100".to_string()],
+            port_low: 20000,
+            port_high: 20999,
+            ..Default::default()
+        }];
+        snapshot
+    }
+
+    let run = |ttl: u8, drain_te: bool| {
+        let forwarding = build_forwarding_state(&snapshot_pool());
+        if drain_te {
+            let bucket = forwarding
+                .time_exceeded_buckets
+                .get(&TEST_LAN_ZONE_ID)
+                .expect("nat_snapshot must build a per-zone TE bucket for lan")
+                .clone();
+            bucket.drain_aggregate_for_test(u64::MAX / 2, 1000, 1000);
+        }
+        let ha_state = txn_ha_state();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        let mut frame = build_txn_tcp_syn_frame_v4(
+            src,
+            dst,
+            12345,
+            443,
+            TCP_FLAG_SYN,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        frame[14 + 8] = ttl;
+        let csum = checksum16(&frame[14..34]);
+        frame[24] = (csum >> 8) as u8;
+        frame[25] = csum as u8;
+        let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+        let (batch, dbg) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
+        );
+        let pools = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
+        (binding, sessions, batch, dbg, pools)
+    };
+
+    let (binding, sessions, batch, dbg, pools) = run(1, true);
+    assert_eq!(dbg.rx, 1, "witness descriptor must reach the poll path");
+    assert_eq!(
+        batch.session_creates, 0,
+        "#14643: suppressed-TE TTL=1 miss must not create sessions"
+    );
+    assert_eq!(
+        sessions.len(),
+        0,
+        "#14643: suppressed-TE TTL=1 miss must not install fwd/rev pair"
+    );
+    assert_eq!(dbg.forward, 0, "#14643: TTL=1 packet must not count as forwarded");
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "#14643: suppressed TE must not queue a forward or a TE reply"
+    );
+    assert_eq!(
+        binding
+            .scratch
+            .scratch_recycle
+            .iter()
+            .filter(|&&a| a == 128)
+            .count(),
+        1,
+        "#14643: suppressed-TE TTL=1 frame must be recycled exactly once"
+    );
+    assert_eq!(pools.len(), 1, "pool fixture must expose one pool");
+    assert_eq!(
+        pools[0].live_flows, 0,
+        "#14643: SNAT allocation must be rolled back on suppressed TE"
+    );
+    assert_eq!(pools[0].used_ports, 0);
+
+    let (binding, sessions, batch, _dbg, pools) = run(1, false);
+    assert_eq!(
+        binding
+            .scratch
+            .scratch_forwards
+            .iter()
+            .filter(|f| matches!(f.frame, PendingForwardFrame::Prebuilt(_)))
+            .count(),
+        1,
+        "control: buildable TE must queue exactly one prebuilt reply"
+    );
+    // A second (Live) entry from the session-hit TE arm also appears in
+    // this fixture — a separate out-of-scope defect; the miss-arm
+    // contract asserted here is Prebuilt==1, no session, SNAT rolled back.
+    assert_eq!(batch.session_creates, 0, "control TE must create no session");
+    assert_eq!(sessions.len(), 0, "control TE must install no session");
+    assert_eq!(pools[0].live_flows, 0, "control TE must also roll back SNAT");
+    assert_eq!(pools[0].used_ports, 0);
+
+    let (_binding, sessions, batch, dbg, pools) = run(64, true);
+    assert_eq!(
+        batch.session_creates, 2,
+        "TTL=64 control must install forward+reverse pair"
+    );
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(dbg.tx, 1, "TTL=64 control must forward");
+    assert_eq!(pools[0].live_flows, 1, "TTL=64 control retains its SNAT hold");
+}
+
 /// #10890: run a real validated TCP SYN through the worker admission path at
 /// 90% of a table's cap. Opening local flows are shed as whole forward/reverse
 /// pairs before the new flow installs; established pairs remain live.
