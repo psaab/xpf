@@ -35,12 +35,16 @@ const (
     }
 }
 `
+	// #14399: the RI IS-IS fixture now carries a key as well — a bare
+	// `authentication-type` with no key is rejected as unauthenticated,
+	// which is not what this #8443 spelling control is about.
 	riISISAuthCfg = `routing-instances {
     vrf1 {
         instance-type virtual-router;
         protocols {
             isis {
                 authentication-type %s;
+                authentication-key "k";
             }
         }
     }

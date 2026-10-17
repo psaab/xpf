@@ -972,6 +972,16 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		if isis.Overload {
 			b.WriteString(" set-overload-bit\n")
 		}
+		// #14399: authentication-type with NO key renders UNAUTHENTICATED.
+		// The strict gate rejects new instances; this warns for a config
+		// arriving via tolerant load / peer sync. generateProtocols has no
+		// error return, so this cannot fail the apply closed.
+		if isis.AuthKey == "" && !config.AuthTypeAbsent(isis.AuthType) {
+			slog.Warn("frr: isis authentication-type is set with NO authentication-key; "+
+				"rendering UNAUTHENTICATED -- no area/domain password is emitted. Set "+
+				"authentication-key to authenticate (#14399)",
+				"authentication_type", isis.AuthType)
+		}
 		if isis.AuthKey != "" {
 			// #9105: an ABSENT type is not `unrecognized`, so this warning could not
 			// fire for it -- and it renders the key in CLEARTEXT exactly as a
@@ -1041,6 +1051,14 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 					"interface", sanitizeFRRValue(iface.Name), "metric", iface.Metric)
 			} else if iface.Metric > 0 {
 				fmt.Fprintf(&b, " isis metric %d\n", iface.Metric)
+			}
+			// #14399: per-interface type with NO key renders UNAUTHENTICATED
+			// (see the area/domain belt above).
+			if iface.AuthKey == "" && !config.AuthTypeAbsent(iface.AuthType) {
+				slog.Warn("frr: isis interface authentication-type is set with NO authentication-key; "+
+					"rendering UNAUTHENTICATED -- no interface password is emitted. Set "+
+					"authentication-key to authenticate (#14399)",
+					"interface", iface.Name, "authentication_type", iface.AuthType)
 			}
 			if iface.AuthKey != "" {
 				// #9105: an ABSENT type is not `unrecognized`, so this warning could not

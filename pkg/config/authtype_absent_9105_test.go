@@ -43,9 +43,13 @@ func TestAuthKeyWithoutTypeIsRefused9105(t *testing.T) {
 		{"isis key + simple (deliberate plaintext)", []string{
 			"set protocols isis authentication-key secret1",
 			"set protocols isis authentication-type simple"}, true},
-		// No key means nothing to expose.
-		{"isis type only, no key", []string{
-			"set protocols isis authentication-type md5"}, true},
+		// No key means nothing to expose — in #9105's own terms. #14399
+		// rejects this same cell from the other direction (a stated type
+		// with no key renders UNAUTHENTICATED); the two gates compose, so
+		// type-only no longer commits. Keyed `simple` above is the way to
+		// state plaintext deliberately.
+		{"isis type only, no key (#14399 rejects)", []string{
+			"set protocols isis authentication-type md5"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := &ConfigTree{}
