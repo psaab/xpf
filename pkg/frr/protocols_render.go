@@ -229,6 +229,43 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		for _, name := range interfaceOrder {
 			state := renderedAreaByInterface[name]
 			iface := state.settings.OSPFInterface
+			// #14388 (DR6-H4): decide MD5 survivability BEFORE emitting the
+			// interface header. If AuthType is md5 but no key survives
+			// (all key-ids out of 1..255, all secrets empty, or all secrets
+			// unsafe as a single vtysh token), emitting the block would run
+			// OSPF with null authentication while the config states MD5.
+			// Two adjacent routers leniently loading the same template
+			// would then form an unauthenticated adjacency. Omit the whole
+			// interface block (area activation included) so no adjacency
+			// can form; a peer still requiring MD5 refuses anyway.
+			var md5Block strings.Builder
+			if iface.AuthType == "md5" {
+				authEmitted := false
+				for _, key := range state.settings.MD5Keys {
+					if key.Key == "" {
+						continue
+					}
+					if key.ID < 1 || key.ID > 255 {
+						slog.Warn("frr: omitting OSPF MD5 authentication with an invalid key-id (#11794)",
+							"interface", sanitizeFRRValue(iface.Name), "key_id", key.ID)
+						continue
+					}
+					tok, ok := authTokenOrOmit("ospf-md5", key.Key.Reveal())
+					if !ok {
+						continue
+					}
+					if !authEmitted {
+						md5Block.WriteString(" ip ospf authentication message-digest\n")
+						authEmitted = true
+					}
+					fmt.Fprintf(&md5Block, " ip ospf message-digest-key %d md5 %s\n", key.ID, tok)
+				}
+				if !authEmitted {
+					slog.Warn("frr: omitting OSPF interface with MD5 authentication but no renderable MD5 key (#14388)",
+						"interface", sanitizeFRRValue(iface.Name), "area", sanitizeFRRValue(state.area.id))
+					continue
+				}
+			}
 			fmt.Fprintf(&b, "interface %s\n", iface.Name)
 			if iface.Cost > 0 {
 				fmt.Fprintf(&b, " ip ospf cost %d\n", frrClampInt("ospf cost", iface.Cost, 65535))
@@ -253,28 +290,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				fmt.Fprintf(&b, " ip ospf network %s\n", iface.NetworkType)
 			}
 			if iface.AuthType == "md5" {
-				// One interface can carry multiple key IDs during rollover.
-				// A key is rendered only when both its ID and secret are safe.
-				authEmitted := false
-				for _, key := range state.settings.MD5Keys {
-					if key.Key == "" {
-						continue
-					}
-					if key.ID < 1 || key.ID > 255 {
-						slog.Warn("frr: omitting OSPF MD5 authentication with an invalid key-id (#11794)",
-							"interface", sanitizeFRRValue(iface.Name), "key_id", key.ID)
-						continue
-					}
-					tok, ok := authTokenOrOmit("ospf-md5", key.Key.Reveal())
-					if !ok {
-						continue
-					}
-					if !authEmitted {
-						b.WriteString(" ip ospf authentication message-digest\n")
-						authEmitted = true
-					}
-					fmt.Fprintf(&b, " ip ospf message-digest-key %d md5 %s\n", key.ID, tok)
-				}
+				b.WriteString(md5Block.String())
 			} else if iface.AuthKey != "" && iface.AuthType == "simple" {
 				// #11462: the empty-key guard and token-first gate keep
 				// malformed simple authentication from bricking frr-reload.
