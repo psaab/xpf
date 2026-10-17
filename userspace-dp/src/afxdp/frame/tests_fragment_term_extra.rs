@@ -186,7 +186,7 @@ fn term_extra_non_first_tcp_fragment_suppresses_tcp_flags() {
 #[test]
 fn term_extra_first_fragment_keeps_l4_fields() {
     // A FIRST fragment (offset 0, MF=1) carries the real L4 header — keep the
-    // L4 fields AND mark is_fragment.
+    // L4 fields. #14631: it is NOT a Junos `is-fragment` term match.
     let frag = frag_v4_packet(PROTO_ICMP, 0x2000, &[8, 0, 0, 0, 0, 0, 0, 0]);
     let mut frame = vec![0u8; 14];
     frame.extend_from_slice(&frag);
@@ -206,7 +206,104 @@ fn term_extra_first_fragment_keeps_l4_fields() {
         extra.l4_present,
         "first fragment carries the real L4 header → l4_present true"
     );
-    assert!(extra.is_fragment, "first fragment IS a fragment");
+    assert!(!extra.is_fragment, "#14631: first fragment must NOT match is-fragment (trailing only)");
+}
+
+// #14631: decisive SRX regression — an IPv4 first fragment (MF=1, offset 0)
+// carrying TCP/22 must NOT match `is-fragment` (Junos SRX: `is-fragment` is
+// `fragment-offset 0 except`, trailing fragments only), so it falls through
+// to the port term. A trailing fragment still matches, and plain traffic
+// still faces the port term. RED on the any-fragment predicate.
+#[test]
+fn is_fragment_term_14631_first_fragment_faces_port_term_trailing_matches() {
+    use crate::filter::{FilterAction, FilterState};
+    use std::net::{IpAddr, Ipv4Addr};
+    let filters = vec![FirewallFilterSnapshot {
+        name: "f".into(),
+        family: "inet".into(),
+        terms: vec![
+            FirewallTermSnapshot {
+                name: "frags".into(),
+                is_fragment: true,
+                action: "accept".into(),
+                ..Default::default()
+            },
+            FirewallTermSnapshot {
+                name: "no-ssh".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports: vec!["22".into()],
+                action: "discard".into(),
+                ..Default::default()
+            },
+        ],
+    }];
+    let state: FilterState = crate::filter::parse_filter_state(&filters, &[], &[], "", "")
+        .expect("filter compiles");
+    let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let eval = |frag_off: u16, tcp_payload: &[u8]| {
+        let pkt = frag_v4_packet(PROTO_TCP, frag_off, tcp_payload);
+        let mut frame = vec![0u8; 14];
+        frame.extend_from_slice(&pkt);
+        let meta = UserspaceDpMeta {
+            l3_offset: 14,
+            l4_offset: 34,
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            ..UserspaceDpMeta::default()
+        };
+        let extra = term_match_extra_from_frame(&frame, meta);
+        crate::filter::evaluate_filter(
+            &state, "inet:f", src, dst, PROTO_TCP, 12345, 22, 0, extra,
+        )
+        .action
+    };
+    let tcp = [0u8; 20];
+    assert_eq!(
+        eval(0x0000, &tcp),
+        FilterAction::Discard,
+        "plain TCP/22 must hit no-ssh"
+    );
+    assert_eq!(
+        eval(0x2000, &tcp),
+        FilterAction::Discard,
+        "#14631: first fragment (MF=1, offset 0) must NOT match is-fragment; it faces no-ssh"
+    );
+    assert_eq!(
+        eval(0x0001, &tcp),
+        FilterAction::Accept,
+        "trailing fragment must still match is-fragment"
+    );
+    let filters6 = vec![FirewallFilterSnapshot {
+        name: "f6".into(),
+        family: "inet6".into(),
+        terms: filters[0].terms.clone(),
+    }];
+    let state6: FilterState = crate::filter::parse_filter_state(&filters6, &[], &[], "", "")
+        .expect("v6 filter compiles");
+    let src6 = IpAddr::V6("2001:db8::1".parse().unwrap());
+    let dst6 = IpAddr::V6("2001:db8::2".parse().unwrap());
+    let eval6 = |frag: Option<u16>| {
+        let pkt = frag_v6_packet(PROTO_TCP, frag, &tcp);
+        let mut frame = vec![0u8; 14];
+        frame.extend_from_slice(&pkt);
+        let l4 = if frag.is_some() { 14 + 40 + 8 } else { 14 + 40 };
+        let meta = UserspaceDpMeta {
+            l3_offset: 14,
+            l4_offset: l4,
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            ..UserspaceDpMeta::default()
+        };
+        let extra = term_match_extra_from_frame(&frame, meta);
+        crate::filter::evaluate_filter(
+            &state6, "inet6:f6", src6, dst6, PROTO_TCP, 12345, 22, 0, extra,
+        )
+        .action
+    };
+    assert_eq!(eval6(Some(0x0001)), FilterAction::Discard, "v6 first fragment must face no-ssh");
+    assert_eq!(eval6(Some(0x0008)), FilterAction::Accept, "v6 trailing fragment must match is-fragment");
+    assert_eq!(eval6(None), FilterAction::Discard, "v6 plain TCP/22 must hit no-ssh");
 }
 
 
@@ -1182,12 +1279,13 @@ fn term_extra_full_tcp_keeps_l4_present_and_flags() {
 }
 
 
-// #5568 anti-over-gate: a REAL IPv6 fragment (fragment header within the declared
-// payload_len) is still classified is_fragment = true — the declared-end bound
-// excludes slack, never a legitimately-declared fragment header.
+// #5568 anti-over-gate + #14631: a REAL IPv6 trailing fragment (offset != 0,
+// fragment header within the declared payload_len) is still classified
+// is_fragment = true — the declared-end bound excludes slack, never a
+// legitimately-declared trailing fragment header.
 #[test]
 fn term_extra_ipv6_real_fragment_still_detected_no_slack() {
-    let datagram = frag_v6_packet(PROTO_TCP, Some(0x0001), &[0u8; 8]);
+    let datagram = frag_v6_packet(PROTO_TCP, Some(0x0009), &[0u8; 8]);
     let mut frame = vec![0u8; 14];
     frame.extend_from_slice(&datagram);
     let meta = UserspaceDpMeta {
@@ -1200,7 +1298,7 @@ fn term_extra_ipv6_real_fragment_still_detected_no_slack() {
     let extra = term_match_extra_from_frame(&frame, meta);
     assert!(
         extra.is_fragment,
-        "a real (declared) IPv6 fragment is still detected"
+        "a real (declared) IPv6 trailing fragment is still detected"
     );
 }
 

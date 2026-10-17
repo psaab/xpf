@@ -411,9 +411,10 @@ fn term_match_extra_meta_flavors_produce_identical_extra() {
 
     // And the fail-closed gates themselves still hold on the unified
     // builder: the shim-stamped flags survive (declared datagram reaches
-    // the flags byte), the fragment bit reads the declared chain, and the
-    // flex slices stop at the IP-declared end (slack excluded).
-    assert!(a.is_fragment);
+    // the flags byte), and the flex slices stop at the IP-declared end
+    // (slack excluded). #14631: this is a FIRST fragment, so the Junos
+    // `is-fragment` term bit is false (trailing only) while L4 stays present.
+    assert!(!a.is_fragment);
     assert!(a.l4_present);
     assert_eq!(a.tcp_flags, 0x12);
     assert!(!a.flex_l3.expect("l3 slice").ends_with(&FLEX_SLACK_MARKER));

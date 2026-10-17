@@ -294,8 +294,8 @@ pub(crate) struct FirewallTermSnapshot {
     // older control plane that omits the field (#1961).
     #[serde(rename = "tcp_flags_unparseable", default)]
     pub tcp_flags_unparseable: bool,
-    // is_fragment matches any IP fragment (IPv4 MF set OR non-zero offset;
-    // IPv6 fragment extension header present).
+    // is_fragment: Junos SRX `is-fragment` term — trailing fragments only
+    // (fragment offset != 0, #14631). False = no fragment constraint.
     #[serde(rename = "is_fragment", default)]
     pub is_fragment: bool,
     // icmp_types / icmp_codes match the ICMP/ICMPv6 type and code bytes (#2545,

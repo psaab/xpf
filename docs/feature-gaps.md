@@ -843,12 +843,13 @@ tcp-flags / icmp-type / icmp-code constraints on that flag (NOT on the byte
 value). Keying off the value alone is insufficient: 0 is a VALID icmp-type
 (echo-reply) and a VALID icmp-code, so a zeroed byte would still spuriously match
 `from { icmp-type 0 }` / `from { icmp-code 0 }`. The L3-derived `is-fragment` bit
-is NOT gated by `l4_present` and stays true (a non-first fragment IS a fragment).
+is NOT gated by `l4_present` and stays true for a trailing fragment.
 This prevents a crafted fragment whose payload byte equals a filter's
 `icmp-type`/`icmp-code` from spuriously matching (the #2344 non-first-fragment
 class). Semantics: `tcp-flags <list>` requires ALL listed flags set
-(a non-TCP packet never matches); `is-fragment` matches any IP fragment (IPv4 MF
-set OR non-zero offset; IPv6 fragment header present); `icmp-type`/`icmp-code`
+(a non-TCP packet never matches); `is-fragment` matches trailing fragments
+only — fragment offset != 0 (#14631, Junos SRX `fragment-offset 0 except`;
+first/atomic fragments face L4 terms); `icmp-type`/`icmp-code`
 match the ICMP/ICMPv6 type/code bytes (a non-ICMP packet never matches).
 Limitation: the parser produces a flat flag-name list, so the richer Junos
 `tcp-flags "(syn & !ack)"` expression grammar (negation/disjunction/aliases like

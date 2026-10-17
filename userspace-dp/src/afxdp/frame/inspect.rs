@@ -1034,25 +1034,27 @@ pub(in crate::afxdp) fn is_non_first_fragment(packet: &[u8], addr_family: u8) ->
     }
 }
 
-/// #2362: is this L3-relative IPv4 packet ANY fragment? Junos `is-fragment`
-/// matches a datagram that is part of a fragmented packet — the FIRST fragment
+/// #2362: is this L3-relative IPv4 packet ANY fragment? Internal predicate:
+/// a datagram that is part of a fragmented packet — the FIRST fragment
 /// (MF=1, offset=0), a MIDDLE/LAST fragment (offset != 0), but NOT an
 /// unfragmented datagram (MF=0, offset=0). The MF bit is 0x2000 and the
 /// fragment-offset field is the low 13 bits, so the combined test on the
 /// `frag_off` field (IPv4 header bytes 6-7) is `(value & 0x3FFF) != 0`. The DF
 /// bit (0x4000) and the reserved bit (0x8000) are intentionally excluded. A
-/// too-short slice returns `false`.
+/// too-short slice returns `false`. NOT the Junos `is-fragment` term
+/// semantics — see `is_term_fragment` (#14631).
 #[inline]
 pub(in crate::afxdp) fn ipv4_is_any_fragment(packet: &[u8]) -> bool {
     packet.len() >= 8 && (u16::from_be_bytes([packet[6], packet[7]]) & 0x3FFF) != 0
 }
 
-/// #2362: is this L3-relative IPv6 packet ANY fragment? Junos `is-fragment`
-/// matches any datagram that carries a declared Fragment header, including
+/// #2362: is this L3-relative IPv6 packet ANY fragment? Internal predicate:
+/// any datagram that carries a declared Fragment header, including
 /// atomic headers and a declaration truncated before all 8 bytes are readable.
 /// The first declared sighting is retained for this declaration-sensitive
 /// verdict; readable fragment-status predicates instead consume the walk's
-/// every-sighting or first-non-atomic fields.
+/// every-sighting or first-non-atomic fields. NOT the Junos `is-fragment`
+/// term semantics — see `is_term_fragment` (#14631).
 #[inline]
 pub(in crate::afxdp) fn ipv6_is_any_fragment(packet: &[u8]) -> bool {
     walk_ipv6_ext_chain(packet, 0).fragment.is_some()
@@ -1069,7 +1071,8 @@ pub(in crate::afxdp) fn ipv6_is_nonatomically_fragmented(packet: &[u8]) -> bool 
 }
 
 /// #2362: family-dispatched ANY-fragment predicate over the L3-relative packet
-/// slice. Used by the firewall-filter `is-fragment` match condition.
+/// slice. Internal uses only (segmentation/NAT guards); the firewall-filter
+/// `is-fragment` term uses `is_term_fragment` (#14631).
 #[inline]
 pub(in crate::afxdp) fn is_any_fragment(packet: &[u8], addr_family: u8) -> bool {
     match addr_family as i32 {
@@ -1077,6 +1080,18 @@ pub(in crate::afxdp) fn is_any_fragment(packet: &[u8], addr_family: u8) -> bool 
         libc::AF_INET6 => ipv6_is_any_fragment(packet),
         _ => false,
     }
+}
+
+/// #14631: Junos SRX `is-fragment` term predicate — trailing fragments only.
+/// Junos defines `is-fragment` as `fragment-offset 0 except`, so a first
+/// fragment (offset 0, MF/M set — it carries the L4 header and must face
+/// port/tcp-flags terms) and an unfragmented/atomic datagram do NOT match;
+/// only offset != 0 does. This is exactly `is_non_first_fragment`. (The MX
+/// any-fragment reading is platform-specific and not xpf's SRX target; the
+/// IPv6 atomic-fragment contract is likewise offset-based here.)
+#[inline]
+pub(in crate::afxdp) fn is_term_fragment(packet: &[u8], addr_family: u8) -> bool {
+    is_non_first_fragment(packet, addr_family)
 }
 
 /// #2362: build the per-packet L4 match inputs (tcp-flags / is-fragment /
@@ -1097,9 +1112,9 @@ pub(in crate::afxdp) fn is_any_fragment(packet: &[u8], addr_family: u8) -> bool 
 /// `tcp_flags` carries the masked bits) spuriously match. So when the packet is
 /// a non-first fragment, force `tcp_flags = icmp_type = icmp_code = 0` — those
 /// L4 terms must NOT match (matching the `per_packet_l4_matches` doc contract).
-/// `is_fragment` is KEPT true (a non-first fragment IS a fragment; the
-/// `is-fragment` term reads only the L3 header, which is present on every
-/// fragment). Reuses the existing `is_non_first_fragment` predicate (#2344).
+/// `is_fragment` is the Junos term bit (#14631, trailing fragments only —
+/// see `is_term_fragment`): a non-first fragment sets it, a first fragment
+/// does not. Reuses `is_non_first_fragment` (#2344).
 ///
 /// #2449 (the truncation class): a NON-FRAGMENTED ICMP/ICMPv6 frame may still
 /// be shorter than `l4_offset + 2`, so the type/code bytes are absent. Reading
@@ -1187,8 +1202,8 @@ const TCP_FLAGS_DECLARED_MIN: usize = 14;
 /// `addr_family`, `protocol`, `tcp_flags`).
 ///
 /// Same fragment-safe contract on both paths: a non-first fragment forces
-/// the L4-derived fields to 0 (its bytes are payload) while keeping the
-/// L3-only `is_fragment` bit. The CoS path already routes a non-first
+/// the L4-derived fields to 0 (its bytes are payload) while setting the
+/// L3-only `is_fragment` term bit (#14631). The CoS path already routes a non-first
 /// fragment to the default queue with no flow_key (#2357), so in practice
 /// this builder is invoked on first/atomic packets there — the gate is
 /// defense-in-depth and identical for both callers.
@@ -1220,10 +1235,10 @@ pub(in crate::afxdp) fn term_match_extra_from_frame(
     // short to even hold the IP length field (`declared_end == None`), which
     // fails the fragment bits closed (false) — the same posture the L4 gates take.
     let l3_declared = declared_end.and_then(|end| frame.get(l3..end));
-    let is_fragment = l3_declared.is_some_and(|packet| is_any_fragment(packet, meta.addr_family));
+    let is_fragment = l3_declared.is_some_and(|packet| is_term_fragment(packet, meta.addr_family));
     // A non-first fragment has no L4 header at `l4_offset` (its bytes are
     // payload) — suppress every L4-derived match input so those terms fail
-    // closed. The is-fragment bit above stays as-is (L3-only).
+    // closed. The is-fragment bit above is exactly this predicate (#14631).
     let non_first_fragment =
         l3_declared.is_some_and(|packet| is_non_first_fragment(packet, meta.addr_family));
     // #10729 X2-F6: an AH-sighted chain exposes no usable L4 either — the

@@ -113,8 +113,8 @@ type FirewallTermSnapshot struct {
 	// rejects the whole snapshot instead. omitempty + the Rust serde default keep
 	// wire parity with an older control plane that omits the field (#1961).
 	TCPFlagsUnparseable bool `json:"tcp_flags_unparseable,omitempty"`
-	// IsFragment matches any IP fragment (IPv4 MF set OR non-zero offset; IPv6
-	// fragment extension header present). False = no fragment constraint.
+	// IsFragment: Junos SRX `is-fragment` term — trailing fragments only
+	// (fragment offset != 0, #14631). False = no fragment constraint.
 	IsFragment bool `json:"is_fragment,omitempty"`
 	// ICMPTypes / ICMPCodes match the ICMP/ICMPv6 type and code bytes (#2545,
 	// multi-value). An empty slice = no constraint. A non-empty slice matches if

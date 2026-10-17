@@ -25,9 +25,11 @@ use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP};
 /// byte VALUE alone is insufficient: 0 is a valid icmp-type (echo-reply) and a
 /// valid icmp-code, so a zeroed byte on a non-first fragment would still
 /// spuriously match `from { icmp-type 0 }` / `from { icmp-code 0 }`. The
-/// `is-fragment` constraint is L3-derived (every fragment carries the IP
-/// header) and is therefore NOT gated by `l4_present` — a non-first fragment
-/// still matches `from { is-fragment }`.
+/// `is-fragment` constraint is L3-derived and is therefore NOT gated by
+/// `l4_present` — a non-first fragment still matches `from { is-fragment }`.
+/// #14631: `extra.is_fragment` itself is the Junos SRX term bit (trailing
+/// fragments only, offset != 0); a first fragment carries `is_fragment:
+/// false` with `l4_present: true`, so it faces port/tcp-flags terms instead.
 #[inline(always)]
 fn per_packet_l4_matches(term: &FilterTerm, protocol: u8, extra: TermMatchExtra<'_>) -> bool {
     if term.tcp_flags_mask.is_some() || term.tcp_flags_forbidden.is_some() {

@@ -326,7 +326,7 @@ pub(crate) struct FilterTerm {
     // neither. Cache-sensitive (NOT in SessionKey) — see has_per_packet_l4_match
     // and cache_sensitive.rs.
     pub(crate) tcp_flags_forbidden: Option<u8>,
-    // is_fragment: matches any IP fragment.
+    // is_fragment: Junos SRX `is-fragment` — trailing fragments only (#14631).
     pub(crate) is_fragment: bool,
     // icmp_type / icmp_code: SET membership over the ICMP/ICMPv6 type/code byte
     // (#2545, multi-value). The bitmap is 256 bits (`[u64; 4]`); a packet's
@@ -431,8 +431,9 @@ pub(crate) struct TermMatchExtra<'a> {
     /// Raw TCP flags byte (only meaningful when protocol == TCP and
     /// `l4_present`).
     pub(crate) tcp_flags: u8,
-    /// Whether the packet is an IP fragment (any fragment). L3-derived — valid
-    /// regardless of `l4_present` (every fragment carries the IP header).
+    /// Junos SRX `is-fragment` term bit (#14631): true only for a trailing
+    /// fragment (offset != 0). L3-derived — valid regardless of `l4_present`.
+    /// A first fragment (offset 0) is false here and faces L4 terms.
     pub(crate) is_fragment: bool,
     /// ICMP/ICMPv6 type byte (only meaningful when protocol is ICMP/ICMPv6 and
     /// `l4_present`).

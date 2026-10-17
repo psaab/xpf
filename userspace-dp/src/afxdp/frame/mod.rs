@@ -93,7 +93,7 @@ pub(in crate::afxdp) use inspect::{
     L3_CTX_NONE_UNSPECIFIED_ADDR, authoritative_forward_ports, declared_l3_end,
     decode_frame_summary, dest_is_directed_broadcast, dest_is_multicast_or_broadcast,
     flowless_effective_protocol, forward_tuple_mismatch_reason, fragment_protocol_from_frame,
-    icmp_reply_type, ipv4_is_any_fragment, ipv4_is_non_first_fragment,
+    icmp_reply_type, ipv4_is_any_fragment, ipv4_is_non_first_fragment, is_term_fragment,
     ipv6_addr_is_v4_mapped_or_compat, ipv6_ext_chain_over_limit,
     ipv6_frame_has_v4_mapped_or_compat, ipv6_is_any_fragment, ipv6_is_non_first_fragment,
     ipv6_is_nonatomically_fragmented, is_any_fragment, is_non_first_fragment,
