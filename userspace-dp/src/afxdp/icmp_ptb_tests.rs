@@ -2166,3 +2166,52 @@ fn post_transform_inner_mtu_8896_nat64_through_gre_applies_both_budgets() {
         "#2327: an unknown tunnel mode must remain closed without NAT64 too",
     );
 }
+
+/// #14642 fail-on-revert: an oversize DF inner decapsulated from GRE/WG
+/// carries `TUNNEL_DECAP_INGRESS_FLAG` and a zero-MAC synthetic header.
+/// `ptb_reply_suppressed` must suppress it (and the builders must refuse),
+/// otherwise the PTB is reflected unencapsulated onto the underlay with
+/// dst MAC 00:00:00:00:00:00. Control without the flag still builds.
+#[test]
+fn ptb_suppressed_for_tunnel_decap_inner_14642() {
+    let (mut frame, mut meta) = inbound_v4_udp(1500, true);
+    frame[0..12].fill(0);
+    meta.meta_flags |= crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG;
+    let l3 = meta.l3_offset as usize;
+    assert!(
+        ptb_reply_suppressed(&frame, meta, l3, &ForwardingState::default()),
+        "#14642: PTB gate must suppress a tunnel-decapped inner"
+    );
+    let fwd = forwarding_with_egress(1400);
+    assert!(
+        build_frag_needed_v4(&frame, meta, PTB_IFINDEX, &fwd, 1400).is_none(),
+        "#14642: v4 Frag-Needed builder must refuse a tunnel-decapped inner"
+    );
+    let (mut frame6, mut meta6) = inbound_v6_udp(1300);
+    frame6[0..12].fill(0);
+    meta6.meta_flags |= crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG;
+    let l3_6 = meta6.l3_offset as usize;
+    assert!(
+        ptb_reply_suppressed(&frame6, meta6, l3_6, &ForwardingState::default()),
+        "#14642: v6 PTB gate must suppress a tunnel-decapped inner"
+    );
+    assert!(
+        build_packet_too_big_v6(&frame6, meta6, PTB_IFINDEX, &fwd, 1280).is_none(),
+        "#14642: v6 PTB builder must refuse a tunnel-decapped inner"
+    );
+    // Positive controls: same oversize frames without the flag still build.
+    let (frame_c, meta_c) = inbound_v4_udp(1500, true);
+    assert!(
+        !ptb_reply_suppressed(&frame_c, meta_c, meta_c.l3_offset as usize, &ForwardingState::default()),
+        "control: native oversize DF must not be suppressed"
+    );
+    assert!(
+        build_frag_needed_v4(&frame_c, meta_c, PTB_IFINDEX, &fwd, 1400).is_some(),
+        "control: native oversize DF must still build Frag-Needed"
+    );
+    let (frame6_c, meta6_c) = inbound_v6_udp(1300);
+    assert!(
+        build_packet_too_big_v6(&frame6_c, meta6_c, PTB_IFINDEX, &fwd, 1280).is_some(),
+        "control: native oversize v6 must still build Packet Too Big"
+    );
+}

@@ -1312,3 +1312,96 @@ fn te_buildable_respects_and_consumes_token_5567() {
     reset_bucket_for_test(GeneratedErrorReason::TimeExceeded, 0);
 }
 
+// --- #14642 tunnel-decap generated-error suppression ---
+
+/// #14642 fail-on-revert: a GRE/WG-decapped inner packet carries a
+/// fabricated zero-MAC Ethernet header (`TUNNEL_DECAP_INGRESS_FLAG`).
+/// A TTL=1 inner must NOT draw a Time Exceeded reflected onto the
+/// underlay: pre-fix `build_local_time_exceeded_request` has no tunnel
+/// check, so it queues a Prebuilt TE with dst MAC 00:00:00:00:00:00.
+/// The positive control (same frame without the flag) still emits.
+#[test]
+fn time_exceeded_suppressed_for_tunnel_decap_inner_14642() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let client = Ipv4Addr::new(10, 0, 61, 102);
+    let server = Ipv4Addr::new(1, 1, 1, 1);
+    // Zero-MAC synthetic header exactly as GRE/WG decap fabricates it.
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0u8; 12]);
+    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+    let l3 = frame.len();
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x40, 0x00, 1, PROTO_UDP, 0, 0,
+    ]);
+    frame.extend_from_slice(&client.octets());
+    frame.extend_from_slice(&server.octets());
+    let csum = checksum16(&frame[l3..l3 + 20]);
+    frame[l3 + 10..l3 + 12].copy_from_slice(&csum.to_be_bytes());
+    frame.extend_from_slice(&[0xc0, 0x00, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]);
+    let mut meta = ttl_meta_v4();
+    meta.l3_offset = 14;
+    meta.meta_flags |= crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG;
+    assert!(
+        !can_generate_icmp_error_reply(&frame, meta, &ForwardingState::default()),
+        "#14642: tunnel-decap inner must fail the generated-error gate"
+    );
+    assert!(
+        !te_request_built(&frame, meta),
+        "#14642: no Time Exceeded may be queued for a tunnel-decapped inner"
+    );
+    // Builders must also refuse directly (defense in depth, PTB parity).
+    let fwd = icmp_suppress_forwarding();
+    assert!(
+        build_local_time_exceeded_v4(&frame, meta, 5, &fwd).is_none(),
+        "#14642: v4 TE builder must refuse a tunnel-decapped inner"
+    );
+    // Positive control: identical frame without the flag still emits.
+    let mut native_meta = meta;
+    native_meta.meta_flags &= !crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG;
+    // Give the native frame a real sender MAC so reflection is meaningful.
+    let mut native_frame = frame.clone();
+    native_frame[0..6].copy_from_slice(&[0x00, 0x25, 0x90, 0x12, 0x34, 0x56]);
+    native_frame[6..12].copy_from_slice(&[0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    assert!(
+        can_generate_icmp_error_reply(&native_frame, native_meta, &ForwardingState::default()),
+        "control: native TTL=1 unicast must still pass the gate"
+    );
+    let out = build_local_time_exceeded_v4(&native_frame, native_meta, 5, &fwd)
+        .expect("control: native TTL=1 must still build a TE");
+    assert_eq!(&out[0..6], &[0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+}
+
+/// #14642: the v6 TE builder refuses a tunnel-decapped inner as well.
+#[test]
+fn time_exceeded_v6_suppressed_for_tunnel_decap_inner_14642() {
+    let client: Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
+    let server: Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0u8; 12]);
+    frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+    frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00, 0x00, 0x08, 17, 1]);
+    frame.extend_from_slice(&client.octets());
+    frame.extend_from_slice(&server.octets());
+    frame.extend_from_slice(&[0xc0, 0x00, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]);
+    let meta = UserspaceDpMeta {
+        l3_offset: 14,
+        l4_offset: 54,
+        ingress_ifindex: 5,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        meta_flags: crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG,
+        ..UserspaceDpMeta::default()
+    };
+    let fwd = icmp_suppress_forwarding();
+    assert!(
+        build_local_time_exceeded_v6(&frame, meta, 5, &fwd).is_none(),
+        "#14642: v6 TE builder must refuse a tunnel-decapped inner"
+    );
+    let mut native = meta;
+    native.meta_flags = 0;
+    assert!(
+        build_local_time_exceeded_v6(&frame, native, 5, &fwd).is_some(),
+        "control: native v6 hop-limit=1 must still build a TE"
+    );
+}
+
