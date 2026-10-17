@@ -684,6 +684,17 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 						appendPath(ancestorPath, cpeer.Keys), budget, group, vars, level, haveExcept, deferWildcards); err != nil {
 						return err
 					}
+				} else if isRouteFilterORMember14416(ancestorPath, s) &&
+					!routeFilterMemberExists14416(*dst, s) {
+					// #14416: route-filter is a schema-documented OR-member
+					// list (args:2, multi) that leafListUnionEligible cannot
+					// union (args<=1 gate) and the packed promotions cannot
+					// reach (children==nil). Adopt a distinct group member
+					// beside the inline peer as a sibling leaf — the shape
+					// repeated inline route-filters already compile from —
+					// instead of dropping it to the override. A duplicate
+					// full member keeps the drop below.
+					*dst = append(*dst, s)
 				}
 				continue
 			}
