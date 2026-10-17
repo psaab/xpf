@@ -256,6 +256,7 @@ impl SessionTable {
             return SessionExpiryProbe::Absent;
         };
         let mut idle_crossed = false;
+        let mut first: Option<(ForwardSessionMatch, SessionOrigin)> = None;
         for &handle in bucket.iter() {
             let Some(record) = self.entries.get(handle as usize) else {
                 continue;
@@ -270,7 +271,7 @@ impl SessionTable {
                 idle_crossed = true;
                 continue;
             }
-            return SessionExpiryProbe::Live((
+            let matched = (
                 ForwardSessionMatch {
                     key: record.key.clone(),
                     decision: entry.decision,
@@ -287,9 +288,19 @@ impl SessionTable {
                     },
                 },
                 entry.origin,
-            ));
+            );
+            if first.is_some() {
+                // #14382: second live validated candidate — the wire
+                // tuple is ambiguous. Fail closed as Absent (the
+                // candidates are live, so IdleCrossed would be wrong),
+                // matching find_forward_wire_match_inner's None.
+                return SessionExpiryProbe::Absent;
+            }
+            first = Some(matched);
         }
-        if idle_crossed {
+        if let Some(matched) = first {
+            SessionExpiryProbe::Live(matched)
+        } else if idle_crossed {
             SessionExpiryProbe::IdleCrossed
         } else {
             SessionExpiryProbe::Absent
@@ -1203,14 +1214,27 @@ impl SessionTable {
         // collision (interface-mode SNAT with no port translation and the other
         // non-bijective NAT classes; interface SNAT collapses both the reverse-
         // wire AND the forward-wire tuples) parks BOTH colliding forward handles
-        // in one bucket. Walk the candidates and return the first whose forward
-        // session actually maps to THIS wire key (validate-on-lookup): the
-        // pre-#4438 single-value map returned only the last-installed handle, so
-        // a displaced session's wire lookup was mis-delivered (hijacked). The
-        // common (bijective / non-colliding) case is a len-1 bucket — one
-        // validate, zero heap (SmallVec inline) — so the pool-mode-SNAT fast
-        // path is unchanged.
+        // in one bucket. Walk the candidates and validate each against THIS
+        // wire key (validate-on-lookup): the pre-#4438 single-value map
+        // returned only the last-installed handle, so a displaced session's
+        // wire lookup was mis-delivered (hijacked). The common (bijective /
+        // non-colliding) case is a len-1 bucket — one validate, zero heap
+        // (SmallVec inline) — so the pool-mode-SNAT fast path is unchanged.
+        //
+        // #14382: validation is per-candidate, but selection must not be
+        // first-wins when TWO live candidates validate. DNAT-to-shared-
+        // backend (C -> VIP1 and C -> VIP2 both DNAT to B), NAT64, and
+        // non-bijective static NAT survive admission (#6751) and share
+        // W = C -> B; the packet may belong to either VIP's flow, with
+        // different zones/policy counter/session identity. Returning the
+        // first would admit it as established under the wrong flow, so a
+        // second live validated candidate fails closed to the miss/policy
+        // path — mirroring lookup_ipsec_reply_alias_at (Ambiguous) and
+        // find_unique_established_forward_nat_match_at (None). Expired
+        // candidates are skipped by the same idle check, so one live plus
+        // one idle-crossed candidate still resolves to the live survivor.
         let bucket = self.forward_wire_index.get(wire_key)?;
+        let mut first: Option<(ForwardSessionMatch, SessionOrigin)> = None;
         for &handle in bucket.iter() {
             let Some(record) = self.entries.get(handle as usize) else {
                 continue;
@@ -1224,7 +1248,7 @@ impl SessionTable {
             {
                 continue;
             }
-            return Some((
+            let matched = (
                 ForwardSessionMatch {
                     key: record.key.clone(),
                     decision: entry.decision,
@@ -1241,9 +1265,13 @@ impl SessionTable {
                     },
                 },
                 entry.origin,
-            ));
+            );
+            if first.is_some() {
+                return None;
+            }
+            first = Some(matched);
         }
-        None
+        first
     }
 
     /// #4438: resolve the reverse entry whose translated (alias) tuple equals
