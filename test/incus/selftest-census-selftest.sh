@@ -26,7 +26,10 @@ n=0
 
 # stamp_clean <dir> — a fixture tree satisfying every census check: one file
 # per discovery glob, the positive control, one guarded file per python
-# glob, and a runner registering all of them plus exactly the 8 odd names.
+# glob, and a runner registering all of them plus exactly the 10 odd names.
+# The eight test/incus odd names that carry a selftest arm get a real
+# arm file on disk (#14653 §2b scans for the arm, not the name), so the
+# fixture exercises the arm scan's green direction as well as its reds.
 stamp_clean() {
 	local fix="$1"
 	mkdir -p "$fix/test/incus" "$fix/test/xsk-repro" "$fix/test/routing" \
@@ -46,6 +49,12 @@ stamp_clean() {
 	echo '#!/bin/sh' >"$fix/test/debian/preinst-migrate-test.sh"
 	echo '#!/bin/sh' >"$fix/test/debian/preinst-safe-segment-test.sh"
 	echo '#!/bin/sh' >"$fix/test/incus/harness-result-selftest.sh"
+	for w in wire-policy-deny wire-appmatch-twins wire-zone-matrix wire-hostinbound-deny wire-conntrack-lifecycle wire-routing-separation wire-nat-frag-needed t12-g2-9506; do
+		# Build the arm via concatenation: this file must not itself carry
+		# the literal arm text, or the real-tree §2b scan would flag it.
+		arm='--self''test)'
+		printf '#!/usr/bin/env bash\ncase "$1" in\n%s exit 0 ;;\nesac\n' "$arm" >"$fix/test/incus/$w.sh"
+	done
 	for d in image dist deploy; do
 		printf 'x = 1\nif __name__ == "__main__":\n    pass\n' >"$fix/scripts/$d/test_a.py"
 	done
@@ -73,6 +82,8 @@ run_bash test/incus/wire-zone-matrix.sh --selftest
 run_bash test/incus/wire-hostinbound-deny.sh --selftest
 run_bash test/incus/wire-conntrack-lifecycle.sh --selftest
 run_bash test/incus/wire-routing-separation.sh --selftest
+run_bash test/incus/wire-nat-frag-needed.sh --selftest
+run_bash test/incus/t12-g2-9506.sh --selftest
 # -- harness reachability census (#8302) --
 RUNNER
 }
@@ -206,7 +217,7 @@ else
 	esac
 fi
 
-# ── 5. a ninth odd name fails (exact-set, extra direction) ──
+# ── 5. an eleventh odd name fails (exact-set, extra direction) ──
 n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
 printf 'run_bash scripts/odd-new-thing.sh\n' >>"$fix/runner.sh"
 # The append lands after the §4 end marker; move it inside (a registration
@@ -214,7 +225,7 @@ printf 'run_bash scripts/odd-new-thing.sh\n' >>"$fix/runner.sh"
 sed -i '/odd-new-thing/d' "$fix/runner.sh"
 sed -i 's|# -- harness reachability census|run_bash scripts/odd-new-thing.sh\n# -- harness reachability census|' "$fix/runner.sh"
 if out=$(run_census "$fix"); then
-	bad "undeclared ninth odd name passed the census"
+	bad "undeclared eleventh odd name passed the census"
 else
 	case "$out" in
 	*"scripts/odd-new-thing.sh"*) ok "undeclared odd name fails, naming the file" ;;
@@ -232,6 +243,64 @@ else
 	*"scripts/dist/selftest.sh"*) ok "stale odd declaration fails, naming the file" ;;
 	*) bad "odd-stale failure did not name the file: $out" ;;
 esac
+fi
+
+# ── 6b. (#14653 acceptance) dropping both new --selftest registrations
+# fails, naming both — the pre-fix runner shape. §2 stale-direction AND
+# §2b arm-scan must each name them; either alone would catch it, both
+# firing proves neither leg is the other's blind spot.
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+sed -i '/test\/incus\/wire-nat-frag-needed.sh/d; /test\/incus\/t12-g2-9506.sh/d' "$fix/runner.sh"
+if out=$(run_census "$fix"); then
+	bad "dropped #14653 registrations passed the census"
+else
+	case "$out" in
+	*"test/incus/wire-nat-frag-needed.sh"*"test/incus/t12-g2-9506.sh"*) ok "dropped #14653 registrations fail, naming both files" ;;
+	*) bad "dropped-registration failure did not name both files: $out" ;;
+	esac
+fi
+
+# ── 6c. (#14653) a NEW --selftest-arm script nobody registered fails,
+# naming it — the census-blindness regression itself. The name matches no
+# glob and is in no declaration; only the on-disk arm scan can see it.
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+arm='--self''test)'; printf '#!/usr/bin/env bash\ncase "$1" in\n%s exit 0 ;;\nesac\n' "$arm" >"$fix/test/incus/wire-new-arm.sh"
+if out=$(run_census "$fix"); then
+	bad "never-registered --selftest-arm script passed the census"
+else
+	case "$out" in
+	*"test/incus/wire-new-arm.sh"*) ok "never-registered --selftest-arm script fails, naming the file" ;;
+	*) bad "unregistered-arm failure did not name the file: $out" ;;
+	esac
+fi
+
+# ── 6d. (#14653) positive control A: dropping a pre-existing wire
+# registration (wire-zone-matrix) still fails — the control the issue
+# requires to keep passing after the fix.
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+sed -i '/test\/incus\/wire-zone-matrix.sh/d' "$fix/runner.sh"
+if out=$(run_census "$fix"); then
+	bad "dropped wire-zone-matrix registration passed the census (control A)"
+else
+	case "$out" in
+	*"test/incus/wire-zone-matrix.sh"*) ok "control A: dropped wire-zone-matrix registration fails, naming the file" ;;
+	*) bad "control-A failure did not name the file: $out" ;;
+	esac
+fi
+
+# ── 6e. (#14653) twin of 6c: the same new arm script REGISTERED with
+# --selftest inside §4 but NOT declared in the odd set still fails (§2
+# extra direction) — registration alone does not quietly exempt it.
+n=$((n + 1)); fix="$WORK/f$n"; mkdir -p "$fix"; stamp_clean "$fix"
+arm='--self''test)'; printf '#!/usr/bin/env bash\ncase "$1" in\n%s exit 0 ;;\nesac\n' "$arm" >"$fix/test/incus/wire-new-arm.sh"
+sed -i 's|# -- harness reachability census|run_bash test/incus/wire-new-arm.sh --selftest\n# -- harness reachability census|' "$fix/runner.sh"
+if out=$(run_census "$fix"); then
+	bad "registered-but-undeclared arm script passed the census"
+else
+	case "$out" in
+	*"test/incus/wire-new-arm.sh"*) ok "registered-but-undeclared arm script fails, naming the file" ;;
+	*) bad "undeclared-arm failure did not name the file: $out" ;;
+	esac
 fi
 
 # ── 7. a census leg outside §4 is not an odd name (the cell-5 twin) ──
