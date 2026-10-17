@@ -276,8 +276,6 @@ protocols bgp graceful-restart	empty
 protocols bgp log-updown	empty
 protocols bgp multipath ibgp	empty
 protocols bgp multipath multiple-as	empty
-protocols isis overload	empty
-protocols isis wide-metrics-only	empty
 protocols lldp disable	empty
 protocols lldp interface xpfarg disable	empty
 protocols router-advertisement interface xpfarg managed-configuration	empty
@@ -286,8 +284,6 @@ routing-instances xpfname protocols bgp graceful-restart	empty
 routing-instances xpfname protocols bgp log-updown	empty
 routing-instances xpfname protocols bgp multipath ibgp	empty
 routing-instances xpfname protocols bgp multipath multiple-as	empty
-routing-instances xpfname protocols isis overload	empty
-routing-instances xpfname protocols isis wide-metrics-only	empty
 security nat destination pool xpfarg port	empty
 security policies from-zone xpfarg xpfarg xpfarg policy xpfarg scheduler-name	empty
 security policies from-zone xpfarg xpfarg xpfarg policy xpfarg then permit	empty
