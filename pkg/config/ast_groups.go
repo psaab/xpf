@@ -546,6 +546,31 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				appendDuplicateBlockMergeMarkersToLeaves9023(s.Children, markers)
 			}
 		}
+		// #14424: address-book `address` identity (Keys[1]) — same-name
+		// merges into the inline node, different name adopts (below).
+		if s.IsLeaf && isAddressBookAddress14424(ancestorPath, s) {
+			if addressBookPeer14424(*dst, s) != nil {
+				handled, err := mergeAddressBookGroupInto14424(dst, s, ancestorPath, budget, group, vars, level, haveExcept, deferWildcards)
+				if err != nil {
+					return err
+				}
+				if handled {
+					continue
+				}
+			}
+			// Different name: adopt as a new instance (never keyword-suppress).
+			*dst = append(*dst, s)
+			continue
+		}
+		if !s.IsLeaf && isAddressBookAddress14424(ancestorPath, s) {
+			handled, err := addressBookGroupContainerHandled14424(dst, s, ancestorPath, budget, group, vars, level, haveExcept, deferWildcards)
+			if err != nil {
+				return err
+			}
+			if handled {
+				continue
+			}
+		}
 		if s.IsLeaf {
 			key := ""
 			if len(s.Keys) > 0 {
