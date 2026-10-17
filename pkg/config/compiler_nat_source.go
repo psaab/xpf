@@ -918,6 +918,21 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 		var rules []*NATRule
 		for _, ruleInst := range namedInstances(rsInst.node.FindChildren("rule")) {
 			rule := &NATRule{Name: ruleInst.name}
+			// #14415 (DR14-H2): a match PACKED onto the rule line —
+			// `rule r1 match source-address 10.0.0.0/24 { then { ... } }`
+			// — sits in the rule node's Keys, not Children, so the
+			// FindChildren("match") loop below never saw it: the rule
+			// compiled unconstrained and matchAuthored stayed false,
+			// disarming the #8430/#9874 gates. packedBodyChildren with
+			// the rule schema expands that tail into the braced shape
+			// (the braced body re-attaches under the deepest packed
+			// node, #6818). It returns Children unchanged when there is
+			// no packed tail, so braced/flat-set shapes are bit-identical.
+			// The synthetic match node is FILTERED to `match` below:
+			// packedBodyChildren also returns the real `then` child, and
+			// feeding it to the match loop would record `then` as an
+			// unknown match leaf (#9877).
+			ruleNode := packedBody(ruleInst.node, schemaForPath("security", "nat", "source", "rule-set", "rule"))
 
 			// #3850: iterate EVERY `match {}` block, not just the first — a
 			// duplicate block (a `load merge`/`load override` that splits its
@@ -926,7 +941,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 			// read (a fail-open widening of the NAT match). Flat-set is
 			// unaffected: SetPath merges duplicate containers into one node
 			// (ast_edit.go), so this only changes the hierarchical/parser shape.
-			for _, matchNode := range ruleInst.node.FindChildren("match") {
+			for _, matchNode := range ruleNode.FindChildren("match") {
 				// #8430: the rule authored a match container. Recorded before
 				// the leaves are read, so an EMPTY `match { }` is still marked.
 				rule.matchAuthored = true
@@ -1039,7 +1054,7 @@ func compileNATSource(node *Node, sec *SecurityConfig) error {
 			// field precedence, not true last-wins). NATThen carries only these
 			// translation-mode fields, so a whole-struct reset is safe (#3850
 			// review).
-			for _, thenNode := range ruleInst.node.FindChildren("then") {
+			for _, thenNode := range ruleNode.FindChildren("then") {
 				rule.Then = NATThen{}
 				rule.unknownThenLeaves = nil
 				rule.thenAuthored = natThenAuthoredOccurrences(thenNode, "source-nat")

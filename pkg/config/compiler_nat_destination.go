@@ -210,6 +210,11 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 		var rules []*NATRule
 		for _, ruleInst := range namedInstances(rsInst.node.FindChildren("rule")) {
 			rule := &NATRule{Name: ruleInst.name}
+			// #14415 (DR14-H2): packed `match` on the rule line, destination
+			// twin of compileNATSource — see there. Without this the packed
+			// match vanished: no destination key, so the snapshot builder
+			// published no entry and an `off` exemption was silently deleted.
+			ruleNode := packedBody(ruleInst.node, schemaForPath("security", "nat", "destination", "rule-set", "rule"))
 
 			// #3850: iterate EVERY `match {}` block, not just the first — a
 			// duplicate block (a `load merge`/`load override` that splits its
@@ -218,7 +223,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			// read (a fail-open widening of the NAT match). Flat-set is
 			// unaffected: SetPath merges duplicate containers into one node
 			// (ast_edit.go), so this only changes the hierarchical/parser shape.
-			for _, matchNode := range ruleInst.node.FindChildren("match") {
+			for _, matchNode := range ruleNode.FindChildren("match") {
 				rule.matchAuthored = true // #8430, see compiler_nat_source.go
 				// #9877 compact: a brace-elided unknown leaf never unfolds (see
 				// compiler_nat_source.go) — record an unmodeled packed head.
@@ -313,7 +318,7 @@ func compileNATDestination(node *Node, sec *SecurityConfig) error {
 			// block's stale field; a destination-nat then-block is a complete
 			// mutually-exclusive spec (pool | off) and NATThen carries only
 			// translation-mode fields (#3850 review).
-			for _, thenNode := range ruleInst.node.FindChildren("then") {
+			for _, thenNode := range ruleNode.FindChildren("then") {
 				rule.Then = NATThen{}
 				rule.thenAuthored = natThenAuthoredOccurrences(thenNode, "destination-nat")
 				// #7014: the fully-compact `then destination-nat off;` packs

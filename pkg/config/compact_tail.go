@@ -279,7 +279,44 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 	// hold when the chain could only nest.
 	cur = levels[len(levels)-1].schema
 	if cur == nil || (len(cur.children) == 0 && cur.wildcard == nil) {
-		return node.Children
+		// #14415: the deepest packed node is a LEAF (e.g. a NAT match
+		// leaf `source-address 10.0.0.0/24`), so the braced body cannot
+		// belong under it — it belongs beside the packed run as a
+		// SIBLING root. The shape that reaches here is
+		// `rule r1 match source-address 10.0.0.0/24 { then { ... } }`:
+		// the packed run is the `match` statement and the braced body
+		// is the separate `then` statement, both children of `rule`.
+		// Returning node.Children unexpanded (the pre-#14415 answer)
+		// dropped the packed match entirely. Appending the real
+		// children as siblings preserves both statements; the earlier
+		// leaf guard (return unchanged) remains correct only when
+		// there is no sibling-shaped body to preserve — but here the
+		// body IS a sibling statement in the grammar (the container
+		// declares it), which is exactly the `then` case. Guard it:
+		// only append when every real child names a child of the
+		// ORIGINAL container schema, so a genuinely mis-nested body
+		// (`stanza leaf value { body }` where body is not a sibling
+		// statement) still returns unchanged rather than inventing
+		// structure.
+		// Guarded so the #6818 leaf case still declines: there the
+		// real child (`protocol tls`) repeats the packed leaf's own
+		// head (`protocol`) — a competing value for the same
+		// statement, not a sibling. Only append when every real
+		// child names a child of the ORIGINAL container schema and
+		// none repeats a head already synthesized as a root.
+		rootHeads := make(map[string]bool, len(roots))
+		for _, r := range roots {
+			if r != nil && len(r.Keys) > 0 {
+				rootHeads[r.Keys[0]] = true
+			}
+		}
+		for _, ch := range node.Children {
+			if ch == nil || len(ch.Keys) == 0 || rootHeads[ch.Keys[0]] ||
+				resolveSchemaChild(schema, ch.Keys[0]) == nil {
+				return node.Children
+			}
+		}
+		return append(append([]*Node(nil), roots...), node.Children...)
 	}
 	last.Children = append(last.Children, node.Children...)
 	return roots
