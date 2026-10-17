@@ -155,8 +155,35 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 		policySetID++
 	}
 	globalRuleIndex := uint32(0)
+	// #14330: the snapshot quarantine (scrubPoliciesForQuarantinedZones)
+	// drops a scoped-global rule whose configured match side has NO
+	// surviving member after pruning quarantined zones. Such a rule is
+	// never published, so it must not consume a global slot, appear in
+	// PolicyIDsByStableKey/PoliciesByStableKey/RuntimePolicyIDs, or count
+	// toward expansion caps. A partially quarantined side survives pruned
+	// and keeps its slot/ID (fingerprint change is signalled by
+	// PolicyResolvedFingerprints). Use the same policy-quarantine set as
+	// quarantineCollidingZones (collision losers + poisoned zones;
+	// reserved sentinels excluded so defined-`any` / junos-host scope
+	// handling stays with its own poison paths). "" / "any" wildcards are
+	// never quarantined, so unscoped globals are unaffected.
+	policyQuarantined := quarantinedZoneNamesForConfig(cfg)
+	globalScopeFullyQuarantined := func(zones []string) bool {
+		if len(zones) == 0 || len(policyQuarantined) == 0 {
+			return false
+		}
+		for _, z := range zones {
+			if _, drop := policyQuarantined[z]; !drop {
+				return false
+			}
+		}
+		return true
+	}
 	for sliceIdx, pol := range cfg.Security.GlobalPolicies {
 		if pol == nil {
+			continue
+		}
+		if globalScopeFullyQuarantined(pol.Match.FromZones) || globalScopeFullyQuarantined(pol.Match.ToZones) {
 			continue
 		}
 		span := userspacePolicyRuleExpansionCount(cfg, pol.Match.Applications)
