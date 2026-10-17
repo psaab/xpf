@@ -536,7 +536,8 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		// collapsed Keys list and a block child list cannot ride through an
 		// exclusion atomically.
 		if haveExcept && len(level) > 0 && len(s.Keys) > 0 &&
-			isLeafListSchema(ancestorPath, s.Keys[0]) &&
+			(isLeafListSchema(ancestorPath, s.Keys[0]) ||
+				isGroupReplacePortSchema(ancestorPath, s.Keys[0])) &&
 			!filterLeafListMembers9862(s, level) {
 			continue
 		}
@@ -699,11 +700,13 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					}
 				}
 				// A same-key node already exists inline. UNION when the
-				// statement is a pure value-list leaf-list; otherwise OVERRIDE
+				// statement is a pure value-list leaf-list, or a range-free
+				// groupReplace PORT leaf (#14423); otherwise OVERRIDE
 				// (skip the group value — inline wins). Scalars, args>=2
-				// multi-token leaves, groupReplace token-packed leaves, and
+				// multi-token leaves, groupReplace operation leaves, and
 				// range-bearing leaves all take the override path.
-				if leafListUnionEligible(ancestorPath, key, peer, s) {
+				if leafListUnionEligible(ancestorPath, key, peer, s) ||
+					groupReplacePortUnionEligible(ancestorPath, key, peer, s) {
 					mergeLeafListInto(peer, s)
 					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{peer}, markers)
 				} else if body, ok := promoteLeafPeerForPackedGroup9855(ancestorPath, peer, s); ok {
@@ -895,20 +898,43 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 		// UNION its members into an existing inline leaf-list (either shape),
 		// rather than recursing as a real hierarchical container. Multi-key
 		// containers (["family","inet"]) are never leaf-lists.
+		// A range-free groupReplace PORT block (#14423) whose peer is a
+		// leaf takes the same union path; a container peer (block/block,
+		// incl. a previously adopted group) is decided by #14444 below,
+		// which applies the identical range-free-union / range-override
+		// rule with its hyphen-aware range predicate.
 		if len(s.Keys) == 1 && isLeafListSchema(ancestorPath, s.Keys[0]) {
 			if peer := leafListPeer(*dst, s.Keys[0]); peer != nil {
-				if leafListUnionEligible(ancestorPath, s.Keys[0], peer, s) {
+				if leafListUnionEligible(ancestorPath, s.Keys[0], peer, s) ||
+					groupReplacePortUnionEligible(ancestorPath, s.Keys[0], peer, s) {
 					mergeLeafListInto(peer, s)
 					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{peer},
 						duplicateBlockMergeMarkers9023(s))
 				}
-				// else OVERRIDE: a range-bearing inline peer wins, group block
-				// dropped (a groupReplace leaf never reaches here — its
-				// isLeafListSchema is false, so it takes the container path).
+				// else OVERRIDE: a range-bearing inline peer wins, group
+				// block dropped (a groupReplace leaf never reaches here —
+				// its isLeafListSchema is false, so it takes the container
+				// path).
 			} else {
 				*dst = append(*dst, s)
 			}
 			continue
+		}
+		if len(s.Keys) == 1 && isGroupReplacePortSchema(ancestorPath, s.Keys[0]) {
+			peer := leafListPeer(*dst, s.Keys[0])
+			if peer != nil && peer.IsLeaf {
+				if groupReplacePortUnionEligible(ancestorPath, s.Keys[0], peer, s) {
+					mergeLeafListInto(peer, s)
+					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{peer},
+						duplicateBlockMergeMarkers9023(s))
+				}
+				continue
+			}
+			if peer == nil {
+				*dst = append(*dst, s)
+				continue
+			}
+			// Container peer: fall through to #14444.
 		}
 
 		// #14444: a single-key group block whose schema leaf is
@@ -1456,6 +1482,53 @@ func leafListUnionEligible(ancestorPath [][]string, key string, dst, src *Node) 
 		return false
 	}
 	return !leafListCarriesRange(dst) && !leafListCarriesRange(src)
+}
+
+// isGroupReplacePortSchema reports whether key, resolved under
+// ancestorPath, is one of the port leaves whose groupReplace flag exists
+// only to protect RANGE spellings: the firewall `from` port leaves
+// (destination-port, source-port, destination-port-except,
+// source-port-except under family inet/inet6) and the NAT rule `match`
+// destination-port (source and destination NAT). Scoped by schema
+// identity — the resolved node is the actual setSchema node for the key
+// under this ancestor path, and the key must be a port keyword — so the
+// other groupReplace leaves (then community / as-path-prepend, NAT pool
+// address packing `port <n>`, SNAT pool address packing `to`) never
+// qualify even though they share the flag.
+func isGroupReplacePortSchema(ancestorPath [][]string, key string) bool {
+	switch key {
+	case "destination-port", "source-port",
+		"destination-port-except", "source-port-except":
+	default:
+		return false
+	}
+	parent := schemaAtAncestorPath(ancestorPath)
+	if parent == nil {
+		return false
+	}
+	leaf := resolveSchemaChild(parent, key)
+	return leaf != nil && leaf.multi && leaf.children == nil &&
+		leaf.args <= 1 && leaf.groupReplace
+}
+
+// groupReplacePortUnionEligible reports whether a groupReplace PORT leaf
+// (#14423) should UNION into its inline peer instead of taking the
+// groupReplace override. Union is exactly the range-free member set:
+// neither side may carry a `to` range separator. When either side does,
+// the pinned range override applies (inline wins) — token-merging a
+// range into a member list would corrupt the matcher. Both compilers
+// resolve every surviving token independently (the firewall via
+// resolveFilterPortTokens over firewallMatchValues, NAT via
+// parseDNATPortList) and append across nodes, so a range-free union is
+// exactly the set of both sides' members.
+func groupReplacePortUnionEligible(ancestorPath [][]string, key string, dst, src *Node) bool {
+	if !isGroupReplacePortSchema(ancestorPath, key) {
+		return false
+	}
+	// Reuse #14444's range predicate: it covers the hyphen range
+	// (`1000-2000`, a single token that leafListCarriesRange misses
+	// and resolveFilterPort expands to a range) as well as `to`.
+	return !groupReplaceBlockCarriesRange14444(dst) && !groupReplaceBlockCarriesRange14444(src)
 }
 
 // prefixListDefinitionInstanceDiffers14417 reports whether s is a packed
