@@ -7,11 +7,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
 )
+
+// timeNowForRA is the clock for PD lifetime decay in buildRAConfigs;
+// a var so tests could pin it, production is time.Now.
+var timeNowForRA = time.Now
 
 // buildRAConfigs merges static RA configs from the Junos config with
 // PD-derived prefixes from DHCPv6 prefix delegation.
@@ -54,11 +59,23 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 				// DELEGATED prefix without breaking an operator-authored ::/0.
 				Delegated: true,
 			}
+			// #14598: DelegatedPrefixesForRA already returns decayed
+			// remaining lifetimes; decay again from Obtained as a
+			// defence-in-depth so no verbatim copy can exceed remaining.
+			// A mapping whose granted valid lifetime is 0 (test-seeded,
+			// no clock) has no remaining to compute: leave the RAPrefix
+			// lifetimes at 0, the sender default sentinel (#6531).
 			if mapping.ValidLifetime > 0 {
-				pfx.ValidLifetime = int(mapping.ValidLifetime.Seconds())
-			}
-			if mapping.PreferredLifetime > 0 {
-				pfx.PreferredLife = int(mapping.PreferredLifetime.Seconds())
+				remPref, remValid := mapping.RemainingLifetimes(timeNowForRA())
+				if remValid <= 0 {
+					continue
+				}
+				pfx.ValidLifetime = int(remValid.Seconds())
+				if remPref > 0 {
+					pfx.PreferredLife = int(remPref.Seconds())
+				} else {
+					pfx.PreferredLife = 0
+				}
 			}
 
 			if existing, ok := raByIface[mapping.RAIface]; ok {

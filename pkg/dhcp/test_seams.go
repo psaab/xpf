@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"time"
 
 	"github.com/insomniacslk/dhcp/dhcpv6"
 )
@@ -33,7 +34,14 @@ func (m *Manager) SeedDelegatedPrefixesForTesting(ifaceName string, pds []Delega
 	if m.delegatedPDs == nil {
 		m.delegatedPDs = make(map[string][]DelegatedPrefix)
 	}
-	m.delegatedPDs[ifaceName] = append([]DelegatedPrefix(nil), pds...)
+	// Test fixtures carry wall-clock Obtained values in the past; without
+	// this, #14598 expiry pruning would treat them as long-expired. Stamp
+	// a zero Obtained (no clock) so seeded prefixes stay live.
+	cp := append([]DelegatedPrefix(nil), pds...)
+	for i := range cp {
+		cp[i].Obtained = time.Time{}
+	}
+	m.delegatedPDs[ifaceName] = cp
 }
 
 // NewManagerForTesting builds a Manager without a netlink handle and

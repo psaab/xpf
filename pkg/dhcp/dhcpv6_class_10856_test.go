@@ -36,7 +36,7 @@ func TestExtractDelegatedPrefixesRejectsRefusedClasses10856(t *testing.T) {
 				pdPrefixOpt(t, tc.cidr, time.Hour, 2*time.Hour),
 				pdPrefixOpt(t, good.String(), time.Hour, 2*time.Hour),
 			)
-			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
+			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
 			if len(live) != 1 || live[0].Prefix != good {
 				t.Errorf("live = %v, want only valid sibling %s (refused %s must be skipped)", live, good, tc.cidr)
 			}
@@ -56,7 +56,7 @@ func TestExtractDelegatedPrefixesRefusedClassIsNotWithdrawn10856(t *testing.T) {
 		pdPrefixOpt(t, "2001:db8:dead::/56", time.Hour, 0),
 		pdPrefixOpt(t, "fd00:dead::/56", time.Hour, 0),
 	)
-	live, withdrawn := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
+	live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
 	if len(live) != 0 || len(withdrawn) != 0 {
 		t.Fatalf("live = %v withdrawn = %v, want both empty (refusal must not synthesize a withdrawal)", live, withdrawn)
 	}
@@ -76,7 +76,7 @@ func TestExtractDelegatedPrefixesKeepsGlobalUnicast10856(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			want := netip.MustParsePrefix(tc.cidr)
 			msg := iaPDReply(t, pdPrefixOpt(t, tc.cidr, time.Hour, 2*time.Hour))
-			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
+			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), nil)
 			if len(live) != 1 || live[0].Prefix != want {
 				t.Fatalf("live = %v, want %s", live, want)
 			}
@@ -113,7 +113,7 @@ func TestExtractDelegatedPrefixesRefusesConfiguredOverlap10856(t *testing.T) {
 				pdPrefixOpt(t, tc.cidr, time.Hour, 2*time.Hour),
 				pdPrefixOpt(t, inside.String(), time.Hour, 2*time.Hour),
 			)
-			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", time.Now(), protected)
+			live, withdrawn, _ := extractDelegatedPrefixes(msg, "wan0", time.Now(), protected)
 			if len(live) != 1 || live[0].Prefix != inside {
 				t.Fatalf("live = %v, want only non-overlapping sibling %s (overlapping %s must be skipped)", live, inside, tc.cidr)
 			}

@@ -87,12 +87,131 @@ type DHCPv6Options struct {
 }
 
 // DelegatedPrefix holds a prefix received via DHCPv6 Prefix Delegation.
+// PreferredLifetime/ValidLifetime are the lifetimes granted at Obtained;
+// the remaining lifetimes decay from Obtained (#14598).
 type DelegatedPrefix struct {
 	Interface         string
 	Prefix            netip.Prefix
 	PreferredLifetime time.Duration
 	ValidLifetime     time.Duration
 	Obtained          time.Time
+}
+
+// infiniteLifetime is the RFC 8415 0xFFFFFFFF-second sentinel decoded by
+// the dhcpv6 library as a duration far beyond any real clock; treat
+// durations >= this as infinite (never expires, never decays).
+const infiniteLifetime = time.Duration(1) << 62
+
+// ExpiresAt returns Obtained+ValidLifetime, or zero if infinite/unknown.
+func (dp DelegatedPrefix) ExpiresAt() time.Time {
+	if dp.Obtained.IsZero() || dp.ValidLifetime <= 0 || dp.ValidLifetime >= infiniteLifetime {
+		return time.Time{}
+	}
+	return dp.Obtained.Add(dp.ValidLifetime)
+}
+
+// Expired reports whether the valid lifetime has elapsed at now.
+// Prefixes with zero Obtained (test-seeded, no clock) never expire here.
+func (dp DelegatedPrefix) Expired(now time.Time) bool {
+	exp := dp.ExpiresAt()
+	return !exp.IsZero() && !now.Before(exp)
+}
+
+// RemainingLifetimes returns decayed preferred/valid lifetimes at now
+// (RFC 8415 Sec.18.2.10.1, RFC 9096 L-15: advertised lifetimes MUST NOT
+// exceed remaining). A granted preferred of 0 stays 0 (deprecated,
+// #14606); expired valid yields 0. Infinite lifetimes are returned as-is.
+func (dp DelegatedPrefix) RemainingLifetimes(now time.Time) (pref, valid time.Duration) {
+	pref, valid = dp.PreferredLifetime, dp.ValidLifetime
+	if dp.Obtained.IsZero() {
+		return pref, valid
+	}
+	elapsed := now.Sub(dp.Obtained)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	// Wire lifetimes are whole seconds; decay at that granularity so a
+	// prefix observed in its grant second advertises its full grant.
+	elapsed = elapsed / time.Second * time.Second
+	if valid < infiniteLifetime {
+		valid -= elapsed
+		if valid < 0 {
+			valid = 0
+		}
+	}
+	if pref != 0 && pref < infiniteLifetime {
+		pref -= elapsed
+		if pref < 0 {
+			pref = 0
+		}
+	}
+	if valid > 0 && pref > valid && pref < infiniteLifetime {
+		pref = valid
+	}
+	return pref, valid
+}
+
+// pruneExpiredDelegatedLocked drops expired PDs from m.delegatedPDs.
+// Caller holds m.mu. Returns true if any entry was removed.
+func (m *Manager) pruneExpiredDelegatedLocked(now time.Time) bool {
+	changed := false
+	for iface, pds := range m.delegatedPDs {
+		kept := make([]DelegatedPrefix, 0, len(pds))
+		for _, dp := range pds {
+			if dp.Expired(now) {
+				changed = true
+				continue
+			}
+			kept = append(kept, dp)
+		}
+		if len(kept) == 0 {
+			if len(pds) > 0 {
+				delete(m.delegatedPDs, iface)
+			}
+		} else {
+			m.delegatedPDs[iface] = kept
+		}
+	}
+	return changed
+}
+
+// pruneDelegatedFor prunes expired PDs for one interface, updating the
+// caller's committed slice. Returns the live slice and whether pruning
+// removed anything (recompile already scheduled on removal).
+func (m *Manager) pruneDelegatedFor(iface string, committed []DelegatedPrefix, now time.Time) ([]DelegatedPrefix, bool) {
+	m.mu.Lock()
+	stored, ok := m.delegatedPDs[iface]
+	var src []DelegatedPrefix
+	if ok {
+		src = stored
+	} else {
+		src = committed
+	}
+	kept := make([]DelegatedPrefix, 0, len(src))
+	changed := false
+	for _, dp := range src {
+		if dp.Expired(now) {
+			changed = true
+			continue
+		}
+		kept = append(kept, dp)
+	}
+	if changed {
+		if len(kept) == 0 {
+			delete(m.delegatedPDs, iface)
+		} else {
+			m.delegatedPDs[iface] = kept
+		}
+	}
+	m.mu.Unlock()
+	if changed {
+		m.scheduleRecompile()
+		return kept, true
+	}
+	if ok {
+		return stored, false
+	}
+	return committed, false
 }
 
 // Manager manages DHCP clients for multiple interfaces.
@@ -257,14 +376,19 @@ func (m *Manager) SetDHCPv6Options(ifaceName string, opts *DHCPv6Options) {
 	m.v6opts[ifaceName] = opts
 }
 
-// DelegatedPrefixes returns a snapshot of all delegated prefixes from DHCPv6 PD.
+// DelegatedPrefixes returns a snapshot of all live delegated prefixes.
+// Expired prefixes are pruned (and a recompile scheduled) first (#14598).
 func (m *Manager) DelegatedPrefixes() []DelegatedPrefix {
+	now := time.Now()
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	changed := m.pruneExpiredDelegatedLocked(now)
 	var result []DelegatedPrefix
 	for _, pds := range m.delegatedPDs {
 		result = append(result, pds...)
+	}
+	m.mu.Unlock()
+	if changed {
+		m.scheduleRecompile()
 	}
 	return result
 }
@@ -277,12 +401,13 @@ type PDRAMapping struct {
 	SubPrefLen int    // sub-prefix length (0 = use delegated prefix as-is)
 }
 
-// DelegatedPrefixesForRA returns delegated prefixes that have an RA target
-// interface configured, along with the target interface and sub-prefix length.
+// DelegatedPrefixesForRA returns live delegated prefixes that have an RA
+// target, with lifetimes decayed to their remaining values at now
+// (#14598). Expired prefixes are pruned and never returned.
 func (m *Manager) DelegatedPrefixesForRA() []PDRAMapping {
+	now := time.Now()
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	changed := m.pruneExpiredDelegatedLocked(now)
 	var result []PDRAMapping
 	for ifName, pds := range m.delegatedPDs {
 		opts := m.v6opts[ifName]
@@ -290,12 +415,24 @@ func (m *Manager) DelegatedPrefixesForRA() []PDRAMapping {
 			continue
 		}
 		for _, dp := range pds {
+			pref, valid := dp.RemainingLifetimes(now)
+			if valid == 0 && !dp.Obtained.IsZero() && dp.ValidLifetime > 0 {
+				continue
+			}
+			decayed := dp
+			decayed.PreferredLifetime = pref
+			decayed.ValidLifetime = valid
+			decayed.Obtained = now
 			result = append(result, PDRAMapping{
-				DelegatedPrefix: dp,
+				DelegatedPrefix: decayed,
 				RAIface:         opts.RAIface,
 				SubPrefLen:      opts.PDSubLen,
 			})
 		}
+	}
+	m.mu.Unlock()
+	if changed {
+		m.scheduleRecompile()
 	}
 	return result
 }
