@@ -177,10 +177,12 @@ func TestExternalMatchDropsInvalidMACWordsResetsEmptyNameAndAcceptsShortGroups12
 			want:  true,
 		},
 		{
+			// #14593: systemd ignores the file once the reset leaves
+			// no valid [Match] setting; it is not match-all.
 			name:  "empty Name resets to empty Match",
 			rule:  "Name=eth0\nName=\nMACAddress=invalid\n",
 			iface: "other0",
-			want:  true,
+			want:  false,
 		},
 		{
 			name:  "short MAC groups",
