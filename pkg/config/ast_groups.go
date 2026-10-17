@@ -972,6 +972,27 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			found = true
 		}
 		if !found {
+			// #14418 (DR15-H3): a group CONTAINER whose inline peer is a
+			// PACKED leaf naming the same instance (`term t1 { ... }` beside
+			// `term t1 from ... then reject;`). sameKeyedContainers9802 sees
+			// containers only and the #4325 guard below needs one key, so
+			// without this arm the container adopted beside the leaf and the
+			// compiler composed/appended two same-name terms. Promote the
+			// inline leaf and merge the container's children into it with
+			// inline precedence instead of adopting.
+			if peer := containerLeafPeer14418(ancestorPath, *dst, s); peer != nil {
+				budget.notePromoted9855(peer)
+				children := dropConflictingTerminalThen14418(peer, cloneNodes(s.Children))
+				if err := budget.charge(countNodes(children)); err != nil {
+					return err
+				}
+				if err := mergeNodes(&peer.Children, children, appendPath(ancestorPath, peer.Keys), budget, group, vars, scope, haveExcept, deferWildcards); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if !found {
 			// Cross-shape guard (#4325): a single-key group container whose
 			// leaf-list counterpart exists inline as a collapsed leaf sharing
 			// Keys[0]. Leaf-list keys are handled by the union path above, so
