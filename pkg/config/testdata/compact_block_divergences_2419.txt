@@ -273,10 +273,6 @@ interfaces xpfname unit xpfarg family inet6 mtu	empty
 interfaces xpfname unit xpfarg point-to-point	empty
 interfaces xpfname vlan-tagging	partial
 protocols bgp graceful-restart	empty
-protocols bgp group xpfarg neighbor xpfarg default-originate	empty
-protocols bgp group xpfarg neighbor xpfarg passive	empty
-protocols bgp group xpfarg neighbor xpfarg remove-private	empty
-protocols bgp group xpfarg neighbor xpfarg route-reflector-client	empty
 protocols bgp log-updown	empty
 protocols bgp multipath ibgp	empty
 protocols bgp multipath multiple-as	empty
@@ -289,10 +285,6 @@ protocols router-advertisement interface xpfarg other-stateful-configuration	emp
 protocols router-advertisement interface xpfarg prefix xpfarg no-autonomous	empty
 protocols router-advertisement interface xpfarg prefix xpfarg no-onlink	empty
 routing-instances xpfname protocols bgp graceful-restart	empty
-routing-instances xpfname protocols bgp group xpfarg neighbor xpfarg default-originate	empty
-routing-instances xpfname protocols bgp group xpfarg neighbor xpfarg passive	empty
-routing-instances xpfname protocols bgp group xpfarg neighbor xpfarg remove-private	empty
-routing-instances xpfname protocols bgp group xpfarg neighbor xpfarg route-reflector-client	empty
 routing-instances xpfname protocols bgp log-updown	empty
 routing-instances xpfname protocols bgp multipath ibgp	empty
 routing-instances xpfname protocols bgp multipath multiple-as	empty

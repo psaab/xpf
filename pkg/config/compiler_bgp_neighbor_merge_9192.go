@@ -83,8 +83,136 @@ func findBGPNeighbor9192(neighbors []*BGPNeighbor, group, addr string) *BGPNeigh
 // the caller's per-NEIGHBOR state instead of locals — the #5277
 // most-specific-LEVEL-wins flags have to survive from one node to the next or
 // the second node's first `export` wipes the first node's own list.
+
+// bgpNeighborBody14409 returns the statements of ONE neighbor node in the
+// shape applyBGPNeighborProps9192's switch reads.
+//
+// A braced neighbor carries its statements as Children, and that is what
+// this reader historically iterated — so a PACKED neighbor line
+// (`neighbor 10.0.0.1 passive authentication-key K;`) arrived with
+// Children == [] and installed nothing at all: no passive, no peer-as,
+// and in particular no authentication-key, leaving the session to come
+// up with no TCP-MD5 while `show configuration` still displayed the key
+// (#14409). Rescue depended entirely on the #8662 normalizer fold, which
+// never fires for unscoped heads (passive, route-reflector-client,
+// default-originate, family, bfd-liveness-detection, remove-private)
+// and is declined by #8880 whenever the following group-level sibling
+// shares a keyword with the neighbor grammar (export, peer-as, ...).
+//
+// packedBodyChildren expands the packed tail schema-driven (the same
+// reader the group loop and the OSPF interface loop use): with no tail
+// it returns Children unchanged, and a tail that leaves the modelled
+// grammar also returns Children unchanged rather than guessing. When a
+// node carries both a tail and braced children, packedBodyChildren
+// either attaches those children under the deepest packed node (where
+// the grammar permits a body there) or, for a leaf terminal, returns
+// the children unexpanded — either way no statement is read twice or
+// dropped by this substitution.
+func bgpNeighborBody14409(child *Node, schema *schemaNode) []*Node {
+	if child == nil {
+		return nil
+	}
+	body := packedBodyChildren(child, schema)
+	// packedBodyChildren models `export`/`import` as multi leaves, so a
+	// following packed statement can be fused into the value span in
+	// EITHER of two shapes:
+	//   - on the neighbor node's own Keys (`neighbor 10.0.0.1 export EP
+	//     authentication-key K;`), where the expansion synthesizes one
+	//     node carrying all four tokens; or
+	//   - nested under the neighbor by the #8662 normalizer fold
+	//     (`neighbor 10.0.0.1` > `export EP authentication-key K`), where
+	//     the fused node arrives as a real child.
+	// In both, firewallMatchValues would install the keyword and the
+	// key as two extra policies while the key itself never arrives.
+	// Between two statements of a packed run the split is unambiguous —
+	// a bare, unbracketed neighbor-grammar keyword at a statement
+	// position cannot be a policy-name value (a policy actually named
+	// that way must be quoted, and bracketed lists are excluded below)
+	// — so split fused multi leaves at such keywords. This is safe for
+	// braced children too: a braced `export { EP; }` carries EP as a
+	// child node, not in Keys, so it never matches the scan; the only
+	// Keys-carrying shape is the fused one.
+	body = splitFusedMultiLeaves14409(body, schema)
+	return body
+}
+
+// splitFusedMultiLeaves14409 splits a synthesized multi-value leaf whose
+// key span fused a following packed statement (see bgpNeighborBody14409).
+func splitFusedMultiLeaves14409(body []*Node, schema *schemaNode) []*Node {
+	if schema == nil {
+		return body
+	}
+	for i, prop := range body {
+		if prop == nil || len(prop.Keys) < 2 || len(prop.Children) > 0 {
+			continue
+		}
+		head := resolveSchemaChild(schema, prop.Keys[0])
+		if head == nil || !head.multi {
+			continue
+		}
+		cut := -1
+		for j := 1; j < len(prop.Keys); j++ {
+			if prop.KeyBracketed(j) || prop.KeyQuoted(j) {
+				continue
+			}
+			if resolveSchemaChild(schema, prop.Keys[j]) != nil {
+				cut = j
+				break
+			}
+		}
+		if cut < 0 {
+			continue
+		}
+		first := &Node{Keys: append([]string(nil), prop.Keys[:cut]...), InheritedFrom: prop.InheritedFrom}
+		rest := &Node{Keys: append([]string(nil), prop.Keys[cut:]...), InheritedFrom: prop.InheritedFrom}
+		if len(prop.KeysQuoted) == len(prop.Keys) {
+			first.setKeysQuoted(append([]bool(nil), prop.KeysQuoted[:cut]...))
+			rest.setKeysQuoted(append([]bool(nil), prop.KeysQuoted[cut:]...))
+		}
+		if len(prop.KeysBracketed) == len(prop.Keys) {
+			first.setKeysBracketed(append([]bool(nil), prop.KeysBracketed[:cut]...))
+			rest.setKeysBracketed(append([]bool(nil), prop.KeysBracketed[cut:]...))
+		}
+		// The tail after the cut is itself a packed run; expand it so a
+		// chain (`export EP peer-as 65002 authentication-key K`) splits
+		// fully rather than stranding everything after the first keyword.
+		tail := packedBodyTail14409(rest, schema)
+		out := append([]*Node(nil), body[:i]...)
+		out = append(out, first)
+		out = append(out, tail...)
+		out = append(out, body[i+1:]...)
+		// Re-scan: a tail node may itself be a fused multi leaf.
+		return splitFusedMultiLeaves14409(out, schema)
+	}
+	return body
+}
+
+// packedBodyTail14409 expands one already-split packed statement node
+// (Keys = [keyword, ...run]) into the sibling statements of the run it
+// heads, by re-homing its keys under a synthetic neighbor identity and
+// asking packedBodyChildren to walk them.
+func packedBodyTail14409(rest *Node, schema *schemaNode) []*Node {
+	wrapper := &Node{Keys: []string{"neighbor", "0.0.0.0"}, InheritedFrom: rest.InheritedFrom}
+	wrapper.Keys = append(wrapper.Keys, rest.Keys...)
+	if len(rest.KeysQuoted) == len(rest.Keys) {
+		q := []bool{false, false}
+		q = append(q, rest.KeysQuoted...)
+		wrapper.setKeysQuoted(q)
+	}
+	if len(rest.KeysBracketed) == len(rest.Keys) {
+		b := []bool{false, false}
+		b = append(b, rest.KeysBracketed...)
+		wrapper.setKeysBracketed(b)
+	}
+	body := packedBodyChildren(wrapper, schema)
+	if len(body) == 0 {
+		return []*Node{rest}
+	}
+	return body
+}
+
 func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ownImport *bool, opts compileOpts, warnings *[]string, warningRecords *[]bgpSAFIWarning11815) error {
-	for _, prop := range expandResolvingRuns9792(child.Children, bgpNeighborSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
+	for _, prop := range expandFlatRun(expandResolvingRuns9792(bgpNeighborBody14409(child, bgpNeighborSchema9792()), bgpNeighborSchema9792()), bgpNeighborSchema9792()) { // #9792: expand a lenient-path packed run (#9235); #14409: expand the neighbor's own packed tail (fused multi leaves are split inside bgpNeighborBody14409); expandFlatRun then splits any remaining packed run on a synthesized statement.
 		switch prop.Name() {
 		case "description":
 			neighbor.Description = nodeVal(prop)
