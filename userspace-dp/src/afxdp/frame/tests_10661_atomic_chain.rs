@@ -22,7 +22,11 @@
 //
 // One ordering remains EXPLICITLY reconciled rather than unified:
 // `[real-first][real-non-first]`, where the tracker records the first-real
-// (wider, conservative) range while every L4 gate agrees non-first.
+// (wider, conservative) range while every L4 gate agrees non-first. Since
+// #14325 the SCREEN leg of that ordering rejects the chain as malformed
+// (`MultipleIpv6FragmentHeaders` -> `ip-malformed`) instead of reporting
+// `is_first_fragment == false` with the first header's `ip_frag_off`; the
+// tracker/forwarding/shim legs below are unchanged.
 #![allow(unused_imports)]
 
 use super::*;
@@ -355,6 +359,16 @@ fn real_first_then_real_nonfirst_tracker_first_record_10661() {
     // non-first. The forwarding assert is RED pre-fix (first-sighting
     // read offset 0 -> "has L4"); the tracker assert is stable (both
     // wordings key the first header here) and pins the conservative side.
+    //
+    // #14325: the screen leg no longer reports this chain as a parsed
+    // non-first fragment. A second non-ATOMIC Fragment header is
+    // RFC 8200-nonconformant and the #14129 split fields
+    // (`is_first_fragment == false` with the FIRST header's
+    // `ip_frag_off`) evaded both the TCP-flag screens and the sizing
+    // screens, so the extractor now rejects the chain as malformed
+    // (fail-closed `ip-malformed`) rather than reporting inconsistent
+    // fragment state. The tracker/forwarding/shim legs above are
+    // unchanged -- the fix is screen-scoped.
     let pkt = v6_frag_chain(
         &[(WORD_FIRST, IDENT_REAL), (WORD_NONFIRST_O8, IDENT_REAL)],
         &tcp20(),
@@ -368,8 +382,24 @@ fn real_first_then_real_nonfirst_tracker_first_record_10661() {
         "#10661: the later non-zero offset must refuse the L4"
     );
     let frame = eth14(&pkt);
-    let info = screen_of(&frame, 255);
-    assert!(info.is_fragment && !info.is_first_fragment);
+    assert!(
+        matches!(
+            extract_screen_info(
+                &frame,
+                libc::AF_INET6 as u8,
+                255,
+                0,
+                frame.len() as u16,
+                IpAddr::V6(Ipv6Addr::from(SRC6)),
+                IpAddr::V6(Ipv6Addr::from(DST6)),
+                0,
+                0,
+                14,
+            ),
+            Err(ScreenParseError::MultipleIpv6FragmentHeaders)
+        ),
+        "#14325: screens must fail closed on a duplicated non-ATOMIC Fragment header"
+    );
     assert_eq!(
         raw_shim_walk(&pkt, 0).map(|w| w.non_first_fragment),
         Some(true)

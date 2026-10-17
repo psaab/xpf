@@ -481,11 +481,31 @@ pub(crate) fn extract_screen_info(
                     // real first fragment and terminal L4 bytes were
                     // present. Keep the first non-ATOMIC sighting's fields;
                     // ignore ATOMIC sightings entirely when one exists.
-                    // One every-sighting refinement, matching the forwarding
-                    // L4-refusal verdict: a later non-zero offset downgrades
-                    // is_first_fragment to false (terminal bytes are not a
-                    // trustworthy L4 header), without replacing the
-                    // governing header's sizing fields.
+                    //
+                    // #14325: a SECOND non-ATOMIC Fragment header is
+                    // rejected outright instead of downgrading
+                    // is_first_fragment alone. RFC 8200 allows each
+                    // extension-header type at most once, and the #14129
+                    // downgrade left is_first_fragment == false while
+                    // ip_frag_off still reported the first header's
+                    // offset 0, splitting the TCP-flag screens (which
+                    // skip on !is_first_fragment) from the sizing
+                    // screens (which require (ip_frag_off & 0xFFF8) > 0):
+                    // a [Frag(off=0,M=1), Frag(off>0)] packet evaded
+                    // BOTH families. There is no defined screening
+                    // meaning to choose between two non-ATOMIC headers
+                    // -- receivers key reassembly on the first and treat
+                    // the second as payload -- so the chain is malformed
+                    // and fails closed like a truncated chain. Fires on
+                    // the second (or later) non-ATOMIC sighting whatever
+                    // its offset/M: a duplicated first fragment
+                    // ([first][first]) is as RFC-nonconformant and as
+                    // unsized as [first][non-first]. Pure-ATOMIC second
+                    // sightings stay ignored (see above); a lone ATOMIC
+                    // first sighting followed by a real header is still
+                    // governed by the real header (#10661). Checked
+                    // after the truncation guard above, so a truncated
+                    // second header reports TruncatedIpv6ExtChain.
                     let is_atomic = (frag_off & 0xFFF8) == 0 && (frag_off & 0x1) == 0;
                     if !is_atomic {
                         if !info.is_fragment {
@@ -497,8 +517,8 @@ pub(crate) fn extract_screen_info(
                             // (governing) fragment's data.
                             info.frag_data_off =
                                 ((offset + 8).saturating_sub(l3_offset + 40)) as u16;
-                        } else if (frag_off & 0xFFF8) != 0 {
-                            info.is_first_fragment = false;
+                        } else {
+                            return Err(ScreenParseError::MultipleIpv6FragmentHeaders);
                         }
                     }
                     // #3120: a NON-FIRST fragment (fragment offset > 0)
