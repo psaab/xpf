@@ -1,7 +1,7 @@
 // #14323: the IPv4 BPF map-key encoding, EXECUTED across all three sites.
 //
 // `classify_native_gre_inner_ipv4` (userspace-xdp/src/lib.rs) and
-// `parse_ipv4` both derive the `dnat_table` / `userspace_interface_nat_v4`
+// `parse_ipv4` both derive the `dnat_table` / `userspace_interface_nat_v4_domain`
 // / `userspace_local_v4` probe key from the inner/header destination
 // octets; `shim_v4_key` (wg_control/kernel_path.rs) derives the same key
 // from an `Ipv4Addr` for the WG kernel path. Go writes those maps with

@@ -431,13 +431,13 @@ func injectUserspaceBootstrapMaps(t *testing.T, m *Manager) {
 		ValueSize:  1,
 		MaxEntries: 8192,
 	})
-	injectShimMapSpec(t, m.bpfShim, "userspace_interface_nat_v4", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceInterfaceNATv4, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
-		KeySize:    4,
+		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV4Key{})),
 		ValueSize:  1,
 		MaxEntries: 8192,
 	})
-	injectShimMapSpec(t, m.bpfShim, "userspace_interface_nat_v6", &ebpf.MapSpec{
+	injectShimMapSpec(t, m.bpfShim, mapNameUserspaceInterfaceNATv6, &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    uint32(unsafe.Sizeof(userspaceLocalV6Key{})),
 		ValueSize:  1,
@@ -609,7 +609,7 @@ func updateUserspaceXDPTestLocalV6(t *testing.T, coll *ebpf.Collection, ip [16]b
 
 func updateUserspaceXDPTestInterfaceNATV4(t *testing.T, coll *ebpf.Collection, ip [4]byte) {
 	t.Helper()
-	updateUserspaceXDPTestMap(t, coll, "userspace_interface_nat_v4", binary.BigEndian.Uint32(ip[:]), uint8(1))
+	updateUserspaceXDPTestMap(t, coll, mapNameUserspaceInterfaceNATv4, userspaceLocalV4Key{Domain: 0, Addr: binary.BigEndian.Uint32(ip[:])}, uint8(1))
 }
 
 func enableUserspaceXDPTestCPUMap(t *testing.T, coll *ebpf.Collection) {

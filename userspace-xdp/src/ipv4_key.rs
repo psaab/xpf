@@ -1,6 +1,6 @@
 //! #14323: the IPv4 BPF map-key encoding, stated once.
 //!
-//! The `userspace_local_v4` / `userspace_interface_nat_v4` / `dnat_table`
+//! The `userspace_local_v4_domain` / `userspace_interface_nat_v4_domain` / `dnat_table`
 //! keys are the integer whose in-memory bytes are the wire octets: Go
 //! writes them with `binary.BigEndian.Uint32` (maps_sync.go), and
 //! `parse_ipv4` reads them back with `u32::from_be_bytes` of the header
