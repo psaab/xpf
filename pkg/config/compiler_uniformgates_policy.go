@@ -177,5 +177,31 @@ func runUniformGatesPolicy(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 		}
 	}
 
+	// #14449 duplicate `scheduler-name` gate. Strict on commit /
+	// commit-check (hard-reject a policy carrying two differing
+	// scheduler-name values — compilePolicy previously read only the
+	// FIRST, so `scheduler-name wide; scheduler-name narrow;` silently
+	// installed the wide window although the last value selected the
+	// narrow one, enforcing outside the intended hours). Lenient on
+	// load / peer-sync: warn so persisted configs still boot (#1960);
+	// the compiled name is last-wins, and a conflicting PERMIT is
+	// poisoned (LenientContentDropped) so the snapshot is refused
+	// rather than enforcing a potentially wider window, while
+	// deny/reject keep last-wins (refusing a deny would fail open).
+	// Identical repeats stay legal. Runs after the duplicate-name gate
+	// so an earlier policy-structural error still wins the first-error
+	// slot; the typed schedulerNames survive the #8752 tolerant fold
+	// (which never merges scheduler values), so a duplicate split
+	// across two same-name statements is still caught.
+	if err := validateDuplicatePolicySchedulerName14449(cfg); err != nil {
+		if opts.lenientDuplicatePolicySchedulerName14449 {
+			poisonConflictingSchedulerPermits14449(cfg)
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("duplicate policy scheduler-name (downgraded to warning on tolerant path; conflicting permit policies poison the userspace snapshot, other policies use the last scheduler-name): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }

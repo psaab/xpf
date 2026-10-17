@@ -2227,6 +2227,23 @@ type compileOpts struct {
 	// merge that would turn a statement's deny into a permit is poisoned rather
 	// than enforced (#9571). Same doctrine as lenientPolicyLogAction.
 	lenientDuplicatePolicyNames bool
+	// lenientDuplicatePolicySchedulerName14449 downgrades the duplicate
+	// `scheduler-name` gate (validateDuplicatePolicySchedulerName14449)
+	// from a hard compile error to a cfg.Warnings entry. The strict
+	// commit / commit-check path hard-rejects a policy carrying two
+	// differing scheduler-name values: compilePolicy previously read
+	// only the FIRST, so `scheduler-name wide; scheduler-name narrow;`
+	// silently installed the wide 00:00-23:59 window although the last
+	// value selected the narrow one — the policy enforced outside its
+	// intended hours (fail-open). The tolerant load / peer-sync paths
+	// downgrade to a warning so an already-persisted or peer-synced
+	// config still BOOTS (#1960 no-brick); the compiled name is the
+	// last-wins value, and a conflicting PERMIT policy is marked
+	// LenientContentDropped so the snapshot is refused rather than
+	// enforcing a potentially wider window (deny/reject keep last-wins,
+	// since refusing a deny would fail open). Same doctrine as
+	// lenientPolicySchedulerRef.
+	lenientDuplicatePolicySchedulerName14449 bool
 	// lenientScreenProfileRefs (#3066) downgrades the zone screen-profile
 	// reference gate (validateScreenProfileReferencesStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3427,7 +3444,8 @@ func lenientCompileOpts() compileOpts {
 		lenientDDNSDuration:                    true,
 		lenientPolicyTerminalAction:            true,
 		lenientPolicyLogAction:                 true,
-		lenientDuplicatePolicyNames:            true,
+		lenientDuplicatePolicyNames:              true,
+		lenientDuplicatePolicySchedulerName14449: true,
 		lenientScreenProfileRefs:               true,
 		lenientScreenNumeric:                   true,
 		lenientScreenUnknown:                   true,
