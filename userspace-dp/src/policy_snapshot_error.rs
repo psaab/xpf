@@ -444,9 +444,11 @@ pub(crate) enum SnapshotIntegrityError {
     /// or leniently-loaded snapshot, consistent with the #2505/#3367/#3406
     /// fail-closed family. Rejecting the whole snapshot (the reconcile preflight
     /// keeps the previous good filter state) is action-agnostic. `predicate` names
-    /// the offending L4 dimension ("port" / "tcp-flags" / "icmp-type/code") and
-    /// `protocol` is the incompatible IANA number. `family` (inet / inet6) is
-    /// carried because filter names can be reused across families.
+    /// the offending L4 dimension ("port" / "tcp-flags" / "icmp-type/code", or
+    /// for #14445 a combined "port+icmp-type/code" /
+    /// "tcp-flags+icmp-type/code" with `protocol` 0 as the no-protocol
+    /// sentinel) and `protocol` is the incompatible IANA number. `family` (inet
+    /// / inet6) is carried because filter names can be reused across families.
     UnsatisfiableFilterCrossField {
         family: String,
         filter: String,
@@ -1143,11 +1145,21 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 term,
                 predicate,
                 protocol,
-            } => write!(
-                f,
-                "firewall family {:?} filter {:?} term {:?} combines a {} match with protocol {} that cannot carry it — refusing to compile a never-match term (a then discard/reject over it fails open, admitting the traffic via the implicit accept)",
-                family, filter, term, predicate, protocol
-            ),
+            } => {
+                if *protocol == 0 && predicate.contains('+') {
+                    write!(
+                        f,
+                        "firewall family {:?} filter {:?} term {:?} combines a {} match with no protocol set — refusing to compile a never-match term (a then discard/reject over it fails open, admitting the traffic via the implicit accept)",
+                        family, filter, term, predicate
+                    )
+                } else {
+                    write!(
+                        f,
+                        "firewall family {:?} filter {:?} term {:?} combines a {} match with protocol {} that cannot carry it — refusing to compile a never-match term (a then discard/reject over it fails open, admitting the traffic via the implicit accept)",
+                        family, filter, term, predicate, protocol
+                    )
+                }
+            }
             Self::MissingFilterRef {
                 interface,
                 family,

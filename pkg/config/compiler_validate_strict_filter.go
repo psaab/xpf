@@ -616,12 +616,25 @@ func firstIncompatibleProtocol(protocols []string, pred func(string) bool) (stri
 // application gate uses (plus protocolIsTCP for the tcp-flags arm), so the two
 // compatibility gates stay aligned (the TestApplicationAndFilterCrossFieldGates-
 // UseSharedSSOT canary pins that). It fires only when a protocol is PRESENT: a
-// port / tcp-flags / icmp match with NO protocol is legitimate and enforceable
-// for a FILTER (unlike an application, whose matcher keys on protocol+port, a
-// filter matches the port on whatever L4-port-bearing packet arrives and the
-// tcp-flags/icmp arms self-gate on the packet protocol). next-header (the inet6
-// spelling) is covered because compileFilterFrom routes BOTH protocol and
-// next-header into term.Protocols (M02).
+// SINGLE port / tcp-flags / icmp match with NO protocol is legitimate and
+// enforceable for a FILTER (unlike an application, whose matcher keys on
+// protocol+port, a filter matches the port on whatever L4-port-bearing packet
+// arrives and the tcp-flags/icmp arms self-gate on the packet protocol).
+// next-header (the inet6 spelling) is covered because compileFilterFrom routes
+// BOTH protocol and next-header into term.Protocols (M02).
+//
+// #14445 (DR19-H1): a NO-protocol term that combines predicates from DISJOINT
+// protocol families is a never-match even though each predicate ALONE is
+// enforceable: the matcher ANDs its per-packet arms, and
+// port_terms_match requires a port-bearing (TCP/UDP) packet while the
+// icmp-type/code arms require an ICMP(v6) packet, and tcp-flags requires a
+// TCP packet while the icmp arms require ICMP(v6) — no single packet can
+// satisfy both families. So `destination-port 80 + icmp-type 8`,
+// `source-port[-except] ... + icmp-type/code ...`, and
+// `tcp-flags syn + icmp-type 8` (all polarities, `*-except` included) with
+// NO protocol must strict-reject here, and the Rust backstop must fail the
+// lenient snapshot closed. Ports + tcp-flags together are NOT disjoint
+// (both are satisfiable by one TCP packet) and stay accepted.
 //
 // The one exception that fires WITHOUT a protocol is icmp-code without
 // icmp-type (M03): the matcher constrains the code independently of the type, so
@@ -699,6 +712,50 @@ func validateFilterCrossFieldStrict(cfg *Config) error {
 								"`then discard`/`reject` then fails OPEN. Remove the constraint or set "+
 								"protocol icmp/icmpv6)",
 							family, name, term.Name, proto)
+					}
+				}
+				// #14445 (DR19-H1): a NO-protocol term combining predicates
+				// from disjoint protocol families can never match: the
+				// matcher ANDs port_terms_match (requires TCP/UDP) /
+				// tcp-flags (requires TCP) with the icmp-type/code arms
+				// (require ICMP/ICMPv6), and no packet is both. Each
+				// predicate ALONE with no protocol stays legitimate
+				// (pinned by the positive controls), and ports +
+				// tcp-flags together stay legitimate (one TCP packet
+				// satisfies both). hasNonEmptyProtocol mirrors the
+				// placeholder-token skip in firstIncompatibleProtocol.
+				hasNonEmptyProtocol := false
+				for _, p := range term.Protocols {
+					if len(p) > 0 && len(strings.TrimSpace(p)) > 0 {
+						hasNonEmptyProtocol = true
+						break
+					}
+				}
+				if !hasNonEmptyProtocol {
+					hasICMP := len(term.ICMPTypes) > 0 || len(term.ICMPCodes) > 0
+					if hasICMP && hasPorts {
+						return fmt.Errorf(
+							"firewall family %s filter %q term %q: a source-port/destination-port "+
+								"match is combined with an icmp-type/icmp-code match but no "+
+								"protocol is set — ports are valid only on tcp/udp while "+
+								"icmp-type/icmp-code are valid only on icmp/icmpv6, so no "+
+								"packet can satisfy both and the term would never match; a "+
+								"`then discard`/`reject` then fails OPEN. Remove one "+
+								"constraint, split the term, or set a protocol that carries "+
+								"one of them",
+							family, name, term.Name)
+					}
+					if hasICMP && len(term.TCPFlags) > 0 {
+						return fmt.Errorf(
+							"firewall family %s filter %q term %q: a tcp-flags match is "+
+								"combined with an icmp-type/icmp-code match but no "+
+								"protocol is set — tcp-flags is valid only on tcp while "+
+								"icmp-type/icmp-code are valid only on icmp/icmpv6, so no "+
+								"packet can satisfy both and the term would never match; a "+
+								"`then discard`/`reject` then fails OPEN. Remove one "+
+								"constraint, split the term, or set a protocol that carries "+
+								"one of them",
+							family, name, term.Name)
 					}
 				}
 				// M03: an icmp-code with no icmp-type constrains the code while the
