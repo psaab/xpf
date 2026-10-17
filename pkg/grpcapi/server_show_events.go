@@ -152,7 +152,7 @@ func (s *Server) showEventOptions(cfg *config.Config, buf *strings.Builder) {
 			if len(ep.ThenCommands) > 0 {
 				buf.WriteString("  Then commands:\n")
 				for _, cmd := range ep.ThenCommands {
-					fmt.Fprintf(buf, "    %s\n", cmd)
+					fmt.Fprintf(buf, "    %s\n", config.RedactEmbeddedChangeConfigCommand(cmd))
 				}
 			}
 			buf.WriteString("\n")

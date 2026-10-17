@@ -131,9 +131,303 @@ func fingerprintCompareNodes(nodes []*Node, base []string) {
 				n.Keys[valueIndex] = redacted + compareURLFingerprintSuffix(value)
 			}
 		}
+		fingerprintEmbeddedCommands14413(n, full, base)
 		if !n.IsLeaf {
 			fingerprintCompareNodes(n.Children, full)
 		}
+	}
+}
+
+// RedactEmbeddedChangeConfigCommand masks credential values inside one
+// `event-options … then change-configuration commands` payload for DISPLAY
+// (#14413). The stored command is never mutated by callers: the event engine
+// executes the raw text, so this is a render-time transform shared by
+// RedactedClone, `show event-options` (gRPC and CLI), and FormatCompareRedacted.
+//
+// The command is lexed with the real config lexer (never strings.Fields, so
+// quoted segments and escapes match the engine's own ParseSetCommand view).
+// A leading set/delete verb is required (classifyPlan's contract); anything
+// else is returned unchanged. The inner path is then judged by the SAME
+// secretIndices/urlLeafIndices sets the AST redactor uses — no second list —
+// so `pre-shared-key`, gated `password`/`key`/`community`, URL userinfo and
+// every other existing leaf keep their exact semantics inside a command.
+// Masked tokens are replaced by SecretDataPlaceholder; tokens are re-joined
+// with quoteKey so a multi-word value stays one re-parseable token.
+func RedactEmbeddedChangeConfigCommand(cmd string) string {
+	redacted, _ := redactEmbeddedCommand(cmd, false)
+	return redacted
+}
+
+// redactEmbeddedCommand is RedactEmbeddedChangeConfigCommand plus the
+// compare-fingerprint variant: a masked secret token gets the same
+// \x00xpf-sha256= suffix fingerprintCompareNodes appends, so FormatCompare
+// preserves secret-equality without leaking the value.
+func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
+	tokens, _ := lexConfigMutationLine9938(cmd)
+	changed := redactEmbeddedTokens(tokens, fingerprint)
+	if len(tokens) == 0 {
+		return cmd, changed
+	}
+	parts := make([]string, len(tokens))
+	for i, tok := range tokens {
+		parts[i] = quoteKey(tok)
+	}
+	return strings.Join(parts, " "), changed
+}
+
+// redactEmbeddedTokens masks secret/URL token indices in one lexed embedded
+// command in place. Only a `set` command can mint a credential (`delete`
+// removes a path and carries no secret value), so a non-set verb is left
+// alone. Returns whether any token changed.
+func redactEmbeddedTokens(tokens []string, fingerprint bool) bool {
+	if len(tokens) < 2 || tokens[0] != "set" {
+		return false
+	}
+	idxs := make(map[int]bool)
+	for _, idx := range secretIndices(tokens) {
+		idxs[idx] = true
+	}
+	urls := make(map[int]bool)
+	for _, idx := range urlLeafIndices(tokens) {
+		if !idxs[idx] {
+			urls[idx] = true
+		}
+	}
+	// A secret keyword in the FINAL position has no following value token
+	// (its credential is a child in the hierarchical shape); secretIndices
+	// only reports following indices, so nothing is masked — matching the
+	// AST walk, which masks nothing there either.
+	changed := false
+	for idx := range idxs {
+		if idx < 0 || idx >= len(tokens) {
+			continue
+		}
+		if fingerprint {
+			tokens[idx] = SecretDataPlaceholder + compareFingerprintSuffix(tokens[idx])
+		} else {
+			tokens[idx] = SecretDataPlaceholder
+		}
+		changed = true
+	}
+	for idx := range urls {
+		if idx < 0 || idx >= len(tokens) {
+			continue
+		}
+		redacted := RedactURL(tokens[idx])
+		if redacted == tokens[idx] {
+			continue
+		}
+		if fingerprint {
+			tokens[idx] = redacted + compareURLFingerprintSuffix(tokens[idx])
+		} else {
+			tokens[idx] = redacted
+		}
+		changed = true
+	}
+	return changed
+}
+
+// redactEmbeddedCommands14413 applies embedded-command redaction to the
+// `commands` payload carried by node n (full = base + n.Keys) on a redaction
+// CLONE. Shapes (compiler_services.go eventChangeConfigCommands):
+//   - `commands "<one command>"` / `commands [ "a" "b" ]`: every Keys token
+//     after `commands` is one command (quoted) — rewrite each in place.
+//   - `commands set … <bare words>`: one unquoted command — judged as the
+//     joined tail, then re-split only if a secret was masked (a no-secret
+//     tail is left byte-identical so ordinary commands never churn).
+//   - `commands { "a"; set …; }`: each child carries one command in its Keys
+//     (eventMultiWordLeafValues grouping) — recurse with full as base.
+//
+// KeysQuoted provenance, when present, decides quoted-vs-joined exactly as
+// the compiler reader does; without it the token text decides (a token
+// containing a space must have been quoted).
+func redactEmbeddedCommands14413(n *Node, full, base []string) {
+	ci := -1
+	for i := 0; i+1 < len(full); i++ {
+		if full[i] == "change-configuration" && full[i+1] == "commands" {
+			ci = i
+			break
+		}
+	}
+	if ci < 0 {
+		return
+	}
+	// The `commands` keyword must belong to THIS node, not an ancestor: an
+	// ancestor-owned payload is handled when that ancestor is visited.
+	if ci+1 < len(base) {
+		return
+	}
+	local := ci + 1 - len(base) // index of "commands" within n.Keys
+	if local < 0 || local >= len(n.Keys) {
+		return
+	}
+	tailStart := local + 1
+	if len(n.Children) > 0 {
+		for _, child := range n.Children {
+			redactEmbeddedChild14413(child)
+		}
+		return
+	}
+	if tailStart >= len(n.Keys) {
+		return
+	}
+	tail := n.Keys[tailStart:]
+	hasProv := n.KeysHaveQuoteProvenance()
+	quoted := func(j int) bool {
+		if hasProv {
+			return n.KeyQuoted(tailStart + j)
+		}
+		return tail[j] == "" || strings.Contains(tail[j], " ")
+	}
+	if quoted(0) {
+		for j := range tail {
+			if redacted, changed := redactEmbeddedCommand(tail[j], false); changed {
+				n.Keys[tailStart+j] = redacted
+			}
+		}
+		return
+	}
+	redactJoinedTail14413(n, tailStart)
+}
+
+// redactEmbeddedChild14413 handles one child of a `commands { … }` block (or
+// a flat-set bracket child): quoted first token means each Keys token is a
+// separate command; otherwise the Keys join into one command.
+func redactEmbeddedChild14413(child *Node) {
+	if len(child.Keys) == 0 {
+		return
+	}
+	hasProv := child.KeysHaveQuoteProvenance()
+	quotedFirst := (hasProv && child.KeyQuoted(0)) || (!hasProv &&
+		(child.Keys[0] == "" || strings.Contains(child.Keys[0], " ")))
+	if quotedFirst {
+		for j := range child.Keys {
+			if redacted, changed := redactEmbeddedCommand(child.Keys[j], false); changed {
+				child.Keys[j] = redacted
+			}
+		}
+		return
+	}
+	joined := strings.Join(child.Keys, " ")
+	if redacted, changed := redactEmbeddedCommand(joined, false); changed {
+		applyRedactedJoin14413(child, redacted)
+	}
+}
+
+// redactJoinedTail14413 judges the joined unquoted tail of `commands set …`
+// and, only when a secret is masked, rewrites the node's tail to the
+// redacted tokenization. A clean tail is untouched.
+func redactJoinedTail14413(n *Node, tailStart int) {
+	joined := strings.Join(n.Keys[tailStart:], " ")
+	redacted, changed := redactEmbeddedCommand(joined, false)
+	if !changed {
+		return
+	}
+	tokens, _ := lexConfigMutationLine9938(redacted)
+	if len(tokens) == 0 {
+		return
+	}
+	keys := make([]string, 0, tailStart+len(tokens))
+	keys = append(keys, n.Keys[:tailStart]...)
+	keys = append(keys, tokens...)
+	n.Keys = keys
+	if len(n.KeysQuoted) == len(n.Keys) {
+		// Stale provenance no longer describes the rewritten keys; drop it
+		// rather than claim quotes that were never authored.
+		n.KeysQuoted = nil
+	}
+	if len(n.KeysBracketed) == len(n.Keys) {
+		n.KeysBracketed = nil
+	}
+}
+
+// applyRedactedJoin14413 rewrites a block child's Keys to the redacted
+// tokenization of its joined command.
+func applyRedactedJoin14413(child *Node, redacted string) {
+	tokens, _ := lexConfigMutationLine9938(redacted)
+	if len(tokens) == 0 {
+		return
+	}
+	child.Keys = tokens
+	child.KeysQuoted = nil
+	child.KeysBracketed = nil
+}
+
+// fingerprintEmbeddedCommands14413 is redactEmbeddedCommands14413 with
+// compare fingerprints: masked secret/URL tokens carry the \x00xpf-sha256=
+// suffix maskCompareFingerprints already strips into a metadata line, so a
+// changed embedded credential still diffs as changed (and an unchanged one
+// as unchanged) without the value ever rendering.
+func fingerprintEmbeddedCommands14413(n *Node, full, base []string) {
+	ci := -1
+	for i := 0; i+1 < len(full); i++ {
+		if full[i] == "change-configuration" && full[i+1] == "commands" {
+			ci = i
+			break
+		}
+	}
+	if ci < 0 || ci+1 < len(base) {
+		return
+	}
+	local := ci + 1 - len(base)
+	if local < 0 || local >= len(n.Keys) {
+		return
+	}
+	tailStart := local + 1
+	if len(n.Children) > 0 {
+		for _, child := range n.Children {
+			fingerprintEmbeddedChild14413(child)
+		}
+		return
+	}
+	if tailStart >= len(n.Keys) {
+		return
+	}
+	tail := n.Keys[tailStart:]
+	hasProv := n.KeysHaveQuoteProvenance()
+	quotedFirst := (hasProv && n.KeyQuoted(tailStart)) || (!hasProv &&
+		(tail[0] == "" || strings.Contains(tail[0], " ")))
+	if quotedFirst {
+		for j := range tail {
+			if redacted, changed := redactEmbeddedCommand(tail[j], true); changed {
+				n.Keys[tailStart+j] = redacted
+			}
+		}
+		return
+	}
+	joined := strings.Join(tail, " ")
+	if redacted, changed := redactEmbeddedCommand(joined, true); changed {
+		tokens, _ := lexConfigMutationLine9938(redacted)
+		if len(tokens) == 0 {
+			return
+		}
+		keys := make([]string, 0, tailStart+len(tokens))
+		keys = append(keys, n.Keys[:tailStart]...)
+		keys = append(keys, tokens...)
+		n.Keys = keys
+		n.KeysQuoted = nil
+		n.KeysBracketed = nil
+	}
+}
+
+func fingerprintEmbeddedChild14413(child *Node) {
+	if len(child.Keys) == 0 {
+		return
+	}
+	hasProv := child.KeysHaveQuoteProvenance()
+	quotedFirst := (hasProv && child.KeyQuoted(0)) || (!hasProv &&
+		(child.Keys[0] == "" || strings.Contains(child.Keys[0], " ")))
+	if quotedFirst {
+		for j := range child.Keys {
+			if redacted, changed := redactEmbeddedCommand(child.Keys[j], true); changed {
+				child.Keys[j] = redacted
+			}
+		}
+		return
+	}
+	joined := strings.Join(child.Keys, " ")
+	if redacted, changed := redactEmbeddedCommand(joined, true); changed {
+		applyRedactedJoin14413(child, redacted)
 	}
 }
 
@@ -243,6 +537,7 @@ func redactNodes(nodes []*Node, base []string) {
 				n.Keys[idx-len(base)] = RedactURL(n.Keys[idx-len(base)])
 			}
 		}
+		redactEmbeddedCommands14413(n, full, base)
 		if !n.IsLeaf {
 			redactNodes(n.Children, full)
 		}
