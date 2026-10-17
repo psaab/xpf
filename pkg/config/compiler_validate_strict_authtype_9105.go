@@ -53,24 +53,51 @@ func validateAuthTypePresenceStrict(cfg *Config, lenient bool) ([]string, error)
 		return fmt.Errorf("%s", msg)
 	}
 
-	if r := cfg.Protocols.RIP; r != nil && r.AuthKey.Reveal() != "" && AuthTypeAbsent(r.AuthType) {
-		if err := report("protocols rip"); err != nil {
-			return warnings, err
+	// #14400: this gate originally walked only the GLOBAL protocols block;
+	// the checkProtocols walk below is applied to every routing instance
+	// as well, whose RIP/IS-IS render through the identical plaintext arm.
+
+	// checkProtocols applies the three #9105 sites (RIP key, IS-IS key,
+	// IS-IS per-interface key) under one scope prefix.
+	checkProtocols := func(prefix string, rip *RIPConfig, isis *ISISConfig) error {
+		if rip != nil && rip.AuthKey.Reveal() != "" && AuthTypeAbsent(rip.AuthType) {
+			if err := report(prefix + " rip"); err != nil {
+				return err
+			}
 		}
+		if isis != nil {
+			if isis.AuthKey.Reveal() != "" && AuthTypeAbsent(isis.AuthType) {
+				if err := report(prefix + " isis"); err != nil {
+					return err
+				}
+			}
+			for _, iface := range isis.Interfaces {
+				if iface == nil || iface.AuthKey.Reveal() == "" || !AuthTypeAbsent(iface.AuthType) {
+					continue
+				}
+				if err := report(prefix + " isis interface " + iface.Name); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	}
-	if i := cfg.Protocols.ISIS; i != nil {
-		if i.AuthKey.Reveal() != "" && AuthTypeAbsent(i.AuthType) {
-			if err := report("protocols isis"); err != nil {
-				return warnings, err
-			}
+
+	if err := checkProtocols("protocols", cfg.Protocols.RIP, cfg.Protocols.ISIS); err != nil {
+		return warnings, err
+	}
+	// #14400: the per-routing-instance RIP/IS-IS blocks render through the
+	// same plaintext arm in pkg/frr (generateProtocolsWithQNH11447 is called
+	// per instance with a vrf suffix), so the gate must walk them too. Until
+	// this loop only the global instance was checked. Scope spelling matches
+	// the sibling gates (e.g. collectProtocolInterfaceRefs): the canonical
+	// config path `routing-instances <name> protocols ...`.
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
 		}
-		for _, iface := range i.Interfaces {
-			if iface == nil || iface.AuthKey.Reveal() == "" || !AuthTypeAbsent(iface.AuthType) {
-				continue
-			}
-			if err := report("protocols isis interface " + iface.Name); err != nil {
-				return warnings, err
-			}
+		if err := checkProtocols("routing-instances "+ri.Name+" protocols", ri.RIP, ri.ISIS); err != nil {
+			return warnings, err
 		}
 	}
 	return warnings, nil
