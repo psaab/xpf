@@ -766,6 +766,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		defer wg.Done()
 		d.configApplyReassertLoop(ctx)
 	}()
+	// #14597: the always-on retry owner for a security-log stream
+	// skipped at build time (a UDP source bind attempted before its
+	// RETH VIP / interface address exists). The fingerprint no longer
+	// latches over an incomplete build; this loop re-drives the apply
+	// until every stream builds, so recovery needs no commit and no
+	// restart. Started unconditionally; while nothing is owed it costs
+	// one atomic load per tick.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.syslogStreamRetryLoop(ctx)
+	}()
 	// #11497: bounded retry owner for a double host-inbound real+gap nft
 	// failure. The loop is idle except for one debt check per 30s interval
 	// and is joined with the daemon lifetime on shutdown.

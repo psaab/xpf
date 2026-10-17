@@ -756,6 +756,18 @@ source-interface's address can change with no syslog edit at all. It is
 forgotten on both teardown paths, or re-adding an unchanged stanza would
 hash-match a client set that has been closed.
 
+**The fingerprint latches only after a complete build (#14597).** It used
+to latch before construction, so a UDP stream skipped on a source-bind
+failure (`DialUDP: cannot assign requested address` — classically a RETH
+VIP not yet present at the boot apply) stayed dead: the fingerprint for an
+explicit `source-address` is config-only, so when the address appeared
+nothing about the hash changed and every later apply hash-matched. Now a
+build that skips any stream leaves the fingerprint unset (the next apply
+retries) and arms `syslogRetryDebt`; the always-on `syslogStreamRetryLoop`
+(30 s, `applySem`-guarded, active-config re-read) re-drives the apply until
+every stream builds, so recovery needs no commit and no restart. A fully
+built identical config still performs zero rebuilds.
+
 `security log stream <s> host` is also a typed leaf now (`ValidateSyslogHost`:
 an IP address or a DNS name, the `ValidateNTPServer` shape). It was `args: 1`
 with no valueType and no validator, so any string reached the dialer's resolver.
