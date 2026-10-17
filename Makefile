@@ -307,29 +307,41 @@ test-go: test-race-dp
 	# it carries. Unset (the default) execs `go test ./...` unchanged — the
 	# shared gate must not acquire a jq dependency or a new failure mode.
 	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" ./...
-	# #6626: pkg/refactoraudit MUST run uncached.
+	# #6626 + #14649: the tree-reading census packages MUST run uncached.
 	#
-	# Its hard gate (TestTouchedFileCrossedModularityThreshold) measures the
-	# branch's own diff against its merge base by shelling out to
-	# scripts/refactoring-audit-touched.sh. Neither the working tree nor that
-	# script is a `go test` cache input, so a REAL threshold crossing changes
+	# pkg/refactoraudit's hard gate measures the branch's own diff against
+	# its merge base by shelling out to scripts/refactoring-audit-touched.sh.
+	# pkg/docsref (#6615) and pkg/memlockcensus (#8371) shell out to
+	# `git grep` and read only the files it lists. None of those inputs --
+	# the working tree, the index, the script, the git grep output -- is a
+	# `go test` cache input, so a REAL threshold crossing changes
 	# nothing the cache hashes and `./...` above returns "ok (cached)" — the
 	# gate passes without running. Reproduced: a new 2004-LOC production file
 	# (a genuine [REFACTOR] crossing, exactly the event this gate exists to
 	# catch) returned "ok (cached)" and FAILED under -count=1.
+	# Reproduced for docsref (#14649) in a linked worktree: a warm cache
+	# plus a new dangling citation in a tracked doc returned "ok (cached)"
+	# even after `git add`, and FAILED under -count=1. In a primary clone
+	# an intervening git op busts the cache by accident (docsref Stats
+	# .git, which is a directory there); in a linked worktree .git is a
+	# gitdir pointer file ordinary git ops do not rewrite, so masking is
+	# reliable in the standard worktree workflow.
 	#
 	# #6623 widened the window rather than creating it: under the old
 	# byte-exact artifact compare the tracked artifact churned constantly and
 	# busted the cache by accident, so a stale pass survived one commit instead
 	# of many.
 	#
-	# Scoped to this package, not the whole suite: measured at ~10.7s uncached
+	# Scoped to these packages, not the whole suite: measured at ~10.7s uncached
 	# against ~0.1s cached, which is noise on a suite that already runs
 	# minutes, whereas -count=1 on ./... would forfeit caching everywhere.
 	# Deliberately NOT narrowed further with -run: a name predicate silently
 	# stops covering the next tree-reading test added here, which is the
-	# #6743 r2-N3 lesson recorded in this package's own doc.go.
-	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/
+	# #6743 r2-N3 lesson recorded in pkg/refactoraudit's own doc.go.
+	# Any future package whose tests read the tree outside the compiled
+	# sources (git grep, git ls-files, subprocess census) MUST be added
+	# to this leg, not given a cached-only gate.
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/
 
 # #2114 scoped race gate: the dataplane-cell publication races
 # (bootstrap-exit clear vs sampler/watcher/confirm-timer readers) and the
