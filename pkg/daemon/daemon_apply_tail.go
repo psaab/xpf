@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"reflect"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -549,7 +550,45 @@ func effectiveLLDPConfig(cfg *config.Config) *lldp.LLDPConfig {
 		Interval:       cfg.Protocols.LLDP.Interval,
 		HoldMultiplier: cfg.Protocols.LLDP.HoldMultiplier,
 		SystemName:     cfg.System.HostName,
+		ChassisMAC:     systemChassisMAC(),
 	}
+}
+
+// chassisMACLookup is the lookup seam for systemChassisMAC so the
+// daemon wiring is unit-testable without host NICs.
+var chassisMACLookup = func(name string) (net.HardwareAddr, error) {
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return nil, err
+	}
+	return iface.HardwareAddr, nil
+}
+
+// systemChassisMAC derives the one system-wide LLDP Chassis ID
+// (#14618): the management interface's (fxp0, then em0) MAC when it
+// resolves to a usable address, else nil — pkg/lldp then derives the
+// deterministic smallest MAC among the LLDP-enabled interfaces. The
+// management MAC is preferred because it identifies the box rather
+// than any data port and does not change when the LLDP interface set
+// changes. Short/zero results are treated as absent.
+func systemChassisMAC() net.HardwareAddr {
+	for _, name := range []string{"fxp0", "em0"} {
+		mac, err := chassisMACLookup(name)
+		if err != nil || len(mac) < 6 {
+			continue
+		}
+		zero := true
+		for _, b := range mac[:6] {
+			if b != 0 {
+				zero = false
+				break
+			}
+		}
+		if !zero {
+			return append(net.HardwareAddr(nil), mac[:6]...)
+		}
+	}
+	return nil
 }
 
 // reconcileLLDP re-applies the LLDP service config on every commit (#2372). It

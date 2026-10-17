@@ -84,6 +84,13 @@ type LLDPConfig struct {
 	SystemName     string          // system name TLV (defaults to hostname)
 	SystemDesc     string          // system description TLV
 	Disable        bool            // globally disable LLDP
+	// ChassisMAC is the single system-wide Chassis ID (MAC subtype)
+	// advertised on EVERY LLDP-enabled port (#14618). The Chassis ID
+	// identifies the system (IEEE 802.1AB lldpLocChassisId is a scalar
+	// of the local system data), not the transmitting port, so it must
+	// not be derived per-port. Empty/invalid: Apply derives the
+	// deterministic smallest usable MAC among the resolved interfaces.
+	ChassisMAC net.HardwareAddr
 }
 
 // neighborKey identifies a learned LLDP neighbor.
@@ -338,6 +345,19 @@ func (m *Manager) Apply(ctx context.Context, cfg *LLDPConfig) (unresolved []stri
 		sysName = "xpf"
 	}
 
+	// #14618: resolve the ONE system chassis ID for this generation
+	// before spawning any TX goroutine. Two passes over the configured
+	// interfaces: resolve them all first (a socket failure on one port
+	// must not change the chassis another port advertises), then open
+	// sessions. The fallback is the smallest usable MAC among the
+	// resolved interfaces — deterministic and stable for a fixed
+	// interface set, regardless of config order.
+	type resolvedIface struct {
+		cfg   LLDPInterface
+		iface *net.Interface
+	}
+	var resolved []resolvedIface
+	var resolvedIfaces []*net.Interface
 	for _, lldpIf := range cfg.Interfaces {
 		if lldpIf.Disable {
 			continue
@@ -361,7 +381,14 @@ func (m *Manager) Apply(ctx context.Context, cfg *LLDPConfig) (unresolved []stri
 			unresolved = append(unresolved, lldpIf.Name)
 			continue
 		}
+		resolved = append(resolved, resolvedIface{cfg: lldpIf, iface: iface})
+		resolvedIfaces = append(resolvedIfaces, iface)
+	}
+	chassisMAC := resolveChassisMAC(cfg.ChassisMAC, resolvedIfaces)
 
+	for _, r := range resolved {
+		lldpIf := r.cfg
+		iface := r.iface
 		// Open the RX+TX sockets once for this interface. A CAP_NET_RAW or bind
 		// failure now surfaces here (logged, interface skipped) instead of
 		// silently per-frame.
@@ -379,7 +406,7 @@ func (m *Manager) Apply(ctx context.Context, cfg *LLDPConfig) (unresolved []stri
 		m.wg.Add(1)
 		go func(sess *ifSession) {
 			defer m.wg.Done()
-			m.txLoop(lldpCtx, sess, interval, holdMult, sysName, cfg.SystemDesc)
+			m.txLoop(lldpCtx, sess, interval, holdMult, sysName, cfg.SystemDesc, chassisMAC)
 		}(sess)
 
 		// Start RX goroutine.
@@ -517,30 +544,37 @@ func (m *Manager) Neighbors() []*Neighbor {
 
 // txLoop periodically sends LLDP frames on the session's interface, reusing the
 // session's TX socket for every advertisement.
-func (m *Manager) txLoop(ctx context.Context, sess *ifSession, interval time.Duration, holdMult int, sysName, sysDesc string) {
+func (m *Manager) txLoop(ctx context.Context, sess *ifSession, interval time.Duration, holdMult int, sysName, sysDesc string, chassisMAC net.HardwareAddr) {
 	ttl := int(interval.Seconds()) * holdMult
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	// Send first frame immediately.
-	m.sendFrame(sess, ttl, sysName, sysDesc)
+	m.sendFrame(sess, ttl, sysName, sysDesc, chassisMAC)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.sendFrame(sess, ttl, sysName, sysDesc)
+			m.sendFrame(sess, ttl, sysName, sysDesc, chassisMAC)
 		}
 	}
 }
 
 // sendFrame builds and sends a single LLDP frame over the session's reused TX
-// socket.
-func (m *Manager) sendFrame(sess *ifSession, ttl int, sysName, sysDesc string) {
+// socket. The Ethernet source stays the transmitting port's MAC; the
+// Chassis ID TLV carries the system-wide chassisMAC (#14618). An empty
+// chassisMAC (no usable MAC anywhere) leaves BuildFrame's per-frame
+// source as the chassis, preserving the old single-interface behaviour.
+func (m *Manager) sendFrame(sess *ifSession, ttl int, sysName, sysDesc string, chassisMAC net.HardwareAddr) {
 	iface := sess.iface
-	frame, err := BuildFrame(iface.HardwareAddr, iface.Name, ttl, sysName, sysDesc)
+	chassis := chassisMAC
+	if len(chassis) == 0 {
+		chassis = iface.HardwareAddr
+	}
+	frame, err := buildFrame(iface.HardwareAddr, chassis, iface.Name, ttl, sysName, sysDesc)
 	if err != nil {
 		// Fail closed: skip this advertisement rather than send a malformed
 		// frame with a wrapped TLV length (#2036).
@@ -783,14 +817,27 @@ func (m *Manager) expiryLoop(ctx context.Context) {
 	}
 }
 
-// BuildFrame constructs a complete LLDP Ethernet frame. It fails closed if any
-// variable-length identity TLV (system name/description, port description)
-// exceeds the 9-bit TLV length limit, rather than emitting a malformed
-// advertisement (#2036).
+// BuildFrame constructs a complete LLDP Ethernet frame whose Chassis ID
+// and Ethernet source are both srcMAC. Kept for callers modelling a
+// remote peer (one MAC is both its chassis and its port source). It
+// fails closed if any variable-length identity TLV (system
+// name/description, port description) exceeds the 9-bit TLV length
+// limit, rather than emitting a malformed advertisement (#2036).
 func BuildFrame(srcMAC net.HardwareAddr, portName string, ttl int, sysName, sysDesc string) ([]byte, error) {
+	return buildFrame(srcMAC, srcMAC, portName, ttl, sysName, sysDesc)
+}
+
+// BuildFrameWithChassis constructs a frame with an explicit system
+// Chassis ID distinct from the transmitting port's Ethernet source
+// (#14618): one box advertises one chassis on every port.
+func BuildFrameWithChassis(srcMAC, chassisMAC net.HardwareAddr, portName string, ttl int, sysName, sysDesc string) ([]byte, error) {
+	return buildFrame(srcMAC, chassisMAC, portName, ttl, sysName, sysDesc)
+}
+
+func buildFrame(srcMAC, chassisMAC net.HardwareAddr, portName string, ttl int, sysName, sysDesc string) ([]byte, error) {
 	var tlvs []byte
 	// Chassis ID (MAC = 7 bytes) and TTL (2 bytes) are compile-time bounded.
-	tlvs = append(tlvs, mustEncodeTLV(tlvChassisID, encodeChassisID(srcMAC))...)
+	tlvs = append(tlvs, mustEncodeTLV(tlvChassisID, encodeChassisID(chassisMAC))...)
 	// Port ID carries portName which is caller-supplied: propagate error rather
 	// than panic so BuildFrame stays consistently fail-closed (#2036).
 	portIDEnc, err := EncodeTLV(tlvPortID, encodePortID(portName))
@@ -869,6 +916,44 @@ func mustEncodeTLV(tlvType int, value []byte) []byte {
 		panic(err)
 	}
 	return out
+}
+
+// resolveChassisMAC picks the ONE chassis ID for an Apply generation
+// (#14618). A valid explicit MAC (at least 6 bytes, non-zero) wins.
+// Otherwise the smallest usable MAC among the resolved interfaces is
+// used: deterministic, order-independent, and stable for a fixed
+// interface set. Returns nil when no usable MAC exists, in which case
+// sendFrame falls back to the transmitting port's own MAC (the old
+// behaviour, correct for a MAC-less single-port corner).
+func resolveChassisMAC(explicit net.HardwareAddr, ifaces []*net.Interface) net.HardwareAddr {
+	if usableMAC(explicit) {
+		return append(net.HardwareAddr(nil), explicit[:6]...)
+	}
+	var best net.HardwareAddr
+	for _, iface := range ifaces {
+		if iface == nil || !usableMAC(iface.HardwareAddr) {
+			continue
+		}
+		if best == nil || string(iface.HardwareAddr[:6]) < string(best[:6]) {
+			best = iface.HardwareAddr
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	return append(net.HardwareAddr(nil), best[:6]...)
+}
+
+func usableMAC(mac net.HardwareAddr) bool {
+	if len(mac) < 6 {
+		return false
+	}
+	for _, b := range mac[:6] {
+		if b != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func encodeChassisID(mac net.HardwareAddr) []byte {
