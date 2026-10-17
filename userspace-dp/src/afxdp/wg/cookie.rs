@@ -21,6 +21,12 @@
 //! responder DH for an unbounded replay flood. Its state is independent
 //! of the cookie-reply bucket and is bounded by the same source-table cap.
 //!
+//! #14639: both buckets key on the aggregated source key (IPv6 /64,
+//! IPv4 /32 after v4-mapped canonicalisation — [`source_bucket_key`]),
+//! and a full table evicts the least-recently-refilled bucket instead
+//! of refusing a new key, so one /64 refreshing many /128s cannot lock
+//! every legitimate peer out of rekey.
+//!
 //! ## Construction (§5.4.7)
 //!
 //! - `cookie = MAC(Rm, A_r)` where `MAC = keyed-BLAKE2s-128`, `Rm` is a
@@ -62,7 +68,7 @@
 //! or the encryption key.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Mutex;
 
 use blake2::Blake2s256;
@@ -130,9 +136,12 @@ pub(crate) const MAX_TOKENS_NS: i64 = (PACKET_COST_NS * SOURCE_REPLY_BURST) as i
 /// Run the per-source table GC at most this often (mirrors wireguard-go
 /// `garbageCollectTime`, 1 s); a bucket idle for a full interval is dropped.
 const SOURCE_GC_INTERVAL_NS: u64 = 1_000_000_000;
-/// Hard cap on distinct source IPs tracked at once. Bounds map memory under
-/// spoofed-source floods; overflow evicts the least-recently-refilled bucket,
-/// allowing new peers to enter while preserving this memory bound.
+/// Hard cap on distinct source keys tracked at once. Keys are aggregated
+/// (IPv6 on /64, IPv4 on /32 after v4-mapped canonicalisation — see
+/// [`source_bucket_key`]), so this bounds distinct /64s / v4 hosts, not
+/// /128s. Bounds map memory under spoofed-source floods; overflow evicts
+/// the least-recently-refilled bucket in both tables, allowing new peers
+/// to enter while preserving this memory bound (#14639).
 const SOURCE_TABLE_MAX: usize = 2048;
 
 /// Cookie MAC length (keyed-BLAKE2s-128 output).
@@ -219,6 +228,48 @@ fn endpoint_cookie_bytes(addr: SocketAddr) -> ([u8; 18], usize) {
         }
     };
     (buf, n)
+}
+
+/// #14639 rate-limit key for a datagram source: IPv6 aggregated to its
+/// /64 (host bits zeroed), IPv4 kept as the full /32 host address.
+/// A v4-mapped v6 source (`::ffff:a.b.c.d`) is canonicalised to v4
+/// first, mirroring [`endpoint_cookie_bytes`] / `canonicalize_endpoint`,
+/// so both forms share one bucket. This mirrors the Linux reference
+/// ratelimiter ("Only use 64 bits, so as to ratelimit the whole /64",
+/// `ratelimiter.c`) and prevents one host owning a SLAAC /64 from
+/// minting 2^64 distinct /128 keys, filling the bounded table, and
+/// locking every other peer out of admission. Aggregation is a
+/// deliberate trade-off: distinct hosts inside one /64 now share one
+/// budget (as in the reference), while hosts in different /64s — and
+/// every distinct v4 host — keep independent budgets.
+fn source_bucket_key(src_ip: IpAddr) -> IpAddr {
+    match src_ip {
+        IpAddr::V4(_) => src_ip,
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let mut octets = v6.octets();
+                octets[8..].fill(0);
+                IpAddr::V6(Ipv6Addr::from(octets))
+            }
+        },
+    }
+}
+
+/// #14639: evict the least-recently-refilled entry when `key` is new
+/// and the table is at [`SOURCE_TABLE_MAX`], so a new source is
+/// admitted (subject to its fresh bucket) instead of failing closed
+/// forever while an attacker refreshes every tracked entry.
+fn evict_lru_if_full(buckets: &mut HashMap<IpAddr, SourceBucket>, key: &IpAddr) {
+    if !buckets.contains_key(key) && buckets.len() >= SOURCE_TABLE_MAX {
+        if let Some(evict) = buckets
+            .iter()
+            .min_by_key(|(_, bucket)| bucket.last_ns)
+            .map(|(ip, _)| *ip)
+        {
+            buckets.remove(&evict);
+        }
+    }
 }
 
 /// Constant-time-ish 16-byte MAC comparison (fold, no short-circuit).
@@ -377,10 +428,12 @@ impl CookieChecker {
         now_ns < s.under_load_until_ns
     }
 
-    /// #4332: per-SOURCE cookie-reply admission. A token bucket keyed by the
-    /// initiation source IP admits at most [`SOURCE_REPLIES_PER_SEC`] replies/s
-    /// with a [`SOURCE_REPLY_BURST`] burst. Per-source throttling avoids one
-    /// source draining another peer's budget (#13958).
+    /// #4332: per-SOURCE cookie-reply admission. A token bucket keyed by
+    /// the aggregated source key ([`source_bucket_key`]: IPv6 /64, IPv4
+    /// /32) admits at most [`SOURCE_REPLIES_PER_SEC`] replies/s with a
+    /// [`SOURCE_REPLY_BURST`] burst. Per-key throttling avoids one
+    /// source draining another peer's budget (#13958); /64 aggregation
+    /// stops one IPv6 host minting unbounded /128 keys (#14639).
     ///
     /// Fail CLOSED against unbounded map growth: the table is GC-swept every
     /// [`SOURCE_GC_INTERVAL_NS`] and capped at [`SOURCE_TABLE_MAX`]. Overflow
@@ -393,6 +446,7 @@ impl CookieChecker {
     /// cannot be replayed into an over-credit to the ceiling on the next forward
     /// step — the exact weakening that guard prevents.
     pub(crate) fn source_reply_allowed(&self, src_ip: IpAddr, now_ns: u64) -> bool {
+        let src_ip = source_bucket_key(src_ip);
         let mut t = self.per_source.lock().unwrap_or_else(|e| e.into_inner());
 
         // Periodic GC — at most once per interval — drops buckets idle for a
@@ -412,19 +466,10 @@ impl CookieChecker {
         }
 
         // Keep the table bounded without permanently locking out new peers:
-        // discard the least-recently-refilled entry when a fresh address
+        // discard the least-recently-refilled entry when a fresh key
         // arrives at capacity. A rotating source flood cannot make every
         // later legitimate source fail closed forever.
-        if !t.buckets.contains_key(&src_ip) && t.buckets.len() >= SOURCE_TABLE_MAX {
-            if let Some(evict) = t
-                .buckets
-                .iter()
-                .min_by_key(|(_, bucket)| bucket.last_ns)
-                .map(|(ip, _)| *ip)
-            {
-                t.buckets.remove(&evict);
-            }
-        }
+        evict_lru_if_full(&mut t.buckets, &src_ip);
 
         // A fresh bucket starts full (one whole burst of credit) so a legit
         // source's first challenge is never throttled by table churn.
@@ -449,10 +494,14 @@ impl CookieChecker {
     /// #9908 per-source handshake-admission gate. Called only after a
     /// valid MAC1 + MAC2 has been verified and before the responder enters
     /// Noise. The bucket is independent of #4332's reply bucket: valid
-    /// MAC2 admissions never spend cookie-reply tokens. A new source is
-    /// denied when the bounded table is full (fail closed); a tracked source
-    /// receives a 5-packet burst and refills at 20/s.
+    /// MAC2 admissions never spend cookie-reply tokens. Keyed by the
+    /// aggregated source key ([`source_bucket_key`]: IPv6 /64, IPv4 /32,
+    /// #14639); a tracked key receives a 5-packet burst and refills at
+    /// 20/s. When the bounded table is full, a new key evicts the
+    /// least-recently-refilled bucket instead of failing closed, so one
+    /// /64 refreshing many keys cannot lock other peers out forever.
     pub(crate) fn source_handshake_allowed(&self, src_ip: IpAddr, now_ns: u64) -> bool {
+        let src_ip = source_bucket_key(src_ip);
         let mut t = self.per_source.lock().unwrap_or_else(|e| e.into_inner());
 
         // Keep both per-source maps bounded and reclaim idle entries before
@@ -470,14 +519,7 @@ impl CookieChecker {
                 .retain(|_, b| now_ns.saturating_sub(b.last_ns) < SOURCE_GC_INTERVAL_NS);
         }
 
-        // A NEW source that would exceed the bounded table is denied without
-        // insertion. Existing sources are never denied at this structural
-        // cap; they receive their normal token check below.
-        if !t.handshake_buckets.contains_key(&src_ip)
-            && t.handshake_buckets.len() >= SOURCE_TABLE_MAX
-        {
-            return false;
-        }
+        evict_lru_if_full(&mut t.handshake_buckets, &src_ip);
 
         let bucket = t.handshake_buckets.entry(src_ip).or_insert(SourceBucket {
             last_ns: now_ns,
@@ -750,14 +792,20 @@ impl CookieChecker {
         self.per_source.lock().unwrap().buckets.len()
     }
 
-    /// #4332 test hook: whether a specific source IP has a live bucket.
+    /// #4332 test hook: whether a specific source has a live bucket.
+    /// The argument is aggregated with [`source_bucket_key`] first, so
+    /// any address inside a tracked /64 reports present (#14639).
     #[cfg(test)]
     pub(crate) fn source_contains_for_test(&self, ip: IpAddr) -> bool {
-        self.per_source.lock().unwrap().buckets.contains_key(&ip)
+        self.per_source
+            .lock()
+            .unwrap()
+            .buckets
+            .contains_key(&source_bucket_key(ip))
     }
 
-    /// #9908 test hook: number of distinct source IPs currently tracked in
-    /// the per-source handshake-admission table.
+    /// #9908 test hook: number of distinct aggregated source keys
+    /// currently tracked in the per-source handshake-admission table.
     #[cfg(test)]
     pub(crate) fn handshake_source_table_len_for_test(&self) -> usize {
         self.per_source.lock().unwrap().handshake_buckets.len()

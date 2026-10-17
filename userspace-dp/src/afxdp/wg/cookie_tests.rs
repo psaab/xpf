@@ -326,7 +326,10 @@ fn source_table_cap_evicts_for_new_sources() {
 /// #9908: valid-MAC2 admission has its own bounded source table and
 /// token bucket. The reply table's cap must not be the only bound: a
 /// spoofed-IP flood that reaches the admission seam cannot grow the new
-/// map without limit.
+/// map without limit. #14639: keys are aggregated (IPv6 /64, IPv4 /32),
+/// and a new key at the cap evicts the least-recently-refilled bucket
+/// instead of being refused, so the table stays bounded without
+/// locking new peers out.
 #[test]
 fn handshake_source_bucket_burst_and_table_cap() {
     let cc = CookieChecker::new(&[0x86u8; 32]);
@@ -345,8 +348,10 @@ fn handshake_source_bucket_burst_and_table_cap() {
     assert!(cc.source_handshake_allowed(source, now + HANDSHAKE_PACKET_COST_NS));
     assert!(!cc.source_handshake_allowed(source, now + HANDSHAKE_PACKET_COST_NS));
 
-    for i in 0..(SOURCE_TABLE_MAX - 1) {
-        let ip = IpAddr::V6(std::net::Ipv6Addr::from(i as u128));
+    // Fill with distinct /64 keys (host bits zeroed by aggregation):
+    // each loop address is in a different /64.
+    for i in 0..(SOURCE_TABLE_MAX - 1) as u128 {
+        let ip = IpAddr::V6(std::net::Ipv6Addr::from((i + 1) << 64));
         assert!(cc.source_handshake_allowed(ip, now));
     }
     assert_eq!(
@@ -354,12 +359,18 @@ fn handshake_source_bucket_burst_and_table_cap() {
         SOURCE_TABLE_MAX,
         "the handshake source table reaches, but does not exceed, its cap"
     );
+    // #14639: a new source at the cap is admitted via LRU eviction of
+    // the least-recently-refilled bucket, not refused; the map stays
+    // bounded at SOURCE_TABLE_MAX.
     let overflow = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 2));
-    assert!(!cc.source_handshake_allowed(overflow, now));
+    assert!(
+        cc.source_handshake_allowed(overflow, now),
+        "a new over-cap source is admitted by evicting the LRU bucket (#14639)"
+    );
     assert_eq!(
         cc.handshake_source_table_len_for_test(),
         SOURCE_TABLE_MAX,
-        "a new over-cap source is denied without map growth"
+        "LRU eviction keeps the handshake table bounded at its cap"
     );
 }
 
@@ -411,6 +422,89 @@ fn source_bucket_ignores_backwards_clock() {
     assert!(
         !cc.source_reply_allowed(s, t_hi),
         "the forward jump after a backwards step is not replayed into an over-credit"
+    );
+}
+
+// ===================================================================
+// #14639: IPv6 /64 aggregation + LRU eviction for source admission.
+// One /64 refreshing 2048 /128s must not lock a legitimate peer in a
+// different /64 out of handshake admission; one /64 shares one budget.
+// ===================================================================
+
+fn ipv6_in(prefix: u64, host: u64) -> IpAddr {
+    IpAddr::V6(std::net::Ipv6Addr::from(((prefix as u128) << 64) | (host as u128)))
+}
+
+#[test]
+fn handshake_slash64_flood_does_not_lock_out_other_prefix_14639() {
+    let cc = CookieChecker::new(&[0x87u8; 32]);
+    let now = 10_000_000_000u64;
+    // Attacker in 2001:db8:aaaa::/64 refreshes SOURCE_TABLE_MAX /128s.
+    for i in 0..SOURCE_TABLE_MAX as u64 {
+        cc.source_handshake_allowed(ipv6_in(0x2001_0db8_aaaa_0000, i), now);
+        cc.source_reply_allowed(ipv6_in(0x2001_0db8_aaaa_0000, i), now);
+    }
+    // Legitimate peer in a different /64 must still be admitted (both gates).
+    let legit = ipv6_in(0x2001_0db8_bbbb_0000, 1);
+    assert!(
+        cc.source_handshake_allowed(legit, now),
+        "legitimate peer in another /64 locked out by one /64 refreshing 2048 /128s (handshake)"
+    );
+    assert!(
+        cc.source_reply_allowed(legit, now),
+        "legitimate peer in another /64 locked out by one /64 refreshing 2048 /128s (reply)"
+    );
+    // Control: after attacker activity is GC-idle, admission still works.
+    let later = now + SOURCE_GC_INTERVAL_NS + 1;
+    assert!(cc.source_handshake_allowed(legit, later));
+}
+
+#[test]
+fn handshake_slash64_shares_one_budget_14639() {
+    let cc = CookieChecker::new(&[0x88u8; 32]);
+    let now = 10_000_000_000u64;
+    // All /128s in one /64 share a single burst budget.
+    let mut granted = 0u64;
+    for i in 0..(SOURCE_HANDSHAKE_BURST + 5) {
+        if cc.source_handshake_allowed(ipv6_in(0x2001_0db8_cccc_0000, i), now) {
+            granted += 1;
+        }
+    }
+    assert_eq!(
+        granted, SOURCE_HANDSHAKE_BURST,
+        "one /64 receives at most SOURCE_HANDSHAKE_BURST handshake admissions per refill"
+    );
+    // Reply budget likewise shared per /64.
+    let mut granted_r = 0u64;
+    for i in 0..(SOURCE_REPLY_BURST + 5) {
+        if cc.source_reply_allowed(ipv6_in(0x2001_0db8_dddd_0000, i), now) {
+            granted_r += 1;
+        }
+    }
+    assert_eq!(
+        granted_r, SOURCE_REPLY_BURST,
+        "one /64 receives at most SOURCE_REPLY_BURST replies per refill"
+    );
+    // A different /64 is unaffected.
+    assert!(cc.source_handshake_allowed(ipv6_in(0x2001_0db8_eeee_0000, 1), now));
+}
+
+#[test]
+fn handshake_v4_mapped_shares_v4_budget_14639() {
+    let cc = CookieChecker::new(&[0x89u8; 32]);
+    let now = 10_000_000_000u64;
+    let v4 = IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9));
+    let mapped: IpAddr = "::ffff:203.0.113.9".parse().unwrap();
+    for _ in 0..SOURCE_HANDSHAKE_BURST {
+        assert!(cc.source_handshake_allowed(v4, now));
+    }
+    assert!(
+        !cc.source_handshake_allowed(mapped, now),
+        "v4-mapped form must share the canonical v4 bucket, not get a fresh burst"
+    );
+    assert!(
+        !cc.source_handshake_allowed(v4, now),
+        "canonical v4 bucket remains exhausted"
     );
 }
 
