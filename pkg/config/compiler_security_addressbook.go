@@ -25,6 +25,13 @@ func zoneLocalQualify(zone, name string) string {
 	return zoneLocalNamePrefix + zone + "/" + name
 }
 
+// ZoneLocalQualify is the exported form of zoneLocalQualify for consumers
+// (e.g. the dataplane compiler) that must name a zone-local entry in the
+// folded global-book namespace.
+func ZoneLocalQualify(zone, name string) string {
+	return zoneLocalQualify(zone, name)
+}
+
 // ZoneLocalUnqualify reverses zoneLocalQualify. If qualified is a synthetic
 // zone-local key minted by the #3061 fold ("zone-local/<zone>/<name>"), it
 // returns the authored zone and address-book name with ok=true; any other
