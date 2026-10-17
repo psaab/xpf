@@ -800,24 +800,19 @@ func hostInboundVRFMasterNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) 
 // hostInboundIngressClaims rewrites raw interface claims to the netdev names
 // visible at LOCAL_IN and groups signatures by that effective target. A target
 // with multiple signatures is ambiguous and must not be assigned to a view.
+//
+// Lifelines are excluded per slave, never by VRF master (#14332): a lifeline
+// member of a VRF shares the master's LOCAL_IN identity with its non-lifeline
+// co-members, so marking the master itself lifeline would erase every sibling
+// claim — suppressing both the ambiguous fail-closed deny and the unambiguous
+// flood-screen scope for interfaces that are not lifelines. Callers recover
+// the per-member distinction with meta sdifname (IngressVRFScopes /
+// LifelineVRFScopes); the flat master target therefore keeps co-member claims
+// and, when they disagree, lands in the deny list instead of vanishing.
 func hostInboundIngressClaims(netdevSigs map[string]map[string]bool, lifelineNetdevs, vrfEnslaved map[string]bool, vrfMasters map[string]string) map[string]map[string]bool {
-	// Lifelines are excluded by their effective LOCAL_IN identity. This keeps
-	// the invariant here, where both normal and ambiguous-scope callers share
-	// it, instead of relying on the builder to pre-mark every mapped master.
-	effectiveLifelines := map[string]bool{}
-	for netdev := range lifelineNetdevs {
-		target := netdev
-		if vrfEnslaved[netdev] {
-			target = vrfMasters[netdev]
-		}
-		if target != "" {
-			effectiveLifelines[target] = true
-		}
-	}
-
 	out := map[string]map[string]bool{}
 	for netdev, sigs := range netdevSigs {
-		if effectiveLifelines[netdev] {
+		if lifelineNetdevs[netdev] {
 			continue
 		}
 		target := netdev
@@ -826,9 +821,6 @@ func hostInboundIngressClaims(netdevSigs map[string]map[string]bool, lifelineNet
 			if target == "" {
 				continue
 			}
-		}
-		if effectiveLifelines[target] {
-			continue
 		}
 		if out[target] == nil {
 			out[target] = map[string]bool{}
