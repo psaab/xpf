@@ -113,75 +113,126 @@ type managementReconciler struct {
 // NOT change the endpoint (auth is swapped live); only these fields force a
 // make-before-break rebind.
 type mgmtEndpoint struct {
-	addr      string
-	httpsAddr string
-	tls       bool
-	// httpDegraded / httpsDegraded (#14582): the leg's address above is the
-	// loopback fallback because the configured interface had no usable kernel
-	// address at resolution time, not the interface address. A degraded leg
-	// is NOT converged on its configured interface: it reports non-Listening
-	// and drives the re-assert owner until a later re-resolution lands on
-	// the interface address (or the address vanishes and it degrades again).
+	addr       string
+	addrs      []string // full HTTP bind set (#14583); addr mirrors addrs[0]
+	httpsAddr  string
+	httpsAddrs []string // full HTTPS bind set (#14583)
+	tls        bool
+	// httpDegraded / httpsDegraded (#14582): the leg's address set above is
+	// the loopback fallback because the configured interface had no usable
+	// kernel address at resolution time, not the interface address. A
+	// degraded leg is NOT converged on its configured interface: it reports
+	// non-Listening and drives the re-assert owner until a later
+	// re-resolution lands on the interface address (or the address vanishes
+	// and it degrades again).
 	httpDegraded  bool
 	httpsDegraded bool
 }
 
 func (e mgmtEndpoint) summary() string {
 	if e.tls {
-		return fmt.Sprintf("http=%s https=%s", e.addr, e.httpsAddr)
+		return fmt.Sprintf("http=%v https=%v", e.httpAddrs(), e.httpsBindAddrs())
 	}
-	return fmt.Sprintf("http=%s (no TLS)", e.addr)
+	return fmt.Sprintf("http=%v (no TLS)", e.httpAddrs())
+}
+
+// httpAddrs / httpsBindAddrs return the effective bind set: the multi-address
+// slice when present, else the single mirror (nil when the leg is off).
+func (e mgmtEndpoint) httpAddrs() []string {
+	return effectiveMgmtAddrs(e.addrs, e.addr)
+}
+
+func (e mgmtEndpoint) httpsBindAddrs() []string {
+	if !e.tls {
+		return nil
+	}
+	return effectiveMgmtAddrs(e.httpsAddrs, e.httpsAddr)
+}
+
+func effectiveMgmtAddrs(multi []string, single string) []string {
+	if len(multi) > 0 {
+		return multi
+	}
+	if single != "" {
+		return []string{single}
+	}
+	return nil
 }
 
 func endpointOf(cfg api.Config) mgmtEndpoint {
-	return mgmtEndpoint{addr: cfg.Addr, httpsAddr: cfg.HTTPSAddr, tls: cfg.TLS, httpDegraded: cfg.HTTPBindDegraded, httpsDegraded: cfg.HTTPSBindDegraded}
+	addrs := effectiveMgmtAddrs(cfg.Addrs, cfg.Addr)
+	httpsAddrs := effectiveMgmtAddrs(cfg.HTTPSAddrs, cfg.HTTPSAddr)
+	e := mgmtEndpoint{addrs: addrs, httpsAddrs: httpsAddrs, tls: cfg.TLS, httpDegraded: cfg.HTTPBindDegraded, httpsDegraded: cfg.HTTPSBindDegraded}
+	if len(addrs) > 0 {
+		e.addr = addrs[0]
+	}
+	if len(httpsAddrs) > 0 {
+		e.httpsAddr = httpsAddrs[0]
+	}
+	return e
 }
 
 // allLoopback reports whether every listener CURRENTLY SERVING under this
 // fingerprint is bound to a loopback address. It gates the remove-all-api-auth
 // (nil) publish: nil disables authentication outright, so it may only be
-// published once no listener is reachable from off the box. Same per-leg
-// reasoning as everyLiveLegNamedBy — an empty addr, or a cleared tls flag, means
-// that leg is not serving and imposes no requirement.
+// published once no listener is reachable from off the box.
 func (e mgmtEndpoint) allLoopback() bool {
-	return mgmtAddrIsLoopback(e.addr) && (!e.tls || mgmtAddrIsLoopback(e.httpsAddr))
+	for _, a := range e.httpAddrs() {
+		if !mgmtAddrIsLoopback(a) {
+			return false
+		}
+	}
+	for _, a := range e.httpsBindAddrs() {
+		if !mgmtAddrIsLoopback(a) {
+			return false
+		}
+	}
+	return true
 }
 
 // everyLiveLegNamedBy reports whether every listener CURRENTLY SERVING under
-// this fingerprint sits at an address `next` names. It is the question the
-// grant-half gate means to ask (#5561 round 13); `rebinding && len(errs) == 0`
-// was a proxy for it, and the proxy is wider than the property in a reachable
-// direction — see reconcileTo.
-//
-// Per leg:
-//
-//   - The HTTP leg is serving at e.addr unless e.addr is EMPTY, which means no
-//     HTTP listener has ever bound: m.cur starts zeroed and startTo re-zeroes it
-//     on a boot bind failure, while every successful bind records a non-empty
-//     address (api.Server.ReconcileHTTP refuses an empty one outright). An absent
-//     leg has no credential to hand out and imposes no requirement — the same
-//     reading mgmtAddrIsLoopback gives an empty bind, and the same reasoning the
-//     HTTPS arm below uses for a cleared tls flag. Otherwise `next` names it iff
-//     next.Addr == e.addr.
-//   - The HTTPS leg is serving only when e.tls is set. api.Server.ReconcileHTTPS
-//     assigns s.httpsLeg only after BOTH the keypair and the bind succeed, so a
-//     failed ENABLE leaves nothing behind; a disable stops the leg outright. So
-//     when e.tls is clear there is no HTTPS listener to hand a credential to and
-//     that leg imposes no requirement. When it is set, `next` names the serving
-//     listener iff next still wants TLS at exactly e.httpsAddr.
-//
-// The same predicate answers two different questions depending on WHEN it runs,
-// because each field advances only on its own leg's successful reconcile: read
-// BEFORE the rebinds it says whether anything is about to move off what `next`
-// names; read AFTER, whether everything landed on it.
+// this fingerprint sits at an address `next` names (#5561 round 13). Per leg
+// SET (#14583): every serving address of this fingerprint must be named by
+// next's set for that plane; an absent leg set imposes no requirement.
 func (e mgmtEndpoint) everyLiveLegNamedBy(next api.Config) bool {
-	if e.addr != "" && e.addr != next.Addr {
+	nextE := endpointOf(next)
+	for _, a := range e.httpAddrs() {
+		if !addrInSet(a, nextE.httpAddrs()) {
+			return false
+		}
+	}
+	for _, a := range e.httpsBindAddrs() {
+		if !next.TLS || !addrInSet(a, nextE.httpsBindAddrs()) {
+			return false
+		}
+	}
+	return true
+}
+
+func addrInSet(addr string, set []string) bool {
+	for _, a := range set {
+		if a == addr {
+			return true
+		}
+	}
+	return false
+}
+
+func mgmtAddrsEqual(a, b []string) bool {
+	if len(a) != len(b) {
 		return false
 	}
-	if !e.tls {
-		return true
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
 	}
-	return next.TLS && next.HTTPSAddr == e.httpsAddr
+	return true
+}
+
+// isZero reports whether the fingerprint names no leg at all.
+func (e mgmtEndpoint) isZero() bool {
+	return e.addr == "" && len(e.addrs) == 0 && e.httpsAddr == "" && len(e.httpsAddrs) == 0 && !e.tls
 }
 
 // newManagementReconciler builds the owner around the runtime-dependency base
@@ -198,9 +249,11 @@ func newManagementReconciler(d *Daemon, baseCfg api.Config) *managementReconcile
 func (m *managementReconciler) desired(cfg *config.Config) api.Config {
 	next := m.baseCfg
 	next.Addr = m.d.opts.APIAddr
+	next.Addrs = nil
 	next.HTTPSAddr = ""
 	next.HTTPBindDegraded = false
 	next.HTTPSBindDegraded = false
+	next.HTTPSAddrs = nil
 	next.TLS = false
 	next.TLSCertificate = ""
 	next.TLSPrivateKey = ""
@@ -284,7 +337,7 @@ func (m *managementReconciler) startLocked(ctx context.Context, next api.Config)
 	// the boot HTTPS failure was permanent and silent. Ask the server what is
 	// actually serving instead (#5561 round 14, MAJOR 5).
 	if next.TLS && !srv.HTTPSServing() {
-		m.cur.tls, m.cur.httpsAddr, m.cur.httpsDegraded = false, "", false
+		m.cur.tls, m.cur.httpsAddr, m.cur.httpsAddrs, m.cur.httpsDegraded = false, "", nil, false
 	}
 	return nil
 }
@@ -380,6 +433,74 @@ func (m *managementReconciler) effectiveHTTPListener() sysservices.Listener {
 	return sysservices.Listener{Addr: bound, State: sysservices.StateListening}
 }
 
+// effectiveHTTPListeners / effectiveHTTPSListeners return one row per
+// configured bind address (#14583), for the sysservices plural snapshot. A
+// configured address with no serving leg is Failed with that address; a
+// serving leg is Listening with its actual bound address.
+func (m *managementReconciler) effectiveHTTPListeners() []sysservices.Listener {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.curSet && len(m.cur.httpAddrs()) == 0 {
+		return nil
+	}
+	if !m.curSet {
+		return []sysservices.Listener{{Addr: m.lastHTTPAttempt, State: sysservices.StateFailed}}
+	}
+	want := m.cur.httpAddrs()
+	var bound []string
+	if m.srv != nil {
+		bound = m.srv.EffectiveHTTPAddrs()
+	}
+	return mgmtListenerRows(want, bound)
+}
+
+func (m *managementReconciler) effectiveHTTPSListeners() []sysservices.Listener {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.curSet || !m.cur.tls {
+		return nil
+	}
+	want := m.cur.httpsBindAddrs()
+	var bound []string
+	if m.srv != nil {
+		bound = m.srv.EffectiveHTTPSAddrs()
+	}
+	return mgmtListenerRows(want, bound)
+}
+
+// mgmtListenerRows pairs each configured address (in order) with the bound
+// address at the same position; a missing bound entry is Failed.
+func mgmtListenerRows(want, bound []string) []sysservices.Listener {
+	rows := make([]sysservices.Listener, 0, len(want))
+	for i, w := range want {
+		if i < len(bound) && bound[i] != "" {
+			rows = append(rows, sysservices.Listener{Addr: bound[i], State: sysservices.StateListening})
+			continue
+		}
+		// Positional bound lists skip dead legs, so fall back to membership:
+		// a configured address that IS bound (at any position) is Listening.
+		found := ""
+		for _, b := range bound {
+			if b == w {
+				found = b
+				break
+			}
+		}
+		if found != "" {
+			rows = append(rows, sysservices.Listener{Addr: found, State: sysservices.StateListening})
+			continue
+		}
+		rows = append(rows, sysservices.Listener{Addr: w, State: sysservices.StateFailed})
+	}
+	return rows
+}
+
 // reconcile matches the live listener + auth snapshot to cfg. It returns a
 // non-nil error ONLY when an endpoint replacement could not bind — in that case
 // the OLD listener is retained (fail-safe) and the next commit retries. An
@@ -471,12 +592,13 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	// during its asynchronous drain. First publish a non-nil empty policy, then
 	// retire the HTTP leg so its auth slot pins deny-all, and only afterwards
 	// let the ordinary credential publication reach the surviving HTTPS leg.
-	if next.Addr == "" && next.Auth != nil && m.srv.HTTPServing() {
+	nextE := endpointOf(next)
+	if len(nextE.httpAddrs()) == 0 && next.Auth != nil && m.srv.HTTPServing() {
 		m.srv.ReplaceAuth(&api.AuthConfig{})
-		if err := m.srv.ReconcileHTTP(""); err != nil {
+		if err := m.srv.ReconcileHTTPAddrs(nil); err != nil {
 			errs = append(errs, err)
 		} else {
-			m.cur.addr, m.curSet = "", true
+			m.cur.addr, m.cur.addrs, m.curSet = "", nil, true
 			m.lastHTTPAttempt = ""
 		}
 	}
@@ -543,20 +665,20 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		m.publishNilDirectionLocked()
 	}
 
-	// HTTP leg: rebind only when the address changes (or its degraded state
-	// changes, #14582); an empty desired address disables the cleartext
+	// HTTP leg: rebind only when the address set changes (or its degraded
+	// state changes, #14582); an empty desired address disables the cleartext
 	// listener. Retry an unexpected exit only when a non-empty bind is still
 	// requested.
-	if next.Addr != m.cur.addr || next.HTTPBindDegraded != m.cur.httpDegraded || (next.Addr != "" && !m.srv.HTTPServing()) {
+	if !mgmtAddrsEqual(nextE.httpAddrs(), m.cur.httpAddrs()) || next.HTTPBindDegraded != m.cur.httpDegraded || (len(nextE.httpAddrs()) > 0 && !m.srv.HTTPServing()) {
 		// Record the attempted bind so `show system services` reports the address
 		// a boot-failed listener is retrying, not the one it failed at boot (#6401).
 		m.lastHTTPAttempt = next.Addr
-		if err := m.srv.ReconcileHTTP(next.Addr); err != nil {
+		if err := m.srv.ReconcileHTTPAddrs(nextE.httpAddrs()); err != nil {
 			errs = append(errs, err)
 		} else {
 			// curSet advances here too: a boot bind failure leaves it false, and
 			// this is the reconcile that pays that retry debt off (#5561 round 14).
-			m.cur.addr, m.cur.httpDegraded, m.curSet = next.Addr, next.HTTPBindDegraded, true
+			m.cur.addr, m.cur.addrs, m.cur.httpDegraded, m.curSet = next.Addr, nextE.addrs, next.HTTPBindDegraded, true
 		}
 	}
 
@@ -579,11 +701,11 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	// server what is actually serving is the same question startTo asks after the
 	// boot bind (#5561 round 14, MAJOR 5); this is that check applied to the
 	// steady state rather than only to boot.
-	if next.TLS != m.cur.tls || next.HTTPSAddr != m.cur.httpsAddr || next.HTTPSBindDegraded != m.cur.httpsDegraded || (next.TLS && !m.srv.HTTPSServing()) {
-		if err := m.srv.ReconcileHTTPS(next.TLS, next.HTTPSAddr); err != nil {
+	if next.TLS != m.cur.tls || !mgmtAddrsEqual(nextE.httpsBindAddrs(), m.cur.httpsBindAddrs()) || next.HTTPSBindDegraded != m.cur.httpsDegraded || (next.TLS && !m.srv.HTTPSServing()) {
+		if err := m.srv.ReconcileHTTPSAddrs(next.TLS, nextE.httpsBindAddrs()); err != nil {
 			errs = append(errs, err)
 		} else {
-			m.cur.tls, m.cur.httpsAddr, m.cur.httpsDegraded = next.TLS, next.HTTPSAddr, next.HTTPSBindDegraded
+			m.cur.tls, m.cur.httpsAddr, m.cur.httpsAddrs, m.cur.httpsDegraded = next.TLS, next.HTTPSAddr, nextE.httpsAddrs, next.HTTPSBindDegraded
 		}
 	}
 

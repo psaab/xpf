@@ -51,7 +51,7 @@ func TestMgmtBootHTTPBindFailureIsRetriedByTheNextCommit_5561(t *testing.T) {
 	if err := m.startTo(ctx, cfgFor(reg, "10.0.0.1:8080", false, "", nil)); err == nil {
 		t.Fatal("the boot bind was expected to FAIL, so the case never reached the state it tests")
 	}
-	if m.curSet || m.cur != (mgmtEndpoint{}) {
+	if m.curSet || !m.cur.isZero() {
 		t.Fatalf("a boot bind failure left the fingerprint at (%+v, curSet=%v); NOTHING converged, "+
 			"so it must be emptied or the next reconcile sees no leg as changed and retries "+
 			"neither bind", m.cur, m.curSet)

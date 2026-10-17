@@ -187,7 +187,7 @@ func TestHTTPSCertFailureAfterBindClosesTheListener_7041(t *testing.T) {
 			return tls.Certificate{}, nil, certErr
 		},
 	}
-	before := s.httpsLeg
+	before := s.httpsLeg()
 
 	err := s.ReconcileHTTPS(true, addr7041)
 	if err == nil || !errors.Is(err, certErr) {
@@ -203,7 +203,7 @@ func TestHTTPSCertFailureAfterBindClosesTheListener_7041(t *testing.T) {
 			"failure #7041 exists to stop repeating.\n"+
 			"  >1 means it was double-closed.", got)
 	}
-	if s.httpsLeg != before {
+	if s.httpsLeg() != before {
 		t.Fatal("a cert failure must retain the previous HTTPS state (fail-closed)")
 	}
 	if s.HTTPSServing() {

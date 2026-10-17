@@ -1996,14 +1996,7 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	// failure one surface over that #8183 was about.
 	if c.srv.managementListenersFn != nil {
 		ls := c.srv.managementListenersFn()
-		for _, row := range []struct {
-			surface string
-			l       sysservices.Listener
-		}{
-			{"grpc", ls.GRPC},
-			{"http", ls.HTTP},
-			{"https", ls.HTTPS},
-		} {
+		for _, row := range ls.SurfaceRows() {
 			// Every state gets a series, not just the current one. A state set
 			// that emitted only the active state would make an alert on
 			// `state{state="failed"} == 1` silently un-evaluable while the
@@ -2019,11 +2012,11 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 				{"stale", sysservices.StateStale},
 			} {
 				v := 0.0
-				if row.l.State == st.want {
+				if row.L.State == st.want {
 					v = 1
 				}
 				ch <- prometheus.MustNewConstMetric(c.managementListenerState,
-					prometheus.GaugeValue, v, row.surface, row.l.Addr, st.name)
+					prometheus.GaugeValue, v, row.Surface, row.L.Addr, st.name)
 			}
 		}
 	}

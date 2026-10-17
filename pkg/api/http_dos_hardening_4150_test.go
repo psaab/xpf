@@ -16,20 +16,20 @@ import (
 // value.
 func TestManagementServerTimeoutsSetM6(t *testing.T) {
 	s := NewServer(Config{Addr: "127.0.0.1:0"})
-	if s.httpServer == nil {
+	if s.httpServer() == nil {
 		t.Fatal("httpServer was not constructed")
 	}
-	assertTimeouts(t, "http", s.httpServer.ReadHeaderTimeout, s.httpServer.ReadTimeout,
-		s.httpServer.IdleTimeout, s.httpServer.MaxHeaderBytes, s.httpServer.WriteTimeout)
+	assertTimeouts(t, "http", s.httpServer().ReadHeaderTimeout, s.httpServer().ReadTimeout,
+		s.httpServer().IdleTimeout, s.httpServer().MaxHeaderBytes, s.httpServer().WriteTimeout)
 
 	// HTTPS server path: TLS on with an HTTPS listen address builds the second
 	// literal, which must carry the SAME hardening.
 	st := NewServer(Config{Addr: "127.0.0.1:0", TLS: true, HTTPSAddr: "127.0.0.1:0"})
-	if st.httpsServer == nil {
+	if st.httpsServer() == nil {
 		t.Fatal("httpsServer was not constructed with TLS + HTTPSAddr set")
 	}
-	assertTimeouts(t, "https", st.httpsServer.ReadHeaderTimeout, st.httpsServer.ReadTimeout,
-		st.httpsServer.IdleTimeout, st.httpsServer.MaxHeaderBytes, st.httpsServer.WriteTimeout)
+	assertTimeouts(t, "https", st.httpsServer().ReadHeaderTimeout, st.httpsServer().ReadTimeout,
+		st.httpsServer().IdleTimeout, st.httpsServer().MaxHeaderBytes, st.httpsServer().WriteTimeout)
 }
 
 func assertTimeouts(t *testing.T, which string, readHeader, read, idle time.Duration, maxHeaderBytes int, write time.Duration) {

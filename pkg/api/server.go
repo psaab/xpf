@@ -173,14 +173,22 @@ type BinaryUpgradeStatusSnapshot struct {
 
 // Config configures the API server.
 type Config struct {
-	Addr      string
+	Addr string
+	// Addrs is the full set of HTTP listen addresses (#14583): one per address
+	// family when the web-management interface is dual-stack. Addr mirrors
+	// Addrs[0] (and is the sole address when len(Addrs) <= 1) so single-address
+	// callers keep working; the listener lifecycle binds EVERY entry.
+	Addrs     []string
 	HTTPSAddr string // HTTPS listen address (empty = no HTTPS)
-	// HTTPBindDegraded / HTTPSBindDegraded mark that Addr/HTTPSAddr is the
-	// loopback fallback because the configured interface had no usable kernel
-	// address at resolution time (#14582), not the interface address itself.
-	// The daemon's management reconciler uses this to avoid recording the leg
-	// as converged on the configured interface and to report it non-Listening
-	// until a later re-resolution lands on the interface address.
+	// HTTPSAddrs is the HTTPS counterpart of Addrs (#14583).
+	HTTPSAddrs []string
+	// HTTPBindDegraded / HTTPSBindDegraded mark that Addr/Addrs (resp.
+	// HTTPSAddr/HTTPSAddrs) is the loopback fallback because the configured
+	// interface had no usable kernel address at resolution time (#14582), not
+	// the interface address itself. The daemon's management reconciler uses
+	// this to avoid recording the leg as converged on the configured
+	// interface and to report it non-Listening until a later re-resolution
+	// lands on the interface address.
 	HTTPBindDegraded  bool
 	HTTPSBindDegraded bool
 	TLS               bool        // enable HTTPS with a management certificate
@@ -603,8 +611,12 @@ type Config struct {
 
 // Server is the HTTP API server.
 type Server struct {
-	httpServer  *http.Server
-	httpsServer *http.Server
+	// httpServers / httpsServers are the construction-time leg templates
+	// (#14583: one per bind address — a dual-stack web-management interface
+	// binds one listener per family). Accessors below expose the first entry
+	// as httpServer / httpsServer for the single-address readers and tests.
+	httpServers  []*http.Server
+	httpsServers []*http.Server
 	// auth is the LIVE authentication snapshot, read atomically on EVERY request
 	// by the middleware so a day-2 web-management commit that tightens or revokes
 	// credentials takes effect on the very next request WITHOUT rebinding the
@@ -652,16 +664,16 @@ type Server struct {
 	tlsMonitorCancel      context.CancelFunc
 	tlsMonitorWG          sync.WaitGroup
 	tlsCertificateMu      sync.Mutex
-	lifeMu                sync.Mutex      // guards httpLeg/httpsLeg/rootCtx across reconciles
+	lifeMu                sync.Mutex      // guards httpLegs/httpsLegs/rootCtx across reconciles
 	rootCtx               context.Context // daemon lifetime; every leg drains on its cancel
 	wg                    sync.WaitGroup  // joins EVERY serve goroutine (live + retiring legs)
-	httpLeg               *listenerLeg    // live HTTP listener leg (nil = not started / HTTP off)
-	httpsLeg              *listenerLeg    // live HTTPS listener leg (nil = HTTPS off)
-	// httpSlot / httpsSlot are the credential slots of the legs Start launches
+	httpLegs              []*listenerLeg  // live HTTP listener legs, one per bind address (#14583)
+	httpsLegs             []*listenerLeg  // live HTTPS listener legs, one per bind address (#14583)
+	// httpSlots / httpsSlots are the credential slots of the legs Start launches
 	// from the construction-time servers (#5561 round 14). Every leg gets one;
 	// a live slot follows s.auth, a retired one is pinned. See authSlot.
-	httpSlot  *authSlot
-	httpsSlot *authSlot
+	httpSlots  []*authSlot
+	httpsSlots []*authSlot
 	// retiring holds the legs that have been asked to stop but have not finished
 	// draining. Their slots are pinned, and ReplaceAuth keeps tightening them so
 	// a revocation still reaches a listener on its way out. Guarded by retireMu
@@ -1046,24 +1058,152 @@ func NewServer(cfg Config) *Server {
 		certificate: cfg.TLSCertificate,
 		privateKey:  cfg.TLSPrivateKey,
 	})
-	s.tlsDesired.Store(cfg.TLS && cfg.HTTPSAddr != "")
+	s.tlsDesired.Store(cfg.TLS && len(effectiveHTTPSAddrs(cfg)) > 0)
 	s.certGen = generateSelfSignedCertWithStatus
 
-	if cfg.Addr != "" {
-		plan := s.planHTTPLeg(cfg.Addr)
-		s.httpSlot, s.httpServer = plan.slot, plan.srv
+	for _, addr := range effectiveHTTPAddrs(cfg) {
+		plan := s.planHTTPLeg(addr)
+		s.httpSlots = append(s.httpSlots, plan.slot)
+		s.httpServers = append(s.httpServers, plan.srv)
 	}
 
 	// Set up HTTPS with the configured or system-generated management certificate.
-	if cfg.TLS && cfg.HTTPSAddr != "" {
-		if plan, err := s.planHTTPSLeg(cfg.HTTPSAddr); err != nil {
-			slog.Error("failed to prepare HTTPS management certificate; HTTPS unavailable", "err", err)
-		} else {
-			s.httpsSlot, s.httpsServer = plan.slot, plan.srv
+	if cfg.TLS {
+		for _, addr := range effectiveHTTPSAddrs(cfg) {
+			plan, err := s.planHTTPSLeg(addr)
+			if err != nil {
+				slog.Error("failed to prepare HTTPS management certificate; HTTPS unavailable", "err", err)
+				break
+			}
+			s.httpsSlots = append(s.httpsSlots, plan.slot)
+			s.httpsServers = append(s.httpsServers, plan.srv)
 		}
 	}
-
 	return s
+}
+
+// effectiveHTTPAddrs / effectiveHTTPSAddrs return the bind set for cfg: the
+// explicit multi-address slice when present, else the single Addr/HTTPSAddr
+// (#14583). Empty entries are dropped; order is preserved (IPv4 first as the
+// daemon resolver emits it).
+func effectiveHTTPAddrs(cfg Config) []string {
+	return effectiveAddrs(cfg.Addrs, cfg.Addr)
+}
+
+func effectiveHTTPSAddrs(cfg Config) []string {
+	return effectiveAddrs(cfg.HTTPSAddrs, cfg.HTTPSAddr)
+}
+
+func effectiveAddrs(multi []string, single string) []string {
+	if len(multi) > 0 {
+		out := make([]string, 0, len(multi))
+		for _, a := range multi {
+			if a != "" {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+	if single != "" {
+		return []string{single}
+	}
+	return nil
+}
+
+// httpServer / httpsServer expose the first construction-time leg template
+// for the single-address readers (Run/serveBound, test fixtures that set the
+// template directly). Multi-leg serving reads the slices.
+func (s *Server) httpServer() *http.Server {
+	if len(s.httpServers) > 0 {
+		return s.httpServers[0]
+	}
+	return nil
+}
+
+func (s *Server) httpsServer() *http.Server {
+	if len(s.httpsServers) > 0 {
+		return s.httpsServers[0]
+	}
+	return nil
+}
+
+// setHTTPServerTemplate / setHTTPSServerTemplate replace the construction-time
+// templates (test fixtures that install a hand-built server). A nil clears.
+func (s *Server) setHTTPServerTemplate(srv *http.Server) {
+	if srv == nil {
+		s.httpServers = nil
+		return
+	}
+	s.httpServers = []*http.Server{srv}
+}
+
+func (s *Server) setHTTPSServerTemplate(srv *http.Server) {
+	if srv == nil {
+		s.httpsServers = nil
+		return
+	}
+	s.httpsServers = []*http.Server{srv}
+}
+
+// httpLeg / httpsLeg expose the first live leg for single-address readers
+// (test fixtures, test-only helpers). Multi-leg serving reads the slices.
+func (s *Server) httpLeg() *listenerLeg {
+	if len(s.httpLegs) > 0 {
+		return s.httpLegs[0]
+	}
+	return nil
+}
+
+func (s *Server) httpsLeg() *listenerLeg {
+	if len(s.httpsLegs) > 0 {
+		return s.httpsLegs[0]
+	}
+	return nil
+}
+
+// setHTTPLeg / setHTTPSLeg replace the live legs with a single leg (test
+// fixtures that install a hand-built leg). A nil clears.
+func (s *Server) setHTTPLeg(leg *listenerLeg) {
+	if leg == nil {
+		s.httpLegs = nil
+		return
+	}
+	s.httpLegs = []*listenerLeg{leg}
+}
+
+func (s *Server) setHTTPSLeg(leg *listenerLeg) {
+	if leg == nil {
+		s.httpsLegs = nil
+		return
+	}
+	s.httpsLegs = []*listenerLeg{leg}
+}
+
+// httpSlot0 / httpsSlot0 expose the first leg's credential slot (test fixtures).
+func (s *Server) httpSlot0() *authSlot {
+	if len(s.httpSlots) > 0 {
+		return s.httpSlots[0]
+	}
+	return nil
+}
+
+func (s *Server) httpsSlot0() *authSlot {
+	if len(s.httpsSlots) > 0 {
+		return s.httpsSlots[0]
+	}
+	return nil
+}
+
+func (s *Server) setHTTPSlot0(slot *authSlot) { s.setSlot0(&s.httpSlots, slot) }
+
+func (s *Server) setHTTPSSlot0(slot *authSlot) { s.setSlot0(&s.httpsSlots, slot) }
+
+func (s *Server) setSlot0(slots *[]*authSlot, slot *authSlot) {
+	if len(*slots) == 0 {
+		*slots = []*authSlot{slot}
+		return
+	}
+	(*slots)[0] = slot
 }
 
 // authSlot is one listener leg's view of the credential policy (#5561 round 14).
@@ -1221,19 +1361,37 @@ func (s *Server) planHTTPSLeg(addr string) (legPlan, error) {
 // not see — whereas this one writes the very field it read, so the field, the
 // plan and the leg are the same object afterwards and a second call returns it
 // unchanged. One self-consistent adoption cannot diverge from itself.
-func (s *Server) httpLegPlan() legPlan {
-	if s.httpSlot == nil {
-		s.httpSlot = s.newAuthSlot()
+func (s *Server) httpLegPlanAt(i int) legPlan {
+	if i < 0 || i >= len(s.httpServers) {
+		return legPlan{}
 	}
-	return legPlan{srv: s.httpServer, slot: s.httpSlot}
+	for len(s.httpSlots) <= i {
+		s.httpSlots = append(s.httpSlots, nil)
+	}
+	if s.httpSlots[i] == nil {
+		s.httpSlots[i] = s.newAuthSlot()
+	}
+	return legPlan{srv: s.httpServers[i], slot: s.httpSlots[i]}
 }
 
-func (s *Server) httpsLegPlan() legPlan {
-	if s.httpsSlot == nil {
-		s.httpsSlot = s.newAuthSlot()
+func (s *Server) httpsLegPlanAt(i int) legPlan {
+	if i < 0 || i >= len(s.httpsServers) {
+		return legPlan{}
 	}
-	return legPlan{srv: s.httpsServer, slot: s.httpsSlot}
+	for len(s.httpsSlots) <= i {
+		s.httpsSlots = append(s.httpsSlots, nil)
+	}
+	if s.httpsSlots[i] == nil {
+		s.httpsSlots[i] = s.newAuthSlot()
+	}
+	return legPlan{srv: s.httpsServers[i], slot: s.httpsSlots[i]}
 }
+
+// httpLegPlan / httpsLegPlan are the first-leg forms, kept for the
+// single-address test fixtures that install one template directly.
+func (s *Server) httpLegPlan() legPlan { return s.httpLegPlanAt(0) }
+
+func (s *Server) httpsLegPlan() legPlan { return s.httpsLegPlanAt(0) }
 
 func (s *Server) buildHTTPServer(addr string, slot *authSlot) *http.Server {
 	// #7011: trackHijackedConns installs the ConnState hook, so a connection a
@@ -1321,17 +1479,21 @@ func (s *Server) Run(ctx context.Context) error {
 // s.listen (Config.ListenFunc, default net.Listen) so a test injects a fake
 // factory instead of racing on real ports.
 func (s *Server) bindListeners() (httpLn, httpsLn net.Listener, err error) {
-	httpLn, err = s.listen("tcp", s.httpServer.Addr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("api: bind HTTP listener %q: %w", s.httpServer.Addr, err)
+	hs := s.httpServer()
+	if hs == nil {
+		return nil, nil, fmt.Errorf("api: no HTTP listener configured")
 	}
-	if s.httpsServer != nil {
-		httpsLn, err = s.listen("tcp", s.httpsServer.Addr)
+	httpLn, err = s.listen("tcp", hs.Addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("api: bind HTTP listener %q: %w", hs.Addr, err)
+	}
+	if ss := s.httpsServer(); ss != nil {
+		httpsLn, err = s.listen("tcp", ss.Addr)
 		if err != nil {
 			// The HTTP listener already bound — close it so a failed startup
 			// leaves no orphaned socket behind (#5058).
 			httpLn.Close()
-			return nil, nil, fmt.Errorf("api: bind HTTPS listener %q: %w", s.httpsServer.Addr, err)
+			return nil, nil, fmt.Errorf("api: bind HTTPS listener %q: %w", ss.Addr, err)
 		}
 	}
 	return httpLn, httpsLn, nil
@@ -1389,10 +1551,11 @@ func (s *Server) LiveAuth() *AuthConfig { return s.auth.Load() }
 func (s *Server) HTTPHandlerForTest() http.Handler {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	if s.httpLeg == nil || s.httpLeg.srv == nil {
+	leg := s.httpLeg()
+	if leg == nil || leg.srv == nil {
 		return nil
 	}
-	return s.httpLeg.srv.Handler
+	return leg.srv.Handler
 }
 
 // HTTPSHandlerForTest returns the http.Handler the LIVE HTTPS leg is serving,
@@ -1402,10 +1565,11 @@ func (s *Server) HTTPHandlerForTest() http.Handler {
 func (s *Server) HTTPSHandlerForTest() http.Handler {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	if s.httpsLeg == nil || s.httpsLeg.srv == nil {
+	leg := s.httpsLeg()
+	if leg == nil || leg.srv == nil {
 		return nil
 	}
-	return s.httpsLeg.srv.Handler
+	return leg.srv.Handler
 }
 
 // HTTPSLegDrainedForTest reports whether the installed HTTPS leg has finished
@@ -1438,7 +1602,8 @@ func (s *Server) HTTPSHandlerForTest() http.Handler {
 func (s *Server) HTTPSLegDrainedForTest() bool {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	return s.httpsLeg != nil && s.httpsLeg.drained.Load()
+	leg := s.httpsLeg()
+	return leg != nil && leg.drained.Load()
 }
 
 // HTTPSCertForTest returns the served TLS leaf certificate, or nil when the
@@ -1449,9 +1614,9 @@ func (s *Server) HTTPSLegDrainedForTest() bool {
 func (s *Server) HTTPSCertForTest() *tls.Certificate {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	srv := s.httpsServer
-	if s.httpsLeg != nil {
-		srv = s.httpsLeg.srv
+	srv := s.httpsServer()
+	if leg := s.httpsLeg(); leg != nil {
+		srv = leg.srv
 	}
 	return s.managementTLSCertificateForServer(srv)
 }
@@ -1540,28 +1705,26 @@ func (s *Server) dynamicAuthMiddleware(metricsRequireAuth bool, slot *authSlot, 
 // states the two phases separately rather than collapsing them as this summary
 // once did. legDrainTimeout is also the knob a test can shorten.
 func (s *Server) serveBound(ctx context.Context, httpLn, httpsLn net.Listener) error {
-	// Both listeners are bound. Serve each in its own goroutine; a fatal
-	// Serve error is reported once on the buffered channel.
 	errCh := make(chan error, 2)
 	var wg sync.WaitGroup
+	hs := s.httpServer()
+	ss := s.httpsServer()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		slog.Info("HTTP API server listening", "addr", s.httpServer.Addr)
-		if err := s.httpServer.Serve(httpLn); err != http.ErrServerClosed {
+		slog.Info("HTTP API server listening", "addr", hs.Addr)
+		if err := hs.Serve(httpLn); err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()
 
-	if s.httpsServer != nil {
+	if ss != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			slog.Info("HTTPS API server listening", "addr", s.httpsServer.Addr)
-			// The TLS config selects the current validated in-memory pair on
-			// every handshake, so timer-driven remints take effect immediately.
-			if err := s.httpsServer.ServeTLS(httpsLn, "", ""); err != http.ErrServerClosed {
+			slog.Info("HTTPS API server listening", "addr", ss.Addr)
+			if err := ss.ServeTLS(httpsLn, "", ""); err != http.ErrServerClosed {
 				errCh <- err
 			}
 		}()
@@ -1573,23 +1736,15 @@ func (s *Server) serveBound(ctx context.Context, httpLn, httpsLn net.Listener) e
 	case <-ctx.Done():
 	}
 
-	// Drain BOTH servers regardless of which path woke us. Shutdown closes the
-	// listener and unblocks the matching Serve goroutine with
-	// http.ErrServerClosed; join both so no goroutine outlives Run. The
-	// Shutdown error is still what gets reported — a drain that had to sever is
-	// visible as a deadline error here, exactly as before.
 	var shutErr error
-	if s.httpsServer != nil {
-		shutErr = drainLeg(s.httpsServer)
+	if ss != nil {
+		shutErr = drainLeg(ss)
 	}
-	if err := drainLeg(s.httpServer); err != nil && shutErr == nil {
+	if err := drainLeg(hs); err != nil && shutErr == nil {
 		shutErr = err
 	}
 	wg.Wait()
 
-	// A serve error is the real cause of the exit; surface it ahead of any
-	// shutdown error (which, on the serve-error path, is usually just the
-	// already-stopped sibling).
 	if serveErr != nil {
 		return serveErr
 	}
@@ -2058,8 +2213,8 @@ func warnStaleHostName(leaf *x509.Certificate, hostName, bindHost string, ev hos
 func (s *Server) WarnStaleMgmtCertForHostName(hostName string) bool {
 	s.lifeMu.Lock()
 	var srv *http.Server
-	if s.httpsLeg.serving() {
-		srv = s.httpsLeg.srv
+	if leg := s.httpsLeg(); leg.serving() {
+		srv = leg.srv
 	}
 	s.lifeMu.Unlock()
 	if srv == nil || srv.TLSConfig == nil {

@@ -40,7 +40,7 @@ func webmgmtIfnameCfg(t *testing.T, httpsIface string) *config.Config {
 // handed verbatim to net.InterfaceByName (which only knows kernel names).
 //
 // FAIL-ON-REVERT: dropping the config.ResolveKernelIfName mapping in
-// resolveInterfaceAddr passes "ge-0/0/0.0" straight to the kernel lookup, which
+// resolveInterfaceAddrs passes "ge-0/0/0.0" straight to the kernel lookup, which
 // (via the mocked seam, and in reality) does not match "ge-0-0-0", so the bind
 // silently falls back to 127.0.0.1 and the address assertion below fires RED.
 func TestWebMgmtBindResolvesJunosIfnameToLinux_5714(t *testing.T) {

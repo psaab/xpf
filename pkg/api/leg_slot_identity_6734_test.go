@@ -82,7 +82,8 @@ func TestLegSlotIsTheSlotTheHandlerReads6734(t *testing.T) {
 		s := retireTestServer(t, &AuthConfig{Users: map[string]string{"admin": "boot"}})
 		s.lifeMu.Lock()
 		plan := s.planHTTPLeg("10.0.0.1:8080")
-		s.httpSlot, s.httpServer = plan.slot, plan.srv
+		s.setHTTPSlot0(plan.slot)
+		s.setHTTPServerTemplate(plan.srv)
 		ln, err := s.listen("tcp", "10.0.0.1:8080")
 		if err != nil {
 			s.lifeMu.Unlock()
@@ -90,8 +91,8 @@ func TestLegSlotIsTheSlotTheHandlerReads6734(t *testing.T) {
 		}
 		// Exactly what Start does: serve the server built at construction,
 		// re-pairing it with the slot written alongside it.
-		s.httpLeg = s.serveLegLocked(s.httpLegPlan(), ln, false)
-		leg := s.httpLeg
+		s.setHTTPLeg(s.serveLegLocked(s.httpLegPlan(), ln, false))
+		leg := s.httpLeg()
 		s.lifeMu.Unlock()
 		assertLegHonoursItsOwnSlot(t, s, leg, "Start (HTTP)")
 	})
@@ -101,11 +102,11 @@ func TestLegSlotIsTheSlotTheHandlerReads6734(t *testing.T) {
 		if err := s.ReconcileHTTP("10.0.0.2:8080"); err != nil {
 			t.Fatalf("ReconcileHTTP: %v", err)
 		}
-		assertLegHonoursItsOwnSlot(t, s, s.httpLeg, "ReconcileHTTP")
+		assertLegHonoursItsOwnSlot(t, s, s.httpLeg(), "ReconcileHTTP")
 	})
 
 	// The shape that broke the first draft of this change: a caller that sets
-	// s.httpsServer DIRECTLY, with no slot, and then calls Start. It is not
+	// s.httpsServer() DIRECTLY, with no slot, and then calls Start. It is not
 	// hypothetical — TestReconcileHTTPSReplacesADeadLeg_6827's fixture does it,
 	// and the first version of httpsLegPlan assumed the pair always had a
 	// single writer, so the leg got a nil slot and stopLegLocked nil-dereferenced
@@ -114,9 +115,9 @@ func TestLegSlotIsTheSlotTheHandlerReads6734(t *testing.T) {
 	t.Run("Start_https_with_no_preallocated_slot", func(t *testing.T) {
 		s := retireTestServer(t, &AuthConfig{Users: map[string]string{"admin": "boot"}})
 		s.lifeMu.Lock()
-		s.httpsServer = &http.Server{Addr: "10.0.0.4:8443"}
-		s.httpsServer.Handler = s.listenerHandler("10.0.0.4:8443", s.httpsLegPlan().slot)
-		if s.httpsSlot == nil {
+		s.setHTTPSServerTemplate(&http.Server{Addr: "10.0.0.4:8443"})
+		s.httpsServer().Handler = s.listenerHandler("10.0.0.4:8443", s.httpsLegPlan().slot)
+		if s.httpsSlot0() == nil {
 			s.lifeMu.Unlock()
 			t.Fatal("httpsLegPlan must adopt and STORE a slot when the field is nil; " +
 				"without the store-back the leg and the field are different objects " +
@@ -127,8 +128,8 @@ func TestLegSlotIsTheSlotTheHandlerReads6734(t *testing.T) {
 			s.lifeMu.Unlock()
 			t.Fatalf("listen: %v", err)
 		}
-		s.httpsLeg = s.serveLegLocked(s.httpsLegPlan(), ln, true)
-		leg := s.httpsLeg
+		s.setHTTPSLeg(s.serveLegLocked(s.httpsLegPlan(), ln, true))
+		leg := s.httpsLeg()
 		s.lifeMu.Unlock()
 		assertLegHonoursItsOwnSlot(t, s, leg, "Start (HTTPS, adopted slot)")
 	})
@@ -139,7 +140,7 @@ func TestLegSlotIsTheSlotTheHandlerReads6734(t *testing.T) {
 		if err := s.ReconcileHTTPS(true, "10.0.0.3:8443"); err != nil {
 			t.Fatalf("ReconcileHTTPS: %v", err)
 		}
-		assertLegHonoursItsOwnSlot(t, s, s.httpsLeg, "ReconcileHTTPS")
+		assertLegHonoursItsOwnSlot(t, s, s.httpsLeg(), "ReconcileHTTPS")
 	})
 }
 
@@ -170,7 +171,7 @@ func TestServeLegCannotBeHandedAMismatchedSlot6734(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	leg := s.serveLegLocked(plan, ln, false)
-	s.httpLeg = leg
+	s.setHTTPLeg(leg)
 	s.lifeMu.Unlock()
 
 	if leg.slot != plan.slot {

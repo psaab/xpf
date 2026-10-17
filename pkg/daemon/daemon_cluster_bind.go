@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
 	"golang.org/x/sys/unix"
@@ -17,7 +18,7 @@ func isInteractive() bool {
 
 // interfaceAddrsByName resolves a LINUX-kernel interface name to its addresses.
 // It is a package var so the web-management bind resolution
-// (resolveInterfaceAddr) is unit-testable without a real kernel interface.
+// (resolveInterfaceAddrs) is unit-testable without a real kernel interface.
 var interfaceAddrsByName = func(kernelName string) ([]net.Addr, error) {
 	iface, err := net.InterfaceByName(kernelName)
 	if err != nil {
@@ -26,9 +27,13 @@ var interfaceAddrsByName = func(kernelName string) ([]net.Addr, error) {
 	return iface.Addrs()
 }
 
-// resolveInterfaceAddr returns the first IPv4 (then IPv6) address on the
-// interface identified by the AUTHORED Junos ref (e.g. "ge-0/0/0.0"). If the
-// interface cannot be resolved or has no usable address it returns fallback.
+// resolveInterfaceAddrs returns one bind host per address family present on
+// the interface identified by the AUTHORED Junos ref (e.g. "ge-0/0/0.0"): the
+// first usable IPv4 address and the first usable IPv6 address, IPv4 first.
+// It is the #14583 (Y07-02) successor of resolveInterfaceAddr, which returned
+// a SINGLE IPv4-first address — a dual-stack web-management interface silently
+// had no IPv6 management listener at all, though host-inbound admits
+// http/https for both families and IPv6 is first-class.
 //
 // #5714: the ref is first mapped to its Linux kernel ifname via
 // config.ResolveKernelIfName (the same Junos->Linux mapping networkd/linksetup
@@ -37,10 +42,17 @@ var interfaceAddrsByName = func(kernelName string) ([]net.Addr, error) {
 // authored name verbatim never matched and the bind SILENTLY fell back to
 // loopback, leaving web-management unreachable on the configured interface while
 // the operator believed it was bound there. On any resolution/lookup failure
-// this now logs LOUDLY at ERROR (the bind did NOT land on the configured
-// interface) and returns fallback, so the mgmt API still serves on loopback
-// rather than not at all — a hard error here would strand a mgmt interface that
-// is merely not up yet at daemon start.
+// this logs LOUDLY at ERROR (the bind did NOT land on the configured
+// interface) and returns []string{fallback}, so the mgmt API still serves on
+// loopback rather than not at all — a hard error here would strand a mgmt
+// interface that is merely not up yet at daemon start.
+//
+// IPv6 selection (#14583): a global address is preferred; a link-local
+// address is used only when no global address exists, and then WITH its zone
+// (the kernel interface name) attached — a bare link-local bind
+// ("[fe80::…]:443") fails EINVAL because the kernel cannot pick an interface,
+// while the zoned form binds. An address that already carries a zone keeps
+// that zone.
 func resolveInterfaceAddr(cfg *config.Config, ifname, fallback string) string {
 	addr, _ := resolveInterfaceAddrDegraded(cfg, ifname, fallback)
 	return addr
@@ -55,43 +67,125 @@ func resolveInterfaceAddr(cfg *config.Config, ifname, fallback string) string {
 // interface and must not report Listening there: the socket (if any) is on
 // loopback while the operator asked for a routable interface address.
 func resolveInterfaceAddrDegraded(cfg *config.Config, ifname, fallback string) (addr string, degraded bool) {
+	addrs, degraded := resolveInterfaceAddrsDegraded(cfg, ifname, fallback)
+	if len(addrs) == 0 {
+		return fallback, true
+	}
+	return addrs[0], degraded
+}
+
+func resolveInterfaceAddrs(cfg *config.Config, ifname, fallback string) []string {
+	addrs, _ := resolveInterfaceAddrsDegraded(cfg, ifname, fallback)
+	return addrs
+}
+
+// resolveInterfaceAddrsDegraded is the #14583 multi-address resolver with the
+// #14582 degraded signal: degraded=true exactly when the returned set is the
+// loopback fallback because resolution/lookup failed or no usable address
+// exists.
+func resolveInterfaceAddrsDegraded(cfg *config.Config, ifname, fallback string) (addrs []string, degraded bool) {
 	kernelName := ifname
 	if cfg != nil {
 		kernelName = cfg.ResolveKernelIfName(ifname)
 	}
-	addrs, err := interfaceAddrsByName(kernelName)
+	ifaceAddrs, err := interfaceAddrsByName(kernelName)
 	if err != nil {
 		slog.Error("web-management interface not found; NOT bound to configured interface, using loopback fallback",
 			"interface", ifname, "kernel", kernelName, "fallback", fallback, "err", err)
-		return fallback, true
+		return []string{fallback}, true
 	}
-	if len(addrs) == 0 {
-		slog.Error("web-management interface has no addresses; NOT bound to configured interface, using loopback fallback",
+	hosts := selectInterfaceBindHosts(ifaceAddrs, kernelName)
+	if len(hosts) == 0 {
+		slog.Error("web-management interface has no usable addresses; NOT bound to configured interface, using loopback fallback",
 			"interface", ifname, "kernel", kernelName, "fallback", fallback)
-		return fallback, true
+		return []string{fallback}, true
 	}
+	return hosts, false
+}
+
+// selectInterfaceBindHosts picks the bind hosts for one interface's address
+// list: first usable IPv4, plus first global IPv6 — or, when the interface
+// has no global IPv6, its first link-local IPv6 WITH zone attached (the
+// kernel name, unless the address already carries a zone). Unspecified
+// addresses are skipped (they are not interface addresses to bind by name).
+// Returns nil when nothing is usable.
+func selectInterfaceBindHosts(addrs []net.Addr, zone string) []string {
+	var v4, v6Global, v6LinkLocal string
 	for _, a := range addrs {
 		ipNet, ok := a.(*net.IPNet)
-		if !ok {
+		if !ok || ipNet.IP == nil || ipNet.IP.IsUnspecified() {
 			continue
 		}
 		if ip4 := ipNet.IP.To4(); ip4 != nil {
-			return ip4.String(), false
-		}
-	}
-	// No IPv4, try IPv6
-	for _, a := range addrs {
-		ipNet, ok := a.(*net.IPNet)
-		if !ok {
+			if v4 == "" {
+				v4 = ip4.String()
+			}
 			continue
 		}
-		if ipNet.IP.To4() == nil {
-			return ipNet.IP.String(), false
+		// net.IPNet carries no Zone field; a zoned address renders it in
+		// String() ("fe80::1%eth0"). ipNet.IP.String() strips it, so take the
+		// rendered form and drop any "/mask" suffix.
+		host := ipNet.String()
+		if i := strings.IndexByte(host, '/'); i >= 0 {
+			host = host[:i]
+		}
+		if !strings.Contains(host, "%") && ipNet.IP.IsLinkLocalUnicast() && zone != "" {
+			host += "%" + zone
+		}
+		if ipNet.IP.IsLinkLocalUnicast() {
+			if v6LinkLocal == "" {
+				v6LinkLocal = host
+			}
+			continue
+		}
+		if v6Global == "" {
+			v6Global = host
 		}
 	}
-	slog.Error("web-management interface has no usable addresses; NOT bound to configured interface, using loopback fallback",
-		"interface", ifname, "kernel", kernelName, "fallback", fallback)
-	return fallback, true
+	v6 := v6Global
+	if v6 == "" {
+		v6 = v6LinkLocal
+	}
+	var out []string
+	if v4 != "" {
+		out = append(out, v4)
+	}
+	if v6 != "" {
+		out = append(out, v6)
+	}
+	return out
+}
+
+// joinBindAddrs renders one "host:port" bind per host (net.JoinHostPort, so
+// an IPv6 host — zoned or not — is bracketed).
+func joinBindAddrs(hosts []string, port string) []string {
+	out := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		out = append(out, net.JoinHostPort(h, port))
+	}
+	return out
+}
+
+// clampBindsToLoopback applies clampBindToLoopback to every bind in the set
+// (#14583: a dual-stack leg set clamps per family — the IPv4 entry to
+// 127.0.0.1, the IPv6 entry to ::1). The effective set is multi when present,
+// else the single mirror. Each clamped entry warns once.
+func clampBindsToLoopback(multi []string, single string, hasAuth bool, kind string) []string {
+	addrs := multi
+	if len(addrs) == 0 && single != "" {
+		addrs = []string{single}
+	}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		if clamped, ok := clampBindToLoopback(a, hasAuth); ok {
+			slog.Warn(kind+" API bind is non-loopback without api-auth; clamping to loopback (add `set system services web-management api-auth` to bind off-loopback) — #4047/#5127",
+				"requested", a, "clamped", clamped)
+			out = append(out, clamped)
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // hostIsLoopback reports whether a bind host string is a loopback address.

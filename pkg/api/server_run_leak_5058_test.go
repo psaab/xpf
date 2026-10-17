@@ -83,7 +83,7 @@ func TestRunClosesSurvivingListenerOnBindFailure(t *testing.T) {
 		HTTPSAddr: httpsAddr,
 		TLS:       true,
 	})
-	if srv.httpsServer == nil {
+	if srv.httpsServer() == nil {
 		t.Fatal("expected httpsServer to be configured (TLS + HTTPSAddr)")
 	}
 
@@ -129,7 +129,7 @@ func TestRunGracefulShutdownClosesBothListeners(t *testing.T) {
 		HTTPSAddr: httpsAddr,
 		TLS:       true,
 	})
-	if srv.httpsServer == nil {
+	if srv.httpsServer() == nil {
 		t.Fatal("expected httpsServer to be configured (TLS + HTTPSAddr)")
 	}
 

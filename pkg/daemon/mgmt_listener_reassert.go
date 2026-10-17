@@ -118,10 +118,10 @@ func (d *Daemon) mgmtBindStaleLegs() (httpStale, httpsStale, ok bool) {
 		return false, false, false
 	}
 	if cur.tls && want.tls {
-		httpsStale = want.httpsDegraded || cur.httpsDegraded || cur.httpsAddr != want.httpsAddr
+		httpsStale = want.httpsDegraded || cur.httpsDegraded || !mgmtAddrsEqual(cur.httpsBindAddrs(), want.httpsBindAddrs())
 	}
-	if cur.addr != "" && want.addr != "" {
-		httpStale = want.httpDegraded || cur.httpDegraded || cur.addr != want.addr
+	if len(cur.httpAddrs()) > 0 && len(want.httpAddrs()) > 0 {
+		httpStale = want.httpDegraded || cur.httpDegraded || !mgmtAddrsEqual(cur.httpAddrs(), want.httpAddrs())
 	}
 	return httpStale, httpsStale, true
 }
@@ -144,6 +144,68 @@ func (d *Daemon) mgmtBindStale() bool {
 	return ok && (h || s)
 }
 
+// mgmtBindStaleAddrs returns the currently resolved bind set for one plane
+// (https=false → HTTP) when that plane is stale (#14582/#14583), else nil.
+// Daemon.effectiveListeners uses it to promote only the Listening plural
+// rows whose bound address is no longer in the resolved set (or when the
+// plane is degraded) to StateStale, leaving a still-valid family row
+// Listening on a dual-stack plane.
+func (d *Daemon) mgmtBindStaleAddrs(https bool) []string {
+	mgmt := d.mgmt.Load()
+	if mgmt == nil || d.store == nil {
+		return nil
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil {
+		return nil
+	}
+	want := endpointOf(mgmt.committedDesired(cfg))
+	mgmt.mu.Lock()
+	cur, curSet := mgmt.cur, mgmt.curSet
+	mgmt.mu.Unlock()
+	if !curSet {
+		return nil
+	}
+	if https {
+		if !cur.tls || !want.tls {
+			return nil
+		}
+		if want.httpsDegraded || cur.httpsDegraded || !mgmtAddrsEqual(cur.httpsBindAddrs(), want.httpsBindAddrs()) {
+			return want.httpsBindAddrs()
+		}
+		return nil
+	}
+	if len(cur.httpAddrs()) == 0 || len(want.httpAddrs()) == 0 {
+		return nil
+	}
+	if want.httpDegraded || cur.httpDegraded || !mgmtAddrsEqual(cur.httpAddrs(), want.httpAddrs()) {
+		return want.httpAddrs()
+	}
+	return nil
+}
+
+// promoteStaleMgmtRows promotes Listening rows to StateStale when the plane
+// is stale: a row stays Listening only if its bound address is still in the
+// currently resolved set want. want==nil means not stale (no promotion).
+// When want is non-nil but empty the plane resolved to nothing, so every
+// Listening row is stale.
+func promoteStaleMgmtRows(rows []sysservices.Listener, want []string) []sysservices.Listener {
+	if want == nil || len(rows) == 0 {
+		return rows
+	}
+	out := make([]sysservices.Listener, len(rows))
+	copy(out, rows)
+	for i, r := range out {
+		if r.State != sysservices.StateListening {
+			continue
+		}
+		if !addrInSet(r.Addr, want) {
+			out[i].State = sysservices.StateStale
+		}
+	}
+	return out
+}
+
 // mgmtListenerDown reports whether a management listener the configuration asked
 // for is not currently serving AT THE ADDRESS IT CURRENTLY RESOLVES TO.
 //
@@ -161,13 +223,24 @@ func (d *Daemon) mgmtListenerDown() bool {
 	if mgmt == nil {
 		return false
 	}
-	// #8597 K86: ask BOTH legs. This asked only HTTP, so an HTTPS leg that died
-	// to an unexpected serve exit was never re-driven by this always-on owner —
-	// the repair waited for the operator's next commit, which is the one event a
-	// broken management plane makes hard to deliver. The commit path already
-	// asked the right question (`next.TLS && !m.srv.HTTPSServing()`); this is
-	// that question asked by the loop whose entire job is to notice.
+	// #8597 K86 + #14583: ask EVERY configured leg, plus the daemon-level
+	// stale view (#14582). A single dead family of a dual-stack plane must
+	// re-drive the reconcile even while its sibling serves — the singular
+	// rows alone would report the first leg Listening and hide it. The
+	// daemon snapshot (effectiveListeners) folds per-row staleness into the
+	// plural rows and Failed||Stale into the singular rows, so either view
+	// seeing Failed/Stale re-drives.
 	ls := d.effectiveListeners()
+	for _, l := range ls.HTTPs {
+		if l.State == sysservices.StateFailed || l.State == sysservices.StateStale {
+			return true
+		}
+	}
+	for _, l := range ls.HTTPSs {
+		if l.State == sysservices.StateFailed || l.State == sysservices.StateStale {
+			return true
+		}
+	}
 	if ls.HTTP.State == sysservices.StateFailed || ls.HTTP.State == sysservices.StateStale {
 		return true
 	}

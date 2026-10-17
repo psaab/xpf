@@ -195,15 +195,15 @@ func TestRetiredLegNeverGainsARotatedCredential_5561(t *testing.T) {
 
 	// Boot the first leg at some address, then rebind (which retires it).
 	s.lifeMu.Lock()
-	s.httpSlot = s.newAuthSlot()
-	s.httpServer = s.buildHTTPServer("10.0.0.1:8080", s.httpSlot)
+	s.setHTTPSlot0(s.newAuthSlot())
+	s.setHTTPServerTemplate(s.buildHTTPServer("10.0.0.1:8080", s.httpSlot0()))
 	ln, err := s.listen("tcp", "10.0.0.1:8080")
 	if err != nil {
 		s.lifeMu.Unlock()
 		t.Fatalf("listen: %v", err)
 	}
-	s.httpLeg = s.serveLegLocked(s.httpLegPlan(), ln, false)
-	retired := s.httpLeg
+	s.setHTTPLeg(s.serveLegLocked(s.httpLegPlan(), ln, false))
+	retired := s.httpLeg()
 	s.lifeMu.Unlock()
 
 	if !legProbe(t, retired, "admin", "secret-a") {
@@ -222,7 +222,7 @@ func TestRetiredLegNeverGainsARotatedCredential_5561(t *testing.T) {
 	if err := s.ReconcileHTTP("10.0.0.2:8080"); err != nil {
 		t.Fatalf("ReconcileHTTP: %v", err)
 	}
-	live := s.httpLeg
+	live := s.httpLeg()
 	if live == retired {
 		t.Fatal("the rebind did not create a new leg, so nothing was retired")
 	}
@@ -281,21 +281,21 @@ func TestRetiredLegIsNeverDroppedToNoAuth_5561(t *testing.T) {
 	s := retireTestServer(t, &AuthConfig{Users: map[string]string{"admin": "secret"}})
 
 	s.lifeMu.Lock()
-	s.httpSlot = s.newAuthSlot()
-	s.httpServer = s.buildHTTPServer("10.0.0.1:8080", s.httpSlot)
+	s.setHTTPSlot0(s.newAuthSlot())
+	s.setHTTPServerTemplate(s.buildHTTPServer("10.0.0.1:8080", s.httpSlot0()))
 	ln, err := s.listen("tcp", "10.0.0.1:8080")
 	if err != nil {
 		s.lifeMu.Unlock()
 		t.Fatalf("listen: %v", err)
 	}
-	s.httpLeg = s.serveLegLocked(s.httpLegPlan(), ln, false)
-	retired := s.httpLeg
+	s.setHTTPLeg(s.serveLegLocked(s.httpLegPlan(), ln, false))
+	retired := s.httpLeg()
 	s.lifeMu.Unlock()
 
 	if err := s.ReconcileHTTP("127.0.0.1:8080"); err != nil {
 		t.Fatalf("ReconcileHTTP: %v", err)
 	}
-	live := s.httpLeg
+	live := s.httpLeg()
 
 	// The nil publishes once every LIVE leg is loopback — which is true here.
 	s.ReplaceAuth(nil)
@@ -329,15 +329,15 @@ func TestLiveLegFollowsTheServerSnapshot_5561(t *testing.T) {
 	s := retireTestServer(t, &AuthConfig{Users: map[string]string{"admin": "secret-a"}})
 
 	s.lifeMu.Lock()
-	s.httpSlot = s.newAuthSlot()
-	s.httpServer = s.buildHTTPServer("10.0.0.1:8080", s.httpSlot)
+	s.setHTTPSlot0(s.newAuthSlot())
+	s.setHTTPServerTemplate(s.buildHTTPServer("10.0.0.1:8080", s.httpSlot0()))
 	ln, err := s.listen("tcp", "10.0.0.1:8080")
 	if err != nil {
 		s.lifeMu.Unlock()
 		t.Fatalf("listen: %v", err)
 	}
-	s.httpLeg = s.serveLegLocked(s.httpLegPlan(), ln, false)
-	live := s.httpLeg
+	s.setHTTPLeg(s.serveLegLocked(s.httpLegPlan(), ln, false))
+	live := s.httpLeg()
 	s.lifeMu.Unlock()
 
 	s.ReplaceAuth(&AuthConfig{Users: map[string]string{"admin": "secret-b"}})
