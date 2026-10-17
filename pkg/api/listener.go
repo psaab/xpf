@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -12,11 +13,14 @@ import (
 )
 
 // listenerLeg is one independently-managed listening socket + its serve
-// goroutine (#5866). The HTTP and HTTPS listeners each run in their own leg so a
-// day-2 change to one (TLS enable/disable, an HTTPS-bind change, or an HTTP-bind
-// change) rebinds ONLY that leg — the sibling keeps serving without a bounce and
-// without the EADDRINUSE that a whole-server rebuild hit when the two legs
-// shared no socket but the rebuild still re-bound the unchanged one.
+// goroutine (#5866). The HTTP and HTTPS planes each run as a SET of legs — one
+// per bind address (#14583: a dual-stack web-management interface binds one
+// listener per family) — so a day-2 change to one leg (TLS enable/disable, a
+// bind change on one family) rebinds ONLY that leg: siblings keep serving
+// without a bounce and without the EADDRINUSE that a whole-server rebuild hit
+// when the legs shared no socket but the rebuild still re-bound the unchanged
+// one. Leg sets are positional: slot i serves the i-th configured address; a
+// nil hole is a slot whose bind has not yet succeeded (retained for retry).
 type listenerLeg struct {
 	srv      *http.Server
 	ln       net.Listener
@@ -429,23 +433,47 @@ func (s *Server) Start(ctx context.Context) error {
 	defer s.lifeMu.Unlock()
 	s.rootCtx = ctx
 
-	if s.httpServer != nil {
-		ln, err := s.listen("tcp", s.httpServer.Addr)
-		if err != nil {
-			return fmt.Errorf("api: bind HTTP listener %q: %w", s.httpServer.Addr, err)
+	// HTTP is the primary plane (#14583: one leg per bind address). A bind
+	// failure on the FIRST address fails Start with nothing serving (its
+	// pre-#14583 contract); a failure on a LATER address is logged and that
+	// leg is left unbound so the reconciler's serving check retries it,
+	// leaving the families that did bind serving.
+	if len(s.httpServers) > 0 {
+		legs := make([]*listenerLeg, 0, len(s.httpServers))
+		for i, srv := range s.httpServers {
+			ln, err := s.listen("tcp", srv.Addr)
+			if err != nil {
+				if i == 0 {
+					return fmt.Errorf("api: bind HTTP listener %q: %w", srv.Addr, err)
+				}
+				slog.Error("api: HTTP listener bind failed at start; leg disabled until the next reconcile",
+					"addr", srv.Addr, "err", err)
+				legs = append(legs, nil)
+				continue
+			}
+			legs = append(legs, s.serveLegLocked(s.httpLegPlanAt(i), ln, false))
+			slog.Info("HTTP API server listening", "addr", srv.Addr)
 		}
-		s.httpLeg = s.serveLegLocked(s.httpLegPlan(), ln, false)
-		slog.Info("HTTP API server listening", "addr", s.httpServer.Addr)
+		s.httpLegs = legs
+	} else {
+		s.httpLegs = nil
 	}
-	if s.httpsServer != nil {
-		ln, err := s.listen("tcp", s.httpsServer.Addr)
-		if err != nil {
-			slog.Error("api: HTTPS listener bind failed at start; HTTPS disabled until the next reconcile",
-				"addr", s.httpsServer.Addr, "err", err)
-		} else {
-			s.httpsLeg = s.serveLegLocked(s.httpsLegPlan(), ln, true)
-			slog.Info("HTTPS API server listening", "addr", s.httpsServer.Addr)
+	if len(s.httpsServers) > 0 {
+		legs := make([]*listenerLeg, 0, len(s.httpsServers))
+		for i, srv := range s.httpsServers {
+			ln, err := s.listen("tcp", srv.Addr)
+			if err != nil {
+				slog.Error("api: HTTPS listener bind failed at start; HTTPS disabled until the next reconcile",
+					"addr", srv.Addr, "err", err)
+				legs = append(legs, nil)
+				continue
+			}
+			legs = append(legs, s.serveLegLocked(s.httpsLegPlanAt(i), ln, true))
+			slog.Info("HTTPS API server listening", "addr", srv.Addr)
 		}
+		s.httpsLegs = legs
+	} else {
+		s.httpsLegs = nil
 	}
 	s.startManagementTLSCertificateMonitor(ctx)
 	return nil
@@ -476,65 +504,86 @@ func (s *Server) Wait() {
 func (s *Server) EffectiveHTTPAddr() string {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	// httpLeg / ln are swapped only under lifeMu, so read them here; dead is
-	// atomic (set without lifeMu by the serve goroutine to avoid a shutdown
-	// lock-ordering deadlock — see listenerLeg.dead).
-	if s.httpLeg == nil || s.httpLeg.ln == nil || s.httpLeg.dead.Load() {
-		return ""
+	for _, leg := range s.httpLegs {
+		if leg == nil || leg.ln == nil || leg.dead.Load() {
+			continue
+		}
+		return leg.ln.Addr().String()
 	}
-	return s.httpLeg.ln.Addr().String()
+	return ""
 }
 
-// HTTPSServing reports whether an HTTPS leg is bound and serving right now
-// (#5561 round 14 / #6827 round 5 — both rounds arrived at this predicate
-// independently, for the same reason). Start() deliberately returns SUCCESS when
-// the HTTPS bind fails — HTTPS is best-effort at boot so a failure leaves the
-// HTTP plane up — which means a caller cannot infer from Start's error that
-// HTTPS came up. The management reconciler that records a converged HTTPS
-// fingerprint on that assumption pins itself to a listener that does not exist,
-// so the leg-changed test is false on every subsequent unchanged commit and
-// ReconcileHTTPS is never called again: the boot failure is permanent and
-// silent.
-//
-// The answer is listenerLeg.serving(), not `!= nil && !dead`: a leg that is
-// draining is not carrying traffic either, and a caller asking "did the bind
-// land?" must not be told yes by a leg on its way out.
-// EffectiveHTTPSAddr is the HTTPS counterpart of EffectiveHTTPAddr (#8597 K86).
-// It returns the ACTUAL bound HTTPS address, or "" when no HTTPS leg is bound
-// or the leg is dead — the same three-way read EffectiveHTTPAddr performs, for
-// the same reason: the reconciler's converged fingerprint records what the last
-// successful reconcile bound, which is not evidence the socket is still up.
-//
-// It exists because the management status surface reported the HTTP leg only,
-// so an HTTPS leg that died to an unexpected serve exit read as healthy
-// everywhere while serving nothing.
+// EffectiveHTTPAddrs returns the actual bound address of every live HTTP leg
+// (#14583), in bind order.
+func (s *Server) EffectiveHTTPAddrs() []string {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	var out []string
+	for _, leg := range s.httpLegs {
+		if leg == nil || leg.ln == nil || leg.dead.Load() {
+			continue
+		}
+		out = append(out, leg.ln.Addr().String())
+	}
+	return out
+}
+
+// EffectiveHTTPSAddrs returns the actual bound address of every serving HTTPS
+// leg (#14583), in bind order.
+func (s *Server) EffectiveHTTPSAddrs() []string {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	var out []string
+	for _, leg := range s.httpsLegs {
+		if leg.serving() {
+			out = append(out, leg.ln.Addr().String())
+		}
+	}
+	return out
+}
+
 func (s *Server) EffectiveHTTPSAddr() string {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	if !s.httpsLeg.serving() {
-		return ""
+	for _, leg := range s.httpsLegs {
+		if leg.serving() {
+			return leg.ln.Addr().String()
+		}
 	}
-	return s.httpsLeg.ln.Addr().String()
+	return ""
 }
 
+// HTTPSServing reports whether EVERY configured HTTPS leg is serving
+// (#14583: a dual-stack leg set with one family down is not serving — the
+// daemon fingerprint must not record it converged). With no HTTPS legs it
+// is false.
 func (s *Server) HTTPSServing() bool {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	return s.httpsLeg.serving()
+	return legsAllServing(s.httpsLegs, len(s.httpsServers))
 }
 
-// HTTPServing reports whether the HTTP leg is bound and still serving. It is the
-// exact counterpart of HTTPSServing and exists for the same reason (#6803): the
-// reconciler's converged-fingerprint records what the last SUCCESSFUL reconcile
-// bound, which is not evidence that the socket is still up. An unexpected serve
-// exit marks the leg dead and leaves it INSTALLED (listenerLeg.dead — it cannot
-// be removed under lifeMu without deadlocking a shutdown that races the exit),
-// so a fingerprint-only gate matches on every later commit and never rebinds.
-// #6827 round 6 gave HTTPS this question; the HTTP leg never got it.
+// HTTPServing reports whether EVERY configured HTTP leg is serving (#14583,
+// same all-legs rule as HTTPSServing).
 func (s *Server) HTTPServing() bool {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	return s.httpLeg.serving()
+	return legsAllServing(s.httpLegs, len(s.httpServers))
+}
+
+// legsAllServing reports whether want legs exist and every one is serving.
+// want is the configured leg count (len of the construction templates); legs
+// may hold nil holes for binds that failed at Start.
+func legsAllServing(legs []*listenerLeg, want int) bool {
+	if want == 0 || len(legs) < want {
+		return false
+	}
+	for i := range want {
+		if !legs[i].serving() {
+			return false
+		}
+	}
+	return true
 }
 
 // ReconcileHTTP make-before-break rebinds ONLY the HTTP listener to addr (#5866),
@@ -542,91 +591,142 @@ func (s *Server) HTTPServing() bool {
 // live leg. A same-addr call is a no-op. Bind failure retains the previous
 // listener (fail-closed) and returns the error so the caller records retry debt.
 func (s *Server) ReconcileHTTP(addr string) error {
+	return s.ReconcileHTTPAddrs(effectiveAddrs(nil, addr))
+}
+
+// ReconcileHTTPAddrs is the multi-address form of ReconcileHTTP (#14583): it
+// make-before-break reconciles the HTTP leg SET to addrs. An empty set
+// disables HTTP. Each address is reconciled independently: an address whose
+// leg is already serving there is a no-op; a changed address binds its new
+// leg before the old leg at that slot retires; legs beyond the desired count
+// retire. A bind failure on one address retains that slot's previous leg,
+// still converges the others, and returns the joined error (retry debt).
+func (s *Server) ReconcileHTTPAddrs(addrs []string) error {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
-	if addr == "" {
-		old := s.httpLeg
-		s.httpLeg = nil
-		s.stopLegLocked(old)
+	return s.reconcileLegsLocked(addrs, false)
+}
+
+// ReconcileHTTPS is the single-address HTTPS reconcile; see ReconcileHTTPSAddrs.
+func (s *Server) ReconcileHTTPS(useTLS bool, addr string) error {
+	var addrs []string
+	if useTLS {
+		addrs = effectiveAddrs(nil, addr)
+	}
+	return s.ReconcileHTTPSAddrs(useTLS, addrs)
+}
+
+// ReconcileHTTPSAddrs is the multi-address form of ReconcileHTTPS (#14583):
+// useTLS=false or an empty set disables HTTPS. Per address it binds BEFORE it
+// builds the leg's server (#7041), so a cert failure closes the just-bound
+// socket instead of manufacturing an EADDRINUSE retry loop. A failure on one
+// address retains that slot's previous leg and still converges the others.
+func (s *Server) ReconcileHTTPSAddrs(useTLS bool, addrs []string) error {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	s.tlsDesired.Store(useTLS && len(addrs) > 0)
+	if !useTLS {
+		addrs = nil
+	}
+	return s.reconcileLegsLocked(addrs, true)
+}
+
+// reconcileLegsLocked drives one leg set (HTTP or HTTPS) to addrs. Caller
+// holds lifeMu. Slots are positional: slot i serves addrs[i]; a nil hole is a
+// slot whose bind has not yet succeeded. Changed slots bind their replacement
+// before the old leg retires (make-before-break); surplus slots retire.
+func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
+	legs := s.httpLegs
+	if isTLS {
+		legs = s.httpsLegs
+	}
+	setLegs := func(next []*listenerLeg) {
+		if isTLS {
+			s.httpsLegs = next
+		} else {
+			s.httpLegs = next
+		}
+	}
+	if len(addrs) == 0 {
+		for _, leg := range legs {
+			s.stopLegLocked(leg)
+		}
+		setLegs(nil)
+		if isTLS {
+			s.httpsServers = nil
+			s.httpsSlots = nil
+		} else {
+			s.httpServers = nil
+			s.httpSlots = nil
+		}
 		return nil
 	}
-	// The same-address short circuit requires the leg to still be SERVING, the
-	// way ReconcileHTTPS's does (#6803). Without the serving() half, a leg whose
-	// serve loop exited unexpectedly — dead, but still installed — satisfied the
-	// address compare, so a rebind to the same endpoint returned nil having done
-	// nothing and the management API stayed down until a daemon restart.
-	if s.httpLeg.serving() && s.httpLeg.srv.Addr == addr {
-		return nil
+	next := make([]*listenerLeg, len(addrs))
+	var errs []error
+	for i, addr := range addrs {
+		var cur *listenerLeg
+		if i < len(legs) {
+			cur = legs[i]
+		}
+		// The same-address short circuit requires the leg to still be
+		// SERVING (#6803/#6827): a dead-but-installed leg must be replaced.
+		if cur.serving() && cur.srv.Addr == addr {
+			next[i] = cur
+			continue
+		}
+		ln, err := s.listen("tcp", addr)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("api: bind %s listener %q: %w", legKind(isTLS), addr, err))
+			next[i] = cur // retain the previous leg (fail-closed)
+			continue
+		}
+		var plan legPlan
+		if isTLS {
+			plan, err = s.planHTTPSLeg(addr)
+		} else {
+			plan = s.planHTTPLeg(addr)
+		}
+		if err != nil {
+			// #7041: close the just-bound socket or every retry EADDRINUSEs.
+			ln.Close()
+			errs = append(errs, fmt.Errorf("api: generate HTTPS certificate for %q: %w", addr, err))
+			next[i] = cur
+			continue
+		}
+		next[i] = s.serveLegLocked(plan, ln, isTLS)
+		s.stopLegLocked(cur)
 	}
-	plan := s.planHTTPLeg(addr)
-	ln, err := s.listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("api: bind HTTP listener %q: %w", addr, err)
+	// Retire surplus legs beyond the desired count.
+	if len(legs) > len(addrs) {
+		for _, leg := range legs[len(addrs):] {
+			s.stopLegLocked(leg)
+		}
 	}
-	old := s.httpLeg
-	s.httpLeg = s.serveLegLocked(plan, ln, false)
-	s.stopLegLocked(old) // retire the previous HTTP listener only after the new one is serving
+	setLegs(next)
+	// Keep the construction templates in step with the live set so Start-shaped
+	// readers (Run/serveBound, cert-for-test) see the current first leg.
+	servers := make([]*http.Server, len(next))
+	slots := make([]*authSlot, len(next))
+	for i, leg := range next {
+		if leg != nil {
+			servers[i] = leg.srv
+			slots[i] = leg.slot
+		}
+	}
+	if isTLS {
+		s.httpsServers, s.httpsSlots = servers, slots
+	} else {
+		s.httpServers, s.httpSlots = servers, slots
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
 	return nil
 }
 
-// ReconcileHTTPS enables, disables, or make-before-break rebinds ONLY the HTTPS
-// listener (#5866), leaving the live HTTP listener untouched — this is the fix
-// for the whole-server rebuild that re-bound the still-held HTTP socket on a
-// TLS-enable (EADDRINUSE). useTLS=false or addr=="" disables HTTPS. A same-addr
-// call over a leg that is actually SERVING is a no-op. On enable/rebind the new
-// listener with a validated current certificate is bound and serving BEFORE any
-// old one is retired. A cert or bind failure retains the previous HTTPS state
-// (fail-closed) and returns the error for retry debt.
-//
-// The default arm BINDS BEFORE IT BUILDS (#7041) — see the comment on that arm
-// for why, and for the two consequences it carries (the listener is closed if
-// the build then fails; the bind error wins when both fail).
-//
-// The same-addr no-op tests listenerLeg.serving(), NOT a non-nil pointer
-// (#6827 round 6). An unexpected serve exit marks the leg `dead` and leaves it
-// INSTALLED in s.httpsLeg, so a pointer test called that address converged and
-// returned nil — a same-address reconcile could never resurrect HTTPS, and
-// neither could any other commit, because the reconciler above it never even
-// reached this call (its own converged fingerprint still matched). The dead leg
-// was a permanent, restart-only dead end on an UNCHANGED configuration. Asking
-// whether a socket is really carrying traffic makes the rebind the recovery
-// path it was always documented to be.
-func (s *Server) ReconcileHTTPS(useTLS bool, addr string) error {
-	s.lifeMu.Lock()
-	defer s.lifeMu.Unlock()
-	want := useTLS && addr != ""
-	s.tlsDesired.Store(want)
-	switch {
-	case !want:
-		if s.httpsLeg != nil {
-			s.stopLegLocked(s.httpsLeg)
-			s.httpsLeg = nil
-		}
-		return nil
-	case s.httpsLeg.serving() && s.httpsLeg.srv.Addr == addr:
-		return nil
-	default:
-		// Bind before resolving the certificate so repeated bind failures do not
-		// emit certificate diagnostics for a listener that cannot serve. After
-		// binding, build from the latest validated pair; a build failure closes
-		// this socket before returning.
-		ln, err := s.listen("tcp", addr)
-		if err != nil {
-			return fmt.Errorf("api: bind HTTPS listener %q: %w", addr, err)
-		}
-		plan, err := s.planHTTPSLeg(addr)
-		if err != nil {
-			// The socket is already held. Closing it is not tidiness: a retained
-			// listener keeps the port, so every later retry would fail
-			// EADDRINUSE and a transient cert fault would become a permanent
-			// bind failure — manufacturing exactly the never-converging state
-			// this reordering exists to stop.
-			ln.Close()
-			return fmt.Errorf("api: generate HTTPS certificate for %q: %w", addr, err)
-		}
-		old := s.httpsLeg
-		s.httpsLeg = s.serveLegLocked(plan, ln, true)
-		s.stopLegLocked(old)
-		return nil
+func legKind(isTLS bool) string {
+	if isTLS {
+		return "HTTPS"
 	}
+	return "HTTP"
 }

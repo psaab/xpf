@@ -166,7 +166,7 @@ func CompileConfigLenient(tree *ConfigTree) (*Config, error) {
 // carries at least one user or api-key. The default bind is loopback
 // 127.0.0.1:8080 (safe); a `web-management http|https interface <mgmt-if>`
 // stanza resolves to the interface's routable address (daemon_run.go ->
-// resolveInterfaceAddr), so binding off-loopback WITHOUT api-auth exposes every
+// resolveInterfaceAddrs), so binding off-loopback WITHOUT api-auth exposes every
 // mutating config RPC to any host that can reach the management address — a
 // network attacker can reconfigure the firewall unauthenticated.
 //

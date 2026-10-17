@@ -89,7 +89,7 @@ func newLeg(cert tls.Certificate, addr string) *listenerLeg {
 // goroutine).
 func legServing(cert tls.Certificate, addr string) *Server {
 	s := &Server{}
-	s.httpsLeg = newLeg(cert, addr)
+	s.setHTTPSLeg(newLeg(cert, addr))
 	return s
 }
 
@@ -130,16 +130,16 @@ func (errLn) Addr() net.Addr            { return &net.TCPAddr{IP: net.IPv4(127, 
 func startWithDeadHTTPSLeg(t *testing.T, cert tls.Certificate, addr string) (*Server, context.CancelFunc) {
 	t.Helper()
 	s := &Server{listen: func(network, a string) (net.Listener, error) { return errLn{}, nil }}
-	s.httpsServer = &http.Server{
+	s.setHTTPSServerTemplate(&http.Server{
 		Addr:      addr,
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
-	}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := s.Start(ctx); err != nil {
 		cancel()
 		t.Fatalf("start: %v", err)
 	}
-	if s.httpsLeg == nil {
+	if s.httpsLeg() == nil {
 		cancel()
 		t.Fatal("precondition: the listen call SUCCEEDED, so the leg must be installed — " +
 			"a test about a dead installed leg must not silently become a test about a failed bind")
@@ -433,7 +433,7 @@ func TestWarnStaleMgmtCertForHostName_6827(t *testing.T) {
 		// report a cert nobody serves, the same false positive the construction
 		// template was rejected for (#6827).
 		s := legServing(mintCert(t, "old-fw", "10.0.0.1"), "10.0.0.1:8443")
-		s.httpsLeg.dead.Store(true)
+		s.httpsLeg().dead.Store(true)
 		out := captureWarn(t, func() { s.WarnStaleMgmtCertForHostName("new-fw") })
 		if out != "" {
 			t.Fatalf("a leg whose serve loop exited must not be diagnosed; got %q", out)
@@ -443,12 +443,12 @@ func TestWarnStaleMgmtCertForHostName_6827(t *testing.T) {
 	t.Run("root_shutdown_drained_leg_is_not_diagnosed", func(t *testing.T) {
 		// The state a root-context shutdown ACTUALLY leaves behind: the serve
 		// goroutine drains and RETURNS without ever setting `dead` and without
-		// `stopCh` being closed, leaving the leg installed in s.httpsLeg
+		// `stopCh` being closed, leaving the leg installed in s.httpsLeg()
 		// permanently. A predicate built from `dead` alone misses it entirely —
 		// which is why the drain arm stores `stopping` before `Shutdown`, so the
 		// root-context path is marked too (#6827).
 		s := legServing(mintCert(t, "old-fw", "10.0.0.1"), "10.0.0.1:8443")
-		s.httpsLeg.stopping.Store(true)
+		s.httpsLeg().stopping.Store(true)
 		out := captureWarn(t, func() { s.WarnStaleMgmtCertForHostName("new-fw") })
 		if out != "" {
 			t.Fatalf("a leg whose serve goroutine has returned must not be diagnosed; got %q", out)
@@ -468,7 +468,7 @@ func TestWarnStaleMgmtCertForHostName_6827(t *testing.T) {
 			t.Fatal("no serving leg must report the question UNanswered so the caller retries")
 		}
 		draining := legServing(mintCert(t, "old-fw", "10.0.0.1"), "10.0.0.1:8443")
-		draining.httpsLeg.stopping.Store(true)
+		draining.httpsLeg().stopping.Store(true)
 		if draining.WarnStaleMgmtCertForHostName("new-fw") {
 			t.Fatal("a draining leg must report the question UNanswered")
 		}
@@ -476,7 +476,7 @@ func TestWarnStaleMgmtCertForHostName_6827(t *testing.T) {
 
 	t.Run("leg_without_a_listener_is_not_diagnosed", func(t *testing.T) {
 		s := legServing(mintCert(t, "old-fw", "10.0.0.1"), "10.0.0.1:8443")
-		s.httpsLeg.ln = nil
+		s.httpsLeg().ln = nil
 		out := captureWarn(t, func() { s.WarnStaleMgmtCertForHostName("new-fw") })
 		if out != "" {
 			t.Fatalf("a leg holding no listener must not be diagnosed; got %q", out)
@@ -487,10 +487,11 @@ func TestWarnStaleMgmtCertForHostName_6827(t *testing.T) {
 		// httpsServer survives a `ReconcileHTTPS(false, ...)` disable while
 		// httpsLeg is cleared. Reading the template would warn about a
 		// certificate nobody serves.
-		s := &Server{httpsServer: &http.Server{
+		s := &Server{}
+		s.setHTTPSServerTemplate(&http.Server{
 			Addr:      "10.0.0.1:8443",
 			TLSConfig: &tls.Config{Certificates: []tls.Certificate{mintCert(t, "old-fw", "10.0.0.1")}},
-		}}
+		})
 		out := captureWarn(t, func() { s.WarnStaleMgmtCertForHostName("new-fw") })
 		if out != "" {
 			t.Fatalf("a disabled HTTPS leg must not be diagnosed; got %q", out)
@@ -515,10 +516,10 @@ func TestWarnStaleMgmtCertForHostNameReadsTheLiveLeg_6827(t *testing.T) {
 	live := mintCert(t, "old-fw", "10.0.0.1")  // does NOT cover new-fw
 	stale := mintCert(t, "new-fw", "10.0.0.1") // DOES cover new-fw
 	s := legServing(live, "10.0.0.1:8443")
-	s.httpsServer = &http.Server{
+	s.setHTTPSServerTemplate(&http.Server{
 		Addr:      "10.0.0.9:8443",
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{stale}},
-	}
+	})
 	out := captureWarn(t, func() { s.WarnStaleMgmtCertForHostName("new-fw") })
 	if !strings.Contains(out, hostNameMsg) {
 		t.Fatalf("the diagnostic must read the LIVE leg's cert (which misses new-fw), "+
@@ -541,10 +542,10 @@ func TestWarnStaleMgmtCertForHostNameReadsTheLiveLeg_6827(t *testing.T) {
 func TestDrainFlagIsSetByTheRealServeGoroutine_6827(t *testing.T) {
 	cert := mintCert(t, "old-fw", "10.0.0.1")
 	s := &Server{listen: func(network, addr string) (net.Listener, error) { return newStubLn(), nil }}
-	s.httpsServer = &http.Server{
+	s.setHTTPSServerTemplate(&http.Server{
 		Addr:      "10.0.0.1:8443",
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
-	}
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := s.Start(ctx); err != nil {
@@ -577,7 +578,7 @@ func TestDrainFlagIsSetByTheRealServeGoroutine_6827(t *testing.T) {
 // fails.
 //
 // What this does NOT bind is the SHAPE of the HTTPSServing predicate (#6827
-// round 6). The comment here used to claim a bare `s.httpsLeg != nil` would
+// round 6). The comment here used to claim a bare `s.httpsLeg() != nil` would
 // report a failed bind as serving; it would not, because ReconcileHTTPS/Start
 // install a leg only AFTER the listen call succeeds, so this path leaves the
 // pointer nil under every implementation and the second assertion holds
@@ -590,16 +591,16 @@ func TestHTTPSBindFailureIsNotReportedAsServing_6827(t *testing.T) {
 	s := &Server{listen: func(network, addr string) (net.Listener, error) {
 		return nil, errors.New("bind refused")
 	}}
-	s.httpsServer = &http.Server{
+	s.setHTTPSServerTemplate(&http.Server{
 		Addr:      "10.0.0.1:8443",
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
-	}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := s.Start(ctx); err != nil {
 		t.Fatalf("Start must stay best-effort for HTTPS and return nil, got %v", err)
 	}
-	if s.httpsLeg != nil {
+	if s.httpsLeg() != nil {
 		t.Fatal("precondition: a failed bind must install NO leg — if it ever installs one, " +
 			"this test silently becomes a test about an installed leg and the assertion below " +
 			"stops being vacuous by accident rather than by design")
@@ -611,7 +612,7 @@ func TestHTTPSBindFailureIsNotReportedAsServing_6827(t *testing.T) {
 
 // TestUnexpectedServeExitLeavesADeadInstalledLeg_6827 binds the `dead` clause of
 // listenerLeg.serving() on the state production actually produces: the serve
-// loop exits on its own, sets `dead`, and the leg stays INSTALLED in s.httpsLeg
+// loop exits on its own, sets `dead`, and the leg stays INSTALLED in s.httpsLeg()
 // (it cannot be removed there — that would need lifeMu, which deadlocks a
 // shutdown racing the exit, #6401 round 3).
 //
@@ -645,14 +646,14 @@ func TestUnexpectedServeExitLeavesADeadInstalledLeg_6827(t *testing.T) {
 // #6827-round-6 BLOCKER: a dead HTTPS leg was a permanent dead end.
 //
 // An unexpected serve exit leaves the leg installed with `dead` set. The
-// same-address no-op then read `s.httpsLeg != nil && addr matches` and returned
+// same-address no-op then read `s.httpsLeg() != nil && addr matches` and returned
 // nil, so even a reconcile aimed directly at the configured address could not
 // rebind — HTTPS stayed down for the life of the process on an UNCHANGED
 // configuration, and with it every debt that can only be settled against a
 // served certificate (the host-name staleness diagnosis). Nothing short of a
 // restart escaped it.
 //
-// RED on revert: restore `case s.httpsLeg != nil && s.httpsLeg.srv.Addr == addr`
+// RED on revert: restore `case s.httpsLeg() != nil && s.httpsLeg().srv.Addr == addr`
 // in ReconcileHTTPS and the reconcile returns nil having done nothing — the same
 // dead leg is still installed and HTTPSServing stays false.
 func TestReconcileHTTPSReplacesADeadLeg_6827(t *testing.T) {
@@ -660,7 +661,7 @@ func TestReconcileHTTPSReplacesADeadLeg_6827(t *testing.T) {
 	cert := mintCert(t, "old-fw", "10.0.0.1")
 	s, cancel := startWithDeadHTTPSLeg(t, cert, addr)
 	defer cancel()
-	dead := s.httpsLeg
+	dead := s.httpsLeg()
 
 	// The address is UNCHANGED — this is the reconcile an operator's next commit
 	// makes on a configuration they never touched.
@@ -670,7 +671,7 @@ func TestReconcileHTTPSReplacesADeadLeg_6827(t *testing.T) {
 		t.Fatalf("reconcile over a dead leg: %v", err)
 	}
 
-	if s.httpsLeg == dead {
+	if s.httpsLeg() == dead {
 		t.Fatal("the reconcile left the DEAD leg installed: a same-address call was treated as " +
 			"converged because the pointer was non-nil, so HTTPS can never come back without a " +
 			"daemon restart (#6827 round 6)")
@@ -818,12 +819,12 @@ func TestDeadLegConnectionCannotOutliveRevocation_6827(t *testing.T) {
 	// are the same object. A hand-built http.Server would leave serveLegLocked
 	// substituting a slot the handler never reads, and the pin/tighten path this
 	// cell is about would be bypassed entirely.
-	s.httpsSlot = s.newAuthSlot()
-	srv, err := s.buildHTTPSServer(addr, s.httpsSlot)
+	s.setHTTPSSlot0(s.newAuthSlot())
+	srv, err := s.buildHTTPSServer(addr, s.httpsSlot0())
 	if err != nil {
 		t.Fatalf("build HTTPS server: %v", err)
 	}
-	s.httpsServer = srv
+	s.setHTTPSServerTemplate(srv)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer s.Wait() // runs after cancel(): joins both legs' serve goroutines
@@ -831,7 +832,7 @@ func TestDeadLegConnectionCannotOutliveRevocation_6827(t *testing.T) {
 	if err := s.Start(ctx); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	dead := s.httpsLeg
+	dead := s.httpsLeg()
 	if dead == nil {
 		t.Fatal("precondition: the listen call succeeded, so the HTTPS leg must be installed")
 	}
@@ -873,7 +874,7 @@ func TestDeadLegConnectionCannotOutliveRevocation_6827(t *testing.T) {
 	if err := s.ReconcileHTTPS(true, addr); err != nil {
 		t.Fatalf("recovery reconcile over the dead leg: %v", err)
 	}
-	if s.httpsLeg == dead {
+	if s.httpsLeg() == dead {
 		t.Fatal("precondition: the recovery reconcile must install a REPLACEMENT leg — without " +
 			"the retirement of the dead one there is no pin, and this cell is not testing the " +
 			"path it claims (#6827 round 6)")
@@ -954,16 +955,16 @@ func newStreamFixture(t *testing.T, ctx context.Context) *streamFixture {
 		certGen: func(string) (tls.Certificate, *x509.Certificate, error) { return cert, nil, nil },
 	}
 	s.listen = func(network, a string) (net.Listener, error) { return kln, nil }
-	s.httpsSlot = s.newAuthSlot()
-	srv, err := s.buildHTTPSServer(addr, s.httpsSlot)
+	s.setHTTPSSlot0(s.newAuthSlot())
+	srv, err := s.buildHTTPSServer(addr, s.httpsSlot0())
 	if err != nil {
 		t.Fatalf("build HTTPS server: %v", err)
 	}
-	s.httpsServer = srv
+	s.setHTTPSServerTemplate(srv)
 	if err := s.Start(ctx); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	leg := s.httpsLeg
+	leg := s.httpsLeg()
 	if leg == nil {
 		t.Fatal("precondition: the listen call succeeded, so the HTTPS leg must be installed")
 	}
@@ -1357,14 +1358,14 @@ func TestServeBoundSeversInFlightResponses_6827(t *testing.T) {
 	s := &Server{
 		sharedBase: endless,
 		certGen:    func(string) (tls.Certificate, *x509.Certificate, error) { return cert, nil, nil },
-		httpServer: &http.Server{Addr: addr, Handler: endless},
 	}
-	s.httpsSlot = s.newAuthSlot()
-	httpsSrv, err := s.buildHTTPSServer(httpsAddr, s.httpsSlot)
+	s.setHTTPServerTemplate(&http.Server{Addr: addr, Handler: endless})
+	s.setHTTPSSlot0(s.newAuthSlot())
+	httpsSrv, err := s.buildHTTPSServer(httpsAddr, s.httpsSlot0())
 	if err != nil {
 		t.Fatalf("build HTTPS server: %v", err)
 	}
-	s.httpsServer = httpsSrv
+	s.setHTTPSServerTemplate(httpsSrv)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -319,7 +319,7 @@ func TestHTTPSInstalledOnPersistFailure(t *testing.T) {
 		HTTPSAddr: "127.0.0.1:0",
 		TLS:       true,
 	})
-	if s.httpsServer == nil {
+	if s.httpsServer() == nil {
 		t.Fatal("httpsServer not installed on persistence failure — HTTPS wrongly disabled by a disk error")
 	}
 	cert := s.HTTPSCertForTest()

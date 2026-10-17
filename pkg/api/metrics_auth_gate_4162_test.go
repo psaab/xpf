@@ -102,10 +102,10 @@ func TestNewServerMetricsAuthIsOwnedByEachListener(t *testing.T) {
 	newServer := func(t *testing.T, cfg Config) *Server {
 		t.Helper()
 		s := NewServer(cfg)
-		if s.httpServer == nil || s.httpServer.Handler == nil {
+		if s.httpServer() == nil || s.httpServer().Handler == nil {
 			t.Fatal("NewServer did not install the HTTP owner handler")
 		}
-		if cfg.TLS && cfg.HTTPSAddr != "" && (s.httpsServer == nil || s.httpsServer.Handler == nil) {
+		if cfg.TLS && cfg.HTTPSAddr != "" && (s.httpsServer() == nil || s.httpsServer().Handler == nil) {
 			t.Fatal("NewServer did not install the requested HTTPS owner handler")
 		}
 		return s
@@ -130,13 +130,13 @@ func TestNewServerMetricsAuthIsOwnedByEachListener(t *testing.T) {
 			TLS:       true,
 			Auth:      auth,
 		})
-		request(t, s.httpServer.Handler, "/metrics", nil, http.StatusOK)
-		request(t, s.httpsServer.Handler, "/metrics", nil, http.StatusUnauthorized)
-		request(t, s.httpsServer.Handler, "/metrics", map[string]string{"Authorization": basic}, http.StatusOK)
-		request(t, s.httpsServer.Handler, "/metrics", map[string]string{"Authorization": "Bearer tok-abc-123"}, http.StatusOK)
-		request(t, s.httpsServer.Handler, "/metrics", map[string]string{"X-API-Key": "tok-abc-123"}, http.StatusOK)
-		request(t, s.httpsServer.Handler, "/health", nil, http.StatusOK)
-		request(t, s.httpsServer.Handler, "/api/v1/status", nil, http.StatusUnauthorized)
+		request(t, s.httpServer().Handler, "/metrics", nil, http.StatusOK)
+		request(t, s.httpsServer().Handler, "/metrics", nil, http.StatusUnauthorized)
+		request(t, s.httpsServer().Handler, "/metrics", map[string]string{"Authorization": basic}, http.StatusOK)
+		request(t, s.httpsServer().Handler, "/metrics", map[string]string{"Authorization": "Bearer tok-abc-123"}, http.StatusOK)
+		request(t, s.httpsServer().Handler, "/metrics", map[string]string{"X-API-Key": "tok-abc-123"}, http.StatusOK)
+		request(t, s.httpsServer().Handler, "/health", nil, http.StatusOK)
+		request(t, s.httpsServer().Handler, "/api/v1/status", nil, http.StatusUnauthorized)
 	})
 
 	t.Run("HTTP wildcard HTTPS loopback", func(t *testing.T) {
@@ -146,15 +146,15 @@ func TestNewServerMetricsAuthIsOwnedByEachListener(t *testing.T) {
 			TLS:       true,
 			Auth:      auth,
 		})
-		request(t, s.httpServer.Handler, "/metrics", nil, http.StatusUnauthorized)
-		request(t, s.httpsServer.Handler, "/metrics", nil, http.StatusOK)
-		request(t, s.httpServer.Handler, "/health", nil, http.StatusOK)
-		request(t, s.httpServer.Handler, "/api/v1/status", nil, http.StatusUnauthorized)
+		request(t, s.httpServer().Handler, "/metrics", nil, http.StatusUnauthorized)
+		request(t, s.httpsServer().Handler, "/metrics", nil, http.StatusOK)
+		request(t, s.httpServer().Handler, "/health", nil, http.StatusOK)
+		request(t, s.httpServer().Handler, "/api/v1/status", nil, http.StatusUnauthorized)
 	})
 
 	t.Run("literal IPv4 and IPv6 loopback", func(t *testing.T) {
 		v4 := newServer(t, Config{Addr: "127.0.0.2:8080", Auth: auth})
-		request(t, v4.httpServer.Handler, "/metrics", nil, http.StatusOK)
+		request(t, v4.httpServer().Handler, "/metrics", nil, http.StatusOK)
 
 		v6 := newServer(t, Config{
 			Addr:      "192.0.2.10:8080",
@@ -162,7 +162,7 @@ func TestNewServerMetricsAuthIsOwnedByEachListener(t *testing.T) {
 			TLS:       true,
 			Auth:      auth,
 		})
-		request(t, v6.httpsServer.Handler, "/metrics", nil, http.StatusOK)
+		request(t, v6.httpsServer().Handler, "/metrics", nil, http.StatusOK)
 	})
 
 	t.Run("unprovable binds fail closed", func(t *testing.T) {
@@ -175,15 +175,15 @@ func TestNewServerMetricsAuthIsOwnedByEachListener(t *testing.T) {
 			"not-a-listen-address",
 		} {
 			s := newServer(t, Config{Addr: addr, Auth: auth})
-			request(t, s.httpServer.Handler, "/metrics", nil, http.StatusUnauthorized)
+			request(t, s.httpServer().Handler, "/metrics", nil, http.StatusUnauthorized)
 		}
 	})
 
 	t.Run("auth-wrapped listener leaves health open", func(t *testing.T) {
 		s := newServer(t, Config{Addr: "192.0.2.10:8080", Auth: auth})
-		request(t, s.httpServer.Handler, "/metrics", nil, http.StatusUnauthorized)
-		request(t, s.httpServer.Handler, "/health", nil, http.StatusOK)
-		request(t, s.httpServer.Handler, "/api/v1/status", nil, http.StatusUnauthorized)
+		request(t, s.httpServer().Handler, "/metrics", nil, http.StatusUnauthorized)
+		request(t, s.httpServer().Handler, "/health", nil, http.StatusOK)
+		request(t, s.httpServer().Handler, "/api/v1/status", nil, http.StatusUnauthorized)
 	})
 
 	t.Run("nil auth leaves both listeners on the base mux", func(t *testing.T) {
@@ -192,9 +192,9 @@ func TestNewServerMetricsAuthIsOwnedByEachListener(t *testing.T) {
 			HTTPSAddr: "198.51.100.10:8443",
 			TLS:       true,
 		})
-		request(t, s.httpServer.Handler, "/metrics", nil, http.StatusOK)
-		request(t, s.httpsServer.Handler, "/metrics", nil, http.StatusOK)
-		request(t, s.httpServer.Handler, "/not-a-route", nil, http.StatusNotFound)
-		request(t, s.httpsServer.Handler, "/not-a-route", nil, http.StatusNotFound)
+		request(t, s.httpServer().Handler, "/metrics", nil, http.StatusOK)
+		request(t, s.httpsServer().Handler, "/metrics", nil, http.StatusOK)
+		request(t, s.httpServer().Handler, "/not-a-route", nil, http.StatusNotFound)
+		request(t, s.httpsServer().Handler, "/not-a-route", nil, http.StatusNotFound)
 	})
 }

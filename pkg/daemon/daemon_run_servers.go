@@ -19,7 +19,6 @@ import (
 	"github.com/psaab/xpf/pkg/sysservices"
 	"github.com/psaab/xpf/pkg/webmgmt"
 	"log/slog"
-	"net"
 	"sync"
 	"time"
 )
@@ -49,19 +48,26 @@ func (d *Daemon) effectiveListeners() sysservices.Listeners {
 	}
 	ls.HTTP = d.mgmt.Load().effectiveHTTPListener()
 	ls.HTTPS = d.mgmt.Load().effectiveHTTPSListener()
+	ls.HTTPs = d.mgmt.Load().effectiveHTTPListeners()
+	ls.HTTPSs = d.mgmt.Load().effectiveHTTPSListeners()
 	// #14582: a leg the reconciler recorded as converged can still be STALE —
 	// serving, but at an address the current config no longer resolves to
 	// (the interface address appeared/was replaced after the last reconcile,
 	// with no commit since). The reconciler-level snapshot cannot see that
 	// (it would need to re-resolve under m.mu), so fold it in here, where
 	// the store is reachable. Only a Listening leg is promoted to Stale: a
-	// Failed/Disabled leg already reports its own truth.
+	// Failed/Disabled leg already reports its own truth. For a dual-stack
+	// plane (#14583) the plural rows are promoted per row by
+	// promoteStaleMgmtRows, comparing each row's address against the
+	// currently resolved bind set for its family position.
 	if ls.HTTP.State == sysservices.StateListening && d.mgmtBindStaleHTTP() {
 		ls.HTTP.State = sysservices.StateStale
 	}
 	if ls.HTTPS.State == sysservices.StateListening && d.mgmtBindStaleHTTPS() {
 		ls.HTTPS.State = sysservices.StateStale
 	}
+	ls.HTTPs = promoteStaleMgmtRows(ls.HTTPs, d.mgmtBindStaleAddrs(false))
+	ls.HTTPSs = promoteStaleMgmtRows(ls.HTTPSs, d.mgmtBindStaleAddrs(true))
 	return ls
 }
 
@@ -391,32 +397,32 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 		// default (127.0.0.1:8080), a loopback-only diagnostic path that is never
 		// host-inbound-admitted; that path must NOT be silently moved to port 80.
 		if wm.HTTP {
-			httpBindIP := "127.0.0.1"
+			// #14583: one bind per family on a dual-stack interface.
+			// #14582: record whether the whole set is the loopback fallback.
+			httpHosts := []string{"127.0.0.1"}
 			apiCfg.HTTPBindDegraded = false
 			if wm.HTTPInterface != "" {
 				var degraded bool
-				httpBindIP, degraded = resolveInterfaceAddrDegraded(cfg, wm.HTTPInterface, "127.0.0.1")
+				httpHosts, degraded = resolveInterfaceAddrsDegraded(cfg, wm.HTTPInterface, "127.0.0.1")
 				apiCfg.HTTPBindDegraded = degraded
 			}
-			// net.JoinHostPort (not string-concat) so an IPv6 interface
-			// address is bracketed ("[2001:db8::1]:80") — a bare
-			// "2001:db8::1:80" is unparseable by net.SplitHostPort (the
-			// clamp below) and net.Listen, blackholing an IPv6-only mgmt bind.
-			apiCfg.Addr = net.JoinHostPort(httpBindIP, webmgmt.HTTPPortString())
-			slog.Info("HTTP web-management bound", "interface", wm.HTTPInterface, "addr", apiCfg.Addr)
+			apiCfg.Addrs = joinBindAddrs(httpHosts, webmgmt.HTTPPortString())
+			apiCfg.Addr = apiCfg.Addrs[0]
+			slog.Info("HTTP web-management bound", "interface", wm.HTTPInterface, "addrs", apiCfg.Addrs)
 		}
 		// Enable HTTPS if configured — bind the canonical TCP/443 (webmgmt SSOT).
 		if wm.HTTPS {
-			httpsBindIP := "127.0.0.1"
+			httpsHosts := []string{"127.0.0.1"}
 			apiCfg.HTTPSBindDegraded = false
 			if wm.HTTPSInterface != "" {
 				var degraded bool
-				httpsBindIP, degraded = resolveInterfaceAddrDegraded(cfg, wm.HTTPSInterface, "127.0.0.1")
+				httpsHosts, degraded = resolveInterfaceAddrsDegraded(cfg, wm.HTTPSInterface, "127.0.0.1")
 				apiCfg.HTTPSBindDegraded = degraded
 			}
 			apiCfg.TLS = true
-			apiCfg.HTTPSAddr = net.JoinHostPort(httpsBindIP, webmgmt.HTTPSPortString())
-			slog.Info("HTTPS web-management bound", "interface", wm.HTTPSInterface, "addr", apiCfg.HTTPSAddr)
+			apiCfg.HTTPSAddrs = joinBindAddrs(httpsHosts, webmgmt.HTTPSPortString())
+			apiCfg.HTTPSAddr = apiCfg.HTTPSAddrs[0]
+			slog.Info("HTTPS web-management bound", "interface", wm.HTTPSInterface, "addrs", apiCfg.HTTPSAddrs)
 		}
 		// API authentication
 		if wm.APIAuth != nil {
@@ -509,6 +515,7 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 			slog.Warn("api-auth is not served over clear HTTP; disabling the HTTP API leg (#10826)",
 				"addr", apiCfg.Addr)
 			apiCfg.Addr = ""
+			apiCfg.Addrs = nil
 		}
 	}
 
@@ -528,16 +535,14 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 	// with the console/SSH the lifeline (device-map §9.6 posture) until the
 	// operator adds api-auth (which restores the non-loopback bind).
 	hasAuth := apiCfg.Auth != nil
-	if clamped, ok := clampBindToLoopback(apiCfg.Addr, hasAuth); ok {
-		slog.Warn("HTTP API bind is non-loopback without api-auth; clamping to loopback (add `set system services web-management api-auth` to bind off-loopback) — #4047/#5127",
-			"requested", apiCfg.Addr, "clamped", clamped)
-		apiCfg.Addr = clamped
+	apiCfg.Addrs = clampBindsToLoopback(apiCfg.Addrs, apiCfg.Addr, hasAuth, "HTTP")
+	if len(apiCfg.Addrs) > 0 {
+		apiCfg.Addr = apiCfg.Addrs[0]
 	}
 	if apiCfg.TLS {
-		if clamped, ok := clampBindToLoopback(apiCfg.HTTPSAddr, hasAuth); ok {
-			slog.Warn("HTTPS API bind is non-loopback without api-auth; clamping to loopback — #4047/#5127",
-				"requested", apiCfg.HTTPSAddr, "clamped", clamped)
-			apiCfg.HTTPSAddr = clamped
+		apiCfg.HTTPSAddrs = clampBindsToLoopback(apiCfg.HTTPSAddrs, apiCfg.HTTPSAddr, hasAuth, "HTTPS")
+		if len(apiCfg.HTTPSAddrs) > 0 {
+			apiCfg.HTTPSAddr = apiCfg.HTTPSAddrs[0]
 		}
 	}
 }

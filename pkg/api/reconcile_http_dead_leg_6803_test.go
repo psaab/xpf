@@ -11,7 +11,7 @@ import (
 // ReconcileHTTPS short-circuits a same-address call only when the leg is still
 // SERVING:
 //
-//	case s.httpsLeg.serving() && s.httpsLeg.srv.Addr == addr: return nil
+//	case s.httpsLeg().serving() && s.httpsLeg().srv.Addr == addr: return nil
 //
 // ReconcileHTTP short-circuited on the address alone. An unexpected serve exit
 // marks the leg dead and leaves it INSTALLED (it cannot be removed under lifeMu
@@ -53,15 +53,15 @@ func bootHTTPLeg6803(t *testing.T) (*Server, net.Listener, string) {
 	s := retireTestServer(t, nil)
 
 	s.lifeMu.Lock()
-	s.httpSlot = s.newAuthSlot()
+	s.setHTTPSlot0(s.newAuthSlot())
 	ln, err := s.listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		s.lifeMu.Unlock()
 		t.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
-	s.httpServer = s.buildHTTPServer(addr, s.httpSlot)
-	s.httpLeg = s.serveLegLocked(s.httpLegPlan(), ln, false)
+	s.setHTTPServerTemplate(s.buildHTTPServer(addr, s.httpSlot0()))
+	s.setHTTPLeg(s.serveLegLocked(s.httpLegPlan(), ln, false))
 	s.lifeMu.Unlock()
 
 	if !s.HTTPServing() {
@@ -78,17 +78,17 @@ func bootHTTPLeg6803(t *testing.T) (*Server, net.Listener, string) {
 // either way.
 //
 // FAIL-ON-REVERT: restore the short circuit to
-// `if s.httpLeg != nil && s.httpLeg.srv.Addr == addr { return nil }` and the
+// `if s.httpLeg() != nil && s.httpLeg().srv.Addr == addr { return nil }` and the
 // dead leg is never replaced.
 func TestReconcileHTTPRebindsADeadSameAddressLeg6803(t *testing.T) {
 	s, ln, addr := bootHTTPLeg6803(t)
-	dead := s.httpLeg
+	dead := s.httpLeg()
 	killHTTPLeg6803(t, s, ln)
 
 	if err := s.ReconcileHTTP(addr); err != nil {
 		t.Fatalf("ReconcileHTTP to the same address: %v", err)
 	}
-	if s.httpLeg == dead {
+	if s.httpLeg() == dead {
 		t.Fatal("ReconcileHTTP short-circuited on a DEAD same-address leg, so the " +
 			"management API stays down until a daemon restart — ReconcileHTTPS asks " +
 			"serving() for exactly this reason (#6803)")
@@ -109,12 +109,12 @@ func TestReconcileHTTPRebindsADeadSameAddressLeg6803(t *testing.T) {
 // every commit and, since this issue, every 30s.
 func TestReconcileHTTPLeavesALiveSameAddressLegAlone6803(t *testing.T) {
 	s, _, addr := bootHTTPLeg6803(t)
-	live := s.httpLeg
+	live := s.httpLeg()
 
 	if err := s.ReconcileHTTP(addr); err != nil {
 		t.Fatalf("ReconcileHTTP to the same address: %v", err)
 	}
-	if s.httpLeg != live {
+	if s.httpLeg() != live {
 		t.Fatal("ReconcileHTTP REBOUND a healthy same-address leg; the liveness " +
 			"question must widen the trigger for a dead leg only")
 	}

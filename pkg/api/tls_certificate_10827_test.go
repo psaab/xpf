@@ -83,7 +83,7 @@ func TestManagementTLSRejectsOutOfWindowCustomCertificates(t *testing.T) {
 				TLSCertificate: certPath,
 				TLSPrivateKey:  keyPath,
 			})
-			if s.httpsServer != nil {
+			if s.httpsServer() != nil {
 				t.Fatal("an out-of-window custom pair installed an HTTPS server")
 			}
 			if _, err := s.managementTLSGetCertificate(nil); err == nil {
@@ -117,7 +117,7 @@ func TestManagementTLSMonitorRefusesExpiredCertificateWithoutSNI(t *testing.T) {
 		TLSCertificate: certPath,
 		TLSPrivateKey:  keyPath,
 	})
-	if len(s.httpsServer.TLSConfig.Certificates) != 0 {
+	if len(s.httpsServer().TLSConfig.Certificates) != 0 {
 		t.Fatal("TLSConfig contains a snapshot certificate that can bypass GetCertificate without SNI")
 	}
 	s.tlsNow = func() time.Time { return now.Add(48 * time.Hour) }

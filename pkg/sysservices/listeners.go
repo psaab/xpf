@@ -95,21 +95,18 @@ type Listeners struct {
 	// is always configured, so it is never StateDisabled — StateListening while
 	// serving, StateFailed if net.Listen failed or the serve loop exited.
 	GRPC Listener
-	// HTTP is the HTTP REST listener. StateDisabled when --api-addr is empty (the
-	// daemon never started it), StateFailed on a boot bind failure, else
-	// StateListening.
+	// HTTP is the HTTP REST listener (first bind). StateDisabled when --api-addr
+	// is empty (the daemon never started it), StateFailed on a boot bind failure,
+	// else StateListening.
 	HTTP Listener
-	// HTTPS is the HTTPS REST listener (#8597 K86). StateDisabled when TLS is
-	// not configured, StateFailed when it IS configured but no leg is serving
-	// (a boot bind failure, or an unexpected serve-loop exit that left the leg
-	// installed-but-dead), else StateListening with the actual bound address.
-	//
-	// Before #8597 this row did not exist and `mgmtListenerDown` asked only the
-	// HTTP leg, so a dead HTTPS leg was reported healthy on every surface AND
-	// was never re-driven by the always-on reassert loop — repair waited for the
-	// operator's next commit, which is the one event a broken management plane
-	// makes hard to deliver.
+	// HTTPS is the HTTPS REST listener (first bind, #8597 K86).
 	HTTPS Listener
+	// HTTPs / HTTPSs carry one row per bind address when the plane binds more
+	// than one address (#14583: dual-stack web-management). Empty means the
+	// single HTTP/HTTPS row is the whole plane; renderers and metrics prefer
+	// these when present.
+	HTTPs  []Listener
+	HTTPSs []Listener
 }
 
 // Lines renders the gRPC / HTTP REST listener rows for `show system services`,
@@ -117,9 +114,62 @@ type Listeners struct {
 // both the local CLI and remote gRPC renderers call, so the two surfaces are
 // byte-identical by construction.
 func (l Listeners) Lines() []string {
-	return []string{
-		fmt.Sprintf("  gRPC:           %s", l.GRPC.render()),
-		fmt.Sprintf("  HTTP REST:      %s", l.HTTP.render()),
-		fmt.Sprintf("  HTTPS REST:     %s", l.HTTPS.render()),
+	lines := []string{fmt.Sprintf("  gRPC:           %s", l.GRPC.render())}
+	for _, row := range l.httpRows() {
+		lines = append(lines, fmt.Sprintf("  HTTP REST:      %s", row.render()))
 	}
+	for _, row := range l.httpsRows() {
+		lines = append(lines, fmt.Sprintf("  HTTPS REST:     %s", row.render()))
+	}
+	return lines
+}
+
+// HTTPRows / HTTPSRows return the per-address rows for a plane, falling back
+// to the single legacy row when no plural rows were recorded.
+func (l Listeners) HTTPRows() []Listener { return l.httpRows() }
+
+func (l Listeners) HTTPSRows() []Listener { return l.httpsRows() }
+
+func (l Listeners) httpRows() []Listener {
+	if len(l.HTTPs) > 0 {
+		return l.HTTPs
+	}
+	return []Listener{l.HTTP}
+}
+
+func (l Listeners) httpsRows() []Listener {
+	if len(l.HTTPSs) > 0 {
+		return l.HTTPSs
+	}
+	return []Listener{l.HTTPS}
+}
+
+// SurfaceRows returns the (surface, listener) rows the management-listener
+// metric emits (#14583): grpc always; http/https one per bind address when
+// plural rows exist, else the single legacy row — but only when that row
+// names a configured plane (non-empty Addr or non-Disabled state), so a
+// legacy snapshot with no HTTPS row emits no https series.
+func (l Listeners) SurfaceRows() []struct {
+	Surface string
+	L       Listener
+} {
+	type row = struct {
+		Surface string
+		L       Listener
+	}
+	rows := []row{{"grpc", l.GRPC}}
+	appendPlane := func(surface string, single Listener, plural []Listener, always bool) {
+		if len(plural) > 0 {
+			for _, r := range plural {
+				rows = append(rows, row{surface, r})
+			}
+			return
+		}
+		if always || single.Addr != "" || single.State != StateDisabled {
+			rows = append(rows, row{surface, single})
+		}
+	}
+	appendPlane("http", l.HTTP, l.HTTPs, true)
+	appendPlane("https", l.HTTPS, l.HTTPSs, false)
+	return rows
 }
