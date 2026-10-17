@@ -1592,6 +1592,15 @@ impl AppCatalog {
     /// mislabeled as that service in session display / RT_FLOW create+close /
     /// policy-deny / filter-log records — log-integrity pollution during
     /// incident response. Matching on the directional service slot fixes it.
+    /// #14313: `l4_present` is `false` for a flowless packet (a non-first
+    /// TCP/UDP fragment, whose post-IP bytes are payload — #2344). With no L4
+    /// header the caller cannot supply real ports (`src_port`/`dst_port` are
+    /// the synthetic 0,0), so every PORT-CONSTRAINED tier MUST be skipped —
+    /// `exact_dst` and `port_constrained` scan entries — and only a bare
+    /// protocol-only entry may resolve. Otherwise a `0..=N` entry (#13920)
+    /// spuriously matches port 0 and mislabels the fragment. This mirrors the
+    /// #3291 guard in `CompiledApplications::matches`. Every flow-backed
+    /// caller passes `l4_present = true`, so the L4 path is byte-identical.
     #[inline]
     pub(crate) fn lookup_directional(
         &self,
@@ -1599,6 +1608,7 @@ impl AppCatalog {
         src_port: u16,
         dst_port: u16,
         is_reverse: bool,
+        l4_present: bool,
     ) -> u16 {
         let Some(bucket) = self.by_protocol.get(&protocol) else {
             return 0;
@@ -1613,7 +1623,13 @@ impl AppCatalog {
         // Exact single-port entries carry no source constraint by construction
         // (`from_snapshot` only routes src-unconstrained single-dst entries to
         // `exact_dst`), so an exact hit needs only the service port.
-        let exact = bucket.exact_dst.get(&service_port).copied();
+        // #14313: exact entries are port-constrained — a flowless packet has
+        // no known service port, so it can never exact-match.
+        let exact = if l4_present {
+            bucket.exact_dst.get(&service_port).copied()
+        } else {
+            None
+        };
         // Scan entries (ranges / source-constrained / protocol-only).
         //
         // #3612: resolve overlaps by SPECIFICITY TIER first — a port-constrained
@@ -1640,6 +1656,11 @@ impl AppCatalog {
         let mut port_scan_hit: Option<u16> = None;
         let mut proto_only_scan_hit: Option<u16> = None;
         for s in &bucket.scan {
+            // #14313: a port-constrained scan entry cannot match a flowless
+            // packet — its ports are unknown, not 0.
+            if s.port_constrained && !l4_present {
+                continue;
+            }
             // Destination constraint is matched against the service slot and
             // the source constraint against the client slot — directional, no
             // cross-slot probing.
@@ -1673,10 +1694,13 @@ impl AppCatalog {
     /// Forward-keyed convenience wrapper: the service port is the destination.
     /// This is the common case for cold-path RT_FLOW / filter-log / policy-deny
     /// resolution where the 5-tuple is the received (forward) packet and there
-    /// is no session-direction flag at the call site.
+    /// is no session-direction flag at the call site. Flow-backed only: the
+    /// caller holds a real L4 tuple, so `l4_present = true`. Flowless
+    /// (fragment) records pass app_id 0 at their emit sites and never resolve
+    /// through here (#14313).
     #[inline]
     pub(crate) fn lookup_forward(&self, protocol: u8, src_port: u16, dst_port: u16) -> u16 {
-        self.lookup_directional(protocol, src_port, dst_port, false)
+        self.lookup_directional(protocol, src_port, dst_port, false, true)
     }
 
     /// #3416: resolve the AppID a session was ADMITTED under for the permit-side
@@ -1713,7 +1737,9 @@ impl AppCatalog {
         } else {
             rewrite_dst_port.unwrap_or(dst_port)
         };
-        self.lookup_directional(protocol, src_port, service_dst_port, is_reverse)
+        // Admitted sessions are flow-backed (a real L4 tuple installed them),
+        // so `l4_present = true` (#14313).
+        self.lookup_directional(protocol, src_port, service_dst_port, is_reverse, true)
     }
 }
 

@@ -340,6 +340,7 @@ pub(super) fn evaluate_non_pbr_input_filter(
         cached_log: result.log_match.map(|log_match| CachedInputFilterLog {
             log_match,
             ingress_zone_id,
+            l4_present: extra.l4_present,
         }),
     }
 }
@@ -660,6 +661,7 @@ pub(super) fn evaluate_non_pbr_input_filter_log_only(
             ingress_zone_override,
             ingress_ifindex,
         ),
+        l4_present: extra.l4_present,
     })
 }
 
@@ -1378,6 +1380,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                         cached_log: counted.log_match.map(|log_match| CachedInputFilterLog {
                             log_match,
                             ingress_zone_id,
+                            l4_present: extra.l4_present,
                         }),
                     },
                     revoked_key: None,
@@ -1772,6 +1775,7 @@ fn static_input_filter_deny_eval(
                 cached_log: counted.log_match.map(|log_match| CachedInputFilterLog {
                     log_match,
                     ingress_zone_id,
+                    l4_present: extra.l4_present,
                 }),
             },
             FilterLogSource::Pbr,
@@ -1973,7 +1977,8 @@ pub(super) fn emit_input_filter_log_match(
         log_source,
         // #2520: resolve the AppID via the hot-path app_catalog.lookup so the
         // filter-log RT_FLOW record carries the application, not UNKNOWN.
-        resolve_flow_app_id(&forwarding.app_catalog, flow),
+        // #14313: honour the evaluated packet's L4 presence.
+        resolve_flow_app_id_l4(&forwarding.app_catalog, flow, cached_log.l4_present),
         reject_reply_enqueued,
         now_ns,
     );
@@ -2160,7 +2165,9 @@ pub(super) fn apply_lo0_filter_action(
         action: log_match.action,
         source: FilterLogSource::Lo0,
         // #2520: AppID via the hot-path app_catalog.lookup.
-        app_id: resolve_flow_app_id(&forwarding.app_catalog, flow),
+        // #14313: `extra.l4_present` is false for a flowless fragment, whose
+        // synthetic (0,0) ports must not match a 0..=N port-constrained entry.
+        app_id: resolve_flow_app_id_l4(&forwarding.app_catalog, flow, extra.l4_present),
     });
     (action, pending)
 }
@@ -2200,7 +2207,7 @@ pub(super) fn stage11_input_filter_terminal(
         term_id: log.log_match.term_id,
         action: log.log_match.action,
         source: FilterLogSource::Input,
-        app_id: resolve_flow_app_id(&forwarding.app_catalog, flow),
+        app_id: resolve_flow_app_id_l4(&forwarding.app_catalog, flow, extra.l4_present),
     });
     Some((policer_drop_action(eval.action, eval.policer_drop), pending))
 }

@@ -120,6 +120,14 @@ periodic ACK from the daemon.
   -close stamps pass the binding's own direction flag. A forward flow whose
   SOURCE port coincides with a service port (e.g. tcp `src=443`) is no longer
   mislabeled — the old probe matched the service on either slot.
+  (#14313) the lookup is also L4-AWARE: `lookup_directional` takes
+  `l4_present`; a flowless packet (non-first fragment, synthetic ports
+  0,0) skips the port-constrained tiers (`exact_dst` + `port_constrained`
+  scan entries) so a `0..=N` entry (#13920) cannot mislabel it — only a
+  protocol-only entry may resolve. Flow-backed resolvers pass `true`;
+  flowless deny/filter-log sites pass `extra.l4_present` / their known
+  `false`, and the transit/MissingNeighbor/embedded-ICMP flowless denies
+  pass app_id 0 outright.
   (#3058) a DNAT / static-NAT / inbound-NPTv6 policy-DENY record now reflects
   what the policy was actually evaluated against (the #2345 post-translation
   tuple), mirroring the permit / SESSION_CLOSE convention exactly: the

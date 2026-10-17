@@ -97,14 +97,30 @@ pub(super) fn event_now_ns_from_secs(now_secs: u64) -> u64 {
 /// unresolvable tuple.
 #[inline]
 pub(super) fn resolve_flow_app_id(app_catalog: &AppCatalog, flow: &SessionFlow) -> u16 {
+    resolve_flow_app_id_l4(app_catalog, flow, true)
+}
+
+/// #14313: as `resolve_flow_app_id`, but for a caller that knows whether the
+/// flow carries a real L4 header. A flowless synthetic L3 flow (non-first
+/// fragment, ports 0,0) passes `l4_present = false` so a `0..=N`
+/// port-constrained catalog entry cannot mislabel it; only a protocol-only
+/// entry may resolve. Flow-backed callers use `resolve_flow_app_id`.
+#[inline]
+pub(super) fn resolve_flow_app_id_l4(
+    app_catalog: &AppCatalog,
+    flow: &SessionFlow,
+    l4_present: bool,
+) -> u16 {
     // #3321: a cold-path record carries the received (forward) 5-tuple, so the
     // service port is the destination — resolve forward-directionally so a
     // forward flow whose source port coincides with a service port is not
     // mislabeled.
-    app_catalog.lookup_forward(
+    app_catalog.lookup_directional(
         flow.forward_key.protocol,
         flow.forward_key.src_port,
         flow.forward_key.dst_port,
+        false,
+        l4_present,
     )
 }
 
@@ -125,12 +141,26 @@ pub(super) fn resolve_policy_deny_app_id(
     flow: &SessionFlow,
     policy_dst_port: u16,
 ) -> u16 {
+    resolve_policy_deny_app_id_l4(app_catalog, flow, policy_dst_port, true)
+}
+
+/// #14313: as `resolve_policy_deny_app_id`, with explicit L4 presence for
+/// flowless deny records (see `resolve_flow_app_id_l4`).
+#[inline]
+pub(super) fn resolve_policy_deny_app_id_l4(
+    app_catalog: &AppCatalog,
+    flow: &SessionFlow,
+    policy_dst_port: u16,
+    l4_present: bool,
+) -> u16 {
     // #3321: forward-directional — the policy was evaluated against the
     // (post-translation) destination port, which is the service slot.
-    app_catalog.lookup_forward(
+    app_catalog.lookup_directional(
         flow.forward_key.protocol,
         flow.forward_key.src_port,
         policy_dst_port,
+        false,
+        l4_present,
     )
 }
 

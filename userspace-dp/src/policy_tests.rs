@@ -4329,7 +4329,7 @@ fn app_catalog_exact_dst_port_resolves_id() {
     assert_eq!(cat.lookup_forward(6, 51000, 443), 7);
     // reverse-keyed session carries the service port in the src slot; only the
     // reverse-aware lookup probes that slot (#3321).
-    assert_eq!(cat.lookup_directional(6, 443, 51000, true), 7);
+    assert_eq!(cat.lookup_directional(6, 443, 51000, true, true), 7);
     // #3321 fail-on-revert: a FORWARD flow whose SOURCE port coincides with the
     // service port (src=443, dst=ephemeral) must NOT be mislabeled. The old
     // directionless probe returned 7 here.
@@ -4350,7 +4350,7 @@ fn app_catalog_port_range_resolves_id() {
     assert_eq!(cat.lookup_forward(6, 40000, 9101), 0); // above
     // reverse-keyed: service-port range in the src slot still resolves via the
     // reverse-aware lookup.
-    assert_eq!(cat.lookup_directional(6, 9050, 40000, true), 9);
+    assert_eq!(cat.lookup_directional(6, 9050, 40000, true, true), 9);
     // #3321: a forward flow with the service-port range in the SOURCE slot is
     // not mislabeled.
     assert_eq!(cat.lookup_forward(6, 9050, 40000), 0);
@@ -4374,7 +4374,7 @@ fn app_catalog_directional_forward_not_mislabeled_by_source_port() {
     );
     // Reverse-keyed: the service port legitimately rides the src slot.
     assert_eq!(
-        https.lookup_directional(6, 443, 51000, true),
+        https.lookup_directional(6, 443, 51000, true, true),
         7,
         "reverse-keyed session with the service port in the src slot resolves"
     );
@@ -4397,7 +4397,7 @@ fn app_catalog_directional_forward_not_mislabeled_by_source_port() {
     // value in the dst slot -> must NOT match.
     assert_eq!(ranged.lookup_forward(6, 9050, 1500), 0);
     // Reverse-keyed: service range in src, client range in dst -> match.
-    assert_eq!(ranged.lookup_directional(6, 9050, 1500, true), 9);
+    assert_eq!(ranged.lookup_directional(6, 9050, 1500, true, true), 9);
 }
 
 // #3385: a dual-constrained custom app whose SOURCE and DESTINATION port ranges
@@ -4439,11 +4439,11 @@ fn app_catalog_overlapping_dual_range_no_cross_slot_overmatch() {
 
     // Reverse-keyed: service slot rides the source port. service=src=500 (in
     // dstR), client=dst=80 (in srcR) -> match.
-    assert_eq!(cat.lookup_directional(6, 500, 80, true), 11);
+    assert_eq!(cat.lookup_directional(6, 500, 80, true, true), 11);
 
     // Reverse-keyed over-match guard: service=src=55555 (NOT in dstR) ->
     // UNKNOWN regardless of the client (dst) slot landing in the overlap.
-    assert_eq!(cat.lookup_directional(6, 55555, 80, true), 0);
+    assert_eq!(cat.lookup_directional(6, 55555, 80, true, true), 0);
 }
 
 // #3416: the permit-side audit AppID must resolve from the POST-translation
@@ -4459,7 +4459,7 @@ fn app_catalog_lookup_admitted_uses_post_nat_dst_port() {
     // RED-on-revert: passing the pre-NAT forward-key dst (2222) to the plain
     // directional lookup mislabels the session UNKNOWN — exactly the #3416 bug.
     assert_eq!(
-        ssh.lookup_directional(6, 51000, 2222, false),
+        ssh.lookup_directional(6, 51000, 2222, false, true),
         0,
         "pre-NAT public dst port resolves UNKNOWN — the #3416 mislabel"
     );
@@ -4512,6 +4512,57 @@ fn app_catalog_protocol_only_entry() {
     assert_eq!(cat.lookup_forward(1, 0, 0), 3);
     assert_eq!(cat.lookup_forward(1, 1234, 5678), 3);
     assert_eq!(cat.lookup_forward(6, 1234, 5678), 0); // different protocol
+}
+
+// #14313: a flowless packet (non-first TCP/UDP fragment) carries synthetic
+// ports (0,0) with l4_present = false. A 0..=N port-constrained entry
+// (#13920 shape, e.g. FaceTime 0-41640) must NOT match port 0 when L4 is
+// absent — only the protocol-only tier may resolve. With L4 present, a real
+// port 0 inside 0..=41640 still matches (#13920).
+#[test]
+fn app_catalog_flowless_fragment_skips_zero_floor_port_range_14313() {
+    // FaceTime-0_41640 stand-in: TCP dst 0..=41640 (port-constrained scan
+    // entry); plus a protocol-only TCP entry.
+    let cat = AppCatalog::from_snapshot(&[
+        cat_entry(5, 6, 0, 41640),
+        cat_entry(3, 6, 0, 0),
+    ]);
+    // Flowless fragment: ports unknown (0,0), l4_present = false. Must fall
+    // back to the protocol-only app, not the 0..=41640 port tier.
+    assert_eq!(
+        cat.lookup_directional(6, 0, 0, false, false),
+        3,
+        "flowless (0,0) must not match the 0..=41640 port-constrained entry"
+    );
+    // Reverse-keyed flowless fragment: same guard on the src service slot.
+    assert_eq!(
+        cat.lookup_directional(6, 0, 0, true, false),
+        3,
+        "reverse flowless (0,0) must not match the 0..=41640 entry"
+    );
+    // L4 present with a real dst port 0: the 0..=41640 entry legitimately
+    // covers port 0 (#13920) and beats protocol-only.
+    assert_eq!(
+        cat.lookup_directional(6, 51000, 0, false, true),
+        5,
+        "real port 0 with L4 present must still match 0..=41640"
+    );
+    // L4 present inside the range still resolves the port tier.
+    assert_eq!(cat.lookup_forward(6, 51000, 41640), 5);
+    // Flowless with no protocol-only entry: unknown, not the port tier.
+    let port_only = AppCatalog::from_snapshot(&[cat_entry(5, 6, 0, 41640)]);
+    assert_eq!(
+        port_only.lookup_directional(6, 0, 0, false, false),
+        0,
+        "flowless fragment with only a 0..=N entry resolves UNKNOWN"
+    );
+    // Flowless exact-port entry also skipped (exact_dst is port-constrained).
+    let exact = AppCatalog::from_snapshot(&[cat_entry(7, 6, 443, 443), cat_entry(3, 6, 0, 0)]);
+    assert_eq!(
+        exact.lookup_directional(6, 0, 0, false, false),
+        3,
+        "flowless fragment must not match an exact dst-port entry"
+    );
 }
 
 // app_id 0 is the reserved unknown sentinel and must never be indexed even if a
@@ -4707,7 +4758,7 @@ fn app_catalog_precedence_parity_fixture() {
         let dst_port = u16f(&tuple["dst_port"]);
         let is_reverse = tuple["is_reverse"].as_bool().expect("is_reverse");
 
-        let got_id = cat.lookup_directional(proto, src_port, dst_port, is_reverse);
+        let got_id = cat.lookup_directional(proto, src_port, dst_port, is_reverse, true);
         let expected_id = u16f(&case["expected_app_id"]);
         assert_eq!(
             got_id, expected_id,

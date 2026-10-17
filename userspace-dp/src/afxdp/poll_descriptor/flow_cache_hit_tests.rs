@@ -3079,6 +3079,7 @@ fn logging_cached_entry(input: bool, output: bool) -> FlowCacheEntry {
                 action: crate::filter::FilterAction::Accept,
             },
             ingress_zone_id: TEST_TRUST_ZONE_ID,
+            l4_present: true,
         });
     }
     if output {

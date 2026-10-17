@@ -13,7 +13,7 @@ use super::filter::{
     host_inbound_gated_lo0_action,
 };
 use super::host_inbound_policy::{
-    emit_host_inbound_deny, emit_junos_host_deny, junos_host_policy_eval,
+    emit_host_inbound_deny_l4, emit_junos_host_deny_l4, junos_host_policy_eval,
 };
 use super::*;
 
@@ -119,13 +119,15 @@ pub(super) fn flowless_local_delivery_verdict(
             // flowless flow (a non-first fragment / no-L4 packet) the zone
             // host-inbound gate dropped. Reuses the policy-deny event machinery
             // via the shared helper, identical to the flow-backed arms.
-            emit_host_inbound_deny(
+            emit_host_inbound_deny_l4(
                 forwarding,
                 event_stream,
                 flow,
                 meta,
                 from_zone_id,
                 flow.forward_key.dst_port,
+                // #14313: flowless — ports are synthetic (0,0), not real L4.
+                extra.l4_present,
                 now_ns,
             );
             return FlowlessLocalVerdict::HostInboundDeny;
@@ -165,7 +167,7 @@ pub(super) fn flowless_local_delivery_verdict(
         now_ns,
     ) {
         if !matches!(result.action, PolicyAction::Permit) {
-            emit_junos_host_deny(
+            emit_junos_host_deny_l4(
                 forwarding,
                 event_stream,
                 flow,
@@ -176,6 +178,8 @@ pub(super) fn flowless_local_delivery_verdict(
                 result.action,
                 // Flowless: no reply is ever synthesized.
                 false,
+                // #14313: flowless — ports are synthetic (0,0).
+                extra.l4_present,
                 now_ns,
             );
             return FlowlessLocalVerdict::Filtered;
