@@ -166,9 +166,11 @@ type Lo0FilterTerm struct {
 	// PRIMARY enforcement for host traffic: that is a control-plane fail-OPEN,
 	// the same class #5512 fixed for tcp-flags.
 	//
-	// Only `layer-3` match-start is representable, which is exactly what the
-	// compiler accepts (FlexMatchConfig.MatchStart), and it maps to nft's
-	// network-header payload base.
+	// Both `layer-3` and `layer-4` match-starts are representable (the
+	// compiler has accepted layer-4 since #3232): layer-3 maps to nft's
+	// network-header payload base and layer-4 to its transport-header
+	// base (#14394). Any other match-start is unrepresentable and fails
+	// the term closed via flexMatchRepresentable.
 	FlexMatch *Lo0FlexMatch
 	// FlexMatchUnrepresentable marks a term whose flexible-match-range could NOT
 	// be resolved — an unknown range name, or a numeric token the compiler could
@@ -203,12 +205,16 @@ type Lo0FilterTerm struct {
 }
 
 // Lo0FlexMatch is a resolved `flexible-match-range` predicate: compare
-// BitLength bits at ByteOffset from the layer-3 header against Value, after
-// masking with Mask. It is a verbatim copy of config.FlexMatchConfig's
-// representable fields — the netlink builder re-derives the payload/bitwise/cmp
-// expressions, so the two renderers share this input rather than each
-// interpreting the config type.
+// BitLength bits at ByteOffset from the match-start header against Value,
+// after masking with Mask. It is a verbatim copy of
+// config.FlexMatchConfig's representable fields — the netlink builder
+// re-derives the payload/bitwise/cmp expressions, so the two renderers
+// share this input rather than each interpreting the config type.
 type Lo0FlexMatch struct {
+	// MatchStart is the match base: "layer-3" (network header, default)
+	// or "layer-4" (transport header). "" means layer-3 (callers that
+	// predate the field). Any other value is unrepresentable (#14394).
+	MatchStart string
 	ByteOffset uint8
 	BitLength  uint8
 	Value      uint32

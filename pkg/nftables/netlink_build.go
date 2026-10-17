@@ -291,13 +291,13 @@ func (a *ruleAsm) fragV4() *ruleAsm {
 }
 
 // flexMatch appends a `flexible-match-range` predicate (#6804): load BitLength
-// bits at ByteOffset from the LAYER-3 header, mask, and compare.
+// bits at ByteOffset from the match-start header (layer-3 = network header,
+// layer-4 = transport header, #14394), mask, and compare.
 //
-// No nfproto/l4proto dep is added, deliberately. `layer-3` means "from the start
-// of the network header", which is well-defined in both families, and adding an
-// nfproto dep would narrow the term to one family — silently dropping the
-// predicate's effect in the other pass, which is the widening this exists to
-// prevent.
+// No nfproto/l4proto dep is added, deliberately. Both bases are well-defined
+// in both families, and adding an nfproto dep would narrow the term to one
+// family — silently dropping the predicate's effect in the other pass, which
+// is the widening this exists to prevent.
 func (a *ruleAsm) flexMatch(fm Lo0FlexMatch) *ruleAsm {
 	return a.add(flexMatchExprs(fm)...)
 }
@@ -733,16 +733,25 @@ func flexMatchByteLen(bits uint8) uint32 {
 }
 
 // flexMatchRepresentable reports whether a resolved predicate can be rendered
-// as an nft payload load. Only the width can fail: the commit gate bounds
+// as an nft payload load. The width can fail: the commit gate bounds
 // bit-length to 1..32, so a width outside 1..4 arrives only on a corrupt /
-// version-drifted tolerant-load snapshot.
+// version-drifted tolerant-load snapshot. The match-start can also fail
+// (#14394): only "", "layer-3" and "layer-4" have a faithful base; any
+// other value must fail closed upstream (netlink_lo0.go emits no rule
+// for the term) rather than silently re-base to layer-3.
 func flexMatchRepresentable(fm Lo0FlexMatch) bool {
+	switch fm.MatchStart {
+	case "", "layer-3", "layer-4":
+	default:
+		return false
+	}
 	n := flexMatchByteLen(fm.BitLength)
 	return n >= 1 && n <= 4
 }
 
-// flexMatchExprs renders `@nh,<off*8>,<bits> & mask == value` as
-// payload + bitwise + cmp, the same three-expression shape fragV4Match uses.
+// flexMatchExprs renders `@nh,<off*8>,<bits> & mask == value` (layer-3) or
+// `@th,<off*8>,<bits> & mask == value` (layer-4, #14394) as payload +
+// bitwise + cmp, the same three-expression shape fragV4Match uses.
 //
 // Value and Mask are emitted BIG-ENDIAN over the load width, because a payload
 // load returns network-order bytes and the compiler stores both as host-order
@@ -766,8 +775,12 @@ func flexMatchExprs(fm Lo0FlexMatch) []expr.Any {
 	for i := range v {
 		v[i] &= m[i]
 	}
+	base := expr.PayloadBaseNetworkHeader
+	if fm.MatchStart == "layer-4" {
+		base = expr.PayloadBaseTransportHeader
+	}
 	return []expr.Any{
-		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: uint32(fm.ByteOffset), Len: n},
+		&expr.Payload{DestRegister: 1, Base: base, Offset: uint32(fm.ByteOffset), Len: n},
 		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: n, Mask: m, Xor: make([]byte, n)},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: v},
 	}

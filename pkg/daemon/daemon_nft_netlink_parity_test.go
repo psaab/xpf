@@ -364,6 +364,13 @@ func runNftNetlinkParityInner(t *testing.T) {
 			// value never matches: a silent never-match, which is a different
 			// fail direction from the widening but just as quiet.
 			{"value-outside-mask-is-pre-masked", config.FlexMatchConfig{MatchStart: "layer-3", ByteOffset: 9, BitLength: 8, Value: 0xff11, Mask: 0x0f}},
+			// #14394: match-start layer-4 must render at the TRANSPORT
+			// header base (@th) in BOTH renderers. Before the fix both
+			// dropped MatchStart and rendered @nh, so this row's @th
+			// guard below fails on the oracle and the netlink payload
+			// base diverges — parity alone could not catch it because
+			// both renderers made the identical L3 error.
+			{"layer-4-transport-base", config.FlexMatchConfig{MatchStart: "layer-4", ByteOffset: 0, BitLength: 8, Value: 0x11, Mask: 0xff}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				fm := tc.fm
@@ -378,9 +385,15 @@ func runNftNetlinkParityInner(t *testing.T) {
 				oracle := buildLo0FilterPayload(cfg, "flexf", "")
 				// Guard the fixture's own premise: an oracle that omitted the
 				// predicate would make the diff below pass for the wrong reason.
-				if !strings.Contains(oracle, "@nh,") {
-					t.Fatalf("the oracle emitted no raw-payload match, so this "+
-						"cell cannot detect a dropped predicate:\n%s", oracle)
+				// The expected base follows the authored match-start (#14394):
+				// layer-4 must render @th, everything else @nh.
+				wantBase := "@nh,"
+				if tc.fm.MatchStart == "layer-4" {
+					wantBase = "@th,"
+				}
+				if !strings.Contains(oracle, wantBase) {
+					t.Fatalf("the oracle emitted no %s raw-payload match, so this "+
+						"cell cannot detect a dropped/wrong-base predicate:\n%s", wantBase, oracle)
 				}
 				spec := toNftLo0Spec(cfg, "flexf", "")
 				parityCheck(t, xnft.Lo0TableName, oracle, func() error { _, err := inst.InstallLo0(spec); return err })
@@ -436,6 +449,18 @@ func runNftNetlinkParityInner(t *testing.T) {
 					Action:    "accept",
 				},
 			},
+			{
+				// #14394: a match-start with no faithful base. Strict commit
+				// rejects "payload", but a tolerant load can carry it; it
+				// must match nothing, never re-base to layer-3.
+				name: "unrepresentable-match-start",
+				term: &config.FirewallFilterTerm{
+					Name:      "unrepresentable-match-start",
+					Protocols: []string{"tcp"},
+					FlexMatch: &config.FlexMatchConfig{MatchStart: "payload", ByteOffset: 6, BitLength: 8, Value: 1, Mask: 0xff},
+					Action:    "accept",
+				},
+			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				cfg := &config.Config{}
@@ -447,7 +472,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 				}
 				nftDeleteTableBestEffort(xnft.Lo0TableName)
 				oracle := buildLo0FilterPayload(cfg, "flexbad", "")
-				if strings.Contains(oracle, "@nh,") {
+				if strings.Contains(oracle, "@nh,") || strings.Contains(oracle, "@th,") {
 					t.Fatalf("an UNREPRESENTABLE flex-match still rendered a "+
 						"payload match:\n%s", oracle)
 				}

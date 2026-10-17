@@ -3711,17 +3711,21 @@ never lock an operator out of a remote box it manages.
   PRIMARY enforcement for host traffic.
 
   A representable predicate now renders as nft's raw payload match,
-  `@nh,<byteOffset*8>,<byteLen*8> & <mask> == <value>` — `layer-3` match-start
-  (the only start point the compiler emits) is the network-header base. The load
-  is whole BYTES because nft loads byte-aligned; a sub-byte bit length is carried
-  by the MASK, exactly as the userspace matcher does it, and the expected value
+  `@nh,<byteOffset*8>,<byteLen*8> & <mask> == <value>` for `layer-3`
+  match-start (the network-header base) and `@th,...` for `layer-4`
+  (the transport-header base, #14394 — the compiler has accepted layer-4
+  since #3232 and the userspace matcher honours it; the kernel mirror
+  previously dropped `MatchStart` and rendered every flex-match at the
+  L3 base, a fail-open for `then discard` terms on host-bound traffic).
+  The load is whole BYTES because nft loads byte-aligned; a sub-byte bit
+  length is carried by the MASK, exactly as the userspace matcher does it, and the expected value
   is pre-masked on both sides (nft compares the masked load, so a value with bits
   outside the mask would never match — a silent never-match is a different fail
   direction but just as quiet).
 
   An UNREPRESENTABLE predicate — more than one named range (#5823), an
-  unparseable numeric token (`UnknownFlexMatch`), or a load width outside 1..4
-  bytes — makes the term match NOTHING (no rule emitted), so later terms still
+  unparseable numeric token (`UnknownFlexMatch`), a load width outside 1..4
+  bytes, or a match-start other than `layer-3`/`layer-4` (#14394) — makes the term match NOTHING (no rule emitted), so later terms still
   run. That mirrors userspace, which poisons the term to
   `FlexMatchStart::Unsupported` so `flex_matches()` returns false. It is
   deliberately NOT the #5512 tcp-flags drop: a tcp-flags constraint only ever

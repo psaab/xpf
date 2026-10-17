@@ -474,8 +474,8 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	// the kernel before userspace-dp), so that is a control-plane fail-OPEN.
 	//
 	// nft's raw payload syntax takes BIT offset and BIT length from the base:
-	// `@nh,<off>,<len>`. match-start layer-3 — the only start point the compiler
-	// emits — is the network header base.
+	// `@nh,<off>,<len>` for match-start layer-3 (network header) and
+	// `@th,<off>,<len>` for layer-4 (transport header, #14394).
 	// The `!lo0FlexMatchUnrepresentable` conjunct is a BELT and is currently
 	// UNREACHABLE: the early return above already left the function for every
 	// unrepresentable term, so by here the predicate is always false. It is kept
