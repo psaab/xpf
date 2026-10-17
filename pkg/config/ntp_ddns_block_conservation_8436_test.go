@@ -42,9 +42,15 @@ system {
 			"`server` directive (#8436)", got)
 	}
 	opt := cfg.System.NTPServerOptions["1.1.1.1"]
-	if opt.Key != 5 {
-		t.Errorf("Key = %d, want 5 — the second statement's option entry REPLACED the "+
-			"first's instead of merging, so the authentication key is gone (#8436)", opt.Key)
+	// #14596: the merged key id is stripped into NTPServerKeyIDs (the
+	// renderer must never emit chrony `key` without a keyfile); the
+	// conservation property is that the id survives the merge there.
+	if len(cfg.System.NTPServerKeyIDs) != 1 || cfg.System.NTPServerKeyIDs[0] != 5 {
+		t.Errorf("NTPServerKeyIDs = %v, want [5] — the second statement's option entry REPLACED the "+
+			"first's instead of merging, so the authentication key is gone (#8436)", cfg.System.NTPServerKeyIDs)
+	}
+	if opt.Key != 0 {
+		t.Errorf("Key = %d, want 0 after the #14596 strip", opt.Key)
 	}
 	if opt.Version != 4 {
 		t.Errorf("Version = %d, want 4 — the second statement's own setting was lost", opt.Version)
@@ -73,8 +79,11 @@ system {
 		t.Fatalf("NTPServers = %v, want two entries. An over-broad merge collapses two "+
 			"configured time sources into one (#8436)", got)
 	}
-	if got := cfg.System.NTPServerOptions["1.1.1.1"].Key; got != 5 {
-		t.Errorf("1.1.1.1 Key = %d, want 5", got)
+	if len(cfg.System.NTPServerKeyIDs) != 1 || cfg.System.NTPServerKeyIDs[0] != 5 {
+		t.Errorf("NTPServerKeyIDs = %v, want [5] from 1.1.1.1 only (#14596 strip)", cfg.System.NTPServerKeyIDs)
+	}
+	if got := cfg.System.NTPServerOptions["1.1.1.1"].Key; got != 0 {
+		t.Errorf("1.1.1.1 Key = %d, want 0 after the #14596 strip", got)
 	}
 	if got := cfg.System.NTPServerOptions["2.2.2.2"].Version; got != 4 {
 		t.Errorf("2.2.2.2 Version = %d, want 4", got)

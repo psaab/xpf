@@ -201,6 +201,30 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 						sys.NTPServerOptions[addr], opt)
 				}
 			}
+			// #14596: strip per-server `key <id>` into NTPServerKeyIDs.
+			// xpf writes no chrony keyfile, so leaving the id on the
+			// option would render chrony `key <id>` with no key material
+			// behind it and chronyd would never poll the source. The
+			// warning naming each id is emitted by
+			// systemInertKnobWarnings from NTPServerKeyIDs.
+			for addr, opt := range sys.NTPServerOptions {
+				if opt.Key <= 0 {
+					continue
+				}
+				found := false
+				for _, id := range sys.NTPServerKeyIDs {
+					if id == opt.Key {
+						found = true
+						break
+					}
+				}
+				if !found {
+					sys.NTPServerKeyIDs = append(sys.NTPServerKeyIDs, opt.Key)
+				}
+				opt.Key = 0
+				sys.NTPServerOptions[addr] = opt
+			}
+			sort.Ints(sys.NTPServerKeyIDs)
 			if thNode := child.FindChild("threshold"); thNode != nil {
 				if v := nodeVal(thNode); v != "" {
 					if n, ok := parseIntLeaf(&cfg.Warnings, "system ntp threshold", v); ok {
@@ -2807,6 +2831,9 @@ func systemInertKnobWarnings(sysNode *Node, system *SystemConfig) []string {
 		}
 	}
 	if system != nil {
+		for _, id := range system.NTPServerKeyIDs {
+			add(fmt.Sprintf("system ntp server key %d: NTP authentication accepted but NOT enforced (key %d stripped; no chrony keyfile is written, so the source is polled without authentication)", id, id))
+		}
 		for _, option := range system.NTPServerOptions {
 			if option.RoutingInstance != "" {
 				add("system ntp server routing-instance: accepted but NOT enforced (NTP sources assigned to a routing-instance are queried through the default instance)")

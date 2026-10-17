@@ -203,10 +203,12 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				"prefer": {desc: "Prefer this server", children: nil},
 				// #9880: the modifier value is an integer id the compiler
 				// Atoi-parses and drops to the 0 = unset/default sentinel on
-				// garbage — the #6940 shape (consumers gate on > 0, cf.
-				// renderChronySources) — so the strict gate enforces the
+				// garbage — the #6940 shape — so the strict gate enforces the
 				// positive floor and fails loud instead of committing a
-				// silently-dropped value.
+				// silently-dropped value. #14596: the id is then stripped
+				// into NTPServerKeyIDs with a commit warning, because xpf
+				// writes no chrony keyfile and rendering `key <id>` would
+				// stop chronyd polling the source.
 				"key":              {desc: "Authentication key id for this server", args: 1, placeholder: "<key-id>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
 				"version":          {desc: "NTP version for this server", args: 1, placeholder: "<version>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
 				"routing-instance": {desc: "Routing instance to reach this server in", args: 1, placeholder: "<instance>", children: nil},
