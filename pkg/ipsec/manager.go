@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -236,10 +238,12 @@ func (m *Manager) ApplyNotifyLoaded(ipsecCfg *config.IPsecConfig, loaded func())
 type ApplyHooks struct {
 	// Written runs once the on-disk swanctl config has CHANGED (the new file is
 	// written, or the file is removed for an empty config) and BEFORE the reload.
-	// From that moment until the reload succeeds or the prior file is restored
-	// (#10712), charon runs a generation that is not the file on disk. A failed
-	// reload restores the prior file, so once the apply returns an error the disk
-	// again matches what charon runs — but Written has already fired and stays
+	// From that moment until the reload succeeds or recovery completes
+	// (#10712/#14589), charon runs a generation that is not the file on
+	// disk. A total failure restores the prior file; a partial load is
+	// reconciled to the set charon actually loaded (see applyConfig), so
+	// once the apply returns an error the disk again matches what charon
+	// runs — but Written has already fired and stays
 	// fired (conservative: the caller re-validates rather than trusting a record
 	// that may briefly have described the wrong generation). It does not run when
 	// render or write fails, because the previous file is still on disk.
@@ -264,9 +268,11 @@ func (m *Manager) ApplyWithHooks(ipsecCfg *config.IPsecConfig, hooks ApplyHooks)
 // UnknownGeneration. Only a rendered config carries the marker: the empty-config clear
 // path removes the file, so charon then lists no marker at all.
 //
-// A successful apply runs Written, then Loaded. A write followed by a failed reload
-// runs only Written, and the prior file is restored (#10712), so the disk again
-// matches the generation charon still runs. A render or write failure runs neither.
+// A successful apply runs Written, then Loaded. A write followed by a total reload
+// failure runs only Written, and the prior file is restored (#10712); a partial
+// load runs only Written and is reconciled to charon's loaded set (#14589), so
+// the disk again matches the generation charon still runs in both cases. A
+// render or write failure runs neither.
 // Both run on the caller's goroutine with no Manager lock held.
 func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation string, hooks ApplyHooks) error {
 	// loadedNames and loadedHashes describe the connections swanctl actually
@@ -282,12 +288,31 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 	}
 
 	// #4898: state promotion and SA teardown are gated on reload SUCCESS. On a
-	// failed reload strongSwan keeps the PREVIOUS config loaded and effective, so
-	// prevConnNames and prevConnHashes must NOT advance and stale connections'
-	// live SAs must NOT be terminated — they may still be the effective policy.
-	// Leaving this state unchanged lets the next successful Apply/Clear recompute
-	// the diff and retry the teardown.
+	// total reload failure strongSwan keeps the PREVIOUS config loaded and
+	// effective, so prevConnNames and prevConnHashes must NOT advance and stale
+	// connections' live SAs must NOT be terminated — they may still be the
+	// effective policy. Leaving this state unchanged lets the next successful
+	// Apply/Clear recompute the diff and retry the teardown. The #14589
+	// partial exception (recovered set promoted below) is the one case where
+	// charon demonstrably no longer runs the previous set.
 	if applyErr != nil {
+		var pae *partialApplyError
+		if errors.As(applyErr, &pae) {
+			// #14589: a partial load was recovered so disk == charon.
+			// Promote the recovered set (tearing down SAs that departed
+			// it, e.g. the deleted b whose config charon unloaded),
+			// do NOT fire Loaded (the candidate generation did not
+			// load), and still return the partial error.
+			var removed []string
+			if pae.clear {
+				removed, _ = m.promoteConnNames(map[string]bool{}, map[string]string{})
+			} else {
+				removed, _ = m.promoteConnNames(pae.names, pae.hashes)
+			}
+			_, failed := m.terminateRemovedConns(removed)
+			termErr := m.recordTerminateDebt(removed, failed)
+			return errors.Join(applyErr, termErr)
+		}
 		return applyErr
 	}
 
@@ -309,6 +334,12 @@ func (m *Manager) ApplyGeneration(ipsecCfg *config.IPsecConfig, generation strin
 // SAs of every previously-applied connection.
 func (m *Manager) Clear() error {
 	if err := m.clearConfig(nil); err != nil {
+		var pae *partialApplyError
+		if errors.As(err, &pae) && pae.clear {
+			removed, _ := m.promoteConnNames(pae.names, pae.hashes)
+			_, failed := m.terminateRemovedConns(removed)
+			return errors.Join(err, m.recordTerminateDebt(removed, failed))
+		}
 		// #4898: the reload failed — the old config is still the effective
 		// loaded config. Preserve the loaded names and hashes and skip termination
 		// so a later Clear retries the teardown rather than reporting false success.
@@ -346,12 +377,13 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 
 	// #10712: snapshot the prior file BEFORE replacing it. reload() runs
 	// `swanctl --load-all`, which reads this same live path, so the NEW file
-	// must be on disk when the reload runs — but if the reload fails, charon
-	// keeps the OLD generation while the NEW file would stay on disk, and
+	// must be on disk when the reload runs — but after a total reload failure
+	// charon keeps the OLD generation while the NEW file would stay on disk, and
 	// charon's own next start or reload (strongswan.service ExecStartPost/
 	// ExecReload `swanctl --load-all`) would then load a config that was never
-	// successfully loaded. The snapshot lets the reload-failure path below
-	// restore the prior bytes, so disk again matches what charon runs.
+	// successfully loaded. The snapshot lets the failure paths below restore
+	// the prior bytes (total failure, #10712) or reconcile to charon's loaded
+	// subset (partial load, #14589), so disk again matches what charon runs.
 	prior, priorErr := os.ReadFile(m.configPath)
 	havePrior := true
 	if priorErr != nil {
@@ -379,7 +411,19 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 	if written != nil {
 		written()
 	}
-	if err := m.reload(); err != nil {
+	if _, err := m.reloadResult(); err != nil {
+		var perr *partialReloadError
+		if errors.As(err, &perr) {
+			loadedNames, loadedHashes, rerr := m.recoverPartialLoad14589(ipsecCfg, generation, rendered, hashes, prior, havePrior, perr)
+			if rerr != nil {
+				return nil, nil, rerr
+			}
+			// Recovered: charon, disk and the returned set agree. Still
+			// report the partial so the commit fails and the operator
+			// fixes the refused VPN; the recovered set travels on the
+			// partialApplyError for ApplyGeneration to promote.
+			return loadedNames, loadedHashes, &partialApplyError{err: err, names: loadedNames, hashes: loadedHashes}
+		}
 		slog.Warn("swanctl reload failed", "err", err)
 		if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {
 			return nil, nil, errors.Join(err, restoreErr)
@@ -388,6 +432,244 @@ func (m *Manager) applyConfig(ipsecCfg *config.IPsecConfig, generation string, w
 	}
 
 	return rendered, hashes, nil
+}
+
+// partialApplyError is returned by applyConfig (and clearConfig, with a
+// nil set meaning empty) when a partial load was recovered to a
+// consistent state. ApplyGeneration promotes names/hashes (when
+// non-nil) and still returns the underlying partial error.
+type partialApplyError struct {
+	err    error
+	names  map[string]bool
+	hashes map[string]string
+	clear  bool
+}
+
+func (e *partialApplyError) Error() string { return e.err.Error() }
+func (e *partialApplyError) Unwrap() error { return e.err }
+
+// recoverPartialLoad14589 reconciles disk + charon after a partial
+// --load-all (#14589). It asks charon what it actually loaded. If that
+// set can be filed (subset of candidate or of prior), it writes that
+// set's file and re-loads it (rollback re-load for a prior set, subset
+// file for a candidate subset). If charon cannot be asked or the
+// verification reload does not converge, it falls back to a true
+// rollback: restore the prior file and re-load it. The returned set
+// always describes what charon runs and what is on disk on success.
+func (m *Manager) recoverPartialLoad14589(ipsecCfg *config.IPsecConfig, generation string, rendered map[string]bool, hashes map[string]string, prior []byte, havePrior bool, perr *partialReloadError) (map[string]bool, map[string]string, error) {
+	slog.Warn("swanctl partial load; reconciling disk with charon", "err", perr)
+	loaded, lerr := m.ListLoadedConns()
+	if lerr != nil {
+		// Cannot discover the subset: true rollback.
+		if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
+			return nil, nil, errors.Join(perr, rbErr)
+		}
+		names, hs := m.priorSet14589(prior, havePrior)
+		return names, hs, nil
+	}
+	loadedSet := make(map[string]bool, len(loaded))
+	for n := range loaded {
+		loadedSet[n] = true
+	}
+	// Candidate subset (includes empty set when nothing loaded but
+	// other loaders failed, and the full set cannot happen here).
+	if isSubset14589(loadedSet, rendered) {
+		if len(loadedSet) == len(rendered) {
+			// Summary lied / raced to full: candidate file already correct.
+			return rendered, hashes, nil
+		}
+		text, _, ferr := m.renderSubsetFile14589(ipsecCfg, generation, loadedSet)
+		if ferr != nil {
+			if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
+				return nil, nil, errors.Join(perr, rbErr)
+			}
+			names, phs := m.priorSet14589(prior, havePrior)
+			return names, phs, nil
+		}
+		if werr := fsatomic.WriteFileAtomic(m.configPath, []byte(text), 0600); werr != nil {
+			return nil, nil, errors.Join(perr, fmt.Errorf("write reconciled config after partial load: %w", werr))
+		}
+		if _, rerr := m.reloadResult(); rerr != nil {
+			// Verification reload failed (possibly another partial):
+			// fall back to a true rollback rather than leaving the
+			// subset file unverified.
+			if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
+				return nil, nil, errors.Join(perr, rerr, rbErr)
+			}
+			names, phs := m.priorSet14589(prior, havePrior)
+			return names, phs, nil
+		}
+		// Confirm charon still reports the same set.
+		if confirm, cerr := m.ListLoadedConns(); cerr == nil {
+			cs := make(map[string]bool, len(confirm))
+			for n := range confirm {
+				cs[n] = true
+			}
+			if !sameBoolSet14589(cs, loadedSet) {
+				if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
+					return nil, nil, errors.Join(perr, rbErr)
+				}
+				names, phs := m.priorSet14589(prior, havePrior)
+				return names, phs, nil
+			}
+		}
+		subHashes := make(map[string]string, len(loadedSet))
+		for n := range loadedSet {
+			subHashes[n] = hashes[n]
+		}
+		return loadedSet, subHashes, nil
+	}
+	// Loaded set is not a candidate subset: it may be exactly the prior
+	// set (secret/pool-only partial, connections untouched).
+	priorNames, priorHashes := m.priorSet14589(prior, havePrior)
+	if sameBoolSet14589(loadedSet, priorNames) {
+		if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
+			return nil, nil, errors.Join(perr, rbErr)
+		}
+		return priorNames, priorHashes, nil
+	}
+	// Hybrid/unknown set charon runs that neither file describes.
+	// Safest consistent state reachable is a true rollback.
+	if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
+		return nil, nil, errors.Join(perr, rbErr)
+	}
+	return priorNames, priorHashes, nil
+}
+
+// rollbackReload14589 restores the prior file (or removes it) and
+// re-loads it, so charon converges to the prior generation. A failed
+// re-load is joined by the caller; disk still names the prior set,
+// which is the best available consistent target and what the next
+// charon restart will load.
+func (m *Manager) rollbackReload14589(prior []byte, havePrior bool) error {
+	if err := m.restoreConfigAfterFailedReload(prior, havePrior); err != nil {
+		return err
+	}
+	if _, err := m.reloadResult(); err != nil {
+		return fmt.Errorf("rollback reload after partial load: %w", err)
+	}
+	return nil
+}
+
+// priorSet14589 derives the connection names/hashes the prior file
+// describes. Names are parsed from the file; hashes are recomputed by
+// matching against the current Manager state when the name was
+// previously loaded (the common case) — otherwise the hash is left
+// absent so promoteConnNames adopts the baseline without forcing a
+// teardown (the #10878 legacy-adoption rule). Rendering the prior
+// config is impossible (only its bytes survive), so an absent hash is
+// the honest value.
+func (m *Manager) priorSet14589(prior []byte, havePrior bool) (map[string]bool, map[string]string) {
+	names := map[string]bool{}
+	hashes := map[string]string{}
+	if !havePrior {
+		return names, hashes
+	}
+	for _, n := range connNamesInConfigText14589(string(prior)) {
+		names[n] = true
+		if h, ok := m.prevHashFor14589(n); ok {
+			hashes[n] = h
+		}
+	}
+	return names, hashes
+}
+
+func (m *Manager) prevHashFor14589(name string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.prevConnHashes == nil {
+		return "", false
+	}
+	h, ok := m.prevConnHashes[name]
+	return h, ok
+}
+
+// renderSubsetFile14589 re-renders only the loaded subset. PSKs of
+// refused connections are dropped with their VPN entry, so a restart
+// cannot resurrect their secret.
+func (m *Manager) renderSubsetFile14589(ipsecCfg *config.IPsecConfig, generation string, keep map[string]bool) (string, map[string]string, error) {
+	sub := filterIPsecCfg14589(ipsecCfg, keep)
+	text, rendered, err := m.renderConfig(sub)
+	if err != nil {
+		return "", nil, err
+	}
+	if !sameBoolSet14589(rendered, keep) {
+		// A kept name fell out of the subset render (should not happen
+		// for a set charon just loaded); treat as unrecoverable here.
+		return "", nil, fmt.Errorf("subset render %v does not match loaded set %v", rendered, keep)
+	}
+	hs, err := renderedConnectionHashes(text, rendered)
+	if err != nil {
+		return "", nil, err
+	}
+	text += "\n" + renderGenerationMarker(generation)
+	return text, hs, nil
+}
+
+func filterIPsecCfg14589(src *config.IPsecConfig, keep map[string]bool) *config.IPsecConfig {
+	if src == nil {
+		return &config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{}}
+	}
+	out := *src
+	vpns := make(map[string]*config.IPsecVPN, len(keep))
+	for name, vpn := range src.VPNs {
+		// Rendered names are sanitized; keep matching on both the raw
+		// and sanitized spellings.
+		if keep[name] || keep[sanitizeSwanctlValue(name)] {
+			vpns[name] = vpn
+		}
+	}
+	out.VPNs = vpns
+	return &out
+}
+
+func isSubset14589(set, super map[string]bool) bool {
+	for n := range set {
+		if !super[n] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameBoolSet14589(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for n := range a {
+		if !b[n] {
+			return false
+		}
+	}
+	return true
+}
+
+// connNamesInConfigText14589 lists top-level connection names in a
+// rendered swanctl file's connections{} section.
+func connNamesInConfigText14589(text string) []string {
+	var out []string
+	inConns := false
+	for _, line := range strings.Split(text, "\n") {
+		trim := strings.TrimSpace(line)
+		if trim == "connections {" {
+			inConns = true
+			continue
+		}
+		if !inConns {
+			continue
+		}
+		if trim == "}" && !strings.HasPrefix(line, " ") {
+			break
+		}
+		if strings.HasSuffix(trim, "{") && strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") {
+			out = append(out, strings.TrimSpace(strings.TrimSuffix(trim, "{")))
+		}
+		if trim == "}" && strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") {
+			// connection close; keep scanning
+			continue
+		}
+	}
+	return out
 }
 
 // clearConfig removes the xpf snippet and reloads strongSwan.
@@ -420,7 +702,30 @@ func (m *Manager) clearConfig(written func()) error {
 	if written != nil {
 		written()
 	}
-	if err := m.reload(); err != nil {
+	if _, err := m.reloadResult(); err != nil {
+		var perr *partialReloadError
+		if errors.As(err, &perr) {
+			loaded, lerr := m.ListLoadedConns()
+			if lerr == nil {
+				loadedSet := make(map[string]bool, len(loaded))
+				for n := range loaded {
+					loadedSet[n] = true
+				}
+				if len(loadedSet) == 0 {
+					return &partialApplyError{err: err, names: map[string]bool{}, hashes: map[string]string{}, clear: true}
+				}
+				if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
+					return errors.Join(err, rbErr)
+				}
+				names, hs := m.priorSet14589(prior, havePrior)
+				return &partialApplyError{err: err, names: names, hashes: hs, clear: true}
+			}
+			if rbErr := m.rollbackReload14589(prior, havePrior); rbErr != nil {
+				return errors.Join(err, rbErr)
+			}
+			names, hs := m.priorSet14589(prior, havePrior)
+			return &partialApplyError{err: err, names: names, hashes: hs, clear: true}
+		}
 		if restoreErr := m.restoreConfigAfterFailedReload(prior, havePrior); restoreErr != nil {
 			return errors.Join(err, restoreErr)
 		}
@@ -430,12 +735,13 @@ func (m *Manager) clearConfig(written func()) error {
 }
 
 // restoreConfigAfterFailedReload returns the swanctl snippet to its pre-apply
-// state after a failed reload (#10712): the prior bytes when a file existed, or
-// no file when the apply would have created one. reload() reads the live path,
-// so the divergence window between the write and the restore cannot be closed
-// further here — but it is synchronous and short, and once the apply returns an
-// error the disk again matches the generation charon runs, so charon's own next
-// start or reload cannot pick up a config that was never successfully loaded.
+// state (#10712): the prior bytes when a file existed, or no file when the
+// apply would have created one. It restores the FILE only; callers on the
+// #14589 partial path additionally re-load it (rollbackReload14589), because
+// after a partial load charon no longer runs the prior generation and a
+// file-only restore would resurrect it on the next restart. reload() reads
+// the live path, so the divergence window between the write and the restore
+// cannot be closed further here — but it is synchronous and short.
 func (m *Manager) restoreConfigAfterFailedReload(prior []byte, havePrior bool) error {
 	if !havePrior {
 		if err := os.Remove(m.configPath); err != nil && !os.IsNotExist(err) {
@@ -451,13 +757,72 @@ func (m *Manager) restoreConfigAfterFailedReload(prior []byte, havePrior bool) e
 	return nil
 }
 
+// partialLoadSummary is the parsed "loaded N of M ..., F failed to load"
+// verdict swanctl --load-all prints for one loader (connections, pools,
+// authorities). loaded < total (equivalently failed > 0) means charon
+// accepted only part of the candidate (#14589).
+type partialLoadSummary struct {
+	loaded, total, failed int
+	kind                  string
+}
+
+var partialLoadRe14589 = regexp.MustCompile(`loaded (\d+) of (\d+) (connections|pools|authorities), (\d+) failed to load`)
+
+// parsePartialLoad14589 returns the first partial summary in output.
+func parsePartialLoad14589(output string) (partialLoadSummary, bool) {
+	m := partialLoadRe14589.FindStringSubmatch(output)
+	if m == nil {
+		return partialLoadSummary{}, false
+	}
+	loaded, _ := strconv.Atoi(m[1])
+	total, _ := strconv.Atoi(m[2])
+	failed, _ := strconv.Atoi(m[4])
+	if failed == 0 && loaded >= total {
+		return partialLoadSummary{}, false
+	}
+	return partialLoadSummary{loaded: loaded, total: total, failed: failed, kind: m[3]}, true
+}
+
+// partialReloadError reports a partial --load-all: charon loaded a
+// subset of the candidate. The subset is not named by the summary;
+// callers discover it via ListLoadedConns (#14589).
+type partialReloadError struct {
+	summary partialLoadSummary
+	output  string
+	err     error
+}
+
+func (e *partialReloadError) Error() string {
+	if e.err != nil {
+		return fmt.Sprintf("swanctl --load-all: partial load (%s): %v: %s", e.summary.kind, e.err, e.output)
+	}
+	return fmt.Sprintf("swanctl --load-all: partial load (%s): %s", e.summary.kind, e.output)
+}
+
+func (e *partialReloadError) Unwrap() error { return e.err }
+
+// reload runs swanctl --load-all. A nil return means the candidate is
+// what charon runs. A *partialReloadError means charon loaded only a
+// subset (see #14589); any other error means charon kept the prior
+// config (vici/exec/total failure). swanctl may exit 0 on a partial,
+// so the output text, not just the exit code, is the verdict
+// (docs/ipsec-swanctl-load-proof.md).
 func (m *Manager) reload() error {
+	_, err := m.reloadResult()
+	return err
+}
+
+func (m *Manager) reloadResult() (partialLoadSummary, error) {
 	output, err := m.sc("--load-all")
+	outStr := string(output)
+	if summary, partial := parsePartialLoad14589(outStr); partial {
+		return summary, &partialReloadError{summary: summary, output: outStr, err: err}
+	}
 	if err != nil {
-		return fmt.Errorf("swanctl --load-all: %w: %s", err, string(output))
+		return partialLoadSummary{}, fmt.Errorf("swanctl --load-all: %w: %s", err, outStr)
 	}
 	slog.Info("swanctl config reloaded")
-	return nil
+	return partialLoadSummary{}, nil
 }
 
 // promoteConnNames records newNames — the set of connections that were
@@ -472,7 +837,8 @@ func (m *Manager) reload() error {
 // must be torn down. Cosmetic fields not emitted by renderConfig do not affect
 // the hash.
 //
-// #4898: this is called ONLY after a successful reload, so the remembered
+// #4898: this is called ONLY after a successful reload, or after a #14589
+// partial load recovered to a set charon demonstrably runs, so the remembered
 // names/hashes always describe the last config strongSwan actually loaded.
 // The diff and state advance stay atomic under mu.
 //
