@@ -1270,14 +1270,14 @@ fn parse_term_ports(snap: &FirewallTermSnapshot) -> TermPortMatch {
 
 /// Map the snapshot action string to a `FilterAction`.
 ///
-/// #2399 (032-16) / #2544: an EMPTY action is the legitimate "no
+/// #2399 (032-16) / #14632: an EMPTY action is the legitimate "no
 /// terminating action" case — the term carries only modifiers
-/// (count/log/forwarding-class/policer/dscp) and falls through to the
-/// next term. Map it to Accept as a PLACEHOLDER (the action field is
-/// never returned for a matched fall-through term — see `continue_term`
-/// in `build_filter_term`), but the real semantic is carried by
-/// FilterTerm.continue_term: the evaluator applies the modifiers and
-/// CONTINUES rather than short-circuiting to a terminating decision. A
+/// (count/log/forwarding-class/policer/dscp). Map it to Accept: that IS
+/// the Junos implicit accept a nonterminating-action term terminates with
+/// (the action field is returned when the term terminates — see
+/// `continue_term` in `build_filter_term`, which is true only for an
+/// authored `next term`, in which case the term never returns here on a
+/// match). A
 /// NON-EMPTY but unrecognized action string can only arrive from a
 /// mixed-version snapshot (the Go commit gate validateFilterActionsStrict
 /// rejects an unknown `then` token before it is persisted). For a FIREWALL
@@ -1412,29 +1412,35 @@ fn build_filter_term(
         flex_mask: flex.mask,
         flex_match_start: flex.match_start,
         action,
-        // #2544: this term falls through (applies modifiers, continues to the
-        // next term) when it carries no terminating action. The Go control
-        // plane sets next_term for both the explicit `then next term` and the
-        // modifier-only case. A term with an empty action falls through; a
-        // routing-instance (PBR) term takes its own routing decision and is
-        // NOT a fall-through even with an empty action.
+        // #14632: this term falls through (applies modifiers, continues to
+        // the next term) ONLY on the authored `then next term` bit. Junos
+        // nonterminating actions (count/log/forwarding-class/policer/dscp
+        // with no terminating action) "carry with them an implicit accept
+        // action": a modifier-only term (empty action, next_term false)
+        // applies its modifiers and TERMINATES as Accept (the placeholder
+        // `resolve_term_action` maps "" to Accept). It must NOT reach a
+        // later discard. A routing-instance (PBR) term takes its own
+        // routing decision and is NOT a fall-through even with next_term.
         //
         // #5142 (fail-CLOSED): a term that carries a REAL terminating action
-        // (accept/reject/discard) MUST terminate and apply that action, EVEN IF
-        // next_term is also set. `then discard; next term;` is a contradiction:
-        // the deny is a terminal, and a fall-through bit must NEVER suppress it
-        // (vSRX filter semantics). Before #5142 this read `(snap.next_term ||
-        // snap.action.is_empty()) && routing_instance.is_empty()`, so a
-        // discard/reject term carrying next_term=true fell through and left the
-        // `FilterResult::default()` implicit Accept in place — the deny was
-        // silently dropped (fail-OPEN). The Go commit gate
-        // (validateFilterTerminalConflictStrict) now rejects that contradiction,
+        // (accept/reject/discard) MUST terminate and apply that action, EVEN
+        // IF next_term is also set. `then discard; next term;` is a
+        // contradiction: the deny is a terminal, and a fall-through bit must
+        // NEVER suppress it. The Go commit gate
+        // (validateFilterTerminalConflictStrict) rejects that contradiction,
         // but the tolerant peer-sync path could still deliver one, so the
-        // runtime fails closed on its own: fall through ONLY when the action is
-        // empty. An empty action stays a fall-through whether or not next_term
-        // was set (belt-and-suspenders for an older Go control plane that omits
-        // next_term but sends a modifier-only term).
-        continue_term: snap.action.is_empty() && snap.routing_instance.is_empty(),
+        // runtime fails closed on its own: fall through ONLY when the action
+        // is empty AND next_term was authored AND no routing-instance is set.
+        // Mixed-version note: an older Go peer synthesizes next_term=true
+        // for modifier-only terms, so its terms keep falling through until
+        // it upgrades; a new Go peer sends next_term=false there and this
+        // helper terminates them as implicit Accept. The reverse
+        // (new Go, old Rust) also keeps falling through: the old Rust
+        // ignores next_term and treats every empty action as fall-through,
+        // so implicit accept requires BOTH upgrades together.
+        continue_term: snap.next_term
+            && snap.action.is_empty()
+            && snap.routing_instance.is_empty(),
         count: snap.count.clone(),
         has_count: !snap.count.is_empty(),
         log: snap.log,

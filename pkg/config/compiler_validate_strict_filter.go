@@ -862,7 +862,8 @@ func validateFilterCrossFieldStrict(cfg *Config) error {
 // — #2399 finding 032-16.
 //
 // An unknown token must not be allowed to become the empty action, which the
-// dataplane interprets as fall-through to implicit accept. `compileFilterThen`
+// dataplane interprets as a modifier-only implicit accept (#14632).
+// `compileFilterThen`
 // retains it in `UnknownActions`; `compileFirewall` sets the final action to
 // `discard` after all `then` blocks have contributed, so the tolerant uniform
 // gate warns and fails closed. Strict commit still refuses the unknown token
@@ -1642,7 +1643,7 @@ func validateFilterRoutingInstanceConflictStrict(cfg *Config) error {
 // `then routing-instance <x>` is NOT one of them. It is a TERMINATING
 // (filter-based-forwarding) action: the term takes its own forwarding decision
 // and both runtimes terminate on it — the Rust evaluator sets
-// `continue_term: snap.action.is_empty() && snap.routing_instance.is_empty()`
+// `continue_term: snap.next_term && snap.action.is_empty() && snap.routing_instance.is_empty()` (#14632)
 // (userspace-dp/src/filter/compiler.rs) and resolves the empty action to
 // Accept, and the kernel lo0 nft mirror emits a terminating `accept`
 // (nftRulesFromTerm, pkg/daemon/daemon_nft_term_lower.go;
@@ -1710,8 +1711,8 @@ func validateFilterTerminalConflictStrict(cfg *Config) error {
 				// (on the runtime) fell through, leaving the implicit Accept in
 				// place — the deny was silently dropped (fail-OPEN). Reject the
 				// contradiction here, naming the filter+term. A modifier-only
-				// next-term term (no terminating action) is a VALID fall-through
-				// (#2544/#3427) and is left untouched.
+				// next-term term (no terminating action) is a VALID authored
+				// fall-through (#14632) and is left untouched.
 				//
 				// #9140 extends the same invariant to `then routing-instance
 				// <x>`, which is a TERMINATING filter-based-forwarding action

@@ -13,17 +13,18 @@ import (
 // but the tolerant load / peer-sync path downgrades that gate to a warning
 // (#1960 no-brick), so the shape can still reach the snapshot builder and the
 // renderer. The Rust evaluator resolves the contradiction in favour of the
-// action — `continue_term: snap.action.is_empty() &&
-// snap.routing_instance.is_empty()` (userspace-dp/src/filter/compiler.rs) —
-// and TERMINATES. The snapshot renderer branched on `term.NextTerm` alone and
-// printed ONLY `then next term (fall-through)`, omitting the action the
-// runtime enforces: the surface lied while enforcement stayed fail-closed.
+// action — `continue_term: snap.next_term && snap.action.is_empty() &&
+// snap.routing_instance.is_empty()` (userspace-dp/src/filter/compiler.rs,
+// #14632) — and TERMINATES. The snapshot renderer branched on
+// `term.NextTerm` alone and printed ONLY `then next term (fall-through)`,
+// omitting the action the runtime enforces: the surface lied while
+// enforcement stayed fail-closed.
 //
 // These cells pin the corrected contract: the renderer computes effective
-// fall-through with the SAME predicate as the Rust evaluator (no action AND
-// no routing-instance), shows the terminating action, and annotates the
-// contradictory next-term bit as IGNORED instead of printing the bare
-// fall-through claim.
+// fall-through with the SAME predicate as the Rust evaluator (authored
+// next-term AND no action AND no routing-instance), shows the terminating
+// action, and annotates the contradictory next-term bit as IGNORED instead
+// of printing the bare fall-through claim.
 //
 // FAIL-ON-REVERT: restore `if term.NextTerm {` as the renderer branch and the
 // contradictory cells go RED — the render again claims fall-through while the
@@ -137,11 +138,12 @@ func snapshotTermsFromConfig10012(t *testing.T, cfg *config.Config, filterName s
 }
 
 // rustContinues10012 is the Go spelling of the Rust evaluator's termination
-// predicate (`continue_term: snap.action.is_empty() &&
+// predicate (`continue_term: snap.next_term && snap.action.is_empty() &&
 // snap.routing_instance.is_empty()`, userspace-dp/src/filter/compiler.rs,
-// #5142). The renderer's implied decision must agree with it on every cell.
+// #14632/#5142). The renderer's implied decision must agree with it on
+// every cell.
 func rustContinues10012(snap FirewallTermSnapshot) bool {
-	return snap.Action == "" && snap.RoutingInstance == ""
+	return snap.NextTerm && snap.Action == "" && snap.RoutingInstance == ""
 }
 
 // TestSnapshotRenderContradictoryActionNextTermTerminates10012 is the issue
@@ -246,25 +248,25 @@ func TestSnapshotRenderPureTerminalControl10012(t *testing.T) {
 	}
 }
 
-// TestSnapshotRenderImplicitFallThroughWithoutBit10012 pins the Rust
-// belt-and-suspenders parity: an empty action with NO next_term bit (a shape
-// a hand-built or older-control-plane snapshot can carry — the Rust test
-// `fallthrough_modifier_only_term_reaches_later_discard` falls through on
-// exactly it) still renders as fall-through, because the renderer branches
-// on the Rust predicate, not on the advisory bit.
+// TestSnapshotRenderImplicitFallThroughWithoutBit10012 pins the #14632
+// narrowing: an empty action with NO next_term bit (a modifier-only term —
+// the shape a hand-built or older-control-plane snapshot can carry) does
+// NOT fall through. Junos nonterminating actions carry an implicit accept,
+// so the renderer shows the terminating `then accept`, never the
+// fall-through claim.
 func TestSnapshotRenderImplicitFallThroughWithoutBit10012(t *testing.T) {
 	snap := FirewallTermSnapshot{Name: "mo", Count: "hits"}
-	if !rustContinues10012(snap) {
-		t.Fatalf("Rust predicate terminates the empty-action fixture: %+v", snap)
+	if rustContinues10012(snap) {
+		t.Fatalf("Rust predicate continues the modifier-only fixture: %+v", snap)
 	}
 	out := RenderFirewallFilterSnapshot(&FirewallFilterSnapshot{
 		Name: "edge", Family: "inet", Terms: []FirewallTermSnapshot{snap},
 	})
-	if !strings.Contains(out, "then next term (fall-through)") {
-		t.Errorf("empty action without the next-term bit must still render fall-through (runtime continues).\n%s", out)
+	if strings.Contains(out, "then next term (fall-through)") {
+		t.Errorf("modifier-only term must not render fall-through; runtime terminates as implicit accept (#14632).\n%s", out)
 	}
-	if strings.Contains(out, "then accept") {
-		t.Errorf("render must not claim a terminating accept the runtime never takes.\n%s", out)
+	if !strings.Contains(out, "then accept") {
+		t.Errorf("modifier-only render must show the terminating implicit accept.\n%s", out)
 	}
 }
 

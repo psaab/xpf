@@ -496,30 +496,27 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	// enforcement for host traffic — a wrong terminating verdict here is a real
 	// control-plane mis-enforcement, not a cosmetic shadow.
 	//
-	// #3427: a term with NO terminating action is a FALL-THROUGH in Junos —
-	// apply its modifiers and continue to the NEXT term. An explicit
-	// `then next term` is in this class only when `Action == ""`; a
-	// contradictory real-action + `NextTerm` term is handled as terminating
-	// per the Rust evaluator (#10253). Modifier-only terms carry Action==""
-	// with only count/log/forwarding-class/policer/dscp.
-	// The pre-fix code mapped Action=="" to a terminating nft `accept`, which
-	// SHADOWED every later discard/reject term in the kernel mirror — a fail-OPEN
-	// that diverged from userspace (e.g. `from protocol tcp then next term`
-	// followed by `from destination-port 22 then discard` accepted SSH at term 1,
-	// leaving the drop unreachable). A fall-through with no honored modifier
-	// contributes no rule. When log/count is honored, the emitted rule carries
-	// only those non-terminating statements, so later terms remain reachable.
-	// A routing-instance (PBR) term is explicitly NOT a fall-through: userspace
-	// sets continue_term=false when routing_instance is non-empty
-	// (pkg/dataplane/userspace compiler.rs) and the evaluator TERMINATES the
-	// matched term, returning its action — the empty-action placeholder Accept
-	// (compiler.rs) — so the packet is ACCEPTED. The kernel lo0 input chain
-	// cannot perform route-selection, but the filter VERDICT is accept, so it
-	// must emit a TERMINATING accept (not skip): skipping would let a later
-	// deny term match and OVER-DROP legitimate host traffic on the
-	// kernel-primary lo0 chain. Userspace remains authoritative for the actual
-	// route-selection. Falls through to the verdict emission below (empty action
-	// -> default accept).
+	// #14632: fall-through is ONLY the authored `then next term`. Junos
+	// nonterminating actions (count/log/forwarding-class/policer/dscp with
+	// no terminating action) carry an implicit accept: a modifier-only term
+	// applies its modifiers and TERMINATES as `accept`, so it SHADOWS later
+	// discard/reject terms exactly as the Rust evaluator does (e.g. `then
+	// count bgp;` ahead of a final discard accepts tcp/179). An authored
+	// `then next term` term applies its modifiers and continues: with no
+	// honored modifier it contributes no rule; with log/count the rule
+	// carries only those non-terminating statements, so later terms remain
+	// reachable. A contradictory real-action + `NextTerm` term terminates
+	// per the Rust evaluator (#10253). A routing-instance (PBR) term is
+	// explicitly NOT a fall-through: userspace sets continue_term=false
+	// when routing_instance is non-empty and the evaluator TERMINATES the
+	// matched term, returning its action — the empty-action placeholder
+	// Accept — so the packet is ACCEPTED. The kernel lo0 input chain
+	// cannot perform route-selection, but the filter VERDICT is accept, so
+	// it must emit a TERMINATING accept (not skip): skipping would let a
+	// later deny term match and OVER-DROP legitimate host traffic on the
+	// kernel-primary lo0 chain. Userspace remains authoritative for the
+	// actual route-selection. Falls through to the verdict emission below
+	// (empty action -> default accept).
 
 	// #3445: build the NON-TERMINATING modifier statements the kernel lo0 mirror
 	// can honor natively. nft executes a rule's statements left-to-right and the
@@ -570,18 +567,15 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 		return []string{joinNftFields(match, "meta l4proto 6", modStr, "drop")}
 	}
 
-	// Fall-through (#3427/#10253): ONLY a term with no terminating action
-	// (`Action == ""`) and no routing-instance applies its modifiers and
-	// continues to the next term. An explicit `then next term` paired with a
-	// real action is contradictory input; Rust `continue_term` is false for
-	// that shape, so it must reach the terminating verdict below. A
-	// modifier-only term applies its honored modifiers as a NON-TERMINATING
-	// rule (no verdict) so the per-term log/count fires while later
-	// discard/reject terms stay reachable — nft falls through any rule that
-	// carries no verdict. With no honored modifier the term contributes
-	// nothing: return no rule (the pre-#3445 behavior), which keeps the
-	// subsequent terms reachable.
-	if term.Action == "" && term.RoutingInstance == "" {
+	// Fall-through (#14632): ONLY an authored `then next term` (NextTerm set,
+	// no terminating action, no routing-instance) applies its modifiers and
+	// continues to the next term. A modifier-only term (empty action, no
+	// authored bit — Junos nonterminating actions) terminates below as the
+	// implicit `accept`, with its honored modifiers riding the verdict. An
+	// explicit `then next term` paired with a real action is contradictory
+	// input; Rust `continue_term` is false for that shape, so it must reach
+	// the terminating verdict below.
+	if term.NextTerm && term.Action == "" && term.RoutingInstance == "" {
 		if modStr == "" {
 			return nil
 		}

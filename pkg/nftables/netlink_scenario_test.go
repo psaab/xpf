@@ -169,10 +169,13 @@ func lo0Scenario() Lo0FilterSpec {
 				Action:   "accept",
 			},
 			{
-				// modifier-only fall-through (count, no verdict).
-				Name:   "count-only",
-				Count:  "audit",
-				Action: "",
+				// Authored fall-through (count + next term, no verdict) —
+				// #14632: fall-through requires the explicit bit; a bare
+				// modifier-only term would terminate as implicit accept.
+				Name:     "count-only",
+				Count:    "audit",
+				Action:   "",
+				NextTerm: true,
 			},
 			{
 				// multi-host daddr exact set + protocol set, accept.

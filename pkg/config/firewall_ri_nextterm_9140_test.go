@@ -18,7 +18,7 @@ import (
 //
 // committed cleanly and then rendered a TERMINATING accept in BOTH runtimes
 // (userspace-dp/src/filter/compiler.rs sets
-// `continue_term: action.is_empty() && routing_instance.is_empty()` and resolves
+// `continue_term: next_term && action.is_empty() && routing_instance.is_empty()` (#14632) and resolves
 // the empty action to Accept; the kernel lo0 nft mirror emits `accept` — pinned
 // by TestNftRuleFromTermRoutingInstanceTerminatesAccept in pkg/daemon). On lo0,
 // the host control-plane filter, that makes every later deny term unreachable

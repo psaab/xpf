@@ -121,42 +121,53 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   (`resolve_cos_tx_selection` / `_at`, `resolve_cached_cos_tx_selection`)
   pass the same key for both stages — behaviour-preserving.
 
-  **Fall-through terms (`then next term` / modifier-only) (#2544).**
-  "First-match-wins" applies only to TERMINATING terms. A term whose
-  `then` carries NO terminating action — an explicit `then next term`
-  OR a modifier-only term (only `count`/`log`/`forwarding-class`/
-  `policer`/`dscp`) — must APPLY its modifiers and FALL THROUGH to the
-  next term, per Junos semantics. The Go control plane records this:
-  `buildFirewallFilterSnapshots` sets the wire field `next_term` true
-  for a term with `NextTerm` OR an empty `Action` (a routing-instance
-  PBR term is excluded — it takes its own routing decision). The Rust
-  compiler maps `next_term` (or a belt-and-suspenders empty action) to
-  `FilterTerm.continue_term`. Every per-term eval loop (`eval.rs`
-  standard/non-routing/routing-instance/log-match, `tx_selection.rs`
-  live, `cache_sensitive.rs` cached TX-selection) now: on a MATCH,
-  applies the term's modifiers (count/policer side effects fire, and
-  forwarding-class/dscp-rewrite/log/routing-instance accumulate into the
-  running result, latest matched term winning per scalar, `log` and
-  policer-drop OR'd); then, if `continue_term`, CONTINUES to the next
-  term instead of returning. A matched TERMINATING term sets the result
-  action and returns. If no term terminates, the accumulated modifiers
-  ride the implicit default Accept. Before #2544 the empty action
-  compiled to `FilterAction::Accept` and the loop returned on first
-  match, so a packet matching a fall-through term was ACCEPTED there and
-  a later `discard` was never reached. `continue_term` is compared in
-  `filter_term_semantics_match` (it flips terminate-vs-fall-through
-  without changing the parsed match vecs, so a flow-cache rebuild must
-  catch a `then next term` toggle). The cached TX-selection result
-  accumulates EVERY matched `then count` term in `CachedFilterCounters`
-  (#2573), deduped by counter identity, so a flow whose fall-through set
-  carries multiple `then count` terms increments all of them on the
-  cached replay — matching the uncached full-eval path. The container is
-  a `SmallVec<[_; 2]>` (built once at flow-cache install, only read on
-  the per-packet replay), so the common single/dual-counter case records
-  with no heap allocation. Before #2573 the result held a single
-  `counter` Arc and the cached rebuild path recorded only the LAST
-  matched count term (the earlier fall-through count terms were silently
-  under-counted on the cached path only).
+  **Fall-through is ONLY the authored `then next term` (#14632).**
+  "First-match-wins" applies to every term except an authored
+  fall-through. Junos "Firewall Filter Nonterminating Actions" states
+  nonterminating actions "carry with them an implicit accept action", and
+  `next term` is the explicit continuation — so a modifier-only term
+  (only `count`/`log`/`forwarding-class`/`policer`/`dscp`, no authored
+  `next term`) APPLIES its modifiers and TERMINATES as Accept; it does
+  NOT fall through to a later discard (the pre-#14632 reading inverted
+  this and blackholed e.g. lo0 `then count bgp;` traffic ahead of a final
+  discard). The Go control plane records ONLY the authored bit:
+  `buildFirewallFilterSnapshots` copies `term.NextTerm` verbatim (no
+  empty-Action synthesis). The Rust compiler computes
+  `continue_term := snap.next_term && snap.action.is_empty() &&
+  snap.routing_instance.is_empty()` and maps the empty action to Accept —
+  for a fall-through term that Accept is never returned on a match; for a
+  modifier-only term it IS the terminating verdict, with the term's own
+  forwarding-class/routing-instance/policer modifiers merged first (so a
+  later term can no longer override the operator's classification).
+  Every per-term eval loop (`eval.rs` standard/non-routing/
+  routing-instance/log-match, `tx_selection.rs` live, `cache_sensitive.rs`
+  cached TX-selection): on a MATCH, applies the term's modifiers
+  (count/policer side effects fire, and forwarding-class/dscp-rewrite/
+  log/routing-instance accumulate into the running result, latest matched
+  term winning per scalar, `log` and policer-drop OR'd); then, if
+  `continue_term`, CONTINUES to the next term instead of returning. A
+  matched TERMINATING term (including a modifier-only implicit accept)
+  sets the result action and returns. If no term terminates, the
+  accumulated modifiers ride the implicit default Accept. `continue_term`
+  is compared in `filter_term_semantics_match` (it flips
+  terminate-vs-fall-through without changing the parsed match vecs, so a
+  flow-cache rebuild must catch a `then next term` toggle). The cached
+  TX-selection result accumulates EVERY matched fall-through `then count`
+  term in `CachedFilterCounters` (#2573), deduped by counter identity, so
+  a flow whose fall-through set carries multiple `then count` terms
+  increments all of them on the cached replay — matching the uncached
+  full-eval path. The container is a `SmallVec<[_; 2]>` (built once at
+  flow-cache install, only read on the per-packet replay), so the common
+  single/dual-counter case records with no heap allocation. Before #2573
+  the result held a single `counter` Arc and the cached rebuild path
+  recorded only the LAST matched count term (the earlier fall-through
+  count terms were silently under-counted on the cached path only).
+  **Mixed-version rollout:** an older Go peer synthesizes
+  `next_term=true` for modifier-only terms, so against this Rust helper
+  those terms keep falling through until the peer upgrades; a new Go peer
+  sends `next_term=false` there, and even an older Rust helper terminates
+  a modifier-only term's modifiers-then-Accept identically once the Go
+  side stops synthesizing — no wire-format change is involved.
 
   **Terminal + next_term is fail-CLOSED (#5142, security).** A term with
   a REAL terminating action (`discard`/`reject`/`accept`) MUST terminate
@@ -166,17 +177,15 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   then next term;` (a single terminal co-located with next-term), so the
   contradiction never reaches a snapshot through a commit. Belt-and-
   suspenders, the Rust compiler computes `continue_term :=
-  snap.action.is_empty() && routing_instance.is_empty()` — a term FALLS
-  THROUGH only when it carries no terminating action, so even a
-  mixed-version peer-sync snapshot that sets `next_term` on a
-  discard/reject term still TERMINATES (applies the deny). Before #5142
-  the compiler read `(snap.next_term || snap.action.is_empty()) &&
-  routing_instance.is_empty()`, so a discard/reject term carrying
-  `next_term=true` fell through and left the `FilterResult::default()`
-  implicit Accept in place — the deny was silently dropped (fail-OPEN).
-  A modifier-only next-term term (empty action) still falls through, and
-  a routing-instance (PBR) term is unchanged. Distinct from #4375 (two
-  DISTINCT terminals) and #2544 (empty-action modifier-only next-term).
+  snap.next_term && snap.action.is_empty() &&
+  routing_instance.is_empty()` — fall-through requires the authored bit
+  AND no terminating action, so even a mixed-version peer-sync snapshot
+  that sets `next_term` on a discard/reject term still TERMINATES
+  (applies the deny). A modifier-only term WITH authored `next term`
+  (empty action, bit set) still falls through, a modifier-only term
+  WITHOUT it terminates as implicit accept (#14632), and a
+  routing-instance (PBR) term is unchanged. Distinct from #4375 (two
+  DISTINCT terminals) and #2544 (authored next-term fall-through).
 
   The same accumulate-all-fall-through-terms contract applies to
   three-color policers via `CachedThreeColorPolicers`. Every matched
@@ -230,10 +239,12 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   interface/lo0 input/output hook that has no terminal catch-all term, so
   the divergence and the workaround are surfaced at commit; it is never a
   commit error (implicit-accept is the documented default and a hard
-  reject would brick a previously-accepted config). A `then next term` /
-  modifier-only fall-through term is NOT a catch-all; a `then
-  routing-instance` PBR term terminates but is not accept/discard/reject
-  and so is also not treated as a catch-all.
+  reject would brick a previously-accepted config). An authored
+  `then next term` fall-through term is NOT a catch-all (a modifier-only
+  term without the bit terminates as implicit accept, #14632, but is
+  scoped by its `from` and so is also not treated as a catch-all); a
+  `then routing-instance` PBR term terminates but is not
+  accept/discard/reject and so is also not treated as a catch-all.
 
   **Fall-through log action follows the terminal verdict (#2616).** A
   matched fall-through logging term records its identity

@@ -14,8 +14,8 @@ import (
 // the raw `show firewall filter` prints the reference name verbatim, while the
 // effective view resolves it to the literal prefixes the matcher enforces
 // (#2506). This also pins multi-value list survival (bracketed destination-port
-// collapse, #2419), DSCP code-point resolution (`ef` -> 46), and fall-through
-// (a modifier-only term renders `then next term`, #2544).
+// collapse, #2419), DSCP code-point resolution (`ef` -> 46), and implicit
+// accept (a modifier-only term renders `then accept`, #14632).
 func newEffectiveFilterTestStore(t *testing.T) *configstore.Store {
 	t.Helper()
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
@@ -78,12 +78,15 @@ func TestShowEffectiveFirewallFilterRendersCompiledSnapshot(t *testing.T) {
 	if !strings.Contains(effOut, "from dscp 46") {
 		t.Fatalf("effective output = %q, want DSCP resolved to code point 46", effOut)
 	}
-	// Modifier-only t1 is a fall-through; t2 terminates with accept.
-	if !strings.Contains(effOut, "then next term (fall-through)") {
-		t.Fatalf("effective output = %q, want fall-through for modifier-only term t1", effOut)
+	// #14632: modifier-only t1 (count + forwarding-class, NO authored
+	// `next term`) terminates as implicit accept — it must NOT render the
+	// fall-through line; t2's explicit accept is indistinguishable in text,
+	// so the fall-through absence is the discriminating assertion.
+	if strings.Contains(effOut, "then next term (fall-through)") {
+		t.Fatalf("effective output = %q, must not claim fall-through for modifier-only term t1 (#14632)", effOut)
 	}
 	if !strings.Contains(effOut, "then accept") {
-		t.Fatalf("effective output = %q, want terminating accept for term t2", effOut)
+		t.Fatalf("effective output = %q, want terminating accept (t1 implicit / t2 explicit)", effOut)
 	}
 
 	// Contrast: the RAW view prints the prefix-list reference verbatim and does

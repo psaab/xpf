@@ -17,7 +17,7 @@ import (
 //
 // Both runtimes terminate the term as accept:
 //
-//   - Rust: `continue_term: snap.action.is_empty() && snap.routing_instance.is_empty()`
+//   - Rust: `continue_term: snap.next_term && snap.action.is_empty() && snap.routing_instance.is_empty()` (#14632)
 //     (userspace-dp/src/filter/compiler.rs) is FALSE when the routing-instance
 //     is set — even with next_term set — and `resolve_term_action` maps the
 //     empty action to FilterAction::Accept.

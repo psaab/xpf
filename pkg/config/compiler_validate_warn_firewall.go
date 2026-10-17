@@ -471,8 +471,10 @@ func validateFilterNoCatchAllWarnings(cfg *Config) []string {
 // term that both (a) is a terminating action (`then accept`/`discard`/`reject`
 // with no `then next term`) and (b) has a fully unconstrained `from` (matches
 // every packet). Such a term governs every packet that reaches it, so the
-// filter does not rely on the implicit no-match default. A `then next term` or
-// modifier-only fall-through is NOT a terminator; a `then routing-instance` PBR
+// filter does not rely on the implicit no-match default. An authored
+// `then next term` fall-through is NOT a terminator, and a modifier-only term
+// terminates as implicit accept but is scoped by its `from`, so neither is a
+// catch-all; a `then routing-instance` PBR
 // term terminates but is not accept/discard/reject and so is not a catch-all.
 func firewallFilterHasCatchAllTerminator(f *FirewallFilter) bool {
 	if f == nil {
@@ -491,8 +493,10 @@ func firewallFilterHasCatchAllTerminator(f *FirewallFilter) bool {
 
 // firewallTermIsTerminatingAction reports whether the term carries an explicit
 // terminating action (accept/discard/reject) and is not an explicit
-// fall-through (`then next term`). `then routing-instance` (PBR) and
-// modifier-only terms (Action == "") are not terminating for this purpose.
+// fall-through (`then next term`). `then routing-instance` (PBR) terms are
+// not terminating for this purpose; a modifier-only term (Action == "",
+// no authored `next term`) terminates as implicit accept (#14632) but is
+// likewise not an accept/discard/reject catch-all for this warning.
 func firewallTermIsTerminatingAction(t *FirewallFilterTerm) bool {
 	if t.NextTerm {
 		return false

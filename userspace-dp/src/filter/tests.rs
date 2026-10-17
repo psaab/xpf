@@ -1415,6 +1415,7 @@ fn single_rate_policer_instances_are_term_scoped_11333() {
                 FirewallTermSnapshot {
                     name: "meter-first".into(),
                     policer: "shared-legacy".into(),
+                    next_term: true,
                     ..Default::default()
                 },
                 FirewallTermSnapshot {
@@ -1528,9 +1529,12 @@ fn flow_cache_hit_runs_all_three_fall_through_policers() {
     fn fall_through_term(name: &str, policer: &str, terminating: bool) -> FirewallTermSnapshot {
         FirewallTermSnapshot {
             name: name.into(),
-            // Empty action => fall-through (continue_term); a terminating
-            // "accept" stops the walk but still merges its own policer first.
+            // Authored `next term` => fall-through (continue_term, #14632);
+            // a terminating "accept" stops the walk but still merges its own
+            // policer first. Modifier-only without next_term would implicitly
+            // accept and stop the walk.
             action: if terminating { "accept".into() } else { String::new() },
+            next_term: !terminating,
             policer: policer.into(),
             ..Default::default()
         }
@@ -1610,6 +1614,7 @@ fn flow_cache_hit_runs_both_fall_through_policers() {
                 FirewallTermSnapshot {
                     name: "t-alpha".into(),
                     action: String::new(),
+                    next_term: true,
                     policer: "alpha".into(),
                     ..Default::default()
                 },
@@ -2241,6 +2246,7 @@ fn cached_three_color_policer_instances_are_term_scoped_11333() {
                     FirewallTermSnapshot {
                         name: "meter-in-a".into(),
                         policer: "same-pol".into(),
+                        next_term: true,
                         ..Default::default()
                     },
                     FirewallTermSnapshot {
@@ -6312,11 +6318,12 @@ fn unknown_nonempty_action_fails_closed_discard() {
     );
 }
 
-// An EMPTY action is the legitimate "no terminating action" case: the term
-// carries only modifiers and falls through to the next term. It must remain
-// Accept (today's fall-through semantics) so a valid `then count`-only term is
-// not turned into a deny. MUST FAIL if the empty-string arm is folded into the
-// fail-closed default.
+// #14632: an EMPTY action with no authored `next term` is a modifier-only
+// term: its nonterminating actions carry an implicit accept, so it
+// TERMINATES as Accept (never falls through, never becomes a deny). The
+// distinguishing later-discard cell is
+// `modifier_only_term_implicit_accept_14632`. MUST FAIL if the empty-string
+// arm is folded into the fail-closed default.
 #[test]
 fn empty_action_falls_through_to_accept() {
     let state = make_filter_state(
@@ -6327,12 +6334,17 @@ fn empty_action_falls_through_to_accept() {
                 name: "count-only".into(),
                 protocols: vec!["tcp".into()],
                 count: "c1".into(),
-                // No terminating action — empty string.
+                // No terminating action, no authored next term — empty string.
                 action: String::new(),
                 ..Default::default()
             }],
         }],
         &[],
+    );
+    let filter = state.filters.get("inet:fallthrough").expect("filter");
+    assert!(
+        !filter.terms[0].continue_term,
+        "modifier-only term must terminate (implicit accept), not fall through (#14632)"
     );
     let r = evaluate_filter(
         &state,
@@ -6348,7 +6360,7 @@ fn empty_action_falls_through_to_accept() {
     assert_eq!(
         r.action,
         FilterAction::Accept,
-        "an empty (no terminating) action must keep fall-through accept semantics"
+        "an empty (modifier-only) action must terminate as implicit Accept (#14632)"
     );
 }
 
@@ -8837,17 +8849,12 @@ fn except_v4_list_does_not_constrain_v6_packet() {
 }
 
 // ---------------------------------------------------------------------------
-// #2544: firewall-filter fall-through. A term whose `then` carries NO
-// terminating action — either an explicit `then next term` (Action == "",
-// next_term == true) OR a modifier-only term (only count/log/forwarding-class/
-// policer/dscp) — must APPLY its modifiers and FALL THROUGH to the next term
-// (Junos), instead of terminating as Accept and short-circuiting the loop.
-//
-// Pre-fix (master): the empty action compiled to FilterAction::Accept and the
-// evaluator returned on the first match, so a packet matching a fall-through
-// term was ACCEPTED at that term and a later `discard` term was never reached.
-// These tests FAIL on master (assert Discard, master returns Accept) and pass
-// with continue_term wired through.
+// #2544 as narrowed by #14632: firewall-filter fall-through is ONLY the
+// authored `then next term` (Action == "", next_term == true). Such a term
+// APPLIES its modifiers and FALLS THROUGH to the next term. A modifier-only
+// term (only count/log/forwarding-class/policer/dscp, next_term == false)
+// instead TERMINATES as Accept — Junos nonterminating actions carry an
+// implicit accept (see `modifier_only_term_implicit_accept_14632` below).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -8901,28 +8908,30 @@ fn fallthrough_explicit_next_term_reaches_later_discard() {
 }
 
 #[test]
-fn fallthrough_modifier_only_term_reaches_later_discard() {
-    // A modifier-only term: empty action, NO explicit next_term flag set on the
-    // snapshot. The compiler still treats an empty terminating action as
-    // fall-through (continue_term true), matching Junos implicit fall-through.
+fn modifier_only_term_implicit_accept_14632() {
+    // #14632 acceptance cell: a modifier-only term (`then count bgp;`,
+    // empty action, NO authored next_term) ahead of a final discard must
+    // TERMINATE as Accept for tcp/179 — Junos nonterminating actions carry
+    // an implicit accept. Only authored `next term` falls through.
+    // FAIL-ON-REVERT: restoring
+    // `continue_term: snap.action.is_empty() && ...` makes this Discard.
     let state = make_filter_state(
         &[FirewallFilterSnapshot {
             name: "mo".into(),
             family: "inet".into(),
             terms: vec![
                 FirewallTermSnapshot {
-                    name: "count-only".into(),
+                    name: "count-bgp".into(),
                     protocols: vec!["tcp".into()],
-                    destination_ports: vec!["80".into()],
+                    destination_ports: vec!["179".into()],
                     action: String::new(),
-                    next_term: false, // modifier-only, no explicit `next term`
-                    count: "mo-hits".into(),
+                    next_term: false, // modifier-only, no authored `next term`
+                    count: "bgp".into(),
                     ..Default::default()
                 },
                 FirewallTermSnapshot {
-                    name: "drop-web".into(),
+                    name: "drop-rest".into(),
                     protocols: vec!["tcp".into()],
-                    destination_ports: vec!["80".into()],
                     action: "discard".into(),
                     ..Default::default()
                 },
@@ -8930,11 +8939,10 @@ fn fallthrough_modifier_only_term_reaches_later_discard() {
         }],
         &[],
     );
-    // Confirm the compiler marked term0 as fall-through.
     let filter = state.filters.get("inet:mo").expect("filter");
     assert!(
-        filter.terms[0].continue_term,
-        "modifier-only term must compile to a fall-through term"
+        !filter.terms[0].continue_term,
+        "modifier-only term must NOT compile to fall-through (#14632 implicit accept)"
     );
     let r = evaluate_filter_counted(
         &state,
@@ -8943,13 +8951,19 @@ fn fallthrough_modifier_only_term_reaches_later_discard() {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         PROTO_TCP,
         40000,
-        80,
+        179,
         0,
         TermMatchExtra::default(),
         1400,
     );
-    assert_eq!(r.action, FilterAction::Discard);
+    assert_eq!(
+        r.action,
+        FilterAction::Accept,
+        "modifier-only `then count bgp;` must implicitly accept tcp/179, not fall through to discard (#14632)"
+    );
+    // The count modifier still fired before terminating.
     assert_eq!(filter.terms[0].counter.packets.load(Ordering::Relaxed), 1);
+    assert_eq!(filter.terms[0].counter.bytes.load(Ordering::Relaxed), 1400);
 }
 
 #[test]
@@ -9107,12 +9121,12 @@ fn fallthrough_tx_selection_applies_forwarding_class_then_discards() {
 // NEVER suppress it (vSRX filter semantics). The Go commit gate rejects the
 // contradiction, but the tolerant peer-sync path could still deliver such a
 // snapshot, so the compiler treats a nonempty action as terminating regardless
-// of next_term (continue_term := action.is_empty() && routing_instance.empty).
+// of next_term (continue_term := next_term && action.is_empty() &&
+// routing_instance.is_empty(), #14632).
 //
-// FAIL-ON-REVERT: restore `continue_term: (snap.next_term ||
-// snap.action.is_empty()) && snap.routing_instance.is_empty()` and the
-// discard/reject asserts below go RED — the term falls through and the implicit
-// default Accept survives (fail-OPEN).
+// FAIL-ON-REVERT: dropping the `action.is_empty()` conjunct (falling through
+// on next_term alone) and the discard/reject asserts below go RED — the term
+// falls through and the implicit default Accept survives (fail-OPEN).
 // ---------------------------------------------------------------------------
 
 #[test]

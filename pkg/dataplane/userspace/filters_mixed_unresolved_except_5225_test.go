@@ -67,7 +67,7 @@ func TestResolvePrefixListAddrsUnresolvedPositivePlusExceptFailsClosedByAction_5
 		{"accept-dest-inet", refs4, "destination", "accept"},
 		{"accept-source-inet6", refs6, "source", "accept"},
 		{"accept-dest-inet6", refs6, "destination", "accept"},
-		// A modifier-only fall-through (Action == "") and a PBR redirect must ALSO
+		// A modifier-only term (Action == "", implicit accept under #14632) and a PBR redirect must ALSO
 		// fail closed to match-NOTHING — an unresolvable positive set must never be
 		// counted, logged, admitted, or redirected as a match.
 		{"fallthrough-source-inet", refs4, "source", ""},
