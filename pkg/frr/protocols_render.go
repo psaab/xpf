@@ -266,6 +266,19 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 					continue
 				}
 			}
+			// #14397: the #14388 pre-check above covers md5 (including the
+			// keyless selection, whose keys are all empty); simple with an
+			// empty key needs the same fail-closed omission here, or the
+			// interface would be activated with ip ospf area and zero
+			// authentication lines. The strict gate rejects this at
+			// commit; a tolerant-loaded config must never run
+			// unauthenticated. Do NOT emit a keyless authentication line —
+			// FRR adjacency behaviour for it is not established.
+			if iface.AuthType == "simple" && iface.AuthKey == "" {
+				slog.Warn("frr: omitting OSPF interface with simple authentication configured but no key; refusing to activate it unauthenticated (#14397)",
+					"interface", sanitizeFRRValue(iface.Name), "authentication_type", iface.AuthType)
+				continue
+			}
 			fmt.Fprintf(&b, "interface %s\n", iface.Name)
 			if iface.Cost > 0 {
 				fmt.Fprintf(&b, " ip ospf cost %d\n", frrClampInt("ospf cost", iface.Cost, 65535))

@@ -207,6 +207,17 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #14397: an OSPF authentication type with no key (md5 with every key
+	// empty, or simple-password with an empty password) must not reach the
+	// renderer, which would otherwise activate the interface with NO
+	// authentication. Appended beside the #11794 gate so a new error cannot
+	// steal established first-error priority. Tolerant loads preserve the
+	// config with a warning; the renderer omits the keyless-auth interface.
+	if w, err := validateOSPFAuthKeyPresenceStrict(cfg, opts.lenientOSPFAuthKeyPresence14397); err != nil {
+		return err
+	} else {
+		cfg.Warnings = append(cfg.Warnings, w...)
+	}
 	// #11823 follows existing routing gates to preserve strict first-error
 	// priority. Tolerant loads retain invalid values with a warning; the FRR
 	// renderer omits out-of-domain metrics.

@@ -153,3 +153,71 @@ func TestUnrecognizedAuthTypeRendersPlaintextNotMD5OrSilence8443(t *testing.T) {
 		}
 	}
 }
+
+// #14397 (DR9-H1): a keyless OSPF auth selection (AuthType md5 with every
+// MD5 key empty, or simple with an empty key) must NEVER render as a silent
+// unauthenticated interface. The strict gate rejects it at compile; on the
+// tolerant path the renderer fails closed by omitting the interface
+// activation entirely (with a warning) rather than emitting ip ospf area
+// with zero authentication lines. Keyed auth must render byte-identical.
+func TestKeylessOSPFAuthNeverRendersUnauthenticated14397(t *testing.T) {
+	keyless := map[string]*config.OSPFConfig{
+		"md5-no-keys": {Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
+			{Name: "ge-0/0/1.0", AuthType: "md5", AuthKeyID: 1, AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: ""}}},
+		}}}},
+		"md5-empty-slice": {Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
+			{Name: "ge-0/0/1.0", AuthType: "md5"},
+		}}}},
+		"simple-empty-key": {Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
+			{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: ""},
+		}}}},
+	}
+	for name, ospf := range keyless {
+		t.Run(name, func(t *testing.T) {
+			got := New().generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
+			if strings.Contains(got, "interface ge-0/0/1.0") || strings.Contains(got, "ip ospf area") {
+				t.Fatalf("keyless OSPF auth rendered an (unauthenticated) interface activation; want fail-closed omission (#14397):\n%s", got)
+			}
+		})
+	}
+
+	keyed := map[string]struct {
+		ospf *config.OSPFConfig
+		want []string
+	}{
+		"md5-keyed": {
+			ospf: &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
+				{Name: "ge-0/0/1.0", AuthType: "md5", AuthKeyID: 1, AuthKey: "s3cret", AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: "s3cret"}}},
+			}}}},
+			want: []string{"interface ge-0/0/1.0", " ip ospf authentication message-digest\n", " ip ospf message-digest-key 1 md5 s3cret\n", " ip ospf area 0.0.0.0\n"},
+		},
+		"md5-rollover-mix": {
+			ospf: &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
+				{Name: "ge-0/0/1.0", AuthType: "md5", AuthKeyID: 2, AuthKey: "s3cret", AuthMD5Keys: []config.OSPFMD5Key12186{{ID: 1, Key: ""}, {ID: 2, Key: "s3cret"}}},
+			}}}},
+			want: []string{"interface ge-0/0/1.0", " ip ospf authentication message-digest\n", " ip ospf message-digest-key 2 md5 s3cret\n", " ip ospf area 0.0.0.0\n"},
+		},
+		"simple-keyed": {
+			ospf: &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
+				{Name: "ge-0/0/1.0", AuthType: "simple", AuthKey: "s3cret"},
+			}}}},
+			want: []string{"interface ge-0/0/1.0", " ip ospf authentication\n", " ip ospf authentication-key s3cret\n", " ip ospf area 0.0.0.0\n"},
+		},
+		"no-auth": {
+			ospf: &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{
+				{Name: "ge-0/0/1.0"},
+			}}}},
+			want: []string{"interface ge-0/0/1.0", " ip ospf area 0.0.0.0\n"},
+		},
+	}
+	for name, tc := range keyed {
+		t.Run(name, func(t *testing.T) {
+			got := New().generateProtocols(tc.ospf, nil, nil, nil, nil, "", 0, nil, nil)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("keyed OSPF auth (%s) missing %q; rendered output changed:\n%s", name, want, got)
+				}
+			}
+		})
+	}
+}
