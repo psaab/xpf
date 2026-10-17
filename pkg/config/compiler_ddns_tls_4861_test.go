@@ -5,13 +5,14 @@ import (
 	"testing"
 )
 
-// #4861: a credentialed HTTP DDNS backend (dyndns2 Basic auth, DuckDNS /
+// #4861/#14386: a credentialed HTTP DDNS backend (dyndns2 Basic auth, DuckDNS /
 // Cloudflare token, Route 53 SigV4, generic with %u/%p or Basic auth) must not
 // carry its update credential over a plaintext http:// endpoint. Strict (commit
 // / commit-check) hard-rejects such a `server` / `url-template`; lenient (load /
-// peer-sync) warns. A bare host (no scheme, composed over https) and an https://
-// endpoint are accepted; a NON-credentialed backend over http is not this
-// finding's concern and is not rejected here.
+// peer-sync) DROPS the provider (#14386) so no engine issues a cleartext
+// request, warning that it was dropped. A bare host (no scheme, composed over
+// https) and an https:// endpoint are accepted; a NON-credentialed backend over
+// http is not this finding's concern and is not rejected here.
 //
 // All tests use the production ParseSetCommand + SetPath path (buildTree).
 
@@ -167,9 +168,10 @@ func TestDDNSGenericAtInPathQueryNotMisclassified(t *testing.T) {
 	}
 }
 
-// The lenient (tolerant load / peer-sync) path WARNS instead of rejecting a
-// credentialed plaintext endpoint so an already-persisted config an older
-// binary accepted still boots (#1960).
+// The lenient (tolerant load / peer-sync) path DROPS the credentialed
+// plaintext provider (#14386) instead of warn-and-keep, so no engine issues
+// a cleartext request, while the config still boots (#1960) and the warning
+// states the drop.
 func TestDDNSCredentialedPlaintextLenientWarns(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set system services dynamic-dns provider p backend dyndns2",
@@ -184,11 +186,47 @@ func TestDDNSCredentialedPlaintextLenientWarns(t *testing.T) {
 	if !hasDDNSHTTPSWarning(cfg, "p") {
 		t.Fatalf("lenient load must emit an https warning, warnings=%v", cfg.Warnings)
 	}
-	// The provider is still materialized (the field is accepted; only the
-	// warning is new) — matches the #4837 lenient discipline.
-	if cfg.System.Services == nil || cfg.System.Services.DynamicDNS == nil ||
-		cfg.System.Services.DynamicDNS.Providers["p"] == nil {
-		t.Fatalf("lenient load should still materialize the provider catalog")
+	if cfg.System.Services != nil && cfg.System.Services.DynamicDNS != nil {
+		if _, ok := cfg.System.Services.DynamicDNS.Providers["p"]; ok {
+			t.Fatalf("lenient load must DROP the credentialed plaintext provider (#14386)")
+		}
+	}
+	foundDrop := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, `provider "p"`) && strings.Contains(w, "dropped") {
+			foundDrop = true
+		}
+		if strings.Contains(w, "s3cret") {
+			t.Fatalf("warning leaks credential: %q", w)
+		}
+	}
+	if !foundDrop {
+		t.Fatalf("lenient warning must state provider dropped, warnings=%v", cfg.Warnings)
+	}
+}
+
+// Lenient controls: an https credentialed provider and a non-credentialed
+// http generic provider are kept on lenient load.
+func TestDDNSLenientKeepsSafeProviders14386(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set system services dynamic-dns provider q backend dyndns2",
+		"set system services dynamic-dns provider q username alice",
+		"set system services dynamic-dns provider q password s3cret",
+		"set system services dynamic-dns provider q server https://updates.example/nic/update",
+		"set system services dynamic-dns provider r backend generic",
+		`set system services dynamic-dns provider r url-template "http://host.example/upd?ip=%i"`,
+	})
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	if cfg.System.Services == nil || cfg.System.Services.DynamicDNS == nil {
+		t.Fatal("catalog missing")
+	}
+	for _, n := range []string{"q", "r"} {
+		if _, ok := cfg.System.Services.DynamicDNS.Providers[n]; !ok {
+			t.Fatalf("lenient must keep safe provider %q", n)
+		}
 	}
 }
 

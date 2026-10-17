@@ -70,6 +70,13 @@ func newGenericBackend(p *config.DDNSProvider, client *http.Client) (*genericBac
 	if err := validateGenericURLTemplate(tmpl); err != nil {
 		return nil, fmt.Errorf("ddns generic: provider %q %w", p.Name, err)
 	}
+	// #14386 runtime belt: refuse a credentialed plaintext http:// template
+	// at construction (direct construction bypasses the compiler drop).
+	if genericCarriesCredentials(p) {
+		if err := plaintextEndpointRefusal("generic", p.Name, tmpl); err != nil {
+			return nil, err
+		}
+	}
 	ok := defaultGenericOKTokens
 	if s := strings.TrimSpace(p.OKResponse); s != "" {
 		// Split a configured ok-response into WHOLE TOKENS, not one
@@ -213,6 +220,15 @@ func renderGenericURL(tmpl, host, ip, user, pass string) string {
 // UpsertLease publishes via the rendered template URL.
 func (b *genericBackend) UpsertLease(ctx context.Context, rec LeaseDNSRecord) error {
 	rawURL := renderGenericURL(b.urlTemplate, rec.FQDN, rec.Addr.Unmap().String(), b.username, b.password)
+	// #14386 belt at issuance: the rendered URL may carry a credential
+	// (%u/%p expansion, typed Basic auth, userinfo, or a literal token);
+	// never send it over plaintext http:// to a non-loopback host.
+	if (b.username != "" || b.password != "" ||
+		strings.Contains(b.urlTemplate, "%u") || strings.Contains(b.urlTemplate, "%p") ||
+		templateAuthorityUserinfo(b.urlTemplate) || templateCarriesLiteralToken(b.urlTemplate)) &&
+		plaintextEndpointRefusal("generic", b.name, rawURL) != nil {
+		return fmt.Errorf("ddns generic: %s: endpoint must be an https:// endpoint — refusing to transmit the update credential in cleartext (#14386)", b.name)
+	}
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		// SECURITY: a build-request error (url.Parse) embeds the offending URL,

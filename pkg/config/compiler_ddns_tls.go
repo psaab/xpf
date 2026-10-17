@@ -8,15 +8,20 @@ import "strings"
 // only ever talk to an https:// endpoint (#4861); an rfc2136 backend (DNS, not
 // HTTP) and an unknown backend are false. For the generic templated backend the
 // credential may be Basic auth (typed username/password), an inadyn %u/%p
-// specifier embedded in the url-template, or a LITERAL "user:secret@host"
-// userinfo written directly into the template authority (#5471) — the generic
-// template validator explicitly supports a userinfo credential, so that form
-// must classify as credentialed or the http-vs-https gate would let it leak the
-// credential in cleartext.
+// specifier embedded in the url-template, a LITERAL "user:secret@host"
+// userinfo written directly into the template authority (#5471), a credential
+// in the dyndns2 server URL userinfo, or a literal credential-named token in
+// the generic template query/path (#14386/#14439) — those forms must classify
+// as credentialed or the http-vs-https gate would let them leak in cleartext.
+// A bare path segment ("/update/SECRET") is intentionally NOT flagged: the
+// backend documents credential channels as userinfo or query only, and no
+// precise detector exists for bare segments without heuristics that would
+// break the pinned non-credentialed http:// acceptance.
 func ddnsBackendCarriesCredentials(p *DDNSProvider) bool {
 	switch p.Backend {
 	case "dyndns2":
-		return p.Username != "" || p.Password.Reveal() != ""
+		return p.Username != "" || p.Password.Reveal() != "" ||
+			ddnsTemplateAuthorityHasUserinfo(p.Server)
 	case "duckdns", "cloudflare":
 		return p.APIToken.Reveal() != ""
 	case "route53":
@@ -24,7 +29,62 @@ func ddnsBackendCarriesCredentials(p *DDNSProvider) bool {
 	case "generic":
 		return p.Username != "" || p.Password.Reveal() != "" ||
 			strings.Contains(p.URLTemplate, "%u") || strings.Contains(p.URLTemplate, "%p") ||
-			ddnsTemplateAuthorityHasUserinfo(p.URLTemplate)
+			ddnsTemplateAuthorityHasUserinfo(p.URLTemplate) ||
+			ddnsTemplateCarriesLiteralToken(p.URLTemplate)
+	}
+	return false
+}
+
+// ddnsTemplateCarriesLiteralToken reports whether a generic url-template
+// carries a credential as a literal credential-named key=value pair in its
+// query or path (#14386/#14439): e.g. "?token=SECRET" or "/update/token=SECRET".
+// The template is otherwise opaque, so the detector keys on credential-NAMED
+// pairs only, never on bare values. A value counts as literal only when it is
+// non-empty and contains no '%' (excludes %u/%p/%h/%i specifiers) and no "{{"
+// (excludes placeholders). Bare path segments ("/update/SECRET") are
+// intentionally not flagged — see ddnsBackendCarriesCredentials.
+func ddnsTemplateCarriesLiteralToken(tmpl string) bool {
+	tmpl = strings.TrimSpace(tmpl)
+	if i := strings.Index(tmpl, "#"); i >= 0 {
+		tmpl = tmpl[:i]
+	}
+	authStart := 0
+	if i := strings.Index(tmpl, "://"); i >= 0 {
+		authStart = i + len("://")
+	}
+	authEnd := len(tmpl)
+	for j := authStart; j < len(tmpl); j++ {
+		if c := tmpl[j]; c == '/' || c == '?' {
+			authEnd = j
+			break
+		}
+	}
+	rest := tmpl[authEnd:]
+	path, query := rest, ""
+	if i := strings.Index(rest, "?"); i >= 0 {
+		path, query = rest[:i], rest[i+1:]
+	}
+	isLiteral := func(v string) bool {
+		return v != "" && !strings.Contains(v, "%") && !strings.Contains(v, "{{")
+	}
+	isCredKey := func(k string) bool {
+		switch strings.ToLower(k) {
+		case "token", "access-token", "access_token", "accesstoken",
+			"api-key", "api_key", "apikey", "auth", "auth-key", "authkey",
+			"password", "passwd", "secret", "session-key", "sessionkey":
+			return true
+		}
+		return false
+	}
+	for _, seg := range strings.Split(path, "/") {
+		if i := strings.Index(seg, "="); i > 0 && isCredKey(seg[:i]) && isLiteral(seg[i+1:]) {
+			return true
+		}
+	}
+	for _, pair := range strings.Split(query, "&") {
+		if i := strings.Index(pair, "="); i > 0 && isCredKey(pair[:i]) && isLiteral(pair[i+1:]) {
+			return true
+		}
 	}
 	return false
 }

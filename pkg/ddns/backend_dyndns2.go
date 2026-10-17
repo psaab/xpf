@@ -79,6 +79,13 @@ func newDyndns2Backend(p *config.DDNSProvider, client *http.Client) (*dyndns2Bac
 	if err != nil {
 		return nil, err
 	}
+	// #14386 runtime belt: refuse a credentialed plaintext http:// endpoint
+	// at construction (direct construction bypasses the compiler drop).
+	if dyndns2CarriesCredentials(p) {
+		if err := plaintextEndpointRefusal("dyndns2", p.Name, endpoint); err != nil {
+			return nil, err
+		}
+	}
 	// Bind the dial to the configured source-address/interface/VRF (#2846). A
 	// cached client (#2904) is reused when supplied; nil builds a fresh one.
 	client, err = ensureProviderHTTPClient(p, client)
@@ -233,6 +240,14 @@ func (b *dyndns2Backend) DeleteLease(ctx context.Context, rec LeaseDNSRecord) er
 // query, then parses the body verdict. Shared by UpsertLease and DeleteLease so
 // both paths apply identical auth, status, and response-keyword handling.
 func (b *dyndns2Backend) update(ctx context.Context, q url.Values) error {
+	// #14386 belt at issuance: never send a credentialed request over
+	// plaintext http:// to a non-loopback host, even if the backend was
+	// constructed without going through newDyndns2Backend.
+	if (b.username != "" || b.password != "" || templateAuthorityUserinfo(b.endpoint)) &&
+		plaintextEndpointRefusal("dyndns2", b.name, b.endpoint) != nil {
+		return fmt.Errorf("ddns dyndns2: provider %q endpoint %q must be an https:// endpoint — refusing to transmit the update credential in cleartext (#14386)",
+			b.name, config.RedactURL(b.endpoint))
+	}
 	u, err := url.Parse(b.endpoint)
 	if err != nil {
 		// SECURITY: the endpoint derives from the `server` leaf and may carry

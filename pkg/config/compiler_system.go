@@ -1193,17 +1193,20 @@ func compileDDNSServices(node *Node, lenient bool) (*DDNSServicesConfig, []strin
 			continue
 		}
 		cat.Providers[p.Name] = p
-		// TLS enforcement (#4861 + #14372): a credentialed HTTP backend
-		// (dyndns2/duckdns/cloudflare/route53/generic) must not carry its
-		// update credential over a plaintext http:// server/url-template, and
-		// NO backend may use a plaintext checkip-url — its response is an
+		// TLS enforcement (#4861 + #14372 + #14386): a credentialed HTTP
+		// backend (dyndns2/duckdns/cloudflare/route53/generic) must not carry
+		// its update credential over a plaintext http:// server/url-template,
+		// and NO backend may use a plaintext checkip-url — its response is an
 		// unauthenticated oracle Surface A publishes as this firewall's DNS
 		// record. Strict (commit / commit-check) hard-rejects; lenient (load
-		// / peer-sync) downgrades to a warning so an already-persisted config
-		// an older binary accepted still boots (#1960 fail-closed-on-load
-		// class). The redirect-downgrade half (an https endpoint 30x'd to
-		// http) is blocked at runtime by the shared client's CheckRedirect
-		// (pkg/ddns); the runtime CheckIP gate refuses http outright.
+		// / peer-sync) DROPS the provider (#14386, no engine, no updates) and
+		// warns that it was dropped, rather than warn-and-keep transmitting
+		// the credential (or trusting a spoofed checkip response) in
+		// cleartext on every update. The config still boots (#1960); only
+		// the offending provider is inert. The redirect-downgrade half (an
+		// https endpoint 30x'd to http) is blocked at runtime by the shared
+		// client's CheckRedirect (pkg/ddns); the runtime CheckIP gate refuses
+		// http outright.
 		if field, val, bad := ddnsPlaintextCredentialEndpoint(p); bad {
 			msg := fmt.Sprintf("system services dynamic-dns provider %q (backend %s) "+
 				"%s %q must be an https:// endpoint — a credentialed backend over a "+
@@ -1222,7 +1225,17 @@ func compileDDNSServices(node *Node, lenient bool) (*DDNSServicesConfig, []strin
 			if !lenient {
 				return nil, nil, fmt.Errorf("%s", msg)
 			}
-			warnings = append(warnings, msg)
+			if field == "checkip-url" {
+				// #14372: lenient keeps the provider (its update endpoint may
+				// be https); the runtime CheckIP gate refuses http outright,
+				// so no spoofed response is trusted. Warn only.
+				warnings = append(warnings, msg)
+			} else {
+				// #14386: warn-and-keep would transmit the credential in
+				// cleartext on every update — drop the provider instead.
+				delete(cat.Providers, p.Name)
+				warnings = append(warnings, msg+" — provider dropped, no DDNS updates will be sent for it")
+			}
 		}
 	}
 	// Engine tunables: a duration ("24h") or a bare-seconds integer. They may
