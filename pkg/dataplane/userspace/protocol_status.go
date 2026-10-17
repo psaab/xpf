@@ -556,6 +556,10 @@ type ProcessStatus struct {
 	// embedded ICMP errors suppressed by the per-session 64/64 GCRA.
 	// Surfaced as xpf_userspace_embedded_error_per_session_suppressed_total.
 	EmbeddedErrorPerSessionSuppressedTotal uint64 `json:"embedded_error_per_session_suppressed_total,omitempty"`
+	// NATReverseAmbiguousTotal is #14374 (DR4-H2): reverse-NAT matches
+	// refused as ambiguous on a shared egress.
+	// Surfaced as xpf_userspace_nat_reverse_ambiguous_total.
+	NATReverseAmbiguousTotal uint64 `json:"nat_reverse_ambiguous_total,omitempty"`
 	// InterfaceSNATIdentityExhaustionTotal is #6751 PR 2/3: interface-mode
 	// SNAT admissions that failed CLOSED because no free translated
 	// identity existed for their (egress address, remote endpoint) — every

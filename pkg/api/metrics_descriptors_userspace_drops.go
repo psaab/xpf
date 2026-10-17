@@ -289,6 +289,13 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"session (forged PTB/TE as a PMTUD / throughput weapon).",
 		nil, nil,
 	)
+	c.userspaceNATReverseAmbiguous = prometheus.NewDesc(
+		"xpf_userspace_nat_reverse_ambiguous_total",
+		"#14374 (DR4-H2): reverse-NAT matches refused as ambiguous — "+
+			"a second distinct forward candidate passed every check on "+
+			"a shared egress, so no tenant could be chosen truthfully.",
+		nil, nil,
+	)
 	// #10695 (#9506): IPsec-inner zone-gate, parse, ECN, and D11
 	// queue/slab/orphan counters. Emitted unconditionally so zero means
 	// a reporting helper observed no refusals rather than no series.

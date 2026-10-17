@@ -603,6 +603,7 @@ type xpfCollector struct {
 	userspaceSessionGCReapedStaleSynced         *prometheus.Desc
 	userspaceSessionGCHealedOnPromote           *prometheus.Desc
 	userspaceSessionGCAgedOwnerRGZeroActiveNode *prometheus.Desc
+	userspaceNATReverseAmbiguous                *prometheus.Desc
 	userspaceSessionGCKeptAliveByCompanion      *prometheus.Desc
 	userspaceNATParseErrorsTotal                *prometheus.Desc
 	// #8447: source-NAT rule-match outcome quartet.
@@ -1417,6 +1418,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspacePTBUnbuildable
 	ch <- c.userspaceEmbeddedQuoteSubminimalRefused
 	ch <- c.userspaceEmbeddedErrorPerSessionSuppressed
+	ch <- c.userspaceNATReverseAmbiguous
 	ch <- c.userspaceInterfaceSNATIdentityExhaustion
 	ch <- c.userspaceInterfaceSNATSyncConflictDrops
 	ch <- c.userspaceInterfaceSNATRegistryCap

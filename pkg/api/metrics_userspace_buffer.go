@@ -300,6 +300,11 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		float64(status.EmbeddedErrorPerSessionSuppressedTotal),
 	)
 	ch <- prometheus.MustNewConstMetric(
+		c.userspaceNATReverseAmbiguous,
+		prometheus.CounterValue,
+		float64(status.NATReverseAmbiguousTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
 		c.userspaceInterfaceSNATIdentityExhaustion,
 		prometheus.CounterValue,
 		float64(status.InterfaceSNATIdentityExhaustionTotal),

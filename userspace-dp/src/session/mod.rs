@@ -1311,6 +1311,13 @@ const ICMP_ERROR_SIDE_TABLE_CAP: usize = 1024;
 /// `xpf_userspace_embedded_error_per_session_suppressed_total`.
 pub(crate) static EMBEDDED_ERROR_PER_SESSION_SUPPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+/// #14374 (DR4-H2): reverse-NAT matches refused because a second distinct
+/// forward candidate passed every check — the tenants share one egress
+/// domain, so no truthful winner exists. Bumped once per refused lookup in
+/// both first-wins matchers; surfaced as
+/// `xpf_userspace_nat_reverse_ambiguous_total`.
+pub(crate) static NAT_REVERSE_AMBIGUOUS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 /// Single-TAT GCRA consume on a worker-owned `u64` (no atomics: every call
 /// site runs under `&mut` on the owning worker). Init 0 = full: `0 -
 /// horizon` saturates to 0, which is `<=` any `now`. On deny bumps the

@@ -447,6 +447,7 @@ pub(crate) fn run() -> Result<(), String> {
             ptb_unbuildable_total: 0,
             embedded_quote_subminimal_refused_total: 0,
             embedded_error_per_session_suppressed_total: 0,
+            nat_reverse_ambiguous_total: 0,
             interface_snat_identity_exhaustion_total: 0,
             interface_snat_sync_identity_conflict_drops_total: 0,
             interface_snat_registry_cap_exhaustion_total: 0,

@@ -1203,6 +1203,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceNATReverseAmbiguous: prometheus.NewDesc(
+			"xpf_userspace_nat_reverse_ambiguous_total",
+			"nat reverse ambiguous",
+			nil,
+			nil,
+		),
 		userspaceInterfaceSNATIdentityExhaustion: prometheus.NewDesc(
 			"xpf_userspace_interface_snat_identity_exhaustion_total",
 			"interface snat identity exhaustion",
@@ -1806,6 +1812,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		PTBUnbuildableTotal:                         61,
 		EmbeddedQuoteSubminimalRefusedTotal:         47,
 		EmbeddedErrorPerSessionSuppressedTotal:      59,
+		NATReverseAmbiguousTotal:                    71,
 		InterfaceSNATIdentityExhaustionTotal:        19,
 		SourceNATParseErrors:                        7,
 		DestinationNATParseErrors:                   11,
@@ -1939,13 +1946,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// permit-forward-armed counter, for 98; #13283 adds three typed NAT parse
 	// failure series, for 101, and replaces an aggregate with three typed
 	// counters, bringing this emitter census to 104. #13282 adds four PPTP
-	// lifecycle counters, for 108.
+	// lifecycle counters, for 108. #14374 adds the nat-reverse-ambiguous
+	// counter, for 109.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 108 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 108 metrics, got %d", len(got))
+	if len(got) != 109 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 109 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1985,6 +1993,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspacePTBUnbuildable, nil, 61)
 	assertCounterClose(t, got, c.userspaceEmbeddedQuoteSubminimalRefused, nil, 47)
 	assertCounterClose(t, got, c.userspaceEmbeddedErrorPerSessionSuppressed, nil, 59)
+	assertCounterClose(t, got, c.userspaceNATReverseAmbiguous, nil, 71)
 	assertCounterClose(t, got, c.userspaceInterfaceSNATIdentityExhaustion, nil, 19)
 	assertCounterClose(t, got, c.userspaceInterfaceSNATSyncConflictDrops, nil, 29)
 	assertCounterClose(t, got, c.userspaceInterfaceSNATRegistryCap, nil, 23)
