@@ -120,9 +120,10 @@ pub(crate) fn release_nat64_pool_port(
 ///
 /// #5178: `deterministic` is `true` when the prefix runs a NAPT64 (mode 2)
 /// deterministic pool (`prefix.deterministic_v6.is_some()`), so the reservation
-/// is tagged deterministic and released via `free_no_recycle` — matching the
-/// active node's `allocate_deterministic_v6` release. A round-robin NAT64 pool
-/// passes `false` and keeps today's recycle behaviour.
+/// is tagged deterministic (mode identity for BIB/lease bookkeeping; #14625:
+/// release recycles every port) — matching the active node's
+/// `allocate_deterministic_v6` release. A round-robin NAT64 pool passes
+/// `false`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reserve_nat64_pool_port(
     allocator: &PortAllocator,
@@ -211,8 +212,7 @@ pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
 /// `rollback_flow` rather than `release_flow`: this activation is being
 /// WITHDRAWN, not completing, and the two take different persistent-lease arms
 /// (#6528). It also matters for the DETERMINISTIC arm, whose block port must go
-/// back through `free_no_recycle` rather than onto the recycle ring the
-/// deterministic mapping never draws from.
+/// back through the recycling free (#14625) rather than being dropped.
 pub(crate) fn nat64_refuse_if_peer_owns(
     allocator: &PortAllocator,
     owners: Option<&PoolAddressOwners>,

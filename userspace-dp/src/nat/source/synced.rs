@@ -769,9 +769,9 @@ fn reserve_synced_on_first_pool_owner<'a>(
             continue;
         }
         // #5178: tag the reservation deterministic iff this rule runs a
-        // deterministic CGNAT (mode 1) pool, so its release uses
-        // `free_no_recycle` and the standby's recycle queue does not grow under
-        // synced-session churn — matching the active node's
+        // deterministic CGNAT (mode 1) pool (mode identity for BIB/lease
+        // bookkeeping; #14625: every port recycles on release, the ring is
+        // bounded to one token per offset) — matching the active node's
         // `allocate_deterministic_v4` release path.
         // #7360: hand the allocator this rule's persistence identity when the
         // rule runs `persistent-nat`, so the reservation JOINS the source's

@@ -441,14 +441,15 @@ struct LiveAllocation {
     // this copy mirrors it so the non-persistent / deterministic release paths
     // are uniform.
     addr_index: usize,
-    // #4559: a deterministic CGNAT block allocation. Its port is NOT pushed onto
-    // the per-address recycle queue on release (`free`-path `recycle = false`) —
-    // the deterministic claim scans its subscriber block against the occupancy
-    // bitmap directly, so a freed port becomes claimable again the moment its
-    // bit clears. Recycling it too would let the queue grow without bound across
-    // per-subscriber flow churn (a deterministic-only pool never drains the
-    // recycle queue). `false` for every round-robin/persistent allocation
-    // (unchanged behaviour).
+    // #4559: a deterministic CGNAT block allocation. The deterministic claim
+    // scans its subscriber block against the occupancy bitmap directly, so a
+    // freed port becomes claimable again the moment its bit clears. #14625:
+    // its port IS pushed onto the per-address recycle queue on release like
+    // any other port -- the ring is bounded to one token per offset (#7174)
+    // and `claim_in_block` ignores it, while a pool that later flips to
+    // round-robin PAT on this reused allocator can only reach the freed
+    // port through the ring. `false` for every round-robin/persistent
+    // allocation.
     deterministic: bool,
     // #5269: an address-only occupancy token (port no-translation / port-less
     // source NAT). No pool PORT is consumed on the occupancy bitmap — the packet
@@ -1878,9 +1879,11 @@ impl AddressOccupancy {
         true
     }
 
-    /// Free `port` WITHOUT recycling it (#4559 deterministic path — the bit is
-    /// the only reuse gate, and a deterministic-only pool never drains the
-    /// recycle queue). Returns true iff the bit was set.
+    /// Free `port` WITHOUT recycling it. Returns true iff the bit was set.
+    ///
+    /// Test-only out-of-band clear (`debug_clear_owner`): models an owner
+    /// outside the flow table releasing its bit. Production frees go
+    /// through `free_recycle` (#14625: deterministic ports included).
     fn free_no_recycle(&self, port: u16) -> bool {
         match self.offset_of(port) {
             Some(offset) => self.free_offset(offset),
@@ -2445,13 +2448,13 @@ impl PortAllocator {
                     key,
                 );
                 if !lease.address_only {
-                    freed.push((lease.addr_index, lease.translated.port, !lease.deterministic));
+                    freed.push((lease.addr_index, lease.translated.port));
                 }
             }
             (count, freed)
         };
-        for (addr_index, port, recycle) in freed {
-            self.free_translated_port(addr_index, port, recycle);
+        for (addr_index, port) in freed {
+            self.free_translated_port(addr_index, port);
         }
         count
     }
@@ -2697,9 +2700,9 @@ impl PortAllocator {
     }
 
     /// Test-only: free `port` on pool address `addr_index` through the
-    /// RECYCLING path — the same path a plain-PAT record takes in
-    /// `unlink_live_allocation_locked` (recycle = !deterministic). Returns true
-    /// iff the occupancy bit was set.
+    /// RECYCLING path — the same path every record takes in
+    /// `unlink_live_allocation_locked` (#14625). Returns true iff the
+    /// occupancy bit was set.
     #[cfg(test)]
     pub(super) fn debug_free_recycle(&self, addr_index: usize, port: u16) -> bool {
         match self.shared.occupancy.get(addr_index) {
@@ -2862,7 +2865,7 @@ impl PortAllocator {
         Self::remove_lease_expiration_locked(&mut live, lease.addr_index, lease.expires_at_ns, key);
         live.remove_persistent_lease(&key);
         if !lease.address_only {
-            self.free_translated_port(lease.addr_index, lease.translated.port, !lease.deterministic && !rec.deterministic);
+            self.free_translated_port(lease.addr_index, lease.translated.port);
         }
         true
     }
@@ -2884,18 +2887,27 @@ impl PortAllocator {
         live.persistent_by_source.len() >= self.shared.max_tracked_flows
     }
 
-    /// Free a translated port's occupancy bit. `recycle` pushes the port onto
-    /// the FIFO reuse ring (#3011); the deterministic path passes `false`.
-    /// Returns true iff the bit was set.
-    fn free_translated_port(&self, addr_index: usize, port: u16, recycle: bool) -> bool {
+    /// Free a translated port's occupancy bit, pushing it onto the FIFO
+    /// reuse ring (#3011). Returns true iff the bit was set.
+    ///
+    /// #14625: deterministic ports recycle too. The pre-#14625 split
+    /// (`free_no_recycle` for deterministic records) was sound only while
+    /// an allocator served deterministic rules for its whole life, because
+    /// `claim_in_block` scans the bitmap directly and never drains the
+    /// ring. But `SourceNatPoolAllocatorKey` excludes mode, so removing
+    /// `port deterministic` reuses the SAME allocator for round-robin PAT,
+    /// whose `claim()` -- once its fresh cursor is spent -- reaches free
+    /// ports ONLY through this ring. A no-recycle free after the flip
+    /// cleared the bit with no token, stranding the port until the pool
+    /// key changed. Recycling is harmless for a still-deterministic pool:
+    /// `claim_in_block` ignores the ring, the ring holds at most one
+    /// token per offset (#7174), and a PAT claim that later pops the
+    /// token finds the bit via the normal claim path.
+    fn free_translated_port(&self, addr_index: usize, port: u16) -> bool {
         let Some(occ) = self.shared.occupancy.get(addr_index) else {
             return false;
         };
-        if recycle {
-            occ.free_recycle(port)
-        } else {
-            occ.free_no_recycle(port)
-        }
+        occ.free_recycle(port)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2994,7 +3006,7 @@ impl PortAllocator {
                 'ports: loop {
                     let Some(port) = occ.claim() else {
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port(abs, rejected_port, true);
+                            self.free_translated_port(abs, rejected_port);
                         }
                         break;
                     };
@@ -3034,9 +3046,9 @@ impl PortAllocator {
                         let existing = slot.translated;
                         self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                         drop(live);
-                        self.free_translated_port(abs, port, true);
+                        self.free_translated_port(abs, port);
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port(abs, rejected_port, true);
+                            self.free_translated_port(abs, rejected_port);
                         }
                         return Ok(existing);
                     }
@@ -3060,9 +3072,9 @@ impl PortAllocator {
                         // authoritative — no overshoot. Give back the claimed port.
                         self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                         drop(live);
-                        self.free_translated_port(abs, port, true);
+                        self.free_translated_port(abs, port);
                         for rejected_port in rejected_ports.drain(..) {
-                            self.free_translated_port(abs, rejected_port, true);
+                            self.free_translated_port(abs, rejected_port);
                         }
                         return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
                     }
@@ -3092,7 +3104,7 @@ impl PortAllocator {
                         .fetch_add(1, Ordering::Relaxed);
                     drop(live);
                     for rejected_port in rejected_ports.drain(..) {
-                        self.free_translated_port(abs, rejected_port, true);
+                        self.free_translated_port(abs, rejected_port);
                     }
                     return Ok(translated);
                 }
@@ -3239,7 +3251,7 @@ impl PortAllocator {
                 }
                 let Some(port) = port else {
                     for rejected_port in rejected_ports.drain(..) {
-                        self.free_translated_port(abs, rejected_port, true);
+                        self.free_translated_port(abs, rejected_port);
                     }
                     break;
                 };
@@ -3310,7 +3322,7 @@ impl PortAllocator {
                     .allocations_total
                     .fetch_add(1, Ordering::Relaxed);
                 for rejected_port in rejected_ports.drain(..) {
-                    self.free_translated_port(abs, rejected_port, true);
+                    self.free_translated_port(abs, rejected_port);
                 }
                 return Ok(translated);
             }
@@ -3367,7 +3379,7 @@ impl PortAllocator {
                 );
                 live.remove_persistent_lease(&key);
                 if !lease.address_only {
-                    self.free_translated_port(lease.addr_index, lease.translated.port, !lease.deterministic);
+                    self.free_translated_port(lease.addr_index, lease.translated.port);
                 }
                 return LeaseReuse::NoLease;
             }
@@ -3508,7 +3520,7 @@ impl PortAllocator {
         if let Some((translated, addr_index, expires_at_ns, address_only, deterministic)) = expired {
             Self::remove_lease_expiration_locked(live, addr_index, expires_at_ns, key);
             if !address_only {
-                self.free_translated_port(addr_index, translated.port, !deterministic);
+                self.free_translated_port(addr_index, translated.port);
             }
             live.remove_persistent_lease(&key);
         }
@@ -3546,7 +3558,7 @@ impl PortAllocator {
         Self::remove_lease_expiration_locked(live, lease.addr_index, lease.expires_at_ns, key);
         live.remove_persistent_lease(&key);
         if !lease.address_only {
-            self.free_translated_port(lease.addr_index, lease.translated.port, !lease.deterministic);
+            self.free_translated_port(lease.addr_index, lease.translated.port);
         }
         true
     }
@@ -3638,8 +3650,8 @@ impl PortAllocator {
     ///     LEASE, not the flow. Freeing the bit here hands out a port the lease
     ///     still claims. Only the lease teardown frees it — see the caller-owned
     ///     lease arms below.
-    ///   - Plain PAT: owns its port outright — free the bit, recycling it unless
-    ///     it is a deterministic block port (#4559).
+    ///   - Plain PAT / deterministic: owns its port outright — free the bit
+    ///     and recycle it (#14625).
     ///
     /// The LEASE arm is deliberately NOT here: `release_flow` completes a flow
     /// (bump `completed_flows`, refresh the idle expiry) while `rollback_flow`
@@ -3674,11 +3686,7 @@ impl PortAllocator {
             live.remove_pat_owner(flow, existing.translated);
         }
         if existing.persistent_key.is_none() && !existing.address_only {
-            self.free_translated_port(
-                existing.addr_index,
-                existing.translated.port,
-                !existing.deterministic,
-            );
+            self.free_translated_port(existing.addr_index, existing.translated.port);
         }
     }
 
@@ -3982,7 +3990,7 @@ impl PortAllocator {
                 // PAT lease frees its port when the fresh-activation rollback
                 // removes it.
                 if !existing.address_only {
-                    self.free_translated_port(existing.addr_index, translated.port, !existing.deterministic);
+                    self.free_translated_port(existing.addr_index, translated.port);
                 }
             }
             if let Some((addr_index, expires_at_ns)) = insert_expiry {
@@ -4122,7 +4130,7 @@ impl PortAllocator {
                 let existing = slot.translated;
                 self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                 drop(live);
-                self.free_translated_port(ip_idx, port, false);
+                self.free_translated_port(ip_idx, port);
                 return Ok(existing);
             }
             // #10190: deterministic PAT claims only the bitmap. Reject a
@@ -4130,14 +4138,14 @@ impl PortAllocator {
             // then probe the next candidate in this subscriber's block (#10721).
             if live.address_only_owns_wire_identity(&flow, translated) {
                 drop(live);
-                self.free_translated_port(ip_idx, port, false);
+                self.free_translated_port(ip_idx, port);
                 probe_start = port.checked_add(1);
                 continue;
             }
             if live.live_by_flow.len() >= self.shared.max_tracked_flows {
                 self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                 drop(live);
-                self.free_translated_port(ip_idx, port, false);
+                self.free_translated_port(ip_idx, port);
                 return Err(SourceNatFailureReason::AllocatorExhausted);
             }
             live.live_by_flow.insert(
@@ -4330,7 +4338,7 @@ impl PortAllocator {
                 if let Some(expired) = live.persistent_by_source.get(&bib_key).copied().filter(|lease| lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
                     Self::remove_lease_expiration_locked(&mut live, expired.addr_index, expired.expires_at_ns, bib_key);
                     live.remove_persistent_lease(&bib_key);
-                    if !expired.address_only { self.free_translated_port(expired.addr_index, expired.translated.port, !expired.deterministic); }
+                    if !expired.address_only { self.free_translated_port(expired.addr_index, expired.translated.port); }
                     drop(live);
                     probe_start = Some(port_start as u16);
                     continue;
@@ -4360,11 +4368,9 @@ impl PortAllocator {
             if let Some(slot) = live.live_by_flow.get_mut(&flow) {
                 // This flow already has a translation — a second packet racing the
                 // session install, or a sibling worker that inserted it while the
-                // probe ran. Give the port back WITHOUT recycling: a deterministic
-                // port is reusable via the occupancy bit alone and must never reach
-                // the per-address recycle queue, which the deterministic allocation
-                // path never drains (#4559 / #5178 — a recycled deterministic port
-                // is a leak).
+                // probe ran. Give the port back through the normal recycling
+                // free (#14625: the ring is bounded and `claim_in_block`
+                // ignores it; a later PAT phase on this allocator needs it).
                 // #9145: record this worker as a HOLDER on the idempotent-reuse
                 // return. `reserve_flow_maybe_persistent` and
                 // `reserve_address_only_maybe_persistent` already do it here
@@ -4383,13 +4389,13 @@ impl PortAllocator {
                 let existing = slot.translated;
                 self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                 drop(live);
-                self.free_translated_port(ip_idx, port, false);
+                self.free_translated_port(ip_idx, port);
                 return Ok(existing);
             }
             if let Some(expired) = live.persistent_by_source.get(&bib_key).copied().filter(|lease| lease.active_flows == 0 && lease.expires_at_ns <= now_ns) {
                 Self::remove_lease_expiration_locked(&mut live, expired.addr_index, expired.expires_at_ns, bib_key);
                 live.remove_persistent_lease(&bib_key);
-                if !expired.address_only { self.free_translated_port(expired.addr_index, expired.translated.port, !expired.deterministic); }
+                if !expired.address_only { self.free_translated_port(expired.addr_index, expired.translated.port); }
             }
             if let Some(lease) = live.persistent_by_source.get(&bib_key).copied() {
                 if lease.deterministic
@@ -4402,7 +4408,7 @@ impl PortAllocator {
                 {
                     if live.live_by_flow.len() >= self.shared.max_tracked_flows {
                         drop(live);
-                        self.free_translated_port(ip_idx, port, false);
+                        self.free_translated_port(ip_idx, port);
                         return Err(SourceNatFailureReason::AllocatorExhausted);
                     }
                     if lease.active_flows == 0 {
@@ -4423,11 +4429,11 @@ impl PortAllocator {
                     live.record_pat_owner(&flow, lease.translated);
                     self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                     drop(live);
-                    self.free_translated_port(ip_idx, port, false);
+                    self.free_translated_port(ip_idx, port);
                     return Ok(lease.translated);
                 }
                 drop(live);
-                self.free_translated_port(ip_idx, port, false);
+                self.free_translated_port(ip_idx, port);
                 return Err(SourceNatFailureReason::AllocatorExhausted);
             }
             // #10190: deterministic NAT64 PAT claims only the bitmap. Reject a
@@ -4435,7 +4441,7 @@ impl PortAllocator {
             // then probe the next candidate in this subscriber's block (#10721).
             if live.address_only_owns_wire_identity(&flow, translated) {
                 drop(live);
-                self.free_translated_port(ip_idx, port, false);
+                self.free_translated_port(ip_idx, port);
                 probe_start = port.checked_add(1);
                 continue;
             }
@@ -4444,7 +4450,7 @@ impl PortAllocator {
             {
                 self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                 drop(live);
-                self.free_translated_port(ip_idx, port, false);
+                self.free_translated_port(ip_idx, port);
                 return Err(SourceNatFailureReason::AllocatorExhausted);
             }
             let expires_at_ns = now_ns.saturating_add(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
@@ -4598,15 +4604,11 @@ impl PortAllocator {
     /// #5178: `deterministic` mirrors the ACTIVE node's allocation mode for this
     /// synced flow — `true` when the reservation belongs to a deterministic
     /// CGNAT (mode 1) / NAPT64 (mode 2) pool, `false` for round-robin PAT. It is
-    /// stored on the `LiveAllocation` so the SAME `release_flow`/`rollback_flow`
-    /// teardown frees a deterministic reservation via `free_no_recycle` (the bit
-    /// is the only reuse gate) instead of pushing it onto the per-address recycle
-    /// `VecDeque`. Before #5178 this was hardcoded `false`, so a standby running
-    /// a deterministic pool tagged every synced reservation non-deterministic and
-    /// leaked each released port into a recycle queue the deterministic
-    /// allocation path never drains — unbounded standby memory growth under
-    /// synced-session churn. Matches the non-HA deterministic release contract
-    /// (#4559): a deterministic-only pool never grows the recycle queue.
+    /// stored on the `LiveAllocation` for mode-correct bookkeeping (BIB /
+    /// lease identity, overlap checks). Before #5178 this was hardcoded
+    /// `false`. #14625: release recycles every port regardless of this flag
+    /// (see `free_translated_port`), so the flag no longer selects the free
+    /// path; it is retained because lease/BIB identity still depends on it.
     /// #6765: carry live port ownership across a PARTIAL-OVERLAP pool change.
     ///
     /// THE DEFECT. The allocator carry-over is keyed on the whole address list
@@ -6056,7 +6058,7 @@ impl PortAllocator {
             // Every lease reaching here is idle by the arms above, so no live
             // flow is forwarding on the port being freed.
             if !address_only {
-                self.free_translated_port(addr_index, translated.port, !deterministic);
+                self.free_translated_port(addr_index, translated.port);
             }
             live.remove_persistent_lease(&key);
         }
@@ -6432,7 +6434,7 @@ impl PortAllocator {
             return 0;
         }
         let mut reclaimed = 0;
-        let mut freed: Vec<(usize, u16, bool)> = Vec::new();
+        let mut freed: Vec<(usize, u16)> = Vec::new();
         while reclaimed < budget {
             let chunk = (budget - reclaimed).min(GC_CHUNK);
             freed.clear();
@@ -6446,8 +6448,8 @@ impl PortAllocator {
                 // `live` guard dropped here, BEFORE the lock-free port frees
                 // below and BEFORE the loop re-acquires it for the next chunk.
             };
-            for &(addr_index, port, recycle) in &freed {
-                self.free_translated_port(addr_index, port, recycle);
+            for &(addr_index, port) in &freed {
+                self.free_translated_port(addr_index, port);
             }
             reclaimed += collected;
             if collected < chunk {
@@ -6475,10 +6477,10 @@ impl PortAllocator {
         now_ns: u64,
         budget: usize,
     ) -> usize {
-        let mut freed: Vec<(usize, u16, bool)> = Vec::new();
+        let mut freed: Vec<(usize, u16)> = Vec::new();
         let reclaimed = self.collect_expired_global_locked(live, now_ns, budget, &mut freed);
-        for (addr_index, port, recycle) in freed {
-            self.free_translated_port(addr_index, port, recycle);
+        for (addr_index, port) in freed {
+            self.free_translated_port(addr_index, port);
         }
         reclaimed
     }
@@ -6492,11 +6494,11 @@ impl PortAllocator {
         now_ns: u64,
         budget: usize,
     ) -> usize {
-        let mut freed: Vec<(usize, u16, bool)> = Vec::new();
+        let mut freed: Vec<(usize, u16)> = Vec::new();
         let reclaimed =
             self.collect_expired_for_addr_locked(live, addr_index, now_ns, budget, &mut freed);
-        for (addr_index, port, recycle) in freed {
-            self.free_translated_port(addr_index, port, recycle);
+        for (addr_index, port) in freed {
+            self.free_translated_port(addr_index, port);
         }
         reclaimed
     }
@@ -6513,7 +6515,7 @@ impl PortAllocator {
         live: &mut PortAllocatorLiveState,
         now_ns: u64,
         budget: usize,
-        freed: &mut Vec<(usize, u16, bool)>,
+        freed: &mut Vec<(usize, u16)>,
     ) -> usize {
         if now_ns == 0 || budget == 0 {
             return 0;
@@ -6548,7 +6550,7 @@ impl PortAllocator {
         addr_index: usize,
         now_ns: u64,
         budget: usize,
-        freed: &mut Vec<(usize, u16, bool)>,
+        freed: &mut Vec<(usize, u16)>,
     ) -> usize {
         if now_ns == 0 || budget == 0 || addr_index >= live.lease_expirations_by_addr.len() {
             return 0;
@@ -6586,7 +6588,7 @@ impl PortAllocator {
         live: &mut PortAllocatorLiveState,
         key: PersistentSourceKey,
         expires_at_ns: u64,
-        freed: &mut Vec<(usize, u16, bool)>,
+        freed: &mut Vec<(usize, u16)>,
     ) -> bool {
         let Some(lease) = live.persistent_by_source.get(&key).copied() else {
             return false;
@@ -6605,7 +6607,7 @@ impl PortAllocator {
         // reverse-identity tokens were cleared per flow on release — so there is
         // nothing to free on the occupancy bitmap. A PAT lease records its port.
         if !lease.address_only {
-            freed.push((lease.addr_index, lease.translated.port, !lease.deterministic));
+            freed.push((lease.addr_index, lease.translated.port));
         }
         true
     }

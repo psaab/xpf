@@ -75,7 +75,7 @@
 //! deterministic NAPT64 (#4559) — because the arms differ in how they CHOOSE
 //! the tuple, not in what makes it a duplicate. The deterministic arm still
 //! earns its own cell, for the ROLLBACK: #6528 frees a block port with
-//! `free_no_recycle`, and a skipped rollback strands it.
+//! the recycling free (#14625), and a skipped rollback strands it.
 //!
 //! Everything is reachable only from the same tolerated / peer-synced /
 //! handcrafted population as the covered case (the Go #5144 strict gate rejects
