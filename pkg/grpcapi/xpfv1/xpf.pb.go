@@ -3253,21 +3253,27 @@ type PolicyRule struct {
 	// when non-empty and fall back to the singular otherwise.
 	MatchFromZones []string `protobuf:"bytes,21,rep,name=match_from_zones,json=matchFromZones,proto3" json:"match_from_zones,omitempty"`
 	MatchToZones   []string `protobuf:"bytes,22,rep,name=match_to_zones,json=matchToZones,proto3" json:"match_to_zones,omitempty"`
-	// hit_counters_unavailable marks hit_packets/hit_bytes as NOT authoritative
-	// because the rule is counter-ELIGIBLE (system-wide `policy-stats` on, or the
-	// rule carries `then count`) but no runtime counter source answered for it:
-	// the dataplane is unloaded, or it is loaded and the helper has published no
-	// counter for THIS rule's stable rule id yet — the pre-first-status-poll
+	// hit_counters_unavailable marks hit_packets/hit_bytes as NOT authoritative.
+	// The primary case is a counter-ELIGIBLE rule (system-wide `policy-stats`
+	// on, or the rule carries `then count`) with no runtime counter source:
+	// the dataplane is unloaded, or it is loaded and the helper has published
+	// no counter for THIS rule's stable rule id yet — the pre-first-status-poll
 	// warm-up window, or config skew after a non-abort-class apply failure
 	// (#5679) where the control plane has promoted a config the helper is not
 	// yet enforcing (#7016). Before this field GetPolicies answered that window
 	// with codes.Internal, discarding the WHOLE inventory for one unpublished
 	// rule. The REST sibling carries the same flag as hit_counters_unavailable
-	// (#5580). Additive; false (omitted) on a healthy read and for a rule that
-	// is legitimately not counter-enabled — that one is signalled by count=false,
-	// which is DISTINCT from counter-enabled-but-source-unavailable. A genuine
-	// read FAILURE (the dataplane snapshot itself errored) is still fail-loud as
-	// codes.Internal (#3408), never this flag.
+	// (#5580).
+	//
+	// #14361: a QUARANTINED rule (field 24) also sets this flag unconditionally,
+	// even when it is not counter-eligible — the scrub dropped the rule, so its
+	// 0/0 can never become a live reading and must not read as idle. That is
+	// distinct from the stats-off/not-eligible case (#8177), which keeps this
+	// flag false: an unmeasured live rule may still match traffic, a dropped
+	// rule cannot. Additive; false (omitted) on a healthy read and for a rule
+	// that is legitimately not counter-enabled. A genuine read FAILURE (the
+	// dataplane snapshot itself errored) is still fail-loud as codes.Internal
+	// (#3408), never this flag.
 	HitCountersUnavailable bool `protobuf:"varint,23,opt,name=hit_counters_unavailable,json=hitCountersUnavailable,proto3" json:"hit_counters_unavailable,omitempty"`
 	// #11072: true when either of the rule's zones is StableZoneID-collision
 	// quarantined. The text twin marks such scope (ZoneQuarantinePoliciesQualifier);
