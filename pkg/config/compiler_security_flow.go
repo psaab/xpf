@@ -487,6 +487,16 @@ func validateTCPMSSRanges(nodes []*Node, prefix string, lenient bool) ([]string,
 							// still boots.
 							if kind == "ipsec-vpn" {
 								if _, ok := selectMSSToken(kn); ok {
+									// #14576: account for a packed tail
+									// FIRST, so it cannot hide behind the
+									// ipsec rejection (and, lenient, still
+									// warns even though ipsec itself is
+									// only warned about).
+									if w, terr := checkTCPMSSKindTail(kn, kindPath, lenient); terr != nil {
+										return nil, terr
+									} else {
+										warnings = append(warnings, w...)
+									}
 									msg := fmt.Sprintf("%s: tcp-mss ipsec-vpn is not "+
 										"supported in the userspace forwarding path "+
 										"(IPsec is processed by the kernel XFRM stack, "+
@@ -520,13 +530,31 @@ func validateTCPMSSRanges(nodes []*Node, prefix string, lenient bool) ([]string,
 }
 
 // checkTCPMSSKind range-checks one tcp-mss kind node's compiler-selected MSS
-// value. See validateTCPMSSRanges.
+// value, and accounts for every other token packed into the node. See
+// validateTCPMSSRanges.
 func checkTCPMSSKind(node *Node, nodePath string, lenient bool) ([]string, error) {
 	tok, ok := selectMSSToken(node)
 	if !ok {
 		// No value token in either position — the compiler reads 0 (the
 		// "unset" sentinel). Not a range violation; leave it.
 		return nil, nil
+	}
+	// #14576 (Y03-01): tokens past the selected value — a second kind
+	// packed into the same node (`gre-out mss 1300 all-tcp mss 1350`),
+	// trailing junk (`all-tcp mss 1350 bogus 7`), or an extra value
+	// (`all-tcp 1350 9999`) — were silently dropped: the compiler reads
+	// only the selected token and the kinds are closedWorldOpaque, so
+	// SchemaValidate never sees the tail. Junos rejects these spellings,
+	// so strict must reject rather than compile a subset, and lenient
+	// must warn rather than silently load a partial clamp. The tokens
+	// the #1979 precedence deliberately discards are NOT leftover (see
+	// mssLeftoverTokens), so the mixed shapes keep compiling. Checked
+	// BEFORE the range gate so a packed second kind carrying an
+	// out-of-range value still names the actual defect (the tail).
+	if w, terr := checkTCPMSSKindTail(node, nodePath, lenient); terr != nil {
+		return nil, terr
+	} else if len(w) > 0 {
+		return w, nil
 	}
 	if err := ValidateInteger(0, maxWireU16)(tok, nil); err != nil {
 		msg := fmt.Sprintf("%s: invalid tcp-mss value: %v", nodePath, err)
@@ -547,6 +575,26 @@ func checkTCPMSSKind(node *Node, nodePath string, lenient bool) ([]string, error
 		return []string{msg + suffix}, nil
 	}
 	return nil, nil
+}
+
+// checkTCPMSSKindTail is the #14576 token-accounting gate, shared by the
+// regular kind path and the ipsec-vpn branch (which must not let a packed
+// tail hide behind its own rejection). Strict is a hard error; lenient
+// warns and the compiler keeps only the selected (first) value.
+func checkTCPMSSKindTail(node *Node, nodePath string, lenient bool) ([]string, error) {
+	tok, ok := selectMSSToken(node)
+	if !ok {
+		return nil, nil
+	}
+	leftover := mssLeftoverTokens(node)
+	if len(leftover) == 0 {
+		return nil, nil
+	}
+	msg := fmt.Sprintf("%s: invalid tcp-mss value: unexpected token(s) %s after the selected MSS value %q (each tcp-mss kind takes exactly one value; write each kind as its own statement)", nodePath, strings.Join(leftover, " "), tok)
+	if !lenient {
+		return nil, fmt.Errorf("%s", msg)
+	}
+	return []string{msg + " (ignored: token(s) not compiled — a strict commit would reject this)"}, nil
 }
 
 func compileFlow(node *Node, sec *SecurityConfig) error {
