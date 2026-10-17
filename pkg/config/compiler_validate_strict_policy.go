@@ -248,9 +248,10 @@ func validatePolicyMatchApplicationsStrict(cfg *Config) error {
 			return err
 		}
 	}
-	if err := validatePolicyExpandedRuleCountStrict(cfg); err != nil {
-		return err
-	}
+	// #14353: the expanded-rule-count gate is NOT chained here — it is
+	// registered independently in runTailGates so an undefined
+	// application above cannot suppress its warning on the tolerant
+	// path.
 	return nil
 }
 

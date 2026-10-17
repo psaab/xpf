@@ -427,5 +427,26 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 		return err
 	}
 
+	// #14353 (#13921): policy expanded-rule-count gate — per-set
+	// MaxPolicyRulesPerSet (256) and total MaxTotalPolicyRuleExpansion
+	// (65536) across all non-quarantined sets, mirroring
+	// walkPolicyRuleSlots. Registered HERE, independently, rather than
+	// chained onto validatePolicyMatchApplicationsStrict: that gate
+	// returns on the first undefined application, which suppressed this
+	// gate's tolerant-path warning wholesale. Strict: hard-reject so an
+	// over-limit config fails commit instead of failing dataplane apply
+	// after a green commit (stale snapshot retained). Lenient: warn
+	// (#1960) — the dataplane walker independently rejects the snapshot
+	// and retains the previous one. Runs last so established tail-gate
+	// diagnostics keep first-error priority.
+	if err := validatePolicyExpandedRuleCountStrict(cfg); err != nil {
+		if opts.lenientPolicyExpandedRuleCount {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("policy expanded rule count (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }
