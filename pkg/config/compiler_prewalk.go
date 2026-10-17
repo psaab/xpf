@@ -347,6 +347,21 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	}
 	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, dhcpRelayChildWarnings...)
 
+	// #14660 event-options closed-world gate. Unknown event names, `then`
+	// actions other than change-configuration, and undeclared
+	// event-options / policy children compile to nothing (compileEventOptions
+	// has no default arm; the only producer fires three RPM names and the
+	// engine executes only change-configuration), so by the time the typed
+	// EventPolicy exists the dropped tokens are gone. Scoped AST pre-walk
+	// (NOT closedWorld, which would inherit past `then`), permitted sets
+	// read from schemaEventOptions. Strict: hard-reject; lenient: warn so a
+	// persisted config still boots (#1960).
+	eventInertWarnings, err := validateEventOptionsInertAST(tree.Children, opts.lenientEventInert14660)
+	if err != nil {
+		return nil, err
+	}
+	fwFilterFamilyWarnings = append(fwFilterFamilyWarnings, eventInertWarnings...)
+
 	// #4296 firewall-filter family-any specific-match gate. #4287 dual-compiles a
 	// `family any` filter into BOTH the inet and inet6 pools; a family-specific
 	// match under `family any` (a v4/v6 source/destination-address literal or a

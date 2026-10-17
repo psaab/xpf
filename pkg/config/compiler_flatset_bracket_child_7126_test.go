@@ -287,38 +287,38 @@ func Test_7126_RibGroupImportRibTailReachesTheRefValidator(t *testing.T) {
 // Site 2.
 func Test_7126_EventPolicyEventsEverySpelling(t *testing.T) {
 	t.Run("A-hier-bracket", func(t *testing.T) {
-		cfg := compileBraceStrict7126(t, `event-options { policy p1 { events [ ev_one ev_two ]; } }`)
-		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ev_one", "ev_two")
+		cfg := compileBraceStrict7126(t, `event-options { policy p1 { events [ ping_test_failed ping_test_completed ]; } }`)
+		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ping_test_failed", "ping_test_completed")
 	})
 	t.Run("B-hier-block", func(t *testing.T) {
-		cfg := compileBraceStrict7126(t, `event-options { policy p1 { events { ev_one; ev_two; } } }`)
-		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ev_one", "ev_two")
+		cfg := compileBraceStrict7126(t, `event-options { policy p1 { events { ping_test_failed; ping_test_completed; } } }`)
+		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ping_test_failed", "ping_test_completed")
 	})
 	t.Run("C-hier-repeat", func(t *testing.T) {
-		cfg := compileBraceStrict7126(t, `event-options { policy p1 { events ev_one; events ev_two; } }`)
-		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ev_one", "ev_two")
+		cfg := compileBraceStrict7126(t, `event-options { policy p1 { events ping_test_failed; events ping_test_completed; } }`)
+		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ping_test_failed", "ping_test_completed")
 	})
 	t.Run("D-set-bracket", func(t *testing.T) {
-		cfg := compileSetStrict7126(t, `set event-options policy p1 events [ ev_one ev_two ]`)
-		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ev_one", "ev_two")
+		cfg := compileSetStrict7126(t, `set event-options policy p1 events [ ping_test_failed ping_test_completed ]`)
+		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ping_test_failed", "ping_test_completed")
 	})
 	t.Run("E-set-repeat", func(t *testing.T) {
 		cfg := compileSetStrict7126(t,
-			`set event-options policy p1 events ev_one`,
-			`set event-options policy p1 events ev_two`)
-		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ev_one", "ev_two")
+			`set event-options policy p1 events ping_test_failed`,
+			`set event-options policy p1 events ping_test_completed`)
+		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ping_test_failed", "ping_test_completed")
 	})
 	t.Run("D-set-bracket-three-events", func(t *testing.T) {
-		cfg := compileSetStrict7126(t, `set event-options policy p1 events [ ev_one ev_two ev_three ]`)
-		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ev_one", "ev_two", "ev_three")
+		cfg := compileSetStrict7126(t, `set event-options policy p1 events [ ping_test_failed ping_test_completed ping_probe_failed ]`)
+		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ping_test_failed", "ping_test_completed", "ping_probe_failed")
 	})
 	t.Run("D-set-bracket-with-a-then-clause", func(t *testing.T) {
 		// The whole point of the trigger set is the remediation it gates, so
 		// pin the drop on a policy that actually has one.
 		cfg := compileSetStrict7126(t,
-			`set event-options policy p1 events [ ev_one ev_two ]`,
+			`set event-options policy p1 events [ ping_test_failed ping_test_completed ]`,
 			`set event-options policy p1 then change-configuration commands "set system host-name recovered"`)
-		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ev_one", "ev_two")
+		wantValues(t, "Events", policyEvents(t, cfg, "p1"), "ping_test_failed", "ping_test_completed")
 		ep := cfg.EventOptions[0]
 		if len(ep.ThenCommands) != 1 || ep.ThenCommands[0] != "set system host-name recovered" {
 			t.Fatalf("ThenCommands = %v, want the single authored command", ep.ThenCommands)

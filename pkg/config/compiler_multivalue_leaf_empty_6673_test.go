@@ -599,11 +599,11 @@ func TestEventAttributesMatch6673EmptyExprStaysRejected(t *testing.T) {
 		tree *ConfigTree
 	}{
 		{"block, empty in FIRST slot", hierTree6659(t, `
-event-options { policy pA { events e1; attributes-match { ""; e1.test-owner matches Comcast; } } }`)},
+event-options { policy pA { events ping_test_failed; attributes-match { ""; ping_test_failed.test-owner matches Comcast; } } }`)},
 		{"block, empty in a NON-FIRST slot", hierTree6659(t, `
-event-options { policy pA { events e1; attributes-match { e1.test-owner matches Comcast; ""; } } }`)},
+event-options { policy pA { events ping_test_failed; attributes-match { ping_test_failed.test-owner matches Comcast; ""; } } }`)},
 		{"packed, bare empty value", hierTree6659(t, `
-event-options { policy pA { events e1; attributes-match ""; } }`)},
+event-options { policy pA { events ping_test_failed; attributes-match ""; } }`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := CompileConfig(tc.tree); err == nil {
@@ -631,9 +631,9 @@ event-options { policy pA { events e1; attributes-match ""; } }`)},
 		tree *ConfigTree
 	}{
 		{"no value slot at all", hierTree6659(t, `
-event-options { policy pA { events e1; attributes-match; } }`)},
+event-options { policy pA { events ping_test_failed; attributes-match; } }`)},
 		{"well-formed expression", hierTree6659(t, `
-event-options { policy pA { events e1; attributes-match e1.test-owner matches Comcast; } }`)},
+event-options { policy pA { events ping_test_failed; attributes-match ping_test_failed.test-owner matches Comcast; } }`)},
 	} {
 		t.Run(tc.name+" (CONTROL)", func(t *testing.T) {
 			if _, err := CompileConfig(tc.tree); err != nil {
@@ -667,22 +667,22 @@ func TestEventChangeConfigCommands6673EmptyCommandStaysInTheBatch(t *testing.T) 
 		want []string
 	}{
 		{"block, empty in FIRST slot", hierTree6659(t, `
-event-options { policy pA { events e1; then { change-configuration {
+event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands { ""; "set system host-name foo"; } } } } }`),
 			[]string{"", "set system host-name foo"}},
 		{"block, empty in a NON-FIRST slot", hierTree6659(t, `
-event-options { policy pA { events e1; then { change-configuration {
+event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands { "set system host-name foo"; ""; } } } } }`),
 			[]string{"set system host-name foo", ""}},
 		{"packed bracket, empty in FIRST slot", hierTree6659(t, `
-event-options { policy pA { events e1; then { change-configuration {
+event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands [ "" "set system host-name foo" ]; } } } }`),
 			[]string{"", "set system host-name foo"}},
 		{"packed, bare empty value", hierTree6659(t, `
-event-options { policy pA { events e1; then { change-configuration {
+event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands ""; } } } }`), []string{""}},
 		{"single command (CONTROL)", hierTree6659(t, `
-event-options { policy pA { events e1; then { change-configuration {
+event-options { policy pA { events ping_test_failed; then { change-configuration {
     commands "set system host-name foo"; } } } }`),
 			[]string{"set system host-name foo"}},
 	} {
@@ -1206,19 +1206,19 @@ func TestEventOptions6673ValuesAreStoredVerbatim(t *testing.T) {
 		{
 			name: "block spelling",
 			cfg: `
-event-options { policy pA { events e1;
-    attributes-match { "  e1.test-owner matches Comcast  "; }
+event-options { policy pA { events ping_test_failed;
+    attributes-match { "  ping_test_failed.test-owner matches Comcast  "; }
     then { change-configuration { commands { "  set system host-name foo  "; } } } } }`,
-			wantAM:   []string{"  e1.test-owner matches Comcast  "},
+			wantAM:   []string{"  ping_test_failed.test-owner matches Comcast  "},
 			wantCmds: []string{"  set system host-name foo  "},
 		},
 		{
 			name: "packed spelling",
 			cfg: `
-event-options { policy pA { events e1;
-    attributes-match "  e1.test-owner matches Comcast  ";
+event-options { policy pA { events ping_test_failed;
+    attributes-match "  ping_test_failed.test-owner matches Comcast  ";
     then { change-configuration { commands "  set system host-name foo  "; } } } }`,
-			wantAM:   []string{"  e1.test-owner matches Comcast  "},
+			wantAM:   []string{"  ping_test_failed.test-owner matches Comcast  "},
 			wantCmds: []string{"  set system host-name foo  "},
 		},
 	} {

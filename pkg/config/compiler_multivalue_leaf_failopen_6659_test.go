@@ -192,14 +192,14 @@ func TestEventChangeConfigCommands6659(t *testing.T) {
 	}{
 		{
 			"hier packed single quoted",
-			hierTree6659(t, `event-options { policy p1 { events e; then { change-configuration {
+			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
                 commands "set system host-name foo";
             } } } }`),
 			[]string{cmd1},
 		},
 		{
 			"hier packed bracket list",
-			hierTree6659(t, `event-options { policy p1 { events e; then { change-configuration {
+			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
                 commands [ "set system host-name foo" "delete interfaces ge-0/0/0" ];
             } } } }`),
 			[]string{cmd1, cmd2},
@@ -209,21 +209,21 @@ func TestEventChangeConfigCommands6659(t *testing.T) {
 			// read PER TOKEN unconditionally — so one command became four
 			// bare words, none of which carries a `set `/`delete ` prefix.
 			"hier packed unquoted (four bare words pre-fold)",
-			hierTree6659(t, `event-options { policy p1 { events e; then { change-configuration {
+			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
                 commands set system host-name foo;
             } } } }`),
 			[]string{cmd1},
 		},
 		{
 			"hier block unquoted (truncated to `set` pre-#6659)",
-			hierTree6659(t, `event-options { policy p1 { events e; then { change-configuration { commands {
+			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration { commands {
                 set system host-name foo;
             } } } } }`),
 			[]string{cmd1},
 		},
 		{
 			"hier block quoted (GREEN CONTROL — worked pre-#6659)",
-			hierTree6659(t, `event-options { policy p1 { events e; then { change-configuration { commands {
+			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration { commands {
                 "set system host-name foo";
                 "delete interfaces ge-0/0/0";
             } } } } }`),
@@ -236,28 +236,28 @@ func TestEventChangeConfigCommands6659(t *testing.T) {
 			// string that classifyPlan turns into a garbage set path.
 			"flat-set bracket list",
 			setTree6659(t,
-				"set event-options policy p1 events e",
+				"set event-options policy p1 events ping_test_failed",
 				`set event-options policy p1 then change-configuration commands [ "set system host-name foo" "delete interfaces ge-0/0/0" ]`),
 			[]string{cmd1, cmd2},
 		},
 		{
 			"flat-set single quoted (GREEN CONTROL)",
 			setTree6659(t,
-				"set event-options policy p1 events e",
+				"set event-options policy p1 events ping_test_failed",
 				`set event-options policy p1 then change-configuration commands "set system host-name foo"`),
 			[]string{cmd1},
 		},
 		{
 			"flat-set single unquoted (GREEN CONTROL)",
 			setTree6659(t,
-				"set event-options policy p1 events e",
+				"set event-options policy p1 events ping_test_failed",
 				`set event-options policy p1 then change-configuration commands set system host-name foo`),
 			[]string{cmd1},
 		},
 		{
 			"flat-set repeated statements (GREEN CONTROL)",
 			setTree6659(t,
-				"set event-options policy p1 events e",
+				"set event-options policy p1 events ping_test_failed",
 				`set event-options policy p1 then change-configuration commands "set system host-name foo"`,
 				`set event-options policy p1 then change-configuration commands "delete interfaces ge-0/0/0"`),
 			[]string{cmd1, cmd2},
@@ -316,49 +316,49 @@ func TestEventMultiValueLeaf6673TokenBoundaryBothParsers(t *testing.T) {
 		{
 			"am/flat-set bracket splits per member",
 			setTree6659(t,
-				"set event-options policy p1 events e1",
-				`set event-options policy p1 attributes-match [ "e1.test-owner matches Comcast" "e1.test-name matches wan" ]`),
+				"set event-options policy p1 events ping_test_failed",
+				`set event-options policy p1 attributes-match [ "ping_test_failed.test-owner matches Comcast" "ping_test_failed.test-name matches wan" ]`),
 			amOf,
-			[]string{"e1.test-owner matches Comcast", "e1.test-name matches wan"},
+			[]string{"ping_test_failed.test-owner matches Comcast", "ping_test_failed.test-name matches wan"},
 		},
 		{
 			"am/hier bracket splits per member (GREEN CONTROL)",
-			hierTree6659(t, `event-options { policy p1 { events e1;
-                attributes-match [ "e1.test-owner matches Comcast" "e1.test-name matches wan" ]; } }`),
+			hierTree6659(t, `event-options { policy p1 { events ping_test_failed;
+                attributes-match [ "ping_test_failed.test-owner matches Comcast" "ping_test_failed.test-name matches wan" ]; } }`),
 			amOf,
-			[]string{"e1.test-owner matches Comcast", "e1.test-name matches wan"},
+			[]string{"ping_test_failed.test-owner matches Comcast", "ping_test_failed.test-name matches wan"},
 		},
 		{
 			"am/hier block (GREEN CONTROL)",
-			hierTree6659(t, `event-options { policy p1 { events e1; attributes-match {
-                e1.test-owner matches Comcast; e1.test-name matches wan; } } }`),
+			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; attributes-match {
+                ping_test_failed.test-owner matches Comcast; ping_test_failed.test-name matches wan; } } }`),
 			amOf,
-			[]string{"e1.test-owner matches Comcast", "e1.test-name matches wan"},
+			[]string{"ping_test_failed.test-owner matches Comcast", "ping_test_failed.test-name matches wan"},
 		},
 
 		// --- OVER-REACH GUARD: a quoted value inside a bare statement ------
-		// Tokens are [e1.test-owner, matches, "Comcast Business"]. This is ONE
+		// Tokens are [ping_test_failed.test-owner, matches, "Comcast Business"]. This is ONE
 		// constraint. A discriminator keyed on "any token has a space" would
 		// emit three, two of which are malformed and one of which silently
 		// narrows the policy to the literal owner "Comcast Business" only.
 		{
 			"am/hier quoted VALUE stays one expression",
-			hierTree6659(t, `event-options { policy p1 { events e1;
-                attributes-match e1.test-owner matches "Comcast Business"; } }`),
+			hierTree6659(t, `event-options { policy p1 { events ping_test_failed;
+                attributes-match ping_test_failed.test-owner matches "Comcast Business"; } }`),
 			amOf,
-			[]string{"e1.test-owner matches Comcast Business"},
+			[]string{"ping_test_failed.test-owner matches Comcast Business"},
 		},
 		{
 			"am/flat-set quoted VALUE stays one expression",
 			setTree6659(t,
-				"set event-options policy p1 events e1",
-				`set event-options policy p1 attributes-match e1.test-owner matches "Comcast Business"`),
+				"set event-options policy p1 events ping_test_failed",
+				`set event-options policy p1 attributes-match ping_test_failed.test-owner matches "Comcast Business"`),
 			amOf,
-			[]string{"e1.test-owner matches Comcast Business"},
+			[]string{"ping_test_failed.test-owner matches Comcast Business"},
 		},
 		{
 			"cmd/hier quoted VALUE stays one command",
-			hierTree6659(t, `event-options { policy p1 { events e1; then { change-configuration {
+			hierTree6659(t, `event-options { policy p1 { events ping_test_failed; then { change-configuration {
                 commands set system host-name "foo bar"; } } } }`),
 			cmdsOf,
 			[]string{"set system host-name foo bar"},
@@ -366,7 +366,7 @@ func TestEventMultiValueLeaf6673TokenBoundaryBothParsers(t *testing.T) {
 		{
 			"cmd/flat-set quoted VALUE stays one command",
 			setTree6659(t,
-				"set event-options policy p1 events e1",
+				"set event-options policy p1 events ping_test_failed",
 				`set event-options policy p1 then change-configuration commands set system host-name "foo bar"`),
 			cmdsOf,
 			[]string{"set system host-name foo bar"},
@@ -379,7 +379,7 @@ func TestEventMultiValueLeaf6673TokenBoundaryBothParsers(t *testing.T) {
 		{
 			"cmd/flat-set mixed bracket splits so the bare member fails alone",
 			setTree6659(t,
-				"set event-options policy p1 events e1",
+				"set event-options policy p1 events ping_test_failed",
 				`set event-options policy p1 then change-configuration commands [ "set system host-name foo" bogus ]`),
 			cmdsOf,
 			[]string{"set system host-name foo", "bogus"},
@@ -1014,8 +1014,8 @@ func TestMultiValueLeaf6659NoSharedBackingStore(t *testing.T) {
 	t.Run("two event policies stay independent", func(t *testing.T) {
 		cfg := mustCompile6659(t, hierTree6659(t, `
 event-options {
-    policy pA { events e1; attributes-match e1.test-owner matches Comcast; }
-    policy pB { events e2; attributes-match e2.test-name matches wan; }
+    policy pA { events ping_test_failed; attributes-match ping_test_failed.test-owner matches Comcast; }
+    policy pB { events ping_test_completed; attributes-match ping_test_completed.test-name matches wan; }
 }`))
 		if len(cfg.EventOptions) != 2 {
 			t.Fatalf("expected 2 policies, got %d", len(cfg.EventOptions))
@@ -1024,10 +1024,10 @@ event-options {
 		for _, p := range cfg.EventOptions {
 			byName[p.Name] = p.AttributesMatch
 		}
-		if want := []string{"e1.test-owner matches Comcast"}; !reflect.DeepEqual(byName["pA"], want) {
+		if want := []string{"ping_test_failed.test-owner matches Comcast"}; !reflect.DeepEqual(byName["pA"], want) {
 			t.Fatalf("pA AttributesMatch = %q, want %q", byName["pA"], want)
 		}
-		if want := []string{"e2.test-name matches wan"}; !reflect.DeepEqual(byName["pB"], want) {
+		if want := []string{"ping_test_completed.test-name matches wan"}; !reflect.DeepEqual(byName["pB"], want) {
 			t.Fatalf("pB AttributesMatch = %q, want %q", byName["pB"], want)
 		}
 	})

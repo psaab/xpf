@@ -3054,6 +3054,20 @@ type compileOpts struct {
 	// lenientEventAttributesMatch (its attributes-match sibling).
 	lenientEventWithinTrigger bool
 
+	// lenientEventInert14660 (#14660) downgrades the event-options
+	// closed-world gate (validateEventOptionsInertAST: unknown event
+	// names, non-change-configuration `then` actions, and undeclared
+	// event-options / policy children) from a hard compile error to a
+	// cfg.Warnings entry. The strict commit / commit-check path
+	// hard-rejects so the operator learns the remediation can never
+	// fire or execute; the tolerant load / peer-sync paths downgrade
+	// to a warning so an already-persisted or peer-synced config an
+	// older binary silently accepted still BOOTS (#1960). The inert
+	// policy never fires / never executes on that boot, which is the
+	// pre-existing runtime behaviour, now surfaced. Same doctrine as
+	// lenientEventWithinTrigger.
+	lenientEventInert14660 bool
+
 	// lenientFirewallTCPFlags (#4953) downgrades the firewall-filter
 	// `from tcp-flags` enforceability reject (validateFirewallTCPFlagsStrict:
 	// disjunction, negated group, unknown flag, dangling negation, or a
@@ -3593,6 +3607,7 @@ func lenientCompileOpts() compileOpts {
 		lenientNATTerminalAction:               true,
 		lenientInterfaceUnitAliasCollisions:    true,
 		lenientEventWithinTrigger:              true,
+		lenientEventInert14660:                 true,
 		lenientFirewallTCPFlags:                true,
 		lenientCoSNumericCodePoint:             true,
 		lenientNonNumericUnit:                  true,

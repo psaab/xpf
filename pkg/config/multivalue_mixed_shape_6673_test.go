@@ -49,7 +49,7 @@ func amNode6673(t *testing.T, tree *ConfigTree) *Node {
 
 // TestEventAttributesMatch6673MixedShapeStillCommits is the R4 differential.
 //
-// `attributes-match bogus { "e.test-owner matches ^alice$"; }` parses as
+// `attributes-match bogus { "ping_test_failed.test-owner matches ^alice$"; }` parses as
 // Keys=["attributes-match","bogus"] with one child. Master read Children only,
 // so `bogus` was discarded and the config committed. Materialising it hands
 // ValidateEventAttributesMatchStrict a token with no " matches " separator,
@@ -62,8 +62,8 @@ func amNode6673(t *testing.T, tree *ConfigTree) *Node {
 func TestEventAttributesMatch6673MixedShapeStillCommits(t *testing.T) {
 	const cfgText = `event-options {
   policy p {
-    events e;
-    attributes-match bogus { "e.test-owner matches ^alice$"; }
+    events ping_test_failed;
+    attributes-match bogus { "ping_test_failed.test-owner matches ^alice$"; }
   }
 }`
 	tree := hierTree6659(t, cfgText)
@@ -103,7 +103,7 @@ func TestEventAttributesMatch6673MixedShapeStillCommits(t *testing.T) {
 func TestEventChangeConfigCommands6673MixedShapeStillCommits(t *testing.T) {
 	tree := hierTree6659(t, `event-options {
   policy p {
-    events e;
+    events ping_test_failed;
     then { change-configuration { commands bogus { "set system host-name fired"; } } }
   }
 }`)
@@ -128,7 +128,7 @@ func TestEventChangeConfigCommands6673MixedShapeStillCommits(t *testing.T) {
 func TestEventAttributesMatch6673PackedMalformedStillRejected(t *testing.T) {
 	tree := hierTree6659(t, `event-options {
   policy p {
-    events e;
+    events ping_test_failed;
     attributes-match bogus;
   }
 }`)
@@ -211,8 +211,8 @@ routing-options { forwarding-table { export [ p1 p2 ]; } }`,
 func TestEventOptions6673IdentifierSlotValueIsDropped(t *testing.T) {
 	tree := hierTree6659(t, `event-options {
   policy p {
-    events e;
-    attributes-match "e.test-owner matches ^alice$" { "e.test-name matches ^wan$"; }
+    events ping_test_failed;
+    attributes-match "ping_test_failed.test-owner matches ^alice$" { "ping_test_failed.test-name matches ^wan$"; }
     then { change-configuration { commands "set system host-name a" { "set system host-name b"; } } }
   }
 }`)
