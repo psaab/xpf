@@ -247,13 +247,13 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 				cancelLease()
 				break renewalLoop
 			}
-			// A DHCPNAK from the granting server is an explicit lease
+			// A DHCPNAK accepted by v4RenewMatcher is an explicit lease
 			// revocation: the address is no longer valid (reassigned /
 			// moved subnet). Per RFC 2131 §4.4.5 abandon it immediately and
 			// return to INIT (fresh DISCOVER) — do NOT keep using it until
-			// T2 (#3956). A genuine renew TIMEOUT still falls through to
-			// the T2 rebind. Wrong-server NAKs are filtered by
-			// v4RenewMatcher and remain ordinary timeouts.
+			// T2 (#3956). In RENEWING only the granting server's NAK
+			// matches; in REBINDING any server's NAK matches (#14600). A
+			// genuine renew TIMEOUT still falls through to the T2 rebind.
 			if errors.Is(rerr, errDHCPNAK) {
 				slog.Warn("DHCPv4: RENEWING NAK — lease revoked, deconfiguring and restarting DISCOVER",
 					"interface", ifaceName)
@@ -309,13 +309,12 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 				cancelLease()
 				break renewalLoop
 			}
-			// A DHCPNAK from the granting server in REBINDING is also a
-			// revocation (RFC 2131 §4.4.5): deconfigure now and re-DISCOVER
-			// from INIT with no prior lease. A rebind TIMEOUT is left to the
+			// A DHCPNAK accepted in REBINDING is also a revocation
+			// (RFC 2131 §4.4.5): deconfigure now and re-DISCOVER from
+			// INIT with no prior lease. A rebind TIMEOUT is left to the
 			// lease-expiry fallback, retaining the address and routes until
 			// a new acquisition replaces it or Obtained+LeaseTime is reached.
-			// Only an explicit granting-server NAK forces immediate abandon;
-			// off-server NAKs never match.
+			// In REBINDING any server's NAK matches (#14600).
 			if errors.Is(rerr, errDHCPNAK) {
 				slog.Warn("DHCPv4: REBINDING NAK — lease revoked, deconfiguring and restarting DISCOVER",
 					"interface", ifaceName)
@@ -334,14 +333,15 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 	}
 }
 
-// errDHCPNAK is returned (wrapped) by doDHCPv4 when the granting server
+// errDHCPNAK is returned (wrapped) by doDHCPv4 when an accepted server
 // answers a RENEWING/REBINDING DHCPREQUEST with a DHCPNAK. It is a sentinel so
 // the run loop can distinguish an explicit lease REVOCATION (RFC 2131 §4.4.5:
 // stop using the address immediately and return to INIT) from a renew TIMEOUT
 // (which still falls through to the T2 rebind). The discriminator is
-// errors.Is(err, errDHCPNAK); see runDHCPv4 (#3956). A NAK from any other
-// server is rejected by v4RenewMatcher and never reaches this branch.
-var errDHCPNAK = errors.New("DHCPv4 granting server sent NAK")
+// errors.Is(err, errDHCPNAK); see runDHCPv4 (#3956). In RENEWING a NAK
+// from a non-granting server is rejected by v4RenewMatcher and never
+// reaches this branch; in REBINDING any server's NAK is accepted (#14600).
+var errDHCPNAK = errors.New("DHCPv4 server sent NAK")
 
 // abandonLeaseAfterNAK deconfigures the interface and drops the lease record
 // after a DHCPNAK revoked the lease (RFC 2131 §4.4.5). The client must stop
@@ -420,10 +420,10 @@ func (m *Manager) doDHCPv4(ctx context.Context, ifaceName string, mode dhcpExcha
 			return nil, fmt.Errorf("DHCPv4 %s: %w", mode, err)
 		}
 		if resp.MessageType() == dhcpv4.MessageTypeNak {
-			// A granting-server NAK is kept distinct from an ACK so the
-			// run loop can revoke the lease and return to INIT. A NAK from
-			// any other server never reaches this branch: v4RenewMatcher
-			// rejects it before SendAndRead returns.
+			// An accepted NAK is kept distinct from an ACK so the run
+			// loop can revoke the lease and return to INIT. Which
+			// servers can NAK is decided by v4RenewMatcher: granting
+			// server only in RENEWING, any server in REBINDING (#14600).
 			return nil, fmt.Errorf("DHCPv4 %s: %w", mode, errDHCPNAK)
 		}
 		ack = resp

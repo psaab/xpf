@@ -24,9 +24,12 @@ func leaseInterfaceMatches(ifaceName string, prev *Lease) bool {
 // hardware identity. nclient4's receive loop also filters packets by the
 // interface-bound socket and client hardware address; repeat the transaction
 // and hardware checks here so the acceptance predicate is explicit and
-// testable. During both RENEWING and REBINDING, ACK and NAK must identify the
-// granting server. A non-nil manager records server-identity rejections.
-func v4RenewMatcher(m *Manager, req *dhcpv4.DHCPv4, prev *Lease, _ bool) nclient4.Matcher {
+// testable. During RENEWING, ACK and NAK must identify the granting server.
+// During REBINDING any server may answer (RFC 2131 §4.3.2), so only a
+// present, valid server-identifier is required; the reply's server is
+// stored as the new binding by leaseFromACKv4. A non-nil manager records
+// server-identity rejections.
+func v4RenewMatcher(m *Manager, req *dhcpv4.DHCPv4, prev *Lease, rebind bool) nclient4.Matcher {
 	var expectedServer net.IP
 	if prev != nil && prev.serverID.IsValid() {
 		expectedServer = net.IP(prev.serverID.AsSlice())
@@ -41,8 +44,9 @@ func v4RenewMatcher(m *Manager, req *dhcpv4.DHCPv4, prev *Lease, _ bool) nclient
 			return false
 		}
 		serverID := resp.ServerIdentifier()
-		if len(serverID) == 0 || serverID.To4() == nil || expectedServer == nil ||
-			!nclient4.IsCorrectServer(expectedServer)(resp) {
+		if len(serverID) == 0 || serverID.To4() == nil ||
+			(!rebind && (expectedServer == nil ||
+				!nclient4.IsCorrectServer(expectedServer)(resp))) {
 			if m != nil {
 				m.renewV4ServerIdentityRejects.Add(1)
 			}
@@ -52,12 +56,15 @@ func v4RenewMatcher(m *Manager, req *dhcpv4.DHCPv4, prev *Lease, _ bool) nclient
 	}
 }
 
-// v6RenewMatcher accepts only a Reply tied to req's transaction, client DUID,
-// and the granting server DUID. nclient6 receives from the
-// interface-bound socket and keys its queue by transaction ID; the explicit
-// transaction/client checks keep the acceptance predicate testable. A non-nil
-// manager records server-identity rejections.
-func v6RenewMatcher(m *Manager, req *dhcpv6.Message, prev *Lease, _ bool) nclient6.Matcher {
+// v6RenewMatcher accepts only a Reply tied to req's transaction and client
+// DUID. nclient6 receives from the interface-bound socket and keys its
+// queue by transaction ID; the explicit transaction/client checks keep the
+// acceptance predicate testable. During RENEW the Reply must identify the
+// granting server DUID; during REBIND any server may answer (RFC 8415
+// §18.2.5), so only a present server DUID is required and parseV6Reply
+// stores it as the new binding. A non-nil manager records server-identity
+// rejections.
+func v6RenewMatcher(m *Manager, req *dhcpv6.Message, prev *Lease, rebind bool) nclient6.Matcher {
 	var expectedServer dhcpv6.DUID
 	if prev != nil {
 		expectedServer = prev.v6ServerDUID
@@ -75,7 +82,7 @@ func v6RenewMatcher(m *Manager, req *dhcpv6.Message, prev *Lease, _ bool) nclien
 			return false
 		}
 		serverID := resp.Options.ServerID()
-		if serverID == nil || expectedServer == nil || !sameDUID(serverID, expectedServer) {
+		if serverID == nil || (!rebind && (expectedServer == nil || !sameDUID(serverID, expectedServer))) {
 			if m != nil {
 				m.renewV6ServerIdentityRejects.Add(1)
 			}

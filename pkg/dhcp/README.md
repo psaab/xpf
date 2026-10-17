@@ -179,25 +179,31 @@ the debounced `onAddressChange` callback when content changed.
   DUID-LLT (a `GetTime()` timestamp stamped at send) while the renew path
   presented the persistent DUID-LL — a DUID mismatch that churned the
   lease on every renewal.
-- **Renew replies are bound to the lease owner (#9944)**: the DHCPv4
-  RENEWING and REBINDING matchers require the request transaction ID, client
-  hardware address/interface, and stored granting server-identifier. The
-  DHCPv6 matchers apply the same transaction/interface/client identity
-  checks and require the stored server DUID. Replies from another server,
-  including ACKs and NAKs, are ignored rather than rewriting or revoking the
-  lease.
-- **NAK immediately revokes the lease (#9944, #3956)**: a NAK accepted from
-  the granting server is an explicit lease revocation in either RENEWING or
-  REBINDING. The client deconfigures and drops the lease record, then starts
-  fresh acquisition from INIT; a timeout remains the separate path that
-  waits for T2 or retains the address through re-acquisition.
+- **Renew replies are bound to the lease owner (#9944, #14600)**: the DHCPv4
+  RENEWING matcher requires the request transaction ID, client hardware
+  address/interface, and stored granting server-identifier; the DHCPv6
+  RENEW matcher applies the same transaction/interface/client identity
+  checks and requires the stored server DUID. In RENEWING/RENEW a reply
+  from another server, including an ACK or NAK, is ignored rather than
+  rewriting or revoking the lease. In REBINDING/REBIND any server may
+  answer (RFC 2131 §4.3.2, RFC 8415 §18.2.5): the transaction/client
+  checks and a present valid server identity are still required, and the
+  answering server's identifier/DUID from the accepted reply is stored
+  as the new granting binding for the next RENEW.
+- **NAK immediately revokes the lease (#9944, #3956, #14600)**: a NAK
+  accepted under the rules above is an explicit lease revocation — from
+  the granting server in RENEWING/RENEW, or from any server in
+  REBINDING/REBIND. The client deconfigures and drops the lease record,
+  then starts fresh acquisition from INIT; a timeout remains the separate
+  path that waits for T2 or retains the address through re-acquisition.
 - **Server identity changes are content changes (#9944)**:
   `leaseContentChanged` includes the v4 server-identifier and v6 server DUID,
   so a changed renewal binding is visible to downstream consumers instead
   of silently changing renewal state.
 - `Manager.RenewalBindingStats()` exposes per-family counters for replies
   ignored after transaction/client validation because their server identity
-  did not match the committed granting lease.
+  was missing or, in RENEWING/RENEW, did not match the committed granting
+  lease. Accepted REBINDING/REBIND replies from a new server do not count.
 - **Address moves are re-acquisition-equivalent**: if a renewal returns
   a different address, the old one is removed and the new one applied
   via the same netlink mechanisms the fresh-acquisition path uses.
@@ -482,9 +488,10 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   routes. Stateless DHCPv6 has no binding expiry; its synthetic `LeaseTime`
   only determines refresh timing, and failed Information-Requests retain
   installed options.
-  An explicit **DHCPNAK is honored** (#3956, #9944): the granting-server NAK
-  deconfigures immediately through `abandonLeaseAfterNAK` and returns the
-  client to INIT; a wrong-server NAK is ignored.
+  An explicit **DHCPNAK is honored** (#3956, #9944, #14600): an accepted
+  NAK (granting server in RENEWING, any server in REBINDING) deconfigures
+  immediately through `abandonLeaseAfterNAK` and returns the client to
+  INIT; a non-granting-server NAK in RENEWING is ignored.
 - **Coupling rule (#1844, extended #4874 A2 / #11382):** the T2-expiry path
   (`abandonLeaseAfterExpiry`), terminal exits (`finishClient`), and DHCPv4
   NAK (`abandonLeaseAfterNAK`) fire both `onGatewayChange` and
