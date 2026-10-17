@@ -76,3 +76,38 @@ func rejectOSPFAuthType(_ string, _ *Config) error {
 			"UNAUTHENTICATED while the configuration reads as though it is " +
 			"protected (#8443)")
 }
+
+// #14402: the KEY leaf carried over from RIP/IS-IS/BGP. #8443 refused the
+// sibling `authentication-type` leaf (above) but not `authentication-key`.
+// OSPF has no direct `authentication-key` child under `interface` — the
+// compiler switch in compiler_protocols.go has no case for it, so the key
+// was dropped, AuthType/AuthKey stayed empty, and the renderer emitted
+// `ip ospf area` with no auth lines. Modelled ONLY so it is REFUSED, in
+// exactly the unmodeledOSPFAuthTypeLeaf shape. Because `authentication-key`
+// is a secret leaf (secret.go), typedLeafInvalidErrorf redacts its value
+// from the diagnostic; the validator message itself never contains it.
+func unmodeledOSPFAuthKeyLeaf() *schemaNode {
+	return &schemaNode{
+		desc: "authentication-key (RIP/IS-IS/BGP spelling — OSPF uses a nested " +
+			"`authentication { }` block; rejected at commit)",
+		args:        1,
+		placeholder: "<key>",
+		valueType:   ValueEnumOf,
+		valueDesc: "not an OSPF leaf; use `authentication { md5 ... }` or " +
+			"`authentication { simple-password ... }`",
+		validator: rejectOSPFAuthKey,
+		children:  nil,
+	}
+}
+
+func rejectOSPFAuthKey(_ string, _ *Config) error {
+	return fmt.Errorf(
+		"protocols ospf ... interface ... authentication-key: OSPF has no " +
+			"`authentication-key` leaf — that spelling belongs to RIP, IS-IS, and BGP. " +
+			"Under OSPF the key lives inside the nested block: " +
+			"`authentication { md5 <key-id> { key \"<secret>\"; } }` or " +
+			"`authentication { simple-password \"<secret>\"; }`. This is refused " +
+			"rather than ignored because ignoring it leaves the adjacency " +
+			"UNAUTHENTICATED while the configuration reads as though it is " +
+			"protected (#14402)")
+}

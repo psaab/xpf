@@ -383,6 +383,9 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				// #8443: modeled ONLY so it is REFUSED — see
 				// schema_ospf_authentication_8443.go.
 				"authentication-type": unmodeledOSPFAuthTypeLeaf(),
+				// #14402: modeled ONLY so it is REFUSED — see
+				// schema_ospf_authentication_8443.go.
+				"authentication-key":  unmodeledOSPFAuthKeyLeaf(),
 				"cost":                {desc: "Interface cost", args: 1, valueType: ValueInteger, placeholder: "<cost>", validator: ValidateInteger(1, 65535), children: nil},
 				"hello-interval":      {desc: "Hello interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
 				"dead-interval":       {desc: "Dead interval (seconds)", args: 1, valueType: ValueInteger, placeholder: "<seconds>", validator: ValidateInteger(1, 65535), children: nil},
